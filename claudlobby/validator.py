@@ -4,12 +4,12 @@ Permissive by default: warnings let `generate` proceed; errors block it.
 Pass `--strict` to make warnings into errors (CI-friendly).
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
+import json
 import os
-import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import FleetConfig
+from .config import BotConfig, FleetConfig
 from .paths import Paths
 
 
@@ -30,13 +30,62 @@ class ValidationReport:
         return self.errors + self.warnings
 
 
-_ENV_PLACEHOLDER = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
-
-
-def _scan_env_placeholders(path: Path) -> set[str]:
+def _read_dotenv(path: Path) -> dict[str, str]:
+    """Parse a .env file into {var: value}. Strips `export ` prefix and quotes.
+    Mirrors the parser in __main__._read_env_file (kept local here to avoid
+    a circular import: __main__ imports from validator)."""
     if not path.is_file():
-        return set()
-    return set(_ENV_PLACEHOLDER.findall(path.read_text()))
+        return {}
+    out: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if k.startswith("export "):
+            k = k[len("export "):].strip()
+        v = v.strip().strip('"').strip("'")
+        if k:
+            out[k] = v
+    return out
+
+
+def _bot_required_env_vars(
+    bot: BotConfig, paths: Paths
+) -> list[tuple[str, str, str, str | None]]:
+    """Return [(canonical_var, tier, source, instance)] this bot's MCPs need.
+
+    Mirrors the resolution in composer._resolve_instance_env so the validator
+    sees the same canonical names that end up in the rendered `.mcp.json`:
+    instance-scoped vars get prefixed (`${TOKEN}` → `${NOTION_WORK_TOKEN}`),
+    shared vars stay verbatim. `instance` is None for shared vars."""
+    out: list[tuple[str, str, str, str | None]] = []
+    seen: set[str] = set()
+    for entry in bot.mcp:
+        if entry.name in seen:
+            continue
+        seen.add(entry.name)
+        frag_path = paths.find_library_file("mcp", entry.name, ".json")
+        if frag_path is None:
+            continue
+        try:
+            frag = json.loads(frag_path.read_text())
+        except Exception:
+            continue
+        contract = frag.get("_env_contract", {})
+        for var_name, meta in contract.items():
+            if not isinstance(meta, dict):
+                continue
+            tier = meta.get("tier", "fleet")
+            scope = meta.get("scope", "shared")
+            if scope == "instance":
+                for instance in entry.instances:
+                    prefix = entry.instance_prefix(instance)
+                    out.append((prefix + var_name, tier, f"mcp/{entry.name}", instance))
+            else:
+                out.append((var_name, tier, f"mcp/{entry.name}", None))
+    return out
 
 
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
@@ -46,8 +95,15 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     if not fleet.bots:
         report.errors.append("fleet.bots is empty — nothing to compose")
 
+    # Read fleet-tier .env once. Bot-tier .env is read per-bot inside the loop
+    # because each bot has its own. The 3-tier composition mirrors what
+    # lib/start-bot.sh does at runtime: os.environ → fleet → bot, later wins.
+    fleet_env = _read_dotenv(paths.env_file)
+
     # Per-bot checks (overlay-aware lookups — overlay first, base fallback)
     for bot_name, bot in fleet.bots.items():
+        bot_env = _read_dotenv(paths.bot_runtime(bot_name) / ".env")
+        effective_env: dict[str, str] = {**os.environ, **fleet_env, **bot_env}
         # Expertise — at least one must exist (HARD)
         if not bot.expertise:
             report.errors.append(
@@ -95,22 +151,28 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                     f"bot '{bot_name}': skill '{skill}' not in any library/skills/ — symlink will be skipped"
                 )
 
-        # MCP (warn) — also check for unset env placeholders. MCP fragments
-        # are JSON; overlay wins over base (same lookup model as other kinds).
-        # bot.mcp is list[McpEntry]; the file on disk is named after .name
-        # regardless of how many instances the entry composes into .mcp.json.
+        # MCP fragment existence (warn). bot.mcp is list[McpEntry]; the file
+        # on disk is named after .name regardless of how many instances the
+        # entry composes into .mcp.json.
         for mcp in bot.mcp:
-            mcp_path = paths.find_library_file("mcp", mcp.name, ".json")
-            if mcp_path is None:
+            if paths.find_library_file("mcp", mcp.name, ".json") is None:
                 report.warnings.append(
                     f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured"
                 )
+
+        # MCP env-contract check (warn) — uses the canonical instance-renamed
+        # var names (the same names composer puts into the rendered
+        # `.mcp.json`), and looks across the full 3-tier env (host →
+        # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
+        # didn't know about instance scoping or bot-tier .env files.
+        for var, tier, source, instance in _bot_required_env_vars(bot, paths):
+            if var in effective_env:
                 continue
-            for var in _scan_env_placeholders(mcp_path):
-                if var not in os.environ:
-                    report.warnings.append(
-                        f"bot '{bot_name}': mcp '{mcp.name}' references ${{{var}}} but {var} is not set — MCP server will fail at runtime"
-                    )
+            inst_note = f" (instance: {instance})" if instance else ""
+            report.warnings.append(
+                f"bot '{bot_name}': {source}{inst_note} requires {var} but it's not set — "
+                f"add to {tier}-tier .env (MCP server will fail at runtime)"
+            )
 
         # Integrations (warn). Accepts `name`, `dir/name`, or `dir/`.
         for integ in bot.integrations:
@@ -164,10 +226,12 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                         f"bot '{bot_name}': {kind[:-1]} '{item}' not in any library/{kind}/ — section will be skipped"
                     )
 
-        # Telegram token env (warn)
-        if bot.telegram.token_env and bot.telegram.token_env not in os.environ:
+        # Telegram token env (warn). Check effective_env so bot-tier .env
+        # values count (the common case — per-bot Telegram tokens live in
+        # runtime/bots/<bot>/.env so multi-bot fleets don't cross-wire).
+        if bot.telegram.token_env and bot.telegram.token_env not in effective_env:
             report.warnings.append(
-                f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in environment — bot won't connect to Telegram until you add it to .env"
+                f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in any tier of .env — bot won't connect to Telegram"
             )
 
         # Account (warn)
