@@ -1,0 +1,12 @@
+{
+  "_env_contract": {
+    "GRANOLA_MCP_PORT": {
+      "description": "Port for Granola MCP remote proxy",
+      "tier": "fleet"
+    }
+  },
+  "granola": {
+    "command": "npx",
+    "args": ["-y", "mcp-remote", "https://mcp.granola.ai/mcp", "--port", "${GRANOLA_MCP_PORT}"]
+  }
+}

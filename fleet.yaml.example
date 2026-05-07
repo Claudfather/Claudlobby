@@ -1,0 +1,58 @@
+# Example fleet.yaml — copy to fleet.yaml and customize.
+# See docs/fleet-yaml-schema.md for the full reference.
+
+fleet:
+  name: example-fleet
+  service_prefix: com.example.claudlobby
+  telegram_group_chat_id: "-1001234567890"   # replace with your group ID
+
+  accounts:
+    default: ~/.claude
+    # work: ~/.claude-work                    # uncomment if you have a 2nd Claude account
+
+  defaults:
+    model: opus
+    effort: max
+    account: default
+    guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
+    protocols: [report-back, context-management, telegram-routing, telegram-formatting]
+
+  teams:
+    engineering:
+      manager: lead
+      workers: [eng-1, reviewer-1]
+
+  bots:
+    lead:
+      expertise: [orchestration]              # area(s) of expertise from library/expertise/
+      mission: "Coordinate the engineering team end-to-end. Dispatch work, monitor reports, surface blockers to the human within 5 minutes."
+      # voice: voices/erlich-bachman.md                 # uncomment to add a personality overlay
+      skills: [dispatch, fleet-status, lifecycle, prs, status, sweep, restart]
+      mcp: [github, notion, slack]
+      protocols: [dispatch, consensus-loop]
+      guardrails: [merge-policy-human]
+      telegram:
+        handle: my_lead_bot
+        token_env: TELEGRAM_TOKEN_LEAD
+        require_mention: false                # manager hears all messages in its group
+      startup_prompt: "Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."
+
+    eng-1:
+      expertise: [software-engineering]
+      mission: "Implement features and fix bugs in fleet repos. Branch + PR. Tests pass before report-back."
+      mcp: [github]
+      telegram:
+        handle: my_eng_1_bot
+        token_env: TELEGRAM_TOKEN_ENG1
+        require_mention: true                 # workers only respond to @-mentions
+
+    reviewer-1:
+      expertise: [code-review]
+      mission: "Review PRs the manager dispatches. Mutation-test assertions. Verdict-first comments. No commits, no merges."
+      model: sonnet                            # reviewers run hot — Sonnet is enough
+      mcp: [github]
+      protocols: [review-flow]
+      telegram:
+        handle: my_reviewer_bot
+        token_env: TELEGRAM_TOKEN_REV1
+        require_mention: true

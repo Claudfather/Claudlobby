@@ -1,0 +1,113 @@
+{#-
+  CLAUDE.md master template.
+  Owns all top-level structure. Library files supply slot content.
+  A section disappears entirely if its data is empty.
+
+  Variables in scope:
+    bot                — BotConfig with .name, .telegram, .scope, etc.
+    fleet              — FleetConfig
+    title_label        — string, derived from first expertise file's frontmatter
+    expertise_body     — string, concatenated expertise file bodies
+    voice              — None or { name, body }
+    teams              — list of TeamConfig (only if bot is a manager)
+    resources          — list of { title, description, body }
+    integrations       — list of { title, description, body }
+    principles         — list of { title, description, body }
+    protocols          — list of { title, description, body }
+    guardrails         — list of { title, description, body }
+    lessons            — list of { title, description, body }
+    post_actions       — list of { title, description, body }
+-#}
+# {{ bot.name }}{% if title_label %} — {{ title_label }}{% endif %}
+
+{% if voice -%}
+## Voice: {{ voice.title }}
+
+{{ voice.body }}
+
+{% endif -%}
+{{ expertise_body }}
+
+{%- if bot.mission %}
+
+## Mission
+
+{{ bot.mission | trim }}
+{% endif -%}
+
+{%- if bot.scope %}
+
+## Scope
+
+{% if bot.scope.org -%}
+- **Org:** `{{ bot.scope.org }}`
+{% endif -%}
+{% if bot.scope.repos -%}
+- **Repos:** {{ bot.scope.repos | map('quote_backtick') | join(', ') }}
+{% endif -%}
+{% if bot.scope.snowflake_targets -%}
+- **Snowflake targets:** {{ bot.scope.snowflake_targets | map('quote_backtick') | join(', ') }}
+{% endif -%}
+{% for k, v in bot.scope.raw.items() -%}
+- **{{ k }}:** {{ v }}
+{% endfor %}
+Operate exclusively within this scope. If a task targets resources outside it, surface to the human before acting.
+{% endif -%}
+
+{%- if bot.model_strategy %}
+
+## Model Strategy
+
+{% if bot.model_strategy.base -%}
+- **Base model:** `{{ bot.model_strategy.base }}`
+{% endif -%}
+{% if bot.model_strategy.escalate_to -%}
+- **Escalate to:** `{{ bot.model_strategy.escalate_to }}` — {{ bot.model_strategy.escalate_when or 'when work exceeds base capacity' }}
+{% endif -%}
+{% if bot.model_strategy.compact_when -%}
+- **Compact when:** {{ bot.model_strategy.compact_when }}
+{% endif %}
+{% endif -%}
+
+{%- if teams %}
+
+## Fleet You Manage
+
+{% for team in teams -%}
+### Team: {{ team.name }}
+
+| Bot | Expertise | Model | tmux | Telegram |
+|-----|-----------|-------|------|----------|
+{% for worker_name in team.workers -%}
+{% set worker = fleet.bots.get(worker_name) -%}
+{% if worker -%}
+| {{ worker_name }} | {{ worker.expertise | join(', ') }} | {{ worker.model or '(default)' }} | {{ worker_name }} | {% if worker.telegram.handle %}@{{ worker.telegram.handle }}{% else %}—{% endif %} |
+{% else -%}
+| {{ worker_name }} | (undefined) | — | {{ worker_name }} | — |
+{% endif -%}
+{% endfor %}
+
+{% endfor -%}
+{% endif -%}
+
+{%- macro render_section(label, items) -%}
+{% if items %}
+
+## {{ label }}
+
+{% for item in items -%}
+### {{ item.title }}
+
+{{ item.body | trim }}
+
+{% endfor -%}
+{% endif -%}
+{%- endmacro -%}
+
+{{ render_section('Resources', resources) -}}
+{{ render_section('Integrations', integrations) -}}
+{{ render_section('Principles', principles) -}}
+{{ render_section('Protocols', protocols) -}}
+{{ render_section('Guardrails', guardrails) -}}
+{{ render_section('Lessons', lessons) -}}
+{{ render_section('Post-actions', post_actions) -}}

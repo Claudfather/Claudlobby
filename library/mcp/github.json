@@ -1,0 +1,15 @@
+{
+  "_env_contract": {
+    "GITHUB_PAT": {
+      "description": "GitHub Personal Access Token",
+      "tier": "fleet"
+    }
+  },
+  "github": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env": {
+      "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "dmPolicy": "allowlist",
+  "allowFrom": ["YOUR_TELEGRAM_USER_ID"],
+  "groups": {
+    "YOUR_SUPERGROUP_CHAT_ID": {
+      "requireMention": false,
+      "allowFrom": []
+    }
+  },
+  "pending": {}
+}

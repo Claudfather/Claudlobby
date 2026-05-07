@@ -1,0 +1,16 @@
+{
+  "_env_contract": {
+    "TOKEN": {
+      "description": "Notion API integration token",
+      "tier": "fleet",
+      "scope": "instance"
+    }
+  },
+  "notion": {
+    "command": "npx",
+    "args": ["-y", "@notionhq/notion-mcp-server"],
+    "env": {
+      "NOTION_TOKEN": "${TOKEN}"
+    }
+  }
+}

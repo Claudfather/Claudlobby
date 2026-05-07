@@ -1,0 +1,20 @@
+{
+  "_env_contract": {
+    "SPOTIFY_CLIENT_ID": {
+      "description": "Spotify OAuth client ID",
+      "tier": "fleet"
+    },
+    "SPOTIFY_CLIENT_SECRET": {
+      "description": "Spotify OAuth client secret",
+      "tier": "fleet"
+    }
+  },
+  "spotify": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-spotify"],
+    "env": {
+      "SPOTIFY_CLIENT_ID": "${SPOTIFY_CLIENT_ID}",
+      "SPOTIFY_CLIENT_SECRET": "${SPOTIFY_CLIENT_SECRET}"
+    }
+  }
+}

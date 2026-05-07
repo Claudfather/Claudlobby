@@ -1,0 +1,50 @@
+# Secrets — never commit
+*.env
+.env
+.env.*
+
+# Generated MCP configs (composed from library/mcp/ fragments at generate time)
+.mcp.json
+runtime/bots/*/.mcp.json
+
+# OAuth credentials
+.google_workspace_mcp/
+
+# Compositor output — gitignored. Bots may edit themselves here freely;
+# promote useful changes back to library/ via `claudlobby promote`.
+runtime/bots/
+
+# Local fleet overlays — user's fleet-specific library, voices, fleet.yaml,
+# runtime, .env, etc. Never committed to the public claudlobby repo.
+local/
+
+# Local-only voices (legacy path — use local/<fleet>/voices/ now)
+voices/local/
+
+# Claude Code state (auth, channels, sessions)
+.claude/
+
+# Python build artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Node modules
+node_modules/
+
+# Cloned project repos (legacy: bots clone repos under their own dir)
+*/projects/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# Active fleet config (root mode) — fleet.yaml.example is the canonical template
+fleet.yaml

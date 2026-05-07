@@ -1,0 +1,40 @@
+{
+  "_env_contract": {
+    "GOOGLE_OAUTH_CLIENT_ID": {
+      "description": "Google OAuth client ID",
+      "tier": "fleet",
+      "scope": "shared"
+    },
+    "GOOGLE_OAUTH_CLIENT_SECRET": {
+      "description": "Google OAuth client secret",
+      "tier": "fleet",
+      "scope": "shared"
+    },
+    "CREDENTIALS_DIR": {
+      "description": "OAuth credentials directory",
+      "tier": "fleet",
+      "scope": "instance"
+    },
+    "EMAIL": {
+      "description": "Google email address",
+      "tier": "fleet",
+      "scope": "instance"
+    },
+    "PORT": {
+      "description": "MCP server port",
+      "tier": "fleet",
+      "scope": "instance"
+    }
+  },
+  "gws": {
+    "command": "uvx",
+    "args": ["workspace-mcp", "--tools", "gmail", "calendar"],
+    "env": {
+      "GOOGLE_OAUTH_CLIENT_ID": "${GOOGLE_OAUTH_CLIENT_ID}",
+      "GOOGLE_OAUTH_CLIENT_SECRET": "${GOOGLE_OAUTH_CLIENT_SECRET}",
+      "WORKSPACE_MCP_CREDENTIALS_DIR": "${CREDENTIALS_DIR}",
+      "USER_GOOGLE_EMAIL": "${EMAIL}",
+      "WORKSPACE_MCP_PORT": "${PORT}"
+    }
+  }
+}

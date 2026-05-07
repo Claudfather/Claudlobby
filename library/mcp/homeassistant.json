@@ -1,0 +1,19 @@
+{
+  "_env_contract": {
+    "HA_URL": {
+      "description": "Home Assistant base URL",
+      "tier": "fleet"
+    },
+    "HA_TOKEN": {
+      "description": "Home Assistant long-lived access token",
+      "tier": "fleet"
+    }
+  },
+  "homeassistant": {
+    "type": "http",
+    "url": "${HA_URL}/api/mcp/",
+    "headers": {
+      "Authorization": "Bearer ${HA_TOKEN}"
+    }
+  }
+}

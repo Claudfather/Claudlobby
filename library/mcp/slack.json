@@ -1,0 +1,17 @@
+{
+  "_env_contract": {
+    "SLACK_TOKEN": {
+      "description": "Slack user OAuth token (xoxp-...)",
+      "tier": "bot"
+    }
+  },
+  "slack": {
+    "command": "npx",
+    "args": ["-y", "slack-mcp-server@latest", "--transport", "stdio"],
+    "env": {
+      "SLACK_MCP_XOXP_TOKEN": "${SLACK_TOKEN}",
+      "SLACK_MCP_ADD_MESSAGE_TOOL": "true",
+      "SLACK_MCP_MARK_TOOL": "true"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Entry-point shim. Locates the repo root and invokes the Python module.
+#
+# This wrapper exists so users can put `bin/` on PATH and run `claudlobby`
+# without `pip install`-ing the package. For an installed package, the
+# `claudlobby` script defined in pyproject.toml [project.scripts] is used
+# instead.
+set -euo pipefail
+
+# Resolve script dir → repo root (one level up from bin/)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Prefer python3, fall back to python
+PY="${CLAUDLOBBY_PYTHON:-$(command -v python3 || command -v python)}"
+if [ -z "$PY" ]; then
+    echo "claudlobby: no python3 found on PATH" >&2
+    exit 127
+fi
+
+exec "$PY" -m claudlobby --root "$REPO_ROOT" "$@"

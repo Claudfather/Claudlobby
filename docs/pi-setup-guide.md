@@ -1,0 +1,304 @@
+# Raspberry Pi Setup Guide
+
+Complete setup guide for preparing a Raspberry Pi 5 to run a Claude Code bot fleet.
+
+## Base System
+
+### OS
+
+Raspberry Pi OS (Debian Bookworm, 64-bit). Flash with [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
+
+### Initial Config
+
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Set timezone
+sudo timedatectl set-timezone America/New_York  # or your timezone
+
+# Enable SSH (if not already)
+sudo systemctl enable --now ssh
+
+# Update Pi firmware (important — newer firmware is more SD/USB-tolerant)
+sudo rpi-eeprom-update -a
+sudo reboot
+```
+
+### SD card stability — strongly recommended
+
+If the Pi will run 24/7 (which a fleet host does), apply this kernel cmdline param **before deploying**:
+
+```bash
+# Edit /boot/firmware/cmdline.txt — single line, APPEND to the existing line, do NOT add a newline:
+sudo sed -i -e "s|\$| sdhci.debug_quirks2=0x4|" /boot/firmware/cmdline.txt
+sudo reboot
+```
+
+**What it does:** drops the SD bus from UHS-I SDR104 (200 MHz, 1.8 V) to High-Speed mode (50 MHz, 3.3 V). Pi 5 + some SD cards have a known compatibility class of issues at SDR104 — the kernel logs `mmc0: Card stuck being busy! __mmc_poll_for_busy` and `jbd2/mmcblk0p2 blocked for 120+ seconds` events at random intervals, eventually wedging the system. The throttle eliminates this without needing a card replacement.
+
+**Verify after reboot:**
+
+```bash
+cat /sys/kernel/debug/mmc0/ios | grep -E "clock|timing|signal"
+# Expected:
+#   clock:           50000000 Hz
+#   timing spec:     2 (sd high-speed)
+#   signal voltage:  0 (3.30 V)
+```
+
+Performance halves (~90 → ~45 MB/s sequential) — irrelevant for a fleet workload of logs + state writes. See `library/lessons/raspberry-pi/sdhci-uhs-quirk.md` for the full postmortem.
+
+**Note:** the legacy `dtparam=sd_overclock=N` and `dtparam=sd_disable_uhs=1` parameters from Pi 1-4 do NOT take effect on Pi 5 (different driver). Use the cmdline approach above.
+
+## Required Software
+
+### Node.js + npm
+
+Required for MCP servers (most use `npx`).
+
+```bash
+# Install Node.js 20.x via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+
+# Create global npm directory (avoids sudo for global installs)
+mkdir -p ~/.npm-global
+npm config set prefix '~/.npm-global'
+echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Bun (for Telegram plugin)
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+echo 'export PATH="$HOME/.bun/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Python + uv/uvx (for workspace-mcp and other Python MCP servers)
+
+```bash
+# Python should already be installed. Install uv:
+curl -LsSf https://astral.sh/uv/install.sh | sh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### tmux
+
+```bash
+sudo apt install -y tmux
+```
+
+### Claude Code
+
+```bash
+# Install via npm
+npm install -g @anthropic-ai/claude-code
+
+# Authenticate
+claude auth login
+# Complete OAuth flow in browser (use SSH tunnel if headless)
+```
+
+### GitHub CLI
+
+```bash
+# Install
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+sudo apt update && sudo apt install -y gh
+
+# Authenticate
+gh auth login
+```
+
+## Optional CLIs
+
+Install these based on what your bots need to manage.
+
+### Vercel CLI
+
+```bash
+npm install -g vercel
+vercel login
+# Complete browser auth via SSH tunnel
+```
+
+### Railway CLI
+
+```bash
+npm install -g @railway/cli
+railway login
+# Complete browser auth via SSH tunnel
+```
+
+### Neon CLI
+
+```bash
+npm install -g neonctl
+neonctl auth
+# Complete browser auth via SSH tunnel
+```
+
+### DigitalOcean CLI (doctl)
+
+```bash
+# Download latest release
+wget https://github.com/digitalocean/doctl/releases/download/v1.104.0/doctl-1.104.0-linux-arm64.tar.gz
+tar xf doctl-1.104.0-linux-arm64.tar.gz
+sudo mv doctl /usr/local/bin/
+doctl auth init
+# Paste API token from DO dashboard
+```
+
+### dbt Core (for data teams)
+
+```bash
+pip install dbt-snowflake  # or dbt-postgres, dbt-bigquery, etc.
+```
+
+### Tailscale (remote access)
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+# Authenticate via URL
+```
+
+## MCP Server Dependencies
+
+Most MCP servers install on-demand via `npx` or `uvx`. Some need pre-installation:
+
+### workspace-mcp (Gmail / Google Calendar)
+
+```bash
+# Installs on-demand via uvx, but needs a Google Cloud OAuth client:
+# 1. Go to console.cloud.google.com
+# 2. Create project → APIs & Services → Credentials → OAuth Client ID
+# 3. Type: Desktop app
+# 4. Copy Client ID and Client Secret
+# 5. First run triggers OAuth flow — open URL in browser via SSH tunnel
+```
+
+### Notion MCP
+
+```bash
+# Installs on-demand via npx. Needs:
+# 1. Go to notion.so/profile/integrations
+# 2. Create integration → copy token (ntn_...)
+# 3. Share target pages/databases with the integration
+```
+
+### Home Assistant MCP
+
+```bash
+# hass-mcp installs via uvx. Needs:
+# 1. HA long-lived access token from HA dashboard → Profile → Security
+# 2. HA must be accessible from Pi (usually http://localhost:8123)
+```
+
+## SSH Tunnel for OAuth Flows
+
+Headless Pi can't open browsers. Use SSH tunnels for OAuth:
+
+```bash
+# On your laptop — forward Pi's OAuth callback port
+ssh -L 8000:localhost:8000 your-pi-host -N
+
+# Then open the OAuth URL in your laptop's browser
+# The callback redirects to localhost:8000 which tunnels to the Pi
+```
+
+For multiple Gmail accounts, each needs a unique port:
+```bash
+# Account 1: port 8000 (default)
+# Account 2: port 8001
+# Account 3: port 8002
+# Set WORKSPACE_MCP_PORT in .mcp.json for each
+```
+
+## Security Hardening
+
+```bash
+# Lock down secret files
+chmod 600 ~/claudlobby/*/.env ~/claudlobby/*/.mcp.json
+
+# Disable SSH password auth
+sudo sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo systemctl restart ssh
+
+# Firewall
+sudo apt install -y ufw
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow from YOUR_LAN_SUBNET/24 to any port 22
+sudo ufw enable
+
+# Brute-force protection
+sudo apt install -y fail2ban
+echo -e "[sshd]\nenabled = true\nbackend = systemd" | sudo tee /etc/fail2ban/jail.local
+sudo systemctl enable --now fail2ban
+
+# Disable unnecessary services
+sudo systemctl disable --now cups cups-browsed ModemManager
+```
+
+## Swap (Recommended for 4+ Bots)
+
+```bash
+sudo dphys-swapfile swapoff
+sudo sed -i 's/CONF_SWAPSIZE=.*/CONF_SWAPSIZE=4096/' /etc/dphys-swapfile
+sudo dphys-swapfile setup
+sudo dphys-swapfile swapon
+```
+
+## Installing the fleet (pick one pattern)
+
+Two supported patterns on Linux. Pick the one that fits — both produce a working fleet, neither blocks the other later. Full reference: [install-patterns.md](./install-patterns.md).
+
+### Pattern A — cron + tmux (simplest, what most Pi setups use)
+
+```bash
+# Compose the fleet first
+claudlobby --fleet <name> generate
+
+# Install cron entries (per-bot keepalive staggered, log rotation, disk monitor, daily creds-check)
+lib/install-cron.sh --fleet <name>
+
+# Inspect without writing
+lib/install-cron.sh --fleet <name> --dry-run
+```
+
+`install-cron.sh` writes a managed block bracketed by `# BEGIN claudlobby:<fleet>` / `# END claudlobby:<fleet>` markers. Re-run it to update; lines outside the markers are preserved.
+
+Bots themselves are still tmux sessions; bring them up at boot with one `@reboot` entry per bot:
+
+```crontab
+@reboot sleep 60 && /path/to/claudlobby/lib/start-bot.sh /path/to/runtime/bots/<bot>
+```
+
+### Pattern B — systemd user services (modern, self-restarting)
+
+```bash
+loginctl enable-linger $USER     # one-time, so user services persist past logout
+claudlobby --fleet <name> generate
+
+# Per bot
+lib/install-bot-systemd.sh local/<name>/runtime/bots/<bot>
+
+# Fleet-wide timers
+lib/install-keepalive-systemd.sh <name>
+lib/install-creds-check-systemd.sh
+```
+
+Each bot becomes a `systemd --user` unit with `Restart=on-failure`. View with `systemctl --user list-timers` and `journalctl --user -u <name> -f`.
+
+### Generic helpers used by both patterns
+
+- `lib/keepalive.sh <bot-dir>` — restart a dead session, nudge idle panes
+- `lib/log-rotate.sh [--keep N] <log>...` — tail each log to last N lines
+- `lib/disk-monitor.sh [--threshold N]` — warn if disk usage > threshold
+- `lib/bot-sweep-cron.sh <bot> <trigger>` — periodic dispatch (e.g. `bot-sweep-cron.sh assistant "briefing morning"`)

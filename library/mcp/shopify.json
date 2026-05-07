@@ -1,0 +1,20 @@
+{
+  "_env_contract": {
+    "SHOPIFY_ACCESS_TOKEN": {
+      "description": "Shopify Admin API access token",
+      "tier": "fleet"
+    },
+    "SHOPIFY_STORE_DOMAIN": {
+      "description": "Shopify store domain (e.g. mystore.myshopify.com)",
+      "tier": "fleet"
+    }
+  },
+  "shopify": {
+    "command": "npx",
+    "args": ["-y", "@shopify/dev-mcp@latest"],
+    "env": {
+      "SHOPIFY_ACCESS_TOKEN": "${SHOPIFY_ACCESS_TOKEN}",
+      "SHOPIFY_STORE_DOMAIN": "${SHOPIFY_STORE_DOMAIN}"
+    }
+  }
+}

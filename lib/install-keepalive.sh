@@ -1,0 +1,71 @@
+#!/bin/bash
+# Install the fleet-wide keepalive as a launchd LaunchAgent (macOS).
+#
+# Companion to install-bot.sh. Per-bot plists have KeepAlive=false (or
+# Restart=on-failure on Linux), so if a bot's tmux session dies nothing
+# restarts it automatically. This agent ticks every 60s and runs
+# keepalive-all.sh, which kickstarts dead sessions and nudges idle bots.
+#
+# Usage: install-keepalive.sh [<fleet-name>]
+#   <fleet-name>: defaults to $CLAUDLOBBY_FLEET. Used to scope the
+#                  LaunchAgent label and the runtime/bots/ directory the
+#                  keepalive iterates.
+set -euo pipefail
+
+if [ "$(uname)" != "Darwin" ]; then
+    echo "install-keepalive.sh: macOS only. On Linux, install a systemd timer" >&2
+    echo "  pointing at $CLAUDLOBBY_ROOT/lib/keepalive-all.sh (every 60s)." >&2
+    exit 1
+fi
+
+CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
+FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
+if [ -z "$FLEET" ]; then
+    echo "install-keepalive.sh: pass a fleet name or set CLAUDLOBBY_FLEET" >&2
+    exit 2
+fi
+
+LABEL="com.claudlobby.$FLEET.keepalive"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+PROGRAM="$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
+LOG_DIR="$CLAUDLOBBY_ROOT/lib"
+
+if [ ! -x "$PROGRAM" ]; then
+    echo "error: $PROGRAM not executable (run: chmod +x $PROGRAM)" >&2
+    exit 1
+fi
+
+mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
+
+cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$PROGRAM</string>
+    </array>
+    <!-- Tick every 60 seconds -->
+    <key>StartInterval</key><integer>60</integer>
+    <key>RunAtLoad</key><true/>
+    <key>StandardOutPath</key><string>$LOG_DIR/keepalive-agent.out.log</string>
+    <key>StandardErrorPath</key><string>$LOG_DIR/keepalive-agent.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key><string>$HOME</string>
+        <key>CLAUDLOBBY_ROOT</key><string>$CLAUDLOBBY_ROOT</string>
+        <key>CLAUDLOBBY_FLEET</key><string>$FLEET</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+
+UID_NUM="$(id -u)"
+/bin/launchctl bootout "gui/$UID_NUM/$LABEL" 2>/dev/null || true
+/bin/launchctl bootstrap "gui/$UID_NUM" "$PLIST"
+echo "installed + loaded: $LABEL"
+echo "plist: $PLIST"
+echo "tail logs: tail -f $LOG_DIR/keepalive-agent.*.log"

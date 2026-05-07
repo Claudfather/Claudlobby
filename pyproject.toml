@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudlobby"
+version = "0.1.0"
+description = "Compositor for Claude Code agent fleets — assembles bots from a library of personas, skills, MCP fragments, guardrails, and protocols via fleet.yaml"
+authors = [{ name = "Chris Rogers" }]
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "PyYAML>=6.0",
+    "Jinja2>=3.1",
+]
+
+[project.scripts]
+claudlobby = "claudlobby.__main__:main"
+
+[tool.setuptools]
+packages = ["claudlobby"]

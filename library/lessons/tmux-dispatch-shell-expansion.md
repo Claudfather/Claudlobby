@@ -1,0 +1,17 @@
+---
+title: tmux dispatch shell expansion
+description: Disable bash history expansion before tmux send-keys dispatches containing ! tokens
+---
+
+Every tmux send-keys dispatch with prompt-like content MUST begin with `set +H;` prefix to disable bash history expansion.
+
+A literal `!` followed by a word (e.g., `!readOnly`, `!isDashboard`, `!foo && bar`) triggers bash/zsh history expansion, which can:
+- Silently blank exclamation-adjacent text
+- Cause the Enter keystroke to not fire — the prompt lands in the worker's input buffer unsubmitted
+
+**Fixes:**
+- **Prefix:** `set +H; <dispatch content>`
+- **Large dispatches (>50 lines):** write to a temp file and `tmux send-keys -t <bot> 'cat /tmp/dispatch.txt | claude' Enter`
+- **If a dispatch lands but doesn't submit:** send a bare `tmux send-keys -t <bot> Enter`
+
+**Related:** backticks inside double-quoted bash strings also trigger command substitution. Use single quotes for curl/message bodies containing backticks or `!word` patterns. If double quotes are required, escape every backtick as `` \` ``.
