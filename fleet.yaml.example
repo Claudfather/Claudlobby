@@ -17,6 +17,13 @@ fleet:
     prompt_suggestions: false                # disable autocomplete suggestions (headless bots don't need them)
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
     protocols: [report-back, context-management, telegram-routing, telegram-formatting]
+    sandbox:
+      auto_allow_bash: true                  # don't prompt for bash in sandbox mode
+      network_allowed_domains:               # domains all bots may access without prompts
+        - api.github.com
+        - api.telegram.org
+        - "*.anthropic.com"
+      # filesystem_allow_write: []           # additional write paths (bot dir is always writable)
 
   teams:
     engineering:
@@ -82,6 +89,10 @@ fleet:
 #     # post_actions — workflows to run after task completion
 #     post_actions:
 #       - notify-human
+#
+#     # mounts — symlinks to external host paths, created under <bot>/mounts/
+#     mounts:
+#       ha-config: /path/to/homeassistant/config  # edits write to the real location
 #
 #     # scope — operational boundaries (org, repos the bot is allowed to touch)
 #     scope:

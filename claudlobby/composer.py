@@ -41,12 +41,14 @@ def _expand(text: str, ctx: dict[str, str]) -> str:
 
 
 def _bot_template_context(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict[str, str]:
+    bot_dir = paths.bot_runtime(bot.name)
     return {
         "BOT_NAME": bot.name,
         "BOT_NAME_UPPER": bot.name.upper(),
         "FLEET_NAME": fleet.name,
         "SERVICE_PREFIX": fleet.service_prefix,
         "CLAUDLOBBY_ROOT": str(paths.root),
+        "BOT_DIR": str(bot_dir),
         "TELEGRAM_GROUP_CHAT_ID": (
             bot.telegram.chat_id or fleet.telegram_group_chat_id or ""
         ),
@@ -450,6 +452,34 @@ def link_skills(bot: BotConfig, paths: Paths, log) -> None:
             _add(src.name, src)
 
 
+def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
+    """Create symlinks for declared mounts.
+
+    Each mount maps a local name to an absolute host path.
+    Symlinks are placed under bot_dir/mounts/<name>.
+    Stale symlinks (removed from config) are cleaned up.
+    """
+    mounts_dir = bot_dir / "mounts"
+    mounts_dir.mkdir(exist_ok=True)
+
+    # Clean stale symlinks
+    if mounts_dir.exists():
+        for entry in mounts_dir.iterdir():
+            if entry.is_symlink() and entry.name not in bot.mounts:
+                entry.unlink()
+
+    for name, target in bot.mounts.items():
+        target_path = Path(target).expanduser()
+        link = mounts_dir / name
+        if link.is_symlink():
+            if link.resolve() == target_path.resolve():
+                continue  # already correct
+            link.unlink()
+        if not target_path.exists():
+            log(f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink")
+        link.symlink_to(target_path)
+
+
 # ----------------------------------------------------------------------
 # CLAUDE.md composition (template-driven)
 # ----------------------------------------------------------------------
@@ -509,7 +539,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
 # ----------------------------------------------------------------------
 
 def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict:
-    """Generate .claude/settings.local.json with memory dir + sibling isolation."""
+    """Generate .claude/settings.local.json with memory dir, sibling isolation, and sandbox."""
     bot_dir = paths.bot_runtime(bot.name)
     memory_dir = str(bot_dir / "memory")
 
@@ -527,6 +557,18 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
             deny_patterns.append(f"Read({sibling_dir}/**)")
         settings["permissions"] = {"deny": deny_patterns}
 
+    # Sandbox: network + filesystem allowlists + bash auto-allow
+    sandbox = bot.sandbox
+    if sandbox.network_allowed_domains or sandbox.filesystem_allow_write or sandbox.auto_allow_bash:
+        sandbox_cfg: dict = {}
+        if sandbox.network_allowed_domains:
+            sandbox_cfg["network"] = {"allowedDomains": sandbox.network_allowed_domains}
+        if sandbox.filesystem_allow_write:
+            sandbox_cfg["filesystem"] = {"allowWrite": sandbox.filesystem_allow_write}
+        if sandbox.auto_allow_bash:
+            sandbox_cfg["autoAllowBashIfSandboxed"] = True
+        settings["sandbox"] = sandbox_cfg
+
     return settings
 
 
@@ -535,6 +577,9 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / ".claude").mkdir(exist_ok=True)
     (bot_dir / "memory").mkdir(exist_ok=True)
+    (bot_dir / "projects").mkdir(exist_ok=True)
+    (bot_dir / "data").mkdir(exist_ok=True)
+    (bot_dir / "logs").mkdir(exist_ok=True)
 
     (bot_dir / "CLAUDE.md").write_text(compose_claude_md(bot, fleet, paths))
 
@@ -549,6 +594,7 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
     )
 
     link_skills(bot, paths, log)
+    link_mounts(bot, bot_dir, log)
 
     (bot_dir / f"{bot.name}.service").write_text(compose_systemd_unit(bot, fleet, paths))
     (bot_dir / f"{bot.name}.plist").write_text(compose_launchd_plist(bot, fleet, paths))

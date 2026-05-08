@@ -40,6 +40,18 @@ class ModelStrategyConfig:
 
 
 @dataclass
+class SandboxConfig:
+    """Sandbox network/filesystem settings → .claude/settings.local.json.
+
+    Controls the Claude Code sandbox layer (separate from --dangerously-skip-permissions
+    which controls tool-call permission prompts).
+    """
+    network_allowed_domains: list[str] = field(default_factory=list)
+    filesystem_allow_write: list[str] = field(default_factory=list)
+    auto_allow_bash: bool = True  # autoAllowBashIfSandboxed
+
+
+@dataclass
 class McpEntry:
     """Parsed MCP entry from fleet.yaml.
 
@@ -99,6 +111,8 @@ class BotConfig:
     resources: list[str] = field(default_factory=list)
     lessons: list[str] = field(default_factory=list)
     post_actions: list[str] = field(default_factory=list)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    mounts: dict[str, str] = field(default_factory=dict)  # name → absolute host path
     env: dict[str, str] = field(default_factory=dict)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     startup_prompt: str | None = None
@@ -222,6 +236,29 @@ def _coerce_model_strategy(raw: dict | None) -> ModelStrategyConfig | None:
     )
 
 
+def _coerce_sandbox(raw: dict | None) -> SandboxConfig:
+    if not raw:
+        return SandboxConfig()
+    return SandboxConfig(
+        network_allowed_domains=list(raw.get("network_allowed_domains") or []),
+        filesystem_allow_write=list(raw.get("filesystem_allow_write") or []),
+        auto_allow_bash=bool(raw.get("auto_allow_bash", True)),
+    )
+
+
+def _merge_sandbox(default: SandboxConfig, override: SandboxConfig) -> SandboxConfig:
+    """Merge sandbox configs — lists are unioned, bools use override value."""
+    return SandboxConfig(
+        network_allowed_domains=_merge_lists(
+            default.network_allowed_domains, override.network_allowed_domains
+        ),
+        filesystem_allow_write=_merge_lists(
+            default.filesystem_allow_write, override.filesystem_allow_write
+        ),
+        auto_allow_bash=override.auto_allow_bash,
+    )
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_raw = raw.get("telegram", {}) or {}
@@ -264,6 +301,11 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         resources=_merge_lists(defaults.get("resources"), raw.get("resources")),
         lessons=_merge_lists(defaults.get("lessons"), raw.get("lessons")),
         post_actions=_merge_lists(defaults.get("post_actions"), raw.get("post_actions")),
+        sandbox=_merge_sandbox(
+            _coerce_sandbox(defaults.get("sandbox")),
+            _coerce_sandbox(raw.get("sandbox")),
+        ),
+        mounts={**(defaults.get("mounts") or {}), **(raw.get("mounts") or {})},
         env=raw.get("env", {}) or {},
         telegram=TelegramConfig(
             handle=tg_raw.get("handle"),
