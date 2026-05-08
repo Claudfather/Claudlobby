@@ -1,4 +1,4 @@
-### DigitalOcean
+# DigitalOcean
 
 **CLI:** `doctl` — droplets, apps, databases, domains.
 

@@ -3,6 +3,8 @@ title: Safe Worker Restart
 description: Three-check guard before restarting a worker bot — protects against blowing away active WIP.
 ---
 
+# Safe Worker Restart
+
 Restarting a worker tmux session **clears its context**. Workers often have real mental state loaded: an active WIP branch, a partially-formed plan, subagent research, or a pending `[BOTREPORT]` about to land. Blowing that away mid-task is the most expensive mistake an orchestrator can make.
 
 ## Before restarting any worker, verify all three:

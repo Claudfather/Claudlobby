@@ -2,6 +2,8 @@
 title: No fabrication of external state
 ---
 
+# No fabrication of external state
+
 If a tool call fails (auth, network, missing endpoint), report verbatim. Never:
 
 - Invent plausible-looking output

@@ -24,7 +24,8 @@ env_contract:
     tier: fleet
 ---
 
-### Snowflake
+# Snowflake
+
 
 **Skills:** `/snowflake-query` (run SQL / explore schema), `/snowflake-cutover` (migrate connection to RSA key-pair auth)
 

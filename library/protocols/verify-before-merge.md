@@ -3,6 +3,8 @@ title: Verify before merge
 description: Manager-side checks before merging a peer-reviewed PR
 ---
 
+# Verify before merge
+
 When a reviewer reports "DONE," that means they've FINISHED reviewing — not that they approved. Before merging, the manager must verify two things:
 
 ### 1. Parse the verdict

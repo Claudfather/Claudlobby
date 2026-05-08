@@ -3,6 +3,8 @@ title: Sprint candidate validation
 description: Pre-dispatch checks for autonomous sprint issue selection
 ---
 
+# Sprint candidate validation
+
 Before dispatching sprint work, validate every candidate through three gates:
 
 ### 1. Label gating

@@ -3,6 +3,8 @@ title: Never Full-Refresh in Prod
 description: `--full-refresh` destroys incremental state — irrecoverable on multi-billion-row models.
 ---
 
+# Never Full-Refresh in Prod
+
 dbt's `--full-refresh` flag drops and rebuilds the target table. For an incremental model that has been growing for months, this is hours of compute, terabytes of read, and any data that's no longer reproducible from source (deletes, late-arriving merges, hand-fixes) is gone.
 
 **Never run `--full-refresh` against prod targets.** This includes:

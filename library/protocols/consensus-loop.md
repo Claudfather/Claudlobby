@@ -2,6 +2,8 @@
 title: Consensus Decision-Making
 ---
 
+# Consensus Decision-Making
+
 When a worker pauses with multiple viable approaches, **triage first** before bouncing the question up.
 
 **Triage:**

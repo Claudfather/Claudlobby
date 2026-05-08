@@ -3,6 +3,8 @@ title: Auto-merge with --admin after peer review
 description: Manager auto-merges PRs using --admin after a real peer review verdict + CI green. For same-identity fleets where regular merge is blocked by branch protection.
 ---
 
+# Auto-merge with --admin after peer review
+
 The manager auto-merges PRs using `--admin` when ALL of:
 
 1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict, or a `COMMENT` with `**Approve**` verdict line (same-identity fallback). The review must be from a different bot than the PR author — no self-reviews.

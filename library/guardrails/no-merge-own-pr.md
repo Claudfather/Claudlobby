@@ -3,6 +3,8 @@ title: Never Merge Your Own PR
 description: Authors do not merge. Reviewers do not merge. The human merges.
 ---
 
+# Never Merge Your Own PR
+
 The author of a PR has the strongest motivation to ship and the weakest visibility into what they got wrong. Merging your own PR collapses the review gate to a self-rationalisation.
 
 **The rule:**

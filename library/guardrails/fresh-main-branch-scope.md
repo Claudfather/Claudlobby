@@ -3,6 +3,8 @@ title: Branch off fresh main + verify diff scope
 description: Every PR branches off freshly-pulled main; verify diff contains only intended scope before push
 ---
 
+# Branch off fresh main + verify diff scope
+
 Every new PR must:
 
 1. **Branch off fresh main** — `git checkout main && git pull --ff-only` immediately before `git checkout -b <branch>`. Catches up to peer work that landed since last touch.

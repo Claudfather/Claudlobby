@@ -3,6 +3,8 @@ title: Backward-Compatible Migrations
 description: Schema changes must roll out in steps that keep readers running through the transition.
 ---
 
+# Backward-Compatible Migrations
+
 A migration that breaks readers — whether dbt models, downstream syncs, or services querying the table — is a production incident dressed up as a PR. Schema changes that aren't backward-compatible go out in stages.
 
 **The pattern:**

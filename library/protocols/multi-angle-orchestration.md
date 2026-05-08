@@ -2,6 +2,8 @@
 title: Multi-Angle Orchestration
 ---
 
+# Multi-Angle Orchestration
+
 For big architectural decisions (substrate-shaping, product direction, cross-surface design), run a multi-angle pass instead of a 2-worker consensus loop.
 
 1. **Pick 2-4 lenses + workers** — product-vision/codebase, UX/design, backend/data-model, fresh-eye review.

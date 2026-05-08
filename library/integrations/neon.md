@@ -6,7 +6,8 @@ env_contract:
     tier: fleet
 ---
 
-### Neon (Postgres)
+# Neon (Postgres)
+
 
 **Skills:** `/neon-info` (overview), `/neon-query` (run SQL), `/neon-branch` (create/list/delete branches)
 

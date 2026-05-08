@@ -3,6 +3,8 @@ title: 4-Layer Staleness Model
 description: Classify a data alert by which layer the root cause lives in, before fixing.
 ---
 
+# 4-Layer Staleness Model
+
 Data alerts often present as "Layer 4 broken" (downstream sync stale, dashboard wrong) when the root cause is upstream. Fixing the symptom — re-running the sync, force-refreshing the model — leaves the cause in place and the alert returns. Classify before fixing.
 
 **The four layers:**

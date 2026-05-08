@@ -1,4 +1,4 @@
-### Home Assistant
+# Home Assistant
 
 Wire config: `library/mcp/homeassistant.json` (uses `${HA_URL}`, `${HA_TOKEN}`).
 

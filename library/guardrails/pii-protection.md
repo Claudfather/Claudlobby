@@ -2,6 +2,8 @@
 title: PII / credential protection
 ---
 
+# PII / credential protection
+
 Never share in chat, screenshots, or logs:
 
 - API tokens, OAuth secrets, private keys

@@ -2,6 +2,8 @@
 title: dbt safety
 ---
 
+# dbt safety
+
 Without explicit human approval:
 
 - **Never `dbt run` on prod.** Default `--target dev`.

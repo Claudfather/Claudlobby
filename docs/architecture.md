@@ -17,14 +17,14 @@ Five subdirectories, each a flat collection of small files:
 
 ```
 library/
-├── personas/           manager.md, engineer.md, reviewer.md, designer.md, business.md
+├── expertise/          orchestration.md, software-engineering.md, code-review.md, …
 ├── skills/             dispatch/, lifecycle/, prs/, fleet-status/, sweep/, …
 ├── mcp/                github.json, notion.json, slack.json, gmail.json, …
 ├── guardrails/         no-push-main.md, pii-protection.md, dbt-safety.md, …
 └── protocols/          report-back.md, dispatch.md, telegram-routing.md, …
 ```
 
-**Personas** are role scaffolding — what a manager *does*, not what it sounds like. (Voice goes elsewhere — see below.)
+**Expertise** files are role scaffolding — what a manager *does*, not what it sounds like. (Voice goes elsewhere — see below.)
 
 **Skills** are slash-command-style packages. Each skill is a directory with a `SKILL.md` (and optional helpers). The compositor symlinks them into the bot's `.claude/skills/` so edits in `library/skills/` propagate live to all bots that load the skill.
 
@@ -55,7 +55,7 @@ fleet:
 
   bots:
     lead:
-      persona: manager
+      expertise: [orchestration]
       voice: voices/lead.md
       skills: [dispatch, fleet-status, lifecycle]
       mcp: [github, notion]
@@ -65,7 +65,7 @@ fleet:
         require_mention: false
 
     eng-1:
-      persona: engineer
+      expertise: [software-engineering]
       mcp: [github]
       telegram:
         handle: my_eng_1_bot
@@ -85,7 +85,7 @@ For each bot in `fleet.yaml`, `claudlobby generate` writes:
 
 ```
 runtime/bots/<name>/
-├── CLAUDE.md           ← composed from persona + voice + roster + protocols + guardrails
+├── CLAUDE.md           ← composed from expertise + voice + roster + protocols + guardrails
 ├── .mcp.json           ← merged from library/mcp/ fragments
 ├── bot.conf            ← env exports for lib/start-bot.sh
 ├── .claude/
@@ -97,7 +97,7 @@ runtime/bots/<name>/
 #### CLAUDE.md composition order
 
 ```
-1. Persona base                    library/personas/<persona>.md
+1. Expertise base                  library/expertise/<name>.md (one per expertise entry)
 2. Voice overlay                   inserted after H1 (if voice: set)
 3. Team roster                     auto-generated for managers
 4. Protocols                       library/protocols/<each>.md, in fleet.yaml order
@@ -108,7 +108,7 @@ Reading the generated file top-to-bottom, you can see exactly which library file
 
 #### Templating
 
-Persona / protocol / guardrail files may use `{{BOT_NAME}}`, `{{SERVICE_PREFIX}}`, `{{CLAUDLOBBY_ROOT}}`, `{{TELEGRAM_GROUP_CHAT_ID}}`, `{{FLEET_NAME}}` placeholders. The compositor expands them per bot.
+Expertise / protocol / guardrail files may use `{{BOT_NAME}}`, `{{SERVICE_PREFIX}}`, `{{CLAUDLOBBY_ROOT}}`, `{{TELEGRAM_GROUP_CHAT_ID}}`, `{{FLEET_NAME}}` placeholders. The compositor expands them per bot.
 
 ### 4. The host — systemd / launchd
 
@@ -144,7 +144,7 @@ Bots can edit themselves in `runtime/bots/<name>/` during a session. `runtime/bo
 
   1. Bot edits its CLAUDE.md mid-session (e.g., learns a new pattern, codifies a rule)
   2. `claudlobby diff <bot>` shows the drift vs what `generate` would produce
-  3. `claudlobby promote <bot>` (interactive — v1 is manual; v2 will have a picker) moves drifted content back to `library/personas/<role>.md`, `library/voices/<voice>.md`, or a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`
+  3. `claudlobby promote <bot>` (interactive — v1 is manual; v2 will have a picker) moves drifted content back to `library/expertise/<role>.md`, `library/voices/<voice>.md`, or a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`
   4. After promotion, `library/` reflects the learned change. Re-running `generate` produces a CLAUDE.md consistent with the new library state.
 
 This is the foundation for the future ML / self-learning layer: drift becomes training data. When the same drift shows up across multiple bots, that's a signal a guardrail or protocol should exist.
@@ -153,7 +153,7 @@ This is the foundation for the future ML / self-learning layer: drift becomes tr
 
 `claudlobby validate` is permissive by default:
 
-- **Hard error** — bot references a `persona` that doesn't exist (can't generate without a base)
+- **Hard error** — bot references an `expertise` that doesn't exist (can't generate without a base)
 - **Hard error** — `fleet.yaml` is invalid YAML or missing required keys
 - **Warn** — bot references a skill / mcp / guardrail / protocol that doesn't exist (skipped)
 - **Warn** — MCP fragment uses `${FOO}` but `FOO` is unset (bot boots; MCP server fails loudly at runtime)

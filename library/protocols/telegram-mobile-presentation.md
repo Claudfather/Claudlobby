@@ -2,6 +2,8 @@
 title: Telegram Mobile Presentation
 ---
 
+# Telegram Mobile Presentation
+
 The human is often on their phone when ratifying. Walls of text don't get read; one fork per message does.
 
 - **One fork per message.** Name the fork, give 2-3 options with concise trade-offs, state the team's lean, ask for the call.

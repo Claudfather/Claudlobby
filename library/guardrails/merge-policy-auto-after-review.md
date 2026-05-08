@@ -3,6 +3,8 @@ title: Auto-merge after peer review
 description: Manager auto-merges PRs after a peer review verdict + CI green. Does not use --admin — requires GitHub branch protection to allow it.
 ---
 
+# Auto-merge after peer review
+
 The manager auto-merges PRs when ALL of:
 
 1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict (or `COMMENT` with `**Approve**` verdict line under same-identity fallback).

@@ -60,3 +60,37 @@ fleet:
         handle: my_reviewer_bot
         token_env: TELEGRAM_TOKEN_REV1
         require_mention: true
+
+# ---------------------------------------------------------------------------
+# Advanced options (uncomment and add to any bot stanza above)
+# ---------------------------------------------------------------------------
+#
+#     # env — bot-specific environment variables (merged with .env files)
+#     env:
+#       TZ: America/New_York
+#       SOME_FLAG: "true"
+#
+#     # resources — reference docs from library/resources/ (e.g. timezone, DB schemas)
+#     resources:
+#       - timezone
+#
+#     # lessons — learned patterns from library/lessons/ to include in CLAUDE.md
+#     lessons:
+#       - tmux-dispatch-shell-expansion
+#       - messaging-channel-discipline
+#
+#     # post_actions — workflows to run after task completion
+#     post_actions:
+#       - notify-human
+#
+#     # scope — operational boundaries (org, repos the bot is allowed to touch)
+#     scope:
+#       org: my-github-org
+#       repos: [repo-a, repo-b, repo-c]
+#
+#     # voice — personality overlay file (separate from expertise)
+#     voice: voices/erlich-bachman.md
+#
+#     # telegram.chat_id — override the fleet-level group for this bot
+#     telegram:
+#       chat_id: "-1009999999999"

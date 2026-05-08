@@ -2,6 +2,8 @@
 title: Telegram Formatting
 ---
 
+# Telegram Formatting
+
 **Default: plain text.** Do not pass `parseMode`. Do not wrap output in `**bold**`, `_italic_`, or backticks — they render literally, which is fine and preferable to escape failures.
 
 The bash helper `$CLAUDLOBBY_ROOT/lib/tg-post.sh` sends plain text by default. The MCP tool `mcp__plugin_telegram_telegram__reply` — call it WITHOUT `parseMode`.

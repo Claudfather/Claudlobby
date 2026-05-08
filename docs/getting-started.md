@@ -65,7 +65,7 @@ Key fields to customize:
 - `fleet.service_prefix` — reverse-domain prefix for service unit names (`com.yourorg.fleet`)
 - `fleet.telegram_group_chat_id` — your default Telegram group ID. Get it by adding [@RawDataBot](https://t.me/raw_data_bot) to your group; the chat_id appears in its first message.
 - For each bot:
-  - `persona` — pick one of `manager / engineer / reviewer / designer / business`
+  - `expertise` — list of roles from `library/expertise/` (e.g. `[orchestration]`, `[software-engineering, code-review]`)
   - `voice` — optional path to a personality file under `voices/`
   - `mcp` — list of MCP fragments from `library/mcp/`
   - `skills` — list of skills from `library/skills/`

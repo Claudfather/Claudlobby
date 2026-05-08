@@ -3,6 +3,8 @@ title: Dev-Auth Server-Side Only
 description: Auth bypass flags must never appear in `NEXT_PUBLIC_*` (or any client-bundled) env. Server-side only.
 ---
 
+# Dev-Auth Server-Side Only
+
 Dev-auth bypass mechanisms (e.g., `DEV_AUTH_BYPASS=true`) exist to skip login during development and preview crawls. They must never reach the browser bundle.
 
 **The rule:**

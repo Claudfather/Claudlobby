@@ -1,4 +1,4 @@
-### Vercel
+# Vercel
 
 **Skills:** `/vercel-status` (deployments, domains, env vars), `/vercel-logs` (view/debug logs), `/vercel-deploy` (deploy to production or preview)
 

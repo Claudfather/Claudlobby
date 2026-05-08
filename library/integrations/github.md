@@ -1,4 +1,4 @@
-### GitHub MCP
+# GitHub MCP
 
 Wire config: `library/mcp/github.json` (uses `${GITHUB_PAT}`).
 

@@ -3,6 +3,8 @@ title: Paired-Work Review
 description: Two reviewers, independent lenses (logic + cost, or empirical + mathematical), separate verdicts before consolidation.
 ---
 
+# Paired-Work Review
+
 For PRs where one lens is insufficient, dispatch two reviewers with **distinct, non-overlapping mandates**. Common pairings:
 
 - **Logic + cost** — one reviews correctness (compile vs execute, incremental contracts, tests). The other reviews performance (query plans, clustering, warehouse sizing, credits).
