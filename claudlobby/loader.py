@@ -104,11 +104,41 @@ def _demote_headings(body: str) -> str:
     return "\n".join(out_lines)
 
 
+def _strip_leading_title_heading(body: str, title: str) -> str:
+    """Drop a leading title-heading from `body` if it matches `title`.
+
+    The CLAUDE.md template wraps each library item in `### <title>`.
+    Authors who also write `### Title` (or `# Title`) at the top of the
+    file get a duplicate heading in the rendered output. Strip such a
+    heading when its text matches the LibraryItem title so authors can
+    keep authoring with a leading title (natural in isolation) without
+    paying for it in the composed CLAUDE.md.
+
+    Match is case-insensitive on the heading text. If the leading
+    heading doesn't match the title, it's left alone.
+    """
+    lines = body.splitlines()
+    first_idx = next((i for i, ln in enumerate(lines) if ln.strip()), None)
+    if first_idx is None:
+        return body
+    m = re.match(r"^#{1,6}\s+(.+?)\s*$", lines[first_idx])
+    if not m:
+        return body
+    if m.group(1).strip().lower() != title.strip().lower():
+        return body
+    del lines[first_idx]
+    while first_idx < len(lines) and not lines[first_idx].strip():
+        del lines[first_idx]
+    return "\n".join(lines)
+
+
 def load_library_item(path: Path) -> LibraryItem | None:
     """Load a single library file. Returns None if path doesn't exist.
 
     Body headings are demoted by one level so they nest correctly under
-    the template's `### <title>` wrapper.
+    the template's `### <title>` wrapper. A leading title-heading whose
+    text matches the LibraryItem title is stripped first, to avoid
+    duplicate headings when a file author writes `### Title` at the top.
     """
     if not path.is_file():
         return None
@@ -116,10 +146,13 @@ def load_library_item(path: Path) -> LibraryItem | None:
     fm, body = parse_frontmatter(text)
     title = fm.get("title") or _derive_title(path.stem)
     description = fm.get("description")
+    body = body.rstrip()
+    body = _strip_leading_title_heading(body, title)
+    body = _demote_headings(body)
     return LibraryItem(
         title=title,
         description=description,
-        body=_demote_headings(body.rstrip()),
+        body=body,
         source_path=path,
     )
 
