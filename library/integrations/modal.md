@@ -1,3 +1,7 @@
+---
+title: Modal
+---
+
 # Modal
 
 **Skills:** `/modal-status` (workspace overview), `/modal-logs` (view/debug logs), `/modal-deploy` (deploy apps)
