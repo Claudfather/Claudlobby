@@ -135,7 +135,7 @@ chmod 600 "$STATE_DIR/access.json"
 CCJSON="$HOME/.claude.json"
 if [ -f "$CCJSON" ] && command -v jq >/dev/null; then
   TMP=$(mktemp)
-  jq --arg dir "$BOT_DIR" '.projects[$dir] = {
+  if jq --arg dir "$BOT_DIR" '.projects[$dir] = {
     "allowedTools": [],
     "mcpContextUris": [],
     "mcpServers": {},
@@ -145,7 +145,12 @@ if [ -f "$CCJSON" ] && command -v jq >/dev/null; then
     "projectOnboardingSeenCount": 99,
     "hasClaudeMdExternalIncludesApproved": true,
     "hasClaudeMdExternalIncludesWarningShown": true
-  }' "$CCJSON" > "$TMP" && mv "$TMP" "$CCJSON"
+  }' "$CCJSON" > "$TMP" && [ -s "$TMP" ]; then
+    mv "$TMP" "$CCJSON"
+  else
+    echo "WARNING: jq failed seeding workspace trust — $CCJSON unchanged" >&2
+    rm -f "$TMP"
+  fi
 fi
 
 echo

@@ -25,6 +25,7 @@ fi
 
 cd "$BOT_DIR"
 
+# Kill any prior session — expected to fail on first boot or after clean shutdown
 tmux kill-session -t "$BOT_NAME" 2>/dev/null || true
 
 SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
@@ -83,7 +84,7 @@ if [ -n "${STARTUP_PROMPT:-}" ]; then
     tmux send-keys -t "$BOT_NAME" "$STARTUP_PROMPT" Enter
 fi
 
-# Mark bot as idle in fleet-state (if helper is present)
+# Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
 [ -x "$(dirname "$0")/fleet-state-update.sh" ] && "$(dirname "$0")/fleet-state-update.sh" "$BOT_NAME" "idle" || true
 
 echo "$BOT_LABEL started"

@@ -53,7 +53,8 @@ if [ "$USAGE" -gt "$THRESHOLD" ]; then
     echo "$TS $msg" >>"$LOG"
     TG_POST="$CLAUDLOBBY_ROOT/lib/tg-post.sh"
     if [ -x "$TG_POST" ] && [ -n "${TG_CHAT_ID:-}" ]; then
-        "$TG_POST" "$TG_CHAT_ID" "disk-monitor: $msg" >/dev/null 2>&1 || true
+        "$TG_POST" "$TG_CHAT_ID" "disk-monitor: $msg" >>"$LOG" 2>&1 || \
+            echo "$TS ERROR — tg-post failed for disk warning" >>"$LOG"
     fi
 else
     echo "$TS OK — disk usage at ${USAGE}% on $MOUNT" >>"$LOG"

@@ -62,6 +62,9 @@ record_and_alert() {
     prev="$(prev_status "$provider")"
     now="$(ts)"
 
+    # Lock state file writes to prevent concurrent corruption
+    (
+    flock -x 200
     if "$JQ" --arg k "$provider" --arg s "$status" --arg d "$detail" --arg t "$now" \
         '.[$k] = {status: $s, detail: $d, ts: $t}' "$STATE" > "$STATE.tmp"; then
         mv "$STATE.tmp" "$STATE"
@@ -72,6 +75,7 @@ record_and_alert() {
         rm -f "$STATE.tmp"
         log "STATE WRITE FAILED for $provider — $status will not transition"
     fi
+    ) 200>"$STATE.lock"
 
     log "$provider $status ($detail)"
 
@@ -108,11 +112,15 @@ check_github_pat() {
         return
     fi
     local code
+    local curl_err_file
+    curl_err_file=$(mktemp -t creds-curl-err.XXXXXX)
     code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
         -H "Authorization: Bearer $token" \
         -H "Accept: application/vnd.github+json" \
         --max-time 10 \
-        https://api.github.com/user 2>/dev/null || echo curl_err)"
+        https://api.github.com/user 2>"$curl_err_file")" \
+        || code="curl_err($(head -c 120 "$curl_err_file"))"
+    rm -f "$curl_err_file"
     if [ "$code" = "200" ]; then
         record_and_alert "github_pat" "ok" "HTTP 200"
     else
@@ -133,12 +141,16 @@ check_railway_token() {
     # shellcheck disable=SC2064
     trap "rm -f '$resp_body'" RETURN
     local code
+    local curl_err_file
+    curl_err_file=$(mktemp -t creds-curl-err.XXXXXX)
     code="$("$CURL" -sS -o "$resp_body" -w '%{http_code}' \
         -X POST https://backboard.railway.app/graphql/v2 \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         --max-time 10 \
-        -d '{"query":"query{me{name}}"}' 2>/dev/null || echo curl_err)"
+        -d '{"query":"query{me{name}}"}' 2>"$curl_err_file")" \
+        || code="curl_err($(head -c 120 "$curl_err_file"))"
+    rm -f "$curl_err_file"
     if [ "$code" != "200" ]; then
         record_and_alert "railway_token" "fail" "HTTP $code on /graphql/v2"
         return
@@ -180,6 +192,8 @@ check_streamable_mcp() {
     local body
     body='{"jsonrpc":"2.0","id":"creds-check","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claudlobby-creds-check","version":"1.0"}}}'
     local code
+    local curl_err_file
+    curl_err_file=$(mktemp -t creds-curl-err.XXXXXX)
     code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
         -X POST \
         -H "Accept: application/json, text/event-stream" \
@@ -187,7 +201,9 @@ check_streamable_mcp() {
         "${auth_header[@]}" \
         --max-time 10 \
         --data "$body" \
-        "$url" 2>/dev/null || echo curl_err)"
+        "$url" 2>"$curl_err_file")" \
+        || code="curl_err($(head -c 120 "$curl_err_file"))"
+    rm -f "$curl_err_file"
     if [ "$code" = "200" ]; then
         record_and_alert "$name" "ok" "HTTP 200"
     else
