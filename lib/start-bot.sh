@@ -10,7 +10,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOT_DIR="${1:?Usage: start-bot.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
 
-export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.bun/bin:$HOME/.npm-global/bin
+export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin
 export HOME="$HOME"
 
 # 3-tier env sourcing: global -> fleet -> bot (later tiers override)
@@ -50,6 +50,22 @@ SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
 BOT_ENV_FILE="$BOT_DIR/.tmux-env"
 (umask 177; : > "$BOT_ENV_FILE")
 chmod 600 "$BOT_ENV_FILE"
+
+# 3-tier env sourcing inside the tmux session so Claude Code (and its MCP
+# servers) inherit all env vars. Later tiers override earlier ones.
+# These source commands run inside the tmux shell, NOT the parent start-bot.sh.
+[ -f "$HOME/.env" ]                                && printf '. %q\n' "$HOME/.env" >> "$BOT_ENV_FILE"
+if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
+    printf '. %q\n' "$CLAUDLOBBY_ROOT/.env" >> "$BOT_ENV_FILE"
+fi
+if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
+    local_fleet_env="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/.env"
+    [ -f "$local_fleet_env" ] && printf '. %q\n' "$local_fleet_env" >> "$BOT_ENV_FILE"
+fi
+[ -f "$BOT_DIR/.env" ]                             && printf '. %q\n' "$BOT_DIR/.env" >> "$BOT_ENV_FILE"
+
+# Per-bot identity vars — written explicitly so they override any
+# same-named var from upper tiers (prevents tmux server env leakage).
 [ -n "${CLAUDE_CONFIG_DIR:-}" ]                    && printf 'export CLAUDE_CONFIG_DIR=%q\n' "$CLAUDE_CONFIG_DIR" >> "$BOT_ENV_FILE"
 [ -n "${TELEGRAM_STATE_DIR:-}" ]                   && printf 'export TELEGRAM_STATE_DIR=%q\n' "$TELEGRAM_STATE_DIR" >> "$BOT_ENV_FILE"
 [ -n "${TELEGRAM_BOT_TOKEN:-}" ]                   && printf 'export TELEGRAM_BOT_TOKEN=%q\n' "$TELEGRAM_BOT_TOKEN" >> "$BOT_ENV_FILE"
