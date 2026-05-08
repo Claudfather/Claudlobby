@@ -44,6 +44,7 @@ def _bot_template_context(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> d
     bot_dir = paths.bot_runtime(bot.bot_id)
     return {
         "BOT_ID": bot.bot_id,
+        "BOT_ID_UPPER": bot.bot_id.upper(),
         "BOT_NAME": bot.name,
         "BOT_NAME_UPPER": bot.name.upper(),
         "FLEET_NAME": fleet.name,

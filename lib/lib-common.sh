@@ -82,6 +82,12 @@ source_env_tiered() {
     # Global
     # shellcheck source=/dev/null
     [ -f "$HOME/.env" ] && . "$HOME/.env"
+    # Backward-compat: source legacy location with deprecation warning
+    if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
+        echo "DEPRECATED: $CLAUDLOBBY_ROOT/.env detected — move secrets to ~/.env or local/<fleet>/.env" >&2
+        # shellcheck source=/dev/null
+        . "$CLAUDLOBBY_ROOT/.env"
+    fi
     # Fleet
     if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
         local fleet_env="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/.env"
