@@ -680,6 +680,134 @@ def cmd_data_migrate(args) -> int:
     return 0
 
 
+def cmd_cron_migrate(args) -> int:
+    """Rewrite cron entries from a legacy bot-fleet path layout to claudlobby's.
+
+    Defaults to dry-run; pass --apply to install the new crontab. Backs up
+    the existing crontab to ~/crontab-backup-<ts>.txt before writing.
+
+    Substitution rule per (fleet_bot, src_dir) pair:
+      <source>/<src_dir>  →  <bot_runtime>/data
+    e.g. with --source ~/pi-fleet --map clog=assistant:
+      /home/<u>/pi-fleet/assistant/finances/x.py
+        → /home/<u>/claudlobby/local/<fleet>/runtime/bots/clog/data/finances/x.py
+
+    Lines that don't reference the source prefix pass through unchanged.
+    """
+    import subprocess
+    from collections import defaultdict
+    from datetime import datetime
+
+    paths = _resolve_paths(args)
+    fleet = load_fleet(paths.fleet_yaml)
+    source_dir = Path(args.source).expanduser().resolve()
+
+    if not source_dir.is_dir():
+        print(f"ERROR: source directory not found: {source_dir}", file=sys.stderr)
+        return 1
+
+    rename_map: dict[str, str] = {}
+    for entry in (args.map or []):
+        if "=" not in entry:
+            print(f"ERROR: --map expects 'fleet-bot=src-dir', got: {entry}", file=sys.stderr)
+            return 1
+        fleet_bot, src_name = entry.split("=", 1)
+        rename_map[fleet_bot.strip()] = src_name.strip()
+
+    # Build substitution rules: longest legacy prefix first so child paths win
+    # over parent ones when both match. Same identity-fallback as data-migrate.
+    rules: list[tuple[str, str, str]] = []
+    for fleet_bot in fleet.bots:
+        src_name = rename_map.get(fleet_bot, fleet_bot)
+        legacy_prefix = str(source_dir / src_name)
+        new_prefix = str(paths.bot_runtime(fleet_bot) / "data")
+        rules.append((legacy_prefix, new_prefix, fleet_bot))
+    rules.sort(key=lambda r: len(r[0]), reverse=True)
+
+    # Read current user crontab
+    proc = subprocess.run(
+        ["crontab", "-l"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").lower()
+        if "no crontab" in stderr:
+            print(f"no current crontab for {os.environ.get('USER', 'this user')} — nothing to migrate", file=sys.stderr)
+            return 0
+        print(f"ERROR: `crontab -l` failed: {proc.stderr.strip()}", file=sys.stderr)
+        return 1
+    current_crontab = proc.stdout
+
+    # Plan: per-line, apply the first matching rule (longest-prefix-first ordering)
+    new_lines: list[str] = []
+    rewrites: list[tuple[int, str, str, str]] = []
+    unmatched_legacy: list[tuple[int, str]] = []
+    legacy_root = str(source_dir)
+    for i, line in enumerate(current_crontab.splitlines(), 1):
+        replaced = line
+        matched_bot: str | None = None
+        for legacy, new_pfx, bot_name in rules:
+            if legacy in replaced:
+                replaced = replaced.replace(legacy, new_pfx)
+                matched_bot = bot_name
+                break
+        new_lines.append(replaced)
+        if matched_bot:
+            rewrites.append((i, line, replaced, matched_bot))
+        elif legacy_root in line and not line.lstrip().startswith("#"):
+            # References the legacy root but doesn't match any bot's
+            # subpath — operator needs to handle by hand.
+            unmatched_legacy.append((i, line))
+
+    # Plan output
+    print(f"\n=== cron-migrate plan ===")
+    print(f"source: {source_dir}")
+    print(f"fleet:  {fleet.name}")
+    if rename_map:
+        print(f"rename map: {rename_map}")
+    print()
+
+    if not rewrites and not unmatched_legacy:
+        print("(no crontab lines reference the source prefix — nothing to migrate)")
+        return 0
+
+    if rewrites:
+        by_bot: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
+        for line_no, old, new, bot in rewrites:
+            by_bot[bot].append((line_no, old, new))
+        for bot in sorted(by_bot):
+            print(f"  {bot}: {len(by_bot[bot])} line(s) to rewrite")
+            for line_no, old, new in by_bot[bot]:
+                print(f"    line {line_no}:")
+                print(f"      − {old}")
+                print(f"      + {new}")
+        print()
+        print(f"Total: {len(rewrites)} lines rewritten across {len(by_bot)} bot(s)")
+
+    if unmatched_legacy:
+        print()
+        print(f"⚠ {len(unmatched_legacy)} line(s) reference {legacy_root} but no bot subpath — operator must handle:")
+        for line_no, line in unmatched_legacy:
+            print(f"    line {line_no}: {line}")
+
+    if not args.apply:
+        print("\n(dry-run — pass --apply to install the new crontab)")
+        return 0
+
+    # Apply: backup current crontab, install rewritten one
+    backup_path = Path.home() / f"crontab-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    backup_path.write_text(current_crontab)
+    print(f"\nbackup: {backup_path}")
+
+    new_crontab = "\n".join(new_lines) + ("\n" if new_lines and not new_lines[-1].endswith("\n") else "")
+    install = subprocess.run(["crontab", "-"], input=new_crontab, text=True, capture_output=True)
+    if install.returncode != 0:
+        print(f"ERROR: `crontab -` install failed: {install.stderr.strip()}", file=sys.stderr)
+        print(f"  your old crontab is preserved as {backup_path}", file=sys.stderr)
+        return 1
+    print(f"installed new crontab ({len(rewrites)} lines rewritten)")
+    return 0
+
+
 def cmd_memory_migrate(args) -> int:
     """Migrate memory files from an existing bot setup to claudlobby per-bot memory dirs."""
     import shutil
@@ -953,6 +1081,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     pdm.add_argument("--apply", action="store_true", help="Actually copy the dirs (default: dry-run preview only)")
     pdm.set_defaults(func=cmd_data_migrate)
+
+    pcm = sub.add_parser(
+        "cron-migrate",
+        help="Rewrite cron entries from a legacy bot-fleet path layout to claudlobby's (dry-run by default)",
+    )
+    pcm.add_argument("--source", required=True, help="Path to existing bot fleet dir (e.g. ~/my-bots)")
+    pcm.add_argument(
+        "--map",
+        action="append",
+        default=[],
+        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
+    )
+    pcm.add_argument("--apply", action="store_true", help="Install the rewritten crontab (default: dry-run preview only)")
+    pcm.set_defaults(func=cmd_cron_migrate)
 
     pm = sub.add_parser("memory-migrate", help="Copy memory files from ~/.claude/projects/ to per-bot memory dirs")
     pm.add_argument("--map", nargs="*", help="Source-to-bot mappings (e.g. 'project-name-pattern:bot-name')")
