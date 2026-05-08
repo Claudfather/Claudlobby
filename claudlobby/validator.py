@@ -6,6 +6,7 @@ Pass `--strict` to make warnings into errors (CI-friendly).
 from __future__ import annotations
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -92,7 +93,7 @@ def _bot_required_env_vars(
             continue
         try:
             fm, _ = parse_frontmatter(int_path.read_text())
-        except (ValueError, KeyError):
+        except (OSError, ValueError, KeyError):
             print(f"WARN: failed to parse frontmatter in {int_path}, skipping", file=sys.stderr)
             continue
         contract = fm.get("env_contract", {}) if isinstance(fm, dict) else {}

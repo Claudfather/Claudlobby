@@ -63,6 +63,33 @@ class TestValidate:
         report = validate(fleet, paths)
         assert any("TELEGRAM_TOKEN_LEAD" in w for w in report.warnings)
 
+    def test_unreadable_integration_skips_with_warning(self, fleet_dir, capsys):
+        # Give lead bot an explicit integration so validator walks it
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [orchestration]",
+            "expertise: [orchestration]\n      integrations: [github]",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+
+        # Make the integration file unreadable
+        int_file = fleet_dir / "library" / "integrations" / "github.md"
+        int_file.chmod(0o000)
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        # Must not crash — OSError is caught
+        report = validate(fleet, paths)
+        assert not report.has_errors
+
+        # Restore permissions for cleanup
+        int_file.chmod(0o644)
+
+        # Verify the warning was printed to stderr
+        captured = capsys.readouterr()
+        assert "WARN" in captured.err
+        assert "skipping" in captured.err
+
     def test_empty_bots_is_error(self, fleet_dir):
         (fleet_dir / "fleet.yaml").write_text(
             "fleet:\n  name: empty\n  bots: {}\n"
