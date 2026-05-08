@@ -463,10 +463,9 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
     mounts_dir.mkdir(exist_ok=True)
 
     # Clean stale symlinks
-    if mounts_dir.exists():
-        for entry in mounts_dir.iterdir():
-            if entry.is_symlink() and entry.name not in bot.mounts:
-                entry.unlink()
+    for entry in mounts_dir.iterdir():
+        if entry.is_symlink() and entry.name not in bot.mounts:
+            entry.unlink()
 
     for name, target in bot.mounts.items():
         target_path = Path(target).expanduser()
@@ -475,6 +474,9 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
             if link.resolve() == target_path.resolve():
                 continue  # already correct
             link.unlink()
+        elif link.exists():
+            log(f"  mount '{name}': non-symlink already exists at {link} — skipping")
+            continue
         if not target_path.exists():
             log(f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink")
         link.symlink_to(target_path)

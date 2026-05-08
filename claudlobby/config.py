@@ -48,7 +48,7 @@ class SandboxConfig:
     """
     network_allowed_domains: list[str] = field(default_factory=list)
     filesystem_allow_write: list[str] = field(default_factory=list)
-    auto_allow_bash: bool = True  # autoAllowBashIfSandboxed
+    auto_allow_bash: bool = False  # autoAllowBashIfSandboxed — opt-in per fleet
 
 
 @dataclass
