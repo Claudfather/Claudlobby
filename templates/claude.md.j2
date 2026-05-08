@@ -54,6 +54,19 @@
 Operate exclusively within this scope. If a task targets resources outside it, surface to the human before acting.
 {% endif -%}
 
+{%- if bot.telegram.handle %}
+
+## Telegram Identity
+
+- **Your handle:** `@{{ bot.telegram.handle }}`
+- **Your requireMention setting:** `{{ bot.telegram.require_mention }}`
+{% if bot.telegram.require_mention -%}
+- **This means:** ONLY respond to messages that @-mention `@{{ bot.telegram.handle }}` or reply to one of your own messages. Stay silent on all other group messages, even if they seem relevant to you.
+{% else -%}
+- **This means:** You see every group message. Stay silent if it @-mentions another bot or replies to another bot's message. Respond to generic messages, messages addressed to the group, or messages that name you.
+{% endif -%}
+{% endif -%}
+
 {%- if bot.model_strategy %}
 
 ## Model Strategy
