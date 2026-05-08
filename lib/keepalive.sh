@@ -8,6 +8,8 @@
 # act on input the user never typed. If you want a nudge mechanism, build
 # one in your local overlay with eyes open about the input-injection risk.
 
+set -euo pipefail
+
 BOT_DIR="${1:?Usage: keepalive.sh /path/to/bot/dir}"
 source "$BOT_DIR/bot.conf"
 
@@ -40,7 +42,7 @@ if ! /usr/bin/tmux has-session -t "$BOT_NAME" 2>/dev/null; then
     exit 0
 fi
 
-pane_content=$(/usr/bin/tmux capture-pane -t "$BOT_NAME" -p 2>/dev/null)
+pane_content=$(/usr/bin/tmux capture-pane -t "$BOT_NAME" -p 2>/dev/null) || true
 last_lines=$(echo "$pane_content" | tail -10)
 
 # Log state — useful for fleet-health dashboards. Does NOT act on idle.

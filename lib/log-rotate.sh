@@ -10,7 +10,7 @@
 #
 # Defaults to keeping the last 500 lines per file. Files that don't exist
 # are silently skipped (not an error — they just haven't been created yet).
-set -u
+set -euo pipefail
 
 KEEP=500
 LOGS=()

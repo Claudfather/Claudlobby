@@ -10,7 +10,7 @@
 # Posts to TELEGRAM_GROUP_CHAT_ID (env) or the default in bot.conf.
 #
 # Usage: tg-post.sh "<message>"
-set -u
+set -euo pipefail
 MSG="${1:?Usage: tg-post.sh <message>}"
 CHAT_ID="${TELEGRAM_GROUP_CHAT_ID:-}"
 STATE_DIR="${TELEGRAM_STATE_DIR:-$HOME/.claude/channels/telegram}"
@@ -20,7 +20,7 @@ if [ -z "$CHAT_ID" ]; then
   exit 2
 fi
 
-TOKEN=$(grep ^TELEGRAM_BOT_TOKEN "$STATE_DIR/.env" 2>/dev/null | cut -d= -f2)
+TOKEN=$(grep ^TELEGRAM_BOT_TOKEN "$STATE_DIR/.env" 2>/dev/null | sed 's/^TELEGRAM_BOT_TOKEN=//' || true)
 if [ -z "$TOKEN" ]; then
   echo "tg-post: no TELEGRAM_BOT_TOKEN in $STATE_DIR/.env" >&2
   exit 1

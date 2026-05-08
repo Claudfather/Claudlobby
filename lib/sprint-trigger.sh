@@ -5,7 +5,7 @@
 #   */360 * * * * ~/claudlobby/bot-common/sprint-trigger.sh
 #
 # Skips if manager is busy or not alive. Logs each run.
-set -u
+set -euo pipefail
 MANAGER_TMUX="${MANAGER_TMUX:-claude-bot}"
 LOG="${SPRINT_TRIGGER_LOG:-$HOME/claudlobby/logs/sprint-trigger.log}"
 TMUX="${TMUX_BIN:-$(command -v tmux)}"
@@ -18,7 +18,7 @@ if ! "$TMUX" has-session -t "$MANAGER_TMUX" 2>/dev/null; then
   exit 0
 fi
 
-pane=$("$TMUX" capture-pane -t "$MANAGER_TMUX" -p | tail -3)
+pane=$("$TMUX" capture-pane -t "$MANAGER_TMUX" -p | tail -3) || true
 if echo "$pane" | grep -qE '(Thinking|Running|Reading|Writing|Editing|Spelunking|Prestidigitating|esc to interrupt)'; then
   echo "$TS SKIP — manager busy" >> "$LOG"
   exit 0

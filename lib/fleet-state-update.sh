@@ -5,7 +5,7 @@
 #
 # Usage: fleet-state-update.sh <bot> <status> [<current_task>] [<current_repo>] [<last_completed>]
 #   status: idle | working | blocked | offline
-set -u
+set -euo pipefail
 STATE="${FLEET_STATE_PATH:-$HOME/claudlobby/bot-common/fleet-state.json}"
 BOT="${1:?bot}"
 STATUS="${2:?status}"

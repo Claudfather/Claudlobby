@@ -12,7 +12,7 @@
 # (creating the dir if needed). When the threshold is crossed and tg-post.sh
 # is available + TG_CHAT_ID is set in the environment, also fires a Telegram
 # alert. Otherwise just logs and exits 0 — non-fatal.
-set -u
+set -euo pipefail
 
 THRESHOLD=90
 MOUNT="/"

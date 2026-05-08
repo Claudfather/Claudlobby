@@ -23,7 +23,7 @@
 #   - Pair the first human via /telegram:access
 #   - Install the service unit (systemd: sudo cp + systemctl; launchd: cp plist + launchctl bootstrap)
 #   - Fill in remaining secrets in .mcp.json
-set -u
+set -euo pipefail
 BOT="${1:?Usage: bootstrap-bot.sh <bot-name> <template>}"
 TEMPLATE="${2:?Usage: bootstrap-bot.sh <bot-name> <template (manager|worker)>}"
 shift 2
@@ -107,17 +107,20 @@ mkdir -p "$STATE_DIR"/{approved,inbox}
 umask 077
 
 if [ -n "$TOKEN" ]; then
-  echo "TELEGRAM_BOT_TOKEN=$TOKEN" > "$STATE_DIR/.env"
+  printf '%s\n' "TELEGRAM_BOT_TOKEN=$TOKEN" > "$STATE_DIR/.env"
   chmod 600 "$STATE_DIR/.env"
 fi
 
 POLICY="pairing"
+# shellcheck disable=SC2178
 GROUPS="{}"
 if [ -n "$CHAT_ID" ]; then
   # Include the group with requireMention:true by default for workers, false for manager
   REQUIRE=$([ "$TEMPLATE" = "manager" ] && echo "false" || echo "true")
+  # shellcheck disable=SC2178
   GROUPS="{\"$CHAT_ID\": {\"requireMention\": $REQUIRE, \"allowFrom\": []}}"
 fi
+# shellcheck disable=SC2128
 cat > "$STATE_DIR/access.json" <<JSON
 {
   "dmPolicy": "$POLICY",

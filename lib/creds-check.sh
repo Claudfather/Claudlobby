@@ -22,7 +22,7 @@
 # To probe additional fleet-specific MCPs, copy `check_streamable_mcp`
 # below into a fleet overlay script and pass per-MCP env var names.
 
-set -u
+set -euo pipefail
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 ENV_FILE="${CLAUDLOBBY_ENV:-$CLAUDLOBBY_ROOT/.env}"
