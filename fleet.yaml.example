@@ -35,7 +35,10 @@ fleet:
         handle: my_lead_bot
         token_env: TELEGRAM_TOKEN_LEAD
         require_mention: false                # manager hears all messages in its group
-      startup_prompt: "Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."
+      # startup_prompt accepts jinja placeholders against fleet/bot context:
+      #   {{ bot_name }}, {{ fleet_name }}, {{ telegram_group_chat_id }}, {{ telegram_handle }}
+      # Use them so identifiers aren't duplicated between fleet.yaml fields.
+      startup_prompt: "Welcome back, {{ bot_name }}. Read your CLAUDE.md. Idle and await messages in chat {{ telegram_group_chat_id }}."
 
     eng-1:
       expertise: [software-engineering]
