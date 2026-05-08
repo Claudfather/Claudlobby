@@ -5,6 +5,7 @@ loader, renders the bot's CLAUDE.md. Library files are pure content — the
 template owns all top-level structure.
 """
 from __future__ import annotations
+import copy
 import json
 import shutil
 from dataclasses import dataclass
@@ -152,7 +153,10 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
         frag_path = paths.find_library_file("mcp", entry.name, ".json")
         if frag_path is None:
             continue
-        frag = json.loads(frag_path.read_text())
+        try:
+            frag = json.loads(frag_path.read_text())
+        except json.JSONDecodeError as e:
+            raise ValueError(f"invalid JSON in MCP fragment {frag_path}: {e}") from e
         contract = frag.pop("_env_contract", {})
 
         # Find the server config (the non-underscore key)
@@ -173,7 +177,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
             else:
                 output_name = f"{entry.name}-{instance}"
 
-            instance_config = json.loads(json.dumps(server_config))  # deep copy
+            instance_config = copy.deepcopy(server_config)
             if "env" in instance_config:
                 instance_config["env"] = _resolve_instance_env(
                     instance_config["env"], contract, entry, instance
