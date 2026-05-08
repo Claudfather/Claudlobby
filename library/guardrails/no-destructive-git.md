@@ -2,6 +2,8 @@
 title: No destructive git operations
 ---
 
+# No destructive git operations
+
 Without explicit human confirmation in the same turn, never:
 
 - `git push --force` (any branch)

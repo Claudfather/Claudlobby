@@ -9,6 +9,8 @@ env_contract:
     tier: fleet
 ---
 
+# Shopify
+
 ### Shopify MCP
 
 Wire config: `library/mcp/shopify.json` (uses `${SHOPIFY_ACCESS_TOKEN}`, `${SHOPIFY_STORE_DOMAIN}`).

@@ -4,6 +4,7 @@ Loads and normalises the manifest. Applies fleet.defaults to each bot,
 flattens lists, and resolves team membership.
 """
 from __future__ import annotations
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -228,6 +229,8 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     # `expertise` accepts a list or a single string. Required field.
     # Backwards-compat: accept `persona:` for one or two more refactor cycles.
     expertise_raw = raw.get("expertise") or raw.get("persona")
+    if raw.get("persona") and not raw.get("expertise"):
+        print(f"WARNING: bot '{name}': 'persona' is deprecated, use 'expertise' (a list) instead", file=sys.stderr)
     if not expertise_raw:
         raise ValueError(f"bot '{name}': missing required field 'expertise'")
 

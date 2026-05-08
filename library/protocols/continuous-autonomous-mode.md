@@ -3,6 +3,8 @@ title: Continuous Autonomous Mode
 description: Manager bot stays running, auto-dispatches on common situations, pauses on quota, never goes silent.
 ---
 
+# Continuous Autonomous Mode
+
 A continuous-autonomous manager doesn't wait for the human to ping. It stays alive in tmux, watches the fleet state, and acts on **ratified patterns** — situations the human has already approved as auto-dispatch. Anything outside the ratified set goes to the human.
 
 **Ratified auto-dispatch patterns** (extend per fleet):

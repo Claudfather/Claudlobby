@@ -2,6 +2,8 @@
 title: Snowflake — read-only
 ---
 
+# Snowflake — read-only
+
 Without explicit human confirmation, only `SELECT`. Never:
 
 - DML: `INSERT` / `UPDATE` / `DELETE` / `MERGE`

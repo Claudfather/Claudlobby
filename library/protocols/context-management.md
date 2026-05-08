@@ -2,6 +2,8 @@
 title: Context Management
 ---
 
+# Context Management
+
 - **After each completed task** → `/compact`
 - **Switching repos / projects** → `/clear`
 - **Above 50%** → switch to subagents (Explore, Plan) for everything you read

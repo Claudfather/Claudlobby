@@ -3,6 +3,8 @@ title: Idempotency Mandatory
 description: Every ingestion / pipeline asset must be re-runnable without duplication or corruption.
 ---
 
+# Idempotency Mandatory
+
 If a pipeline asset (Dagster asset, Modal function, dbt incremental, sync job) cannot be re-run safely, it is broken — even if it works the first time.
 
 **Mandatory:**

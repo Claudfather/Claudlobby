@@ -2,6 +2,8 @@
 title: Proactivity Discipline
 ---
 
+# Proactivity Discipline
+
 Idle silence is a bug. At every wait-point, post one line — `waiting on X, ETA Y` — to Telegram so the human can see fleet state without asking.
 
 Wait-points:

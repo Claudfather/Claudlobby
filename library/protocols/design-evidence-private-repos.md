@@ -3,6 +3,8 @@ title: Design Evidence for Private Repos
 description: Screenshot crawls in private repos need an asset branch + clickable links — not inline embeds.
 ---
 
+# Design Evidence for Private Repos
+
 Designer bots audit visual changes by crawling a preview deployment, capturing screenshots, and citing file:line in their reports. For **private** repos, the standard "embed the screenshot inline in the PR comment" pattern fails: GitHub's image proxy needs a public source.
 
 **Pattern:**

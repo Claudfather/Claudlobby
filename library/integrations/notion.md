@@ -1,4 +1,8 @@
-### Notion MCP
+---
+title: Notion MCP
+---
+
+# Notion MCP
 
 Wire config: `library/mcp/notion.json` (uses `${NOTION_TOKEN}`).
 

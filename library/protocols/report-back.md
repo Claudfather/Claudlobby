@@ -2,6 +2,8 @@
 title: Report-Back Protocol
 ---
 
+# Report-Back Protocol
+
 Workers report via `{{CLAUDLOBBY_ROOT}}/lib/report-back.sh`, which sends a structured message into the manager's tmux session:
 
 ```

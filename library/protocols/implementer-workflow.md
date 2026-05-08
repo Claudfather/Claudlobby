@@ -3,6 +3,8 @@ title: Implementer workflow
 description: Required pre-push quality gates for bots that ship code
 ---
 
+# Implementer workflow
+
 Two skills are mandatory before pushing non-trivial changes:
 
 **`/simplify`** — run on changes before the final push whenever the change is non-trivial (>~50 LOC or >2 files). Reviews for reuse, quality, and efficiency. This is a codified rule, not optional — below the threshold it's discretionary, above it's required.

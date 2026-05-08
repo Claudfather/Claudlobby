@@ -9,6 +9,8 @@ env_contract:
     tier: fleet
 ---
 
+# Printify
+
 ### Printify MCP
 
 Wire config: `library/mcp/printify.json` (uses `${PRINTIFY_API_KEY}`, `${PRINTIFY_SHOP_ID}`).

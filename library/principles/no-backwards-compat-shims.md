@@ -3,6 +3,8 @@ title: No backwards-compat shims
 description: Cut cleanly when the team owns all callers — no shims, wrappers, or deprecated aliases
 ---
 
+# No backwards-compat shims
+
 When the team owns every caller of its own code (no external consumers), do not ship backwards-compat shims, thin wrappers, deprecated aliases, or "keep old path working for a cycle" layers. Cut cleanly.
 
 - When dispatching a refactor, default to "cut cleanly — no shims, no aliases, no legacy wrappers."

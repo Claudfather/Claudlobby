@@ -3,6 +3,8 @@ title: Same-Identity Comment Fallback
 description: GitHub blocks approve/request-changes when reviewer shares identity with author — fall back to a verdict-bearing comment.
 ---
 
+# Same-Identity Comment Fallback
+
 When the fleet shares a single GitHub PAT (every bot commits as the same identity), the GitHub API rejects `gh pr review --approve` and `gh pr review --request-changes` on PRs the same identity authored. A verdict you couldn't post is not a verdict.
 
 **Fallback:**

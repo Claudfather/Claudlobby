@@ -48,7 +48,7 @@ See [`docs/getting-started.md`](docs/getting-started.md) for the zero-to-running
 ```
 ┌────────────────────────────────────────────────────────────┐
 │  library/                  ← single source of truth (git)   │
-│  ├── personas/             ← manager / engineer / reviewer  │
+│  ├── expertise/            ← orchestration, engineering, …   │
 │  ├── skills/               ← dispatch, lifecycle, prs, …    │
 │  ├── mcp/                  ← github.json, notion.json, …    │
 │  ├── guardrails/           ← no-push-main, pii-protection,…│

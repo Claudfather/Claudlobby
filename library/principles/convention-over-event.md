@@ -3,6 +3,8 @@ title: Convention over event
 description: Code comments reference durable conventions and semantics, not point-in-time events
 ---
 
+# Convention over event
+
 In code (comments, config inline notes, model docstrings): reference the **durable convention or semantic**, NOT the **point-in-time event** that introduced the change.
 
 - Bad: `-- Reclassified per Q1 decision (2026-04-30)`

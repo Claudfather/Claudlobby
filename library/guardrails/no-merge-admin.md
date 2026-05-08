@@ -3,6 +3,8 @@ title: Never Merge with --admin
 description: Admin-bypass merges defeat branch protection — and the human's merge gate.
 ---
 
+# Never Merge with --admin
+
 Branch protection rules exist for a reason: required reviews, status checks, signed commits, linear history. `gh pr merge --admin` bypasses all of them. Bots never use `--admin`. Reviewers never use `--admin`. Even managers never use `--admin`.
 
 **The merge button belongs to the human.** Bots prepare the merge — passing tests, verdicts posted, conflicts resolved — and stop. The human clicks merge.
