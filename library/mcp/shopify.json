@@ -11,7 +11,7 @@
   },
   "shopify": {
     "command": "npx",
-    "args": ["-y", "@shopify/dev-mcp@latest"],
+    "args": ["-y", "@ajackus/shopify-mcp-server"],
     "env": {
       "SHOPIFY_ACCESS_TOKEN": "${SHOPIFY_ACCESS_TOKEN}",
       "SHOPIFY_STORE_DOMAIN": "${SHOPIFY_STORE_DOMAIN}"
