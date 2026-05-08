@@ -679,15 +679,77 @@ def cmd_cron_migrate(args) -> int:
         fleet_bot, src_name = entry.split("=", 1)
         rename_map[fleet_bot.strip()] = src_name.strip()
 
-    # Build substitution rules: longest legacy prefix first so child paths win
-    # over parent ones when both match. Same identity-fallback as data-migrate.
-    rules: list[tuple[str, str, str]] = []
+    # Build per-bot context: legacy prefix, bot data dir, search dirs for resolution.
+    import re
+
+    @dataclass
+    class _BotCronCtx:
+        legacy_prefix: str
+        bot_name: str
+        data_dir: Path        # <bot_runtime>/data
+        search_dirs: list[Path]  # ordered: lib/, data/scripts/, data/
+
+    bot_ctxs: list[_BotCronCtx] = []
     for fleet_bot in fleet.bots:
         src_name = rename_map.get(fleet_bot, fleet_bot)
         legacy_prefix = str(source_dir / src_name)
-        new_prefix = str(paths.bot_runtime(fleet_bot) / "data")
-        rules.append((legacy_prefix, new_prefix, fleet_bot))
-    rules.sort(key=lambda r: len(r[0]), reverse=True)
+        data_dir = paths.bot_runtime(fleet_bot) / "data"
+        projects_dir = paths.bot_runtime(fleet_bot) / "projects"
+        search_dirs = [
+            paths.lib,                      # package-level shared scripts
+            paths.lib / "personal",         # package-level personal scripts
+            data_dir / "scripts",           # bot-specific scripts
+            data_dir,                       # bot data (finances/, etc.)
+            projects_dir,                   # git checkouts the bot works in
+        ]
+        bot_ctxs.append(_BotCronCtx(legacy_prefix, fleet_bot, data_dir, search_dirs))
+    # Sort longest prefix first so child paths win
+    bot_ctxs.sort(key=lambda c: len(c.legacy_prefix), reverse=True)
+
+    def _resolve_path(legacy_path: str, ctx: _BotCronCtx) -> str:
+        """Resolve a single legacy absolute path to its claudlobby location.
+
+        Strategy: strip the legacy prefix to get the relative path, then
+        check each search dir for the file/dir. If found, return the resolved
+        path. If not found, fall back to the naive data/ prefix (will be
+        caught by the verify pass).
+        """
+        if not legacy_path.startswith(ctx.legacy_prefix):
+            return legacy_path
+        rel = legacy_path[len(ctx.legacy_prefix):].lstrip("/")
+        if not rel:
+            return str(ctx.data_dir)
+
+        # For paths like "finances/portfolio-snapshot.py", try each search dir
+        for search_dir in ctx.search_dirs:
+            candidate = search_dir / rel
+            if candidate.exists():
+                return str(candidate)
+
+        # For top-level files (e.g., "briefing-cron.sh"), also try just the filename
+        basename = Path(rel).name
+        if basename != rel:  # only if rel has subdirs
+            for search_dir in ctx.search_dirs:
+                candidate = search_dir / basename
+                if candidate.exists():
+                    return str(candidate)
+
+        # Fallback: naive prefix substitution (verify pass will flag it)
+        return str(ctx.data_dir / rel)
+
+    def _rewrite_line(line: str) -> tuple[str, str | None]:
+        """Rewrite all legacy paths in a cron line. Returns (new_line, bot_name)."""
+        for ctx in bot_ctxs:
+            if ctx.legacy_prefix not in line:
+                continue
+            # Replace each occurrence of a legacy path individually
+            result = line
+            for m in reversed(list(re.finditer(re.escape(ctx.legacy_prefix) + r'[/\w._-]*', line))):
+                old_path = m.group(0)
+                new_path = _resolve_path(old_path, ctx)
+                result = result[:m.start()] + new_path + result[m.end():]
+            return result, ctx.bot_name
+        return line, None
 
     # Read current user crontab
     proc = subprocess.run(
@@ -702,25 +764,17 @@ def cmd_cron_migrate(args) -> int:
         return 1
     current_crontab = proc.stdout
 
-    # Plan: per-line, apply the first matching rule (longest-prefix-first ordering)
+    # Plan: per-line, resolve paths intelligently
     new_lines: list[str] = []
     rewrites: list[tuple[int, str, str, str]] = []
     unmatched_legacy: list[tuple[int, str]] = []
     legacy_root = str(source_dir)
     for i, line in enumerate(current_crontab.splitlines(), 1):
-        replaced = line
-        matched_bot: str | None = None
-        for legacy, new_pfx, bot_name in rules:
-            if legacy in replaced:
-                replaced = replaced.replace(legacy, new_pfx)
-                matched_bot = bot_name
-                break
+        replaced, matched_bot = _rewrite_line(line)
         new_lines.append(replaced)
         if matched_bot:
             rewrites.append((i, line, replaced, matched_bot))
         elif legacy_root in line and not line.lstrip().startswith("#"):
-            # References the legacy root but doesn't match any bot's
-            # subpath — operator needs to handle by hand.
             unmatched_legacy.append((i, line))
 
     # Plan output
@@ -735,6 +789,30 @@ def cmd_cron_migrate(args) -> int:
         print("(no crontab lines reference the source prefix — nothing to migrate)")
         return 0
 
+    # Verify pass: extract absolute paths from rewritten lines and check existence.
+    # A cron line can reference multiple paths (script path, log path, args).
+    import re
+    broken_paths: list[tuple[int, str, str]] = []  # (line_no, bot, missing_path)
+    for line_no, _old, new, bot in rewrites:
+        # Extract all absolute paths from the rewritten line
+        for m in re.finditer(r'(/\S+)', new):
+            candidate = m.group(1)
+            # Skip env-sourcing paths (. /home/.env), pipes, and redirections
+            if candidate.startswith("/usr/") or candidate.startswith("/bin/"):
+                continue
+            # Strip trailing redirection chars
+            candidate = candidate.rstrip(";\"'")
+            p = Path(candidate)
+            if p.suffix or p.name.endswith(".log"):
+                # It's a file reference — check parent dir exists and file exists
+                if not p.exists() and not p.parent.exists():
+                    broken_paths.append((line_no, bot, candidate))
+                elif not p.exists() and p.suffix in (".sh", ".py"):
+                    broken_paths.append((line_no, bot, candidate))
+            elif not p.exists() and str(p).startswith(str(paths.root)):
+                # Directory reference under claudlobby that doesn't exist
+                broken_paths.append((line_no, bot, candidate))
+
     if rewrites:
         by_bot: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
         for line_no, old, new, bot in rewrites:
@@ -747,6 +825,12 @@ def cmd_cron_migrate(args) -> int:
                 print(f"      + {new}")
         print()
         print(f"Total: {len(rewrites)} lines rewritten across {len(by_bot)} bot(s)")
+
+    if broken_paths:
+        print()
+        print(f"⚠ {len(broken_paths)} rewritten path(s) don't exist at destination — verify before applying:")
+        for line_no, bot, path in broken_paths:
+            print(f"    line {line_no} ({bot}): {path}")
 
     if unmatched_legacy:
         print()

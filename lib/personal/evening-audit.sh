@@ -5,7 +5,7 @@
 # The manager bot picks up the prompt and uses global skills
 # like /tech-debt or /security-audit to run the audit.
 
-MANAGER_SESSION="${1:-claude-bot}"
+MANAGER_SESSION="${1:-clog}"
 
 if ! /usr/bin/tmux has-session -t "$MANAGER_SESSION" 2>/dev/null; then
     echo "$(date): No manager session, skipping evening audit"
