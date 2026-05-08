@@ -80,10 +80,8 @@ load_bot_conf() {
 # Requires load_bot_conf to have been called first (CLAUDLOBBY_ROOT, FLEET_NAME, BOT_DIR must be set).
 source_env_tiered() {
     # Global
-    if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
-        # shellcheck source=/dev/null
-        . "$CLAUDLOBBY_ROOT/.env"
-    fi
+    # shellcheck source=/dev/null
+    [ -f "$HOME/.env" ] && . "$HOME/.env"
     # Fleet
     if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
         local fleet_env="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/.env"

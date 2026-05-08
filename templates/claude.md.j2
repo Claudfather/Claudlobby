@@ -69,6 +69,13 @@ Operate exclusively within this scope. If a task targets resources outside it, s
 {% endif %}
 {% endif -%}
 
+{%- if org_structure %}
+
+## Org Structure
+
+{{ org_structure }}
+{% endif -%}
+
 {%- if teams %}
 
 ## Fleet You Manage

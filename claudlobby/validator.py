@@ -260,6 +260,19 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                 f"bot '{bot_name}': account '{bot.account}' not in fleet.accounts — falling back to 'default'"
             )
 
+    # Org structure integrity (warn — bot_ids may reference other fleets)
+    for bot_name, bot in fleet.bots.items():
+        if bot.reports_to and bot.reports_to not in fleet.bots:
+            report.warnings.append(
+                f"bot '{bot_name}': reports_to '{bot.reports_to}' not found in fleet.bots"
+            )
+        if bot.manages:
+            for managed_id in bot.manages:
+                if managed_id not in fleet.bots:
+                    report.warnings.append(
+                        f"bot '{bot_name}': manages '{managed_id}' not found in fleet.bots"
+                    )
+
     # Team integrity (warn)
     for team in fleet.teams.values():
         if team.manager not in fleet.bots:
