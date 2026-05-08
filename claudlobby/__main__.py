@@ -447,7 +447,7 @@ _DATA_MIGRATE_AUTO_SKIP_DIRS: set[str] = {
     ".claude", "memory", "logs",
 }
 
-PlanAction = Literal["copy", "skip-git", "skip-git-container", "skip-exists", "skip-empty"]
+PlanAction = Literal["copy", "skip-git", "skip-git-container", "skip-exists", "skip-empty", "skip-mount"]
 
 
 def _contains_git_checkouts(path: Path, threshold: float = 0.5) -> bool:
@@ -548,6 +548,13 @@ def cmd_data_migrate(args) -> int:
             continue
 
         bot_data_dir = paths.bot_runtime(fleet_bot_name) / "data"
+        bot_cfg = fleet.bots[fleet_bot_name]
+        mount_names = set(bot_cfg.mounts.keys())
+        # Resolve mount targets so we can match source dirs by real path
+        mount_targets = {
+            Path(t).expanduser().resolve()
+            for t in bot_cfg.mounts.values()
+        }
 
         for child in sorted(src_bot_path.iterdir()):
             name = child.name
@@ -560,6 +567,10 @@ def cmd_data_migrate(args) -> int:
             if name in exclude_set:
                 continue
             if include_set is not None and name not in include_set:
+                continue
+            # Skip dirs that are handled by mounts (by name or by resolved path)
+            if name in mount_names or child.resolve() in mount_targets:
+                plan.append(_DataMigratePlanItem(fleet_bot_name, child, bot_data_dir / name, "skip-mount", 0.0))
                 continue
 
             dst = bot_data_dir / name
@@ -610,6 +621,7 @@ def cmd_data_migrate(args) -> int:
         "skip-git-container": "contains git checkouts — symlink/move to ~/projects/ instead",
         "skip-exists": "destination already exists",
         "skip-empty": "empty",
+        "skip-mount": "handled by mounts config — symlinked, not copied",
     }
 
     total_to_copy_mb = 0.0
