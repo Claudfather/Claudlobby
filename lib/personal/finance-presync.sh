@@ -7,6 +7,10 @@
 
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 # Source env vars (API keys, etc.)
 # shellcheck source=/dev/null
 [ -f ~/.env ] && . ~/.env
@@ -24,7 +28,7 @@ curl -s -H "Authorization: Bearer ${API_TOKEN:-}" \
 
 # Example: fetch transaction data
 curl -s -H "Authorization: Bearer ${API_TOKEN:-}" \
-  "https://api.yourdatasource.com/v1/transactions?since=$(date -d '7 days ago' +%Y-%m-%d)" \
+  "https://api.yourdatasource.com/v1/transactions?since=$(date_relative '7 days ago')" \
   > "$SNAPSHOT_DIR/transactions-$DATE.json" 2>/dev/null || true
 
-echo "$(date -Iseconds) Pre-sync complete" >> "$(dirname "$0")/data/presync.log"
+echo "$(ts_iso) Pre-sync complete" >> "$(dirname "$0")/data/presync.log"

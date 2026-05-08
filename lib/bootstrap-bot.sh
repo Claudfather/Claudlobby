@@ -24,6 +24,11 @@
 #   - Install the service unit (systemd: sudo cp + systemctl; launchd: cp plist + launchctl bootstrap)
 #   - Fill in remaining secrets in .mcp.json
 set -euo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 BOT="${1:?Usage: bootstrap-bot.sh <bot-name> <template>}"
 TEMPLATE="${2:?Usage: bootstrap-bot.sh <bot-name> <template (manager|worker)>}"
 shift 2
@@ -77,7 +82,7 @@ cp -R "$SRC"/. "$BOT_DIR/"
 BOT_UPPER=$(echo "$BOT" | tr '[:lower:]' '[:upper:]')
 find "$BOT_DIR" -type f \( -name '*.md' -o -name 'bot.conf' -o -name '.mcp.json*' \) -print0 | \
 while IFS= read -r -d '' f; do
-  sed -i.bak \
+  sed_i \
     -e "s|<BOT_NAME_UPPER>|$BOT_UPPER|g" \
     -e "s|<BOT_NAME>|$BOT|g" \
     -e "s|<BOT_DIR>|$BOT_DIR|g" \
@@ -90,7 +95,7 @@ while IFS= read -r -d '' f; do
     -e "s|<MANAGER_TMUX>|$MANAGER_TMUX|g" \
     -e "s|<FLEET_REPOS>|$FLEET_REPOS|g" \
     -e "s|<PERSONAL_REPOS>|$PERSONAL_REPOS|g" \
-    "$f" && rm "$f.bak"
+    "$f"
 done
 
 # Keep .mcp.json as .template by default — do NOT auto-rename.
@@ -134,7 +139,7 @@ chmod 600 "$STATE_DIR/access.json"
 # Pre-seed Claude Code workspace trust (avoids interactive prompt on first launch)
 CCJSON="$HOME/.claude.json"
 if [ -f "$CCJSON" ] && command -v jq >/dev/null; then
-  TMP=$(mktemp)
+  TMP=$(safe_mktemp)
   if jq --arg dir "$BOT_DIR" '.projects[$dir] = {
     "allowedTools": [],
     "mcpContextUris": [],
@@ -149,7 +154,6 @@ if [ -f "$CCJSON" ] && command -v jq >/dev/null; then
     mv "$TMP" "$CCJSON"
   else
     echo "WARNING: jq failed seeding workspace trust — $CCJSON unchanged" >&2
-    rm -f "$TMP"
   fi
 fi
 

@@ -10,8 +10,12 @@
 
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 BOT_DIR="${1:?Usage: keepalive.sh /path/to/bot/dir}"
-source "$BOT_DIR/bot.conf"
+load_bot_conf "$BOT_DIR"
 
 LOG="$BOT_DIR/keepalive.log"
 
@@ -27,35 +31,34 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 #   Linux  → systemctl --user restart $BOT_NAME.service (user units, no sudo)
 #   macOS  → launchctl kickstart -k gui/<uid>/<label>   (LaunchAgent)
 #   else   → fall back to start-bot.sh directly (cron+tmux pattern)
-if ! /usr/bin/tmux has-session -t "$BOT_NAME" 2>/dev/null; then
+if ! check_tmux_session "$BOT_NAME"; then
     # Reduce (not eliminate) race with start-bot.sh
     sleep 1
-    if /usr/bin/tmux has-session -t "$BOT_NAME" 2>/dev/null; then
-        echo "$(date -Iseconds) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"
+    if check_tmux_session "$BOT_NAME"; then
+        echo "$(ts_iso) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"
         exit 0
     fi
-    UNAME=$(uname)
-    if [ "$UNAME" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
-        echo "$(date -Iseconds) RESTART — session dead, systemctl --user restart $BOT_NAME" >> "$LOG"
+    if [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
+        echo "$(ts_iso) RESTART — session dead, systemctl --user restart $BOT_NAME" >> "$LOG"
         systemctl --user restart "$BOT_NAME.service" >>"$LOG" 2>&1
-    elif [ "$UNAME" = "Darwin" ] && [ -n "$BOT_SERVICE" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
-        echo "$(date -Iseconds) RESTART — session dead, launchctl kickstart $BOT_SERVICE" >> "$LOG"
+    elif [ "$_OS" = "Darwin" ] && [ -n "$BOT_SERVICE" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
+        echo "$(ts_iso) RESTART — session dead, launchctl kickstart $BOT_SERVICE" >> "$LOG"
         launchctl kickstart -k "gui/$(id -u)/$BOT_SERVICE" >>"$LOG" 2>&1
     else
-        echo "$(date -Iseconds) RESTART — session dead, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
-        "$(dirname "$0")/start-bot.sh" "$BOT_DIR" >>"$LOG" 2>&1
+        echo "$(ts_iso) RESTART — session dead, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
+        "$LIB_DIR/start-bot.sh" "$BOT_DIR" >>"$LOG" 2>&1
     fi
     exit 0
 fi
 
-pane_content=$(/usr/bin/tmux capture-pane -t "$BOT_NAME" -p 2>/dev/null) || true
+pane_content=$("$_TMUX_BIN" capture-pane -t "$BOT_NAME" -p 2>/dev/null) || true
 last_lines=$(echo "$pane_content" | tail -10)
 
 # Log state — useful for fleet-health dashboards. Does NOT act on idle.
 if echo "$last_lines" | grep -qE '(Running|Thinking|Reading|Writing|Editing)'; then
-    echo "$(date -Iseconds) BUSY — active processing" >> "$LOG"
+    echo "$(ts_iso) BUSY — active processing" >> "$LOG"
 elif echo "$last_lines" | grep -qE '(^\s*[>❯]|Remote Control active|Enter/Esc to close)'; then
-    echo "$(date -Iseconds) IDLE — at prompt" >> "$LOG"
+    echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
 else
-    echo "$(date -Iseconds) UNKNOWN — pane state did not match known patterns" >> "$LOG"
+    echo "$(ts_iso) UNKNOWN — pane state did not match known patterns" >> "$LOG"
 fi
