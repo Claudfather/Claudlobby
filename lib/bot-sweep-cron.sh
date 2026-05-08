@@ -12,7 +12,7 @@
 #
 # Skips dispatch if the pane appears busy (active spinner). Logs to
 # $CLAUDLOBBY_ROOT/lib/bot-sweep-cron.log.
-set -u
+set -euo pipefail
 
 BOT_NAME="${1:?Usage: bot-sweep-cron.sh <bot-name> <dispatch-text>}"
 DISPATCH="${2:?Usage: bot-sweep-cron.sh <bot-name> <dispatch-text>}"
@@ -29,7 +29,7 @@ if ! tmux has-session -t "$BOT_NAME" 2>/dev/null; then
 fi
 
 # Don't interrupt in-flight work — skip if pane shows active processing.
-PANE_TAIL=$(tmux capture-pane -t "$BOT_NAME" -p 2>&1 | tail -3)
+PANE_TAIL=$(tmux capture-pane -t "$BOT_NAME" -p 2>&1 | tail -3) || true
 if echo "$PANE_TAIL" | grep -qiE '(thinking|running|reading|writing|calling|editing)'; then
     echo "$TS WARN — $BOT_NAME appears busy; skipping this tick ($DISPATCH)" >>"$LOG"
     exit 0

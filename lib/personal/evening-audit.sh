@@ -5,6 +5,8 @@
 # The manager bot picks up the prompt and uses global skills
 # like /tech-debt or /security-audit to run the audit.
 
+set -euo pipefail
+
 MANAGER_SESSION="${1:-clog}"
 
 if ! /usr/bin/tmux has-session -t "$MANAGER_SESSION" 2>/dev/null; then

@@ -8,6 +8,8 @@
 # Example:
 #   report-back.sh "work-eng" "DONE" "Fixed auth test" "pr:https://github.com/org/repo/pull/42"
 
+set -euo pipefail
+
 MANAGER_SESSION="${MANAGER_BOT_NAME:-claude-bot}"  # Override in bot.conf if needed
 BOT="$1"
 STATUS="$2"
@@ -21,7 +23,7 @@ done
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
-/usr/bin/tmux send-keys -t "$MANAGER_SESSION" "$MESSAGE" Enter
+/usr/bin/tmux send-keys -t "$MANAGER_SESSION" "$MESSAGE" Enter || true
 
 # Mirror to fleet-state if helper is present
 _FS=$(dirname "$0")/fleet-state-update.sh

@@ -7,7 +7,7 @@
 #
 # Usage: keepalive-all.sh [<fleet-runtime-bots-dir>]
 #   default: $CLAUDLOBBY_ROOT/local/$CLAUDLOBBY_FLEET/runtime/bots
-set -u
+set -euo pipefail
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 FLEET="${CLAUDLOBBY_FLEET:-}"
@@ -48,7 +48,7 @@ for conf in "$BOTS_DIR"/*/bot.conf; do
 
     # Only touch bots whose service is registered with the host's init.
     if [ "$HOST_OS" = "Darwin" ]; then
-        plist=$(find "$AGENTS_DIR" -maxdepth 1 -name "*.$bot_name.plist" 2>/dev/null | head -1)
+        plist=$(find "$AGENTS_DIR" -maxdepth 1 -name "*.$bot_name.plist" 2>/dev/null | head -1) || true
         [ -n "$plist" ] || continue
     else
         # Linux: rely on the user's session bus; assume registered if .service exists.

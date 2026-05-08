@@ -10,7 +10,7 @@
 #
 # Without --fleet, rotates logs for ALL fleets under local/.
 # Defaults to keeping the last 500 lines per file.
-set -u
+set -euo pipefail
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 KEEP=500
