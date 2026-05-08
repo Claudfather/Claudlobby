@@ -35,5 +35,5 @@ if [ -x "$_FS" ]; then
     progress)  FS=working ;;
     *)         FS=idle ;;
   esac
-  "$_FS" "$BOT_NAME" "$FS" "" "" "$SUMMARY" || true
+  "$_FS" "$BOT" "$FS" "" "" "$SUMMARY" || true
 fi
