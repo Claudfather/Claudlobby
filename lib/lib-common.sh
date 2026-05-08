@@ -72,11 +72,12 @@ load_bot_conf() {
         return 1
     fi
     # shellcheck source=/dev/null
-    source "$bot_dir/bot.conf"
+    . "$bot_dir/bot.conf"
 }
 
 # --- 3-tier env sourcing ----------------------------------------------------
 
+# Requires load_bot_conf to have been called first (CLAUDLOBBY_ROOT, FLEET_NAME, BOT_DIR must be set).
 source_env_tiered() {
     # Global
     if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
@@ -115,6 +116,9 @@ _lc_cleanup() {
     rm -rf "$_LC_TMPDIR" 2>/dev/null || true
 }
 
+# Source lib-common.sh before setting your own EXIT trap — this overwrites
+# any existing trap.  If your script needs its own EXIT handler, set it
+# after sourcing and call _lc_cleanup explicitly.
 trap '_lc_cleanup' EXIT
 
 safe_mktemp() {

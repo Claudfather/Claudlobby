@@ -22,7 +22,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOT_DIR="${1:?Usage: spin-up-bot.sh /path/to/bot/dir}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd)"
 
-load_bot_conf "$BOT_DIR" || { echo "spin-up-bot.sh: run 'claudlobby generate' first" >&2; exit 1; }
+load_bot_conf "$BOT_DIR" || exit 1
 
 case "$_OS" in
 Linux)
