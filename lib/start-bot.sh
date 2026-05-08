@@ -49,7 +49,7 @@ SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
 # by the tmux session's shell. This avoids unquoted tokens in command
 # strings and process listings while ensuring per-session isolation.
 BOT_ENV_FILE="$BOT_DIR/.tmux-env"
-: > "$BOT_ENV_FILE"
+(umask 177; : > "$BOT_ENV_FILE")
 chmod 600 "$BOT_ENV_FILE"
 [ -n "${CLAUDE_CONFIG_DIR:-}" ]                    && printf 'export CLAUDE_CONFIG_DIR=%q\n' "$CLAUDE_CONFIG_DIR" >> "$BOT_ENV_FILE"
 [ -n "${TELEGRAM_STATE_DIR:-}" ]                   && printf 'export TELEGRAM_STATE_DIR=%q\n' "$TELEGRAM_STATE_DIR" >> "$BOT_ENV_FILE"
@@ -65,7 +65,7 @@ if [ -z "${CLAUDE_FLAGS:-}" ]; then
     [ -n "${CLAUDE_EXTRA_FLAGS:-}" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $CLAUDE_EXTRA_FLAGS"
 fi
 
-CLAUDE_CMD="source '$BOT_ENV_FILE' && exec claude $CLAUDE_FLAGS --name \"$SESSION_NAME\""
+CLAUDE_CMD=". '$BOT_ENV_FILE' && exec claude $CLAUDE_FLAGS --name \"$SESSION_NAME\""
 
 tmux new-session -d -s "$BOT_NAME" "$CLAUDE_CMD"
 
