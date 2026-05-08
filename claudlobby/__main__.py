@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from . import __version__
+from . import dotenv
 from .config import load_fleet
 from .composer import compose_bot, compose_fleet
 from .diff import diff_bot, promote_bot
@@ -32,7 +33,7 @@ def _load_env(paths: Paths) -> None:
     """Load .env file into os.environ (without overriding existing vars).
     Handles both `VAR=value` and `export VAR=value` formats — the latter is
     what env-migrate writes and what hand-edited .env files commonly use."""
-    for k, v in _read_env_file(paths.env_file).items():
+    for k, v in dotenv.read(paths.env_file).items():
         if k not in os.environ:
             os.environ[k] = v
 
@@ -198,42 +199,6 @@ def cmd_status(args) -> int:
     print(f"  runtime: {paths.runtime_bots}")
     print("  (full status dashboard wiring tmux + service health: TODO)")
     return 0
-
-
-def _read_env_file(path: Path) -> dict[str, str]:
-    """Parse a .env file into {var: value}. Strips `export ` prefix and quotes.
-    Returns {} if the file doesn't exist."""
-    if not path.is_file():
-        return {}
-    out: dict[str, str] = {}
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        if k.startswith("export "):
-            k = k[len("export "):].strip()
-        v = v.strip().strip('"').strip("'")
-        if k:
-            out[k] = v
-    return out
-
-
-def _merge_env_into(path: Path, new_vars: dict[str, str]) -> dict[str, str]:
-    """Read existing .env at path, merge new_vars over it (new wins).
-    Returns the merged dict. Caller writes it back."""
-    return {**_read_env_file(path), **new_vars}
-
-
-def _format_env_file(header: str, vars_dict: dict[str, str]) -> str:
-    """Render a .env file with `export VAR="value"` lines, alpha-sorted."""
-    lines = [header, ""]
-    for k in sorted(vars_dict):
-        v = vars_dict[k].replace('"', '\\"')
-        lines.append(f'export {k}="{v}"')
-    lines.append("")
-    return "\n".join(lines)
 
 
 def cmd_env_migrate(args) -> int:
@@ -433,9 +398,9 @@ def cmd_env_migrate(args) -> int:
     # this, a bot's existing hand-edited .env (e.g. SLACK_TOKEN that the
     # migration didn't discover) gets wiped. New values win on conflict.
     if fleet_vars:
-        merged = _merge_env_into(fleet_env_path, fleet_vars)
+        merged = dotenv.merge_into(fleet_env_path, fleet_vars)
         fleet_env_path.parent.mkdir(parents=True, exist_ok=True)
-        fleet_env_path.write_text(_format_env_file(
+        fleet_env_path.write_text(dotenv.format_file(
             f"# Fleet secrets for {fleet.name} (migrated from {source_dir})",
             merged,
         ))
@@ -448,8 +413,8 @@ def cmd_env_migrate(args) -> int:
         if not bot_env_path.parent.is_dir():
             print(f"SKIP {fleet_bot_name}: runtime dir missing — run `claudlobby generate` first", file=sys.stderr)
             continue
-        merged = _merge_env_into(bot_env_path, vars_dict)
-        bot_env_path.write_text(_format_env_file(
+        merged = dotenv.merge_into(bot_env_path, vars_dict)
+        bot_env_path.write_text(dotenv.format_file(
             f"# Bot secrets for {fleet_bot_name} (migrated; pre-existing keys preserved)",
             merged,
         ))
