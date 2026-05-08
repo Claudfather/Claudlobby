@@ -3,20 +3,18 @@
 # Usage: start-bot.sh /path/to/bot/dir
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 BOT_DIR="${1:?Usage: start-bot.sh /path/to/bot/dir}"
-source "$BOT_DIR/bot.conf"
+load_bot_conf "$BOT_DIR"
 
 export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.bun/bin:$HOME/.npm-global/bin
 export HOME="$HOME"
 
-# 3-tier env sourcing: global → fleet → bot (later tiers override)
-[ -f "${CLAUDLOBBY_ROOT:-}/.env" ] && . "$CLAUDLOBBY_ROOT/.env"
-if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
-    FLEET_ENV="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/.env"
-    # shellcheck source=/dev/null
-    [ -f "$FLEET_ENV" ] && . "$FLEET_ENV"
-fi
-[ -f "$BOT_DIR/.env" ] && . "$BOT_DIR/.env"
+# 3-tier env sourcing: global -> fleet -> bot (later tiers override)
+source_env_tiered
 
 # Resolve the Telegram token from the env-var name declared in fleet.yaml
 if [ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
@@ -26,7 +24,7 @@ fi
 cd "$BOT_DIR"
 
 # Kill any prior session — expected to fail on first boot or after clean shutdown
-tmux kill-session -t "$BOT_NAME" 2>/dev/null || true
+"$_TMUX_BIN" kill-session -t "$BOT_NAME" 2>/dev/null || true
 
 SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
 
@@ -68,11 +66,11 @@ fi
 
 CLAUDE_CMD=". '$BOT_ENV_FILE' && exec claude $CLAUDE_FLAGS --name \"$SESSION_NAME\""
 
-tmux new-session -d -s "$BOT_NAME" "$CLAUDE_CMD"
+"$_TMUX_BIN" new-session -d -s "$BOT_NAME" "$CLAUDE_CMD"
 
 # Wait for initialization (up to 90s)
 for _ in $(seq 1 90); do
-    if tmux capture-pane -t "$BOT_NAME" -p 2>/dev/null | grep -q "remote-control is active"; then
+    if "$_TMUX_BIN" capture-pane -t "$BOT_NAME" -p 2>/dev/null | grep -q "remote-control is active"; then
         break
     fi
     sleep 1
@@ -81,10 +79,10 @@ done
 sleep 5  # buffer for MCP servers and channels
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
-    tmux send-keys -t "$BOT_NAME" "$STARTUP_PROMPT" Enter
+    "$_TMUX_BIN" send-keys -t "$BOT_NAME" "$STARTUP_PROMPT" Enter
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
-[ -x "$(dirname "$0")/fleet-state-update.sh" ] && "$(dirname "$0")/fleet-state-update.sh" "$BOT_NAME" "idle" || true
+[ -x "$LIB_DIR/fleet-state-update.sh" ] && "$LIB_DIR/fleet-state-update.sh" "$BOT_NAME" "idle" || true
 
 echo "$BOT_LABEL started"

@@ -15,20 +15,16 @@
 # Usage: spin-up-bot.sh /path/to/runtime/bots/<bot>
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 BOT_DIR="${1:?Usage: spin-up-bot.sh /path/to/bot/dir}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd)"
 
-if [ ! -f "$BOT_DIR/bot.conf" ]; then
-    echo "spin-up-bot.sh: $BOT_DIR/bot.conf not found — run 'claudlobby generate' first" >&2
-    exit 1
-fi
+load_bot_conf "$BOT_DIR" || { echo "spin-up-bot.sh: run 'claudlobby generate' first" >&2; exit 1; }
 
-# shellcheck source=/dev/null
-source "$BOT_DIR/bot.conf"
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-
-UNAME=$(uname)
-case "$UNAME" in
+case "$_OS" in
 Linux)
     UNIT_FILE="$HOME/.config/systemd/user/$BOT_NAME.service"
     if [ -f "$UNIT_FILE" ]; then
@@ -50,7 +46,7 @@ Darwin)
     fi
     ;;
 *)
-    echo "spin-up-bot: unsupported host ($UNAME) — falling back to start-bot.sh"
+    echo "spin-up-bot: unsupported host ($_OS) — falling back to start-bot.sh"
     echo "spin-up-bot: install cron-tmux supervision separately if you want auto-restart"
     "$LIB_DIR/start-bot.sh" "$BOT_DIR"
     ;;

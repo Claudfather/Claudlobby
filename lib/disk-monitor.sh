@@ -14,6 +14,10 @@
 # alert. Otherwise just logs and exits 0 — non-fatal.
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 THRESHOLD=90
 MOUNT="/"
 while [ $# -gt 0 ]; do
@@ -21,7 +25,7 @@ while [ $# -gt 0 ]; do
         --threshold) THRESHOLD="$2"; shift 2 ;;
         --mount)     MOUNT="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+            show_help
             exit 0
             ;;
         *)
@@ -33,15 +37,10 @@ done
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LOG="$CLAUDLOBBY_ROOT/lib/disk-monitor.log"
-mkdir -p "$(dirname "$LOG")"
-TS=$(date -Iseconds)
+setup_log_dir "$LOG"
+TS=$(ts_iso)
 
-# `df --output` is GNU-only; on Darwin use a portable awk parse.
-if df --output=pcent / >/dev/null 2>&1; then
-    USAGE=$(df --output=pcent "$MOUNT" | tail -1 | tr -dc 0-9)
-else
-    USAGE=$(df -P "$MOUNT" | awk 'NR==2 {gsub("%",""); print $5}')
-fi
+USAGE=$(df_pcent "$MOUNT")
 
 if [ -z "$USAGE" ]; then
     echo "$TS ERROR — could not parse disk usage for $MOUNT" >>"$LOG"
