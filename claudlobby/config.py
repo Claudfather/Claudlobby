@@ -88,6 +88,7 @@ class BotConfig:
     channels: list[str] = field(
         default_factory=lambda: ["plugin:telegram@claude-plugins-official"]
     )                                                      # --channels <name>
+    prompt_suggestions: bool = False                        # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION
     extra_flags: list[str] = field(default_factory=list)   # any other claude CLI args
     skills: list[str] = field(default_factory=list)
     mcp: list[McpEntry] = field(default_factory=list)
@@ -249,6 +250,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         effort=raw.get("effort", defaults.get("effort")),
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", True),
+        prompt_suggestions=_bool("prompt_suggestions", False),
         channels=_as_list(raw.get("channels") or defaults.get("channels")) or ["plugin:telegram@claude-plugins-official"],
         extra_flags=_merge_lists(defaults.get("extra_flags"), raw.get("extra_flags")),
         skills=_merge_lists(defaults.get("skills"), raw.get("skills")),

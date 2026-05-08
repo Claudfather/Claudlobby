@@ -14,6 +14,7 @@ fleet:
     model: opus
     effort: max
     account: default
+    prompt_suggestions: false                # disable autocomplete suggestions (headless bots don't need them)
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
     protocols: [report-back, context-management, telegram-routing, telegram-formatting]
 

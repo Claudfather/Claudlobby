@@ -249,6 +249,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append(f'CLAUDE_FLAGS="{" ".join(flags)}"')
     lines.append("")
 
+    # Prompt suggestions — off by default for headless bots.
+    lines.append(f'export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="{str(bot.prompt_suggestions).lower()}"')
+    lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f'export CLAUDLOBBY_ROOT="{paths.root}"')
     lines.append(f'export FLEET_NAME="{fleet.name}"')
