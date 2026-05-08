@@ -278,11 +278,32 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
 
     lines.append("")
     if bot.startup_prompt:
-        lines.append(f'STARTUP_PROMPT={json.dumps(bot.startup_prompt)}')
+        rendered = _render_startup_prompt(bot.startup_prompt, bot, fleet)
+        lines.append(f'STARTUP_PROMPT={json.dumps(rendered)}')
     else:
         lines.append('STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."')
 
     return "\n".join(lines) + "\n"
+
+
+def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> str:
+    """Render jinja placeholders in startup_prompt against fleet/bot context.
+
+    Exposed variables (each is an empty string when not configured):
+      - {{ bot_name }}                — bot.name
+      - {{ fleet_name }}              — fleet.name
+      - {{ telegram_group_chat_id }}  — fleet.telegram_group_chat_id
+      - {{ telegram_handle }}         — bot.telegram.handle
+
+    Lets fleet.yaml authors stop hand-duplicating identifiers — e.g.
+    chat_id literals that already live in fleet.telegram_group_chat_id.
+    """
+    return jinja2.Template(prompt).render(
+        bot_name=bot.name,
+        fleet_name=fleet.name,
+        telegram_group_chat_id=fleet.telegram_group_chat_id or "",
+        telegram_handle=(bot.telegram.handle if bot.telegram else "") or "",
+    )
 
 
 # ----------------------------------------------------------------------
