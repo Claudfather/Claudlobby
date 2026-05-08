@@ -228,7 +228,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         f'BOT_SERVICE="{fleet.service_prefix}.{bot.name}"',
         f'BOT_LABEL="{bot.name.upper()}"',
         f'BOT_DIR="{bot_dir}"',
-        f'TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{bot.name}"',
+        f'TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{bot.telegram.handle or bot.name}"',
         "",
         "# Claude Code config dir (multi-account support)",
     ]
