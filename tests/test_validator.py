@@ -99,3 +99,33 @@ class TestValidate:
         report = validate(fleet, paths)
         assert report.has_errors
         assert any("empty" in e for e in report.errors)
+
+    def test_reports_to_invalid_ref_is_warning(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [software-engineering]",
+            "expertise: [software-engineering]\n      reports_to: nonexistent-bot",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("reports_to" in w and "nonexistent-bot" in w for w in report.warnings)
+
+    def test_manages_invalid_ref_is_warning(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [orchestration]",
+            "expertise: [orchestration]\n      manages: [worker-1, ghost-bot]",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("manages" in w and "ghost-bot" in w for w in report.warnings)
+        # worker-1 exists, so no warning for it
+        assert not any("manages" in w and "worker-1" in w for w in report.warnings)

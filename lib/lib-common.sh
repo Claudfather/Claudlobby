@@ -80,7 +80,11 @@ load_bot_conf() {
 # Requires load_bot_conf to have been called first (CLAUDLOBBY_ROOT, FLEET_NAME, BOT_DIR must be set).
 source_env_tiered() {
     # Global
+    # shellcheck source=/dev/null
+    [ -f "$HOME/.env" ] && . "$HOME/.env"
+    # Backward-compat: source legacy location with deprecation warning
     if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
+        echo "DEPRECATED: $CLAUDLOBBY_ROOT/.env detected — move secrets to ~/.env or local/<fleet>/.env" >&2
         # shellcheck source=/dev/null
         . "$CLAUDLOBBY_ROOT/.env"
     fi

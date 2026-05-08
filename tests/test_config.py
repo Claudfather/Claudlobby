@@ -78,6 +78,33 @@ class TestCoerceBot:
         bot = _coerce_bot("test", raw, defaults)
         assert bot.guardrails == ["a", "b", "c"]
 
+    def test_bot_id_defaults_to_key(self):
+        bot = _coerce_bot("greg", {"expertise": ["eng"]}, {})
+        assert bot.bot_id == "greg"
+        assert bot.name == "greg"
+
+    def test_bot_id_with_custom_name(self):
+        bot = _coerce_bot("greg", {"expertise": ["eng"], "name": "Greg"}, {})
+        assert bot.bot_id == "greg"
+        assert bot.name == "Greg"
+
+    def test_reports_to(self):
+        bot = _coerce_bot("worker", {"expertise": ["eng"], "reports_to": "lead"}, {})
+        assert bot.reports_to == "lead"
+
+    def test_manages(self):
+        bot = _coerce_bot("lead", {"expertise": ["eng"], "manages": ["w1", "w2"]}, {})
+        assert bot.manages == ["w1", "w2"]
+
+    def test_manages_from_string(self):
+        bot = _coerce_bot("lead", {"expertise": ["eng"], "manages": "w1"}, {})
+        assert bot.manages == ["w1"]
+
+    def test_reports_to_and_manages_default_none(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+        assert bot.reports_to is None
+        assert bot.manages is None
+
 
 class TestLoadFleet:
     def test_load_minimal(self, fleet_dir):

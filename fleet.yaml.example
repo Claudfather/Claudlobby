@@ -32,8 +32,10 @@ fleet:
 
   bots:
     lead:
+      name: Lead                              # optional display name (defaults to dict key)
       expertise: [orchestration]              # area(s) of expertise from library/expertise/
       mission: "Coordinate the engineering team end-to-end. Dispatch work, monitor reports, surface blockers to the human within 5 minutes."
+      manages: [eng-1, reviewer-1]            # bot_ids this bot manages (generates Org Structure section)
       # voice: voices/erlich-bachman.md                 # uncomment to add a personality overlay
       skills: [dispatch, fleet-status, lifecycle, prs, status, sweep, restart]
       mcp: [github, notion, slack]
@@ -51,6 +53,7 @@ fleet:
     eng-1:
       expertise: [software-engineering]
       mission: "Implement features and fix bugs in fleet repos. Branch + PR. Tests pass before report-back."
+      reports_to: lead                         # bot_id of manager (generates Org Structure section)
       mcp: [github]
       telegram:
         handle: my_eng_1_bot

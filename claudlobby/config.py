@@ -86,10 +86,13 @@ class McpEntry:
 
 @dataclass
 class BotConfig:
-    name: str
+    bot_id: str                                   # dict key — immutable system slug
+    name: str                                     # display name (defaults to bot_id)
     expertise: list[str]                          # list of library/expertise/<name>.md
     voice: str | None = None
     mission: str | None = None                    # one-paragraph charter
+    reports_to: str | None = None                 # bot_id this bot reports to
+    manages: list[str] | None = None              # bot_ids this bot manages
     scope: ScopeConfig | None = None
     model_strategy: ModelStrategyConfig | None = None
     account: str = "default"
@@ -279,10 +282,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         return fallback
 
     return BotConfig(
-        name=name,
+        bot_id=name,
+        name=raw.get("name", name),
         expertise=_merge_lists(_as_list(defaults.get("expertise")), _as_list(expertise_raw)),
         voice=raw.get("voice"),
         mission=raw.get("mission") or defaults.get("mission"),
+        reports_to=raw.get("reports_to"),
+        manages=_as_list(raw.get("manages")) or None,
         scope=_coerce_scope(raw.get("scope") or defaults.get("scope")),
         model_strategy=_coerce_model_strategy(raw.get("model_strategy") or defaults.get("model_strategy")),
         account=raw.get("account", defaults.get("account", "default")),
