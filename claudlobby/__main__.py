@@ -16,6 +16,31 @@ from .paths import Paths
 from .validator import validate
 
 
+def _parse_rename_map(entries: list[str]) -> dict[str, str]:
+    """Parse --map entries ('fleet-bot=src-dir'). Raises ValueError on bad format."""
+    rename_map: dict[str, str] = {}
+    for entry in entries:
+        if "=" not in entry:
+            raise ValueError(f"--map expects 'fleet-bot=src-dir', got: {entry}")
+        fleet_bot, src_name = entry.split("=", 1)
+        rename_map[fleet_bot.strip()] = src_name.strip()
+    return rename_map
+
+
+def _parse_env_line(line: str) -> tuple[str, str] | None:
+    """Parse a single env line ('VAR=value' or 'export VAR=value').
+    Returns (key, value) or None for blank/comment/invalid lines."""
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    k, v = line.split("=", 1)
+    k = k.strip()
+    if k.startswith("export "):
+        k = k[len("export "):].strip()
+    v = v.strip().strip('"').strip("'")
+    return (k, v)
+
+
 def _resolve_paths(args) -> Paths:
     fleet = getattr(args, "fleet", None)
     if args.root:
@@ -221,13 +246,11 @@ def cmd_env_migrate(args) -> int:
         return 1
 
     # --- Parse --map flags: fleet_bot=src_dir (e.g. clog=assistant) ---
-    rename_map: dict[str, str] = {}
-    for entry in (args.map or []):
-        if "=" not in entry:
-            print(f"ERROR: --map expects 'fleet-bot=src-dir', got: {entry}", file=sys.stderr)
-            return 1
-        fleet_bot, src_name = entry.split("=", 1)
-        rename_map[fleet_bot.strip()] = src_name.strip()
+    try:
+        rename_map = _parse_rename_map(args.map or [])
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
     # --- Discover legacy bot dirs (any subdir containing .mcp.json or bot.conf) ---
     bot_dir_map: dict[str, Path] = {}
@@ -246,15 +269,9 @@ def cmd_env_migrate(args) -> int:
     env_from_home: dict[str, str] = {}
     if home_env.is_file():
         for line in home_env.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            k = k.strip()
-            if k.startswith("export "):  # not lstrip — that's char-set, not prefix
-                k = k[len("export "):].strip()
-            v = v.strip().strip('"').strip("'")
-            env_from_home[k] = v
+            parsed = _parse_env_line(line)
+            if parsed:
+                env_from_home[parsed[0]] = parsed[1]
 
     # --- Source 2: per-bot bot.conf (Telegram + other secrets, scoped per source dir) ---
     SECRET_LIKE = re.compile(r"(TOKEN|KEY|SECRET|URL|HANDLE|CHAT_ID|PASSWORD|API)")
@@ -265,14 +282,10 @@ def cmd_env_migrate(args) -> int:
             continue
         scope: dict[str, str] = {}
         for line in conf_path.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
+            parsed = _parse_env_line(line)
+            if not parsed:
                 continue
-            k, v = line.split("=", 1)
-            k = k.strip()
-            if k.startswith("export "):
-                k = k[len("export "):].strip()
-            v = v.strip().strip('"').strip("'")
+            k, v = parsed
             if not v or v.startswith("$"):
                 continue
             if SECRET_LIKE.search(k):
@@ -288,7 +301,7 @@ def cmd_env_migrate(args) -> int:
             continue
         try:
             mcp_data = _json.loads(mcp_path.read_text())
-        except Exception as e:
+        except _json.JSONDecodeError as e:
             print(f"WARN: failed to parse {mcp_path}: {e}", file=sys.stderr)
             continue
         for _, srv in mcp_data.get("mcpServers", {}).items():
@@ -502,13 +515,11 @@ def cmd_data_migrate(args) -> int:
         print(f"ERROR: source directory not found: {source_dir}", file=sys.stderr)
         return 1
 
-    rename_map: dict[str, str] = {}
-    for entry in (args.map or []):
-        if "=" not in entry:
-            print(f"ERROR: --map expects 'fleet-bot=src-dir', got: {entry}", file=sys.stderr)
-            return 1
-        fleet_bot, src_name = entry.split("=", 1)
-        rename_map[fleet_bot.strip()] = src_name.strip()
+    try:
+        rename_map = _parse_rename_map(args.map or [])
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
     include_set = (
         {x.strip() for x in args.include.split(",") if x.strip()}
@@ -638,7 +649,7 @@ def cmd_data_migrate(args) -> int:
             shutil.copytree(item.src, item.dst, symlinks=True)
             print(f"copied  {item.src}  →  {item.dst}")
             copied += 1
-        except Exception as e:
+        except (OSError, shutil.Error) as e:
             print(f"FAILED  {item.src}: {e}", file=sys.stderr)
 
     print(f"\nApplied: {copied} dirs copied")
@@ -671,13 +682,11 @@ def cmd_cron_migrate(args) -> int:
         print(f"ERROR: source directory not found: {source_dir}", file=sys.stderr)
         return 1
 
-    rename_map: dict[str, str] = {}
-    for entry in (args.map or []):
-        if "=" not in entry:
-            print(f"ERROR: --map expects 'fleet-bot=src-dir', got: {entry}", file=sys.stderr)
-            return 1
-        fleet_bot, src_name = entry.split("=", 1)
-        rename_map[fleet_bot.strip()] = src_name.strip()
+    try:
+        rename_map = _parse_rename_map(args.map or [])
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
     # Build per-bot context: legacy prefix, bot data dir, search dirs for resolution.
     import re

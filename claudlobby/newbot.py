@@ -415,7 +415,8 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     try:
         fleet = load_fleet(paths.fleet_yaml)
         team_options = list(fleet.teams.keys())
-    except Exception:
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as e:
+        print(f"  WARN: could not load fleet.yaml for team listing: {e}", file=sys.stderr)
         team_options = []
     if team_options:
         print()
