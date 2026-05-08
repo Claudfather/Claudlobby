@@ -242,7 +242,7 @@ def _coerce_sandbox(raw: dict | None) -> SandboxConfig:
     return SandboxConfig(
         network_allowed_domains=list(raw.get("network_allowed_domains") or []),
         filesystem_allow_write=list(raw.get("filesystem_allow_write") or []),
-        auto_allow_bash=bool(raw.get("auto_allow_bash", True)),
+        auto_allow_bash=bool(raw.get("auto_allow_bash", False)),
     )
 
 
