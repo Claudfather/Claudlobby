@@ -34,18 +34,28 @@ class ValidationReport:
 def _bot_required_env_vars(
     bot: BotConfig, paths: Paths
 ) -> list[tuple[str, str, str, str | None]]:
-    """Return [(canonical_var, tier, source, instance)] this bot's MCPs need.
+    """Return [(canonical_var, tier, source, instance)] this bot needs.
 
-    Mirrors the resolution in composer._resolve_instance_env so the validator
-    sees the same canonical names that end up in the rendered `.mcp.json`:
-    instance-scoped vars get prefixed (`${TOKEN}` → `${NOTION_WORK_TOKEN}`),
-    shared vars stay verbatim. `instance` is None for shared vars."""
+    Walks two contract sources, mirroring composer.collect_env_contracts:
+
+    - **MCP fragments** (`library/mcp/<name>.json`, `_env_contract` key) —
+      same instance-scope rename as composer._resolve_instance_env, so
+      the validator sees the canonical names that land in the rendered
+      `.mcp.json` (`${TOKEN}` → `${NOTION_WORK_TOKEN}` per instance).
+    - **Integration docs** (`library/integrations/<name>.md`, frontmatter
+      `env_contract` key) — same auto-pair fallback as composer (if
+      `bot.integrations` is empty, derive from the bot's MCP names that
+      have a matching `<name>.md` integration doc).
+
+    `instance` is None for non-instance-scoped vars."""
+    from .loader import parse_frontmatter
+
     out: list[tuple[str, str, str, str | None]] = []
-    seen: set[str] = set()
+    seen_mcp: set[str] = set()
     for entry in bot.mcp:
-        if entry.name in seen:
+        if entry.name in seen_mcp:
             continue
-        seen.add(entry.name)
+        seen_mcp.add(entry.name)
         frag_path = paths.find_library_file("mcp", entry.name, ".json")
         if frag_path is None:
             continue
@@ -65,6 +75,33 @@ def _bot_required_env_vars(
                     out.append((prefix + var_name, tier, f"mcp/{entry.name}", instance))
             else:
                 out.append((var_name, tier, f"mcp/{entry.name}", None))
+
+    # Integration doc contracts (auto-pair fallback matches composer)
+    integration_names = bot.integrations or [
+        e.name for e in bot.mcp
+        if paths.find_library_file("integrations", e.name, ".md") is not None
+    ]
+    seen_int: set[str] = set()
+    for int_name in integration_names:
+        if int_name in seen_int:
+            continue
+        seen_int.add(int_name)
+        int_path = paths.find_library_file("integrations", int_name, ".md")
+        if int_path is None:
+            continue
+        try:
+            fm, _ = parse_frontmatter(int_path.read_text())
+        except Exception:
+            continue
+        contract = fm.get("env_contract", {}) if isinstance(fm, dict) else {}
+        if not isinstance(contract, dict):
+            continue
+        for var_name, meta in contract.items():
+            if not isinstance(meta, dict):
+                continue
+            tier = meta.get("tier", "fleet")
+            out.append((var_name, tier, f"integration/{int_name}", None))
+
     return out
 
 
