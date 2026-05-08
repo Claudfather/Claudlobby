@@ -9,6 +9,7 @@ set -euo pipefail
 
 DIR="${1:?Usage: git-pull-all.sh /path/to/projects/dir}"
 LOG="$(dirname "$DIR")/git-pull.log"
+FAILURES=0
 
 echo "$(date -Iseconds) Starting git pull for repos in $DIR" >> "$LOG"
 
@@ -19,6 +20,12 @@ for repo in "$DIR"/*/; do
             echo "$(date -Iseconds) $REPO_NAME: $RESULT" >> "$LOG"
         else
             echo "$(date -Iseconds) $REPO_NAME: FAILED — $RESULT" >> "$LOG"
+            FAILURES=$((FAILURES + 1))
         fi
     fi
 done
+
+if [ "$FAILURES" -gt 0 ]; then
+    echo "$(date -Iseconds) Done — $FAILURES repo(s) failed" >> "$LOG"
+    exit 1
+fi
