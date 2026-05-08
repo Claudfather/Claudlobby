@@ -28,7 +28,7 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 #   macOS  → launchctl kickstart -k gui/<uid>/<label>   (LaunchAgent)
 #   else   → fall back to start-bot.sh directly (cron+tmux pattern)
 if ! /usr/bin/tmux has-session -t "$BOT_NAME" 2>/dev/null; then
-    # Brief pause + re-check to avoid TOCTOU race with start-bot.sh
+    # Reduce (not eliminate) race with start-bot.sh
     sleep 1
     if /usr/bin/tmux has-session -t "$BOT_NAME" 2>/dev/null; then
         echo "$(date -Iseconds) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"

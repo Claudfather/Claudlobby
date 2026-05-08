@@ -19,6 +19,7 @@ LAST="${5:-}"
 (
 flock -x 200
 TMP=$(mktemp)
+trap "rm -f \"\$TMP\"" EXIT
 jq --arg bot "$BOT" --arg status "$STATUS" --arg task "$TASK" --arg repo "$REPO" \
    --arg last "$LAST" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   .updated = $ts
