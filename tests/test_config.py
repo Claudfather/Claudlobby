@@ -1,10 +1,11 @@
 """Tests for config.py — _coerce_bot defaults and fleet loading."""
+
 from __future__ import annotations
 
-import pytest
-from pathlib import Path
 
-from claudlobby.config import _coerce_bot, load_fleet, BotConfig
+import pytest
+
+from claudlobby.config import _coerce_bot, load_fleet
 
 
 class TestCoerceBot:
@@ -104,6 +105,40 @@ class TestCoerceBot:
         bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
         assert bot.reports_to is None
         assert bot.manages is None
+
+    def test_tools_default_empty(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+        assert bot.tools.deny == []
+        assert bot.tools.allow == []
+
+    def test_tools_deny_list(self):
+        raw = {"expertise": ["eng"], "tools": {"deny": ["Write", "Edit"]}}
+        bot = _coerce_bot("test", raw, {})
+        assert bot.tools.deny == ["Write", "Edit"]
+        assert bot.tools.allow == []
+
+    def test_tools_allow_list(self):
+        raw = {"expertise": ["eng"], "tools": {"allow": ["Read", "Grep"]}}
+        bot = _coerce_bot("test", raw, {})
+        assert bot.tools.allow == ["Read", "Grep"]
+
+    def test_tools_deny_and_allow(self):
+        raw = {"expertise": ["eng"], "tools": {"deny": ["Write"], "allow": ["Read"]}}
+        bot = _coerce_bot("test", raw, {})
+        assert bot.tools.deny == ["Write"]
+        assert bot.tools.allow == ["Read"]
+
+    def test_tools_merge_with_defaults(self):
+        defaults = {"tools": {"deny": ["Write"]}}
+        raw = {"expertise": ["eng"], "tools": {"deny": ["Edit"]}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.tools.deny == ["Write", "Edit"]
+
+    def test_tools_merge_dedup(self):
+        defaults = {"tools": {"deny": ["Write", "Edit"]}}
+        raw = {"expertise": ["eng"], "tools": {"deny": ["Edit", "NotebookEdit"]}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.tools.deny == ["Write", "Edit", "NotebookEdit"]
 
 
 class TestLoadFleet:

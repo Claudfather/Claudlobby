@@ -1,10 +1,9 @@
 """Tests for validator.py — validate() with missing env vars and library refs."""
+
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-import pytest
 
 from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
@@ -91,9 +90,7 @@ class TestValidate:
         assert "skipping" in captured.err
 
     def test_empty_bots_is_error(self, fleet_dir):
-        (fleet_dir / "fleet.yaml").write_text(
-            "fleet:\n  name: empty\n  bots: {}\n"
-        )
+        (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: empty\n  bots: {}\n")
         fleet = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -112,7 +109,9 @@ class TestValidate:
         fleet = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any("reports_to" in w and "nonexistent-bot" in w for w in report.warnings)
+        assert any(
+            "reports_to" in w and "nonexistent-bot" in w for w in report.warnings
+        )
 
     def test_manages_invalid_ref_is_warning(self, fleet_dir, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
@@ -129,3 +128,51 @@ class TestValidate:
         assert any("manages" in w and "ghost-bot" in w for w in report.warnings)
         # worker-1 exists, so no warning for it
         assert not any("manages" in w and "worker-1" in w for w in report.warnings)
+
+    def test_tools_deny_conflicts_with_expertise(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [software-engineering]",
+            "expertise: [software-engineering]\n      tools:\n        deny: [Write, Edit]",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "tools.deny" in w and "software-engineering" in w for w in report.warnings
+        )
+
+    def test_tools_deny_no_conflict_for_reviewer(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        # Add code-review expertise file
+        (fleet_dir / "library" / "expertise" / "code-review.md").write_text(
+            "# Reviewer\n\nReview PRs.\n"
+        )
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [software-engineering]",
+            "expertise: [code-review]\n      tools:\n        deny: [Write, Edit]",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        # code-review has no core tools that conflict with Write/Edit deny
+        assert not any("tools.deny" in w for w in report.warnings)
+
+    def test_tools_allow_deny_overlap_warns(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [software-engineering]",
+            "expertise: [software-engineering]\n      tools:\n        deny: [Write]\n        allow: [Write, Read]",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("both allow and deny" in w for w in report.warnings)
