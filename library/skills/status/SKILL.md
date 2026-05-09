@@ -52,7 +52,7 @@ Also consult the fleet-state ledger (if wired):
 
 ```bash
 jq '.bots | to_entries | map({bot: .key, status: .value.status, task: .value.current_task})' \
-  ~/claudlobby/bot-common/fleet-state.json
+  ~/claudlobby/lib/fleet-state.json
 ```
 
 ### 4. Telegram Connectivity

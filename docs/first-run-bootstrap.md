@@ -5,7 +5,7 @@ The zero-to-ripping walkthrough. Assumes you've cloned this repo and want to get
 ## What this repo gives you (and doesn't)
 
 **Ships in this repo:**
-- `bot-common/` — shared lifecycle scripts (start / keepalive / report-back / fleet-state / tg-post / bootstrap-bot / sprint-trigger)
+- `lib/` — shared lifecycle scripts (start / keepalive / report-back / fleet-state / tg-post / bootstrap-bot / sprint-trigger)
 - `manager/` — canonical manager scaffold with 11 orchestration skills
 - `examples/worker/` — worker template with Lifecycle Protocol, Context Mgmt, Telegram rules
 - `examples/global-skills/` — skills that need to live in `~/.claude/skills/` globally (`mission`, `autonomous-sprint`)
@@ -95,7 +95,7 @@ cp -r examples/global-skills/autonomous-sprint ~/.claude/skills/
 
 ```bash
 # Creates ~/claudlobby/<name>/, ~/.claude/channels/telegram-<name>/, seeds trust
-~/claudlobby/bot-common/bootstrap-bot.sh <manager-name> manager \
+~/claudlobby/lib/bootstrap-bot.sh <manager-name> manager \
   --telegram-token "<BOT_TOKEN_FROM_BOTFATHER>" \
   --group-chat-id "<GROUP_CHAT_ID>"
 ```
@@ -141,7 +141,7 @@ Test: DM the bot again. It should respond normally.
 For each worker:
 
 ```bash
-~/claudlobby/bot-common/bootstrap-bot.sh <worker-name> worker \
+~/claudlobby/lib/bootstrap-bot.sh <worker-name> worker \
   --telegram-token "<BOT_TOKEN>" \
   --group-chat-id "<GROUP_CHAT_ID>"
 ```
@@ -169,7 +169,7 @@ Schedule `sprint-trigger.sh` to fire N times per day:
 
 **Linux (cron)**:
 ```
-15 6,12,18,0 * * * ~/claudlobby/bot-common/sprint-trigger.sh
+15 6,12,18,0 * * * ~/claudlobby/lib/sprint-trigger.sh
 ```
 
 **macOS (launchd)** — see `examples/bot.service` → plist equivalent; use `StartCalendarInterval` with the same hours.
@@ -195,11 +195,11 @@ Requires: a `PROJECT_MISSION.md` in at least one target repo (bootstrap with `/m
 
 ```
 claudlobby/
-├── bot-common/                   Shared scripts, OS-agnostic core
+├── lib/                          Shared scripts, OS-agnostic core
 │   ├── start-bot.sh              Launches the tmux + claude session
 │   ├── keepalive.sh              Periodic health check / nudge
 │   ├── report-back.sh            Worker → manager tmux reporting
-│   ├── tg-post.sh                Bash → Telegram API (parse_mode=Markdown baked in)
+│   ├── tg-post.sh                Bash → Telegram API (plain text default)
 │   ├── fleet-state.json          Central state ledger
 │   ├── fleet-state-update.sh     Updater called by start-bot + report-back
 │   ├── sprint-trigger.sh         Schedule-driven /autonomous-sprint nudger

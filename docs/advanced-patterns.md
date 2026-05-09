@@ -2,7 +2,7 @@
 
 Patterns that extend a running claudlobby fleet beyond basic dispatch and briefings. Each section is self-contained — implement whichever ones fit your setup.
 
-Prerequisites: a working fleet with at least a manager bot and one worker, systemd services, tmux sessions, and the shared `bot-common/` scripts. See the main [README](../README.md) if you're not there yet.
+Prerequisites: a working fleet with at least a manager bot and one worker, systemd services, tmux sessions, and the shared `lib/` scripts. See the main [README](../README.md) if you're not there yet.
 
 ---
 
@@ -86,7 +86,7 @@ Implement the following in <owner/repo>:
 <task description>
 
 Work in a git worktree. Branch from main. Create a PR when done.
-Report back via: ~/claudlobby/bot-common/report-back.sh "<eng-bot>" "completed" "<summary>" "pr:<pr-url>"
+Report back via: ~/claudlobby/lib/report-back.sh "<eng-bot>" "completed" "<summary>" "pr:<pr-url>"
 If blocked, report immediately with status "blocked".
 ```
 
@@ -443,8 +443,8 @@ Update the bot's `.service` file to call pre-stop on shutdown:
 ```ini
 [Service]
 Type=oneshot
-ExecStart=/home/YOUR_USER/claudlobby/bot-common/start-bot.sh /home/YOUR_USER/claudlobby/my-bot
-ExecStop=/home/YOUR_USER/claudlobby/bot-common/pre-stop-handoff.sh /home/YOUR_USER/claudlobby/my-bot
+ExecStart=/home/YOUR_USER/claudlobby/lib/start-bot.sh /home/YOUR_USER/claudlobby/my-bot
+ExecStop=/home/YOUR_USER/claudlobby/lib/pre-stop-handoff.sh /home/YOUR_USER/claudlobby/my-bot
 RemainAfterExit=yes
 TimeoutStopSec=90
 ```
@@ -501,17 +501,17 @@ Bots need a reliable way to tell each other "I'm done" with enough context for t
 
 ### Script: report-back.sh
 
-This already exists in `bot-common/`. Here's how bots use it:
+This already exists in `lib/`. Here's how bots use it:
 
 ```bash
 # Engineer finished a task, created a PR
-~/claudlobby/bot-common/report-back.sh "eng-a" "completed" "Added rate limiting to auth endpoint" "pr:https://github.com/org/api/pull/87"
+~/claudlobby/lib/report-back.sh "eng-a" "completed" "Added rate limiting to auth endpoint" "pr:https://github.com/org/api/pull/87"
 
 # Engineer hit a blocker
-~/claudlobby/bot-common/report-back.sh "eng-a" "blocked" "Need DB migration permissions — cannot alter production schema"
+~/claudlobby/lib/report-back.sh "eng-a" "blocked" "Need DB migration permissions — cannot alter production schema"
 
 # Reviewer finished a review, also filed issues
-~/claudlobby/bot-common/report-back.sh "code-reviewer" "completed" "Reviewed PR #87 — approved with minor comments" "pr:https://github.com/org/api/pull/87" "issues:https://github.com/org/api/issues/88"
+~/claudlobby/lib/report-back.sh "code-reviewer" "completed" "Reviewed PR #87 — approved with minor comments" "pr:https://github.com/org/api/pull/87" "issues:https://github.com/org/api/issues/88"
 ```
 
 ### How the Manager Processes Reports
@@ -629,10 +629,10 @@ echo "$(date -Iseconds) === Sweep complete ===" >> "$LOG"
 
 ```crontab
 # Daily pull for less active repos (4 AM)
-0 4 * * * /home/YOUR_USER/claudlobby/bot-common/git-pull-all.sh /home/YOUR_USER/repos
+0 4 * * * /home/YOUR_USER/claudlobby/lib/git-pull-all.sh /home/YOUR_USER/repos
 
 # 3x/day for active repos (8 AM, 1 PM, 6 PM)
-0 8,13,18 * * * /home/YOUR_USER/claudlobby/bot-common/git-pull-all.sh /home/YOUR_USER/active-repos
+0 8,13,18 * * * /home/YOUR_USER/claudlobby/lib/git-pull-all.sh /home/YOUR_USER/active-repos
 ```
 
 ### Gotchas
@@ -674,7 +674,7 @@ if ! /usr/bin/tmux has-session -t "$BOT_SESSION" 2>/dev/null; then
 fi
 
 # Get the next audit target from the rolling script
-TARGET=$(python3 /home/YOUR_USER/claudlobby/bot-common/next-audit-target.py \
+TARGET=$(python3 /home/YOUR_USER/claudlobby/lib/next-audit-target.py \
     --tracker "$AUDIT_TRACKER" \
     --repos "$REPOS_DIR")
 
@@ -952,9 +952,9 @@ Or symlink a shared copy:
 
 ```bash
 # Shared formatting reference
-cp _telegram-formatting.md ~/claudlobby/bot-common/
+cp _telegram-formatting.md ~/claudlobby/lib/
 # Symlink into each bot
-ln -s ~/claudlobby/bot-common/_telegram-formatting.md ~/claudlobby/my-bot/_telegram-formatting.md
+ln -s ~/claudlobby/lib/_telegram-formatting.md ~/claudlobby/my-bot/_telegram-formatting.md
 ```
 
 ### Gotchas
