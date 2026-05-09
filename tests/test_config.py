@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+
 from claudlobby.config import _coerce_bot, load_fleet
 
 
@@ -139,6 +140,40 @@ class TestCoerceBot:
         raw = {"expertise": ["eng"], "tools": {"deny": ["Edit", "NotebookEdit"]}}
         bot = _coerce_bot("test", raw, defaults)
         assert bot.tools.deny == ["Write", "Edit", "NotebookEdit"]
+
+    def test_model_strategy_full(self):
+        raw = {
+            "expertise": ["eng"],
+            "model_strategy": {
+                "base": "sonnet",
+                "escalate_to": "opus",
+                "escalate_when": ">5 files",
+                "compact_when": ">50% context",
+                "explore": "haiku",
+                "plan": "sonnet",
+            },
+        }
+        bot = _coerce_bot("test", raw, {})
+        assert bot.model_strategy is not None
+        assert bot.model_strategy.base == "sonnet"
+        assert bot.model_strategy.escalate_to == "opus"
+        assert bot.model_strategy.escalate_when == ">5 files"
+        assert bot.model_strategy.compact_when == ">50% context"
+        assert bot.model_strategy.raw["explore"] == "haiku"
+        assert bot.model_strategy.raw["plan"] == "sonnet"
+
+    def test_model_strategy_none_by_default(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+        assert bot.model_strategy is None
+
+    def test_model_strategy_from_defaults(self):
+        defaults = {
+            "model_strategy": {"base": "sonnet", "escalate_to": "opus"},
+        }
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, defaults)
+        assert bot.model_strategy is not None
+        assert bot.model_strategy.base == "sonnet"
+        assert bot.model_strategy.escalate_to == "opus"
 
 
 class TestLoadFleet:

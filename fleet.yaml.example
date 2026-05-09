@@ -104,6 +104,17 @@ fleet:
 #       org: my-github-org
 #       repos: [repo-a, repo-b, repo-c]
 #
+#     # model_strategy — config-driven model escalation, compaction, and subagent preferences
+#     # Emitted as MODEL_STRATEGY_* env vars in bot.conf for skills/protocols to read.
+#     model_strategy:
+#       base: sonnet                        # default model (also set via top-level `model:`)
+#       escalate_to: opus                   # model to switch to for complex tasks
+#       escalate_when: ">5 files or architecture decisions"
+#       compact_when: ">50% context"        # when to compact/summarize context
+#       explore: haiku                      # subagent model for Explore agents
+#       plan: sonnet                        # subagent model for Plan agents
+#       general: sonnet                     # subagent model for general-purpose agents
+#
 #     # voice — personality overlay file (separate from expertise)
 #     voice: voices/erlich-bachman.md
 #

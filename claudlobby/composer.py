@@ -4,9 +4,11 @@ Reads `templates/claude.md.j2`, loads library files via the frontmatter-aware
 loader, renders the bot's CLAUDE.md. Library files are pure content — the
 template owns all top-level structure.
 """
+
 from __future__ import annotations
 import copy
 import json
+import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,12 +16,9 @@ from pathlib import Path
 import jinja2
 
 from . import dotenv
-from .config import BotConfig, FleetConfig, TeamConfig
+from .config import BotConfig, FleetConfig
 from .loader import (
-    ExpertiseItem,
     LibraryItem,
-    load_library_item,
-    load_library_items,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -31,6 +30,7 @@ from .paths import Paths
 # Templating
 # ----------------------------------------------------------------------
 
+
 def _expand(text: str, ctx: dict[str, str]) -> str:
     """Replace {{KEY}} placeholders. Used for non-Jinja substitution within
     library bodies (e.g., `{{BOT_NAME}}` inside a protocol). Missing keys
@@ -41,7 +41,9 @@ def _expand(text: str, ctx: dict[str, str]) -> str:
     return out
 
 
-def _bot_template_context(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict[str, str]:
+def _bot_template_context(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths
+) -> dict[str, str]:
     bot_dir = paths.bot_runtime(bot.bot_id)
     return {
         "BOT_ID": bot.bot_id,
@@ -71,7 +73,10 @@ def _expand_item(item: LibraryItem, ctx: dict[str, str]) -> LibraryItem:
 # Expertise composition (special — provides H1 label + base body)
 # ----------------------------------------------------------------------
 
-def _compose_expertise(bot: BotConfig, paths: Paths, ctx: dict[str, str]) -> tuple[str | None, str]:
+
+def _compose_expertise(
+    bot: BotConfig, paths: Paths, ctx: dict[str, str]
+) -> tuple[str | None, str]:
     """Return (title_label, expertise_body).
 
     First expertise file's H1 (if present) provides the title_label. Subsequent
@@ -103,6 +108,7 @@ def _compose_expertise(bot: BotConfig, paths: Paths, ctx: dict[str, str]) -> tup
 # Jinja2 environment
 # ----------------------------------------------------------------------
 
+
 def _build_jinja_env(paths: Paths) -> jinja2.Environment:
     """Jinja env with overlay-aware template loader.
 
@@ -128,19 +134,24 @@ def _build_jinja_env(paths: Paths) -> jinja2.Environment:
 # .mcp.json merge
 # ----------------------------------------------------------------------
 
-def _resolve_instance_env(env: dict[str, str], contract: dict, entry, instance: str) -> dict[str, str]:
+
+def _resolve_instance_env(
+    env: dict[str, str], contract: dict, entry, instance: str
+) -> dict[str, str]:
     """Resolve env var placeholders for an MCP instance.
 
     Instance-scoped vars get prefixed: ${TOKEN} → ${NOTION_WORK_TOKEN}
     Shared vars stay as-is: ${GOOGLE_OAUTH_CLIENT_ID} → ${GOOGLE_OAUTH_CLIENT_ID}
     """
     import re
+
     prefix = entry.instance_prefix(instance)
     resolved = {}
     for env_key, env_val in env.items():
         if not isinstance(env_val, str):
             resolved[env_key] = env_val
             continue
+
         def replace_var(m):
             var = m.group(1)
             meta = contract.get(var, {})
@@ -148,6 +159,7 @@ def _resolve_instance_env(env: dict[str, str], contract: dict, entry, instance: 
             if scope == "instance":
                 return "${" + prefix + var + "}"
             return m.group(0)  # keep as-is
+
         resolved[env_key] = re.sub(r"\$\{([A-Z_][A-Z0-9_]*)\}", replace_var, env_val)
     return resolved
 
@@ -189,8 +201,10 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
                 )
             # Also resolve placeholders in other string fields (url, args, headers)
             import re
+
             def resolve_field(val):
                 if isinstance(val, str):
+
                     def replace_var(m):
                         var = m.group(1)
                         meta = contract.get(var, {})
@@ -198,6 +212,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
                         if scope == "instance":
                             return "${" + entry.instance_prefix(instance) + var + "}"
                         return m.group(0)
+
                     return re.sub(r"\$\{([A-Z_][A-Z0-9_]*)\}", replace_var, val)
                 elif isinstance(val, list):
                     return [resolve_field(v) for v in val]
@@ -218,10 +233,13 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
 # bot.conf
 # ----------------------------------------------------------------------
 
+
 def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     ctx = _bot_template_context(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
-    account_dir = fleet.accounts.get(bot.account, fleet.accounts.get("default", "~/.claude"))
+    account_dir = fleet.accounts.get(
+        bot.account, fleet.accounts.get("default", "~/.claude")
+    )
 
     lines = [
         "# Generated by claudlobby — do not hand-edit. Edit fleet.yaml + library/, then re-run `claudlobby generate`.",
@@ -260,7 +278,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append("")
 
     # Prompt suggestions — off by default for headless bots.
-    lines.append(f'export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="{str(bot.prompt_suggestions).lower()}"')
+    lines.append(
+        f'export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="{str(bot.prompt_suggestions).lower()}"'
+    )
     lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f'export CLAUDLOBBY_ROOT="{paths.root}"')
@@ -273,9 +293,34 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     if bot.telegram.token_env:
         lines.append(f'export TELEGRAM_TOKEN_ENV_NAME="{bot.telegram.token_env}"')
     if bot.telegram.require_mention is not None:
-        lines.append(f'export TELEGRAM_REQUIRE_MENTION="{str(bot.telegram.require_mention).lower()}"')
+        lines.append(
+            f'export TELEGRAM_REQUIRE_MENTION="{str(bot.telegram.require_mention).lower()}"'
+        )
     if bot.telegram.handle:
         lines.append(f'export TELEGRAM_BOT_HANDLE="{bot.telegram.handle}"')
+
+    # Model strategy — config-driven model escalation / compaction / subagent models.
+    if bot.model_strategy:
+        ms = bot.model_strategy
+        lines.append("")
+        lines.append("# Model strategy")
+        if ms.base:
+            lines.append(f'export MODEL_STRATEGY_BASE="{ms.base}"')
+        if ms.escalate_to:
+            lines.append(f'export MODEL_STRATEGY_ESCALATE_TO="{ms.escalate_to}"')
+        if ms.escalate_when:
+            lines.append(
+                f"export MODEL_STRATEGY_ESCALATE_WHEN={shlex.quote(ms.escalate_when)}"
+            )
+        if ms.compact_when:
+            lines.append(
+                f"export MODEL_STRATEGY_COMPACT_WHEN={shlex.quote(ms.compact_when)}"
+            )
+        # Subagent model preferences (from raw extras)
+        for key in ("explore", "plan", "general"):
+            val = ms.raw.get(key)
+            if val:
+                lines.append(f'export MODEL_STRATEGY_{key.upper()}="{val}"')
 
     for k, v in bot.env.items():
         lines.append(f'export {k}="{v}"')
@@ -292,9 +337,11 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append("")
     if bot.startup_prompt:
         rendered = _render_startup_prompt(bot.startup_prompt, bot, fleet)
-        lines.append(f'STARTUP_PROMPT={json.dumps(rendered)}')
+        lines.append(f"STARTUP_PROMPT={json.dumps(rendered)}")
     else:
-        lines.append('STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."')
+        lines.append(
+            'STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."'
+        )
 
     return "\n".join(lines) + "\n"
 
@@ -323,6 +370,7 @@ def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> s
 # ----------------------------------------------------------------------
 # Service units
 # ----------------------------------------------------------------------
+
 
 def compose_systemd_unit(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     bot_dir = paths.bot_runtime(bot.bot_id)
@@ -392,6 +440,7 @@ def compose_launchd_plist(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> s
 # ----------------------------------------------------------------------
 # Skill symlinks
 # ----------------------------------------------------------------------
+
 
 def link_skills(bot: BotConfig, paths: Paths, log) -> None:
     """Symlink each skill into the bot's runtime .claude/skills/.
@@ -483,13 +532,16 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
             log(f"  mount '{name}': non-symlink already exists at {link} — skipping")
             continue
         if not target_path.exists():
-            log(f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink")
+            log(
+                f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink"
+            )
         link.symlink_to(target_path)
 
 
 # ----------------------------------------------------------------------
 # Org structure
 # ----------------------------------------------------------------------
+
 
 def _compose_org_structure(bot: BotConfig, fleet: FleetConfig) -> str | None:
     """Render the org-structure block for CLAUDE.md when reports_to/manages is set."""
@@ -515,6 +567,7 @@ def _compose_org_structure(bot: BotConfig, fleet: FleetConfig) -> str | None:
 # ----------------------------------------------------------------------
 # Telegram access.json
 # ----------------------------------------------------------------------
+
 
 def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
     """Generate Telegram channel access.json from fleet.yaml.
@@ -555,6 +608,7 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 # CLAUDE.md composition (template-driven)
 # ----------------------------------------------------------------------
 
+
 def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     ctx = _bot_template_context(bot, fleet, paths)
 
@@ -569,7 +623,10 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 voice_item = _expand_item(voice_item, ctx)
 
     def _items(names: list[str], kind: str) -> list[LibraryItem]:
-        return [_expand_item(it, ctx) for it in load_library_items_overlay(names, paths, kind)]
+        return [
+            _expand_item(it, ctx)
+            for it in load_library_items_overlay(names, paths, kind)
+        ]
 
     # Auto-pair integrations with mcp by default; explicit overrides.
     # An integration matches if EITHER overlay or base has `<mcp>.md` under integrations/.
@@ -577,7 +634,8 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         integration_names = bot.integrations
     else:
         integration_names = [
-            e.name for e in bot.mcp
+            e.name
+            for e in bot.mcp
             if paths.find_library_file("integrations", e.name, ".md") is not None
         ]
 
@@ -610,6 +668,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
 # ----------------------------------------------------------------------
 # Main entry: compose one bot
 # ----------------------------------------------------------------------
+
 
 def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict:
     """Generate .claude/settings.local.json with memory dir, sibling isolation, tools, and sandbox."""
@@ -645,7 +704,11 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
 
     # Sandbox: network + filesystem allowlists + bash auto-allow
     sandbox = bot.sandbox
-    if sandbox.network_allowed_domains or sandbox.filesystem_allow_write or sandbox.auto_allow_bash:
+    if (
+        sandbox.network_allowed_domains
+        or sandbox.filesystem_allow_write
+        or sandbox.auto_allow_bash
+    ):
         sandbox_cfg: dict = {}
         if sandbox.network_allowed_domains:
             sandbox_cfg["network"] = {"allowedDomains": sandbox.network_allowed_domains}
@@ -733,9 +796,12 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
     access = compose_access_json(bot, fleet)
     if access is not None:
         import re
+
         handle = bot.telegram.handle
-        if not re.match(r'^[a-zA-Z0-9_][a-zA-Z0-9_-]*$', handle):
-            log(f"  WARNING: bot {bot.bot_id} has invalid telegram handle {handle!r}, skipping access.json")
+        if not re.match(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*$", handle):
+            log(
+                f"  WARNING: bot {bot.bot_id} has invalid telegram handle {handle!r}, skipping access.json"
+            )
         else:
             channel_dir = Path.home() / ".claude" / "channels" / f"telegram-{handle}"
             channel_dir.mkdir(parents=True, exist_ok=True)
@@ -745,8 +811,12 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
             else:
                 access_path.write_text(json.dumps(access, indent=2) + "\n")
 
-    (bot_dir / f"{bot.bot_id}.service").write_text(compose_systemd_unit(bot, fleet, paths))
-    (bot_dir / f"{bot.bot_id}.plist").write_text(compose_launchd_plist(bot, fleet, paths))
+    (bot_dir / f"{bot.bot_id}.service").write_text(
+        compose_systemd_unit(bot, fleet, paths)
+    )
+    (bot_dir / f"{bot.bot_id}.plist").write_text(
+        compose_launchd_plist(bot, fleet, paths)
+    )
 
     return bot_dir
 
@@ -754,6 +824,7 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
 @dataclass
 class EnvVar:
     """A single env var requirement from a library contract."""
+
     name: str
     description: str
     tier: str  # "fleet" or "bot"
@@ -785,7 +856,9 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                         prefix = entry.instance_prefix(instance)
                         canonical = prefix + var_name
                         if canonical not in vars:
-                            inst_label = f" ({instance})" if instance != "default" else ""
+                            inst_label = (
+                                f" ({instance})" if instance != "default" else ""
+                            )
                             vars[canonical] = EnvVar(
                                 name=canonical,
                                 description=f"{meta.get('description', '')}{inst_label}",
@@ -803,7 +876,8 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
 
         # Integration doc contracts
         integration_names = bot.integrations or [
-            e.name for e in bot.mcp
+            e.name
+            for e in bot.mcp
             if paths.find_library_file("integrations", e.name, ".md") is not None
         ]
         for int_name in integration_names:
@@ -856,8 +930,11 @@ def _scaffold_env_merge(
         existing_content = env_path.read_text()
         existing_keys = set(dotenv.read(env_path).keys())
 
-    new_vars = [ev for ev in sorted(required, key=lambda e: e.name)
-                if ev.name not in existing_keys]
+    new_vars = [
+        ev
+        for ev in sorted(required, key=lambda e: e.name)
+        if ev.name not in existing_keys
+    ]
     if not new_vars and existing_content:
         return  # nothing to add
 
@@ -866,7 +943,7 @@ def _scaffold_env_merge(
         lines.append(existing_content.rstrip("\n"))
     else:
         lines.append(header)
-        lines.append(f"# Generated by claudlobby generate — fill in real values.")
+        lines.append("# Generated by claudlobby generate — fill in real values.")
         lines.append("")
 
     if new_vars:

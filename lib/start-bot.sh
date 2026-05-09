@@ -73,6 +73,12 @@ fi
 [ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]               && printf 'export TELEGRAM_GROUP_CHAT_ID=%q\n' "$TELEGRAM_GROUP_CHAT_ID" >> "$BOT_ENV_FILE"
 [ -n "${CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION:-}" ] && printf 'export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=%q\n' "$CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" >> "$BOT_ENV_FILE"
 
+# Model strategy vars — config-driven model escalation/compaction/subagent preferences
+for _ms_var in MODEL_STRATEGY_BASE MODEL_STRATEGY_ESCALATE_TO MODEL_STRATEGY_ESCALATE_WHEN \
+               MODEL_STRATEGY_COMPACT_WHEN MODEL_STRATEGY_EXPLORE MODEL_STRATEGY_PLAN MODEL_STRATEGY_GENERAL; do
+    [ -n "${!_ms_var:-}" ] && printf 'export %s=%q\n' "$_ms_var" "${!_ms_var}" >> "$BOT_ENV_FILE"
+done
+
 # Backwards-compat: if the bot.conf is from before the CLAUDE_FLAGS
 # rename, fall back to the legacy hardcoded flag set + CLAUDE_EXTRA_FLAGS.
 if [ -z "${CLAUDE_FLAGS:-}" ]; then
