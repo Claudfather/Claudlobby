@@ -16,9 +16,10 @@ is the rest of the file (after the closing `---` if present).
 Expertise files are an exception — they may have a leading H1 that
 provides the bot's title label; see `parse_expertise_file`.
 """
+
 from __future__ import annotations
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -33,10 +34,19 @@ class LibraryItem:
 
 
 @dataclass
+class ExpertisePermissions:
+    allow: list[str] = field(default_factory=list)
+    deny: list[str] = field(default_factory=list)
+    allow_all: bool = False
+    bash_allow: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ExpertiseItem:
     title_label: str | None  # text after "—" in the H1, if any
     body: str  # body without the H1
     source_path: Path
+    permissions: ExpertisePermissions | None = None
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -224,6 +234,19 @@ def load_library_items_overlay(items: list[str], paths, kind: str) -> list[Libra
     return out
 
 
+def _parse_expertise_permissions(fm: dict) -> ExpertisePermissions | None:
+    """Extract permissions from expertise frontmatter, if present."""
+    raw = fm.get("permissions")
+    if not raw or not isinstance(raw, dict):
+        return None
+    return ExpertisePermissions(
+        allow=list(raw.get("allow") or []),
+        deny=list(raw.get("deny") or []),
+        allow_all=bool(raw.get("allow_all", False)),
+        bash_allow=list(raw.get("bash_allow") or []),
+    )
+
+
 def parse_expertise_file(path: Path) -> ExpertiseItem | None:
     """Load an expertise file. Strips the H1 if present, captures the title-label.
 
@@ -236,13 +259,21 @@ def parse_expertise_file(path: Path) -> ExpertiseItem | None:
         return None
     text = path.read_text().rstrip()
     fm, text = parse_frontmatter(text)
+    perms = _parse_expertise_permissions(fm)
     if fm.get("title_label"):
         # Frontmatter wins.
-        return ExpertiseItem(title_label=fm["title_label"], body=text.lstrip(), source_path=path)
+        return ExpertiseItem(
+            title_label=fm["title_label"],
+            body=text.lstrip(),
+            source_path=path,
+            permissions=perms,
+        )
     # Otherwise look at the leading H1.
     lines = text.splitlines()
     if not lines:
-        return ExpertiseItem(title_label=None, body="", source_path=path)
+        return ExpertiseItem(
+            title_label=None, body="", source_path=path, permissions=perms
+        )
     if lines[0].startswith("# "):
         h1 = lines[0][2:].strip()
         # Strip "{{BOT_NAME}} —" or "{{BOT_NAME}} -"
@@ -251,11 +282,20 @@ def parse_expertise_file(path: Path) -> ExpertiseItem | None:
                 _, _, after = h1.partition(sep)
                 title_label = after.strip()
                 body = "\n".join(lines[1:]).lstrip("\n")
-                return ExpertiseItem(title_label=title_label, body=body, source_path=path)
+                return ExpertiseItem(
+                    title_label=title_label,
+                    body=body,
+                    source_path=path,
+                    permissions=perms,
+                )
         # H1 didn't have separator — use it as the label, drop body H1
         body = "\n".join(lines[1:]).lstrip("\n")
-        return ExpertiseItem(title_label=h1, body=body, source_path=path)
-    return ExpertiseItem(title_label=None, body=text, source_path=path)
+        return ExpertiseItem(
+            title_label=h1, body=body, source_path=path, permissions=perms
+        )
+    return ExpertiseItem(
+        title_label=None, body=text, source_path=path, permissions=perms
+    )
 
 
 def load_voice(path: Path) -> LibraryItem | None:

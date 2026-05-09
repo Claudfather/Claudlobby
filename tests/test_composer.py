@@ -1,4 +1,4 @@
-"""Tests for composer.py — tools, hooks, scaffold_env_files, access.json reconcile, and bot.conf model strategy."""
+"""Tests for composer.py — tools, hooks, scaffold_env_files, access.json reconcile, bot.conf model strategy, and expertise permissions."""
 
 from __future__ import annotations
 
@@ -1171,3 +1171,334 @@ class TestMcpPermissionsInSettingsLocal:
         assert "mcp__gws-work__get_events" in allow
         assert "mcp__gws-personal__search_gmail_messages" in allow
         assert "mcp__gws-work__search_gmail_messages" in allow
+
+
+class TestParseExpertisePermissions:
+    """parse_expertise_file extracts permissions from YAML frontmatter."""
+
+    def test_extracts_allow_all(self, tmp_path):
+        from claudlobby.loader import parse_expertise_file
+
+        f = tmp_path / "eng.md"
+        f.write_text(
+            "---\npermissions:\n  allow_all: true\n  bash_allow: [git, npm]\n---\n\n# Bot — Engineer\n\nBuild.\n"
+        )
+        item = parse_expertise_file(f)
+        assert item is not None
+        assert item.permissions is not None
+        assert item.permissions.allow_all is True
+        assert item.permissions.bash_allow == ["git", "npm"]
+        assert item.permissions.allow == []
+        assert item.permissions.deny == []
+
+    def test_extracts_deny_list(self, tmp_path):
+        from claudlobby.loader import parse_expertise_file
+
+        f = tmp_path / "reviewer.md"
+        f.write_text(
+            "---\npermissions:\n  deny: [Write, Edit, NotebookEdit]\n  bash_allow: [git, gh]\n---\n\n# Bot — Reviewer\n\nReview.\n"
+        )
+        item = parse_expertise_file(f)
+        assert item.permissions is not None
+        assert item.permissions.deny == ["Write", "Edit", "NotebookEdit"]
+        assert item.permissions.bash_allow == ["git", "gh"]
+        assert item.permissions.allow_all is False
+
+    def test_extracts_explicit_allow_list(self, tmp_path):
+        from claudlobby.loader import parse_expertise_file
+
+        f = tmp_path / "ops.md"
+        f.write_text(
+            "---\npermissions:\n  allow: [Read, Grep, Glob, Bash]\n  bash_allow: [git, curl]\n---\n\n# Ops\n\nWork.\n"
+        )
+        item = parse_expertise_file(f)
+        assert item.permissions is not None
+        assert item.permissions.allow == ["Read", "Grep", "Glob", "Bash"]
+
+    def test_no_frontmatter_gives_none_permissions(self, tmp_path):
+        from claudlobby.loader import parse_expertise_file
+
+        f = tmp_path / "plain.md"
+        f.write_text("# Bot — Plain\n\nNo frontmatter.\n")
+        item = parse_expertise_file(f)
+        assert item is not None
+        assert item.permissions is None
+
+    def test_frontmatter_without_permissions_gives_none(self, tmp_path):
+        from claudlobby.loader import parse_expertise_file
+
+        f = tmp_path / "other.md"
+        f.write_text("---\ntitle_label: Other\n---\n\nBody.\n")
+        item = parse_expertise_file(f)
+        assert item is not None
+        assert item.permissions is None
+
+    def test_title_label_still_extracted_with_permissions(self, tmp_path):
+        from claudlobby.loader import parse_expertise_file
+
+        f = tmp_path / "eng.md"
+        f.write_text(
+            "---\npermissions:\n  allow_all: true\n---\n\n# Bot — Engineer\n\nBuild.\n"
+        )
+        item = parse_expertise_file(f)
+        assert item.title_label == "Engineer"
+        assert item.permissions is not None
+        assert item.permissions.allow_all is True
+
+
+class TestResolveExpertisePermissions:
+    """_resolve_expertise_permissions merges profiles from all expertise files."""
+
+    def _setup_expertise(self, tmp_path, files: dict[str, str]) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        exp_dir = root / "library" / "expertise"
+        exp_dir.mkdir(parents=True)
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for name, content in files.items():
+            (exp_dir / f"{name}.md").write_text(content)
+        return Paths(root=root, fleet_dir=root)
+
+    def test_allow_all_expands_to_full_tool_set(self, tmp_path):
+        from claudlobby.composer import _resolve_expertise_permissions
+
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "eng": "---\npermissions:\n  allow_all: true\n  bash_allow: [git]\n---\n\n# Engineer\n\nBuild.\n",
+            },
+        )
+        bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
+        allow, deny = _resolve_expertise_permissions(bot, paths)
+        # All 10 core tools should be in allow
+        for tool in [
+            "Read",
+            "Write",
+            "Edit",
+            "Bash",
+            "Agent",
+            "Grep",
+            "Glob",
+            "WebFetch",
+            "WebSearch",
+            "NotebookEdit",
+        ]:
+            assert tool in allow, f"{tool} missing from allow"
+        assert "Bash(git *)" in allow
+        assert deny == []
+
+    def test_deny_wins_over_allow(self, tmp_path):
+        from claudlobby.composer import _resolve_expertise_permissions
+
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "eng": "---\npermissions:\n  allow_all: true\n---\n\n# Engineer\n",
+                "reviewer": "---\npermissions:\n  deny: [Write, Edit]\n---\n\n# Reviewer\n",
+            },
+        )
+        bot = BotConfig(bot_id="w", name="w", expertise=["eng", "reviewer"])
+        allow, deny = _resolve_expertise_permissions(bot, paths)
+        # Write and Edit should be in deny, not in allow
+        assert "Write(**)" in deny
+        assert "Edit(**)" in deny
+        assert "Write" not in allow
+        assert "Edit" not in allow
+        # Other tools still allowed
+        assert "Read" in allow
+        assert "Bash" in allow
+
+    def test_bash_allow_merged_across_expertise(self, tmp_path):
+        from claudlobby.composer import _resolve_expertise_permissions
+
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "eng": "---\npermissions:\n  allow_all: true\n  bash_allow: [git, npm]\n---\n\n# Eng\n",
+                "ops": "---\npermissions:\n  allow: [Bash]\n  bash_allow: [git, curl, jq]\n---\n\n# Ops\n",
+            },
+        )
+        bot = BotConfig(bot_id="w", name="w", expertise=["eng", "ops"])
+        allow, deny = _resolve_expertise_permissions(bot, paths)
+        assert "Bash(git *)" in allow
+        assert "Bash(npm *)" in allow
+        assert "Bash(curl *)" in allow
+        assert "Bash(jq *)" in allow
+
+    def test_missing_expertise_file_skipped(self, tmp_path):
+        from claudlobby.composer import _resolve_expertise_permissions
+
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "eng": "---\npermissions:\n  allow_all: true\n---\n\n# Eng\n",
+            },
+        )
+        bot = BotConfig(bot_id="w", name="w", expertise=["eng", "nonexistent"])
+        allow, deny = _resolve_expertise_permissions(bot, paths)
+        # Should still work with just the eng expertise
+        assert "Read" in allow
+        assert "Write" in allow
+
+    def test_no_permissions_in_expertise_skipped(self, tmp_path):
+        from claudlobby.composer import _resolve_expertise_permissions
+
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "eng": "# Engineer\n\nNo frontmatter.\n",
+            },
+        )
+        bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
+        allow, deny = _resolve_expertise_permissions(bot, paths)
+        assert allow == []
+        assert deny == []
+
+    def test_explicit_allow_without_allow_all(self, tmp_path):
+        from claudlobby.composer import _resolve_expertise_permissions
+
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "ops": "---\npermissions:\n  allow: [Read, Grep, Glob, Bash, WebFetch, WebSearch]\n  bash_allow: [git, curl]\n---\n\n# Ops\n",
+            },
+        )
+        bot = BotConfig(bot_id="w", name="w", expertise=["ops"])
+        allow, deny = _resolve_expertise_permissions(bot, paths)
+        assert "Read" in allow
+        assert "Bash" in allow
+        assert "WebFetch" in allow
+        # Write/Edit not in allow (not allow_all, not in explicit list)
+        assert "Write" not in allow
+        assert "Edit" not in allow
+        assert "Bash(git *)" in allow
+        assert "Bash(curl *)" in allow
+
+
+class TestExpertisePermissionsInSettingsLocal:
+    """compose_settings_local integrates expertise permissions into the layered output."""
+
+    def _setup_expertise(self, tmp_path, files: dict[str, str]) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        exp_dir = root / "library" / "expertise"
+        exp_dir.mkdir(parents=True)
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for name, content in files.items():
+            (exp_dir / f"{name}.md").write_text(content)
+        return Paths(root=root, fleet_dir=root)
+
+    def test_expertise_allow_in_settings(self, tmp_path):
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "eng": "---\npermissions:\n  allow_all: true\n  bash_allow: [git, npm]\n---\n\n# Eng\n",
+            },
+        )
+        bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+        assert "Write" in allow
+        assert "Bash" in allow
+        assert "Bash(git *)" in allow
+        assert "Bash(npm *)" in allow
+
+    def test_expertise_deny_in_settings(self, tmp_path):
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "reviewer": "---\npermissions:\n  deny: [Write, Edit]\n  bash_allow: [git, gh]\n---\n\n# Reviewer\n",
+            },
+        )
+        bot = BotConfig(bot_id="r", name="r", expertise=["reviewer"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"r": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        deny = result["permissions"]["deny"]
+        allow = result["permissions"]["allow"]
+        assert "Write(**)" in deny
+        assert "Edit(**)" in deny
+        assert "Bash(git *)" in allow
+        assert "Bash(gh *)" in allow
+
+    def test_bot_deny_wins_over_expertise_allow(self, tmp_path):
+        """Bot-level deny (fleet.yaml) should override expertise allow_all."""
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "eng": "---\npermissions:\n  allow_all: true\n---\n\n# Eng\n",
+            },
+        )
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            tools=ToolsConfig(deny=["Write", "Edit"]),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        deny = result["permissions"]["deny"]
+        allow = result["permissions"]["allow"]
+        assert "Write(**)" in deny
+        assert "Edit(**)" in deny
+        # Bot deny removes from allow
+        assert "Write" not in allow
+        assert "Edit" not in allow
+        # Other tools still present
+        assert "Bash" in allow
+        assert "Read" in allow
+
+    def test_expertise_plus_mcp_plus_skills_combined(self, tmp_path):
+        """Full integration: expertise + MCP contracts + skills + telegram all compose."""
+        from claudlobby.config import McpEntry
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        exp_dir = root / "library" / "expertise"
+        exp_dir.mkdir(parents=True)
+        mcp_dir = root / "library" / "mcp"
+        mcp_dir.mkdir(parents=True)
+        (root / "runtime" / "bots").mkdir(parents=True)
+
+        (exp_dir / "eng.md").write_text(
+            "---\npermissions:\n  allow_all: true\n  bash_allow: [git]\n---\n\n# Eng\n"
+        )
+        (mcp_dir / "github.json").write_text(
+            json.dumps(
+                {
+                    "_permissions_contract": {
+                        "tools": ["search_code", "create_pull_request"]
+                    },
+                    "github": {"command": "npx", "args": ["-y", "gh-mcp"]},
+                }
+            )
+        )
+
+        paths = Paths(root=root, fleet_dir=root)
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github")],
+            skills=["commit"],
+            telegram=TelegramConfig(handle="my_bot"),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+
+        # Layer 2: Expertise
+        assert "Write" in allow
+        assert "Bash(git *)" in allow
+        # Layer 3: MCP
+        assert "mcp__github__search_code" in allow
+        assert "mcp__github__create_pull_request" in allow
+        # Layer 4: Channel
+        assert "mcp__plugin_telegram_telegram__reply" in allow
+        # Layer 5: Skills
+        assert "Skill(commit)" in allow
+        assert "Skill(commit:*)" in allow
+        # Base tools guaranteed
+        assert "Read" in allow
+        assert "Grep" in allow
+        assert "Glob" in allow
