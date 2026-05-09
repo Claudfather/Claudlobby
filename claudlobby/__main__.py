@@ -1086,6 +1086,223 @@ def cmd_new_bot(args) -> int:
     return 0
 
 
+def cmd_bootstrap(args) -> int:
+    """Zero-to-running bootstrap: detect env, scaffold fleet, validate, generate, spin up.
+
+    Each step is idempotent — re-running skips steps that are already done.
+    """
+    import shutil
+    import subprocess
+
+    root = Path(args.root).resolve() if args.root else Path.cwd()
+    fleet_name = getattr(args, "fleet", None)
+    skip_install = args.skip_install
+    skip_spinup = args.skip_spinup
+
+    ok = "[ok]"
+    skip = "[skip]"
+    fail = "[FAIL]"
+    need = "[need]"
+
+    # ── Step 1: Environment detection ──
+    print("=== Step 1: Environment check ===")
+    issues: list[str] = []
+
+    # Python
+    py_ver = sys.version_info
+    py_ok = py_ver >= (3, 10)
+    print(f"  Python {py_ver.major}.{py_ver.minor}.{py_ver.micro}  {ok if py_ok else fail}")
+    if not py_ok:
+        issues.append("Python 3.10+ required")
+
+    # tmux
+    tmux_path = shutil.which("tmux")
+    print(f"  tmux   {ok if tmux_path else fail}")
+    if not tmux_path:
+        issues.append("tmux not found — install with: apt install tmux (Linux) / brew install tmux (macOS)")
+
+    # Claude Code
+    claude_path = shutil.which("claude")
+    print(f"  claude {ok if claude_path else fail}")
+    if not claude_path:
+        issues.append("Claude Code CLI not found — install from https://docs.anthropic.com/en/docs/claude-code/overview")
+
+    # gh (optional but recommended)
+    gh_path = shutil.which("gh")
+    print(f"  gh     {ok if gh_path else '(optional, recommended for MCP)'}")
+
+    if issues:
+        print(f"\n  Prerequisites missing:")
+        for issue in issues:
+            print(f"    - {issue}")
+        if not args.force:
+            print("\n  Pass --force to continue anyway.")
+            return 1
+        print("\n  --force: continuing despite missing prerequisites.")
+    print()
+
+    # ── Step 2: Install package ──
+    print("=== Step 2: Install claudlobby package ===")
+    if skip_install:
+        print(f"  {skip} --skip-install")
+    else:
+        # Check if already installed and importable
+        try:
+            from claudlobby import __version__ as installed_ver
+            print(f"  {ok} claudlobby {installed_ver} already installed")
+        except ImportError:
+            print(f"  {need} installing claudlobby...")
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-e", str(root)],
+                capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                print(f"  {fail} pip install failed:")
+                for line in proc.stderr.splitlines()[-5:]:
+                    print(f"    {line}")
+                if not args.force:
+                    return 1
+            else:
+                print(f"  {ok} installed")
+    print()
+
+    # ── Step 3: Scaffold fleet.yaml ──
+    print("=== Step 3: Fleet configuration ===")
+    if fleet_name:
+        fleet_dir = root / "local" / fleet_name
+        fleet_yaml = fleet_dir / "fleet.yaml"
+    else:
+        fleet_dir = None
+        fleet_yaml = root / "fleet.yaml"
+
+    if fleet_yaml.is_file():
+        print(f"  {ok} {fleet_yaml.relative_to(root)} exists")
+    else:
+        example = root / "fleet.yaml.example"
+        if not example.is_file():
+            print(f"  {fail} no fleet.yaml.example found at {root}")
+            return 1
+        if fleet_dir:
+            fleet_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(example, fleet_yaml)
+        print(f"  {ok} copied fleet.yaml.example → {fleet_yaml.relative_to(root)}")
+        print(f"  {need} edit {fleet_yaml.relative_to(root)} with your bot config before continuing")
+        print(f"\n  Re-run `claudlobby bootstrap` after editing fleet.yaml.")
+        return 0
+    print()
+
+    # From here we need valid paths and fleet config
+    paths = Paths(root=root, fleet_dir=fleet_dir)
+
+    # ── Step 4: Validate fleet config ──
+    print("=== Step 4: Validate fleet config ===")
+    try:
+        fleet = load_fleet(paths.fleet_yaml)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"  {fail} fleet.yaml error: {e}")
+        return 1
+
+    _load_env(paths)
+    report = validate(fleet, paths)
+
+    if report.has_errors:
+        print(f"  {fail} {len(report.errors)} errors:")
+        for e in report.errors:
+            print(f"    ERROR: {e}")
+        return 1
+    if report.warnings:
+        print(f"  {len(report.warnings)} warnings:")
+        for w in report.warnings:
+            print(f"    WARN: {w}")
+    else:
+        print(f"  {ok} fleet.yaml valid ({len(fleet.bots)} bots, {len(fleet.teams)} teams)")
+    print()
+
+    # ── Step 5: Generate bot directories ──
+    # Generate before env scaffold — compose_fleet creates bot dirs that
+    # scaffold_env_files needs for bot-tier .env files.
+    print("=== Step 5: Generate bot directories ===")
+    from .composer import compose_fleet
+    try:
+        out = compose_fleet(fleet, paths, log=lambda m: print(f"  {m}"))
+        print(f"  {ok} composed {len(out)} bots → {paths.runtime_bots.relative_to(root)}")
+    except Exception as e:
+        print(f"  {fail} generation failed: {e}")
+        return 1
+    print()
+
+    # ── Step 6: Scaffold .env ──
+    print("=== Step 6: Environment file (.env) ===")
+    from .composer import scaffold_env_files
+    env_msgs: list[str] = []
+    scaffold_env_files(fleet, paths, log=env_msgs.append)
+    for msg in env_msgs:
+        print(f"  {msg}")
+    if not env_msgs:
+        print(f"  {ok} no env vars required")
+
+    # Check if .env has unfilled stubs
+    env_path = paths.env_file
+    if env_path.is_file():
+        from . import dotenv as _dotenv
+        env_vars = _dotenv.read(env_path)
+        empty_vars = [k for k, v in env_vars.items() if not v]
+        if empty_vars:
+            print(f"\n  {need} {len(empty_vars)} env vars need values in {env_path.relative_to(root)}:")
+            for var in empty_vars[:10]:
+                print(f"    - {var}")
+            if len(empty_vars) > 10:
+                print(f"    ... and {len(empty_vars) - 10} more")
+            if not args.force:
+                print(f"\n  Fill in the values, then re-run `claudlobby bootstrap`.")
+                print(f"  Or pass --force to continue with empty env vars.")
+                return 0
+    print()
+
+    # ── Step 7: Spin up ──
+    print("=== Step 7: Spin up bots ===")
+    if skip_spinup:
+        print(f"  {skip} --skip-spinup")
+    else:
+        spin_up = root / "lib" / "spin-up-bot.sh"
+        if not spin_up.is_file():
+            print(f"  {fail} lib/spin-up-bot.sh not found")
+            return 1
+
+        bot_names = list(fleet.bots.keys())
+        print(f"  Ready to spin up {len(bot_names)} bot(s): {', '.join(bot_names)}")
+        if not args.yes:
+            print(f"\n  Re-run with --yes to auto-spin-up, or start bots manually:")
+            for name in bot_names:
+                bot_dir = paths.bot_runtime(name)
+                print(f"    {spin_up.relative_to(root)} {bot_dir.relative_to(root)}")
+            return 0
+
+        for name in bot_names:
+            bot_dir = paths.bot_runtime(name)
+            print(f"  spinning up {name}...", end=" ", flush=True)
+            proc = subprocess.run(
+                [str(spin_up), str(bot_dir)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if proc.returncode == 0:
+                print(ok)
+            else:
+                print(fail)
+                stderr = proc.stderr.strip()
+                if stderr:
+                    for line in stderr.splitlines()[-3:]:
+                        print(f"    {line}")
+    print()
+
+    print("=== Bootstrap complete ===")
+    print(f"  Fleet: {fleet.name} ({len(fleet.bots)} bots)")
+    print(f"  Runtime: {paths.runtime_bots}")
+    if not (skip_spinup or args.yes):
+        print(f"  Next: spin up bots with lib/spin-up-bot.sh <bot-dir>")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="claudlobby",
@@ -1208,6 +1425,16 @@ def main(argv: list[str] | None = None) -> int:
     pn.add_argument("--yes", "-y", action="store_true", help="Skip confirm-before-write")
     pn.add_argument("--auto-generate", action="store_true", help="Run `claudlobby generate --bot <name>` after writing")
     pn.set_defaults(func=cmd_new_bot)
+
+    pb = sub.add_parser(
+        "bootstrap",
+        help="Zero-to-running setup: detect env, scaffold fleet, validate, generate, spin up",
+    )
+    pb.add_argument("--skip-install", action="store_true", help="Skip pip install step")
+    pb.add_argument("--skip-spinup", action="store_true", help="Skip bot spin-up step")
+    pb.add_argument("--force", action="store_true", help="Continue despite missing prerequisites or unfilled env vars")
+    pb.add_argument("--yes", "-y", action="store_true", help="Auto-spin-up bots without prompting")
+    pb.set_defaults(func=cmd_bootstrap)
 
     args = parser.parse_args(argv)
     return args.func(args)
