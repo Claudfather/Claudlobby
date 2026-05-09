@@ -62,7 +62,7 @@ class TestValidate:
         report = validate(fleet, paths)
         assert any("TELEGRAM_TOKEN_LEAD" in w for w in report.warnings)
 
-    def test_unreadable_integration_skips_with_warning(self, fleet_dir, capsys):
+    def test_unreadable_integration_skips_with_warning(self, fleet_dir, caplog):
         # Give lead bot an explicit integration so validator walks it
         yaml_text = (fleet_dir / "fleet.yaml").read_text()
         yaml_text = yaml_text.replace(
@@ -84,10 +84,8 @@ class TestValidate:
         # Restore permissions for cleanup
         int_file.chmod(0o644)
 
-        # Verify the warning was printed to stderr
-        captured = capsys.readouterr()
-        assert "WARN" in captured.err
-        assert "skipping" in captured.err
+        # Verify the warning was emitted via logging
+        assert "skipping" in caplog.text
 
     def test_empty_bots_is_error(self, fleet_dir):
         (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: empty\n  bots: {}\n")

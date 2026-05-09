@@ -18,6 +18,7 @@ Preserves all comments and formatting.
 """
 from __future__ import annotations
 import argparse
+import logging
 import re
 import shutil
 import sys
@@ -25,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 from .config import load_fleet
 from .paths import Paths
@@ -226,7 +229,7 @@ def _add_to_team(text: str, team: str, bot_name: str) -> str:
                 # next team — not found
                 break
     # Not found / no compact workers list — leave as-is, warn caller via stderr.
-    print(f"  WARN: could not add '{bot_name}' to team '{team}' (not found or non-compact format)", file=sys.stderr)
+    log.warning("could not add '%s' to team '%s' (not found or non-compact format)", bot_name, team)
     return "".join(lines)
 
 
@@ -416,7 +419,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         fleet = load_fleet(paths.fleet_yaml)
         team_options = list(fleet.teams.keys())
     except (FileNotFoundError, ValueError, yaml.YAMLError) as e:
-        print(f"  WARN: could not load fleet.yaml for team listing: {e}", file=sys.stderr)
+        log.warning("could not load fleet.yaml for team listing: %s", e)
         team_options = []
     if team_options:
         print()

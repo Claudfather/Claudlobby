@@ -5,12 +5,14 @@ flattens lists, and resolves team membership.
 """
 
 from __future__ import annotations
-import sys
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -345,9 +347,8 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     # Backwards-compat: accept `persona:` for one or two more refactor cycles.
     expertise_raw = raw.get("expertise") or raw.get("persona")
     if raw.get("persona") and not raw.get("expertise"):
-        print(
-            f"WARNING: bot '{name}': 'persona' is deprecated, use 'expertise' (a list) instead",
-            file=sys.stderr,
+        log.warning(
+            "bot '%s': 'persona' is deprecated, use 'expertise' (a list) instead", name
         )
     if not expertise_raw:
         raise ValueError(f"bot '{name}': missing required field 'expertise'")

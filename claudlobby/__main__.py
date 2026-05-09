@@ -1,6 +1,7 @@
 """claudlobby CLI entry point."""
 from __future__ import annotations
 import argparse
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from .composer import compose_bot, compose_fleet
 from .diff import diff_bot, promote_bot
 from .paths import Paths
 from .validator import validate
+
+log = logging.getLogger("claudlobby")
 
 
 def _parse_rename_map(entries: list[str]) -> dict[str, str]:
@@ -47,8 +50,11 @@ def _resolve_paths(args) -> Paths:
         root = Path(args.root).resolve()
         fleet_dir = (root / "local" / fleet) if fleet else None
         if fleet and fleet_dir and not fleet_dir.is_dir():
-            print(f"ERROR: fleet overlay not found: {fleet_dir}", file=sys.stderr)
-            print(f"       Run `claudlobby new-fleet {fleet}` to scaffold (or remove --fleet to use root mode).", file=sys.stderr)
+            log.error(
+                "fleet overlay not found: %s — run `claudlobby new-fleet %s` to scaffold"
+                " (or remove --fleet to use root mode)",
+                fleet_dir, fleet,
+            )
             sys.exit(1)
         return Paths(root=root, fleet_dir=fleet_dir)
     return Paths.detect(fleet=fleet)
@@ -69,22 +75,18 @@ def cmd_validate(args) -> int:
     fleet = load_fleet(paths.fleet_yaml)
     report = validate(fleet, paths)
 
-    if report.has_errors:
-        print(f"errors ({len(report.errors)}):", file=sys.stderr)
-        for e in report.errors:
-            print(f"  ERROR: {e}", file=sys.stderr)
-    if report.warnings:
-        print(f"warnings ({len(report.warnings)}):")
-        for w in report.warnings:
-            print(f"  WARN: {w}")
+    for e in report.errors:
+        log.error("%s", e)
+    for w in report.warnings:
+        log.warning("%s", w)
 
     if args.strict and report.has_issues:
-        print("--strict: warnings count as errors → fail", file=sys.stderr)
+        log.error("--strict: warnings count as errors")
         return 1
     if report.has_errors:
         return 1
     if not report.has_issues:
-        print(f"fleet.yaml OK ({len(fleet.bots)} bots, {len(fleet.teams)} teams)")
+        log.info("fleet.yaml OK (%d bots, %d teams)", len(fleet.bots), len(fleet.teams))
     return 0
 
 
@@ -95,29 +97,28 @@ def cmd_generate(args) -> int:
     report = validate(fleet, paths)
 
     if report.has_errors:
-        print(f"validation errors ({len(report.errors)}) — refusing to generate:", file=sys.stderr)
+        log.error("validation errors — refusing to generate")
         for e in report.errors:
-            print(f"  ERROR: {e}", file=sys.stderr)
+            log.error("%s", e)
         return 1
     if args.strict and report.warnings:
-        print("--strict: warnings count as errors → refusing to generate", file=sys.stderr)
+        log.error("--strict: warnings count as errors — refusing to generate")
         for w in report.warnings:
-            print(f"  WARN: {w}", file=sys.stderr)
+            log.warning("%s", w)
         return 1
-    if report.warnings:
-        for w in report.warnings:
-            print(f"  WARN: {w}", file=sys.stderr)
+    for w in report.warnings:
+        log.warning("%s", w)
 
     if args.bot:
         bot = fleet.bots.get(args.bot)
         if not bot:
-            print(f"bot '{args.bot}' not in fleet.yaml", file=sys.stderr)
+            log.error("bot '%s' not in fleet.yaml", args.bot)
             return 1
         out = compose_bot(bot, fleet, paths)
-        print(f"composed {args.bot} → {out}")
+        log.info("composed %s → %s", args.bot, out)
     else:
         out = compose_fleet(fleet, paths)
-        print(f"composed {len(out)} bots → {paths.runtime_bots}")
+        log.info("composed %d bots → %s", len(out), paths.runtime_bots)
     return 0
 
 
@@ -219,10 +220,10 @@ def cmd_promote(args) -> int:
 def cmd_status(args) -> int:
     """Stub: placeholder for fleet health dashboard."""
     paths = _resolve_paths(args)
-    print(f"claudlobby status — placeholder")
-    print(f"  root:    {paths.root}")
-    print(f"  runtime: {paths.runtime_bots}")
-    print("  (full status dashboard wiring tmux + service health: TODO)")
+    log.info("claudlobby status — placeholder")
+    log.info("  root:    %s", paths.root)
+    log.info("  runtime: %s", paths.runtime_bots)
+    log.info("  (full status dashboard wiring tmux + service health: TODO)")
     return 0
 
 
@@ -242,14 +243,14 @@ def cmd_env_migrate(args) -> int:
     source_dir = Path(args.source).expanduser().resolve()
 
     if not source_dir.is_dir():
-        print(f"ERROR: source directory not found: {source_dir}", file=sys.stderr)
+        log.error("source directory not found: %s", source_dir)
         return 1
 
     # --- Parse --map flags: fleet_bot=src_dir (e.g. clog=assistant) ---
     try:
         rename_map = _parse_rename_map(args.map or [])
     except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        log.error("%s", e)
         return 1
 
     # --- Discover legacy bot dirs (any subdir containing .mcp.json or bot.conf) ---
@@ -261,7 +262,10 @@ def cmd_env_migrate(args) -> int:
             bot_dir_map[child.name] = child
 
     if not bot_dir_map:
-        print(f"ERROR: no legacy bot dirs found under {source_dir} (looking for subdirs with .mcp.json or bot.conf)", file=sys.stderr)
+        log.error(
+            "no legacy bot dirs found under %s (looking for subdirs with .mcp.json or bot.conf)",
+            source_dir,
+        )
         return 1
 
     # --- Source 1: ~/.env (host shell namespace; used as fallback) ---
@@ -302,7 +306,7 @@ def cmd_env_migrate(args) -> int:
         try:
             mcp_data = _json.loads(mcp_path.read_text())
         except _json.JSONDecodeError as e:
-            print(f"WARN: failed to parse {mcp_path}: {e}", file=sys.stderr)
+            log.warning("failed to parse %s: %s", mcp_path, e)
             continue
         for _, srv in mcp_data.get("mcpServers", {}).items():
             for k, v in srv.get("env", {}).items():
@@ -418,13 +422,13 @@ def cmd_env_migrate(args) -> int:
             merged,
         ))
         new_keys = sorted(set(fleet_vars) - (set(merged) - set(fleet_vars)))
-        print(f"wrote {fleet_env_path} ({len(fleet_vars)} migrated, {len(merged)} total)")
+        log.info("wrote %s (%d migrated, %d total)", fleet_env_path, len(fleet_vars), len(merged))
 
     bot_count = 0
     for fleet_bot_name, vars_dict in bot_vars.items():
         bot_env_path = paths.bot_runtime(fleet_bot_name) / ".env"
         if not bot_env_path.parent.is_dir():
-            print(f"SKIP {fleet_bot_name}: runtime dir missing — run `claudlobby generate` first", file=sys.stderr)
+            log.error("SKIP %s: runtime dir missing — run `claudlobby generate` first", fleet_bot_name)
             continue
         merged = dotenv.merge_into(bot_env_path, vars_dict)
         bot_env_path.write_text(dotenv.format_file(
@@ -432,9 +436,9 @@ def cmd_env_migrate(args) -> int:
             merged,
         ))
         bot_count += 1
-        print(f"wrote {bot_env_path} ({len(vars_dict)} migrated, {len(merged)} total)")
+        log.info("wrote %s (%d migrated, %d total)", bot_env_path, len(vars_dict), len(merged))
 
-    print(f"\nApplied: {len(fleet_vars)} fleet vars, {bot_count} bot .env files")
+    log.info("Applied: %d fleet vars, %d bot .env files", len(fleet_vars), bot_count)
     return 0
 
 
@@ -512,13 +516,13 @@ def cmd_data_migrate(args) -> int:
     source_dir = Path(args.source).expanduser().resolve()
 
     if not source_dir.is_dir():
-        print(f"ERROR: source directory not found: {source_dir}", file=sys.stderr)
+        log.error("source directory not found: %s", source_dir)
         return 1
 
     try:
         rename_map = _parse_rename_map(args.map or [])
     except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        log.error("%s", e)
         return 1
 
     include_set = (
@@ -659,12 +663,12 @@ def cmd_data_migrate(args) -> int:
         item.dst.parent.mkdir(parents=True, exist_ok=True)
         try:
             shutil.copytree(item.src, item.dst, symlinks=True)
-            print(f"copied  {item.src}  →  {item.dst}")
+            log.info("copied  %s  →  %s", item.src, item.dst)
             copied += 1
         except (OSError, shutil.Error) as e:
-            print(f"FAILED  {item.src}: {e}", file=sys.stderr)
+            log.error("FAILED  %s: %s", item.src, e)
 
-    print(f"\nApplied: {copied} dirs copied")
+    log.info("Applied: %d dirs copied", copied)
     return 0
 
 
@@ -691,13 +695,13 @@ def cmd_cron_migrate(args) -> int:
     source_dir = Path(args.source).expanduser().resolve()
 
     if not source_dir.is_dir():
-        print(f"ERROR: source directory not found: {source_dir}", file=sys.stderr)
+        log.error("source directory not found: %s", source_dir)
         return 1
 
     try:
         rename_map = _parse_rename_map(args.map or [])
     except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        log.error("%s", e)
         return 1
 
     # Build per-bot context: legacy prefix, bot data dir, search dirs for resolution.
@@ -779,9 +783,9 @@ def cmd_cron_migrate(args) -> int:
     if proc.returncode != 0:
         stderr = (proc.stderr or "").lower()
         if "no crontab" in stderr:
-            print(f"no current crontab for {os.environ.get('USER', 'this user')} — nothing to migrate", file=sys.stderr)
+            log.warning("no current crontab for %s — nothing to migrate", os.environ.get("USER", "this user"))
             return 0
-        print(f"ERROR: `crontab -l` failed: {proc.stderr.strip()}", file=sys.stderr)
+        log.error("`crontab -l` failed: %s", proc.stderr.strip())
         return 1
     current_crontab = proc.stdout
 
@@ -866,15 +870,15 @@ def cmd_cron_migrate(args) -> int:
     # Apply: backup current crontab, install rewritten one
     backup_path = Path.home() / f"crontab-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
     backup_path.write_text(current_crontab)
-    print(f"\nbackup: {backup_path}")
+    log.info("backup: %s", backup_path)
 
     new_crontab = "\n".join(new_lines) + ("\n" if new_lines and not new_lines[-1].endswith("\n") else "")
     install = subprocess.run(["crontab", "-"], input=new_crontab, text=True, capture_output=True)
     if install.returncode != 0:
-        print(f"ERROR: `crontab -` install failed: {install.stderr.strip()}", file=sys.stderr)
-        print(f"  your old crontab is preserved as {backup_path}", file=sys.stderr)
+        log.error("`crontab -` install failed: %s", install.stderr.strip())
+        log.error("your old crontab is preserved as %s", backup_path)
         return 1
-    print(f"installed new crontab ({len(rewrites)} lines rewritten)")
+    log.info("installed new crontab (%d lines rewritten)", len(rewrites))
     return 0
 
 
@@ -950,14 +954,14 @@ def cmd_memory_migrate(args) -> int:
             file_count += 1
 
         if file_count > 0:
-            print(f"  {project_dir.name} → {target_bot}: {file_count} memory files")
+            log.info("%s → %s: %d memory files", project_dir.name, target_bot, file_count)
             migrated += 1
 
     if migrated == 0:
         print("\nNo memory files migrated. Check --map mappings or run with --force.")
         return 1
 
-    print(f"\nMigrated memory for {migrated} bot(s).")
+    log.info("Migrated memory for %d bot(s).", migrated)
     print("Memories are now in local/<fleet>/runtime/bots/<bot>/memory/")
     return 0
 
@@ -1018,10 +1022,10 @@ def cmd_new_bot(args) -> int:
 
     # Validation: required fields
     if not inp.name:
-        print("ERROR: --name is required", file=sys.stderr)
+        log.error("--name is required")
         return 1
     if not inp.expertise:
-        print("ERROR: at least one --expertise is required", file=sys.stderr)
+        log.error("at least one --expertise is required")
         return 1
 
     # Render the stanza
@@ -1062,7 +1066,7 @@ def cmd_new_bot(args) -> int:
         fleet = load_fleet(paths.fleet_yaml)
         bot = fleet.bots.get(inp.name)
         if bot is None:
-            print(f"ERROR: bot '{inp.name}' not found in fleet.yaml after insertion", file=sys.stderr)
+            log.error("bot '%s' not found in fleet.yaml after insertion", inp.name)
             return 1
         out_dir = compose_bot(bot, fleet, paths)
         print(f"  ✓ Composed to {out_dir}")
@@ -1098,6 +1102,7 @@ def main(argv: list[str] | None = None) -> int:
              "If omitted, runs in root mode (fleet.yaml at repo root).",
     )
     parser.add_argument("-V", "--version", action="version", version=f"claudlobby {__version__}")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -1210,6 +1215,11 @@ def main(argv: list[str] | None = None) -> int:
     pn.set_defaults(func=cmd_new_bot)
 
     args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+    )
     return args.func(args)
 
 
