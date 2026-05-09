@@ -133,6 +133,7 @@ class FleetConfig:
     name: str
     service_prefix: str
     telegram_group_chat_id: str | None = None
+    human_telegram_id: str | None = None
     accounts: dict[str, str] = field(default_factory=lambda: {"default": "~/.claude"})
     defaults: dict[str, Any] = field(default_factory=dict)
     teams: dict[str, TeamConfig] = field(default_factory=dict)
@@ -356,6 +357,7 @@ def load_fleet(fleet_yaml: Path) -> FleetConfig:
         name=fleet.get("name", "unnamed-fleet"),
         service_prefix=fleet.get("service_prefix", "claudlobby"),
         telegram_group_chat_id=fleet.get("telegram_group_chat_id"),
+        human_telegram_id=fleet.get("human_telegram_id"),
         accounts=fleet.get("accounts", {"default": "~/.claude"}) or {"default": "~/.claude"},
         defaults=defaults,
         teams=teams,
