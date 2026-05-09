@@ -50,7 +50,7 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware.
 **Current sprint focus:**
 1. Migrate from shared GitHub PAT to per-bot GitHub Apps, with token-vending sidecar for installation token refresh
 2. Replace the manual "GitHub PAT in env vars" pattern in bot config with App-based auth
-3. Integrate clauDNA marketplace plugin install into `bootstrap-bot.sh`
+3. Integrate clauDNA marketplace plugin install into `claudlobby bootstrap`
 4. Add Claudron MCP server config to bot bootstrap and document the query-before / write-after pattern
 5. Optional telemetry emitter: bots write structured signal to Claudosseum if configured
 6. Extend `bot.conf` with ecosystem-aware fields (clauDNA version pin, Claudron vault path, Claudosseum tenant ID)
@@ -69,7 +69,7 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware.
 
 - Fleets in production (humans actually running Claudlobby on their own hardware)
 - Bot uptime and mean time between restarts trending up
-- Time from `bootstrap-bot.sh` invocation to a running, paired bot trending down
+- Time from `claudlobby bootstrap` invocation to a running, paired bot trending down
 - Resource efficiency holding on the Pi 5 baseline as features are added
 - Number of distinct bot personas in active fleets (system supports diversity, not just one-bot deployments)
 - Reduction in tribal-knowledge issues filed (docs and bootstrap maturity)

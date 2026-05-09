@@ -51,7 +51,6 @@ Key lifecycle scripts in `lib/`:
 | `report-back.sh` | Worker → manager structured reporting via tmux |
 | `fleet-state-update.sh` | Atomic fleet-state.json updates with flock locking |
 | `pre-stop-handoff.sh` | Graceful context handoff before service stop |
-| `bootstrap-bot.sh` | Full new-bot setup: dirs, Telegram pairing, permissions |
 | `lib-common.sh` | Shared helpers: OS detection, bot.conf loading, safe mktemp |
 | `log-rotate-fleet.sh` | Fleet-wide log rotation |
 | `git-pull-all.sh` | Pull all repos in a bot's projects/ directory |
