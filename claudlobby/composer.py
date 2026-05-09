@@ -645,6 +645,52 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     return settings
 
 
+def _reconcile_access_json(
+    access_path: Path,
+    fresh: dict,
+    bot: BotConfig,
+    fleet: FleetConfig,
+    log=print,
+) -> None:
+    """Update fleet-derived fields in an existing access.json, preserving runtime state.
+
+    Fleet-controlled fields (updated every generate):
+      - dmPolicy, groups.<chat_id>.requireMention, allowFrom (human ID)
+
+    Runtime state (preserved):
+      - pending, extra groups added at runtime, extra allowFrom entries
+    """
+    try:
+        existing = json.loads(access_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        log(f"  WARNING: {access_path} is unreadable ({exc}), leaving unchanged")
+        return
+
+    if not isinstance(existing, dict):
+        log(f"  WARNING: {access_path} is not a JSON object, leaving unchanged")
+        return
+
+    chat_id = bot.telegram.chat_id or fleet.telegram_group_chat_id
+    existing["dmPolicy"] = fresh["dmPolicy"]
+
+    if chat_id:
+        existing.setdefault("groups", {})
+        if chat_id in existing["groups"]:
+            existing["groups"][chat_id]["requireMention"] = bot.telegram.require_mention
+        else:
+            existing["groups"][chat_id] = {
+                "requireMention": bot.telegram.require_mention,
+                "allowFrom": [],
+            }
+
+    if fleet.human_telegram_id:
+        allow = existing.setdefault("allowFrom", [])
+        if fleet.human_telegram_id not in allow:
+            allow.append(fleet.human_telegram_id)
+
+    access_path.write_text(json.dumps(existing, indent=2) + "\n")
+
+
 def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> Path:
     bot_dir = paths.bot_runtime(bot.bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)
@@ -673,31 +719,18 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
     # picks up correct requireMention/dmPolicy on first boot.
     access = compose_access_json(bot, fleet)
     if access is not None:
-        handle = bot.telegram.handle or bot.bot_id
-        channel_dir = Path.home() / ".claude" / "channels" / f"telegram-{handle}"
-        channel_dir.mkdir(parents=True, exist_ok=True)
-        access_path = channel_dir / "access.json"
-        if access_path.exists():
-            # Reconcile: update requireMention and allowFrom from fleet.yaml
-            # but preserve any runtime state (pending pairings, extra groups)
-            try:
-                existing = json.loads(access_path.read_text())
-                chat_id = bot.telegram.chat_id or fleet.telegram_group_chat_id
-                if chat_id and chat_id in existing.get("groups", {}):
-                    existing["groups"][chat_id]["requireMention"] = bot.telegram.require_mention
-                elif chat_id:
-                    existing["groups"][chat_id] = {
-                        "requireMention": bot.telegram.require_mention,
-                        "allowFrom": [],
-                    }
-                if fleet.human_telegram_id:
-                    if fleet.human_telegram_id not in existing.get("allowFrom", []):
-                        existing.setdefault("allowFrom", []).append(fleet.human_telegram_id)
-                access_path.write_text(json.dumps(existing, indent=2) + "\n")
-            except (json.JSONDecodeError, OSError):
-                access_path.write_text(json.dumps(access, indent=2) + "\n")
+        import re
+        handle = bot.telegram.handle
+        if not re.match(r'^[a-zA-Z0-9_][a-zA-Z0-9_-]*$', handle):
+            log(f"  WARNING: bot {bot.bot_id} has invalid telegram handle {handle!r}, skipping access.json")
         else:
-            access_path.write_text(json.dumps(access, indent=2) + "\n")
+            channel_dir = Path.home() / ".claude" / "channels" / f"telegram-{handle}"
+            channel_dir.mkdir(parents=True, exist_ok=True)
+            access_path = channel_dir / "access.json"
+            if access_path.exists():
+                _reconcile_access_json(access_path, access, bot, fleet, log)
+            else:
+                access_path.write_text(json.dumps(access, indent=2) + "\n")
 
     (bot_dir / f"{bot.bot_id}.service").write_text(compose_systemd_unit(bot, fleet, paths))
     (bot_dir / f"{bot.bot_id}.plist").write_text(compose_launchd_plist(bot, fleet, paths))
