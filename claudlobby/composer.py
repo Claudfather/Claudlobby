@@ -513,6 +513,45 @@ def _compose_org_structure(bot: BotConfig, fleet: FleetConfig) -> str | None:
 
 
 # ----------------------------------------------------------------------
+# Telegram access.json
+# ----------------------------------------------------------------------
+
+def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
+    """Generate Telegram channel access.json from fleet.yaml.
+
+    Returns None if the bot has no telegram config. The generated config
+    controls DM policy, group requireMention, and human allowlisting.
+
+    Written to ~/.claude/channels/telegram-<handle>/access.json so the
+    Telegram plugin picks up correct settings on first boot — preventing
+    the default-config bug where requireMention defaults to false.
+    """
+    if not bot.telegram or not bot.telegram.handle:
+        return None
+
+    chat_id = bot.telegram.chat_id or fleet.telegram_group_chat_id
+    if not chat_id:
+        return None
+
+    access: dict = {
+        "dmPolicy": "allowlist",
+        "allowFrom": [],
+        "groups": {
+            chat_id: {
+                "requireMention": bot.telegram.require_mention,
+                "allowFrom": [],
+            }
+        },
+        "pending": {},
+    }
+
+    if fleet.human_telegram_id:
+        access["allowFrom"] = [fleet.human_telegram_id]
+
+    return access
+
+
+# ----------------------------------------------------------------------
 # CLAUDE.md composition (template-driven)
 # ----------------------------------------------------------------------
 
@@ -606,6 +645,52 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     return settings
 
 
+def _reconcile_access_json(
+    access_path: Path,
+    fresh: dict,
+    bot: BotConfig,
+    fleet: FleetConfig,
+    log=print,
+) -> None:
+    """Update fleet-derived fields in an existing access.json, preserving runtime state.
+
+    Fleet-controlled fields (updated every generate):
+      - dmPolicy, groups.<chat_id>.requireMention, allowFrom (human ID)
+
+    Runtime state (preserved):
+      - pending, extra groups added at runtime, extra allowFrom entries
+    """
+    try:
+        existing = json.loads(access_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        log(f"  WARNING: {access_path} is unreadable ({exc}), leaving unchanged")
+        return
+
+    if not isinstance(existing, dict):
+        log(f"  WARNING: {access_path} is not a JSON object, leaving unchanged")
+        return
+
+    chat_id = bot.telegram.chat_id or fleet.telegram_group_chat_id
+    existing["dmPolicy"] = fresh["dmPolicy"]
+
+    if chat_id:
+        existing.setdefault("groups", {})
+        if chat_id in existing["groups"]:
+            existing["groups"][chat_id]["requireMention"] = bot.telegram.require_mention
+        else:
+            existing["groups"][chat_id] = {
+                "requireMention": bot.telegram.require_mention,
+                "allowFrom": [],
+            }
+
+    if fleet.human_telegram_id:
+        allow = existing.setdefault("allowFrom", [])
+        if fleet.human_telegram_id not in allow:
+            allow.append(fleet.human_telegram_id)
+
+    access_path.write_text(json.dumps(existing, indent=2) + "\n")
+
+
 def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> Path:
     bot_dir = paths.bot_runtime(bot.bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)
@@ -629,6 +714,23 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
 
     link_skills(bot, paths, log)
     link_mounts(bot, bot_dir, log)
+
+    # Telegram access.json — write to channel state dir so the plugin
+    # picks up correct requireMention/dmPolicy on first boot.
+    access = compose_access_json(bot, fleet)
+    if access is not None:
+        import re
+        handle = bot.telegram.handle
+        if not re.match(r'^[a-zA-Z0-9_][a-zA-Z0-9_-]*$', handle):
+            log(f"  WARNING: bot {bot.bot_id} has invalid telegram handle {handle!r}, skipping access.json")
+        else:
+            channel_dir = Path.home() / ".claude" / "channels" / f"telegram-{handle}"
+            channel_dir.mkdir(parents=True, exist_ok=True)
+            access_path = channel_dir / "access.json"
+            if access_path.exists():
+                _reconcile_access_json(access_path, access, bot, fleet, log)
+            else:
+                access_path.write_text(json.dumps(access, indent=2) + "\n")
 
     (bot_dir / f"{bot.bot_id}.service").write_text(compose_systemd_unit(bot, fleet, paths))
     (bot_dir / f"{bot.bot_id}.plist").write_text(compose_launchd_plist(bot, fleet, paths))

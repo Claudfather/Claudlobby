@@ -1,14 +1,15 @@
-"""Tests for composer.py — scaffold_env_files merge behavior."""
+"""Tests for composer.py — scaffold_env_files merge and access.json reconcile."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from textwrap import dedent
+from unittest.mock import patch
 
 import pytest
 
-from claudlobby.config import load_fleet
-from claudlobby.composer import scaffold_env_files
+from claudlobby.config import BotConfig, FleetConfig, TelegramConfig, load_fleet
+from claudlobby.composer import compose_access_json, _reconcile_access_json, scaffold_env_files
 from claudlobby.paths import Paths
 
 
@@ -111,3 +112,152 @@ class TestScaffoldEnvMerge:
         second_content = (root / ".env").read_text()
 
         assert first_content == second_content
+
+
+def _make_bot(handle="test_bot", require_mention=True, chat_id=None):
+    return BotConfig(
+        bot_id="test",
+        name="test",
+        expertise=["eng"],
+        telegram=TelegramConfig(
+            handle=handle,
+            require_mention=require_mention,
+            chat_id=chat_id,
+        ),
+    )
+
+
+def _make_fleet(group_chat_id="-1001234567890", human_id="12345"):
+    return FleetConfig(
+        name="test-fleet",
+        service_prefix="com.test",
+        telegram_group_chat_id=group_chat_id,
+        human_telegram_id=human_id,
+    )
+
+
+class TestComposeAccessJson:
+    """compose_access_json generates correct structure from fleet.yaml."""
+
+    def test_basic_structure(self):
+        bot = _make_bot(require_mention=True)
+        fleet = _make_fleet()
+        result = compose_access_json(bot, fleet)
+
+        assert result is not None
+        assert result["dmPolicy"] == "allowlist"
+        assert result["allowFrom"] == ["12345"]
+        assert "-1001234567890" in result["groups"]
+        assert result["groups"]["-1001234567890"]["requireMention"] is True
+        assert result["pending"] == {}
+
+    def test_returns_none_without_handle(self):
+        bot = _make_bot(handle=None)
+        fleet = _make_fleet()
+        assert compose_access_json(bot, fleet) is None
+
+    def test_returns_none_without_chat_id(self):
+        bot = _make_bot()
+        fleet = _make_fleet(group_chat_id=None)
+        assert compose_access_json(bot, fleet) is None
+
+    def test_bot_chat_id_overrides_fleet(self):
+        bot = _make_bot(chat_id="-999")
+        fleet = _make_fleet(group_chat_id="-1001234567890")
+        result = compose_access_json(bot, fleet)
+        assert "-999" in result["groups"]
+        assert "-1001234567890" not in result["groups"]
+
+    def test_no_human_id_gives_empty_allowfrom(self):
+        bot = _make_bot()
+        fleet = _make_fleet(human_id=None)
+        result = compose_access_json(bot, fleet)
+        assert result["allowFrom"] == []
+
+
+class TestReconcileAccessJson:
+    """_reconcile_access_json preserves runtime state while updating fleet fields."""
+
+    def test_preserves_pending_and_extra_groups(self, tmp_path):
+        bot = _make_bot(require_mention=True)
+        fleet = _make_fleet()
+        fresh = compose_access_json(bot, fleet)
+
+        # Pre-seed with runtime state
+        access_path = tmp_path / "access.json"
+        existing = {
+            "dmPolicy": "allowlist",
+            "allowFrom": ["12345"],
+            "groups": {
+                "-1001234567890": {"requireMention": False, "allowFrom": []},
+                "-999999": {"requireMention": False, "allowFrom": ["67890"]},
+            },
+            "pending": {"abc123": {"user": "someone"}},
+        }
+        access_path.write_text(json.dumps(existing))
+
+        _reconcile_access_json(access_path, fresh, bot, fleet, log=lambda m: None)
+
+        result = json.loads(access_path.read_text())
+        # Fleet field updated
+        assert result["groups"]["-1001234567890"]["requireMention"] is True
+        # Runtime state preserved
+        assert "-999999" in result["groups"]
+        assert result["groups"]["-999999"]["allowFrom"] == ["67890"]
+        assert result["pending"] == {"abc123": {"user": "someone"}}
+
+    def test_propagates_dm_policy(self, tmp_path):
+        bot = _make_bot()
+        fleet = _make_fleet()
+        fresh = compose_access_json(bot, fleet)
+
+        access_path = tmp_path / "access.json"
+        existing = {"dmPolicy": "open", "allowFrom": [], "groups": {}, "pending": {}}
+        access_path.write_text(json.dumps(existing))
+
+        _reconcile_access_json(access_path, fresh, bot, fleet, log=lambda m: None)
+
+        result = json.loads(access_path.read_text())
+        assert result["dmPolicy"] == "allowlist"
+
+    def test_non_dict_json_leaves_file_unchanged(self, tmp_path):
+        bot = _make_bot()
+        fleet = _make_fleet()
+        fresh = compose_access_json(bot, fleet)
+
+        access_path = tmp_path / "access.json"
+        access_path.write_text("[]")
+
+        messages = []
+        _reconcile_access_json(access_path, fresh, bot, fleet, log=messages.append)
+
+        assert access_path.read_text() == "[]"
+        assert any("not a JSON object" in m for m in messages)
+
+    def test_malformed_json_leaves_file_unchanged(self, tmp_path):
+        bot = _make_bot()
+        fleet = _make_fleet()
+        fresh = compose_access_json(bot, fleet)
+
+        access_path = tmp_path / "access.json"
+        access_path.write_text("{invalid json")
+
+        messages = []
+        _reconcile_access_json(access_path, fresh, bot, fleet, log=messages.append)
+
+        assert access_path.read_text() == "{invalid json"
+        assert any("unreadable" in m for m in messages)
+
+    def test_adds_human_id_without_duplicating(self, tmp_path):
+        bot = _make_bot()
+        fleet = _make_fleet(human_id="12345")
+        fresh = compose_access_json(bot, fleet)
+
+        access_path = tmp_path / "access.json"
+        existing = {"dmPolicy": "allowlist", "allowFrom": ["12345"], "groups": {}, "pending": {}}
+        access_path.write_text(json.dumps(existing))
+
+        _reconcile_access_json(access_path, fresh, bot, fleet, log=lambda m: None)
+
+        result = json.loads(access_path.read_text())
+        assert result["allowFrom"].count("12345") == 1
