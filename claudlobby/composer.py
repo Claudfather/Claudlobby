@@ -8,10 +8,13 @@ template owns all top-level structure.
 from __future__ import annotations
 import copy
 import json
+import logging
 import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 import jinja2
 
@@ -770,7 +773,7 @@ def _reconcile_access_json(
     fresh: dict,
     bot: BotConfig,
     fleet: FleetConfig,
-    log=print,
+    log=None,
 ) -> None:
     """Update fleet-derived fields in an existing access.json, preserving runtime state.
 
@@ -783,11 +786,17 @@ def _reconcile_access_json(
     try:
         existing = json.loads(access_path.read_text())
     except (json.JSONDecodeError, OSError) as exc:
-        log(f"  WARNING: {access_path} is unreadable ({exc}), leaving unchanged")
+        msg = f"  WARNING: {access_path} is unreadable ({exc}), leaving unchanged"
+        _log.warning("%s is unreadable: %s, leaving unchanged", access_path, exc)
+        if log is not None:
+            log(msg)
         return
 
     if not isinstance(existing, dict):
-        log(f"  WARNING: {access_path} is not a JSON object, leaving unchanged")
+        msg = f"  WARNING: {access_path} is not a JSON object, leaving unchanged"
+        _log.warning("%s is not a JSON object, leaving unchanged", access_path)
+        if log is not None:
+            log(msg)
         return
 
     chat_id = bot.telegram.chat_id or fleet.telegram_group_chat_id
@@ -811,7 +820,7 @@ def _reconcile_access_json(
     access_path.write_text(json.dumps(existing, indent=2) + "\n")
 
 
-def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> Path:
+def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=None) -> Path:
     bot_dir = paths.bot_runtime(bot.bot_id)
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / ".claude").mkdir(exist_ok=True)
@@ -832,8 +841,9 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
         json.dumps(settings_local, indent=2) + "\n"
     )
 
-    link_skills(bot, paths, log)
-    link_mounts(bot, bot_dir, log)
+    _emit = log if log is not None else _log.info
+    link_skills(bot, paths, _emit)
+    link_mounts(bot, bot_dir, _emit)
 
     # Telegram access.json — write to channel state dir so the plugin
     # picks up correct requireMention/dmPolicy on first boot.
@@ -843,9 +853,15 @@ def compose_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths, log=print) -> 
 
         handle = bot.telegram.handle
         if not re.match(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*$", handle):
-            log(
-                f"  WARNING: bot {bot.bot_id} has invalid telegram handle {handle!r}, skipping access.json"
+            _log.warning(
+                "bot %s has invalid telegram handle %r, skipping access.json",
+                bot.bot_id,
+                handle,
             )
+            if log is not None:
+                log(
+                    f"  WARNING: bot {bot.bot_id} has invalid telegram handle {handle!r}, skipping access.json"
+                )
         else:
             channel_dir = Path.home() / ".claude" / "channels" / f"telegram-{handle}"
             channel_dir.mkdir(parents=True, exist_ok=True)
@@ -960,7 +976,7 @@ def _scaffold_env_merge(
     env_path: Path,
     header: str,
     required: list[EnvVar],
-    log=print,
+    log=None,
 ) -> None:
     """Idempotent .env scaffold: preserve existing values, append new stubs.
 
@@ -1000,10 +1016,13 @@ def _scaffold_env_merge(
     env_path.write_text("\n".join(lines) + "\n")
     if new_vars:
         new_names = ", ".join(ev.name for ev in new_vars)
-        log(f"  {env_path.name}: added {len(new_vars)} new vars ({new_names})")
+        msg = f"  {env_path.name}: added {len(new_vars)} new vars ({new_names})"
+        _log.info("%s: added %d new vars (%s)", env_path.name, len(new_vars), new_names)
+        if log is not None:
+            log(msg)
 
 
-def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=print) -> None:
+def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
     """Idempotent .env scaffolding at fleet and bot tiers.
 
     Preserves existing key=value pairs, appends stubs for any new
@@ -1031,11 +1050,13 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=print) -> None:
             )
 
 
-def compose_fleet(fleet: FleetConfig, paths: Paths, log=print) -> dict[str, Path]:
+def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
     paths.runtime_bots.mkdir(parents=True, exist_ok=True)
     out: dict[str, Path] = {}
     for bot_name, bot in fleet.bots.items():
-        log(f"composing {bot_name}...")
+        _log.info("composing %s...", bot_name)
+        if log is not None:
+            log(f"composing {bot_name}...")
         out[bot_name] = compose_bot(bot, fleet, paths, log=log)
 
     scaffold_env_files(fleet, paths, log=log)

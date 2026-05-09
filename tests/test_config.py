@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 
 import pytest
-
 
 from claudlobby.config import _coerce_bot, load_fleet
 
@@ -53,10 +53,11 @@ class TestCoerceBot:
         with pytest.raises(ValueError, match="missing required field 'expertise'"):
             _coerce_bot("test", {}, {})
 
-    def test_deprecated_persona_warns(self, capsys):
-        bot = _coerce_bot("test", {"persona": "old-role"}, {})
+    def test_deprecated_persona_warns(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="claudlobby.config"):
+            bot = _coerce_bot("test", {"persona": "old-role"}, {})
         assert bot.expertise == ["old-role"]
-        assert "deprecated" in capsys.readouterr().err
+        assert "deprecated" in caplog.text
 
     def test_telegram_config(self):
         raw = {

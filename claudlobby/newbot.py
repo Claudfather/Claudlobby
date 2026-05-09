@@ -16,15 +16,16 @@ YAML editing: text-based, not round-tripped through PyYAML. Inserts
 the new stanza as a properly-indented block at the end of `bots:`.
 Preserves all comments and formatting.
 """
+
 from __future__ import annotations
-import argparse
+import logging
 import re
-import shutil
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 from .config import load_fleet
 from .paths import Paths
@@ -34,9 +35,11 @@ from .paths import Paths
 # Stanza assembly
 # ----------------------------------------------------------------------
 
+
 @dataclass
 class NewBotInputs:
     """Everything we need to render a bot stanza."""
+
     name: str
     expertise: list[str]
     voice: str | None = None
@@ -73,7 +76,7 @@ def _yaml_list(items: list[str]) -> str:
 def _yaml_str(s: str) -> str:
     """Quote a string for YAML if it contains chars that would confuse the parser."""
     if any(c in s for c in ":#&*!|>'%@`,{}[]"):
-        return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return s
 
 
@@ -93,7 +96,9 @@ def render_stanza(inp: NewBotInputs) -> str:
         if inp.scope_repos:
             lines.append(f"        repos: {_yaml_list(inp.scope_repos)}")
         if inp.scope_snowflake_targets:
-            lines.append(f"        snowflake_targets: {_yaml_list(inp.scope_snowflake_targets)}")
+            lines.append(
+                f"        snowflake_targets: {_yaml_list(inp.scope_snowflake_targets)}"
+            )
     if inp.account and inp.account != "default":
         lines.append(f"      account: {inp.account}")
     if inp.model:
@@ -117,7 +122,14 @@ def render_stanza(inp: NewBotInputs) -> str:
     ]:
         if vals:
             lines.append(f"      {label}: {_yaml_list(vals)}")
-    if any([inp.telegram_handle, inp.token_env, inp.require_mention is not None, inp.chat_id]):
+    if any(
+        [
+            inp.telegram_handle,
+            inp.token_env,
+            inp.require_mention is not None,
+            inp.chat_id,
+        ]
+    ):
         lines.append("      telegram:")
         if inp.telegram_handle:
             lines.append(f"        handle: {inp.telegram_handle}")
@@ -136,11 +148,14 @@ def render_stanza(inp: NewBotInputs) -> str:
 # fleet.yaml editing — text-based, comment-preserving
 # ----------------------------------------------------------------------
 
+
 class FleetYamlEditError(Exception):
     pass
 
 
-def insert_bot_stanza(fleet_yaml_path: Path, stanza_text: str, team: str | None = None) -> str:
+def insert_bot_stanza(
+    fleet_yaml_path: Path, stanza_text: str, team: str | None = None
+) -> str:
     """Insert a new bot stanza into fleet.yaml. Returns the diff for display.
 
     Strategy: find the `bots:` block, find its end (next top-level or fleet-level
@@ -183,7 +198,13 @@ def insert_bot_stanza(fleet_yaml_path: Path, stanza_text: str, team: str | None 
     before = "".join(lines[:insert_at])
     after = "".join(lines[insert_at:])
     block = "\n" + stanza_text
-    new_text = before.rstrip() + "\n" + block + ("\n" if not after.startswith("\n") else "") + after.lstrip("\n")
+    new_text = (
+        before.rstrip()
+        + "\n"
+        + block
+        + ("\n" if not after.startswith("\n") else "")
+        + after.lstrip("\n")
+    )
 
     # Optionally append to a team's workers list.
     if team:
@@ -196,7 +217,9 @@ def _bot_name_from_stanza(stanza_text: str) -> str:
     """`    eng-1:\\n      ...` → `eng-1`."""
     m = re.match(r"^\s+([a-zA-Z0-9_-]+):\s*$", stanza_text.split("\n", 1)[0])
     if not m:
-        raise FleetYamlEditError(f"can't parse bot name from stanza: {stanza_text[:80]!r}")
+        raise FleetYamlEditError(
+            f"can't parse bot name from stanza: {stanza_text[:80]!r}"
+        )
     return m.group(1)
 
 
@@ -226,7 +249,11 @@ def _add_to_team(text: str, team: str, bot_name: str) -> str:
                 # next team — not found
                 break
     # Not found / no compact workers list — leave as-is, warn caller via stderr.
-    print(f"  WARN: could not add '{bot_name}' to team '{team}' (not found or non-compact format)", file=sys.stderr)
+    log.warning(
+        "could not add '%s' to team '%s' (not found or non-compact format)",
+        bot_name,
+        team,
+    )
     return "".join(lines)
 
 
@@ -234,7 +261,10 @@ def _add_to_team(text: str, team: str, bot_name: str) -> str:
 # Voice file creation
 # ----------------------------------------------------------------------
 
-def maybe_create_voice(paths: Paths, name: str, voice_arg: str | None, voice_text: str | None) -> str | None:
+
+def maybe_create_voice(
+    paths: Paths, name: str, voice_arg: str | None, voice_text: str | None
+) -> str | None:
     """Return the voice path (relative to root) to put in fleet.yaml, or None.
 
     - voice_arg = explicit path → use as-is
@@ -246,7 +276,9 @@ def maybe_create_voice(paths: Paths, name: str, voice_arg: str | None, voice_tex
     if voice_text:
         voice_path = paths.voices / f"{name}.md"
         voice_path.parent.mkdir(parents=True, exist_ok=True)
-        voice_path.write_text(f"---\nname: {name.title()}\n---\n\n{voice_text.strip()}\n")
+        voice_path.write_text(
+            f"---\nname: {name.title()}\n---\n\n{voice_text.strip()}\n"
+        )
         return f"voices/{name}.md"
     return None
 
@@ -254,6 +286,7 @@ def maybe_create_voice(paths: Paths, name: str, voice_arg: str | None, voice_tex
 # ----------------------------------------------------------------------
 # .env management — token write
 # ----------------------------------------------------------------------
+
 
 def write_token_to_env(env_path: Path, token_env: str, token: str) -> None:
     """Append/update TOKEN_ENV=token in .env. Creates file if missing."""
@@ -275,6 +308,7 @@ def write_token_to_env(env_path: Path, token_env: str, token: str) -> None:
 # ----------------------------------------------------------------------
 # Interactive prompts
 # ----------------------------------------------------------------------
+
 
 def _ask(prompt: str, default: str | None = None, allow_empty: bool = True) -> str:
     """Prompt with optional default. Empty input returns default."""
@@ -308,7 +342,11 @@ def _ask_pick(prompt: str, options: list[str], multi: bool = True) -> list[str]:
     for i, opt in enumerate(options, 1):
         print(f"  {i:>2}. {opt}")
     while True:
-        v = input("  pick (comma-separated numbers, 'none', or 'all'): ").strip().lower()
+        v = (
+            input("  pick (comma-separated numbers, 'none', or 'all'): ")
+            .strip()
+            .lower()
+        )
         if v in ("", "none"):
             return []
         if v == "all":
@@ -331,8 +369,7 @@ def _list_dir(p: Path, ext: str = ".md") -> list[str]:
     if not p.is_dir():
         return []
     return sorted(
-        f.stem for f in p.glob(f"*{ext}")
-        if not f.name.lower().startswith("readme")
+        f.stem for f in p.glob(f"*{ext}") if not f.name.lower().startswith("readme")
     )
 
 
@@ -357,7 +394,9 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         multi=True,
     )
     if not expertise:
-        print("  WARN: at least one expertise is required to generate. Continuing anyway.")
+        log.warning(
+            "at least one expertise is required to generate. Continuing anyway."
+        )
 
     voice_text = None
     voice_arg = None
@@ -367,7 +406,11 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     print("  3. Skip — use bare expertise")
     choice = _ask("Choice (1/2/3)", default="3")
     if choice == "1":
-        existing = sorted(p.relative_to(paths.root) for p in paths.voices.rglob("*.md")) if paths.voices.is_dir() else []
+        existing = (
+            sorted(p.relative_to(paths.root) for p in paths.voices.rglob("*.md"))
+            if paths.voices.is_dir()
+            else []
+        )
         existing_names = [str(p) for p in existing]
         if existing_names:
             picks = _ask_pick("Pick voice file:", existing_names, multi=False)
@@ -416,7 +459,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         fleet = load_fleet(paths.fleet_yaml)
         team_options = list(fleet.teams.keys())
     except (FileNotFoundError, ValueError, yaml.YAMLError) as e:
-        print(f"  WARN: could not load fleet.yaml for team listing: {e}", file=sys.stderr)
+        log.warning("could not load fleet.yaml for team listing: %s", e)
         team_options = []
     if team_options:
         print()
@@ -433,22 +476,25 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     require_mention = _ask_yn("Require @-mention to respond?", default=True)
     chat_id = _ask("Chat ID (override default group, optional)") or None
 
-    print(f"\nWalk through @BotFather setup now?")
-    print(f"  - Open https://t.me/BotFather in Telegram")
-    print(f"  - Send: /newbot")
-    print(f"  - Bot name: <whatever you want displayed>")
+    print("\nWalk through @BotFather setup now?")
+    print("  - Open https://t.me/BotFather in Telegram")
+    print("  - Send: /newbot")
+    print("  - Bot name: <whatever you want displayed>")
     print(f"  - Bot username: {handle}  (must end in '_bot' and be globally unique)")
-    print(f"  - Copy the token BotFather replies with")
+    print("  - Copy the token BotFather replies with")
     do_token = _ask_yn("Have a token to paste now?", default=True)
     if do_token:
-        token = _ask("  Paste token (format: <numbers>:<letters_and_numbers>)", allow_empty=False)
+        token = _ask(
+            "  Paste token (format: <numbers>:<letters_and_numbers>)", allow_empty=False
+        )
         # Save to .env
         write_token_to_env(paths.env_file, token_env, token)
-        print(f"  ✓ Saved {token_env} to {paths.env_file}")
+        log.info("  ✓ Saved %s to %s", token_env, paths.env_file)
 
-    startup_prompt = _ask(
-        "Startup prompt (sent once when the bot boots; leave blank for default)"
-    ) or None
+    startup_prompt = (
+        _ask("Startup prompt (sent once when the bot boots; leave blank for default)")
+        or None
+    )
 
     return NewBotInputs(
         name=name,
@@ -478,5 +524,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
 
 
 # Helper that the CLI uses to defer voice file creation until after stanza is built.
-def materialize_voice(paths: Paths, name: str, voice_arg: str | None, voice_text: str | None) -> str | None:
+def materialize_voice(
+    paths: Paths, name: str, voice_arg: str | None, voice_text: str | None
+) -> str | None:
     return maybe_create_voice(paths, name, voice_arg, voice_text)
