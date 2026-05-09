@@ -670,8 +670,47 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
 # ----------------------------------------------------------------------
 
 
+def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
+    """Transform fleet.yaml hook entries into Claude Code settings.local.json format.
+
+    Fleet.yaml uses a flat format per entry:
+        {command: "script.sh", matcher: "Bash", timeout: 10}
+
+    Claude Code expects nested matcher groups:
+        [{matcher: "Bash", hooks: [{type: "command", command: "script.sh", timeout: 10}]}]
+
+    Entries with the same matcher within one event are grouped together.
+    """
+    if not hooks:
+        return {}
+    out: dict[str, list] = {}
+    for event, entries in hooks.items():
+        if not entries:
+            continue
+        # Group entries by matcher value
+        by_matcher: dict[str, list[dict]] = {}
+        for entry in entries:
+            matcher = entry.get("matcher", "")
+            if matcher not in by_matcher:
+                by_matcher[matcher] = []
+            # Build the hook object — everything except "matcher" is a hook field
+            hook = {k: v for k, v in entry.items() if k != "matcher"}
+            if "type" not in hook:
+                hook["type"] = "command"
+            by_matcher[matcher].append(hook)
+        # Build matcher groups
+        groups = []
+        for matcher, hook_list in by_matcher.items():
+            group: dict[str, Any] = {"hooks": hook_list}
+            if matcher:
+                group["matcher"] = matcher
+            groups.append(group)
+        out[event] = groups
+    return out
+
+
 def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict:
-    """Generate .claude/settings.local.json with memory dir, sibling isolation, tools, and sandbox."""
+    """Generate .claude/settings.local.json with memory dir, sibling isolation, tools, sandbox, and hooks."""
     bot_dir = paths.bot_runtime(bot.bot_id)
     memory_dir = str(bot_dir / "memory")
 
@@ -717,6 +756,11 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
         if sandbox.auto_allow_bash:
             sandbox_cfg["autoAllowBashIfSandboxed"] = True
         settings["sandbox"] = sandbox_cfg
+
+    # Hooks: PreToolUse, PostToolUse, etc.
+    hooks = _compose_hooks(bot.hooks)
+    if hooks:
+        settings["hooks"] = hooks
 
     return settings
 

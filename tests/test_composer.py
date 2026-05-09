@@ -1,4 +1,4 @@
-"""Tests for composer.py — scaffold_env_files merge, access.json reconcile, settings.local tools, bot.conf model strategy."""
+"""Tests for composer.py — tools, hooks, scaffold_env_files, access.json reconcile, and bot.conf model strategy."""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.composer import (
+    _compose_hooks,
+    _reconcile_access_json,
     compose_access_json,
     compose_settings_local,
-    _reconcile_access_json,
     scaffold_env_files,
 )
 from claudlobby.paths import Paths
@@ -488,3 +489,228 @@ class TestComposeBotConfModelStrategy:
         ms = ModelStrategyConfig(base="sonnet")
         conf = self._compose(tmp_path, model_strategy=ms)
         assert "# Model strategy" in conf
+
+
+class TestComposeHooks:
+    """_compose_hooks transforms flat fleet.yaml entries into Claude Code format."""
+
+    def test_empty_hooks(self):
+        assert _compose_hooks({}) == {}
+
+    def test_single_command_hook_no_matcher(self):
+        hooks = {
+            "PreToolUse": [
+                {"command": "/usr/local/bin/log.sh"},
+            ],
+        }
+        result = _compose_hooks(hooks)
+        assert "PreToolUse" in result
+        groups = result["PreToolUse"]
+        assert len(groups) == 1
+        # No matcher key when matcher is empty
+        assert "matcher" not in groups[0]
+        assert groups[0]["hooks"] == [
+            {"type": "command", "command": "/usr/local/bin/log.sh"}
+        ]
+
+    def test_hook_with_matcher(self):
+        hooks = {
+            "PostToolUse": [
+                {"command": "notify.sh", "matcher": "Bash"},
+            ],
+        }
+        result = _compose_hooks(hooks)
+        groups = result["PostToolUse"]
+        assert len(groups) == 1
+        assert groups[0]["matcher"] == "Bash"
+        assert groups[0]["hooks"][0]["command"] == "notify.sh"
+
+    def test_groups_by_matcher(self):
+        hooks = {
+            "PreToolUse": [
+                {"command": "log.sh", "matcher": "Bash"},
+                {"command": "validate.sh", "matcher": "Bash"},
+                {"command": "other.sh", "matcher": "Write|Edit"},
+            ],
+        }
+        result = _compose_hooks(hooks)
+        groups = result["PreToolUse"]
+        assert len(groups) == 2
+        # First group: Bash with 2 hooks
+        bash_group = [g for g in groups if g.get("matcher") == "Bash"][0]
+        assert len(bash_group["hooks"]) == 2
+        # Second group: Write|Edit with 1 hook
+        write_group = [g for g in groups if g.get("matcher") == "Write|Edit"][0]
+        assert len(write_group["hooks"]) == 1
+
+    def test_defaults_type_to_command(self):
+        hooks = {"PreToolUse": [{"command": "script.sh"}]}
+        result = _compose_hooks(hooks)
+        assert result["PreToolUse"][0]["hooks"][0]["type"] == "command"
+
+    def test_preserves_explicit_type(self):
+        hooks = {"PreToolUse": [{"type": "prompt", "prompt": "Is this safe?"}]}
+        result = _compose_hooks(hooks)
+        hook = result["PreToolUse"][0]["hooks"][0]
+        assert hook["type"] == "prompt"
+        assert hook["prompt"] == "Is this safe?"
+
+    def test_preserves_extra_fields(self):
+        hooks = {
+            "PostToolUse": [
+                {"command": "log.sh", "timeout": 10, "async": True, "matcher": "Bash"},
+            ],
+        }
+        result = _compose_hooks(hooks)
+        hook = result["PostToolUse"][0]["hooks"][0]
+        assert hook["timeout"] == 10
+        assert hook["async"] is True
+        assert "matcher" not in hook  # matcher stays on the group, not the hook
+
+    def test_skips_empty_event_lists(self):
+        hooks = {"PreToolUse": [], "PostToolUse": [{"command": "log.sh"}]}
+        result = _compose_hooks(hooks)
+        assert "PreToolUse" not in result
+        assert "PostToolUse" in result
+
+
+class TestHooksMergeAndSettings:
+    """Hooks merge from fleet defaults + bot overrides into settings.local.json."""
+
+    def test_hooks_in_fleet_yaml(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+
+        (root / "fleet.yaml").write_text(
+            dedent("""\
+            fleet:
+              name: test-fleet
+              service_prefix: com.test
+              defaults:
+                hooks:
+                  PreToolUse:
+                    - command: "log-pre.sh"
+                  PostToolUse:
+                    - command: "log-post.sh"
+              bots:
+                worker:
+                  expertise: [eng]
+                  hooks:
+                    PostToolUse:
+                      - command: "notify.sh"
+                        matcher: "Bash"
+        """)
+        )
+
+        fleet = load_fleet(root / "fleet.yaml")
+        bot = fleet.bots["worker"]
+
+        # Verify merge: default PreToolUse + merged PostToolUse
+        assert "PreToolUse" in bot.hooks
+        assert len(bot.hooks["PreToolUse"]) == 1
+        assert bot.hooks["PreToolUse"][0]["command"] == "log-pre.sh"
+
+        assert "PostToolUse" in bot.hooks
+        assert len(bot.hooks["PostToolUse"]) == 2  # default + bot override
+        assert bot.hooks["PostToolUse"][0]["command"] == "log-post.sh"
+        assert bot.hooks["PostToolUse"][1]["command"] == "notify.sh"
+
+    def test_settings_local_includes_hooks(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+        paths = _make_paths(root)
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            hooks={
+                "PreToolUse": [{"command": "log.sh"}],
+                "PostToolUse": [{"command": "check.sh", "matcher": "Bash"}],
+            },
+        )
+        fleet = FleetConfig(name="test", service_prefix="com.test")
+
+        settings = compose_settings_local(bot, fleet, paths)
+        assert "hooks" in settings
+        assert "PreToolUse" in settings["hooks"]
+        assert "PostToolUse" in settings["hooks"]
+
+        # Verify Claude Code format: matcher groups with nested hooks
+        pre_groups = settings["hooks"]["PreToolUse"]
+        assert len(pre_groups) == 1
+        assert pre_groups[0]["hooks"][0]["type"] == "command"
+        assert pre_groups[0]["hooks"][0]["command"] == "log.sh"
+
+        post_groups = settings["hooks"]["PostToolUse"]
+        assert post_groups[0]["matcher"] == "Bash"
+
+    def test_no_hooks_omits_key(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+        paths = _make_paths(root)
+
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="test", service_prefix="com.test")
+
+        settings = compose_settings_local(bot, fleet, paths)
+        assert "hooks" not in settings
+
+    def test_bot_only_hooks_no_defaults(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+
+        (root / "fleet.yaml").write_text(
+            dedent("""\
+            fleet:
+              name: test-fleet
+              service_prefix: com.test
+              bots:
+                worker:
+                  expertise: [eng]
+                  hooks:
+                    PreToolUse:
+                      - command: "my-hook.sh"
+                        matcher: "Write|Edit"
+        """)
+        )
+
+        fleet = load_fleet(root / "fleet.yaml")
+        bot = fleet.bots["worker"]
+        assert len(bot.hooks["PreToolUse"]) == 1
+        assert bot.hooks["PreToolUse"][0]["matcher"] == "Write|Edit"
+
+    def test_defaults_only_hooks_no_bot_override(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+
+        (root / "fleet.yaml").write_text(
+            dedent("""\
+            fleet:
+              name: test-fleet
+              service_prefix: com.test
+              defaults:
+                hooks:
+                  PostToolUse:
+                    - command: "fleet-log.sh"
+              bots:
+                worker:
+                  expertise: [eng]
+        """)
+        )
+
+        fleet = load_fleet(root / "fleet.yaml")
+        bot = fleet.bots["worker"]
+        assert len(bot.hooks["PostToolUse"]) == 1
+        assert bot.hooks["PostToolUse"][0]["command"] == "fleet-log.sh"
