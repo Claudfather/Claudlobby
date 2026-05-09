@@ -5,6 +5,15 @@
       "tier": "fleet"
     }
   },
+  "_permissions_contract": {
+    "tools": [
+      "get_meeting_transcript",
+      "get_meetings",
+      "list_meeting_folders",
+      "list_meetings",
+      "query_granola_meetings"
+    ]
+  },
   "granola": {
     "command": "npx",
     "args": ["-y", "mcp-remote", "https://mcp.granola.ai/mcp", "--port", "${GRANOLA_MCP_PORT}"]

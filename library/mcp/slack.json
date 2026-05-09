@@ -5,6 +5,23 @@
       "tier": "bot"
     }
   },
+  "_permissions_contract": {
+    "tools": [
+      "channels_list",
+      "conversations_add_message",
+      "conversations_history",
+      "conversations_mark",
+      "conversations_replies",
+      "conversations_search_messages",
+      "conversations_unreads",
+      "usergroups_create",
+      "usergroups_list",
+      "usergroups_me",
+      "usergroups_update",
+      "usergroups_users_update",
+      "users_search"
+    ]
+  },
   "slack": {
     "command": "npx",
     "args": ["-y", "slack-mcp-server@latest", "--transport", "stdio"],

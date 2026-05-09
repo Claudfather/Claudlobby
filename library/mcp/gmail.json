@@ -17,6 +17,9 @@
       "tier": "fleet"
     }
   },
+  "_permissions_contract": {
+    "tools": []
+  },
   "gmail": {
     "command": "uvx",
     "args": ["workspace-mcp", "--single-user", "--tools", "gmail", "calendar"],

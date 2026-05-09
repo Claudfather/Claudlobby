@@ -9,6 +9,22 @@
       "tier": "fleet"
     }
   },
+  "_permissions_contract": {
+    "tools": [
+      "call_service_tool",
+      "domain_summary_tool",
+      "entity_action",
+      "get_entity",
+      "get_error_log",
+      "get_history",
+      "get_version",
+      "list_automations",
+      "list_entities",
+      "restart_ha",
+      "search_entities_tool",
+      "system_overview"
+    ]
+  },
   "homeassistant": {
     "type": "http",
     "url": "${HA_URL}/api/mcp/",

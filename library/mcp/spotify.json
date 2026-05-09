@@ -9,6 +9,15 @@
       "tier": "fleet"
     }
   },
+  "_permissions_contract": {
+    "tools": [
+      "SpotifyGetInfo",
+      "SpotifyPlayback",
+      "SpotifyPlaylist",
+      "SpotifyQueue",
+      "SpotifySearch"
+    ]
+  },
   "spotify": {
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-spotify"],

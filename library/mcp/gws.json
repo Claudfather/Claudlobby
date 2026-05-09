@@ -26,6 +26,32 @@
       "scope": "instance"
     }
   },
+  "_permissions_contract": {
+    "tools": [
+      "search_gmail_messages",
+      "get_gmail_message_content",
+      "get_gmail_messages_content_batch",
+      "get_gmail_thread_content",
+      "get_gmail_threads_content_batch",
+      "get_gmail_attachment_content",
+      "draft_gmail_message",
+      "send_gmail_message",
+      "list_gmail_labels",
+      "list_gmail_filters",
+      "manage_gmail_label",
+      "manage_gmail_filter",
+      "modify_gmail_message_labels",
+      "batch_modify_gmail_message_labels",
+      "get_events",
+      "manage_event",
+      "list_calendars",
+      "create_calendar",
+      "query_freebusy",
+      "manage_focus_time",
+      "manage_out_of_office",
+      "start_google_auth"
+    ]
+  },
   "gws": {
     "command": "uvx",
     "args": ["workspace-mcp", "--tools", "gmail", "calendar"],

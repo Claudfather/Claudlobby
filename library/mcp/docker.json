@@ -1,4 +1,27 @@
 {
+  "_permissions_contract": {
+    "tools": [
+      "list_containers",
+      "list_images",
+      "list_networks",
+      "list_volumes",
+      "fetch_container_logs",
+      "start_container",
+      "stop_container",
+      "create_container",
+      "remove_container",
+      "recreate_container",
+      "run_container",
+      "build_image",
+      "pull_image",
+      "push_image",
+      "remove_image",
+      "create_network",
+      "remove_network",
+      "create_volume",
+      "remove_volume"
+    ]
+  },
   "docker": {
     "command": "npx",
     "args": ["-y", "docker-mcp@latest"]

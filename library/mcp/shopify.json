@@ -9,6 +9,9 @@
       "tier": "fleet"
     }
   },
+  "_permissions_contract": {
+    "tools": []
+  },
   "shopify": {
     "command": "npx",
     "args": ["-y", "@ajackus/shopify-mcp-server"],
