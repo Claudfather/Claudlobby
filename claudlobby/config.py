@@ -48,7 +48,7 @@ class SandboxConfig:
     """
     network_allowed_domains: list[str] = field(default_factory=list)
     filesystem_allow_write: list[str] = field(default_factory=list)
-    auto_allow_bash: bool = False  # autoAllowBashIfSandboxed — opt-in per fleet
+    auto_allow_bash: bool | None = None  # None = not set, cascades from fleet default
 
 
 @dataclass
@@ -243,15 +243,17 @@ def _coerce_model_strategy(raw: dict | None) -> ModelStrategyConfig | None:
 def _coerce_sandbox(raw: dict | None) -> SandboxConfig:
     if not raw:
         return SandboxConfig()
+    aab = raw.get("auto_allow_bash")
     return SandboxConfig(
         network_allowed_domains=list(raw.get("network_allowed_domains") or []),
         filesystem_allow_write=list(raw.get("filesystem_allow_write") or []),
-        auto_allow_bash=bool(raw.get("auto_allow_bash", False)),
+        auto_allow_bash=bool(aab) if aab is not None else None,
     )
 
 
 def _merge_sandbox(default: SandboxConfig, override: SandboxConfig) -> SandboxConfig:
-    """Merge sandbox configs — lists are unioned, bools use override value."""
+    """Merge sandbox configs — lists are unioned, bools cascade (override wins if set)."""
+    aab = override.auto_allow_bash if override.auto_allow_bash is not None else default.auto_allow_bash
     return SandboxConfig(
         network_allowed_domains=_merge_lists(
             default.network_allowed_domains, override.network_allowed_domains
@@ -259,7 +261,7 @@ def _merge_sandbox(default: SandboxConfig, override: SandboxConfig) -> SandboxCo
         filesystem_allow_write=_merge_lists(
             default.filesystem_allow_write, override.filesystem_allow_write
         ),
-        auto_allow_bash=override.auto_allow_bash,
+        auto_allow_bash=aab,
     )
 
 

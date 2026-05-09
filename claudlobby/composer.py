@@ -846,7 +846,8 @@ def _scaffold_env_merge(
     new_vars = [ev for ev in sorted(required, key=lambda e: e.name)
                 if ev.name not in existing_keys]
     if not new_vars and existing_content:
-        return  # nothing to add
+        log(f"  {env_path.name}: up to date")
+        return
 
     lines: list[str] = []
     if existing_content:

@@ -1,4 +1,4 @@
-"""Tests for composer.py — scaffold_env_files merge and access.json reconcile."""
+"""Tests for composer.py — scaffold_env_files, access.json, and settings generation."""
 from __future__ import annotations
 
 import json
@@ -8,8 +8,14 @@ from unittest.mock import patch
 
 import pytest
 
-from claudlobby.config import BotConfig, FleetConfig, TelegramConfig, load_fleet
-from claudlobby.composer import compose_access_json, _reconcile_access_json, scaffold_env_files
+from claudlobby.config import (
+    BotConfig, FleetConfig, SandboxConfig, TelegramConfig,
+    _coerce_sandbox, _merge_sandbox, load_fleet,
+)
+from claudlobby.composer import (
+    compose_access_json, _reconcile_access_json,
+    compose_settings_local, scaffold_env_files,
+)
 from claudlobby.paths import Paths
 
 
@@ -112,6 +118,23 @@ class TestScaffoldEnvMerge:
         second_content = (root / ".env").read_text()
 
         assert first_content == second_content
+
+    def test_no_op_logs_up_to_date(self, tmp_path):
+        """When all vars already present, log 'up to date' instead of silence."""
+        root, paths = self._setup_fleet(tmp_path)
+        fleet = load_fleet(root / "fleet.yaml")
+
+        # First run — creates the file
+        scaffold_env_files(fleet, paths, log=lambda m: None)
+
+        # Second run — should log "up to date"
+        messages: list[str] = []
+        scaffold_env_files(fleet, paths, log=messages.append)
+
+        assert any("up to date" in m for m in messages)
+
+
+# ── Access JSON tests ────────────────────────────────────────────────
 
 
 def _make_bot(handle="test_bot", require_mention=True, chat_id=None):
@@ -261,3 +284,102 @@ class TestReconcileAccessJson:
 
         result = json.loads(access_path.read_text())
         assert result["allowFrom"].count("12345") == 1
+
+
+# ── Sandbox / auto_allow_bash cascade tests ──────────────────────────
+
+
+class TestAutoAllowBashCascade:
+    """auto_allow_bash: None cascades from fleet defaults; explicit values win."""
+
+    def _make_fleet(self, tmp_path, defaults_sandbox=None, bot_sandbox=None) -> tuple[FleetConfig, Paths]:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+
+        defaults = {}
+        if defaults_sandbox is not None:
+            defaults["sandbox"] = defaults_sandbox
+
+        bot_raw = {"expertise": ["eng"], "telegram": {"handle": "t_bot"}}
+        if bot_sandbox is not None:
+            bot_raw["sandbox"] = bot_sandbox
+
+        fleet_yaml = {"fleet": {
+            "name": "test", "service_prefix": "t",
+            "defaults": defaults,
+            "bots": {"worker": bot_raw},
+        }}
+        (root / "fleet.yaml").write_text(
+            __import__("yaml").dump(fleet_yaml, default_flow_style=False)
+        )
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+
+        paths = Paths(root=root, fleet_dir=root)
+        fleet = load_fleet(root / "fleet.yaml")
+        return fleet, paths
+
+    def test_default_none_no_sandbox_key(self, tmp_path):
+        """Neither fleet nor bot sets auto_allow_bash → no autoAllowBashIfSandboxed."""
+        fleet, paths = self._make_fleet(tmp_path)
+        bot = fleet.bots["worker"]
+        assert bot.sandbox.auto_allow_bash is None
+
+        settings = compose_settings_local(bot, fleet, paths)
+        assert "sandbox" not in settings
+
+    def test_fleet_default_cascades_to_bot(self, tmp_path):
+        """Fleet default auto_allow_bash: true cascades to bot with no sandbox config."""
+        fleet, paths = self._make_fleet(
+            tmp_path, defaults_sandbox={"auto_allow_bash": True}
+        )
+        bot = fleet.bots["worker"]
+        assert bot.sandbox.auto_allow_bash is True
+
+        settings = compose_settings_local(bot, fleet, paths)
+        assert settings["sandbox"]["autoAllowBashIfSandboxed"] is True
+
+    def test_bot_override_false_wins(self, tmp_path):
+        """Bot explicitly sets auto_allow_bash: false, overrides fleet default true."""
+        fleet, paths = self._make_fleet(
+            tmp_path,
+            defaults_sandbox={"auto_allow_bash": True},
+            bot_sandbox={"auto_allow_bash": False},
+        )
+        bot = fleet.bots["worker"]
+        assert bot.sandbox.auto_allow_bash is False
+
+        settings = compose_settings_local(bot, fleet, paths)
+        # False means no autoAllowBashIfSandboxed key
+        assert "sandbox" not in settings
+
+    def test_bot_override_true_no_fleet_default(self, tmp_path):
+        """Bot sets auto_allow_bash: true with no fleet default."""
+        fleet, paths = self._make_fleet(
+            tmp_path, bot_sandbox={"auto_allow_bash": True}
+        )
+        bot = fleet.bots["worker"]
+        assert bot.sandbox.auto_allow_bash is True
+
+        settings = compose_settings_local(bot, fleet, paths)
+        assert settings["sandbox"]["autoAllowBashIfSandboxed"] is True
+
+    def test_coerce_sandbox_preserves_none(self):
+        """_coerce_sandbox with no auto_allow_bash key → None, not False."""
+        result = _coerce_sandbox({"network_allowed_domains": ["example.com"]})
+        assert result.auto_allow_bash is None
+
+    def test_merge_sandbox_cascade(self):
+        """_merge_sandbox: override None falls through to default; explicit wins."""
+        default = SandboxConfig(auto_allow_bash=True)
+        override_none = SandboxConfig(auto_allow_bash=None)
+        override_false = SandboxConfig(auto_allow_bash=False)
+
+        # None falls through
+        merged = _merge_sandbox(default, override_none)
+        assert merged.auto_allow_bash is True
+
+        # Explicit False wins
+        merged = _merge_sandbox(default, override_false)
+        assert merged.auto_allow_bash is False
