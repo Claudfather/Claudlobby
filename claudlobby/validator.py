@@ -260,6 +260,33 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                 f"bot '{bot_name}': account '{bot.account}' not in fleet.accounts — falling back to 'default'"
             )
 
+        # Tool deny vs expertise conflict (warn). Flag when a denied tool is
+        # core to the bot's expertise — the bot won't be able to do its job.
+        _EXPERTISE_CORE_TOOLS: dict[str, set[str]] = {
+            "software-engineering": {"Write", "Edit"},
+            "frontend-design": {"Write", "Edit"},
+            "data-engineering": {"Write", "Edit"},
+            "pipeline-engineering": {"Write", "Edit"},
+            "orchestration": {"Agent", "Bash"},
+        }
+        if bot.tools.deny:
+            denied = set(bot.tools.deny)
+            for area in bot.expertise:
+                core = _EXPERTISE_CORE_TOOLS.get(area, set())
+                conflict = denied & core
+                if conflict:
+                    report.warnings.append(
+                        f"bot '{bot_name}': tools.deny includes {sorted(conflict)} "
+                        f"but expertise '{area}' typically requires them"
+                    )
+            # Also warn if same tool appears in both allow and deny
+            if bot.tools.allow:
+                overlap = denied & set(bot.tools.allow)
+                if overlap:
+                    report.warnings.append(
+                        f"bot '{bot_name}': tools {sorted(overlap)} appear in both allow and deny lists"
+                    )
+
     # Org structure integrity (warn — bot_ids may reference other fleets)
     for bot_name, bot in fleet.bots.items():
         if bot.reports_to and bot.reports_to not in fleet.bots:

@@ -1,15 +1,25 @@
 """Tests for composer.py — scaffold_env_files merge and access.json reconcile."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 from textwrap import dedent
-from unittest.mock import patch
 
-import pytest
 
-from claudlobby.config import BotConfig, FleetConfig, TelegramConfig, load_fleet
-from claudlobby.composer import compose_access_json, _reconcile_access_json, scaffold_env_files
+from claudlobby.config import (
+    BotConfig,
+    FleetConfig,
+    TelegramConfig,
+    ToolsConfig,
+    load_fleet,
+)
+from claudlobby.composer import (
+    compose_access_json,
+    compose_settings_local,
+    _reconcile_access_json,
+    scaffold_env_files,
+)
 from claudlobby.paths import Paths
 
 
@@ -26,7 +36,8 @@ class TestScaffoldEnvMerge:
         root.mkdir()
 
         # Fleet.yaml with one bot using github MCP (needs GITHUB_PAT)
-        (root / "fleet.yaml").write_text(dedent("""\
+        (root / "fleet.yaml").write_text(
+            dedent("""\
             fleet:
               name: test-fleet
               service_prefix: com.test
@@ -37,26 +48,44 @@ class TestScaffoldEnvMerge:
                   telegram:
                     handle: w_bot
                     token_env: TG_TOKEN_W
-        """))
+        """)
+        )
 
         # Library dirs
         (root / "library" / "expertise").mkdir(parents=True)
         (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
 
         (root / "library" / "mcp").mkdir(parents=True)
-        (root / "library" / "mcp" / "github.json").write_text(json.dumps({
-            "github": {"command": "gh", "args": ["mcp"]},
-            "_env_contract": {
-                "GITHUB_PAT": {"description": "GitHub PAT", "tier": "fleet"},
-            },
-        }))
-        (root / "library" / "mcp" / "shopify.json").write_text(json.dumps({
-            "shopify": {"command": "npx", "args": ["-y", "@ajackus/shopify-mcp-server"]},
-            "_env_contract": {
-                "SHOPIFY_ACCESS_TOKEN": {"description": "Shopify token", "tier": "fleet"},
-                "SHOPIFY_STORE_DOMAIN": {"description": "Shopify domain", "tier": "fleet"},
-            },
-        }))
+        (root / "library" / "mcp" / "github.json").write_text(
+            json.dumps(
+                {
+                    "github": {"command": "gh", "args": ["mcp"]},
+                    "_env_contract": {
+                        "GITHUB_PAT": {"description": "GitHub PAT", "tier": "fleet"},
+                    },
+                }
+            )
+        )
+        (root / "library" / "mcp" / "shopify.json").write_text(
+            json.dumps(
+                {
+                    "shopify": {
+                        "command": "npx",
+                        "args": ["-y", "@ajackus/shopify-mcp-server"],
+                    },
+                    "_env_contract": {
+                        "SHOPIFY_ACCESS_TOKEN": {
+                            "description": "Shopify token",
+                            "tier": "fleet",
+                        },
+                        "SHOPIFY_STORE_DOMAIN": {
+                            "description": "Shopify domain",
+                            "tier": "fleet",
+                        },
+                    },
+                }
+            )
+        )
 
         # Runtime dir (scaffold_env_files runs after compose_bot which creates these)
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
@@ -82,10 +111,12 @@ class TestScaffoldEnvMerge:
 
         # Pre-populate with one var already set
         env_path = root / ".env"
-        env_path.write_text(dedent("""\
+        env_path.write_text(
+            dedent("""\
             # Fleet environment for: test-fleet
             export GITHUB_PAT="ghp_realtoken123"
-        """))
+        """)
+        )
 
         messages: list[str] = []
         scaffold_env_files(fleet, paths, log=messages.append)
@@ -254,10 +285,125 @@ class TestReconcileAccessJson:
         fresh = compose_access_json(bot, fleet)
 
         access_path = tmp_path / "access.json"
-        existing = {"dmPolicy": "allowlist", "allowFrom": ["12345"], "groups": {}, "pending": {}}
+        existing = {
+            "dmPolicy": "allowlist",
+            "allowFrom": ["12345"],
+            "groups": {},
+            "pending": {},
+        }
         access_path.write_text(json.dumps(existing))
 
         _reconcile_access_json(access_path, fresh, bot, fleet, log=lambda m: None)
 
         result = json.loads(access_path.read_text())
         assert result["allowFrom"].count("12345") == 1
+
+
+class TestComposeSettingsLocal:
+    """compose_settings_local generates permissions from sibling isolation + tool rules."""
+
+    def _make_paths_with_runtime(self, tmp_path: Path) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "runtime" / "bots").mkdir(parents=True)
+        return Paths(root=root, fleet_dir=root)
+
+    def _make_fleet_with_bots(self, *bot_ids):
+        bots = {}
+        for bid in bot_ids:
+            bots[bid] = BotConfig(
+                bot_id=bid,
+                name=bid,
+                expertise=["eng"],
+                telegram=TelegramConfig(handle=f"{bid}_bot"),
+            )
+        return FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            bots=bots,
+        )
+
+    def test_no_tools_no_siblings(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert "permissions" not in result
+
+    def test_sibling_isolation_only(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        fleet = self._make_fleet_with_bots("bot-a", "bot-b")
+        result = compose_settings_local(fleet.bots["bot-a"], fleet, paths)
+        assert "permissions" in result
+        deny = result["permissions"]["deny"]
+        assert len(deny) == 1
+        assert "Read(" in deny[0] and "bot-b" in deny[0]
+
+    def test_tool_deny_generates_patterns(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="reviewer",
+            name="reviewer",
+            expertise=["code-review"],
+            tools=ToolsConfig(deny=["Write", "Edit", "NotebookEdit"]),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"reviewer": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        deny = result["permissions"]["deny"]
+        assert "Write(**)" in deny
+        assert "Edit(**)" in deny
+        assert "NotebookEdit(**)" in deny
+
+    def test_tool_allow_generates_patterns(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="reader",
+            name="reader",
+            expertise=["eng"],
+            tools=ToolsConfig(allow=["Read", "Grep", "Glob"]),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"reader": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+        assert "Read(**)" in allow
+        assert "Grep(**)" in allow
+        assert "Glob(**)" in allow
+
+    def test_tool_deny_and_allow_combined(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="lead",
+            name="lead",
+            expertise=["orchestration"],
+            tools=ToolsConfig(deny=["Write", "Edit"], allow=["Agent", "Bash"]),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"lead": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert "Write(**)" in result["permissions"]["deny"]
+        assert "Agent(**)" in result["permissions"]["allow"]
+
+    def test_tool_deny_merged_with_sibling_isolation(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot_a = BotConfig(
+            bot_id="bot-a",
+            name="bot-a",
+            expertise=["code-review"],
+            tools=ToolsConfig(deny=["Write"]),
+            telegram=TelegramConfig(handle="a_bot"),
+        )
+        bot_b = BotConfig(
+            bot_id="bot-b",
+            name="bot-b",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="b_bot"),
+        )
+        fleet = FleetConfig(
+            name="t",
+            service_prefix="p",
+            bots={"bot-a": bot_a, "bot-b": bot_b},
+        )
+        result = compose_settings_local(bot_a, fleet, paths)
+        deny = result["permissions"]["deny"]
+        # Should have both sibling isolation and tool deny
+        assert any("Read(" in d and "bot-b" in d for d in deny)
+        assert "Write(**)" in deny

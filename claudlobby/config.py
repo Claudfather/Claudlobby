@@ -3,6 +3,7 @@
 Loads and normalises the manifest. Applies fleet.defaults to each bot,
 flattens lists, and resolves team membership.
 """
+
 from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ class TelegramConfig:
 @dataclass
 class ScopeConfig:
     """Org / repos / data sources the bot operates on. Optional."""
+
     org: str | None = None
     repos: list[str] = field(default_factory=list)
     snowflake_targets: list[str] = field(default_factory=list)
@@ -32,11 +34,25 @@ class ScopeConfig:
 @dataclass
 class ModelStrategyConfig:
     """When and how to escalate / compact / restart. Optional."""
-    base: str | None = None             # default model
-    escalate_to: str | None = None      # e.g. "opus" if base is "sonnet"
-    escalate_when: str | None = None    # human-readable rule
+
+    base: str | None = None  # default model
+    escalate_to: str | None = None  # e.g. "opus" if base is "sonnet"
+    escalate_when: str | None = None  # human-readable rule
     compact_when: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolsConfig:
+    """Tool allow/deny lists → .claude/settings.local.json permissions.
+
+    Controls which Claude Code tools a bot may use. Deny rules generate
+    permission deny patterns like "Write(**)", enforcing bot roles at the
+    platform level rather than relying on CLAUDE.md prose alone.
+    """
+
+    deny: list[str] = field(default_factory=list)
+    allow: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -46,6 +62,7 @@ class SandboxConfig:
     Controls the Claude Code sandbox layer (separate from --dangerously-skip-permissions
     which controls tool-call permission prompts).
     """
+
     network_allowed_domains: list[str] = field(default_factory=list)
     filesystem_allow_write: list[str] = field(default_factory=list)
     auto_allow_bash: bool = False  # autoAllowBashIfSandboxed — opt-in per fleet
@@ -60,6 +77,7 @@ class McpEntry:
       - `"notion:"` with `instances: [default, work]` → name="notion", instances=["default", "work"]
       - `"gws:"` with `instances: [personal, work]` → name="gws", instances=["personal", "work"]
     """
+
     name: str
     instances: list[str] = field(default_factory=lambda: ["default"])
 
@@ -86,35 +104,38 @@ class McpEntry:
 
 @dataclass
 class BotConfig:
-    bot_id: str                                   # dict key — immutable system slug
-    name: str                                     # display name (defaults to bot_id)
-    expertise: list[str]                          # list of library/expertise/<name>.md
+    bot_id: str  # dict key — immutable system slug
+    name: str  # display name (defaults to bot_id)
+    expertise: list[str]  # list of library/expertise/<name>.md
     voice: str | None = None
-    mission: str | None = None                    # one-paragraph charter
-    reports_to: str | None = None                 # bot_id this bot reports to
-    manages: list[str] | None = None              # bot_ids this bot manages
+    mission: str | None = None  # one-paragraph charter
+    reports_to: str | None = None  # bot_id this bot reports to
+    manages: list[str] | None = None  # bot_ids this bot manages
     scope: ScopeConfig | None = None
     model_strategy: ModelStrategyConfig | None = None
     account: str = "default"
     model: str | None = None
     effort: str | None = None
     # Claude Code CLI flags — composed into CLAUDE_FLAGS in bot.conf.
-    remote_control: bool = True                            # --remote-control
-    dangerously_skip_permissions: bool = True              # --dangerously-skip-permissions
+    remote_control: bool = True  # --remote-control
+    dangerously_skip_permissions: bool = True  # --dangerously-skip-permissions
     channels: list[str] = field(
         default_factory=lambda: ["plugin:telegram@claude-plugins-official"]
-    )                                                      # --channels <name>
-    prompt_suggestions: bool = False                        # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION
-    extra_flags: list[str] = field(default_factory=list)   # any other claude CLI args
+    )  # --channels <name>
+    prompt_suggestions: bool = False  # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION
+    extra_flags: list[str] = field(default_factory=list)  # any other claude CLI args
     skills: list[str] = field(default_factory=list)
     mcp: list[McpEntry] = field(default_factory=list)
-    integrations: list[str] = field(default_factory=list)   # explicit; auto-paired with mcp by default
+    integrations: list[str] = field(
+        default_factory=list
+    )  # explicit; auto-paired with mcp by default
     guardrails: list[str] = field(default_factory=list)
     protocols: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
     lessons: list[str] = field(default_factory=list)
     post_actions: list[str] = field(default_factory=list)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
     mounts: dict[str, str] = field(default_factory=dict)  # name → absolute host path
     env: dict[str, str] = field(default_factory=dict)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -150,6 +171,7 @@ class FleetConfig:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+
 
 def _merge_lists(*lists) -> list[str]:
     """Concat lists, dedupe preserving first-seen order."""
@@ -192,7 +214,9 @@ def _parse_mcp_list(raw_list: list | None) -> list[McpEntry]:
             for name, config in item.items():
                 if name not in seen:
                     seen.add(name)
-                    instances = config.get("instances", ["default"]) if config else ["default"]
+                    instances = (
+                        config.get("instances", ["default"]) if config else ["default"]
+                    )
                     # Accept both list of strings and list of dicts (future: per-instance config)
                     parsed_instances = []
                     for inst in instances:
@@ -224,7 +248,11 @@ def _coerce_scope(raw: dict | None) -> ScopeConfig | None:
         org=raw.get("org"),
         repos=list(raw.get("repos") or []),
         snowflake_targets=list(raw.get("snowflake_targets") or []),
-        raw={k: v for k, v in raw.items() if k not in {"org", "repos", "snowflake_targets"}},
+        raw={
+            k: v
+            for k, v in raw.items()
+            if k not in {"org", "repos", "snowflake_targets"}
+        },
     )
 
 
@@ -236,7 +264,11 @@ def _coerce_model_strategy(raw: dict | None) -> ModelStrategyConfig | None:
         escalate_to=raw.get("escalate_to"),
         escalate_when=raw.get("escalate_when"),
         compact_when=raw.get("compact_when"),
-        raw={k: v for k, v in raw.items() if k not in {"base", "escalate_to", "escalate_when", "compact_when"}},
+        raw={
+            k: v
+            for k, v in raw.items()
+            if k not in {"base", "escalate_to", "escalate_when", "compact_when"}
+        },
     )
 
 
@@ -263,6 +295,23 @@ def _merge_sandbox(default: SandboxConfig, override: SandboxConfig) -> SandboxCo
     )
 
 
+def _coerce_tools(raw: dict | None) -> ToolsConfig:
+    if not raw:
+        return ToolsConfig()
+    return ToolsConfig(
+        deny=list(raw.get("deny") or []),
+        allow=list(raw.get("allow") or []),
+    )
+
+
+def _merge_tools(default: ToolsConfig, override: ToolsConfig) -> ToolsConfig:
+    """Merge tools configs — lists are unioned, deduplicated."""
+    return ToolsConfig(
+        deny=_merge_lists(default.deny, override.deny),
+        allow=_merge_lists(default.allow, override.allow),
+    )
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_raw = raw.get("telegram", {}) or {}
@@ -271,7 +320,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     # Backwards-compat: accept `persona:` for one or two more refactor cycles.
     expertise_raw = raw.get("expertise") or raw.get("persona")
     if raw.get("persona") and not raw.get("expertise"):
-        print(f"WARNING: bot '{name}': 'persona' is deprecated, use 'expertise' (a list) instead", file=sys.stderr)
+        print(
+            f"WARNING: bot '{name}': 'persona' is deprecated, use 'expertise' (a list) instead",
+            file=sys.stderr,
+        )
     if not expertise_raw:
         raise ValueError(f"bot '{name}': missing required field 'expertise'")
 
@@ -285,32 +337,47 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     return BotConfig(
         bot_id=name,
         name=raw.get("name", name),
-        expertise=_merge_lists(_as_list(defaults.get("expertise")), _as_list(expertise_raw)),
+        expertise=_merge_lists(
+            _as_list(defaults.get("expertise")), _as_list(expertise_raw)
+        ),
         voice=raw.get("voice"),
         mission=raw.get("mission") or defaults.get("mission"),
         reports_to=raw.get("reports_to"),
         manages=_as_list(raw.get("manages")) or None,
         scope=_coerce_scope(raw.get("scope") or defaults.get("scope")),
-        model_strategy=_coerce_model_strategy(raw.get("model_strategy") or defaults.get("model_strategy")),
+        model_strategy=_coerce_model_strategy(
+            raw.get("model_strategy") or defaults.get("model_strategy")
+        ),
         account=raw.get("account", defaults.get("account", "default")),
         model=raw.get("model", defaults.get("model")),
         effort=raw.get("effort", defaults.get("effort")),
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", True),
         prompt_suggestions=_bool("prompt_suggestions", False),
-        channels=_as_list(raw.get("channels") or defaults.get("channels")) or ["plugin:telegram@claude-plugins-official"],
+        channels=_as_list(raw.get("channels") or defaults.get("channels"))
+        or ["plugin:telegram@claude-plugins-official"],
         extra_flags=_merge_lists(defaults.get("extra_flags"), raw.get("extra_flags")),
         skills=_merge_lists(defaults.get("skills"), raw.get("skills")),
-        mcp=_merge_mcp_lists(_parse_mcp_list(defaults.get("mcp")), _parse_mcp_list(raw.get("mcp"))),
-        integrations=_merge_lists(defaults.get("integrations"), raw.get("integrations")),
+        mcp=_merge_mcp_lists(
+            _parse_mcp_list(defaults.get("mcp")), _parse_mcp_list(raw.get("mcp"))
+        ),
+        integrations=_merge_lists(
+            defaults.get("integrations"), raw.get("integrations")
+        ),
         guardrails=_merge_lists(defaults.get("guardrails"), raw.get("guardrails")),
         protocols=_merge_lists(defaults.get("protocols"), raw.get("protocols")),
         resources=_merge_lists(defaults.get("resources"), raw.get("resources")),
         lessons=_merge_lists(defaults.get("lessons"), raw.get("lessons")),
-        post_actions=_merge_lists(defaults.get("post_actions"), raw.get("post_actions")),
+        post_actions=_merge_lists(
+            defaults.get("post_actions"), raw.get("post_actions")
+        ),
         sandbox=_merge_sandbox(
             _coerce_sandbox(defaults.get("sandbox")),
             _coerce_sandbox(raw.get("sandbox")),
+        ),
+        tools=_merge_tools(
+            _coerce_tools(defaults.get("tools")),
+            _coerce_tools(raw.get("tools")),
         ),
         mounts={**(defaults.get("mounts") or {}), **(raw.get("mounts") or {})},
         env=raw.get("env", {}) or {},
@@ -358,7 +425,8 @@ def load_fleet(fleet_yaml: Path) -> FleetConfig:
         service_prefix=fleet.get("service_prefix", "claudlobby"),
         telegram_group_chat_id=fleet.get("telegram_group_chat_id"),
         human_telegram_id=fleet.get("human_telegram_id"),
-        accounts=fleet.get("accounts", {"default": "~/.claude"}) or {"default": "~/.claude"},
+        accounts=fleet.get("accounts", {"default": "~/.claude"})
+        or {"default": "~/.claude"},
         defaults=defaults,
         teams=teams,
         bots=bots,

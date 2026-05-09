@@ -612,7 +612,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
 # ----------------------------------------------------------------------
 
 def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict:
-    """Generate .claude/settings.local.json with memory dir, sibling isolation, and sandbox."""
+    """Generate .claude/settings.local.json with memory dir, sibling isolation, tools, and sandbox."""
     bot_dir = paths.bot_runtime(bot.bot_id)
     memory_dir = str(bot_dir / "memory")
 
@@ -620,15 +620,28 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
         "autoMemoryDirectory": memory_dir,
     }
 
+    # Build permissions block from sibling isolation + tool deny/allow rules
+    deny_patterns: list[str] = []
+
     # Sibling isolation: deny reading other bots' files
-    # Bot can still communicate via tmux send-keys (process-level, not file-level)
     siblings = [bid for bid in fleet.bots if bid != bot.bot_id]
-    if siblings:
-        deny_patterns = []
-        for sibling in siblings:
-            sibling_dir = str(paths.bot_runtime(sibling))
-            deny_patterns.append(f"Read({sibling_dir}/**)")
-        settings["permissions"] = {"deny": deny_patterns}
+    for sibling in siblings:
+        sibling_dir = str(paths.bot_runtime(sibling))
+        deny_patterns.append(f"Read({sibling_dir}/**)")
+
+    # Tool deny rules: e.g. "Write" -> "Write(**)"
+    for tool in bot.tools.deny:
+        deny_patterns.append(f"{tool}(**)")
+
+    if deny_patterns:
+        permissions: dict = {"deny": deny_patterns}
+        if bot.tools.allow:
+            permissions["allow"] = [f"{tool}(**)" for tool in bot.tools.allow]
+        settings["permissions"] = permissions
+    elif bot.tools.allow:
+        settings["permissions"] = {
+            "allow": [f"{tool}(**)" for tool in bot.tools.allow],
+        }
 
     # Sandbox: network + filesystem allowlists + bash auto-allow
     sandbox = bot.sandbox
