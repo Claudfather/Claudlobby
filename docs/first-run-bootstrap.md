@@ -94,7 +94,6 @@ cp -r examples/global-skills/autonomous-sprint ~/.claude/skills/
 ## Step 5 — Bootstrap your fleet
 
 ```bash
-# Scaffold fleet.yaml from the example, validate, generate bot dirs, spin up
 cd ~/claudlobby
 cp fleet.yaml.example local/<fleet-name>/fleet.yaml
 # Edit local/<fleet-name>/fleet.yaml — add your bots, tokens, group chat IDs
@@ -102,15 +101,7 @@ claudlobby --fleet <fleet-name> validate
 claudlobby --fleet <fleet-name> generate
 ```
 
-Or use the all-in-one bootstrap command (idempotent, re-runnable):
-
-```bash
-claudlobby --fleet <fleet-name> bootstrap
-```
-
-This handles: env check → fleet.yaml scaffold → validate → generate → .env scaffold → optional spin-up.
-
-Edit the generated files:
+Then fill in secrets and MCP tokens in the generated output:
 - `local/<fleet-name>/runtime/bots/<name>/bot.conf` — verify env vars
 - `local/<fleet-name>/runtime/bots/<name>/.mcp.json` — fill in MCP server tokens
 - `.env` — fill in secrets referenced by bot.conf
