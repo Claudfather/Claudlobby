@@ -1,4 +1,5 @@
 """claudlobby CLI entry point."""
+
 from __future__ import annotations
 import argparse
 import logging
@@ -39,7 +40,7 @@ def _parse_env_line(line: str) -> tuple[str, str] | None:
     k, v = line.split("=", 1)
     k = k.strip()
     if k.startswith("export "):
-        k = k[len("export "):].strip()
+        k = k[len("export ") :].strip()
     v = v.strip().strip('"').strip("'")
     return (k, v)
 
@@ -53,7 +54,8 @@ def _resolve_paths(args) -> Paths:
             log.error(
                 "fleet overlay not found: %s — run `claudlobby new-fleet %s` to scaffold"
                 " (or remove --fleet to use root mode)",
-                fleet_dir, fleet,
+                fleet_dir,
+                fleet,
             )
             sys.exit(1)
         return Paths(root=root, fleet_dir=fleet_dir)
@@ -127,12 +129,16 @@ def cmd_list_library(args) -> int:
 
     def _list_md(label: str, kind: str):
         """Walk overlay → base recursively. Display nested files as `dir/name`."""
-        print(f"\n{label}:")
+        log.info("%s:", label)
         seen: dict[str, str] = {}  # rel_key (no .md) → "[overlay]" or "[base]"
         for d in paths.library_search_dirs(kind):
             if not d.is_dir():
                 continue
-            tag = "[overlay]" if (paths.overlay_library and d == paths.overlay_library / kind) else "[base]"
+            tag = (
+                "[overlay]"
+                if (paths.overlay_library and d == paths.overlay_library / kind)
+                else "[base]"
+            )
             for p in sorted(d.rglob("*.md")):
                 if p.stem.lower().startswith("readme"):
                     continue
@@ -141,14 +147,14 @@ def cmd_list_library(args) -> int:
                     seen[rel_key] = tag
         for rel_key, tag in sorted(seen.items()):
             marker = " (override)" if tag == "[overlay]" else ""
-            print(f"  {rel_key}{marker}")
+            log.info("  %s%s", rel_key, marker)
 
     _list_md("Expertise", "expertise")
 
-    print("\nMCP fragments (base only):")
+    log.info("MCP fragments (base only):")
     if paths.mcp.is_dir():
         for p in sorted(paths.mcp.glob("*.json")):
-            print(f"  {p.stem}")
+            log.info("  %s", p.stem)
 
     _list_md("Integrations", "integrations")
     _list_md("Protocols", "protocols")
@@ -157,12 +163,16 @@ def cmd_list_library(args) -> int:
     _list_md("Lessons", "lessons")
     _list_md("Post-actions", "post_actions")
 
-    print("\nSkills:")
+    log.info("Skills:")
     seen_skills: dict[str, str] = {}  # rel_key → tag
     for d in paths.library_search_dirs("skills"):
         if not d.is_dir():
             continue
-        tag = "[overlay]" if (paths.overlay_library and d == paths.overlay_library / "skills") else "[base]"
+        tag = (
+            "[overlay]"
+            if (paths.overlay_library and d == paths.overlay_library / "skills")
+            else "[base]"
+        )
         for sub in sorted(d.rglob("*")):
             if not sub.is_dir():
                 continue
@@ -173,9 +183,9 @@ def cmd_list_library(args) -> int:
                 seen_skills[rel_key] = tag
     for rel_key, tag in sorted(seen_skills.items()):
         marker = " (override)" if tag == "[overlay]" else ""
-        print(f"  {rel_key}{marker}")
+        log.info("  %s%s", rel_key, marker)
 
-    print("\nVoices:")
+    log.info("Voices:")
     seen_voices: dict[str, Path] = {}
     if paths.overlay_voices and paths.overlay_voices.is_dir():
         for p in sorted(paths.overlay_voices.rglob("*.md")):
@@ -186,15 +196,19 @@ def cmd_list_library(args) -> int:
     for name in sorted(seen_voices):
         p = seen_voices[name]
         try:
-            tag = " (override)" if (paths.overlay_voices and p.is_relative_to(paths.overlay_voices)) else ""
+            tag = (
+                " (override)"
+                if (paths.overlay_voices and p.is_relative_to(paths.overlay_voices))
+                else ""
+            )
         except ValueError:
             tag = ""
-        print(f"  {p.relative_to(paths.root)}{tag}")
+        log.info("  %s%s", p.relative_to(paths.root), tag)
 
     if paths.fleet_dir:
-        print(f"\n[fleet overlay: {paths.fleet_dir.relative_to(paths.root)}]")
+        log.info("[fleet overlay: %s]", paths.fleet_dir.relative_to(paths.root))
     else:
-        print(f"\n[no fleet overlay — root mode. Use --fleet <name> for overlay mode.]")
+        log.info("[no fleet overlay — root mode. Use --fleet <name> for overlay mode.]")
     return 0
 
 
@@ -324,7 +338,9 @@ def cmd_env_migrate(args) -> int:
             seen_mcp.add(mcp_name)
             frag_path = paths.find_library_file("mcp", mcp_name, ".json")
             if frag_path:
-                for var in re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", frag_path.read_text()):
+                for var in re.findall(
+                    r"\$\{([A-Z_][A-Z0-9_]*)\}", frag_path.read_text()
+                ):
                     needed_fleet_vars.add(var)
 
     # Resolve fleet vars: prefer ~/.env, fall back to mcp values if home didn't have it
@@ -366,48 +382,45 @@ def cmd_env_migrate(args) -> int:
             )
 
     # --- Plan output (always print; --apply to commit) ---
-    fleet_env_path = paths.fleet_dir / ".env" if paths.fleet_dir else paths.root / ".env"
+    fleet_env_path = (
+        paths.fleet_dir / ".env" if paths.fleet_dir else paths.root / ".env"
+    )
 
     def _redact(v: str) -> str:
         if len(v) <= 8:
             return "***"
         return f"{v[:4]}…{v[-2:]}"
 
-    print(f"\n=== env-migrate plan ===")
-    print(f"source: {source_dir}")
-    print(f"fleet:  {fleet.name}")
-    print(f"discovered legacy bot dirs: {sorted(bot_dir_map.keys())}")
+    log.info("=== env-migrate plan ===")
+    log.info("source: %s", source_dir)
+    log.info("fleet:  %s", fleet.name)
+    log.info("discovered legacy bot dirs: %s", sorted(bot_dir_map.keys()))
     if rename_map:
-        print(f"rename map: {rename_map}")
-    print()
+        log.info("rename map: %s", rename_map)
 
     if fleet_vars:
-        print(f"FLEET-LEVEL ({len(fleet_vars)} vars) → {fleet_env_path}")
+        log.info("FLEET-LEVEL (%d vars) → %s", len(fleet_vars), fleet_env_path)
         for k in sorted(fleet_vars):
-            print(f"  {k}={_redact(fleet_vars[k])}")
+            log.info("  %s=%s", k, _redact(fleet_vars[k]))
     else:
-        print("FLEET-LEVEL: (no fleet-shared vars to migrate)")
-    print()
+        log.info("FLEET-LEVEL: (no fleet-shared vars to migrate)")
 
     if bot_vars:
-        print(f"BOT-LEVEL ({len(bot_vars)} bot .env files):")
+        log.info("BOT-LEVEL (%d bot .env files):", len(bot_vars))
         for fleet_bot_name in sorted(bot_vars):
             bot_env_path = paths.bot_runtime(fleet_bot_name) / ".env"
-            print(f"  {fleet_bot_name} → {bot_env_path}")
+            log.info("  %s → %s", fleet_bot_name, bot_env_path)
             for k in sorted(bot_vars[fleet_bot_name]):
-                print(f"    {k}={_redact(bot_vars[fleet_bot_name][k])}")
+                log.info("    %s=%s", k, _redact(bot_vars[fleet_bot_name][k]))
     else:
-        print("BOT-LEVEL: (no per-bot tokens resolved)")
-    print()
+        log.info("BOT-LEVEL: (no per-bot tokens resolved)")
 
     if bot_warnings:
-        print("Warnings:")
         for w in bot_warnings:
-            print(w)
-        print()
+            log.warning("%s", w)
 
     if not args.apply:
-        print("(dry-run — pass --apply to write these files)")
+        log.info("(dry-run — pass --apply to write these files)")
         return 0
 
     # --- Apply ---
@@ -417,26 +430,43 @@ def cmd_env_migrate(args) -> int:
     if fleet_vars:
         merged = dotenv.merge_into(fleet_env_path, fleet_vars)
         fleet_env_path.parent.mkdir(parents=True, exist_ok=True)
-        fleet_env_path.write_text(dotenv.format_file(
-            f"# Fleet secrets for {fleet.name} (migrated from {source_dir})",
-            merged,
-        ))
+        fleet_env_path.write_text(
+            dotenv.format_file(
+                f"# Fleet secrets for {fleet.name} (migrated from {source_dir})",
+                merged,
+            )
+        )
         new_keys = sorted(set(fleet_vars) - (set(merged) - set(fleet_vars)))
-        log.info("wrote %s (%d migrated, %d total)", fleet_env_path, len(fleet_vars), len(merged))
+        log.info(
+            "wrote %s (%d migrated, %d total)",
+            fleet_env_path,
+            len(fleet_vars),
+            len(merged),
+        )
 
     bot_count = 0
     for fleet_bot_name, vars_dict in bot_vars.items():
         bot_env_path = paths.bot_runtime(fleet_bot_name) / ".env"
         if not bot_env_path.parent.is_dir():
-            log.error("SKIP %s: runtime dir missing — run `claudlobby generate` first", fleet_bot_name)
+            log.error(
+                "SKIP %s: runtime dir missing — run `claudlobby generate` first",
+                fleet_bot_name,
+            )
             continue
         merged = dotenv.merge_into(bot_env_path, vars_dict)
-        bot_env_path.write_text(dotenv.format_file(
-            f"# Bot secrets for {fleet_bot_name} (migrated; pre-existing keys preserved)",
-            merged,
-        ))
+        bot_env_path.write_text(
+            dotenv.format_file(
+                f"# Bot secrets for {fleet_bot_name} (migrated; pre-existing keys preserved)",
+                merged,
+            )
+        )
         bot_count += 1
-        log.info("wrote %s (%d migrated, %d total)", bot_env_path, len(vars_dict), len(merged))
+        log.info(
+            "wrote %s (%d migrated, %d total)",
+            bot_env_path,
+            len(vars_dict),
+            len(merged),
+        )
 
     log.info("Applied: %d fleet vars, %d bot .env files", len(fleet_vars), bot_count)
     return 0
@@ -445,13 +475,28 @@ def cmd_env_migrate(args) -> int:
 # Subdir names we never copy from a legacy bot dir — claudlobby-managed,
 # build artifacts, dotfile noise, runtime junk.
 _DATA_MIGRATE_AUTO_SKIP_DIRS: set[str] = {
-    ".git", ".github", ".gitignore", ".idea", ".vscode",
-    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    "node_modules", "venv", ".venv", "dist", "build",
-    ".claude", "memory", "logs",
+    ".git",
+    ".github",
+    ".gitignore",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    "venv",
+    ".venv",
+    "dist",
+    "build",
+    ".claude",
+    "memory",
+    "logs",
 }
 
-PlanAction = Literal["copy", "skip-git", "skip-git-container", "skip-exists", "skip-empty", "skip-mount"]
+PlanAction = Literal[
+    "copy", "skip-git", "skip-git-container", "skip-exists", "skip-empty", "skip-mount"
+]
 
 
 def _contains_git_checkouts(path: Path, threshold: float = 0.5) -> bool:
@@ -556,8 +601,7 @@ def cmd_data_migrate(args) -> int:
         mount_names = set(bot_cfg.mounts.keys())
         # Resolve mount targets so we can match source dirs by real path
         mount_targets = {
-            Path(t).expanduser().resolve()
-            for t in bot_cfg.mounts.values()
+            Path(t).expanduser().resolve() for t in bot_cfg.mounts.values()
         }
 
         for child in sorted(src_bot_path.iterdir()):
@@ -574,7 +618,11 @@ def cmd_data_migrate(args) -> int:
                 continue
             # Skip dirs that are handled by mounts (by name or by resolved path)
             if name in mount_names or child.resolve() in mount_targets:
-                plan.append(_DataMigratePlanItem(fleet_bot_name, child, bot_data_dir / name, "skip-mount", 0.0))
+                plan.append(
+                    _DataMigratePlanItem(
+                        fleet_bot_name, child, bot_data_dir / name, "skip-mount", 0.0
+                    )
+                )
                 continue
 
             dst = bot_data_dir / name
@@ -583,38 +631,48 @@ def cmd_data_migrate(args) -> int:
             # 4.7G of git-checkout files only to discard the result is a real
             # cost on the Pi.
             if (child / ".git").is_dir():
-                plan.append(_DataMigratePlanItem(fleet_bot_name, child, dst, "skip-git", 0.0))
+                plan.append(
+                    _DataMigratePlanItem(fleet_bot_name, child, dst, "skip-git", 0.0)
+                )
                 continue
             if _contains_git_checkouts(child):
-                plan.append(_DataMigratePlanItem(fleet_bot_name, child, dst, "skip-git-container", 0.0))
+                plan.append(
+                    _DataMigratePlanItem(
+                        fleet_bot_name, child, dst, "skip-git-container", 0.0
+                    )
+                )
                 continue
             if dst.exists():
-                plan.append(_DataMigratePlanItem(fleet_bot_name, child, dst, "skip-exists", 0.0))
+                plan.append(
+                    _DataMigratePlanItem(fleet_bot_name, child, dst, "skip-exists", 0.0)
+                )
                 continue
 
             size_mb = _dir_size_mb(child)
             if size_mb == 0:
-                plan.append(_DataMigratePlanItem(fleet_bot_name, child, dst, "skip-empty", 0.0))
+                plan.append(
+                    _DataMigratePlanItem(fleet_bot_name, child, dst, "skip-empty", 0.0)
+                )
                 continue
 
-            plan.append(_DataMigratePlanItem(fleet_bot_name, child, dst, "copy", size_mb))
+            plan.append(
+                _DataMigratePlanItem(fleet_bot_name, child, dst, "copy", size_mb)
+            )
 
-    print(f"\n=== data-migrate plan ===")
-    print(f"source: {source_dir}")
-    print(f"fleet:  {fleet.name}")
+    log.info("=== data-migrate plan ===")
+    log.info("source: %s", source_dir)
+    log.info("fleet:  %s", fleet.name)
     if rename_map:
-        print(f"rename map: {rename_map}")
+        log.info("rename map: %s", rename_map)
     if include_set is not None:
-        print(f"include filter: {sorted(include_set)}")
+        log.info("include filter: %s", sorted(include_set))
     if exclude_set:
-        print(f"exclude filter: {sorted(exclude_set)}")
-    print()
+        log.info("exclude filter: %s", sorted(exclude_set))
 
     if missing_sources:
-        print("Source dirs missing (use --map fleet-bot=src-dir if renamed):")
+        log.warning("Source dirs missing (use --map fleet-bot=src-dir if renamed):")
         for fb, sp in missing_sources:
-            print(f"  {fb} → expected {sp}")
-        print()
+            log.warning("  %s → expected %s", fb, sp)
 
     by_bot: dict[str, list[_DataMigratePlanItem]] = {}
     for item in plan:
@@ -631,7 +689,7 @@ def cmd_data_migrate(args) -> int:
     total_to_copy_mb = 0.0
     if by_bot:
         for fb in sorted(by_bot):
-            print(f"  {fb}:")
+            log.info("  %s:", fb)
             for item in by_bot[fb]:
                 sz_str = _human_size(item.size_mb)
                 rel_src = item.src.relative_to(source_dir)
@@ -641,21 +699,21 @@ def cmd_data_migrate(args) -> int:
                     else item.dst
                 )
                 if item.action == "copy":
-                    print(f"    COPY  {sz_str:>6}  {rel_src}/  →  {rel_dst}/")
+                    log.info("    COPY  %6s  %s/  →  %s/", sz_str, rel_src, rel_dst)
                     total_to_copy_mb += item.size_mb
                 else:
                     reason = _SKIP_REASON[item.action]
-                    print(f"    SKIP  {sz_str:>6}  {rel_src}/  ({reason})")
-        print()
-        print(f"Total to copy: {_human_size(total_to_copy_mb)}")
+                    log.info("    SKIP  %6s  %s/  (%s)", sz_str, rel_src, reason)
+        log.info("Total to copy: %s", _human_size(total_to_copy_mb))
     else:
-        print("(no data dirs found to migrate — try --include <name> if subdirs were auto-skipped)")
+        log.info(
+            "(no data dirs found to migrate — try --include <name> if subdirs were auto-skipped)"
+        )
 
     if not args.apply:
-        print("\n(dry-run — pass --apply to copy)")
+        log.info("(dry-run — pass --apply to copy)")
         return 0
 
-    print()
     copied = 0
     for item in plan:
         if item.action != "copy":
@@ -711,7 +769,7 @@ def cmd_cron_migrate(args) -> int:
     class _BotCronCtx:
         legacy_prefix: str
         bot_name: str
-        data_dir: Path        # <bot_runtime>/data
+        data_dir: Path  # <bot_runtime>/data
         search_dirs: list[Path]  # ordered: lib/, data/scripts/, data/
 
     bot_ctxs: list[_BotCronCtx] = []
@@ -721,11 +779,11 @@ def cmd_cron_migrate(args) -> int:
         data_dir = paths.bot_runtime(fleet_bot) / "data"
         projects_dir = paths.bot_runtime(fleet_bot) / "projects"
         search_dirs = [
-            paths.lib,                      # package-level shared scripts
-            paths.lib / "personal",         # package-level personal scripts
-            data_dir / "scripts",           # bot-specific scripts
-            data_dir,                       # bot data (finances/, etc.)
-            projects_dir,                   # git checkouts the bot works in
+            paths.lib,  # package-level shared scripts
+            paths.lib / "personal",  # package-level personal scripts
+            data_dir / "scripts",  # bot-specific scripts
+            data_dir,  # bot data (finances/, etc.)
+            projects_dir,  # git checkouts the bot works in
         ]
         bot_ctxs.append(_BotCronCtx(legacy_prefix, fleet_bot, data_dir, search_dirs))
     # Sort longest prefix first so child paths win
@@ -741,7 +799,7 @@ def cmd_cron_migrate(args) -> int:
         """
         if not legacy_path.startswith(ctx.legacy_prefix):
             return legacy_path
-        rel = legacy_path[len(ctx.legacy_prefix):].lstrip("/")
+        rel = legacy_path[len(ctx.legacy_prefix) :].lstrip("/")
         if not rel:
             return str(ctx.data_dir)
 
@@ -769,21 +827,24 @@ def cmd_cron_migrate(args) -> int:
                 continue
             # Replace each occurrence of a legacy path individually
             result = line
-            for m in reversed(list(re.finditer(re.escape(ctx.legacy_prefix) + r'[/\w._-]*', line))):
+            for m in reversed(
+                list(re.finditer(re.escape(ctx.legacy_prefix) + r"[/\w._-]*", line))
+            ):
                 old_path = m.group(0)
                 new_path = _resolve_path(old_path, ctx)
-                result = result[:m.start()] + new_path + result[m.end():]
+                result = result[: m.start()] + new_path + result[m.end() :]
             return result, ctx.bot_name
         return line, None
 
     # Read current user crontab
-    proc = subprocess.run(
-        ["crontab", "-l"], capture_output=True, text=True
-    )
+    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     if proc.returncode != 0:
         stderr = (proc.stderr or "").lower()
         if "no crontab" in stderr:
-            log.warning("no current crontab for %s — nothing to migrate", os.environ.get("USER", "this user"))
+            log.warning(
+                "no current crontab for %s — nothing to migrate",
+                os.environ.get("USER", "this user"),
+            )
             return 0
         log.error("`crontab -l` failed: %s", proc.stderr.strip())
         return 1
@@ -803,24 +864,23 @@ def cmd_cron_migrate(args) -> int:
             unmatched_legacy.append((i, line))
 
     # Plan output
-    print(f"\n=== cron-migrate plan ===")
-    print(f"source: {source_dir}")
-    print(f"fleet:  {fleet.name}")
+    log.info("=== cron-migrate plan ===")
+    log.info("source: %s", source_dir)
+    log.info("fleet:  %s", fleet.name)
     if rename_map:
-        print(f"rename map: {rename_map}")
-    print()
+        log.info("rename map: %s", rename_map)
 
     if not rewrites and not unmatched_legacy:
-        print("(no crontab lines reference the source prefix — nothing to migrate)")
+        log.info("(no crontab lines reference the source prefix — nothing to migrate)")
         return 0
 
     # Verify pass: extract absolute paths from rewritten lines and check existence.
     # A cron line can reference multiple paths (script path, log path, args).
-    import re
+
     broken_paths: list[tuple[int, str, str]] = []  # (line_no, bot, missing_path)
     for line_no, _old, new, bot in rewrites:
         # Extract all absolute paths from the rewritten line
-        for m in re.finditer(r'(/\S+)', new):
+        for m in re.finditer(r"(/\S+)", new):
             candidate = m.group(1)
             # Skip env-sourcing paths (. /home/.env), pipes, and redirections
             if candidate.startswith("/usr/") or candidate.startswith("/bin/"):
@@ -843,37 +903,49 @@ def cmd_cron_migrate(args) -> int:
         for line_no, old, new, bot in rewrites:
             by_bot[bot].append((line_no, old, new))
         for bot in sorted(by_bot):
-            print(f"  {bot}: {len(by_bot[bot])} line(s) to rewrite")
+            log.info("  %s: %d line(s) to rewrite", bot, len(by_bot[bot]))
             for line_no, old, new in by_bot[bot]:
-                print(f"    line {line_no}:")
-                print(f"      − {old}")
-                print(f"      + {new}")
-        print()
-        print(f"Total: {len(rewrites)} lines rewritten across {len(by_bot)} bot(s)")
+                log.info("    line %d:", line_no)
+                log.info("      − %s", old)
+                log.info("      + %s", new)
+        log.info(
+            "Total: %d lines rewritten across %d bot(s)", len(rewrites), len(by_bot)
+        )
 
     if broken_paths:
-        print()
-        print(f"⚠ {len(broken_paths)} rewritten path(s) don't exist at destination — verify before applying:")
+        log.warning(
+            "%d rewritten path(s) don't exist at destination — verify before applying:",
+            len(broken_paths),
+        )
         for line_no, bot, path in broken_paths:
-            print(f"    line {line_no} ({bot}): {path}")
+            log.warning("    line %d (%s): %s", line_no, bot, path)
 
     if unmatched_legacy:
-        print()
-        print(f"⚠ {len(unmatched_legacy)} line(s) reference {legacy_root} but no bot subpath — operator must handle:")
+        log.warning(
+            "%d line(s) reference %s but no bot subpath — operator must handle:",
+            len(unmatched_legacy),
+            legacy_root,
+        )
         for line_no, line in unmatched_legacy:
-            print(f"    line {line_no}: {line}")
+            log.warning("    line %d: %s", line_no, line)
 
     if not args.apply:
-        print("\n(dry-run — pass --apply to install the new crontab)")
+        log.info("(dry-run — pass --apply to install the new crontab)")
         return 0
 
     # Apply: backup current crontab, install rewritten one
-    backup_path = Path.home() / f"crontab-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    backup_path = (
+        Path.home() / f"crontab-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    )
     backup_path.write_text(current_crontab)
     log.info("backup: %s", backup_path)
 
-    new_crontab = "\n".join(new_lines) + ("\n" if new_lines and not new_lines[-1].endswith("\n") else "")
-    install = subprocess.run(["crontab", "-"], input=new_crontab, text=True, capture_output=True)
+    new_crontab = "\n".join(new_lines) + (
+        "\n" if new_lines and not new_lines[-1].endswith("\n") else ""
+    )
+    install = subprocess.run(
+        ["crontab", "-"], input=new_crontab, text=True, capture_output=True
+    )
     if install.returncode != 0:
         log.error("`crontab -` install failed: %s", install.stderr.strip())
         log.error("your old crontab is preserved as %s", backup_path)
@@ -891,7 +963,7 @@ def cmd_memory_migrate(args) -> int:
     claude_projects = Path.home() / ".claude" / "projects"
 
     if not claude_projects.is_dir():
-        print(f"ERROR: no ~/.claude/projects/ directory found", file=sys.stderr)
+        log.error("no ~/.claude/projects/ directory found")
         return 1
 
     # Build a mapping of source memory dirs → fleet bot names
@@ -932,12 +1004,22 @@ def cmd_memory_migrate(args) -> int:
         if target_bot is None:
             memory_files = list(memory_dir.glob("*.md"))
             if memory_files:
-                print(f"  SKIP {project_dir.name} ({len(memory_files)} files) — no matching bot in fleet")
-                print(f"        use --map '{project_dir.name}:<bot-name>' to map it")
+                log.info(
+                    "  SKIP %s (%d files) — no matching bot in fleet",
+                    project_dir.name,
+                    len(memory_files),
+                )
+                log.info(
+                    "        use --map '%s:<bot-name>' to map it", project_dir.name
+                )
             continue
 
         if target_bot not in fleet.bots:
-            print(f"  SKIP {project_dir.name} — mapped to '{target_bot}' but not in fleet", file=sys.stderr)
+            log.error(
+                "  SKIP %s — mapped to '%s' but not in fleet",
+                project_dir.name,
+                target_bot,
+            )
             continue
 
         # Copy memory files to bot's memory dir
@@ -948,21 +1030,29 @@ def cmd_memory_migrate(args) -> int:
         for src_file in memory_dir.glob("*.md"):
             dest_file = dest_memory / src_file.name
             if dest_file.exists() and not args.force:
-                print(f"  SKIP {target_bot}/{src_file.name} — already exists (use --force to overwrite)")
+                log.info(
+                    "  SKIP %s/%s — already exists (use --force to overwrite)",
+                    target_bot,
+                    src_file.name,
+                )
                 continue
             shutil.copy2(src_file, dest_file)
             file_count += 1
 
         if file_count > 0:
-            log.info("%s → %s: %d memory files", project_dir.name, target_bot, file_count)
+            log.info(
+                "%s → %s: %d memory files", project_dir.name, target_bot, file_count
+            )
             migrated += 1
 
     if migrated == 0:
-        print("\nNo memory files migrated. Check --map mappings or run with --force.")
+        log.warning(
+            "No memory files migrated. Check --map mappings or run with --force."
+        )
         return 1
 
     log.info("Migrated memory for %d bot(s).", migrated)
-    print("Memories are now in local/<fleet>/runtime/bots/<bot>/memory/")
+    log.info("Memories are now in local/<fleet>/runtime/bots/<bot>/memory/")
     return 0
 
 
@@ -974,8 +1064,8 @@ def cmd_new_bot(args) -> int:
         interactive_collect,
         materialize_voice,
         render_stanza,
-        write_token_to_env,
     )
+
     paths = _resolve_paths(args)
 
     # Pick mode. If --name given without --interactive, run non-interactive.
@@ -1004,15 +1094,24 @@ def cmd_new_bot(args) -> int:
             lessons=_csv(args.lessons),
             integrations=_csv(args.integrations),
             remote_control=False if args.no_remote_control else None,
-            dangerously_skip_permissions=False if args.no_dangerously_skip_permissions else None,
+            dangerously_skip_permissions=False
+            if args.no_dangerously_skip_permissions
+            else None,
             extra_flags=_csv(args.extra_flags),
             scope_org=args.scope_org,
             scope_repos=_csv(args.scope_repos),
             scope_snowflake_targets=_csv(args.scope_snowflake_targets),
             team=args.team,
             telegram_handle=args.telegram_handle,
-            token_env=args.token_env or (f"TELEGRAM_TOKEN_{args.name.upper().replace('-', '_')}" if args.name else None),
-            require_mention=args.require_mention if args.require_mention is not None else True,
+            token_env=args.token_env
+            or (
+                f"TELEGRAM_TOKEN_{args.name.upper().replace('-', '_')}"
+                if args.name
+                else None
+            ),
+            require_mention=args.require_mention
+            if args.require_mention is not None
+            else True,
             chat_id=args.chat_id,
             startup_prompt=args.startup_prompt,
         )
@@ -1035,58 +1134,74 @@ def cmd_new_bot(args) -> int:
     print(stanza)
 
     if inp.team:
-        print(f"  → will also be added to team '{inp.team}'.workers")
+        log.info("  → will also be added to team '%s'.workers", inp.team)
 
     if args.dry_run:
-        print("\n--dry-run: no changes written. Stanza above would be inserted into fleet.yaml.")
+        log.info(
+            "--dry-run: no changes written. Stanza above would be inserted into fleet.yaml."
+        )
         return 0
 
     # Confirm
     if not args.yes:
         ans = input("\nWrite to fleet.yaml? [Y/n]: ").strip().lower()
         if ans and ans not in ("y", "yes"):
-            print("Aborted.")
+            log.info("Aborted.")
             return 1
 
     # Backup fleet.yaml
     backup = paths.fleet_yaml.with_suffix(".yaml.bak")
     backup.write_text(paths.fleet_yaml.read_text())
-    print(f"  ✓ Backup: {backup}")
+    log.info("  ✓ Backup: %s", backup)
 
     # Insert
     new_text = insert_bot_stanza(paths.fleet_yaml, stanza, team=inp.team)
     paths.fleet_yaml.write_text(new_text)
-    print(f"  ✓ Updated {paths.fleet_yaml}")
+    log.info("  ✓ Updated %s", paths.fleet_yaml)
 
     # Auto-generate
     if args.auto_generate:
-        print(f"\n=== Running `claudlobby generate --bot {inp.name}` ===\n")
+        log.info("=== Running `claudlobby generate --bot %s` ===", inp.name)
         from .composer import compose_bot
         from .config import load_fleet
+
         fleet = load_fleet(paths.fleet_yaml)
         bot = fleet.bots.get(inp.name)
         if bot is None:
             log.error("bot '%s' not found in fleet.yaml after insertion", inp.name)
             return 1
         out_dir = compose_bot(bot, fleet, paths)
-        print(f"  ✓ Composed to {out_dir}")
+        log.info("  ✓ Composed to %s", out_dir)
 
     # Next steps
-    print("\n=== Next steps ===")
-    print(f"  1. Review {paths.fleet_yaml}")
+    log.info("=== Next steps ===")
+    log.info("  1. Review %s", paths.fleet_yaml)
     if inp.token_env:
-        env_set = (paths.env_file.is_file() and inp.token_env in paths.env_file.read_text())
+        env_set = (
+            paths.env_file.is_file() and inp.token_env in paths.env_file.read_text()
+        )
         if env_set:
-            print(f"  2. Token already in .env ✓")
+            log.info("  2. Token already in .env ✓")
         else:
-            print(f"  2. Add {inp.token_env}=<your-token> to {paths.env_file}")
-    print(f"  3. Run: claudlobby validate")
+            log.info("  2. Add %s=<your-token> to %s", inp.token_env, paths.env_file)
+    log.info("  3. Run: claudlobby validate")
     if not args.auto_generate:
-        print(f"  4. Run: claudlobby generate --bot {inp.name}")
-    print(f"  5. Install service:")
-    print(f"     # Linux: sudo ln -sf {paths.bot_runtime(inp.name)}/{inp.name}.service /etc/systemd/system/")
-    print(f"     #        sudo systemctl daemon-reload && sudo systemctl enable --now {inp.name}.service")
-    print(f"     # macOS: ln -sf {paths.bot_runtime(inp.name)}/{inp.name}.plist ~/Library/LaunchAgents/")
+        log.info("  4. Run: claudlobby generate --bot %s", inp.name)
+    log.info("  5. Install service:")
+    log.info(
+        "     # Linux: sudo ln -sf %s/%s.service /etc/systemd/system/",
+        paths.bot_runtime(inp.name),
+        inp.name,
+    )
+    log.info(
+        "     #        sudo systemctl daemon-reload && sudo systemctl enable --now %s.service",
+        inp.name,
+    )
+    log.info(
+        "     # macOS: ln -sf %s/%s.plist ~/Library/LaunchAgents/",
+        paths.bot_runtime(inp.name),
+        inp.name,
+    )
     return 0
 
 
@@ -1095,14 +1210,20 @@ def main(argv: list[str] | None = None) -> int:
         prog="claudlobby",
         description="Compositor for Claude Code agent fleets.",
     )
-    parser.add_argument("--root", help="Path to claudlobby repo root (auto-detected by default)")
+    parser.add_argument(
+        "--root", help="Path to claudlobby repo root (auto-detected by default)"
+    )
     parser.add_argument(
         "--fleet",
         help="Fleet overlay name (uses local/<fleet>/ for fleet.yaml, library overlay, voices overlay, runtime/). "
-             "If omitted, runs in root mode (fleet.yaml at repo root).",
+        "If omitted, runs in root mode (fleet.yaml at repo root).",
     )
-    parser.add_argument("-V", "--version", action="version", version=f"claudlobby {__version__}")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "-V", "--version", action="version", version=f"claudlobby {__version__}"
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable debug logging"
+    )
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -1110,15 +1231,25 @@ def main(argv: list[str] | None = None) -> int:
     pv.add_argument("--strict", action="store_true", help="Fail on warnings")
     pv.set_defaults(func=cmd_validate)
 
-    pg = sub.add_parser("generate", help="Compose runtime/bots/ from fleet.yaml + library/")
+    pg = sub.add_parser(
+        "generate", help="Compose runtime/bots/ from fleet.yaml + library/"
+    )
     pg.add_argument("--bot", help="Generate only one bot")
-    pg.add_argument("--strict", action="store_true", help="Refuse to generate on warnings")
+    pg.add_argument(
+        "--strict", action="store_true", help="Refuse to generate on warnings"
+    )
     pg.set_defaults(func=cmd_generate)
 
-    pl = sub.add_parser("list-library", help="List available personas, skills, mcp, guardrails, protocols, voices")
+    pl = sub.add_parser(
+        "list-library",
+        help="List available personas, skills, mcp, guardrails, protocols, voices",
+    )
     pl.set_defaults(func=cmd_list_library)
 
-    pd = sub.add_parser("diff", help="Show drift between runtime/bots/<bot>/ and what generate would produce")
+    pd = sub.add_parser(
+        "diff",
+        help="Show drift between runtime/bots/<bot>/ and what generate would produce",
+    )
     pd.add_argument("--bot", help="Diff only one bot (default: all)")
     pd.set_defaults(func=cmd_diff)
 
@@ -1129,17 +1260,37 @@ def main(argv: list[str] | None = None) -> int:
     ps = sub.add_parser("status", help="Fleet health dashboard (stub)")
     ps.set_defaults(func=cmd_status)
 
-    pe = sub.add_parser("env-migrate", help="Extract secrets from an existing bot setup into tiered .env files (dry-run by default)")
-    pe.add_argument("--source", required=True, help="Path to existing bot fleet dir (e.g. ~/my-bots)")
-    pe.add_argument("--map", action="append", default=[], help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.")
-    pe.add_argument("--apply", action="store_true", help="Write the .env files (default: dry-run preview only)")
+    pe = sub.add_parser(
+        "env-migrate",
+        help="Extract secrets from an existing bot setup into tiered .env files (dry-run by default)",
+    )
+    pe.add_argument(
+        "--source",
+        required=True,
+        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
+    )
+    pe.add_argument(
+        "--map",
+        action="append",
+        default=[],
+        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
+    )
+    pe.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the .env files (default: dry-run preview only)",
+    )
     pe.set_defaults(func=cmd_env_migrate)
 
     pdm = sub.add_parser(
         "data-migrate",
         help="Copy bot data dirs from a legacy bot setup into per-bot runtime data/ (dry-run by default)",
     )
-    pdm.add_argument("--source", required=True, help="Path to existing bot fleet dir (e.g. ~/my-bots)")
+    pdm.add_argument(
+        "--source",
+        required=True,
+        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
+    )
     pdm.add_argument(
         "--map",
         action="append",
@@ -1154,26 +1305,47 @@ def main(argv: list[str] | None = None) -> int:
         "--exclude",
         help="Comma-separated subdir names to skip (e.g. 'personal-projects,work-projects' to keep big git checkouts in place)",
     )
-    pdm.add_argument("--apply", action="store_true", help="Actually copy the dirs (default: dry-run preview only)")
+    pdm.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually copy the dirs (default: dry-run preview only)",
+    )
     pdm.set_defaults(func=cmd_data_migrate)
 
     pcm = sub.add_parser(
         "cron-migrate",
         help="Rewrite cron entries from a legacy bot-fleet path layout to claudlobby's (dry-run by default)",
     )
-    pcm.add_argument("--source", required=True, help="Path to existing bot fleet dir (e.g. ~/my-bots)")
+    pcm.add_argument(
+        "--source",
+        required=True,
+        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
+    )
     pcm.add_argument(
         "--map",
         action="append",
         default=[],
         help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
     )
-    pcm.add_argument("--apply", action="store_true", help="Install the rewritten crontab (default: dry-run preview only)")
+    pcm.add_argument(
+        "--apply",
+        action="store_true",
+        help="Install the rewritten crontab (default: dry-run preview only)",
+    )
     pcm.set_defaults(func=cmd_cron_migrate)
 
-    pm = sub.add_parser("memory-migrate", help="Copy memory files from ~/.claude/projects/ to per-bot memory dirs")
-    pm.add_argument("--map", nargs="*", help="Source-to-bot mappings (e.g. 'project-name-pattern:bot-name')")
-    pm.add_argument("--force", action="store_true", help="Overwrite existing memory files")
+    pm = sub.add_parser(
+        "memory-migrate",
+        help="Copy memory files from ~/.claude/projects/ to per-bot memory dirs",
+    )
+    pm.add_argument(
+        "--map",
+        nargs="*",
+        help="Source-to-bot mappings (e.g. 'project-name-pattern:bot-name')",
+    )
+    pm.add_argument(
+        "--force", action="store_true", help="Overwrite existing memory files"
+    )
     pm.set_defaults(func=cmd_memory_migrate)
 
     pn = sub.add_parser(
@@ -1182,8 +1354,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     pn.add_argument("--name", help="Bot name (lowercase, e.g. 'eng-1')")
     pn.add_argument("--expertise", help="Comma-separated expertise areas (required)")
-    pn.add_argument("--voice", help="Path to voice file (e.g. voices/erlich-bachman.md)")
-    pn.add_argument("--voice-text", help="Inline voice description (creates voices/<name>.md)")
+    pn.add_argument(
+        "--voice", help="Path to voice file (e.g. voices/erlich-bachman.md)"
+    )
+    pn.add_argument(
+        "--voice-text", help="Inline voice description (creates voices/<name>.md)"
+    )
     pn.add_argument("--mission", help="One-paragraph charter")
     pn.add_argument("--model", help="opus / sonnet / haiku")
     pn.add_argument("--effort", help="max / default")
@@ -1194,24 +1370,54 @@ def main(argv: list[str] | None = None) -> int:
     pn.add_argument("--protocols", help="Comma-separated protocols")
     pn.add_argument("--resources", help="Comma-separated resources")
     pn.add_argument("--lessons", help="Comma-separated lessons")
-    pn.add_argument("--integrations", help="Comma-separated integrations (auto-paired with mcp by default)")
-    pn.add_argument("--no-remote-control", action="store_true", help="Disable --remote-control flag")
-    pn.add_argument("--no-dangerously-skip-permissions", action="store_true", help="Disable --dangerously-skip-permissions")
+    pn.add_argument(
+        "--integrations",
+        help="Comma-separated integrations (auto-paired with mcp by default)",
+    )
+    pn.add_argument(
+        "--no-remote-control", action="store_true", help="Disable --remote-control flag"
+    )
+    pn.add_argument(
+        "--no-dangerously-skip-permissions",
+        action="store_true",
+        help="Disable --dangerously-skip-permissions",
+    )
     pn.add_argument("--extra-flags", help="Comma-separated extra claude CLI flags")
     pn.add_argument("--scope-org", help="GitHub org for scope")
     pn.add_argument("--scope-repos", help="Comma-separated repos for scope")
-    pn.add_argument("--scope-snowflake-targets", help="Comma-separated Snowflake targets")
+    pn.add_argument(
+        "--scope-snowflake-targets", help="Comma-separated Snowflake targets"
+    )
     pn.add_argument("--team", help="Add bot to this team's workers list")
     pn.add_argument("--telegram-handle", help="Bot @-handle (without @)")
-    pn.add_argument("--token-env", help="Env var name holding the Telegram token (defaults to TELEGRAM_TOKEN_<NAME>)")
-    pn.add_argument("--require-mention", type=lambda v: v.lower() in ("true", "yes", "1"),
-                    default=None, help="true/false — Telegram requireMention")
+    pn.add_argument(
+        "--token-env",
+        help="Env var name holding the Telegram token (defaults to TELEGRAM_TOKEN_<NAME>)",
+    )
+    pn.add_argument(
+        "--require-mention",
+        type=lambda v: v.lower() in ("true", "yes", "1"),
+        default=None,
+        help="true/false — Telegram requireMention",
+    )
     pn.add_argument("--chat-id", help="Override default group chat_id")
     pn.add_argument("--startup-prompt", help="Custom startup prompt")
-    pn.add_argument("--interactive", action="store_true", help="Force interactive mode even if flags provided")
-    pn.add_argument("--dry-run", action="store_true", help="Show stanza but don't write")
-    pn.add_argument("--yes", "-y", action="store_true", help="Skip confirm-before-write")
-    pn.add_argument("--auto-generate", action="store_true", help="Run `claudlobby generate --bot <name>` after writing")
+    pn.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Force interactive mode even if flags provided",
+    )
+    pn.add_argument(
+        "--dry-run", action="store_true", help="Show stanza but don't write"
+    )
+    pn.add_argument(
+        "--yes", "-y", action="store_true", help="Skip confirm-before-write"
+    )
+    pn.add_argument(
+        "--auto-generate",
+        action="store_true",
+        help="Run `claudlobby generate --bot <name>` after writing",
+    )
     pn.set_defaults(func=cmd_new_bot)
 
     args = parser.parse_args(argv)
