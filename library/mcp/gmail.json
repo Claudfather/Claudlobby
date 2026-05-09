@@ -18,7 +18,8 @@
     }
   },
   "_permissions_contract": {
-    "tools": []
+    "tools": [],
+    "_note": "Deprecated — use gws.json with a single instance instead"
   },
   "gmail": {
     "command": "uvx",

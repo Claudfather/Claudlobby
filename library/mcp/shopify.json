@@ -10,7 +10,8 @@
     }
   },
   "_permissions_contract": {
-    "tools": []
+    "tools": [],
+    "_note": "Tool list not yet enumerated — run server with MCP inspector to discover"
   },
   "shopify": {
     "command": "npx",

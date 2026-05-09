@@ -1502,3 +1502,37 @@ class TestExpertisePermissionsInSettingsLocal:
         assert "Read" in allow
         assert "Grep" in allow
         assert "Glob" in allow
+
+    def test_code_review_profile_in_settings_local(self, tmp_path):
+        """Code reviewer gets Agent/WebFetch/WebSearch in allow, Write/Edit/NotebookEdit in deny."""
+        paths = self._setup_expertise(
+            tmp_path,
+            {
+                "code-review": (
+                    "---\npermissions:\n"
+                    "  allow: [Agent, WebFetch, WebSearch]\n"
+                    "  deny: [Write, Edit, NotebookEdit]\n"
+                    "  bash_allow: [git, gh, grep, find, cat, head, tail, diff]\n"
+                    "---\n\n# Reviewer\n"
+                ),
+            },
+        )
+        bot = BotConfig(bot_id="r", name="r", expertise=["code-review"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"r": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+        deny = result["permissions"]["deny"]
+        # Reviewer needs subagents and research tools
+        assert "Agent" in allow
+        assert "WebFetch" in allow
+        assert "WebSearch" in allow
+        # Reviewer must not write code
+        assert "Write(**)" in deny
+        assert "Edit(**)" in deny
+        assert "NotebookEdit(**)" in deny
+        assert "Write" not in allow
+        assert "Edit" not in allow
+        assert "NotebookEdit" not in allow
+        # Bash commands scoped
+        assert "Bash(git *)" in allow
+        assert "Bash(gh *)" in allow

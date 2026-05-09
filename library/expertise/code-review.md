@@ -1,5 +1,6 @@
 ---
 permissions:
+  allow: [Agent, WebFetch, WebSearch]
   deny: [Write, Edit, NotebookEdit]
   bash_allow: [git, gh, grep, find, cat, head, tail, diff]
 ---
