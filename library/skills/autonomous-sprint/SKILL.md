@@ -170,7 +170,7 @@ Reviewer is whichever reviewer bot is idle and least-context-saturated.
 
 This skill can be triggered:
 - Manually: `/autonomous-sprint <repo> --max-issues 5`
-- Via cron / launchd: see `bot-common/sprint-trigger.sh`
+- Via cron / launchd: see `lib/sprint-trigger.sh`
 - By the manager: when the fleet is idle and there's mission-aligned work to do
 
 ## Notes

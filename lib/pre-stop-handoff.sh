@@ -3,7 +3,7 @@
 # Called by systemd ExecStop before the tmux session is terminated.
 #
 # Add to your .service file:
-#   ExecStop=/path/to/claudlobby/bot-common/pre-stop-handoff.sh /path/to/bot/dir
+#   ExecStop=/path/to/claudlobby/lib/pre-stop-handoff.sh /path/to/bot/dir
 
 set -euo pipefail
 

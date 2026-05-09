@@ -2,7 +2,7 @@
 # sprint-trigger.sh — schedule-driven nudge to run /autonomous-sprint.
 #
 # Wire into cron (Linux) or launchd (macOS) to fire N times per day:
-#   */360 * * * * ~/claudlobby/bot-common/sprint-trigger.sh
+#   */360 * * * * ~/claudlobby/lib/sprint-trigger.sh
 #
 # Skips if manager is busy or not alive. Logs each run.
 set -euo pipefail

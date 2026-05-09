@@ -5,7 +5,7 @@ The zero-to-ripping walkthrough. Assumes you've cloned this repo and want to get
 ## What this repo gives you (and doesn't)
 
 **Ships in this repo:**
-- `bot-common/` — shared lifecycle scripts (start / keepalive / report-back / fleet-state / tg-post / bootstrap-bot / sprint-trigger)
+- `lib/` — shared lifecycle scripts (start / keepalive / report-back / fleet-state / tg-post / sprint-trigger)
 - `manager/` — canonical manager scaffold with 11 orchestration skills
 - `examples/worker/` — worker template with Lifecycle Protocol, Context Mgmt, Telegram rules
 - `examples/global-skills/` — skills that need to live in `~/.claude/skills/` globally (`mission`, `autonomous-sprint`)
@@ -91,25 +91,20 @@ cp -r examples/global-skills/mission ~/.claude/skills/
 cp -r examples/global-skills/autonomous-sprint ~/.claude/skills/
 ```
 
-## Step 5 — Bootstrap your first bot (the manager)
+## Step 5 — Bootstrap your fleet
 
 ```bash
-# Creates ~/claudlobby/<name>/, ~/.claude/channels/telegram-<name>/, seeds trust
-~/claudlobby/bot-common/bootstrap-bot.sh <manager-name> manager \
-  --telegram-token "<BOT_TOKEN_FROM_BOTFATHER>" \
-  --group-chat-id "<GROUP_CHAT_ID>"
+cd ~/claudlobby
+cp fleet.yaml.example local/<fleet-name>/fleet.yaml
+# Edit local/<fleet-name>/fleet.yaml — add your bots, tokens, group chat IDs
+claudlobby --fleet <fleet-name> validate
+claudlobby --fleet <fleet-name> generate
 ```
 
-Edit the scaffolded files:
-- `~/claudlobby/<manager-name>/bot.conf` — fill in `TELEGRAM_GROUP_CHAT_ID`, `FLEET_ORG`
-- `~/claudlobby/<manager-name>/CLAUDE.md` — persona, fleet roster (after workers exist), scope rules
-- `~/claudlobby/<manager-name>/.mcp.json` — tokens for GitHub, Notion, Slack
-
-Install the service unit:
-
-**macOS (launchd)** — see `docs/pi-setup-guide.md` for the plist template; load with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist`.
-
-**Linux (systemd)** — `sudo cp examples/bot.service /etc/systemd/system/<manager-name>.service`, edit paths, then `sudo systemctl daemon-reload && sudo systemctl enable --now <manager-name>`.
+Then fill in secrets and MCP tokens in the generated output:
+- `local/<fleet-name>/runtime/bots/<name>/bot.conf` — verify env vars
+- `local/<fleet-name>/runtime/bots/<name>/.mcp.json` — fill in MCP server tokens
+- `.env` — fill in secrets referenced by bot.conf
 
 ## Step 6 — Pair the human
 
@@ -136,19 +131,16 @@ Test: DM the bot again. It should respond normally.
    ```
 7. Add the group to `access.json` under `groups` with `requireMention: false` (manager sees all).
 
-## Step 8 — Bootstrap workers
+## Step 8 — Add workers to your fleet
 
-For each worker:
+Add worker bots to your `fleet.yaml`, then re-generate:
 
 ```bash
-~/claudlobby/bot-common/bootstrap-bot.sh <worker-name> worker \
-  --telegram-token "<BOT_TOKEN>" \
-  --group-chat-id "<GROUP_CHAT_ID>"
+claudlobby --fleet <fleet-name> validate
+claudlobby --fleet <fleet-name> generate
 ```
 
-Workers default to `requireMention: true` — they only respond when `@<handle>` mentioned in the group.
-
-Customize `~/claudlobby/<worker>/CLAUDE.md` for the role (engineer / reviewer / designer). Fill in MCP tokens.
+Workers default to `requireMention: true` — they only respond when `@<handle>` mentioned in the group. Configure per-worker expertise, skills, and MCP servers in fleet.yaml.
 
 Pair each worker (Step 6), install service unit, start.
 
@@ -169,7 +161,7 @@ Schedule `sprint-trigger.sh` to fire N times per day:
 
 **Linux (cron)**:
 ```
-15 6,12,18,0 * * * ~/claudlobby/bot-common/sprint-trigger.sh
+15 6,12,18,0 * * * ~/claudlobby/lib/sprint-trigger.sh
 ```
 
 **macOS (launchd)** — see `examples/bot.service` → plist equivalent; use `StartCalendarInterval` with the same hours.
@@ -184,7 +176,7 @@ Requires: a `PROJECT_MISSION.md` in at least one target repo (bootstrap with `/m
 |---|---|---|
 | "Not logged in" after launchd/systemd start | (macOS) keychain locked | Auto-login + unlocked screen |
 | `tmux new-session` creates session that dies instantly | Claude CLI in non-TTY fallback | Pin `CLAUDE=/opt/homebrew/bin/claude` in `start-bot.sh` (avoid native-install binary in tmux contexts) |
-| First launch hangs on "Trust this folder?" | Workspace trust not seeded | `bootstrap-bot.sh` seeds `~/.claude.json` automatically; if you skip it, accept once interactively |
+| First launch hangs on "Trust this folder?" | Workspace trust not seeded | Accept once interactively, or pre-seed `~/.claude.json` with `hasTrustDialogAccepted: true` for the bot dir |
 | `**bold**` shows as literal `**` in Telegram | Missing `parseMode: "Markdown"` | See `manager/.claude/skills/_telegram-formatting.md` + worker CLAUDE.md |
 | Worker silently drops after long `[FLEET NOTICE]` paste | Very long tmux send-keys payload tripped something | Break long messages into chunks, or write to a file the bot reads |
 | Bot's Telegram plugin shows no `bot.pid` | Plugin init flaked | `launchctl kickstart -k gui/$(id -u)/<label>` (macOS) or `systemctl restart <name>` (Linux) |
@@ -195,15 +187,14 @@ Requires: a `PROJECT_MISSION.md` in at least one target repo (bootstrap with `/m
 
 ```
 claudlobby/
-├── bot-common/                   Shared scripts, OS-agnostic core
+├── lib/                          Shared scripts, OS-agnostic core
 │   ├── start-bot.sh              Launches the tmux + claude session
 │   ├── keepalive.sh              Periodic health check / nudge
 │   ├── report-back.sh            Worker → manager tmux reporting
-│   ├── tg-post.sh                Bash → Telegram API (parse_mode=Markdown baked in)
+│   ├── tg-post.sh                Bash → Telegram API (plain text default)
 │   ├── fleet-state.json          Central state ledger
 │   ├── fleet-state-update.sh     Updater called by start-bot + report-back
-│   ├── sprint-trigger.sh         Schedule-driven /autonomous-sprint nudger
-│   └── bootstrap-bot.sh          One-shot per-bot scaffolder
+│   └── sprint-trigger.sh         Schedule-driven /autonomous-sprint nudger
 │
 ├── manager/                      Canonical manager scaffold — copy to your fleet
 │   ├── bot.conf                  (template w/ <PLACEHOLDERS>)

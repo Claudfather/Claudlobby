@@ -3,7 +3,7 @@
 # Usage: git-pull-all.sh /path/to/projects/dir
 #
 # Schedule via cron:
-#   30 6 * * * /path/to/claudlobby/bot-common/git-pull-all.sh /path/to/projects
+#   30 6 * * * /path/to/claudlobby/lib/git-pull-all.sh /path/to/projects
 
 set -euo pipefail
 
