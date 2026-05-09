@@ -232,6 +232,36 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
     return merged
 
 
+def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
+    """Resolve MCP permission patterns from fragment _permissions_contract fields.
+
+    For each MCP entry the bot uses, reads the fragment, extracts
+    _permissions_contract.tools, and generates mcp__<server>__<tool> patterns
+    for each tool per instance.
+    """
+    patterns: list[str] = []
+    for entry in bot.mcp:
+        frag_path = paths.find_library_file("mcp", entry.name, ".json")
+        if frag_path is None:
+            continue
+        try:
+            frag = json.loads(frag_path.read_text())
+        except json.JSONDecodeError:
+            continue
+        contract = frag.get("_permissions_contract", {})
+        tools = contract.get("tools", [])
+        if not tools:
+            continue
+        for instance in entry.instances:
+            if instance == "default":
+                output_name = entry.name
+            else:
+                output_name = f"{entry.name}-{instance}"
+            for tool in tools:
+                patterns.append(f"mcp__{output_name}__{tool}")
+    return patterns
+
+
 # ----------------------------------------------------------------------
 # bot.conf
 # ----------------------------------------------------------------------
@@ -712,6 +742,37 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
     return out
 
 
+_TELEGRAM_PLUGIN_TOOLS = [
+    "mcp__plugin_telegram_telegram__reply",
+    "mcp__plugin_telegram_telegram__edit_message",
+    "mcp__plugin_telegram_telegram__react",
+    "mcp__plugin_telegram_telegram__download_attachment",
+]
+
+
+def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
+    """Auto-derive tool permissions from configured channels.
+
+    When a bot has a Telegram handle set, include the 4 plugin tools.
+    """
+    tools: list[str] = []
+    if bot.telegram.handle:
+        tools.extend(_TELEGRAM_PLUGIN_TOOLS)
+    return tools
+
+
+def _resolve_skill_permissions(bot: BotConfig) -> list[str]:
+    """Auto-derive Skill() permission patterns from bot's skill list.
+
+    Each skill needs both Skill(<name>) and Skill(<name>:*) for full operation.
+    """
+    patterns: list[str] = []
+    for skill in bot.skills:
+        patterns.append(f"Skill({skill})")
+        patterns.append(f"Skill({skill}:*)")
+    return patterns
+
+
 def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict:
     """Generate .claude/settings.local.json with memory dir, sibling isolation, tools, sandbox, and hooks."""
     bot_dir = paths.bot_runtime(bot.bot_id)
@@ -734,14 +795,32 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     for tool in bot.tools.deny:
         deny_patterns.append(f"{tool}(**)")
 
+    # Build allow list: layers 3-7
+    allow_patterns: list[str] = []
+
+    # Layer 3: MCP tool contracts (auto-derived from fragment _permissions_contract)
+    allow_patterns.extend(_resolve_mcp_permissions(bot, paths))
+
+    # Layer 4: Channel/plugin tools (auto-derived from config)
+    allow_patterns.extend(_resolve_channel_permissions(bot))
+
+    # Layer 5: Skill patterns (auto-derived from bot.skills)
+    allow_patterns.extend(_resolve_skill_permissions(bot))
+
+    # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
+    for tool in bot.tools.allow:
+        pattern = f"{tool}(**)"
+        if pattern not in allow_patterns:
+            allow_patterns.append(pattern)
+
     if deny_patterns:
         permissions: dict = {"deny": deny_patterns}
-        if bot.tools.allow:
-            permissions["allow"] = [f"{tool}(**)" for tool in bot.tools.allow]
+        if allow_patterns:
+            permissions["allow"] = allow_patterns
         settings["permissions"] = permissions
-    elif bot.tools.allow:
+    elif allow_patterns:
         settings["permissions"] = {
-            "allow": [f"{tool}(**)" for tool in bot.tools.allow],
+            "allow": allow_patterns,
         }
 
     # Sandbox: network + filesystem allowlists + bash auto-allow

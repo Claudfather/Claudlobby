@@ -714,3 +714,194 @@ class TestHooksMergeAndSettings:
         bot = fleet.bots["worker"]
         assert len(bot.hooks["PostToolUse"]) == 1
         assert bot.hooks["PostToolUse"][0]["command"] == "fleet-log.sh"
+
+
+class TestResolveChannelPermissions:
+    """_resolve_channel_permissions auto-derives Telegram plugin tools."""
+
+    def test_returns_telegram_tools_when_handle_set(self):
+        from claudlobby.composer import _resolve_channel_permissions
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="my_bot"),
+        )
+        result = _resolve_channel_permissions(bot)
+        assert "mcp__plugin_telegram_telegram__reply" in result
+        assert "mcp__plugin_telegram_telegram__edit_message" in result
+        assert "mcp__plugin_telegram_telegram__react" in result
+        assert "mcp__plugin_telegram_telegram__download_attachment" in result
+        assert len(result) == 4
+
+    def test_returns_empty_when_no_handle(self):
+        from claudlobby.composer import _resolve_channel_permissions
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle=None),
+        )
+        result = _resolve_channel_permissions(bot)
+        assert result == []
+
+    def test_returns_empty_when_handle_is_empty_string(self):
+        from claudlobby.composer import _resolve_channel_permissions
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle=""),
+        )
+        result = _resolve_channel_permissions(bot)
+        assert result == []
+
+
+class TestResolveSkillPermissions:
+    """_resolve_skill_permissions generates Skill() patterns from bot.skills."""
+
+    def test_generates_both_patterns_per_skill(self):
+        from claudlobby.composer import _resolve_skill_permissions
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            skills=["lifecycle", "prs"],
+        )
+        result = _resolve_skill_permissions(bot)
+        assert "Skill(lifecycle)" in result
+        assert "Skill(lifecycle:*)" in result
+        assert "Skill(prs)" in result
+        assert "Skill(prs:*)" in result
+        assert len(result) == 4
+
+    def test_empty_skills_returns_empty(self):
+        from claudlobby.composer import _resolve_skill_permissions
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            skills=[],
+        )
+        result = _resolve_skill_permissions(bot)
+        assert result == []
+
+    def test_single_skill(self):
+        from claudlobby.composer import _resolve_skill_permissions
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            skills=["commit"],
+        )
+        result = _resolve_skill_permissions(bot)
+        assert result == ["Skill(commit)", "Skill(commit:*)"]
+
+
+class TestChannelSkillInSettingsLocal:
+    """compose_settings_local includes channel + skill permissions in allow list."""
+
+    def _make_paths_with_runtime(self, tmp_path: Path) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "runtime" / "bots").mkdir(parents=True)
+        return Paths(root=root, fleet_dir=root)
+
+    def test_telegram_tools_in_allow(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="my_bot"),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+        assert "mcp__plugin_telegram_telegram__reply" in allow
+        assert "mcp__plugin_telegram_telegram__edit_message" in allow
+
+    def test_skill_patterns_in_allow(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            skills=["lifecycle", "prs"],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+        assert "Skill(lifecycle)" in allow
+        assert "Skill(lifecycle:*)" in allow
+        assert "Skill(prs)" in allow
+        assert "Skill(prs:*)" in allow
+
+    def test_channel_and_skill_combined(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            skills=["commit"],
+            telegram=TelegramConfig(handle="my_bot"),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+        # Channel tools present
+        assert "mcp__plugin_telegram_telegram__reply" in allow
+        # Skill patterns present
+        assert "Skill(commit)" in allow
+        assert "Skill(commit:*)" in allow
+
+    def test_explicit_deny_still_wins(self, tmp_path):
+        """Explicit tools.deny should appear in deny regardless of auto-derived allow."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            skills=["commit"],
+            telegram=TelegramConfig(handle="my_bot"),
+            tools=ToolsConfig(deny=["Write"]),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert "Write(**)" in result["permissions"]["deny"]
+        # Auto-derived still in allow
+        assert "mcp__plugin_telegram_telegram__reply" in result["permissions"]["allow"]
+
+    def test_no_telegram_no_skills_no_permissions(self, tmp_path):
+        """Bot with no telegram, no skills, no explicit tools → no permissions block."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert "permissions" not in result
+
+    def test_explicit_allow_merges_with_auto_derived(self, tmp_path):
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            skills=["commit"],
+            telegram=TelegramConfig(handle="my_bot"),
+            tools=ToolsConfig(allow=["Bash", "Agent"]),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+        # Auto-derived
+        assert "mcp__plugin_telegram_telegram__reply" in allow
+        assert "Skill(commit)" in allow
+        # Explicit
+        assert "Bash(**)" in allow
+        assert "Agent(**)" in allow
