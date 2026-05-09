@@ -773,6 +773,80 @@ def _resolve_skill_permissions(bot: BotConfig) -> list[str]:
     return patterns
 
 
+def _resolve_expertise_permissions(
+    bot: BotConfig,
+    paths: Paths,
+) -> tuple[list[str], list[str]]:
+    """Merge permission profiles from all expertise files for a bot.
+
+    Returns (allow_patterns, deny_patterns). For each expertise:
+    - allow_all expands to a broad tool set
+    - allow lists are unioned
+    - deny lists are unioned
+    - bash_allow entries become Bash(<cmd> *) patterns in the allow list
+
+    Deny wins over allow at the same layer — if a tool appears in both,
+    it stays in deny and is removed from allow.
+    """
+    ALL_TOOLS = [
+        "Read",
+        "Write",
+        "Edit",
+        "Bash",
+        "Agent",
+        "Grep",
+        "Glob",
+        "WebFetch",
+        "WebSearch",
+        "NotebookEdit",
+    ]
+
+    merged_allow: list[str] = []
+    merged_deny: list[str] = []
+    merged_bash: list[str] = []
+    has_allow_all = False
+
+    for area in bot.expertise:
+        path = paths.find_library_file("expertise", area, ".md")
+        if path is None:
+            continue
+        item = parse_expertise_file(path)
+        if item is None or item.permissions is None:
+            continue
+        p = item.permissions
+        if p.allow_all:
+            has_allow_all = True
+        for t in p.allow:
+            if t not in merged_allow:
+                merged_allow.append(t)
+        for t in p.deny:
+            if t not in merged_deny:
+                merged_deny.append(t)
+        for cmd in p.bash_allow:
+            if cmd not in merged_bash:
+                merged_bash.append(cmd)
+
+    if has_allow_all:
+        for t in ALL_TOOLS:
+            if t not in merged_allow:
+                merged_allow.append(t)
+
+    # Deny wins at this layer
+    merged_allow = [t for t in merged_allow if t not in merged_deny]
+
+    allow_patterns = list(merged_allow)
+    for cmd in merged_bash:
+        allow_patterns.append(f"Bash({cmd} *)")
+
+    deny_patterns = [f"{t}(**)" for t in merged_deny]
+    return allow_patterns, deny_patterns
+
+
+# Minimal base tools every bot needs for read-only operation.
+# Expertise profiles add Write, Edit, Bash, etc. in Phase 2.
+BASE_TOOLS = ["Read", "Grep", "Glob"]
+
+
 def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict:
     """Generate .claude/settings.local.json with memory dir, sibling isolation, tools, sandbox, and hooks."""
     bot_dir = paths.bot_runtime(bot.bot_id)
@@ -782,21 +856,28 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
         "autoMemoryDirectory": memory_dir,
     }
 
-    # Build permissions block from sibling isolation + tool deny/allow rules
+    # Build permissions block — layered composition
     deny_patterns: list[str] = []
 
-    # Sibling isolation: deny reading other bots' files
+    # Layer 0: Sibling isolation — deny reading other bots' files
     siblings = [bid for bid in fleet.bots if bid != bot.bot_id]
     for sibling in siblings:
         sibling_dir = str(paths.bot_runtime(sibling))
         deny_patterns.append(f"Read({sibling_dir}/**)")
 
-    # Tool deny rules: e.g. "Write" -> "Write(**)"
+    # Layer 2: Expertise permissions (from library/expertise/ frontmatter)
+    expertise_allow, expertise_deny = _resolve_expertise_permissions(bot, paths)
+    deny_patterns.extend(expertise_deny)
+
+    # Layer 7: Bot-level deny (from fleet.yaml tools.deny) — wins over everything
     for tool in bot.tools.deny:
         deny_patterns.append(f"{tool}(**)")
 
-    # Build allow list: layers 3-7
+    # Build allow list: layers 2-7
     allow_patterns: list[str] = []
+
+    # Layer 2: Expertise allow (plain tool names + bash command patterns)
+    allow_patterns.extend(expertise_allow)
 
     # Layer 3: MCP tool contracts (auto-derived from fragment _permissions_contract)
     allow_patterns.extend(_resolve_mcp_permissions(bot, paths))
@@ -809,9 +890,19 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
 
     # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
     for tool in bot.tools.allow:
-        pattern = f"{tool}(**)"
-        if pattern not in allow_patterns:
-            allow_patterns.append(pattern)
+        if tool not in allow_patterns:
+            allow_patterns.append(tool)
+
+    # Bot-level deny wins over all allow layers
+    bot_deny_plain = set(bot.tools.deny)
+    allow_patterns = [p for p in allow_patterns if p not in bot_deny_plain]
+
+    # Ensure base tools are present whenever allow list is non-empty
+    # (settings.local.json allow REPLACES global — without these, bots lose basic access)
+    if allow_patterns:
+        for t in BASE_TOOLS:
+            if t not in allow_patterns and t not in bot_deny_plain:
+                allow_patterns.insert(0, t)
 
     if deny_patterns:
         permissions: dict = {"deny": deny_patterns}

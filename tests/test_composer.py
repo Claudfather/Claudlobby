@@ -366,9 +366,9 @@ class TestComposeSettingsLocal:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"reader": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
-        assert "Read(**)" in allow
-        assert "Grep(**)" in allow
-        assert "Glob(**)" in allow
+        assert "Read" in allow
+        assert "Grep" in allow
+        assert "Glob" in allow
 
     def test_tool_deny_and_allow_combined(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -381,7 +381,7 @@ class TestComposeSettingsLocal:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"lead": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "Write(**)" in result["permissions"]["deny"]
-        assert "Agent(**)" in result["permissions"]["allow"]
+        assert "Agent" in result["permissions"]["allow"]
 
     def test_tool_deny_merged_with_sibling_isolation(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -902,6 +902,272 @@ class TestChannelSkillInSettingsLocal:
         # Auto-derived
         assert "mcp__plugin_telegram_telegram__reply" in allow
         assert "Skill(commit)" in allow
-        # Explicit
-        assert "Bash(**)" in allow
-        assert "Agent(**)" in allow
+        # Explicit (plain tool names, no glob suffix)
+        assert "Bash" in allow
+        assert "Agent" in allow
+        # Base tools prepended
+        assert "Read" in allow
+        assert "Grep" in allow
+        assert "Glob" in allow
+
+
+class TestResolveMcpPermissions:
+    """_resolve_mcp_permissions generates mcp__<server>__<tool> patterns from fragment contracts."""
+
+    def _setup_mcp_library(self, tmp_path: Path, fragments: dict[str, dict]) -> Paths:
+        """Create a minimal library with MCP fragments."""
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        mcp_dir = root / "library" / "mcp"
+        mcp_dir.mkdir(parents=True)
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for name, content in fragments.items():
+            (mcp_dir / f"{name}.json").write_text(json.dumps(content))
+        return Paths(root=root, fleet_dir=root)
+
+    def test_github_and_notion(self, tmp_path):
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import _resolve_mcp_permissions
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "github": {
+                    "_permissions_contract": {
+                        "tools": ["search_code", "get_issue", "create_pull_request"]
+                    },
+                    "github": {
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-github"],
+                    },
+                },
+                "notion": {
+                    "_permissions_contract": {
+                        "tools": ["API-post-page", "API-get-block-children"]
+                    },
+                    "notion": {
+                        "command": "npx",
+                        "args": ["-y", "@notionhq/notion-mcp-server"],
+                    },
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github"), McpEntry(name="notion")],
+        )
+        result = _resolve_mcp_permissions(bot, paths)
+        assert "mcp__github__search_code" in result
+        assert "mcp__github__get_issue" in result
+        assert "mcp__github__create_pull_request" in result
+        assert "mcp__notion__API-post-page" in result
+        assert "mcp__notion__API-get-block-children" in result
+        assert len(result) == 5
+
+    def test_multi_instance_gws(self, tmp_path):
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import _resolve_mcp_permissions
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "gws": {
+                    "_permissions_contract": {
+                        "tools": ["search_gmail_messages", "get_events"]
+                    },
+                    "gws": {"command": "uvx", "args": ["workspace-mcp"]},
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="gws", instances=["personal", "work"])],
+        )
+        result = _resolve_mcp_permissions(bot, paths)
+        assert "mcp__gws-personal__search_gmail_messages" in result
+        assert "mcp__gws-personal__get_events" in result
+        assert "mcp__gws-work__search_gmail_messages" in result
+        assert "mcp__gws-work__get_events" in result
+        assert len(result) == 4
+
+    def test_fragment_without_contract_skipped(self, tmp_path):
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import _resolve_mcp_permissions
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "custom": {
+                    "custom": {"command": "npx", "args": ["-y", "custom-mcp"]},
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="custom")],
+        )
+        result = _resolve_mcp_permissions(bot, paths)
+        assert result == []
+
+    def test_empty_tools_list_skipped(self, tmp_path):
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import _resolve_mcp_permissions
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "shopify": {
+                    "_permissions_contract": {"tools": []},
+                    "shopify": {"command": "npx", "args": ["-y", "shopify-mcp"]},
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="shopify")],
+        )
+        result = _resolve_mcp_permissions(bot, paths)
+        assert result == []
+
+    def test_missing_fragment_skipped(self, tmp_path):
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import _resolve_mcp_permissions
+
+        paths = self._setup_mcp_library(tmp_path, {})
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="nonexistent")],
+        )
+        result = _resolve_mcp_permissions(bot, paths)
+        assert result == []
+
+
+class TestMcpPermissionsInSettingsLocal:
+    """compose_settings_local includes MCP permissions in allow list."""
+
+    def _setup_mcp_library(self, tmp_path: Path, fragments: dict[str, dict]) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        mcp_dir = root / "library" / "mcp"
+        mcp_dir.mkdir(parents=True)
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for name, content in fragments.items():
+            (mcp_dir / f"{name}.json").write_text(json.dumps(content))
+        return Paths(root=root, fleet_dir=root)
+
+    def test_mcp_permissions_in_allow_list(self, tmp_path):
+        from claudlobby.config import McpEntry
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "github": {
+                    "_permissions_contract": {
+                        "tools": ["search_code", "create_pull_request"]
+                    },
+                    "github": {"command": "npx", "args": ["-y", "gh-mcp"]},
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github")],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert "permissions" in result
+        allow = result["permissions"]["allow"]
+        assert "mcp__github__search_code" in allow
+        assert "mcp__github__create_pull_request" in allow
+
+    def test_mcp_emitted_even_without_explicit_tools_allow(self, tmp_path):
+        """MCP permissions should appear even if bot.tools.allow is empty."""
+        from claudlobby.config import McpEntry
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "notion": {
+                    "_permissions_contract": {"tools": ["API-post-page"]},
+                    "notion": {"command": "npx", "args": ["-y", "notion-mcp"]},
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="notion")],
+            tools=ToolsConfig(allow=[], deny=[]),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert "permissions" in result
+        assert "mcp__notion__API-post-page" in result["permissions"]["allow"]
+
+    def test_explicit_deny_alongside_mcp_permissions(self, tmp_path):
+        from claudlobby.config import McpEntry
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "github": {
+                    "_permissions_contract": {"tools": ["search_code"]},
+                    "github": {"command": "npx", "args": ["-y", "gh-mcp"]},
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github")],
+            tools=ToolsConfig(deny=["Write", "Edit"]),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        deny = result["permissions"]["deny"]
+        allow = result["permissions"]["allow"]
+        assert "Write(**)" in deny
+        assert "Edit(**)" in deny
+        assert "mcp__github__search_code" in allow
+
+    def test_multi_instance_in_settings_local(self, tmp_path):
+        from claudlobby.config import McpEntry
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "gws": {
+                    "_permissions_contract": {
+                        "tools": ["get_events", "search_gmail_messages"]
+                    },
+                    "gws": {"command": "uvx", "args": ["workspace-mcp"]},
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="gws", instances=["personal", "work"])],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        allow = result["permissions"]["allow"]
+        assert "mcp__gws-personal__get_events" in allow
+        assert "mcp__gws-work__get_events" in allow
+        assert "mcp__gws-personal__search_gmail_messages" in allow
+        assert "mcp__gws-work__search_gmail_messages" in allow
