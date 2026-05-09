@@ -136,6 +136,7 @@ class BotConfig:
     post_actions: list[str] = field(default_factory=list)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    hooks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     mounts: dict[str, str] = field(default_factory=dict)  # name → absolute host path
     env: dict[str, str] = field(default_factory=dict)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -312,6 +313,30 @@ def _merge_tools(default: ToolsConfig, override: ToolsConfig) -> ToolsConfig:
     )
 
 
+def _coerce_hooks(raw: dict | None) -> dict[str, list[dict[str, Any]]]:
+    """Parse hooks from fleet.yaml into {event_name: [hook_entry, ...]}."""
+    if not raw or not isinstance(raw, dict):
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for event, entries in raw.items():
+        if not isinstance(entries, list):
+            continue
+        out[event] = [e for e in entries if isinstance(e, dict)]
+    return out
+
+
+def _merge_hooks(
+    default: dict[str, list[dict[str, Any]]],
+    override: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Merge hooks — default entries first, bot entries appended per event."""
+    merged: dict[str, list[dict[str, Any]]] = {}
+    all_events = set(default) | set(override)
+    for event in sorted(all_events):
+        merged[event] = list(default.get(event, [])) + list(override.get(event, []))
+    return merged
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_raw = raw.get("telegram", {}) or {}
@@ -378,6 +403,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         tools=_merge_tools(
             _coerce_tools(defaults.get("tools")),
             _coerce_tools(raw.get("tools")),
+        ),
+        hooks=_merge_hooks(
+            _coerce_hooks(defaults.get("hooks")),
+            _coerce_hooks(raw.get("hooks")),
         ),
         mounts={**(defaults.get("mounts") or {}), **(raw.get("mounts") or {})},
         env=raw.get("env", {}) or {},

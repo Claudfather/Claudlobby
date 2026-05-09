@@ -25,6 +25,24 @@ fleet:
         - "*.anthropic.com"
       # filesystem_allow_write: []           # additional write paths (bot dir is always writable)
 
+    # hooks — Claude Code hooks for fleet-wide observability.
+    # Each event (PreToolUse, PostToolUse, etc.) contains a list of hook entries.
+    # Fleet defaults are merged with per-bot hooks (bot entries appended after defaults).
+    # Format mirrors Claude Code's hooks schema — see https://docs.anthropic.com/en/docs/claude-code/hooks
+    #
+    # hooks:
+    #   PreToolUse:
+    #     - command: "$CLAUDLOBBY_ROOT/lib/log-tool-call.sh"    # log all tool calls
+    #   PostToolUse:
+    #     - command: "$CLAUDLOBBY_ROOT/lib/log-tool-call.sh"    # log tool results
+    #
+    # Supported fields per hook entry:
+    #   command    — shell command to run (required for type: command)
+    #   matcher    — tool name filter: "Bash", "Write|Edit", "mcp__.*", or omit for all
+    #   type       — hook type: command (default), http, prompt, agent
+    #   timeout    — seconds before timeout (default: 600 for command)
+    #   async      — run in background without blocking (default: false)
+
   teams:
     engineering:
       manager: lead
@@ -114,6 +132,13 @@ fleet:
 #       explore: haiku                      # subagent model for Explore agents
 #       plan: sonnet                        # subagent model for Plan agents
 #       general: sonnet                     # subagent model for general-purpose agents
+#
+#     # hooks — per-bot hooks (appended to fleet defaults)
+#     # Use to add bot-specific behavior on top of fleet-wide logging.
+#     hooks:
+#       PostToolUse:
+#         - command: "notify-manager.sh"          # alert manager on tool completion
+#           matcher: "Bash"                       # only for Bash tool calls
 #
 #     # voice — personality overlay file (separate from expertise)
 #     voice: voices/erlich-bachman.md
