@@ -1,4 +1,4 @@
-"""Tests for composer.py — scaffold_env_files merge and access.json reconcile."""
+"""Tests for composer.py — scaffold_env_files merge, access.json reconcile, settings.local tools, bot.conf model strategy."""
 
 from __future__ import annotations
 
@@ -407,3 +407,84 @@ class TestComposeSettingsLocal:
         # Should have both sibling isolation and tool deny
         assert any("Read(" in d and "bot-b" in d for d in deny)
         assert "Write(**)" in deny
+
+
+class TestComposeBotConfModelStrategy:
+    """compose_bot_conf emits MODEL_STRATEGY_* env vars when model_strategy is set."""
+
+    def _compose(self, tmp_path, model_strategy=None, model=None):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            model=model,
+            model_strategy=model_strategy,
+            telegram=TelegramConfig(handle="w_bot"),
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_bot_conf(bot, fleet, paths)
+
+    def test_no_model_strategy_no_vars(self, tmp_path):
+        conf = self._compose(tmp_path)
+        assert "MODEL_STRATEGY" not in conf
+
+    def test_full_model_strategy(self, tmp_path):
+        from claudlobby.config import ModelStrategyConfig
+
+        ms = ModelStrategyConfig(
+            base="sonnet",
+            escalate_to="opus",
+            escalate_when=">5 files or architecture decisions",
+            compact_when=">50% context",
+        )
+        conf = self._compose(tmp_path, model_strategy=ms)
+        assert 'export MODEL_STRATEGY_BASE="sonnet"' in conf
+        assert 'export MODEL_STRATEGY_ESCALATE_TO="opus"' in conf
+        assert "MODEL_STRATEGY_ESCALATE_WHEN=" in conf
+        assert ">5 files or architecture decisions" in conf
+        assert "MODEL_STRATEGY_COMPACT_WHEN=" in conf
+        assert ">50% context" in conf
+
+    def test_partial_model_strategy(self, tmp_path):
+        from claudlobby.config import ModelStrategyConfig
+
+        ms = ModelStrategyConfig(base="sonnet", escalate_to="opus")
+        conf = self._compose(tmp_path, model_strategy=ms)
+        assert 'export MODEL_STRATEGY_BASE="sonnet"' in conf
+        assert 'export MODEL_STRATEGY_ESCALATE_TO="opus"' in conf
+        assert "MODEL_STRATEGY_ESCALATE_WHEN" not in conf
+        assert "MODEL_STRATEGY_COMPACT_WHEN" not in conf
+
+    def test_subagent_model_preferences(self, tmp_path):
+        from claudlobby.config import ModelStrategyConfig
+
+        ms = ModelStrategyConfig(
+            base="sonnet",
+            raw={"explore": "haiku", "plan": "sonnet", "general": "sonnet"},
+        )
+        conf = self._compose(tmp_path, model_strategy=ms)
+        assert 'export MODEL_STRATEGY_EXPLORE="haiku"' in conf
+        assert 'export MODEL_STRATEGY_PLAN="sonnet"' in conf
+        assert 'export MODEL_STRATEGY_GENERAL="sonnet"' in conf
+
+    def test_model_flag_still_in_claude_flags(self, tmp_path):
+        conf = self._compose(tmp_path, model="opus")
+        assert "--model opus" in conf
+
+    def test_model_strategy_section_header(self, tmp_path):
+        from claudlobby.config import ModelStrategyConfig
+
+        ms = ModelStrategyConfig(base="sonnet")
+        conf = self._compose(tmp_path, model_strategy=ms)
+        assert "# Model strategy" in conf
