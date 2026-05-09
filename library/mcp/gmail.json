@@ -17,6 +17,10 @@
       "tier": "fleet"
     }
   },
+  "_permissions_contract": {
+    "tools": [],
+    "_note": "Deprecated — use gws.json with a single instance instead"
+  },
   "gmail": {
     "command": "uvx",
     "args": ["workspace-mcp", "--single-user", "--tools", "gmail", "calendar"],

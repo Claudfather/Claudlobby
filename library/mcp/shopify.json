@@ -9,6 +9,10 @@
       "tier": "fleet"
     }
   },
+  "_permissions_contract": {
+    "tools": [],
+    "_note": "Tool list not yet enumerated — run server with MCP inspector to discover"
+  },
   "shopify": {
     "command": "npx",
     "args": ["-y", "@ajackus/shopify-mcp-server"],

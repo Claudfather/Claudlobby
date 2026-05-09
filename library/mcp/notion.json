@@ -6,6 +6,32 @@
       "scope": "instance"
     }
   },
+  "_permissions_contract": {
+    "tools": [
+      "API-query-data-source",
+      "API-retrieve-a-database",
+      "API-retrieve-a-page",
+      "API-retrieve-a-page-property",
+      "API-post-search",
+      "API-post-page",
+      "API-patch-page",
+      "API-get-block-children",
+      "API-retrieve-a-block",
+      "API-update-a-block",
+      "API-delete-a-block",
+      "API-patch-block-children",
+      "API-create-a-comment",
+      "API-retrieve-a-comment",
+      "API-get-self",
+      "API-get-user",
+      "API-get-users",
+      "API-move-page",
+      "API-create-a-data-source",
+      "API-retrieve-a-data-source",
+      "API-update-a-data-source",
+      "API-list-data-source-templates"
+    ]
+  },
   "notion": {
     "command": "npx",
     "args": ["-y", "@notionhq/notion-mcp-server"],
