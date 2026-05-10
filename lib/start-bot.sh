@@ -90,13 +90,28 @@ CLAUDE_CMD=". '$BOT_ENV_FILE' && exec claude $CLAUDE_FLAGS --name \"$SESSION_NAM
 
 "$_TMUX_BIN" new-session -d -s "$BOT_NAME" "$CLAUDE_CMD"
 
-# Wait for initialization (up to 90s)
-for _ in $(seq 1 90); do
+# Wait for initialization (up to 90s) with observability
+LOG="$BOT_DIR/logs/startup.log"
+setup_log_dir "$LOG"
+_poll_start=$(date +%s)
+echo "$(ts_iso) POLL_START — waiting for remote-control readiness" >> "$LOG"
+_ready=0
+for _i in $(seq 1 90); do
+    if ! check_tmux_session "$BOT_NAME"; then
+        echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
+        exit 1
+    fi
     if "$_TMUX_BIN" capture-pane -t "$BOT_NAME" -p 2>/dev/null | grep -q "remote-control is active"; then
+        _elapsed=$(( $(date +%s) - _poll_start ))
+        echo "$(ts_iso) READY — remote-control active after ${_elapsed}s" >> "$LOG"
+        _ready=1
         break
     fi
     sleep 1
 done
+if [ "$_ready" -eq 0 ]; then
+    echo "$(ts_iso) TIMEOUT — 90s elapsed, remote-control string not found, proceeding anyway" >> "$LOG"
+fi
 
 sleep 5  # buffer for MCP servers and channels
 
