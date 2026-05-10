@@ -41,6 +41,13 @@ node_modules/
 */projects/
 
 # Logs
+# Runtime state (fleet-state.json, creds-check-state.json, locks)
+state/
+lib/fleet-state.json
+lib/fleet-state.json.lock
+lib/creds-check-state.json
+lib/creds-check-state.json.lock
+
 *.log
 
 # OS

@@ -6,7 +6,7 @@ Composable lifecycle hooks — actions to take when the bot's session ends, rest
 
 - **Pre-stop handoff** — "before this session ends, write a handoff note for the next session" (see `lib/pre-stop-handoff.sh`)
 - **Post-restart announce** — "when you come back from a restart, briefly summarize what state you're in"
-- **Session retrospective** — "every N hours, log a one-line activity summary to fleet-state.json"
+- **Session retrospective** — "every N hours, log a one-line activity summary to state/fleet-state.json"
 - **Daily wrap-up** — "at end-of-day, post a Telegram summary of the day's work"
 
 ## What does NOT belong here

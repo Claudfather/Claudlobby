@@ -350,7 +350,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append(f'export CLAUDLOBBY_ROOT="{paths.root}"')
     lines.append(f'export FLEET_NAME="{fleet.name}"')
     lines.append(f'export SERVICE_PREFIX="{fleet.service_prefix}"')
-    lines.append(f'export FLEET_STATE_PATH="{paths.lib / "fleet-state.json"}"')
+    lines.append(f'export FLEET_STATE_PATH="{paths.root / "state" / "fleet-state.json"}"')
     chat_id = ctx["TELEGRAM_GROUP_CHAT_ID"]
     if chat_id:
         lines.append(f'export TELEGRAM_GROUP_CHAT_ID="{chat_id}"')

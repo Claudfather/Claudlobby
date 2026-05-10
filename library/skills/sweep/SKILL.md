@@ -36,7 +36,7 @@ Select the stalest repo — either from a fleet-maintained tracker or by inspect
 ```bash
 # Option A: fleet-state ledger, if you maintain last_swept per repo
 jq -r '.sweeps | to_entries | sort_by(.value.last_swept) | .[0].key' \
-  ~/claudlobby/lib/fleet-state.json
+  ~/claudlobby/state/fleet-state.json
 
 # Option B: pick the repo with the most days since last commit to main
 for repo in <FLEET_REPOS>; do
