@@ -725,6 +725,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         org_structure=org_structure,
         resources=_items(bot.resources, "resources"),
         integrations=_items(integration_names, "integrations"),
+        principles=_items(bot.principles, "principles"),
         protocols=_items(bot.protocols, "protocols"),
         guardrails=_items(bot.guardrails, "guardrails"),
         lessons=_items(bot.lessons, "lessons"),
