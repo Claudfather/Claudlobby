@@ -18,6 +18,10 @@
 # `claudlobby --fleet <name> generate` first.
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 FLEET="${CLAUDLOBBY_FLEET:-}"
 NO_CREDS_CHECK=0
 DRY_RUN=0
@@ -74,8 +78,7 @@ BEGIN_MARKER="# BEGIN claudlobby:$FLEET"
 END_MARKER="# END claudlobby:$FLEET"
 
 # Build the new managed block.
-TMPBLOCK=$(mktemp)
-trap 'rm -f "$TMPBLOCK"' EXIT
+TMPBLOCK=$(safe_mktemp)
 
 {
     echo "$BEGIN_MARKER"

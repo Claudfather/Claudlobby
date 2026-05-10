@@ -131,6 +131,14 @@ safe_mktemp() {
 
 # --- tmux helpers ------------------------------------------------------------
 
+# Strip control chars and escape sequences dangerous in tmux send-keys.
+sanitize_tmux_input() {
+    local input="$1"
+    input=$(printf '%s' "$input" | tr -d '\000-\037\177')
+    input=$(printf '%s' "$input" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+    printf '%s' "$input"
+}
+
 check_tmux_session() {
     local session="${1:?Usage: check_tmux_session <name>}"
     "$_TMUX_BIN" has-session -t "$session" 2>/dev/null
