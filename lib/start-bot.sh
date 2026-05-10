@@ -107,7 +107,7 @@ for _i in $(seq 1 90); do
         _ready=1
         break
     fi
-    sleep 1
+    sleep 0.5
 done
 if [ "$_ready" -eq 0 ]; then
     echo "$(ts_iso) TIMEOUT — 90s elapsed, remote-control string not found, proceeding anyway" >> "$LOG"
