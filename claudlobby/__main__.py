@@ -1056,6 +1056,77 @@ def cmd_memory_migrate(args) -> int:
     return 0
 
 
+def cmd_warm_cache(args) -> int:
+    """Pre-download npx packages referenced by MCP fragments.
+
+    Scans all MCP fragments used by the fleet and runs `npx -y <pkg> --help`
+    for each unique npx-based package. This ensures ~/.npm/_npx/ is warm
+    before bot startup, avoiding 30-60s cold-download delays on Pi hardware.
+    """
+    import json as _json
+    import subprocess
+
+    paths = _resolve_paths(args)
+    _load_env(paths)
+    fleet = load_fleet(paths.fleet_yaml)
+
+    # Collect unique npx packages from all bot MCP configs
+    npx_packages: set[str] = set()
+    for bot in fleet.bots.values():
+        for entry in bot.mcp:
+            frag_path = paths.find_library_file("mcp", entry.name, ".json")
+            if frag_path is None:
+                continue
+            try:
+                frag = _json.loads(frag_path.read_text())
+            except _json.JSONDecodeError:
+                continue
+            for k, v in frag.items():
+                if k.startswith("_") or not isinstance(v, dict):
+                    continue
+                if v.get("command") == "npx" and "args" in v:
+                    args_list = v["args"]
+                    # Extract package name: first arg after "-y"
+                    for i, a in enumerate(args_list):
+                        if a == "-y" and i + 1 < len(args_list):
+                            npx_packages.add(args_list[i + 1])
+                            break
+
+    if not npx_packages:
+        log.info("no npx-based MCP packages found in fleet")
+        return 0
+
+    log.info("warming npx cache for %d packages:", len(npx_packages))
+    failed = []
+    for pkg in sorted(npx_packages):
+        log.info("  %s", pkg)
+        if args.dry_run:
+            continue
+        # Use --help or a quick-exit to trigger download without running the server
+        try:
+            subprocess.run(
+                ["npx", "-y", pkg, "--help"],
+                capture_output=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("  timeout warming %s (120s) — may still have cached", pkg)
+        except FileNotFoundError:
+            log.error("npx not found — install Node.js first")
+            return 1
+        except Exception as e:
+            log.warning("  failed to warm %s: %s", pkg, e)
+            failed.append(pkg)
+
+    if args.dry_run:
+        log.info("(dry run — no downloads)")
+    elif failed:
+        log.warning("%d packages failed to warm: %s", len(failed), ", ".join(failed))
+    else:
+        log.info("cache warm complete")
+    return 0
+
+
 def cmd_new_bot(args) -> int:
     """Interactive (or flag-driven) bot creation."""
     from .newbot import (
@@ -1419,6 +1490,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Run `claudlobby generate --bot <name>` after writing",
     )
     pn.set_defaults(func=cmd_new_bot)
+
+    pw = sub.add_parser(
+        "warm-cache",
+        help="Pre-download npx packages for all MCP servers in fleet",
+    )
+    pw.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show packages that would be warmed without downloading",
+    )
+    pw.set_defaults(func=cmd_warm_cache)
 
     args = parser.parse_args(argv)
     logging.basicConfig(
