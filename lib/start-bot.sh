@@ -96,7 +96,7 @@ setup_log_dir "$LOG"
 _poll_start=$(date +%s)
 echo "$(ts_iso) POLL_START — waiting for remote-control readiness" >> "$LOG"
 _ready=0
-for _i in $(seq 1 90); do
+for _i in $(seq 1 180); do
     if ! check_tmux_session "$BOT_NAME"; then
         echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
         exit 1
@@ -107,7 +107,7 @@ for _i in $(seq 1 90); do
         _ready=1
         break
     fi
-    sleep 1
+    sleep 0.5
 done
 if [ "$_ready" -eq 0 ]; then
     echo "$(ts_iso) TIMEOUT — 90s elapsed, remote-control string not found, proceeding anyway" >> "$LOG"
