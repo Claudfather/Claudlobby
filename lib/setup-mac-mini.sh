@@ -67,7 +67,7 @@ run()  {
     if [ "$DRY_RUN" = 1 ]; then
         printf 'setup: [dry-run] %s\n' "$*"
     else
-        eval "$@"
+        "$@"
     fi
 }
 
