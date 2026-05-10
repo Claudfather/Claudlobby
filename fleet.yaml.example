@@ -29,6 +29,7 @@ fleet:
   name: example-fleet
   service_prefix: com.example.claudlobby
   telegram_group_chat_id: "-1001234567890"   # replace with your group ID
+  # human_telegram_id: "1234567890"          # your Telegram user ID — enables DM allowlisting for all bots
 
   accounts:
     default: ~/.claude
@@ -139,6 +140,10 @@ fleet:
 #     # mounts — symlinks to external host paths, created under <bot>/mounts/
 #     mounts:
 #       ha-config: /path/to/homeassistant/config  # edits write to the real location
+#
+#     # integrations — usage docs from library/integrations/ (auto-paired with mcp by default)
+#     # Setting this explicitly overrides auto-pairing. Omit to let mcp drive it.
+#     integrations: [neon, railway, vercel]
 #
 #     # scope — operational boundaries (org, repos the bot is allowed to touch)
 #     scope:

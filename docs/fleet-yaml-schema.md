@@ -9,6 +9,7 @@ fleet:
   name: <fleet-name>                    # human-readable identifier
   service_prefix: <reverse-domain>      # e.g. "com.example.claudlobby" — used for service unit names
   telegram_group_chat_id: "<chat-id>"   # default group; bots can override per-bot
+  human_telegram_id: "<user-id>"        # OPTIONAL — human's Telegram ID for DM allowlisting
 
   accounts:                             # OPTIONAL — alternate Claude Code config dirs (multi-auth)
     default: ~/.claude
@@ -18,6 +19,7 @@ fleet:
     model: opus | sonnet | haiku
     effort: max | default
     account: default
+    prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
     expertise: [<list>]                 # appended to bot's expertise
     skills: [<list>]
     mcp: [<list>]
@@ -30,6 +32,20 @@ fleet:
     mission: <string>
     scope: { ... }
     model_strategy: { ... }
+    telegram:                           # merged field-by-field with bot telegram
+      token_env: <env-var-name>
+      require_mention: true | false
+    sandbox:                            # sandbox network/filesystem allowlists
+      auto_allow_bash: true | false
+      network_allowed_domains: [<list>]
+      filesystem_allow_write: [<list>]
+    tools:                              # tool allow/deny defaults
+      deny: [<tool>, ...]
+      allow: [<tool>, ...]
+    hooks:                              # Claude Code hooks for fleet-wide observability
+      <EventName>:
+        - command: <shell-command>
+          matcher: <tool-pattern>
 
   teams:                                # OPTIONAL — group bots so managers know their roster
     <team-name>:
@@ -38,6 +54,7 @@ fleet:
 
   bots:                                 # REQUIRED — one entry per bot
     <bot-name>:
+      name: <display-name>              # OPTIONAL — defaults to dict key
       expertise: [<list>]               # REQUIRED — area(s) of expertise from library/expertise/
       voice: voices/<file>.md           # OPTIONAL — personality overlay
       mission: <string>                 # OPTIONAL — one-paragraph charter
@@ -62,6 +79,15 @@ fleet:
       lessons: [<list>]
       post_actions: [<list>]
       env: { <KEY>: <value>, ... }      # bot-specific env exports (merged into bot.conf)
+      tools:                            # OPTIONAL — tool allow/deny
+        deny: [<tool>, ...]
+        allow: [<tool>, ...]
+      hooks:                            # OPTIONAL — per-bot hooks (appended to fleet defaults)
+        <EventName>:
+          - command: <shell-command>
+            matcher: <tool-pattern>
+      mounts:                           # OPTIONAL — symlinks to external host paths
+        <name>: /absolute/host/path
       telegram:
         handle: <bot-handle>
         token_env: TELEGRAM_TOKEN_<X>
@@ -80,9 +106,20 @@ Cosmetic + service-unit naming + default Telegram chat. Bots may override `chat_
 
 Alternate Claude Code config directories. Useful when some bots authenticate against a different account. Bot stanza references the key (`account: work`); the generator writes `CLAUDE_CONFIG_DIR` into `bot.conf`.
 
+### `fleet.human_telegram_id`
+
+The human operator's Telegram user ID. When set, the compositor writes this into every bot's `access.json` `allowFrom` list, so the human can DM any bot without pending approval.
+
 ### `fleet.defaults`
 
-Applied to every bot. Bot-level fields **append to** lists (skills, expertise, guardrails, protocols, resources, etc.) and **override** scalars (model, effort, account, mission).
+Applied to every bot. Merge rules by type:
+
+- **Lists** (skills, expertise, guardrails, protocols, resources, lessons, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
+- **Scalars** (model, effort, account, mission) — bot-level **overrides** defaults.
+- **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
+- **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
+- **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
+- **Hooks** — bot-level entries are **appended after** defaults per event. Same-matcher hooks group together.
 
 ### `fleet.teams`
 
@@ -138,11 +175,79 @@ List of skill basenames from `library/skills/`. Generator symlinks each into `ru
 
 Lists of basenames from the corresponding `library/<dir>/`. Each gets appended to CLAUDE.md as its own section. Bot accumulates `defaults.<list>` + bot-level (deduped, order-preserved).
 
-### `bots.<name>.telegram.token_env`
+### `bots.<name>.telegram`
 
-Name of the **env var** that holds this bot's Telegram token (e.g., `TELEGRAM_TOKEN_LEAD`). The actual token lives in `.env`. The generator writes the env-var *name* into `bot.conf` as `TELEGRAM_TOKEN_ENV_NAME`; `lib/start-bot.sh` reads through to the actual token.
+Telegram config for this bot. Fields: `handle` (bot username), `token_env` (env var name holding the token), `require_mention` (whether the bot responds only to @-mentions), `chat_id` (override fleet-level group).
 
-This indirection lets you commit `fleet.yaml` publicly while keeping tokens in a gitignored `.env`.
+`token_env` names the **env var** that holds the Telegram token (e.g., `TELEGRAM_TOKEN_LEAD`). The actual token lives in `.env`. The generator writes the env-var *name* into `bot.conf` as `TELEGRAM_TOKEN_ENV_NAME`; `lib/start-bot.sh` reads through to the actual token. This indirection lets you commit `fleet.yaml` publicly while keeping tokens in a gitignored `.env`.
+
+Telegram fields support defaults merging — set common values (like `token_env`) in `defaults.telegram` and override per-bot as needed.
+
+### `bots.<name>.tools`
+
+Control which Claude Code tools a bot may use. Two sub-fields:
+
+- `deny: [Write, Edit, NotebookEdit]` — generates permission deny rules like `Write(**)` in `settings.local.json`. The bot cannot call these tools.
+- `allow: [Agent, Bash, Read]` — generates permission allow rules. Useful when combined with auto-derived permissions from expertise profiles.
+
+Deny wins over allow at the same layer. The validator warns if denied tools conflict with the bot's expertise (e.g., denying `Write` for a `software-engineering` bot).
+
+### `bots.<name>.hooks`
+
+Per-bot Claude Code hooks, appended to fleet defaults. Each event (e.g., `PreToolUse`, `PostToolUse`) contains a list of hook entries:
+
+```yaml
+hooks:
+  PostToolUse:
+    - command: "notify-manager.sh"
+      matcher: "Bash"
+      timeout: 30
+```
+
+Hook entry fields:
+
+| Field | Description |
+|-------|-------------|
+| `command` | Shell command to run (required for type: command) |
+| `matcher` | Tool name filter: `"Bash"`, `"Write\|Edit"`, `"mcp__.*"`, or omit for all tools |
+| `type` | Hook type: `command` (default), `http`, `prompt`, `agent` |
+| `timeout` | Seconds before timeout (default: 600 for command) |
+| `async` | Run in background without blocking (default: false) |
+
+The compositor transforms the flat fleet.yaml format into Claude Code's nested matcher-group format in `settings.local.json`.
+
+### `bots.<name>.sandbox`
+
+Sandbox network and filesystem allowlists, written to `settings.local.json`. Merged with defaults (lists unioned, bools overridden).
+
+- `network_allowed_domains` — hostnames the bot may access (e.g., `api.github.com`, `"*.anthropic.com"`)
+- `filesystem_allow_write` — additional writable paths beyond the bot directory
+- `auto_allow_bash` — skip Bash tool permission prompts when running in sandbox mode
+
+### `bots.<name>.mounts`
+
+Symlinks to external host paths, created under `<bot-dir>/mounts/<name>`. Useful for giving a bot access to files outside the repo (e.g., Home Assistant config).
+
+```yaml
+mounts:
+  ha-config: /path/to/homeassistant/config
+```
+
+Edits write to the real location via the symlink. Stale symlinks (removed from config) are cleaned up on re-generate.
+
+## Auto-derived permissions
+
+The compositor auto-derives permission entries in `settings.local.json` from several sources. These don't require explicit `tools:` config — they're generated automatically.
+
+| Source | What it generates |
+|--------|-------------------|
+| **Expertise profiles** | `library/expertise/<name>.md` frontmatter can declare `permissions: { allow_all, allow, deny, bash_allow }`. Merged across all expertise files. |
+| **MCP permission contracts** | `library/mcp/<name>.json` `_permissions_contract.tools` field lists tool names → generates `mcp__<server>__<tool>` allow patterns. |
+| **Channel plugins** | Bots with a Telegram handle get allow rules for `mcp__plugin_telegram_telegram__*` tools. |
+| **Skills** | Each skill generates `Skill(<name>)` and `Skill(<name>:*)` allow patterns. |
+| **Base tools** | `Read`, `Grep`, `Glob` are always allowed when an allow list is non-empty. |
+
+Layering order (later layers win on conflict): expertise → MCP contracts → channels → skills → fleet defaults → bot-level. Bot-level deny always wins.
 
 ## Composition order (per bot)
 
@@ -162,6 +267,15 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 12. **Post-actions** — `## Post-actions` section.
 
 The result is a single CLAUDE.md you can read top-to-bottom. Each section's origin is obvious from the markdown headers.
+
+In addition to CLAUDE.md, the generator produces:
+
+- **bot.conf** — env vars sourced at startup (model flags, Telegram config, model strategy, mounts)
+- **.mcp.json** — merged MCP server configs with env-var placeholders
+- **.claude/settings.local.json** — memory dir, sibling isolation, tool permissions, sandbox config, hooks
+- **access.json** — Telegram channel config (requireMention, DM policy, human allowlist)
+- **\<bot\>.service / .plist** — systemd / launchd supervision units
+- **.claude/skills/** — symlinked skill directories
 
 ## Validation rules
 
