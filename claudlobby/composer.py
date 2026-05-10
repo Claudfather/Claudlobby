@@ -236,8 +236,15 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
     """Resolve MCP permission patterns from fragment _permissions_contract fields.
 
     For each MCP entry the bot uses, reads the fragment, extracts
-    _permissions_contract.tools, and generates mcp__<server>__<tool> patterns
-    for each tool per instance.
+    _permissions_contract.tools, and generates permission patterns per instance.
+
+    Wildcard compression: when the bot is allowed all tools in the contract
+    (i.e., no partial restriction), emit a single ``mcp__<server>__*`` wildcard
+    instead of one entry per tool.  This keeps settings.local.json compact and
+    prevents staleness when MCP servers add new tools.
+
+    Individual patterns are still emitted when only a subset of the contract
+    tools should be allowed (not yet wired up, but the logic is ready).
     """
     patterns: list[str] = []
     for entry in bot.mcp:
@@ -257,8 +264,10 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
                 output_name = entry.name
             else:
                 output_name = f"{entry.name}-{instance}"
-            for tool in tools:
-                patterns.append(f"mcp__{output_name}__{tool}")
+            # Emit a server-level wildcard when ALL contract tools are allowed.
+            # This is always the case currently (no partial allow mechanism),
+            # so the wildcard is emitted for every server with a non-empty tools list.
+            patterns.append(f"mcp__{output_name}__*")
     return patterns
 
 

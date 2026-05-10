@@ -912,7 +912,7 @@ class TestChannelSkillInSettingsLocal:
 
 
 class TestResolveMcpPermissions:
-    """_resolve_mcp_permissions generates mcp__<server>__<tool> patterns from fragment contracts."""
+    """_resolve_mcp_permissions emits server-level wildcards from fragment contracts."""
 
     def _setup_mcp_library(self, tmp_path: Path, fragments: dict[str, dict]) -> Paths:
         """Create a minimal library with MCP fragments."""
@@ -925,7 +925,8 @@ class TestResolveMcpPermissions:
             (mcp_dir / f"{name}.json").write_text(json.dumps(content))
         return Paths(root=root, fleet_dir=root)
 
-    def test_github_and_notion(self, tmp_path):
+    def test_github_and_notion_emit_wildcards(self, tmp_path):
+        """When all tools are allowed, emit mcp__<server>__* wildcards instead of per-tool entries."""
         from claudlobby.config import McpEntry
         from claudlobby.composer import _resolve_mcp_permissions
 
@@ -959,14 +960,16 @@ class TestResolveMcpPermissions:
             mcp=[McpEntry(name="github"), McpEntry(name="notion")],
         )
         result = _resolve_mcp_permissions(bot, paths)
-        assert "mcp__github__search_code" in result
-        assert "mcp__github__get_issue" in result
-        assert "mcp__github__create_pull_request" in result
-        assert "mcp__notion__API-post-page" in result
-        assert "mcp__notion__API-get-block-children" in result
-        assert len(result) == 5
+        # Wildcards emitted instead of per-tool entries
+        assert "mcp__github__*" in result
+        assert "mcp__notion__*" in result
+        # No individual tool entries
+        assert "mcp__github__search_code" not in result
+        assert "mcp__notion__API-post-page" not in result
+        assert len(result) == 2
 
-    def test_multi_instance_gws(self, tmp_path):
+    def test_multi_instance_gws_wildcards(self, tmp_path):
+        """Multi-instance servers each get their own wildcard entry."""
         from claudlobby.config import McpEntry
         from claudlobby.composer import _resolve_mcp_permissions
 
@@ -988,11 +991,12 @@ class TestResolveMcpPermissions:
             mcp=[McpEntry(name="gws", instances=["personal", "work"])],
         )
         result = _resolve_mcp_permissions(bot, paths)
-        assert "mcp__gws-personal__search_gmail_messages" in result
-        assert "mcp__gws-personal__get_events" in result
-        assert "mcp__gws-work__search_gmail_messages" in result
-        assert "mcp__gws-work__get_events" in result
-        assert len(result) == 4
+        assert "mcp__gws-personal__*" in result
+        assert "mcp__gws-work__*" in result
+        # No individual tool entries
+        assert "mcp__gws-personal__search_gmail_messages" not in result
+        assert "mcp__gws-work__get_events" not in result
+        assert len(result) == 2
 
     def test_fragment_without_contract_skipped(self, tmp_path):
         from claudlobby.config import McpEntry
@@ -1066,6 +1070,7 @@ class TestMcpPermissionsInSettingsLocal:
         return Paths(root=root, fleet_dir=root)
 
     def test_mcp_permissions_in_allow_list(self, tmp_path):
+        """Wildcard is emitted for github MCP in settings.local allow list."""
         from claudlobby.config import McpEntry
 
         paths = self._setup_mcp_library(
@@ -1089,8 +1094,10 @@ class TestMcpPermissionsInSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" in result
         allow = result["permissions"]["allow"]
-        assert "mcp__github__search_code" in allow
-        assert "mcp__github__create_pull_request" in allow
+        assert "mcp__github__*" in allow
+        # Individual tool entries should not appear
+        assert "mcp__github__search_code" not in allow
+        assert "mcp__github__create_pull_request" not in allow
 
     def test_mcp_emitted_even_without_explicit_tools_allow(self, tmp_path):
         """MCP permissions should appear even if bot.tools.allow is empty."""
@@ -1115,7 +1122,7 @@ class TestMcpPermissionsInSettingsLocal:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" in result
-        assert "mcp__notion__API-post-page" in result["permissions"]["allow"]
+        assert "mcp__notion__*" in result["permissions"]["allow"]
 
     def test_explicit_deny_alongside_mcp_permissions(self, tmp_path):
         from claudlobby.config import McpEntry
@@ -1142,7 +1149,7 @@ class TestMcpPermissionsInSettingsLocal:
         allow = result["permissions"]["allow"]
         assert "Write(**)" in deny
         assert "Edit(**)" in deny
-        assert "mcp__github__search_code" in allow
+        assert "mcp__github__*" in allow
 
     def test_multi_instance_in_settings_local(self, tmp_path):
         from claudlobby.config import McpEntry
@@ -1167,10 +1174,11 @@ class TestMcpPermissionsInSettingsLocal:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
         allow = result["permissions"]["allow"]
-        assert "mcp__gws-personal__get_events" in allow
-        assert "mcp__gws-work__get_events" in allow
-        assert "mcp__gws-personal__search_gmail_messages" in allow
-        assert "mcp__gws-work__search_gmail_messages" in allow
+        assert "mcp__gws-personal__*" in allow
+        assert "mcp__gws-work__*" in allow
+        # Individual tool entries should not appear
+        assert "mcp__gws-personal__get_events" not in allow
+        assert "mcp__gws-work__search_gmail_messages" not in allow
 
 
 class TestParseExpertisePermissions:
@@ -1490,9 +1498,10 @@ class TestExpertisePermissionsInSettingsLocal:
         # Layer 2: Expertise
         assert "Write" in allow
         assert "Bash(git *)" in allow
-        # Layer 3: MCP
-        assert "mcp__github__search_code" in allow
-        assert "mcp__github__create_pull_request" in allow
+        # Layer 3: MCP — wildcard instead of individual tool entries
+        assert "mcp__github__*" in allow
+        assert "mcp__github__search_code" not in allow
+        assert "mcp__github__create_pull_request" not in allow
         # Layer 4: Channel
         assert "mcp__plugin_telegram_telegram__reply" in allow
         # Layer 5: Skills
