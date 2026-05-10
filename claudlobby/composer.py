@@ -439,6 +439,10 @@ WantedBy=default.target
 """
 
 
+# NOTE: launchd has no ExecStartPre equivalent for boot stagger.
+# On macOS, fleet boot contention is less of an issue (Mac Mini has
+# more cores/RAM than Pi). If needed, stagger can be added via a
+# BOOT_DELAY env var honored by start-bot.sh itself.
 def compose_launchd_plist(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     bot_dir = paths.bot_runtime(bot.bot_id)
     label = f"{fleet.service_prefix}.{bot.bot_id}"
