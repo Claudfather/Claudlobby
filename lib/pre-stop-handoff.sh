@@ -14,6 +14,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
 
+# Clean up .tmux-env on ALL exit paths (including early returns).
+# This file contains resolved secrets written by start-bot.sh.
+trap 'rm -f "$BOT_DIR/.tmux-env"' EXIT
+
 HANDOFF_DIR="$HOME/.claude/notes/projects/$(basename "$BOT_DIR")"
 HANDOFF_FILE="$HANDOFF_DIR/context-resume.md"
 
@@ -42,7 +46,3 @@ if check_tmux_session "$BOT_NAME"; then
     done
     echo "Handoff timed out after 30s"
 fi
-
-# Clean up .tmux-env which contains resolved secrets (tokens, credentials).
-# This file is created by start-bot.sh with mode 600 but persists after stop.
-rm -f "$BOT_DIR/.tmux-env"
