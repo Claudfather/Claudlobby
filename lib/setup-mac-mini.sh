@@ -55,6 +55,8 @@ fi
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$SCRIPT_DIR/lib-common.sh"
 FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
 RUNTIME_BOTS="$FLEET_DIR/runtime/bots"
 
@@ -132,8 +134,8 @@ phase_claude() {
     local claude=""
     if [ -x "$HOME/.local/bin/claude" ]; then
         claude="$HOME/.local/bin/claude"
-    elif [ -x "/opt/homebrew/bin/claude" ]; then
-        claude="/opt/homebrew/bin/claude"
+    elif [ -x "$_HOMEBREW/bin/claude" ]; then
+        claude="$_HOMEBREW/bin/claude"
     elif claude="$(command -v claude 2>/dev/null)" && [ -n "$claude" ]; then
         :
     else

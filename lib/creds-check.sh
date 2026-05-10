@@ -25,6 +25,9 @@
 set -euo pipefail
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
 ENV_FILE="${CLAUDLOBBY_ENV:-$CLAUDLOBBY_ROOT/.env}"
 LOG="${CLAUDLOBBY_CREDS_LOG:-$CLAUDLOBBY_ROOT/lib/creds-check.log}"
 STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/lib/creds-check-state.json}"
@@ -39,7 +42,7 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-JQ="$(command -v jq || echo /opt/homebrew/bin/jq)"
+JQ="$(command -v jq || echo "${_HOMEBREW:-/usr/local}/bin/jq")"
 CURL="$(command -v curl || echo /usr/bin/curl)"
 
 mkdir -p "$(dirname "$LOG")"
