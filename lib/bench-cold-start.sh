@@ -21,7 +21,7 @@
 #          total_seconds, notes
 #
 # Example cron (weekly, Sunday 03:00):
-#   0 3 * * 0 /home/user/claudlobby/lib/bench-cold-start.sh --fleet myfleeet >> /tmp/bench.out 2>&1
+#   0 3 * * 0 /home/user/claudlobby/lib/bench-cold-start.sh --fleet myfleet >> /tmp/bench.out 2>&1
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -153,9 +153,14 @@ fi
 # ---------------------------------------------------------------------------
 
 _now_ns() {
-    # Nanosecond-resolution epoch if available (Linux date +%s.%N),
-    # otherwise fall back to integer seconds (macOS/BSD).
-    date +%s.%N 2>/dev/null || date +%s
+    # Nanosecond-resolution epoch on Linux (date +%s.%N);
+    # macOS date accepts %N syntactically but outputs it literally — use
+    # integer seconds there. _OS is set by lib-common.sh.
+    if [ "${_OS:-}" = "Darwin" ]; then
+        date +%s
+    else
+        date +%s.%N
+    fi
 }
 
 _elapsed() {

@@ -29,12 +29,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Determine library path
-if [ -n "$FLEET" ]; then
-    MCP_DIR="$CLAUDLOBBY_ROOT/library/mcp"
-else
-    MCP_DIR="$CLAUDLOBBY_ROOT/library/mcp"
-fi
+# Scan the shared library — the canonical source of npx package names.
+# Fleet overlays (local/<fleet>/library/mcp/) would override individual
+# fragments, but the base library drives the package list for warm-cache.
+MCP_DIR="$CLAUDLOBBY_ROOT/library/mcp"
 
 if [ ! -d "$MCP_DIR" ]; then
     echo "check-npx-cache: MCP library not found at $MCP_DIR" >&2
