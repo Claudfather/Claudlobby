@@ -42,3 +42,7 @@ if check_tmux_session "$BOT_NAME"; then
     done
     echo "Handoff timed out after 30s"
 fi
+
+# Clean up .tmux-env which contains resolved secrets (tokens, credentials).
+# This file is created by start-bot.sh with mode 600 but persists after stop.
+rm -f "$BOT_DIR/.tmux-env"
