@@ -3,11 +3,11 @@
 Permissive by default: warnings let `generate` proceed; errors block it.
 Pass `--strict` to make warnings into errors (CI-friendly).
 """
+
 from __future__ import annotations
 import json
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,7 +83,8 @@ def _bot_required_env_vars(
 
     # Integration doc contracts (auto-pair fallback matches composer)
     integration_names = bot.integrations or [
-        e.name for e in bot.mcp
+        e.name
+        for e in bot.mcp
         if paths.find_library_file("integrations", e.name, ".md") is not None
     ]
     seen_int: set[str] = set()

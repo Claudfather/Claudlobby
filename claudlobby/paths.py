@@ -16,9 +16,10 @@ If no `--fleet` flag is given, paths default to the repo root —
 fleet.yaml at root, runtime/ at root, no overlay. This preserves the
 "single fleet at the root" mode used by the public example fleets.
 """
+
 from __future__ import annotations
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class Paths:
 
     `fleet_dir` is None for root-mode, or `local/<fleet>/` for overlay-mode.
     """
+
     root: Path
     fleet_dir: Path | None = None
 
