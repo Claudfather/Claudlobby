@@ -16,6 +16,9 @@ if [ "$(uname)" != "Darwin" ]; then
 fi
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
 FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
 if [ -z "$FLEET" ]; then
     echo "install-creds-check.sh: pass a fleet name or set CLAUDLOBBY_FLEET" >&2
@@ -56,7 +59,7 @@ cat > "$PLIST" <<PLIST
     <key>StandardErrorPath</key><string>$LOG_DIR/creds-check-agent.err.log</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PATH</key><string>$_HOMEBREW/bin:$_HOMEBREW/sbin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key><string>$HOME</string>
         <key>CLAUDLOBBY_ROOT</key><string>$CLAUDLOBBY_ROOT</string>
     </dict>
