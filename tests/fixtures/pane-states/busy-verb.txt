@@ -1,0 +1,8 @@
+
+  claudlobby/validator.py
+
+  Thinking…
+
+  I need to check the validator for any issues with the
+  current configuration.
+

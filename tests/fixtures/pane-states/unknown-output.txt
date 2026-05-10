@@ -1,0 +1,4 @@
+
+  error: pathspec 'nonexistent' did not match any file(s) known to git
+  fatal: not a valid object name: 'nonexistent'
+
