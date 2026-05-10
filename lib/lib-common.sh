@@ -134,7 +134,7 @@ safe_mktemp() {
 # Strip control chars and escape sequences dangerous in tmux send-keys.
 sanitize_tmux_input() {
     local input="$1"
-    input=$(printf '%s' "$input" | tr -d '\000-\010\013\014\016-\037\177')
+    input=$(printf '%s' "$input" | tr -d '\000-\037\177')
     input=$(printf '%s' "$input" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
     printf '%s' "$input"
 }
