@@ -22,7 +22,7 @@ else
 fi
 
 KEEPALIVE="$CLAUDLOBBY_ROOT/lib/keepalive.sh"
-LOG="$CLAUDLOBBY_ROOT/lib/keepalive-all.log"
+LOG="$CLAUDLOBBY_ROOT/lib/logs/keepalive-all.log"
 
 mkdir -p "$(dirname "$LOG")"
 TS=$(date -Iseconds)

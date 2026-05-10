@@ -35,13 +35,8 @@ mkdir -p "$(dirname "$STATE")"
 TG_POST="$CLAUDLOBBY_ROOT/lib/tg-post.sh"
 
 # Schedulers (launchd / systemd timer) start with a minimal PATH; .env is
-# the source of truth for runtime credentials. Source it before any check.
-if [ -f "$ENV_FILE" ]; then
-    set -a
-    # shellcheck source=/dev/null
-    . "$ENV_FILE"
-    set +a
-fi
+# the source of truth for runtime credentials. Parse it safely before any check.
+parse_env_file "$ENV_FILE"
 
 JQ="$(command -v jq || echo "${_HOMEBREW:-/usr/local}/bin/jq")"
 CURL="$(command -v curl || echo /usr/bin/curl)"
