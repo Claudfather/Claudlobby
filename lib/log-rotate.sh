@@ -12,6 +12,10 @@
 # are silently skipped (not an error — they just haven't been created yet).
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 KEEP=500
 LOGS=()
 while [ $# -gt 0 ]; do
@@ -32,5 +36,6 @@ fi
 
 for log in "${LOGS[@]}"; do
     [ -f "$log" ] || continue
-    tail -n "$KEEP" "$log" > "$log.tmp" && mv "$log.tmp" "$log"
+    tmp=$(safe_mktemp)
+    tail -n "$KEEP" "$log" > "$tmp" && mv "$tmp" "$log"
 done

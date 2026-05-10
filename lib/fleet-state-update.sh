@@ -6,6 +6,11 @@
 # Usage: fleet-state-update.sh <bot> <status> [<current_task>] [<current_repo>] [<last_completed>]
 #   status: idle | working | blocked | offline
 set -euo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 STATE="${FLEET_STATE_PATH:-$CLAUDLOBBY_ROOT/state/fleet-state.json}"
 mkdir -p "$(dirname "$STATE")"
@@ -20,8 +25,7 @@ LAST="${5:-}"
 # Exclusive lock prevents concurrent bot updates from corrupting state
 (
 flock -x 200
-TMP=$(mktemp)
-trap "rm -f \"\$TMP\"" EXIT
+TMP=$(safe_mktemp)
 jq --arg bot "$BOT" --arg status "$STATUS" --arg task "$TASK" --arg repo "$REPO" \
    --arg last "$LAST" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   .updated = $ts

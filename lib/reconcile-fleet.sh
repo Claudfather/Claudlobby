@@ -16,6 +16,8 @@ ENROLL="${2:-}"
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
 FLEET_YAML="$CLAUDLOBBY_ROOT/local/$FLEET/fleet.yaml"
 RUNTIME_DIR="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots"
 
@@ -83,7 +85,8 @@ esac
 # Build buckets
 healthy=""; orphan=""; missing=""; unbound=""
 
-for b in $defined; do
+while IFS= read -r b; do
+    [ -z "$b" ] && continue
     has_tmux=0; has_unit=0
     echo "$tmux_sessions" | grep -qx "$b" && has_tmux=1
     echo "$units"         | grep -qx "$b" && has_unit=1
@@ -91,15 +94,16 @@ for b in $defined; do
     elif [ $has_tmux = 1 ] && [ $has_unit = 0 ]; then orphan="$orphan $b"
     elif [ $has_tmux = 0 ] && [ $has_unit = 1 ]; then missing="$missing $b"
     fi
-done
+done <<< "$defined"
 
 # Unbound: tmux sessions whose name matches no defined bot in ANY fleet.yaml
 all_defined=$(for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml; do
     [ -f "$fy" ] && parse_bots "$fy"
 done | sort -u)
-for s in $tmux_sessions; do
+while IFS= read -r s; do
+    [ -z "$s" ] && continue
     echo "$all_defined" | grep -qx "$s" || unbound="$unbound $s"
-done
+done <<< "$tmux_sessions"
 
 # Report
 echo "Fleet: $FLEET"
@@ -118,14 +122,15 @@ fi
 if [ "$ENROLL" = "--enroll" ] && [ -n "${orphan// /}" ]; then
     echo
     echo "Enrolling orphans via spin-up-bot.sh..."
-    for b in $orphan; do
+    while IFS= read -r b; do
+        [ -z "$b" ] && continue
         bot_dir="$RUNTIME_DIR/$b"
         if [ -d "$bot_dir" ]; then
             echo "→ $b"
-            tmux kill-session -t "$b" 2>/dev/null || true
+            "$_TMUX_BIN" kill-session -t "$b" 2>/dev/null || true
             "$LIB_DIR/spin-up-bot.sh" "$bot_dir"
         else
             echo "→ $b SKIPPED (no runtime dir at $bot_dir; run 'claudlobby generate' first)"
         fi
-    done
+    done <<< "$orphan"
 fi

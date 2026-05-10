@@ -119,7 +119,7 @@ fi
 # start in parallel on a 4-core machine. See docs/audit-cold-start-timing.md.
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
-    "$_TMUX_BIN" send-keys -t "$BOT_NAME" "$STARTUP_PROMPT" Enter
+    "$_TMUX_BIN" send-keys -t "$BOT_NAME" "set +H; $STARTUP_PROMPT" Enter
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails

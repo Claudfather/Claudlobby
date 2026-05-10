@@ -14,8 +14,15 @@
 # $CLAUDLOBBY_ROOT/lib/bot-sweep-cron.log.
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 BOT_NAME="${1:?Usage: bot-sweep-cron.sh <bot-name> <dispatch-text>}"
 DISPATCH="${2:?Usage: bot-sweep-cron.sh <bot-name> <dispatch-text>}"
+
+# Sanitize dispatch text before sending to tmux
+DISPATCH="$(sanitize_tmux_input "$DISPATCH")"
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LOG="$CLAUDLOBBY_ROOT/lib/bot-sweep-cron.log"

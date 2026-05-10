@@ -10,11 +10,27 @@
 
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 MANAGER_SESSION="${MANAGER_BOT_NAME:-claude-bot}"  # Override in bot.conf if needed
 BOT="$1"
 STATUS="$2"
 SUMMARY="$3"
 shift 3
+
+# Validate status against allowed set
+case "$STATUS" in
+    completed|progress|blocked|failed) ;;
+    *)
+        echo "report-back: invalid status '$STATUS' (must be: completed|progress|blocked|failed)" >&2
+        exit 1
+        ;;
+esac
+
+# Sanitize summary for tmux safety
+SUMMARY="$(sanitize_tmux_input "$SUMMARY")"
 
 EXTRAS=""
 for arg in "$@"; do
@@ -23,7 +39,7 @@ done
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
-/usr/bin/tmux send-keys -t "$MANAGER_SESSION" "$MESSAGE" Enter || true
+"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" "$MESSAGE" Enter || true
 
 # Mirror to fleet-state if helper is present
 _FS=$(dirname "$0")/fleet-state-update.sh
