@@ -457,6 +457,7 @@ KillMode=process
 WorkingDirectory={bot_dir}{stagger}
 ExecStart={paths.lib}/start-bot.sh {bot_dir}
 ExecStop=/bin/sh -c 'tmux kill-session -t {bot.bot_id} 2>/dev/null || true'
+ExecStopPost=/bin/rm -f {bot_dir}/.tmux-env
 # Restart= here only fires on non-zero exit of start-bot.sh — i.e., a config
 # failure before tmux ever spawned. Tmux dying after we've gone "active" is
 # detected by lib/keepalive.sh, NOT by systemd, because exit 0 + RemainAfterExit
