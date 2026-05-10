@@ -226,13 +226,13 @@ claudlobby warm-cache                    # pre-download any missing packages
 
 ```bash
 # Stop all bots first to avoid contention
-systemctl --user stop ari greg craig branden rajan navi virgil mason
+systemctl --user stop bot1 bot2 bot3 ...   # all bots in the fleet
 
 # Re-warm the cache serially (not in parallel)
 claudlobby --fleet <name> warm-cache
 
 # Restart fleet
-systemctl --user start ari greg craig branden rajan navi virgil mason
+systemctl --user start bot1 bot2 bot3 ...  # same list
 ```
 
 The cache typically occupies 500-800 MB. This is expected and should not be reclaimed.
