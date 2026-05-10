@@ -51,7 +51,7 @@ Key lifecycle scripts in `lib/`:
 | `keepalive-all.sh` | Fleet-level watchdog — runs keepalive for all bots |
 | `reconcile-fleet.sh` | Audits supervision state: healthy, orphan, missing, unbound |
 | `report-back.sh` | Worker → manager structured reporting via tmux |
-| `fleet-state-update.sh` | Atomic fleet-state.json updates with flock locking |
+| `fleet-state-update.sh` | Atomic state/fleet-state.json updates with flock locking |
 | `pre-stop-handoff.sh` | Graceful context handoff before service stop |
 | `lib-common.sh` | Shared helpers: OS detection, bot.conf loading, safe mktemp |
 | `log-rotate-fleet.sh` | Fleet-wide log rotation |

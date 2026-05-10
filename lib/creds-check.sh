@@ -30,7 +30,8 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 ENV_FILE="${CLAUDLOBBY_ENV:-$CLAUDLOBBY_ROOT/.env}"
 LOG="${CLAUDLOBBY_CREDS_LOG:-$CLAUDLOBBY_ROOT/lib/creds-check.log}"
-STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/lib/creds-check-state.json}"
+STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/state/creds-check-state.json}"
+mkdir -p "$(dirname "$STATE")"
 TG_POST="$CLAUDLOBBY_ROOT/lib/tg-post.sh"
 
 # Schedulers (launchd / systemd timer) start with a minimal PATH; .env is

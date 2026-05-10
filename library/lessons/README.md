@@ -37,7 +37,7 @@ times for reasons that had nothing to do with what they were working on.
 alerts Telegram on state transitions.
 
 **What this means for you:** if you see a credential failure, check
-`lib/creds-check-state.json` and the Telegram archive — the failure may
+`state/creds-check-state.json` and the Telegram archive — the failure may
 already be known and tracked.
 ```
 

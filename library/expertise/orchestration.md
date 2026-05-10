@@ -96,7 +96,7 @@ If the fleet shares one Anthropic Opus account (no per-bot API keys, no per-bot 
 
 - `tmux list-sessions` — who's alive
 - `tmux capture-pane -t <bot> -p | tail -10` — recent activity / idle / error
-- `cat {{CLAUDLOBBY_ROOT}}/lib/fleet-state.json | jq '.bots'` — fleet-state ledger
+- `cat {{CLAUDLOBBY_ROOT}}/state/fleet-state.json | jq '.bots'` — fleet-state ledger
 - If a worker is stuck > 5 min, restart via:
   - macOS: `launchctl kickstart -k gui/$(id -u)/{{SERVICE_PREFIX}}.<bot>`
   - Linux: `sudo systemctl restart <bot>`
