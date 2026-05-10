@@ -19,6 +19,7 @@ from claudlobby.composer import (
     _reconcile_access_json,
     compose_access_json,
     compose_settings_local,
+    compose_systemd_unit,
     scaffold_env_files,
 )
 from claudlobby.paths import Paths
@@ -1536,3 +1537,34 @@ class TestExpertisePermissionsInSettingsLocal:
         # Bash commands scoped
         assert "Bash(git *)" in allow
         assert "Bash(gh *)" in allow
+
+
+class TestComposeSystemdUnit:
+    """Boot stagger injection in systemd units."""
+
+    def _make(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        (root / "runtime" / "bots" / "w").mkdir(parents=True)
+        bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        return bot, fleet, paths
+
+    def test_no_stagger_when_delay_zero(self, tmp_path):
+        bot, fleet, paths = self._make(tmp_path)
+        unit = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
+        assert "ExecStartPre" not in unit
+
+    def test_stagger_injected_when_delay_positive(self, tmp_path):
+        bot, fleet, paths = self._make(tmp_path)
+        unit = compose_systemd_unit(bot, fleet, paths, boot_delay_s=3)
+        assert "ExecStartPre=/bin/sleep 3" in unit
+
+    def test_stagger_value_varies(self, tmp_path):
+        bot, fleet, paths = self._make(tmp_path)
+        unit6 = compose_systemd_unit(bot, fleet, paths, boot_delay_s=6)
+        assert "ExecStartPre=/bin/sleep 6" in unit6
+        unit0 = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
+        assert "ExecStartPre" not in unit0
