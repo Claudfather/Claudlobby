@@ -428,7 +428,7 @@ ExecStop=/bin/sh -c 'tmux kill-session -t {bot.bot_id} 2>/dev/null || true'
 # detected by lib/keepalive.sh, NOT by systemd, because exit 0 + RemainAfterExit
 # leaves the unit looking healthy regardless of what tmux is doing.
 Restart=on-failure
-RestartSec=10
+RestartSec=5
 Environment=CLAUDLOBBY_ROOT={paths.root}
 
 [Install]
