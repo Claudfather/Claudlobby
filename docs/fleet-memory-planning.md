@@ -96,19 +96,24 @@ The script:
 1. Reads `/proc/meminfo` (Linux) or `vm_stat` (macOS) for available RAM.
 2. Sums RSS of all `claude`, `node`, and Python MCP processes owned by the
    current user via `ps aux`.
-3. If `fleet RSS / total RAM >= threshold`, calls `lib/tg-post.sh` to fire a
-   Telegram alert (requires `TELEGRAM_GROUP_CHAT_ID` in environment).
+3. If available RAM drops below the reserve floor (`total * (100 - threshold) / 100`),
+   calls `lib/tg-post.sh` to fire a Telegram alert (requires `TELEGRAM_GROUP_CHAT_ID`
+   in environment).
 4. Writes a one-line status entry to `lib/fleet-memory-check.log`.
 5. Exits 0 unconditionally — a RAM threshold crossing must not abort cron chains.
 
 ## What the 80% Threshold Means
 
-The 80% threshold is the fraction of **total** RAM at which fleet processes
-should trigger an alert:
+The 80% threshold means "alert when less than 20% of total RAM remains
+available." The check compares available RAM against a reserve floor:
 
 ```
-fleet_rss_mb / total_ram_mb * 100 >= threshold  →  alert
+available_mb < total_ram_mb * (100 - threshold) / 100  →  alert
 ```
+
+For threshold=80 on a 15 GB host: alert fires when available RAM drops below
+3 GB (20% of 15 GB). This catches swap pressure early without producing
+nonsensical >100% values.
 
 Reserving 20% covers:
 
