@@ -45,6 +45,50 @@ def _parse_env_line(line: str) -> tuple[str, str] | None:
     return (k, v)
 
 
+def _migration_preamble(
+    args,
+) -> tuple[Paths, "FleetConfig", Path, dict[str, str]] | int:
+    """Shared preamble for migration commands.
+
+    Returns (paths, fleet, source_dir, rename_map) or an int exit code on failure.
+    """
+    paths = _resolve_paths(args)
+    fleet = load_fleet(paths.fleet_yaml)
+    source_dir = Path(args.source).expanduser().resolve()
+
+    if not source_dir.is_dir():
+        log.error("source directory not found: %s", source_dir)
+        return 1
+
+    try:
+        rename_map = _parse_rename_map(args.map or [])
+    except ValueError as e:
+        log.error("%s", e)
+        return 1
+
+    return paths, fleet, source_dir, rename_map
+
+
+def _add_migration_args(parser) -> None:
+    """Add the common --source, --map, --apply args shared by all migration commands."""
+    parser.add_argument(
+        "--source",
+        required=True,
+        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
+    )
+    parser.add_argument(
+        "--map",
+        action="append",
+        default=[],
+        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write changes (default: dry-run preview only)",
+    )
+
+
 def _resolve_paths(args) -> Paths:
     fleet = getattr(args, "fleet", None)
     if args.root:
@@ -252,20 +296,10 @@ def cmd_env_migrate(args) -> int:
     import re
     import json as _json
 
-    paths = _resolve_paths(args)
-    fleet = load_fleet(paths.fleet_yaml)
-    source_dir = Path(args.source).expanduser().resolve()
-
-    if not source_dir.is_dir():
-        log.error("source directory not found: %s", source_dir)
-        return 1
-
-    # --- Parse --map flags: fleet_bot=src_dir (e.g. clog=assistant) ---
-    try:
-        rename_map = _parse_rename_map(args.map or [])
-    except ValueError as e:
-        log.error("%s", e)
-        return 1
+    result = _migration_preamble(args)
+    if isinstance(result, int):
+        return result
+    paths, fleet, source_dir, rename_map = result
 
     # --- Discover legacy bot dirs (any subdir containing .mcp.json or bot.conf) ---
     bot_dir_map: dict[str, Path] = {}
@@ -556,19 +590,10 @@ def cmd_data_migrate(args) -> int:
     """
     import shutil
 
-    paths = _resolve_paths(args)
-    fleet = load_fleet(paths.fleet_yaml)
-    source_dir = Path(args.source).expanduser().resolve()
-
-    if not source_dir.is_dir():
-        log.error("source directory not found: %s", source_dir)
-        return 1
-
-    try:
-        rename_map = _parse_rename_map(args.map or [])
-    except ValueError as e:
-        log.error("%s", e)
-        return 1
+    result = _migration_preamble(args)
+    if isinstance(result, int):
+        return result
+    paths, fleet, source_dir, rename_map = result
 
     include_set = (
         {x.strip() for x in args.include.split(",") if x.strip()}
@@ -748,19 +773,10 @@ def cmd_cron_migrate(args) -> int:
     from collections import defaultdict
     from datetime import datetime
 
-    paths = _resolve_paths(args)
-    fleet = load_fleet(paths.fleet_yaml)
-    source_dir = Path(args.source).expanduser().resolve()
-
-    if not source_dir.is_dir():
-        log.error("source directory not found: %s", source_dir)
-        return 1
-
-    try:
-        rename_map = _parse_rename_map(args.map or [])
-    except ValueError as e:
-        log.error("%s", e)
-        return 1
+    result = _migration_preamble(args)
+    if isinstance(result, int):
+        return result
+    paths, fleet, source_dir, rename_map = result
 
     # Build per-bot context: legacy prefix, bot data dir, search dirs for resolution.
     import re
@@ -1335,39 +1351,14 @@ def main(argv: list[str] | None = None) -> int:
         "env-migrate",
         help="Extract secrets from an existing bot setup into tiered .env files (dry-run by default)",
     )
-    pe.add_argument(
-        "--source",
-        required=True,
-        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
-    )
-    pe.add_argument(
-        "--map",
-        action="append",
-        default=[],
-        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
-    )
-    pe.add_argument(
-        "--apply",
-        action="store_true",
-        help="Write the .env files (default: dry-run preview only)",
-    )
+    _add_migration_args(pe)
     pe.set_defaults(func=cmd_env_migrate)
 
     pdm = sub.add_parser(
         "data-migrate",
         help="Copy bot data dirs from a legacy bot setup into per-bot runtime data/ (dry-run by default)",
     )
-    pdm.add_argument(
-        "--source",
-        required=True,
-        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
-    )
-    pdm.add_argument(
-        "--map",
-        action="append",
-        default=[],
-        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
-    )
+    _add_migration_args(pdm)
     pdm.add_argument(
         "--include",
         help="Comma-separated subdir names to include (overrides auto-discovery — useful to force-copy a default-skipped dir like 'logs')",
@@ -1376,33 +1367,13 @@ def main(argv: list[str] | None = None) -> int:
         "--exclude",
         help="Comma-separated subdir names to skip (e.g. 'personal-projects,work-projects' to keep big git checkouts in place)",
     )
-    pdm.add_argument(
-        "--apply",
-        action="store_true",
-        help="Actually copy the dirs (default: dry-run preview only)",
-    )
     pdm.set_defaults(func=cmd_data_migrate)
 
     pcm = sub.add_parser(
         "cron-migrate",
         help="Rewrite cron entries from a legacy bot-fleet path layout to claudlobby's (dry-run by default)",
     )
-    pcm.add_argument(
-        "--source",
-        required=True,
-        help="Path to existing bot fleet dir (e.g. ~/my-bots)",
-    )
-    pcm.add_argument(
-        "--map",
-        action="append",
-        default=[],
-        help="Rename a fleet bot to its legacy dir (e.g. --map clog=assistant). Repeatable.",
-    )
-    pcm.add_argument(
-        "--apply",
-        action="store_true",
-        help="Install the rewritten crontab (default: dry-run preview only)",
-    )
+    _add_migration_args(pcm)
     pcm.set_defaults(func=cmd_cron_migrate)
 
     pm = sub.add_parser(
