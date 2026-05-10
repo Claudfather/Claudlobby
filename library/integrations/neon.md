@@ -15,8 +15,3 @@ env_contract:
 - Database schema exploration → `/neon-info`
 - Running queries or checking data → `/neon-query`
 - Safe experimentation before migrations → `/neon-branch` (branches are copy-on-write, cents per branch)
-
-**Gotchas:**
-- Always branch before destructive migrations — test on the branch, then apply to prod
-- `neonctl` requires `--org-id` for org-scoped projects (configured per fleet in env)
-- Connection strings use `?sslmode=require` — don't strip it
