@@ -37,7 +37,7 @@ fi
 LOGS=()
 
 # Package-level logs
-for f in "$CLAUDLOBBY_ROOT"/lib/logs/*.log "$CLAUDLOBBY_ROOT"/lib/*.log; do
+for f in "$CLAUDLOBBY_ROOT"/lib/logs/*.log "$CLAUDLOBBY_ROOT"/lib/logs/*.jsonl "$CLAUDLOBBY_ROOT"/lib/*.log "$CLAUDLOBBY_ROOT"/lib/*.jsonl; do
     [ -f "$f" ] && LOGS+=("$f")
 done
 
@@ -53,11 +53,11 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
     for bot_dir in "$fleet_dir"/runtime/bots/*/; do
         [ -d "$bot_dir" ] || continue
         # Bot root logs
-        for f in "$bot_dir"*.log; do
+        for f in "$bot_dir"*.log "$bot_dir"*.jsonl; do
             [ -f "$f" ] && LOGS+=("$f")
         done
         # Bot logs/ subdir
-        for f in "$bot_dir"logs/*.log; do
+        for f in "$bot_dir"logs/*.log "$bot_dir"logs/*.jsonl; do
             [ -f "$f" ] && LOGS+=("$f")
         done
         # Bot data/ logs (only named cron.log, briefing*.log, git-pull.log, etc.)
@@ -67,7 +67,7 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
                 LOGS+=("$f")
             done < <(find "${bot_dir}data" -maxdepth 3 -type f \
                 \( -name 'cron.log' -o -name 'git-pull.log' -o -name 'briefing*.log' \
-                   -o -name 'home-assistant.log' \) \
+                   -o -name 'home-assistant.log' -o -name 'activity.jsonl' \) \
                 -print0 2>/dev/null)
         fi
     done
