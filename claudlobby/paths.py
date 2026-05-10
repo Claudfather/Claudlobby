@@ -72,6 +72,8 @@ class Paths:
 
     def find_library_file(self, kind: str, stem: str, ext: str = ".md") -> Path | None:
         """Find a single library file by kind + stem. Overlay wins."""
+        if ".." in stem:
+            raise ValueError(f"path traversal in library file name: {stem!r}")
         for d in self.library_search_dirs(kind):
             p = d / f"{stem}{ext}"
             if p.is_file():

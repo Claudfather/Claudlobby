@@ -58,3 +58,24 @@ if [ "$USAGE" -gt "$THRESHOLD" ]; then
 else
     echo "$TS OK — disk usage at ${USAGE}% on $MOUNT" >>"$LOG"
 fi
+
+# Per-bot data/ directory sizes
+FLEET="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"
+if [ -n "$FLEET" ]; then
+    BOTS_DIR="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots"
+else
+    BOTS_DIR="$CLAUDLOBBY_ROOT/runtime/bots"
+fi
+
+if [ -d "$BOTS_DIR" ]; then
+    echo "$TS BOT DATA SIZES:" >>"$LOG"
+    for bot_dir in "$BOTS_DIR"/*/; do
+        [ -d "$bot_dir" ] || continue
+        data_dir="$bot_dir/data"
+        bot_name="$(basename "$bot_dir")"
+        if [ -d "$data_dir" ]; then
+            size=$(du -sh "$data_dir" 2>/dev/null | cut -f1)
+            echo "  $bot_name/data: $size" >>"$LOG"
+        fi
+    done
+fi

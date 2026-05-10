@@ -594,6 +594,17 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
 
     for name, target in bot.mounts.items():
         target_path = Path(target).expanduser()
+        try:
+            resolved = target_path.resolve()
+            if not resolved.is_relative_to(Path.home()) and not resolved.is_relative_to(
+                bot_dir
+            ):
+                log(
+                    f"  mount '{name}': target {target_path} escapes home and bot dir — skipping"
+                )
+                continue
+        except (ValueError, OSError):
+            pass
         link = mounts_dir / name
         if link.is_symlink():
             if link.resolve() == target_path.resolve():
