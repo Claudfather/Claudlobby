@@ -317,19 +317,19 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                 )
 
     # clauDNA dependency check (warn)
-    clauDNA_breadcrumb = Path.home() / ".claude" / ".clauDNA-repo"
-    if not clauDNA_breadcrumb.is_file():
+    cladna_breadcrumb = Path.home() / ".claude" / ".cladna-repo"
+    if not cladna_breadcrumb.is_file():
         report.warnings.append(
             "clauDNA not installed — bots will lack global skills "
             "(/simplify, /review-pr, /tech-debt, etc.). "
             "Clone and run install.sh from your clauDNA repo."
         )
     else:
-        repo_path = Path(clauDNA_breadcrumb.read_text().strip())
+        repo_path = Path(cladna_breadcrumb.read_text().strip())
         if not repo_path.is_dir():
             report.warnings.append(
                 f"clauDNA breadcrumb points to {repo_path} but directory not found — "
-                "re-run /clauDNA-setup or update ~/.claude/.clauDNA-repo"
+                "re-run /clauDNA-setup or update ~/.claude/.cladna-repo"
             )
 
     return report
