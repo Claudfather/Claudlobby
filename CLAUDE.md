@@ -55,8 +55,25 @@ Key lifecycle scripts in `lib/`:
 | `pre-stop-handoff.sh` | Graceful context handoff before service stop |
 | `lib-common.sh` | Shared helpers: OS detection, bot.conf loading, safe mktemp |
 | `log-rotate-fleet.sh` | Fleet-wide log rotation |
+| `log-rotate.sh` | Single-bot log rotation |
+| `log-tool-call.sh` | Reference hook script for tool-call logging |
 | `git-pull-all.sh` | Pull all repos in a bot's projects/ directory |
 | `tg-post.sh` | Bash helper for posting to Telegram |
+| `disk-monitor.sh` | Check disk usage, alert if high |
+| `fleet-memory-check.sh` | Fleet memory planning and monitoring |
+| `bench-cold-start.sh` | Cold-start timing baseline and regression tracking |
+| `check-npx-cache.sh` | Verify npx package cache state for MCP servers |
+| `sprint-trigger.sh` | Schedule-driven autonomous sprint nudger |
+| `creds-check.sh` | Credential validation for fleet secrets |
+| `bot-sweep-cron.sh` | Periodic bot sweep via cron |
+| `install-bot.sh` | Bot service enrollment (launchd) |
+| `install-bot-systemd.sh` | Bot service enrollment (systemd) |
+| `install-keepalive.sh` | Keepalive timer enrollment (launchd) |
+| `install-keepalive-systemd.sh` | Keepalive timer enrollment (systemd) |
+| `install-cron.sh` | Cron job installation |
+| `install-creds-check.sh` | Creds-check timer enrollment (launchd) |
+| `install-creds-check-systemd.sh` | Creds-check timer enrollment (systemd) |
+| `setup-mac-mini.sh` | macOS host setup automation |
 
 ## Repository Hygiene — MANDATORY
 
@@ -162,13 +179,18 @@ claudlobby promote --bot <name>        # extract bot drift back into library
 claudlobby list-library                # show available building blocks
 claudlobby new-bot                     # interactive bot scaffolding
 
+# Operations
+claudlobby status                      # fleet health dashboard (stub)
+claudlobby warm-cache                  # pre-download npx packages for MCP servers
+
 # Migration (from legacy layouts)
 claudlobby env-migrate                 # migrate .env files into fleet structure
 claudlobby data-migrate                # migrate bot data directories
 claudlobby cron-migrate                # migrate crontab entries to new paths
+claudlobby memory-migrate              # copy memory files from ~/.claude/projects/ to per-bot dirs
 
 # Testing
-pip install -e '.[dev]' && pytest      # run test suite (33 tests)
+pip install -e '.[dev]' && pytest      # run test suite
 ```
 
 Use `--fleet <name>` for overlay mode: `claudlobby --fleet <your-fleet> generate`
@@ -185,6 +207,9 @@ lib/reconcile-fleet.sh <fleet> --enroll # fix orphan bots
 lib/log-rotate-fleet.sh --fleet <name> # rotate all bot logs
 lib/git-pull-all.sh <projects-dir>     # pull all repos in a directory
 lib/disk-monitor.sh                    # check disk usage, alert if high
+lib/fleet-memory-check.sh              # fleet memory planning and monitoring
+lib/bench-cold-start.sh               # cold-start timing baseline
+lib/check-npx-cache.sh                # verify npx cache state
 ```
 
 ## Python Package Structure
