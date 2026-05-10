@@ -112,6 +112,11 @@ echo "  ⚠ orphan:   ${orphan:-(none)}"
 echo "  ⚠ missing:  ${missing:-(none)}"
 echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before killing"
 
+# Prune fleet-state entries for bots no longer in fleet.yaml
+if [ -x "$LIB_DIR/fleet-state-update.sh" ]; then
+    "$LIB_DIR/fleet-state-update.sh" prune "$FLEET_YAML" || true
+fi
+
 # NPX cache health check
 if [ -x "$LIB_DIR/check-npx-cache.sh" ]; then
     echo

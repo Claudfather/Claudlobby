@@ -3,8 +3,16 @@
 #
 # Called by start-bot.sh (boot → idle) and report-back.sh (completion → idle / blocked).
 #
-# Usage: fleet-state-update.sh <bot> <status> [<current_task>] [<current_repo>] [<last_completed>]
-#   status: idle | working | blocked | offline
+# Usage:
+#   fleet-state-update.sh <bot> <status> [<current_task>] [<current_repo>] [<last_completed>]
+#     status: idle | working | blocked | offline
+#
+#   fleet-state-update.sh prune <fleet-yaml-path>
+#     Remove bot entries not present in the given fleet.yaml.
+#
+# Scaling note: the single-file + flock design works well for <50 bots.
+# Beyond that, consider per-bot state files (state/<bot>.json) or a
+# lightweight SQLite database to reduce lock contention.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +22,43 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 STATE="${FLEET_STATE_PATH:-$CLAUDLOBBY_ROOT/state/fleet-state.json}"
 mkdir -p "$(dirname "$STATE")"
+
+# --- Prune subcommand ---------------------------------------------------------
+if [ "${1:-}" = "prune" ]; then
+    FLEET_YAML="${2:?Usage: fleet-state-update.sh prune <fleet-yaml-path>}"
+    if [ ! -f "$FLEET_YAML" ]; then
+        echo "fleet-state-update: $FLEET_YAML not found" >&2
+        exit 1
+    fi
+    [ -f "$STATE" ] || exit 0  # nothing to prune
+
+    # Extract bot names from fleet.yaml (same parser as reconcile-fleet.sh)
+    DEFINED=$(awk '
+        /^  bots:[ \t]*$/ {in_bots=1; next}
+        in_bots && /^    [a-zA-Z_][a-zA-Z0-9_-]*:[ \t]*$/ {
+            gsub(/[ \t:]/, "", $0); print
+        }
+        in_bots && /^  [a-zA-Z_]/ && !/^    / {in_bots=0}
+    ' "$FLEET_YAML")
+
+    # Build a JSON object of defined bot names for jq --argjson
+    JQ_KEEP=$(printf '%s\n' "$DEFINED" | awk '{printf "\"%s\": 1, ", $0}' | sed 's/, $//')
+
+    (
+    flock -x 200
+    TMP=$(mktemp)
+    trap "rm -f \"\$TMP\"" EXIT
+    PRUNED=$(jq -r --argjson keep "{${JQ_KEEP}}" '.bots | keys[] | select($keep[.] == null)' "$STATE")
+    if [ -z "$PRUNED" ]; then
+        exit 0
+    fi
+    jq --argjson keep "{${JQ_KEEP}}" '.bots |= with_entries(select($keep[.key] == 1))' "$STATE" > "$TMP" && mv "$TMP" "$STATE"
+    echo "Pruned from fleet-state: $PRUNED"
+    ) 200>"$STATE.lock"
+    exit 0
+fi
+
+# --- Normal update ------------------------------------------------------------
 BOT="${1:?bot}"
 STATUS="${2:?status}"
 TASK="${3:-}"
