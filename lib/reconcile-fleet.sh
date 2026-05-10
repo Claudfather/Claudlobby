@@ -108,6 +108,12 @@ echo "  ⚠ orphan:   ${orphan:-(none)}"
 echo "  ⚠ missing:  ${missing:-(none)}"
 echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before killing"
 
+# NPX cache health check
+if [ -x "$LIB_DIR/check-npx-cache.sh" ]; then
+    echo
+    "$LIB_DIR/check-npx-cache.sh" --fleet "$FLEET" || true
+fi
+
 # Enroll orphans if requested
 if [ "$ENROLL" = "--enroll" ] && [ -n "${orphan// /}" ]; then
     echo

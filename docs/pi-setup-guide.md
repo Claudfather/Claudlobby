@@ -200,6 +200,43 @@ Most MCP servers install on-demand via `npx` or `uvx`. Some need pre-installatio
 # 2. HA must be accessible from Pi (usually http://localhost:8123)
 ```
 
+### NPX Cache — Critical Infrastructure
+
+The `~/.npm/_npx/` directory caches downloaded MCP server packages. **Do not clear this cache** unless you understand the consequences:
+
+- With warm cache: MCP servers start in ~1.5s (local resolution, no network)
+- With cold cache: each package takes 30-60s to download on Pi hardware
+- With 8 bots sharing the same packages, a cold cache causes catastrophic IO contention (SD card at 19 MB/s)
+
+**Protected operations — do NOT run on a fleet host:**
+
+```bash
+npm cache clean --force    # clears ~/.npm/_npx/ among other things
+rm -rf ~/.npm/_npx/        # instant fleet-wide cold start regression
+```
+
+**Health check:**
+
+```bash
+lib/check-npx-cache.sh --fleet <name>   # verify all MCP packages are cached
+claudlobby warm-cache                    # pre-download any missing packages
+```
+
+**Recovery if cache is cleared:**
+
+```bash
+# Stop all bots first to avoid contention
+systemctl --user stop bot1 bot2 bot3 ...   # all bots in the fleet
+
+# Re-warm the cache serially (not in parallel)
+claudlobby --fleet <name> warm-cache
+
+# Restart fleet
+systemctl --user start bot1 bot2 bot3 ...  # same list
+```
+
+The cache typically occupies 500-800 MB. This is expected and should not be reclaimed.
+
 ## SSH Tunnel for OAuth Flows
 
 Headless Pi can't open browsers. Use SSH tunnels for OAuth:
