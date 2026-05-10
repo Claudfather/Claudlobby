@@ -116,15 +116,16 @@ check_github_pat() {
         return
     fi
     local code
-    local curl_err_file
-    curl_err_file=$(mktemp -t creds-curl-err.XXXXXX)
+    local curl_err_file auth_cfg
+    curl_err_file=$(safe_mktemp)
+    auth_cfg=$(safe_mktemp)
+    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_cfg"
+    printf 'header = "Accept: application/vnd.github+json"\n' >> "$auth_cfg"
     code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
-        -H "Authorization: Bearer $token" \
-        -H "Accept: application/vnd.github+json" \
+        --config "$auth_cfg" \
         --max-time 10 \
         https://api.github.com/user 2>"$curl_err_file")" \
         || code="curl_err($(head -c 120 "$curl_err_file"))"
-    rm -f "$curl_err_file"
     if [ "$code" = "200" ]; then
         record_and_alert "github_pat" "ok" "HTTP 200"
     else
@@ -140,21 +141,18 @@ check_railway_token() {
     fi
     # Direct GraphQL probe — avoids hard dependency on `railway` CLI
     # being on PATH. The me query is the cheapest auth probe.
-    local resp_body
-    resp_body="$(mktemp -t creds-check-railway)"
-    # shellcheck disable=SC2064
-    trap "rm -f '$resp_body'" RETURN
-    local code
-    local curl_err_file
-    curl_err_file=$(mktemp -t creds-curl-err.XXXXXX)
+    local resp_body code curl_err_file auth_cfg
+    resp_body=$(safe_mktemp)
+    curl_err_file=$(safe_mktemp)
+    auth_cfg=$(safe_mktemp)
+    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_cfg"
+    printf 'header = "Content-Type: application/json"\n' >> "$auth_cfg"
     code="$("$CURL" -sS -o "$resp_body" -w '%{http_code}' \
         -X POST https://backboard.railway.app/graphql/v2 \
-        -H "Authorization: Bearer $token" \
-        -H "Content-Type: application/json" \
+        --config "$auth_cfg" \
         --max-time 10 \
         -d '{"query":"query{me{name}}"}' 2>"$curl_err_file")" \
         || code="curl_err($(head -c 120 "$curl_err_file"))"
-    rm -f "$curl_err_file"
     if [ "$code" != "200" ]; then
         record_and_alert "railway_token" "fail" "HTTP $code on /graphql/v2"
         return
@@ -180,10 +178,6 @@ check_streamable_mcp() {
         return
     fi
     local token="${MCP_PROBE_TOKEN:-}"
-    local auth_header=()
-    if [ -n "$token" ]; then
-        auth_header=(-H "Authorization: Bearer $token")
-    fi
     # Streamable-HTTP MCP requires a JSONRPC POST and Accept covering
     # both application/json and text/event-stream. ``initialize`` is the
     # canonical first-call handshake — auth-touching, side-effect-free,
@@ -195,19 +189,21 @@ check_streamable_mcp() {
     # FAIL alert pointing here, the right failure mode.
     local body
     body='{"jsonrpc":"2.0","id":"creds-check","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claudlobby-creds-check","version":"1.0"}}}'
-    local code
-    local curl_err_file
-    curl_err_file=$(mktemp -t creds-curl-err.XXXXXX)
+    local code curl_err_file auth_cfg
+    curl_err_file=$(safe_mktemp)
+    auth_cfg=$(safe_mktemp)
+    printf 'header = "Accept: application/json, text/event-stream"\n' > "$auth_cfg"
+    printf 'header = "Content-Type: application/json"\n' >> "$auth_cfg"
+    if [ -n "$token" ]; then
+        printf 'header = "Authorization: Bearer %s"\n' "$token" >> "$auth_cfg"
+    fi
     code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
         -X POST \
-        -H "Accept: application/json, text/event-stream" \
-        -H "Content-Type: application/json" \
-        "${auth_header[@]}" \
+        --config "$auth_cfg" \
         --max-time 10 \
         --data "$body" \
         "$url" 2>"$curl_err_file")" \
         || code="curl_err($(head -c 120 "$curl_err_file"))"
-    rm -f "$curl_err_file"
     if [ "$code" = "200" ]; then
         record_and_alert "$name" "ok" "HTTP 200"
     else
