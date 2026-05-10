@@ -58,6 +58,8 @@ fleet:
       expertise: [<list>]               # REQUIRED — area(s) of expertise from library/expertise/
       voice: voices/<file>.md           # OPTIONAL — personality overlay
       mission: <string>                 # OPTIONAL — one-paragraph charter
+      reports_to: <bot-name>            # OPTIONAL — bot_id of manager
+      manages: [<bot-name>, ...]        # OPTIONAL — bot_ids this bot manages
       scope:                            # OPTIONAL — operational boundary
         org: <github-org>
         repos: [<repo>, ...]
@@ -67,6 +69,9 @@ fleet:
         escalate_to: <model>
         escalate_when: <human-readable rule>
         compact_when: <human-readable rule>
+        explore: <model>                # subagent model for Explore agents
+        plan: <model>                   # subagent model for Plan agents
+        general: <model>                # subagent model for general-purpose agents
       account: <account-key>
       model: <model>
       effort: <effort>
@@ -147,6 +152,10 @@ Optional path to a voice overlay (relative to repo root). Voice content gets inj
 
 One-paragraph charter — why this bot exists, what success looks like. Forces every bot to articulate its purpose in `fleet.yaml` itself (kept visible alongside the rest of the config). Composed into a `## Mission` section.
 
+### `bots.<name>.reports_to` / `bots.<name>.manages`
+
+Org structure fields. `reports_to` names the bot_id of this bot's manager. `manages` lists bot_ids this bot manages. Together they generate an `## Org Structure` section in CLAUDE.md showing the reporting hierarchy. Both are optional — bots without either get no org section.
+
 ### `bots.<name>.scope`
 
 Operational boundary. Composed into a `## Scope` section. Common fields:
@@ -159,7 +168,9 @@ Any extra fields are passed through verbatim.
 
 ### `bots.<name>.model_strategy`
 
-Escalation rules. When you have a bot that runs Sonnet for routine work but should escalate to Opus for architecturally tricky tasks, declare it here. Composed into a `## Model Strategy` section so the bot is aware of its own escalation pattern.
+Escalation rules. When you have a bot that runs Sonnet for routine work but should escalate to Opus for architecturally tricky tasks, declare it here. Composed into a `## Model Strategy` section so the bot is aware of its own escalation pattern. Emitted as `MODEL_STRATEGY_*` env vars in `bot.conf` for skills/protocols to read.
+
+Subagent model preferences (`explore`, `plan`, `general`) control which model subagents use. These are stored in the `raw` dict and emitted as env vars (e.g., `MODEL_STRATEGY_EXPLORE=haiku`).
 
 ### `bots.<name>.skills`
 
