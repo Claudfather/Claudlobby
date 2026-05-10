@@ -44,10 +44,10 @@ PACKAGES=()
 for frag in "$MCP_DIR"/*.json; do
     [ -f "$frag" ] || continue
     # Extract package names from "args": ["-y", "<package>", ...] patterns
-    pkg=$(python3 -c "
+    pkg=$(python3 - "$frag" <<'PYEOF'
 import json, sys
 try:
-    d = json.load(open('$frag'))
+    d = json.load(open(sys.argv[1]))
     for k, v in d.items():
         if k.startswith('_') or not isinstance(v, dict):
             continue
@@ -57,8 +57,10 @@ try:
                 if a == '-y' and i + 1 < len(args):
                     print(args[i+1])
                     break
-except: pass
-" 2>/dev/null)
+except Exception:
+    pass
+PYEOF
+    )
     [ -n "$pkg" ] && PACKAGES+=("$pkg")
 done
 
