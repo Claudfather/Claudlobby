@@ -75,6 +75,24 @@ class TestCoerceBot:
         assert bot.telegram.require_mention is False
         assert bot.telegram.chat_id == "-100123"
 
+    def test_telegram_defaults_merge(self):
+        defaults = {"telegram": {"token_env": "FLEET_TOKEN", "require_mention": True}}
+        raw = {
+            "expertise": ["eng"],
+            "telegram": {"handle": "my_bot", "require_mention": False},
+        }
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.telegram.handle == "my_bot"
+        assert bot.telegram.token_env == "FLEET_TOKEN"  # inherited from defaults
+        assert bot.telegram.require_mention is False  # bot override wins
+
+    def test_telegram_defaults_only(self):
+        defaults = {"telegram": {"token_env": "FLEET_TOKEN"}}
+        raw = {"expertise": ["eng"], "telegram": {"handle": "bot1"}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.telegram.token_env == "FLEET_TOKEN"
+        assert bot.telegram.handle == "bot1"
+
     def test_lists_dedup(self):
         defaults = {"guardrails": ["a", "b"]}
         raw = {"expertise": ["eng"], "guardrails": ["b", "c"]}

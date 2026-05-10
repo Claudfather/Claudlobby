@@ -341,7 +341,8 @@ def _merge_hooks(
 
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
-    tg_raw = raw.get("telegram", {}) or {}
+    tg_defaults = defaults.get("telegram", {}) or {}
+    tg_raw = {**tg_defaults, **(raw.get("telegram", {}) or {})}
 
     # `expertise` accepts a list or a single string. Required field.
     # Backwards-compat: accept `persona:` for one or two more refactor cycles.
