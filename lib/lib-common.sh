@@ -24,6 +24,8 @@
 #   _HOMEBREW  — Homebrew prefix (macOS only; empty on Linux)
 #   _TMUX_BIN  — resolved path to tmux binary
 
+set -euo pipefail
+
 # Guard against double-sourcing
 [ -n "${_LIB_COMMON_LOADED:-}" ] && return 0
 _LIB_COMMON_LOADED=1
@@ -75,29 +77,59 @@ load_bot_conf() {
     . "$bot_dir/bot.conf"
 }
 
+# --- Restricted .env parser -------------------------------------------------
+
+# Safely parse a .env file without executing arbitrary shell code.
+# Accepts only KEY=VALUE lines; rejects lines with $(), backticks, pipes, semicolons.
+parse_env_file() {
+    local file="${1:?Usage: parse_env_file /path/to/.env}"
+    [ -f "$file" ] || return 0
+    local line key value
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip comments and blank lines
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+        # Only accept KEY=VALUE where KEY is a valid shell identifier
+        if ! printf '%s' "$line" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*='; then
+            echo "parse_env_file: skipping invalid line in $file: ${line:0:40}" >&2
+            continue
+        fi
+        # Reject lines with command substitution, backticks, pipes, semicolons
+        if printf '%s' "$line" | grep -qE '(\$\(|`|\||\;)'; then
+            echo "parse_env_file: rejecting dangerous line in $file: ${line:0:40}" >&2
+            continue
+        fi
+        key="${line%%=*}"
+        value="${line#*=}"
+        # Strip optional surrounding quotes (single or double)
+        case "$value" in
+            \"*\") value="${value#\"}"; value="${value%\"}" ;;
+            \'*\') value="${value#\'}"; value="${value%\'}" ;;
+        esac
+        export "$key=$value"
+    done < "$file"
+}
+
 # --- 3-tier env sourcing ----------------------------------------------------
 
 # Requires load_bot_conf to have been called first (CLAUDLOBBY_ROOT, FLEET_NAME, BOT_DIR must be set).
 source_env_tiered() {
     # Global
-    # shellcheck source=/dev/null
-    [ -f "$HOME/.env" ] && . "$HOME/.env"
+    [ -f "$HOME/.env" ] && parse_env_file "$HOME/.env"
     # Backward-compat: source legacy location with deprecation warning
     if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
         echo "DEPRECATED: $CLAUDLOBBY_ROOT/.env detected — move secrets to ~/.env or local/<fleet>/.env" >&2
-        # shellcheck source=/dev/null
-        . "$CLAUDLOBBY_ROOT/.env"
+        parse_env_file "$CLAUDLOBBY_ROOT/.env"
     fi
     # Fleet
     if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
         local fleet_env="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/.env"
-        # shellcheck source=/dev/null
-        [ -f "$fleet_env" ] && . "$fleet_env"
+        [ -f "$fleet_env" ] && parse_env_file "$fleet_env"
     fi
     # Bot
     if [ -n "${BOT_DIR:-}" ] && [ -f "$BOT_DIR/.env" ]; then
-        # shellcheck source=/dev/null
-        . "$BOT_DIR/.env"
+        parse_env_file "$BOT_DIR/.env"
     fi
 }
 
