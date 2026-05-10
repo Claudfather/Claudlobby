@@ -11,6 +11,11 @@
 #
 # Usage: tg-post.sh "<message>"
 set -euo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 MSG="${1:?Usage: tg-post.sh <message>}"
 CHAT_ID="${TELEGRAM_GROUP_CHAT_ID:-}"
 STATE_DIR="${TELEGRAM_STATE_DIR:-$HOME/.claude/channels/telegram}"
@@ -26,7 +31,10 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 
-curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+URL_CFG=$(safe_mktemp)
+printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" > "$URL_CFG"
+
+curl -s -X POST --config "$URL_CFG" \
   -d "chat_id=${CHAT_ID}" \
   --data-urlencode "text=${MSG}" \
   -d "parse_mode=Markdown" \
