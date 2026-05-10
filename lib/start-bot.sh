@@ -98,7 +98,7 @@ for _ in $(seq 1 90); do
     sleep 1
 done
 
-sleep 5  # buffer for MCP servers and channels
+sleep 1  # brief settle after remote-control readiness
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
     "$_TMUX_BIN" send-keys -t "$BOT_NAME" "$STARTUP_PROMPT" Enter
