@@ -168,6 +168,8 @@ def _resolve_instance_env(
 
 
 def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
+    import shutil
+
     merged: dict = {"mcpServers": {}}
     for entry in bot.mcp:
         frag_path = paths.find_library_file("mcp", entry.name, ".json")
@@ -178,6 +180,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
         except json.JSONDecodeError as e:
             raise ValueError(f"invalid JSON in MCP fragment {frag_path}: {e}") from e
         contract = frag.pop("_env_contract", {})
+        global_binary = frag.pop("_global_binary", None)
 
         # Find the server config (the non-underscore key)
         server_key = None
@@ -198,6 +201,25 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
                 output_name = f"{entry.name}-{instance}"
 
             instance_config = copy.deepcopy(server_config)
+
+            # Use global binary if available (saves ~0.8s npx overhead per server)
+            resolved_binary = shutil.which(global_binary) if global_binary else None
+            if resolved_binary and instance_config.get("command") == "npx":
+                instance_config["command"] = "node"
+                # Replace npx args ([-y, pkg, ...rest]) with [binary, ...rest]
+                npx_args = instance_config.get("args", [])
+                rest_args = []
+                skip_next = False
+                for a in npx_args:
+                    if a == "-y":
+                        skip_next = True
+                        continue
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    rest_args.append(a)
+                instance_config["args"] = [resolved_binary] + rest_args
+
             if "env" in instance_config:
                 instance_config["env"] = _resolve_instance_env(
                     instance_config["env"], contract, entry, instance
