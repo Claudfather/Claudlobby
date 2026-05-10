@@ -34,7 +34,7 @@
   },
   "notion": {
     "command": "npx",
-    "args": ["-y", "@notionhq/notion-mcp-server"],
+    "args": ["-y", "@notionhq/notion-mcp-server@2.2.1"],
     "env": {
       "NOTION_TOKEN": "${TOKEN}"
     }

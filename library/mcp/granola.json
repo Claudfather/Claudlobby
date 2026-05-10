@@ -16,6 +16,6 @@
   },
   "granola": {
     "command": "npx",
-    "args": ["-y", "mcp-remote", "https://mcp.granola.ai/mcp", "--port", "${GRANOLA_MCP_PORT}"]
+    "args": ["-y", "mcp-remote@0.1.38", "https://mcp.granola.ai/mcp", "--port", "${GRANOLA_MCP_PORT}"]
   }
 }
