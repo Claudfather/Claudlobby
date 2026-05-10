@@ -1210,7 +1210,10 @@ def _scaffold_env_merge(
         if ev.name not in existing_keys
     ]
     if not new_vars and existing_content:
-        return  # nothing to add
+        _log.debug("%s: up to date", env_path.name)
+        if log is not None:
+            log(f"  {env_path.name}: up to date")
+        return
 
     lines: list[str] = []
     if existing_content:

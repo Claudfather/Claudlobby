@@ -141,10 +141,12 @@ class TestScaffoldEnvMerge:
         scaffold_env_files(fleet, paths, log=lambda m: None)
         first_content = (root / ".env").read_text()
 
-        scaffold_env_files(fleet, paths, log=lambda m: None)
+        messages = []
+        scaffold_env_files(fleet, paths, log=messages.append)
         second_content = (root / ".env").read_text()
 
         assert first_content == second_content
+        assert any("up to date" in m for m in messages)
 
 
 def _make_bot(handle="test_bot", require_mention=True, chat_id=None):
