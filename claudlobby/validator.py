@@ -316,20 +316,21 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                     f"team '{team.name}': worker '{worker}' is not in fleet.bots"
                 )
 
-    # clauDNA dependency check (warn)
-    cladna_breadcrumb = Path.home() / ".claude" / ".cladna-repo"
+    # claudefather dependency check (warn)
+    # install.sh writes ~/.claude/.claudefather-repo as the breadcrumb.
+    cladna_breadcrumb = Path.home() / ".claude" / ".claudefather-repo"
     if not cladna_breadcrumb.is_file():
         report.warnings.append(
-            "clauDNA not installed — bots will lack global skills "
+            "claudefather not installed — bots will lack global skills "
             "(/simplify, /review-pr, /tech-debt, etc.). "
-            "Clone and run install.sh from your clauDNA repo."
+            "Clone and run install.sh from your claudefather repo."
         )
     else:
         repo_path = Path(cladna_breadcrumb.read_text().strip())
         if not repo_path.is_dir():
             report.warnings.append(
-                f"clauDNA breadcrumb points to {repo_path} but directory not found — "
-                "re-run /clauDNA-setup or update ~/.claude/.cladna-repo"
+                f"claudefather breadcrumb points to {repo_path} but directory not found — "
+                "re-run install.sh or update ~/.claude/.claudefather-repo"
             )
 
     return report
