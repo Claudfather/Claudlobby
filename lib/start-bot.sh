@@ -113,7 +113,10 @@ if [ "$_ready" -eq 0 ]; then
     echo "$(ts_iso) TIMEOUT — 90s elapsed, remote-control string not found, proceeding anyway" >> "$LOG"
 fi
 
-sleep 1  # brief settle after remote-control readiness
+# No sleep here: the remote-control wait loop above already confirms Claude Code
+# is fully initialized (MCP servers connected, channel plugin active). A fixed
+# sleep after that point is wasted CPU time — especially costly when 8 bots
+# start in parallel on a 4-core machine. See docs/audit-cold-start-timing.md.
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
     "$_TMUX_BIN" send-keys -t "$BOT_NAME" "$STARTUP_PROMPT" Enter
