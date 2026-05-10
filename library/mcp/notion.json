@@ -38,5 +38,6 @@
     "env": {
       "NOTION_TOKEN": "${TOKEN}"
     }
-  }
+  },
+  "_global_binary": "notion-mcp-server"
 }
