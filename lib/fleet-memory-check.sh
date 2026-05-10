@@ -144,26 +144,29 @@ per_bot_summary() {
 FLEET_RSS_MB=$(fleet_rss_mb)
 USED_MB=$(( TOTAL_MB - AVAIL_MB ))
 
-# Percentage of available RAM consumed by fleet-related processes.
-# Available RAM (MemAvailable) is the kernel's estimate of usable memory
-# without swapping — the correct denominator for swap-pressure detection.
-if [ "$AVAIL_MB" -gt 0 ]; then
-    FLEET_PCT=$(( FLEET_RSS_MB * 100 / AVAIL_MB ))
+# Alert when available RAM drops below the reserve floor.
+# Threshold=80 means "alert when less than 20% of total RAM remains available."
+# This avoids the >100% nonsense that fleet_rss/avail produces when RSS > avail.
+RESERVE_PCT=$(( 100 - THRESHOLD ))
+RESERVE_MB=$(( TOTAL_MB * RESERVE_PCT / 100 ))
+
+if [ "$TOTAL_MB" -gt 0 ]; then
+    AVAIL_PCT=$(( AVAIL_MB * 100 / TOTAL_MB ))
 else
-    FLEET_PCT=0
+    AVAIL_PCT=0
 fi
 
 # --- Report -------------------------------------------------------------------
 
-SUMMARY="fleet RSS ${FLEET_RSS_MB} MB / avail ${AVAIL_MB} MB (${FLEET_PCT}%), total ${TOTAL_MB} MB, threshold ${THRESHOLD}%"
+SUMMARY="fleet RSS ${FLEET_RSS_MB} MB, avail ${AVAIL_MB} MB (${AVAIL_PCT}% of ${TOTAL_MB} MB), reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%)"
 
 echo "$TS $SUMMARY" | tee -a "$LOG"
 per_bot_summary | tee -a "$LOG" || true
 
 # --- Alert --------------------------------------------------------------------
 
-if [ "$FLEET_PCT" -ge "$THRESHOLD" ]; then
-    ALERT_MSG="fleet-memory-check: RAM at ${FLEET_PCT}% (${FLEET_RSS_MB} MB fleet RSS / ${AVAIL_MB} MB available). Threshold ${THRESHOLD}%. Consider stopping idle bots."
+if [ "$AVAIL_MB" -lt "$RESERVE_MB" ]; then
+    ALERT_MSG="fleet-memory-check: available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. Consider stopping idle bots."
     echo "$TS ALERT — $ALERT_MSG" | tee -a "$LOG"
 
     TG_POST="$CLAUDLOBBY_ROOT/lib/tg-post.sh"
