@@ -1,6 +1,30 @@
 # Example fleet.yaml — copy to fleet.yaml and customize.
 # See docs/fleet-yaml-schema.md for the full reference.
 
+# ---------------------------------------------------------------------------
+# YAML Anchors — define reusable blocks above `fleet:`, reference with *anchor.
+# Use <<: *anchor to merge an anchor into a bot stanza (bot keys override).
+# ---------------------------------------------------------------------------
+#
+# x-all-repos: &all-repos                       # shared repo list
+#   - repo-a
+#   - repo-b
+#   - repo-c
+#
+# x-engineer-base: &engineer-base               # shared engineer config
+#   integrations: [neon, railway, vercel]
+#   principles: [visibility-and-speed]
+#   protocols: [implementer-workflow]
+#   scope:
+#     org: my-github-org
+#     repos: *all-repos
+#
+# Then in a bot stanza:
+#   eng-1:
+#     <<: *engineer-base                         # merges all keys from anchor
+#     expertise: [software-engineering]           # bot-specific keys override
+#     voice: voices/dinesh.md
+
 fleet:
   name: example-fleet
   service_prefix: com.example.claudlobby
