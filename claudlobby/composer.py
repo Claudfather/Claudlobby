@@ -604,7 +604,8 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
                 )
                 continue
         except (ValueError, OSError):
-            pass
+            log(f"  mount '{name}': could not resolve target {target_path} — skipping")
+            continue
         link = mounts_dir / name
         if link.is_symlink():
             if link.resolve() == target_path.resolve():

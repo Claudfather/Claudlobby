@@ -20,7 +20,13 @@ DAYS=30
 while [ $# -gt 0 ]; do
     case "$1" in
         --purge) PURGE=1; shift ;;
-        --days)  DAYS="$2"; shift 2 ;;
+        --days)
+            DAYS="$2"
+            if ! [[ "$DAYS" =~ ^[1-9][0-9]*$ ]]; then
+                echo "data-sweep: --days must be a positive integer, got '$DAYS'" >&2
+                exit 2
+            fi
+            shift 2 ;;
         -h|--help)
             show_help
             exit 0
@@ -64,10 +70,9 @@ for bot_dir in "$BOTS_DIR"/*/; do
     echo "  $bot_name: $size ($file_count files)" | tee -a "$LOG"
 
     if [ "$PURGE" -eq 1 ]; then
-        old_files=$(find "$data_dir" -type f -mtime +"$DAYS" 2>/dev/null)
-        if [ -n "$old_files" ]; then
-            old_count=$(printf '%s\n' "$old_files" | wc -l | tr -d ' ')
-            printf '%s\n' "$old_files" | xargs rm -f
+        old_count=$(find "$data_dir" -type f -mtime +"$DAYS" -print0 2>/dev/null | tr -dc '\0' | wc -c | tr -d ' ')
+        if [ "$old_count" -gt 0 ]; then
+            find "$data_dir" -type f -mtime +"$DAYS" -print0 2>/dev/null | xargs -0 rm -f
             echo "    purged $old_count files older than $DAYS days" | tee -a "$LOG"
         fi
     fi
