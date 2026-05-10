@@ -65,6 +65,7 @@ class SandboxConfig:
     which controls tool-call permission prompts).
     """
 
+    enabled: bool | None = None  # None = inherit from global settings
     network_allowed_domains: list[str] = field(default_factory=list)
     filesystem_allow_write: list[str] = field(default_factory=list)
     auto_allow_bash: bool = False  # autoAllowBashIfSandboxed — opt-in per fleet
@@ -278,7 +279,9 @@ def _coerce_model_strategy(raw: dict | None) -> ModelStrategyConfig | None:
 def _coerce_sandbox(raw: dict | None) -> SandboxConfig:
     if not raw:
         return SandboxConfig()
+    enabled_raw = raw.get("enabled")
     return SandboxConfig(
+        enabled=bool(enabled_raw) if enabled_raw is not None else None,
         network_allowed_domains=list(raw.get("network_allowed_domains") or []),
         filesystem_allow_write=list(raw.get("filesystem_allow_write") or []),
         auto_allow_bash=bool(raw.get("auto_allow_bash", False)),
@@ -286,8 +289,9 @@ def _coerce_sandbox(raw: dict | None) -> SandboxConfig:
 
 
 def _merge_sandbox(default: SandboxConfig, override: SandboxConfig) -> SandboxConfig:
-    """Merge sandbox configs — lists are unioned, bools use override value."""
+    """Merge sandbox configs — lists are unioned, bools use override value when not None."""
     return SandboxConfig(
+        enabled=override.enabled if override.enabled is not None else default.enabled,
         network_allowed_domains=_merge_lists(
             default.network_allowed_domains, override.network_allowed_domains
         ),
