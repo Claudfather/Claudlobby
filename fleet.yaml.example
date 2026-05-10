@@ -47,6 +47,7 @@ fleet:
       token_env: TELEGRAM_BOT_TOKEN            # shared token (most fleets use one bot token)
       require_mention: true                    # workers respond to @-mentions only
     sandbox:
+      enabled: false                         # disable sandbox per-bot (overrides global settings.json)
       auto_allow_bash: true                  # don't prompt for bash in sandbox mode
       network_allowed_domains:               # domains all bots may access without prompts
         - api.github.com

@@ -952,14 +952,17 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
             "allow": allow_patterns,
         }
 
-    # Sandbox: network + filesystem allowlists + bash auto-allow
+    # Sandbox: enabled toggle + network + filesystem allowlists + bash auto-allow
     sandbox = bot.sandbox
     if (
-        sandbox.network_allowed_domains
+        sandbox.enabled is not None
+        or sandbox.network_allowed_domains
         or sandbox.filesystem_allow_write
         or sandbox.auto_allow_bash
     ):
         sandbox_cfg: dict = {}
+        if sandbox.enabled is not None:
+            sandbox_cfg["enabled"] = sandbox.enabled
         if sandbox.network_allowed_domains:
             sandbox_cfg["network"] = {"allowedDomains": sandbox.network_allowed_domains}
         if sandbox.filesystem_allow_write:
