@@ -24,6 +24,6 @@
   },
   "docker": {
     "command": "npx",
-    "args": ["-y", "docker-mcp@latest"]
+    "args": ["-y", "docker-mcp@1.0.0"]
   }
 }
