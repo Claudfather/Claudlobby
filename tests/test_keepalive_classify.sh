@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test harness for keepalive.sh pane-state classification.
-# Runs each fixture through the classification logic and checks the result.
+# Sources classify_pane() directly from keepalive.sh — single source of truth.
 #
 # Usage: bash tests/test_keepalive_classify.sh
 #   Exit 0 = all pass, exit 1 = failures.
@@ -8,38 +8,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURE_DIR="$SCRIPT_DIR/fixtures/pane-states"
+
+# Source only the classify_pane function from keepalive.sh.
+# keepalive.sh sources lib-common.sh and runs bot-level setup at the top
+# level, so we extract just the function definition.
+eval "$(sed -n '/^classify_pane()/,/^}/p' "$REPO_DIR/lib/keepalive.sh")"
 
 passed=0
 failed=0
 total=0
-
-classify() {
-    local last_lines="$1"
-    local busy_pattern="${KEEPALIVE_BUSY_PATTERNS:-}"
-    local idle_pattern="${KEEPALIVE_IDLE_PATTERNS:-}"
-
-    # Mirror keepalive.sh classification logic
-    _busy_spinner='[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]'
-    _busy_verbs='(Running|Thinking|Reading|Writing|Editing|Searching|Generating|Pondering)'
-    _busy_pattern="$_busy_spinner|$_busy_verbs"
-    if [ -n "$busy_pattern" ]; then
-        _busy_pattern="$_busy_pattern|$busy_pattern"
-    fi
-
-    _idle_pattern='(^\s*[>❯]\s*$|Remote Control active|Enter\/Esc to close|Yes\/No|Allow|Deny|y\/n\b)'
-    if [ -n "$idle_pattern" ]; then
-        _idle_pattern="$_idle_pattern|$idle_pattern"
-    fi
-
-    if echo "$last_lines" | grep -qE "$_busy_pattern"; then
-        echo "BUSY"
-    elif echo "$last_lines" | grep -qE "$_idle_pattern"; then
-        echo "IDLE"
-    else
-        echo "UNKNOWN"
-    fi
-}
 
 assert_state() {
     local fixture="$1"
@@ -49,7 +28,7 @@ assert_state() {
     local content
     content=$(tail -10 "$FIXTURE_DIR/$fixture")
     local actual
-    actual=$(classify "$content")
+    actual=$(classify_pane "$content")
 
     if [ "$actual" = "$expected" ]; then
         passed=$((passed + 1))
@@ -77,13 +56,12 @@ assert_state "idle-permission.txt" "IDLE"
 assert_state "unknown-blank.txt" "UNKNOWN"
 assert_state "unknown-output.txt" "UNKNOWN"
 
-# Extensibility test: custom busy pattern via env var
+# Extensibility test: custom patterns via env vars
 echo ""
 echo "--- extensibility tests ---"
-KEEPALIVE_BUSY_PATTERNS="Compiling" \
-    last_lines="  Compiling main.rs..." \
-    total=$((total + 1))
-result=$(KEEPALIVE_BUSY_PATTERNS="Compiling" classify "  Compiling main.rs...")
+
+total=$((total + 1))
+result=$(KEEPALIVE_BUSY_PATTERNS="Compiling" classify_pane "  Compiling main.rs...")
 if [ "$result" = "BUSY" ]; then
     passed=$((passed + 1))
     printf "  PASS  %-35s → %s\n" "custom-busy-pattern" "$result"
@@ -92,9 +70,8 @@ else
     printf "  FAIL  %-35s → %s (expected BUSY)\n" "custom-busy-pattern" "$result"
 fi
 
-KEEPALIVE_IDLE_PATTERNS="Waiting for approval" \
-    total=$((total + 1))
-result=$(KEEPALIVE_IDLE_PATTERNS="Waiting for approval" classify "  Waiting for approval")
+total=$((total + 1))
+result=$(KEEPALIVE_IDLE_PATTERNS="Waiting for approval" classify_pane "  Waiting for approval")
 if [ "$result" = "IDLE" ]; then
     passed=$((passed + 1))
     printf "  PASS  %-35s → %s\n" "custom-idle-pattern" "$result"

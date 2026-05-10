@@ -52,6 +52,7 @@ if ! check_tmux_session "$BOT_NAME"; then
 fi
 
 pane_content=$("$_TMUX_BIN" capture-pane -t "$BOT_NAME" -p 2>/dev/null) || true
+last_lines=$(echo "$pane_content" | tail -10)
 
 # ---------------------------------------------------------------------------
 # Pane-state classification
@@ -76,41 +77,61 @@ pane_content=$("$_TMUX_BIN" capture-pane -t "$BOT_NAME" -p 2>/dev/null) || true
 #   KEEPALIVE_IDLE_PATTERNS  — extra ERE appended to the idle check
 # ---------------------------------------------------------------------------
 
-last_lines=$(echo "$pane_content" | tail -10)
+# classify_pane <pane_text>
+# Prints BUSY, IDLE, or UNKNOWN to stdout.  Sourced by tests — keep this as
+# the single source of truth for pattern definitions.
+classify_pane() {
+    local text="$1"
+
+    # --- BUSY: spinner characters first, then verb pattern ---
+    local _busy_spinner='[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]'
+    local _busy_verbs='(Running|Thinking|Reading|Writing|Editing|Searching|Generating|Pondering)'
+    local _busy_pattern="$_busy_spinner|$_busy_verbs"
+    if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
+        _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
+    fi
+
+    # --- IDLE: prompt glyph or waiting-for-input marker ---
+    # Note: \b is a GNU grep extension (word boundary). It works on Linux
+    # (GNU grep) and macOS 14+ (which ships GNU-compatible grep). On older
+    # macOS, replace with [^a-z] or drop the boundary check.
+    local _idle_pattern='(^\s*[>❯]\s*$|Remote Control active|Enter\/Esc to close|Yes\/No|Allow|Deny|y\/n\b)'
+    if [ -n "${KEEPALIVE_IDLE_PATTERNS:-}" ]; then
+        _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
+    fi
+
+    if echo "$text" | grep -qE "$_busy_pattern"; then
+        echo "BUSY"
+    elif echo "$text" | grep -qE "$_idle_pattern"; then
+        echo "IDLE"
+    else
+        echo "UNKNOWN"
+    fi
+}
+
+state=$(classify_pane "$last_lines")
 UNKNOWN_COUNTER="$BOT_DIR/.keepalive-unknown-count"
 UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 
-# --- BUSY check: spinner characters first, then verb pattern ---
-_busy_spinner='[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]'
-_busy_verbs='(Running|Thinking|Reading|Writing|Editing|Searching|Generating|Pondering)'
-_busy_pattern="$_busy_spinner|$_busy_verbs"
-if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
-    _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
-fi
-
-# --- IDLE check: prompt glyph or waiting-for-input marker ---
-_idle_pattern='(^\s*[>❯]\s*$|Remote Control active|Enter\/Esc to close|Yes\/No|Allow|Deny|y\/n\b)'
-if [ -n "${KEEPALIVE_IDLE_PATTERNS:-}" ]; then
-    _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
-fi
-
-# --- Classify and log ---
-if echo "$last_lines" | grep -qE "$_busy_pattern"; then
-    echo "$(ts_iso) BUSY — active processing" >> "$LOG"
-    # Reset consecutive-unknown counter on any definite state
-    rm -f "$UNKNOWN_COUNTER"
-elif echo "$last_lines" | grep -qE "$_idle_pattern"; then
-    echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
-    rm -f "$UNKNOWN_COUNTER"
-else
-    # Track consecutive UNKNOWN runs
-    prev=0
-    [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
-    count=$((prev + 1))
-    printf '%d' "$count" > "$UNKNOWN_COUNTER"
-    if [ "$count" -ge "$UNKNOWN_THRESHOLD" ]; then
-        echo "$(ts_iso) UNKNOWN — unrecognized pane state ($count consecutive, threshold $UNKNOWN_THRESHOLD) — investigate" >> "$LOG"
-    else
-        echo "$(ts_iso) UNKNOWN — pane state did not match known patterns ($count consecutive)" >> "$LOG"
-    fi
-fi
+case "$state" in
+    BUSY)
+        echo "$(ts_iso) BUSY — active processing" >> "$LOG"
+        rm -f "$UNKNOWN_COUNTER"
+        ;;
+    IDLE)
+        echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
+        rm -f "$UNKNOWN_COUNTER"
+        ;;
+    *)
+        # Track consecutive UNKNOWN runs
+        prev=0
+        [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
+        count=$((prev + 1))
+        printf '%d' "$count" > "$UNKNOWN_COUNTER"
+        if [ "$count" -ge "$UNKNOWN_THRESHOLD" ]; then
+            echo "$(ts_iso) UNKNOWN — unrecognized pane state ($count consecutive, threshold $UNKNOWN_THRESHOLD) — investigate" >> "$LOG"
+        else
+            echo "$(ts_iso) UNKNOWN — pane state did not match known patterns ($count consecutive)" >> "$LOG"
+        fi
+        ;;
+esac
