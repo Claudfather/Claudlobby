@@ -958,7 +958,7 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
         sandbox.enabled is not None
         or sandbox.network_allowed_domains
         or sandbox.filesystem_allow_write
-        or sandbox.auto_allow_bash
+        or sandbox.auto_allow_bash is not None
     ):
         sandbox_cfg: dict = {}
         if sandbox.enabled is not None:
@@ -967,8 +967,8 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
             sandbox_cfg["network"] = {"allowedDomains": sandbox.network_allowed_domains}
         if sandbox.filesystem_allow_write:
             sandbox_cfg["filesystem"] = {"allowWrite": sandbox.filesystem_allow_write}
-        if sandbox.auto_allow_bash:
-            sandbox_cfg["autoAllowBashIfSandboxed"] = True
+        if sandbox.auto_allow_bash is not None:
+            sandbox_cfg["autoAllowBashIfSandboxed"] = sandbox.auto_allow_bash
         settings["sandbox"] = sandbox_cfg
 
     # Hooks: PreToolUse, PostToolUse, etc.

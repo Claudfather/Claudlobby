@@ -68,7 +68,7 @@ class SandboxConfig:
     enabled: bool | None = None  # None = inherit from global settings
     network_allowed_domains: list[str] = field(default_factory=list)
     filesystem_allow_write: list[str] = field(default_factory=list)
-    auto_allow_bash: bool = False  # autoAllowBashIfSandboxed — opt-in per fleet
+    auto_allow_bash: bool | None = None  # None = inherit from fleet default
 
 
 @dataclass
@@ -280,11 +280,12 @@ def _coerce_sandbox(raw: dict | None) -> SandboxConfig:
     if not raw:
         return SandboxConfig()
     enabled_raw = raw.get("enabled")
+    auto_allow_raw = raw.get("auto_allow_bash")
     return SandboxConfig(
         enabled=bool(enabled_raw) if enabled_raw is not None else None,
         network_allowed_domains=list(raw.get("network_allowed_domains") or []),
         filesystem_allow_write=list(raw.get("filesystem_allow_write") or []),
-        auto_allow_bash=bool(raw.get("auto_allow_bash", False)),
+        auto_allow_bash=bool(auto_allow_raw) if auto_allow_raw is not None else None,
     )
 
 
@@ -298,7 +299,9 @@ def _merge_sandbox(default: SandboxConfig, override: SandboxConfig) -> SandboxCo
         filesystem_allow_write=_merge_lists(
             default.filesystem_allow_write, override.filesystem_allow_write
         ),
-        auto_allow_bash=override.auto_allow_bash,
+        auto_allow_bash=override.auto_allow_bash
+        if override.auto_allow_bash is not None
+        else default.auto_allow_bash,
     )
 
 
