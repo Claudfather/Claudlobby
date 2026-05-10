@@ -8,18 +8,16 @@ Bring a fresh fleet up in about 30 minutes (excluding waiting on Telegram BotFat
 - `python3` (3.10+), `git`, `tmux`, `jq`, `curl` installed
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in (or `ANTHROPIC_API_KEY` set)
 - The Telegram channel plugin: `claude plugin install telegram@claude-plugins-official`
-- A clauDNA-style global skills install (recommended — without it, your bots will lack `/simplify`, `/review-pr`, `/tech-debt`, etc.)
 
 ## 1. Clone + install
 
 ```bash
-git clone https://github.com/<your-username>/claudlobby.git
-cd claudlobby
-python3 -m venv .venv
-.venv/bin/pip install -e .
+git clone https://github.com/Claudfather/Claudlobby.git
+cd Claudlobby
+pip install -e .
 ```
 
-The `-e .` editable install creates a `claudlobby` console script in `.venv/bin/`. You can also use `./bin/claudlobby` directly without the venv install.
+The `-e .` editable install creates a `claudlobby` console script. You can also use `python3 -m claudlobby` directly.
 
 ## 2. Set up secrets
 
@@ -54,9 +52,19 @@ Token rules:
 
 ## 3. Write fleet.yaml
 
+You can run claudlobby in **root mode** (fleet.yaml at repo root) or **overlay mode** (fleet-specific config in `local/<fleet>/`). Overlay mode keeps fleet-specific content isolated and is recommended for multi-fleet setups.
+
+**Root mode:**
 ```bash
 cp fleet.yaml.example fleet.yaml
 $EDITOR fleet.yaml
+```
+
+**Overlay mode (recommended):**
+```bash
+mkdir -p local/my-fleet
+cp fleet.yaml.example local/my-fleet/fleet.yaml
+$EDITOR local/my-fleet/fleet.yaml
 ```
 
 Key fields to customize:
@@ -64,44 +72,63 @@ Key fields to customize:
 - `fleet.name` — human-readable label
 - `fleet.service_prefix` — reverse-domain prefix for service unit names (`com.yourorg.fleet`)
 - `fleet.telegram_group_chat_id` — your default Telegram group ID. Get it by adding [@RawDataBot](https://t.me/raw_data_bot) to your group; the chat_id appears in its first message.
+- `fleet.human_telegram_id` — your Telegram user ID (enables DM allowlisting for all bots)
 - For each bot:
   - `expertise` — list of roles from `library/expertise/` (e.g. `[orchestration]`, `[software-engineering, code-review]`)
   - `voice` — optional path to a personality file under `voices/`
   - `mcp` — list of MCP fragments from `library/mcp/`
   - `skills` — list of skills from `library/skills/`
   - `telegram.handle` — the bot's `@handle` in Telegram
-  - `telegram.token_env` — the env var name in `.env`
+  - `telegram.token_env` — the env var name in `.env` (or set in `defaults.telegram.token_env` for a shared token)
   - `telegram.require_mention` — `true` for workers in shared groups, `false` for solo bots / managers in their own group
 
 ## 4. Validate
 
 ```bash
-.venv/bin/claudlobby validate
+claudlobby validate                        # root mode
+claudlobby --fleet my-fleet validate       # overlay mode
 ```
 
-Expect a clean run, or warnings only (missing env vars, etc.). Hard errors mean a missing persona — fix `fleet.yaml` and re-run.
+Expect a clean run, or warnings only (missing env vars, etc.). Hard errors mean a missing expertise file — fix `fleet.yaml` and re-run.
 
 ## 5. Generate
 
 ```bash
-.venv/bin/claudlobby generate
+claudlobby generate                        # root mode
+claudlobby --fleet my-fleet generate       # overlay mode
 ```
 
-This writes `runtime/bots/<name>/` for every bot. Inspect one:
+This writes bot directories for every bot. In root mode: `runtime/bots/<name>/`. In overlay mode: `local/<fleet>/runtime/bots/<name>/`. The generator also scaffolds `.env` files with stubs for any env vars required by MCP configs and integrations.
+
+Inspect one:
 
 ```bash
-ls runtime/bots/lead/
-cat runtime/bots/lead/CLAUDE.md
-cat runtime/bots/lead/.mcp.json
-ls -la runtime/bots/lead/.claude/skills/
+BOT_DIR=runtime/bots/lead                  # root mode
+BOT_DIR=local/my-fleet/runtime/bots/lead   # overlay mode
+ls $BOT_DIR/
+cat $BOT_DIR/CLAUDE.md
+cat $BOT_DIR/.mcp.json
+ls -la $BOT_DIR/.claude/skills/
 ```
 
 The skill subdirectories should be symlinks into `library/skills/`.
 
-## 6. Install service units
+## 6. Start bots
 
-### macOS (launchd)
+The easiest way to start a bot is `lib/spin-up-bot.sh` — it's idempotent and handles service enrollment + startup:
 
+```bash
+lib/spin-up-bot.sh runtime/bots/lead                         # root mode
+lib/spin-up-bot.sh local/my-fleet/runtime/bots/lead           # overlay mode
+```
+
+This detects your OS, links the service unit (systemd on Linux, launchd on macOS), enables it, and starts the bot. Run it for each bot.
+
+### Manual service install (alternative)
+
+If you prefer manual control:
+
+**macOS (launchd):**
 ```bash
 mkdir -p ~/Library/LaunchAgents
 for bot in $(ls runtime/bots/); do
@@ -112,8 +139,7 @@ done
 
 (Replace `com.example.claudlobby` with your `service_prefix`.)
 
-### Linux (systemd user)
-
+**Linux (systemd user):**
 ```bash
 mkdir -p ~/.config/systemd/user
 for bot in $(ls runtime/bots/); do
@@ -150,16 +176,17 @@ Send a Telegram message to your bot. It should respond within a few seconds.
 When you change `fleet.yaml` or anything in `library/`:
 
 ```bash
-.venv/bin/claudlobby validate
-.venv/bin/claudlobby generate
-# For changes to a specific bot only:
-.venv/bin/claudlobby generate --bot lead
+claudlobby validate                              # or --fleet my-fleet
+claudlobby generate                              # regenerates all bots
+claudlobby generate --bot lead                   # regenerate one bot
 # Then restart the affected bot:
-systemctl --user restart lead     # Linux
+systemctl --user restart lead                    # Linux
 launchctl kickstart -k gui/$(id -u)/com.example.claudlobby.lead  # macOS
 ```
 
 Skill edits in `library/skills/` are picked up live (symlinks) — no regen required, just `/compact` or restart the bot to clear its cache.
+
+Use `claudlobby diff` to check for drift between generated output and what's in the runtime directory. Use `lib/reconcile-fleet.sh <fleet>` to audit fleet supervision state (healthy, orphan, missing, unbound).
 
 ## Troubleshooting
 
