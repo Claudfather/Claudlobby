@@ -320,6 +320,33 @@ def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
 
 def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
     """Fleet-level dependency checks."""
+    import re
+
+    # Warn about disabling defaults — unusual, worth flagging
+    if not fleet.plugins.include_defaults:
+        report.warnings.append(
+            "plugins.include_defaults is false — default plugins (claudna) will not be installed"
+        )
+
+    # Plugin name format: must be name@marketplace
+    for plugin in fleet.plugins.required:
+        if not re.match(r"^[\w-]+@[\w-]+$", plugin):
+            report.warnings.append(
+                f"plugin '{plugin}' does not match expected name@marketplace format"
+            )
+
+    # Marketplace source format: github repos must be org/repo
+    for mp_name, mp_config in fleet.plugins.marketplaces.items():
+        src = mp_config.get("source", {})
+        if isinstance(src, dict):
+            src_type = src.get("source", "")
+            src_repo = src.get("repo", "")
+            if src_type == "github" and not re.match(r"^[\w.-]+/[\w.-]+$", src_repo):
+                report.warnings.append(
+                    f"marketplace '{mp_name}': repo '{src_repo}' does not match "
+                    "expected <org>/<repo> format"
+                )
+
     if not fleet.plugins.required:
         return
 

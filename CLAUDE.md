@@ -35,6 +35,7 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 - **MCP fragments** — JSON wire configs in `library/mcp/` with `${ENV_VAR}` placeholders. Never real tokens.
 - **Guardrails** — Safety rules composed per-bot (e.g. `no-push-main`, `snowflake-read-only`).
 - **Protocols** — Reusable workflow patterns (dispatch, review-flow, context-management).
+- **Plugins** — Claude Code plugins installed fleet-wide. `claudna@Claudfather` is a built-in default; extras via `fleet.plugins.additional`. Auto-installed on bot start.
 - **Voices** — Optional personality overlays from `voices/`.
 
 ### Runtime model

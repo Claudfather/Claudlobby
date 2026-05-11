@@ -8,6 +8,7 @@ Bring a fresh fleet up in about 30 minutes (excluding waiting on Telegram BotFat
 - `python3` (3.10+), `git`, `tmux`, `jq`, `curl` installed
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in (or `ANTHROPIC_API_KEY` set)
 - The Telegram channel plugin: `claude plugin install telegram@claude-plugins-official`
+- The [clauDNA](https://github.com/Claudfather/clauDNA) plugin is auto-installed as a fleet default — no manual setup needed
 
 ## 1. Clone + install
 
