@@ -195,4 +195,4 @@ Use `claudlobby diff` to check for drift between generated output and what's in 
 - **Bot loops on restart** → `journalctl --user -u <bot> -n 50` (Linux) or `tail lib/logs/<bot>.err.log` (macOS) — most often a missing token or a Claude Code auth issue
 - **Skill not loading** → confirm symlink exists in `runtime/bots/<bot>/.claude/skills/<skill>` and points to `library/skills/<skill>/`
 
-See [`docs/architecture.md`](architecture.md) for the deeper model and [`docs/fleet-yaml-schema.md`](fleet-yaml-schema.md) for every config field.
+See [`architecture/overview.md`](architecture/overview.md) for the deeper model and [`fleet-yaml-schema.md`](fleet-yaml-schema.md) for every config field.

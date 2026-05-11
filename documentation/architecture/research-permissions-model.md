@@ -1,6 +1,6 @@
 # Research: Claude Code Permissions Model
 
-Research for the smart permissions compositor feature (see `docs/design-smart-permissions.md`).
+Research for the smart permissions compositor feature.
 
 Sources: Claude Code official documentation, current `~/.claude/settings.json` reference implementation, `claudlobby/composer.py` existing code.
 
