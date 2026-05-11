@@ -27,3 +27,22 @@ $CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll any orphans
 ```
 
 `reconcile-fleet.sh` reports four buckets: healthy (tmux + unit), orphan (tmux but no unit — unsupervised), missing (unit but no tmux — down), unbound (running but not in any fleet.yaml — investigate before killing).
+
+## Preflight: check shared knowledge before dispatch
+
+Before dispatching to a repo, check shared docs for relevant context:
+
+1. Scan `shared/planning/active/INDEX.md` — is there an active plan for the target repo?
+2. Scan `shared/knowledge/<repo>/INDEX.md` — are there existing learnings the worker should know?
+
+If relevant docs exist, **include the key context in the dispatch prompt** so the engineer doesn't duplicate work, contradict an in-flight plan, or re-discover something the fleet already knows.
+
+Example: if an active plan covers auth refactoring in `backend`, and you're dispatching a login endpoint task to the same repo, reference the plan in the dispatch: "See shared/planning/active/backend-auth-rework.md — your task aligns with phase 2."
+
+## Manager: INDEX.md monitoring
+
+The orchestrator periodically scans `shared/planning/active/INDEX.md` to:
+
+- **Surface stale plans** — status: active but `updated:` older than 7 days. Ping the owner.
+- **Detect conflicts** — two active plans touching the same repo. Flag for human resolution.
+- **Catch forgotten transitions** — a completed task whose plan still says status: active. Nudge the owner to update status and run `/index`.
