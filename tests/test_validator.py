@@ -174,3 +174,86 @@ class TestValidate:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("both allow and deny" in w for w in report.warnings)
+
+
+class TestPluginValidation:
+    """_validate_fleet warns about missing plugins."""
+
+    def test_validate_no_warn_no_plugins(self, fleet_dir, monkeypatch):
+        """No plugins declared → no plugin-related warnings."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("plugin" in w.lower() for w in report.warnings)
+
+    def test_validate_warns_missing_manifest(self, fleet_dir, monkeypatch, tmp_path):
+        """Plugins declared but installed_plugins.json doesn't exist."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        # Redirect HOME so installed_plugins.json won't be found
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        from claudlobby.config import PluginsConfig
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.plugins = PluginsConfig(required=["claudna@Claudfather"])
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("installed_plugins.json" in w for w in report.warnings)
+
+    def test_validate_warns_missing_plugin(self, fleet_dir, monkeypatch, tmp_path):
+        """Plugin declared but not in installed_plugins.json."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fake_home = tmp_path / "fakehome"
+        plugins_dir = fake_home / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        import json
+
+        (plugins_dir / "installed_plugins.json").write_text(
+            json.dumps({"plugins": {"telegram@claude-plugins-official": {}}})
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+        from claudlobby.config import PluginsConfig
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.plugins = PluginsConfig(
+            required=["claudna@Claudfather", "telegram@claude-plugins-official"]
+        )
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "claudna@Claudfather" in w and "not installed" in w for w in report.warnings
+        )
+        assert not any(
+            "telegram@claude-plugins-official" in w and "not installed" in w
+            for w in report.warnings
+        )
+
+    def test_validate_no_warn_installed_plugin(self, fleet_dir, monkeypatch, tmp_path):
+        """Plugin declared and present in installed_plugins.json → no warning."""
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fake_home = tmp_path / "fakehome"
+        plugins_dir = fake_home / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        import json
+
+        (plugins_dir / "installed_plugins.json").write_text(
+            json.dumps({"plugins": {"claudna@Claudfather": {"version": "0.2.0"}}})
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+        from claudlobby.config import PluginsConfig
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.plugins = PluginsConfig(required=["claudna@Claudfather"])
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("claudna@Claudfather" in w for w in report.warnings)

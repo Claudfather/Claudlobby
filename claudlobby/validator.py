@@ -318,23 +318,37 @@ def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
                 )
 
 
-def _validate_fleet(report: ValidationReport) -> None:
+def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
     """Fleet-level dependency checks."""
-    # claudefather dependency check (warn)
-    # install.sh writes ~/.claude/.claudefather-repo as the breadcrumb.
-    cladna_breadcrumb = Path.home() / ".claude" / ".claudefather-repo"
-    if not cladna_breadcrumb.is_file():
+    if not fleet.plugins.required:
+        return
+
+    # Check installed_plugins.json for declared plugins
+    config_dir = Path.home() / ".claude"
+    installed_path = config_dir / "plugins" / "installed_plugins.json"
+
+    if not installed_path.is_file():
         report.warnings.append(
-            "claudefather not installed — bots will lack global skills "
-            "(/simplify, /review-pr, /tech-debt, etc.). "
-            "Clone and run install.sh from your claudefather repo."
+            f"plugins declared in fleet.yaml but {installed_path} not found — "
+            "run 'claude plugin install <plugin>' for each declared plugin, or "
+            "set CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1 to auto-install on first bot start"
         )
-    else:
-        repo_path = Path(cladna_breadcrumb.read_text().strip())
-        if not repo_path.is_dir():
+        return
+
+    try:
+        installed = json.loads(installed_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        report.warnings.append(
+            f"could not read {installed_path}: {exc} — plugin state unknown"
+        )
+        return
+
+    installed_plugins = installed.get("plugins", {})
+    for plugin in fleet.plugins.required:
+        if plugin not in installed_plugins:
             report.warnings.append(
-                f"claudefather breadcrumb points to {repo_path} but directory not found — "
-                "re-run install.sh or update ~/.claude/.claudefather-repo"
+                f"plugin '{plugin}' declared in fleet.yaml but not installed — "
+                f"run 'claude plugin install {plugin}'"
             )
 
 
@@ -347,6 +361,6 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     fleet_env = dotenv.read(paths.env_file)
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
-    _validate_fleet(report)
+    _validate_fleet(fleet, report)
 
     return report

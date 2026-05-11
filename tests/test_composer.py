@@ -1579,3 +1579,106 @@ class TestComposeSystemdUnit:
         assert "ExecStartPre=/bin/sleep 6" in unit6
         unit0 = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
         assert "ExecStartPre" not in unit0
+
+
+class TestPluginsBotConf:
+    """compose_bot_conf emits CLAUDE_CODE_SYNC_PLUGIN_INSTALL when fleet has plugins."""
+
+    def _compose(self, tmp_path, plugins=None):
+        from claudlobby.config import PluginsConfig
+        from claudlobby.composer import compose_bot_conf
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot"),
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+            plugins=plugins or PluginsConfig(),
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_bot_conf(bot, fleet, paths)
+
+    def test_bot_conf_has_sync_env_var(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        plugins = PluginsConfig(required=["claudna@Claudfather"])
+        conf = self._compose(tmp_path, plugins=plugins)
+        assert 'export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"' in conf
+
+    def test_bot_conf_no_sync_without_plugins(self, tmp_path):
+        conf = self._compose(tmp_path)
+        assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
+
+
+class TestPluginsSettingsLocal:
+    """compose_settings_local emits enabledPlugins + extraKnownMarketplaces."""
+
+    def _make_paths_with_runtime(self, tmp_path: Path) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "runtime" / "bots").mkdir(parents=True)
+        return Paths(root=root, fleet_dir=root)
+
+    def test_settings_local_has_enabled_plugins(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        plugins = PluginsConfig(
+            required=["claudna@Claudfather", "telegram@claude-plugins-official"]
+        )
+        fleet = FleetConfig(
+            name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins
+        )
+        result = compose_settings_local(bot, fleet, paths)
+        assert "enabledPlugins" in result
+        assert result["enabledPlugins"] == {
+            "claudna@Claudfather": True,
+            "telegram@claude-plugins-official": True,
+        }
+
+    def test_settings_local_has_extra_marketplaces(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        plugins = PluginsConfig(
+            marketplaces={
+                "Claudfather": {
+                    "source": {"source": "github", "repo": "Claudfather/clauDNA"}
+                },
+            },
+            required=["claudna@Claudfather"],
+        )
+        fleet = FleetConfig(
+            name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins
+        )
+        result = compose_settings_local(bot, fleet, paths)
+        assert "extraKnownMarketplaces" in result
+        assert result["extraKnownMarketplaces"] == {
+            "Claudfather": {
+                "source": {"source": "github", "repo": "Claudfather/clauDNA"}
+            }
+        }
+
+    def test_settings_local_no_marketplaces_without_decl(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        plugins = PluginsConfig(required=["telegram@claude-plugins-official"])
+        fleet = FleetConfig(
+            name="t", service_prefix="p", bots={"worker": bot}, plugins=plugins
+        )
+        result = compose_settings_local(bot, fleet, paths)
+        assert "enabledPlugins" in result
+        assert "extraKnownMarketplaces" not in result

@@ -117,6 +117,24 @@ Alternate Claude Code config directories. Useful when some bots authenticate aga
 
 The human operator's Telegram user ID. When set, the compositor writes this into every bot's `access.json` `allowFrom` list, so the human can DM any bot without pending approval.
 
+### `fleet.plugins`
+
+Declares Claude Code plugins that all bots in the fleet should have installed and enabled.
+
+```yaml
+plugins:
+  marketplaces:
+    Claudfather:
+      source: { source: github, repo: Claudfather/clauDNA }
+  required:
+    - claudna@Claudfather
+    - telegram@claude-plugins-official
+```
+
+**`marketplaces`** — Third-party marketplace registrations. The official Anthropic marketplace is built in and doesn't need a declaration. Each entry maps a marketplace name to a source descriptor (the nested `source` key is the Claude Code marketplace schema — `github`, `url`, `git`, or `local` types).
+
+**`required`** — Plugin identifiers in `name@marketplace` format. These are emitted to each bot's `settings.local.json` as `enabledPlugins` and trigger auto-install via `CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1`.
+
 ### `fleet.defaults`
 
 Applied to every bot. Merge rules by type:
