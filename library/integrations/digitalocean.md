@@ -1,5 +1,6 @@
 ---
 title: DigitalOcean
+type: cli
 ---
 
 # DigitalOcean

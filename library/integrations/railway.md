@@ -1,5 +1,6 @@
 ---
 title: Railway
+type: cli
 env_contract:
   RAILWAY_API_TOKEN:
     description: Railway API token (work workspace)
@@ -12,7 +13,7 @@ env_contract:
 # Railway
 
 
-**Skills:** `/railway-status` (service overview), `/railway-logs` (view/debug logs), `/railway-deploy` (deploy/update services)
+**Skills (clauDNA):** `/railway-status` (service overview), `/railway-logs` (view/debug logs), `/railway-deploy` (deploy/update services)
 
 **When to use:**
 - Checking deploy health or service status → `/railway-status`

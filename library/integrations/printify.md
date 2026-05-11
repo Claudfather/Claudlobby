@@ -1,5 +1,6 @@
 ---
 title: Printify
+type: mcp
 env_contract:
   PRINTIFY_API_KEY:
     description: Printify API key
@@ -13,7 +14,7 @@ env_contract:
 
 ### Printify MCP
 
-Wire config: `library/mcp/printify.json` (uses `${PRINTIFY_API_KEY}`, `${PRINTIFY_SHOP_ID}`).
+Wire config: fleet-local (no shared `library/mcp/printify.json` — configure via local overlay or direct `.mcp.json`).
 
 #### Forked MCP with Order Tools
 

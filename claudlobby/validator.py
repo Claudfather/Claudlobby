@@ -65,7 +65,7 @@ def _bot_required_env_vars(
             continue
         try:
             frag = json.loads(frag_path.read_text())
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             log.warning("failed to parse %s, skipping", frag_path)
             continue
         contract = frag.get("_env_contract", {})
@@ -112,19 +112,24 @@ def _bot_required_env_vars(
     return out
 
 
-def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
-    report = ValidationReport()
+# Tool deny vs expertise conflict map — which tools each expertise area
+# typically requires. Used by _validate_bots to warn about deny conflicts.
+_EXPERTISE_CORE_TOOLS: dict[str, set[str]] = {
+    "software-engineering": {"Write", "Edit"},
+    "frontend-design": {"Write", "Edit"},
+    "data-engineering": {"Write", "Edit"},
+    "pipeline-engineering": {"Write", "Edit"},
+    "orchestration": {"Agent", "Bash"},
+}
 
-    # Hard error: no bots
-    if not fleet.bots:
-        report.errors.append("fleet.bots is empty — nothing to compose")
 
-    # Read fleet-tier .env once. Bot-tier .env is read per-bot inside the loop
-    # because each bot has its own. The 3-tier composition mirrors what
-    # lib/start-bot.sh does at runtime: os.environ → fleet → bot, later wins.
-    fleet_env = dotenv.read(paths.env_file)
-
-    # Per-bot checks (overlay-aware lookups — overlay first, base fallback)
+def _validate_bots(
+    fleet: FleetConfig,
+    paths: Paths,
+    fleet_env: dict[str, str],
+    report: ValidationReport,
+) -> None:
+    """Per-bot validation: expertise, voice, skills, MCP, env vars, integrations, etc."""
     for bot_name, bot in fleet.bots.items():
         bot_env = dotenv.read(paths.bot_runtime(bot_name) / ".env")
         effective_env: dict[str, str] = {**os.environ, **fleet_env, **bot_env}
@@ -266,13 +271,6 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
 
         # Tool deny vs expertise conflict (warn). Flag when a denied tool is
         # core to the bot's expertise — the bot won't be able to do its job.
-        _EXPERTISE_CORE_TOOLS: dict[str, set[str]] = {
-            "software-engineering": {"Write", "Edit"},
-            "frontend-design": {"Write", "Edit"},
-            "data-engineering": {"Write", "Edit"},
-            "pipeline-engineering": {"Write", "Edit"},
-            "orchestration": {"Agent", "Bash"},
-        }
         if bot.tools.deny:
             denied = set(bot.tools.deny)
             for area in bot.expertise:
@@ -291,6 +289,9 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                         f"bot '{bot_name}': tools {sorted(overlap)} appear in both allow and deny lists"
                     )
 
+
+def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Org structure integrity and team membership checks."""
     # Org structure integrity (warn — bot_ids may reference other fleets)
     for bot_name, bot in fleet.bots.items():
         if bot.reports_to and bot.reports_to not in fleet.bots:
@@ -316,6 +317,9 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                     f"team '{team.name}': worker '{worker}' is not in fleet.bots"
                 )
 
+
+def _validate_fleet(report: ValidationReport) -> None:
+    """Fleet-level dependency checks."""
     # claudefather dependency check (warn)
     # install.sh writes ~/.claude/.claudefather-repo as the breadcrumb.
     cladna_breadcrumb = Path.home() / ".claude" / ".claudefather-repo"
@@ -332,5 +336,17 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
                 f"claudefather breadcrumb points to {repo_path} but directory not found — "
                 "re-run install.sh or update ~/.claude/.claudefather-repo"
             )
+
+
+def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
+    report = ValidationReport()
+
+    if not fleet.bots:
+        report.errors.append("fleet.bots is empty — nothing to compose")
+
+    fleet_env = dotenv.read(paths.env_file)
+    _validate_bots(fleet, paths, fleet_env, report)
+    _validate_teams(fleet, report)
+    _validate_fleet(report)
 
     return report

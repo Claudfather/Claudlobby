@@ -1,4 +1,5 @@
 {
+  "_deprecated": "Use gws.json instead. This fragment will be removed in a future release.",
   "_env_contract": {
     "GOOGLE_OAUTH_CLIENT_ID": {
       "description": "Google OAuth client ID",

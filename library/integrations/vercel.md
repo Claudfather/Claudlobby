@@ -1,10 +1,11 @@
 ---
 title: Vercel
+type: cli
 ---
 
 # Vercel
 
-**Skills:** `/vercel-status` (deployments, domains, env vars), `/vercel-logs` (view/debug logs), `/vercel-deploy` (deploy to production or preview)
+**Skills (clauDNA):** `/vercel-status` (deployments, domains, env vars), `/vercel-logs` (view/debug logs), `/vercel-deploy` (deploy to production or preview)
 
 **When to use:**
 - Checking deployment health or domain config → `/vercel-status`

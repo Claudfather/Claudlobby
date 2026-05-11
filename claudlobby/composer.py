@@ -178,7 +178,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
             continue
         try:
             frag = json.loads(frag_path.read_text())
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
             raise ValueError(f"invalid JSON in MCP fragment {frag_path}: {e}") from e
         contract = frag.pop("_env_contract", {})
         global_binary = frag.pop("_global_binary", None)

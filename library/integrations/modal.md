@@ -1,10 +1,11 @@
 ---
 title: Modal
+type: cli
 ---
 
 # Modal
 
-**Skills:** `/modal-status` (workspace overview), `/modal-logs` (view/debug logs), `/modal-deploy` (deploy apps)
+**Skills (clauDNA):** `/modal-status` (workspace overview), `/modal-logs` (view/debug logs), `/modal-deploy` (deploy apps)
 
 **When to use:**
 - Checking deployed apps and containers → `/modal-status`
