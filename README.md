@@ -41,7 +41,7 @@ $EDITOR fleet.yaml
 
 The generated `runtime/bots/<bot>/` is everything Claude Code needs — `CLAUDE.md`, `.mcp.json`, `bot.conf`, `.claude/skills/` symlinks, plus a systemd `<bot>.service` and a launchd `<bot>.plist`. Pick the right one for your host.
 
-See [`docs/getting-started.md`](docs/getting-started.md) for the zero-to-running walkthrough.
+See [`documentation/getting-started.md`](documentation/getting-started.md) for the zero-to-running walkthrough.
 
 ## Architecture
 
@@ -82,7 +82,7 @@ See [`docs/getting-started.md`](docs/getting-started.md) for the zero-to-running
 
 The composition order inside `CLAUDE.md` is: persona base → voice overlay (after H1) → team roster (managers only) → protocols → guardrails. You can read the generated file top-to-bottom and it's obvious where each piece came from.
 
-See [`docs/architecture.md`](docs/architecture.md) for the deeper dive.
+See [`documentation/architecture/overview.md`](documentation/architecture/overview.md) for the deeper dive.
 
 ## CLI
 
@@ -112,7 +112,7 @@ claudlobby status                # fleet health (stub for now)
 - **A clauDNA-style global skills install** — the `~/.claude/skills/` library (`/simplify`, `/review-pr`, `/tech-debt`, `/session-handoff`, …) is what makes the bots feel competent. Without it, the project skills in `library/skills/` work, but the global toolbox is sparse.
 - **Your secrets** — `GITHUB_PAT`, `NOTION_TOKEN`, BotFather tokens (one per bot), MCP server credentials. Stored in `.env` at the repo root (gitignored).
 
-See [`docs/first-run-bootstrap.md`](docs/first-run-bootstrap.md) for the full bootstrap sequence.
+See [`documentation/getting-started.md`](documentation/getting-started.md) for the full bootstrap sequence.
 
 ## Sync-back: bots that learn
 

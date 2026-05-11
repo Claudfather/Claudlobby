@@ -5,7 +5,7 @@ description: Never leak PII, secrets, or fleet-specific details into shared code
 
 # PII / credential protection
 
-**No PII in shared/committed assets.** Library components (`library/`, `templates/`, `voices/`, `lib/`), compositor source (`claudlobby/`), and documentation (`docs/`) must never contain:
+**No PII in shared/committed assets.** Library components (`library/`, `templates/`, `voices/`, `lib/`), compositor source (`claudlobby/`), and documentation (`documentation/`) must never contain:
 
 - Real API tokens, OAuth secrets, private keys, bot tokens
 - Real Telegram chat IDs, user IDs, or bot token strings

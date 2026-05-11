@@ -4,7 +4,7 @@ Compositor for Claude Code agent fleets. Transforms `fleet.yaml` + `library/` in
 
 **North star:** Trivial to run a fleet of distinct, cooperating bots on cheap hardware.
 
-**New here?** See [`docs/getting-started.md`](docs/getting-started.md) for the clone-to-fleet walkthrough and [`docs/fleet-yaml-schema.md`](docs/fleet-yaml-schema.md) for every config field.
+**New here?** See [`documentation/getting-started.md`](documentation/getting-started.md) for the clone-to-fleet walkthrough and [`documentation/fleet-yaml-schema.md`](documentation/fleet-yaml-schema.md) for every config field.
 
 ## Architecture
 
@@ -86,7 +86,7 @@ Everything in these top-level directories is committed and shared:
 - `templates/` — Jinja2 templates for CLAUDE.md generation
 - `lib/` — Lifecycle and utility scripts
 - `claudlobby/` — Python compositor source
-- `docs/` — Architecture docs, schema reference, setup guides
+- `documentation/` — Architecture docs, schema reference, setup guides
 - `fleet.yaml.example` — Template manifest (committed; `fleet.yaml` is NOT)
 
 ### What stays local (gitignored, fleet-specific, secret)
