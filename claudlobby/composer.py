@@ -389,6 +389,10 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             if val:
                 lines.append(f'export MODEL_STRATEGY_{key.upper()}="{val}"')
 
+    # Plugin sync — if fleet declares plugins, enable auto-install on session start
+    if fleet.plugins.required:
+        lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
+
     for k, v in bot.env.items():
         lines.append(f'export {k}="{v}"')
 
@@ -1002,6 +1006,12 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     hooks = _compose_hooks(bot.hooks)
     if hooks:
         settings["hooks"] = hooks
+
+    # Plugins — enabledPlugins + extraKnownMarketplaces from fleet config
+    if fleet.plugins.required:
+        settings["enabledPlugins"] = {plugin: True for plugin in fleet.plugins.required}
+    if fleet.plugins.marketplaces:
+        settings["extraKnownMarketplaces"] = dict(fleet.plugins.marketplaces)
 
     return settings
 

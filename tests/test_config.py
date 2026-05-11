@@ -6,7 +6,37 @@ import logging
 
 import pytest
 
-from claudlobby.config import _coerce_bot, load_fleet
+from claudlobby.config import PluginsConfig, _coerce_bot, _coerce_plugins, load_fleet
+
+
+class TestCoercePlugins:
+    def test_coerce_plugins_none(self):
+        result = _coerce_plugins(None)
+        assert result == PluginsConfig(marketplaces={}, required=[])
+
+    def test_coerce_plugins_empty(self):
+        result = _coerce_plugins({})
+        assert result == PluginsConfig(marketplaces={}, required=[])
+
+    def test_coerce_plugins_required_only(self):
+        result = _coerce_plugins({"required": ["telegram@official"]})
+        assert result == PluginsConfig(marketplaces={}, required=["telegram@official"])
+
+    def test_coerce_plugins_full(self):
+        raw = {
+            "marketplaces": {
+                "Claudfather": {"source": "github", "repo": "Claudfather/clauDNA"},
+            },
+            "required": ["claudna@Claudfather", "telegram@claude-plugins-official"],
+        }
+        result = _coerce_plugins(raw)
+        assert result.marketplaces == {
+            "Claudfather": {"source": "github", "repo": "Claudfather/clauDNA"},
+        }
+        assert result.required == [
+            "claudna@Claudfather",
+            "telegram@claude-plugins-official",
+        ]
 
 
 class TestCoerceBot:

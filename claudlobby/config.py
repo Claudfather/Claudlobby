@@ -155,12 +155,19 @@ class TeamConfig:
 
 
 @dataclass
+class PluginsConfig:
+    marketplaces: dict[str, dict] = field(default_factory=dict)
+    required: list[str] = field(default_factory=list)
+
+
+@dataclass
 class FleetConfig:
     name: str
     service_prefix: str
     telegram_group_chat_id: str | None = None
     human_telegram_id: str | None = None
     accounts: dict[str, str] = field(default_factory=lambda: {"default": "~/.claude"})
+    plugins: PluginsConfig = field(default_factory=PluginsConfig)
     defaults: dict[str, Any] = field(default_factory=dict)
     teams: dict[str, TeamConfig] = field(default_factory=dict)
     bots: dict[str, BotConfig] = field(default_factory=dict)
@@ -244,6 +251,15 @@ def _merge_mcp_lists(*lists) -> list[McpEntry]:
                 seen.add(entry.name)
                 out.append(entry)
     return out
+
+
+def _coerce_plugins(raw: dict | None) -> PluginsConfig:
+    if not raw:
+        return PluginsConfig()
+    return PluginsConfig(
+        marketplaces=raw.get("marketplaces") or {},
+        required=_as_list(raw.get("required")),
+    )
 
 
 def _coerce_scope(raw: dict | None) -> ScopeConfig | None:
@@ -468,6 +484,7 @@ def load_fleet(fleet_yaml: Path) -> FleetConfig:
         human_telegram_id=fleet.get("human_telegram_id"),
         accounts=fleet.get("accounts", {"default": "~/.claude"})
         or {"default": "~/.claude"},
+        plugins=_coerce_plugins(fleet.get("plugins")),
         defaults=defaults,
         teams=teams,
         bots=bots,
