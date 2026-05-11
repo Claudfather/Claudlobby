@@ -76,6 +76,12 @@ class TestCoercePlugins:
         )
         assert result.marketplaces["Claudfather"] == custom
 
+    def test_deprecated_required_key_treated_as_additional(self, caplog):
+        result = _coerce_plugins({"required": ["telegram@claude-plugins-official"]})
+        assert "telegram@claude-plugins-official" in result.required
+        assert "claudna@Claudfather" in result.required  # defaults still present
+        assert "deprecated" in caplog.text
+
 
 class TestCoerceBot:
     def test_minimal_bot(self):

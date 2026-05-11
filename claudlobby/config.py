@@ -272,6 +272,9 @@ def _coerce_plugins(raw: dict | None) -> PluginsConfig:
     if raw:
         include_defaults = bool(raw.get("include_defaults", True))
         additional = _as_list(raw.get("additional"))
+        if "required" in raw and "additional" not in raw:
+            log.warning("plugins.required is deprecated — rename to plugins.additional")
+            additional = _as_list(raw.get("required"))
         extra_marketplaces = raw.get("marketplaces") or {}
 
     if include_defaults:
