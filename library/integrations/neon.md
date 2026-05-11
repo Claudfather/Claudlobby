@@ -1,5 +1,6 @@
 ---
 title: Neon (Postgres)
+type: cli
 env_contract:
   NEON_API_KEY:
     description: Neon API key for neonctl CLI
@@ -9,7 +10,7 @@ env_contract:
 # Neon (Postgres)
 
 
-**Skills:** `/neon-info` (overview), `/neon-query` (run SQL), `/neon-branch` (create/list/delete branches)
+**Skills (clauDNA):** `/neon-info` (overview), `/neon-query` (run SQL), `/neon-branch` (create/list/delete branches)
 
 **When to use:**
 - Database schema exploration → `/neon-info`

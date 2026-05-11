@@ -444,14 +444,15 @@ def load_fleet(fleet_yaml: Path) -> FleetConfig:
     fleet = doc["fleet"]
 
     teams_raw = fleet.get("teams", {}) or {}
-    teams = {
-        team_name: TeamConfig(
+    teams = {}
+    for team_name, team_def in teams_raw.items():
+        if not isinstance(team_def, dict) or "manager" not in team_def:
+            raise ValueError(f"team '{team_name}': missing required 'manager' field")
+        teams[team_name] = TeamConfig(
             name=team_name,
             manager=team_def["manager"],
             workers=list(team_def.get("workers", []) or []),
         )
-        for team_name, team_def in teams_raw.items()
-    }
 
     defaults = fleet.get("defaults", {}) or {}
 

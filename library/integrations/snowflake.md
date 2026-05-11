@@ -1,5 +1,6 @@
 ---
 title: Snowflake
+type: cli
 env_contract:
   SNOWFLAKE_ACCOUNT:
     description: Snowflake account identifier
@@ -27,7 +28,7 @@ env_contract:
 # Snowflake
 
 
-**Skills:** `/snowflake-query` (run SQL / explore schema), `/snowflake-cutover` (migrate connection to RSA key-pair auth)
+**Skills (clauDNA):** `/snowflake-query` (run SQL / explore schema), `/snowflake-cutover` (migrate connection to RSA key-pair auth)
 
 **When to use:**
 - Exploring schema or running read queries → `/snowflake-query`

@@ -1,22 +1,29 @@
 # library/integrations/
 
-Per-MCP **usage docs** — the "how to use this MCP server well" companion to each `library/mcp/<name>.json`. Different from `library/mcp/` (which is wire config) and `library/skills/` (which are slash-command-style actions).
+**Usage docs** for external services — guides for MCP servers and CLI tools. Different from `library/mcp/` (wire config) and `library/skills/` (slash-command actions).
+
+Not all integrations require MCP configs. Two flavors exist:
+
+- **MCP-paired** — companion to a `library/mcp/<name>.json` fragment. Auto-included when a bot lists the matching MCP server.
+- **CLI-based** — guide for a CLI tool (`doctl`, `vercel`, `railway`) or clauDNA skill set with no MCP server config. List explicitly via `integrations:` in fleet.yaml.
 
 ## What belongs here
 
-For each MCP server in `library/mcp/`, an optional `<server>.md` doc that captures:
+For each external service a bot interacts with, an optional `<service>.md` doc that captures:
 
 - **Auth model** — what env var holds the token, how to rotate
 - **Common operations** — the 5 calls you'll actually make
 - **Gotchas** — pagination ceilings, rate limits, response shape quirks
 - **Failure modes** — what an auth failure looks like, what a stale token looks like
-- **When NOT to use this MCP** — workflows where the CLI (`gh`, `dbt`, `railway`) is more reliable
+- **When NOT to use this** — workflows where a different tool is more reliable
 
 ## Composition
 
-Auto-paired with `mcp:` in fleet.yaml: if a bot lists `mcp: [github, notion]`, the compositor includes `library/integrations/github.md` and `library/integrations/notion.md` (when present) in a `## Integrations` section.
+**MCP-paired:** auto-included when a bot lists `mcp: [github, notion]` — the compositor includes `library/integrations/github.md` and `library/integrations/notion.md` (when present) in a `## Integrations` section.
 
-To override, list `integrations: [...]` explicitly in the bot's stanza.
+**CLI-based:** not auto-paired. List `integrations: [vercel, railway]` explicitly in the bot's stanza.
+
+To override auto-pairing, list `integrations: [...]` explicitly.
 
 ## Example
 
@@ -52,4 +59,4 @@ If you see exactly 30 files in the MCP response, assume truncation and re-fetch 
 
 ## Naming
 
-The `.md` filename matches the MCP fragment filename: `library/mcp/github.json` ↔ `library/integrations/github.md`.
+The `.md` filename matches the service name. For MCP-paired integrations, this matches the MCP fragment: `library/mcp/github.json` ↔ `library/integrations/github.md`.

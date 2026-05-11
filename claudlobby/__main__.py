@@ -47,24 +47,24 @@ def _parse_env_line(line: str) -> tuple[str, str] | None:
 
 def _migration_preamble(
     args,
-) -> tuple[Paths, "FleetConfig", Path, dict[str, str]] | int:
+) -> tuple[Paths, "FleetConfig", Path, dict[str, str]]:
     """Shared preamble for migration commands.
 
-    Returns (paths, fleet, source_dir, rename_map) or an int exit code on failure.
+    Calls sys.exit(1) on failure — callers can unpack the result directly.
     """
     paths = _resolve_paths(args)
-    fleet = load_fleet(paths.fleet_yaml)
+    fleet = _load_fleet_or_exit(paths)
     source_dir = Path(args.source).expanduser().resolve()
 
     if not source_dir.is_dir():
         log.error("source directory not found: %s", source_dir)
-        return 1
+        sys.exit(1)
 
     try:
         rename_map = _parse_rename_map(args.map or [])
     except ValueError as e:
         log.error("%s", e)
-        return 1
+        sys.exit(1)
 
     return paths, fleet, source_dir, rename_map
 
@@ -115,10 +115,27 @@ def _load_env(paths: Paths) -> None:
             os.environ[k] = v
 
 
+def _load_fleet_or_exit(paths: Paths) -> "FleetConfig":
+    """Wrap load_fleet() with user-friendly error messages on common failures."""
+    import yaml
+
+    try:
+        return load_fleet(paths.fleet_yaml)
+    except FileNotFoundError as e:
+        log.error("%s", e)
+        sys.exit(1)
+    except ValueError as e:
+        log.error("%s", e)
+        sys.exit(1)
+    except yaml.YAMLError as e:
+        log.error("invalid YAML in %s: %s", paths.fleet_yaml, e)
+        sys.exit(1)
+
+
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = load_fleet(paths.fleet_yaml)
+    fleet = _load_fleet_or_exit(paths)
     report = validate(fleet, paths)
 
     for e in report.errors:
@@ -139,7 +156,7 @@ def cmd_validate(args) -> int:
 def cmd_generate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = load_fleet(paths.fleet_yaml)
+    fleet = _load_fleet_or_exit(paths)
     report = validate(fleet, paths)
 
     if report.has_errors:
@@ -259,7 +276,7 @@ def cmd_list_library(args) -> int:
 def cmd_diff(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = load_fleet(paths.fleet_yaml)
+    fleet = _load_fleet_or_exit(paths)
     if args.bot:
         sys.stdout.write(diff_bot(args.bot, fleet, paths))
     else:
@@ -270,7 +287,7 @@ def cmd_diff(args) -> int:
 
 def cmd_promote(args) -> int:
     paths = _resolve_paths(args)
-    fleet = load_fleet(paths.fleet_yaml)
+    fleet = _load_fleet_or_exit(paths)
     sys.stdout.write(promote_bot(args.bot, fleet, paths))
     return 0
 
@@ -285,38 +302,27 @@ def cmd_status(args) -> int:
     return 0
 
 
-def cmd_env_migrate(args) -> int:
-    """Extract secrets from an existing bot setup into tiered .env files.
-
-    Defaults to dry-run; pass --apply to write files. Per-bot tokens are
-    scoped to their source bot.conf — no cross-wiring across bots that share
-    a token_env name. On --apply, existing .env content is preserved
-    (merged), so this won't wipe hand-edited keys the migrator didn't find.
-    """
-    import re
-    import json as _json
-
-    result = _migration_preamble(args)
-    if isinstance(result, int):
-        return result
-    paths, fleet, source_dir, rename_map = result
-
-    # --- Discover legacy bot dirs (any subdir containing .mcp.json or bot.conf) ---
+def _discover_legacy_bot_dirs(source_dir: Path) -> dict[str, Path]:
+    """Find legacy bot dirs (subdirs containing .mcp.json or bot.conf)."""
     bot_dir_map: dict[str, Path] = {}
     for child in source_dir.iterdir():
         if not child.is_dir():
             continue
         if (child / ".mcp.json").is_file() or (child / "bot.conf").is_file():
             bot_dir_map[child.name] = child
+    return bot_dir_map
 
-    if not bot_dir_map:
-        log.error(
-            "no legacy bot dirs found under %s (looking for subdirs with .mcp.json or bot.conf)",
-            source_dir,
-        )
-        return 1
 
-    # --- Source 1: ~/.env (host shell namespace; used as fallback) ---
+def _extract_secrets(
+    source_dir: Path, bot_dir_map: dict[str, Path]
+) -> tuple[dict[str, str], dict[str, dict[str, str]], dict[str, str]]:
+    """Gather secrets from ~/.env, per-bot bot.conf, and per-bot .mcp.json.
+
+    Returns (env_from_home, bot_conf_secrets, mcp_values).
+    """
+    import re
+    import json as _json
+
     home_env = Path.home() / ".env"
     env_from_home: dict[str, str] = {}
     if home_env.is_file():
@@ -325,9 +331,8 @@ def cmd_env_migrate(args) -> int:
             if parsed:
                 env_from_home[parsed[0]] = parsed[1]
 
-    # --- Source 2: per-bot bot.conf (Telegram + other secrets, scoped per source dir) ---
     SECRET_LIKE = re.compile(r"(TOKEN|KEY|SECRET|URL|HANDLE|CHAT_ID|PASSWORD|API)")
-    bot_conf_secrets: dict[str, dict[str, str]] = {}  # src_dir_name → {var → value}
+    bot_conf_secrets: dict[str, dict[str, str]] = {}
     for src_name, bot_path in bot_dir_map.items():
         conf_path = bot_path / "bot.conf"
         if not conf_path.is_file():
@@ -345,7 +350,6 @@ def cmd_env_migrate(args) -> int:
         if scope:
             bot_conf_secrets[src_name] = scope
 
-    # --- Source 3: per-bot .mcp.json env values (resolved tokens leak through here) ---
     mcp_values: dict[str, str] = {}
     for src_name, bot_path in bot_dir_map.items():
         mcp_path = bot_path / ".mcp.json"
@@ -361,41 +365,65 @@ def cmd_env_migrate(args) -> int:
                 if v and not str(v).startswith("${"):
                     mcp_values[k] = str(v)
 
-    # --- Determine fleet-level vars needed (scan all referenced MCP fragments) ---
-    needed_fleet_vars: set[str] = set()
+    return env_from_home, bot_conf_secrets, mcp_values
+
+
+def _resolve_fleet_vars(
+    fleet: "FleetConfig",
+    paths: Paths,
+    env_from_home: dict[str, str],
+    mcp_values: dict[str, str],
+) -> dict[str, str]:
+    """Determine fleet-level vars from MCP fragment placeholders.
+
+    Resolves values from ~/.env first, then .mcp.json fallback.
+    """
+    import re
+
+    needed: set[str] = set()
     seen_mcp: set[str] = set()
     for bot in fleet.bots.values():
         for mcp_entry in bot.mcp:
-            mcp_name = mcp_entry.name  # post-#19 multi-instance: McpEntry has .name
-            if mcp_name in seen_mcp:
+            if mcp_entry.name in seen_mcp:
                 continue
-            seen_mcp.add(mcp_name)
-            frag_path = paths.find_library_file("mcp", mcp_name, ".json")
+            seen_mcp.add(mcp_entry.name)
+            frag_path = paths.find_library_file("mcp", mcp_entry.name, ".json")
             if frag_path:
                 for var in re.findall(
                     r"\$\{([A-Z_][A-Z0-9_]*)\}", frag_path.read_text()
                 ):
-                    needed_fleet_vars.add(var)
+                    needed.add(var)
 
-    # Resolve fleet vars: prefer ~/.env, fall back to mcp values if home didn't have it
     fleet_vars: dict[str, str] = {}
-    for var in needed_fleet_vars:
+    for var in needed:
         if var in env_from_home:
             fleet_vars[var] = env_from_home[var]
         elif var in mcp_values:
             fleet_vars[var] = mcp_values[var]
+    return fleet_vars
 
-    # --- Resolve per-bot vars (Telegram tokens etc.) — scoped to source bot.conf ---
+
+def _resolve_bot_vars(
+    fleet: "FleetConfig",
+    source_dir: Path,
+    rename_map: dict[str, str],
+    bot_dir_map: dict[str, Path],
+    bot_conf_secrets: dict[str, dict[str, str]],
+    env_from_home: dict[str, str],
+) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Resolve per-bot vars (Telegram tokens etc.) scoped to source bot.conf.
+
+    Returns (bot_vars, warnings).
+    """
     bot_vars: dict[str, dict[str, str]] = {}
-    bot_warnings: list[str] = []
+    warnings: list[str] = []
     for fleet_bot_name, bot in fleet.bots.items():
         if not (bot.telegram and bot.telegram.token_env):
             continue
         token_env = bot.telegram.token_env
-        # Find legacy source dir: --map override, then identity match
         src_name = rename_map.get(fleet_bot_name, fleet_bot_name)
         if src_name not in bot_dir_map:
-            bot_warnings.append(
+            warnings.append(
                 f"  WARN: fleet bot '{fleet_bot_name}' has no source dir at "
                 f"'{source_dir / src_name}' (use --map {fleet_bot_name}=<dir> if renamed)"
             )
@@ -404,18 +432,102 @@ def cmd_env_migrate(args) -> int:
         if token_env in src_secrets:
             bot_vars[fleet_bot_name] = {token_env: src_secrets[token_env]}
         elif token_env in env_from_home:
-            bot_warnings.append(
+            warnings.append(
                 f"  WARN: '{token_env}' for '{fleet_bot_name}' not found in "
                 f"{src_name}/bot.conf — falling back to ~/.env (likely wrong "
                 f"if multiple bots share the var name)"
             )
             bot_vars[fleet_bot_name] = {token_env: env_from_home[token_env]}
         else:
-            bot_warnings.append(
+            warnings.append(
                 f"  WARN: '{token_env}' for '{fleet_bot_name}' not found in any source"
             )
+    return bot_vars, warnings
 
-    # --- Plan output (always print; --apply to commit) ---
+
+def _apply_env_migration(
+    fleet: "FleetConfig",
+    paths: Paths,
+    source_dir: Path,
+    fleet_vars: dict[str, str],
+    bot_vars: dict[str, dict[str, str]],
+) -> int:
+    """Write fleet and per-bot .env files. Returns exit code."""
+    fleet_env_path = (
+        paths.fleet_dir / ".env" if paths.fleet_dir else paths.root / ".env"
+    )
+
+    if fleet_vars:
+        merged = dotenv.merge_into(fleet_env_path, fleet_vars)
+        fleet_env_path.parent.mkdir(parents=True, exist_ok=True)
+        fleet_env_path.write_text(
+            dotenv.format_file(
+                f"# Fleet secrets for {fleet.name} (migrated from {source_dir})",
+                merged,
+            )
+        )
+        log.info(
+            "wrote %s (%d migrated, %d total)",
+            fleet_env_path,
+            len(fleet_vars),
+            len(merged),
+        )
+
+    bot_count = 0
+    for fleet_bot_name, vars_dict in bot_vars.items():
+        bot_env_path = paths.bot_runtime(fleet_bot_name) / ".env"
+        if not bot_env_path.parent.is_dir():
+            log.error(
+                "SKIP %s: runtime dir missing — run `claudlobby generate` first",
+                fleet_bot_name,
+            )
+            continue
+        merged = dotenv.merge_into(bot_env_path, vars_dict)
+        bot_env_path.write_text(
+            dotenv.format_file(
+                f"# Bot secrets for {fleet_bot_name} (migrated; pre-existing keys preserved)",
+                merged,
+            )
+        )
+        bot_count += 1
+        log.info(
+            "wrote %s (%d migrated, %d total)",
+            bot_env_path,
+            len(vars_dict),
+            len(merged),
+        )
+
+    log.info("Applied: %d fleet vars, %d bot .env files", len(fleet_vars), bot_count)
+    return 0
+
+
+def cmd_env_migrate(args) -> int:
+    """Extract secrets from an existing bot setup into tiered .env files.
+
+    Defaults to dry-run; pass --apply to write files. Per-bot tokens are
+    scoped to their source bot.conf — no cross-wiring across bots that share
+    a token_env name. On --apply, existing .env content is preserved
+    (merged), so this won't wipe hand-edited keys the migrator didn't find.
+    """
+    paths, fleet, source_dir, rename_map = _migration_preamble(args)
+
+    bot_dir_map = _discover_legacy_bot_dirs(source_dir)
+    if not bot_dir_map:
+        log.error(
+            "no legacy bot dirs found under %s (looking for subdirs with .mcp.json or bot.conf)",
+            source_dir,
+        )
+        return 1
+
+    env_from_home, bot_conf_secrets, mcp_values = _extract_secrets(
+        source_dir, bot_dir_map
+    )
+    fleet_vars = _resolve_fleet_vars(fleet, paths, env_from_home, mcp_values)
+    bot_vars, bot_warnings = _resolve_bot_vars(
+        fleet, source_dir, rename_map, bot_dir_map, bot_conf_secrets, env_from_home
+    )
+
+    # --- Plan output ---
     fleet_env_path = (
         paths.fleet_dir / ".env" if paths.fleet_dir else paths.root / ".env"
     )
@@ -457,53 +569,7 @@ def cmd_env_migrate(args) -> int:
         log.info("(dry-run — pass --apply to write these files)")
         return 0
 
-    # --- Apply ---
-    # Merge with any existing .env content rather than overwrite. Without
-    # this, a bot's existing hand-edited .env (e.g. SLACK_TOKEN that the
-    # migration didn't discover) gets wiped. New values win on conflict.
-    if fleet_vars:
-        merged = dotenv.merge_into(fleet_env_path, fleet_vars)
-        fleet_env_path.parent.mkdir(parents=True, exist_ok=True)
-        fleet_env_path.write_text(
-            dotenv.format_file(
-                f"# Fleet secrets for {fleet.name} (migrated from {source_dir})",
-                merged,
-            )
-        )
-        new_keys = sorted(set(fleet_vars) - (set(merged) - set(fleet_vars)))
-        log.info(
-            "wrote %s (%d migrated, %d total)",
-            fleet_env_path,
-            len(fleet_vars),
-            len(merged),
-        )
-
-    bot_count = 0
-    for fleet_bot_name, vars_dict in bot_vars.items():
-        bot_env_path = paths.bot_runtime(fleet_bot_name) / ".env"
-        if not bot_env_path.parent.is_dir():
-            log.error(
-                "SKIP %s: runtime dir missing — run `claudlobby generate` first",
-                fleet_bot_name,
-            )
-            continue
-        merged = dotenv.merge_into(bot_env_path, vars_dict)
-        bot_env_path.write_text(
-            dotenv.format_file(
-                f"# Bot secrets for {fleet_bot_name} (migrated; pre-existing keys preserved)",
-                merged,
-            )
-        )
-        bot_count += 1
-        log.info(
-            "wrote %s (%d migrated, %d total)",
-            bot_env_path,
-            len(vars_dict),
-            len(merged),
-        )
-
-    log.info("Applied: %d fleet vars, %d bot .env files", len(fleet_vars), bot_count)
-    return 0
+    return _apply_env_migration(fleet, paths, source_dir, fleet_vars, bot_vars)
 
 
 # Subdir names we never copy from a legacy bot dir — claudlobby-managed,
@@ -590,10 +656,7 @@ def cmd_data_migrate(args) -> int:
     """
     import shutil
 
-    result = _migration_preamble(args)
-    if isinstance(result, int):
-        return result
-    paths, fleet, source_dir, rename_map = result
+    paths, fleet, source_dir, rename_map = _migration_preamble(args)
 
     include_set = (
         {x.strip() for x in args.include.split(",") if x.strip()}
@@ -755,6 +818,112 @@ def cmd_data_migrate(args) -> int:
     return 0
 
 
+@dataclass
+class _BotCronCtx:
+    """Per-bot context for cron path resolution."""
+
+    legacy_prefix: str
+    bot_name: str
+    data_dir: Path
+    search_dirs: list[Path]
+
+
+def _build_cron_contexts(
+    fleet: "FleetConfig",
+    source_dir: Path,
+    rename_map: dict[str, str],
+    paths: Paths,
+) -> list["_BotCronCtx"]:
+    """Build per-bot cron contexts sorted longest-prefix-first."""
+    ctxs: list[_BotCronCtx] = []
+    for fleet_bot in fleet.bots:
+        src_name = rename_map.get(fleet_bot, fleet_bot)
+        legacy_prefix = str(source_dir / src_name)
+        data_dir = paths.bot_runtime(fleet_bot) / "data"
+        projects_dir = paths.bot_runtime(fleet_bot) / "projects"
+        search_dirs = [
+            paths.lib,
+            paths.lib / "personal",
+            data_dir / "scripts",
+            data_dir,
+            projects_dir,
+        ]
+        ctxs.append(_BotCronCtx(legacy_prefix, fleet_bot, data_dir, search_dirs))
+    ctxs.sort(key=lambda c: len(c.legacy_prefix), reverse=True)
+    return ctxs
+
+
+def _resolve_cron_path(legacy_path: str, ctx: _BotCronCtx) -> str:
+    """Resolve a single legacy absolute path to its claudlobby location.
+
+    Strips the legacy prefix, searches each search dir for the relative path.
+    Falls back to naive data/ prefix (verify pass will flag it).
+    """
+    if not legacy_path.startswith(ctx.legacy_prefix):
+        return legacy_path
+    rel = legacy_path[len(ctx.legacy_prefix) :].lstrip("/")
+    if not rel:
+        return str(ctx.data_dir)
+
+    for search_dir in ctx.search_dirs:
+        candidate = search_dir / rel
+        if candidate.exists():
+            return str(candidate)
+
+    basename = Path(rel).name
+    if basename != rel:
+        for search_dir in ctx.search_dirs:
+            candidate = search_dir / basename
+            if candidate.exists():
+                return str(candidate)
+
+    return str(ctx.data_dir / rel)
+
+
+def _rewrite_cron_line(
+    line: str, bot_ctxs: list[_BotCronCtx]
+) -> tuple[str, str | None]:
+    """Rewrite all legacy paths in a cron line. Returns (new_line, bot_name)."""
+    import re
+
+    for ctx in bot_ctxs:
+        if ctx.legacy_prefix not in line:
+            continue
+        result = line
+        for m in reversed(
+            list(re.finditer(re.escape(ctx.legacy_prefix) + r"[/\w._-]*", line))
+        ):
+            old_path = m.group(0)
+            new_path = _resolve_cron_path(old_path, ctx)
+            result = result[: m.start()] + new_path + result[m.end() :]
+        return result, ctx.bot_name
+    return line, None
+
+
+def _verify_cron_paths(
+    rewrites: list[tuple[int, str, str, str]], root: Path
+) -> list[tuple[int, str, str]]:
+    """Check rewritten paths exist. Returns list of (line_no, bot, missing_path)."""
+    import re
+
+    broken: list[tuple[int, str, str]] = []
+    for line_no, _old, new, bot in rewrites:
+        for m in re.finditer(r"(/\S+)", new):
+            candidate = m.group(1)
+            if candidate.startswith("/usr/") or candidate.startswith("/bin/"):
+                continue
+            candidate = candidate.rstrip(";\"'")
+            p = Path(candidate)
+            if p.suffix or p.name.endswith(".log"):
+                if not p.exists() and not p.parent.exists():
+                    broken.append((line_no, bot, candidate))
+                elif not p.exists() and p.suffix in (".sh", ".py"):
+                    broken.append((line_no, bot, candidate))
+            elif not p.exists() and str(p).startswith(str(root)):
+                broken.append((line_no, bot, candidate))
+    return broken
+
+
 def cmd_cron_migrate(args) -> int:
     """Rewrite cron entries from a legacy bot-fleet path layout to claudlobby's.
 
@@ -773,87 +942,15 @@ def cmd_cron_migrate(args) -> int:
     from collections import defaultdict
     from datetime import datetime
 
-    result = _migration_preamble(args)
-    if isinstance(result, int):
-        return result
-    paths, fleet, source_dir, rename_map = result
-
-    # Build per-bot context: legacy prefix, bot data dir, search dirs for resolution.
-    import re
-
-    @dataclass
-    class _BotCronCtx:
-        legacy_prefix: str
-        bot_name: str
-        data_dir: Path  # <bot_runtime>/data
-        search_dirs: list[Path]  # ordered: lib/, data/scripts/, data/
-
-    bot_ctxs: list[_BotCronCtx] = []
-    for fleet_bot in fleet.bots:
-        src_name = rename_map.get(fleet_bot, fleet_bot)
-        legacy_prefix = str(source_dir / src_name)
-        data_dir = paths.bot_runtime(fleet_bot) / "data"
-        projects_dir = paths.bot_runtime(fleet_bot) / "projects"
-        search_dirs = [
-            paths.lib,  # package-level shared scripts
-            paths.lib / "personal",  # package-level personal scripts
-            data_dir / "scripts",  # bot-specific scripts
-            data_dir,  # bot data (finances/, etc.)
-            projects_dir,  # git checkouts the bot works in
-        ]
-        bot_ctxs.append(_BotCronCtx(legacy_prefix, fleet_bot, data_dir, search_dirs))
-    # Sort longest prefix first so child paths win
-    bot_ctxs.sort(key=lambda c: len(c.legacy_prefix), reverse=True)
-
-    def _resolve_path(legacy_path: str, ctx: _BotCronCtx) -> str:
-        """Resolve a single legacy absolute path to its claudlobby location.
-
-        Strategy: strip the legacy prefix to get the relative path, then
-        check each search dir for the file/dir. If found, return the resolved
-        path. If not found, fall back to the naive data/ prefix (will be
-        caught by the verify pass).
-        """
-        if not legacy_path.startswith(ctx.legacy_prefix):
-            return legacy_path
-        rel = legacy_path[len(ctx.legacy_prefix) :].lstrip("/")
-        if not rel:
-            return str(ctx.data_dir)
-
-        # For paths like "finances/portfolio-snapshot.py", try each search dir
-        for search_dir in ctx.search_dirs:
-            candidate = search_dir / rel
-            if candidate.exists():
-                return str(candidate)
-
-        # For top-level files (e.g., "briefing-cron.sh"), also try just the filename
-        basename = Path(rel).name
-        if basename != rel:  # only if rel has subdirs
-            for search_dir in ctx.search_dirs:
-                candidate = search_dir / basename
-                if candidate.exists():
-                    return str(candidate)
-
-        # Fallback: naive prefix substitution (verify pass will flag it)
-        return str(ctx.data_dir / rel)
-
-    def _rewrite_line(line: str) -> tuple[str, str | None]:
-        """Rewrite all legacy paths in a cron line. Returns (new_line, bot_name)."""
-        for ctx in bot_ctxs:
-            if ctx.legacy_prefix not in line:
-                continue
-            # Replace each occurrence of a legacy path individually
-            result = line
-            for m in reversed(
-                list(re.finditer(re.escape(ctx.legacy_prefix) + r"[/\w._-]*", line))
-            ):
-                old_path = m.group(0)
-                new_path = _resolve_path(old_path, ctx)
-                result = result[: m.start()] + new_path + result[m.end() :]
-            return result, ctx.bot_name
-        return line, None
+    paths, fleet, source_dir, rename_map = _migration_preamble(args)
+    bot_ctxs = _build_cron_contexts(fleet, source_dir, rename_map, paths)
 
     # Read current user crontab
-    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    try:
+        proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    except FileNotFoundError:
+        log.error("crontab command not found — is cron installed?")
+        return 1
     if proc.returncode != 0:
         stderr = (proc.stderr or "").lower()
         if "no crontab" in stderr:
@@ -866,13 +963,13 @@ def cmd_cron_migrate(args) -> int:
         return 1
     current_crontab = proc.stdout
 
-    # Plan: per-line, resolve paths intelligently
+    # Rewrite lines
     new_lines: list[str] = []
     rewrites: list[tuple[int, str, str, str]] = []
     unmatched_legacy: list[tuple[int, str]] = []
     legacy_root = str(source_dir)
     for i, line in enumerate(current_crontab.splitlines(), 1):
-        replaced, matched_bot = _rewrite_line(line)
+        replaced, matched_bot = _rewrite_cron_line(line, bot_ctxs)
         new_lines.append(replaced)
         if matched_bot:
             rewrites.append((i, line, replaced, matched_bot))
@@ -890,29 +987,7 @@ def cmd_cron_migrate(args) -> int:
         log.info("(no crontab lines reference the source prefix — nothing to migrate)")
         return 0
 
-    # Verify pass: extract absolute paths from rewritten lines and check existence.
-    # A cron line can reference multiple paths (script path, log path, args).
-
-    broken_paths: list[tuple[int, str, str]] = []  # (line_no, bot, missing_path)
-    for line_no, _old, new, bot in rewrites:
-        # Extract all absolute paths from the rewritten line
-        for m in re.finditer(r"(/\S+)", new):
-            candidate = m.group(1)
-            # Skip env-sourcing paths (. /home/.env), pipes, and redirections
-            if candidate.startswith("/usr/") or candidate.startswith("/bin/"):
-                continue
-            # Strip trailing redirection chars
-            candidate = candidate.rstrip(";\"'")
-            p = Path(candidate)
-            if p.suffix or p.name.endswith(".log"):
-                # It's a file reference — check parent dir exists and file exists
-                if not p.exists() and not p.parent.exists():
-                    broken_paths.append((line_no, bot, candidate))
-                elif not p.exists() and p.suffix in (".sh", ".py"):
-                    broken_paths.append((line_no, bot, candidate))
-            elif not p.exists() and str(p).startswith(str(paths.root)):
-                # Directory reference under claudlobby that doesn't exist
-                broken_paths.append((line_no, bot, candidate))
+    broken_paths = _verify_cron_paths(rewrites, paths.root)
 
     if rewrites:
         by_bot: dict[str, list[tuple[int, str, str]]] = defaultdict(list)
@@ -975,7 +1050,7 @@ def cmd_memory_migrate(args) -> int:
     import shutil
 
     paths = _resolve_paths(args)
-    fleet = load_fleet(paths.fleet_yaml)
+    fleet = _load_fleet_or_exit(paths)
     claude_projects = Path.home() / ".claude" / "projects"
 
     if not claude_projects.is_dir():
@@ -1084,7 +1159,7 @@ def cmd_warm_cache(args) -> int:
 
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = load_fleet(paths.fleet_yaml)
+    fleet = _load_fleet_or_exit(paths)
 
     # Collect unique npx packages from all bot MCP configs
     npx_packages: set[str] = set()
@@ -1130,7 +1205,7 @@ def cmd_warm_cache(args) -> int:
         except FileNotFoundError:
             log.error("npx not found — install Node.js first")
             return 1
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             log.warning("  failed to warm %s: %s", pkg, e)
             failed.append(pkg)
 
