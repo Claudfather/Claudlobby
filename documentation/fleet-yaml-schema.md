@@ -121,19 +121,29 @@ The human operator's Telegram user ID. When set, the compositor writes this into
 
 Declares Claude Code plugins that all bots in the fleet should have installed and enabled.
 
+**Defaults:** `claudna@Claudfather` is installed by default on every fleet with its marketplace pre-registered. No `plugins:` section needed for the baseline.
+
 ```yaml
+# Minimal — defaults apply automatically, just add extras:
 plugins:
-  marketplaces:
-    Claudfather:
-      source: { source: github, repo: Claudfather/clauDNA }
-  required:
-    - claudna@Claudfather
+  additional:
     - telegram@claude-plugins-official
+
+# Full — custom marketplace + disable defaults:
+plugins:
+  include_defaults: false
+  marketplaces:
+    MyMarket:
+      source: { source: github, repo: MyOrg/my-plugins }
+  additional:
+    - my-plugin@MyMarket
 ```
 
-**`marketplaces`** — Third-party marketplace registrations. The official Anthropic marketplace is built in and doesn't need a declaration. Each entry maps a marketplace name to a source descriptor (the nested `source` key is the Claude Code marketplace schema — `github`, `url`, `git`, or `local` types).
+**`additional`** — Plugin identifiers in `name@marketplace` format, appended to the defaults. Deduplicated.
 
-**`required`** — Plugin identifiers in `name@marketplace` format. These are emitted to each bot's `settings.local.json` as `enabledPlugins` and trigger auto-install via `CLAUDE_CODE_SYNC_PLUGIN_INSTALL=1`.
+**`marketplaces`** — Third-party marketplace registrations, merged with defaults. The official Anthropic marketplace is built in and doesn't need a declaration. Each entry maps a marketplace name to a source descriptor (the nested `source` key is the Claude Code marketplace schema — `github`, `url`, `git`, or `local` types).
+
+**`include_defaults`** — Boolean (default `true`). Set to `false` to disable the built-in default plugins and marketplaces. Unusual — the validator warns when this is set.
 
 ### `fleet.defaults`
 

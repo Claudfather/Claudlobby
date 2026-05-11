@@ -35,13 +35,13 @@ fleet:
     default: ~/.claude
     # work: ~/.claude-work                    # uncomment if you have a 2nd Claude account
 
-  # plugins:                            # OPTIONAL — Claude Code plugins to install/enable
-  #   marketplaces:                     # Third-party marketplaces (official is built-in)
-  #     Claudfather:
-  #       source: { source: github, repo: Claudfather/clauDNA }
-  #   required:                         # Plugins to enable on all bots
-  #     - claudna@Claudfather
+  # plugins:                            # OPTIONAL — claudna@Claudfather is installed by default
+  #   additional:                       # Extra plugins beyond the defaults
   #     - telegram@claude-plugins-official
+  #   # include_defaults: false         # Uncomment to disable built-in defaults (unusual)
+  #   # marketplaces:                   # Third-party marketplaces (Claudfather is pre-registered)
+  #   #   MyMarket:
+  #   #     source: { source: github, repo: MyOrg/my-plugins }
 
   defaults:
     model: opus

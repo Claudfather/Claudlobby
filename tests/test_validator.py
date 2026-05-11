@@ -177,24 +177,60 @@ class TestValidate:
 
 
 class TestPluginValidation:
-    """_validate_fleet warns about missing plugins."""
+    """_validate_fleet warns about missing plugins and validates format."""
 
-    def test_validate_no_warn_no_plugins(self, fleet_dir, monkeypatch):
-        """No plugins declared → no plugin-related warnings."""
+    def _env_patch(self, monkeypatch):
         monkeypatch.setenv("GITHUB_PAT", "ghp_test")
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def _fake_installed(self, tmp_path, monkeypatch, plugins_dict):
+        import json
+
+        fake_home = tmp_path / "fakehome"
+        plugins_dir = fake_home / ".claude" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        (plugins_dir / "installed_plugins.json").write_text(
+            json.dumps({"plugins": plugins_dict})
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+
+    def test_defaults_validated_even_without_plugins_section(
+        self, fleet_dir, monkeypatch, tmp_path
+    ):
+        """No plugins: section in yaml → defaults still apply and get validated."""
+        self._env_patch(monkeypatch)
+        self._fake_installed(
+            tmp_path, monkeypatch, {"claudna@Claudfather": {"version": "0.2.0"}}
+        )
         fleet = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any("plugin" in w.lower() for w in report.warnings)
+        # Default plugins present but installed → no warnings about missing
+        assert not any(
+            "claudna@Claudfather" in w and "not installed" in w for w in report.warnings
+        )
+
+    def test_include_defaults_false_no_plugin_warnings(
+        self, fleet_dir, monkeypatch, tmp_path
+    ):
+        """include_defaults: false + no additional → no install warnings, but does warn about disabling."""
+        self._env_patch(monkeypatch)
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        from claudlobby.config import PluginsConfig
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.plugins = PluginsConfig(required=[], include_defaults=False)
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("include_defaults is false" in w for w in report.warnings)
+        assert not any("not installed" in w for w in report.warnings)
 
     def test_validate_warns_missing_manifest(self, fleet_dir, monkeypatch, tmp_path):
         """Plugins declared but installed_plugins.json doesn't exist."""
-        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
-        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
-        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-        # Redirect HOME so installed_plugins.json won't be found
+        self._env_patch(monkeypatch)
         fake_home = tmp_path / "fakehome"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
@@ -208,18 +244,10 @@ class TestPluginValidation:
 
     def test_validate_warns_missing_plugin(self, fleet_dir, monkeypatch, tmp_path):
         """Plugin declared but not in installed_plugins.json."""
-        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
-        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
-        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-        fake_home = tmp_path / "fakehome"
-        plugins_dir = fake_home / ".claude" / "plugins"
-        plugins_dir.mkdir(parents=True)
-        import json
-
-        (plugins_dir / "installed_plugins.json").write_text(
-            json.dumps({"plugins": {"telegram@claude-plugins-official": {}}})
+        self._env_patch(monkeypatch)
+        self._fake_installed(
+            tmp_path, monkeypatch, {"telegram@claude-plugins-official": {}}
         )
-        monkeypatch.setenv("HOME", str(fake_home))
         from claudlobby.config import PluginsConfig
 
         fleet = load_fleet(fleet_dir / "fleet.yaml")
@@ -238,22 +266,47 @@ class TestPluginValidation:
 
     def test_validate_no_warn_installed_plugin(self, fleet_dir, monkeypatch, tmp_path):
         """Plugin declared and present in installed_plugins.json → no warning."""
-        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
-        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
-        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-        fake_home = tmp_path / "fakehome"
-        plugins_dir = fake_home / ".claude" / "plugins"
-        plugins_dir.mkdir(parents=True)
-        import json
-
-        (plugins_dir / "installed_plugins.json").write_text(
-            json.dumps({"plugins": {"claudna@Claudfather": {"version": "0.2.0"}}})
+        self._env_patch(monkeypatch)
+        self._fake_installed(
+            tmp_path, monkeypatch, {"claudna@Claudfather": {"version": "0.2.0"}}
         )
-        monkeypatch.setenv("HOME", str(fake_home))
         from claudlobby.config import PluginsConfig
 
         fleet = load_fleet(fleet_dir / "fleet.yaml")
         fleet.plugins = PluginsConfig(required=["claudna@Claudfather"])
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any("claudna@Claudfather" in w for w in report.warnings)
+        assert not any(
+            "claudna@Claudfather" in w and "not installed" in w for w in report.warnings
+        )
+
+    def test_validate_warns_bad_plugin_format(self, fleet_dir, monkeypatch, tmp_path):
+        """Plugin name not matching name@marketplace gets a warning."""
+        self._env_patch(monkeypatch)
+        self._fake_installed(tmp_path, monkeypatch, {})
+        from claudlobby.config import PluginsConfig
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.plugins = PluginsConfig(required=["bad-no-at-sign"])
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("name@marketplace format" in w for w in report.warnings)
+
+    def test_validate_warns_bad_marketplace_repo(
+        self, fleet_dir, monkeypatch, tmp_path
+    ):
+        """Marketplace repo not matching org/repo gets a warning."""
+        self._env_patch(monkeypatch)
+        self._fake_installed(tmp_path, monkeypatch, {})
+        from claudlobby.config import PluginsConfig
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.plugins = PluginsConfig(
+            required=[],
+            marketplaces={
+                "Bad": {"source": {"source": "github", "repo": "noslash"}},
+            },
+        )
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("<org>/<repo> format" in w for w in report.warnings)

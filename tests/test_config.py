@@ -6,37 +6,81 @@ import logging
 
 import pytest
 
-from claudlobby.config import PluginsConfig, _coerce_bot, _coerce_plugins, load_fleet
+from claudlobby.config import (
+    DEFAULT_MARKETPLACES,
+    DEFAULT_PLUGINS,
+    _coerce_bot,
+    _coerce_plugins,
+    load_fleet,
+)
 
 
 class TestCoercePlugins:
-    def test_coerce_plugins_none(self):
+    def test_defaults_applied_when_no_plugins_section(self):
         result = _coerce_plugins(None)
-        assert result == PluginsConfig(marketplaces={}, required=[])
+        assert result.required == DEFAULT_PLUGINS
+        assert result.marketplaces == DEFAULT_MARKETPLACES
+        assert result.include_defaults is True
 
-    def test_coerce_plugins_empty(self):
+    def test_defaults_applied_when_empty(self):
         result = _coerce_plugins({})
-        assert result == PluginsConfig(marketplaces={}, required=[])
+        assert result.required == DEFAULT_PLUGINS
+        assert result.marketplaces == DEFAULT_MARKETPLACES
 
-    def test_coerce_plugins_required_only(self):
-        result = _coerce_plugins({"required": ["telegram@official"]})
-        assert result == PluginsConfig(marketplaces={}, required=["telegram@official"])
-
-    def test_coerce_plugins_full(self):
-        raw = {
-            "marketplaces": {
-                "Claudfather": {"source": "github", "repo": "Claudfather/clauDNA"},
-            },
-            "required": ["claudna@Claudfather", "telegram@claude-plugins-official"],
-        }
-        result = _coerce_plugins(raw)
-        assert result.marketplaces == {
-            "Claudfather": {"source": "github", "repo": "Claudfather/clauDNA"},
-        }
+    def test_additional_merges_with_defaults(self):
+        result = _coerce_plugins({"additional": ["telegram@claude-plugins-official"]})
         assert result.required == [
             "claudna@Claudfather",
             "telegram@claude-plugins-official",
         ]
+        assert "Claudfather" in result.marketplaces
+
+    def test_additional_dedup_with_defaults(self):
+        result = _coerce_plugins({"additional": ["claudna@Claudfather"]})
+        assert result.required == ["claudna@Claudfather"]
+        assert result.required.count("claudna@Claudfather") == 1
+
+    def test_include_defaults_false(self):
+        result = _coerce_plugins({"include_defaults": False})
+        assert result.required == []
+        assert result.marketplaces == {}
+        assert result.include_defaults is False
+
+    def test_include_defaults_false_with_additional(self):
+        result = _coerce_plugins(
+            {
+                "include_defaults": False,
+                "additional": ["telegram@claude-plugins-official"],
+            }
+        )
+        assert result.required == ["telegram@claude-plugins-official"]
+        assert result.marketplaces == {}
+
+    def test_custom_marketplace_merges_with_defaults(self):
+        result = _coerce_plugins(
+            {
+                "marketplaces": {
+                    "MyMarket": {"source": {"source": "github", "repo": "Org/Repo"}},
+                },
+            }
+        )
+        assert "Claudfather" in result.marketplaces
+        assert "MyMarket" in result.marketplaces
+
+    def test_custom_marketplace_overrides_default(self):
+        custom = {"source": {"source": "github", "repo": "Fork/clauDNA"}}
+        result = _coerce_plugins(
+            {
+                "marketplaces": {"Claudfather": custom},
+            }
+        )
+        assert result.marketplaces["Claudfather"] == custom
+
+    def test_deprecated_required_key_treated_as_additional(self, caplog):
+        result = _coerce_plugins({"required": ["telegram@claude-plugins-official"]})
+        assert "telegram@claude-plugins-official" in result.required
+        assert "claudna@Claudfather" in result.required  # defaults still present
+        assert "deprecated" in caplog.text
 
 
 class TestCoerceBot:

@@ -158,6 +158,17 @@ class TeamConfig:
 class PluginsConfig:
     marketplaces: dict[str, dict] = field(default_factory=dict)
     required: list[str] = field(default_factory=list)
+    include_defaults: bool = True
+
+
+# Built-in defaults — claudna is always installed unless explicitly disabled.
+DEFAULT_MARKETPLACES: dict[str, dict] = {
+    "Claudfather": {"source": {"source": "github", "repo": "Claudfather/clauDNA"}},
+}
+
+DEFAULT_PLUGINS: list[str] = [
+    "claudna@Claudfather",
+]
 
 
 @dataclass
@@ -254,11 +265,35 @@ def _merge_mcp_lists(*lists) -> list[McpEntry]:
 
 
 def _coerce_plugins(raw: dict | None) -> PluginsConfig:
-    if not raw:
-        return PluginsConfig()
+    include_defaults = True
+    additional: list[str] = []
+    extra_marketplaces: dict[str, dict] = {}
+
+    if raw:
+        include_defaults = bool(raw.get("include_defaults", True))
+        additional = _as_list(raw.get("additional"))
+        if "required" in raw and "additional" not in raw:
+            log.warning("plugins.required is deprecated — rename to plugins.additional")
+            additional = _as_list(raw.get("required"))
+        extra_marketplaces = raw.get("marketplaces") or {}
+
+    if include_defaults:
+        required = list(DEFAULT_PLUGINS)
+        marketplaces = dict(DEFAULT_MARKETPLACES)
+    else:
+        required = []
+        marketplaces = {}
+
+    for plugin in additional:
+        if plugin not in required:
+            required.append(plugin)
+
+    marketplaces.update(extra_marketplaces)
+
     return PluginsConfig(
-        marketplaces=raw.get("marketplaces") or {},
-        required=_as_list(raw.get("required")),
+        marketplaces=marketplaces,
+        required=required,
+        include_defaults=include_defaults,
     )
 
 
