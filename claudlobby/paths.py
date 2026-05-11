@@ -159,6 +159,15 @@ class Paths:
     def voices(self) -> Path:
         return self.base_voices
 
+    # --- shared documentation ---
+
+    @property
+    def shared_docs(self) -> Path | None:
+        """Fleet-level shared documentation directory."""
+        if self.fleet_dir:
+            return self.fleet_dir / "shared"
+        return None
+
     # --- fleet-specific files ---
 
     @property
