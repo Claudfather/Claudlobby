@@ -88,6 +88,44 @@ fi
 
 CLAUDE_CMD=". '$BOT_ENV_FILE' && exec claude $CLAUDE_FLAGS --name \"$SESSION_NAME\""
 
+# Update third-party plugins before launch. Handles cold start (fresh
+# host with no plugins installed) through full lifecycle: register
+# marketplace → install plugin → update plugin. FLEET_PLUGINS_REQUIRED
+# and FLEET_PLUGINS_MARKETPLACES come from bot.conf (composed from
+# fleet.yaml plugins config). The shared cache at ~/.claude/plugins/cache/
+# means only the first bot to start actually fetches; others get a no-op.
+# || true on each step so a network failure never blocks bot startup.
+if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
+    LOG="$BOT_DIR/logs/startup.log"
+    setup_log_dir "$LOG"
+
+    # Step 1: Register marketplaces if not already known
+    if [ -n "${FLEET_PLUGINS_MARKETPLACES:-}" ]; then
+        for _mp_pair in $FLEET_PLUGINS_MARKETPLACES; do
+            _mp_name="${_mp_pair%%=*}"
+            _mp_source="${_mp_pair#*=}"
+            _mp_repo="${_mp_source#*:}"
+            if [ ! -f "$HOME/.claude/plugins/known_marketplaces.json" ] || \
+               ! grep -q "\"$_mp_name\"" "$HOME/.claude/plugins/known_marketplaces.json" 2>/dev/null; then
+                echo "$(ts_iso) PLUGIN registering marketplace $_mp_name ($_mp_repo)" >> "$LOG"
+                timeout 30 claude plugin marketplace add "$_mp_name" --source github --repo "$_mp_repo" >> "$LOG" 2>&1 || true
+            fi
+        done
+    fi
+
+    # Step 2: Install or update each required plugin
+    for _plugin in $FLEET_PLUGINS_REQUIRED; do
+        if [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] || \
+           ! grep -q "\"$_plugin\"" "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null; then
+            echo "$(ts_iso) PLUGIN installing $_plugin (cold start)" >> "$LOG"
+            timeout 30 claude plugin install "$_plugin" >> "$LOG" 2>&1 || true
+        else
+            echo "$(ts_iso) PLUGIN updating $_plugin" >> "$LOG"
+            timeout 30 claude plugin update "$_plugin" >> "$LOG" 2>&1 || true
+        fi
+    done
+fi
+
 "$_TMUX_BIN" new-session -d -s "$BOT_NAME" "$CLAUDE_CMD"
 
 # Wait for initialization (up to 90s) with observability
