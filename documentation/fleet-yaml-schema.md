@@ -28,6 +28,7 @@ fleet:
     protocols: [<list>]
     resources: [<list>]
     lessons: [<list>]
+    principles: [<list>]
     post_actions: [<list>]
     mission: <string>
     scope: { ... }
@@ -82,6 +83,7 @@ fleet:
       protocols: [<list>]
       resources: [<list>]
       lessons: [<list>]
+      principles: [<list>]
       post_actions: [<list>]
       env: { <KEY>: <value>, ... }      # bot-specific env exports (merged into bot.conf)
       tools:                            # OPTIONAL — tool allow/deny
@@ -119,7 +121,7 @@ The human operator's Telegram user ID. When set, the compositor writes this into
 
 Applied to every bot. Merge rules by type:
 
-- **Lists** (skills, expertise, guardrails, protocols, resources, lessons, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
+- **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
 - **Scalars** (model, effort, account, mission) — bot-level **overrides** defaults.
 - **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
@@ -182,9 +184,13 @@ List of skill basenames from `library/skills/`. Generator symlinks each into `ru
 
 `integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
 
-### `bots.<name>.guardrails` / `protocols` / `resources` / `lessons` / `post_actions`
+### `bots.<name>.guardrails` / `protocols` / `resources` / `lessons` / `principles` / `post_actions`
 
 Lists of basenames from the corresponding `library/<dir>/`. Each gets appended to CLAUDE.md as its own section. Bot accumulates `defaults.<list>` + bot-level (deduped, order-preserved).
+
+### `bots.<name>.expertise` (note: `persona` is deprecated)
+
+The `persona:` key is accepted as a backwards-compatible alias for `expertise:` but emits a deprecation warning. Use `expertise:` in all new configs — `persona:` will be removed in a future release.
 
 ### `bots.<name>.telegram`
 
@@ -272,10 +278,11 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 6. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
 7. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
 8. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
-9. **Protocols** — `## Protocols` section.
-10. **Guardrails** — `## Guardrails` section.
-11. **Lessons** — `## Lessons` section.
-12. **Post-actions** — `## Post-actions` section.
+9. **Principles** — `## Principles` section.
+10. **Protocols** — `## Protocols` section.
+11. **Guardrails** — `## Guardrails` section.
+12. **Lessons** — `## Lessons` section.
+13. **Post-actions** — `## Post-actions` section.
 
 The result is a single CLAUDE.md you can read top-to-bottom. Each section's origin is obvious from the markdown headers.
 

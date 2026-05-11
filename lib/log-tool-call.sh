@@ -16,6 +16,10 @@
 
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 # Read the hook payload from stdin (Claude Code sends JSON)
 payload="$(cat)"
 
@@ -23,7 +27,7 @@ payload="$(cat)"
 log_dir="${BOT_DIR:-${PWD}}/logs"
 mkdir -p "$log_dir"
 
-ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+ts=$(ts_iso)
 bot="${BOT_ID:-unknown}"
 
 # Single python3 call: parse payload + build output in one shot.

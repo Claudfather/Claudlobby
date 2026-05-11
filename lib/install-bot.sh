@@ -11,11 +11,15 @@
 # also lives in the bot's runtime dir.
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 BOT_DIR="${1:?Usage: install-bot.sh /path/to/bot/dir}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd)"
 
-if [ "$(uname)" != "Darwin" ]; then
-    echo "install-bot.sh: macOS only (saw uname=$(uname))" >&2
+if [ "$_OS" != "Darwin" ]; then
+    echo "install-bot.sh: macOS only (saw uname=$_OS)" >&2
     echo "  on Linux, copy <bot>.service to ~/.config/systemd/user/ and run:" >&2
     echo "  systemctl --user daemon-reload && systemctl --user enable --now <bot>" >&2
     exit 1

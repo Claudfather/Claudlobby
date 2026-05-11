@@ -40,15 +40,17 @@ Task management, databases, kanban boards. See [notion-integration.md](notion-in
 
 **Setup:** [notion.so/profile/integrations](https://www.notion.so/profile/integrations) → New integration → copy token. Share target pages with the integration.
 
-### Gmail (via workspace-mcp)
+### Gmail + Calendar (via `gws.json` / workspace-mcp)
 
-Read, search, draft, and send emails. Supports multiple accounts on different ports.
+Read, search, draft, and send emails. Calendar events, free/busy, reminders. Uses the `workspace-mcp` tool, registered as server name `gws` in the MCP fragment `library/mcp/gws.json`.
+
+> **Note:** The older `gmail.json` fragment is deprecated — use `gws.json` instead, which bundles both Gmail and Calendar in a single server instance.
 
 ```json
 {
-  "gmail": {
+  "gws": {
     "command": "uvx",
-    "args": ["workspace-mcp", "--tools", "gmail"],
+    "args": ["workspace-mcp", "--tools", "gmail", "calendar"],
     "env": {
       "GOOGLE_OAUTH_CLIENT_ID": "your_client_id.apps.googleusercontent.com",
       "GOOGLE_OAUTH_CLIENT_SECRET": "GOCSPX-your_secret",
@@ -72,26 +74,7 @@ Account 2: port 8001, ~/.google_workspace_mcp/work/credentials
 Account 3: port 8002, ~/.google_workspace_mcp/business/credentials
 ```
 
-### Google Calendar (via workspace-mcp)
-
-Events, free time, reminders. Same OAuth client as Gmail.
-
-```json
-{
-  "calendar": {
-    "command": "uvx",
-    "args": ["workspace-mcp", "--tools", "gmail", "calendar"],
-    "env": {
-      "GOOGLE_OAUTH_CLIENT_ID": "your_client_id",
-      "GOOGLE_OAUTH_CLIENT_SECRET": "your_secret",
-      "WORKSPACE_MCP_CREDENTIALS_DIR": "/home/user/.google_workspace_mcp/my-email/credentials",
-      "USER_GOOGLE_EMAIL": "you@yourdomain.com"
-    }
-  }
-}
-```
-
-**Note:** Add `"calendar"` to the `--tools` args alongside `"gmail"` to get both from one server.
+**Google Calendar** is included in the `gws` server above — add `"calendar"` to `--tools`. No separate MCP entry needed.
 
 ### Slack
 

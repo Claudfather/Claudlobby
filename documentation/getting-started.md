@@ -166,7 +166,7 @@ tmux list-sessions
 # Bot logs
 tail -f runtime/bots/lead/.claude/logs/* 2>/dev/null
 journalctl --user -u lead -f       # Linux
-tail -f lib/logs/lead.out.log      # macOS (if you set log paths)
+tail -f runtime/bots/lead/logs/*.log  # launchd stdout/stderr logs (macOS)
 ```
 
 Send a Telegram message to your bot. It should respond within a few seconds.

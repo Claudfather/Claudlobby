@@ -7,11 +7,15 @@
 
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 MANAGER_SESSION="${1:-clog}"
 
-if ! /usr/bin/tmux has-session -t "$MANAGER_SESSION" 2>/dev/null; then
-    echo "$(date): No manager session, skipping evening audit"
+if ! check_tmux_session "$MANAGER_SESSION"; then
+    echo "$(ts_iso): No manager session, skipping evening audit"
     exit 0
 fi
 
-/usr/bin/tmux send-keys -t "$MANAGER_SESSION" 'Run a rolling code audit. Check which repo/area is most stale using the audit tracker, then run /tech-debt or /security-audit on it. Log the results.' Enter
+"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" 'Run a rolling code audit. Check which repo/area is most stale using the audit tracker, then run /tech-debt or /security-audit on it. Log the results.' Enter

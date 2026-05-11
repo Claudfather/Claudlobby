@@ -80,8 +80,8 @@ NEXT_STEPS=()
 # ---------------------------------------------------------------------------
 phase_preflight() {
     log "phase 1/9: preflight"
-    if [ "$(uname)" != "Darwin" ]; then
-        echo "setup: this script is macOS-only (saw uname=$(uname))" >&2
+    if [ "$_OS" != "Darwin" ]; then
+        echo "setup: this script is macOS-only (saw uname=$_OS)" >&2
         exit 1
     fi
     if [ ! -d "$CLAUDLOBBY_ROOT" ]; then

@@ -199,7 +199,6 @@ Visual quality auditor. Crawls deployed apps, screenshots at multiple viewports,
 | Skill | Purpose |
 |-------|---------|
 | `/visual-crawl` | Autonomous crawl + screenshot + issue-filing |
-| `/design-norms` | Load design system tokens before reviewing |
 | `/restart` | Graceful self-restart |
 
 **Inherits from global:** `/design-review`, `/frontend-performance-audit`

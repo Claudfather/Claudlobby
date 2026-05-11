@@ -12,11 +12,15 @@
 # at the end of every login session).
 set -euo pipefail
 
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 BOT_DIR="${1:?Usage: install-bot-systemd.sh /path/to/bot/dir}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd)"
 
-if [ "$(uname)" != "Linux" ]; then
-    echo "install-bot-systemd.sh: Linux only (saw uname=$(uname))" >&2
+if [ "$_OS" != "Linux" ]; then
+    echo "install-bot-systemd.sh: Linux only (saw uname=$_OS)" >&2
     echo "  on macOS, use install-bot.sh (launchd LaunchAgent)" >&2
     exit 1
 fi

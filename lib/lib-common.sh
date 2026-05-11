@@ -18,8 +18,10 @@
 #   stat_mtime         — portable file mtime (epoch seconds)
 #   sed_i              — portable in-place sed
 #   df_pcent           — portable disk usage percentage
+#   resolve_bots_dir   — fleet-aware runtime/bots path resolution
 #
 # Variables set on source:
+#   CLAUDLOBBY_ROOT — repo root (auto-detected from this file's location)
 #   _OS        — "Linux" or "Darwin"
 #   _HOMEBREW  — Homebrew prefix (macOS only; empty on Linux)
 #   _TMUX_BIN  — resolved path to tmux binary
@@ -29,6 +31,12 @@ set -euo pipefail
 # Guard against double-sourcing
 [ -n "${_LIB_COMMON_LOADED:-}" ] && return 0
 _LIB_COMMON_LOADED=1
+
+# --- Repo root resolution ----------------------------------------------------
+# Derive CLAUDLOBBY_ROOT from this file's location ($CLAUDLOBBY_ROOT/lib/lib-common.sh)
+# unless already set by the environment or the calling script.
+: "${CLAUDLOBBY_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export CLAUDLOBBY_ROOT
 
 # --- OS detection -----------------------------------------------------------
 
@@ -256,5 +264,19 @@ df_pcent() {
         df --output=pcent "$mount" | tail -1 | tr -dc 0-9
     else
         df -P "$mount" | awk 'NR==2 {gsub("%",""); print $5}'
+    fi
+}
+
+# --- Fleet path resolution ---------------------------------------------------
+
+resolve_bots_dir() {
+    # Resolve the runtime/bots directory for a fleet.
+    # Usage: BOTS_DIR=$(resolve_bots_dir [fleet-name])
+    # Falls back to CLAUDLOBBY_FLEET / FLEET_NAME env vars, then root-mode runtime/bots.
+    local fleet="${1:-${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}}"
+    if [ -n "$fleet" ]; then
+        printf '%s' "$CLAUDLOBBY_ROOT/local/$fleet/runtime/bots"
+    else
+        printf '%s' "$CLAUDLOBBY_ROOT/runtime/bots"
     fi
 }
