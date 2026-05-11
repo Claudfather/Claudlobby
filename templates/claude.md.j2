@@ -17,6 +17,7 @@
     guardrails         — list of { title, description, body }
     lessons            — list of { title, description, body }
     post_actions       — list of { title, description, body }
+    shared_docs_path   — string or None, fleet shared docs directory
 -#}
 # {{ bot.name }}{% if title_label %} — {{ title_label }}{% endif %}
 
@@ -52,6 +53,23 @@
 - **{{ k }}:** {{ v }}
 {% endfor %}
 Operate exclusively within this scope. If a task targets resources outside it, surface to the human before acting.
+{% endif -%}
+
+{%- if shared_docs_path %}
+
+## Shared Documentation
+
+Fleet-shared docs at `{{ shared_docs_path }}`:
+
+- `planning/active/` — in-flight plans. Check before starting related work.
+- `planning/completed/` — archived after merge/close.
+- `decisions/` — ratified ADRs. Follow unless human overrides.
+- `knowledge/<repo>/` — repo-specific learnings. Check before deep-diving.
+- `runbooks/` — operational procedures.
+
+Each doc uses frontmatter (title, type, status, owner, tags). Each subdirectory has an INDEX.md — scan it before creating new files to avoid duplication.
+
+When you learn something reusable, write to `knowledge/<repo>/`. When a plan completes, move from `active/` to `completed/`.
 {% endif -%}
 
 {%- if bot.model_strategy %}

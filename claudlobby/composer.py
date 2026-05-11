@@ -60,6 +60,7 @@ def _bot_template_context(
         "TELEGRAM_GROUP_CHAT_ID": (
             bot.telegram.chat_id or fleet.telegram_group_chat_id or ""
         ),
+        "SHARED_DOCS_PATH": str(paths.shared_docs) if paths.shared_docs else "",
     }
 
 
@@ -350,7 +351,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append(f'export CLAUDLOBBY_ROOT="{paths.root}"')
     lines.append(f'export FLEET_NAME="{fleet.name}"')
     lines.append(f'export SERVICE_PREFIX="{fleet.service_prefix}"')
-    lines.append(f'export FLEET_STATE_PATH="{paths.root / "state" / "fleet-state.json"}"')
+    lines.append(
+        f'export FLEET_STATE_PATH="{paths.root / "state" / "fleet-state.json"}"'
+    )
     chat_id = ctx["TELEGRAM_GROUP_CHAT_ID"]
     if chat_id:
         lines.append(f'export TELEGRAM_GROUP_CHAT_ID="{chat_id}"')
@@ -723,6 +726,11 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             if paths.find_library_file("integrations", e.name, ".md") is not None
         ]
 
+    # Auto-include shared-documentation protocol when shared docs are available
+    protocol_names = list(bot.protocols)
+    if paths.shared_docs and "shared-documentation" not in protocol_names:
+        protocol_names.append("shared-documentation")
+
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
 
@@ -736,10 +744,11 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         voice=voice_item,
         teams=teams,
         org_structure=org_structure,
+        shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         resources=_items(bot.resources, "resources"),
         integrations=_items(integration_names, "integrations"),
         principles=_items(bot.principles, "principles"),
-        protocols=_items(bot.protocols, "protocols"),
+        protocols=_items(protocol_names, "protocols"),
         guardrails=_items(bot.guardrails, "guardrails"),
         lessons=_items(bot.lessons, "lessons"),
         post_actions=_items(bot.post_actions, "post_actions"),
@@ -967,22 +976,26 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
         }
 
     # Sandbox: enabled toggle + network + filesystem allowlists + bash auto-allow
+    sandbox_cfg: dict = {}
     sandbox = bot.sandbox
-    if (
-        sandbox.enabled is not None
-        or sandbox.network_allowed_domains
-        or sandbox.filesystem_allow_write
-        or sandbox.auto_allow_bash is not None
-    ):
-        sandbox_cfg: dict = {}
-        if sandbox.enabled is not None:
-            sandbox_cfg["enabled"] = sandbox.enabled
-        if sandbox.network_allowed_domains:
-            sandbox_cfg["network"] = {"allowedDomains": sandbox.network_allowed_domains}
-        if sandbox.filesystem_allow_write:
-            sandbox_cfg["filesystem"] = {"allowWrite": sandbox.filesystem_allow_write}
-        if sandbox.auto_allow_bash is not None:
-            sandbox_cfg["autoAllowBashIfSandboxed"] = sandbox.auto_allow_bash
+    if sandbox.enabled is not None:
+        sandbox_cfg["enabled"] = sandbox.enabled
+    if sandbox.network_allowed_domains:
+        sandbox_cfg["network"] = {"allowedDomains": sandbox.network_allowed_domains}
+    if sandbox.filesystem_allow_write:
+        sandbox_cfg["filesystem"] = {"allowWrite": list(sandbox.filesystem_allow_write)}
+    if sandbox.auto_allow_bash is not None:
+        sandbox_cfg["autoAllowBashIfSandboxed"] = sandbox.auto_allow_bash
+
+    # Inject shared docs write access
+    if paths.shared_docs:
+        fs = sandbox_cfg.setdefault("filesystem", {})
+        aw = fs.setdefault("allowWrite", [])
+        shared_str = str(paths.shared_docs)
+        if shared_str not in aw:
+            aw.append(shared_str)
+
+    if sandbox_cfg:
         settings["sandbox"] = sandbox_cfg
 
     # Hooks: PreToolUse, PostToolUse, etc.
@@ -1285,6 +1298,18 @@ _BOOT_STAGGER_SECONDS = 3  # delay between each bot's startup on fleet boot
 
 def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
     paths.runtime_bots.mkdir(parents=True, exist_ok=True)
+
+    # Scaffold shared documentation directories
+    if paths.shared_docs:
+        for subdir in [
+            "planning/active",
+            "planning/completed",
+            "decisions",
+            "knowledge",
+            "runbooks",
+        ]:
+            (paths.shared_docs / subdir).mkdir(parents=True, exist_ok=True)
+
     out: dict[str, Path] = {}
     for i, (bot_name, bot) in enumerate(fleet.bots.items()):
         _log.info("composing %s...", bot_name)
