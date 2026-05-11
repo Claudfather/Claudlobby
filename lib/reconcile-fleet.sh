@@ -14,12 +14,11 @@ set -euo pipefail
 FLEET="${1:?Usage: reconcile-fleet.sh <fleet-name> [--enroll]}"
 ENROLL="${2:-}"
 
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 FLEET_YAML="$CLAUDLOBBY_ROOT/local/$FLEET/fleet.yaml"
-RUNTIME_DIR="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots"
+RUNTIME_DIR=$(resolve_bots_dir "$FLEET")
 
 if [ ! -f "$FLEET_YAML" ]; then
     echo "reconcile-fleet: $FLEET_YAML not found" >&2
@@ -59,7 +58,7 @@ tmux_sessions=$(tmux ls 2>/dev/null | awk -F: '{print $1}' | sort -u || true)
 
 # 3. systemd-user unit files (Linux) OR launchd plists (macOS)
 units=""
-case "$(uname)" in
+case "$_OS" in
 Linux)
     units=$(ls "$HOME/.config/systemd/user/" 2>/dev/null \
         | grep -v '^claudlobby-' \

@@ -9,12 +9,14 @@
 # Usage: install-creds-check-systemd.sh
 set -euo pipefail
 
-if [ "$(uname)" != "Linux" ]; then
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
+if [ "$_OS" != "Linux" ]; then
     echo "install-creds-check-systemd.sh: Linux only. On macOS, use install-creds-check.sh" >&2
     exit 1
 fi
-
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 NAME="claudlobby-creds-check"
 SERVICE_FILE="$HOME/.config/systemd/user/$NAME.service"
 TIMER_FILE="$HOME/.config/systemd/user/$NAME.timer"

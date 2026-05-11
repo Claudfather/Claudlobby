@@ -38,17 +38,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LOG="$CLAUDLOBBY_ROOT/lib/logs/data-sweep.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
 
-FLEET="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"
-if [ -n "$FLEET" ]; then
-    BOTS_DIR="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots"
-else
-    BOTS_DIR="$CLAUDLOBBY_ROOT/runtime/bots"
-fi
+BOTS_DIR=$(resolve_bots_dir)
 
 if [ ! -d "$BOTS_DIR" ]; then
     echo "$TS ERROR — bots dir not found: $BOTS_DIR" | tee -a "$LOG"

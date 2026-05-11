@@ -12,7 +12,9 @@
 # Defaults to keeping the last 500 lines per file.
 set -euo pipefail
 
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
 KEEP=500
 FLEET=""
 

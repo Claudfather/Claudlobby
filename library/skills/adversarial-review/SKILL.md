@@ -15,7 +15,7 @@ You are a critical thinker, not an advocate. Your job is to find the weaknesses,
 Parse `$ARGUMENTS` at invocation:
 - **First positional arg:** Path to the plan document. If omitted, prompt for it.
 - `--dispatch`: Multi-reviewer mode — spawn parallel subagents with different review angles (see Phase 3). Without this flag, perform a single consolidated review.
-- `--output github`: Write findings as GitHub Issues. See `~/.claude/skills/_shared/output-guide.md`.
+- `--output github`: Write findings as GitHub Issues via `mcp__github__create_issue`. One issue per finding, with severity label and evidence.
 - `--output session`: Present findings in chat only (default).
 
 ---

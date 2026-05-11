@@ -6,23 +6,27 @@
 #
 # Skips if manager is busy or not alive. Logs each run.
 set -euo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
 MANAGER_TMUX="${MANAGER_TMUX:-claude-bot}"
-LOG="${SPRINT_TRIGGER_LOG:-$HOME/claudlobby/logs/sprint-trigger.log}"
-TMUX="${TMUX_BIN:-$(command -v tmux)}"
-mkdir -p "$(dirname "$LOG")"
+LOG="${SPRINT_TRIGGER_LOG:-$CLAUDLOBBY_ROOT/logs/sprint-trigger.log}"
+setup_log_dir "$LOG"
 
-TS=$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)
+TS=$(ts_iso)
 
-if ! "$TMUX" has-session -t "$MANAGER_TMUX" 2>/dev/null; then
+if ! check_tmux_session "$MANAGER_TMUX"; then
   echo "$TS SKIP — manager '$MANAGER_TMUX' not alive" >> "$LOG"
   exit 0
 fi
 
-pane=$("$TMUX" capture-pane -t "$MANAGER_TMUX" -p | tail -3) || true
+pane=$("$_TMUX_BIN" capture-pane -t "$MANAGER_TMUX" -p | tail -3) || true
 if echo "$pane" | grep -qE '(Thinking|Running|Reading|Writing|Editing|Spelunking|Prestidigitating|esc to interrupt)'; then
   echo "$TS SKIP — manager busy" >> "$LOG"
   exit 0
 fi
 
-"$TMUX" send-keys -t "$MANAGER_TMUX" "/autonomous-sprint" Enter
+"$_TMUX_BIN" send-keys -t "$MANAGER_TMUX" "/autonomous-sprint" Enter
 echo "$TS DISPATCH — /autonomous-sprint sent to $MANAGER_TMUX" >> "$LOG"

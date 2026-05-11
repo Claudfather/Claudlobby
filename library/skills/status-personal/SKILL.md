@@ -82,7 +82,7 @@ cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null | awk '{printf "CPU temp: 
 
 ## Output
 
-See [_telegram-formatting.md](../../../manager/.claude/skills/_telegram-formatting.md) for MarkdownV2 rules.
+See [_telegram-formatting.md](../_telegram-formatting.md) for MarkdownV2 rules.
 
 Send via `mcp__plugin_telegram_telegram__reply` to `$TELEGRAM_GROUP_CHAT_ID` with `format: "markdownv2"`:
 

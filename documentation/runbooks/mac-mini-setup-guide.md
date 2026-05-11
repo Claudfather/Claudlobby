@@ -317,7 +317,7 @@ If all of those work, you're set.
 
 ## Next Steps
 
-Once the mini is reachable and Claude Code is installed, follow the [getting-started guide](./getting-started.md) to clone claudlobby and compose your first bot fleet. Then run `lib/setup-mac-mini.sh --fleet <name>` to install the keepalive + creds-check LaunchAgents.
+Once the mini is reachable and Claude Code is installed, follow the [getting-started guide](../getting-started.md) to clone claudlobby and compose your first bot fleet. Then run `lib/setup-mac-mini.sh --fleet <name>` to install the keepalive + creds-check LaunchAgents.
 
 - For details on launchd vs systemd vs cron install patterns, see [install-patterns.md](./install-patterns.md).
 - For the Pi equivalent of this guide, see [pi-setup-guide.md](./pi-setup-guide.md).

@@ -35,7 +35,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LOG="$CLAUDLOBBY_ROOT/lib/disk-monitor.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)

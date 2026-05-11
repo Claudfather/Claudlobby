@@ -9,16 +9,15 @@
 # Usage: install-creds-check.sh [<fleet-name>]
 set -euo pipefail
 
-if [ "$(uname)" != "Darwin" ]; then
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+
+if [ "$_OS" != "Darwin" ]; then
     echo "install-creds-check.sh: macOS only. On Linux, install a systemd timer" >&2
     echo "  with OnCalendar=*-*-* 09:00:00 pointing at $CLAUDLOBBY_ROOT/lib/creds-check.sh." >&2
     exit 1
 fi
-
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
-LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib-common.sh
-. "$LIB_DIR/lib-common.sh"
 FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
 if [ -z "$FLEET" ]; then
     echo "install-creds-check.sh: pass a fleet name or set CLAUDLOBBY_FLEET" >&2

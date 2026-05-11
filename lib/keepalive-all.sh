@@ -9,23 +9,25 @@
 #   default: $CLAUDLOBBY_ROOT/local/$CLAUDLOBBY_FLEET/runtime/bots
 set -euo pipefail
 
-CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
-FLEET="${CLAUDLOBBY_FLEET:-}"
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
 
 if [ -n "${1:-}" ]; then
     BOTS_DIR="$1"
-elif [ -n "$FLEET" ]; then
-    BOTS_DIR="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots"
 else
-    echo "keepalive-all: pass a runtime/bots dir or set CLAUDLOBBY_FLEET" >&2
-    exit 2
+    BOTS_DIR=$(resolve_bots_dir)
+    if [ -z "${CLAUDLOBBY_FLEET:-}${FLEET_NAME:-}" ]; then
+        echo "keepalive-all: pass a runtime/bots dir or set CLAUDLOBBY_FLEET" >&2
+        exit 2
+    fi
 fi
 
 KEEPALIVE="$CLAUDLOBBY_ROOT/lib/keepalive.sh"
 LOG="$CLAUDLOBBY_ROOT/lib/logs/keepalive-all.log"
 
-mkdir -p "$(dirname "$LOG")"
-TS=$(date -Iseconds)
+setup_log_dir "$LOG"
+TS=$(ts_iso)
 
 if [ ! -x "$KEEPALIVE" ]; then
     echo "$TS FATAL — $KEEPALIVE not executable" >>"$LOG"
@@ -37,8 +39,6 @@ if [ ! -d "$BOTS_DIR" ]; then
     exit 1
 fi
 
-# Detect host for service-presence check.
-HOST_OS="$(uname)"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 for conf in "$BOTS_DIR"/*/bot.conf; do
@@ -47,7 +47,7 @@ for conf in "$BOTS_DIR"/*/bot.conf; do
     bot_name="$(basename "$bot_dir")"
 
     # Only touch bots whose service is registered with the host's init.
-    if [ "$HOST_OS" = "Darwin" ]; then
+    if [ "$_OS" = "Darwin" ]; then
         plist=$(find "$AGENTS_DIR" -maxdepth 1 -name "*.$bot_name.plist" 2>/dev/null | head -1) || true
         [ -n "$plist" ] || continue
     else
