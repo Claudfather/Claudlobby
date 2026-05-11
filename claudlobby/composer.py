@@ -392,6 +392,18 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # Plugin sync — if fleet declares plugins, enable auto-install on session start
     if fleet.plugins.required:
         lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
+        lines.append(
+            f'export FLEET_PLUGINS_REQUIRED="{" ".join(fleet.plugins.required)}"'
+        )
+    if fleet.plugins.marketplaces:
+        # Encode as "Name=github:Owner/Repo Name2=github:Owner2/Repo2"
+        pairs = []
+        for name, meta in fleet.plugins.marketplaces.items():
+            src = meta.get("source", {})
+            src_type = src.get("source", "github")
+            src_repo = src.get("repo", "")
+            pairs.append(f"{name}={src_type}:{src_repo}")
+        lines.append(f'export FLEET_PLUGINS_MARKETPLACES="{" ".join(pairs)}"')
 
     for k, v in bot.env.items():
         lines.append(f'export {k}="{v}"')

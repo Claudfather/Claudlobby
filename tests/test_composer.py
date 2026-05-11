@@ -1618,6 +1618,46 @@ class TestPluginsBotConf:
         conf = self._compose(tmp_path)
         assert "CLAUDE_CODE_SYNC_PLUGIN_INSTALL" not in conf
 
+    def test_bot_conf_emits_fleet_plugins_required(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        plugins = PluginsConfig(
+            required=["claudna@Claudfather", "telegram@claude-plugins-official"]
+        )
+        conf = self._compose(tmp_path, plugins=plugins)
+        assert (
+            'export FLEET_PLUGINS_REQUIRED="claudna@Claudfather telegram@claude-plugins-official"'
+            in conf
+        )
+
+    def test_bot_conf_no_fleet_plugins_required_without_plugins(self, tmp_path):
+        conf = self._compose(tmp_path)
+        assert "FLEET_PLUGINS_REQUIRED" not in conf
+
+    def test_bot_conf_emits_fleet_plugins_marketplaces(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        plugins = PluginsConfig(
+            required=["claudna@Claudfather"],
+            marketplaces={
+                "Claudfather": {
+                    "source": {"source": "github", "repo": "Claudfather/clauDNA"}
+                }
+            },
+        )
+        conf = self._compose(tmp_path, plugins=plugins)
+        assert (
+            'export FLEET_PLUGINS_MARKETPLACES="Claudfather=github:Claudfather/clauDNA"'
+            in conf
+        )
+
+    def test_bot_conf_no_marketplaces_when_empty(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+
+        plugins = PluginsConfig(required=["claudna@Claudfather"])
+        conf = self._compose(tmp_path, plugins=plugins)
+        assert "FLEET_PLUGINS_MARKETPLACES" not in conf
+
 
 class TestPluginsSettingsLocal:
     """compose_settings_local emits enabledPlugins + extraKnownMarketplaces."""
