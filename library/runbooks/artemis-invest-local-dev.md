@@ -9,10 +9,10 @@ last_verified: 2026-05-12
 repos: [artemis-invest-frontend, artemis-data-svc]
 tags: [local-dev, fullstack, stytch, auth, playwright, screenshot]
 links:
-  - /Users/ak/farm-artemis/docs/fullstack-local-setup.md
   - /Users/ak/work/artemis-invest-frontend/.cursor/environment.json
   - /Users/ak/work/artemis-data-svc/.cursor/environment.json
-  - /Users/ak/farm-artemis/bot-common/mint-stytch-storage-state.py
+  - /Users/ak/Claudlobby/library/scripts/mint-stytch-storage-state.py
+  - /Users/ak/Claudlobby/library/scripts/playwright-mcp-wrapper.sh
 ---
 
 # Artemis Invest — Local Development Runbook
@@ -117,7 +117,7 @@ Works with either Recipe 1 (local BE) or Recipe 2 (prod BE), as long as `.env.lo
 #    STYTCH_SECRET, TEST_USERNAME, TEST_PASSWORD from the FE's .env.local.
 cd ~/work/artemis-invest-frontend
 set -a; . ./.env.local; set +a
-/Users/ak/farm-artemis/bot-common/mint-stytch-storage-state.py > /tmp/stytch-storage.json
+/Users/ak/Claudlobby/library/scripts/mint-stytch-storage-state.py > /tmp/stytch-storage.json
 
 # 2. Use the storageState in Playwright. The `npx playwright screenshot`
 #    CLI does NOT support --storage-state, so drive the browser with a
@@ -145,7 +145,7 @@ node /tmp/screenshot-signedin.mjs
 
 **Verify:** screenshot shows `Good Afternoon, <test-user-handle>` instead of `Log In / Sign Up`.
 
-**For designer fleet bots:** they consume this same flow via `~/farm-artemis/bot-common/playwright-mcp-wrapper.sh`, which wraps `npx @playwright/mcp@latest --storage-state=<tempfile>` (the MCP server, unlike the CLI, accepts `--storage-state`). The wrapper falls back to anonymous Playwright if any mint step fails and logs to `/tmp/playwright-mcp-mint.log`.
+**For designer fleet bots:** they consume this same flow via `/Users/ak/Claudlobby/library/scripts/playwright-mcp-wrapper.sh`, which wraps `npx @playwright/mcp@latest --storage-state=<tempfile>` (the MCP server, unlike the CLI, accepts `--storage-state`). The wrapper falls back to anonymous Playwright if any mint step fails and logs to `/tmp/playwright-mcp-mint.log`.
 
 ## Common failure modes
 
@@ -160,8 +160,7 @@ node /tmp/screenshot-signedin.mjs
 
 ## Cross-links
 
-- Existing source-of-truth doc: `~/farm-artemis/docs/fullstack-local-setup.md` (covers Recipe 1 + Recipe 3; this runbook adds Recipe 2 and the host-specific PATH gotchas).
 - BE recipe: `~/work/artemis-data-svc/.cursor/environment.json` → `dev/data-svc-secrets`.
 - FE recipe: `~/work/artemis-invest-frontend/.cursor/environment.json` → `dev/invest-frontend-secrets`.
-- Mint script: `~/farm-artemis/bot-common/mint-stytch-storage-state.py`.
-- Designer wrapper: `~/farm-artemis/bot-common/playwright-mcp-wrapper.sh`.
+- Mint script: `/Users/ak/Claudlobby/library/scripts/mint-stytch-storage-state.py`.
+- Designer wrapper: `/Users/ak/Claudlobby/library/scripts/playwright-mcp-wrapper.sh`.
