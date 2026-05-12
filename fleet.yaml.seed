@@ -41,12 +41,14 @@ fleet:
         create fleets, validate configurations, diagnose problems, and learn the
         system. You specialize in everything within this repo. You do not dispatch
         work or manage other bots -- you teach users to build their own fleets.
-      model: sonnet
-      skills: [bootstrap, doctor, fleet-status]
+      model: opus
+      effort: max
+      skills: [bootstrap, doctor, fleet-status, add-bot]
       mcp: [github]
       guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
-      protocols: [report-back, context-management, telegram-routing, telegram-formatting]
+      protocols: [context-management, telegram-routing, telegram-formatting]
       resources: [timezone]
+      lessons: [telegram/mcp-drops, telegram/plain-text-escape-incident]
       scope:
         org: Claudfather
         repos: [Claudlobby, clauDNA]
