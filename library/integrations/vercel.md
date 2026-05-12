@@ -5,12 +5,12 @@ type: cli
 
 # Vercel
 
-**Skills (clauDNA):** `/vercel-status` (deployments, domains, env vars), `/vercel-logs` (view/debug logs), `/vercel-deploy` (deploy to production or preview)
+**Skills (clauDNA):** `/claudna:vercel-status` (deployments, domains, env vars), `/claudna:vercel-logs` (view/debug logs), `/claudna:vercel-deploy` (deploy to production or preview)
 
 **When to use:**
-- Checking deployment health or domain config → `/vercel-status`
-- Debugging build failures or runtime errors → `/vercel-logs`
-- Deploying or promoting a preview → `/vercel-deploy`
+- Checking deployment health or domain config → `/claudna:vercel-status`
+- Debugging build failures or runtime errors → `/claudna:vercel-logs`
+- Deploying or promoting a preview → `/claudna:vercel-deploy`
 
 **Gotchas:**
 - Vercel CLI logged in as a specific user — check `vercel whoami` if auth issues arise

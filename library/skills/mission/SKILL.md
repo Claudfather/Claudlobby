@@ -1,12 +1,12 @@
 ---
 name: mission
-description: "Create or update a PROJECT_MISSION.md for a repo — defines the north star, guiding principles, and what success looks like. Used by /product-vision and /autonomous-sprint to prioritize work."
+description: "Create or update a PROJECT_MISSION.md for a repo — defines the north star, guiding principles, and what success looks like. Used by /claudna:product-vision and /autonomous-sprint to prioritize work."
 argument-hint: "[--bootstrap] [--edit]"
 ---
 
 # Mission — Define a Project's North Star
 
-Create or update a `PROJECT_MISSION.md` file that grounds all autonomous work in a clear direction. This doc is read by `/product-vision` and `/autonomous-sprint` to score and prioritize features.
+Create or update a `PROJECT_MISSION.md` file that grounds all autonomous work in a clear direction. This doc is read by `/claudna:product-vision` and `/autonomous-sprint` to score and prioritize features.
 
 ## Arguments
 
@@ -19,7 +19,7 @@ Parse `$ARGUMENTS`:
 
 - Setting up a new repo for autonomous work
 - After a major pivot or scope change
-- When `/product-vision` notes "no PROJECT_MISSION.md found"
+- When `/claudna:product-vision` notes "no PROJECT_MISSION.md found"
 - Periodically (quarterly) to reassess direction
 
 ## Procedure
@@ -86,7 +86,7 @@ Write `PROJECT_MISSION.md` to the repo root:
 ## In bounds for autonomous work
 [What the fleet can build without asking]
 - Bug fixes and tech debt
-- Features scored 🟢 by /product-vision
+- Features scored 🟢 by /claudna:product-vision
 - Documentation and test coverage
 - Performance improvements
 

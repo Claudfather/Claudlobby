@@ -1,6 +1,6 @@
 ---
 name: autonomous-sprint
-description: "Autonomous development cycle: reads PROJECT_MISSION.md, evaluates backlog, runs /product-vision if needed, picks highest-impact issues, dispatches /lifecycle, and reports results. The conductor that orchestrates the fleet."
+description: "Autonomous development cycle: reads PROJECT_MISSION.md, evaluates backlog, runs /claudna:product-vision if needed, picks highest-impact issues, dispatches /lifecycle, and reports results. The conductor that orchestrates the fleet."
 argument-hint: "<repo> [--max-issues N] [--dry-run] [--focus <area>]"
 ---
 
@@ -51,7 +51,7 @@ Categorize:
 **Step 3: Backlog health check**
 
 If fewer than 5 mission-aligned open issues exist:
-- Run `/product-vision --auto --output github` on the repo to generate new issues
+- Run `/claudna:product-vision --auto --output github` on the repo to generate new issues
 - Wait for issues to be created, then re-evaluate
 
 If plenty of issues exist, skip to Phase 2.
@@ -144,7 +144,7 @@ Next sprint candidates:
 
 **Step 9: Post-sprint retro (optional)**
 
-If any issues were merged, dispatch an engineer to run `/development-retro` on the combined work. Create follow-up issues from findings.
+If any issues were merged, dispatch an engineer to run `/claudna:development-retro` on the combined work. Create follow-up issues from findings.
 
 ## Bot Selection
 
