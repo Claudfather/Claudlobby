@@ -15,11 +15,11 @@ The sweep orchestrates clauDNA planning skills. Pick a repo → pick an audit ty
 
 | Audit type | Skill to run | What it finds |
 |-----------|-------------|---------------|
-| tech-debt | `/tech-debt` | Dead code, god modules, deprecated patterns |
-| security | `/security-audit` | Credential leaks, injection vectors, auth gaps |
-| docs | `/docs-review` | Stale or missing documentation |
-| data-model | `/data-model-audit` | Schema / app mismatches (if applicable) |
-| enhancement | `/product-enhance` | UX gaps, missing features, inconsistencies |
+| tech-debt | `/claudna:tech-debt` | Dead code, god modules, deprecated patterns |
+| security | `/claudna:security-audit` | Credential leaks, injection vectors, auth gaps |
+| docs | `/claudna:docs-review` | Stale or missing documentation |
+| data-model | `/claudna:data-model-audit` | Schema / app mismatches (if applicable) |
+| enhancement | `/claudna:product-enhance` | UX gaps, missing features, inconsistencies |
 
 Each is run with `--auto --output github` so it operates non-interactively and creates GitHub issues directly.
 
