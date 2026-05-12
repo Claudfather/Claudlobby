@@ -97,6 +97,21 @@ class TestCoerceBot:
         assert bot.mcp == []
         assert bot.skills == []
         assert bot.guardrails == []
+        assert bot.bench is False
+
+    def test_bench_from_bot(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"], "bench": True}, {})
+        assert bot.bench is True
+
+    def test_bench_from_defaults(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {"bench": True})
+        assert bot.bench is True
+
+    def test_bench_bot_overrides_defaults(self):
+        bot = _coerce_bot(
+            "test", {"expertise": ["eng"], "bench": False}, {"bench": True}
+        )
+        assert bot.bench is False
 
     def test_defaults_merge(self):
         defaults = {

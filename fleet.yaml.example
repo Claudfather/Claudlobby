@@ -142,6 +142,11 @@ fleet:
 #       - tmux-dispatch-shell-expansion
 #       - messaging-channel-discipline
 #
+#     # principles — guiding principles from library/principles/
+#     principles:
+#       - visibility-and-speed
+#       - consolidate-dont-fork
+#
 #     # post_actions — workflows to run after task completion
 #     post_actions:
 #       - notify-human
@@ -191,3 +196,24 @@ fleet:
 #     # telegram.chat_id — override the fleet-level group for this bot
 #     telegram:
 #       chat_id: "-1009999999999"
+#
+#     # bench — marks this bot as the fleet's benchmarking target for cold-start timing.
+#     # Multi-bot fleets should set bench: true on exactly one bot.
+#     bench: true
+#
+#     # dangerously_skip_permissions — skip tool-call permission prompts (default: true)
+#     # Set to false for bots that should require approval before tool calls.
+#     dangerously_skip_permissions: false
+#
+#     # remote_control — enable --remote-control flag (default: true)
+#     # Allows dispatch via tmux send-keys. Disable for standalone bots.
+#     remote_control: true
+#
+#     # channels — Claude Code channel plugins for messaging (default: [plugin:telegram@claude-plugins-official])
+#     # Override to use a different channel or disable Telegram.
+#     channels:
+#       - plugin:telegram@claude-plugins-official
+#
+#     # extra_flags — additional Claude CLI arguments appended to CLAUDE_FLAGS in bot.conf
+#     extra_flags:
+#       - "--verbose"
