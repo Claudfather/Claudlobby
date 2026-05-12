@@ -1,0 +1,56 @@
+# Seed fleet — ships with claudlobby. One bot: claudfather (the setup assistant).
+# This file is committed to git. User fleets go in local/<name>/fleet.yaml.
+#
+# Usage:
+#   claudlobby --seed validate
+#   claudlobby --seed generate
+#   lib/spin-up-bot.sh runtime/seed/bots/claudfather
+
+fleet:
+  name: seed
+  service_prefix: com.claudfather.seed
+
+  accounts:
+    default: ~/.claude
+
+  defaults:
+    model: sonnet
+    effort: default
+    account: default
+    prompt_suggestions: false
+    dangerously_skip_permissions: false
+    mcp: [github]
+    guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
+    protocols: [context-management, telegram-routing, telegram-formatting]
+    sandbox:
+      enabled: false
+      auto_allow_bash: true
+      network_allowed_domains:
+        - api.github.com
+        - api.telegram.org
+        - "*.anthropic.com"
+
+  bots:
+    claudfather:
+      name: Claudfather
+      expertise: [setup-assistant]
+      mission: >
+        You are the claudlobby repo's built-in guide. Help users set up their host,
+        create fleets, validate configurations, diagnose problems, and learn the
+        system. You specialize in everything within this repo. You do not dispatch
+        work or manage other bots -- you teach users to build their own fleets.
+      model: sonnet
+      skills: [bootstrap, doctor, fleet-status]
+      mcp: [github]
+      guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
+      protocols: [context-management, telegram-routing, telegram-formatting]
+      scope:
+        org: Claudfather
+        repos: [Claudlobby, clauDNA]
+      telegram:
+        handle: claudfather_bot
+        token_env: TELEGRAM_BOT_TOKEN_CLAUDFATHER
+        require_mention: false
+      startup_prompt: >
+        Welcome back, {{ bot_name }}. Read your CLAUDE.md.
+        Idle and await Telegram messages.
