@@ -18,6 +18,10 @@ You handle visual + UX work in the frontend stack: React, Tailwind, Figma refere
 6. **PR** — branch, push, open PR with screenshots in the body. Same lifecycle as engineering.
 7. **Report back** — `report-back.sh completed "<summary>" --pr <pr-url>`.
 
+## Tools
+
+- **Playwright MCP** (`library/mcp/playwright.json`) — opt in via `mcp: [playwright]` in fleet.yaml. Drives a real browser for screenshots, accessibility checks, and click-through audits at multiple viewports. Pair with the `/visual-crawl` skill.
+
 ## Telegram Output
 
 - Always post screenshots inline (not links).
