@@ -23,6 +23,17 @@ fi
 
 cd "$BOT_DIR"
 
+# Pin tmux socket to a fleet-shared location so bots launched under
+# launchd (which inherits a per-process TMPDIR like /var/folders/...)
+# reach the same tmux server as the rest of the fleet. Without this, a
+# launchd-started bot opens its own tmux server in launchd's tmpdir and
+# is invisible to `tmux send-keys -t <other-bot>` from peers — the
+# manager can't dispatch to it. macOS-specific in practice; harmless on
+# Linux (systemd doesn't isolate TMPDIR the same way).
+if [ "$(uname -s)" = "Darwin" ]; then
+    export TMUX_TMPDIR=/private/tmp
+fi
+
 # Kill any prior session — expected to fail on first boot or after clean shutdown
 "$_TMUX_BIN" kill-session -t "$BOT_NAME" 2>/dev/null || true
 
@@ -126,7 +137,17 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
     done
 fi
 
+# Some user-level tmux configs auto-split panes via a session-created
+# hook, which shrinks claude's pane to a degenerate size and prevents
+# it from booting cleanly. Save the hook (if any), unset it before
+# creating the bot session, then restore so other tmux usage is
+# unaffected.
+SESSION_CREATED_HOOK="$("$_TMUX_BIN" show-hooks -g 2>/dev/null | sed -nE 's/^session-created\[0\] (.*)$/\1/p' || true)"
+"$_TMUX_BIN" set-hook -gu session-created 2>/dev/null || true
+
 "$_TMUX_BIN" new-session -d -s "$BOT_NAME" "$CLAUDE_CMD"
+
+[ -n "${SESSION_CREATED_HOOK:-}" ] && "$_TMUX_BIN" set-hook -g session-created "$SESSION_CREATED_HOOK"
 
 # Wait for initialization (up to 90s) with observability
 LOG="$BOT_DIR/logs/startup.log"
