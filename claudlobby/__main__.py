@@ -91,6 +91,13 @@ def _add_migration_args(parser) -> None:
 
 def _resolve_paths(args) -> Paths:
     fleet = getattr(args, "fleet", None)
+    seed = getattr(args, "seed", False)
+    if seed and fleet:
+        log.error("--seed and --fleet are mutually exclusive")
+        sys.exit(1)
+    if seed:
+        root = Path(args.root).resolve() if args.root else Paths.detect().root
+        return Paths(root=root, seed=True)
     if args.root:
         root = Path(args.root).resolve()
         fleet_dir = (root / "local" / fleet) if fleet else None
@@ -1379,6 +1386,12 @@ def main(argv: list[str] | None = None) -> int:
         "--fleet",
         help="Fleet overlay name (uses local/<fleet>/ for fleet.yaml, library overlay, voices overlay, runtime/). "
         "If omitted, runs in root mode (fleet.yaml at repo root).",
+    )
+    parser.add_argument(
+        "--seed",
+        action="store_true",
+        help="Operate on the built-in seed fleet (fleet.yaml.seed). "
+        "Mutually exclusive with --fleet.",
     )
     parser.add_argument(
         "-V", "--version", action="version", version=f"claudlobby {__version__}"

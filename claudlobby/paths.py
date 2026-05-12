@@ -27,10 +27,12 @@ class Paths:
     """Path resolution. `root` is the claudlobby repo root.
 
     `fleet_dir` is None for root-mode, or `local/<fleet>/` for overlay-mode.
+    `seed` is True when operating on the built-in seed fleet (fleet.yaml.seed).
     """
 
     root: Path
     fleet_dir: Path | None = None
+    seed: bool = False
 
     # --- public base (always at repo root) ---
 
@@ -172,6 +174,8 @@ class Paths:
 
     @property
     def fleet_yaml(self) -> Path:
+        if self.seed:
+            return self.root / "fleet.yaml.seed"
         if self.fleet_dir:
             return self.fleet_dir / "fleet.yaml"
         return self.root / "fleet.yaml"
@@ -186,6 +190,8 @@ class Paths:
 
     @property
     def runtime(self) -> Path:
+        if self.seed:
+            return self.root / "runtime" / "seed"
         if self.fleet_dir:
             return self.fleet_dir / "runtime"
         return self.root / "runtime"
