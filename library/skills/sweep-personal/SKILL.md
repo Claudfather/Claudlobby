@@ -22,9 +22,9 @@ The sweep orchestrates three existing skills based on the audit type:
 
 | Type from `rolling-audit.sh` | Skill to run | What it finds |
 |------------------------------|-------------|---------------|
-| `tech-debt` | `/tech-debt` | Dead code, god modules, deprecated patterns, missing abstractions |
-| `security` | `/security-audit` | Credential leaks, injection vectors, auth gaps, TLS issues |
-| `enhancement` | `/product-enhance` | UX gaps, missing features, performance issues, API inconsistencies |
+| `tech-debt` | `/claudna:tech-debt` | Dead code, god modules, deprecated patterns, missing abstractions |
+| `security` | `/claudna:security-audit` | Credential leaks, injection vectors, auth gaps, TLS issues |
+| `enhancement` | `/claudna:product-enhance` | UX gaps, missing features, performance issues, API inconsistencies |
 
 Each skill is run with `--auto --github-issues` flags so it operates non-interactively and creates GitHub issues directly.
 
