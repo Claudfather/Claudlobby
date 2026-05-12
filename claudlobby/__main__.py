@@ -754,6 +754,44 @@ def cmd_data_migrate(args) -> int:
                 _DataMigratePlanItem(fleet_bot_name, child, dst, "copy", size_mb)
             )
 
+        # Top-level files (not inside subdirectories)
+        for child in sorted(src_bot_path.iterdir()):
+            name = child.name
+            if child.is_dir():
+                continue
+            if name.startswith(".") and not _user_overrode(name):
+                continue
+            if name in exclude_set:
+                continue
+            if include_set is not None and name not in include_set:
+                continue
+
+            dst = bot_data_dir / name
+
+            if dst.exists():
+                plan.append(
+                    _DataMigratePlanItem(
+                        fleet_bot_name, child, dst, "skip-exists", 0.0
+                    )
+                )
+                continue
+
+            try:
+                size_mb = child.stat().st_size / (1024 * 1024)
+            except OSError:
+                size_mb = 0.0
+            if size_mb == 0:
+                plan.append(
+                    _DataMigratePlanItem(
+                        fleet_bot_name, child, dst, "skip-empty", 0.0
+                    )
+                )
+                continue
+
+            plan.append(
+                _DataMigratePlanItem(fleet_bot_name, child, dst, "copy", size_mb)
+            )
+
     log.info("=== data-migrate plan ===")
     log.info("source: %s", source_dir)
     log.info("fleet:  %s", fleet.name)
@@ -793,12 +831,13 @@ def cmd_data_migrate(args) -> int:
                     if item.dst.is_relative_to(paths.root)
                     else item.dst
                 )
+                suffix = "/" if item.src.is_dir() else ""
                 if item.action == "copy":
-                    log.info("    COPY  %6s  %s/  →  %s/", sz_str, rel_src, rel_dst)
+                    log.info("    COPY  %6s  %s%s  →  %s%s", sz_str, rel_src, suffix, rel_dst, suffix)
                     total_to_copy_mb += item.size_mb
                 else:
                     reason = _SKIP_REASON[item.action]
-                    log.info("    SKIP  %6s  %s/  (%s)", sz_str, rel_src, reason)
+                    log.info("    SKIP  %6s  %s%s  (%s)", sz_str, rel_src, suffix, reason)
         log.info("Total to copy: %s", _human_size(total_to_copy_mb))
     else:
         log.info(
@@ -815,13 +854,16 @@ def cmd_data_migrate(args) -> int:
             continue
         item.dst.parent.mkdir(parents=True, exist_ok=True)
         try:
-            shutil.copytree(item.src, item.dst, symlinks=True)
+            if item.src.is_file():
+                shutil.copy2(item.src, item.dst)
+            else:
+                shutil.copytree(item.src, item.dst, symlinks=True)
             log.info("copied  %s  →  %s", item.src, item.dst)
             copied += 1
         except (OSError, shutil.Error) as e:
             log.error("FAILED  %s: %s", item.src, e)
 
-    log.info("Applied: %d dirs copied", copied)
+    log.info("Applied: %d item(s) copied", copied)
     return 0
 
 
