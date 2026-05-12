@@ -34,6 +34,10 @@ class Paths:
     fleet_dir: Path | None = None
     seed: bool = False
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, Path):
+            object.__setattr__(self, "root", Path(self.root))
+
     # --- public base (always at repo root) ---
 
     @property

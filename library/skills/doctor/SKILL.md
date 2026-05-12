@@ -107,5 +107,6 @@ Issues:
 4. Present the report to the user (via Telegram if available, otherwise terminal).
 5. If any check is FAIL, suggest specific remediation steps below the report.
 6. If `--fleet` is provided as an argument, scope all checks to that fleet overlay. Otherwise check the default or seed fleet.
+7. If no `--fleet` argument is provided, check the `FLEET_NAME` env var from bot.conf. If `FLEET_NAME` is `seed`, pass `seed` to `reconcile-fleet.sh` and other fleet-scoped scripts. Example: `lib/reconcile-fleet.sh seed`
 
 $ARGUMENTS
