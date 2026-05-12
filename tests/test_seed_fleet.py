@@ -56,6 +56,10 @@ class TestSeedFleetConfig:
         assert "fleet-status" in skills
         assert "add-bot" in skills
 
+    def test_seed_bot_voice(self):
+        fleet = load_fleet(SEED_FLEET_YAML)
+        assert fleet.bots["claudfather"].voice == "vito-corleone.md"
+
     def test_seed_bot_telegram(self):
         fleet = load_fleet(SEED_FLEET_YAML)
         tg = fleet.bots["claudfather"].telegram
@@ -198,8 +202,11 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
         "{{ expertise_body }}\n"
     )
 
-    # Voices dir
+    # Voices dir + voice stub
     (root / "voices").mkdir()
+    (root / "voices" / "vito-corleone.md").write_text(
+        "---\nname: Vito Corleone\n---\n\nVoice stub.\n"
+    )
 
     # Runtime seed dir
     (root / "runtime" / "seed" / "bots").mkdir(parents=True)
