@@ -10,9 +10,12 @@
 #   fleet-state-update.sh prune <fleet-yaml-path>
 #     Remove bot entries not present in the given fleet.yaml.
 #
-# Scaling note: the single-file + flock design works well for <50 bots.
+# Scaling note: the single-file + lock design works well for <50 bots.
 # Beyond that, consider per-bot state files (state/<bot>.json) or a
 # lightweight SQLite database to reduce lock contention.
+#
+# Locking is via lib-common's with_lock — flock(1) where available, otherwise
+# an atomic mkdir-based spinlock (stock macOS has no flock).
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,17 +47,15 @@ if [ "${1:-}" = "prune" ]; then
     # Build a JSON object of defined bot names for jq --argjson
     JQ_KEEP=$(printf '%s\n' "$DEFINED" | awk '{printf "\"%s\": 1, ", $0}' | sed 's/, $//')
 
-    (
-    flock -x 200
-    TMP=$(mktemp)
-    trap "rm -f \"\$TMP\"" EXIT
-    PRUNED=$(jq -r --argjson keep "{${JQ_KEEP}}" '.bots | keys[] | select($keep[.] == null)' "$STATE")
-    if [ -z "$PRUNED" ]; then
-        exit 0
-    fi
-    jq --argjson keep "{${JQ_KEEP}}" '.bots |= with_entries(select($keep[.key] == 1))' "$STATE" > "$TMP" && mv "$TMP" "$STATE"
-    echo "Pruned from fleet-state: $PRUNED"
-    ) 200>"$STATE.lock"
+    _prune_state() {
+        local tmp pruned
+        pruned=$(jq -r --argjson keep "{${JQ_KEEP}}" '.bots | keys[] | select($keep[.] == null)' "$STATE")
+        [ -z "$pruned" ] && return 0
+        tmp=$(safe_mktemp)
+        jq --argjson keep "{${JQ_KEEP}}" '.bots |= with_entries(select($keep[.key] == 1))' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+        echo "Pruned from fleet-state: $pruned"
+    }
+    with_lock "$STATE.lock" _prune_state
     exit 0
 fi
 
@@ -68,16 +69,17 @@ LAST="${5:-}"
 [ -f "$STATE" ] || { echo '{"updated":"1970-01-01T00:00:00Z","bots":{},"queue":[]}' > "$STATE"; }
 
 # Exclusive lock prevents concurrent bot updates from corrupting state
-(
-flock -x 200
-TMP=$(safe_mktemp)
-jq --arg bot "$BOT" --arg status "$STATUS" --arg task "$TASK" --arg repo "$REPO" \
-   --arg last "$LAST" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-  .updated = $ts
-  | .bots[$bot] //= {"status":"idle","current_task":null,"current_repo":null,"last_completed":null}
-  | .bots[$bot].status = $status
-  | (if $task != "" then .bots[$bot].current_task = $task else . end)
-  | (if $repo != "" then .bots[$bot].current_repo = $repo else . end)
-  | (if $last != "" then .bots[$bot].last_completed = $last else . end)
-' "$STATE" > "$TMP" && mv "$TMP" "$STATE"
-) 200>"$STATE.lock"
+_update_state() {
+    local tmp
+    tmp=$(safe_mktemp)
+    jq --arg bot "$BOT" --arg status "$STATUS" --arg task "$TASK" --arg repo "$REPO" \
+       --arg last "$LAST" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      .updated = $ts
+      | .bots[$bot] //= {"status":"idle","current_task":null,"current_repo":null,"last_completed":null}
+      | .bots[$bot].status = $status
+      | (if $task != "" then .bots[$bot].current_task = $task else . end)
+      | (if $repo != "" then .bots[$bot].current_repo = $repo else . end)
+      | (if $last != "" then .bots[$bot].last_completed = $last else . end)
+    ' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+}
+with_lock "$STATE.lock" _update_state

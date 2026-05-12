@@ -9,6 +9,9 @@
 #   detect_os          — sets _OS (Linux|Darwin), _HOMEBREW (macOS prefix)
 #   load_bot_conf      — source bot.conf with validation
 #   source_env_tiered  — 3-tier env loading: global -> fleet -> bot
+#   parse_env_file     — restricted .env parser ([export ]KEY=VALUE only)
+#   with_timeout       — run a command under timeout(1) if available, else bare
+#   with_lock          — portable mutex (flock if available, else mkdir spinlock)
 #   setup_log_dir      — mkdir -p for log file's parent directory
 #   safe_mktemp        — mktemp with automatic EXIT cleanup
 #   check_tmux_session — tmux has-session wrapper (returns 0/1)
@@ -22,9 +25,11 @@
 #
 # Variables set on source:
 #   CLAUDLOBBY_ROOT — repo root (auto-detected from this file's location)
-#   _OS        — "Linux" or "Darwin"
-#   _HOMEBREW  — Homebrew prefix (macOS only; empty on Linux)
-#   _TMUX_BIN  — resolved path to tmux binary
+#   _OS          — "Linux" or "Darwin"
+#   _HOMEBREW    — Homebrew prefix (macOS only; empty on Linux)
+#   _TMUX_BIN    — resolved path to tmux binary
+#   _TIMEOUT_BIN — resolved path to timeout/gtimeout (empty if neither exists)
+#   _FLOCK_BIN   — resolved path to flock (empty on stock macOS)
 
 set -euo pipefail
 
@@ -73,6 +78,47 @@ fi
 : "${_TMUX_BIN:=/usr/bin/tmux}"
 unset _p
 
+# --- Portable external tools ------------------------------------------------
+# timeout(1) and flock(1) are GNU/util-linux — absent on a stock macOS host.
+# Resolve GNU variants if present (Homebrew installs them with a `g` prefix).
+
+_TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+_FLOCK_BIN="$(command -v flock 2>/dev/null || true)"
+
+# with_timeout <seconds> <command> [args...]
+# Runs the command under a timeout if a timeout binary exists; otherwise runs
+# it unguarded (better to risk a hang than to fail outright on macOS).
+with_timeout() {
+    local secs="${1:?Usage: with_timeout <seconds> <command...>}"; shift
+    if [ -n "$_TIMEOUT_BIN" ]; then
+        "$_TIMEOUT_BIN" "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+# with_lock <lockfile> <command> [args...]
+# Portable mutex: uses flock if available, else an atomic mkdir-based spinlock
+# (mkdir is atomic on every POSIX filesystem). Spins up to ~5s then proceeds
+# best-effort. Suitable for the small jq+mv critical sections in this repo.
+with_lock() {
+    local lockfile="${1:?Usage: with_lock <lockfile> <command...>}"; shift
+    if [ -n "$_FLOCK_BIN" ]; then
+        ( "$_FLOCK_BIN" -x 200; "$@" ) 200>"$lockfile"
+        return $?
+    fi
+    local lockdir="${lockfile}.d" i=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        i=$((i + 1))
+        [ "$i" -ge 100 ] && break
+        sleep 0.05
+    done
+    local rc=0
+    "$@" || rc=$?
+    rmdir "$lockdir" 2>/dev/null || true
+    return $rc
+}
+
 # --- Bot conf loading -------------------------------------------------------
 
 load_bot_conf() {
@@ -88,7 +134,7 @@ load_bot_conf() {
 # --- Restricted .env parser -------------------------------------------------
 
 # Safely parse a .env file without executing arbitrary shell code.
-# Accepts only KEY=VALUE lines; rejects lines with $(), backticks, pipes, semicolons.
+# Accepts `[export ]KEY=VALUE` lines; rejects lines with $(), backticks, pipes, semicolons.
 parse_env_file() {
     local file="${1:?Usage: parse_env_file /path/to/.env}"
     [ -f "$file" ] || return 0
@@ -97,6 +143,12 @@ parse_env_file() {
         # Skip comments and blank lines
         case "$line" in
             ''|\#*) continue ;;
+        esac
+        # Tolerate a leading `export ` (with any leading whitespace) — many
+        # hand-written .env files use it. The value is still treated as data.
+        line="${line#"${line%%[![:space:]]*}"}"
+        case "$line" in
+            export[[:space:]]*) line="${line#export}"; line="${line#"${line%%[![:space:]]*}"}" ;;
         esac
         # Only accept KEY=VALUE where KEY is a valid shell identifier
         if ! printf '%s' "$line" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*='; then
