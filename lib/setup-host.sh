@@ -160,15 +160,32 @@ phase_packages() {
 # ---------------------------------------------------------------------------
 phase_node() {
     log "phase 3/8: node"
+    local need_install=0
     if command -v node >/dev/null 2>&1; then
-        local node_version
-        node_version="$(node --version 2>/dev/null || echo 'unknown')"
-        ok "node $node_version already installed"
-        PREREQ_OK+=("node")
+        local node_version node_major
+        node_version="$(node --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo '0.0.0')"
+        node_major="$(echo "$node_version" | cut -d. -f1)"
+        if [ "$node_major" -lt 18 ]; then
+            miss "node v$node_version found — 18+ required"
+            need_install=1
+        else
+            ok "node v$node_version already installed"
+            PREREQ_OK+=("node")
+        fi
     else
         miss "node missing — installing"
+        need_install=1
+    fi
+
+    if [ "$need_install" -eq 1 ]; then
         if [ "$_OS" = "Linux" ]; then
-            run sudo apt-get install -y -qq nodejs npm
+            # NodeSource provides current LTS; Debian stock nodejs may be too old
+            if [ "$DRY_RUN" != 1 ]; then
+                curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - >/dev/null 2>&1
+                sudo apt-get install -y -qq nodejs
+            else
+                printf 'setup-host: [dry-run] would run: install node 20.x via NodeSource\n'
+            fi
         elif [ "$_OS" = "Darwin" ]; then
             run brew install --quiet node
         fi
