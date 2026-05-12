@@ -8,7 +8,9 @@
 
 fleet:
   name: seed
-  service_prefix: com.claudfather.seed
+  service_prefix: com.claudlobby.seed
+  telegram_group_chat_id: "REPLACE_ME"       # /setup patches this
+  human_telegram_id: "REPLACE_ME"             # /setup patches this
 
   accounts:
     default: ~/.claude
@@ -48,8 +50,8 @@ fleet:
         org: Claudfather
         repos: [Claudlobby, clauDNA]
       telegram:
-        handle: claudfather_bot
-        token_env: TELEGRAM_BOT_TOKEN_CLAUDFATHER
+        handle: REPLACE_ME                    # /setup patches with actual bot handle
+        token_env: TELEGRAM_TOKEN_CLAUDFATHER
         require_mention: false
       startup_prompt: >
         Welcome back, {{ bot_name }}. Read your CLAUDE.md.

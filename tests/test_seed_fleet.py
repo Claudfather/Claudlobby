@@ -26,7 +26,7 @@ class TestSeedFleetConfig:
         """fleet.yaml.seed parses without error."""
         fleet = load_fleet(SEED_FLEET_YAML)
         assert fleet.name == "seed"
-        assert fleet.service_prefix == "com.claudfather.seed"
+        assert fleet.service_prefix == "com.claudlobby.seed"
 
     def test_seed_fleet_single_bot(self):
         """Exactly one bot named claudfather."""
@@ -58,8 +58,8 @@ class TestSeedFleetConfig:
     def test_seed_bot_telegram(self):
         fleet = load_fleet(SEED_FLEET_YAML)
         tg = fleet.bots["claudfather"].telegram
-        assert tg.handle == "claudfather_bot"
-        assert tg.token_env == "TELEGRAM_BOT_TOKEN_CLAUDFATHER"
+        assert tg.handle == "REPLACE_ME"
+        assert tg.token_env == "TELEGRAM_TOKEN_CLAUDFATHER"
         assert tg.require_mention is False
 
     def test_seed_bot_scope(self):
