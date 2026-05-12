@@ -121,7 +121,7 @@ If `.env` already exists, read it first and only add/update the keys above. Do n
 
 ## Step 4: Generate Seed Fleet
 
-1. Copy `fleet.yaml.seed` to `fleet.yaml` (if `fleet.yaml` doesn't already exist)
+1. Copy `fleet.yaml.seed` to `fleet.yaml` at the repo root (if `fleet.yaml` doesn't already exist). This uses root mode — all paths resolve under `runtime/bots/`, matching the getting-started guide.
 2. Patch the placeholder values in `fleet.yaml`:
    - Replace `telegram_group_chat_id: "REPLACE_ME"` with the collected group ID
    - Replace `human_telegram_id: "REPLACE_ME"` with the collected user ID
