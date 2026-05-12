@@ -18,6 +18,9 @@
 #   RAILWAY_API_TOKEN             — account-wide Railway token
 #   MCP_PROBE_URL                 — optional: streamable-HTTP MCP endpoint
 #   MCP_PROBE_TOKEN               — optional: bearer for the MCP probe
+#   AWS_ACCESS_KEY_ID             — optional: fleetwide IAM user for Secrets Manager
+#   AWS_SECRET_ACCESS_KEY         — paired secret for the same IAM user
+#   AWS_DEFAULT_REGION            — required when AWS_* are set (no ~/.aws/config on bots)
 #
 # To probe additional fleet-specific MCPs, copy `check_streamable_mcp`
 # below into a fleet overlay script and pass per-MCP env var names.
@@ -206,11 +209,40 @@ check_streamable_mcp() {
     fi
 }
 
+check_aws_secrets() {
+    # Validates fleetwide AWS credentials used by bots that pull secrets from
+    # AWS Secrets Manager. Probe is sts:GetCallerIdentity — zero-privilege
+    # auth check, returns the account ID on success, 403s on rotated keys.
+    # Does NOT validate IAM policy scope (that surfaces on the first
+    # GetSecretValue call). Skips silently if keys or `aws` CLI aren't present
+    # — fleets that don't use AWS won't see false alerts.
+    local key="${AWS_ACCESS_KEY_ID:-}"
+    local secret="${AWS_SECRET_ACCESS_KEY:-}"
+    if [ -z "$key" ] || [ -z "$secret" ]; then
+        record_and_alert "aws_secrets" "skip" "no AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
+        return
+    fi
+    local aws_bin
+    aws_bin="$(command -v aws || echo /opt/homebrew/bin/aws)"
+    if [ ! -x "$aws_bin" ]; then
+        record_and_alert "aws_secrets" "skip" "aws CLI not on PATH"
+        return
+    fi
+    local out
+    if out="$("$aws_bin" sts get-caller-identity --output text --query Account 2>&1)"; then
+        record_and_alert "aws_secrets" "ok" "account $out"
+    else
+        local err
+        err="$(printf '%s' "$out" | head -c 120)"
+        record_and_alert "aws_secrets" "fail" "sts get-caller-identity: $err"
+    fi
+}
+
 # ---------------------------------------------------------------------
 # Run all checks
 # ---------------------------------------------------------------------
 
-CHECKS=(check_github_pat check_railway_token check_streamable_mcp)
+CHECKS=(check_github_pat check_railway_token check_streamable_mcp check_aws_secrets)
 
 for fn in "${CHECKS[@]}"; do
     "$fn" || log "$fn raised (non-fatal)"
