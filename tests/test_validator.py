@@ -176,6 +176,52 @@ class TestValidate:
         assert any("both allow and deny" in w for w in report.warnings)
 
 
+class TestBenchValidation:
+    """bench: true marker — multi-bot fleets should designate one."""
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def test_multi_bot_no_bench_warns(self, fleet_dir, monkeypatch):
+        """Multiple bots with no bench: true → warning."""
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("bench: true" in w for w in report.warnings)
+
+    def test_multi_bot_with_bench_no_warn(self, fleet_dir, monkeypatch):
+        """Multiple bots with one bench: true → no warning."""
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].bench = True
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("bench: true" in w for w in report.warnings)
+
+    def test_single_bot_no_bench_no_warn(self, fleet_dir, monkeypatch):
+        """Single-bot fleet without bench: true → no warning."""
+        self._env_patch(monkeypatch)
+        from textwrap import dedent
+
+        (fleet_dir / "fleet.yaml").write_text(
+            dedent("""\
+            fleet:
+              name: solo
+              service_prefix: com.test
+              bots:
+                solo:
+                  expertise: [orchestration]
+        """)
+        )
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("bench: true" in w for w in report.warnings)
+
+
 class TestPluginValidation:
     """_validate_fleet warns about missing plugins and validates format."""
 

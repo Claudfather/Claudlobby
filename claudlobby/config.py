@@ -145,6 +145,7 @@ class BotConfig:
     env: dict[str, str] = field(default_factory=dict)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     startup_prompt: str | None = None
+    bench: bool = False  # marks the bot as the fleet's benchmarking target
 
 
 @dataclass
@@ -479,6 +480,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             chat_id=tg_raw.get("chat_id"),
         ),
         startup_prompt=raw.get("startup_prompt"),
+        bench=_bool("bench", False),
     )
 
 

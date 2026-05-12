@@ -101,6 +101,12 @@ fleet:
         require_mention: true | false
         chat_id: "<override>"
       startup_prompt: <string>
+      bench: true | false                 # OPTIONAL — benchmarking target (default: false)
+      dangerously_skip_permissions: true | false  # OPTIONAL — skip permission prompts (default: true)
+      remote_control: true | false        # OPTIONAL — enable --remote-control (default: true)
+      prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
+      channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
+      extra_flags: [<string>, ...]        # OPTIONAL — additional Claude CLI flags
 ```
 
 ## Field reference
@@ -280,6 +286,34 @@ mounts:
 
 Edits write to the real location via the symlink. Stale symlinks (removed from config) are cleaned up on re-generate.
 
+### `bots.<name>.bench`
+
+Boolean (default `false`). Marks this bot as the fleet's benchmarking target for cold-start timing (`lib/bench-cold-start.sh`). Multi-bot fleets should set `bench: true` on exactly one bot so the benchmarking script knows which bot to measure. The validator warns if a fleet has multiple bots and none has `bench: true`.
+
+### `bots.<name>.dangerously_skip_permissions`
+
+Boolean (default `true`). Controls whether the bot runs with `--dangerously-skip-permissions`, which skips tool-call permission prompts. Set to `false` for bots that should require human approval before executing tools. Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
+
+### `bots.<name>.remote_control`
+
+Boolean (default `true`). Controls whether the bot runs with `--remote-control`, which allows dispatch via `tmux send-keys`. Disable for standalone bots that should only respond to Telegram messages. Can be set in `defaults:`.
+
+### `bots.<name>.prompt_suggestions`
+
+Boolean (default `false`). Controls `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` env var. When true, Claude Code shows autocomplete prompt suggestions. Headless bots don't need them — only enable for interactive use. Can be set in `defaults:`.
+
+### `bots.<name>.channels`
+
+List of channel plugin identifiers (default `["plugin:telegram@claude-plugins-official"]`). Each entry generates a `--channels <name>` CLI flag. Override to use a different messaging plugin or disable channels entirely with an empty list. Can be set in `defaults:`.
+
+### `bots.<name>.extra_flags`
+
+List of additional CLI flags appended to `CLAUDE_FLAGS` in `bot.conf`. Use for any Claude Code flags not covered by dedicated fields. Bot-level list appends to defaults (deduped). Example: `["--verbose"]`.
+
+### `bots.<name>.startup_prompt`
+
+Jinja2-templated string sent to the bot on startup. Available placeholders: `{{ bot_name }}`, `{{ fleet_name }}`, `{{ telegram_group_chat_id }}`, `{{ telegram_handle }}`. Written to `bot.conf` as `STARTUP_PROMPT`. Use to give the bot initial instructions (e.g., "read your CLAUDE.md and idle").
+
 ## Auto-derived permissions
 
 The compositor auto-derives permission entries in `settings.local.json` from several sources. These don't require explicit `tools:` config — they're generated automatically.
@@ -334,6 +368,7 @@ In addition to CLAUDE.md, the generator produces:
 - **Warn** — `voice:` path doesn't resolve
 - **Warn** — `telegram.token_env` env var not set
 - **Warn** — `teams.<X>.workers` references a bot not defined in `bots:`
+- **Warn** — fleet has multiple bots but none has `bench: true` — benchmarking won't know which bot to measure
 
 Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI use).
 
