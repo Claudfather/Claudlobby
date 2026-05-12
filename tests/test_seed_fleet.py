@@ -105,6 +105,12 @@ class TestSeedPaths:
         paths = Paths(root=REPO_ROOT, seed=True)
         assert paths.shared_docs is None
 
+    def test_seed_string_root_coerced_to_path(self):
+        """Passing root as a str should be coerced to Path without TypeError."""
+        paths = Paths(root="/tmp/test", seed=True)
+        assert paths.fleet_yaml == Path("/tmp/test/fleet.yaml.seed")
+        assert isinstance(paths.root, Path)
+
     def test_seed_bot_runtime_path(self):
         paths = Paths(root=REPO_ROOT, seed=True)
         assert paths.bot_runtime("claudfather") == (
