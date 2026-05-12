@@ -34,10 +34,10 @@ class TestSeedFleetConfig:
         assert list(fleet.bots.keys()) == ["claudfather"]
         assert fleet.bots["claudfather"].name == "Claudfather"
 
-    def test_seed_bot_model_sonnet(self):
-        """Claudfather uses sonnet for cost efficiency."""
+    def test_seed_bot_model_opus(self):
+        """Claudfather uses opus per spec v2."""
         fleet = load_fleet(SEED_FLEET_YAML)
-        assert fleet.bots["claudfather"].model == "sonnet"
+        assert fleet.bots["claudfather"].model == "opus"
 
     def test_seed_bot_no_skip_permissions(self):
         """Standard permissions — no dangerously_skip_permissions."""
@@ -245,4 +245,4 @@ class TestComposeSeedBot:
         assert bot_conf.is_file()
         conf_text = bot_conf.read_text()
         assert "--dangerously-skip-permissions" not in conf_text
-        assert "sonnet" in conf_text
+        assert "opus" in conf_text
