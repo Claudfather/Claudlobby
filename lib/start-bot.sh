@@ -137,17 +137,48 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
     done
 fi
 
-# Some user-level tmux configs auto-split panes via a session-created
-# hook, which shrinks claude's pane to a degenerate size and prevents
-# it from booting cleanly. Save the hook (if any), unset it before
-# creating the bot session, then restore so other tmux usage is
-# unaffected.
-SESSION_CREATED_HOOK="$("$_TMUX_BIN" show-hooks -g 2>/dev/null | sed -nE 's/^session-created\[0\] (.*)$/\1/p' || true)"
-"$_TMUX_BIN" set-hook -gu session-created 2>/dev/null || true
+# User-level tmux configs commonly auto-split panes via `session-created`
+# or `after-new-window` hooks. These hooks fire *after* new-session
+# returns, so unset/restore around new-session races and leaves the
+# splits behind — shrinking claude's pane to a degenerate size (sometimes
+# 1x24) and breaking TUI rendering and send-keys dispatch.
+#
+# Strategy: do BOTH:
+#   1. Try to unset hooks before new-session (catches synchronous hooks).
+#   2. After new-session, kill every pane in the session except the one
+#      running claude — leaves a single full-window pane regardless of
+#      whether the user's hooks fired.
+#
+# Then restore the hooks so the user's interactive tmux behavior is
+# unchanged.
+_HOOKS_TO_NEUTRALIZE=(session-created after-new-window)
+declare -a _SAVED_HOOKS
+for _hk in "${_HOOKS_TO_NEUTRALIZE[@]}"; do
+    _val="$("$_TMUX_BIN" show-hooks -g 2>/dev/null | sed -nE "s/^${_hk}\[0\] (.*)$/\1/p" || true)"
+    _SAVED_HOOKS+=("$_val")
+    "$_TMUX_BIN" set-hook -gu "$_hk" 2>/dev/null || true
+done
 
 "$_TMUX_BIN" new-session -d -s "$BOT_NAME" -c "$BOT_DIR" "$CLAUDE_CMD"
 
-[ -n "${SESSION_CREATED_HOOK:-}" ] && "$_TMUX_BIN" set-hook -g session-created "$SESSION_CREATED_HOOK"
+# Reactive cleanup. `after-new-window` fires asynchronously after
+# new-session returns, so we poll: if the session has extra panes, kill
+# all but pane 0 (where CLAUDE_CMD is running). Retry briefly to win the
+# race against the hook handler. Once pane 0 fills the window, claude
+# receives SIGWINCH and redraws at the correct size.
+for _i in 1 2 3 4 5 6 7 8; do
+    _pane_count="$("$_TMUX_BIN" list-panes -t "$BOT_NAME" 2>/dev/null | wc -l | tr -d ' ')"
+    [ "${_pane_count:-0}" -gt 1 ] && "$_TMUX_BIN" kill-pane -a -t "$BOT_NAME:0.0" 2>/dev/null || true
+    sleep 0.3
+    _pane_count="$("$_TMUX_BIN" list-panes -t "$BOT_NAME" 2>/dev/null | wc -l | tr -d ' ')"
+    [ "${_pane_count:-0}" -eq 1 ] && break
+done
+
+for _i in "${!_HOOKS_TO_NEUTRALIZE[@]}"; do
+    _hk="${_HOOKS_TO_NEUTRALIZE[$_i]}"
+    _val="${_SAVED_HOOKS[$_i]}"
+    [ -n "$_val" ] && "$_TMUX_BIN" set-hook -g "$_hk" "$_val"
+done
 
 # Wait for initialization (up to 90s) with observability
 LOG="$BOT_DIR/logs/startup.log"
