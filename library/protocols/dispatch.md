@@ -2,6 +2,8 @@
 title: Dispatch Protocol
 ---
 
+# Dispatch Protocol
+
 Manager → worker via `tmux send-keys -t <worker> '<task prompt>' Enter`.
 
 Dispatch prompt names: **what** (concrete deliverable), **target** (`--repo <name>`), **constraints** (scope, deadlines, hand-off rules), **reporting expectation** (what `[BOTREPORT]` payload back).
