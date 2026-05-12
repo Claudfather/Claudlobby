@@ -10,7 +10,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOT_DIR="${1:?Usage: start-bot.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
 
-export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin
+export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}
 export HOME="$HOME"
 
 # 3-tier env sourcing: global -> fleet -> bot (later tiers override)
@@ -108,7 +108,7 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
             if [ ! -f "$HOME/.claude/plugins/known_marketplaces.json" ] || \
                ! grep -q "\"$_mp_name\"" "$HOME/.claude/plugins/known_marketplaces.json" 2>/dev/null; then
                 echo "$(ts_iso) PLUGIN registering marketplace $_mp_name ($_mp_repo)" >> "$LOG"
-                timeout 30 claude plugin marketplace add "$_mp_name" --source github --repo "$_mp_repo" >> "$LOG" 2>&1 || true
+                with_timeout 30 claude plugin marketplace add "$_mp_name" --source github --repo "$_mp_repo" >> "$LOG" 2>&1 || true
             fi
         done
     fi
@@ -118,10 +118,10 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
         if [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] || \
            ! grep -q "\"$_plugin\"" "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null; then
             echo "$(ts_iso) PLUGIN installing $_plugin (cold start)" >> "$LOG"
-            timeout 30 claude plugin install "$_plugin" >> "$LOG" 2>&1 || true
+            with_timeout 30 claude plugin install "$_plugin" >> "$LOG" 2>&1 || true
         else
             echo "$(ts_iso) PLUGIN updating $_plugin" >> "$LOG"
-            timeout 30 claude plugin update "$_plugin" >> "$LOG" 2>&1 || true
+            with_timeout 30 claude plugin update "$_plugin" >> "$LOG" 2>&1 || true
         fi
     done
 fi
