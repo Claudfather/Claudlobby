@@ -13,6 +13,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
+TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 
 # Clean up .tmux-env on ALL exit paths (including early returns).
 # This file contains resolved secrets written by start-bot.sh.
@@ -31,8 +32,8 @@ if [ -f "$HANDOFF_FILE" ]; then
 fi
 
 # Try to trigger a handoff via the running session
-if check_tmux_session "$BOT_NAME"; then
-    "$_TMUX_BIN" send-keys -t "$BOT_NAME" '/session-handoff --auto' Enter || true
+if check_tmux_session "$TMUX_SESSION"; then
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" '/session-handoff --auto' Enter || true
     # Wait up to 30 seconds for handoff to complete
     for _ in $(seq 1 30); do
         if [ -f "$HANDOFF_FILE" ]; then

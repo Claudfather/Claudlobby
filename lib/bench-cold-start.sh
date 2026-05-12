@@ -134,6 +134,7 @@ BOT_DIR="$(_find_bot_dir "$BOT_NAME")" || {
     exit 1
 }
 
+TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 echo "bench-cold-start: bot dir = $BOT_DIR"
 
 # ---------------------------------------------------------------------------
@@ -181,11 +182,11 @@ TOTAL_START="$(_now_ns)"
 
 echo "bench-cold-start: stopping '$BOT_NAME'..."
 
-if check_tmux_session "$BOT_NAME"; then
-    "$_TMUX_BIN" kill-session -t "$BOT_NAME" 2>/dev/null || true
+if check_tmux_session "$TMUX_SESSION"; then
+    "$_TMUX_BIN" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     # Brief settle — give the process tree a moment to clean up
     sleep 1
-    if check_tmux_session "$BOT_NAME"; then
+    if check_tmux_session "$TMUX_SESSION"; then
         echo "bench-cold-start: WARNING — session still alive after kill; proceeding anyway" >&2
     else
         echo "bench-cold-start: session stopped."
@@ -214,7 +215,7 @@ RC_TIMEOUT=120   # seconds to wait for remote-control readiness
 echo "bench-cold-start: waiting for remote-control (timeout ${RC_TIMEOUT}s)..."
 
 for _i in $(seq 1 "$RC_TIMEOUT"); do
-    if "$_TMUX_BIN" capture-pane -t "$BOT_NAME" -p 2>/dev/null \
+    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null \
             | grep -q "remote-control is active"; then
         RC_ACTIVE_TIME="$(_now_ns)"
         echo "bench-cold-start: remote-control active at ${_i}s"

@@ -14,6 +14,7 @@
 #   with_lock          — portable mutex (flock if available, else mkdir spinlock)
 #   setup_log_dir      — mkdir -p for log file's parent directory
 #   safe_mktemp        — mktemp with automatic EXIT cleanup
+#   tmux_session_name  — derive tmux session name from bot directory
 #   check_tmux_session — tmux has-session wrapper (returns 0/1)
 #   show_help          — extract comment header from calling script
 #   ts_iso             — portable ISO 8601 timestamp
@@ -229,6 +230,13 @@ sanitize_tmux_input() {
     input=$(printf '%s' "$input" | tr -d '\000-\037\177')
     input=$(printf '%s' "$input" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
     printf '%s' "$input"
+}
+
+# Derive tmux session name from bot directory basename (always lowercase).
+# BOT_NAME can be mixed-case (display name from fleet.yaml); the directory
+# slug is the stable lowercase identifier that dispatch scripts expect.
+tmux_session_name() {
+    basename "${1:?Usage: tmux_session_name /path/to/bot/dir}"
 }
 
 check_tmux_session() {
