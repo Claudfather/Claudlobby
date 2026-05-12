@@ -21,27 +21,37 @@ Add a 9th bot? Add 10 lines to `fleet.yaml`. Update a guardrail? Edit one file i
 
 ## Quick start
 
+**You need:** An Anthropic account (Claude Max, Team, or Enterprise — or an `ANTHROPIC_API_KEY`), [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed, and a Telegram account.
+
+**Guided setup (recommended):** Clone the repo, install, and let claudfather walk you through it:
+
 ```bash
-git clone https://github.com/<your-username>/claudlobby.git
-cd claudlobby
+git clone https://github.com/Claudfather/Claudlobby.git
+cd Claudlobby
+pip install -e .
+claude                              # opens Claude Code in the repo
+```
 
-python3 -m venv .venv && .venv/bin/pip install -e .
+Then type `/setup` — it checks your host, collects credentials, and spins up claudfather (the built-in setup assistant) on Telegram. Continue setup from your phone.
+
+**Manual setup:**
+
+```bash
+git clone https://github.com/Claudfather/Claudlobby.git
+cd Claudlobby
+pip install -e .
+
 cp fleet.yaml.example fleet.yaml
-cp .env.example .env                # if present; otherwise create one with your tokens
+cp .env.seed.example .env           # fill in your Telegram token + GitHub PAT
+$EDITOR fleet.yaml                  # set chat IDs, bot handles, pick personas
 
-# Edit fleet.yaml — pick personas, skills, MCP servers, set Telegram chat IDs
-$EDITOR fleet.yaml
-
-# Compose runtime/bots/<name>/ for every bot
-.venv/bin/claudlobby generate
-
-# Or, without an install:
-./bin/claudlobby generate
+claudlobby validate && claudlobby generate
+lib/spin-up-bot.sh runtime/bots/<your-bot>
 ```
 
 The generated `runtime/bots/<bot>/` is everything Claude Code needs — `CLAUDE.md`, `.mcp.json`, `bot.conf`, `.claude/skills/` symlinks, plus a systemd `<bot>.service` and a launchd `<bot>.plist`. Pick the right one for your host.
 
-See [`documentation/getting-started.md`](documentation/getting-started.md) for the zero-to-running walkthrough.
+See [`documentation/getting-started.md`](documentation/getting-started.md) for the full zero-to-running walkthrough.
 
 ## Architecture
 
