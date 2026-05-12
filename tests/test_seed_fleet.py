@@ -34,10 +34,10 @@ class TestSeedFleetConfig:
         assert list(fleet.bots.keys()) == ["claudfather"]
         assert fleet.bots["claudfather"].name == "Claudfather"
 
-    def test_seed_bot_model_sonnet(self):
-        """Claudfather uses sonnet for cost efficiency per consolidated spec."""
+    def test_seed_bot_model_opus(self):
+        """Claudfather uses opus per seed fleet config."""
         fleet = load_fleet(SEED_FLEET_YAML)
-        assert fleet.bots["claudfather"].model == "sonnet"
+        assert fleet.bots["claudfather"].model == "opus"
 
     def test_seed_bot_no_skip_permissions(self):
         """Standard permissions — no dangerously_skip_permissions."""
@@ -54,6 +54,7 @@ class TestSeedFleetConfig:
         assert "bootstrap" in skills
         assert "doctor" in skills
         assert "fleet-status" in skills
+        assert "add-bot" in skills
 
     def test_seed_bot_telegram(self):
         fleet = load_fleet(SEED_FLEET_YAML)
@@ -164,11 +165,20 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
         )
 
     # Skill stubs
-    for s in ("bootstrap", "doctor", "fleet-status"):
+    for s in ("bootstrap", "doctor", "fleet-status", "add-bot"):
         skill_dir = root / "library" / "skills" / s
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
             f"---\ntitle: {s}\ndescription: Skill\n---\n\n# {s}\n\nSkill.\n"
+        )
+
+    # Lesson stubs
+    tg_lessons_dir = root / "library" / "lessons" / "telegram"
+    tg_lessons_dir.mkdir(parents=True)
+    for lesson in ("mcp-drops", "plain-text-escape-incident"):
+        (tg_lessons_dir / f"{lesson}.md").write_text(
+            f"---\ntitle: {lesson}\ndescription: Telegram lesson\n---\n\n"
+            f"# {lesson}\n\nLesson content.\n"
         )
 
     # MCP fragment
@@ -188,8 +198,11 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
         "{{ expertise_body }}\n"
     )
 
-    # Voices dir
+    # Voices dir + stub
     (root / "voices").mkdir()
+    (root / "voices" / "erlich-bachman.md").write_text(
+        "---\nname: Erlich Bachman\n---\n\nYou are Erlich Bachman.\n"
+    )
 
     # Runtime seed dir
     (root / "runtime" / "seed" / "bots").mkdir(parents=True)
@@ -251,4 +264,4 @@ class TestComposeSeedBot:
         assert bot_conf.is_file()
         conf_text = bot_conf.read_text()
         assert "--dangerously-skip-permissions" not in conf_text
-        assert "sonnet" in conf_text
+        assert "opus" in conf_text

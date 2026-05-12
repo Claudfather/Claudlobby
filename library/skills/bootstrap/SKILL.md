@@ -53,6 +53,7 @@ For each bot the user wants to create, collect:
    Offer to show a preview (`head -5 voices/<name>.md`). Optional.
 3. **What repos should it work on?** — GitHub org + repo list for scope.
 4. **Model** — Explain the trade-offs: Opus (most capable, highest cost), Sonnet (balanced), Haiku (fastest, cheapest). Default: Sonnet.
+5. **Timezone** — Ask: "What timezone are you in? e.g., America/New_York, Europe/London, Asia/Tokyo". Used for human-friendly timestamps in bot output. Set as `env: { TZ: "<value>" }` in the bot's fleet.yaml stanza.
 
 Use `claudlobby new-bot` to add each bot:
 
@@ -91,7 +92,7 @@ Write all credentials to `local/<fleet-name>/.env`:
 TELEGRAM_TOKEN_<BOT_UPPER>=<token>
 ```
 
-Patch `fleet.yaml` with the group chat ID and human Telegram ID if they were collected.
+Patch `fleet.yaml` with the group chat ID, human Telegram ID, and timezone (if collected). The timezone goes in each bot's `env:` block as `TZ: "<value>"`.
 
 ## Step 4: Validate + Generate
 
