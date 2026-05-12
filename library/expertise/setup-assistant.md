@@ -1,6 +1,6 @@
 ---
 permissions:
-  allow: [Bash, Agent, Read, Grep, Glob, WebFetch, WebSearch]
+  allow: [Bash, Agent, Read, Write, Edit, Grep, Glob, WebFetch, WebSearch]
   bash_allow: [tmux, git, gh, claude, claudlobby, systemctl, launchctl, node, npm, pip, python3, uname, df, free, uptime, curl, jq, cat, ls, test, loginctl]
 ---
 

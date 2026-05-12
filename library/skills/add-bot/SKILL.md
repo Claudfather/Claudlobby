@@ -49,7 +49,7 @@ Guide the user through creating a Telegram bot:
 4. Choose a username (must end in `bot`, e.g., `my_fleet_eng_bot`)
 5. Copy the token BotFather returns
 6. Paste the token (claudfather validates via `curl https://api.telegram.org/bot<TOKEN>/getMe`)
-7. Add the token to the fleet's `.env` file as `TELEGRAM_BOT_TOKEN_<BOTNAME>` (uppercase, underscores)
+7. Add the token to the fleet's `.env` file as `TELEGRAM_TOKEN_<BOTNAME>` (uppercase, underscores)
 8. Disable group privacy: BotFather -> `/mybots` -> select bot -> Bot Settings -> Group Privacy -> Turn off
 9. Add the new bot to the fleet's Telegram group
 
