@@ -198,11 +198,8 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
         "{{ expertise_body }}\n"
     )
 
-    # Voices dir + stub
+    # Voices dir
     (root / "voices").mkdir()
-    (root / "voices" / "erlich-bachman.md").write_text(
-        "---\nname: Erlich Bachman\n---\n\nYou are Erlich Bachman.\n"
-    )
 
     # Runtime seed dir
     (root / "runtime" / "seed" / "bots").mkdir(parents=True)

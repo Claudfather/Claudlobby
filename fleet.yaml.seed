@@ -43,15 +43,12 @@ fleet:
         work or manage other bots -- you teach users to build their own fleets.
       model: opus
       effort: max
-      voice: erlich-bachman.md
       skills: [bootstrap, doctor, fleet-status, add-bot]
       mcp: [github]
       guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
       protocols: [context-management, telegram-routing, telegram-formatting]
       resources: [timezone]
       lessons: [telegram/mcp-drops, telegram/plain-text-escape-incident]
-      env:
-        TZ: "America/New_York"
       scope:
         org: Claudfather
         repos: [Claudlobby, clauDNA]
