@@ -4,11 +4,15 @@ Bring a fresh fleet up in about 30 minutes (excluding waiting on Telegram BotFat
 
 ## Prerequisites
 
+- An Anthropic account with a Claude Code subscription (Claude Max, Team, or Enterprise) or an `ANTHROPIC_API_KEY`
 - A host you control: Mac mini, Linux box, or Raspberry Pi 5
 - `python3` (3.10+), `git`, `tmux`, `jq`, `curl` installed
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in (or `ANTHROPIC_API_KEY` set)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in
 - The Telegram channel plugin: `claude plugin install telegram@claude-plugins-official`
+- A Telegram account (to create bots via [@BotFather](https://t.me/BotFather))
 - The [clauDNA](https://github.com/Claudfather/clauDNA) plugin is auto-installed as a fleet default — no manual setup needed
+
+> **Want a guided setup?** Run `claude` in the repo root and type `/setup`. It walks you through host readiness, credential collection, and spins up claudfather — the built-in setup assistant — in about 10 minutes. The steps below are the manual equivalent.
 
 ## 1. Clone + install
 
