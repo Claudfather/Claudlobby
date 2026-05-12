@@ -16,6 +16,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BOT_DIR="${1:?Usage: keepalive.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
+TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 
 LOG="$BOT_DIR/keepalive.log"
 
@@ -31,10 +32,10 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 #   Linux  → systemctl --user restart $BOT_NAME.service (user units, no sudo)
 #   macOS  → launchctl kickstart -k gui/<uid>/<label>   (LaunchAgent)
 #   else   → fall back to start-bot.sh directly (cron+tmux pattern)
-if ! check_tmux_session "$BOT_NAME"; then
+if ! check_tmux_session "$TMUX_SESSION"; then
     # Reduce (not eliminate) race with start-bot.sh
     sleep 1
-    if check_tmux_session "$BOT_NAME"; then
+    if check_tmux_session "$TMUX_SESSION"; then
         echo "$(ts_iso) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"
         exit 0
     fi
@@ -51,7 +52,7 @@ if ! check_tmux_session "$BOT_NAME"; then
     exit 0
 fi
 
-pane_content=$("$_TMUX_BIN" capture-pane -t "$BOT_NAME" -p 2>/dev/null) || true
+pane_content=$("$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
 last_lines=$(echo "$pane_content" | tail -10)
 
 # ---------------------------------------------------------------------------

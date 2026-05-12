@@ -23,8 +23,13 @@ fi
 
 cd "$BOT_DIR"
 
+# Tmux session name: use the bot directory slug (always lowercase) rather
+# than BOT_NAME (display name, potentially mixed-case from fleet.yaml).
+# Dispatch and monitoring scripts target sessions by this slug.
+TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
+
 # Kill any prior session — expected to fail on first boot or after clean shutdown
-"$_TMUX_BIN" kill-session -t "$BOT_NAME" 2>/dev/null || true
+"$_TMUX_BIN" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
 SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
 
@@ -126,7 +131,7 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
     done
 fi
 
-"$_TMUX_BIN" new-session -d -s "$BOT_NAME" "$CLAUDE_CMD"
+"$_TMUX_BIN" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
 
 # Wait for initialization (up to 90s) with observability
 LOG="$BOT_DIR/logs/startup.log"
@@ -135,11 +140,11 @@ _poll_start=$(date +%s)
 echo "$(ts_iso) POLL_START — waiting for remote-control readiness" >> "$LOG"
 _ready=0
 for _i in $(seq 1 180); do
-    if ! check_tmux_session "$BOT_NAME"; then
+    if ! check_tmux_session "$TMUX_SESSION"; then
         echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
         exit 1
     fi
-    if "$_TMUX_BIN" capture-pane -t "$BOT_NAME" -p 2>/dev/null | grep -q "remote-control is active"; then
+    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "remote-control is active"; then
         _elapsed=$(( $(date +%s) - _poll_start ))
         echo "$(ts_iso) READY — remote-control active after ${_elapsed}s" >> "$LOG"
         _ready=1
@@ -157,7 +162,7 @@ fi
 # start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
-    "$_TMUX_BIN" send-keys -t "$BOT_NAME" "set +H; $STARTUP_PROMPT" Enter
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "set +H; $STARTUP_PROMPT" Enter
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
