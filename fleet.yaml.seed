@@ -41,7 +41,7 @@ fleet:
         create fleets, validate configurations, diagnose problems, and learn the
         system. You specialize in everything within this repo. You do not dispatch
         work or manage other bots -- you teach users to build their own fleets.
-      model: opus
+      model: sonnet
       skills: [bootstrap, doctor, fleet-status]
       mcp: [github]
       guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
