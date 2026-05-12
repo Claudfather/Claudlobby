@@ -145,7 +145,7 @@ fi
 SESSION_CREATED_HOOK="$("$_TMUX_BIN" show-hooks -g 2>/dev/null | sed -nE 's/^session-created\[0\] (.*)$/\1/p' || true)"
 "$_TMUX_BIN" set-hook -gu session-created 2>/dev/null || true
 
-"$_TMUX_BIN" new-session -d -s "$BOT_NAME" "$CLAUDE_CMD"
+"$_TMUX_BIN" new-session -d -s "$BOT_NAME" -c "$BOT_DIR" "$CLAUDE_CMD"
 
 [ -n "${SESSION_CREATED_HOOK:-}" ] && "$_TMUX_BIN" set-hook -g session-created "$SESSION_CREATED_HOOK"
 
