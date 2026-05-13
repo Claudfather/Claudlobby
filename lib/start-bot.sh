@@ -62,6 +62,13 @@ BOT_ENV_FILE="$BOT_DIR/.tmux-env"
 (umask 177; : > "$BOT_ENV_FILE")
 chmod 600 "$BOT_ENV_FILE"
 
+# Enable auto-export for everything sourced below. `.env` files commonly mix
+# `export VAR=…` and bare `VAR=…` lines; without `set -a`, bare lines set a
+# local shell var that is LOST on `exec claude` and therefore invisible to
+# claude or its MCP plugins. Telegram channel plugin needs TELEGRAM_BOT_TOKEN
+# in its env — without auto-export, the plugin sees no token and exits.
+printf 'set -a\n' >> "$BOT_ENV_FILE"
+
 # 3-tier env sourcing inside the tmux session so Claude Code (and its MCP
 # servers) inherit all env vars. Later tiers override earlier ones.
 # These source commands run inside the tmux shell, NOT the parent start-bot.sh.
