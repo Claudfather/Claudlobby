@@ -10,7 +10,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOT_DIR="${1:?Usage: start-bot.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
 
-export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}
+export PATH=${_HOMEBREW:+${_HOMEBREW}/bin:${_HOMEBREW}/sbin:}$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.bun/bin:$HOME/.npm-global/bin
 export HOME="$HOME"
 
 # 3-tier env sourcing: global -> fleet -> bot (later tiers override)
@@ -61,6 +61,13 @@ SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
 BOT_ENV_FILE="$BOT_DIR/.tmux-env"
 (umask 177; : > "$BOT_ENV_FILE")
 chmod 600 "$BOT_ENV_FILE"
+
+# Enable auto-export for everything sourced below. `.env` files commonly mix
+# `export VAR=…` and bare `VAR=…` lines; without `set -a`, bare lines set a
+# local shell var that is LOST on `exec claude` and therefore invisible to
+# claude or its MCP plugins. Telegram channel plugin needs TELEGRAM_BOT_TOKEN
+# in its env — without auto-export, the plugin sees no token and exits.
+printf 'set -a\n' >> "$BOT_ENV_FILE"
 
 # 3-tier env sourcing inside the tmux session so Claude Code (and its MCP
 # servers) inherit all env vars. Later tiers override earlier ones.
@@ -209,7 +216,14 @@ fi
 # start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
-    "$_TMUX_BIN" send-keys -t "$BOT_NAME" "set +H; $STARTUP_PROMPT" Enter
+    # Send the text and the carriage return separately. `C-m` is the literal
+    # CR keypress; `Enter` is a tmux alias that some claude TUI builds drop
+    # right after a SIGWINCH (the kill-pane -a cleanup resizes the pane just
+    # before this fires). Two-step send + C-m is reliable post-resize, where
+    # appending Enter to the same send-keys call occasionally lands the text
+    # but loses the submit.
+    "$_TMUX_BIN" send-keys -t "$BOT_NAME" "set +H; $STARTUP_PROMPT"
+    "$_TMUX_BIN" send-keys -t "$BOT_NAME" C-m
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails

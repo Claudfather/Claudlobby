@@ -109,8 +109,25 @@ record_and_alert() {
 
 check_github_pat() {
     local token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}"
+    # No static token? Try git's credential helper chain (e.g. the
+    # GitHub App installation-token pattern from
+    # documentation/runbooks/github-app-setup.md). If that mints a
+    # token, treat the check as "ok" without storing the value.
+    if [ -z "$token" ] && command -v git-credential-botfarm >/dev/null 2>&1; then
+        local helper_token
+        helper_token="$(
+            printf 'protocol=https\nhost=github.com\n\n' \
+            | git credential fill 2>/dev/null \
+            | awk -F= '/^password=/{print $2; exit}'
+        )"
+        if [ -n "$helper_token" ]; then
+            token="$helper_token"
+            record_and_alert "github_pat" "ok" "minted via credential helper"
+            return
+        fi
+    fi
     if [ -z "$token" ]; then
-        record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN"
+        record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN and no credential helper"
         return
     fi
     local code
