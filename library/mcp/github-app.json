@@ -40,7 +40,7 @@
     "command": "/bin/sh",
     "args": [
       "-c",
-      "exec \"$CLAUDLOBBY_ROOT/lib/github-mcp-wrapper.sh\""
+      "exec \"$CLAUDLOBBY_ROOT/lib/github-mcp-wrapper.py\""
     ]
   },
   "_global_binary": "mcp-server-github"
