@@ -209,7 +209,14 @@ fi
 # start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
-    "$_TMUX_BIN" send-keys -t "$BOT_NAME" "set +H; $STARTUP_PROMPT" Enter
+    # Send the text and the carriage return separately. `C-m` is the literal
+    # CR keypress; `Enter` is a tmux alias that some claude TUI builds drop
+    # right after a SIGWINCH (the kill-pane -a cleanup resizes the pane just
+    # before this fires). Two-step send + C-m is reliable post-resize, where
+    # appending Enter to the same send-keys call occasionally lands the text
+    # but loses the submit.
+    "$_TMUX_BIN" send-keys -t "$BOT_NAME" "set +H; $STARTUP_PROMPT"
+    "$_TMUX_BIN" send-keys -t "$BOT_NAME" C-m
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
