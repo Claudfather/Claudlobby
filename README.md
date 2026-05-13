@@ -124,6 +124,8 @@ claudlobby status                # fleet health (stub for now)
 
 See [`documentation/getting-started.md`](documentation/getting-started.md) for the full bootstrap sequence.
 
+For headless boxes where you want bots authenticated under their own GitHub identity (subject to branch protection independent of the operator's admin powers), see [`documentation/runbooks/github-app-setup.md`](documentation/runbooks/github-app-setup.md) — uses GitHub App installation tokens minted on demand via a credential helper, instead of a long-lived `GITHUB_PAT`.
+
 ## Sync-back: bots that learn
 
 Bots can edit themselves at runtime — `runtime/bots/` is gitignored, so an in-session edit to a skill, a CLAUDE.md, or a protocol won't pollute git. Two patterns:
