@@ -6,6 +6,24 @@ title: GitHub MCP
 
 Wire config: `library/mcp/github.json` (uses `${GITHUB_PAT}`).
 
+#### Identity / Auth — bot App, not personal PAT
+
+Fleet-scope GitHub operations authenticate via the **bot App identity** the fleet commits as, never via a developer's personal PAT.
+
+**Why:**
+
+- Personal PATs scope to the individual's repo access — they miss org repos the developer isn't on, and rotate when the developer rotates them.
+- Bot Apps install on the orgs/repos they need. Installation tokens are stable across team changes and scoped to the install.
+- Fleet commits already land as `<botname>[bot]` via git config — issue/PR auth should match the same identity.
+
+**How to wire:**
+
+- `$GITHUB_PAT` (referenced by `library/mcp/github.json`) and `GH_TOKEN` (read by `gh` CLI) both resolve to the App's installation token, not a personal PAT.
+- The App must be installed on the target orgs with the needed scopes: `issues:write`, `pull_requests:write`, `contents:read` at minimum.
+- Mint short-lived installation tokens via GitHub's API (App private key → JWT → installation token) and refresh on a cron via a fleet script. Or use a long-lived flow if the integration is one-off.
+
+**Failure signal:** `Could not resolve to a Repository` on a known org repo means the token's identity doesn't have access. **Don't rotate the personal PAT — wire the App token.** The tell: `gh repo list <org>` returns only a developer's visible subset (e.g. ~8 repos) instead of the org's full repo list.
+
 #### Common Ops
 
 - **List PRs:** `mcp__github__list_pull_requests` — returns open PRs for a repo
