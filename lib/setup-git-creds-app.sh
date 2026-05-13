@@ -59,8 +59,16 @@ if ! head -1 "$PRIVATE_KEY" | grep -q "BEGIN .* PRIVATE KEY"; then
   exit 1
 fi
 
-if ! python3 -c "import jwt" 2>/dev/null; then
-  echo "Error: pyjwt is not installed. Run: uv pip install pyjwt cryptography --break-system-packages --system" >&2
+if ! openssl rsa -in "$PRIVATE_KEY" -check -noout >/dev/null 2>&1; then
+  echo "Error: $PRIVATE_KEY does not parse as a valid RSA private key." >&2
+  echo "       Common causes: CRLF line endings (run: tr -d '\\r' < key > key.fixed)," >&2
+  echo "       truncated file from scp, or a public key was supplied by mistake." >&2
+  exit 1
+fi
+
+if ! python3 -c "import jwt, cryptography" 2>/dev/null; then
+  echo "Error: pyjwt and cryptography are required (cryptography is needed for RS256 signing)." >&2
+  echo "       Run: uv pip install pyjwt cryptography --break-system-packages --system" >&2
   exit 1
 fi
 
@@ -92,7 +100,24 @@ try:
     with urllib.request.urlopen(req, timeout=15) as r:
         print(json.loads(r.read())["token"])
 except urllib.error.HTTPError as e:
-    print(f"FAIL: GitHub returned {e.code}: {e.read().decode()}", file=sys.stderr)
+    body = e.read().decode()
+    print(f"FAIL: GitHub returned {e.code}: {body}", file=sys.stderr)
+    if e.code == 401 and "could not be decoded" in body:
+        print("", file=sys.stderr)
+        print(f"GitHub couldn't verify the JWT signature against any public key", file=sys.stderr)
+        print(f"registered for App ID {os.environ['BOTFARM_APP_ID']}.", file=sys.stderr)
+        print("Most likely causes, in order:", file=sys.stderr)
+        print("  1. The .pem on this box is for a DIFFERENT App than --app-id.", file=sys.stderr)
+        print("     Compute its fingerprint and compare to the App settings page:", file=sys.stderr)
+        print(f"       openssl rsa -in {os.environ['BOTFARM_PRIVATE_KEY_PATH']} -pubout 2>/dev/null \\", file=sys.stderr)
+        print("         | openssl rsa -pubin -outform DER 2>/dev/null \\", file=sys.stderr)
+        print("         | openssl dgst -sha256 -binary | openssl base64", file=sys.stderr)
+        print("  2. --app-id is wrong (you may have passed Installation ID or Client ID).", file=sys.stderr)
+        print("     The App ID is the numeric value at the top of the App's settings page.", file=sys.stderr)
+        print("  3. The private key was deleted/revoked in App settings; generate a new one.", file=sys.stderr)
+    elif e.code == 401 and ("iat" in body or "expired" in body):
+        print("", file=sys.stderr)
+        print("This usually indicates clock skew. Check `date` against UTC and resync NTP.", file=sys.stderr)
     sys.exit(1)
 PY
 )

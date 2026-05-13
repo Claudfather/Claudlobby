@@ -124,7 +124,10 @@ claudlobby status                # fleet health (stub for now)
 
 See [`documentation/getting-started.md`](documentation/getting-started.md) for the full bootstrap sequence.
 
-For headless boxes where you want bots authenticated under their own GitHub identity (subject to branch protection independent of the operator's admin powers), see [`documentation/runbooks/github-app-setup.md`](documentation/runbooks/github-app-setup.md) — uses GitHub App installation tokens minted on demand via a credential helper, instead of a long-lived `GITHUB_PAT`.
+For headless boxes, two runbooks in order:
+
+1. [`documentation/runbooks/mac-mini-setup-guide.md`](documentation/runbooks/mac-mini-setup-guide.md) — bring up a fresh Mac mini as a headless host: SSH, **Tailscale SSH** (stable remote access from anywhere on your Tailnet), Homebrew, Node, Claude Code. Do this first.
+2. [`documentation/runbooks/github-app-setup.md`](documentation/runbooks/github-app-setup.md) — once the box is reachable, give its bots their own GitHub identity (subject to branch protection independent of the operator's admin powers) using GitHub App installation tokens minted on demand via a credential helper, instead of a long-lived `GITHUB_PAT`.
 
 ## Sync-back: bots that learn
 
