@@ -156,21 +156,30 @@ In the [Tailscale admin console](https://login.tailscale.com), rename the device
 
 ---
 
-## Phase 5: Install Node + Claude Code
+## Phase 5: Install Node + Claude Code + fleet runtime deps
 
 ```bash
-brew install node
+brew install node awscli python
 npm install -g @anthropic-ai/claude-code
 
 # verify
 node --version
 claude --version
+aws --version
+python3 --version
 
 # first run — completes OAuth
 claude
 ```
 
 Claude Code will print an auth URL. Open it on your laptop browser, sign in, paste the code back. Done.
+
+**Why awscli + python?**
+
+- `awscli` — bots that pull fleet secrets from AWS Secrets Manager need it; `lib/creds-check.sh` also uses it to validate fleetwide AWS keys via `sts:GetCallerIdentity` on every tick.
+- `python` — bots that `pip install` Python tooling directly (outside `uv`-managed envs) need system pip on PATH. Also required if any of your bots run Python-based MCP servers.
+
+Skip either if your fleet doesn't use AWS or Python tooling.
 
 ---
 
