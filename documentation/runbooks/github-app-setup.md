@@ -7,6 +7,9 @@ End-to-end guide for setting up a GitHub App that uses **installation tokens** t
 ```
 Laptop (one-time)                   Headless box
 ─────────────────                   ────────────
+0. Set up the box first  ─────►    See mac-mini-setup-guide.md
+   (SSH, Tailscale SSH,             (you should be able to `ssh mini`
+    Homebrew, deps)                  over Tailscale before continuing)
 1. Register GitHub App
 2. Generate private key (.pem)
 3. scp .pem to box           ─►    ~/.config/botfarm/private-key.pem
@@ -36,12 +39,14 @@ Since bot operators at Artemis are admins, a user-token-based bot would inherit 
 
 ## Prerequisites
 
+> **Do the headless-box setup first.** This guide assumes you already have a reachable, properly-configured headless box. If you're starting from a fresh Mac mini, work through [`mac-mini-setup-guide.md`](mac-mini-setup-guide.md) first — it enables Remote Login, installs Tailscale SSH (so you can reach the box from anywhere on your Tailnet via a stable `mini` alias), and installs Homebrew, Node, and Claude Code. Come back here once `ssh mini` works and the box has `git`, `python3`, `curl`, `jq`, and `uv` on it.
+
 - GitHub account with permission to create GitHub Apps (one-time, by app admin)
-- Local machine with `python3`, `ssh`, and `scp`
-- Headless box reachable over SSH with `git`, `python3`, `curl`, and `jq` installed
-  - Python needs the `pyjwt` and `cryptography` packages, plus `uv` for installing them (installed in Step 4)
-  - SSH access can be configured via `~/.ssh/config` on your laptop with a host alias (this playbook uses `mini` as the example alias)
-  - For Macs acting as the headless box: enable Remote Login in System Settings → General → Sharing
+- Local machine with `python3`, `ssh`, and `scp`, on the same Tailnet as the headless box
+- Headless box already set up per [`mac-mini-setup-guide.md`](mac-mini-setup-guide.md) (or the Linux equivalent):
+  - Reachable over Tailscale SSH from your laptop as `mini` (or whatever alias you chose)
+  - `git`, `python3`, `curl`, `jq`, and `uv` installed
+  - Python `pyjwt` and `cryptography` packages installed via `uv` (Step 4 below)
 - **`gh` CLI must NOT be installed on the headless box** (it shadows the bot's credential helper via the macOS Keychain — see "Important: no `gh` CLI on the box")
 
 ## Step 1: Configure the GitHub App (one-time, by app admin)
@@ -58,9 +63,13 @@ For each new bot app you need to create (per-person or per-project), go to **git
 | Homepage URL | Anything (e.g., `https://artemis.xyz`) |
 | Callback URL | Leave blank |
 | Webhook → Active | **Uncheck** |
-| Repository permissions → Contents | **Read and write** |
+| Repository permissions → Actions | **Read-only** (lets the bot inspect workflow runs and statuses) |
+| Repository permissions → Checks | **Read-only** (lets the bot read check-run results without authoring them) |
+| Repository permissions → Contents | **Read and write** (push branches, edit files) |
+| Repository permissions → Issues | **Read and write** (open, comment on, label, and close issues) |
 | Repository permissions → Metadata | Read-only (required, auto) |
-| Repository permissions → Pull requests | **Read and write** (only if you want the bot to open PRs; see "Permission decisions" below) |
+| Repository permissions → Pull requests | **Read and write** (open PRs, comment, label, merge — gated by branch protection; see "Permission decisions" below) |
+| Repository permissions → Workflows | **Read and write** (lets the bot add or edit files under `.github/workflows/`) |
 | All other permissions | No access |
 | Where can this be installed? | Only on this account (the org) |
 
@@ -82,18 +91,35 @@ mv ~/Downloads/botfarm.*.private-key.pem ~/.config/botfarm/private-key.pem
 chmod 600 ~/.config/botfarm/private-key.pem
 ```
 
-### Step 1c: Note the App ID and Installation ID
+### Step 1c: Record the App ID and Installation ID
 
-- **App ID**: top of the App settings page, e.g., `1234567`. Not secret.
-- **Installation ID**: visit **github.com/organizations/Artemis-xyz/settings/installations**, click **Configure** next to the bot's installation. The URL will be `.../settings/installations/<INSTALLATION_ID>`. Not secret.
+You'll need both values verbatim in Step 5 — write them down somewhere you can copy-paste from (password manager, sticky note, scratch file). They're not secret, but if you mistype one or use the runbook's placeholder by accident the setup script returns a cryptic 401 from GitHub.
 
-Save both — you'll need them for Step 5.
+| Value | Where to find it | Example format |
+|---|---|---|
+| **App ID** | Top of the App settings page (`https://github.com/organizations/<org>/settings/apps/<bot-slug>`), labelled "App ID" — *not* the Client ID `Iv23li…` directly below it | `3647284` (6-8 digit integer) |
+| **Installation ID** | `https://github.com/organizations/<org>/settings/installations` → click **Configure** next to the bot's installation; the resulting URL ends in `/installations/<INSTALLATION_ID>` | `94217635` (7-9 digit integer) |
+
+Record them now:
+
+```
+App ID:           ____________
+Installation ID:  ____________
+Bot slug:         ____________   (the App's URL slug, e.g. artemis-infra-botfarm)
+Private key path: ~/.config/botfarm/private-key.pem
+```
+
+**Do not** carry over the example values from Step 5's code block (`1234567`, `7654321`) — those are placeholders. Substitute yours.
 
 ### Permission decisions
 
-A note on the `Pull requests: write` permission — this single grant covers PR creation, commenting, labeling, *and* merging. There's no way to grant create-without-merge at the App level. The merge restriction must come from branch protection rules instead (see Step 2).
+**Pull requests: write** is a single grant covering PR creation, commenting, labeling, *and* merging — GitHub does not offer create-without-merge at the App level. The merge restriction must come from branch protection rules instead (see Step 2). If the bot doesn't need to open PRs at all (e.g., it just pushes branches and humans handle PRs entirely), leave this off and the bot has no merge capability via the API regardless of branch protection.
 
-If the bot doesn't need to open PRs at all (e.g., it just pushes branches and humans handle PRs entirely), leave this off and the bot has no merge capability via the API regardless of branch protection.
+**Workflows: write** is required if the bot ever needs to add, edit, or delete files under `.github/workflows/` — without it, a `git push` containing workflow changes will be rejected with `refusing to allow a GitHub App to create or update workflow without `workflows` permission`. If the bot will never touch CI definitions, you can downgrade this to no access; pushes that don't change workflow files are unaffected.
+
+**Actions: read** and **Checks: read** are read-only by design — they let the bot inspect CI state (e.g. wait for a green build before merging, or comment with a failing job's log link) without granting it the ability to re-run workflows, cancel jobs, or author check runs. Upgrade to write only if you have a specific use case.
+
+**Issues: write** lets the bot file, triage, and close issues. Drop it if the bot has no issue-management responsibilities.
 
 ## Step 2: Configure branch protection on bot-accessible repos
 
@@ -175,6 +201,18 @@ ssh mini chmod +x setup-git-creds-app.sh git-credential-botfarm
 ```
 
 ## Step 5: Run the setup script on the box
+
+Substitute the **App ID** and **Installation ID** you recorded in Step 1c — `1234567` and `7654321` are placeholders, not real values. Running with the placeholders verbatim is a common foot-gun and produces a misleading 401 ("JSON web token could not be decoded") from GitHub.
+
+```bash
+ssh mini "./setup-git-creds-app.sh \
+  --app-id <APP_ID_FROM_STEP_1c> \
+  --installation-id <INSTALLATION_ID_FROM_STEP_1c> \
+  --private-key ~/.config/botfarm/private-key.pem \
+  --bot-slug <YOUR_BOT_SLUG>"
+```
+
+Example with concrete (but **fake**) values, for shape reference only:
 
 ```bash
 ssh mini "./setup-git-creds-app.sh \
@@ -284,6 +322,40 @@ curl -i -X PUT \
 If all four checks pass, the bot has scoped access, a separate identity, and is genuinely restricted by branch protection independent of your admin privileges.
 
 ## Common issues
+
+### `setup-git-creds-app.sh` returns 401 "A JSON web token could not be decoded"
+
+GitHub couldn't verify the JWT signature against any public key registered for App ID `<your --app-id>`. Diagnose in this order — stop at the first failure:
+
+1. **PEM matches the App.** Compute the public-key fingerprint and compare to the App's settings page (under **Private keys** — GitHub shows a SHA-256 fingerprint per key):
+
+   ```bash
+   ssh mini 'openssl rsa -in ~/.config/botfarm/private-key.pem -pubout 2>/dev/null \
+             | openssl rsa -pubin -outform DER 2>/dev/null \
+             | openssl dgst -sha256 -binary | openssl base64'
+   ```
+
+   Mismatch ⇒ the `.pem` on the box is for a different App, or the key was rotated and the old `.pem` is stale. Re-`scp` the correct file from your laptop (step 4a).
+
+2. **`--app-id` is correct.** It's the numeric App ID at the top of the App's settings page — *not* the Installation ID and *not* the Client ID. They look similar but each is wrong in its own way.
+
+3. **PEM line endings are LF.** Verify with `ssh mini 'file ~/.config/botfarm/private-key.pem'`. If it says "with CRLF line terminators", strip them:
+
+   ```bash
+   ssh mini "tr -d '\r' < ~/.config/botfarm/private-key.pem > /tmp/pk && \
+             mv /tmp/pk ~/.config/botfarm/private-key.pem && \
+             chmod 600 ~/.config/botfarm/private-key.pem"
+   ```
+
+4. **`cryptography` is installed.** PyJWT alone cannot sign RS256 and will silently produce a token GitHub rejects:
+
+   ```bash
+   ssh mini 'python3 -c "import cryptography, jwt"'   # must not raise
+   ```
+
+   If missing: `ssh mini 'uv pip install pyjwt cryptography --break-system-packages --system'`.
+
+5. **The private key wasn't revoked.** If steps 1-4 all pass but the error persists, check the App's settings page — if the key was deleted there, generate a new one and re-deploy.
 
 ### Helper returns no credential
 
