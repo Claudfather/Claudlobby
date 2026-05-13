@@ -4,7 +4,10 @@ title: GitHub MCP
 
 # GitHub MCP
 
-Wire config: `library/mcp/github.json` (uses `${GITHUB_PAT}`).
+Wire config:
+
+- `library/mcp/github.json` — static `${GITHUB_PAT}` mode. Simplest setup. Reference via `mcp: [github]` in fleet.yaml.
+- `library/mcp/github-app.json` — GitHub App installation-token mode. Mints a fresh `ghs_` token at MCP spawn time via `git-credential-botfarm` (no long-lived PAT in the fleet `.env`). Reference via `mcp: [github-app]`. Setup: [`documentation/runbooks/github-app-setup.md`](../../documentation/runbooks/github-app-setup.md). Skills/CLI calls that need a short-lived token can mint one with `lib/mint-github-token.sh`.
 
 #### Identity / Auth — bot App, not personal PAT
 

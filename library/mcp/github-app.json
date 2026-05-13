@@ -1,0 +1,47 @@
+{
+  "_env_contract": {
+    "GITHUB_PAT": {
+      "description": "Optional fallback PAT — used only when git-credential-botfarm is not configured. Set this OR install the credential helper, not both. See documentation/runbooks/github-app-setup.md.",
+      "tier": "fleet",
+      "optional": true
+    }
+  },
+  "_permissions_contract": {
+    "tools": [
+      "search_code",
+      "search_issues",
+      "search_repositories",
+      "search_users",
+      "get_file_contents",
+      "get_issue",
+      "get_pull_request",
+      "get_pull_request_comments",
+      "get_pull_request_files",
+      "get_pull_request_reviews",
+      "get_pull_request_status",
+      "list_commits",
+      "list_issues",
+      "list_pull_requests",
+      "create_branch",
+      "create_issue",
+      "create_or_update_file",
+      "create_pull_request",
+      "create_pull_request_review",
+      "create_repository",
+      "fork_repository",
+      "push_files",
+      "add_issue_comment",
+      "update_issue",
+      "update_pull_request_branch",
+      "merge_pull_request"
+    ]
+  },
+  "github": {
+    "command": "/bin/sh",
+    "args": [
+      "-c",
+      "exec \"$CLAUDLOBBY_ROOT/lib/github-mcp-wrapper.sh\""
+    ]
+  },
+  "_global_binary": "mcp-server-github"
+}
