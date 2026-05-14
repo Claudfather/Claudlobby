@@ -10,10 +10,16 @@ Laptop (one-time)                   Headless box
 0. Set up the box first  ─────►    See mac-mini-setup-guide.md
    (SSH, Tailscale SSH,             (you should be able to `ssh mini`
     Homebrew, deps)                  over Tailscale before continuing)
-1. Register GitHub App
+
+─── once per App (Steps 1–3) ──────────────────────────────────────
+1. Register GitHub App + permissions
 2. Generate private key (.pem)
-3. scp .pem to box           ─►    ~/.config/botfarm/private-key.pem
-4. scp setup script to box   ─►    ~/setup-git-creds-app.sh
+3. Configure branch protection on target repos
+
+─── once per box (Steps 4–5) ──────────────────────────────────────
+4. scp .pem + scripts to box ─►    ~/.config/botfarm/private-key.pem
+                                   ~/setup-git-creds-app.sh
+                                   ~/git-credential-botfarm
 5. Run setup                       Configures git + credential helper
                                           │
                                           ▼
@@ -21,6 +27,8 @@ Laptop (one-time)                   Headless box
                                    fresh ghs_ tokens via the helper
 
 ```
+
+> **Already have an App?** If you already have a working PEM + App ID + Installation ID from a previous setup, you can skip Steps 1–3. See [Shortcut: reusing an existing App](#shortcut-reusing-an-existing-app) below the Prerequisites.
 
 **Key properties of this setup:**
 
@@ -48,6 +56,18 @@ Since bot operators at Artemis are admins, a user-token-based bot would inherit 
   - `git`, `python3`, `curl`, `jq`, and `uv` installed
   - Python `pyjwt` and `cryptography` packages installed via `uv` (Step 4 below)
 - **`gh` CLI must NOT be installed on the headless box** (it shadows the bot's credential helper via the macOS Keychain — see "Important: no `gh` CLI on the box")
+
+## Shortcut: reusing an existing App
+
+If you already have the App's **private key PEM**, the **App ID**, and the **Installation ID** from a previous setup — e.g. a teammate set this up on a different box, or you're re-enrolling a wiped mini, or you're adding a new repo to an existing bot's access — you can skip Steps 1–3 entirely and jump to Step 4.
+
+Do this first:
+
+1. **Install the App on the repos the bot needs to access.** Go to `https://github.com/organizations/<org>/settings/installations`, click **Configure** next to your App, and under **Repository access** add the target repos (or select **All repositories** if that matches your policy). Adding or removing repos does *not* change the Installation ID — the value you already have stays valid.
+2. **Confirm `gh` is not installed on the target box.** `ssh <box> 'which gh'` should print nothing. If it does, follow [Step 3](#step-3-important--no-gh-cli-on-the-box) to remove it and wipe the keychain before continuing.
+3. **Sanity-check branch protection on any newly-added repos.** Org-level rulesets usually cover this automatically (see [Step 2](#step-2-configure-branch-protection-on-bot-accessible-repos)), but if the new repos predate your ruleset or were configured ad-hoc, verify the bot isn't in any `bypass_actors` list.
+
+Then jump straight to **[Step 4: Install the private key and dependencies on the box](#step-4-install-the-private-key-and-dependencies-on-the-box)** — copying the PEM + scripts and running `setup-git-creds-app.sh` is the only per-box work for a reused App.
 
 ## Step 1: Configure the GitHub App (one-time, by app admin)
 
