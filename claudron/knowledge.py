@@ -249,20 +249,20 @@ def _score_index_entry(query: str, entry: dict) -> tuple[int, str]:
     if len(tokens) > 1:
         token_total = 0
         token_type = "none"
-        for token in tokens:  # noqa: SIM102 — if not elif is intentional (#219)
+        for token in tokens:
             if token in title:
                 token_total += W_TITLE_WORD_OVERLAP
                 if token_type == "none":
                     token_type = "title"
-            if any(token == t for t in tags):
+            elif any(token == t for t in tags):  # noqa: SIM102
                 token_total += W_TAG_EXACT
                 if token_type == "none":
                     token_type = "tag"
-            if any(token in t for t in tags) and not any(token == t for t in tags):
+            elif any(token in t for t in tags):  # noqa: SIM102
                 token_total += W_TAG_PARTIAL
                 if token_type == "none":
                     token_type = "tag"
-            if token in filename:
+            elif token in filename:
                 token_total += W_FILENAME
                 if token_type == "none":
                     token_type = "filename"
