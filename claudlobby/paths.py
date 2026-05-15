@@ -264,7 +264,7 @@ class Paths:
             if vault_str:
                 vault_path = Path(vault_str)
                 vault_fleet = vault_path / fleet
-                if vault_fleet.is_dir():
+                if (vault_fleet / "fleet.yaml").is_file():
                     fleet_dir = vault_fleet
                     vault_root = vault_path
 

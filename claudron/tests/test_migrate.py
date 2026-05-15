@@ -70,6 +70,7 @@ class TestMigrateDryRun:
         out = capsys.readouterr().out
         assert "would copy" in out
         assert "would preserve" in out
+        assert "(new)" in out
         assert "dry run" in out
 
         # Source untouched
@@ -80,6 +81,39 @@ class TestMigrateDryRun:
         assert not (
             vault / "test-fleet" / "shared" / "knowledge" / "deploy-tips.md"
         ).is_file()
+
+    def test_dry_run_shows_overwrites(self, migration_setup, capsys, monkeypatch):
+        cl_root, vault = migration_setup
+        # Pre-populate a file in vault to trigger overwrite detection
+        dst = vault / "test-fleet" / "shared" / "knowledge" / "deploy-tips.md"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text("old content\n")
+
+        monkeypatch.chdir(cl_root)
+        rc = main(["--vault", str(vault), "migrate", "--fleet", "test-fleet"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "(overwrite)" in out
+
+    def test_claudlobby_flag(self, migration_setup, capsys, tmp_path):
+        """--claudlobby flag lets migrate find claudlobby root from any CWD."""
+        cl_root, vault = migration_setup
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        rc = main(
+            [
+                "--vault",
+                str(vault),
+                "migrate",
+                "--fleet",
+                "test-fleet",
+                "--claudlobby",
+                str(cl_root),
+            ]
+        )
+        assert rc == 0
+        assert "dry run" in capsys.readouterr().out
 
 
 class TestMigrateApply:
@@ -116,6 +150,45 @@ class TestMigrateApply:
         assert (
             cl_root / "local" / "test-fleet" / "shared" / "knowledge" / "deploy-tips.md"
         ).is_file()
+
+    def test_apply_blocks_overwrite_without_force(
+        self, migration_setup, capsys, monkeypatch
+    ):
+        cl_root, vault = migration_setup
+        # Pre-populate to trigger overwrite
+        dst = vault / "test-fleet" / "shared" / "knowledge" / "deploy-tips.md"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text("old content\n")
+
+        monkeypatch.chdir(cl_root)
+        rc = main(
+            ["--vault", str(vault), "migrate", "--fleet", "test-fleet", "--apply"]
+        )
+        assert rc == 1
+        assert "overwritten" in capsys.readouterr().err
+
+    def test_apply_force_overwrites(self, migration_setup, capsys, monkeypatch):
+        cl_root, vault = migration_setup
+        dst = vault / "test-fleet" / "shared" / "knowledge" / "deploy-tips.md"
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text("old content\n")
+
+        monkeypatch.chdir(cl_root)
+        rc = main(
+            [
+                "--vault",
+                str(vault),
+                "migrate",
+                "--fleet",
+                "test-fleet",
+                "--apply",
+                "--force",
+            ]
+        )
+        assert rc == 0
+        assert "migration complete" in capsys.readouterr().out
+        # File was overwritten with new content
+        assert "Deploy Tips" in dst.read_text()
 
     def test_source_not_found(self, tmp_path: Path, capsys, monkeypatch):
         cl_root = tmp_path / "cl"

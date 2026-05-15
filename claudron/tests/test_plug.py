@@ -61,6 +61,22 @@ class TestPlug:
         assert rc == 2
         assert "not a vault" in capsys.readouterr().err
 
+    def test_plug_warns_on_overwrite(
+        self, claudlobby_root: Path, vault_for_plug: Path, tmp_path: Path, capsys
+    ):
+        # First plug
+        main(["plug", str(vault_for_plug), "--claudlobby", str(claudlobby_root)])
+        capsys.readouterr()
+
+        # Second plug with different vault
+        vault2 = tmp_path / "vault2"
+        (vault2 / "_shared").mkdir(parents=True)
+        rc = main(["plug", str(vault2), "--claudlobby", str(claudlobby_root)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "replacing existing config" in out
+        assert str(vault_for_plug) in out
+
     def test_plug_no_claudlobby_root(
         self, vault_for_plug: Path, tmp_path: Path, capsys
     ):

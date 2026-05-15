@@ -209,6 +209,10 @@ def cmd_plug(args) -> int:
         return 2
 
     config_path = cl_root / ".claudron"
+    old_config = _read_claudron_config(config_path)
+    old_vault = old_config.get("vault")
+    if old_vault:
+        print(f"replacing existing config (was: {old_vault})")
     _write_claudron_config(config_path, vault_path)
     print(f"plugged vault {vault_path}")
     print(f"  config: {config_path}")
@@ -276,9 +280,21 @@ fleet:
 """
 
 
+_RESERVED_FLEET_NAMES = frozenset(
+    {"_shared", "projects", ".git", ".github", ".claudron"}
+)
+
+
 def cmd_fleet_add(args) -> int:
     vault = _resolve_vault(args)
     name = args.name
+
+    if name in _RESERVED_FLEET_NAMES:
+        print(
+            f"'{name}' is a reserved name and cannot be used as a fleet name",
+            file=sys.stderr,
+        )
+        return 2
 
     fleet_dir = vault.root / name
     if fleet_dir.exists():
@@ -318,9 +334,13 @@ def cmd_migrate(args) -> int:
     vault = _resolve_vault(args)
     fleet_name = args.fleet
     apply = args.apply
+    force = getattr(args, "force", False)
 
     # Find claudlobby root to locate local/<fleet>/
-    cl_root = _detect_claudlobby_root()
+    hint = (
+        Path(args.claudlobby).resolve() if getattr(args, "claudlobby", None) else None
+    )
+    cl_root = _detect_claudlobby_root(hint)
     if cl_root is None:
         print("could not find claudlobby root", file=sys.stderr)
         return 2
@@ -338,7 +358,7 @@ def cmd_migrate(args) -> int:
         )
         return 2
 
-    # Determine what to copy
+    # Determine what to copy and detect overwrites
     copyable = ("shared", "library", "voices")
     plan: list[tuple[Path, Path]] = []
     for dirname in copyable:
@@ -361,35 +381,42 @@ def cmd_migrate(args) -> int:
         print("nothing to migrate")
         return 0
 
-    # Print plan
-    for src, dst in plan:
-        label = "copy" if apply else "would copy"
-        print(f"  {label}: {src.relative_to(cl_root)} -> {dst.relative_to(vault.root)}")
-    for src, dst in memory_plan:
-        label = "preserve" if apply else "would preserve"
-        print(f"  {label}: {src.relative_to(cl_root)} -> {dst.relative_to(vault.root)}")
+    # Build detailed file plan, distinguish new vs overwrite
+    has_overwrites = False
+    for src, dst in plan + memory_plan:
+        is_memory = src in [m[0] for m in memory_plan]
+        for item in sorted(src.rglob("*")):
+            if item.is_dir():
+                continue
+            rel = item.relative_to(src)
+            target = dst / rel
+            overwrites = target.is_file()
+            if overwrites:
+                has_overwrites = True
+            if is_memory:
+                verb = "preserve" if not apply else "preserve"
+            else:
+                verb = "copy" if not apply else "copy"
+            if not apply:
+                verb = "would " + verb
+            tag = " (overwrite)" if overwrites else " (new)"
+            print(
+                f"  {verb}: {item.relative_to(cl_root)} -> {target.relative_to(vault.root)}{tag}"
+            )
 
     if not apply:
         print("\ndry run — pass --apply to execute")
         return 0
 
-    # Execute
-    for src, dst in plan:
-        if dst.is_dir():
-            # Merge: copy tree contents into existing dir
-            for item in src.rglob("*"):
-                rel = item.relative_to(src)
-                target = dst / rel
-                if item.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, target)
-        else:
-            shutil.copytree(src, dst)
+    if has_overwrites and not force:
+        print(
+            "\nsome files would be overwritten — pass --force to confirm",
+            file=sys.stderr,
+        )
+        return 1
 
-    for src, dst in memory_plan:
-        dst.parent.mkdir(parents=True, exist_ok=True)
+    # Execute
+    for src, dst in plan + memory_plan:
         if dst.is_dir():
             for item in src.rglob("*"):
                 rel = item.relative_to(src)
@@ -497,6 +524,12 @@ def main(argv=None) -> int:
     p_migrate.add_argument("--fleet", required=True, help="Fleet name to migrate")
     p_migrate.add_argument(
         "--apply", action="store_true", help="Execute migration (default: dry-run)"
+    )
+    p_migrate.add_argument(
+        "--force", action="store_true", help="Allow overwriting existing files"
+    )
+    p_migrate.add_argument(
+        "--claudlobby", default=None, help="Claudlobby root (default: auto-detect)"
     )
 
     args = parser.parse_args(argv)

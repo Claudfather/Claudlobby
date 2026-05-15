@@ -74,6 +74,25 @@ class TestPathsVaultDetection:
         assert paths.fleet_dir == local_fleet
         assert paths.vault_root is None
 
+    def test_requires_fleet_yaml_not_just_dir(self, tmp_path: Path):
+        """Vault dir exists but has no fleet.yaml → falls back to local/."""
+        cl_root = tmp_path / "claudlobby"
+        (cl_root / "library").mkdir(parents=True)
+        (cl_root / "lib").mkdir()
+
+        vault = tmp_path / "vault"
+        (vault / "_shared").mkdir(parents=True)
+        # Dir exists but no fleet.yaml inside
+        (vault / "bare-fleet").mkdir()
+        (cl_root / ".claudron").write_text(f"vault={vault}\n")
+
+        local_fleet = cl_root / "local" / "bare-fleet"
+        local_fleet.mkdir(parents=True)
+
+        paths = Paths.detect(hint=cl_root, fleet="bare-fleet")
+        assert paths.fleet_dir == local_fleet
+        assert paths.vault_root is None
+
     def test_no_claudron_config(self, tmp_path: Path):
         """Without .claudron, normal local/ resolution works."""
         cl_root = tmp_path / "claudlobby"
@@ -95,3 +114,31 @@ class TestPathsVaultDetection:
         paths = Paths.detect(hint=cl_root)
         assert paths.fleet_dir is None
         assert paths.vault_root is None
+
+
+class TestComposeBotConfVaultMode:
+    def test_bot_dir_absolute_when_outside_root(self, claudlobby_with_vault):
+        """compose_bot_conf uses absolute path for BOT_DIR when bot_dir is outside claudlobby root."""
+        from claudlobby.composer import compose_bot_conf
+        from claudlobby.config import BotConfig, FleetConfig, TelegramConfig
+
+        cl_root, vault, fleet_dir = claudlobby_with_vault
+        paths = Paths(root=cl_root, fleet_dir=fleet_dir, vault_root=vault)
+        bot = BotConfig(
+            bot_id="testbot",
+            name="testbot",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="testbot"),
+        )
+        fleet = FleetConfig(name="my-fleet", service_prefix="com.test")
+        conf = compose_bot_conf(bot, fleet, paths)
+
+        # BOT_DIR should be absolute (not $CLAUDLOBBY_ROOT-relative) since
+        # fleet_dir is in the vault, outside claudlobby root
+        for line in conf.splitlines():
+            if line.startswith("BOT_DIR="):
+                assert "$CLAUDLOBBY_ROOT" not in line
+                assert str(fleet_dir / "runtime" / "bots" / "testbot") in line
+                break
+        else:
+            pytest.fail("BOT_DIR line not found in bot.conf")
