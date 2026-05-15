@@ -129,3 +129,32 @@ def empty_vault(tmp_path: Path) -> Path:
     (root / "_shared" / "decisions").mkdir(parents=True)
     (root / "_shared" / "runbooks").mkdir(parents=True)
     return root
+
+
+@pytest.fixture
+def shared_vault(tmp_path: Path) -> Path:
+    """Vault using shared/ (no underscore) as the marker directory."""
+    root = tmp_path / "shared-vault"
+    (root / "shared" / "knowledge").mkdir(parents=True)
+    (root / "shared" / "decisions").mkdir(parents=True)
+    (root / "shared" / "runbooks").mkdir(parents=True)
+    (root / "projects").mkdir()
+
+    (root / "shared" / "knowledge" / "testing-guide.md").write_text(
+        dedent("""\
+        ---
+        title: Testing Guide
+        type: knowledge
+        status: active
+        owner: alex
+        tags: [testing, guide]
+        created: 2026-04-01
+        updated: 2026-05-01
+        ---
+
+        # Testing Guide
+
+        Always run pytest before pushing.
+    """)
+    )
+    return root

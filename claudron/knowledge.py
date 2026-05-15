@@ -17,9 +17,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-import yaml
-
-from .vault import Vault, _index_is_stale
+from .vault import SCHEMA_VERSION, Vault, _index_is_stale, _parse_frontmatter
 
 # ── data models ───────────────────────────────────────────────────────
 
@@ -31,6 +29,8 @@ class KnowledgeDoc:
     body: str
     source_path: Path
     tier: str  # "shared" | "project:<name>" | "fleet:<name>" | "other"
+    status: str = "active"
+    expires: str = ""
 
 
 @dataclass
@@ -56,35 +56,14 @@ W_BODY_EXTRA_CAP = 25
 
 TIER_A_THRESHOLD = 50  # if best Tier A score < this, fall back to Tier B
 
+W_WORD_BOUNDARY_BONUS = 10  # bonus when substring match aligns to word boundaries
+
 SCORE_CAP = 200
 
 
-# ── frontmatter parsing ──────────────────────────────────────────────
-
-
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """Split markdown into (frontmatter dict, body str).
-
-    Returns ``({}, text)`` if no frontmatter present.
-    """
-    if not text.startswith("---\n") and not text.startswith("---\r\n"):
-        return {}, text
-    lines = text.splitlines(keepends=True)
-    end = None
-    for i, line in enumerate(lines[1:], start=1):
-        if line.rstrip("\r\n") == "---":
-            end = i
-            break
-    if end is None:
-        return {}, text
-    try:
-        fm = yaml.safe_load("".join(lines[1:end])) or {}
-    except yaml.YAMLError:
-        return {}, text
-    if not isinstance(fm, dict):
-        return {}, text
-    body = "".join(lines[end + 1 :]).lstrip("\n")
-    return fm, body
+def _is_word_boundary_match(needle: str, haystack: str) -> bool:
+    """True if *needle* appears in *haystack* at word boundaries on both sides."""
+    return bool(re.search(r"\b" + re.escape(needle) + r"\b", haystack))
 
 
 def _derive_title(stem: str) -> str:
@@ -125,6 +104,8 @@ def _parse_doc(path: Path, tier: str) -> KnowledgeDoc | None:
         body=body.rstrip(),
         source_path=path,
         tier=tier,
+        status=fm.get("status", "active"),
+        expires=str(fm.get("expires", "")),
     )
 
 
@@ -172,18 +153,34 @@ def _build_index(vault: "Vault") -> dict:
             _index_tier(fleet_shared, f"fleet:{name}")
 
     # Also index unrecognized root dirs
-    _SKIP = {"_shared", "projects", ".git", ".github", ".claudron", "__pycache__"}
+    _SKIP = {
+        "_shared",
+        "shared",
+        "projects",
+        ".git",
+        ".github",
+        ".claudron",
+        "__pycache__",
+    }
     fleet_names = set(vault.fleets.keys())
     for d in sorted(vault.root.iterdir()):
         if d.is_dir() and d.name not in _SKIP and not d.name.startswith("."):
             if d.name not in fleet_names and d.name != "projects":
                 _index_tier(d, f"other:{d.name}")
 
-    index = {"version": 1, "entries": entries}
+    index = {"schema_version": SCHEMA_VERSION, "entries": entries}
     index_dir = vault.root / ".claudron"
-    index_dir.mkdir(exist_ok=True)
-    index_path = index_dir / "index.json"
-    index_path.write_text(json.dumps(index, indent=2, default=str))
+    try:
+        index_dir.mkdir(exist_ok=True)
+        index_path = index_dir / "index.json"
+        index_path.write_text(json.dumps(index, indent=2, default=str))
+    except OSError as exc:
+        import warnings
+
+        warnings.warn(
+            f"claudron: could not write index to {index_dir}: {exc}",
+            stacklevel=2,
+        )
     return index
 
 
@@ -197,6 +194,8 @@ def _load_index(vault: Vault) -> dict | None:
     try:
         data = json.loads(index_path.read_text())
         if isinstance(data, dict) and "entries" in data:
+            if data.get("schema_version") != SCHEMA_VERSION:
+                return None  # stale schema — trigger rebuild
             return data
     except (json.JSONDecodeError, OSError):
         pass
@@ -223,9 +222,11 @@ def _score_index_entry(query: str, entry: dict) -> tuple[int, str]:
     if q in aliases:
         return min(W_ALIAS_EXACT, SCORE_CAP), "alias"
 
-    # Single phrase substring
+    # Single phrase substring (word-boundary matches score higher)
     if q in title:
         total += W_TITLE_SUBSTR
+        if _is_word_boundary_match(q, title):
+            total += W_WORD_BOUNDARY_BONUS
         best_type = "title"
     if any(q == t for t in tags):
         total += W_TAG_EXACT
@@ -253,11 +254,11 @@ def _score_index_entry(query: str, entry: dict) -> tuple[int, str]:
                 token_total += W_TITLE_WORD_OVERLAP
                 if token_type == "none":
                     token_type = "title"
-            elif any(token == t for t in tags):
+            elif any(token == t for t in tags):  # noqa: SIM102
                 token_total += W_TAG_EXACT
                 if token_type == "none":
                     token_type = "tag"
-            elif any(token in t for t in tags):
+            elif any(token in t for t in tags):  # noqa: SIM102
                 token_total += W_TAG_PARTIAL
                 if token_type == "none":
                     token_type = "tag"
@@ -332,16 +333,8 @@ def _is_doc_excluded(
     doc: KnowledgeDoc, include_archived: bool = False, include_expired: bool = False
 ) -> bool:
     """Check exclusion for a parsed KnowledgeDoc (Tier B)."""
-    try:
-        text = doc.source_path.read_text()
-        fm, _ = _parse_frontmatter(text)
-    except OSError:
-        fm = {}
     return _is_excluded(
-        {
-            "status": fm.get("status", "active"),
-            "expires": str(fm.get("expires", "")),
-        },
+        {"status": doc.status, "expires": doc.expires},
         include_archived,
         include_expired,
     )
@@ -385,19 +378,22 @@ def lookup(
 
     # ── Tier B: full-text fallback ──
     if best_a_score < TIER_A_THRESHOLD:
-        seen_paths = {r.doc.source_path for r in results}
+        result_by_path = {r.doc.source_path: r for r in results}
         for doc in _collect_all_docs(vault, project=project, fleet=fleet):
-            if doc.source_path in seen_paths:
-                continue
             if _is_doc_excluded(doc, include_archived, include_expired):
                 continue
             score, match_type = _score_body(query, doc)
             if score > 0:
-                # Merge with any Tier A score for the same doc
-                results.append(
-                    KnowledgeResult(doc=doc, score=score, match_type=match_type)
-                )
-                seen_paths.add(doc.source_path)
+                existing = result_by_path.get(doc.source_path)
+                if existing is not None:
+                    # Merge: add body score to existing Tier A score
+                    existing.score = min(existing.score + score, SCORE_CAP)
+                else:
+                    result = KnowledgeResult(
+                        doc=doc, score=score, match_type=match_type
+                    )
+                    results.append(result)
+                    result_by_path[doc.source_path] = result
 
     # ── Sort: score desc, then tier priority ──
     tier_priority = {"project": 0, "fleet": 1, "shared": 2, "other": 3}
@@ -422,6 +418,10 @@ def _collect_all_docs(
     # Project-local (most specific)
     if project and project in vault.projects:
         docs.extend(_walk_knowledge_tier(vault.projects[project], f"project:{project}"))
+    else:
+        # No project scope — include all projects at lower priority
+        for name, proj_path in vault.projects.items():
+            docs.extend(_walk_knowledge_tier(proj_path, f"project:{name}"))
 
     # Fleet shared
     if fleet and fleet in vault.fleets:
@@ -433,7 +433,15 @@ def _collect_all_docs(
         docs.extend(_walk_knowledge_tier(vault.shared / subdir, "shared"))
 
     # Unrecognized root dirs
-    _SKIP = {"_shared", "projects", ".git", ".github", ".claudron", "__pycache__"}
+    _SKIP = {
+        "_shared",
+        "shared",
+        "projects",
+        ".git",
+        ".github",
+        ".claudron",
+        "__pycache__",
+    }
     fleet_names = set(vault.fleets.keys())
     for d in sorted(vault.root.iterdir()):
         if d.is_dir() and d.name not in _SKIP and not d.name.startswith("."):

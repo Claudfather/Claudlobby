@@ -1,7 +1,8 @@
 """Vault detection, scaffolding, validation, and status.
 
-A vault is a directory containing ``_shared/`` at its root. Detection
-walks up from a starting path (like git walks up looking for ``.git/``).
+A vault is a directory containing ``_shared/`` (or ``shared/``) at its
+root. Detection walks up from a starting path (like git walks up looking
+for ``.git/``).
 """
 
 from __future__ import annotations
@@ -15,7 +16,13 @@ import yaml
 
 # ── reserved directory names ──────────────────────────────────────────
 
-_RESERVED = frozenset({"_shared", "projects", ".git", ".github", "__pycache__"})
+_RESERVED = frozenset(
+    {"_shared", "shared", "projects", ".git", ".github", "__pycache__"}
+)
+
+_SHARED_MARKERS = ("_shared", "shared")
+
+SCHEMA_VERSION = 1  # bump when index.json structure changes
 
 _GITIGNORE_CONTENT = """\
 # claudron vault — gitignored runtime & secrets
@@ -41,7 +48,7 @@ class Vault:
 
 
 def detect(path: Path | None = None) -> Vault | None:
-    """Walk up from *path* (or CWD) looking for ``_shared/``.
+    """Walk up from *path* looking for ``_shared/`` or ``shared/``.
 
     Returns a :class:`Vault` on success, ``None`` if no vault found.
     """
@@ -49,11 +56,16 @@ def detect(path: Path | None = None) -> Vault | None:
     for candidate in [start, *start.parents]:
         if (candidate / "_shared").is_dir():
             return _scan_vault(candidate)
+        # shared/ is also valid, but NOT inside fleet overlays (which
+        # have fleet.yaml next to their shared/ dir).
+        if (candidate / "shared").is_dir() and not (candidate / "fleet.yaml").is_file():
+            return _scan_vault(candidate)
     return None
 
 
 def _scan_vault(root: Path) -> Vault:
-    shared = root / "_shared"
+    # Prefer _shared/ over shared/ when both exist
+    shared = root / "_shared" if (root / "_shared").is_dir() else root / "shared"
 
     # Discover projects/
     projects: dict[str, Path] = {}
@@ -92,11 +104,12 @@ def init(path: str | Path, *, adopt: bool = False) -> Path:
     """
     root = Path(path).resolve()
 
-    if root.is_dir() and (root / "_shared").is_dir():
-        raise VaultError(
-            f"vault already exists at {root}\n"
-            f"  (has _shared/ directory — run `claudron status --vault {root}` to inspect)"
-        )
+    for marker in _SHARED_MARKERS:
+        if root.is_dir() and (root / marker).is_dir():
+            raise VaultError(
+                f"vault already exists at {root}\n"
+                f"  (has {marker}/ directory — run `claudron status --vault {root}` to inspect)"
+            )
 
     if root.is_dir() and any(root.iterdir()) and not adopt:
         raise VaultError(
@@ -226,10 +239,13 @@ def _is_stale(path: Path, today: date, default_ttl_days: int) -> bool:
     return False
 
 
-def _quick_frontmatter(text: str) -> dict | None:
-    """Fast frontmatter extraction (no body return)."""
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Split markdown into (frontmatter dict, body str).
+
+    Returns ``({}, text)`` if no frontmatter present.
+    """
     if not text.startswith("---\n") and not text.startswith("---\r\n"):
-        return None
+        return {}, text
     lines = text.splitlines(keepends=True)
     end = None
     for i, line in enumerate(lines[1:], start=1):
@@ -237,20 +253,47 @@ def _quick_frontmatter(text: str) -> dict | None:
             end = i
             break
     if end is None:
-        return None
+        return {}, text
     try:
-        fm = yaml.safe_load("".join(lines[1:end]))
-        return fm if isinstance(fm, dict) else None
+        fm = yaml.safe_load("".join(lines[1:end])) or {}
     except yaml.YAMLError:
-        return None
+        return {}, text
+    if not isinstance(fm, dict):
+        return {}, text
+    body = "".join(lines[end + 1 :]).lstrip("\n")
+    return fm, body
+
+
+def _quick_frontmatter(text: str) -> dict | None:
+    """Fast frontmatter extraction (no body return)."""
+    fm, _ = _parse_frontmatter(text)
+    return fm or None
+
+
+_stale_cache: dict[tuple[str, float], bool] = {}
+
+
+def _clear_stale_cache() -> None:
+    """Clear the stale-check cache (used by tests)."""
+    _stale_cache.clear()
 
 
 def _index_is_stale(vault: Vault, index_path: Path) -> bool:
-    """True if any .md under vault root is newer than the index."""
+    """True if any .md under vault root is newer than the index.
+
+    Caches the result per (path, index_mtime) so repeated lookups in the
+    same process skip the O(n) stat walk.
+    """
     index_mtime = index_path.stat().st_mtime
+    cache_key = (str(index_path), index_mtime)
+    cached = _stale_cache.get(cache_key)
+    if cached is not None:
+        return cached
     for md in vault.root.rglob("*.md"):
         if md.name.startswith("."):
             continue
         if md.stat().st_mtime > index_mtime:
+            _stale_cache[cache_key] = True
             return True
+    _stale_cache[cache_key] = False
     return False

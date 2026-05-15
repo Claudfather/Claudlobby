@@ -47,6 +47,22 @@ class TestDetect:
         vault = detect(root)
         assert vault is None
 
+    def test_detect_shared_no_underscore(self, shared_vault: Path):
+        """Vault with shared/ (no underscore) is detected."""
+        vault = detect(shared_vault)
+        assert vault is not None
+        assert vault.root == shared_vault
+        assert vault.shared == shared_vault / "shared"
+
+    def test_detect_prefers_underscore_shared(self, tmp_path: Path):
+        """When both _shared/ and shared/ exist, _shared/ wins."""
+        root = tmp_path / "both"
+        (root / "_shared" / "knowledge").mkdir(parents=True)
+        (root / "shared" / "knowledge").mkdir(parents=True)
+        vault = detect(root)
+        assert vault is not None
+        assert vault.shared == root / "_shared"
+
 
 class TestScan:
     def test_scan_discovers_fleets(self, vault_with_fleet: Path):
@@ -94,6 +110,10 @@ class TestInit:
         with pytest.raises(VaultError, match="already exists"):
             init(vault_dir)
 
+    def test_init_existing_shared_vault_errors(self, shared_vault: Path):
+        with pytest.raises(VaultError, match="already exists"):
+            init(shared_vault)
+
     def test_init_adopt_nonempty(self, tmp_path: Path):
         target = tmp_path / "adopt-me"
         target.mkdir()
@@ -121,3 +141,9 @@ class TestStatus:
         info = status(vault)
         assert "test-fleet" in info["fleets"]
         assert "test-fleet/shared" in info["tiers"]
+
+    def test_status_shared_vault(self, shared_vault: Path):
+        vault = detect(shared_vault)
+        info = status(vault)
+        assert info["total_docs"] == 1
+        assert info["tiers"]["shared/knowledge"]["docs"] == 1

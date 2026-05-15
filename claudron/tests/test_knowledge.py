@@ -61,6 +61,13 @@ class TestScoring:
         assert top.match_type == "title"
         assert top.score == 100
 
+    def test_lookup_in_shared_vault(self, shared_vault: Path):
+        """Lookup works in vaults using shared/ instead of _shared/."""
+        vault = detect(shared_vault)
+        results = lookup("Testing Guide", vault)
+        assert len(results) >= 1
+        assert results[0].score == 100
+
 
 class TestTiers:
     def test_tier_ordering(self, vault_with_projects: Path):
@@ -209,6 +216,46 @@ class TestFiltering:
         assert len(expired) >= 1
 
 
+class TestScoreMerge:
+    def test_tier_b_merges_with_tier_a(self, vault_dir: Path):
+        """When a doc scores low in Tier A and also matches body, scores merge."""
+        # filename match only → score 30 (below TIER_A_THRESHOLD of 50)
+        (vault_dir / "_shared" / "knowledge" / "caching.md").write_text(
+            dedent("""\
+            ---
+            title: Caching Strategies
+            type: knowledge
+            status: active
+            owner: alex
+            tags: [performance]
+            created: 2026-04-01
+            updated: 2026-05-01
+            ---
+
+            # Caching Strategies
+
+            Use caching for frequently accessed data.
+        """)
+        )
+        vault = detect(vault_dir)
+        # "caching" matches filename (30) in Tier A, and heading (70) in Tier B
+        results = lookup("caching", vault, limit=10)
+        caching_results = [r for r in results if "Caching" in r.doc.title]
+        assert len(caching_results) >= 1
+        # Score should be merged (30 + 70 = 100), not just 30
+        assert caching_results[0].score > 30
+
+
+class TestProjectVisibility:
+    def test_unscoped_lookup_finds_project_docs(self, vault_with_projects: Path):
+        """Tier B body search finds project docs even without --project."""
+        vault = detect(vault_with_projects)
+        # "serverless driver" appears only in the project doc body
+        results = lookup("serverless driver", vault, limit=10)
+        assert len(results) >= 1
+        assert any(r.doc.tier.startswith("project:") for r in results)
+
+
 class TestIndex:
     def test_index_build_and_load(self, vault_dir: Path):
         vault = detect(vault_dir)
@@ -223,6 +270,8 @@ class TestIndex:
     def test_index_stale_detection(self, vault_dir: Path):
         import time
 
+        from claudron.vault import _clear_stale_cache
+
         vault = detect(vault_dir)
         _build_index(vault)
         loaded = _load_index(vault)
@@ -234,5 +283,25 @@ class TestIndex:
             (vault_dir / "_shared" / "knowledge" / "auth-patterns.md").read_text()
             + "\nupdate"
         )
+        _clear_stale_cache()
         loaded = _load_index(vault)
         assert loaded is None  # stale
+
+    def test_index_build_warns_on_unwritable_dir(self, vault_dir: Path):
+        import warnings
+
+        vault = detect(vault_dir)
+        # Make .claudron unwritable
+        claudron_dir = vault_dir / ".claudron"
+        claudron_dir.mkdir(exist_ok=True)
+        claudron_dir.chmod(0o444)
+        try:
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                index = _build_index(vault)
+            # Should warn but still return the index
+            assert len(w) == 1
+            assert "could not write index" in str(w[0].message)
+            assert "entries" in index
+        finally:
+            claudron_dir.chmod(0o755)
