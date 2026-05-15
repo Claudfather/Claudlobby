@@ -22,17 +22,37 @@ from pathlib import Path
 from dataclasses import dataclass
 
 
+def _read_claudron_config(path: Path) -> dict[str, str]:
+    """Read shell-sourceable ``.claudron`` config file at *path*.
+
+    Returns parsed key=value pairs. Returns empty dict if file missing.
+    """
+    result: dict[str, str] = {}
+    if not path.is_file():
+        return result
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+            result[key.strip()] = val.strip()
+    return result
+
+
 @dataclass(frozen=True)
 class Paths:
     """Path resolution. `root` is the claudlobby repo root.
 
     `fleet_dir` is None for root-mode, or `local/<fleet>/` for overlay-mode.
     `seed` is True when operating on the built-in seed fleet (fleet.yaml.seed).
+    `vault_root` is set when a ``.claudron`` config points to a vault.
     """
 
     root: Path
     fleet_dir: Path | None = None
     seed: bool = False
+    vault_root: Path | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.root, Path):
@@ -219,8 +239,9 @@ class Paths:
 
         Marker: a directory containing both `library/` and `lib/`.
 
-        If `fleet` is given, the fleet overlay path is set to
-        `<root>/local/<fleet>/`. The directory must exist.
+        If `fleet` is given, first check ``.claudron`` config at claudlobby root
+        for a vault path. If the vault contains a fleet overlay for *fleet*,
+        use that. Otherwise fall back to ``<root>/local/<fleet>/``.
         """
         start = (hint or Path.cwd()).resolve()
         root = None
@@ -234,11 +255,25 @@ class Paths:
             )
 
         fleet_dir = None
-        if fleet:
-            fleet_dir = root / "local" / fleet
-            if not fleet_dir.is_dir():
-                raise FileNotFoundError(
-                    f"Fleet overlay not found: {fleet_dir} (run `claudlobby new-fleet {fleet}` to scaffold)"
-                )
+        vault_root = None
 
-        return cls(root=root, fleet_dir=fleet_dir)
+        if fleet:
+            # Check .claudron config for vault-based fleet resolution
+            config = _read_claudron_config(root / ".claudron")
+            vault_str = config.get("vault")
+            if vault_str:
+                vault_path = Path(vault_str)
+                vault_fleet = vault_path / fleet
+                if (vault_fleet / "fleet.yaml").is_file():
+                    fleet_dir = vault_fleet
+                    vault_root = vault_path
+
+            # Fall back to local/<fleet>/
+            if fleet_dir is None:
+                fleet_dir = root / "local" / fleet
+                if not fleet_dir.is_dir():
+                    raise FileNotFoundError(
+                        f"Fleet overlay not found: {fleet_dir} (run `claudlobby new-fleet {fleet}` to scaffold)"
+                    )
+
+        return cls(root=root, fleet_dir=fleet_dir, vault_root=vault_root)
