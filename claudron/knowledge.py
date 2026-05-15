@@ -16,12 +16,10 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
 
-if TYPE_CHECKING:
-    from .vault import Vault
+from .vault import Vault, _index_is_stale
 
 # ── data models ───────────────────────────────────────────────────────
 
@@ -189,18 +187,13 @@ def _build_index(vault: "Vault") -> dict:
     return index
 
 
-def _load_index(vault: "Vault") -> dict | None:
+def _load_index(vault: Vault) -> dict | None:
     """Load index if it exists and is fresh. Returns None if stale or missing."""
     index_path = vault.root / ".claudron" / "index.json"
     if not index_path.is_file():
         return None
-    index_mtime = index_path.stat().st_mtime
-    # Check if any .md is newer
-    for md in vault.root.rglob("*.md"):
-        if md.name.startswith("."):
-            continue
-        if md.stat().st_mtime > index_mtime:
-            return None  # stale
+    if _index_is_stale(vault, index_path):
+        return None
     try:
         data = json.loads(index_path.read_text())
         if isinstance(data, dict) and "entries" in data:
@@ -339,8 +332,6 @@ def _is_doc_excluded(
     doc: KnowledgeDoc, include_archived: bool = False, include_expired: bool = False
 ) -> bool:
     """Check exclusion for a parsed KnowledgeDoc (Tier B)."""
-    fm, _ = _parse_frontmatter(doc.body)
-    # Re-parse from original file for accurate frontmatter
     try:
         text = doc.source_path.read_text()
         fm, _ = _parse_frontmatter(text)

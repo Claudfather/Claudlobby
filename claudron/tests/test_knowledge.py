@@ -51,12 +51,15 @@ class TestScoring:
 
     def test_multiword_tokenization(self, vault_dir: Path):
         vault = detect(vault_dir)
-        # "deploy checklist" should match "Deploy Checklist"
-        results = lookup("deploy checklist", vault)
+        # "checklist deploy" is NOT a substring of "Deploy Checklist",
+        # so phrase match fails and multi-word tokenization fires.
+        results = lookup("checklist deploy", vault)
         assert len(results) >= 1
-        assert (
-            "Deploy" in results[0].doc.title or "deploy" in results[0].doc.title.lower()
-        )
+        top = results[0]
+        assert "deploy checklist" in top.doc.title.lower()
+        # Must hit title via token-per-word (score 100 = 2×50), not body
+        assert top.match_type == "title"
+        assert top.score == 100
 
 
 class TestTiers:

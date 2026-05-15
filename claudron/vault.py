@@ -249,6 +249,8 @@ def _index_is_stale(vault: Vault, index_path: Path) -> bool:
     """True if any .md under vault root is newer than the index."""
     index_mtime = index_path.stat().st_mtime
     for md in vault.root.rglob("*.md"):
+        if md.name.startswith("."):
+            continue
         if md.stat().st_mtime > index_mtime:
             return True
     return False
