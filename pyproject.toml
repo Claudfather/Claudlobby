@@ -20,6 +20,7 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 claudlobby = "claudlobby.__main__:main"
+claudron = "claudron.cli:main"
 
 [tool.setuptools]
-packages = ["claudlobby"]
+packages = ["claudlobby", "claudron"]
