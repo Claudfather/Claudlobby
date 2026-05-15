@@ -56,5 +56,8 @@ lib/creds-check-state.json.lock
 # OS
 .DS_Store
 
+# Claudron vault pointer (machine-specific)
+.claudron
+
 # Active fleet config (root mode) — fleet.yaml.example is the canonical template
 fleet.yaml
