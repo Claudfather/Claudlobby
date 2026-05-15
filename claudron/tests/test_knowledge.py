@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from pathlib import Path
 from textwrap import dedent
 
 
-from claudron.vault import detect
+from claudron.vault import SCHEMA_VERSION, _clear_stale_cache, detect
 from claudron.knowledge import (
     _build_index,
     _load_index,
@@ -57,9 +58,9 @@ class TestScoring:
         assert len(results) >= 1
         top = results[0]
         assert "deploy checklist" in top.doc.title.lower()
-        # Must hit title via token-per-word (score 100 = 2×50), not body
+        # Tokens accumulate across match types (#219)
         assert top.match_type == "title"
-        assert top.score == 100
+        assert top.score == 200
 
     def test_lookup_in_shared_vault(self, shared_vault: Path):
         """Lookup works in vaults using shared/ instead of _shared/."""
@@ -219,7 +220,7 @@ class TestFiltering:
 class TestScoreMerge:
     def test_tier_b_merges_with_tier_a(self, vault_dir: Path):
         """When a doc scores low in Tier A and also matches body, scores merge."""
-        # filename match only → score 30 (below TIER_A_THRESHOLD of 50)
+        # filename match only -> score 30 (below TIER_A_THRESHOLD of 50)
         (vault_dir / "_shared" / "knowledge" / "caching.md").write_text(
             dedent("""\
             ---
@@ -270,8 +271,6 @@ class TestIndex:
     def test_index_stale_detection(self, vault_dir: Path):
         import time
 
-        from claudron.vault import _clear_stale_cache
-
         vault = detect(vault_dir)
         _build_index(vault)
         loaded = _load_index(vault)
@@ -305,3 +304,125 @@ class TestIndex:
             assert "entries" in index
         finally:
             claudron_dir.chmod(0o755)
+
+
+class TestSchemaVersion:
+    def test_index_has_schema_version(self, vault_dir: Path):
+        vault = detect(vault_dir)
+        index = _build_index(vault)
+        assert "schema_version" in index
+        assert index["schema_version"] == SCHEMA_VERSION
+
+    def test_stale_schema_triggers_rebuild(self, vault_dir: Path):
+        vault = detect(vault_dir)
+        _build_index(vault)
+        # Tamper with version
+        index_path = vault_dir / ".claudron" / "index.json"
+        data = json.loads(index_path.read_text())
+        data["schema_version"] = 0
+        index_path.write_text(json.dumps(data))
+        loaded = _load_index(vault)
+        assert loaded is None
+
+
+class TestWordBoundary:
+    def test_word_boundary_bonus(self, vault_dir: Path):
+        """Full-word substring matches score higher than partial-word matches."""
+        (vault_dir / "_shared" / "knowledge" / "auth-guide.md").write_text(
+            dedent("""\
+            ---
+            title: Auth Guide
+            tags: [security]
+            ---
+
+            # Auth Guide
+        """)
+        )
+        (vault_dir / "_shared" / "knowledge" / "authentication-methods.md").write_text(
+            dedent("""\
+            ---
+            title: Authentication Methods
+            tags: [security]
+            ---
+
+            # Authentication Methods
+        """)
+        )
+        vault = detect(vault_dir)
+        results = lookup("auth", vault, limit=10)
+        auth_guide = [r for r in results if r.doc.title == "Auth Guide"]
+        auth_methods = [r for r in results if r.doc.title == "Authentication Methods"]
+        assert len(auth_guide) >= 1
+        assert len(auth_methods) >= 1
+        # "auth" is a full word in "Auth Guide" but a prefix in "Authentication Methods"
+        assert auth_guide[0].score > auth_methods[0].score
+
+
+class TestMultiWordAccumulation:
+    def test_tokens_accumulate_across_match_types(self, vault_dir: Path):
+        """Multi-word tokens accumulate scores from title, tag, and filename."""
+        vault = detect(vault_dir)
+        results = lookup("checklist deploy", vault, limit=10)
+        assert len(results) >= 1
+        top = results[0]
+        assert "deploy checklist" in top.doc.title.lower()
+        # With if-chain (#219), tokens accumulate: title + tag + filename
+        assert top.score > 100
+
+
+class TestUnicode:
+    def test_accented_characters(self, vault_dir: Path):
+        (vault_dir / "_shared" / "knowledge" / "cafe-guide.md").write_text(
+            dedent("""\
+            ---
+            title: "Caf\u00e9 Deployment Guide"
+            tags: ["caf\u00e9", deploy]
+            ---
+
+            # Caf\u00e9 Deployment Guide
+
+            D\u00e9ployer le caf\u00e9.
+        """)
+        )
+        vault = detect(vault_dir)
+        results = lookup("caf\u00e9", vault, limit=10)
+        matching = [r for r in results if "Caf\u00e9" in r.doc.title]
+        assert len(matching) >= 1
+
+    def test_cjk_characters(self, vault_dir: Path):
+        (vault_dir / "_shared" / "knowledge" / "db-guide-ja.md").write_text(
+            dedent("""\
+            ---
+            title: "\u30c7\u30fc\u30bf\u30d9\u30fc\u30b9\u30ac\u30a4\u30c9"
+            tags: ["\u30c7\u30fc\u30bf\u30d9\u30fc\u30b9"]
+            ---
+
+            # \u30c7\u30fc\u30bf\u30d9\u30fc\u30b9\u30ac\u30a4\u30c9
+
+            \u30c7\u30fc\u30bf\u30d9\u30fc\u30b9\u306e\u8a2d\u8a08\u30d1\u30bf\u30fc\u30f3\u3002
+        """)
+        )
+        vault = detect(vault_dir)
+        results = lookup("\u30c7\u30fc\u30bf\u30d9\u30fc\u30b9", vault, limit=10)
+        matching = [
+            r for r in results if "\u30c7\u30fc\u30bf\u30d9\u30fc\u30b9" in r.doc.title
+        ]
+        assert len(matching) >= 1
+
+    def test_emoji_in_content(self, vault_dir: Path):
+        (vault_dir / "_shared" / "knowledge" / "security-keys.md").write_text(
+            dedent("""\
+            ---
+            title: Security Key Guide
+            tags: [security]
+            ---
+
+            # Security Key Guide
+
+            Use \U0001f511 keys for authentication.
+        """)
+        )
+        vault = detect(vault_dir)
+        results = lookup("\U0001f511", vault, limit=10)
+        matching = [r for r in results if r.doc.title == "Security Key Guide"]
+        assert len(matching) >= 1

@@ -67,6 +67,29 @@ class TestLookup:
         assert exc_info.value.code == 2
 
 
+class TestIndex:
+    def test_index_builds(self, vault_dir: Path, capsys):
+        rc = main(["--vault", str(vault_dir), "index"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "indexed" in out
+
+    def test_index_full_flag(self, vault_dir: Path, capsys):
+        # First build
+        main(["--vault", str(vault_dir), "index"])
+        capsys.readouterr()  # clear
+        # Second call without --full should say up to date
+        rc = main(["--vault", str(vault_dir), "index"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "up to date" in out
+        # With --full, always rebuilds
+        rc = main(["--vault", str(vault_dir), "index", "--full"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "indexed" in out
+
+
 class TestVersion:
     def test_version_prints_semver(self, capsys):
         rc = main(["version"])
