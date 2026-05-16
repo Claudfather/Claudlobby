@@ -162,7 +162,9 @@ fi
 # start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "set +H; $STARTUP_PROMPT" Enter
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
+    sleep 0.3
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
