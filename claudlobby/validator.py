@@ -263,24 +263,27 @@ def _validate_bots(
                 f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in any tier of .env — bot won't connect to Telegram"
             )
 
-        # Observability config (warn)
+        # Observability config (warn). Fields may be None (= use hardcoded default);
+        # only validate when explicitly set.
         obs = bot.observability
-        if obs.pulse_interval <= 0:
-            report.warnings.append(
-                f"bot '{bot_name}': observability.pulse_interval must be > 0 (got {obs.pulse_interval})"
-            )
-        elif obs.pulse_interval > 3600:
-            report.warnings.append(
-                f"bot '{bot_name}': observability.pulse_interval > 3600s (1h) is unusually long — got {obs.pulse_interval}"
-            )
-        if obs.reap_days <= 0:
-            report.warnings.append(
-                f"bot '{bot_name}': observability.reap_days must be > 0 (got {obs.reap_days})"
-            )
-        elif obs.reap_days > 365:
-            report.warnings.append(
-                f"bot '{bot_name}': observability.reap_days > 365 is unusually long — got {obs.reap_days}"
-            )
+        if obs.pulse_interval is not None:
+            if obs.pulse_interval <= 0:
+                report.warnings.append(
+                    f"bot '{bot_name}': observability.pulse_interval must be > 0 (got {obs.pulse_interval})"
+                )
+            elif obs.pulse_interval > 3600:
+                report.warnings.append(
+                    f"bot '{bot_name}': observability.pulse_interval > 3600s (1h) is unusually long — got {obs.pulse_interval}"
+                )
+        if obs.reap_days is not None:
+            if obs.reap_days <= 0:
+                report.warnings.append(
+                    f"bot '{bot_name}': observability.reap_days must be > 0 (got {obs.reap_days})"
+                )
+            elif obs.reap_days > 365:
+                report.warnings.append(
+                    f"bot '{bot_name}': observability.reap_days > 365 is unusually long — got {obs.reap_days}"
+                )
 
         # Hook command existence (warn)
         for event, entries in bot.hooks.items():

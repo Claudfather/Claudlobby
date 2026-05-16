@@ -57,16 +57,21 @@ class ToolsConfig:
     allow: list[str] = field(default_factory=list)
 
 
+_OBS_DEFAULT_PULSE_INTERVAL = 300
+_OBS_DEFAULT_REAP_DAYS = 7
+
+
 @dataclass
 class ObservabilityConfig:
     """Fleet observability settings — pulse interval and event retention.
 
     Composed into bot.conf as env vars so bot-vitals.sh and fleet-pulse.sh
-    can read them at runtime.
+    can read them at runtime.  Fields use None sentinel so _merge_observability
+    can distinguish "not set" from "explicitly set to the default value".
     """
 
-    pulse_interval: int = 300  # seconds between heartbeat pulses
-    reap_days: int = 7  # days to retain event files before reaping
+    pulse_interval: int | None = None  # seconds between heartbeat pulses
+    reap_days: int | None = None  # days to retain event files before reaping
 
 
 @dataclass
@@ -391,24 +396,33 @@ def _merge_tools(default: ToolsConfig, override: ToolsConfig) -> ToolsConfig:
 def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
     if not raw:
         return ObservabilityConfig()
+    pi = raw.get("pulse_interval")
+    rd = raw.get("reap_days")
     return ObservabilityConfig(
-        pulse_interval=int(raw.get("pulse_interval", 300)),
-        reap_days=int(raw.get("reap_days", 7)),
+        pulse_interval=int(pi) if pi is not None else None,
+        reap_days=int(rd) if rd is not None else None,
     )
 
 
 def _merge_observability(
     default: ObservabilityConfig, override: ObservabilityConfig
 ) -> ObservabilityConfig:
-    """Merge observability — override values win when they differ from defaults."""
-    default_obj = ObservabilityConfig()
+    """Merge observability — override wins when not None, then default, then hardcoded fallback."""
     return ObservabilityConfig(
         pulse_interval=override.pulse_interval
-        if override.pulse_interval != default_obj.pulse_interval
-        else default.pulse_interval,
+        if override.pulse_interval is not None
+        else (
+            default.pulse_interval
+            if default.pulse_interval is not None
+            else _OBS_DEFAULT_PULSE_INTERVAL
+        ),
         reap_days=override.reap_days
-        if override.reap_days != default_obj.reap_days
-        else default.reap_days,
+        if override.reap_days is not None
+        else (
+            default.reap_days
+            if default.reap_days is not None
+            else _OBS_DEFAULT_REAP_DAYS
+        ),
     )
 
 

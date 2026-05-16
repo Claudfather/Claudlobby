@@ -336,3 +336,11 @@ class TestObservabilityConfig:
         bot = _coerce_bot("test", raw, defaults)
         assert bot.observability.pulse_interval == 120  # inherited from defaults
         assert bot.observability.reap_days == 3
+
+    def test_bot_explicit_default_value_not_dropped(self):
+        """Bot explicitly sets pulse_interval to 300 (the hardcoded default) —
+        must not be silently overridden by fleet default of 120."""
+        defaults = {"observability": {"pulse_interval": 120}}
+        raw = {"expertise": ["eng"], "observability": {"pulse_interval": 300}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.observability.pulse_interval == 300  # bot wins, not fleet's 120
