@@ -39,7 +39,7 @@ done
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
-"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" "$MESSAGE"
+"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" "$MESSAGE" || true
 sleep 0.3
 "$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" Enter || true
 
