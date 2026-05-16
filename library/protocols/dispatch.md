@@ -4,11 +4,13 @@ title: Dispatch Protocol
 
 # Dispatch Protocol
 
-Manager → worker via `tmux send-keys -t <worker> '<task prompt>' Enter`.
+Manager → worker via `lib/dispatch.sh <worker-session> <task prompt>`.
 
 Dispatch prompt names: **what** (concrete deliverable), **target** (`--repo <name>`), **constraints** (scope, deadlines, hand-off rules), **reporting expectation** (what `[BOTREPORT]` payload back).
 
-Example: `tmux send-keys -t eng-1 '/lifecycle "Add rate-limit middleware to /api/login" --repo backend' Enter`
+**Always use `lib/dispatch.sh`** — never raw `tmux send-keys ... Enter`. The script splits text and Enter into two calls with a pause between them, preventing a race where Claude Code's TUI swallows keystrokes during render.
+
+Example: `$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '/lifecycle "Add rate-limit middleware to /api/login" --repo backend'`
 
 After dispatch, monitor: capture the worker's pane after ~2-3 min if you haven't heard back. Workers acknowledge in Telegram, go quiet during work, post completion.
 

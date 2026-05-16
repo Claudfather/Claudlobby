@@ -39,7 +39,9 @@ done
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
-"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" "$MESSAGE" Enter || true
+"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" "$MESSAGE"
+sleep 0.3
+"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" Enter || true
 
 # Mirror to fleet-state if helper is present
 _FS=$(dirname "$0")/fleet-state-update.sh
