@@ -395,6 +395,21 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             if val:
                 lines.append(f'export MODEL_STRATEGY_{key.upper()}="{val}"')
 
+    # Observability — pulse interval and event retention
+    from .config import _OBS_DEFAULT_PULSE_INTERVAL, _OBS_DEFAULT_REAP_DAYS
+
+    obs = bot.observability
+    pi = (
+        obs.pulse_interval
+        if obs.pulse_interval is not None
+        else _OBS_DEFAULT_PULSE_INTERVAL
+    )
+    rd = obs.reap_days if obs.reap_days is not None else _OBS_DEFAULT_REAP_DAYS
+    lines.append("")
+    lines.append("# Observability")
+    lines.append(f'export OBSERVABILITY_PULSE_INTERVAL="{pi}"')
+    lines.append(f'export OBSERVABILITY_REAP_DAYS="{rd}"')
+
     # Plugin sync — if fleet declares plugins, enable auto-install on session start
     if fleet.plugins.required:
         lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
@@ -1095,6 +1110,7 @@ def compose_bot(
     (bot_dir / "memory").mkdir(exist_ok=True)
     (bot_dir / "projects").mkdir(exist_ok=True)
     (bot_dir / "data").mkdir(exist_ok=True)
+    (bot_dir / "data" / "events").mkdir(exist_ok=True)
     (bot_dir / "logs").mkdir(exist_ok=True)
 
     (bot_dir / "CLAUDE.md").write_text(compose_claude_md(bot, fleet, paths))

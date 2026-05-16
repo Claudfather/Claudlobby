@@ -1722,3 +1722,76 @@ class TestPluginsSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         assert "enabledPlugins" in result
         assert "extraKnownMarketplaces" not in result
+
+
+class TestComposeBotEventsDir:
+    """compose_bot creates data/events/ directory."""
+
+    def test_events_dir_created(self, tmp_path):
+        from claudlobby.composer import compose_bot
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "templates").mkdir()
+        (root / "templates" / "claude.md.j2").write_text(
+            "# {{ bot.name }}\n\n{{ expertise_body }}\n"
+        )
+        (root / "runtime" / "bots").mkdir(parents=True)
+        (root / "lib").mkdir()
+        (root / "voices").mkdir()
+
+        paths = Paths(root=root, fleet_dir=root)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+
+        bot_dir = compose_bot(bot, fleet, paths, log=lambda m: None)
+
+        assert (bot_dir / "data").is_dir()
+        assert (bot_dir / "data" / "events").is_dir()
+
+
+class TestComposeBotConfObservability:
+    """compose_bot_conf emits OBSERVABILITY_* env vars."""
+
+    def _compose(self, tmp_path, observability=None):
+        from claudlobby.composer import compose_bot_conf
+        from claudlobby.config import ObservabilityConfig
+
+        obs = observability or ObservabilityConfig()
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot"),
+            observability=obs,
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_bot_conf(bot, fleet, paths)
+
+    def test_default_observability_values(self, tmp_path):
+        conf = self._compose(tmp_path)
+        assert 'export OBSERVABILITY_PULSE_INTERVAL="300"' in conf
+        assert 'export OBSERVABILITY_REAP_DAYS="7"' in conf
+
+    def test_custom_observability_values(self, tmp_path):
+        from claudlobby.config import ObservabilityConfig
+
+        obs = ObservabilityConfig(pulse_interval=60, reap_days=14)
+        conf = self._compose(tmp_path, observability=obs)
+        assert 'export OBSERVABILITY_PULSE_INTERVAL="60"' in conf
+        assert 'export OBSERVABILITY_REAP_DAYS="14"' in conf
+
+    def test_observability_section_header(self, tmp_path):
+        conf = self._compose(tmp_path)
+        assert "# Observability" in conf

@@ -57,6 +57,23 @@ class ToolsConfig:
     allow: list[str] = field(default_factory=list)
 
 
+_OBS_DEFAULT_PULSE_INTERVAL = 300
+_OBS_DEFAULT_REAP_DAYS = 7
+
+
+@dataclass
+class ObservabilityConfig:
+    """Fleet observability settings — pulse interval and event retention.
+
+    Composed into bot.conf as env vars so bot-vitals.sh and fleet-pulse.sh
+    can read them at runtime.  Fields use None sentinel so _merge_observability
+    can distinguish "not set" from "explicitly set to the default value".
+    """
+
+    pulse_interval: int | None = None  # seconds between heartbeat pulses
+    reap_days: int | None = None  # days to retain event files before reaping
+
+
 @dataclass
 class SandboxConfig:
     """Sandbox network/filesystem settings → .claude/settings.local.json.
@@ -141,6 +158,7 @@ class BotConfig:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     hooks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     mounts: dict[str, str] = field(default_factory=dict)  # name → absolute host path
     env: dict[str, str] = field(default_factory=dict)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -375,6 +393,39 @@ def _merge_tools(default: ToolsConfig, override: ToolsConfig) -> ToolsConfig:
     )
 
 
+def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
+    if not raw:
+        return ObservabilityConfig()
+    pi = raw.get("pulse_interval")
+    rd = raw.get("reap_days")
+    return ObservabilityConfig(
+        pulse_interval=int(pi) if pi is not None else None,
+        reap_days=int(rd) if rd is not None else None,
+    )
+
+
+def _merge_observability(
+    default: ObservabilityConfig, override: ObservabilityConfig
+) -> ObservabilityConfig:
+    """Merge observability — override wins when not None, then default, then hardcoded fallback."""
+    return ObservabilityConfig(
+        pulse_interval=override.pulse_interval
+        if override.pulse_interval is not None
+        else (
+            default.pulse_interval
+            if default.pulse_interval is not None
+            else _OBS_DEFAULT_PULSE_INTERVAL
+        ),
+        reap_days=override.reap_days
+        if override.reap_days is not None
+        else (
+            default.reap_days
+            if default.reap_days is not None
+            else _OBS_DEFAULT_REAP_DAYS
+        ),
+    )
+
+
 def _coerce_hooks(raw: dict | None) -> dict[str, list[dict[str, Any]]]:
     """Parse hooks from fleet.yaml into {event_name: [hook_entry, ...]}."""
     if not raw or not isinstance(raw, dict):
@@ -470,6 +521,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         hooks=_merge_hooks(
             _coerce_hooks(defaults.get("hooks")),
             _coerce_hooks(raw.get("hooks")),
+        ),
+        observability=_merge_observability(
+            _coerce_observability(defaults.get("observability")),
+            _coerce_observability(raw.get("observability")),
         ),
         mounts={**(defaults.get("mounts") or {}), **(raw.get("mounts") or {})},
         env=raw.get("env", {}) or {},
