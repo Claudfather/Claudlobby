@@ -356,3 +356,112 @@ class TestPluginValidation:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("<org>/<repo> format" in w for w in report.warnings)
+
+
+class TestObservabilityValidation:
+    """Observability config range validation."""
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def test_default_observability_no_warnings(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].bench = True
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("observability" in w for w in report.warnings)
+
+    def test_pulse_interval_zero_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].observability.pulse_interval = 0
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "pulse_interval must be > 0" in w and "lead" in w for w in report.warnings
+        )
+
+    def test_pulse_interval_over_3600_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["worker-1"].observability.pulse_interval = 7200
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "pulse_interval > 3600" in w and "worker-1" in w for w in report.warnings
+        )
+
+    def test_reap_days_zero_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].observability.reap_days = 0
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "reap_days must be > 0" in w and "lead" in w for w in report.warnings
+        )
+
+    def test_reap_days_over_365_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["worker-1"].observability.reap_days = 500
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("reap_days > 365" in w and "worker-1" in w for w in report.warnings)
+
+
+class TestHookCommandValidation:
+    """Hook command path existence validation."""
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def test_absolute_missing_command_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].hooks = {
+            "PreToolUse": [{"command": "/nonexistent/path/hook.sh"}],
+        }
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "hook" in w and "/nonexistent/path/hook.sh" in w for w in report.warnings
+        )
+
+    def test_relative_command_not_checked(self, fleet_dir, monkeypatch):
+        """Relative commands (like 'log.sh') are not validated — may be on PATH."""
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].hooks = {
+            "PostToolUse": [{"command": "log.sh", "matcher": "Bash"}],
+        }
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("hook" in w and "log.sh" in w for w in report.warnings)
+
+    def test_existing_absolute_command_no_warn(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        # /bin/true exists on all Unix systems
+        fleet.bots["lead"].hooks = {
+            "PreToolUse": [{"command": "/bin/true"}],
+        }
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("hook" in w and "/bin/true" in w for w in report.warnings)
+
+    def test_prompt_type_hooks_skip_command_check(self, fleet_dir, monkeypatch):
+        """Hooks with type: prompt don't have file-based commands."""
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].hooks = {
+            "PreToolUse": [{"type": "prompt", "prompt": "Is this safe?"}],
+        }
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("hook" in w and "not found" in w for w in report.warnings)

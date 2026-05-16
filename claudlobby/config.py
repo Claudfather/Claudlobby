@@ -58,6 +58,18 @@ class ToolsConfig:
 
 
 @dataclass
+class ObservabilityConfig:
+    """Fleet observability settings — pulse interval and event retention.
+
+    Composed into bot.conf as env vars so bot-vitals.sh and fleet-pulse.sh
+    can read them at runtime.
+    """
+
+    pulse_interval: int = 300  # seconds between heartbeat pulses
+    reap_days: int = 7  # days to retain event files before reaping
+
+
+@dataclass
 class SandboxConfig:
     """Sandbox network/filesystem settings → .claude/settings.local.json.
 
@@ -141,6 +153,7 @@ class BotConfig:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     hooks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     mounts: dict[str, str] = field(default_factory=dict)  # name → absolute host path
     env: dict[str, str] = field(default_factory=dict)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -375,6 +388,30 @@ def _merge_tools(default: ToolsConfig, override: ToolsConfig) -> ToolsConfig:
     )
 
 
+def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
+    if not raw:
+        return ObservabilityConfig()
+    return ObservabilityConfig(
+        pulse_interval=int(raw.get("pulse_interval", 300)),
+        reap_days=int(raw.get("reap_days", 7)),
+    )
+
+
+def _merge_observability(
+    default: ObservabilityConfig, override: ObservabilityConfig
+) -> ObservabilityConfig:
+    """Merge observability — override values win when they differ from defaults."""
+    default_obj = ObservabilityConfig()
+    return ObservabilityConfig(
+        pulse_interval=override.pulse_interval
+        if override.pulse_interval != default_obj.pulse_interval
+        else default.pulse_interval,
+        reap_days=override.reap_days
+        if override.reap_days != default_obj.reap_days
+        else default.reap_days,
+    )
+
+
 def _coerce_hooks(raw: dict | None) -> dict[str, list[dict[str, Any]]]:
     """Parse hooks from fleet.yaml into {event_name: [hook_entry, ...]}."""
     if not raw or not isinstance(raw, dict):
@@ -470,6 +507,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         hooks=_merge_hooks(
             _coerce_hooks(defaults.get("hooks")),
             _coerce_hooks(raw.get("hooks")),
+        ),
+        observability=_merge_observability(
+            _coerce_observability(defaults.get("observability")),
+            _coerce_observability(raw.get("observability")),
         ),
         mounts={**(defaults.get("mounts") or {}), **(raw.get("mounts") or {})},
         env=raw.get("env", {}) or {},

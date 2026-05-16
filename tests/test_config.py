@@ -300,3 +300,39 @@ class TestLoadFleet:
         (tmp_path / "bad.yaml").write_text("not_fleet:\n  key: val\n")
         with pytest.raises(ValueError, match="'fleet' missing"):
             load_fleet(tmp_path / "bad.yaml")
+
+
+class TestObservabilityConfig:
+    def test_defaults(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+        assert bot.observability.pulse_interval == 300
+        assert bot.observability.reap_days == 7
+
+    def test_from_bot(self):
+        raw = {
+            "expertise": ["eng"],
+            "observability": {"pulse_interval": 60, "reap_days": 14},
+        }
+        bot = _coerce_bot("test", raw, {})
+        assert bot.observability.pulse_interval == 60
+        assert bot.observability.reap_days == 14
+
+    def test_from_defaults(self):
+        defaults = {"observability": {"pulse_interval": 120, "reap_days": 30}}
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, defaults)
+        assert bot.observability.pulse_interval == 120
+        assert bot.observability.reap_days == 30
+
+    def test_bot_overrides_defaults(self):
+        defaults = {"observability": {"pulse_interval": 120, "reap_days": 30}}
+        raw = {"expertise": ["eng"], "observability": {"pulse_interval": 60}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.observability.pulse_interval == 60
+        assert bot.observability.reap_days == 30  # inherited from defaults
+
+    def test_partial_bot_inherits_defaults(self):
+        defaults = {"observability": {"pulse_interval": 120, "reap_days": 30}}
+        raw = {"expertise": ["eng"], "observability": {"reap_days": 3}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.observability.pulse_interval == 120  # inherited from defaults
+        assert bot.observability.reap_days == 3
