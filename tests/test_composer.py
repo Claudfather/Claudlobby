@@ -1795,3 +1795,149 @@ class TestComposeBotConfObservability:
     def test_observability_section_header(self, tmp_path):
         conf = self._compose(tmp_path)
         assert "# Observability" in conf
+
+
+class TestComposePermissions:
+    """compose_claude_md renders library/permissions/ into CLAUDE.md."""
+
+    def _setup(self, tmp_path, permissions_files: dict[str, str]):
+        from claudlobby.composer import compose_claude_md
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        perm_dir = root / "library" / "permissions"
+        perm_dir.mkdir(parents=True)
+        for name, content in permissions_files.items():
+            (perm_dir / f"{name}.md").write_text(content)
+        (root / "templates").mkdir()
+        import shutil
+
+        shutil.copy(
+            Path(__file__).parent.parent / "templates" / "claude.md.j2",
+            root / "templates" / "claude.md.j2",
+        )
+        (root / "runtime" / "bots").mkdir(parents=True)
+        (root / "voices").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_claude_md, paths
+
+    def test_permissions_rendered_in_claude_md(self, tmp_path):
+        compose_claude_md, paths = self._setup(
+            tmp_path,
+            {
+                "read-only-db": "---\ntitle: Read-only database access\ndescription: Restrict to SELECT only\n---\n\n# Read-only database access\n\nNever run INSERT, UPDATE, or DELETE.\n",
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            permissions=["read-only-db"],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_claude_md(bot, fleet, paths)
+        assert "## Permissions" in result
+        assert "### Read-only database access" in result
+        assert "Never run INSERT, UPDATE, or DELETE." in result
+
+    def test_empty_permissions_omits_section(self, tmp_path):
+        compose_claude_md, paths = self._setup(tmp_path, {})
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_claude_md(bot, fleet, paths)
+        assert "## Permissions" not in result
+
+    def test_multiple_permissions_rendered(self, tmp_path):
+        compose_claude_md, paths = self._setup(
+            tmp_path,
+            {
+                "no-delete": "---\ntitle: No destructive writes\ndescription: No DELETE or DROP\n---\n\n# No destructive writes\n\nNever DELETE or DROP.\n",
+                "prod-readonly": "---\ntitle: Production read-only\ndescription: No writes to prod\n---\n\n# Production read-only\n\nProd is read-only.\n",
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            permissions=["no-delete", "prod-readonly"],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_claude_md(bot, fleet, paths)
+        assert "### No destructive writes" in result
+        assert "### Production read-only" in result
+
+
+class TestJinja2Sandbox:
+    """Jinja2 sandbox blocks SSTI payloads in startup_prompt and template rendering."""
+
+    def test_render_startup_prompt_allows_documented_variables(self):
+        from claudlobby.composer import _render_startup_prompt
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="Worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot"),
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        prompt = "Hello {{ bot_name }} on {{ fleet_name }}, id={{ bot_id }}"
+        result = _render_startup_prompt(prompt, bot, fleet)
+        assert result == "Hello Worker on test-fleet, id=worker"
+
+    def test_render_startup_prompt_blocks_class_traversal(self):
+        import pytest
+        from jinja2.sandbox import SecurityError
+        from claudlobby.composer import _render_startup_prompt
+
+        bot = BotConfig(bot_id="evil", name="evil", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p")
+        prompt = "{{ ''.__class__.__mro__[1].__subclasses__() }}"
+        with pytest.raises(SecurityError):
+            _render_startup_prompt(prompt, bot, fleet)
+
+    def test_render_startup_prompt_blocks_subclass_walk(self):
+        import pytest
+        from jinja2.sandbox import SecurityError
+        from claudlobby.composer import _render_startup_prompt
+
+        bot = BotConfig(bot_id="evil", name="evil", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p")
+        # Attempt to walk from str -> object -> subclasses to find Popen
+        prompt = "{{ ''.__class__.__mro__[1].__subclasses__()[100] }}"
+        with pytest.raises(SecurityError):
+            _render_startup_prompt(prompt, bot, fleet)
+
+    def test_build_jinja_env_is_sandboxed(self, tmp_path):
+        from jinja2.sandbox import SandboxedEnvironment
+        from claudlobby.composer import _build_jinja_env
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "templates").mkdir()
+        (root / "templates" / "claude.md.j2").write_text("{{ bot.name }}")
+        paths = Paths(root=root, fleet_dir=root)
+        env = _build_jinja_env(paths)
+        assert isinstance(env, SandboxedEnvironment)
+
+    def test_build_jinja_env_blocks_ssti_in_template(self, tmp_path):
+        import pytest
+        from jinja2.sandbox import SecurityError
+        from claudlobby.composer import _build_jinja_env
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "templates").mkdir()
+        (root / "templates" / "evil.j2").write_text(
+            "{{ ''.__class__.__mro__[1].__subclasses__() }}"
+        )
+        paths = Paths(root=root, fleet_dir=root)
+        env = _build_jinja_env(paths)
+        tmpl = env.get_template("evil.j2")
+        with pytest.raises(SecurityError):
+            tmpl.render()

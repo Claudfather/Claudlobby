@@ -29,6 +29,7 @@ fleet:
     resources: [<list>]
     lessons: [<list>]
     principles: [<list>]
+    permissions: [<list>]
     post_actions: [<list>]
     mission: <string>
     scope: { ... }
@@ -84,6 +85,7 @@ fleet:
       resources: [<list>]
       lessons: [<list>]
       principles: [<list>]
+      permissions: [<list>]
       post_actions: [<list>]
       env: { <KEY>: <value>, ... }      # bot-specific env exports (merged into bot.conf)
       tools:                            # OPTIONAL — tool allow/deny
