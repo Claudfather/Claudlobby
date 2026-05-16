@@ -75,7 +75,7 @@ mcp__plugin_telegram_telegram__reply(chat_id=$TELEGRAM_GROUP_CHAT_ID, text="On i
 Report-back:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh progress "Acked: <summary>"
+$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> progress "Acked: <summary>"
 ```
 
 **This step happens BEFORE any other tool call.** Before reading files, before spawning subagents, before git operations. The ack is the first thing.
@@ -144,7 +144,7 @@ Done: <one-line summary>. PR: <url>
 Report-back:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh completed "<summary>" --pr <pr-url>
+$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> completed "<summary>" --pr <pr-url>
 ```
 
 ### Step 9: BLOCKED (any point)
@@ -161,7 +161,7 @@ Blocked: <what's wrong and what you tried>
 Report-back:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh blocked "<reason>"
+$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> blocked "<reason>"
 ```
 
 Then stop. Do not attempt workarounds that might cause damage. Wait for guidance.
@@ -176,9 +176,9 @@ Concretely: if your expertise says "Step 1: Read the PR description" — that ru
 
 | Moment | Telegram | [BOTREPORT] |
 |--------|----------|-------------|
-| Task received | "On it: ..." | `progress "Acked: ..."` |
+| Task received | "On it: ..." | `<bot-name> progress "Acked: ..."` |
 | Planning start (if applicable) | "Planning: ..." | — |
 | Every 2-3 min during work | One-line milestone | — |
-| Scope surprise | "Scope note: ..." | `progress "Scope: ..."` |
-| Completion | "Done: ... PR: <url>" | `completed "<summary>" --pr <url>` |
-| Blocked | "Blocked: ..." | `blocked "<reason>"` |
+| Scope surprise | "Scope note: ..." | `<bot-name> progress "Scope: ..."` |
+| Completion | "Done: ... PR: <url>" | `<bot-name> completed "<summary>" --pr <url>` |
+| Blocked | "Blocked: ..." | `<bot-name> blocked "<reason>"` |
