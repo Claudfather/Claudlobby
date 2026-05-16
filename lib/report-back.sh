@@ -14,7 +14,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
-MANAGER_SESSION="${MANAGER_BOT_NAME:-claude-bot}"  # Override in bot.conf if needed
+MANAGER_SESSION="${MANAGER_TMUX:-claude-bot}"
 BOT="$1"
 STATUS="$2"
 SUMMARY="$3"
