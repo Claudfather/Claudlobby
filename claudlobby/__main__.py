@@ -220,8 +220,8 @@ def cmd_list_library(args) -> int:
     _list_md("Expertise", "expertise")
 
     log.info("MCP fragments (base only):")
-    if paths.mcp.is_dir():
-        for p in sorted(paths.mcp.glob("*.json")):
+    if paths.base_mcp.is_dir():
+        for p in sorted(paths.base_mcp.glob("*.json")):
             log.info("  %s", p.stem)
 
     _list_md("Integrations", "integrations")
