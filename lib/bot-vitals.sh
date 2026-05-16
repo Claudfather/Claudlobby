@@ -5,7 +5,9 @@
 # the bot's data/events/fleet-YYYY-MM-DD.jsonl. Works as both
 # PreToolUse and PostToolUse hook.
 #
-# Captures: tool_call, mcp_error, context_warning, rate_limit, session events.
+# Captures: tool_call, mcp_error, session events.
+# NOTE: context_warning and rate_limit are NOT available via the Claude Code
+# hook payload (PreToolUse/PostToolUse). Managers must use live checks for those.
 # Reaps event files older than 7 days on each invocation.
 #
 # Supersedes the older log-tool-call.sh reference hook.
@@ -79,19 +81,9 @@ if tool:
 if error and 'mcp' in tool.lower():
     evt('mcp_error', {'server': tool, 'error': str(error)[:500]})
 
-# Context warnings — look for context_window_percent in payload
-ctx_pct = p.get('context_window_percent')
-if ctx_pct is not None:
-    try:
-        pct = int(ctx_pct)
-        if pct >= 50:
-            evt('context_warning', {'pct': pct})
-    except (ValueError, TypeError):
-        pass
-
-# Rate limit detection
-if 'rate_limit' in str(error).lower() or p.get('rate_limited'):
-    evt('rate_limit', {'tool': tool, 'error': str(error)[:500]})
+# NOTE: context_warning and rate_limit are not available in the hook payload.
+# The PreToolUse/PostToolUse schema does not include context_window_percent
+# or rate_limited fields. Managers must use live checks for these signals.
 
 # Session events (start, stop, etc.)
 session_event = p.get('session_event')

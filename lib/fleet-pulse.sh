@@ -92,7 +92,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
                     now_epoch=$(date +%s)
                     elapsed=$(( now_epoch - prev_ts ))
                     if [ "$elapsed" -ge 300 ]; then
-                        emit_event "$bot_dir" "$bot_id" "pane_stuck" '{"unchanged_since":"'"$prev_ts"'","elapsed_seconds":'"$elapsed"'}'
+                        emit_event "$bot_dir" "$bot_id" "pane_stuck" '{"unchanged_since_epoch":'"$prev_ts"',"elapsed_seconds":'"$elapsed"'}'
                     fi
                 else
                     # Hash changed — update timestamp

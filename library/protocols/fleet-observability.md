@@ -59,14 +59,14 @@ Read bot event logs at these natural decision points — not continuously, not o
 
 | Event type | Source | Manager action |
 |------------|--------|---------------|
-| `context_warning` (>60%) | vitals | Restart worker before next dispatch (reviewers) or flag for handoff (engineers with WIP) |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck |
 | `mcp_error` | vitals | Attempt MCP server reconnect; flag human if persistent (>3 in 30 min) |
 | `service_down` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `session_missing` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. Check for staleness instead. |
-| `rate_limit` | vitals | Pause fleet dispatch, schedule wakeup after rate limit window resets |
 | `session_event` | vitals | Informational — log awareness of session lifecycle |
+
+**Not yet captured via hooks:** `context_warning` and `rate_limit` are not available in the Claude Code PreToolUse/PostToolUse hook payload. Managers must continue using live checks (capture-pane, direct query) for context percentage and rate limit status until these signals become available in the hook schema.
 
 ## Reading Events
 
@@ -85,7 +85,7 @@ done
 Filter for actionable events:
 
 ```bash
-grep -h '"type":"context_warning"\|"type":"pane_stuck"\|"type":"service_down"\|"type":"session_missing"\|"type":"mcp_error"\|"type":"rate_limit"' \
+grep -Eh '"type":"pane_stuck"|"type":"service_down"|"type":"session_missing"|"type":"mcp_error"' \
     "$bot_dir/data/events/fleet-${today}.jsonl" 2>/dev/null
 ```
 
