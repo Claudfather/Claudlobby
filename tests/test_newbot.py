@@ -13,6 +13,7 @@ from claudlobby.newbot import (
     insert_bot_stanza,
     _add_to_team,
     maybe_create_voice,
+    interactive_collect,
     write_token_to_env,
 )
 from claudlobby.paths import Paths
@@ -268,6 +269,50 @@ class TestMaybeCreateVoice:
     def test_none_when_no_voice(self, tmp_path):
         paths = Paths(root=tmp_path)
         assert maybe_create_voice(paths, "bot", None, None) is None
+
+
+def test_interactive_collect_lists_public_base_expertise_only(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    (root / "library" / "expertise").mkdir(parents=True)
+    (root / "library" / "expertise" / "base-engineering.md").write_text("base")
+    (root / "local" / "fleet-a" / "library" / "expertise").mkdir(parents=True)
+    (root / "local" / "fleet-a" / "library" / "expertise" / "overlay-only.md").write_text("overlay")
+    paths = Paths(root=root, fleet_dir=root / "local" / "fleet-a")
+    answers = iter(
+        [
+            "bot-a",
+            "1",
+            "3",
+            "",
+            "",
+            "",
+            "",
+            "none",
+            "none",
+            "none",
+            "none",
+            "none",
+            "none",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "n",
+            "",
+        ]
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    result = interactive_collect(paths)
+
+    output = capsys.readouterr().out
+    assert "base-engineering" in output
+    assert "overlay-only" not in output
+    assert result.expertise == ["base-engineering"]
 
 
 # ---------------------------------------------------------------------------

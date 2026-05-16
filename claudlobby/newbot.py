@@ -274,7 +274,7 @@ def maybe_create_voice(
     if voice_arg:
         return voice_arg
     if voice_text:
-        voice_path = paths.voices / f"{name}.md"
+        voice_path = paths.base_voices / f"{name}.md"
         voice_path.parent.mkdir(parents=True, exist_ok=True)
         voice_path.write_text(
             f"---\nname: {name.title()}\n---\n\n{voice_text.strip()}\n"
@@ -390,7 +390,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
 
     expertise = _ask_pick(
         "Expertise areas (which library/expertise/<name>.md files to compose):",
-        _list_dir(paths.expertise),
+        _list_dir(paths.base_expertise),
         multi=True,
     )
     if not expertise:
@@ -407,8 +407,8 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     choice = _ask("Choice (1/2/3)", default="3")
     if choice == "1":
         existing = (
-            sorted(p.relative_to(paths.root) for p in paths.voices.rglob("*.md"))
-            if paths.voices.is_dir()
+            sorted(p.relative_to(paths.root) for p in paths.base_voices.rglob("*.md"))
+            if paths.base_voices.is_dir()
             else []
         )
         existing_names = [str(p) for p in existing]
@@ -438,12 +438,12 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
     account = _ask("Account key (default/work/etc)", default="default")
 
     print()
-    mcp = _ask_pick("MCP servers:", _list_dir(paths.mcp, ".json"))
-    skills = _ask_pick("Skills:", _list_skills(paths.skills))
-    guardrails = _ask_pick("Guardrails:", _list_dir(paths.guardrails))
-    protocols = _ask_pick("Protocols:", _list_dir(paths.protocols))
-    resources = _ask_pick("Resources:", _list_dir(paths.resources))
-    lessons = _ask_pick("Lessons:", _list_dir(paths.lessons))
+    mcp = _ask_pick("MCP servers:", _list_dir(paths.base_mcp, ".json"))
+    skills = _ask_pick("Skills:", _list_skills(paths.base_skills))
+    guardrails = _ask_pick("Guardrails:", _list_dir(paths.base_guardrails))
+    protocols = _ask_pick("Protocols:", _list_dir(paths.base_protocols))
+    resources = _ask_pick("Resources:", _list_dir(paths.base_resources))
+    lessons = _ask_pick("Lessons:", _list_dir(paths.base_lessons))
 
     print()
     remote_control = _ask_yn("--remote-control?", default=True)

@@ -59,10 +59,48 @@ class Paths:
             object.__setattr__(self, "root", Path(self.root))
 
     # --- public base (always at repo root) ---
+    # Use these for callers, such as new-bot scaffolding, that intentionally
+    # want public-base-only lookup instead of overlay-merged content.
 
     @property
     def base_library(self) -> Path:
         return self.root / "library"
+
+    @property
+    def base_expertise(self) -> Path:
+        return self.base_library / "expertise"
+
+    @property
+    def base_skills(self) -> Path:
+        return self.base_library / "skills"
+
+    @property
+    def base_mcp(self) -> Path:
+        return self.base_library / "mcp"
+
+    @property
+    def base_integrations(self) -> Path:
+        return self.base_library / "integrations"
+
+    @property
+    def base_guardrails(self) -> Path:
+        return self.base_library / "guardrails"
+
+    @property
+    def base_protocols(self) -> Path:
+        return self.base_library / "protocols"
+
+    @property
+    def base_resources(self) -> Path:
+        return self.base_library / "resources"
+
+    @property
+    def base_lessons(self) -> Path:
+        return self.base_library / "lessons"
+
+    @property
+    def base_post_actions(self) -> Path:
+        return self.base_library / "post_actions"
 
     @property
     def base_voices(self) -> Path:
@@ -132,58 +170,6 @@ class Paths:
             if c.is_file():
                 return c
         return None
-
-    # --- legacy single-dir properties (for code that doesn't yet handle overlay) ---
-    # These now refer to the BASE library only. New code should use
-    # find_library_file / library_search_dirs / find_skill_dir.
-
-    @property
-    def library(self) -> Path:
-        return self.base_library
-
-    @property
-    def expertise(self) -> Path:
-        return self.base_library / "expertise"
-
-    @property
-    def skills(self) -> Path:
-        return self.base_library / "skills"
-
-    @property
-    def mcp(self) -> Path:
-        return self.base_library / "mcp"
-
-    @property
-    def integrations(self) -> Path:
-        return self.base_library / "integrations"
-
-    @property
-    def guardrails(self) -> Path:
-        return self.base_library / "guardrails"
-
-    @property
-    def principles(self) -> Path:
-        return self.base_library / "principles"
-
-    @property
-    def protocols(self) -> Path:
-        return self.base_library / "protocols"
-
-    @property
-    def resources(self) -> Path:
-        return self.base_library / "resources"
-
-    @property
-    def lessons(self) -> Path:
-        return self.base_library / "lessons"
-
-    @property
-    def post_actions(self) -> Path:
-        return self.base_library / "post_actions"
-
-    @property
-    def voices(self) -> Path:
-        return self.base_voices
 
     # --- shared documentation ---
 
