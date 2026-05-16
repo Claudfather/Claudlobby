@@ -17,6 +17,7 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 
 import jinja2
+from jinja2.sandbox import SandboxedEnvironment
 
 from . import dotenv
 from .config import BotConfig, FleetConfig
@@ -123,7 +124,7 @@ def _build_jinja_env(paths: Paths) -> jinja2.Environment:
     if paths.fleet_dir and (paths.fleet_dir / "templates").is_dir():
         search.append(str(paths.fleet_dir / "templates"))
     search.append(str(paths.root / "templates"))
-    env = jinja2.Environment(
+    env = SandboxedEnvironment(
         loader=jinja2.FileSystemLoader(search),
         autoescape=False,
         trim_blocks=False,
@@ -462,7 +463,8 @@ def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> s
     Lets fleet.yaml authors stop hand-duplicating identifiers — e.g.
     chat_id literals that already live in fleet.telegram_group_chat_id.
     """
-    return jinja2.Template(prompt).render(
+    env = SandboxedEnvironment()
+    return env.from_string(prompt).render(
         bot_id=bot.bot_id,
         bot_name=bot.name,
         fleet_name=fleet.name,
@@ -785,6 +787,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         resources=_items(bot.resources, "resources"),
         integrations=_items(integration_names, "integrations"),
         principles=_items(bot.principles, "principles"),
+        permissions=_items(bot.permissions, "permissions"),
         protocols=_items(protocol_names, "protocols"),
         guardrails=_items(bot.guardrails, "guardrails"),
         lessons=_items(bot.lessons, "lessons"),

@@ -152,6 +152,7 @@ class BotConfig:
     guardrails: list[str] = field(default_factory=list)
     protocols: list[str] = field(default_factory=list)
     principles: list[str] = field(default_factory=list)
+    permissions: list[str] = field(default_factory=list)
     resources: list[str] = field(default_factory=list)
     lessons: list[str] = field(default_factory=list)
     post_actions: list[str] = field(default_factory=list)
@@ -505,6 +506,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         guardrails=_merge_lists(defaults.get("guardrails"), raw.get("guardrails")),
         protocols=_merge_lists(defaults.get("protocols"), raw.get("protocols")),
         principles=_merge_lists(defaults.get("principles"), raw.get("principles")),
+        permissions=_merge_lists(defaults.get("permissions"), raw.get("permissions")),
         resources=_merge_lists(defaults.get("resources"), raw.get("resources")),
         lessons=_merge_lists(defaults.get("lessons"), raw.get("lessons")),
         post_actions=_merge_lists(

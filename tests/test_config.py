@@ -188,6 +188,21 @@ class TestCoerceBot:
         bot = _coerce_bot("test", raw, defaults)
         assert bot.guardrails == ["a", "b", "c"]
 
+    def test_permissions_from_bot(self):
+        raw = {"expertise": ["eng"], "permissions": ["read-only-db", "no-delete"]}
+        bot = _coerce_bot("test", raw, {})
+        assert bot.permissions == ["read-only-db", "no-delete"]
+
+    def test_permissions_merge_with_defaults(self):
+        defaults = {"permissions": ["read-only-db"]}
+        raw = {"expertise": ["eng"], "permissions": ["no-delete"]}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.permissions == ["read-only-db", "no-delete"]
+
+    def test_permissions_default_empty(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+        assert bot.permissions == []
+
     def test_bot_id_defaults_to_key(self):
         bot = _coerce_bot("greg", {"expertise": ["eng"]}, {})
         assert bot.bot_id == "greg"
