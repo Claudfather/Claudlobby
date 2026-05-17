@@ -494,6 +494,32 @@ class TestComposeBotConfModelStrategy:
         assert "# Model strategy" in conf
 
 
+class TestComposeBotConfExportedVars:
+    """bot.conf must export BOT_ID so hook subprocesses (bot-vitals.sh) can read it."""
+
+    def test_bot_id_is_exported(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = BotConfig(
+            bot_id="astrid",
+            name="astrid",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot"),
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "astrid").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert 'export BOT_ID="astrid"' in conf
+
+
 class TestComposeHooks:
     """_compose_hooks transforms flat fleet.yaml entries into Claude Code format."""
 
