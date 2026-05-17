@@ -11,12 +11,18 @@ Dispatch prompt names: **what** (concrete deliverable), **target** (`--repo <nam
 **Use two-step send-keys** — split text and Enter into separate calls with a short pause to prevent a race where Claude Code's TUI swallows keystrokes during render:
 
 ```bash
-tmux send-keys -t <worker> '<task prompt>'
+tmux send-keys -t <worker> "set +H; <task prompt>"
 sleep 0.3
 tmux send-keys -t <worker> Enter
 ```
 
-Example: `tmux send-keys -t eng-1 '/lifecycle "Add rate-limit middleware to /api/login" --repo backend' && sleep 0.3 && tmux send-keys -t eng-1 Enter`
+Example:
+
+```bash
+tmux send-keys -t eng-1 "set +H; /lifecycle 'Add rate-limit middleware' --repo backend"
+sleep 0.3
+tmux send-keys -t eng-1 Enter
+```
 
 After dispatch, monitor: capture the worker's pane after ~2-3 min if you haven't heard back. Workers acknowledge in Telegram, go quiet during work, post completion.
 
