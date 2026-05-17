@@ -411,6 +411,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append(f'export OBSERVABILITY_PULSE_INTERVAL="{pi}"')
     lines.append(f'export OBSERVABILITY_REAP_DAYS="{rd}"')
 
+    # Ecosystem — clauDNA version pin, Claudron vault, Claudosseum tenant
+    if bot.claudna_version or bot.claudron_vault_path or bot.claudosseum_tenant_id:
+        lines.append("")
+        lines.append("# Ecosystem")
+        if bot.claudna_version:
+            lines.append(f'export CLAUDNA_VERSION="{bot.claudna_version}"')
+        if bot.claudron_vault_path:
+            lines.append(f'export CLAUDRON_VAULT_PATH="{bot.claudron_vault_path}"')
+        if bot.claudosseum_tenant_id:
+            lines.append(f'export CLAUDOSSEUM_TENANT_ID="{bot.claudosseum_tenant_id}"')
+
     # Plugin sync — if fleet declares plugins, enable auto-install on session start
     if fleet.plugins.required:
         lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')

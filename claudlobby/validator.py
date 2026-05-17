@@ -297,6 +297,15 @@ def _validate_bots(
                         f"bot '{bot_name}': hook {event} command '{cmd}' not found on disk"
                     )
 
+        # Ecosystem: claudron_vault_path without Claudron MCP (warn)
+        if bot.claudron_vault_path:
+            has_claudron_mcp = any(entry.name == "claudron" for entry in bot.mcp)
+            if not has_claudron_mcp:
+                report.warnings.append(
+                    f"bot '{bot_name}': claudron_vault_path is set but no 'claudron' MCP server is configured — "
+                    "the vault path won't be used without the Claudron MCP server"
+                )
+
         # Account (warn)
         if bot.account not in fleet.accounts:
             report.warnings.append(

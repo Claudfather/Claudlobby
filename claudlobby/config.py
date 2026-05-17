@@ -165,6 +165,10 @@ class BotConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     startup_prompt: str | None = None
     bench: bool = False  # marks the bot as the fleet's benchmarking target
+    # Ecosystem-aware fields — optional integration with clauDNA, Claudron, Claudosseum
+    claudna_version: str | None = None
+    claudron_vault_path: str | None = None
+    claudosseum_tenant_id: str | None = None
 
 
 @dataclass
@@ -538,6 +542,11 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         ),
         startup_prompt=raw.get("startup_prompt"),
         bench=_bool("bench", False),
+        claudna_version=raw.get("claudna_version") or defaults.get("claudna_version"),
+        claudron_vault_path=raw.get("claudron_vault_path")
+        or defaults.get("claudron_vault_path"),
+        claudosseum_tenant_id=raw.get("claudosseum_tenant_id")
+        or defaults.get("claudosseum_tenant_id"),
     )
 
 
