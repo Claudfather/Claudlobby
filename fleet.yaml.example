@@ -68,18 +68,20 @@ fleet:
     # Fleet defaults are merged with per-bot hooks (bot entries appended after defaults).
     # Format mirrors Claude Code's hooks schema — see https://docs.anthropic.com/en/docs/claude-code/hooks
     #
-    # hooks:
-    #   PreToolUse:
-    #     - command: "$CLAUDLOBBY_ROOT/lib/log-tool-call.sh"    # log all tool calls
-    #   PostToolUse:
-    #     - command: "$CLAUDLOBBY_ROOT/lib/log-tool-call.sh"    # log tool results
-    #
     # Supported fields per hook entry:
     #   command    — shell command to run (required for type: command)
     #   matcher    — tool name filter: "Bash", "Write|Edit", "mcp__.*", or omit for all
     #   type       — hook type: command (default), http, prompt, agent
     #   timeout    — seconds before timeout (default: 600 for command)
     #   async      — run in background without blocking (default: false)
+    hooks:
+      PreToolUse:
+        - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"      # emit tool-call events to data/events/
+      PostToolUse:
+        - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"      # emit tool-result events to data/events/
+    observability:
+      pulse_interval: 300    # fleet-pulse.sh cron interval (seconds)
+      reap_days: 7           # auto-delete event files older than N days
 
   teams:
     engineering:
