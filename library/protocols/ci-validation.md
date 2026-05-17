@@ -15,11 +15,24 @@ Before executing any merge, the manager **must** check CI status:
 gh pr checks <PR_NUMBER> --repo <owner>/<repo> --json name,state,conclusion
 ```
 
+**Determining required checks:**
+
+All checks returned by `gh pr checks` are treated as required by default. If the repo has branch protection rules with explicit required status checks, query them:
+
+```bash
+gh api repos/<owner>/<repo>/branches/main/protection/required_status_checks --jq '.contexts[]'
+```
+
+If the endpoint returns checks, only those are required — others are informational. If it 404s (no branch protection), treat all checks as required. This is slightly over-conservative but unambiguous.
+
 **Gate logic:**
 
-- All required checks `conclusion: "success"` �� proceed to merge
-- Any required check `state: "pending"` or `state: "queued"` → wait and re-check in 60s (max 3 polls)
+- All required checks `conclusion: "success"` or `conclusion: "skipped"` → proceed to merge
+- `conclusion: "neutral"` → treat as pass (non-blocking informational workflow)
+- Any required check `state: "pending"` or `state: "queued"` → wait and re-check in 60s (max 3 polls, then abort)
 - Any required check `conclusion: "failure"` or `conclusion: "cancelled"` → **abort merge**, route to fix
+
+**After 3 pending polls with no resolution** → abort merge, flag human in Telegram: "CI checks still pending after 3 min on PR #N — may need manual investigation (stuck workflow, queued runner, etc.)."
 
 Never merge with failing or pending required checks. This is non-negotiable — even if the reviewer approved and the code looks correct. CI is the final gate.
 
@@ -27,7 +40,8 @@ Never merge with failing or pending required checks. This is non-negotiable — 
 
 - `no-push-main` — CI validation adds to, not replaces, the branch-only workflow
 - `merge-policy-human` — human still clicks merge; this protocol gates the manager's *recommendation* to merge
-- `verify-before-merge` — CI check happens *before* the verdict check (no point parsing a verdict if CI is red)
+- `merge-policy-auto-*` — in auto-merge fleets where the manager executes merge, this protocol's gate logic applies equally; the manager runs the CI gate before executing `gh pr merge`
+- `verify-before-merge` — CI check happens *before* verify-before-merge (no point parsing a verdict if CI is red)
 
 ## 2. CI failure routing
 
@@ -43,7 +57,7 @@ When CI fails on a PR, the manager auto-dispatches the **PR author** (not the re
 **Example dispatch prompt:**
 
 ```
-CI failed on chrisrogers37/storydump#353 (branch: fix/railway-health-check).
+CI failed on <owner>/<repo>#<N> (branch: <branch-name>).
 Failing check: "test" — exit code 1.
 Failure output: [paste relevant error lines]
 Fix the failure and push to the same branch. Report back when CI is green.
@@ -71,15 +85,16 @@ When a PR is ready for review, check CI status **before** dispatching to the rev
 PR opened/updated
   → Manager checks CI
     → Green: dispatch to reviewer
-    → Pending: wait (poll 60s, max 5 min)
+    → Pending: wait (poll 60s, max 3 polls)
       → Green: dispatch to reviewer
+      → Still pending after 3 polls: flag human
       → Failed: route to author
     → Failed: route to author for fix
 ```
 
 ## 4. Retry budget
 
-Auto-dispatch fix attempts are capped at **2 per CI failure cycle**:
+Auto-dispatch fix attempts are capped at **2 per CI failure cycle**, with a per-PR lifetime cap of **4 total dispatch cycles**:
 
 | Attempt | Action |
 |---------|--------|
@@ -93,17 +108,16 @@ Auto-dispatch fix attempts are capped at **2 per CI failure cycle**:
 - A different check fails (new failure type = new counter)
 - Human explicitly says "try again"
 
+**Lifetime cap:** Regardless of resets, a single PR gets at most 4 total auto-dispatch fix cycles. After that, flag human even if CI went green-then-red again. This prevents a flaky-test loop from generating unlimited dispatch noise.
+
 **Why cap at 2:** Bots fixing CI failures is high-leverage when the fix is obvious (missing import, type error, test assertion drift). After 2 failed attempts, the failure is likely architectural or environmental — human judgement needed.
 
 ## Manager checklist (pre-merge)
 
 ```
-1. gh pr checks <N> → all green?
-   - No → abort, route to author
-   - Pending → poll (60s × 3)
-2. Review verdict = "Ship it"?
-   - No → bounce to author with reviewer feedback
-3. Migration files present?
-   - Yes → verify deployment plan
-4. Merge (or recommend merge to human per merge-policy)
+1. gh pr checks <N> → all green/skipped/neutral?
+   - No (failed) → abort, route to author
+   - Pending → poll 60s × 3, then abort + flag human
+2. If CI green → run verify-before-merge checklist
+3. Merge (or recommend merge to human, per active merge-policy guardrail)
 ```
