@@ -109,6 +109,9 @@ fleet:
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
       extra_flags: [<string>, ...]        # OPTIONAL — additional Claude CLI flags
+      claudna_version: <string>           # OPTIONAL — pin clauDNA plugin version
+      claudron_vault_path: <string>       # OPTIONAL — Claudron vault path for this bot
+      claudosseum_tenant_id: <string>     # OPTIONAL — Claudosseum telemetry tenant
 ```
 
 ## Field reference
@@ -312,6 +315,18 @@ List of channel plugin identifiers (default `["plugin:telegram@claude-plugins-of
 
 List of additional CLI flags appended to `CLAUDE_FLAGS` in `bot.conf`. Use for any Claude Code flags not covered by dedicated fields. Bot-level list appends to defaults (deduped). Example: `["--verbose"]`.
 
+### `bots.<name>.claudna_version` / `claudron_vault_path` / `claudosseum_tenant_id`
+
+Ecosystem-aware fields connecting bots to clauDNA, Claudron, and Claudosseum. All optional; emitted as env vars in `bot.conf` when set.
+
+| Field | Env var | Purpose |
+|-------|---------|---------|
+| `claudna_version` | `CLAUDNA_VERSION` | Pin the clauDNA plugin version (e.g., `"0.2.0"`). Skills/hooks can read this to gate behavior by version. |
+| `claudron_vault_path` | `CLAUDRON_VAULT_PATH` | Path to the bot's Claudron vault (e.g., `"vaults/my-fleet/eng-1"`). The Claudron MCP server reads this to scope queries. |
+| `claudosseum_tenant_id` | `CLAUDOSSEUM_TENANT_ID` | Tenant identifier for Claudosseum telemetry (e.g., `"tenant_abc123"`). Bots emit structured signal to this tenant when configured. |
+
+Can be set in `defaults:` (fleet-wide) or per-bot (bot overrides default). The validator warns if `claudron_vault_path` is set but no `claudron` MCP server is configured.
+
 ### `bots.<name>.startup_prompt`
 
 Jinja2-templated string sent to the bot on startup. Available placeholders: `{{ bot_name }}`, `{{ fleet_name }}`, `{{ telegram_group_chat_id }}`, `{{ telegram_handle }}`. Written to `bot.conf` as `STARTUP_PROMPT`. Use to give the bot initial instructions (e.g., "read your CLAUDE.md and idle").
@@ -371,6 +386,7 @@ In addition to CLAUDE.md, the generator produces:
 - **Warn** — `telegram.token_env` env var not set
 - **Warn** — `teams.<X>.workers` references a bot not defined in `bots:`
 - **Warn** — fleet has multiple bots but none has `bench: true` — benchmarking won't know which bot to measure
+- **Warn** — `claudron_vault_path` is set but no `claudron` MCP server is configured
 
 Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI use).
 

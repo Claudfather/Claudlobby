@@ -217,3 +217,9 @@ fleet:
 #     # extra_flags — additional Claude CLI arguments appended to CLAUDE_FLAGS in bot.conf
 #     extra_flags:
 #       - "--verbose"
+#
+#     # Ecosystem fields — connect bots to clauDNA, Claudron, and Claudosseum.
+#     # All optional. Can also be set in defaults: for fleet-wide values.
+#     claudna_version: "0.2.0"                    # pin clauDNA plugin version
+#     claudron_vault_path: "vaults/my-fleet/eng-1" # Claudron vault scope for this bot
+#     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
