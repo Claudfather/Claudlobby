@@ -72,7 +72,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # --- Check 2: systemd service state ---
     if [ -n "$BOT_SERVICE" ] && [ "$_OS" = "Linux" ]; then
         if ! systemctl --user is-active "$BOT_SERVICE" >/dev/null 2>&1; then
-            state=$(systemctl --user is-active "$BOT_SERVICE" 2>/dev/null || echo "unknown")
+            state=$(systemctl --user show -p ActiveState --value "$BOT_SERVICE" 2>/dev/null | tr -d '[:cntrl:]' || echo "unknown")
             emit_event "$bot_dir" "$bot_id" "service_down" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'"}'
         fi
     fi
