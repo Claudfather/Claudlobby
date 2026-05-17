@@ -320,7 +320,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         "",
         f'export CLAUDLOBBY_ROOT="{paths.root}"',
         "",
-        f'BOT_ID="{bot.bot_id}"',
+        f'export BOT_ID="{bot.bot_id}"',
         f'BOT_NAME="{bot.name}"',
         f'BOT_SERVICE="{fleet.service_prefix}.{bot.bot_id}"',
         f'BOT_LABEL="{bot.bot_id.upper()}"',
