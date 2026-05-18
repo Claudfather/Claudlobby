@@ -20,6 +20,24 @@ TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 
 LOG="$BOT_DIR/keepalive.log"
 
+# JSONL retention — delete keepalive event files older than this many days.
+KEEPALIVE_REAP_DAYS="${KEEPALIVE_REAP_DAYS:-7}"
+
+# Emit structured JSONL event for fleet-pulse / claudlobby uptime consumption.
+emit_keepalive_event() {
+    local ev_state="$1"
+    local events_dir="$BOT_DIR/data/events"
+    mkdir -p "$events_dir"
+    local events_file="$events_dir/keepalive-$(date +%Y-%m-%d).jsonl"
+    local ts
+    ts=$(ts_iso)
+    printf '{"ts":"%s","bot":"%s","type":"keepalive","source":"keepalive","data":{"state":"%s"}}\n' \
+        "$ts" "$BOT_NAME" "$ev_state" >> "$events_file"
+
+    # Reap old keepalive JSONL files beyond retention window.
+    find "$events_dir" -name 'keepalive-*.jsonl' -type f -mtime +"$KEEPALIVE_REAP_DAYS" -delete 2>/dev/null || true
+}
+
 # Cron runs with a minimal env. `systemctl --user` needs XDG_RUNTIME_DIR to
 # reach the user bus, otherwise it fails silently with "Failed to connect to
 # bus" while we still log a "RESTART" line — so the bot looks supervised
@@ -37,8 +55,10 @@ if ! check_tmux_session "$TMUX_SESSION"; then
     sleep 1
     if check_tmux_session "$TMUX_SESSION"; then
         echo "$(ts_iso) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"
+        emit_keepalive_event "SKIP"
         exit 0
     fi
+    emit_keepalive_event "RESTART"
     if [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
         echo "$(ts_iso) RESTART — session dead, systemctl --user restart $BOT_NAME" >> "$LOG"
         systemctl --user restart "$BOT_NAME.service" >>"$LOG" 2>&1
@@ -117,10 +137,12 @@ UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 case "$state" in
     BUSY)
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
+        emit_keepalive_event "BUSY"
         rm -f "$UNKNOWN_COUNTER"
         ;;
     IDLE)
         echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
+        emit_keepalive_event "IDLE"
         rm -f "$UNKNOWN_COUNTER"
         ;;
     *)
@@ -129,6 +151,7 @@ case "$state" in
         [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
         count=$((prev + 1))
         printf '%d' "$count" > "$UNKNOWN_COUNTER"
+        emit_keepalive_event "UNKNOWN"
         if [ "$count" -ge "$UNKNOWN_THRESHOLD" ]; then
             echo "$(ts_iso) UNKNOWN — unrecognized pane state ($count consecutive, threshold $UNKNOWN_THRESHOLD) — investigate" >> "$LOG"
         else

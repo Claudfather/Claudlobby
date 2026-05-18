@@ -407,6 +407,31 @@ def cmd_report_back(args) -> int:
     return 0
 
 
+def cmd_uptime(args) -> int:
+    """Per-bot uptime, MTBR, and restart-rate metrics from keepalive logs."""
+    from .uptime import aggregate_fleet, format_table, format_json, WINDOWS
+
+    paths = _resolve_paths(args)
+    bots_dir = paths.runtime_bots
+    if not bots_dir.is_dir():
+        log.error("runtime bots dir not found: %s", bots_dir)
+        return 1
+
+    windows = [args.window] if args.window else list(WINDOWS.keys())
+    results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot)
+
+    if not results:
+        log.info("No bots found in %s", bots_dir)
+        return 0
+
+    if args.json:
+        sys.stdout.write(format_json(results) + "\n")
+    else:
+        display_window = args.window or "24h"
+        sys.stdout.write(format_table(results, window=display_window) + "\n")
+    return 0
+
+
 def _discover_legacy_bot_dirs(source_dir: Path) -> dict[str, Path]:
     """Find legacy bot dirs (subdirs containing .mcp.json or bot.conf)."""
     bot_dir_map: dict[str, Path] = {}
@@ -1699,6 +1724,19 @@ def main(argv: list[str] | None = None) -> int:
         "--json", action="store_true", help="Output raw JSONL instead of table"
     )
     prb.set_defaults(func=cmd_report_back)
+
+    pu = sub.add_parser(
+        "uptime",
+        help="Per-bot uptime, MTBR, and restart-rate from keepalive logs",
+    )
+    pu.add_argument("--bot", help="Show metrics for one bot only")
+    pu.add_argument(
+        "--window",
+        choices=["24h", "7d", "30d"],
+        help="Time window (default: show all three in JSON, 24h for table)",
+    )
+    pu.add_argument("--json", action="store_true", dest="json", help="JSON output")
+    pu.set_defaults(func=cmd_uptime)
 
     pe = sub.add_parser(
         "env-migrate",
