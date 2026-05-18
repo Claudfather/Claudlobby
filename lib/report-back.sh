@@ -72,19 +72,19 @@ _emit_ledger_event() {
     local safe_summary
     safe_summary=$(printf '%s' "$SUMMARY" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-    _write_ledger_line() {
+    _write_and_rotate() {
         printf '{"ts":"%s","bot":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s"}\n' \
             "$ts" "$BOT" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" >> "$ledger"
-    }
-    with_lock "$ledger.lock" _write_ledger_line
 
-    # Rotate: keep only last 7 days of entries (consistent with fleet-pulse reap).
-    local cutoff
-    cutoff=$(date_relative "-7 days" "%Y-%m-%dT%H:%M:%SZ") 2>/dev/null || return 0
-    local tmp
-    tmp=$(safe_mktemp)
-    awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\""); if (a[1] >= cutoff) print }' "$ledger" > "$tmp" \
-        && mv "$tmp" "$ledger"
+        # Rotate: keep only last 7 days of entries (consistent with fleet-pulse reap).
+        local cutoff
+        cutoff=$(date_relative "-7 days" "%Y-%m-%dT%H:%M:%SZ") 2>/dev/null || return 0
+        local tmp
+        tmp=$(safe_mktemp)
+        awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\""); if (a[1] >= cutoff) print }' "$ledger" > "$tmp" \
+            && mv "$tmp" "$ledger"
+    }
+    with_lock "$ledger.lock" _write_and_rotate
 }
 _emit_ledger_event "$@" || true
 
