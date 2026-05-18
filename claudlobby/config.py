@@ -123,6 +123,40 @@ class McpEntry:
 
 
 @dataclass
+class AutonomousRunnerPicker:
+    """Picker config for autonomous-runner. Selects work items per cadence tick."""
+
+    type: str = "github_issues"
+    label: str | None = None
+    state: str = "open"
+    score_by: str = "recency"
+
+
+@dataclass
+class AutonomousRunnerBypass:
+    """Pre-flight risk-based bypass. See design spec §6.1.1."""
+
+    risk_classifier: str = "structural_vs_mechanical"
+    block_on: list[str] = field(default_factory=lambda: ["structural"])
+    on_bypass: str = "comment_and_label"
+
+
+@dataclass
+class AutonomousRunnerConfig:
+    """Configuration for the library/skills/autonomous-runner wrapper skill."""
+
+    skill: str
+    cadence: str
+    target_repo: str
+    args: str = ""
+    picker: AutonomousRunnerPicker | None = None
+    bypass: AutonomousRunnerBypass | None = None
+    pre_hooks: list[str] = field(default_factory=list)
+    post_hooks: list[str] = field(default_factory=list)
+    on_outcome: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class BotConfig:
     bot_id: str  # dict key — immutable system slug
     name: str  # display name (defaults to bot_id)
@@ -169,6 +203,7 @@ class BotConfig:
     claudna_version: str | None = None
     claudron_vault_path: str | None = None
     claudosseum_tenant_id: str | None = None
+    autonomous_runner: AutonomousRunnerConfig | None = None
 
 
 @dataclass
@@ -455,6 +490,53 @@ def _merge_hooks(
     return merged
 
 
+def _coerce_autonomous_runner(
+    raw: dict | None, bot_name: str
+) -> AutonomousRunnerConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"bot '{bot_name}': autonomous_runner must be a mapping, got {type(raw).__name__}"
+        )
+    for required in ("skill", "cadence", "target_repo"):
+        if not raw.get(required):
+            raise ValueError(
+                f"bot '{bot_name}': autonomous_runner missing required field '{required}'"
+            )
+
+    picker = None
+    if raw.get("picker"):
+        p = raw["picker"]
+        picker = AutonomousRunnerPicker(
+            type=p.get("type", "github_issues"),
+            label=p.get("label"),
+            state=p.get("state", "open"),
+            score_by=p.get("score_by", "recency"),
+        )
+
+    bypass = None
+    if raw.get("bypass"):
+        b = raw["bypass"]
+        bypass = AutonomousRunnerBypass(
+            risk_classifier=b.get("risk_classifier", "structural_vs_mechanical"),
+            block_on=list(b.get("block_on") or ["structural"]),
+            on_bypass=b.get("on_bypass", "comment_and_label"),
+        )
+
+    return AutonomousRunnerConfig(
+        skill=raw["skill"],
+        cadence=raw["cadence"],
+        target_repo=raw["target_repo"],
+        args=raw.get("args", "") or "",
+        picker=picker,
+        bypass=bypass,
+        pre_hooks=list(raw.get("pre_hooks") or []),
+        post_hooks=list(raw.get("post_hooks") or []),
+        on_outcome=dict(raw.get("on_outcome") or {}),
+    )
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
@@ -547,6 +629,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         or defaults.get("claudron_vault_path"),
         claudosseum_tenant_id=raw.get("claudosseum_tenant_id")
         or defaults.get("claudosseum_tenant_id"),
+        autonomous_runner=_coerce_autonomous_runner(raw.get("autonomous_runner"), name),
     )
 
 

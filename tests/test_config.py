@@ -9,6 +9,9 @@ import pytest
 from claudlobby.config import (
     DEFAULT_MARKETPLACES,
     DEFAULT_PLUGINS,
+    AutonomousRunnerBypass,
+    AutonomousRunnerConfig,
+    AutonomousRunnerPicker,
     _coerce_bot,
     _coerce_plugins,
     load_fleet,
@@ -315,6 +318,134 @@ class TestLoadFleet:
         (tmp_path / "bad.yaml").write_text("not_fleet:\n  key: val\n")
         with pytest.raises(ValueError, match="'fleet' missing"):
             load_fleet(tmp_path / "bad.yaml")
+
+
+class TestAutonomousRunnerConfig:
+    def test_default_none_when_omitted(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+        assert bot.autonomous_runner is None
+
+    def test_minimal_dataclass_construction(self):
+        cfg = AutonomousRunnerConfig(
+            skill="/claudna:tech-debt", cadence="1h", target_repo="org/repo"
+        )
+        assert cfg.skill == "/claudna:tech-debt"
+        assert cfg.args == ""
+        assert cfg.picker is None
+        assert cfg.bypass is None
+        assert cfg.pre_hooks == []
+        assert cfg.post_hooks == []
+        assert cfg.on_outcome == {}
+
+    def test_full_dataclass_construction(self):
+        cfg = AutonomousRunnerConfig(
+            skill="/claudna:implement-plan",
+            cadence="2h",
+            target_repo="artemis-xyz/dbt",
+            args="--source github",
+            picker=AutonomousRunnerPicker(
+                type="github_issues",
+                label="claudna-eligible",
+                state="open",
+                score_by="mission_alignment",
+            ),
+            bypass=AutonomousRunnerBypass(
+                risk_classifier="structural_vs_mechanical",
+                block_on=["structural"],
+                on_bypass="comment_and_label",
+            ),
+            pre_hooks=["/claudna:adversarial-review"],
+            post_hooks=["/claudna:simplify"],
+            on_outcome={"blocked": "report_and_pause"},
+        )
+        assert cfg.picker.score_by == "mission_alignment"
+        assert cfg.bypass.block_on == ["structural"]
+        assert cfg.on_outcome["blocked"] == "report_and_pause"
+
+    def test_coerce_minimal_block(self):
+        raw = {
+            "expertise": ["eng"],
+            "autonomous_runner": {
+                "skill": "/claudna:tech-debt",
+                "cadence": "1h",
+                "target_repo": "org/repo",
+            },
+        }
+        bot = _coerce_bot("test", raw, {})
+        assert bot.autonomous_runner is not None
+        assert bot.autonomous_runner.skill == "/claudna:tech-debt"
+        assert bot.autonomous_runner.cadence == "1h"
+        assert bot.autonomous_runner.target_repo == "org/repo"
+        assert bot.autonomous_runner.args == ""
+        assert bot.autonomous_runner.picker is None
+
+    def test_coerce_full_block(self):
+        raw = {
+            "expertise": ["eng"],
+            "autonomous_runner": {
+                "skill": "/claudna:implement-plan",
+                "cadence": "2h",
+                "target_repo": "artemis-xyz/dbt",
+                "args": "--source github",
+                "picker": {
+                    "type": "github_issues",
+                    "label": "claudna-eligible",
+                    "state": "open",
+                    "score_by": "mission_alignment",
+                },
+                "bypass": {
+                    "risk_classifier": "structural_vs_mechanical",
+                    "block_on": ["structural"],
+                    "on_bypass": "comment_and_label",
+                },
+                "pre_hooks": ["/claudna:adversarial-review"],
+                "post_hooks": ["/claudna:simplify"],
+                "on_outcome": {
+                    "completed": "report",
+                    "blocked": "report_and_pause",
+                },
+            },
+        }
+        bot = _coerce_bot("dbt-bot", raw, {})
+        ar = bot.autonomous_runner
+        assert ar.args == "--source github"
+        assert ar.picker.label == "claudna-eligible"
+        assert ar.bypass.block_on == ["structural"]
+        assert "/claudna:adversarial-review" in ar.pre_hooks
+        assert ar.on_outcome["blocked"] == "report_and_pause"
+
+    @pytest.mark.parametrize("missing", ["skill", "cadence", "target_repo"])
+    def test_missing_required_field_raises(self, missing):
+        block = {
+            "skill": "/claudna:tech-debt",
+            "cadence": "1h",
+            "target_repo": "org/repo",
+        }
+        del block[missing]
+        raw = {"expertise": ["eng"], "autonomous_runner": block}
+        with pytest.raises(ValueError, match=f"missing required field '{missing}'"):
+            _coerce_bot("test", raw, {})
+
+    def test_non_dict_block_raises(self):
+        raw = {"expertise": ["eng"], "autonomous_runner": "not-a-dict"}
+        with pytest.raises(ValueError, match="must be a mapping"):
+            _coerce_bot("test", raw, {})
+
+    def test_picker_defaults_applied(self):
+        raw = {
+            "expertise": ["eng"],
+            "autonomous_runner": {
+                "skill": "/claudna:tech-debt",
+                "cadence": "1h",
+                "target_repo": "org/repo",
+                "picker": {"label": "ok-to-auto"},
+            },
+        }
+        bot = _coerce_bot("test", raw, {})
+        assert bot.autonomous_runner.picker.type == "github_issues"
+        assert bot.autonomous_runner.picker.state == "open"
+        assert bot.autonomous_runner.picker.score_by == "recency"
+        assert bot.autonomous_runner.picker.label == "ok-to-auto"
 
 
 class TestObservabilityConfig:
