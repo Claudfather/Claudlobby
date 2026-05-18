@@ -1294,6 +1294,7 @@ def _scaffold_env_merge(
         if ev.name not in existing_keys
     ]
     if not new_vars and existing_content:
+        env_path.chmod(0o600)
         _log.debug("%s: up to date", env_path.name)
         if log is not None:
             log(f"  {env_path.name}: up to date")
@@ -1315,6 +1316,7 @@ def _scaffold_env_merge(
             lines.append(f"export {ev.name}=")
 
     env_path.write_text("\n".join(lines) + "\n")
+    env_path.chmod(0o600)
     if new_vars:
         new_names = ", ".join(ev.name for ev in new_vars)
         msg = f"  {env_path.name}: added {len(new_vars)} new vars ({new_names})"

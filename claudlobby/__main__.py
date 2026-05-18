@@ -473,6 +473,7 @@ def _apply_env_migration(
                 merged,
             )
         )
+        fleet_env_path.chmod(0o600)
         log.info(
             "wrote %s (%d migrated, %d total)",
             fleet_env_path,
@@ -496,6 +497,7 @@ def _apply_env_migration(
                 merged,
             )
         )
+        bot_env_path.chmod(0o600)
         bot_count += 1
         log.info(
             "wrote %s (%d migrated, %d total)",
