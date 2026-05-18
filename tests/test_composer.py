@@ -453,8 +453,8 @@ class TestComposeBotConfModelStrategy:
             compact_when=">50% context",
         )
         conf = self._compose(tmp_path, model_strategy=ms)
-        assert 'export MODEL_STRATEGY_BASE="sonnet"' in conf
-        assert 'export MODEL_STRATEGY_ESCALATE_TO="opus"' in conf
+        assert "export MODEL_STRATEGY_BASE=sonnet" in conf
+        assert "export MODEL_STRATEGY_ESCALATE_TO=opus" in conf
         assert "MODEL_STRATEGY_ESCALATE_WHEN=" in conf
         assert ">5 files or architecture decisions" in conf
         assert "MODEL_STRATEGY_COMPACT_WHEN=" in conf
@@ -465,8 +465,8 @@ class TestComposeBotConfModelStrategy:
 
         ms = ModelStrategyConfig(base="sonnet", escalate_to="opus")
         conf = self._compose(tmp_path, model_strategy=ms)
-        assert 'export MODEL_STRATEGY_BASE="sonnet"' in conf
-        assert 'export MODEL_STRATEGY_ESCALATE_TO="opus"' in conf
+        assert "export MODEL_STRATEGY_BASE=sonnet" in conf
+        assert "export MODEL_STRATEGY_ESCALATE_TO=opus" in conf
         assert "MODEL_STRATEGY_ESCALATE_WHEN" not in conf
         assert "MODEL_STRATEGY_COMPACT_WHEN" not in conf
 
@@ -478,9 +478,9 @@ class TestComposeBotConfModelStrategy:
             raw={"explore": "haiku", "plan": "sonnet", "general": "sonnet"},
         )
         conf = self._compose(tmp_path, model_strategy=ms)
-        assert 'export MODEL_STRATEGY_EXPLORE="haiku"' in conf
-        assert 'export MODEL_STRATEGY_PLAN="sonnet"' in conf
-        assert 'export MODEL_STRATEGY_GENERAL="sonnet"' in conf
+        assert "export MODEL_STRATEGY_EXPLORE=haiku" in conf
+        assert "export MODEL_STRATEGY_PLAN=sonnet" in conf
+        assert "export MODEL_STRATEGY_GENERAL=sonnet" in conf
 
     def test_model_flag_still_in_claude_flags(self, tmp_path):
         conf = self._compose(tmp_path, model="opus")
@@ -517,7 +517,7 @@ class TestComposeBotConfExportedVars:
         (root / "lib").mkdir(exist_ok=True)
         paths = Paths(root=root, fleet_dir=root)
         conf = compose_bot_conf(bot, fleet, paths)
-        assert 'export BOT_ID="astrid"' in conf
+        assert "export BOT_ID=astrid" in conf
 
 
 class TestComposeHooks:
@@ -1652,7 +1652,7 @@ class TestPluginsBotConf:
         )
         conf = self._compose(tmp_path, plugins=plugins)
         assert (
-            'export FLEET_PLUGINS_REQUIRED="claudna@Claudfather telegram@claude-plugins-official"'
+            "export FLEET_PLUGINS_REQUIRED='claudna@Claudfather telegram@claude-plugins-official'"
             in conf
         )
 
@@ -1673,7 +1673,7 @@ class TestPluginsBotConf:
         )
         conf = self._compose(tmp_path, plugins=plugins)
         assert (
-            'export FLEET_PLUGINS_MARKETPLACES="Claudfather=github:Claudfather/clauDNA"'
+            "export FLEET_PLUGINS_MARKETPLACES=Claudfather=github:Claudfather/clauDNA"
             in conf
         )
 
@@ -1807,16 +1807,16 @@ class TestComposeBotConfObservability:
 
     def test_default_observability_values(self, tmp_path):
         conf = self._compose(tmp_path)
-        assert 'export OBSERVABILITY_PULSE_INTERVAL="300"' in conf
-        assert 'export OBSERVABILITY_REAP_DAYS="7"' in conf
+        assert "export OBSERVABILITY_PULSE_INTERVAL=300" in conf
+        assert "export OBSERVABILITY_REAP_DAYS=7" in conf
 
     def test_custom_observability_values(self, tmp_path):
         from claudlobby.config import ObservabilityConfig
 
         obs = ObservabilityConfig(pulse_interval=60, reap_days=14)
         conf = self._compose(tmp_path, observability=obs)
-        assert 'export OBSERVABILITY_PULSE_INTERVAL="60"' in conf
-        assert 'export OBSERVABILITY_REAP_DAYS="14"' in conf
+        assert "export OBSERVABILITY_PULSE_INTERVAL=60" in conf
+        assert "export OBSERVABILITY_REAP_DAYS=14" in conf
 
     def test_observability_section_header(self, tmp_path):
         conf = self._compose(tmp_path)
@@ -1967,3 +1967,97 @@ class TestJinja2Sandbox:
         tmpl = env.get_template("evil.j2")
         with pytest.raises(SecurityError):
             tmpl.render()
+
+class TestComposeBotConfShellEscaping:
+    """compose_bot_conf must shell-escape all interpolated values to prevent injection."""
+
+    def _compose(self, tmp_path, env=None, bot_id="worker", name="worker", telegram_handle="w_bot"):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = BotConfig(
+            bot_id=bot_id,
+            name=name,
+            expertise=["eng"],
+            telegram=TelegramConfig(handle=telegram_handle),
+            env=env or {},
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / bot_id).mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_bot_conf(bot, fleet, paths)
+
+    def test_command_substitution_escaped(self, tmp_path):
+        """$(cmd) in bot.env must not be interpreted by the shell."""
+        conf = self._compose(tmp_path, env={"MALICIOUS": "$(touch /tmp/pwned)"})
+        line = [l for l in conf.splitlines() if "MALICIOUS=" in l][0]
+        assert line == "export MALICIOUS='$(touch /tmp/pwned)'"
+
+    def test_backtick_escaped(self, tmp_path):
+        """`cmd` in bot.env must not be interpreted by the shell."""
+        conf = self._compose(tmp_path, env={"BAR": "`whoami`"})
+        line = [l for l in conf.splitlines() if "BAR=" in l][0]
+        assert line == "export BAR='`whoami`'"
+
+    def test_double_quote_escaped(self, tmp_path):
+        conf = self._compose(tmp_path, env={"Q": 'he said "hello"'})
+        line = [l for l in conf.splitlines() if l.startswith("export Q=")][0]
+        assert line == """export Q='he said "hello"'"""
+
+    def test_newline_in_value(self, tmp_path):
+        """Values with newlines must be wrapped safely."""
+        conf = self._compose(tmp_path, env={"NL": "line1\nline2"})
+        assert "export NL=" in conf
+
+    def test_invalid_env_key_raises(self, tmp_path):
+        import pytest
+        with pytest.raises(ValueError, match="not a valid shell identifier"):
+            self._compose(tmp_path, env={"FOO;ls": "x"})
+
+    def test_invalid_env_key_with_space_raises(self, tmp_path):
+        import pytest
+        with pytest.raises(ValueError, match="not a valid shell identifier"):
+            self._compose(tmp_path, env={"FOO BAR": "x"})
+
+    def test_unsafe_bot_id_raises(self, tmp_path):
+        import pytest
+        with pytest.raises(ValueError, match="shell-unsafe"):
+            self._compose(tmp_path, bot_id="evil$(whoami)")
+
+    def test_safe_values_unquoted(self, tmp_path):
+        """Simple alphanumeric values rendered without wrapper quotes."""
+        conf = self._compose(tmp_path, env={"SIMPLE": "hello123"})
+        assert "export SIMPLE=hello123" in conf
+
+    def test_roundtrip_injection_payload(self, tmp_path):
+        """Source generated bot.conf in bash — injection payloads must stay literal."""
+        import subprocess
+
+        conf = self._compose(
+            tmp_path,
+            env={
+                "INJECT1": "$(touch /tmp/pwned)",
+                "INJECT2": "`whoami`",
+                "INJECT3": "${IFS}evil",
+            },
+        )
+        conf_path = tmp_path / "test_bot.conf"
+        conf_path.write_text(conf)
+
+        result = subprocess.run(
+            [
+                "bash", "-c",
+                f'source {conf_path} && echo "I1=$INJECT1" && echo "I2=$INJECT2" && echo "I3=$INJECT3"',
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0
+        assert "$(touch /tmp/pwned)" in result.stdout
+        assert "`whoami`" in result.stdout
+        assert "${IFS}evil" in result.stdout
