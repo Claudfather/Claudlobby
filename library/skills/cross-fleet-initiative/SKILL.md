@@ -1,7 +1,7 @@
 ---
 name: cross-fleet-initiative
 description: "Coordinate a multi-team initiative across multiple manager fleets via a 7-stage operating loop (FRAME, DECOMPOSE, GATE, DISPATCH, MONITOR, SYNTHESIZE, CLOSE). Use when a strategic goal spans more than one fleet and needs the senior-management layer to keep both aligned, surface forks to the owner, and drive to a defined done state."
-argument-hint: "<stage> <initiative-name> | bootstrap <initiative-name> <one-line-goal>"
+argument-hint: "<stage> <initiative-name> | bootstrap <initiative-name> <one-line-goal> | next <initiative-name>"
 ---
 
 # Cross-Fleet Initiative
@@ -22,6 +22,7 @@ Required config keys:
 - `managers`: array of `{name, tmux_session, telegram_handle, project_root, fleet_repos}` objects
 - `managers_chat_id`: Telegram chat where strategic forks surface
 - `founder_handle`: Telegram user for direct escalation
+- `founder_user_id`: Telegram user ID for programmatic tagging
 - `cron_offset_minutes`: poll cadence offset (e.g. `8` for `8-59/15` cron)
 - `initiatives_root`: absolute path where initiative state directories are stored
 
