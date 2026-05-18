@@ -344,21 +344,21 @@ def cmd_report_back(args) -> int:
     if args.since:
         raw = args.since.strip()
         now = datetime.now(timezone.utc)
-        if raw.endswith("h"):
-            cutoff = now - timedelta(hours=int(raw[:-1]))
-        elif raw.endswith("d"):
-            cutoff = now - timedelta(days=int(raw[:-1]))
-        elif raw.endswith("m"):
-            cutoff = now - timedelta(minutes=int(raw[:-1]))
-        else:
-            try:
+        try:
+            if raw.endswith("h"):
+                cutoff = now - timedelta(hours=int(raw[:-1]))
+            elif raw.endswith("d"):
+                cutoff = now - timedelta(days=int(raw[:-1]))
+            elif raw.endswith("m"):
+                cutoff = now - timedelta(minutes=int(raw[:-1]))
+            else:
                 cutoff = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            except ValueError:
-                log.error(
-                    "cannot parse --since '%s' (use e.g. 24h, 7d, 30m, or ISO date)",
-                    raw,
-                )
-                return 1
+        except ValueError:
+            log.error(
+                "cannot parse --since '%s' (use e.g. 24h, 7d, 30m, or ISO date)",
+                raw,
+            )
+            return 1
 
     # Read and filter entries
     entries = []

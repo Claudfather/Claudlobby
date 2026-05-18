@@ -72,10 +72,21 @@ _emit_ledger_event() {
     local safe_summary
     safe_summary=$(printf '%s' "$SUMMARY" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-    printf '{"ts":"%s","bot":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s"}\n' \
-        "$ts" "$BOT" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" >> "$ledger"
+    _write_ledger_line() {
+        printf '{"ts":"%s","bot":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s"}\n' \
+            "$ts" "$BOT" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" >> "$ledger"
+    }
+    with_lock "$ledger.lock" _write_ledger_line
+
+    # Rotate: keep only last 7 days of entries (consistent with fleet-pulse reap).
+    local cutoff
+    cutoff=$(date_relative "-7 days" "%Y-%m-%dT%H:%M:%SZ") 2>/dev/null || return 0
+    local tmp
+    tmp=$(safe_mktemp)
+    awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\""); if (a[1] >= cutoff) print }' "$ledger" > "$tmp" \
+        && mv "$tmp" "$ledger"
 }
-_emit_ledger_event "$@"
+_emit_ledger_event "$@" || true
 
 # Mirror to fleet-state if helper is present
 _FS=$(dirname "$0")/fleet-state-update.sh

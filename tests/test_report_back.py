@@ -82,7 +82,9 @@ def test_report_back_filter_status(ledger_root, capsys):
 
 
 def test_report_back_since(ledger_root, capsys):
-    rc = main(["--root", str(ledger_root), "report-back", "--since", "1h"])
+    # Use 59m instead of 1h to avoid boundary race — the 1h-ago entry's
+    # timestamp can land inside/outside the window depending on sub-second timing.
+    rc = main(["--root", str(ledger_root), "report-back", "--since", "59m"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "1 event(s)" in out
