@@ -139,6 +139,18 @@ def _load_fleet_or_exit(paths: Paths) -> "FleetConfig":
         sys.exit(1)
 
 
+def cmd_doctor(args) -> int:
+    """Pre-flight fleet health diagnostic."""
+    from .doctor import format_report, run_doctor
+
+    paths = _resolve_paths(args)
+    _load_env(paths)
+    fleet = _load_fleet_or_exit(paths)
+    report = run_doctor(fleet, paths)
+    print(format_report(report))
+    return 1 if report.has_failures else 0
+
+
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
@@ -306,6 +318,91 @@ def cmd_status(args) -> int:
     log.info("  root:    %s", paths.root)
     log.info("  runtime: %s", paths.runtime_bots)
     log.info("  (full status dashboard wiring tmux + service health: TODO)")
+    return 0
+
+
+def cmd_report_back(args) -> int:
+    """Query the report-back ledger — human-readable table of bot work events."""
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    paths = _resolve_paths(args)
+
+    # Resolve ledger path (mirrors shell logic in report-back.sh)
+    if paths.fleet_dir:
+        ledger = paths.runtime / "report-back.jsonl"
+    else:
+        ledger = paths.root / "runtime" / "fleet" / "report-back.jsonl"
+
+    if not ledger.is_file():
+        log.info("no report-back ledger found at %s", ledger)
+        return 0
+
+    # Parse --since into a cutoff timestamp
+    cutoff = None
+    if args.since:
+        raw = args.since.strip()
+        now = datetime.now(timezone.utc)
+        if raw.endswith("h"):
+            cutoff = now - timedelta(hours=int(raw[:-1]))
+        elif raw.endswith("d"):
+            cutoff = now - timedelta(days=int(raw[:-1]))
+        elif raw.endswith("m"):
+            cutoff = now - timedelta(minutes=int(raw[:-1]))
+        else:
+            try:
+                cutoff = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                log.error(
+                    "cannot parse --since '%s' (use e.g. 24h, 7d, 30m, or ISO date)",
+                    raw,
+                )
+                return 1
+
+    # Read and filter entries
+    entries = []
+    for line in ledger.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if args.bot and entry.get("bot") != args.bot:
+            continue
+        if args.status and entry.get("status") != args.status:
+            continue
+        if cutoff:
+            try:
+                ts = datetime.fromisoformat(entry["ts"].replace("Z", "+00:00"))
+                if ts < cutoff:
+                    continue
+            except (KeyError, ValueError):
+                continue
+        entries.append(entry)
+
+    if not entries:
+        log.info("no matching events")
+        return 0
+
+    if args.json:
+        for e in entries:
+            print(_json.dumps(e))
+        return 0
+
+    # Table output
+    print(f"{'TIMESTAMP':<22} {'BOT':<12} {'STATUS':<10} {'SUMMARY':<50} {'PR'}")
+    print("-" * 110)
+    for e in entries:
+        ts = e.get("ts", "")[:19]
+        bot = e.get("bot", "")[:11]
+        status = e.get("status", "")[:9]
+        summary = e.get("summary", "")[:49]
+        pr = e.get("pr_url", "")
+        print(f"{ts:<22} {bot:<12} {status:<10} {summary:<50} {pr}")
+
+    print(f"\n{len(entries)} event(s)")
     return 0
 
 
@@ -770,9 +867,7 @@ def cmd_data_migrate(args) -> int:
 
             if dst.exists():
                 plan.append(
-                    _DataMigratePlanItem(
-                        fleet_bot_name, child, dst, "skip-exists", 0.0
-                    )
+                    _DataMigratePlanItem(fleet_bot_name, child, dst, "skip-exists", 0.0)
                 )
                 continue
 
@@ -782,9 +877,7 @@ def cmd_data_migrate(args) -> int:
                 size_mb = 0.0
             if size_mb == 0:
                 plan.append(
-                    _DataMigratePlanItem(
-                        fleet_bot_name, child, dst, "skip-empty", 0.0
-                    )
+                    _DataMigratePlanItem(fleet_bot_name, child, dst, "skip-empty", 0.0)
                 )
                 continue
 
@@ -833,11 +926,20 @@ def cmd_data_migrate(args) -> int:
                 )
                 suffix = "/" if item.src.is_dir() else ""
                 if item.action == "copy":
-                    log.info("    COPY  %6s  %s%s  →  %s%s", sz_str, rel_src, suffix, rel_dst, suffix)
+                    log.info(
+                        "    COPY  %6s  %s%s  →  %s%s",
+                        sz_str,
+                        rel_src,
+                        suffix,
+                        rel_dst,
+                        suffix,
+                    )
                     total_to_copy_mb += item.size_mb
                 else:
                     reason = _SKIP_REASON[item.action]
-                    log.info("    SKIP  %6s  %s%s  (%s)", sz_str, rel_src, suffix, reason)
+                    log.info(
+                        "    SKIP  %6s  %s%s  (%s)", sz_str, rel_src, suffix, reason
+                    )
         log.info("Total to copy: %s", _human_size(total_to_copy_mb))
     else:
         log.info(
@@ -1447,6 +1549,12 @@ def main(argv: list[str] | None = None) -> int:
     pv = sub.add_parser("validate", help="Validate fleet.yaml against library/")
     pv.add_argument("--strict", action="store_true", help="Fail on warnings")
     pv.set_defaults(func=cmd_validate)
+
+    pdr = sub.add_parser(
+        "doctor",
+        help="Pre-flight fleet health diagnostic (env, MCP, services, creds)",
+    )
+    pdr.set_defaults(func=cmd_doctor)
 
     pg = sub.add_parser(
         "generate", help="Compose runtime/bots/ from fleet.yaml + library/"
