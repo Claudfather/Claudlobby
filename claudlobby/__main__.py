@@ -1369,6 +1369,86 @@ def cmd_warm_cache(args) -> int:
     return 0
 
 
+def cmd_new_skill(args) -> int:
+    """Interactive (or flag-driven) skill scaffolding."""
+    from .newskill import interactive_collect, render_skill
+
+    paths = _resolve_paths(args)
+
+    if args.interactive or not args.name:
+        name, description, argument_hint = interactive_collect()
+    else:
+        name = args.name
+        description = args.description or ""
+        argument_hint = args.argument_hint
+        if not description:
+            log.error("--description is required in non-interactive mode")
+            return 1
+
+    # Determine target directory (overlay if fleet, else base)
+    if paths.overlay_library:
+        skill_dir = paths.overlay_library / "skills" / name
+    else:
+        skill_dir = paths.base_skills / name
+
+    if skill_dir.exists():
+        log.error("skill already exists: %s", skill_dir)
+        return 1
+
+    content = render_skill(name, description, argument_hint)
+
+    if args.dry_run:
+        print(f"\n=== Would create {skill_dir}/SKILL.md ===\n")
+        print(content)
+        return 0
+
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(content)
+    log.info("created %s/SKILL.md", skill_dir)
+    log.info("next: edit %s/SKILL.md to flesh out the skill behavior", skill_dir)
+    return 0
+
+
+def cmd_new_guardrail(args) -> int:
+    """Interactive (or flag-driven) guardrail scaffolding."""
+    from .newguardrail import interactive_collect, render_guardrail
+
+    paths = _resolve_paths(args)
+
+    if args.interactive or not args.name:
+        name, title, description = interactive_collect()
+    else:
+        name = args.name
+        title = args.title or name.replace("-", " ").title()
+        description = args.description or ""
+        if not description:
+            log.error("--description is required in non-interactive mode")
+            return 1
+
+    # Determine target directory (overlay if fleet, else base)
+    if paths.overlay_library:
+        guardrail_path = paths.overlay_library / "guardrails" / f"{name}.md"
+    else:
+        guardrail_path = paths.base_guardrails / f"{name}.md"
+
+    if guardrail_path.exists():
+        log.error("guardrail already exists: %s", guardrail_path)
+        return 1
+
+    content = render_guardrail(name, title, description)
+
+    if args.dry_run:
+        print(f"\n=== Would create {guardrail_path} ===\n")
+        print(content)
+        return 0
+
+    guardrail_path.parent.mkdir(parents=True, exist_ok=True)
+    guardrail_path.write_text(content)
+    log.info("created %s", guardrail_path)
+    log.info("next: edit %s to add specific rules and examples", guardrail_path)
+    return 0
+
+
 def cmd_new_bot(args) -> int:
     """Interactive (or flag-driven) bot creation."""
     from .newbot import (
@@ -1699,6 +1779,43 @@ def main(argv: list[str] | None = None) -> int:
         help="Run `claudlobby generate --bot <name>` after writing",
     )
     pn.set_defaults(func=cmd_new_bot)
+
+    pns = sub.add_parser(
+        "new-skill",
+        help="Scaffold a new skill directory with SKILL.md template",
+    )
+    pns.add_argument("--name", help="Skill name (lowercase, e.g. 'deploy-status')")
+    pns.add_argument("--description", help="One-line description of the skill")
+    pns.add_argument(
+        "--argument-hint",
+        help="Argument hint (e.g. '<task> [--repo <repo>]')",
+    )
+    pns.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Force interactive mode even if flags provided",
+    )
+    pns.add_argument(
+        "--dry-run", action="store_true", help="Show output but don't write"
+    )
+    pns.set_defaults(func=cmd_new_skill)
+
+    png = sub.add_parser(
+        "new-guardrail",
+        help="Scaffold a new guardrail file with frontmatter template",
+    )
+    png.add_argument("--name", help="Guardrail slug (lowercase, e.g. 'no-push-main')")
+    png.add_argument("--title", help="Human-readable title")
+    png.add_argument("--description", help="One-line description of the rule")
+    png.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Force interactive mode even if flags provided",
+    )
+    png.add_argument(
+        "--dry-run", action="store_true", help="Show output but don't write"
+    )
+    png.set_defaults(func=cmd_new_guardrail)
 
     pw = sub.add_parser(
         "warm-cache",
