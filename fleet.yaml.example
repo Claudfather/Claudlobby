@@ -225,3 +225,64 @@ fleet:
 #     claudna_version: "0.2.0"                    # pin clauDNA plugin version
 #     claudron_vault_path: "vaults/my-fleet/eng-1" # Claudron vault scope for this bot
 #     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
+#
+#     # autonomous_runner — turns a bot into an Autonomous Worker that picks
+#     # GitHub issues from a target repo per a cadence and runs a clauDNA --auto
+#     # skill (typically /claudna:implement-plan) to resolve them. The bot's
+#     # CLAUDE.md gets a rendered "Autonomous Runner" section describing the job.
+#     # See library/skills/autonomous-runner/{SKILL.md,archetype.md} for details.
+#     autonomous_runner:
+#       skill: /claudna:implement-plan            # required: which clauDNA --auto skill to run
+#       cadence: 1h                                # required: how often (15m | 1h | 6h | 24h, etc.)
+#       target_repo: my-org/my-repo                # required: <owner>/<repo>
+#       args: ""                                   # optional: appended after --auto
+#       picker:                                    # required if the skill consumes a work item
+#         type: github_issues
+#         label: claudna-eligible
+#         state: open
+#         score_by: mission_alignment              # mission_alignment | recency | priority_label
+#       bypass:                                    # optional: defaults to structural-only
+#         risk_classifier: structural_vs_mechanical
+#         block_on: [structural]                   # [] | [structural] | [structural, localized]
+#         on_bypass: comment_and_label             # comment_and_label | comment_only | exit_silent
+#       pre_hooks: []                              # optional: clauDNA skills to run before main
+#       post_hooks: []                             # optional: clauDNA skills to run after main
+#       on_outcome:                                # optional: defaults to "report" for all outcomes
+#         completed: report
+#         bypassed: report
+#         needs_input: report_and_pause
+#         blocked: report_and_pause
+#         partial: report
+#
+# ---------------------------------------------------------------------------
+# Complete example: an Autonomous Worker bot stanza.
+# Uncomment and add to bots: above to enable.
+# ---------------------------------------------------------------------------
+#
+#     dbt-auto-bot:
+#       expertise: [data-engineering]
+#       mission: "Resolve claudna-eligible dbt issues during the cadence window. PRs only — never merge."
+#       skills: [autonomous-runner]
+#       protocols: [continuous-autonomous-mode, report-back]
+#       guardrails: [no-push-main, verify-before-merge]
+#       telegram:
+#         handle: my_dbt_auto_bot
+#       autonomous_runner:
+#         skill: /claudna:implement-plan
+#         cadence: 1h
+#         target_repo: my-org/my-dbt-repo
+#         picker:
+#           type: github_issues
+#           label: claudna-eligible
+#           state: open
+#           score_by: mission_alignment
+#         bypass:
+#           risk_classifier: structural_vs_mechanical
+#           block_on: [structural]
+#           on_bypass: comment_and_label
+#         on_outcome:
+#           completed: report
+#           bypassed: report
+#           needs_input: report_and_pause
+#           blocked: report_and_pause
+#           partial: report
