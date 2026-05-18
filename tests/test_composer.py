@@ -2126,3 +2126,111 @@ class TestComposeBotConfShellEscaping:
         assert "$(touch /tmp/pwned)" in result.stdout
         assert "`whoami`" in result.stdout
         assert "${IFS}evil" in result.stdout
+
+
+class TestComposeAutonomousRunner:
+    """compose_claude_md renders the autonomous_runner block when configured."""
+
+    def _setup(self, tmp_path):
+        from claudlobby.composer import compose_claude_md
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "templates").mkdir()
+        import shutil
+
+        shutil.copy(
+            Path(__file__).parent.parent / "templates" / "claude.md.j2",
+            root / "templates" / "claude.md.j2",
+        )
+        (root / "runtime" / "bots").mkdir(parents=True)
+        (root / "voices").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_claude_md, paths
+
+    def test_section_omitted_when_not_configured(self, tmp_path):
+        compose_claude_md, paths = self._setup(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_claude_md(bot, fleet, paths)
+        assert "Autonomous Runner" not in result
+
+    def test_minimal_block_rendered(self, tmp_path):
+        from claudlobby.config import AutonomousRunnerConfig
+
+        compose_claude_md, paths = self._setup(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            autonomous_runner=AutonomousRunnerConfig(
+                skill="/claudna:tech-debt",
+                cadence="1h",
+                target_repo="org/repo",
+            ),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_claude_md(bot, fleet, paths)
+        assert "## Autonomous Runner — Your Continuous Job" in result
+        assert "/claudna:tech-debt" in result
+        assert "every `1h`" in result
+        assert "org/repo" in result
+        # Optional fields not present → those bullets omitted
+        assert "Additional args" not in result
+        assert "Picker:" not in result
+        assert "Bypass:" not in result
+        assert "Pre-hooks:" not in result
+        assert "Post-hooks:" not in result
+        assert "On-outcome:" not in result
+
+    def test_full_block_rendered(self, tmp_path):
+        from claudlobby.config import (
+            AutonomousRunnerBypass,
+            AutonomousRunnerConfig,
+            AutonomousRunnerPicker,
+        )
+
+        compose_claude_md, paths = self._setup(tmp_path)
+        bot = BotConfig(
+            bot_id="dbt-bot",
+            name="dbt-bot",
+            expertise=["eng"],
+            autonomous_runner=AutonomousRunnerConfig(
+                skill="/claudna:implement-plan",
+                cadence="2h",
+                target_repo="artemis-xyz/dbt",
+                args="--source github",
+                picker=AutonomousRunnerPicker(
+                    type="github_issues",
+                    label="claudna-eligible",
+                    score_by="mission_alignment",
+                ),
+                bypass=AutonomousRunnerBypass(
+                    risk_classifier="structural_vs_mechanical",
+                    block_on=["structural"],
+                    on_bypass="comment_and_label",
+                ),
+                pre_hooks=["/claudna:adversarial-review"],
+                post_hooks=["/claudna:simplify"],
+                on_outcome={
+                    "completed": "report",
+                    "blocked": "report_and_pause",
+                },
+            ),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"dbt-bot": bot})
+        result = compose_claude_md(bot, fleet, paths)
+        assert "/claudna:implement-plan" in result
+        assert "artemis-xyz/dbt" in result
+        assert "--source github" in result
+        assert "claudna-eligible" in result
+        assert "mission_alignment" in result
+        assert "structural_vs_mechanical" in result
+        assert "structural" in result
+        assert "comment_and_label" in result
+        assert "/claudna:adversarial-review" in result
+        assert "/claudna:simplify" in result
+        assert "completed" in result and "report" in result
+        assert "blocked" in result and "report_and_pause" in result

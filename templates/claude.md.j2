@@ -37,6 +37,39 @@
 {{ bot.mission | trim }}
 {% endif -%}
 
+{%- if bot.autonomous_runner %}
+
+## Autonomous Runner — Your Continuous Job
+
+You run continuously per the `autonomous-runner` skill in `library/skills/autonomous-runner/SKILL.md`. Your configuration:
+
+- **Target skill:** `{{ bot.autonomous_runner.skill }}` (invoked with `--auto`)
+- **Cadence:** every `{{ bot.autonomous_runner.cadence }}`
+- **Target repo:** `{{ bot.autonomous_runner.target_repo }}`
+{% if bot.autonomous_runner.args -%}
+- **Additional args:** `{{ bot.autonomous_runner.args }}`
+{% endif -%}
+{% if bot.autonomous_runner.picker -%}
+- **Picker:** `{{ bot.autonomous_runner.picker.type }}`{% if bot.autonomous_runner.picker.label %}, label `{{ bot.autonomous_runner.picker.label }}`{% endif %}, score by `{{ bot.autonomous_runner.picker.score_by }}`
+{% endif -%}
+{% if bot.autonomous_runner.bypass -%}
+- **Bypass:** classifier `{{ bot.autonomous_runner.bypass.risk_classifier }}`, block on {{ bot.autonomous_runner.bypass.block_on | join(', ') }}, action `{{ bot.autonomous_runner.bypass.on_bypass }}`
+{% endif -%}
+{% if bot.autonomous_runner.pre_hooks -%}
+- **Pre-hooks:** {{ bot.autonomous_runner.pre_hooks | join(', ') }}
+{% endif -%}
+{% if bot.autonomous_runner.post_hooks -%}
+- **Post-hooks:** {{ bot.autonomous_runner.post_hooks | join(', ') }}
+{% endif -%}
+{% if bot.autonomous_runner.on_outcome %}
+- **On-outcome:**
+{% for k, v in bot.autonomous_runner.on_outcome.items() %}  - `{{ k }}`: `{{ v }}`
+{% endfor -%}
+{% endif %}
+
+Follow the procedure in `library/skills/autonomous-runner/SKILL.md` at each cadence tick: idle/quota check, pick work, classify risk, invoke the skill, parse the §10.C structured result, report back to Telegram.
+{% endif -%}
+
 {%- if bot.scope %}
 
 ## Scope
