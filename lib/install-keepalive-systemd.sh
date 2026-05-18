@@ -23,7 +23,20 @@ if [ -z "$FLEET" ]; then
     exit 2
 fi
 
-NAME="claudlobby-$FLEET-keepalive"
+# Derive service prefix from bot.conf (all bots share the same SERVICE_PREFIX).
+if [ -z "${SERVICE_PREFIX:-}" ]; then
+    _first_conf="$(find "$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots" -name bot.conf -print -quit 2>/dev/null)"
+    if [ -n "$_first_conf" ]; then
+        SERVICE_PREFIX="$(grep -m1 '^export SERVICE_PREFIX=' "$_first_conf" | cut -d= -f2- | tr -d "'")"
+    fi
+fi
+if [ -z "${SERVICE_PREFIX:-}" ]; then
+    echo "install-keepalive-systemd.sh: SERVICE_PREFIX not set and no bot.conf found." >&2
+    echo "  Run 'claudlobby generate' first, or export SERVICE_PREFIX." >&2
+    exit 2
+fi
+
+NAME="$SERVICE_PREFIX.keepalive"
 SERVICE_FILE="$HOME/.config/systemd/user/$NAME.service"
 TIMER_FILE="$HOME/.config/systemd/user/$NAME.timer"
 PROGRAM="$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
