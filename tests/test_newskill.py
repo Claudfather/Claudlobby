@@ -94,3 +94,39 @@ class TestCmdNewSkill:
         (tmp_path / "lib").mkdir()
         rc = main(["--root", str(tmp_path), "new-skill", "--name", "no-desc"])
         assert rc == 1
+
+    def test_rejects_invalid_name(self, tmp_path):
+        from claudlobby.__main__ import main
+
+        (tmp_path / "library" / "skills").mkdir(parents=True)
+        (tmp_path / "lib").mkdir()
+        rc = main(
+            [
+                "--root",
+                str(tmp_path),
+                "new-skill",
+                "--name",
+                "Bad Name",
+                "--description",
+                "x",
+            ]
+        )
+        assert rc == 1
+
+    def test_rejects_name_starting_with_number(self, tmp_path):
+        from claudlobby.__main__ import main
+
+        (tmp_path / "library" / "skills").mkdir(parents=True)
+        (tmp_path / "lib").mkdir()
+        rc = main(
+            [
+                "--root",
+                str(tmp_path),
+                "new-skill",
+                "--name",
+                "123bad",
+                "--description",
+                "x",
+            ]
+        )
+        assert rc == 1

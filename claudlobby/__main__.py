@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -1369,6 +1370,9 @@ def cmd_warm_cache(args) -> int:
     return 0
 
 
+_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
 def cmd_new_skill(args) -> int:
     """Interactive (or flag-driven) skill scaffolding."""
     from .newskill import interactive_collect, render_skill
@@ -1384,6 +1388,12 @@ def cmd_new_skill(args) -> int:
         if not description:
             log.error("--description is required in non-interactive mode")
             return 1
+
+    if not _SLUG_RE.match(name):
+        log.error(
+            "name must be lowercase, start with a letter, only [a-z0-9_-]: %r", name
+        )
+        return 1
 
     # Determine target directory (overlay if fleet, else base)
     if paths.overlay_library:
@@ -1424,6 +1434,12 @@ def cmd_new_guardrail(args) -> int:
         if not description:
             log.error("--description is required in non-interactive mode")
             return 1
+
+    if not _SLUG_RE.match(name):
+        log.error(
+            "name must be lowercase, start with a letter, only [a-z0-9_-]: %r", name
+        )
+        return 1
 
     # Determine target directory (overlay if fleet, else base)
     if paths.overlay_library:

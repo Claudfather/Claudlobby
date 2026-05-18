@@ -11,8 +11,14 @@ class TestRenderGuardrail:
             "no-yolo", "No YOLO deploys", "Never deploy untested code"
         )
         assert "title: No YOLO deploys" in content
-        assert "description: Never deploy untested code" in content
+        assert 'description: "Never deploy untested code"' in content
         assert "# No YOLO deploys" in content
+
+    def test_description_with_colon_is_valid_yaml(self):
+        content = render_guardrail(
+            "no-deploy", "No deploys", "Never deploy: untested code"
+        )
+        assert 'description: "Never deploy: untested code"' in content
 
     def test_frontmatter_structure(self):
         content = render_guardrail("test", "Test Rule", "A test")
@@ -98,3 +104,21 @@ class TestCmdNewGuardrail:
         assert rc == 0
         content = (tmp_path / "library" / "guardrails" / "no-force-push.md").read_text()
         assert "title: No Force Push" in content
+
+    def test_rejects_invalid_name(self, tmp_path):
+        from claudlobby.__main__ import main
+
+        (tmp_path / "library" / "guardrails").mkdir(parents=True)
+        (tmp_path / "lib").mkdir()
+        rc = main(
+            [
+                "--root",
+                str(tmp_path),
+                "new-guardrail",
+                "--name",
+                "Bad Name!",
+                "--description",
+                "x",
+            ]
+        )
+        assert rc == 1

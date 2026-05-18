@@ -16,7 +16,6 @@ import re
 log = logging.getLogger(__name__)
 
 
-
 def _ask(prompt: str, default: str | None = None, allow_empty: bool = True) -> str:
     """Prompt with optional default. Empty input returns default."""
     suffix = f" [{default}]" if default else ""
@@ -36,7 +35,7 @@ def render_guardrail(name: str, title: str, description: str) -> str:
     lines: list[str] = []
     lines.append("---")
     lines.append(f"title: {title}")
-    lines.append(f"description: {description}")
+    lines.append(f'description: "{description}"')
     lines.append("---")
     lines.append("")
     lines.append(f"# {title}")
