@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -319,8 +320,6 @@ def _truncate(text: str | None, width: int) -> str:
         return text
     return text[: width - 1] + "\u2026"
 
-
-import re
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
