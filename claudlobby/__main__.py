@@ -313,12 +313,38 @@ def cmd_promote(args) -> int:
 
 
 def cmd_status(args) -> int:
-    """Stub: placeholder for fleet health dashboard."""
+    """Fleet health dashboard — live snapshot from tmux, systemd, fleet-state."""
+    from .status import (
+        collect_fleet_status,
+        format_bot_detail,
+        format_json,
+        format_table,
+    )
+
     paths = _resolve_paths(args)
-    log.info("claudlobby status — placeholder")
-    log.info("  root:    %s", paths.root)
-    log.info("  runtime: %s", paths.runtime_bots)
-    log.info("  (full status dashboard wiring tmux + service health: TODO)")
+    _load_env(paths)
+    fleet = _load_fleet_or_exit(paths)
+
+    bot_filter = getattr(args, "bot", None)
+    use_json = getattr(args, "json", False)
+
+    statuses = collect_fleet_status(fleet, paths)
+
+    if bot_filter:
+        matches = [bs for bs in statuses if bs.name == bot_filter]
+        if not matches:
+            log.error("bot %r not found in fleet %r", bot_filter, fleet.name)
+            return 1
+        if use_json:
+            sys.stdout.write(format_json(matches, fleet.name))
+        else:
+            sys.stdout.write(format_bot_detail(matches[0]))
+        return 0
+
+    if use_json:
+        sys.stdout.write(format_json(statuses, fleet.name))
+    else:
+        sys.stdout.write(format_table(statuses, fleet.name))
     return 0
 
 
@@ -1705,7 +1731,11 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("bot", help="Bot name")
     pp.set_defaults(func=cmd_promote)
 
-    ps = sub.add_parser("status", help="Fleet health dashboard (stub)")
+    ps = sub.add_parser("status", help="Fleet health dashboard")
+    ps.add_argument("--bot", help="Show detailed status for one bot")
+    ps.add_argument(
+        "--json", action="store_true", dest="json", help="JSON output for scripting"
+    )
     ps.set_defaults(func=cmd_status)
 
     prb = sub.add_parser(
