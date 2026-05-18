@@ -1683,6 +1683,23 @@ def main(argv: list[str] | None = None) -> int:
     ps = sub.add_parser("status", help="Fleet health dashboard (stub)")
     ps.set_defaults(func=cmd_status)
 
+    prb = sub.add_parser(
+        "report-back",
+        help="Query the report-back ledger (bot work events)",
+    )
+    prb.add_argument("--bot", help="Filter by bot name")
+    prb.add_argument(
+        "--status", help="Filter by status (completed/progress/blocked/failed)"
+    )
+    prb.add_argument(
+        "--since",
+        help="Show events since (e.g. 24h, 7d, 30m, or ISO timestamp)",
+    )
+    prb.add_argument(
+        "--json", action="store_true", help="Output raw JSONL instead of table"
+    )
+    prb.set_defaults(func=cmd_report_back)
+
     pe = sub.add_parser(
         "env-migrate",
         help="Extract secrets from an existing bot setup into tiered .env files (dry-run by default)",
