@@ -317,6 +317,11 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         raise ValueError(f"bot_id {bot.bot_id!r} contains shell-unsafe characters")
     if not _SAFE_NAME_RE.match(bot.name):
         raise ValueError(f"bot name {bot.name!r} contains shell-unsafe characters")
+    tg_handle = (bot.telegram.handle if bot.telegram else None) or bot.bot_id
+    if not _SAFE_NAME_RE.match(tg_handle):
+        raise ValueError(
+            f"telegram handle {tg_handle!r} contains shell-unsafe characters"
+        )
 
     ctx = _bot_template_context(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
@@ -404,9 +409,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"export MODEL_STRATEGY_ESCALATE_WHEN={_shq(ms.escalate_when)}"
             )
         if ms.compact_when:
-            lines.append(
-                f"export MODEL_STRATEGY_COMPACT_WHEN={_shq(ms.compact_when)}"
-            )
+            lines.append(f"export MODEL_STRATEGY_COMPACT_WHEN={_shq(ms.compact_when)}")
         # Subagent model preferences (from raw extras)
         for key in ("explore", "plan", "general"):
             val = ms.raw.get(key)
@@ -437,7 +440,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if bot.claudron_vault_path:
             lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
         if bot.claudosseum_tenant_id:
-            lines.append(f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}")
+            lines.append(
+                f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
+            )
 
     # Plugin sync — if fleet declares plugins, enable auto-install on session start
     if fleet.plugins.required:
@@ -1166,7 +1171,6 @@ def compose_bot(
     # picks up correct requireMention/dmPolicy on first boot.
     access = compose_access_json(bot, fleet)
     if access is not None:
-
         handle = bot.telegram.handle
         if not re.match(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*$", handle):
             _log.warning(
