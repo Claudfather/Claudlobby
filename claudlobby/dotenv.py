@@ -24,9 +24,10 @@ from pathlib import Path
 def read(path: Path) -> dict[str, str]:
     """Parse a .env file into {var: value}.
 
-    Handles both `VAR=value` and `export VAR=value` forms. Strips matched
-    surrounding quotes (single or double). Returns {} if the file doesn't
-    exist. Lines that start with `#` or have no `=` are skipped silently.
+    Handles both `VAR=value` and `export VAR=value` forms. Parses
+    shell-quoted values via shlex.split (handles shlex.quote output like
+    ``'it'"'"'s'``). Returns {} if the file doesn't exist. Lines that
+    start with `#` or have no `=` are skipped silently.
     """
     if not path.is_file():
         return {}
@@ -40,9 +41,14 @@ def read(path: Path) -> dict[str, str]:
         if k.startswith("export "):
             k = k[len("export ") :].strip()
         v = v.strip()
-        # Strip one layer of matching quotes
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
-            v = v[1:-1]
+        # Parse shell-quoted values (handles shlex.quote output like 'it'"'"'s')
+        if v and v[0] in ('"', "'"):
+            try:
+                v = shlex.split(v)[0]
+            except ValueError:
+                # Malformed quoting — strip matching outer quotes as fallback
+                if len(v) >= 2 and v[0] == v[-1]:
+                    v = v[1:-1]
         if k:
             out[k] = v
     return out

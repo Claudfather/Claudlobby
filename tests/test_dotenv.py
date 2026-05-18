@@ -14,14 +14,15 @@ class TestFormatFileShellSafety:
 
     def test_dollar_sign_not_expanded(self, tmp_path):
         env_file = tmp_path / ".env"
-        env_file.write_text(format_file("# test", {"X": "$(touch /tmp/pwned)"}))
+        marker = tmp_path / "pwned"
+        env_file.write_text(format_file("# test", {"X": f"$(touch {marker})"}))
         result = subprocess.run(
             ["bash", "-c", f'set -a; . "{env_file}"; printf "%s" "$X"'],
             capture_output=True,
             text=True,
         )
-        assert result.stdout == "$(touch /tmp/pwned)"
-        assert not (tmp_path / "pwned").exists()
+        assert result.stdout == f"$(touch {marker})"
+        assert not marker.exists()
 
     def test_backtick_not_expanded(self, tmp_path):
         env_file = tmp_path / ".env"
@@ -125,14 +126,26 @@ class TestReadRoundTrip:
         original = {"TOKEN": 'abc$def`ghi"jkl\\mno'}
         env_file = tmp_path / ".env"
         env_file.write_text(format_file("# test", original))
-        # read() strips outer quotes — for single-quoted values with
-        # shlex.quote escaping, we verify the shell round-trip instead
-        result = subprocess.run(
-            ["bash", "-c", f'set -a; . "{env_file}"; printf "%s" "$TOKEN"'],
-            capture_output=True,
-            text=True,
-        )
-        assert result.stdout == original["TOKEN"]
+        parsed = read(env_file)
+        assert parsed == original
+
+    def test_round_trip_embedded_single_quote(self, tmp_path):
+        original = {"TOKEN": "it's a string"}
+        env_file = tmp_path / ".env"
+        env_file.write_text(format_file("# test", original))
+        parsed = read(env_file)
+        assert parsed == original
+
+    def test_merge_into_preserves_single_quote_value(self, tmp_path):
+        from claudlobby.dotenv import merge_into
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(format_file("# test", {"A": "it's here"}))
+        merged = merge_into(env_file, {"B": "new"})
+        assert merged == {"A": "it's here", "B": "new"}
+        # Write and re-read to verify double round-trip
+        env_file.write_text(format_file("# test", merged))
+        assert read(env_file) == merged
 
     def test_read_skips_comments_and_blanks(self, tmp_path):
         env_file = tmp_path / ".env"
