@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.seed.example
+!.env.example
 
 # Generated MCP configs (composed from library/mcp/ fragments at generate time)
 .mcp.json
