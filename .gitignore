@@ -57,6 +57,9 @@ lib/creds-check-state.json.lock
 # OS
 .DS_Store
 
+# Skill config files (real tokens — only config.example.json is committed)
+library/skills/*/config.json
+
 # Claudron vault pointer (machine-specific)
 .claudron
 
