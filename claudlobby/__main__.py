@@ -458,6 +458,91 @@ def cmd_uptime(args) -> int:
     return 0
 
 
+def cmd_report_back(args) -> int:
+    """Query the report-back ledger — human-readable table of bot work events."""
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+
+    paths = _resolve_paths(args)
+
+    # Resolve ledger path (mirrors shell logic in report-back.sh)
+    if paths.fleet_dir:
+        ledger = paths.runtime / "report-back.jsonl"
+    else:
+        ledger = paths.root / "runtime" / "fleet" / "report-back.jsonl"
+
+    if not ledger.is_file():
+        log.info("no report-back ledger found at %s", ledger)
+        return 0
+
+    # Parse --since into a cutoff timestamp
+    cutoff = None
+    if args.since:
+        raw = args.since.strip()
+        now = datetime.now(timezone.utc)
+        if raw.endswith("h"):
+            cutoff = now - timedelta(hours=int(raw[:-1]))
+        elif raw.endswith("d"):
+            cutoff = now - timedelta(days=int(raw[:-1]))
+        elif raw.endswith("m"):
+            cutoff = now - timedelta(minutes=int(raw[:-1]))
+        else:
+            try:
+                cutoff = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                log.error(
+                    "cannot parse --since '%s' (use e.g. 24h, 7d, 30m, or ISO date)",
+                    raw,
+                )
+                return 1
+
+    # Read and filter entries
+    entries = []
+    for line in ledger.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if args.bot and entry.get("bot") != args.bot:
+            continue
+        if args.status and entry.get("status") != args.status:
+            continue
+        if cutoff:
+            try:
+                ts = datetime.fromisoformat(entry["ts"].replace("Z", "+00:00"))
+                if ts < cutoff:
+                    continue
+            except (KeyError, ValueError):
+                continue
+        entries.append(entry)
+
+    if not entries:
+        log.info("no matching events")
+        return 0
+
+    if args.json:
+        for e in entries:
+            print(_json.dumps(e))
+        return 0
+
+    # Table output
+    print(f"{'TIMESTAMP':<22} {'BOT':<12} {'STATUS':<10} {'SUMMARY':<50} {'PR'}")
+    print("-" * 110)
+    for e in entries:
+        ts = e.get("ts", "")[:19]
+        bot = e.get("bot", "")[:11]
+        status = e.get("status", "")[:9]
+        summary = e.get("summary", "")[:49]
+        pr = e.get("pr_url", "")
+        print(f"{ts:<22} {bot:<12} {status:<10} {summary:<50} {pr}")
+
+    print(f"\n{len(entries)} event(s)")
+    return 0
+
+
 def _discover_legacy_bot_dirs(source_dir: Path) -> dict[str, Path]:
     """Find legacy bot dirs (subdirs containing .mcp.json or bot.conf)."""
     bot_dir_map: dict[str, Path] = {}

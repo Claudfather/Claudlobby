@@ -252,8 +252,33 @@ def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
 # ----------------------------------------------------------------------
 
 
+def _curl_with_config(
+    headers: dict[str, str], extra_args: list[str]
+) -> subprocess.CompletedProcess:
+    """Run curl with auth headers in a tmpfile to avoid leaking tokens in ps output."""
+    import tempfile
+
+    fd, cfg_path = tempfile.mkstemp(suffix=".cfg")
+    try:
+        with os.fdopen(fd, "w") as f:
+            for k, v in headers.items():
+                f.write(f'header = "{k}: {v}"\n')
+        return subprocess.run(
+            ["curl", "-sS", "--config", cfg_path, "--max-time", "10"] + extra_args,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    finally:
+        os.unlink(cfg_path)
+
+
 def check_credentials(paths: Paths, report: DoctorReport) -> None:
-    """Probe key credentials for validity (GitHub PAT, Railway token)."""
+    """Probe key credentials for validity (GitHub PAT, Railway token).
+
+    Matches creds-check.sh patterns: tokens passed via --config tmpfile
+    (not -H args), Railway body checked for GraphQL errors on 200.
+    """
     checks_run = 0
     failures = []
 
@@ -264,54 +289,59 @@ def check_credentials(paths: Paths, report: DoctorReport) -> None:
     if gh_pat:
         checks_run += 1
         try:
-            result = subprocess.run(
+            result = _curl_with_config(
+                {
+                    "Authorization": f"Bearer {gh_pat}",
+                    "Accept": "application/vnd.github+json",
+                },
                 [
-                    "curl",
-                    "-sS",
                     "-o",
                     "/dev/null",
                     "-w",
                     "%{http_code}",
-                    "-H",
-                    f"Authorization: token {gh_pat}",
                     "https://api.github.com/user",
                 ],
-                capture_output=True,
-                text=True,
-                timeout=10,
             )
             if result.stdout.strip() != "200":
                 failures.append(f"GITHUB_PAT (HTTP {result.stdout.strip()})")
         except (subprocess.TimeoutExpired, OSError):
             failures.append("GITHUB_PAT (timeout)")
 
-    # Railway token
+    # Railway token — probe via GraphQL me query (matches creds-check.sh)
     railway_token = os.environ.get("RAILWAY_API_TOKEN")
     if railway_token:
         checks_run += 1
         try:
-            result = subprocess.run(
+            result = _curl_with_config(
+                {
+                    "Authorization": f"Bearer {railway_token}",
+                    "Content-Type": "application/json",
+                },
                 [
-                    "curl",
-                    "-sS",
-                    "-o",
-                    "/dev/null",
+                    "-X",
+                    "POST",
                     "-w",
-                    "%{http_code}",
-                    "-H",
-                    f"Authorization: Bearer {railway_token}",
-                    "-H",
-                    "Content-Type: application/json",
+                    "\n%{http_code}",
                     "-d",
-                    '{"query":"{me{name}}"}',
-                    "https://backboard.railway.com/graphql/v2",
+                    '{"query":"query{me{name}}"}',
+                    "https://backboard.railway.app/graphql/v2",
                 ],
-                capture_output=True,
-                text=True,
-                timeout=10,
             )
-            if result.stdout.strip() != "200":
-                failures.append(f"RAILWAY_API_TOKEN (HTTP {result.stdout.strip()})")
+            # stdout = response body + \n + http code
+            lines = result.stdout.strip().rsplit("\n", 1)
+            body = lines[0] if len(lines) == 2 else ""
+            code = lines[-1]
+            if code != "200":
+                failures.append(f"RAILWAY_API_TOKEN (HTTP {code})")
+            elif body:
+                # Railway returns 200 with {"errors":[...]} on auth failure
+                try:
+                    resp = json.loads(body)
+                    if "errors" in resp:
+                        msg = resp["errors"][0].get("message", "unknown error")[:120]
+                        failures.append(f"RAILWAY_API_TOKEN (graphql error: {msg})")
+                except (json.JSONDecodeError, IndexError, KeyError):
+                    pass
         except (subprocess.TimeoutExpired, OSError):
             failures.append("RAILWAY_API_TOKEN (timeout)")
 
