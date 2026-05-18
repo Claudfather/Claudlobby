@@ -520,6 +520,57 @@ class TestComposeBotConfExportedVars:
         assert "export BOT_ID=astrid" in conf
 
 
+class TestComposeBotConfServicePrefix:
+    """compose_bot_conf derives BOT_SERVICE and SERVICE_PREFIX from fleet config."""
+
+    def test_service_prefix_from_fleet_config(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = BotConfig(
+            bot_id="eng-1",
+            name="eng-1",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="eng_bot"),
+        )
+        fleet = FleetConfig(
+            name="my-fleet",
+            service_prefix="com.myorg.prod",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "eng-1").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "BOT_SERVICE=com.myorg.prod.eng-1" in conf
+        assert "export SERVICE_PREFIX=com.myorg.prod" in conf
+
+    def test_no_hardcoded_example_prefix(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot"),
+        )
+        fleet = FleetConfig(
+            name="custom",
+            service_prefix="io.custom.fleet",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "com.example" not in conf
+        assert "com.claudlobby" not in conf
+        assert "io.custom.fleet" in conf
+
+
 class TestComposeHooks:
     """_compose_hooks transforms flat fleet.yaml entries into Claude Code format."""
 
@@ -1968,10 +2019,18 @@ class TestJinja2Sandbox:
         with pytest.raises(SecurityError):
             tmpl.render()
 
+
 class TestComposeBotConfShellEscaping:
     """compose_bot_conf must shell-escape all interpolated values to prevent injection."""
 
-    def _compose(self, tmp_path, env=None, bot_id="worker", name="worker", telegram_handle="w_bot"):
+    def _compose(
+        self,
+        tmp_path,
+        env=None,
+        bot_id="worker",
+        name="worker",
+        telegram_handle="w_bot",
+    ):
         from claudlobby.composer import compose_bot_conf
 
         bot = BotConfig(
@@ -2017,16 +2076,19 @@ class TestComposeBotConfShellEscaping:
 
     def test_invalid_env_key_raises(self, tmp_path):
         import pytest
+
         with pytest.raises(ValueError, match="not a valid shell identifier"):
             self._compose(tmp_path, env={"FOO;ls": "x"})
 
     def test_invalid_env_key_with_space_raises(self, tmp_path):
         import pytest
+
         with pytest.raises(ValueError, match="not a valid shell identifier"):
             self._compose(tmp_path, env={"FOO BAR": "x"})
 
     def test_unsafe_bot_id_raises(self, tmp_path):
         import pytest
+
         with pytest.raises(ValueError, match="shell-unsafe"):
             self._compose(tmp_path, bot_id="evil$(whoami)")
 
@@ -2052,10 +2114,13 @@ class TestComposeBotConfShellEscaping:
 
         result = subprocess.run(
             [
-                "bash", "-c",
+                "bash",
+                "-c",
                 f'source {conf_path} && echo "I1=$INJECT1" && echo "I2=$INJECT2" && echo "I3=$INJECT3"',
             ],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         assert result.returncode == 0
         assert "$(touch /tmp/pwned)" in result.stdout
