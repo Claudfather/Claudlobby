@@ -465,3 +465,133 @@ class TestHookCommandValidation:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert not any("hook" in w and "not found" in w for w in report.warnings)
+
+
+class TestAutonomousRunnerValidation:
+    """Validation of the per-bot autonomous_runner block."""
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def _attach(self, fleet, **kwargs):
+        from claudlobby.config import (
+            AutonomousRunnerBypass,
+            AutonomousRunnerConfig,
+            AutonomousRunnerPicker,
+        )
+
+        defaults = dict(
+            skill="/claudna:tech-debt", cadence="1h", target_repo="org/repo"
+        )
+        defaults.update(kwargs)
+        picker = defaults.pop("picker", None)
+        bypass = defaults.pop("bypass", None)
+        fleet.bots["lead"].autonomous_runner = AutonomousRunnerConfig(
+            **defaults,
+            picker=AutonomousRunnerPicker(**picker) if picker else None,
+            bypass=AutonomousRunnerBypass(**bypass) if bypass else None,
+        )
+
+    def test_known_skill_no_warning(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet)
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any(
+            "autonomous_runner.skill" in w and "tech-debt" in w
+            for w in report.warnings
+        )
+
+    def test_unknown_skill_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet, skill="/claudna:nonexistent")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "autonomous_runner.skill" in w and "--auto-eligible" in w
+            for w in report.warnings
+        )
+
+    def test_bad_cadence_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet, cadence="banana")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "cadence" in w and "banana" in w for w in report.warnings
+        )
+
+    def test_bad_target_repo_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet, target_repo="just-a-name")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "target_repo" in w and "org/repo" in w for w in report.warnings
+        )
+
+    def test_github_issues_picker_without_label_is_error(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet, picker={"type": "github_issues", "label": None})
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "picker.label is required" in e for e in report.errors
+        )
+
+    def test_unknown_on_bypass_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet, bypass={"on_bypass": "explode"})
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "on_bypass" in w and "explode" in w for w in report.warnings
+        )
+
+    def test_unknown_on_outcome_key_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet, on_outcome={"banana": "report"})
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "on_outcome key" in w and "banana" in w for w in report.warnings
+        )
+
+    def test_unknown_on_outcome_action_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet, on_outcome={"completed": "explode"})
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "on_outcome action" in w and "explode" in w for w in report.warnings
+        )
+
+    def test_non_claudna_hook_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        self._attach(fleet, pre_hooks=["random-skill"])
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "autonomous_runner hook" in w and "random-skill" in w
+            for w in report.warnings
+        )
+
+    def test_no_autonomous_runner_no_warnings(self, fleet_dir, monkeypatch):
+        """A bot without autonomous_runner produces no autonomous_runner warnings."""
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("autonomous_runner" in w for w in report.warnings)
+        assert not any("autonomous_runner" in e for e in report.errors)

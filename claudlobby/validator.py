@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +17,31 @@ log = logging.getLogger(__name__)
 from . import dotenv
 from .config import BotConfig, FleetConfig
 from .paths import Paths
+
+
+# clauDNA skills known to support --auto. The wrapper's structured-result
+# contract (§10.C) is honored by these skills today; configurators get a
+# soft warning if they wire up a skill not on this list. Update when new
+# --auto skills ship in clauDNA.
+_AUTO_ELIGIBLE_SKILLS = frozenset(
+    {
+        "/claudna:tech-debt",
+        "/claudna:security-audit",
+        "/claudna:product-enhance",
+        "/claudna:frontend-performance-audit",
+        "/claudna:docs-review",
+        "/claudna:access-path-audit",
+        "/claudna:product-vision",
+        "/claudna:session-handoff",
+        "/claudna:visual-crawl",
+        "/claudna:implement-plan",
+    }
+)
+
+_CADENCE_RE = re.compile(r"^\d+[mhd]$")
+_OUTCOME_KEYS = frozenset({"completed", "bypassed", "needs_input", "blocked", "partial"})
+_OUTCOME_ACTIONS = frozenset({"report", "report_and_pause", "silent"})
+_BYPASS_ACTIONS = frozenset({"comment_and_label", "comment_only", "exit_silent"})
 
 
 @dataclass
@@ -334,6 +360,64 @@ def _validate_bots(
                 if overlap:
                     report.warnings.append(
                         f"bot '{bot_name}': tools {sorted(overlap)} appear in both allow and deny lists"
+                    )
+
+        # Autonomous-runner block (Phase 4). Soft validation: mostly warnings
+        # since the wrapper at runtime is more authoritative than this static
+        # checker. One hard error: github_issues picker without a label.
+        ar = bot.autonomous_runner
+        if ar is not None:
+            if ar.skill not in _AUTO_ELIGIBLE_SKILLS:
+                report.warnings.append(
+                    f"bot '{bot_name}': autonomous_runner.skill '{ar.skill}' is not on the "
+                    f"--auto-eligible list — the wrapper will still invoke it, but unknown "
+                    f"clauDNA skills may not emit a structured result"
+                )
+
+            if not _CADENCE_RE.match(ar.cadence):
+                report.warnings.append(
+                    f"bot '{bot_name}': autonomous_runner.cadence '{ar.cadence}' doesn't match "
+                    f"<N><m|h|d> — the bot may not fire on the expected interval"
+                )
+
+            if "/" not in ar.target_repo or ar.target_repo.count("/") != 1:
+                report.warnings.append(
+                    f"bot '{bot_name}': autonomous_runner.target_repo '{ar.target_repo}' "
+                    f"should be 'org/repo' format"
+                )
+
+            if ar.picker is not None:
+                if ar.picker.type == "github_issues" and not ar.picker.label:
+                    report.errors.append(
+                        f"bot '{bot_name}': autonomous_runner.picker.label is required when "
+                        f"type='github_issues'"
+                    )
+
+            if ar.bypass is not None:
+                if ar.bypass.on_bypass not in _BYPASS_ACTIONS:
+                    report.warnings.append(
+                        f"bot '{bot_name}': autonomous_runner.bypass.on_bypass "
+                        f"'{ar.bypass.on_bypass}' not in known set "
+                        f"({sorted(_BYPASS_ACTIONS)})"
+                    )
+
+            for k, v in ar.on_outcome.items():
+                if k not in _OUTCOME_KEYS:
+                    report.warnings.append(
+                        f"bot '{bot_name}': autonomous_runner.on_outcome key '{k}' is not a "
+                        f"known outcome (expected one of {sorted(_OUTCOME_KEYS)})"
+                    )
+                if v not in _OUTCOME_ACTIONS:
+                    report.warnings.append(
+                        f"bot '{bot_name}': autonomous_runner.on_outcome action '{v}' is not "
+                        f"a known action (expected one of {sorted(_OUTCOME_ACTIONS)})"
+                    )
+
+            for hook in ar.pre_hooks + ar.post_hooks:
+                if not hook.startswith("/claudna:"):
+                    report.warnings.append(
+                        f"bot '{bot_name}': autonomous_runner hook '{hook}' is not a "
+                        f"/claudna: skill — hooks should be clauDNA skill names"
                     )
 
 
