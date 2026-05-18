@@ -1,0 +1,24 @@
+{
+  "_comment": "Copy this to config.json and fill in real values for the host bot. config.json is bot-specific and gitignored; this example is the schema reference.",
+  "managers": [
+    {
+      "name": "lead",
+      "tmux_session": "lead",
+      "telegram_handle": "@fleet_lead_bot",
+      "project_root": "/path/to/fleet/lead",
+      "fleet_repos": ["repo-a", "repo-b"]
+    },
+    {
+      "name": "eng-manager",
+      "tmux_session": "eng-manager",
+      "telegram_handle": "@fleet_eng_manager_bot",
+      "project_root": "/path/to/fleet/eng-manager",
+      "fleet_repos": ["repo-c", "repo-d"]
+    }
+  ],
+  "managers_chat_id": "-1001234567890",
+  "founder_handle": "@founder",
+  "founder_user_id": "0000000000",
+  "cron_offset_minutes": 8,
+  "initiatives_root": "{{INITIATIVES_ROOT}}"
+}
