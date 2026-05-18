@@ -19,8 +19,9 @@ TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 # This file contains resolved secrets written by start-bot.sh.
 trap 'rm -f "$BOT_DIR/.tmux-env"' EXIT
 
-HANDOFF_DIR="$HOME/.claude/notes/projects/$(basename "$BOT_DIR")"
-HANDOFF_FILE="$HANDOFF_DIR/context-resume.md"
+# clauDNA's redesigned /session-handoff (May 2026) writes to <cwd>/.claude/session.md,
+# where cwd is the bot's runtime dir (start-bot.sh `cd "$BOT_DIR"` before tmux).
+HANDOFF_FILE="$BOT_DIR/.claude/session.md"
 
 # If a fresh handoff was written in the last 5 minutes, skip
 if [ -f "$HANDOFF_FILE" ]; then

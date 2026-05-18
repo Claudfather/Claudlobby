@@ -30,7 +30,7 @@ These are available to every bot on the system:
 | `/product-vision` | Architecture-aware product roadmapping |
 | `/implement-plan` | Execute a written plan step-by-step |
 | `/session-handoff` | Capture context for session continuity |
-| `/context-resume` | Restore context from a previous session |
+| `/session-resume` | Restore context from a previous session |
 | `/investigate-app` | Debug production issues |
 | `/repo-health` | Cross-repo health overview |
 | `/lessons` | Capture and review learnings |
