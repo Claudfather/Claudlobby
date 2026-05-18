@@ -126,7 +126,7 @@ class TestComputeMetrics:
         ]
         m = compute_metrics(entries, timedelta(hours=24), now=now)
         assert m["restart_count"] == 2
-        assert m["mtbr_seconds"] is not None
+        assert m["mtbr_seconds"] == 900
 
     def test_first_boot_after_restart(self):
         now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)
@@ -149,6 +149,23 @@ class TestComputeMetrics:
         ]
         m = compute_metrics(entries, timedelta(hours=24), now=now)
         assert m["first_boot"] == first_ts.isoformat()
+
+    def test_uptime_pct_numerical(self):
+        """uptime_pct must equal (up_secs / window_secs) * 100, capped at 100.
+
+        Scenario: two IDLE entries 5 min apart, now is 5 min after the last.
+        Interval 1: 300s (< 600s cap) → 300s IDLE.
+        Interval 2: 300s (< 600s cap) → 300s IDLE.
+        up_secs = 600, window = 86400 → pct = round(600/86400*100, 1) = 0.7%.
+        """
+        now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)
+        entries = [
+            (datetime(2026, 5, 17, 11, 50, tzinfo=TZ), "IDLE"),
+            (datetime(2026, 5, 17, 11, 55, tzinfo=TZ), "IDLE"),
+        ]
+        m = compute_metrics(entries, timedelta(hours=24), now=now)
+        assert m["uptime_pct"] == 0.7
+        assert m["idle_seconds"] == 600
 
     def test_window_filtering(self):
         now = datetime(2026, 5, 17, 12, 0, tzinfo=TZ)

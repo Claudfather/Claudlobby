@@ -20,6 +20,9 @@ TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 
 LOG="$BOT_DIR/keepalive.log"
 
+# JSONL retention — delete keepalive event files older than this many days.
+KEEPALIVE_REAP_DAYS="${KEEPALIVE_REAP_DAYS:-7}"
+
 # Emit structured JSONL event for fleet-pulse / claudlobby uptime consumption.
 emit_keepalive_event() {
     local ev_state="$1"
@@ -30,6 +33,9 @@ emit_keepalive_event() {
     ts=$(ts_iso)
     printf '{"ts":"%s","bot":"%s","type":"keepalive","source":"keepalive","data":{"state":"%s"}}\n' \
         "$ts" "$BOT_NAME" "$ev_state" >> "$events_file"
+
+    # Reap old keepalive JSONL files beyond retention window.
+    find "$events_dir" -name 'keepalive-*.jsonl' -type f -mtime +"$KEEPALIVE_REAP_DAYS" -delete 2>/dev/null || true
 }
 
 # Cron runs with a minimal env. `systemctl --user` needs XDG_RUNTIME_DIR to
@@ -49,6 +55,7 @@ if ! check_tmux_session "$TMUX_SESSION"; then
     sleep 1
     if check_tmux_session "$TMUX_SESSION"; then
         echo "$(ts_iso) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"
+        emit_keepalive_event "SKIP"
         exit 0
     fi
     emit_keepalive_event "RESTART"
