@@ -15,17 +15,33 @@ public base. Voices the same. fleet.yaml lives at the overlay root
 If no `--fleet` flag is given, paths default to the repo root —
 fleet.yaml at root, runtime/ at root, no overlay. This preserves the
 "single fleet at the root" mode used by the public example fleets.
+
+Vault integration:
+
+  When claudron is installed (``pip install claudlobby[vault]``), vault-aware
+  path resolution uses ``claudron.vault.detect()`` for proper fleet discovery.
+  When claudron is not installed, a built-in ``.claudron`` bridge file parser
+  provides basic vault support. Both paths produce identical results for the
+  common case; claudron adds richer vault health and index features.
 """
 
 from __future__ import annotations
 from pathlib import Path
 from dataclasses import dataclass
 
+try:
+    from claudron.vault import detect as _claudron_detect
+
+    _HAS_CLAUDRON = True
+except ImportError:
+    _HAS_CLAUDRON = False
+
 
 def _read_claudron_config(path: Path) -> dict[str, str]:
     """Read shell-sourceable ``.claudron`` config file at *path*.
 
     Returns parsed key=value pairs. Returns empty dict if file missing.
+    Fallback for when claudron is not installed.
     """
     result: dict[str, str] = {}
     if not path.is_file():
@@ -38,6 +54,35 @@ def _read_claudron_config(path: Path) -> dict[str, str]:
             key, _, val = line.partition("=")
             result[key.strip()] = val.strip()
     return result
+
+
+def _resolve_vault_fleet(root: Path, fleet: str) -> tuple[Path | None, Path | None]:
+    """Resolve a fleet overlay through a vault.
+
+    Tries claudron's ``Vault`` API first (proper fleet discovery via
+    ``Vault.fleets``). Falls back to manual ``.claudron`` bridge file
+    parsing when claudron is not installed.
+
+    Returns (fleet_dir, vault_root) or (None, None) if no vault match.
+    """
+    config = _read_claudron_config(root / ".claudron")
+    vault_str = config.get("vault")
+    if not vault_str:
+        return None, None
+
+    vault_path = Path(vault_str)
+
+    if _HAS_CLAUDRON:
+        vault = _claudron_detect(vault_path)
+        if vault and fleet in vault.fleets:
+            return vault.fleets[fleet], vault.root
+        return None, None
+
+    # Fallback: manual fleet.yaml existence check
+    vault_fleet = vault_path / fleet
+    if (vault_fleet / "fleet.yaml").is_file():
+        return vault_fleet, vault_path
+    return None, None
 
 
 @dataclass(frozen=True)
@@ -244,15 +289,8 @@ class Paths:
         vault_root = None
 
         if fleet:
-            # Check .claudron config for vault-based fleet resolution
-            config = _read_claudron_config(root / ".claudron")
-            vault_str = config.get("vault")
-            if vault_str:
-                vault_path = Path(vault_str)
-                vault_fleet = vault_path / fleet
-                if (vault_fleet / "fleet.yaml").is_file():
-                    fleet_dir = vault_fleet
-                    vault_root = vault_path
+            # Try vault-based fleet resolution (.claudron bridge → claudron API)
+            fleet_dir, vault_root = _resolve_vault_fleet(root, fleet)
 
             # Fall back to local/<fleet>/
             if fleet_dir is None:
