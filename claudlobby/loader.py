@@ -199,20 +199,10 @@ def load_library_items_overlay(items: list[str], paths, kind: str) -> list[Libra
 
     for name in items:
         if name.endswith("/"):
-            # Folder expansion. Walk overlay → base, dedupe by relative path.
+            # Folder expansion — delegate to shared helper on Paths.
             dir_name = name.rstrip("/")
-            collected: dict[str, Path] = {}
-            for search_dir in paths.library_search_dirs(kind):
-                target = search_dir / dir_name if dir_name else search_dir
-                if not target.is_dir():
-                    continue
-                for path in sorted(target.rglob("*.md")):
-                    if path.stem.lower().startswith("readme"):
-                        continue
-                    rel_key = str(path.relative_to(target).with_suffix(""))
-                    if rel_key not in collected:  # overlay (first) wins
-                        collected[rel_key] = path
-            for rel_key, path in sorted(collected.items()):
+            collected = paths.expand_library_folder(kind, dir_name)
+            for rel_key, path in collected.items():
                 full_key = f"{dir_name}/{rel_key}" if dir_name else rel_key
                 if full_key in seen_paths:
                     continue
