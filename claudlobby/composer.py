@@ -766,6 +766,29 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 
 
 # ----------------------------------------------------------------------
+# Integration resolution
+# ----------------------------------------------------------------------
+
+
+def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
+    """Return the list of integration names to use for a bot.
+
+    If bot.integrations is explicitly set, use it verbatim. Otherwise,
+    derive from bot.mcp: any MCP entry whose name has a matching
+    integrations/<name>.md file (in the overlay or base library) is
+    auto-paired. This avoids requiring authors to repeat integration names
+    that are already implied by the MCP config.
+    """
+    if bot.integrations:
+        return bot.integrations
+    return [
+        e.name
+        for e in bot.mcp
+        if paths.find_library_file("integrations", e.name, ".md") is not None
+    ]
+
+
+# ----------------------------------------------------------------------
 # CLAUDE.md composition (template-driven)
 # ----------------------------------------------------------------------
 
@@ -789,16 +812,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             for it in load_library_items_overlay(names, paths, kind)
         ]
 
-    # Auto-pair integrations with mcp by default; explicit overrides.
-    # An integration matches if EITHER overlay or base has `<mcp>.md` under integrations/.
-    if bot.integrations:
-        integration_names = bot.integrations
-    else:
-        integration_names = [
-            e.name
-            for e in bot.mcp
-            if paths.find_library_file("integrations", e.name, ".md") is not None
-        ]
+    integration_names = resolve_effective_integrations(bot, paths)
 
     # Auto-include shared-documentation protocol when shared docs are available
     protocol_names = list(bot.protocols)
@@ -1255,11 +1269,7 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                         )
 
         # Integration doc contracts
-        integration_names = bot.integrations or [
-            e.name
-            for e in bot.mcp
-            if paths.find_library_file("integrations", e.name, ".md") is not None
-        ]
+        integration_names = resolve_effective_integrations(bot, paths)
         for int_name in integration_names:
             int_path = paths.find_library_file("integrations", int_name, ".md")
             if int_path is None:
