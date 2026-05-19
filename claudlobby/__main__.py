@@ -1519,6 +1519,7 @@ def cmd_move_bot(args) -> int:
     bot_name: str = args.bot
     apply: bool = args.apply
     cleanup: bool = args.cleanup_source
+    force: bool = args.force
 
     # --- Resolve claudlobby root ---
     root = Path(args.root).resolve() if args.root else Paths.detect().root
@@ -1603,6 +1604,35 @@ def cmd_move_bot(args) -> int:
                 )
                 return 1
 
+    # --- Pre-flight: check tmux session activity ---
+    if apply and not force:
+        tmux_check = subprocess.run(
+            ["tmux", "has-session", "-t", bot_name],
+            capture_output=True,
+        )
+        if tmux_check.returncode == 0:
+            # Session exists — capture what it's doing
+            pane_content = subprocess.run(
+                ["tmux", "capture-pane", "-t", bot_name, "-p", "-l", "5"],
+                capture_output=True,
+                text=True,
+            )
+            session_info = (
+                pane_content.stdout.strip()
+                if pane_content.returncode == 0
+                else "(could not read pane)"
+            )
+            log.warning(
+                "bot '%s' has an active tmux session — stopping it "
+                "mid-task will lose in-flight context",
+                bot_name,
+            )
+            print(f"\n  ⚠ Active tmux session for '{bot_name}':")
+            for line in session_info.splitlines()[-5:]:
+                print(f"    {line}")
+            print("\n  Pass --force to override.\n")
+            return 1
+
     # --- Determine service file paths ---
     is_linux = platform.system() == "Linux"
     is_macos = platform.system() == "Darwin"
@@ -1610,18 +1640,18 @@ def cmd_move_bot(args) -> int:
     launchd_dir = Path.home() / "Library" / "LaunchAgents"
 
     # Read source service_prefix from bot.conf
-    src_service_prefix = None
+    src_bot_service_label = None
     for line in (src_bot_dir / "bot.conf").read_text().splitlines():
         if line.startswith("BOT_SERVICE="):
-            src_service_prefix = line.split("=", 1)[1].strip().strip("'\"")
+            src_bot_service_label = line.split("=", 1)[1].strip().strip("'\"")
             break
-    if not src_service_prefix:
-        src_service_prefix = f"claudlobby.{bot_name}"
+    if not src_bot_service_label:
+        src_bot_service_label = f"claudlobby.{bot_name}"
 
     if is_linux:
         old_unit = systemd_dir / f"{bot_name}.service"
     elif is_macos:
-        old_unit = launchd_dir / f"{src_service_prefix}.plist"
+        old_unit = launchd_dir / f"{src_bot_service_label}.plist"
     else:
         old_unit = None
 
@@ -1679,6 +1709,16 @@ def cmd_move_bot(args) -> int:
         print("Dry run — pass --apply to execute.\n")
         return 0
 
+    # --- Pre-apply validation (before any mutation) ---
+    target_paths = Paths(root=root, fleet_dir=target_fleet_dir)
+    _load_env(target_paths)
+    report = validate(target_fleet, target_paths)
+    if report.has_errors:
+        log.error("target fleet has validation errors — aborting before any changes")
+        for e in report.errors:
+            log.error("  %s", e)
+        return 1
+
     # --- Execute ---
 
     # 1. Copy .env
@@ -1689,12 +1729,17 @@ def cmd_move_bot(args) -> int:
         (target_bot_dir / ".env").chmod(0o600)
         log.info("copied .env → %s", target_bot_dir / ".env")
 
-    # 2. Copy memory/
+    # 2. Copy memory/ (temp-dir-then-rename for rollback safety)
     if src_memory.is_dir() and any(src_memory.iterdir()):
+        target_bot_dir.mkdir(parents=True, exist_ok=True)
         target_memory = target_bot_dir / "memory"
+        tmp_memory = target_bot_dir / ".memory_tmp"
+        if tmp_memory.exists():
+            shutil.rmtree(tmp_memory)
+        shutil.copytree(src_memory, tmp_memory)
         if target_memory.exists():
             shutil.rmtree(target_memory)
-        shutil.copytree(src_memory, target_memory)
+        tmp_memory.rename(target_memory)
         log.info(
             "copied memory/ (%d files)",
             sum(1 for _ in target_memory.rglob("*") if _.is_file()),
@@ -1703,37 +1748,47 @@ def cmd_move_bot(args) -> int:
     # 3. Stop + disable old service
     if old_unit and old_unit.is_file():
         if is_linux:
-            subprocess.run(
+            for cmd in [
                 ["systemctl", "--user", "stop", f"{bot_name}.service"],
-                capture_output=True,
-            )
-            subprocess.run(
                 ["systemctl", "--user", "disable", f"{bot_name}.service"],
-                capture_output=True,
-            )
+            ]:
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    log.warning(
+                        "%s exited %d: %s",
+                        " ".join(cmd),
+                        r.returncode,
+                        r.stderr.strip(),
+                    )
             old_unit.unlink()
-            subprocess.run(
+            r = subprocess.run(
                 ["systemctl", "--user", "daemon-reload"],
                 capture_output=True,
+                text=True,
             )
+            if r.returncode != 0:
+                log.warning(
+                    "daemon-reload exited %d: %s", r.returncode, r.stderr.strip()
+                )
             log.info("stopped + removed systemd unit %s", old_unit.name)
         elif is_macos:
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{os.getuid()}/{src_service_prefix}"],
+            r = subprocess.run(
+                [
+                    "launchctl",
+                    "bootout",
+                    f"gui/{os.getuid()}/{src_bot_service_label}",
+                ],
                 capture_output=True,
+                text=True,
             )
+            if r.returncode != 0:
+                log.warning(
+                    "launchctl bootout exited %d: %s", r.returncode, r.stderr.strip()
+                )
             old_unit.unlink()
             log.info("stopped + removed launchd plist %s", old_unit.name)
 
-    # 4. Regenerate target bot
-    target_paths = Paths(root=root, fleet_dir=target_fleet_dir)
-    _load_env(target_paths)
-    report = validate(target_fleet, target_paths)
-    if report.has_errors:
-        log.error("target fleet has validation errors — cannot generate")
-        for e in report.errors:
-            log.error("  %s", e)
-        return 1
+    # 4. Regenerate target bot (validation already passed above)
     compose_bot(target_fleet.bots[bot_name], target_fleet, target_paths)
     log.info("regenerated bot → %s", target_bot_dir)
 
@@ -1765,7 +1820,14 @@ def cmd_move_bot(args) -> int:
                 "updated access.json group → %s", target_fleet.telegram_group_chat_id
             )
         except (_json.JSONDecodeError, OSError) as e:
-            log.warning("could not update access.json: %s — update manually", e)
+            log.error("could not update access.json: %s", e)
+            print(
+                "\nINCOMPLETE MIGRATION: access.json update failed."
+                "\nThe bot will boot but Telegram routing "
+                "may point to the wrong group."
+                f"\nFix manually: {access_json_path}\n"
+            )
+            return 1
 
     # 6. Re-enroll via spin-up-bot
     spin_up = root / "lib" / "spin-up-bot.sh"
@@ -1778,16 +1840,28 @@ def cmd_move_bot(args) -> int:
         if result.returncode == 0:
             log.info("re-enrolled via spin-up-bot.sh")
         else:
-            log.warning(
+            log.error(
                 "spin-up-bot.sh exited %d — enroll manually:\n  %s %s",
                 result.returncode,
                 spin_up,
                 target_bot_dir,
             )
             if result.stderr.strip():
-                log.warning("  stderr: %s", result.stderr.strip())
+                log.error("  stderr: %s", result.stderr.strip())
+            print(
+                f"\nINCOMPLETE MIGRATION: bot '{bot_name}' moved "
+                "but enrollment failed."
+                f"\nRun manually:  {spin_up} {target_bot_dir}\n"
+            )
+            return 1
     else:
-        log.warning("spin-up-bot.sh not found at %s — enroll manually", spin_up)
+        log.error("spin-up-bot.sh not found at %s — enroll manually", spin_up)
+        print(
+            f"\nINCOMPLETE MIGRATION: bot '{bot_name}' moved "
+            "but not enrolled."
+            f"\nExpected: {spin_up}\n"
+        )
+        return 1
 
     # 7. Cleanup source
     if cleanup:
@@ -2328,6 +2402,11 @@ def main(argv: list[str] | None = None) -> int:
         "--cleanup-source",
         action="store_true",
         help="Remove source bot directory after move",
+    )
+    pmb.add_argument(
+        "--force",
+        action="store_true",
+        help="Override pre-flight checks (e.g. active tmux session)",
     )
     pmb.set_defaults(func=cmd_move_bot)
 

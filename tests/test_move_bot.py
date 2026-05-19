@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 from claudlobby.__main__ import main
 
 
@@ -15,6 +14,7 @@ def _scaffold_fleet(
     *,
     service_prefix: str = "com.test",
     telegram_group_chat_id: str | None = None,
+    create_bot_dirs: bool = True,
 ) -> Path:
     """Create a minimal fleet overlay with bot dirs."""
     fleet_dir = local_dir / fleet_name
@@ -33,24 +33,30 @@ def _scaffold_fleet(
         f"fleet:\n  name: {fleet_name}\n  service_prefix: {service_prefix}{tg_line}\n  bots:\n{bots_yaml}\n"
     )
 
-    for bot in bots:
-        bot_dir = fleet_dir / "runtime" / "bots" / bot
-        bot_dir.mkdir(parents=True, exist_ok=True)
-        (bot_dir / "bot.conf").write_text(
-            f"BOT_NAME={bot}\nBOT_SERVICE={service_prefix}.{bot}\n"
-        )
+    if create_bot_dirs:
+        for bot in bots:
+            bot_dir = fleet_dir / "runtime" / "bots" / bot
+            bot_dir.mkdir(parents=True, exist_ok=True)
+            (bot_dir / "bot.conf").write_text(
+                f"BOT_NAME={bot}\nBOT_SERVICE={service_prefix}.{bot}\n"
+            )
 
     return fleet_dir
 
 
 def _scaffold_root(tmp_path: Path) -> Path:
-    """Create a minimal claudlobby root."""
+    """Create a minimal claudlobby root with a working spin-up-bot.sh stub."""
     root = tmp_path / "claudlobby"
     (root / "library" / "expertise").mkdir(parents=True)
     (root / "library" / "expertise" / "eng.md").write_text(
         "---\ntitle: Engineering\ndescription: Software engineering\n---\n# Engineering\nBuild software.\n"
     )
-    (root / "lib").mkdir()
+    lib_dir = root / "lib"
+    lib_dir.mkdir()
+    # Create a stub spin-up-bot.sh that exits 0 (tests enrollment path)
+    stub = lib_dir / "spin-up-bot.sh"
+    stub.write_text("#!/bin/bash\nexit 0\n")
+    stub.chmod(0o755)
     (root / "voices").mkdir()
     (root / "templates").mkdir()
     # Minimal template
@@ -65,21 +71,18 @@ class TestMoveBotDryRun:
         _scaffold_fleet(local, "fleet-a", ["mybot"])  # source: has bot dir + bot.conf
 
         # Target: has stanza in fleet.yaml but no bot dir with bot.conf
-        target = local / "fleet-b"
-        target.mkdir(parents=True)
-        (target / "fleet.yaml").write_text(
-            "fleet:\n  name: fleet-b\n  service_prefix: com.test\n  bots:\n"
-            "    mybot:\n      expertise: [eng]\n      telegram:\n        handle: mybot\n"
-        )
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
 
         rc = main(["--root", str(root), "move-bot", "mybot", "--to", "fleet-b"])
         assert rc == 0  # dry run succeeds
 
     def test_error_bot_not_found(self, tmp_path: Path):
+        """Bot not present in any fleet (no bot dir with bot.conf anywhere)."""
         root = _scaffold_root(tmp_path)
         local = root / "local"
         _scaffold_fleet(local, "fleet-a", ["other"])
-        _scaffold_fleet(local, "fleet-b", ["ghost"])
+        # fleet-b has stanza but no bot.conf dir — autodetect won't find 'ghost'
+        _scaffold_fleet(local, "fleet-b", ["otherbot"], create_bot_dirs=False)
 
         rc = main(["--root", str(root), "move-bot", "ghost", "--to", "fleet-b"])
         assert rc == 1
@@ -135,15 +138,9 @@ class TestMoveBotDryRun:
         local = root / "local"
         _scaffold_fleet(local, "fleet-a", ["mybot"])
         _scaffold_fleet(local, "fleet-b", ["mybot"])
-        # Both have bot.conf so autodetect finds both
-        # But fleet-b also has the stanza so it would succeed as target
-        # The ambiguity error should fire first
+
         rc = main(["--root", str(root), "move-bot", "mybot", "--to", "fleet-b"])
-        # Should be ambiguous (both fleets have the bot dir)
-        # Actually fleet-a source → fleet-b target works since fleet-b has 'mybot' stanza
-        # autodetect picks the only one NOT equal to target... let me check
-        # No — autodetect doesn't know the target yet. It finds both fleet-a and fleet-b.
-        assert rc == 1  # ambiguous
+        assert rc == 1  # ambiguous — both fleets have bot dir
 
     def test_wip_check_blocks(self, tmp_path: Path):
         root = _scaffold_root(tmp_path)
@@ -156,7 +153,6 @@ class TestMoveBotDryRun:
             local / "fleet-a" / "runtime" / "bots" / "mybot" / "projects" / "repo"
         )
         projects.mkdir(parents=True)
-        # Initialize git repo with dirty state
         import subprocess
 
         subprocess.run(["git", "init", str(projects)], capture_output=True)
@@ -196,7 +192,7 @@ class TestMoveBotApply:
         root = _scaffold_root(tmp_path)
         local = root / "local"
         src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
 
         # Add .env and memory to source
         src_bot = src_fleet / "runtime" / "bots" / "mybot"
@@ -229,7 +225,7 @@ class TestMoveBotApply:
         root = _scaffold_root(tmp_path)
         local = root / "local"
         src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
-        _scaffold_fleet(local, "fleet-b", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
 
         src_bot = src_fleet / "runtime" / "bots" / "mybot"
         assert src_bot.is_dir()
@@ -250,3 +246,123 @@ class TestMoveBotApply:
         )
         assert rc == 0
         assert not src_bot.exists()
+
+    def test_enrollment_runs_spin_up_bot(self, tmp_path: Path):
+        """spin-up-bot.sh is called and its exit code determines success."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+            ]
+        )
+        assert rc == 0  # stub exits 0
+
+    def test_enrollment_failure_returns_nonzero(self, tmp_path: Path):
+        """spin-up-bot.sh failure should cause move-bot to return 1."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+
+        # Replace stub with one that fails
+        stub = root / "lib" / "spin-up-bot.sh"
+        stub.write_text("#!/bin/bash\necho 'enrollment failed' >&2\nexit 1\n")
+
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+            ]
+        )
+        assert rc == 1
+
+    def test_memory_copy_is_atomic(self, tmp_path: Path):
+        """Memory copy uses temp-dir-then-rename for rollback safety."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+
+        # Create source memory
+        src_bot = src_fleet / "runtime" / "bots" / "mybot"
+        mem_dir = src_bot / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "fact.md").write_text("important fact")
+
+        # Create existing target memory that should be replaced
+        target_bot = local / "fleet-b" / "runtime" / "bots" / "mybot"
+        target_bot.mkdir(parents=True, exist_ok=True)
+        target_mem = target_bot / "memory"
+        target_mem.mkdir()
+        (target_mem / "old.md").write_text("old data")
+
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+            ]
+        )
+        assert rc == 0
+        # New memory replaced old
+        assert (target_mem / "fact.md").read_text() == "important fact"
+        assert not (target_mem / "old.md").exists()
+        # No temp dir left behind
+        assert not (target_bot / ".memory_tmp").exists()
+
+    def test_validate_runs_before_mutation(self, tmp_path: Path):
+        """Validation failure should return 1 without stopping any service."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        _scaffold_fleet(local, "fleet-a", ["mybot"])
+
+        # Target fleet references a nonexistent expertise — validation will fail
+        target = local / "fleet-b"
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "fleet.yaml").write_text(
+            "fleet:\n  name: fleet-b\n"
+            "  service_prefix: com.test\n  bots:\n"
+            "    mybot:\n"
+            "      expertise: [nonexistent_expertise]\n"
+            "      telegram:\n        handle: mybot\n"
+        )
+
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+            ]
+        )
+        assert rc == 1  # validation error, no mutation occurred
