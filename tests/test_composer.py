@@ -2234,3 +2234,60 @@ class TestComposeAutonomousRunner:
         assert "/claudna:simplify" in result
         assert "completed" in result and "report" in result
         assert "blocked" in result and "report_and_pause" in result
+
+
+class TestResolveEffectiveIntegrations:
+    """resolve_effective_integrations: explicit list used verbatim; auto-derived from MCP when empty."""
+
+    def _paths_with_integrations(self, tmp_path: Path, names: list[str]) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        int_dir = root / "library" / "integrations"
+        int_dir.mkdir(parents=True)
+        for name in names:
+            (int_dir / f"{name}.md").write_text(f"# {name}\n")
+        return Paths(root=root, fleet_dir=root)
+
+    def test_explicit_integrations_used_verbatim(self, tmp_path):
+        from claudlobby.composer import resolve_effective_integrations
+        from claudlobby.config import McpEntry
+
+        paths = self._paths_with_integrations(tmp_path, ["github", "neon"])
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            integrations=["neon"],  # explicit; github not listed
+            mcp=[McpEntry(name="github"), McpEntry(name="neon")],
+        )
+        assert resolve_effective_integrations(bot, paths) == ["neon"]
+
+    def test_auto_derived_from_mcp_when_empty(self, tmp_path):
+        from claudlobby.composer import resolve_effective_integrations
+        from claudlobby.config import McpEntry
+
+        # github has an integration doc; slack does not
+        paths = self._paths_with_integrations(tmp_path, ["github"])
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github"), McpEntry(name="slack")],
+        )
+        result = resolve_effective_integrations(bot, paths)
+        assert result == ["github"]
+        assert "slack" not in result
+
+    def test_empty_when_no_mcp_has_integration_doc(self, tmp_path):
+        from claudlobby.composer import resolve_effective_integrations
+        from claudlobby.config import McpEntry
+
+        # No integration docs exist at all
+        paths = self._paths_with_integrations(tmp_path, [])
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github")],
+        )
+        assert resolve_effective_integrations(bot, paths) == []
