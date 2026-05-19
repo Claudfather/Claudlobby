@@ -381,7 +381,7 @@ systemctl stop my-bot
 
 systemctl start my-bot
   → Bot starts, reads CLAUDE.md
-  → CLAUDE.md or startup prompt includes: run /context-resume
+  → CLAUDE.md or startup prompt includes: run /session-resume
   → Bot reads handoff file and picks up where it left off
 ```
 
@@ -395,14 +395,14 @@ systemctl start my-bot
 BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
 source "$BOT_DIR/bot.conf"
 
-HANDOFF_DIR="$BOT_DIR/planning"
-HANDOFF_PATTERN="$HANDOFF_DIR/session-handoff-*.md"
+# clauDNA's /session-handoff (schema v2) writes to <cwd>/.claude/session.md.
+# start-bot.sh cd's into BOT_DIR before launching tmux, so cwd == BOT_DIR.
+HANDOFF_FILE="$BOT_DIR/.claude/session.md"
 MAX_AGE_SECONDS=300  # 5 minutes
 
 # Check if a recent handoff already exists (e.g., user ran /session-handoff manually)
-LATEST=$(ls -t $HANDOFF_PATTERN 2>/dev/null | head -1)
-if [ -n "$LATEST" ]; then
-    FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$LATEST" 2>/dev/null || stat -f %m "$LATEST" 2>/dev/null) ))
+if [ -f "$HANDOFF_FILE" ]; then
+    FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$HANDOFF_FILE" 2>/dev/null || stat -f %m "$HANDOFF_FILE" 2>/dev/null) ))
     if [ "$FILE_AGE" -lt "$MAX_AGE_SECONDS" ]; then
         echo "Recent handoff exists ($FILE_AGE seconds old), skipping"
         exit 0
@@ -421,11 +421,10 @@ echo "Requesting session handoff..."
 
 # Wait for handoff file to appear (up to 45 seconds)
 for i in $(seq 1 45); do
-    LATEST=$(ls -t $HANDOFF_PATTERN 2>/dev/null | head -1)
-    if [ -n "$LATEST" ]; then
-        FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$LATEST" 2>/dev/null || stat -f %m "$LATEST" 2>/dev/null) ))
+    if [ -f "$HANDOFF_FILE" ]; then
+        FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$HANDOFF_FILE" 2>/dev/null || stat -f %m "$HANDOFF_FILE" 2>/dev/null) ))
         if [ "$FILE_AGE" -lt 60 ]; then
-            echo "Handoff captured: $LATEST"
+            echo "Handoff captured: $HANDOFF_FILE"
             exit 0
         fi
     fi
@@ -456,7 +455,7 @@ Note `TimeoutStopSec=90` — enough time for the handoff script (45s max) plus c
 Add to the bot's `STARTUP_PROMPT` in `bot.conf`:
 
 ```bash
-STARTUP_PROMPT="You just restarted. Read your CLAUDE.md. Then run /context-resume to check for a session handoff. If one exists, pick up where you left off. If not, greet the team."
+STARTUP_PROMPT="You just restarted. Read your CLAUDE.md. Then run /session-resume --auto to check for a session handoff. If one exists, pick up where you left off. If not, greet the team."
 ```
 
 Or add it to the bot's CLAUDE.md:
@@ -464,7 +463,7 @@ Or add it to the bot's CLAUDE.md:
 ```markdown
 ## On Startup
 
-After reading this file, always run `/context-resume` to check for pending handoffs.
+After reading this file, always run `/session-resume` to check for pending handoffs.
 ```
 
 ### Gotchas

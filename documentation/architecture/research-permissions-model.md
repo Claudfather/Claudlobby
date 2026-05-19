@@ -417,8 +417,8 @@ Bash(which *)
 ### Skill patterns (14 = 7 skills x 2)
 
 ```
-Skill(context-resume)
-Skill(context-resume:*)
+Skill(session-resume)
+Skill(session-resume:*)
 Skill(docs-review)
 Skill(docs-review:*)
 Skill(frontend-performance-audit)
