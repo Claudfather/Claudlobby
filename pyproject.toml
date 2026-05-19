@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git"]
 
 [project.scripts]
 claudlobby = "claudlobby.__main__:main"
