@@ -197,6 +197,47 @@ class Paths:
                 return p
         return None
 
+    def expand_library_folder(self, kind: str, dir_name: str) -> dict[str, Path]:
+        """Expand a ``dir/`` entry into ``{rel_key: Path}`` for every ``.md`` file.
+
+        Walks overlay → base, deduplicates by relative path (sans extension),
+        skips README files, returns a sorted dict. Overlay wins on collisions.
+        """
+        collected: dict[str, Path] = {}
+        for search_dir in self.library_search_dirs(kind):
+            target = search_dir / dir_name if dir_name else search_dir
+            if not target.is_dir():
+                continue
+            for path in sorted(target.rglob("*.md")):
+                if path.stem.lower().startswith("readme"):
+                    continue
+                rel_key = str(path.relative_to(target).with_suffix(""))
+                if rel_key not in collected:  # overlay (first) wins
+                    collected[rel_key] = path
+        return dict(sorted(collected.items()))
+
+    def expand_skill_folder(self, dir_name: str) -> dict[str, Path]:
+        """Expand a ``dir/`` entry into ``{leaf_name: Path}`` for every skill dir.
+
+        A skill dir is any directory containing a ``SKILL.md`` marker file.
+        Walks overlay → base, deduplicates by leaf directory name, returns a
+        sorted dict. Overlay wins on collisions.
+        """
+        collected: dict[str, Path] = {}
+        for search_dir in self.library_search_dirs("skills"):
+            target = search_dir / dir_name if dir_name else search_dir
+            if not target.is_dir():
+                continue
+            for sub in sorted(target.rglob("*")):
+                if not sub.is_dir():
+                    continue
+                if not (sub / "SKILL.md").is_file():
+                    continue
+                leaf = sub.name
+                if leaf not in collected:
+                    collected[leaf] = sub
+        return dict(sorted(collected.items()))
+
     def find_voice_file(self, rel_path: str) -> Path | None:
         """Voice file lookup. `rel_path` is relative to voices/ (e.g. 'erlich-bachman.md').
 

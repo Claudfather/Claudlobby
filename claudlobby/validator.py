@@ -39,7 +39,9 @@ _AUTO_ELIGIBLE_SKILLS = frozenset(
 )
 
 _CADENCE_RE = re.compile(r"^\d+[mhd]$")
-_OUTCOME_KEYS = frozenset({"completed", "bypassed", "needs_input", "blocked", "partial"})
+_OUTCOME_KEYS = frozenset(
+    {"completed", "bypassed", "needs_input", "blocked", "partial"}
+)
 _OUTCOME_ACTIONS = frozenset({"report", "report_and_pause", "silent"})
 _BYPASS_ACTIONS = frozenset({"comment_and_label", "comment_only", "exit_silent"})
 
@@ -184,20 +186,7 @@ def _validate_bots(
         for skill in bot.skills:
             if skill.endswith("/"):
                 dir_name = skill.rstrip("/")
-                found = False
-                for d in paths.library_search_dirs("skills"):
-                    target = d / dir_name if dir_name else d
-                    if target.is_dir():
-                        # Empty folder is still a warning — flag it.
-                        has_skill = any(
-                            (sub / "SKILL.md").is_file()
-                            for sub in target.rglob("*")
-                            if sub.is_dir()
-                        )
-                        if has_skill:
-                            found = True
-                            break
-                if not found:
+                if not paths.expand_skill_folder(dir_name):
                     report.warnings.append(
                         f"bot '{bot_name}': skill folder '{skill}' empty or missing in any library/skills/ — no skills will be linked"
                     )
@@ -233,16 +222,7 @@ def _validate_bots(
         for integ in bot.integrations:
             if integ.endswith("/"):
                 dir_name = integ.rstrip("/")
-                found = False
-                for d in paths.library_search_dirs("integrations"):
-                    target = d / dir_name if dir_name else d
-                    if target.is_dir() and any(
-                        p.is_file() and not p.stem.lower().startswith("readme")
-                        for p in target.rglob("*.md")
-                    ):
-                        found = True
-                        break
-                if not found:
+                if not paths.expand_library_folder("integrations", dir_name):
                     report.warnings.append(
                         f"bot '{bot_name}': integration folder '{integ}' empty or missing in any library/integrations/ — skipped"
                     )
@@ -263,16 +243,7 @@ def _validate_bots(
             for item in ref:
                 if item.endswith("/"):
                     dir_name = item.rstrip("/")
-                    found = False
-                    for d in paths.library_search_dirs(kind):
-                        target = d / dir_name if dir_name else d
-                        if target.is_dir() and any(
-                            p.is_file() and not p.stem.lower().startswith("readme")
-                            for p in target.rglob("*.md")
-                        ):
-                            found = True
-                            break
-                    if not found:
+                    if not paths.expand_library_folder(kind, dir_name):
                         report.warnings.append(
                             f"bot '{bot_name}': {kind[:-1]} folder '{item}' empty or missing in any library/{kind}/ — no items will be loaded"
                         )

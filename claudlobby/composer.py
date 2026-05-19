@@ -629,23 +629,11 @@ def link_skills(bot: BotConfig, paths: Paths, log) -> None:
     for skill in bot.skills:
         if skill.endswith("/"):
             dir_name = skill.rstrip("/")
-            collected: dict[str, Path] = {}  # leaf → src; overlay (first) wins
-            for search_dir in paths.library_search_dirs("skills"):
-                target = search_dir / dir_name if dir_name else search_dir
-                if not target.is_dir():
-                    continue
-                for sub in sorted(target.rglob("*")):
-                    if not sub.is_dir():
-                        continue
-                    if not (sub / "SKILL.md").is_file():
-                        continue
-                    leaf = sub.name
-                    if leaf not in collected:
-                        collected[leaf] = sub
+            collected = paths.expand_skill_folder(dir_name)
             if not collected:
                 log(f"  skill folder '{skill}' empty or missing — skipped")
                 continue
-            for leaf, src in sorted(collected.items()):
+            for leaf, src in collected.items():
                 _add(leaf, src)
         else:
             src = paths.find_skill_dir(skill)
