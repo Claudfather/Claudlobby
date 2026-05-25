@@ -10,6 +10,41 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOT_DIR="${1:?Usage: start-bot.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
 
+# --- Boot-mass mitigation -----------------------------------------------------
+# When the whole fleet is mass-restarted (e.g. reconcile-fleet --enroll, or
+# systemd restarts triggered by keepalive), all bots race to spawn their channel
+# plugins simultaneously. Observed failure mode: some bots silently fail to bring
+# up their telegram plugin (no bot.pid ever written), so the bot is "alive" in
+# tmux but never sees inbound channel messages.
+#
+# Serialize the first few seconds of each bot's boot with a fleet-wide mkdir
+# lock so plugins come up one-at-a-time. mkdir is atomic on every Unix and
+# requires no external tools (flock may not be available on all hosts).
+# Safe on solo restarts (uncontended → instant).
+BOOT_LOCK_DIR="${TMPDIR:-/tmp}/.claudlobby-fleet-boot.lock"
+BOOT_LOCK_HOLD_S="${BOOT_LOCK_HOLD_S:-8}"
+_bl_waited=0
+while ! mkdir "$BOOT_LOCK_DIR" 2>/dev/null; do
+    # Stale lock cleanup: if lock dir is older than 60s, force-claim
+    if [ -d "$BOOT_LOCK_DIR" ]; then
+        _lock_age=$(($(date +%s) - $(stat -c %Y "$BOOT_LOCK_DIR" 2>/dev/null || stat -f %m "$BOOT_LOCK_DIR" 2>/dev/null || date +%s)))
+        if [ "$_lock_age" -gt 60 ]; then
+            rmdir "$BOOT_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+    fi
+    sleep 1
+    _bl_waited=$((_bl_waited + 1))
+    if [ "$_bl_waited" -gt 120 ]; then
+        echo "start-bot.sh: boot lock contended >120s, proceeding without it" >&2
+        break
+    fi
+done
+# Release the lock after BOOT_LOCK_HOLD_S so the next bot can proceed.
+( sleep "$BOOT_LOCK_HOLD_S"; rmdir "$BOOT_LOCK_DIR" 2>/dev/null || true ) &
+disown
+# --- end boot-mass mitigation -------------------------------------------------
+
 export PATH=/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:${_HOMEBREW}/bin}
 export HOME="$HOME"
 
@@ -162,9 +197,18 @@ fi
 # start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
+    # Two-step send + Enter with verify-retry. The TUI's input buffer can race
+    # on cold start, leaving the prompt typed but unsubmitted. Sleep between
+    # text and Enter so the buffer settles, then verify the prompt text is gone
+    # from the pane and resend Enter if it isn't.
     "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
-    sleep 0.3
+    sleep 0.5
     "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    sleep 1
+    _probe="${STARTUP_PROMPT:0:80}"
+    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -qF "$_probe"; then
+        "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    fi
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
