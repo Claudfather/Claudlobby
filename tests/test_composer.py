@@ -1860,14 +1860,18 @@ class TestComposeBotConfObservability:
         conf = self._compose(tmp_path)
         assert "export OBSERVABILITY_PULSE_INTERVAL=300" in conf
         assert "export OBSERVABILITY_REAP_DAYS=7" in conf
+        assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1800" in conf
 
     def test_custom_observability_values(self, tmp_path):
         from claudlobby.config import ObservabilityConfig
 
-        obs = ObservabilityConfig(pulse_interval=60, reap_days=14)
+        obs = ObservabilityConfig(
+            pulse_interval=60, reap_days=14, activity_stuck_threshold=600
+        )
         conf = self._compose(tmp_path, observability=obs)
         assert "export OBSERVABILITY_PULSE_INTERVAL=60" in conf
         assert "export OBSERVABILITY_REAP_DAYS=14" in conf
+        assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=600" in conf
 
     def test_observability_section_header(self, tmp_path):
         conf = self._compose(tmp_path)
