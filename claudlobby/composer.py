@@ -419,6 +419,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # Observability — pulse interval and event retention
     from .config import (
         _OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD,
+        _OBS_DEFAULT_DISPATCH_DEADLINE,
         _OBS_DEFAULT_PULSE_INTERVAL,
         _OBS_DEFAULT_REAP_DAYS,
     )
@@ -435,11 +436,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if obs.activity_stuck_threshold is not None
         else _OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD
     )
+    dd = (
+        obs.dispatch_deadline
+        if obs.dispatch_deadline is not None
+        else _OBS_DEFAULT_DISPATCH_DEADLINE
+    )
     lines.append("")
     lines.append("# Observability")
     lines.append(f"export OBSERVABILITY_PULSE_INTERVAL={_shq(pi)}")
     lines.append(f"export OBSERVABILITY_REAP_DAYS={_shq(rd)}")
     lines.append(f"export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD={_shq(ast)}")
+    lines.append(f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(dd)}")
 
     # Ecosystem — clauDNA version pin, Claudron vault, Claudosseum tenant
     if bot.claudna_version or bot.claudron_vault_path or bot.claudosseum_tenant_id:
