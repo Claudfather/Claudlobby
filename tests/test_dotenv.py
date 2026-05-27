@@ -154,3 +154,30 @@ class TestReadRoundTrip:
 
     def test_read_missing_file(self, tmp_path):
         assert read(tmp_path / "nonexistent") == {}
+
+    def test_read_value_with_equals(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("URL=https://example.com?a=1&b=2\n")
+        assert read(env_file) == {"URL": "https://example.com?a=1&b=2"}
+
+    def test_read_export_prefix(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("export FOO=bar\n")
+        assert read(env_file) == {"FOO": "bar"}
+
+    def test_read_whitespace_around_key(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("  export  KEY  = value  \n")
+        assert read(env_file) == {"KEY": "value"}
+
+    def test_read_skips_lines_without_equals(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("just-a-word\nFOO=bar\n")
+        assert read(env_file) == {"FOO": "bar"}
+
+    def test_read_unquoted_dollar_value_preserved(self, tmp_path):
+        # bot.conf often contains lines like KEY=$OTHER_VAR — value must
+        # not be shell-expanded and must remain literal "$OTHER_VAR".
+        env_file = tmp_path / ".env"
+        env_file.write_text("REF=$OTHER\n")
+        assert read(env_file) == {"REF": "$OTHER"}

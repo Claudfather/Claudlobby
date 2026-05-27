@@ -32,20 +32,6 @@ def _parse_rename_map(entries: list[str]) -> dict[str, str]:
     return rename_map
 
 
-def _parse_env_line(line: str) -> tuple[str, str] | None:
-    """Parse a single env line ('VAR=value' or 'export VAR=value').
-    Returns (key, value) or None for blank/comment/invalid lines."""
-    line = line.strip()
-    if not line or line.startswith("#") or "=" not in line:
-        return None
-    k, v = line.split("=", 1)
-    k = k.strip()
-    if k.startswith("export "):
-        k = k[len("export ") :].strip()
-    v = v.strip().strip('"').strip("'")
-    return (k, v)
-
-
 def _migration_preamble(
     args,
 ) -> tuple[Paths, "FleetConfig", Path, dict[str, str]]:
@@ -565,29 +551,17 @@ def _extract_secrets(
     import json as _json
 
     home_env = Path.home() / ".env"
-    env_from_home: dict[str, str] = {}
-    if home_env.is_file():
-        for line in home_env.read_text().splitlines():
-            parsed = _parse_env_line(line)
-            if parsed:
-                env_from_home[parsed[0]] = parsed[1]
+    env_from_home = dotenv.read(home_env)
 
     SECRET_LIKE = re.compile(r"(TOKEN|KEY|SECRET|URL|HANDLE|CHAT_ID|PASSWORD|API)")
     bot_conf_secrets: dict[str, dict[str, str]] = {}
     for src_name, bot_path in bot_dir_map.items():
         conf_path = bot_path / "bot.conf"
-        if not conf_path.is_file():
-            continue
-        scope: dict[str, str] = {}
-        for line in conf_path.read_text().splitlines():
-            parsed = _parse_env_line(line)
-            if not parsed:
-                continue
-            k, v = parsed
-            if not v or v.startswith("$"):
-                continue
-            if SECRET_LIKE.search(k):
-                scope[k] = v
+        scope = {
+            k: v
+            for k, v in dotenv.read(conf_path).items()
+            if v and not v.startswith("$") and SECRET_LIKE.search(k)
+        }
         if scope:
             bot_conf_secrets[src_name] = scope
 

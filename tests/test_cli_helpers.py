@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from claudlobby.__main__ import _parse_rename_map, _parse_env_line
+from claudlobby.__main__ import _parse_rename_map
 
 
 # ── _parse_rename_map ─────────────────────────────────────────────────
@@ -35,33 +35,3 @@ class TestParseRenameMap:
             _parse_rename_map(["good=entry", "bad"])
 
 
-# ── _parse_env_line ───────────────────────────────────────────────────
-
-class TestParseEnvLine:
-    def test_simple_var(self):
-        assert _parse_env_line("FOO=bar") == ("FOO", "bar")
-
-    def test_export_prefix(self):
-        assert _parse_env_line("export FOO=bar") == ("FOO", "bar")
-
-    def test_strips_quotes(self):
-        assert _parse_env_line('FOO="bar"') == ("FOO", "bar")
-        assert _parse_env_line("FOO='bar'") == ("FOO", "bar")
-
-    def test_blank_line(self):
-        assert _parse_env_line("") is None
-        assert _parse_env_line("   ") is None
-
-    def test_comment(self):
-        assert _parse_env_line("# this is a comment") is None
-
-    def test_no_equals(self):
-        assert _parse_env_line("just-a-word") is None
-
-    def test_value_with_equals(self):
-        assert _parse_env_line("URL=https://example.com?a=1") == (
-            "URL", "https://example.com?a=1"
-        )
-
-    def test_whitespace_handling(self):
-        assert _parse_env_line("  export  KEY  = value  ") == ("KEY", "value")
