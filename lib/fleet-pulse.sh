@@ -31,6 +31,16 @@ ts=$(ts_iso)
 state_dir="${CLAUDLOBBY_ROOT}/state/pulse"
 mkdir -p "$state_dir"
 
+# Dispatch watchdog inputs: the manager-written dispatch ledger and the
+# worker-written report ledger (overlay path first, root fallback — matches
+# report-back.sh). The overdue matcher cross-references them per bot.
+dispatch_log="${CLAUDLOBBY_ROOT}/state/dispatch-log.jsonl"
+if [ -d "${CLAUDLOBBY_ROOT}/local/${fleet}/runtime" ]; then
+    report_ledger="${CLAUDLOBBY_ROOT}/local/${fleet}/runtime/report-back.jsonl"
+else
+    report_ledger="${CLAUDLOBBY_ROOT}/runtime/fleet/report-back.jsonl"
+fi
+
 # --- Helper: emit a single event to a bot's event log ---
 emit_event() {
     local bot_dir="$1" bot_id="$2" event_type="$3" data_json="$4"
@@ -178,6 +188,29 @@ for bot_dir in "$BOTS_DIR"/*/; do
             fi
         else
             rm -f "$alerted"
+        fi
+    fi
+
+    # --- Check 6: overdue dispatch (manager-side watchdog) ---
+    # A task this bot was dispatched is overdue if its deadline passed with no
+    # terminal [BOTREPORT]. The matcher (dispatch-overdue.py) cross-references
+    # the dispatch ledger against the report ledger. Notify the manager, debounced.
+    if [ -f "$dispatch_log" ]; then
+        overdue_out=$(python3 "$LIB_DIR/dispatch-overdue.py" "$bot_id" "$dispatch_log" "$report_ledger" 2>/dev/null || true)
+        if [ -n "$overdue_out" ]; then
+            oldest_elapsed=0
+            while read -r _da _exp _elapsed; do
+                [ -n "${_elapsed:-}" ] || continue
+                emit_event "$bot_dir" "$bot_id" "overdue_dispatch" \
+                    '{"dispatched_at":'"$_da"',"expected_by":'"$_exp"',"elapsed_seconds":'"$_elapsed"'}'
+                [ "$_elapsed" -gt "$oldest_elapsed" ] && oldest_elapsed="$_elapsed"
+            done <<< "$overdue_out"
+            if [ ! -f "$state_dir/${bot_id}.dispatch_alerted" ]; then
+                notify_manager "$bot_dir" "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report"
+                touch "$state_dir/${bot_id}.dispatch_alerted"
+            fi
+        else
+            rm -f "$state_dir/${bot_id}.dispatch_alerted"
         fi
     fi
 
