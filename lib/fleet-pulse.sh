@@ -94,7 +94,9 @@ for bot_dir in "$BOTS_DIR"/*/; do
     BOT_SERVICE=""
     if [ -f "$bot_dir/bot.conf" ]; then
         # Extract BOT_SERVICE without full load_bot_conf (avoid side effects)
-        BOT_SERVICE=$(grep '^BOT_SERVICE=' "$bot_dir/bot.conf" | head -1 | sed 's/^BOT_SERVICE=//' | tr -d '"')
+        # `|| true`: a bot.conf missing this line must not abort the whole sweep
+        # under `set -euo pipefail` (grep returns non-zero on no match).
+        BOT_SERVICE=$(grep '^BOT_SERVICE=' "$bot_dir/bot.conf" | head -1 | sed 's/^BOT_SERVICE=//' | tr -d '"' || true)
     fi
 
     session_name=$(tmux_session_name "$bot_dir")

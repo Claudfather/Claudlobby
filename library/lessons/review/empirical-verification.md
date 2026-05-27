@@ -26,4 +26,10 @@ A PR description says "all tests pass." The CI status says green. Reviewers appr
 - Compare row counts, key invariants, and a checksum across before/after.
 - If the PR claims a perf improvement, measure: `query_history` before/after, EXPLAIN plans, warehouse credits.
 
+**For bot-behavior PRs (claudlobby):**
+
+- A change to lib/ scripts, hooks, protocols, guardrails, or composed `bot.conf` changes how a bot *behaves*, not just how it composes. Unit tests prove the env var lands in `bot.conf`; they do not prove the event fires, the alert sends, or the bot acts.
+- Require the author to have run the **Deliver → Add config → Recompose → Observe** loop (see CLAUDE.md) and cited the observation: "ran `lib/validate-bot-change.sh` → `activity_stuck` + `overdue_dispatch` fired, manager notified." If the path needs a live bot, require a `spin-up-bot` + `data/events` observation.
+- Treat "the composer test passes" as necessary but insufficient. The harness that runs the real sweep is what caught a latent `fleet-pulse.sh` sweep-abort no composer test could see.
+
 The verdict is only as strong as what was actually verified. "Approved based on the PR description" is not a verdict.
