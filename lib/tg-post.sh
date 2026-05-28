@@ -27,7 +27,11 @@ fi
 
 TOKEN=$(grep ^TELEGRAM_BOT_TOKEN "$STATE_DIR/.env" 2>/dev/null | sed 's/^TELEGRAM_BOT_TOKEN=//' || true)
 if [ -z "$TOKEN" ]; then
-  echo "tg-post: no TELEGRAM_BOT_TOKEN in $STATE_DIR/.env" >&2
+  # Fall back to environment variable (set by the Telegram plugin at bot startup)
+  TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+fi
+if [ -z "$TOKEN" ]; then
+  echo "tg-post: no TELEGRAM_BOT_TOKEN in $STATE_DIR/.env or environment" >&2
   exit 1
 fi
 

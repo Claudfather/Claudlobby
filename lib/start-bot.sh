@@ -117,14 +117,24 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
     LOG="$BOT_DIR/logs/startup.log"
     setup_log_dir "$LOG"
 
+    # All plugin registry checks below MUST use the BOT's Claude config dir
+    # (CLAUDE_CONFIG_DIR), not the human's ~/.claude. When CLAUDE_CONFIG_DIR
+    # points at a per-fleet dir (e.g. ~/.claude-quintorius) but the human has
+    # the plugin in their personal ~/.claude, checking the human's registry
+    # false-positives → we skip the install, and `--channels plugin:*` then
+    # silently no-ops at runtime (the bridge bun process never spawns).
+    _CC_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    _MARKETPLACE_REGISTRY="$_CC_DIR/plugins/known_marketplaces.json"
+    _PLUGIN_REGISTRY="$_CC_DIR/plugins/installed_plugins.json"
+
     # Step 1: Register marketplaces if not already known
     if [ -n "${FLEET_PLUGINS_MARKETPLACES:-}" ]; then
         for _mp_pair in $FLEET_PLUGINS_MARKETPLACES; do
             _mp_name="${_mp_pair%%=*}"
             _mp_source="${_mp_pair#*=}"
             _mp_repo="${_mp_source#*:}"
-            if [ ! -f "$HOME/.claude/plugins/known_marketplaces.json" ] || \
-               ! grep -q "\"$_mp_name\"" "$HOME/.claude/plugins/known_marketplaces.json" 2>/dev/null; then
+            if [ ! -f "$_MARKETPLACE_REGISTRY" ] || \
+               ! grep -q "\"$_mp_name\"" "$_MARKETPLACE_REGISTRY" 2>/dev/null; then
                 echo "$(ts_iso) PLUGIN registering marketplace $_mp_name ($_mp_repo)" >> "$LOG"
                 with_timeout 30 claude plugin marketplace add "$_mp_name" --source github --repo "$_mp_repo" >> "$LOG" 2>&1 || true
             fi
@@ -133,8 +143,8 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
 
     # Step 2: Install or update each required plugin
     for _plugin in $FLEET_PLUGINS_REQUIRED; do
-        if [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] || \
-           ! grep -q "\"$_plugin\"" "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null; then
+        if [ ! -f "$_PLUGIN_REGISTRY" ] || \
+           ! grep -q "\"$_plugin\"" "$_PLUGIN_REGISTRY" 2>/dev/null; then
             echo "$(ts_iso) PLUGIN installing $_plugin (cold start)" >> "$LOG"
             with_timeout 30 claude plugin install "$_plugin" >> "$LOG" 2>&1 || true
         else

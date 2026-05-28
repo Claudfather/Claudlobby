@@ -14,7 +14,9 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
-MANAGER_SESSION="${MANAGER_BOT_NAME:-claude-bot}"  # Override in bot.conf if needed
+MANAGER_SESSION="${MANAGER_BOT_NAME:-${MANAGER_TMUX:-claude-bot}}"  # Override in bot.conf if needed
+# Composer writes MANAGER_TMUX into each worker's bot.conf; fall back to that so
+# the script "just works" without having to inline MANAGER_BOT_NAME at the call site.
 BOT="$1"
 STATUS="$2"
 SUMMARY="$3"
@@ -39,7 +41,12 @@ done
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
-"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" "$MESSAGE" Enter || true
+# Two-step send: text, then literal C-m. See lib/start-bot.sh for rationale.
+# A single `send-keys "<text>" Enter` can race with the Claude Code TUI input
+# widget post-SIGWINCH, leaving the BOTREPORT buffered but never submitted.
+# The raw CR keycode (C-m) is more reliable than the `Enter` tmux alias.
+"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" "$MESSAGE" || true
+"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" C-m || true
 
 # Mirror to fleet-state if helper is present
 _FS=$(dirname "$0")/fleet-state-update.sh
