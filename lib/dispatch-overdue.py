@@ -26,8 +26,10 @@ _TERMINAL = {"completed", "failed", "blocked"}
 
 def _iso_to_epoch(ts: str) -> int | None:
     try:
-        dt = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
-        return int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
+        # Use fromisoformat (handles offset/fractional‐seconds) — matches the
+        # pattern in uptime.py/status.py rather than a strict strptime format.
+        dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return int(dt.timestamp())
     except (ValueError, TypeError):
         return None
 
