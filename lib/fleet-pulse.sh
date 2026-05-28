@@ -68,7 +68,7 @@ bot_conf_get() {
 # the human-facing escalation as the manager's decision (see fleet-observability).
 notify_manager() {
     local bot_dir="$1" msg="$2" mgr=""
-    mgr=$(bot_conf_get "$bot_dir" MANAGER_BOT_NAME "")
+    mgr=$(bot_conf_get "$bot_dir" MANAGER_TMUX "")
     [ -n "$mgr" ] || return 0
     check_tmux_session "$mgr" || return 0
     "$_TMUX_BIN" send-keys -t "$mgr" "[FLEET-PULSE] $(sanitize_tmux_input "$msg")" Enter 2>/dev/null || true
@@ -90,14 +90,8 @@ for bot_dir in "$BOTS_DIR"/*/; do
     [ -d "$bot_dir" ] || continue
     bot_id=$(basename "$bot_dir")
 
-    # Load bot.conf if it exists (for BOT_SERVICE, etc.)
-    BOT_SERVICE=""
-    if [ -f "$bot_dir/bot.conf" ]; then
-        # Extract BOT_SERVICE without full load_bot_conf (avoid side effects)
-        # `|| true`: a bot.conf missing this line must not abort the whole sweep
-        # under `set -euo pipefail` (grep returns non-zero on no match).
-        BOT_SERVICE=$(grep '^BOT_SERVICE=' "$bot_dir/bot.conf" | head -1 | sed 's/^BOT_SERVICE=//' | tr -d '"' || true)
-    fi
+    # Load BOT_SERVICE via the helper (handles `export` prefix + no-match safely).
+    BOT_SERVICE=$(bot_conf_get "$bot_dir" BOT_SERVICE "")
 
     session_name=$(tmux_session_name "$bot_dir")
 
