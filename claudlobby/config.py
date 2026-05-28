@@ -60,6 +60,7 @@ class ToolsConfig:
 _OBS_DEFAULT_PULSE_INTERVAL = 300
 _OBS_DEFAULT_REAP_DAYS = 7
 _OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD = 1800
+_OBS_DEFAULT_DISPATCH_DEADLINE = 1800
 
 
 @dataclass
@@ -76,6 +77,9 @@ class ObservabilityConfig:
     # seconds of no tool-call activity (while not idle) before a bot is flagged
     # activity_stuck — catches an animated-but-hung session that pane_stuck misses
     activity_stuck_threshold: int | None = None
+    # seconds after a manager dispatch before an unanswered task is flagged
+    # overdue_dispatch (manager-side watchdog)
+    dispatch_deadline: int | None = None
 
 
 @dataclass
@@ -443,10 +447,12 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
     pi = raw.get("pulse_interval")
     rd = raw.get("reap_days")
     ast = raw.get("activity_stuck_threshold")
+    dd = raw.get("dispatch_deadline")
     return ObservabilityConfig(
         pulse_interval=int(pi) if pi is not None else None,
         reap_days=int(rd) if rd is not None else None,
         activity_stuck_threshold=int(ast) if ast is not None else None,
+        dispatch_deadline=int(dd) if dd is not None else None,
     )
 
 
@@ -475,6 +481,13 @@ def _merge_observability(
             default.activity_stuck_threshold
             if default.activity_stuck_threshold is not None
             else _OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD
+        ),
+        dispatch_deadline=override.dispatch_deadline
+        if override.dispatch_deadline is not None
+        else (
+            default.dispatch_deadline
+            if default.dispatch_deadline is not None
+            else _OBS_DEFAULT_DISPATCH_DEADLINE
         ),
     )
 

@@ -60,6 +60,7 @@ Read bot event logs at these natural decision points — not continuously, not o
 | Event type | Source | Manager action |
 |------------|--------|---------------|
 | `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold while *not* idle — it's animating but hung (e.g. a stalled main thread after a subagent returned). Investigate; restart only if `safe-worker-restart` guards pass. |
+| `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal `[BOTREPORT]`. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
 | `mcp_error` | vitals | Attempt MCP server reconnect; flag human if persistent (>3 in 30 min) |
 | `service_down` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
