@@ -244,6 +244,20 @@ check_tmux_session() {
     "$_TMUX_BIN" has-session -t "$session" 2>/dev/null
 }
 
+# pane_is_idle <pane_text>
+# Returns 0 if the pane is at a prompt / waiting-for-input, 1 otherwise.
+# Mirrors keepalive.sh classify_pane's IDLE branch — used by fleet-pulse to
+# avoid flagging a finished, at-prompt bot as activity_stuck (a legitimately
+# idle bot makes no tool calls). Operators extend via KEEPALIVE_IDLE_PATTERNS.
+pane_is_idle() {
+    local text="$1"
+    local _idle_pattern='(^\s*[>❯]\s*$|Remote Control active|Enter\/Esc to close|Yes\/No|Allow|Deny|y\/n\b)'
+    if [ -n "${KEEPALIVE_IDLE_PATTERNS:-}" ]; then
+        _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
+    fi
+    printf '%s' "$text" | grep -qE "$_idle_pattern"
+}
+
 # --- Help display ------------------------------------------------------------
 
 show_help() {

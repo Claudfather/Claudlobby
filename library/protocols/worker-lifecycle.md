@@ -38,6 +38,10 @@ Workers communicate on **two** channels simultaneously:
 
 Both channels fire at lifecycle boundaries. Telegram is prose; `[BOTREPORT]` is structured.
 
+## You are monitored (and why it helps you)
+
+Your tool-call activity is observed by the fleet pulse. If your session is alive and not at an idle prompt but you make **no tool call for a long stretch** (the configured `activity_stuck` threshold — e.g. a main thread that stalled after a subagent returned), the pulse flags `activity_stuck` and notifies your manager. This is a safety net, not surveillance: it exists so a silent hang gets noticed in minutes instead of hours. You will only be restarted after the `safe-worker-restart` guards pass (no uncommitted WIP, no pending report expected) — so keep work committed and report at lifecycle boundaries, and a restart will never lose your progress.
+
 ## The lifecycle
 
 ```

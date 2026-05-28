@@ -59,6 +59,7 @@ class ToolsConfig:
 
 _OBS_DEFAULT_PULSE_INTERVAL = 300
 _OBS_DEFAULT_REAP_DAYS = 7
+_OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD = 1800
 
 
 @dataclass
@@ -72,6 +73,9 @@ class ObservabilityConfig:
 
     pulse_interval: int | None = None  # seconds between heartbeat pulses
     reap_days: int | None = None  # days to retain event files before reaping
+    # seconds of no tool-call activity (while not idle) before a bot is flagged
+    # activity_stuck — catches an animated-but-hung session that pane_stuck misses
+    activity_stuck_threshold: int | None = None
 
 
 @dataclass
@@ -438,9 +442,11 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
         return ObservabilityConfig()
     pi = raw.get("pulse_interval")
     rd = raw.get("reap_days")
+    ast = raw.get("activity_stuck_threshold")
     return ObservabilityConfig(
         pulse_interval=int(pi) if pi is not None else None,
         reap_days=int(rd) if rd is not None else None,
+        activity_stuck_threshold=int(ast) if ast is not None else None,
     )
 
 
@@ -462,6 +468,13 @@ def _merge_observability(
             default.reap_days
             if default.reap_days is not None
             else _OBS_DEFAULT_REAP_DAYS
+        ),
+        activity_stuck_threshold=override.activity_stuck_threshold
+        if override.activity_stuck_threshold is not None
+        else (
+            default.activity_stuck_threshold
+            if default.activity_stuck_threshold is not None
+            else _OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD
         ),
     )
 

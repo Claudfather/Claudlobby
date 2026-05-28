@@ -95,8 +95,16 @@ for e in events:
     print(e)
 " <<< "$payload" >> "$outfile" 2>/dev/null || true
 
-# --- Reap old event files (>7 days) ---
-find "$events_dir" -name "fleet-*.jsonl" -mtime +7 -delete 2>/dev/null || true
+# --- Activity marker ---
+# Touch a marker file on every tool-call hook invocation. fleet-pulse.sh reads
+# its mtime to detect an "activity_stuck" bot — one whose pane is animating but
+# has made no tool call for a long time (the case pane_stuck can't see). Cheaper
+# and more portable than parsing the last tool_call timestamp out of the JSONL.
+touch "${BOT_DIR:-${PWD}}/data/.last-tool-call" 2>/dev/null || true
+
+# --- Reap old event files ---
+_reap_days="${OBSERVABILITY_REAP_DAYS:-7}"
+find "$events_dir" -name "fleet-*.jsonl" -mtime +"$_reap_days" -delete 2>/dev/null || true
 
 # Non-blocking hook — always exit 0
 exit 0

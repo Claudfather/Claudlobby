@@ -74,6 +74,14 @@ fi
 STAGGER_STEP=$((60 / NUM_BOTS))
 [ "$STAGGER_STEP" -lt 1 ] && STAGGER_STEP=1
 
+# Fleet-pulse cadence — derive minutes from OBSERVABILITY_PULSE_INTERVAL (seconds),
+# read from the first bot's composed bot.conf. Defaults to 300s (5 min).
+PULSE_INTERVAL=$(grep -h '^\(export \)\?OBSERVABILITY_PULSE_INTERVAL=' "${BOTS[0]}/bot.conf" 2>/dev/null \
+    | head -1 | sed -E 's/^(export )?OBSERVABILITY_PULSE_INTERVAL=//' | tr -d '"' || true)
+PULSE_MIN=$(( ${PULSE_INTERVAL:-300} / 60 ))
+[ "$PULSE_MIN" -lt 1 ] && PULSE_MIN=1
+[ "$PULSE_MIN" -gt 59 ] && PULSE_MIN=59
+
 BEGIN_MARKER="# BEGIN claudlobby:$FLEET"
 END_MARKER="# END claudlobby:$FLEET"
 
@@ -103,6 +111,9 @@ TMPBLOCK=$(safe_mktemp)
     echo "#"
     echo "# Weekly log rotation: Sunday 03:00 — keep last 500 lines of each log."
     echo "0 3 * * 0 $LIB/log-rotate.sh $LIB/keepalive.log $LIB/keepalive-all.log $LIB/bot-sweep-cron.log $LIB/disk-monitor.log $LIB/creds-check.log"
+    echo "#"
+    echo "# Fleet pulse: external liveness + activity-stuck checks."
+    echo "*/$PULSE_MIN * * * * $LIB/fleet-pulse.sh $FLEET"
     echo "#"
     echo "# Daily disk-usage monitor: 07:00 — warn if > 90%."
     echo "0 7 * * * $LIB/disk-monitor.sh"

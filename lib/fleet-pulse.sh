@@ -41,12 +41,37 @@ emit_event() {
         "$ts" "$bot_id" "$event_type" "$data_json" >> "$outfile"
 }
 
-# --- Helper: reap old event files for a bot ---
+# --- Helper: read a value from a bot's bot.conf (no side effects) ---
+bot_conf_get() {
+    local bot_dir="$1" key="$2" default="$3" val=""
+    if [ -f "$bot_dir/bot.conf" ]; then
+        val=$(grep "^\(export \)\?$key=" "$bot_dir/bot.conf" | head -1 \
+            | sed -E "s/^(export )?$key=//" | tr -d '"' || true)
+    fi
+    printf '%s' "${val:-$default}"
+}
+
+# --- Helper: actively notify a bot's manager via its tmux session ---
+# The system is pull-based by design, but silent stalls (the reason this exists)
+# mean the manager can't rely on polling. We push a one-line [FLEET-PULSE] note
+# into the manager's session — the same channel report-back.sh uses — leaving
+# the human-facing escalation as the manager's decision (see fleet-observability).
+notify_manager() {
+    local bot_dir="$1" msg="$2" mgr=""
+    mgr=$(bot_conf_get "$bot_dir" MANAGER_BOT_NAME "")
+    [ -n "$mgr" ] || return 0
+    check_tmux_session "$mgr" || return 0
+    "$_TMUX_BIN" send-keys -t "$mgr" "[FLEET-PULSE] $(sanitize_tmux_input "$msg")" Enter 2>/dev/null || true
+}
+
+# --- Helper: reap old event files for a bot (honors OBSERVABILITY_REAP_DAYS) ---
 reap_events() {
     local bot_dir="$1"
     local events_dir="$bot_dir/data/events"
+    local reap_days
+    reap_days=$(bot_conf_get "$bot_dir" OBSERVABILITY_REAP_DAYS 7)
     if [ -d "$events_dir" ]; then
-        find "$events_dir" -name "fleet-*.jsonl" -mtime +7 -delete 2>/dev/null || true
+        find "$events_dir" -name "fleet-*.jsonl" -mtime +"$reap_days" -delete 2>/dev/null || true
     fi
 }
 
@@ -67,6 +92,12 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # --- Check 1: tmux session exists ---
     if ! check_tmux_session "$session_name"; then
         emit_event "$bot_dir" "$bot_id" "session_missing" '{"session":"'"$session_name"'"}'
+        if [ ! -f "$state_dir/${bot_id}.session_alerted" ]; then
+            notify_manager "$bot_dir" "$bot_id session_missing — tmux session '$session_name' is gone"
+            touch "$state_dir/${bot_id}.session_alerted"
+        fi
+    else
+        rm -f "$state_dir/${bot_id}.session_alerted"
     fi
 
     # --- Check 2: systemd service state ---
@@ -74,6 +105,12 @@ for bot_dir in "$BOTS_DIR"/*/; do
         if ! systemctl --user is-active "$BOT_SERVICE" >/dev/null 2>&1; then
             state=$(systemctl --user show -p ActiveState --value "$BOT_SERVICE" 2>/dev/null | tr -d '[:cntrl:]' || echo "unknown")
             emit_event "$bot_dir" "$bot_id" "service_down" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'"}'
+            if [ ! -f "$state_dir/${bot_id}.service_alerted" ]; then
+                notify_manager "$bot_dir" "$bot_id service_down — unit '$BOT_SERVICE' state=$state"
+                touch "$state_dir/${bot_id}.service_alerted"
+            fi
+        else
+            rm -f "$state_dir/${bot_id}.service_alerted"
         fi
     fi
 
@@ -117,6 +154,31 @@ for bot_dir in "$BOTS_DIR"/*/; do
                 emit_event "$bot_dir" "$bot_id" "wip_uncommitted" '{"repo":"'"$repo_name"'","dirty_files":'"$file_count"'}'
             fi
         done
+    fi
+
+    # --- Check 5: activity stuck (animating but no tool calls) ---
+    # pane_stuck (Check 3) is fooled by the braille spinner, which animates even
+    # during a hang — the pane hash keeps changing, so it never fires. This check
+    # uses the .last-tool-call marker bot-vitals.sh touches on every tool call:
+    # session alive + not idle + no tool call for > threshold ⇒ activity_stuck.
+    marker="$bot_dir/data/.last-tool-call"
+    alerted="$state_dir/${bot_id}.activity_alerted"
+    if check_tmux_session "$session_name" && [ -f "$marker" ]; then
+        threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
+        now_epoch=$(date +%s)
+        last_epoch=$(stat_mtime "$marker" 2>/dev/null || echo "$now_epoch")
+        gap=$(( now_epoch - last_epoch ))
+        pane_tail=$("$_TMUX_BIN" capture-pane -t "$session_name" -p 2>/dev/null | tail -10 || true)
+        if [ "$gap" -ge "$threshold" ] && ! pane_is_idle "$pane_tail"; then
+            emit_event "$bot_dir" "$bot_id" "activity_stuck" \
+                '{"last_tool_call_epoch":'"$last_epoch"',"elapsed_seconds":'"$gap"'}'
+            if [ ! -f "$alerted" ]; then
+                notify_manager "$bot_dir" "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)"
+                touch "$alerted"
+            fi
+        else
+            rm -f "$alerted"
+        fi
     fi
 
     # Reap old event files for this bot

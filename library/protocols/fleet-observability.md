@@ -59,12 +59,23 @@ Read bot event logs at these natural decision points — not continuously, not o
 
 | Event type | Source | Manager action |
 |------------|--------|---------------|
-| `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck |
+| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold while *not* idle — it's animating but hung (e.g. a stalled main thread after a subagent returned). Investigate; restart only if `safe-worker-restart` guards pass. |
+| `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
 | `mcp_error` | vitals | Attempt MCP server reconnect; flag human if persistent (>3 in 30 min) |
 | `service_down` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `session_missing` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. Check for staleness instead. |
 | `session_event` | vitals | Informational — log awareness of session lifecycle |
+
+## Active Notifications (push)
+
+Reading events at decision points is the default, but silent stalls — the reason `activity_stuck` exists — are exactly the case where a manager *can't* rely on remembering to poll. So `fleet-pulse.sh` also **pushes** a one-line note into your tmux session for high-severity events (`activity_stuck`, `session_missing`, `service_down`), debounced to once per episode:
+
+```
+[FLEET-PULSE] <bot> activity_stuck — no tool calls for 11400s while not idle (likely hung mid-task)
+```
+
+Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the table above and act. The push tells you *something needs attention*; the decision (investigate, restart, escalate to the human via Telegram) is still yours.
 
 **Not yet captured via hooks:** `context_warning` and `rate_limit` are not available in the Claude Code PreToolUse/PostToolUse hook payload. Managers must continue using live checks (capture-pane, direct query) for context percentage and rate limit status until these signals become available in the hook schema.
 
