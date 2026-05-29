@@ -106,6 +106,9 @@ fi
 
 # Per-bot identity vars — written explicitly so they override any
 # same-named var from upper tiers (prevents tmux server env leakage).
+[ -n "${BOT_ID:-}" ]                               && printf 'export BOT_ID=%q\n' "$BOT_ID" >> "$BOT_ENV_FILE"
+[ -n "${BOT_NAME:-}" ]                             && printf 'export BOT_NAME=%q\n' "$BOT_NAME" >> "$BOT_ENV_FILE"
+[ -n "${BOT_DIR:-}" ]                              && printf 'export BOT_DIR=%q\n' "$BOT_DIR" >> "$BOT_ENV_FILE"
 [ -n "${CLAUDE_CONFIG_DIR:-}" ]                    && printf 'export CLAUDE_CONFIG_DIR=%q\n' "$CLAUDE_CONFIG_DIR" >> "$BOT_ENV_FILE"
 [ -n "${TELEGRAM_STATE_DIR:-}" ]                   && printf 'export TELEGRAM_STATE_DIR=%q\n' "$TELEGRAM_STATE_DIR" >> "$BOT_ENV_FILE"
 [ -n "${TELEGRAM_BOT_TOKEN:-}" ]                   && printf 'export TELEGRAM_BOT_TOKEN=%q\n' "$TELEGRAM_BOT_TOKEN" >> "$BOT_ENV_FILE"
