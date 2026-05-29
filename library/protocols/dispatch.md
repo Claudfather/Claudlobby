@@ -4,25 +4,97 @@ title: Dispatch Protocol
 
 # Dispatch Protocol
 
-Manager → worker via `tmux send-keys -t <worker> '<task prompt>' Enter`.
+Manager → worker via `tmux send-keys`. The default payload format is `[BOTCOMMAND]` — a structured envelope that workers parse on receipt (see `worker-lifecycle` for the inbound spec).
 
-Dispatch prompt names: **what** (concrete deliverable), **target** (`--repo <name>`), **constraints** (scope, deadlines, hand-off rules), **reporting expectation** (what `[BOTREPORT]` payload back).
+## [BOTCOMMAND] format
 
-**Use two-step send-keys** — split text and Enter into separate calls with a short pause to prevent a race where Claude Code's TUI swallows keystrokes during render:
+```
+[BOTCOMMAND] <manager> | <type> | <summary> | <key:value pairs>
+```
+
+**Types:**
+
+| Type | Purpose |
+|------|---------|
+| `task` | Implementation work — branch, code, PR |
+| `cancel` | Abort current task, discard WIP |
+| `compact` | Run `/compact` to free context |
+| `restart` | Wrap up, report back, expect session restart |
+| `query` | Answer inline — no branch, no PR |
+
+**Key-value pairs** (optional, pipe-delimited after summary):
+
+| Key | Values / format | Purpose |
+|-----|-----------------|---------|
+| `repo:<name>` | Repository name | Target repo for the work |
+| `branch:<name>` | Branch name | Specific branch to work on |
+| `report:<target>` | Bot name or channel | Where to send the `[BOTREPORT]` |
+| `priority:<level>` | `high` / `normal` / `low` | Task priority |
+| `ref:<url>` | Issue or PR URL | Originating issue or context link |
+
+### Examples
+
+**Task dispatch:**
+
+```
+[BOTCOMMAND] ari | task | Fix rate-limit bypass in auth middleware | repo:backend | priority:high | ref:https://github.com/org/backend/issues/42
+```
+
+**Cancel in-flight work:**
+
+```
+[BOTCOMMAND] ari | cancel | Dropping the auth refactor — scope changed
+```
+
+**Free context on a worker:**
+
+```
+[BOTCOMMAND] ari | compact | Free context before next task
+```
+
+**Restart a worker:**
+
+```
+[BOTCOMMAND] ari | restart | Rolling restart for config reload
+```
+
+**Query (no branch/PR):**
+
+```
+[BOTCOMMAND] ari | query | What's the current retry logic in payment_service.py? | repo:backend
+```
+
+## Two-step tmux send-keys
+
+Split text and Enter into separate calls with a short pause. This prevents a race where Claude Code's TUI swallows keystrokes during render:
 
 ```bash
-tmux send-keys -t <worker> "set +H; <task prompt>"
+tmux send-keys -t <worker> 'set +H; [BOTCOMMAND] <manager> | task | <summary> | repo:<name>'
 sleep 0.3
 tmux send-keys -t <worker> Enter
 ```
 
-Example:
+Full example:
 
 ```bash
-tmux send-keys -t eng-1 "set +H; /lifecycle 'Add rate-limit middleware' --repo backend"
+tmux send-keys -t eng-1 'set +H; [BOTCOMMAND] ari | task | Run security audit on storydump | repo:storydump | priority:high | ref:https://github.com/org/storydump/issues/99'
 sleep 0.3
 tmux send-keys -t eng-1 Enter
 ```
+
+**Always prefix with `set +H;`** — disables bash history expansion, which silently mangles `!` characters in prompts.
+
+## Freeform fallback
+
+For ad-hoc prompts that don't fit the structured format (exploratory questions, multi-paragraph context), freeform dispatch still works. Workers treat any dispatch without a `[BOTCOMMAND]` prefix as a freeform task.
+
+```bash
+tmux send-keys -t eng-1 "set +H; Look at the flaky test in tests/test_auth.py -- it passes locally but fails in CI about 30% of the time. Root-cause it and fix."
+sleep 0.3
+tmux send-keys -t eng-1 Enter
+```
+
+Prefer `[BOTCOMMAND]` for anything with a clear type, repo, or priority. Use freeform for exploratory or context-heavy dispatches where the overhead of structured fields isn't worth it.
 
 After dispatch, monitor: capture the worker's pane after ~2-3 min if you haven't heard back. Workers acknowledge in Telegram, go quiet during work, post completion.
 
