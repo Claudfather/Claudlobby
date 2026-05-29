@@ -203,8 +203,13 @@ fleet:
 #     # Multi-bot fleets should set bench: true on exactly one bot.
 #     bench: true
 #
-#     # dangerously_skip_permissions — skip tool-call permission prompts (default: true)
-#     # Set to false for bots that should require approval before tool calls.
+#     # permission_mode — Claude Code --permission-mode flag (default: unset)
+#     # Values: default, acceptEdits, bypassPermissions, plan, dontAsk, auto
+#     # When set, overrides dangerously_skip_permissions. Preferred for fleet use.
+#     permission_mode: auto
+#
+#     # dangerously_skip_permissions — legacy flag (default: true)
+#     # Ignored when permission_mode is set. Use permission_mode instead.
 #     dangerously_skip_permissions: false
 #
 #     # remote_control — enable --remote-control flag (default: true)

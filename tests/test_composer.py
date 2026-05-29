@@ -2300,3 +2300,64 @@ class TestResolveEffectiveIntegrations:
             mcp=[McpEntry(name="github")],
         )
         assert resolve_effective_integrations(bot, paths) == []
+
+
+class TestPermissionMode:
+    """compose_bot_conf handles permission_mode vs dangerously_skip_permissions."""
+
+    def _compose(
+        self, tmp_path, permission_mode=None, dangerously_skip_permissions=True
+    ):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot"),
+            permission_mode=permission_mode,
+            dangerously_skip_permissions=dangerously_skip_permissions,
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_bot_conf(bot, fleet, paths)
+
+    def test_permission_mode_auto(self, tmp_path):
+        conf = self._compose(tmp_path, permission_mode="auto")
+        assert "--permission-mode auto" in conf
+        assert "--dangerously-skip-permissions" not in conf
+
+    def test_permission_mode_bypass(self, tmp_path):
+        conf = self._compose(tmp_path, permission_mode="bypassPermissions")
+        assert "--permission-mode bypassPermissions" in conf
+        assert "--dangerously-skip-permissions" not in conf
+
+    def test_no_permission_mode_falls_back_to_skip(self, tmp_path):
+        conf = self._compose(
+            tmp_path, permission_mode=None, dangerously_skip_permissions=True
+        )
+        assert "--dangerously-skip-permissions" in conf
+        assert "--permission-mode" not in conf
+
+    def test_neither_set(self, tmp_path):
+        conf = self._compose(
+            tmp_path, permission_mode=None, dangerously_skip_permissions=False
+        )
+        assert "--dangerously-skip-permissions" not in conf
+        assert "--permission-mode" not in conf
+
+    def test_invalid_permission_mode_raises(self):
+        from claudlobby.config import _parse_permission_mode
+
+        import pytest
+
+        with pytest.raises(ValueError, match="Invalid permission_mode"):
+            _parse_permission_mode("yolo")

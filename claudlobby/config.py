@@ -181,6 +181,9 @@ class BotConfig:
     # Claude Code CLI flags — composed into CLAUDE_FLAGS in bot.conf.
     remote_control: bool = True  # --remote-control
     dangerously_skip_permissions: bool = True  # --dangerously-skip-permissions
+    permission_mode: str | None = (
+        None  # --permission-mode (overrides dangerously_skip_permissions)
+    )
     channels: list[str] = field(
         default_factory=lambda: ["plugin:telegram@claude-plugins-official"]
     )  # --channels <name>
@@ -563,6 +566,22 @@ def _coerce_autonomous_runner(
     )
 
 
+_VALID_PERMISSION_MODES = frozenset(
+    {"default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"}
+)
+
+
+def _parse_permission_mode(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value not in _VALID_PERMISSION_MODES:
+        raise ValueError(
+            f"Invalid permission_mode '{value}'. "
+            f"Must be one of: {', '.join(sorted(_VALID_PERMISSION_MODES))}"
+        )
+    return value
+
+
 def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> BotConfig:
     raw = raw or {}
     tg_defaults = defaults.get("telegram", {}) or {}
@@ -604,6 +623,9 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         effort=raw.get("effort", defaults.get("effort")),
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", True),
+        permission_mode=_parse_permission_mode(
+            raw.get("permission_mode") or defaults.get("permission_mode")
+        ),
         prompt_suggestions=_bool("prompt_suggestions", False),
         channels=_as_list(raw.get("channels") or defaults.get("channels"))
         or ["plugin:telegram@claude-plugins-official"],
