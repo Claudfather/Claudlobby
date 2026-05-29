@@ -364,7 +364,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         flags.append(f"--channels {ch}")
     if bot.remote_control:
         flags.append("--remote-control")
-    if bot.dangerously_skip_permissions:
+    if bot.permission_mode:
+        flags.append(f"--permission-mode {bot.permission_mode}")
+    elif bot.dangerously_skip_permissions:
         flags.append("--dangerously-skip-permissions")
     if bot.model:
         flags.append(f"--model {bot.model}")
