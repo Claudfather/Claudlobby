@@ -8,7 +8,7 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 |----------|--------|-------------|
 | `BOT_ID` | `bots.<name>` key | Bot identifier (same as fleet.yaml key) |
 | `BOT_NAME` | `bots.<name>` key | Bot name (same as BOT_ID) |
-| `BOT_SERVICE` | Derived | systemd/launchd service name (e.g., `com.crog.eng.alex`) |
+| `BOT_SERVICE` | Derived | systemd/launchd service name (e.g., `com.example.fleet.botname`) |
 | `BOT_LABEL` | Derived | Human-readable label for the service |
 | `BOT_DIR` | Derived | Absolute path to the bot's runtime directory |
 | `CLAUDLOBBY_ROOT` | Detected | Absolute path to the claudlobby repository root |
