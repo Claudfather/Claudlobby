@@ -248,6 +248,22 @@ Control which Claude Code tools a bot may use. Two sub-fields:
 
 Deny wins over allow at the same layer. The validator warns if denied tools conflict with the bot's expertise (e.g., denying `Write` for a `software-engineering` bot).
 
+### `bots.<name>.observability`
+
+Controls fleet observability thresholds for heartbeat pulses, event retention, and stuck-detection. Emitted as env vars in `bot.conf` for consumption by `lib/fleet-pulse.sh`, `lib/bot-vitals.sh`, and the dispatch watchdog.
+
+```yaml
+observability:
+  pulse_interval: 300           # seconds between heartbeat pulses (default: 300)
+  reap_days: 7                  # days to retain event files before reaping (default: 7)
+  activity_stuck_threshold: 1800  # seconds of no tool-call activity before flagged (default: 1800)
+  dispatch_deadline: 1800       # seconds after manager dispatch before flagged overdue (default: 1800)
+```
+
+All fields are optional integers with sensible defaults. Can be set in `defaults:` to apply fleet-wide; bot-level overrides. The validator warns if `pulse_interval` is less than 30 or `activity_stuck_threshold` is less than 60.
+
+Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`.
+
 ### `bots.<name>.hooks`
 
 Per-bot Claude Code hooks, appended to fleet defaults. Each event (e.g., `PreToolUse`, `PostToolUse`) contains a list of hook entries:
@@ -295,9 +311,26 @@ Edits write to the real location via the symlink. Stale symlinks (removed from c
 
 Boolean (default `false`). Marks this bot as the fleet's benchmarking target for cold-start timing (`lib/bench-cold-start.sh`). Multi-bot fleets should set `bench: true` on exactly one bot so the benchmarking script knows which bot to measure. The validator warns if a fleet has multiple bots and none has `bench: true`.
 
+### `bots.<name>.permission_mode`
+
+String (default `null`). Sets the `--permission-mode` flag on the Claude Code CLI, providing more granular control than `dangerously_skip_permissions`. When set, this field takes precedence over `dangerously_skip_permissions`.
+
+Valid values:
+
+| Mode | Behavior |
+|------|----------|
+| `"default"` | Prompt for every tool call |
+| `"acceptEdits"` | Auto-approve file edits, prompt for others |
+| `"bypassPermissions"` | Skip all permission prompts (equivalent to `dangerously_skip_permissions: true`) |
+| `"plan"` | Plan mode — read-only exploration, no writes |
+| `"dontAsk"` | Skip tool calls that would require permission instead of prompting |
+| `"auto"` | Auto-approve safe operations, prompt for risky ones |
+
+Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
+
 ### `bots.<name>.dangerously_skip_permissions`
 
-Boolean (default `true`). Controls whether the bot runs with `--dangerously-skip-permissions`, which skips tool-call permission prompts. Set to `false` for bots that should require human approval before executing tools. Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
+Boolean (default `true`). Controls whether the bot runs with `--dangerously-skip-permissions`, which skips tool-call permission prompts. Set to `false` for bots that should require human approval before executing tools. Superseded by `permission_mode` when both are set. Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
 
 ### `bots.<name>.remote_control`
 
@@ -326,6 +359,34 @@ Ecosystem-aware fields connecting bots to clauDNA, Claudron, and Claudosseum. Al
 | `claudosseum_tenant_id` | `CLAUDOSSEUM_TENANT_ID` | Tenant identifier for Claudosseum telemetry (e.g., `"tenant_abc123"`). Bots emit structured signal to this tenant when configured. |
 
 Can be set in `defaults:` (fleet-wide) or per-bot (bot overrides default). The validator warns if `claudron_vault_path` is set but no `claudron` MCP server is configured.
+
+### `bots.<name>.autonomous_runner`
+
+Configures a bot to run a skill autonomously on a schedule. When set, the compositor generates autonomous runner instructions in the bot's `CLAUDE.md`.
+
+```yaml
+autonomous_runner:
+  skill: "sweep"                # required — skill name to run
+  cadence: "every 4h"           # required — execution frequency
+  target_repo: "my-org/my-repo" # required — target repository
+  args: "--label bug"           # optional — additional arguments passed to the skill
+  picker:                       # optional — how to select work items
+    type: "github_issues"       # picker type (default: "github_issues")
+    label: "bug"                # filter label (default: null)
+    state: "open"               # issue state filter (default: "open")
+    score_by: "recency"         # scoring strategy (default: "recency")
+  bypass:                       # optional — risk-based bypass config
+    risk_classifier: "structural_vs_mechanical"  # classifier name (default)
+    block_on: ["structural"]    # risk levels that block execution (default)
+    on_bypass: "comment_and_label"  # action when bypassed (default)
+  pre_hooks: []                 # optional — commands to run before skill execution
+  post_hooks: []                # optional — commands to run after skill execution
+  on_outcome:                   # optional — routing based on skill outcome
+    success: "report-back completed"
+    failure: "report-back failed"
+```
+
+All sub-fields except `skill`, `cadence`, and `target_repo` are optional with sensible defaults. Cannot be set in `defaults:` — must be per-bot (each bot's autonomous schedule is unique).
 
 ### `bots.<name>.startup_prompt`
 

@@ -75,6 +75,14 @@ Key lifecycle scripts in `lib/`:
 | `install-creds-check.sh` | Creds-check timer enrollment (launchd) |
 | `install-creds-check-systemd.sh` | Creds-check timer enrollment (systemd) |
 | `setup-mac-mini.sh` | macOS host setup automation |
+| `setup-host.sh` | Host setup automation (cross-platform) |
+| `bot-vitals.sh` | Bot vitals collection for observability |
+| `fleet-pulse.sh` | Fleet-wide heartbeat / status monitoring |
+| `data-sweep.sh` | Data directory sweep and cleanup |
+| `dispatch.sh` | Dispatch helper for manager → worker |
+| `dispatch-task.sh` | Task dispatch helper |
+| `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
+| `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
 
 ## Repository Hygiene — MANDATORY
 
@@ -194,8 +202,19 @@ claudlobby list-library                # show available building blocks
 claudlobby new-bot                     # interactive bot scaffolding
 
 # Operations
-claudlobby status                      # fleet health dashboard (stub)
+claudlobby status                      # fleet health dashboard
+claudlobby status --bot <name>         # detailed status for one bot
+claudlobby doctor                      # pre-flight fleet health diagnostic
+claudlobby report-back                 # query bot work event ledger
+claudlobby report-back --since 24h     # filter by time window
+claudlobby uptime                      # per-bot uptime, MTBR, restart-rate
 claudlobby warm-cache                  # pre-download npx packages for MCP servers
+claudlobby move-bot <bot> --to <fleet> # move a bot between fleets
+
+# Scaffolding
+claudlobby new-bot                     # interactive bot scaffolding
+claudlobby new-skill                   # scaffold a new skill directory
+claudlobby new-guardrail               # scaffold a new guardrail file
 
 # Migration (from legacy layouts)
 claudlobby env-migrate                 # migrate .env files into fleet structure
@@ -230,13 +249,18 @@ lib/check-npx-cache.sh                # verify npx cache state
 
 ```
 claudlobby/
-  __main__.py   — CLI entry point, migration commands, argparse setup
-  config.py     — fleet.yaml parsing, BotConfig/FleetConfig dataclasses
-  composer.py   — CLAUDE.md/bot.conf/.mcp.json/systemd unit generation
-  loader.py     — Library file loading, frontmatter parsing, heading demotion
-  validator.py  — Fleet validation (env vars, MCP refs, scope checks)
-  newbot.py     — Interactive bot scaffolding wizard
-  diff.py       — Drift detection and promotion
-  dotenv.py     — .env file handling
-  paths.py      — Path resolution helpers
+  __main__.py      — CLI entry point, migration commands, argparse setup
+  config.py        — fleet.yaml parsing, BotConfig/FleetConfig dataclasses
+  composer.py      — CLAUDE.md/bot.conf/.mcp.json/systemd unit generation
+  loader.py        — Library file loading, frontmatter parsing, heading demotion
+  validator.py     — Fleet validation (env vars, MCP refs, scope checks)
+  newbot.py        — Interactive bot scaffolding wizard
+  newskill.py      — Skill directory scaffolding
+  newguardrail.py  — Guardrail file scaffolding
+  diff.py          — Drift detection and promotion
+  dotenv.py        — .env file handling
+  paths.py         — Path resolution helpers
+  doctor.py        — Pre-flight fleet health diagnostic
+  status.py        — Fleet health dashboard (tmux/systemd/fleet-state)
+  uptime.py        — Per-bot uptime, MTBR, restart-rate metrics
 ```
