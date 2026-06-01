@@ -179,11 +179,12 @@ check_streamable_mcp() {
     # 401 on a bad token. A bare GET returns 406 even when healthy, so
     # the GET shape would generate constant false positives.
     #
-    # protocolVersion is pinned: bump in lockstep with the MCP spec the
-    # server advertises. A stale pin returns 4xx — surfaces as a real
-    # FAIL alert pointing here, the right failure mode.
+    # protocolVersion defaults to 2025-03-26; override via MCP_PROTOCOL_VERSION
+    # env var when the upstream spec bumps. A stale pin returns 4xx — surfaces
+    # as a real FAIL alert pointing here, the right failure mode.
     local body
-    body='{"jsonrpc":"2.0","id":"creds-check","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"claudlobby-creds-check","version":"1.0"}}}'
+    local proto_version="${MCP_PROTOCOL_VERSION:-2025-03-26}"
+    body="{\"jsonrpc\":\"2.0\",\"id\":\"creds-check\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"${proto_version}\",\"capabilities\":{},\"clientInfo\":{\"name\":\"claudlobby-creds-check\",\"version\":\"1.0\"}}}"
     local code curl_err_file auth_cfg
     curl_err_file=$(safe_mktemp)
     auth_cfg=$(safe_mktemp)

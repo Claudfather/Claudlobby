@@ -150,7 +150,8 @@ case "$state" in
         prev=0
         [ -f "$UNKNOWN_COUNTER" ] && prev=$(cat "$UNKNOWN_COUNTER" 2>/dev/null) || true
         count=$((prev + 1))
-        printf '%d' "$count" > "$UNKNOWN_COUNTER"
+        _tmp_counter="$(safe_mktemp)"
+        printf '%d' "$count" > "$_tmp_counter" && mv "$_tmp_counter" "$UNKNOWN_COUNTER"
         emit_keepalive_event "UNKNOWN"
         if [ "$count" -ge "$UNKNOWN_THRESHOLD" ]; then
             echo "$(ts_iso) UNKNOWN — unrecognized pane state ($count consecutive, threshold $UNKNOWN_THRESHOLD) — investigate" >> "$LOG"

@@ -80,6 +80,6 @@ _update_state() {
       | (if $task != "" then .bots[$bot].current_task = $task else . end)
       | (if $repo != "" then .bots[$bot].current_repo = $repo else . end)
       | (if $last != "" then .bots[$bot].last_completed = $last else . end)
-    ' "$STATE" > "$tmp" && mv "$tmp" "$STATE"
+    ' "$STATE" > "$tmp" && mv "$tmp" "$STATE" || { echo "fleet-state-update: failed to write $STATE" >&2; rm -f "$tmp"; return 1; }
 }
 with_lock "$STATE.lock" _update_state

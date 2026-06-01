@@ -18,11 +18,14 @@ provides the bot's title label; see `parse_expertise_file`.
 """
 
 from __future__ import annotations
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+log = logging.getLogger("claudlobby.loader")
 
 
 @dataclass
@@ -70,7 +73,8 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     body = "".join(lines[end + 1 :]).lstrip("\n")
     try:
         fm = yaml.safe_load(fm_text) or {}
-    except yaml.YAMLError:
+    except yaml.YAMLError as exc:
+        log.warning("malformed YAML frontmatter (treating as plain text): %s", exc)
         return {}, text
     if not isinstance(fm, dict):
         return {}, text

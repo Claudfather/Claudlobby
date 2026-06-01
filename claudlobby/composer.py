@@ -276,7 +276,10 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
             continue
         try:
             frag = json.loads(frag_path.read_text())
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            _log.warning(
+                "skipping MCP permissions for %s: malformed JSON: %s", frag_path, exc
+            )
             continue
         contract = frag.get("_permissions_contract", {})
         tools = contract.get("tools", [])

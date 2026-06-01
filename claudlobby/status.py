@@ -13,6 +13,7 @@ Output is a one-screen table for the operator's morning check.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import re
@@ -25,6 +26,12 @@ from pathlib import Path
 from .config import FleetConfig
 from .paths import Paths
 
+log = logging.getLogger("claudlobby.status")
+
+# -- Heartbeat age thresholds (seconds) ------------------------------------
+_HEARTBEAT_FRESH_SECS = 120  # < 2 min: green, healthy
+_HEARTBEAT_WARN_SECS = 600  # < 10 min: default color
+_HEARTBEAT_STALE_SECS = 3600  # < 1 hr: yellow warning; beyond = yellow hours
 
 # -- ANSI helpers (disabled when NO_COLOR set or not a tty) ----------------
 
@@ -89,7 +96,8 @@ def _load_fleet_state(paths: Paths) -> dict:
         return {}
     try:
         return json.loads(state_path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("corrupted fleet-state.json at %s: %s", state_path, exc)
         return {}
 
 
@@ -258,7 +266,7 @@ def _health_indicator(bs: BotStatus) -> str:
         age = (
             datetime.now(timezone.utc) - bs.last_heartbeat.astimezone(timezone.utc)
         ).total_seconds()
-        if age > 600:  # >10 min since last heartbeat
+        if age > _HEARTBEAT_WARN_SECS:
             return _yellow("~")
     if bs.state == "blocked":
         return _yellow("!")
@@ -286,11 +294,11 @@ def _heartbeat_display(bs: BotStatus) -> str:
     age = (
         datetime.now(timezone.utc) - bs.last_heartbeat.astimezone(timezone.utc)
     ).total_seconds()
-    if age < 120:
+    if age < _HEARTBEAT_FRESH_SECS:
         return _green(f"{int(age)}s ago")
-    if age < 3600:
+    if age < _HEARTBEAT_STALE_SECS:
         mins = int(age / 60)
-        return f"{mins}m ago" if age < 600 else _yellow(f"{mins}m ago")
+        return f"{mins}m ago" if age < _HEARTBEAT_WARN_SECS else _yellow(f"{mins}m ago")
     hours = int(age / 3600)
     return _yellow(f"{hours}h ago")
 

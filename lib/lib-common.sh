@@ -354,3 +354,11 @@ resolve_bots_dir() {
         printf '%s' "$CLAUDLOBBY_ROOT/runtime/bots"
     fi
 }
+
+# extract_bot_conf_var FILE VAR_NAME
+# Extract a variable's value from a bot.conf file (strips 'export' prefix and quotes).
+# Usage: SERVICE_PREFIX="$(extract_bot_conf_var "$conf_file" SERVICE_PREFIX)"
+extract_bot_conf_var() {
+    local conf_file="$1" var_name="$2"
+    grep -m1 "^export ${var_name}=" "$conf_file" | cut -d= -f2- | tr -d "'"
+}

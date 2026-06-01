@@ -13,21 +13,9 @@ from __future__ import annotations
 import logging
 import re
 
+from .prompts import ask as _ask
+
 log = logging.getLogger(__name__)
-
-
-def _ask(prompt: str, default: str | None = None, allow_empty: bool = True) -> str:
-    """Prompt with optional default. Empty input returns default."""
-    suffix = f" [{default}]" if default else ""
-    while True:
-        v = input(f"{prompt}{suffix}: ").strip()
-        if v:
-            return v
-        if default is not None:
-            return default
-        if allow_empty:
-            return ""
-        print("  (required)")
 
 
 def render_guardrail(name: str, title: str, description: str) -> str:
