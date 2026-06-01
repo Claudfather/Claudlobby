@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 
 from .config import load_fleet
 from .paths import Paths
+from .prompts import ask as _ask, ask_yn as _ask_yn, ask_pick as _ask_pick
 
 
 # ----------------------------------------------------------------------
@@ -308,61 +309,6 @@ def write_token_to_env(env_path: Path, token_env: str, token: str) -> None:
 # ----------------------------------------------------------------------
 # Interactive prompts
 # ----------------------------------------------------------------------
-
-
-def _ask(prompt: str, default: str | None = None, allow_empty: bool = True) -> str:
-    """Prompt with optional default. Empty input returns default."""
-    suffix = f" [{default}]" if default else ""
-    while True:
-        v = input(f"{prompt}{suffix}: ").strip()
-        if v:
-            return v
-        if default is not None:
-            return default
-        if allow_empty:
-            return ""
-        print("  (required)")
-
-
-def _ask_yn(prompt: str, default: bool) -> bool:
-    suffix = " [Y/n]" if default else " [y/N]"
-    while True:
-        v = input(f"{prompt}{suffix}: ").strip().lower()
-        if not v:
-            return default
-        if v in ("y", "yes"):
-            return True
-        if v in ("n", "no"):
-            return False
-
-
-def _ask_pick(prompt: str, options: list[str], multi: bool = True) -> list[str]:
-    """Show numbered options; user picks comma-separated indices or 'none'."""
-    print(f"\n{prompt}")
-    for i, opt in enumerate(options, 1):
-        print(f"  {i:>2}. {opt}")
-    while True:
-        v = (
-            input("  pick (comma-separated numbers, 'none', or 'all'): ")
-            .strip()
-            .lower()
-        )
-        if v in ("", "none"):
-            return []
-        if v == "all":
-            return list(options)
-        try:
-            picks = []
-            for tok in v.split(","):
-                idx = int(tok.strip()) - 1
-                if 0 <= idx < len(options):
-                    picks.append(options[idx])
-            if not multi and len(picks) > 1:
-                print("  (single selection)")
-                continue
-            return picks
-        except ValueError:
-            print("  (numbers only, e.g. '1,3,5')")
 
 
 def _list_dir(p: Path, ext: str = ".md") -> list[str]:

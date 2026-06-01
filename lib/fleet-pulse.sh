@@ -145,7 +145,8 @@ for bot_dir in "$BOTS_DIR"/*/; do
                 # First run — seed the hash and timestamp
                 printf '%s' "$(date +%s)" > "$ts_file"
             fi
-            printf '%s' "$current_hash" > "$hash_file"
+            _tmp_hash="$(safe_mktemp)"
+            printf '%s' "$current_hash" > "$_tmp_hash" && mv "$_tmp_hash" "$hash_file"
         fi
     fi
 

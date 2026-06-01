@@ -31,7 +31,7 @@ fi
 if [ -z "${SERVICE_PREFIX:-}" ]; then
     _first_conf="$(find "$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots" -name bot.conf -print -quit 2>/dev/null)"
     if [ -n "$_first_conf" ]; then
-        SERVICE_PREFIX="$(grep -m1 '^export SERVICE_PREFIX=' "$_first_conf" | cut -d= -f2- | tr -d "'")"
+        SERVICE_PREFIX="$(extract_bot_conf_var "$_first_conf" SERVICE_PREFIX)"
     fi
 fi
 if [ -z "${SERVICE_PREFIX:-}" ]; then
