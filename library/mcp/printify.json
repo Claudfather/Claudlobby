@@ -1,0 +1,23 @@
+{
+  "_env_contract": {
+    "PRINTIFY_API_KEY": {
+      "description": "Printify Personal Access Token",
+      "tier": "fleet"
+    },
+    "PRINTIFY_SHOP_ID": {
+      "description": "Printify shop ID",
+      "tier": "fleet"
+    }
+  },
+  "_permissions_contract": {
+    "tools": []
+  },
+  "printify": {
+    "command": "npx",
+    "args": ["-y", "printify-mcp"],
+    "env": {
+      "PRINTIFY_API_KEY": "${PRINTIFY_API_KEY}",
+      "PRINTIFY_SHOP_ID": "${PRINTIFY_SHOP_ID}"
+    }
+  }
+}

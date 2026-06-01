@@ -1,0 +1,93 @@
+# Environment Variables Reference
+
+The compositor writes environment variables to each bot's `bot.conf`. These are sourced at startup by `lib/start-bot.sh` and available to all lib/ scripts, hooks, and skills.
+
+## Bot Identity
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `BOT_ID` | `bots.<name>` key | Bot identifier (same as fleet.yaml key) |
+| `BOT_NAME` | `bots.<name>` key | Bot name (same as BOT_ID) |
+| `BOT_SERVICE` | Derived | systemd/launchd service name (e.g., `com.crog.eng.alex`) |
+| `BOT_LABEL` | Derived | Human-readable label for the service |
+| `BOT_DIR` | Derived | Absolute path to the bot's runtime directory |
+| `CLAUDLOBBY_ROOT` | Detected | Absolute path to the claudlobby repository root |
+
+## Fleet Context
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `FLEET_NAME` | `fleet.name` | Fleet identifier |
+| `SERVICE_PREFIX` | `fleet.service_prefix` | Service name prefix for systemd/launchd units |
+| `FLEET_STATE_PATH` | Derived | Path to `fleet-state.json` for atomic state updates |
+| `MANAGER_TMUX` | `teams` config | tmux session name of this bot's manager (if in a team) |
+
+## Telegram
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `TELEGRAM_GROUP_CHAT_ID` | `bots.<name>.telegram.group_chat_id` | Telegram group chat ID for posting |
+| `TELEGRAM_TOKEN_ENV_NAME` | `bots.<name>.telegram.token_env` | Name of the env var holding the bot's Telegram token |
+| `TELEGRAM_REQUIRE_MENTION` | `bots.<name>.telegram.require_mention` | Whether the bot requires @-mention to respond in groups |
+| `TELEGRAM_BOT_HANDLE` | `bots.<name>.telegram.handle` | Bot's Telegram username (without @) |
+| `TELEGRAM_STATE_DIR` | Derived | Path to the Telegram channel plugin state directory |
+
+## Claude Code Flags
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `CLAUDE_FLAGS` | Multiple fields | Composed CLI flags string (--remote-control, --permission-mode, --model, --channels, etc.) |
+| `CLAUDE_CONFIG_DIR` | `bots.<name>.account` | Custom Claude config directory (only set for non-default accounts) |
+| `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` | `bots.<name>.prompt_suggestions` | Whether to show prompt suggestions (true/false) |
+| `STARTUP_PROMPT` | `bots.<name>.startup_prompt` | Initial prompt sent to bot on startup |
+
+## Model Strategy
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `MODEL_STRATEGY_BASE` | `bots.<name>.model_strategy.base` | Base model for the bot |
+| `MODEL_STRATEGY_ESCALATE_TO` | `bots.<name>.model_strategy.escalate_to` | Model to escalate to for complex tasks |
+| `MODEL_STRATEGY_ESCALATE_WHEN` | `bots.<name>.model_strategy.escalate_when` | Condition for escalation |
+| `MODEL_STRATEGY_COMPACT_WHEN` | `bots.<name>.model_strategy.compact_when` | Condition for context compaction |
+| `MODEL_STRATEGY_EXPLORE` | `bots.<name>.model_strategy.explore` | Model override for Explore subagents |
+| `MODEL_STRATEGY_PLAN` | `bots.<name>.model_strategy.plan` | Model override for Plan subagents |
+| `MODEL_STRATEGY_GENERAL` | `bots.<name>.model_strategy.general` | Model override for general subagents |
+
+## Observability
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `OBSERVABILITY_PULSE_INTERVAL` | `bots.<name>.observability.pulse_interval` | Seconds between heartbeat pulses (default: 300) |
+| `OBSERVABILITY_REAP_DAYS` | `bots.<name>.observability.reap_days` | Days to retain event files (default: 7) |
+| `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | `bots.<name>.observability.activity_stuck_threshold` | Seconds of inactivity before flagged stuck (default: 1800) |
+| `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue (default: 1800) |
+
+## Ecosystem
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | clauDNA plugin version pin |
+| `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault path for scoped queries |
+| `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |
+
+## Plugins
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `CLAUDE_CODE_SYNC_PLUGIN_INSTALL` | `fleet.plugins` | Semicolon-separated plugin install commands |
+| `FLEET_PLUGINS_REQUIRED` | `fleet.plugins.additional` | Comma-separated list of required plugins |
+| `FLEET_PLUGINS_MARKETPLACES` | `fleet.plugins.marketplaces` | Comma-separated marketplace URLs |
+
+## Bot-Specific Env
+
+Any key-value pairs in `bots.<name>.env` are exported directly:
+
+```yaml
+bots:
+  my-bot:
+    env:
+      MY_CUSTOM_VAR: "value"
+      DATABASE_URL: "${NEON_CONNECTION_STRING}"
+```
+
+These are emitted as `export MY_CUSTOM_VAR="value"` in `bot.conf`.

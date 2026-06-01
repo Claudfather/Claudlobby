@@ -103,17 +103,25 @@ claudlobby generate --bot <name> # compose only one bot
 claudlobby list-library          # show available personas / skills / mcp / etc.
 claudlobby diff [--bot <name>]   # show drift between runtime/ and library/
 claudlobby promote <bot>         # move runtime drift back to library/ (v1: manual)
-claudlobby status                # fleet health (stub for now)
+claudlobby status [--bot <name>] # fleet health dashboard
+claudlobby doctor                # pre-flight fleet health diagnostic
+claudlobby report-back           # query bot work event ledger (--since, --bot)
+claudlobby uptime [--bot <name>] # per-bot uptime, MTBR, restart-rate metrics
+claudlobby new-bot               # interactive bot scaffolding
+claudlobby new-skill             # scaffold a new skill directory
+claudlobby new-guardrail         # scaffold a new guardrail file
+claudlobby move-bot <bot> --to <fleet>  # move a bot between fleets
+claudlobby warm-cache            # pre-download npx packages for MCP servers
 ```
 
 ## What this repo gives you — and doesn't
 
 **Gives you:**
 
-- `library/` — pre-built personas (manager, engineer, reviewer, designer, business), 16+ skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 9 MCP fragments (github, notion, slack, gmail, shopify, printify, homeassistant, docker, spotify), 8 guardrails, 7 protocols
-- `lib/` — bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`
+- `library/` — 14 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 38 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 10 MCP fragments (github, gws, notion, slack, shopify, printify, homeassistant, docker, spotify, granola), 19 guardrails, 26 protocols
+- `lib/` — 37 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
 - `bin/claudlobby` — the Python compositor
-- `examples/fleet-pi.yaml` — a working 8-bot Pi fleet manifest you can copy and adapt
+- `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
 
 **You install separately** (the things people miss on a fresh clone):
 

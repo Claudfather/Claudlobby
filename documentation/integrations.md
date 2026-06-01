@@ -44,7 +44,7 @@ Task management, databases, kanban boards. See [notion-integration.md](notion-in
 
 Read, search, draft, and send emails. Calendar events, free/busy, reminders. Uses the `workspace-mcp` tool, registered as server name `gws` in the MCP fragment `library/mcp/gws.json`.
 
-> **Note:** The older `gmail.json` fragment is deprecated — use `gws.json` instead, which bundles both Gmail and Calendar in a single server instance.
+> **Note:** The older `gmail.json` fragment has been removed. `gws.json` bundles both Gmail and Calendar in a single server instance.
 
 ```json
 {
