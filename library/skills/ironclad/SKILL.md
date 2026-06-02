@@ -91,7 +91,7 @@ Design is lens-agnostic. Each lens is a skill name that accepts `--dispatch` (or
 | Lens | Skill | Applies To | Status |
 |------|-------|-----------|--------|
 | Adversarial Review | `/adversarial-review` | plan, implementation, mixed | Active |
-| First Principles | `/first-principles` | plan, implementation, mixed | Planned |
+| First Principles | `/first-principles` | plan, mixed | Planned |
 | Extension Check | `/extension-check` | implementation, mixed | Planned |
 | Precedent Check | `/precedent-check` | plan, implementation, mixed | Planned |
 | Plan Health Audit | `/plan-health-audit` | plan, mixed | Planned |
