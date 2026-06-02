@@ -1,16 +1,17 @@
 ---
 name: ironclad
-description: "Use when a plan PR needs fleet-orchestrated hardening before implementation. Dispatches review lenses to idle workers, collects findings, posts aggregated results to the PR, and checks convergence. Invoke after /forge produces a plan PR, before /implement-plan executes it."
+description: "Use when any PR needs fleet-orchestrated multi-lens review. Dispatches review lenses to idle workers, collects findings, posts aggregated results to the PR, and checks convergence. Works for plan PRs (post-/forge) and implementation PRs alike."
 argument-hint: "<pr-url> [--auto]"
 ---
 
 # Ironclad
 
-Fleet-orchestrated plan hardening. Takes a plan PR, dispatches review lenses to idle workers via `[BOTCOMMAND]`, collects structured findings, posts an aggregated review to the PR, and checks convergence. The plan is hardened when all forks are locked and no unresolved high-severity findings remain.
+Fleet-orchestrated multi-lens review for any PR. Dispatches review lenses to idle workers via `[BOTCOMMAND]`, collects structured findings, posts an aggregated review to the PR, and checks convergence. Adapts its review strategy based on PR type: plan PRs get fork-convergence checks; implementation PRs get code-focused lenses.
 
-**Handoff chain:** `/forge` (produces plan PR) -> `/ironclad` (hardens it) -> `/implement-plan` (executes it).
+**For plan PRs:** sits in the handoff chain `/forge` -> `/ironclad` -> `/implement-plan`.
+**For implementation PRs:** standalone quality gate before merge.
 
-**Pull model:** each invocation runs one hardening cycle. The human re-invokes for cycle 2+ until converged.
+**Pull model:** each invocation runs one review cycle. The human re-invokes for cycle 2+ until converged.
 
 ## Arguments
 
@@ -23,15 +24,18 @@ Parse `$ARGUMENTS`:
 
 ## Procedure
 
-### Phase 1: Read the Plan
+### Phase 1: Read the PR and Classify
 
 1. Extract `owner/repo` and PR number from the URL.
 2. Fetch the PR diff via `gh pr diff <number> -R <owner/repo>`.
-3. Identify the plan file(s) from the diff (typically markdown in `docs/`, `planning/`, or `shared/planning/`).
-4. Read the full plan content. If the plan references other files, read those too.
-5. Record the plan title and a one-line summary for downstream dispatch.
+3. Fetch the PR title and body via `gh pr view <number> -R <owner/repo> --json title,body`.
+4. **Classify the PR type** by inspecting the changed files:
+   - **Plan PR:** the diff modifies markdown files in `docs/`, `planning/`, `shared/planning/`, or `documentation/` directories, and the content contains plan structure (phases, forks, decision points). Read the full plan content. If the plan references other files, read those too.
+   - **Implementation PR:** the diff modifies source code, config, scripts, tests, or other non-plan files. Read the diff to understand the scope of changes.
+   - **Mixed:** if both plan and code files are changed, treat as a plan PR (plan lenses + code lenses both apply).
+5. Record the PR title, type classification (`plan`, `implementation`, or `mixed`), and a one-line summary for downstream dispatch.
 
-If the PR cannot be fetched (auth, 404, network), report the error verbatim and stop. Do not fabricate plan content.
+If the PR cannot be fetched (auth, 404, network), report the error verbatim and stop. Do not fabricate PR content.
 
 ### Phase 2: Prepare Scratch Directory
 
@@ -43,7 +47,7 @@ Before creating a new scratch dir, scan `$CLAUDLOBBY_ROOT/state/ironclad-runs/` 
 
 ```
 state/ironclad-runs/<pr-number>-<YYYYMMDD-HHMMSS>/
-  plan.md              # Copy of the plan content
+  source.md            # Plan content (plan PRs) or PR diff + body (implementation PRs)
   lenses/              # One subdir per dispatched lens
     adversarial-review/
       result.md        # Worker writes findings here (markdown with frontmatter)
@@ -52,23 +56,24 @@ state/ironclad-runs/<pr-number>-<YYYYMMDD-HHMMSS>/
     ...
 ```
 
-Write `plan.md` with frontmatter:
+Write `source.md` with frontmatter:
 
 ```markdown
 ---
 pr_url: <url>
 pr_number: <number>
 repo: <owner/repo>
-plan_title: <title>
+pr_title: <title>
+pr_type: plan | implementation | mixed
 started: <ISO timestamp>
 cycle: <N>
 status: in-progress
 ---
 
-<full plan content>
+<full plan content for plan PRs, or PR diff + body for implementation PRs>
 ```
 
-Workers read `plan.md` from this scratch directory so they have local access without needing to fetch the PR themselves.
+Workers read `source.md` from this scratch directory so they have local access without needing to fetch the PR themselves.
 
 ### Phase 3: Identify Idle Workers
 
@@ -81,12 +86,18 @@ Workers read `plan.md` from this scratch directory so they have local access wit
 
 #### Available Lenses
 
-Design is lens-agnostic. Each lens is a skill name that accepts `--dispatch` (or equivalent) for autonomous execution. Lenses at launch:
+Design is lens-agnostic. Each lens is a skill name that accepts `--dispatch` (or equivalent) for autonomous execution. The `Applies To` column controls which lenses are dispatched based on the PR type classification from Phase 1.
 
-| Lens | Skill | Status |
-|------|-------|--------|
-| Adversarial Review | `/adversarial-review` | Active |
-| First Principles | `/first-principles` | Planned (document the slot; skip dispatch if skill does not exist) |
+| Lens | Skill | Applies To | Status |
+|------|-------|-----------|--------|
+| Adversarial Review | `/adversarial-review` | plan, implementation, mixed | Active |
+| First Principles | `/first-principles` | plan, implementation, mixed | Planned |
+| Extension Check | `/extension-check` | implementation, mixed | Planned |
+| Precedent Check | `/precedent-check` | plan, implementation, mixed | Planned |
+| Plan Health Audit | `/plan-health-audit` | plan, mixed | Planned |
+| Cost-Benefit | `/cost-benefit` | plan, implementation, mixed | Planned |
+
+**Dispatch filtering:** only dispatch lenses whose `Applies To` column includes the current PR type. For `mixed` PRs, dispatch all lenses. Skip dispatch for any lens whose skill does not exist yet (status: Planned).
 
 New lenses plug in by adding a row to this table and a corresponding subdir in the scratch directory. No code changes required.
 
@@ -96,7 +107,7 @@ For each lens, pick an idle worker (round-robin, no worker gets two lenses befor
 
 1. Create the lens subdir: `state/ironclad-runs/<run>/lenses/<lens-name>/`.
 2. Write the dispatch payload to `dispatch.md` in the lens subdir (large payloads go via file to avoid tmux escaping issues; also serves as audit trail). The payload must include:
-   - The plan path and result path
+   - The source path (plan or diff) and result path
    - The result format spec **verbatim** (see Result Format below)
    - Explicit instruction: **"Do NOT post to the GitHub PR. Do NOT create GitHub issues. Write findings ONLY to the result path."**
 4. Dispatch via two-step tmux send-keys:
@@ -113,7 +124,7 @@ tmux send-keys -t <worker> Enter
 The `dispatch.md` content:
 
 ```
-[BOTCOMMAND] <bot-id> | task | Run /<lens-skill> --dispatch on the plan at <PLAN_PATH>.
+[BOTCOMMAND] <bot-id> | task | Run /<lens-skill> --dispatch on the PR source at <SOURCE_PATH>.
 Write your structured findings to <RESULT_PATH> using EXACTLY this format:
 
 <verbatim result format from Result Format section below>
@@ -189,7 +200,7 @@ For each failed lens:
 2. Merge findings across lenses:
    - **Deduplicate:** if two lenses flag the same issue (same file/line, same concern), keep the higher-severity version and note both lenses identified it.
    - **Preserve lens attribution:** each finding tagged with which lens surfaced it.
-   - **Empty sections:** omit any finding category that has zero entries across all lenses. If all lenses returned zero findings, post a summary note: "All lenses completed with no findings. Plan appears robust."
+   - **Empty sections:** omit any finding category that has zero entries across all lenses. If all lenses returned zero findings, post a summary note: "All lenses completed with no findings. PR looks solid."
 3. Sort by severity: Blockers first, then Risks, Gaps, Questions, Observations.
 4. Produce the aggregated review body.
 
@@ -202,7 +213,7 @@ For each failed lens:
 On cycle 2+, before posting the new comment, collapse prior `/ironclad` comments as outdated:
 
 1. List PR comments via `gh api repos/<owner>/<repo>/issues/<number>/comments`.
-2. Identify comments containing `*Hardened by /ironclad —` in the body.
+2. Identify comments containing `*Reviewed by /ironclad —` in the body.
 3. For each, minimize via GitHub GraphQL:
 
 ```bash
@@ -216,9 +227,10 @@ This preserves the audit trail (comments are still expandable) while keeping the
 Post a single comment via `gh pr comment` or GitHub MCP:
 
 ```markdown
-## Ironclad Review: [Plan Title]
+## Ironclad Review: [PR Title]
 
 **Cycle:** <N>
+**PR type:** plan | implementation | mixed
 **Lenses completed:** <list>
 **Lenses failed:** <list, if any>
 
@@ -238,28 +250,36 @@ Post a single comment via `gh pr comment` or GitHub MCP:
 <merged observations>
 
 ---
-*Hardened by /ironclad — cycle <N>, <timestamp>*
+*Reviewed by /ironclad — cycle <N>, <timestamp>*
 ```
 
-Omit any finding section that has zero entries. If all sections are empty, post: "All lenses completed with no findings. Plan appears robust."
+Omit any finding section that has zero entries. If all sections are empty, post: "All lenses completed with no findings. PR looks solid."
 
 ### Phase 9: Convergence Check
 
-Convergence is determined entirely from the scratch directory and plan state — never by scanning PR comments. PR comments are the human-readable trail; the scratch dir is the source of truth.
+Convergence is determined entirely from the scratch directory and PR source state — never by scanning PR comments. PR comments are the human-readable trail; the scratch dir is the source of truth.
 
-A plan is **converged** (hardened) when:
+Convergence criteria adapt by PR type:
+
+**Plan PRs and mixed PRs** are converged when:
 
 1. Zero open Blockers remain (from aggregated `result.md` files in the scratch dir).
 2. All forks from the plan's design phase are locked (ratified). To determine fork state, follow the `decision-fork-lifecycle` protocol — forks are locked when the plan document marks them as ratified.
+
+**Implementation PRs** are converged when:
+
+1. Zero open Blockers remain (from aggregated `result.md` files in the scratch dir).
+
+Fork checks do not apply to implementation PRs — there are no design forks to ratify.
 
 **Partial lens failure does not block convergence.** A lens that fails after retry is noted in the convergence report but does not prevent convergence if the remaining criteria are met. The rationale: best-effort coverage with available results is more useful than blocking on a lens that may be broken or unavailable.
 
 Evaluate:
 
-- **Converged:** Update scratch `plan.md` frontmatter: `status: hardened`. Post `[IRONCLAD] Plan hardened. PR ready for /implement-plan.` as a final PR comment. Then report back:
+- **Converged:** Update scratch `source.md` frontmatter: `status: hardened`. Post `[IRONCLAD] PR reviewed — no open blockers. Ready for merge.` as a final PR comment. Then report back:
 
   ```bash
-  report-back.sh <bot-id> completed "Ironclad cycle <N> converged — plan hardened" "pr:<pr-url>" "skill:ironclad"
+  report-back.sh <bot-id> completed "Ironclad cycle <N> converged — PR hardened" "pr:<pr-url>" "skill:ironclad"
   ```
 
 - **Not converged:** Post a summary of open items to the PR:
@@ -267,7 +287,7 @@ Evaluate:
   ```
   ### Open Items
   - <N> unresolved Blockers
-  - <N> open forks
+  - <N> open forks (plan/mixed PRs only)
   - <N> failed lenses (noted, not blocking)
 
   Re-invoke /ironclad for cycle <N+1> after addressing these.
@@ -297,6 +317,7 @@ Emit structured JSON to stdout:
   "outcome": "converged | not-converged | failed",
   "artifacts": {
     "pr_url": "<url>",
+    "pr_type": "plan | implementation | mixed",
     "review_cycle": <N>,
     "findings_posted": true,
     "lenses_completed": ["adversarial-review"],
@@ -313,9 +334,11 @@ Emit structured JSON to stdout:
 ```
 
 `outcome` values:
-- `converged` — plan hardened, ready for `/implement-plan`.
+- `converged` — PR hardened. For plan PRs, ready for `/implement-plan`. For implementation PRs, ready for merge.
 - `not-converged` — findings posted but open items remain. Human re-invokes.
 - `failed` — could not complete (no workers, PR fetch failed, etc.).
+
+`forks_open` / `forks_locked` are only populated for plan and mixed PRs. For implementation PRs, both are `0`.
 
 ---
 
@@ -332,7 +355,7 @@ Path pattern: `$CLAUDLOBBY_ROOT/state/ironclad-runs/<pr-number>-<YYYYMMDD-HHMMSS
 
 ## Constraints
 
-- **Read-only on the plan.** `/ironclad` never modifies the plan PR's files. It only posts review comments.
+- **Read-only on the PR.** `/ironclad` never modifies the PR's files. It only posts review comments.
 - **Centralized PR posting.** Workers write to the scratch directory. Only `/ironclad` posts to the PR.
 - **No self-dispatch.** The bot running `/ironclad` does not dispatch a lens to itself.
 - **No merge.** `/ironclad` never merges the PR. The human merges.
@@ -343,6 +366,6 @@ Path pattern: `$CLAUDLOBBY_ROOT/state/ironclad-runs/<pr-number>-<YYYYMMDD-HHMMSS
 
 ## Notes
 
-- `/ironclad` is the quality gate between planning and implementation. A plan that survives ironclad review has been stress-tested by multiple lenses across multiple workers.
+- `/ironclad` is a quality gate for any PR. For plan PRs, it sits between `/forge` and `/implement-plan`. For implementation PRs, it's a standalone review gate before merge.
 - The pull model (human re-invokes) is deliberate: it keeps the human in the loop for deciding when findings have been addressed and another cycle is warranted.
-- The `/first-principles` lens is documented as a slot for when the skill is built. Until then, `/ironclad` dispatches only available lenses and notes skipped ones in the PR comment.
+- Planned lenses are documented as slots for when the skills are built. Until then, `/ironclad` dispatches only active lenses and notes skipped ones in the PR comment.
