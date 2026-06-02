@@ -31,13 +31,13 @@ Lenses will disagree. When they do:
 
 A finding's severity is the **maximum** across all lenses that flagged it:
 
-| Lens A | Lens B | Result |
-|--------|--------|--------|
-| high   | medium | high   |
-| medium | low    | medium |
-| high   | —      | high   |
+| Lens A   | Lens B | Result   |
+|----------|--------|----------|
+| critical | major  | critical |
+| major    | minor  | major    |
+| critical | —      | critical |
 
-Rationale: if any lens considers a finding high-severity, it stays high. A lens that rates it lower simply didn't weight the dimension that made it critical. The conservative default protects against blind spots.
+Severity levels (descending): **critical**, **major**, **minor**, **info**. If any lens considers a finding critical, it stays critical. A lens that rates it lower simply didn't weight the dimension that made it critical. The conservative default protects against blind spots.
 
 ## Iteration Limit
 
@@ -45,7 +45,7 @@ Multi-lens review can loop indefinitely as each cycle surfaces new findings. Cap
 
 - **Maximum 3 `/ironclad` cycles** before escalating to the human.
 - Each cycle's output is tagged with its cycle number: `[CYCLE 1]`, `[CYCLE 2]`, `[CYCLE 3]`.
-- If cycle 3 still surfaces new high-severity findings, escalate with: `[CYCLE 3 — ESCALATING] New high-severity findings still emerging after 3 cycles. Human review required.`
+- If cycle 3 still surfaces new critical-severity findings, escalate with: `[CYCLE 3 — ESCALATING] New critical findings still emerging after 3 cycles. Human review required.`
 - Between cycles, only re-review findings that were revised or newly introduced — don't re-run the full lens set against unchanged content.
 
 ## Partial Coverage
@@ -70,10 +70,10 @@ The final synthesis is a single structured comment or document section:
 
 ### Findings
 
-1. **<Finding title>** (severity: high) — lenses: cost-benefit, feasibility
+1. **<Finding title>** (severity: critical) — lenses: cost-benefit, feasibility
    <Merged description>
 
-2. **<Finding title>** (severity: medium) — lenses: align-to-mission
+2. **<Finding title>** (severity: minor) — lenses: align-to-mission
    <Description>
 
 ### Conflicts (human resolution required)
