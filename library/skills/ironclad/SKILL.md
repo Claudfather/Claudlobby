@@ -32,7 +32,7 @@ Parse `$ARGUMENTS`:
 4. **Classify the PR type** by inspecting the changed files:
    - **Plan PR:** the diff modifies markdown files in `docs/`, `planning/`, `shared/planning/`, or `documentation/` directories, and the content contains plan structure (phases, forks, decision points). Read the full plan content. If the plan references other files, read those too.
    - **Implementation PR:** the diff modifies source code, config, scripts, tests, or other non-plan files. Read the diff to understand the scope of changes.
-   - **Mixed:** if both plan and code files are changed, treat as a plan PR (plan lenses + code lenses both apply).
+   - **Mixed:** if both plan and code files are changed, all lenses apply (plan-specific and implementation-specific). Convergence follows plan rules (forks must be locked).
 5. Record the PR title, type classification (`plan`, `implementation`, or `mixed`), and a one-line summary for downstream dispatch.
 
 If the PR cannot be fetched (auth, 404, network), report the error verbatim and stop. Do not fabricate PR content.
@@ -97,7 +97,7 @@ Design is lens-agnostic. Each lens is a skill name that accepts `--dispatch` (or
 | Plan Health Audit | `/plan-health-audit` | plan, mixed | Planned |
 | Cost-Benefit | `/cost-benefit` | plan, implementation, mixed | Planned |
 
-**Dispatch filtering:** only dispatch lenses whose `Applies To` column includes the current PR type. For `mixed` PRs, dispatch all lenses. Skip dispatch for any lens whose skill does not exist yet (status: Planned).
+**Dispatch filtering:** only dispatch lenses whose `Applies To` column includes the current PR type. Skip dispatch for any lens whose skill does not exist yet (status: Planned).
 
 New lenses plug in by adding a row to this table and a corresponding subdir in the scratch directory. No code changes required.
 
