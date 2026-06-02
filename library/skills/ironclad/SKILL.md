@@ -35,14 +35,18 @@ If the PR cannot be fetched (auth, 404, network), report the error verbatim and 
 
 ### Phase 2: Prepare Scratch Directory
 
-Create the run directory:
+#### Cycle Detection
+
+Before creating a new scratch dir, scan `$CLAUDLOBBY_ROOT/state/ironclad-runs/` for existing dirs matching `<pr-number>-*`. Sort by timestamp descending. The current cycle number is `count of matching dirs + 1`. This makes cycle numbering automatic across re-invocations without any external state.
+
+#### Directory Layout
 
 ```
-state/ironclad-runs/<pr-number>-<timestamp>/
+state/ironclad-runs/<pr-number>-<YYYYMMDD-HHMMSS>/
   plan.md              # Copy of the plan content
   lenses/              # One subdir per dispatched lens
     adversarial-review/
-      result.md        # Worker writes findings here
+      result.md        # Worker writes findings here (markdown with frontmatter)
     first-principles/
       result.md
     ...
@@ -57,7 +61,7 @@ pr_number: <number>
 repo: <owner/repo>
 plan_title: <title>
 started: <ISO timestamp>
-cycle: <1-based cycle number, default 1>
+cycle: <N>
 status: in-progress
 ---
 
@@ -71,7 +75,7 @@ Workers read `plan.md` from this scratch directory so they have local access wit
 1. Read `$FLEET_STATE_PATH` (defaults to `$CLAUDLOBBY_ROOT/state/fleet-state.json`).
 2. Filter bots where `status == "idle"` and `current_task == null`.
 3. Exclude yourself from the candidate pool.
-4. If zero idle workers: post findings summary with note "no idle workers available for dispatch" and stop. The human can re-invoke when workers free up.
+4. If zero idle workers: check prior scratch dirs for this PR (`state/ironclad-runs/<pr-number>-*/lenses/`) and note which lenses have existing results from earlier partial cycles. Post: "No idle workers available for dispatch. Prior cycle results exist for: <lens list>." Stop. The human can re-invoke when workers free up.
 
 ### Phase 4: Dispatch Lenses
 
@@ -91,24 +95,41 @@ New lenses plug in by adding a row to this table and a corresponding subdir in t
 For each lens, pick an idle worker (round-robin, no worker gets two lenses before all have one):
 
 1. Create the lens subdir: `state/ironclad-runs/<run>/lenses/<lens-name>/`.
-2. Write a `dispatch.md` in the lens subdir with the dispatch instructions for audit trail.
-3. Dispatch via two-step tmux send-keys:
+2. Write the dispatch payload to `dispatch.md` in the lens subdir (large payloads go via file to avoid tmux escaping issues; also serves as audit trail). The payload must include:
+   - The plan path and result path
+   - The result format spec **verbatim** (see Result Format below)
+   - Explicit instruction: **"Do NOT post to the GitHub PR. Do NOT create GitHub issues. Write findings ONLY to the result path."**
+4. Dispatch via two-step tmux send-keys:
 
 ```bash
 SCRATCH="$CLAUDLOBBY_ROOT/state/ironclad-runs/<run>"
-PLAN_PATH="$SCRATCH/plan.md"
-RESULT_PATH="$SCRATCH/lenses/<lens-name>/result.md"
+DISPATCH_FILE="$SCRATCH/lenses/<lens-name>/dispatch.md"
 
-tmux send-keys -t <worker> "set +H; [BOTCOMMAND] $(BOT_ID) | task | Run /<lens-skill> --dispatch on the plan at $PLAN_PATH. Write your structured findings to $RESULT_PATH using the result format specified below. When done, report back via report-back.sh completed \"<lens-name> lens complete\" --skill ironclad-lens | priority:high"
+tmux send-keys -t <worker> "set +H; cat $DISPATCH_FILE | claude"
 sleep 0.3
 tmux send-keys -t <worker> Enter
 ```
 
-4. Update `fleet-state.json` for dispatched worker: status `working`, current_task `ironclad:<lens-name>`.
+The `dispatch.md` content:
+
+```
+[BOTCOMMAND] <bot-id> | task | Run /<lens-skill> --dispatch on the plan at <PLAN_PATH>.
+Write your structured findings to <RESULT_PATH> using EXACTLY this format:
+
+<verbatim result format from Result Format section below>
+
+IMPORTANT: Do NOT post comments to the GitHub PR. Do NOT create GitHub issues.
+Write findings ONLY to the result path above. /ironclad owns all PR interaction.
+
+When done: report-back.sh <your-bot-id> completed "<lens-name> lens complete" "skill:ironclad-lens"
+| priority:high
+```
+
+5. Update `fleet-state.json` for dispatched worker: status `working`, current_task `ironclad:<lens-name>`.
 
 #### Result Format (Workers Write This)
 
-Workers must write their `result.md` with this structure:
+Workers write markdown with YAML frontmatter directly to `result.md`. No JSON. No translation layer. `/ironclad` reads this markdown as-is for aggregation.
 
 ```markdown
 ---
@@ -138,6 +159,8 @@ status: completed | failed
 - <bullet notes>
 ```
 
+Sections with zero findings must be **omitted entirely** — do not write empty headers. If every section is empty, write a single line under `## Findings`: "No findings surfaced by this lens."
+
 ### Phase 5: Collect Results
 
 Monitor for `[BOTREPORT]` messages from dispatched workers. For each:
@@ -146,7 +169,7 @@ Monitor for `[BOTREPORT]` messages from dispatched workers. For each:
 2. On `failed`: mark the lens as failed in scratch state. Queue for retry (Phase 6).
 3. On `blocked`: treat as failed. Queue for retry.
 
-**Timeout:** if no report arrives within `$OBSERVABILITY_DISPATCH_DEADLINE` (default 1800s), treat the lens as failed.
+**Timeout:** source `$OBSERVABILITY_DISPATCH_DEADLINE` from `bot.conf` (composed by the compositor from fleet.yaml). If no report arrives within that deadline (default 1800s), treat the lens as failed.
 
 Wait until all dispatched lenses have reported or timed out before proceeding.
 
@@ -162,18 +185,35 @@ For each failed lens:
 
 ### Phase 7: Aggregate and Deduplicate
 
-1. Read all `result.md` files from `state/ironclad-runs/<run>/lenses/*/`.
+1. Read all `result.md` files from `state/ironclad-runs/<run>/lenses/*/`. Parse YAML frontmatter and markdown body directly — no JSON translation.
 2. Merge findings across lenses:
    - **Deduplicate:** if two lenses flag the same issue (same file/line, same concern), keep the higher-severity version and note both lenses identified it.
    - **Preserve lens attribution:** each finding tagged with which lens surfaced it.
+   - **Empty sections:** omit any finding category that has zero entries across all lenses. If all lenses returned zero findings, post a summary note: "All lenses completed with no findings. Plan appears robust."
 3. Sort by severity: Blockers first, then Risks, Gaps, Questions, Observations.
 4. Produce the aggregated review body.
 
 ### Phase 8: Post to PR
 
-`/ironclad` owns all PR interaction. Workers never post to the PR directly.
+`/ironclad` owns all PR interaction. Workers never post to the PR directly. `/ironclad` uses its own comment format — it does not follow any external PR comment style guide.
 
-Post a single review comment to the PR via `gh pr comment` or GitHub MCP:
+#### Minimize Prior Comments
+
+On cycle 2+, before posting the new comment, collapse prior `/ironclad` comments as outdated:
+
+1. List PR comments via `gh api repos/<owner>/<repo>/issues/<number>/comments`.
+2. Identify comments containing `*Hardened by /ironclad —` in the body.
+3. For each, minimize via GitHub GraphQL:
+
+```bash
+gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "<comment-node-id>", classifier: OUTDATED}) { minimizedComment { isMinimized } } }'
+```
+
+This preserves the audit trail (comments are still expandable) while keeping the PR thread readable.
+
+#### Comment Format
+
+Post a single comment via `gh pr comment` or GitHub MCP:
 
 ```markdown
 ## Ironclad Review: [Plan Title]
@@ -201,27 +241,42 @@ Post a single review comment to the PR via `gh pr comment` or GitHub MCP:
 *Hardened by /ironclad — cycle <N>, <timestamp>*
 ```
 
-If a previous ironclad comment exists on the PR (from a prior cycle), post a new comment rather than editing. Each cycle's findings are preserved as a record.
+Omit any finding section that has zero entries. If all sections are empty, post: "All lenses completed with no findings. Plan appears robust."
 
 ### Phase 9: Convergence Check
 
+Convergence is determined entirely from the scratch directory and plan state — never by scanning PR comments. PR comments are the human-readable trail; the scratch dir is the source of truth.
+
 A plan is **converged** (hardened) when:
 
-1. All dispatched lenses completed successfully (no unresolved failures).
-2. Zero open Blockers remain.
-3. All forks from the plan's design phase are locked (ratified).
+1. Zero open Blockers remain (from aggregated `result.md` files in the scratch dir).
+2. All forks from the plan's design phase are locked (ratified). To determine fork state, follow the `decision-fork-lifecycle` protocol — forks are locked when the plan document marks them as ratified.
+
+**Partial lens failure does not block convergence.** A lens that fails after retry is noted in the convergence report but does not prevent convergence if the remaining criteria are met. The rationale: best-effort coverage with available results is more useful than blocking on a lens that may be broken or unavailable.
 
 Evaluate:
 
-- **Converged:** post `[IRONCLAD] Plan hardened. PR ready for /implement-plan.` as a final PR comment. Update scratch `plan.md` frontmatter: `status: hardened`.
-- **Not converged:** post a summary of open items to the PR:
+- **Converged:** Update scratch `plan.md` frontmatter: `status: hardened`. Post `[IRONCLAD] Plan hardened. PR ready for /implement-plan.` as a final PR comment. Then report back:
+
+  ```bash
+  report-back.sh <bot-id> completed "Ironclad cycle <N> converged — plan hardened" "pr:<pr-url>" "skill:ironclad"
+  ```
+
+- **Not converged:** Post a summary of open items to the PR:
+
   ```
   ### Open Items
   - <N> unresolved Blockers
   - <N> open forks
-  - <N> failed lenses (no results)
+  - <N> failed lenses (noted, not blocking)
 
   Re-invoke /ironclad for cycle <N+1> after addressing these.
+  ```
+
+  Then report back:
+
+  ```bash
+  report-back.sh <bot-id> completed "Ironclad cycle <N> — not converged, <N> open items" "pr:<pr-url>" "skill:ironclad"
   ```
 
 ---
