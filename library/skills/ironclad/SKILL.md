@@ -1,6 +1,6 @@
 ---
 name: ironclad
-description: "Use when a PR needs structured multi-lens review before merge. Applies to plan PRs (post-/forge), implementation PRs, and mixed PRs. Re-invoke for additional cycles until converged."
+description: "Use when a PR needs structured multi-lens review before merge. Applies to plan PRs (post-/forge), implementation PRs, and mixed PRs."
 argument-hint: "<pr-url> [--auto]"
 ---
 

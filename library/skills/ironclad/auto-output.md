@@ -14,12 +14,12 @@ When invoked with `--auto`, `/ironclad` suppresses interactive output and emits 
   "artifacts": {
     "pr_url": "<url>",
     "pr_type": "plan | implementation | mixed",
-    "review_cycle": "<N>",
+    "review_cycle": <N>,
     "findings_posted": true,
     "lenses_completed": ["adversarial-review", "..."],
     "lenses_failed": [],
-    "forks_open": "<count>",
-    "forks_locked": "<count>",
+    "forks_open": <count>,
+    "forks_locked": <count>,
     "converged": true
   },
   "summary": "<one-line summary>",
