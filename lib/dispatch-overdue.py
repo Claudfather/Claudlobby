@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Find overdue dispatches for a bot — the matcher behind the fleet-pulse watchdog.
+"""Find overdue dispatches — the matcher behind the fleet-pulse watchdog.
 
 A dispatch (from state/dispatch-log.jsonl) is OVERDUE when:
   - now > expected_by, AND
@@ -7,14 +7,20 @@ A dispatch (from state/dispatch-log.jsonl) is OVERDUE when:
     (case-insensitive) with report.ts >= dispatch.dispatched_at exists in the
     report-back ledger.
 
-Prints one line per overdue dispatch: "<dispatched_at> <expected_by> <elapsed_seconds>".
+Single-bot mode (original):
+  dispatch-overdue.py <bot_id> <dispatch_log> <report_ledger> [<now_epoch>]
+  Prints: "<dispatched_at> <expected_by> <elapsed_seconds>"
+
+All-bots mode (fleet-pulse optimization -- reads files once):
+  dispatch-overdue.py --all <dispatch_log> <report_ledger> [<now_epoch>]
+  Prints: "<bot_id> <dispatched_at> <expected_by> <elapsed_seconds>"
+
 No output (and exit 0) when nothing is overdue.
 
-Usage: dispatch-overdue.py <bot_id> <dispatch_log> <report_ledger> [<now_epoch>]
-
 Kept as a standalone, dependency-free script so it is unit-testable in isolation
-and callable from fleet-pulse.sh (which already depends on python3 via bot-vitals).
+and callable from fleet-pulse.sh.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -51,30 +57,60 @@ def _load_jsonl(path: str) -> list[dict]:
     return rows
 
 
-def overdue(bot: str, dispatch_log: str, report_ledger: str, now: int) -> list[tuple[int, int, int]]:
-    bot = bot.lower()
-    dispatches = [d for d in _load_jsonl(dispatch_log) if str(d.get("bot", "")).lower() == bot]
-    report_epochs = [
-        e
-        for r in _load_jsonl(report_ledger)
-        if str(r.get("bot", "")).lower() == bot and r.get("status") in _TERMINAL
-        for e in (_iso_to_epoch(r.get("ts", "")),)
-        if e is not None
-    ]
-    out: list[tuple[int, int, int]] = []
+def overdue(
+    bot: str, dispatch_log: str, report_ledger: str, now: int
+) -> list[tuple[int, int, int]]:
+    """Single-bot variant — delegates to overdue_all and filters."""
+    return overdue_all(dispatch_log, report_ledger, now).get(bot.lower(), [])
+
+
+def overdue_all(
+    dispatch_log: str, report_ledger: str, now: int
+) -> dict[str, list[tuple[int, int, int]]]:
+    """Return overdue dispatches for ALL bots, reading each file once."""
+    dispatches = _load_jsonl(dispatch_log)
+    reports = _load_jsonl(report_ledger)
+
+    # Build per-bot report epochs index
+    report_index: dict[str, list[int]] = {}
+    for r in reports:
+        bot_key = str(r.get("bot", "")).lower()
+        if r.get("status") in _TERMINAL:
+            ep = _iso_to_epoch(r.get("ts", ""))
+            if ep is not None:
+                report_index.setdefault(bot_key, []).append(ep)
+
+    out: dict[str, list[tuple[int, int, int]]] = {}
     for d in dispatches:
+        bot_key = str(d.get("bot", "")).lower()
         exp, da = d.get("expected_by"), d.get("dispatched_at")
         if not isinstance(exp, int) or not isinstance(da, int):
             continue
-        if now <= exp:  # not yet due
+        if now <= exp:
             continue
-        if any(e >= da for e in report_epochs):  # answered after dispatch → closed
+        if any(e >= da for e in report_index.get(bot_key, [])):
             continue
-        out.append((da, exp, now - exp))
+        out.setdefault(bot_key, []).append((da, exp, now - exp))
     return out
 
 
 def main() -> int:
+    if len(sys.argv) < 3:
+        print(__doc__.strip().splitlines()[0], file=sys.stderr)
+        return 2
+
+    if sys.argv[1] == "--all":
+        dlog, rlog = sys.argv[2], sys.argv[3]
+        now = (
+            int(sys.argv[4])
+            if len(sys.argv) > 4
+            else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        )
+        for bot_id, entries in sorted(overdue_all(dlog, rlog, now).items()):
+            for da, exp, elapsed in entries:
+                print(f"{bot_id} {da} {exp} {elapsed}")
+        return 0
+
     if len(sys.argv) < 4:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         return 2
