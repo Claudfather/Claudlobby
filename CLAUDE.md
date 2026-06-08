@@ -78,6 +78,8 @@ Key lifecycle scripts in `lib/`:
 | `setup-host.sh` | Host setup automation (cross-platform) |
 | `bot-vitals.sh` | Bot vitals collection for observability |
 | `fleet-pulse.sh` | Fleet-wide heartbeat / status monitoring |
+| `tail-fleet.sh` | Fleet-wide log tail + grep filter |
+| `ci-health-check.sh` | Pre-push CI health canary for target branch |
 | `data-sweep.sh` | Data directory sweep and cleanup |
 | `dispatch.sh` | Dispatch helper for manager → worker |
 | `dispatch-task.sh` | Task dispatch helper |
