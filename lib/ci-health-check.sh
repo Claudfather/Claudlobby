@@ -1,9 +1,10 @@
 #!/bin/bash
 # ci-health-check.sh — check if a repo's default branch CI is healthy.
 #
-# Queries GitHub Actions for the latest workflow run on the target branch.
-# Returns exit 0 if CI is green (or no workflows exist), exit 1 if CI is
-# failing. Designed for workers to call before pushing a PR so they know
+# Queries GitHub Actions for recent workflow runs on the target branch.
+# Deduplicates by workflow name and checks the latest run per workflow.
+# Returns exit 0 if all workflows pass (or none exist), exit 1 if any
+# workflow is failing. Workers call this before pushing a PR to know
 # whether red checks are pre-existing or caused by their change.
 #
 # Usage: ci-health-check.sh [--repo owner/repo] [--branch main] [--quiet]
@@ -54,25 +55,39 @@ if ! command -v gh >/dev/null 2>&1; then
     exit 2
 fi
 
-# Fetch the most recent completed workflow run on the target branch.
-_runs=$(gh api "repos/$REPO/actions/runs?branch=$BRANCH&status=completed&per_page=1" \
-    --jq '.workflow_runs[0] | {conclusion, name, html_url, updated_at}' 2>/dev/null) || true
+# Fetch recent completed runs — per_page=20 covers multi-workflow repos.
+# Deduplicate by workflow name, keeping only the latest run per workflow.
+_raw=$(gh api "repos/$REPO/actions/runs?branch=$BRANCH&status=completed&per_page=20" 2>/dev/null) || true
 
-if [ -z "$_runs" ] || [ "$_runs" = "null" ]; then
+if [ -z "$_raw" ]; then
+    [ "$QUIET" -eq 0 ] && echo "ci-health-check: GitHub API error for $REPO@$BRANCH"
+    exit 2
+fi
+
+# Latest run per workflow: group by .name, pick first (most recent) from each.
+_latest=$(printf '%s' "$_raw" | jq -c '
+    [.workflow_runs[] | {conclusion, name, html_url, updated_at}]
+    | group_by(.name)
+    | map(.[0])
+') || true
+
+if [ -z "$_latest" ] || [ "$_latest" = "[]" ] || [ "$_latest" = "null" ]; then
     [ "$QUIET" -eq 0 ] && echo "ci-health-check: no completed runs found on $REPO@$BRANCH (no CI configured?)"
     exit 0
 fi
 
-_conclusion=$(printf '%s' "$_runs" | jq -r '.conclusion')
-_name=$(printf '%s' "$_runs" | jq -r '.name')
-_url=$(printf '%s' "$_runs" | jq -r '.html_url')
-_updated=$(printf '%s' "$_runs" | jq -r '.updated_at')
+# Check for any failing workflow.
+_failing=$(printf '%s' "$_latest" | jq -c '[.[] | select(.conclusion != "success")]')
+_fail_count=$(printf '%s' "$_failing" | jq 'length')
 
-if [ "$_conclusion" = "success" ]; then
-    [ "$QUIET" -eq 0 ] && echo "ci-health-check: $REPO@$BRANCH CI healthy — $_name passed ($_updated)"
+if [ "$_fail_count" -eq 0 ]; then
+    _count=$(printf '%s' "$_latest" | jq 'length')
+    [ "$QUIET" -eq 0 ] && echo "ci-health-check: $REPO@$BRANCH CI healthy — $_count workflow(s) passing"
     exit 0
 else
-    [ "$QUIET" -eq 0 ] && echo "ci-health-check: $REPO@$BRANCH CI FAILING — $_name: $_conclusion ($_updated)"
-    [ "$QUIET" -eq 0 ] && echo "  $_url"
+    if [ "$QUIET" -eq 0 ]; then
+        echo "ci-health-check: $REPO@$BRANCH CI FAILING — $_fail_count workflow(s):"
+        printf '%s' "$_failing" | jq -r '.[] | "  \(.name): \(.conclusion) — \(.html_url)"'
+    fi
     exit 1
 fi
