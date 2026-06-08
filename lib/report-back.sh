@@ -1,12 +1,18 @@
 #!/bin/bash
 # Inter-bot communication — worker bots report back to manager
-# Usage: report-back.sh <bot-name> <status> <summary> [pr:<url>] [issues:<urls>]
+# Usage: report-back.sh <bot-name> <status> <summary> [options] [pr:<url>] [issues:<urls>]
 #
 # The manager bot's tmux session receives a structured message it can parse.
-# Format: [BOTREPORT] <bot> | <status> | <summary> [| pr:<url>] [| issues:<urls>]
+# Format: [BOTREPORT] <bot> | <status> | <summary> [| progress:<N>] [| pr:<url>] [| artifact:<url>]
+#
+# Options:
+#   --progress N      Progress percentage (0-100), added to BOTREPORT and ledger
+#   --artifact URL    Source artifact URL for findings provenance (repeatable)
 #
 # Example:
-#   report-back.sh "work-eng" "DONE" "Fixed auth test" "pr:https://github.com/org/repo/pull/42"
+#   report-back.sh "work-eng" completed "Fixed auth test" --pr https://github.com/org/repo/pull/42
+#   report-back.sh "work-eng" progress "Refactoring auth" --progress 40
+#   report-back.sh "work-eng" completed "Audit done" --artifact https://github.com/org/repo/blob/main/REPORT.md
 
 set -euo pipefail
 
@@ -32,10 +38,27 @@ esac
 # Sanitize summary for tmux safety
 SUMMARY="$(sanitize_tmux_input "$SUMMARY")"
 
+# Parse optional flags and positional extras
+PROGRESS=""
+ARTIFACTS=""
+POSITIONAL_EXTRAS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --progress)  PROGRESS="$2"; shift 2 ;;
+        --artifact)  ARTIFACTS="${ARTIFACTS:+$ARTIFACTS,}$2"; shift 2 ;;
+        --pr)        POSITIONAL_EXTRAS+=("pr:$2"); shift 2 ;;
+        --issues)    POSITIONAL_EXTRAS+=("issues:$2"); shift 2 ;;
+        --skill)     POSITIONAL_EXTRAS+=("skill:$2"); shift 2 ;;
+        *)           POSITIONAL_EXTRAS+=("$1"); shift ;;
+    esac
+done
+
 EXTRAS=""
-for arg in "$@"; do
+[ -n "$PROGRESS" ] && EXTRAS="$EXTRAS | progress:$PROGRESS"
+for arg in "${POSITIONAL_EXTRAS[@]+"${POSITIONAL_EXTRAS[@]}"}"; do
     EXTRAS="$EXTRAS | $arg"
 done
+[ -n "$ARTIFACTS" ] && EXTRAS="$EXTRAS | artifact:$ARTIFACTS"
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
@@ -72,8 +95,8 @@ _emit_ledger_event() {
     safe_summary=$(json_escape "$SUMMARY")
 
     _write_and_rotate() {
-        printf '{"ts":"%s","bot":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s"}\n' \
-            "$ts" "$BOT" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" >> "$ledger"
+        printf '{"ts":"%s","bot":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s","progress":"%s","artifact":"%s"}\n' \
+            "$ts" "$BOT" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" >> "$ledger"
 
         # Rotate: keep only last 7 days of entries (consistent with fleet-pulse reap).
         local cutoff
@@ -85,7 +108,7 @@ _emit_ledger_event() {
     }
     with_lock "$ledger.lock" _write_and_rotate
 }
-_emit_ledger_event "$@" || true
+_emit_ledger_event "${POSITIONAL_EXTRAS[@]+"${POSITIONAL_EXTRAS[@]}"}" || true
 
 # Mirror to fleet-state if helper is present
 _FS=$(dirname "$0")/fleet-state-update.sh
