@@ -113,10 +113,8 @@ classify_pane() {
     fi
 
     # --- IDLE: prompt glyph or waiting-for-input marker ---
-    # Note: \b is a GNU grep extension (word boundary). It works on Linux
-    # (GNU grep) and macOS 14+ (which ships GNU-compatible grep). On older
-    # macOS, replace with [^a-z] or drop the boundary check.
-    local _idle_pattern='(^\s*[>❯]\s*$|Remote Control active|Enter\/Esc to close|Yes\/No|Allow|Deny|y\/n\b)'
+    # Uses _IDLE_PATTERN_BASE from lib-common.sh (single source of truth).
+    local _idle_pattern="$_IDLE_PATTERN_BASE"
     if [ -n "${KEEPALIVE_IDLE_PATTERNS:-}" ]; then
         _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
     fi
