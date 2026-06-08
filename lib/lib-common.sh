@@ -23,6 +23,8 @@
 #   sed_i              — portable in-place sed
 #   df_pcent           — portable disk usage percentage
 #   json_escape        — escape backslash + double-quote for JSON values
+#   debounce_notify    — fire-once notification with file-based marker
+#   debounce_clear     — clear a debounce marker for re-firing
 #   resolve_bots_dir   — fleet-aware runtime/bots path resolution
 #
 # Variables set on source:
@@ -270,6 +272,27 @@ pane_is_idle() {
         _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
     fi
     printf '%s' "$text" | grep -qE "$_idle_pattern"
+}
+
+# --- Debounced notification ---------------------------------------------------
+
+# debounce_notify <state_dir> <bot_id> <marker_suffix> <notify_fn> <message>
+# Fires the notification only if the marker file does not exist (first
+# occurrence). Caller is responsible for clearing the marker via
+# debounce_clear when the condition resolves.
+debounce_notify() {
+    local state_dir="$1" bot_id="$2" suffix="$3" notify_fn="$4" message="$5"
+    local marker="$state_dir/${bot_id}.${suffix}"
+    if [ ! -f "$marker" ]; then
+        "$notify_fn" "$message"
+        touch "$marker"
+    fi
+}
+
+# debounce_clear <state_dir> <bot_id> <marker_suffix>
+# Remove the debounce marker so the next occurrence fires again.
+debounce_clear() {
+    rm -f "$1/${2}.${3}"
 }
 
 # --- Help display ------------------------------------------------------------

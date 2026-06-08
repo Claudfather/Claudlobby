@@ -74,6 +74,12 @@ notify_manager() {
     "$_TMUX_BIN" send-keys -t "$mgr" "[FLEET-PULSE] $(sanitize_tmux_input "$msg")" Enter 2>/dev/null || true
 }
 
+# Wrapper: notify_manager needs bot_dir, but debounce_notify passes only
+# the message. We close over _current_bot_dir for each iteration.
+_notify_current_bot() {
+    notify_manager "$_current_bot_dir" "$1"
+}
+
 # --- Helper: reap old event files for a bot (honors OBSERVABILITY_REAP_DAYS) ---
 reap_events() {
     local bot_dir="$1"
@@ -85,25 +91,40 @@ reap_events() {
     fi
 }
 
+# --- Pre-sweep: dispatch-overdue scan (once, not per-bot) ---
+# Runs dispatch-overdue.py --all to read both ledger files exactly once.
+# Output is stored in a temp file for per-bot lookup inside the loop.
+_overdue_cache=$(safe_mktemp)
+if [ -f "$dispatch_log" ]; then
+    python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" 2>/dev/null > "$_overdue_cache" || true
+fi
+
 # --- Iterate all bots ---
 for bot_dir in "$BOTS_DIR"/*/; do
     [ -d "$bot_dir" ] || continue
     bot_id=$(basename "$bot_dir")
+    _current_bot_dir="$bot_dir"
 
     # Load BOT_SERVICE via the helper (handles `export` prefix + no-match safely).
     BOT_SERVICE=$(bot_conf_get "$bot_dir" BOT_SERVICE "")
 
     session_name=$(tmux_session_name "$bot_dir")
 
+    # --- Capture pane once per bot (reused by Check 3 + Check 5) ---
+    _pane_buf=""
+    _session_alive=0
+    if check_tmux_session "$session_name"; then
+        _session_alive=1
+        _pane_buf=$("$_TMUX_BIN" capture-pane -t "$session_name" -p 2>/dev/null || true)
+    fi
+
     # --- Check 1: tmux session exists ---
-    if ! check_tmux_session "$session_name"; then
+    if [ "$_session_alive" -eq 0 ]; then
         emit_event "$bot_dir" "$bot_id" "session_missing" '{"session":"'"$session_name"'"}'
-        if [ ! -f "$state_dir/${bot_id}.session_alerted" ]; then
-            notify_manager "$bot_dir" "$bot_id session_missing — tmux session '$session_name' is gone"
-            touch "$state_dir/${bot_id}.session_alerted"
-        fi
+        debounce_notify "$state_dir" "$bot_id" "session_alerted" _notify_current_bot \
+            "$bot_id session_missing — tmux session '$session_name' is gone"
     else
-        rm -f "$state_dir/${bot_id}.session_alerted"
+        debounce_clear "$state_dir" "$bot_id" "session_alerted"
     fi
 
     # --- Check 2: systemd service state ---
@@ -111,18 +132,16 @@ for bot_dir in "$BOTS_DIR"/*/; do
         if ! systemctl --user is-active "$BOT_SERVICE" >/dev/null 2>&1; then
             state=$(systemctl --user show -p ActiveState --value "$BOT_SERVICE" 2>/dev/null | tr -d '[:cntrl:]' || echo "unknown")
             emit_event "$bot_dir" "$bot_id" "service_down" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'"}'
-            if [ ! -f "$state_dir/${bot_id}.service_alerted" ]; then
-                notify_manager "$bot_dir" "$bot_id service_down — unit '$BOT_SERVICE' state=$state"
-                touch "$state_dir/${bot_id}.service_alerted"
-            fi
+            debounce_notify "$state_dir" "$bot_id" "service_alerted" _notify_current_bot \
+                "$bot_id service_down — unit '$BOT_SERVICE' state=$state"
         else
-            rm -f "$state_dir/${bot_id}.service_alerted"
+            debounce_clear "$state_dir" "$bot_id" "service_alerted"
         fi
     fi
 
     # --- Check 3: pane stuck (>5 min unchanged) ---
-    if check_tmux_session "$session_name"; then
-        pane_content=$("$_TMUX_BIN" capture-pane -t "$session_name" -p 2>/dev/null | tail -5 || true)
+    if [ -n "$_pane_buf" ]; then
+        pane_content=$(echo "$_pane_buf" | tail -5)
         if [ -n "$pane_content" ]; then
             current_hash=$(printf '%s' "$pane_content" | md5sum 2>/dev/null | cut -d' ' -f1 || printf '%s' "$pane_content" | md5 2>/dev/null || echo "nohash")
             hash_file="$state_dir/${bot_id}.pane_hash"
@@ -167,47 +186,39 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # pane_stuck (Check 3) is fooled by the braille spinner, which animates even
     # during a hang — the pane hash keeps changing, so it never fires. This check
     # uses the .last-tool-call marker bot-vitals.sh touches on every tool call:
-    # session alive + not idle + no tool call for > threshold ⇒ activity_stuck.
+    # session alive + not idle + no tool call for > threshold => activity_stuck.
     marker="$bot_dir/data/.last-tool-call"
-    alerted="$state_dir/${bot_id}.activity_alerted"
-    if check_tmux_session "$session_name" && [ -f "$marker" ]; then
+    if [ -n "$_pane_buf" ] && [ -f "$marker" ]; then
         threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
         now_epoch=$(date +%s)
         last_epoch=$(stat_mtime "$marker" 2>/dev/null || echo "$now_epoch")
         gap=$(( now_epoch - last_epoch ))
-        pane_tail=$("$_TMUX_BIN" capture-pane -t "$session_name" -p 2>/dev/null | tail -10 || true)
+        pane_tail=$(echo "$_pane_buf" | tail -10)
         if [ "$gap" -ge "$threshold" ] && ! pane_is_idle "$pane_tail"; then
             emit_event "$bot_dir" "$bot_id" "activity_stuck" \
                 '{"last_tool_call_epoch":'"$last_epoch"',"elapsed_seconds":'"$gap"'}'
-            if [ ! -f "$alerted" ]; then
-                notify_manager "$bot_dir" "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)"
-                touch "$alerted"
-            fi
+            debounce_notify "$state_dir" "$bot_id" "activity_alerted" _notify_current_bot \
+                "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)"
         else
-            rm -f "$alerted"
+            debounce_clear "$state_dir" "$bot_id" "activity_alerted"
         fi
     fi
 
-    # --- Check 6: overdue dispatch (manager-side watchdog) ---
-    # A task this bot was dispatched is overdue if its deadline passed with no
-    # terminal [BOTREPORT]. The matcher (dispatch-overdue.py) cross-references
-    # the dispatch ledger against the report ledger. Notify the manager, debounced.
-    if [ -f "$dispatch_log" ]; then
-        overdue_out=$(python3 "$LIB_DIR/dispatch-overdue.py" "$bot_id" "$dispatch_log" "$report_ledger" 2>/dev/null || true)
-        if [ -n "$overdue_out" ]; then
+    # --- Check 6: overdue dispatch (from pre-sweep cache) ---
+    if [ -s "$_overdue_cache" ]; then
+        overdue_lines=$(grep "^${bot_id} " "$_overdue_cache" || true)
+        if [ -n "$overdue_lines" ]; then
             oldest_elapsed=0
-            while read -r _da _exp _elapsed; do
+            while read -r _bot _da _exp _elapsed; do
                 [ -n "${_elapsed:-}" ] || continue
                 emit_event "$bot_dir" "$bot_id" "overdue_dispatch" \
                     '{"dispatched_at":'"$_da"',"expected_by":'"$_exp"',"elapsed_seconds":'"$_elapsed"'}'
                 [ "$_elapsed" -gt "$oldest_elapsed" ] && oldest_elapsed="$_elapsed"
-            done <<< "$overdue_out"
-            if [ ! -f "$state_dir/${bot_id}.dispatch_alerted" ]; then
-                notify_manager "$bot_dir" "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report"
-                touch "$state_dir/${bot_id}.dispatch_alerted"
-            fi
+            done <<< "$overdue_lines"
+            debounce_notify "$state_dir" "$bot_id" "dispatch_alerted" _notify_current_bot \
+                "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report"
         else
-            rm -f "$state_dir/${bot_id}.dispatch_alerted"
+            debounce_clear "$state_dir" "$bot_id" "dispatch_alerted"
         fi
     fi
 
