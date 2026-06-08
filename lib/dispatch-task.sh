@@ -46,15 +46,12 @@ shift
 TASK="$*"
 [ -n "$TASK" ] || { echo "dispatch-task: empty task" >&2; exit 1; }
 
-# Build the message: structured envelope if any metadata flags were given,
-# raw task text otherwise (freeform fallback).
 if [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] || [ -n "$DISPATCH_REF" ]; then
     CALLER="${BOT_NAME:-${MANAGER_TMUX:-unknown}}"
-    ENVELOPE="[BOTCOMMAND] $CALLER | task | $TASK"
-    [ -n "$DISPATCH_REPO" ]     && ENVELOPE="$ENVELOPE | repo:$DISPATCH_REPO"
-    [ -n "$DISPATCH_PRIORITY" ] && ENVELOPE="$ENVELOPE | priority:$DISPATCH_PRIORITY"
-    [ -n "$DISPATCH_REF" ]      && ENVELOPE="$ENVELOPE | ref:$DISPATCH_REF"
-    DISPATCH_MSG="$ENVELOPE"
+    DISPATCH_MSG="[BOTCOMMAND] $CALLER | task | $TASK"
+    [ -n "$DISPATCH_REPO" ]     && DISPATCH_MSG="$DISPATCH_MSG | repo:$DISPATCH_REPO"
+    [ -n "$DISPATCH_PRIORITY" ] && DISPATCH_MSG="$DISPATCH_MSG | priority:$DISPATCH_PRIORITY"
+    [ -n "$DISPATCH_REF" ]      && DISPATCH_MSG="$DISPATCH_MSG | ref:$DISPATCH_REF"
 else
     DISPATCH_MSG="$TASK"
 fi

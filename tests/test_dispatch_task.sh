@@ -86,7 +86,7 @@ chmod +x "$MOCK_DIR/dispatch.sh"
 # lib-common.sh.
 FAKE_LIB="$MOCK_DIR/lib"
 mkdir -p "$FAKE_LIB"
-cp "$MOCK_DIR/dispatch.sh" "$FAKE_LIB/dispatch.sh"
+ln -s "$MOCK_DIR/dispatch.sh" "$FAKE_LIB/dispatch.sh"
 ln -s "$REPO_DIR/lib/lib-common.sh" "$FAKE_LIB/lib-common.sh"
 
 # Build a patched copy of dispatch-task.sh that uses our fake LIB_DIR
