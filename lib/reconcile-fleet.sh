@@ -111,6 +111,75 @@ echo "  ⚠ orphan:   ${orphan:-(none)}"
 echo "  ⚠ missing:  ${missing:-(none)}"
 echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before killing"
 
+# --- Root-cause diagnostics for missing bots ---------------------------------
+_DIAG_SERVICE_PREFIX=$(parse_service_prefix "$FLEET_YAML")
+_diagnose_missing_bot() {
+    local bot="$1"
+
+    echo "  ── $bot ──"
+
+    # 1. Service unit status
+    case "$_OS" in
+    Linux)
+        local unit_name="${bot}.service"
+        local exit_status
+        exit_status=$(systemctl --user show "$unit_name" --property=ExecMainStatus --value 2>/dev/null || echo "unknown")
+        local active_state
+        active_state=$(systemctl --user show "$unit_name" --property=ActiveState --value 2>/dev/null || echo "unknown")
+        local sub_state
+        sub_state=$(systemctl --user show "$unit_name" --property=SubState --value 2>/dev/null || echo "unknown")
+        echo "    service: $active_state/$sub_state (exit code: $exit_status)"
+
+        # 2. Last journal lines
+        local journal
+        journal=$(journalctl --user -u "$unit_name" -n 10 --no-pager 2>/dev/null || echo "(journal unavailable)")
+        if [ -n "$journal" ] && [ "$journal" != "(journal unavailable)" ]; then
+            echo "    last journal lines:"
+            printf '%s\n' "$journal" | sed 's/^/      /'
+        fi
+        ;;
+    Darwin)
+        local plist_label="${_DIAG_SERVICE_PREFIX}.${bot}"
+        local launchctl_info
+        launchctl_info=$(launchctl print "gui/$(id -u)/$plist_label" 2>/dev/null | head -15 || echo "(launchctl info unavailable)")
+        if [ "$launchctl_info" != "(launchctl info unavailable)" ]; then
+            echo "    launchctl:"
+            printf '%s\n' "$launchctl_info" | sed 's/^/      /'
+        fi
+        ;;
+    esac
+
+    # 3. Fleet-state last known state
+    local state_file="${FLEET_STATE_PATH:-$CLAUDLOBBY_ROOT/state/fleet-state.json}"
+    if [ -f "$state_file" ] && command -v jq >/dev/null 2>&1; then
+        local state_summary
+        state_summary=$(jq -r --arg b "$bot" '
+            .bots[$b] // empty |
+            if . then "status=\(.status // "unknown"), task=\(.current_task // "none")\(
+                if .last_completed then "\n    last completed: \(.last_completed)" else "" end
+            )" else empty end
+        ' "$state_file" 2>/dev/null)
+        [ -n "$state_summary" ] && echo "    fleet-state: $state_summary"
+    fi
+
+    # 4. Startup log (last 5 lines)
+    local startup_log="$RUNTIME_DIR/$bot/logs/startup.log"
+    if [ -f "$startup_log" ]; then
+        echo "    startup.log (last 5):"
+        tail -5 "$startup_log" | sed 's/^/      /'
+    fi
+}
+
+if [ -n "${missing// /}" ]; then
+    echo
+    echo "Diagnostics for missing bots:"
+    for b in $missing; do
+        [ -z "$b" ] && continue
+        _diagnose_missing_bot "$b"
+    done
+fi
+# --- end root-cause diagnostics ----------------------------------------------
+
 # Prune fleet-state entries for bots no longer in fleet.yaml
 if [ -x "$LIB_DIR/fleet-state-update.sh" ]; then
     "$LIB_DIR/fleet-state-update.sh" prune "$FLEET_YAML" || true
