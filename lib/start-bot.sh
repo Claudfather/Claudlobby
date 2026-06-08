@@ -104,26 +104,17 @@ if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
 fi
 [ -f "$BOT_DIR/.env" ]                             && printf '. %q\n' "$BOT_DIR/.env" >> "$BOT_ENV_FILE"
 
-# Per-bot identity vars — written explicitly so they override any
-# same-named var from upper tiers (prevents tmux server env leakage).
-[ -n "${BOT_ID:-}" ]                               && printf 'export BOT_ID=%q\n' "$BOT_ID" >> "$BOT_ENV_FILE"
-[ -n "${BOT_NAME:-}" ]                             && printf 'export BOT_NAME=%q\n' "$BOT_NAME" >> "$BOT_ENV_FILE"
-[ -n "${BOT_DIR:-}" ]                              && printf 'export BOT_DIR=%q\n' "$BOT_DIR" >> "$BOT_ENV_FILE"
-[ -n "${MANAGER_TMUX:-}" ]                         && printf 'export MANAGER_TMUX=%q\n' "$MANAGER_TMUX" >> "$BOT_ENV_FILE"
-[ -n "${CLAUDLOBBY_ROOT:-}" ]                      && printf 'export CLAUDLOBBY_ROOT=%q\n' "$CLAUDLOBBY_ROOT" >> "$BOT_ENV_FILE"
-[ -n "${FLEET_NAME:-}" ]                           && printf 'export FLEET_NAME=%q\n' "$FLEET_NAME" >> "$BOT_ENV_FILE"
-[ -n "${CLAUDE_CONFIG_DIR:-}" ]                    && printf 'export CLAUDE_CONFIG_DIR=%q\n' "$CLAUDE_CONFIG_DIR" >> "$BOT_ENV_FILE"
-[ -n "${TELEGRAM_STATE_DIR:-}" ]                   && printf 'export TELEGRAM_STATE_DIR=%q\n' "$TELEGRAM_STATE_DIR" >> "$BOT_ENV_FILE"
-[ -n "${TELEGRAM_BOT_TOKEN:-}" ]                   && printf 'export TELEGRAM_BOT_TOKEN=%q\n' "$TELEGRAM_BOT_TOKEN" >> "$BOT_ENV_FILE"
-[ -n "${TELEGRAM_BOT_HANDLE:-}" ]                  && printf 'export TELEGRAM_BOT_HANDLE=%q\n' "$TELEGRAM_BOT_HANDLE" >> "$BOT_ENV_FILE"
-[ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]               && printf 'export TELEGRAM_GROUP_CHAT_ID=%q\n' "$TELEGRAM_GROUP_CHAT_ID" >> "$BOT_ENV_FILE"
-[ -n "${CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION:-}" ] && printf 'export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=%q\n' "$CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" >> "$BOT_ENV_FILE"
+# Source bot.conf — the SSOT for all compositor-generated config.
+# set -a auto-exports every assignment so vars reach `exec claude`.
+# This replaces the old per-var cherry-pick block — every var in bot.conf
+# automatically propagates to the tmux session.
+printf 'set -a\n' >> "$BOT_ENV_FILE"
+printf '. %q\n' "$BOT_DIR/bot.conf" >> "$BOT_ENV_FILE"
+printf 'set +a\n' >> "$BOT_ENV_FILE"
 
-# Model strategy vars — config-driven model escalation/compaction/subagent preferences
-for _ms_var in MODEL_STRATEGY_BASE MODEL_STRATEGY_ESCALATE_TO MODEL_STRATEGY_ESCALATE_WHEN \
-               MODEL_STRATEGY_COMPACT_WHEN MODEL_STRATEGY_EXPLORE MODEL_STRATEGY_PLAN MODEL_STRATEGY_GENERAL; do
-    [ -n "${!_ms_var:-}" ] && printf 'export %s=%q\n' "$_ms_var" "${!_ms_var}" >> "$BOT_ENV_FILE"
-done
+# Resolve the Telegram token via the indirection var set in bot.conf.
+# .env tiers provide the actual secret; TELEGRAM_TOKEN_ENV_NAME names it.
+printf '[ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ] && export TELEGRAM_BOT_TOKEN="${!TELEGRAM_TOKEN_ENV_NAME:-}"\n' >> "$BOT_ENV_FILE"
 
 # Backwards-compat: if the bot.conf is from before the CLAUDE_FLAGS
 # rename, fall back to the legacy hardcoded flag set + CLAUDE_EXTRA_FLAGS.
