@@ -467,6 +467,74 @@ class TestHookCommandValidation:
         assert not any("hook" in w and "not found" in w for w in report.warnings)
 
 
+class TestCrossFleetCollisions:
+    """Cross-fleet bot-name collision detection."""
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def test_collision_detected(self, fleet_dir, monkeypatch):
+        """Bot name existing in another fleet's runtime triggers a warning."""
+        self._env_patch(monkeypatch)
+        # Set up an overlay fleet structure
+        my_fleet = fleet_dir / "local" / "my-fleet"
+        my_fleet.mkdir(parents=True)
+        (my_fleet / "fleet.yaml").write_text((fleet_dir / "fleet.yaml").read_text())
+
+        # Create another fleet with a colliding bot name ('lead')
+        other_bots = fleet_dir / "local" / "other-fleet" / "runtime" / "bots" / "lead"
+        other_bots.mkdir(parents=True)
+        (other_bots / "bot.conf").write_text("BOT_NAME=lead\n")
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        report = validate(fleet, paths)
+        assert any(
+            "lead" in w and "other-fleet" in w and "collide" in w
+            for w in report.warnings
+        )
+
+    def test_no_collision_when_names_differ(self, fleet_dir, monkeypatch):
+        """Bot names unique across fleets produce no collision warning."""
+        self._env_patch(monkeypatch)
+        my_fleet = fleet_dir / "local" / "my-fleet"
+        my_fleet.mkdir(parents=True)
+
+        other_bots = (
+            fleet_dir / "local" / "other-fleet" / "runtime" / "bots" / "unique-bot"
+        )
+        other_bots.mkdir(parents=True)
+        (other_bots / "bot.conf").write_text("BOT_NAME=unique-bot\n")
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        report = validate(fleet, paths)
+        assert not any("collide" in w for w in report.warnings)
+
+    def test_no_collision_with_own_fleet(self, fleet_dir, monkeypatch):
+        """Bots in the current fleet's own runtime dir don't trigger collision."""
+        self._env_patch(monkeypatch)
+        my_fleet = fleet_dir / "local" / "my-fleet"
+        own_bots = my_fleet / "runtime" / "bots" / "lead"
+        own_bots.mkdir(parents=True)
+        (own_bots / "bot.conf").write_text("BOT_NAME=lead\n")
+
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
+        report = validate(fleet, paths)
+        assert not any("collide" in w for w in report.warnings)
+
+    def test_no_local_dir_no_crash(self, fleet_dir, monkeypatch):
+        """No local/ directory at all — should not crash."""
+        self._env_patch(monkeypatch)
+        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        paths = Paths(root=fleet_dir, fleet_dir=None)
+        report = validate(fleet, paths)
+        assert not any("collide" in w for w in report.warnings)
+
+
 class TestAutonomousRunnerValidation:
     """Validation of the per-bot autonomous_runner block."""
 
@@ -501,8 +569,7 @@ class TestAutonomousRunnerValidation:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert not any(
-            "autonomous_runner.skill" in w and "tech-debt" in w
-            for w in report.warnings
+            "autonomous_runner.skill" in w and "tech-debt" in w for w in report.warnings
         )
 
     def test_unknown_skill_warns(self, fleet_dir, monkeypatch):
@@ -522,9 +589,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, cadence="banana")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any(
-            "cadence" in w and "banana" in w for w in report.warnings
-        )
+        assert any("cadence" in w and "banana" in w for w in report.warnings)
 
     def test_bad_target_repo_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
@@ -532,9 +597,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, target_repo="just-a-name")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any(
-            "target_repo" in w and "org/repo" in w for w in report.warnings
-        )
+        assert any("target_repo" in w and "org/repo" in w for w in report.warnings)
 
     def test_github_issues_picker_without_label_is_error(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
@@ -542,9 +605,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, picker={"type": "github_issues", "label": None})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any(
-            "picker.label is required" in e for e in report.errors
-        )
+        assert any("picker.label is required" in e for e in report.errors)
 
     def test_unknown_on_bypass_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
@@ -552,9 +613,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, bypass={"on_bypass": "explode"})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any(
-            "on_bypass" in w and "explode" in w for w in report.warnings
-        )
+        assert any("on_bypass" in w and "explode" in w for w in report.warnings)
 
     def test_unknown_on_outcome_key_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
@@ -562,9 +621,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, on_outcome={"banana": "report"})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any(
-            "on_outcome key" in w and "banana" in w for w in report.warnings
-        )
+        assert any("on_outcome key" in w and "banana" in w for w in report.warnings)
 
     def test_unknown_on_outcome_action_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
@@ -572,9 +629,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, on_outcome={"completed": "explode"})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any(
-            "on_outcome action" in w and "explode" in w for w in report.warnings
-        )
+        assert any("on_outcome action" in w and "explode" in w for w in report.warnings)
 
     def test_non_claudna_hook_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
