@@ -481,6 +481,37 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
             )
 
 
+def _validate_cross_fleet_collisions(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport
+) -> None:
+    """Warn when bot names collide with bots in other fleets on the same host.
+
+    tmux session names are derived from the bot directory basename, so two
+    fleets with a bot named 'alex' would fight over the same tmux session.
+    """
+    local_dir = paths.root / "local"
+    if not local_dir.is_dir():
+        return
+
+    current_fleet = paths.fleet_dir.name if paths.fleet_dir else None
+    bot_names = set(fleet.bots)
+
+    for fleet_dir in sorted(local_dir.iterdir()):
+        if not fleet_dir.is_dir() or fleet_dir.name == current_fleet:
+            continue
+        other_bots_dir = fleet_dir / "runtime" / "bots"
+        if not other_bots_dir.is_dir():
+            continue
+        for bot_dir in sorted(other_bots_dir.iterdir()):
+            if not bot_dir.is_dir() or not (bot_dir / "bot.conf").is_file():
+                continue
+            if bot_dir.name in bot_names:
+                report.warnings.append(
+                    f"bot '{bot_dir.name}' also exists in fleet '{fleet_dir.name}' "
+                    f"— tmux session names will collide on this host"
+                )
+
+
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     report = ValidationReport()
 
@@ -491,6 +522,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
+    _validate_cross_fleet_collisions(fleet, paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
     if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):
