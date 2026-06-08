@@ -74,6 +74,7 @@ Key lifecycle scripts in `lib/`:
 | `install-cron.sh` | Cron job installation |
 | `install-creds-check.sh` | Creds-check timer enrollment (launchd) |
 | `install-creds-check-systemd.sh` | Creds-check timer enrollment (systemd) |
+| `install-fleet-pulse-systemd.sh` | Fleet-pulse systemd timer enrollment (systemd) |
 | `setup-mac-mini.sh` | macOS host setup automation |
 | `setup-host.sh` | Host setup automation (cross-platform) |
 | `bot-vitals.sh` | Bot vitals collection for observability |
