@@ -47,8 +47,8 @@ now_epoch=$(date +%s)
 expected_by=$(( now_epoch + DEADLINE_S ))
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# Escape backslash + double-quote for valid JSON (printf, no jq dependency).
-safe_task=$(printf '%s' "$TASK" | sed 's/\\/\\\\/g; s/"/\\"/g')
+# Escape backslash + double-quote for valid JSON (no jq dependency).
+safe_task=$(json_escape "$TASK")
 
 _append_ledger() {
     printf '{"ts":"%s","manager":"%s","bot":"%s","task":"%s","dispatched_at":%s,"expected_by":%s}\n' \

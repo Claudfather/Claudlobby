@@ -68,9 +68,8 @@ _emit_ledger_event() {
     done
 
     # Build JSON with printf — no jq dependency for the hot path.
-    # Escape double quotes and backslashes in summary for valid JSON.
     local safe_summary
-    safe_summary=$(printf '%s' "$SUMMARY" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    safe_summary=$(json_escape "$SUMMARY")
 
     _write_and_rotate() {
         printf '{"ts":"%s","bot":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s"}\n' \
