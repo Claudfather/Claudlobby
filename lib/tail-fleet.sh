@@ -85,7 +85,7 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
             [ -z "$_output" ] && continue
 
             if [ -n "$GREP_PATTERN" ]; then
-                _filtered=$(printf '%s\n' "$_output" | grep -i "$GREP_PATTERN" 2>/dev/null) || true
+                _filtered=$(printf '%s\n' "$_output" | grep "$GREP_PATTERN" 2>/dev/null) || true
                 [ -z "$_filtered" ] && continue
                 _output="$_filtered"
             fi
