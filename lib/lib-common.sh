@@ -22,6 +22,7 @@
 #   stat_mtime         — portable file mtime (epoch seconds)
 #   sed_i              — portable in-place sed
 #   df_pcent           — portable disk usage percentage
+#   json_escape        — escape backslash + double-quote for JSON values
 #   resolve_bots_dir   — fleet-aware runtime/bots path resolution
 #
 # Variables set on source:
@@ -220,6 +221,15 @@ trap '_lc_cleanup' EXIT
 
 safe_mktemp() {
     mktemp "$_LC_TMPDIR/tmp.XXXXXXXXXX"
+}
+
+# --- JSON helpers ------------------------------------------------------------
+
+# json_escape <string>
+# Escape backslashes and double quotes for safe embedding in JSON values.
+# Prints the escaped string to stdout.
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 # --- tmux helpers ------------------------------------------------------------
