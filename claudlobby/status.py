@@ -25,6 +25,7 @@ from pathlib import Path
 
 from .config import FleetConfig
 from .paths import Paths
+from .uptime import _fmt_duration
 
 log = logging.getLogger("claudlobby.status")
 
@@ -82,23 +83,10 @@ class BotStatus:
     # keepalive
     last_heartbeat: datetime | None = None
     pane_state: str = ""  # BUSY/IDLE/UNKNOWN
-
-
-def _load_fleet_state(paths: Paths) -> dict:
-    """Read fleet-state.json. Returns empty dict on missing/corrupt."""
-    state_path = Path(
-        os.environ.get(
-            "FLEET_STATE_PATH",
-            str(paths.root / "state" / "fleet-state.json"),
-        )
-    )
-    if not state_path.is_file():
-        return {}
-    try:
-        return json.loads(state_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("corrupted fleet-state.json at %s: %s", state_path, exc)
-        return {}
+    # utilization (populated by collect_fleet_status)
+    busy_pct_today: float | None = None
+    idle_since: datetime | None = None
+    current_task_age_secs: int | None = None
 
 
 def _check_tmux_sessions() -> set[str]:
@@ -216,10 +204,13 @@ def collect_fleet_status(
     paths: Paths,
 ) -> list[BotStatus]:
     """Collect status for all bots in the fleet."""
-    state_data = _load_fleet_state(paths)
+    from .utilization import compute_bot_utilization, load_fleet_state
+
+    state_data = load_fleet_state(paths)
     bots_state = state_data.get("bots", {})
     tmux_sessions = _check_tmux_sessions()
     is_linux = platform.system() == "Linux"
+    now = datetime.now(timezone.utc)
 
     results: list[BotStatus] = []
 
@@ -249,6 +240,15 @@ def collect_fleet_status(
 
         # keepalive heartbeat
         bs.last_heartbeat, bs.pane_state = _parse_keepalive_log(bot_dir)
+
+        # utilization (from keepalive logs)
+        if bot_dir.is_dir():
+            util = compute_bot_utilization(
+                bot_id, bot_dir, bots_state.get(bot_id, {}), now=now
+            )
+            bs.busy_pct_today = util.busy_pct_today
+            bs.current_task_age_secs = util.current_task_age_secs
+            bs.idle_since = util.idle_since
 
         results.append(bs)
 
@@ -343,6 +343,40 @@ def _pad(s: str, width: int) -> str:
     return s + " " * max(0, pad_needed)
 
 
+def _busy_pct_display(bs: BotStatus) -> str:
+    """Busy % today."""
+    if bs.busy_pct_today is None:
+        return _dim("--")
+    pct = f"{bs.busy_pct_today:.0f}%"
+    if bs.busy_pct_today >= 70:
+        return _green(pct)
+    if bs.busy_pct_today >= 30:
+        return pct
+    return _dim(pct)
+
+
+def _idle_since_display(bs: BotStatus) -> str:
+    """Relative idle duration."""
+    if bs.idle_since is None:
+        return _dim("--")
+    age = (
+        datetime.now(timezone.utc) - bs.idle_since.astimezone(timezone.utc)
+    ).total_seconds()
+    if age < 0:
+        return _dim("--")
+    return _fmt_duration(int(age))
+
+
+def _task_age_display(bs: BotStatus) -> str:
+    """Current task age."""
+    if bs.current_task_age_secs is None:
+        return _dim("--")
+    s = _fmt_duration(bs.current_task_age_secs)
+    if bs.current_task_age_secs > 7200:
+        return _yellow(s)
+    return s
+
+
 def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
     """Format the status table as a string."""
     lines: list[str] = []
@@ -367,6 +401,9 @@ def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
         f"{'SVC':<4}  "
         f"{'TMUX':<4}  "
         f"{'HEARTBEAT':<10}  "
+        f"{'BUSY%':<6}  "
+        f"{'IDLE':<8}  "
+        f"{'TASK AGE':<8}  "
         f"ACTIVITY"
     )
     lines.append(_dim(hdr))
@@ -375,7 +412,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
     for bs in statuses:
         indicator = _health_indicator(bs)
         activity = bs.current_task or bs.last_completed or ""
-        activity = _truncate(activity, 50)
+        activity = _truncate(activity, 40)
         if bs.current_task:
             activity_display = activity
         elif bs.last_completed:
@@ -390,6 +427,9 @@ def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
             f"{_pad(_service_display(bs), 4)}  "
             f"{_pad(_tmux_display(bs), 4)}  "
             f"{_pad(_heartbeat_display(bs), 10)}  "
+            f"{_pad(_busy_pct_display(bs), 6)}  "
+            f"{_pad(_idle_since_display(bs), 8)}  "
+            f"{_pad(_task_age_display(bs), 8)}  "
             f"{activity_display}"
         )
         lines.append(row)
@@ -421,6 +461,10 @@ def format_bot_detail(bs: BotStatus) -> str:
     lines.append(f"  Tmux:       {_tmux_display(bs)}")
     lines.append(f"  Heartbeat:  {_heartbeat_display(bs)}")
 
+    lines.append(f"  Busy today: {_busy_pct_display(bs)}")
+    lines.append(f"  Idle since: {_idle_since_display(bs)}")
+    lines.append(f"  Task age:   {_task_age_display(bs)}")
+
     if bs.current_task:
         lines.append(f"  Task:       {bs.current_task}")
     if bs.last_completed:
@@ -444,6 +488,9 @@ def format_json(statuses: list[BotStatus], fleet_name: str) -> str:
                     bs.last_heartbeat.isoformat() if bs.last_heartbeat else None
                 ),
                 "pane_state": bs.pane_state or None,
+                "busy_pct_today": bs.busy_pct_today,
+                "idle_since": (bs.idle_since.isoformat() if bs.idle_since else None),
+                "current_task_age_secs": bs.current_task_age_secs,
                 "current_task": bs.current_task,
                 "last_completed": bs.last_completed,
             }

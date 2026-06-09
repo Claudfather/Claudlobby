@@ -13,7 +13,6 @@ from claudlobby.status import (
     BotStatus,
     _health_indicator,
     _heartbeat_display,
-    _load_fleet_state,
     _parse_keepalive_log,
     _state_display,
     collect_fleet_status,
@@ -21,6 +20,7 @@ from claudlobby.status import (
     format_json,
     format_table,
 )
+from claudlobby.utilization import load_fleet_state
 
 
 # -- Fixtures ---------------------------------------------------------------
@@ -57,7 +57,7 @@ def mock_fleet():
     )
 
 
-# -- _load_fleet_state -------------------------------------------------------
+# -- load_fleet_state (now in utilization.py) --------------------------------
 
 
 class TestLoadFleetState:
@@ -68,26 +68,26 @@ class TestLoadFleetState:
             yield
 
     def test_missing_file(self, mock_paths):
-        result = _load_fleet_state(mock_paths)
+        result = load_fleet_state(mock_paths)
         assert result == {}
 
     def test_valid_json(self, mock_paths):
-        state_dir = mock_paths.root / "state"
-        state_dir.mkdir()
+        state_dir = mock_paths.runtime / "state"
+        state_dir.mkdir(parents=True)
         state_file = state_dir / "fleet-state.json"
         data = {
             "updated": "2026-01-01T00:00:00Z",
             "bots": {"alice": {"status": "idle"}},
         }
         state_file.write_text(json.dumps(data))
-        result = _load_fleet_state(mock_paths)
+        result = load_fleet_state(mock_paths)
         assert result["bots"]["alice"]["status"] == "idle"
 
     def test_corrupt_json(self, mock_paths):
-        state_dir = mock_paths.root / "state"
-        state_dir.mkdir()
+        state_dir = mock_paths.runtime / "state"
+        state_dir.mkdir(parents=True)
         (state_dir / "fleet-state.json").write_text("{bad json")
-        result = _load_fleet_state(mock_paths)
+        result = load_fleet_state(mock_paths)
         assert result == {}
 
     def test_env_override(self, mock_paths, tmp_path):
@@ -95,7 +95,7 @@ class TestLoadFleetState:
         data = {"bots": {"alice": {"status": "working"}}}
         custom.write_text(json.dumps(data))
         with patch.dict(os.environ, {"FLEET_STATE_PATH": str(custom)}):
-            result = _load_fleet_state(mock_paths)
+            result = load_fleet_state(mock_paths)
         assert result["bots"]["alice"]["status"] == "working"
 
 
@@ -272,7 +272,7 @@ class TestCollectFleetStatus:
                 "claudlobby.status._check_systemd_service",
                 return_value=(True, "exited"),
             ),
-            patch("claudlobby.status._load_fleet_state", return_value={"bots": {}}),
+            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
         ):
             results = collect_fleet_status(mock_fleet, mock_paths)
         assert len(results) == 2
