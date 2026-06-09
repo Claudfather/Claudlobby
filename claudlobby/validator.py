@@ -68,76 +68,12 @@ def _bot_required_env_vars(
 ) -> list[tuple[str, str, str, str | None]]:
     """Return [(canonical_var, tier, source, instance)] this bot needs.
 
-    Walks two contract sources, mirroring composer.collect_env_contracts:
+    Delegates to :func:`mcp_resolve.required_vars` — the single source of
+    truth for MCP env-var contract resolution.
+    """
+    from .mcp_resolve import required_vars
 
-    - **MCP fragments** (`library/mcp/<name>.json`, `_env_contract` key) —
-      same instance-scope rename as composer._resolve_instance_env, so
-      the validator sees the canonical names that land in the rendered
-      `.mcp.json` (`${TOKEN}` → `${NOTION_WORK_TOKEN}` per instance).
-    - **Integration docs** (`library/integrations/<name>.md`, frontmatter
-      `env_contract` key) — same auto-pair fallback as composer (if
-      `bot.integrations` is empty, derive from the bot's MCP names that
-      have a matching `<name>.md` integration doc).
-
-    `instance` is None for non-instance-scoped vars."""
-    from .loader import parse_frontmatter
-
-    out: list[tuple[str, str, str, str | None]] = []
-    seen_mcp: set[str] = set()
-    for entry in bot.mcp:
-        if entry.name in seen_mcp:
-            continue
-        seen_mcp.add(entry.name)
-        frag_path = paths.find_library_file("mcp", entry.name, ".json")
-        if frag_path is None:
-            continue
-        try:
-            frag = json.loads(frag_path.read_text())
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            log.warning("failed to parse %s, skipping", frag_path)
-            continue
-        contract = frag.get("_env_contract", {})
-        for var_name, meta in contract.items():
-            if not isinstance(meta, dict):
-                continue
-            tier = meta.get("tier", "fleet")
-            scope = meta.get("scope", "shared")
-            if scope == "instance":
-                for instance in entry.instances:
-                    prefix = entry.instance_prefix(instance)
-                    out.append((prefix + var_name, tier, f"mcp/{entry.name}", instance))
-            else:
-                out.append((var_name, tier, f"mcp/{entry.name}", None))
-
-    # Integration doc contracts (auto-pair fallback matches composer)
-    integration_names = bot.integrations or [
-        e.name
-        for e in bot.mcp
-        if paths.find_library_file("integrations", e.name, ".md") is not None
-    ]
-    seen_int: set[str] = set()
-    for int_name in integration_names:
-        if int_name in seen_int:
-            continue
-        seen_int.add(int_name)
-        int_path = paths.find_library_file("integrations", int_name, ".md")
-        if int_path is None:
-            continue
-        try:
-            fm, _ = parse_frontmatter(int_path.read_text())
-        except (OSError, ValueError, KeyError):
-            log.warning("failed to parse frontmatter in %s, skipping", int_path)
-            continue
-        contract = fm.get("env_contract", {}) if isinstance(fm, dict) else {}
-        if not isinstance(contract, dict):
-            continue
-        for var_name, meta in contract.items():
-            if not isinstance(meta, dict):
-                continue
-            tier = meta.get("tier", "fleet")
-            out.append((var_name, tier, f"integration/{int_name}", None))
-
-    return out
+    return required_vars(bot, paths)
 
 
 # Tool deny vs expertise conflict map — which tools each expertise area
@@ -422,8 +358,6 @@ def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
 
 def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
     """Fleet-level dependency checks."""
-    import re
-
     # Warn about disabling defaults — unusual, worth flagging
     if not fleet.plugins.include_defaults:
         report.warnings.append(

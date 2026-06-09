@@ -28,6 +28,7 @@ from .loader import (
     load_voice,
     parse_expertise_file,
 )
+from .mcp_resolve import resolve_placeholders
 from .paths import Paths
 
 
@@ -141,34 +142,6 @@ def _build_jinja_env(paths: Paths) -> jinja2.Environment:
 # ----------------------------------------------------------------------
 
 
-def _resolve_instance_env(
-    env: dict[str, str], contract: dict, entry, instance: str
-) -> dict[str, str]:
-    """Resolve env var placeholders for an MCP instance.
-
-    Instance-scoped vars get prefixed: ${TOKEN} → ${NOTION_WORK_TOKEN}
-    Shared vars stay as-is: ${GOOGLE_OAUTH_CLIENT_ID} → ${GOOGLE_OAUTH_CLIENT_ID}
-    """
-
-    prefix = entry.instance_prefix(instance)
-    resolved = {}
-    for env_key, env_val in env.items():
-        if not isinstance(env_val, str):
-            resolved[env_key] = env_val
-            continue
-
-        def replace_var(m):
-            var = m.group(1)
-            meta = contract.get(var, {})
-            scope = meta.get("scope", "shared")
-            if scope == "instance":
-                return "${" + prefix + var + "}"
-            return m.group(0)  # keep as-is
-
-        resolved[env_key] = re.sub(r"\$\{([A-Z_][A-Z0-9_]*)\}", replace_var, env_val)
-    return resolved
-
-
 def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
     import shutil
 
@@ -222,33 +195,12 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
                     rest_args.append(a)
                 instance_config["args"] = [resolved_binary] + rest_args
 
-            if "env" in instance_config:
-                instance_config["env"] = _resolve_instance_env(
-                    instance_config["env"], contract, entry, instance
-                )
-            # Also resolve placeholders in other string fields (url, args, headers)
-
-            def resolve_field(val):
-                if isinstance(val, str):
-
-                    def replace_var(m):
-                        var = m.group(1)
-                        meta = contract.get(var, {})
-                        scope = meta.get("scope", "shared")
-                        if scope == "instance":
-                            return "${" + entry.instance_prefix(instance) + var + "}"
-                        return m.group(0)
-
-                    return re.sub(r"\$\{([A-Z_][A-Z0-9_]*)\}", replace_var, val)
-                elif isinstance(val, list):
-                    return [resolve_field(v) for v in val]
-                elif isinstance(val, dict):
-                    return {k: resolve_field(v) for k, v in val.items()}
-                return val
-
-            for field in ["url", "args", "headers"]:
+            # Resolve ${VAR} placeholders (instance-scoped vars get prefixed)
+            for field in ["env", "url", "args", "headers"]:
                 if field in instance_config:
-                    instance_config[field] = resolve_field(instance_config[field])
+                    instance_config[field] = resolve_placeholders(
+                        instance_config[field], contract, entry, instance
+                    )
 
             merged["mcpServers"][output_name] = instance_config
 
