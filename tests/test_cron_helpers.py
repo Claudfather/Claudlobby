@@ -1,9 +1,10 @@
 """Tests for cron migration helpers in claudlobby/__main__.py."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
-from claudlobby.__main__ import (
+from claudlobby.commands.cron_migrate import (
     _BotCronCtx,
     _resolve_cron_path,
     _rewrite_cron_line,
@@ -11,8 +12,11 @@ from claudlobby.__main__ import (
 )
 
 
-def _make_ctx(tmp_path: Path, bot_name: str = "eng-1",
-              legacy_prefix: str = "/home/user/bots/eng-1") -> _BotCronCtx:
+def _make_ctx(
+    tmp_path: Path,
+    bot_name: str = "eng-1",
+    legacy_prefix: str = "/home/user/bots/eng-1",
+) -> _BotCronCtx:
     """Build a _BotCronCtx with real directories under tmp_path."""
     data_dir = tmp_path / "runtime" / "bots" / bot_name / "data"
     data_dir.mkdir(parents=True)
@@ -39,7 +43,9 @@ def _make_ctx(tmp_path: Path, bot_name: str = "eng-1",
 class TestResolveCronPath:
     def test_non_matching_prefix_unchanged(self, tmp_path):
         ctx = _make_ctx(tmp_path)
-        assert _resolve_cron_path("/other/path/script.sh", ctx) == "/other/path/script.sh"
+        assert (
+            _resolve_cron_path("/other/path/script.sh", ctx) == "/other/path/script.sh"
+        )
 
     def test_bare_prefix_returns_data_dir(self, tmp_path):
         ctx = _make_ctx(tmp_path)
@@ -93,7 +99,7 @@ class TestRewriteCronLine:
         ctx = _make_ctx(tmp_path)
         script = tmp_path / "lib" / "sweep.sh"
         script.write_text("#!/bin/bash\n")
-        line = f"0 3 * * * /home/user/bots/eng-1/sweep.sh --flag"
+        line = "0 3 * * * /home/user/bots/eng-1/sweep.sh --flag"
         result, bot = _rewrite_cron_line(line, [ctx])
         assert str(script) in result
         assert bot == "eng-1"
@@ -105,7 +111,7 @@ class TestRewriteCronLine:
         s1.write_text("")
         s2 = ctx.data_dir / "b.sh"
         s2.write_text("")
-        line = f"*/5 * * * * /home/user/bots/eng-1/a.sh && /home/user/bots/eng-1/b.sh"
+        line = "*/5 * * * * /home/user/bots/eng-1/a.sh && /home/user/bots/eng-1/b.sh"
         result, bot = _rewrite_cron_line(line, [ctx])
         assert str(s1) in result
         assert str(s2) in result
@@ -119,7 +125,9 @@ class TestRewriteCronLine:
         script.write_text("")
         line = "0 * * * * /home/user/bots/eng-1/task.sh"
         # Sorted longest-first as _build_cron_contexts does
-        ctxs = sorted([ctx_short, ctx_long], key=lambda c: len(c.legacy_prefix), reverse=True)
+        ctxs = sorted(
+            [ctx_short, ctx_long], key=lambda c: len(c.legacy_prefix), reverse=True
+        )
         result, bot = _rewrite_cron_line(line, ctxs)
         assert bot == "eng-1"
 

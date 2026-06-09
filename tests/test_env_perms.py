@@ -140,7 +140,7 @@ class TestEnvMigratePermissions:
 
     def test_fleet_env_migrate_has_0o600(self, tmp_path):
         """Fleet .env written by _apply_env_migration has mode 0o600."""
-        from claudlobby.__main__ import _apply_env_migration
+        from claudlobby.commands.env_migrate import _apply_env_migration
 
         root = tmp_path / "claudlobby"
         root.mkdir()
@@ -172,7 +172,7 @@ class TestEnvMigratePermissions:
 
     def test_bot_env_migrate_has_0o600(self, tmp_path):
         """Bot .env written by _apply_env_migration has mode 0o600."""
-        from claudlobby.__main__ import _apply_env_migration
+        from claudlobby.commands.env_migrate import _apply_env_migration
 
         root = tmp_path / "claudlobby"
         root.mkdir()
