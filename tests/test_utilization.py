@@ -147,7 +147,7 @@ class TestComputeBotUtilization:
         bot_dir = _make_bot_dir(tmp_path, "eng-1", log_lines)
         util = compute_bot_utilization("eng-1", bot_dir, {"status": "idle"}, now=now)
 
-        assert util.busy_pct_today == 0.0
+        assert util.busy_pct_24h == 0.0
         assert util.idle_since is not None
         assert util.current_task_age_secs is None
         assert util.stall is False
@@ -161,7 +161,7 @@ class TestComputeBotUtilization:
         bot_dir = _make_bot_dir(tmp_path, "eng-1", log_lines)
         util = compute_bot_utilization("eng-1", bot_dir, {"status": "working"}, now=now)
 
-        assert util.busy_pct_today == 100.0
+        assert util.busy_pct_24h == 100.0
         assert util.idle_since is None
         assert util.current_task_age_secs is not None
         assert util.current_task_age_secs > 0
@@ -185,7 +185,7 @@ class TestComputeBotUtilization:
             "eng-1", bot_dir, {}, now=datetime.now(timezone.utc)
         )
 
-        assert util.busy_pct_today == 0.0
+        assert util.busy_pct_24h == 0.0
         assert util.idle_since is None
         assert util.current_task_age_secs is None
 
@@ -259,7 +259,7 @@ class TestWriteUtilizationJson:
         results = [
             BotUtilization(
                 name="eng-1",
-                busy_pct_today=42.3,
+                busy_pct_24h=42.3,
                 busy_pct_7d=38.1,
                 idle_since=datetime(2026, 6, 9, 14, 30, 0, tzinfo=timezone.utc),
                 state="idle",
@@ -271,7 +271,7 @@ class TestWriteUtilizationJson:
         data = json.loads(out_path.read_text())
         assert "updated" in data
         assert "eng-1" in data["bots"]
-        assert data["bots"]["eng-1"]["busy_pct_today"] == 42.3
+        assert data["bots"]["eng-1"]["busy_pct_24h"] == 42.3
         assert data["bots"]["eng-1"]["state"] == "idle"
 
     def test_creates_state_dir(self, tmp_path):
@@ -295,13 +295,13 @@ class TestFormatUtilizationSummary:
         results = [
             BotUtilization(
                 name="eng-1",
-                busy_pct_today=75.0,
+                busy_pct_24h=75.0,
                 state="working",
                 current_task_age_secs=3600,
             ),
             BotUtilization(
                 name="eng-2",
-                busy_pct_today=10.0,
+                busy_pct_24h=10.0,
                 state="idle",
                 idle_since=datetime(2026, 6, 9, 16, 0, 0, tzinfo=timezone.utc),
             ),
@@ -316,7 +316,7 @@ class TestFormatUtilizationSummary:
 
     def test_busy_only(self):
         results = [
-            BotUtilization(name="eng-1", busy_pct_today=50.0, state="unknown"),
+            BotUtilization(name="eng-1", busy_pct_24h=50.0, state="unknown"),
         ]
         summary = format_utilization_summary(results)
         assert "50% busy" in summary

@@ -72,8 +72,8 @@ class TestLoadFleetState:
         assert result == {}
 
     def test_valid_json(self, mock_paths):
-        state_dir = mock_paths.runtime / "state"
-        state_dir.mkdir(parents=True)
+        state_dir = mock_paths.root / "state"
+        state_dir.mkdir()
         state_file = state_dir / "fleet-state.json"
         data = {
             "updated": "2026-01-01T00:00:00Z",
@@ -84,8 +84,8 @@ class TestLoadFleetState:
         assert result["bots"]["alice"]["status"] == "idle"
 
     def test_corrupt_json(self, mock_paths):
-        state_dir = mock_paths.runtime / "state"
-        state_dir.mkdir(parents=True)
+        state_dir = mock_paths.root / "state"
+        state_dir.mkdir()
         (state_dir / "fleet-state.json").write_text("{bad json")
         result = load_fleet_state(mock_paths)
         assert result == {}

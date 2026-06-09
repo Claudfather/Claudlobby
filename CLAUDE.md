@@ -85,6 +85,7 @@ Key lifecycle scripts in `lib/`:
 | `dispatch.sh` | Dispatch helper for manager → worker |
 | `dispatch-task.sh` | Task dispatch helper |
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
+| `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
 
 ## Repository Hygiene — MANDATORY

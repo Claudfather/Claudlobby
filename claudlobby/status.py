@@ -84,7 +84,7 @@ class BotStatus:
     last_heartbeat: datetime | None = None
     pane_state: str = ""  # BUSY/IDLE/UNKNOWN
     # utilization (populated by collect_fleet_status)
-    busy_pct_today: float | None = None
+    busy_pct_24h: float | None = None
     idle_since: datetime | None = None
     current_task_age_secs: int | None = None
 
@@ -246,7 +246,7 @@ def collect_fleet_status(
             util = compute_bot_utilization(
                 bot_id, bot_dir, bots_state.get(bot_id, {}), now=now
             )
-            bs.busy_pct_today = util.busy_pct_today
+            bs.busy_pct_24h = util.busy_pct_24h
             bs.current_task_age_secs = util.current_task_age_secs
             bs.idle_since = util.idle_since
 
@@ -345,23 +345,21 @@ def _pad(s: str, width: int) -> str:
 
 def _busy_pct_display(bs: BotStatus) -> str:
     """Busy % today."""
-    if bs.busy_pct_today is None:
+    if bs.busy_pct_24h is None:
         return _dim("--")
-    pct = f"{bs.busy_pct_today:.0f}%"
-    if bs.busy_pct_today >= 70:
+    pct = f"{bs.busy_pct_24h:.0f}%"
+    if bs.busy_pct_24h >= 70:
         return _green(pct)
-    if bs.busy_pct_today >= 30:
+    if bs.busy_pct_24h >= 30:
         return pct
     return _dim(pct)
 
 
-def _idle_since_display(bs: BotStatus) -> str:
+def _idle_since_display(bs: BotStatus, now: datetime) -> str:
     """Relative idle duration."""
     if bs.idle_since is None:
         return _dim("--")
-    age = (
-        datetime.now(timezone.utc) - bs.idle_since.astimezone(timezone.utc)
-    ).total_seconds()
+    age = (now - bs.idle_since.astimezone(timezone.utc)).total_seconds()
     if age < 0:
         return _dim("--")
     return _fmt_duration(int(age))
@@ -379,6 +377,7 @@ def _task_age_display(bs: BotStatus) -> str:
 
 def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
     """Format the status table as a string."""
+    now = datetime.now(timezone.utc)
     lines: list[str] = []
 
     # Header
@@ -428,7 +427,7 @@ def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
             f"{_pad(_tmux_display(bs), 4)}  "
             f"{_pad(_heartbeat_display(bs), 10)}  "
             f"{_pad(_busy_pct_display(bs), 6)}  "
-            f"{_pad(_idle_since_display(bs), 8)}  "
+            f"{_pad(_idle_since_display(bs, now), 8)}  "
             f"{_pad(_task_age_display(bs), 8)}  "
             f"{activity_display}"
         )
@@ -461,8 +460,9 @@ def format_bot_detail(bs: BotStatus) -> str:
     lines.append(f"  Tmux:       {_tmux_display(bs)}")
     lines.append(f"  Heartbeat:  {_heartbeat_display(bs)}")
 
-    lines.append(f"  Busy today: {_busy_pct_display(bs)}")
-    lines.append(f"  Idle since: {_idle_since_display(bs)}")
+    lines.append(f"  Busy 24h:   {_busy_pct_display(bs)}")
+    now = datetime.now(timezone.utc)
+    lines.append(f"  Idle since: {_idle_since_display(bs, now)}")
     lines.append(f"  Task age:   {_task_age_display(bs)}")
 
     if bs.current_task:
@@ -488,7 +488,7 @@ def format_json(statuses: list[BotStatus], fleet_name: str) -> str:
                     bs.last_heartbeat.isoformat() if bs.last_heartbeat else None
                 ),
                 "pane_state": bs.pane_state or None,
-                "busy_pct_today": bs.busy_pct_today,
+                "busy_pct_24h": bs.busy_pct_24h,
                 "idle_since": (bs.idle_since.isoformat() if bs.idle_since else None),
                 "current_task_age_secs": bs.current_task_age_secs,
                 "current_task": bs.current_task,

@@ -32,7 +32,7 @@ class BotUtilization:
     """Per-bot utilization metrics."""
 
     name: str
-    busy_pct_today: float = 0.0
+    busy_pct_24h: float = 0.0
     busy_pct_7d: float = 0.0
     idle_since: datetime | None = None
     current_task_age_secs: int | None = None
@@ -107,7 +107,7 @@ def load_fleet_state(paths: Paths) -> dict:
     state_path = Path(
         os.environ.get(
             "FLEET_STATE_PATH",
-            str(paths.runtime / "state" / "fleet-state.json"),
+            str(paths.root / "state" / "fleet-state.json"),
         )
     )
     if not state_path.is_file():
@@ -162,7 +162,7 @@ def compute_bot_utilization(
 
     return BotUtilization(
         name=bot_name,
-        busy_pct_today=busy_today,
+        busy_pct_24h=busy_today,
         busy_pct_7d=busy_7d,
         idle_since=idle_since,
         current_task_age_secs=current_task_age_secs,
@@ -226,7 +226,7 @@ def write_utilization_json(
     }
     for u in results:
         data["bots"][u.name] = {
-            "busy_pct_today": u.busy_pct_today,
+            "busy_pct_24h": u.busy_pct_24h,
             "busy_pct_7d": u.busy_pct_7d,
             "idle_since": u.idle_since.isoformat() if u.idle_since else None,
             "current_task_age_secs": u.current_task_age_secs,
@@ -250,5 +250,5 @@ def format_utilization_summary(results: list[BotUtilization]) -> str:
             idle_secs = (datetime.now(timezone.utc) - u.idle_since).total_seconds()
             parts.append(f"{u.name} idle {_fmt_duration(int(idle_secs))}")
         else:
-            parts.append(f"{u.name} {int(u.busy_pct_today)}% busy")
+            parts.append(f"{u.name} {int(u.busy_pct_24h)}% busy")
     return "team utilization: " + ", ".join(parts) if parts else "no bots"
