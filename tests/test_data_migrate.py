@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 
 from claudlobby.config import BotConfig, FleetConfig
-from claudlobby.__main__ import cmd_data_migrate
+from claudlobby.commands.data_migrate import cmd_data_migrate
 from claudlobby.paths import Paths
 
 

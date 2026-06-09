@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import logging
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -338,9 +339,6 @@ def cmd_warm_cache(args) -> int:
     for each unique npx-based package. This ensures ~/.npm/_npx/ is warm
     before bot startup, avoiding 30-60s cold-download delays on Pi hardware.
     """
-    import json as _json2
-    import subprocess
-
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet = _load_fleet_or_exit(paths)
@@ -353,8 +351,8 @@ def cmd_warm_cache(args) -> int:
             if frag_path is None:
                 continue
             try:
-                frag = _json2.loads(frag_path.read_text())
-            except _json2.JSONDecodeError:
+                frag = _json.loads(frag_path.read_text())
+            except _json.JSONDecodeError:
                 continue
             for k, v in frag.items():
                 if k.startswith("_") or not isinstance(v, dict):

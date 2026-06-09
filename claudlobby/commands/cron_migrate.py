@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 from collections import defaultdict
@@ -170,7 +171,6 @@ def cmd_cron_migrate(args) -> int:
 
     Lines that don't reference the source prefix pass through unchanged.
     """
-    import os
 
     paths, fleet, source_dir, rename_map = _migration_preamble(args)
     bot_ctxs = _build_cron_contexts(fleet, source_dir, rename_map, paths)
