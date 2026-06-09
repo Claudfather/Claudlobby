@@ -1,6 +1,17 @@
 #!/bin/bash
 # Manager dispatch wrapper — record the task to the dispatch ledger, then send.
-# Usage: dispatch-task.sh [--deadline-min N] <worker-session> <task...>
+# Usage: dispatch-task.sh [flags] <worker-session> <task...>
+#
+# Flags:
+#   --deadline-min N   Override default deadline (minutes)
+#   --repo NAME        Target repo (adds repo:<NAME> to envelope)
+#   --priority LEVEL   Priority level (adds priority:<LEVEL> to envelope)
+#   --ref URL          Reference URL (adds ref:<URL> to envelope)
+#
+# When --repo, --priority, or --ref is given, the task text is wrapped in a
+# structured [BOTCOMMAND] envelope:
+#   [BOTCOMMAND] <caller> | task | <summary> | repo:<repo> | priority:<pri> | ref:<url>
+# When none of those flags are passed, the raw task text is sent as-is.
 #
 # Appends {ts,manager,bot,task,dispatched_at,expected_by} to
 # state/dispatch-log.jsonl so the fleet-pulse watchdog can flag the task
@@ -15,15 +26,35 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 DEADLINE_MIN=""
-if [ "${1:-}" = "--deadline-min" ]; then
-    DEADLINE_MIN="${2:?--deadline-min needs a value}"
-    shift 2
-fi
+DISPATCH_REPO=""
+DISPATCH_PRIORITY=""
+DISPATCH_REF=""
 
-WORKER_SESSION="${1:?Usage: dispatch-task.sh [--deadline-min N] <worker-session> <task...>}"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --deadline-min) DEADLINE_MIN="${2:?--deadline-min needs a value}"; shift 2 ;;
+        --repo)         DISPATCH_REPO="${2:?--repo needs a value}"; shift 2 ;;
+        --priority)     DISPATCH_PRIORITY="${2:?--priority needs a value}"; shift 2 ;;
+        --ref)          DISPATCH_REF="${2:?--ref needs a value}"; shift 2 ;;
+        -*)             echo "dispatch-task: unknown flag '$1'" >&2; exit 1 ;;
+        *)              break ;;
+    esac
+done
+
+WORKER_SESSION="${1:?Usage: dispatch-task.sh [flags] <worker-session> <task...>}"
 shift
 TASK="$*"
 [ -n "$TASK" ] || { echo "dispatch-task: empty task" >&2; exit 1; }
+
+if [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] || [ -n "$DISPATCH_REF" ]; then
+    CALLER="${BOT_NAME:-${MANAGER_TMUX:-unknown}}"
+    DISPATCH_MSG="[BOTCOMMAND] $CALLER | task | $TASK"
+    [ -n "$DISPATCH_REPO" ]     && DISPATCH_MSG="$DISPATCH_MSG | repo:$DISPATCH_REPO"
+    [ -n "$DISPATCH_PRIORITY" ] && DISPATCH_MSG="$DISPATCH_MSG | priority:$DISPATCH_PRIORITY"
+    [ -n "$DISPATCH_REF" ]      && DISPATCH_MSG="$DISPATCH_MSG | ref:$DISPATCH_REF"
+else
+    DISPATCH_MSG="$TASK"
+fi
 
 # Fail before recording if the worker isn't there — no orphan ledger entries.
 if ! check_tmux_session "$WORKER_SESSION"; then
@@ -57,4 +88,4 @@ _append_ledger() {
 with_lock "$LEDGER.lock" _append_ledger
 
 # Send via the low-level race-safe primitive (re-validates the session).
-"$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$TASK"
+"$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG"
