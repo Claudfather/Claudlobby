@@ -12,12 +12,8 @@ import types
 from pathlib import Path
 from unittest.mock import patch  # noqa: F401 — used in generate tests
 
-from claudlobby.__main__ import (
-    cmd_generate,
-    cmd_list_library,
-    cmd_memory_migrate,
-    cmd_validate,
-)
+from claudlobby.commands.core import cmd_generate, cmd_list_library, cmd_validate
+from claudlobby.commands.memory_migrate import cmd_memory_migrate
 
 
 def _args(**kwargs):
@@ -125,7 +121,7 @@ class TestGenerateCommandLogging:
         fake_out = {"lead": fleet_dir / "runtime/bots/lead"}
         with (
             caplog.at_level(logging.INFO, logger="claudlobby"),
-            patch("claudlobby.__main__.compose_fleet", return_value=fake_out),
+            patch("claudlobby.commands.core.compose_fleet", return_value=fake_out),
         ):
             result = cmd_generate(args)
         assert result == 0
@@ -150,7 +146,7 @@ class TestGenerateCommandLogging:
         with (
             caplog.at_level(logging.INFO, logger="claudlobby"),
             patch(
-                "claudlobby.__main__.compose_bot",
+                "claudlobby.commands.core.compose_bot",
                 return_value=fleet_dir / "runtime/bots/lead",
             ),
         ):
@@ -229,7 +225,7 @@ class TestNoPrintInMainCommands:
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
         args = _args(root=str(fleet_dir))
-        with patch("claudlobby.__main__.compose_fleet", return_value={}):
+        with patch("claudlobby.commands.core.compose_fleet", return_value={}):
             cmd_generate(args)
         captured = capsys.readouterr()
         assert captured.out == ""

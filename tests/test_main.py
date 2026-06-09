@@ -7,16 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from claudlobby.__main__ import (
+from claudlobby.__main__ import main
+from claudlobby.commands.core import cmd_generate, cmd_validate
+from claudlobby.commands._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
+from claudlobby.commands.data_migrate import (
     _contains_git_checkouts,
     _dir_size_mb,
     _human_size,
-    _load_env,
-    _load_fleet_or_exit,
-    _resolve_paths,
-    cmd_generate,
-    cmd_validate,
-    main,
 )
 from claudlobby.paths import Paths
 

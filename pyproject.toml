@@ -23,4 +23,4 @@ vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git"]
 claudlobby = "claudlobby.__main__:main"
 
 [tool.setuptools]
-packages = ["claudlobby"]
+packages = ["claudlobby", "claudlobby.commands"]

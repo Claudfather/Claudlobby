@@ -1,12 +1,14 @@
 """Tests for CLI helper functions extracted in issue #26."""
+
 from __future__ import annotations
 
 import pytest
 
-from claudlobby.__main__ import _parse_rename_map
+from claudlobby.commands._helpers import _parse_rename_map
 
 
 # ── _parse_rename_map ─────────────────────────────────────────────────
+
 
 class TestParseRenameMap:
     def test_empty_list(self):
@@ -33,5 +35,3 @@ class TestParseRenameMap:
     def test_mixed_valid_invalid(self):
         with pytest.raises(ValueError, match="--map expects"):
             _parse_rename_map(["good=entry", "bad"])
-
-
