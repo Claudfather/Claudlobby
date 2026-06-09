@@ -15,7 +15,8 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 from . import dotenv
-from .config import BotConfig, FleetConfig
+from .config import FleetConfig
+from .mcp_resolve import required_vars as _mcp_required_vars
 from .paths import Paths
 
 
@@ -61,19 +62,6 @@ class ValidationReport:
 
     def merged_for_strict(self) -> list[str]:
         return self.errors + self.warnings
-
-
-def _bot_required_env_vars(
-    bot: BotConfig, paths: Paths
-) -> list[tuple[str, str, str, str | None]]:
-    """Return [(canonical_var, tier, source, instance)] this bot needs.
-
-    Delegates to :func:`mcp_resolve.required_vars` — the single source of
-    truth for MCP env-var contract resolution.
-    """
-    from .mcp_resolve import required_vars
-
-    return required_vars(bot, paths)
 
 
 # Tool deny vs expertise conflict map — which tools each expertise area
@@ -145,7 +133,7 @@ def _validate_bots(
         # `.mcp.json`), and looks across the full 3-tier env (host →
         # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
         # didn't know about instance scoping or bot-tier .env files.
-        for var, tier, source, instance in _bot_required_env_vars(bot, paths):
+        for var, tier, source, instance in _mcp_required_vars(bot, paths):
             if var in effective_env:
                 continue
             inst_note = f" (instance: {instance})" if instance else ""
