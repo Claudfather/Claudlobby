@@ -304,7 +304,7 @@ class TestCoerceBot:
 
 class TestLoadFleet:
     def test_load_minimal(self, fleet_dir):
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         assert fleet.name == "test-fleet"
         assert len(fleet.bots) == 2
         assert "lead" in fleet.bots
@@ -449,10 +449,29 @@ class TestAutonomousRunnerConfig:
 
 
 class TestObservabilityConfig:
-    def test_defaults(self):
-        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+    # System defaults provide observability values when nothing is configured.
+    # _coerce_bot sees the merged defaults dict (system + fleet).
+
+    _SYSTEM_OBS = {
+        "observability": {
+            "pulse_interval": 300,
+            "reap_days": 7,
+            "activity_stuck_threshold": 1800,
+            "dispatch_deadline": 1800,
+        }
+    }
+
+    def test_defaults_from_system(self):
+        """With system defaults merged into defaults, bot gets the values."""
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, self._SYSTEM_OBS)
         assert bot.observability.pulse_interval == 300
         assert bot.observability.reap_days == 7
+
+    def test_none_when_no_system_defaults(self):
+        """Without system defaults, observability fields are None."""
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+        assert bot.observability.pulse_interval is None
+        assert bot.observability.reap_days is None
 
     def test_from_bot(self):
         raw = {
@@ -484,7 +503,7 @@ class TestObservabilityConfig:
         assert bot.observability.reap_days == 3
 
     def test_bot_explicit_default_value_not_dropped(self):
-        """Bot explicitly sets pulse_interval to 300 (the hardcoded default) —
+        """Bot explicitly sets pulse_interval to 300 (the system default) —
         must not be silently overridden by fleet default of 120."""
         defaults = {"observability": {"pulse_interval": 120}}
         raw = {"expertise": ["eng"], "observability": {"pulse_interval": 300}}

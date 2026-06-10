@@ -82,7 +82,9 @@ def cmd_move_bot(args) -> int:
     if not target_fleet_yaml.is_file():
         log.error("no fleet.yaml in target fleet '%s'", target_fleet_name)
         return 1
-    target_fleet = _load_fleet_or_exit(Paths(root=root, fleet_dir=target_fleet_dir))
+    target_fleet, _md = _load_fleet_or_exit(
+        Paths(root=root, fleet_dir=target_fleet_dir)
+    )
     if bot_name not in target_fleet.bots:
         log.error(
             "bot '%s' not in target fleet.yaml — add the stanza first, then retry",

@@ -213,7 +213,7 @@ def cmd_new_bot(args) -> int:
         from ..composer import compose_bot
         from ..config import load_fleet
 
-        fleet = load_fleet(paths.fleet_yaml)
+        fleet, _md = load_fleet(paths.fleet_yaml)
         bot = fleet.bots.get(inp.name)
         if bot is None:
             log.error("bot '%s' not found in fleet.yaml after insertion", inp.name)

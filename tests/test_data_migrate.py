@@ -83,7 +83,7 @@ class TestDataMigrateTopLevelFiles:
         with (
             patch("claudlobby.commands._helpers._resolve_paths", return_value=paths),
             patch(
-                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=fleet
+                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=(fleet, {})
             ),
         ):
             rc = cmd_data_migrate(args)
@@ -101,7 +101,7 @@ class TestDataMigrateTopLevelFiles:
         with (
             patch("claudlobby.commands._helpers._resolve_paths", return_value=paths),
             patch(
-                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=fleet
+                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=(fleet, {})
             ),
         ):
             rc = cmd_data_migrate(args)
@@ -127,7 +127,7 @@ class TestDataMigrateTopLevelFiles:
         with (
             patch("claudlobby.commands._helpers._resolve_paths", return_value=paths),
             patch(
-                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=fleet
+                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=(fleet, {})
             ),
         ):
             cmd_data_migrate(args)
@@ -148,7 +148,7 @@ class TestDataMigrateTopLevelFiles:
         with (
             patch("claudlobby.commands._helpers._resolve_paths", return_value=paths),
             patch(
-                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=fleet
+                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=(fleet, {})
             ),
         ):
             cmd_data_migrate(args)
@@ -173,7 +173,7 @@ class TestDataMigrateTopLevelFiles:
         with (
             patch("claudlobby.commands._helpers._resolve_paths", return_value=paths),
             patch(
-                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=fleet
+                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=(fleet, {})
             ),
         ):
             cmd_data_migrate(args)
@@ -193,7 +193,7 @@ class TestDataMigrateTopLevelFiles:
         with (
             patch("claudlobby.commands._helpers._resolve_paths", return_value=paths),
             patch(
-                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=fleet
+                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=(fleet, {})
             ),
         ):
             cmd_data_migrate(args)
@@ -214,7 +214,7 @@ class TestDataMigrateTopLevelFiles:
         with (
             patch("claudlobby.commands._helpers._resolve_paths", return_value=paths),
             patch(
-                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=fleet
+                "claudlobby.commands._helpers._load_fleet_or_exit", return_value=(fleet, {})
             ),
         ):
             cmd_data_migrate(args)

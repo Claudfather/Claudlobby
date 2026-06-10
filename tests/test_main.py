@@ -99,9 +99,10 @@ class TestLoadFleetOrExit:
 
     def test_valid_fleet_returns_config(self, fleet_dir):
         paths = Paths(root=fleet_dir, fleet_dir=fleet_dir)
-        config = _load_fleet_or_exit(paths)
+        config, merged_defaults = _load_fleet_or_exit(paths)
         assert config.name == "test-fleet"
         assert "lead" in config.bots
+        assert isinstance(merged_defaults, dict)
 
 
 # ── _contains_git_checkouts ──────────────────────────────────────────

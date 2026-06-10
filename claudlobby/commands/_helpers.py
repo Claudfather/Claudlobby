@@ -47,8 +47,12 @@ def _load_env(paths: Paths) -> None:
             os.environ[k] = v
 
 
-def _load_fleet_or_exit(paths: Paths) -> "FleetConfig":
-    """Wrap load_fleet() with user-friendly error messages on common failures."""
+def _load_fleet_or_exit(paths: Paths) -> tuple["FleetConfig", dict]:
+    """Wrap load_fleet() with user-friendly error messages on common failures.
+
+    Returns ``(FleetConfig, merged_defaults)`` — the merged defaults dict
+    produced by ``_merge_system_into_defaults()``.
+    """
     import yaml
 
     try:
@@ -83,7 +87,7 @@ def _migration_preamble(
     Calls sys.exit(1) on failure — callers can unpack the result directly.
     """
     paths = _resolve_paths(args)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
     source_dir = Path(args.source).expanduser().resolve()
 
     if not source_dir.is_dir():

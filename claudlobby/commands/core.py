@@ -23,7 +23,7 @@ def cmd_doctor(args) -> int:
 
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
     report = run_doctor(fleet, paths)
     print(format_report(report))
     return 1 if report.has_failures else 0
@@ -32,7 +32,7 @@ def cmd_doctor(args) -> int:
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
     report = validate(fleet, paths)
 
     for e in report.errors:
@@ -51,9 +51,11 @@ def cmd_validate(args) -> int:
 
 
 def cmd_generate(args) -> int:
+    from ..composer import compose_fleet_timers
+
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, merged_defaults = _load_fleet_or_exit(paths)
     report = validate(fleet, paths)
 
     if report.has_errors:
@@ -79,6 +81,13 @@ def cmd_generate(args) -> int:
     else:
         out = compose_fleet(fleet, paths)
         log.info("composed %d bots → %s", len(out), paths.runtime_bots)
+
+    # Fleet-level timer generation (after per-bot loop)
+    sd = fleet.system_defaults
+    if sd.enabled and sd.timers:
+        timers_dir = compose_fleet_timers(fleet, paths, merged_defaults)
+        log.info("composed fleet timers → %s", timers_dir)
+
     return 0
 
 
@@ -171,20 +180,26 @@ def cmd_list_library(args) -> int:
 
 
 def cmd_diff(args) -> int:
+    from ..diff import diff_fleet_timers
+
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, merged_defaults = _load_fleet_or_exit(paths)
     if args.bot:
         sys.stdout.write(diff_bot(args.bot, fleet, paths))
     else:
         for name in fleet.bots:
             sys.stdout.write(diff_bot(name, fleet, paths))
+        # Fleet-level timer drift
+        timer_drift = diff_fleet_timers(fleet, paths, merged_defaults)
+        if timer_drift:
+            sys.stdout.write(timer_drift)
     return 0
 
 
 def cmd_promote(args) -> int:
     paths = _resolve_paths(args)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
     sys.stdout.write(promote_bot(args.bot, fleet, paths))
     return 0
 
@@ -200,7 +215,7 @@ def cmd_status(args) -> int:
 
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
 
     bot_filter = getattr(args, "bot", None)
     use_json = getattr(args, "json", False)
@@ -341,7 +356,7 @@ def cmd_warm_cache(args) -> int:
     """
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
 
     # Collect unique npx packages from all bot MCP configs
     npx_packages: set[str] = set()

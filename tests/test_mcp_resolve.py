@@ -168,7 +168,7 @@ class TestRoundTrip:
 
     def test_composer_and_validator_agree(self, tmp_path):
         root, paths = self._make_fleet_dir(tmp_path)
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
         bot = fleet.bots["worker"]
 
         # --- Validator side: canonical var names ---

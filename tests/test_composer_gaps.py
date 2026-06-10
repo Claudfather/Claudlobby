@@ -66,7 +66,7 @@ class TestExpand:
 class TestBotTemplateContext:
     def test_builds_expected_keys(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         ctx = _bot_template_context(bot, fleet, paths)
         assert ctx["BOT_ID"] == "lead"
@@ -78,7 +78,7 @@ class TestBotTemplateContext:
 
     def test_telegram_chat_id_from_fleet(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         ctx = _bot_template_context(bot, fleet, paths)
         assert ctx["TELEGRAM_GROUP_CHAT_ID"] == "-100999"
@@ -115,7 +115,7 @@ class TestExpandItem:
 class TestComposeExpertise:
     def test_single_expertise(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["worker-1"]
         ctx = _bot_template_context(bot, fleet, paths)
         label, body = _compose_expertise(bot, paths, ctx)
@@ -124,7 +124,7 @@ class TestComposeExpertise:
 
     def test_empty_expertise_raises(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         bot_copy = BotConfig(
             bot_id="empty",
@@ -142,7 +142,7 @@ class TestComposeExpertise:
             "# {{BOT_NAME}} — Ops\n\nOperate things.\n"
         )
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = BotConfig(
             bot_id="multi",
             name="multi",
@@ -189,7 +189,7 @@ class TestShq:
 class TestComposeMcpJson:
     def test_basic_mcp_fragment(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         # lead has no mcp config in minimal fleet, add it
         bot_with_mcp = BotConfig(
@@ -206,7 +206,7 @@ class TestComposeMcpJson:
 
     def test_empty_mcp_returns_empty(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = BotConfig(
             bot_id="t",
             name="t",
@@ -263,13 +263,13 @@ class TestComposeMcpJson:
 class TestComposeClaudeMd:
     def test_renders_bot_name(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         md = compose_claude_md(fleet.bots["lead"], fleet, paths)
         assert "lead" in md
 
     def test_includes_expertise(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         md = compose_claude_md(fleet.bots["worker-1"], fleet, paths)
         assert "Build things." in md
 
@@ -280,7 +280,7 @@ class TestComposeClaudeMd:
             "{% for g in guardrails %}### {{ g.title }}\n\n{{ g.body }}\n\n{% endfor %}"
         )
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         md = compose_claude_md(fleet.bots["lead"], fleet, paths)
         assert "Never push to main" in md
 
@@ -290,7 +290,7 @@ class TestComposeClaudeMd:
             "{% for p in protocols %}### {{ p.title }}\n\n{{ p.body }}\n\n{% endfor %}"
         )
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         md = compose_claude_md(fleet.bots["lead"], fleet, paths)
         assert "Report back" in md
 
@@ -301,7 +301,7 @@ class TestComposeClaudeMd:
 class TestComposeLaunchdPlist:
     def test_basic_plist(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         plist = compose_launchd_plist(bot, fleet, paths)
         assert "<?xml" in plist
@@ -310,7 +310,7 @@ class TestComposeLaunchdPlist:
 
     def test_label_uses_service_prefix(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         plist = compose_launchd_plist(fleet.bots["worker-1"], fleet, paths)
         assert "com.test.worker-1" in plist
 
@@ -328,7 +328,7 @@ class TestLinkSkills:
     def test_links_single_skill(self, fleet_dir):
         self._setup_skill(fleet_dir, "simplify")
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = BotConfig(
             bot_id="sk",
             name="sk",
@@ -377,7 +377,7 @@ class TestLinkSkills:
 class TestComposeBot:
     def test_creates_all_expected_files(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         bot_dir = compose_bot(bot, fleet, paths)
         assert bot_dir.is_dir()
@@ -391,7 +391,7 @@ class TestComposeBot:
 
     def test_creates_settings_local_json(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["worker-1"]
         bot_dir = compose_bot(bot, fleet, paths)
         settings_path = bot_dir / ".claude" / "settings.local.json"
@@ -401,7 +401,7 @@ class TestComposeBot:
 
     def test_returns_bot_dir_path(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         bot = fleet.bots["lead"]
         bot_dir = compose_bot(bot, fleet, paths)
         assert bot_dir == paths.bot_runtime("lead")
@@ -413,7 +413,7 @@ class TestComposeBot:
 class TestComposeFleet:
     def test_composes_all_bots(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         result = compose_fleet(fleet, paths)
         assert "lead" in result
         assert "worker-1" in result
@@ -421,7 +421,7 @@ class TestComposeFleet:
 
     def test_returns_dict_of_bot_dirs(self, fleet_dir):
         paths = _make_paths(fleet_dir)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         result = compose_fleet(fleet, paths)
         assert isinstance(result, dict)
         assert len(result) == 2  # lead + worker-1

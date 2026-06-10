@@ -70,7 +70,7 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
     (root / "lib").mkdir()
 
     paths = Paths(root=root, fleet_dir=root)
-    fleet = load_fleet(root / "fleet.yaml")
+    fleet, _md = load_fleet(root / "fleet.yaml")
     return root, fleet, paths
 
 

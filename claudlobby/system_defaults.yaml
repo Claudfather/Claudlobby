@@ -1,0 +1,33 @@
+# System defaults -- platform infrastructure injected into every fleet.
+# These represent HOW claudlobby works, not WHAT a specific fleet does.
+# Fleet.yaml system_defaults: can override or disable.
+
+hooks:
+  PreToolUse:
+    - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+  PostToolUse:
+    - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+
+observability:
+  pulse_interval: 300
+  reap_days: 7
+  activity_stuck_threshold: 1800
+  dispatch_deadline: 1800
+
+fleet_timers:
+  fleet-pulse:
+    script: "$CLAUDLOBBY_ROOT/lib/fleet-pulse.sh"
+    interval_from: observability.pulse_interval
+    type: oneshot
+  keepalive:
+    script: "$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
+    interval: 60
+    type: oneshot
+  log-rotation:
+    script: "$CLAUDLOBBY_ROOT/lib/log-rotate-fleet.sh"
+    interval: 86400
+    type: oneshot
+  creds-check:
+    script: "$CLAUDLOBBY_ROOT/lib/creds-check.sh"
+    schedule: "*-*-* 06:00:00"
+    type: oneshot

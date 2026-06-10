@@ -179,7 +179,37 @@ class TestTmuxEnvCompleteness:
         assert env["ANOTHER"] == "world"
 
     def test_observability_vars_propagate(self, tmp_path):
-        bot_dir, _ = _compose_bot(tmp_path)
+        """Observability vars appear when the bot has observability config set
+        (as happens after system defaults merge)."""
+        from claudlobby.config import ObservabilityConfig
+
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        bot_dir = root / "runtime" / "bots" / "worker"
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot", token_env="TG_TOKEN"),
+            observability=ObservabilityConfig(
+                pulse_interval=300,
+                reap_days=7,
+                activity_stuck_threshold=1800,
+                dispatch_deadline=1800,
+            ),
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        paths = _make_paths(root)
+        conf = compose_bot_conf(bot, fleet, paths)
+        (bot_dir / "bot.conf").write_text(conf)
+
         tmux_env = _build_tmux_env(bot_dir)
         env = _source_env_and_dump(tmux_env)
 
