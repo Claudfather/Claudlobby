@@ -406,6 +406,37 @@ class TestComposeBot:
         bot_dir = compose_bot(bot, fleet, paths)
         assert bot_dir == paths.bot_runtime("lead")
 
+    def test_unit_filename_matches_bot_service(self, fleet_dir):
+        """Unit filename must use service_prefix so fleet-pulse can find it."""
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot_dir = compose_bot(bot, fleet, paths)
+
+        expected_name = f"{fleet.service_prefix}.{bot.bot_id}"
+
+        # .service file uses service_prefix
+        svc = bot_dir / f"{expected_name}.service"
+        assert svc.is_file(), (
+            f"expected {svc.name}, got {[f.name for f in bot_dir.glob('*.service')]}"
+        )
+
+        # .plist file uses service_prefix
+        plist = bot_dir / f"{expected_name}.plist"
+        assert plist.is_file(), (
+            f"expected {plist.name}, got {[f.name for f in bot_dir.glob('*.plist')]}"
+        )
+
+        # BOT_SERVICE in bot.conf matches the unit name
+        conf = (bot_dir / "bot.conf").read_text()
+        for line in conf.splitlines():
+            if line.strip().startswith("BOT_SERVICE="):
+                val = line.split("=", 1)[1].strip().strip("'\"")
+                assert val == expected_name, f"BOT_SERVICE={val!r} != {expected_name!r}"
+                break
+        else:
+            raise AssertionError("BOT_SERVICE not found in bot.conf")
+
 
 # ── compose_fleet ────────────────────────────────────────────────────
 
