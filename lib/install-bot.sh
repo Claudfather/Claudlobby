@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install a composed bot as a launchd LaunchAgent (macOS).
 #
-# claudlobby's compositor already wrote <bot>.plist into the bot's runtime
+# claudlobby's compositor already wrote <prefix>.<bot>.plist into the bot's runtime
 # directory. This script copies that plist into ~/Library/LaunchAgents/ and
 # bootstraps it with launchctl.
 #
