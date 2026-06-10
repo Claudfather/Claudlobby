@@ -12,6 +12,8 @@ from typing import Any
 
 import yaml
 
+from .known_values import KNOWN_EFFORTS, VALID_PERMISSION_MODES, closest_match
+
 log = logging.getLogger(__name__)
 
 
@@ -566,18 +568,16 @@ def _coerce_autonomous_runner(
     )
 
 
-_VALID_PERMISSION_MODES = frozenset(
-    {"default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"}
-)
-
-
-def _parse_permission_mode(value: str | None) -> str | None:
+def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | None:
+    """Validate a string field against a known set. Returns value or raises."""
     if value is None:
         return None
-    if value not in _VALID_PERMISSION_MODES:
+    if value not in known:
+        suggestion = closest_match(value, known)
+        hint = f" Did you mean '{suggestion}'?" if suggestion else ""
         raise ValueError(
-            f"Invalid permission_mode '{value}'. "
-            f"Must be one of: {', '.join(sorted(_VALID_PERMISSION_MODES))}"
+            f"Invalid {label} '{value}'.{hint} "
+            f"Must be one of: {', '.join(sorted(known))}"
         )
     return value
 
@@ -620,11 +620,15 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         ),
         account=raw.get("account", defaults.get("account", "default")),
         model=raw.get("model", defaults.get("model")),
-        effort=raw.get("effort", defaults.get("effort")),
+        effort=_parse_enum(
+            "effort", raw.get("effort", defaults.get("effort")), KNOWN_EFFORTS
+        ),
         remote_control=_bool("remote_control", True),
         dangerously_skip_permissions=_bool("dangerously_skip_permissions", True),
-        permission_mode=_parse_permission_mode(
-            raw.get("permission_mode") or defaults.get("permission_mode")
+        permission_mode=_parse_enum(
+            "permission_mode",
+            raw.get("permission_mode") or defaults.get("permission_mode"),
+            VALID_PERMISSION_MODES,
         ),
         prompt_suggestions=_bool("prompt_suggestions", False),
         channels=_as_list(raw.get("channels") or defaults.get("channels"))

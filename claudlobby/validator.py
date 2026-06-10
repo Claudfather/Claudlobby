@@ -16,35 +16,20 @@ log = logging.getLogger(__name__)
 
 from . import dotenv
 from .config import FleetConfig
+from .known_values import (
+    AUTO_ELIGIBLE_SKILLS,
+    BYPASS_ACTIONS,
+    EXPERTISE_CORE_TOOLS,
+    KNOWN_HOOK_EVENTS,
+    KNOWN_MODELS,
+    OUTCOME_ACTIONS,
+    OUTCOME_KEYS,
+    closest_match,
+)
 from .mcp_resolve import required_vars as _mcp_required_vars
 from .paths import Paths
 
-
-# clauDNA skills known to support --auto. The wrapper's structured-result
-# contract (§10.C) is honored by these skills today; configurators get a
-# soft warning if they wire up a skill not on this list. Update when new
-# --auto skills ship in clauDNA.
-_AUTO_ELIGIBLE_SKILLS = frozenset(
-    {
-        "/claudna:tech-debt",
-        "/claudna:security-audit",
-        "/claudna:product-enhance",
-        "/claudna:frontend-performance-audit",
-        "/claudna:docs-review",
-        "/claudna:access-path-audit",
-        "/claudna:product-vision",
-        "/claudna:session-handoff",
-        "/claudna:visual-crawl",
-        "/claudna:implement-plan",
-    }
-)
-
 _CADENCE_RE = re.compile(r"^\d+[mhd]$")
-_OUTCOME_KEYS = frozenset(
-    {"completed", "bypassed", "needs_input", "blocked", "partial"}
-)
-_OUTCOME_ACTIONS = frozenset({"report", "report_and_pause", "silent"})
-_BYPASS_ACTIONS = frozenset({"comment_and_label", "comment_only", "exit_silent"})
 
 
 @dataclass
@@ -64,15 +49,13 @@ class ValidationReport:
         return self.errors + self.warnings
 
 
-# Tool deny vs expertise conflict map — which tools each expertise area
-# typically requires. Used by _validate_bots to warn about deny conflicts.
-_EXPERTISE_CORE_TOOLS: dict[str, set[str]] = {
-    "software-engineering": {"Write", "Edit"},
-    "frontend-design": {"Write", "Edit"},
-    "data-engineering": {"Write", "Edit"},
-    "pipeline-engineering": {"Write", "Edit"},
-    "orchestration": {"Agent", "Bash"},
-}
+def _available_names(paths: Paths, kind: str, ext: str = ".md") -> set[str]:
+    """Scan library search dirs for available file stems of a given kind."""
+    names: set[str] = set()
+    for d in paths.library_search_dirs(kind):
+        if d.is_dir():
+            names |= {p.stem for p in d.glob(f"*{ext}")}
+    return names
 
 
 def _validate_bots(
@@ -82,6 +65,10 @@ def _validate_bots(
     report: ValidationReport,
 ) -> None:
     """Per-bot validation: expertise, voice, skills, MCP, env vars, integrations, etc."""
+    # Pre-compute available names for suggestion hints (avoids per-bot re-scan)
+    avail_expertise = _available_names(paths, "expertise")
+    avail_mcp = _available_names(paths, "mcp", ext=".json")
+
     for bot_name, bot in fleet.bots.items():
         bot_env = dotenv.read(paths.bot_runtime(bot_name) / ".env")
         effective_env: dict[str, str] = {**os.environ, **fleet_env, **bot_env}
@@ -92,8 +79,10 @@ def _validate_bots(
             )
         for area in bot.expertise:
             if paths.find_library_file("expertise", area, ".md") is None:
+                suggestion = closest_match(area, avail_expertise)
+                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.errors.append(
-                    f"bot '{bot_name}': expertise '{area}' not found in overlay or base library"
+                    f"bot '{bot_name}': expertise '{area}' not found in overlay or base library{hint}"
                 )
 
         # Voice (warn)
@@ -124,8 +113,10 @@ def _validate_bots(
         # entry composes into .mcp.json.
         for mcp in bot.mcp:
             if paths.find_library_file("mcp", mcp.name, ".json") is None:
+                suggestion = closest_match(mcp.name, avail_mcp)
+                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(
-                    f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured"
+                    f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{hint}"
                 )
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
@@ -206,6 +197,40 @@ def _validate_bots(
                     f"bot '{bot_name}': observability.reap_days > 365 is unusually long — got {obs.reap_days}"
                 )
 
+        # Model validation (warn + pass-through)
+        if bot.model and bot.model not in KNOWN_MODELS:
+            suggestion = closest_match(bot.model, KNOWN_MODELS)
+            hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            report.warnings.append(
+                f"bot '{bot_name}': model '{bot.model}' not in known models{hint}. "
+                f"Known: {', '.join(sorted(KNOWN_MODELS))}. "
+                f"Passing through as-is (may be a new model)."
+            )
+
+        # model_strategy.base and escalate_to (warn + suggest)
+        if bot.model_strategy:
+            for field_name, val in [
+                ("base", bot.model_strategy.base),
+                ("escalate_to", bot.model_strategy.escalate_to),
+            ]:
+                if val and val not in KNOWN_MODELS:
+                    suggestion = closest_match(val, KNOWN_MODELS)
+                    hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                    report.warnings.append(
+                        f"bot '{bot_name}': model_strategy.{field_name} '{val}' not in known models{hint}"
+                    )
+
+        # Hook event keys (warn)
+        for event in bot.hooks:
+            if event not in KNOWN_HOOK_EVENTS:
+                suggestion = closest_match(event, KNOWN_HOOK_EVENTS)
+                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                report.warnings.append(
+                    f"bot '{bot_name}': hook event '{event}' not recognized{hint}. "
+                    f"Known events: {', '.join(sorted(KNOWN_HOOK_EVENTS))}. "
+                    f"This hook will be silently ignored by Claude Code."
+                )
+
         # Hook command existence (warn)
         for event, entries in bot.hooks.items():
             for entry in entries:
@@ -242,7 +267,7 @@ def _validate_bots(
         if bot.tools.deny:
             denied = set(bot.tools.deny)
             for area in bot.expertise:
-                core = _EXPERTISE_CORE_TOOLS.get(area, set())
+                core = EXPERTISE_CORE_TOOLS.get(area, set())
                 conflict = denied & core
                 if conflict:
                     report.warnings.append(
@@ -262,7 +287,7 @@ def _validate_bots(
         # checker. One hard error: github_issues picker without a label.
         ar = bot.autonomous_runner
         if ar is not None:
-            if ar.skill not in _AUTO_ELIGIBLE_SKILLS:
+            if ar.skill not in AUTO_ELIGIBLE_SKILLS:
                 report.warnings.append(
                     f"bot '{bot_name}': autonomous_runner.skill '{ar.skill}' is not on the "
                     f"--auto-eligible list — the wrapper will still invoke it, but unknown "
@@ -289,23 +314,23 @@ def _validate_bots(
                     )
 
             if ar.bypass is not None:
-                if ar.bypass.on_bypass not in _BYPASS_ACTIONS:
+                if ar.bypass.on_bypass not in BYPASS_ACTIONS:
                     report.warnings.append(
                         f"bot '{bot_name}': autonomous_runner.bypass.on_bypass "
                         f"'{ar.bypass.on_bypass}' not in known set "
-                        f"({sorted(_BYPASS_ACTIONS)})"
+                        f"({sorted(BYPASS_ACTIONS)})"
                     )
 
             for k, v in ar.on_outcome.items():
-                if k not in _OUTCOME_KEYS:
+                if k not in OUTCOME_KEYS:
                     report.warnings.append(
                         f"bot '{bot_name}': autonomous_runner.on_outcome key '{k}' is not a "
-                        f"known outcome (expected one of {sorted(_OUTCOME_KEYS)})"
+                        f"known outcome (expected one of {sorted(OUTCOME_KEYS)})"
                     )
-                if v not in _OUTCOME_ACTIONS:
+                if v not in OUTCOME_ACTIONS:
                     report.warnings.append(
                         f"bot '{bot_name}': autonomous_runner.on_outcome action '{v}' is not "
-                        f"a known action (expected one of {sorted(_OUTCOME_ACTIONS)})"
+                        f"a known action (expected one of {sorted(OUTCOME_ACTIONS)})"
                     )
 
             for hook in ar.pre_hooks + ar.post_hooks:

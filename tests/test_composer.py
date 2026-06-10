@@ -2355,9 +2355,10 @@ class TestPermissionMode:
         assert "--permission-mode" not in conf
 
     def test_invalid_permission_mode_raises(self):
-        from claudlobby.config import _parse_permission_mode
+        from claudlobby.config import _parse_enum
+        from claudlobby.known_values import VALID_PERMISSION_MODES
 
         import pytest
 
         with pytest.raises(ValueError, match="Invalid permission_mode"):
-            _parse_permission_mode("yolo")
+            _parse_enum("permission_mode", "yolo", VALID_PERMISSION_MODES)
