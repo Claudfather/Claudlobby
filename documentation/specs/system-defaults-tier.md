@@ -1,10 +1,10 @@
 ---
 title: "System Defaults Tier"
 type: plan
-status: draft
+status: revised
 owner: mason
 created: 2026-06-09
-updated: 2026-06-09
+updated: 2026-06-10
 tags: [claudlobby, compositor, system-defaults, observability, infrastructure]
 ---
 
@@ -41,6 +41,8 @@ final BotConfig
 ```
 
 System defaults load from `claudlobby/system_defaults.yaml` (inside the Python package directory). Before `_coerce_bot()` runs, system defaults are pre-merged into the fleet defaults dict. `_coerce_bot()` still sees two layers (merged-defaults, bot-stanza) -- the system tier is folded in before it arrives.
+
+**Single source of truth for observability defaults.** Today `config.py` hardcodes `_OBS_DEFAULT_PULSE_INTERVAL`, `_OBS_DEFAULT_REAP_DAYS`, `_OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD`, and `_OBS_DEFAULT_DISPATCH_DEADLINE` as module-level constants, and `_merge_observability()` falls back to them when both layers are None. This PR removes those constants entirely. Observability defaults live exclusively in `system_defaults.yaml`. After system defaults are pre-merged into the fleet defaults dict, `_merge_observability()` no longer needs a hardcoded fallback tier — the system tier guarantees every field has a value. `_merge_observability()` simplifies to a two-layer merge (override wins when not None, else default) with no third fallback.
 
 ### Data Flow
 
@@ -86,6 +88,10 @@ fleet_timers:
     type: oneshot
   log-rotation:
     script: "$CLAUDLOBBY_ROOT/lib/log-rotate-fleet.sh"
+    interval: 86400
+    type: oneshot
+  creds-check:
+    script: "$CLAUDLOBBY_ROOT/lib/creds-check.sh"
     interval: 86400
     type: oneshot
 ```
@@ -161,7 +167,7 @@ def _merge_hooks_dedup(
 
 This replaces the existing `_merge_hooks()` which concatenates without dedup. The new function handles all three merge points: system-into-defaults, defaults-into-bot, and the existing fleet-default + bot-stanza merge.
 
-**Backwards compatibility:** Existing fleets that declare bot-vitals hooks in fleet.yaml get zero behavioral change -- their hooks win via dedup and no duplicate appears.
+**Backwards compatibility:** Existing fleets that declare bot-vitals hooks in fleet.yaml get zero behavioral change -- their hooks win via dedup and no duplicate appears. The dedup replacement applies to all hook merge points, not just system-defaults injection. Any fleet that previously concatenated identical hooks (same command + matcher across fleet defaults and bot stanza) now deduplicates them — the higher-priority layer's version wins. This is intentional: concatenating identical hooks was always a bug (double-firing), not a feature.
 
 ## Opt-Out
 
@@ -208,7 +214,21 @@ class FleetConfig:
 **Decision Fork F3.** Lean: (a) `generate` emits them.
 **Decision Fork F4.** Lean: (a) `runtime/fleet/` directory.
 
-`compose_fleet()` gains a `compose_fleet_timers()` step that emits systemd service+timer units and launchd plists into `runtime/fleet/`.
+`compose_fleet_timers()` is a new top-level function in `composer.py`. It is called once in `__main__.py`'s `generate` command, after the per-bot `compose_bot()` loop completes. It emits systemd service+timer units and launchd plists into `runtime/fleet/timers/`.
+
+```python
+# In __main__.py generate command, after per-bot loop:
+if fleet.system_defaults.enabled and fleet.system_defaults.timers:
+    compose_fleet_timers(fleet, paths, system_defaults)
+```
+
+`Paths` gains a `runtime_fleet` property:
+
+```python
+@property
+def runtime_fleet(self) -> Path:
+    return self.runtime / "fleet"
+```
 
 ### Generated Artifacts
 
@@ -216,9 +236,9 @@ For each timer in `system_defaults.yaml`'s `fleet_timers`:
 
 | File | Purpose |
 |------|---------|
-| `runtime/fleet/<prefix>.<name>.service` | systemd oneshot service |
-| `runtime/fleet/<prefix>.<name>.timer` | systemd timer unit |
-| `runtime/fleet/<prefix>.<name>.plist` | launchd LaunchAgent |
+| `runtime/fleet/timers/<prefix>.<name>.service` | systemd oneshot service |
+| `runtime/fleet/timers/<prefix>.<name>.timer` | systemd timer unit |
+| `runtime/fleet/timers/<prefix>.<name>.plist` | launchd LaunchAgent |
 
 Example for fleet-pulse with `service_prefix=com.crog.eng`:
 
@@ -254,18 +274,27 @@ Timer intervals are resolved from the final merged config:
 - `interval: 60` -- static value, not resolvable from config.
 
 ```python
-def _resolve_timer_interval(timer_cfg: dict, fleet: FleetConfig) -> int:
-    """Resolve interval from config reference or static value."""
+def _resolve_timer_interval(timer_cfg: dict, merged_defaults: dict) -> int:
+    """Resolve interval from config reference or static value.
+
+    Uses the merged defaults dict (system + fleet defaults, before per-bot
+    coercion) — fleet timers are fleet-level, not bot-level. Reading from
+    an arbitrary bot would produce wrong intervals when bots override
+    observability individually.
+    """
     if "interval_from" in timer_cfg:
-        # Parse "observability.pulse_interval" -> fleet-level merged value
+        # Parse "observability.pulse_interval" -> merged defaults value
         ref = timer_cfg["interval_from"]
         section, _, field = ref.partition(".")
         if section == "observability":
-            # Read from any bot's observability (all share fleet defaults)
-            first_bot = next(iter(fleet.bots.values()))
-            return getattr(first_bot.observability, field)
+            obs = merged_defaults.get("observability", {})
+            val = obs.get(field)
+            if val is not None:
+                return int(val)
     return timer_cfg.get("interval", 300)
 ```
+
+`compose_fleet_timers()` receives the `merged_defaults` dict (the product of `_merge_system_into_defaults()`) so interval resolution operates on fleet-level config, not bot-level overrides.
 
 ### Install Script Changes
 
@@ -273,13 +302,18 @@ Existing `install-fleet-pulse-systemd.sh` and `install-keepalive-systemd.sh` bec
 
 ```bash
 # New pattern: copy generated unit + enable
-cp "$FLEET_DIR/runtime/fleet/$NAME.service" "$HOME/.config/systemd/user/"
-cp "$FLEET_DIR/runtime/fleet/$NAME.timer" "$HOME/.config/systemd/user/"
+TIMER_DIR="$FLEET_DIR/runtime/fleet/timers"
+if [[ ! -d "$TIMER_DIR" ]]; then
+    echo "Error: $TIMER_DIR not found — run 'claudlobby generate' first." >&2
+    exit 1
+fi
+cp "$TIMER_DIR/$NAME.service" "$HOME/.config/systemd/user/"
+cp "$TIMER_DIR/$NAME.timer" "$HOME/.config/systemd/user/"
 systemctl --user daemon-reload
 systemctl --user enable --now "$NAME.timer"
 ```
 
-This keeps a single source of truth (compositor generates, scripts install).
+Install scripts guard against missing `runtime/fleet/timers/` — if it doesn't exist, the user hasn't run `claudlobby generate` yet. This keeps a single source of truth (compositor generates, scripts install).
 
 ## Visibility
 
@@ -290,7 +324,7 @@ Extended to diff fleet-level timer units:
 ```python
 def diff_fleet_timers(fleet: FleetConfig, paths: Paths, system_defaults: dict) -> str:
     """Diff fleet-level timer units against what generate would produce."""
-    fleet_dir = paths.runtime / "fleet"
+    timers_dir = paths.runtime_fleet / "timers"
     # Compare each expected timer unit against actual on disk
     # Return unified diff or "no drift"
 ```
@@ -303,7 +337,7 @@ New checks:
 
 | Check | Status | Detail |
 |-------|--------|--------|
-| `system-defaults-loaded` | pass/warn | "system defaults active: hooks (2), observability (4), timers (3)" |
+| `system-defaults-loaded` | pass/warn | "system defaults active: hooks (2), observability (4), timers (4)" |
 | `fleet-timers-installed` | pass/warn | Checks each timer's systemd/launchd enrollment status |
 | `system-defaults-overrides` | info | "fleet.yaml overrides: observability.reap_days (14 overrides system 7)" |
 | `system-defaults-disabled` | info | "system defaults disabled: hooks, timers" (when user opts out) |
@@ -313,7 +347,7 @@ New checks:
 Informational output appended to validation report:
 
 ```
-[info] system defaults: hooks (2 events), observability (4 fields), timers (3)
+[info] system defaults: hooks (2 events), observability (4 fields), timers (4)
 [info] fleet overrides system defaults: observability.reap_days (14)
 [info] fleet declares hooks also in system defaults: PreToolUse bot-vitals.sh (deduped, fleet version wins)
 ```
@@ -356,7 +390,7 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 
 - **(a) Command-based dedup** -- Deduplicate by `(command, matcher)` tuple. No new config fields. The command string is a natural identity. Two hooks with the same command+matcher do the same thing.
 - **(b) Named hook IDs** -- System hooks get explicit `_id` fields. User overrides by matching `_id`. More explicit but adds schema complexity.
-- **Lean:** (a). Semantically correct without new fields. Override by declaring the same command with different params (timeout, async).
+- **Locked:** (a). Command-based dedup by `(command, matcher)` tuple. Higher-priority layer wins on collision.
 - **Ratifier:** Human
 
 ### F2: Opt-out granularity
@@ -364,21 +398,21 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 - **(a) Single kill switch** -- `system_defaults: false`. All or nothing.
 - **(b) Per-category only** -- `system_defaults: { hooks: false, timers: false }`.
 - **(c) Both** -- Top-level bool for kill-all, per-category for surgical control.
-- **Lean:** (c). Power users want granularity. New users want simplicity. Cheap to implement.
+- **Locked:** (c). Master switch + category overrides via `SystemDefaultsConfig` with 4 booleans.
 - **Ratifier:** Human
 
 ### F3: Timer generation ownership
 
 - **(a) `claudlobby generate` emits them** into `runtime/fleet/`. Install scripts become thin copy+enable wrappers. Single source of truth.
 - **(b) Keep generation in lib/ install scripts.** `doctor` warns if not installed.
-- **Lean:** (a). `generate` already owns all generated artifacts. Consistent model.
+- **Locked:** (a). `generate` emits fleet-level timer units. Install scripts become thin copy+enroll wrappers.
 - **Ratifier:** Human
 
 ### F4: Fleet-level unit location
 
-- **(a) `runtime/fleet/`** -- Alongside `runtime/bots/`. Can hold more than timers later.
+- **(a) `runtime/fleet/`** -- Alongside `runtime/bots/`. Can hold more than timers later. Timer units go in `runtime/fleet/timers/` subdirectory.
 - **(b) `runtime/timers/`** -- More specific name.
-- **Lean:** (a). Natural home for fleet infrastructure that isn't bot-specific.
+- **Locked:** (a). `runtime/fleet/` as the fleet-level output directory, with `timers/` subdirectory for generated units. Structure: `runtime/fleet/timers/<prefix>.<name>.service|timer|plist`. Parallels `runtime/bots/` cleanly and leaves room for future fleet-level artifacts.
 - **Ratifier:** Human
 
 ## Files Changed
@@ -386,16 +420,18 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 | File | Change |
 |------|--------|
 | `claudlobby/system_defaults.yaml` | **New.** Platform infrastructure defaults definition. |
-| `claudlobby/config.py` | Load system defaults, `SystemDefaultsConfig` dataclass, `_merge_system_into_defaults()`, hook dedup in `_merge_hooks_dedup()`. |
-| `claudlobby/composer.py` | `compose_fleet_timers()` for fleet-level units. Called from `compose_fleet()`. |
+| `claudlobby/config.py` | Load system defaults, `SystemDefaultsConfig` dataclass, `_merge_system_into_defaults()`, replace `_merge_hooks()` with `_merge_hooks_dedup()`, remove `_OBS_DEFAULT_*` constants, simplify `_merge_observability()`. |
+| `claudlobby/__main__.py` | Call `compose_fleet_timers()` after per-bot loop in `generate` command. |
+| `claudlobby/composer.py` | `compose_fleet_timers()` for fleet-level units. |
 | `claudlobby/validator.py` | Informational output for system defaults status + override detection. |
 | `claudlobby/paths.py` | `system_defaults_file` and `runtime_fleet` properties. |
 | `claudlobby/diff.py` | `diff_fleet_timers()` for fleet-level unit drift detection. |
 | `claudlobby/doctor.py` | System defaults checks (loaded, timers installed, hooks active). |
 | `fleet.yaml.example` | Remove hooks/observability from defaults, add system_defaults comments. |
 | `documentation/fleet-yaml-schema.md` | Document `system_defaults` field, precedence rules, opt-out. |
-| `lib/install-fleet-pulse-systemd.sh` | Thin wrapper: copy from `runtime/fleet/` + enroll. |
-| `lib/install-keepalive-systemd.sh` | Thin wrapper: copy from `runtime/fleet/` + enroll. |
+| `lib/install-fleet-pulse-systemd.sh` | Thin wrapper: copy from `runtime/fleet/timers/` + enroll. |
+| `lib/install-keepalive-systemd.sh` | Thin wrapper: copy from `runtime/fleet/timers/` + enroll. |
+| `lib/install-creds-check-systemd.sh` | Thin wrapper: copy from `runtime/fleet/timers/` + enroll. |
 | `tests/test_system_defaults.py` | **New.** Unit tests for merge logic, dedup, opt-out, timer generation. |
 | `tests/test_config.py` | Extended: three-layer merge, hook dedup, SystemDefaultsConfig parsing. |
 | `tests/test_composer.py` | Extended: fleet timer generation, opt-out skips timers. |
