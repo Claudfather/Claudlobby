@@ -1164,10 +1164,10 @@ def compose_bot(
             else:
                 access_path.write_text(json.dumps(access, indent=2) + "\n")
 
-    (bot_dir / f"{bot.bot_id}.service").write_text(
+    (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.service").write_text(
         compose_systemd_unit(bot, fleet, paths, boot_delay_s=boot_delay_s)
     )
-    (bot_dir / f"{bot.bot_id}.plist").write_text(
+    (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.plist").write_text(
         compose_launchd_plist(bot, fleet, paths)
     )
 

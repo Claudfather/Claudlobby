@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install a composed bot as a systemd user service (Linux).
 #
-# claudlobby's compositor already wrote <bot>.service into the bot's runtime
+# claudlobby's compositor already wrote <prefix>.<bot>.service into the bot's runtime
 # directory. This script copies that unit file into ~/.config/systemd/user/,
 # runs `systemctl --user daemon-reload`, then enables + starts it.
 #
