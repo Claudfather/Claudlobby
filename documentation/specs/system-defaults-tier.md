@@ -1,7 +1,7 @@
 ---
 title: "System Defaults Tier"
 type: plan
-status: revised
+status: revised-v2
 owner: mason
 created: 2026-06-09
 updated: 2026-06-10
@@ -42,7 +42,37 @@ final BotConfig
 
 System defaults load from `claudlobby/system_defaults.yaml` (inside the Python package directory). Before `_coerce_bot()` runs, system defaults are pre-merged into the fleet defaults dict. `_coerce_bot()` still sees two layers (merged-defaults, bot-stanza) -- the system tier is folded in before it arrives.
 
-**Single source of truth for observability defaults.** Today `config.py` hardcodes `_OBS_DEFAULT_PULSE_INTERVAL`, `_OBS_DEFAULT_REAP_DAYS`, `_OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD`, and `_OBS_DEFAULT_DISPATCH_DEADLINE` as module-level constants, and `_merge_observability()` falls back to them when both layers are None. This PR removes those constants entirely. Observability defaults live exclusively in `system_defaults.yaml`. After system defaults are pre-merged into the fleet defaults dict, `_merge_observability()` no longer needs a hardcoded fallback tier — the system tier guarantees every field has a value. `_merge_observability()` simplifies to a two-layer merge (override wins when not None, else default) with no third fallback.
+**Single source of truth for observability defaults.** Today observability defaults are dual-sourced:
+
+1. `config.py` hardcodes `_OBS_DEFAULT_PULSE_INTERVAL`, `_OBS_DEFAULT_REAP_DAYS`, `_OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD`, and `_OBS_DEFAULT_DISPATCH_DEADLINE` as module-level constants. `_merge_observability()` falls back to them when both layers are None.
+2. `composer.py` (lines 376-406) imports these same constants and uses them as fallbacks in `compose_bot_conf()` when `bot.observability` fields are None.
+
+This PR removes the constants from `config.py` and the imports + None-fallback pattern from `composer.py`. Observability defaults live exclusively in `system_defaults.yaml`. After system defaults are pre-merged into the fleet defaults dict, `_merge_observability()` simplifies to a two-layer merge (override wins when not None, else default) with no third fallback. And `compose_bot_conf()` reads directly from `bot.observability` fields — they are guaranteed non-None after the system tier merge.
+
+```python
+# composer.py — before (lines 376-406):
+from .config import (_OBS_DEFAULT_PULSE_INTERVAL, ...)
+obs = bot.observability
+pi = obs.pulse_interval if obs.pulse_interval is not None else _OBS_DEFAULT_PULSE_INTERVAL
+# ... same pattern for all 4 fields
+
+# composer.py — after:
+obs = bot.observability
+lines.append(f"export OBSERVABILITY_PULSE_INTERVAL={_shq(obs.pulse_interval)}")
+lines.append(f"export OBSERVABILITY_REAP_DAYS={_shq(obs.reap_days)}")
+lines.append(f"export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD={_shq(obs.activity_stuck_threshold)}")
+lines.append(f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(obs.dispatch_deadline)}")
+```
+
+**Opt-out edge case:** When `system_defaults: { observability: false }`, no system observability values are injected. If the fleet also omits observability in its defaults, `bot.observability` fields will be None. `compose_bot_conf()` must handle this — skip the observability section entirely when all fields are None:
+
+```python
+if any(v is not None for v in [obs.pulse_interval, obs.reap_days,
+                                obs.activity_stuck_threshold, obs.dispatch_deadline]):
+    lines.append("")
+    lines.append("# Observability")
+    # ... emit only non-None fields
+```
 
 ### Data Flow
 
@@ -92,11 +122,15 @@ fleet_timers:
     type: oneshot
   creds-check:
     script: "$CLAUDLOBBY_ROOT/lib/creds-check.sh"
-    interval: 86400
+    schedule: "*-*-* 06:00:00"
     type: oneshot
 ```
 
-`fleet_timers` defines fleet-level systemd/launchd timers. `interval_from` references a field from the final merged observability config (so fleet.yaml overrides to `pulse_interval: 600` propagate to the timer). `interval` is a static value in seconds.
+`fleet_timers` defines fleet-level systemd/launchd timers. Three scheduling modes:
+
+- `interval_from` — references a field from the final merged config (so fleet.yaml overrides to `pulse_interval: 600` propagate to the timer).
+- `interval` — static value in seconds, emits `OnBootSec` + `OnUnitActiveSec`.
+- `schedule` — systemd `OnCalendar` expression for daily-at-time scheduling (e.g., `*-*-* 06:00:00`). For launchd, converted to `StartCalendarInterval`.
 
 ## Merge Logic
 
@@ -144,19 +178,30 @@ def _merge_hooks_dedup(
     base: dict[str, list[dict]],
     override: dict[str, list[dict]],
 ) -> dict[str, list[dict]]:
-    """Merge hooks, deduplicating by (command, matcher). Override wins."""
+    """Merge hooks, deduplicating by (command, matcher). Override wins on collision.
+
+    Preserves current base-first ordering: base entries appear first,
+    override entries appended after. When a collision occurs (same
+    command+matcher in both layers), the override version replaces the
+    base version in-place.
+    """
     merged = {}
     for event in sorted(set(base) | set(override)):
+        override_map: dict[tuple[str, str], dict] = {}
+        for e in override.get(event, []):
+            override_map[_hook_key(e)] = e
+
         seen: set[tuple[str, str]] = set()
         entries: list[dict] = []
-        # Override entries first (they win on collisions)
-        for e in override.get(event, []):
+        # Base entries first (preserves existing order). If override
+        # declares the same command+matcher, use the override version.
+        for e in base.get(event, []):
             key = _hook_key(e)
             if key not in seen:
                 seen.add(key)
-                entries.append(e)
-        # Base entries (skipped if override already declared same command+matcher)
-        for e in base.get(event, []):
+                entries.append(override_map.get(key, e))
+        # Override-only entries appended after base
+        for e in override.get(event, []):
             key = _hook_key(e)
             if key not in seen:
                 seen.add(key)
@@ -167,7 +212,7 @@ def _merge_hooks_dedup(
 
 This replaces the existing `_merge_hooks()` which concatenates without dedup. The new function handles all three merge points: system-into-defaults, defaults-into-bot, and the existing fleet-default + bot-stanza merge.
 
-**Backwards compatibility:** Existing fleets that declare bot-vitals hooks in fleet.yaml get zero behavioral change -- their hooks win via dedup and no duplicate appears. The dedup replacement applies to all hook merge points, not just system-defaults injection. Any fleet that previously concatenated identical hooks (same command + matcher across fleet defaults and bot stanza) now deduplicates them — the higher-priority layer's version wins. This is intentional: concatenating identical hooks was always a bug (double-firing), not a feature.
+**Backwards compatibility:** Existing fleets that declare bot-vitals hooks in fleet.yaml get zero behavioral change -- their hooks win via dedup and no duplicate appears. The dedup replacement applies to all hook merge points, not just system-defaults injection. Any fleet that previously concatenated identical hooks (same command + matcher across fleet defaults and bot stanza) now deduplicates them — the higher-priority layer's version wins. This is intentional: concatenating identical hooks was always a bug (double-firing), not a feature. Hook ordering is preserved: base (lower-priority) entries appear first, override entries appended after — matching the current `_merge_hooks()` behavior.
 
 ## Opt-Out
 
@@ -200,6 +245,30 @@ class SystemDefaultsConfig:
 
 `system_defaults: false` sets `enabled=False`, which skips all system default injection. Per-category bools disable individual categories. When `enabled=False`, all categories are off regardless of their individual values.
 
+### Wiring per-category opt-out
+
+`_merge_system_into_defaults` receives the full `system_defaults.yaml` dict regardless of opt-out settings. The filtering happens before the merge call — `load_fleet()` builds an `effective_system` dict gated by the `SystemDefaultsConfig` booleans:
+
+```python
+# In load_fleet(), after parsing system_defaults_cfg:
+raw_system = yaml.safe_load((pkg_dir / "system_defaults.yaml").read_text()) or {}
+
+if not system_defaults_cfg.enabled:
+    effective_system = {}
+else:
+    effective_system = {}
+    if system_defaults_cfg.hooks:
+        effective_system["hooks"] = raw_system.get("hooks", {})
+    if system_defaults_cfg.observability:
+        effective_system["observability"] = raw_system.get("observability", {})
+    # fleet_timers are not merged into defaults — they're consumed
+    # directly by compose_fleet_timers(), gated there by system_defaults_cfg.timers
+
+merged_defaults = _merge_system_into_defaults(effective_system, defaults)
+```
+
+This keeps `_merge_system_into_defaults` simple (it merges whatever it receives) and puts the opt-out gate in one place.
+
 Added to `FleetConfig`:
 
 ```python
@@ -216,11 +285,30 @@ class FleetConfig:
 
 `compose_fleet_timers()` is a new top-level function in `composer.py`. It is called once in `__main__.py`'s `generate` command, after the per-bot `compose_bot()` loop completes. It emits systemd service+timer units and launchd plists into `runtime/fleet/timers/`.
 
+`load_fleet()` returns a `(FleetConfig, dict)` tuple — the fleet config and the `merged_defaults` dict produced by `_merge_system_into_defaults()`. Callers that don't need `merged_defaults` can ignore the second element. `_load_fleet_or_exit()` in `commands/_helpers.py` is updated to return the same tuple.
+
 ```python
-# In __main__.py generate command, after per-bot loop:
+# config.py
+def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
+    # ... existing parsing ...
+    merged_defaults = _merge_system_into_defaults(effective_system, defaults)
+    bots = {name: _coerce_bot(name, raw, merged_defaults) for name, raw in ...}
+    return FleetConfig(...), merged_defaults
+
+# commands/_helpers.py
+def _load_fleet_or_exit(paths: Paths) -> tuple[FleetConfig, dict]:
+    fleet, merged_defaults = load_fleet(paths.fleet_yaml)
+    return fleet, merged_defaults
+
+# commands/core.py — cmd_generate
+fleet, merged_defaults = _load_fleet_or_exit(paths)
+# ... validation, per-bot compose_bot loop ...
+out = compose_fleet(fleet, paths)
 if fleet.system_defaults.enabled and fleet.system_defaults.timers:
-    compose_fleet_timers(fleet, paths, system_defaults)
+    compose_fleet_timers(fleet, paths, merged_defaults)
 ```
+
+`compose_fleet_timers` receives `merged_defaults` for `interval_from` resolution. The `raw_system` dict for `fleet_timers` entries is loaded directly from `system_defaults.yaml` inside `compose_fleet_timers` — timer definitions are not part of the defaults merge (they're fleet-level artifacts, not bot-level config).
 
 `Paths` gains a `runtime_fleet` property:
 
@@ -274,25 +362,33 @@ Timer intervals are resolved from the final merged config:
 - `interval: 60` -- static value, not resolvable from config.
 
 ```python
-def _resolve_timer_interval(timer_cfg: dict, merged_defaults: dict) -> int:
-    """Resolve interval from config reference or static value.
+def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
+    """Resolve timer scheduling from config.
+
+    Returns a dict describing the schedule type:
+      {"type": "interval", "seconds": 300}
+      {"type": "calendar", "expression": "*-*-* 06:00:00"}
 
     Uses the merged defaults dict (system + fleet defaults, before per-bot
-    coercion) — fleet timers are fleet-level, not bot-level. Reading from
-    an arbitrary bot would produce wrong intervals when bots override
-    observability individually.
+    coercion) — fleet timers are fleet-level, not bot-level.
     """
+    if "schedule" in timer_cfg:
+        return {"type": "calendar", "expression": timer_cfg["schedule"]}
     if "interval_from" in timer_cfg:
-        # Parse "observability.pulse_interval" -> merged defaults value
         ref = timer_cfg["interval_from"]
         section, _, field = ref.partition(".")
         if section == "observability":
             obs = merged_defaults.get("observability", {})
             val = obs.get(field)
             if val is not None:
-                return int(val)
-    return timer_cfg.get("interval", 300)
+                return {"type": "interval", "seconds": int(val)}
+    return {"type": "interval", "seconds": timer_cfg.get("interval", 300)}
 ```
+
+Timer unit generation uses the schedule type to pick the right systemd directive:
+
+- `interval` → `OnBootSec` + `OnUnitActiveSec` (periodic)
+- `calendar` → `OnCalendar` (daily-at-time, e.g., `*-*-* 06:00:00`)
 
 `compose_fleet_timers()` receives the `merged_defaults` dict (the product of `_merge_system_into_defaults()`) so interval resolution operates on fleet-level config, not bot-level overrides.
 
@@ -421,8 +517,9 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 |------|--------|
 | `claudlobby/system_defaults.yaml` | **New.** Platform infrastructure defaults definition. |
 | `claudlobby/config.py` | Load system defaults, `SystemDefaultsConfig` dataclass, `_merge_system_into_defaults()`, replace `_merge_hooks()` with `_merge_hooks_dedup()`, remove `_OBS_DEFAULT_*` constants, simplify `_merge_observability()`. |
-| `claudlobby/__main__.py` | Call `compose_fleet_timers()` after per-bot loop in `generate` command. |
-| `claudlobby/composer.py` | `compose_fleet_timers()` for fleet-level units. |
+| `claudlobby/commands/core.py` | `cmd_generate` unpacks `(fleet, merged_defaults)` tuple, calls `compose_fleet_timers()` after per-bot loop. |
+| `claudlobby/commands/_helpers.py` | `_load_fleet_or_exit()` returns `(FleetConfig, dict)` tuple. |
+| `claudlobby/composer.py` | `compose_fleet_timers()` for fleet-level units. Remove `_OBS_DEFAULT_*` imports and None-fallback pattern in `compose_bot_conf()`. |
 | `claudlobby/validator.py` | Informational output for system defaults status + override detection. |
 | `claudlobby/paths.py` | `system_defaults_file` and `runtime_fleet` properties. |
 | `claudlobby/diff.py` | `diff_fleet_timers()` for fleet-level unit drift detection. |
