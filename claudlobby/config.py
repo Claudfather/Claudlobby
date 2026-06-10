@@ -59,10 +59,18 @@ class ToolsConfig:
     allow: list[str] = field(default_factory=list)
 
 
-_OBS_DEFAULT_PULSE_INTERVAL = 300
-_OBS_DEFAULT_REAP_DAYS = 7
-_OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD = 1800
-_OBS_DEFAULT_DISPATCH_DEADLINE = 1800
+@dataclass
+class SystemDefaultsConfig:
+    """Controls which system defaults are injected.
+
+    ``system_defaults: false`` in fleet.yaml sets ``enabled=False``,
+    disabling all injection.  Per-category bools allow surgical opt-out.
+    """
+
+    enabled: bool = True
+    hooks: bool = True
+    timers: bool = True
+    observability: bool = True
 
 
 @dataclass
@@ -251,6 +259,7 @@ class FleetConfig:
     human_telegram_id: str | None = None
     accounts: dict[str, str] = field(default_factory=lambda: {"default": "~/.claude"})
     plugins: PluginsConfig = field(default_factory=PluginsConfig)
+    system_defaults: SystemDefaultsConfig = field(default_factory=SystemDefaultsConfig)
     defaults: dict[str, Any] = field(default_factory=dict)
     teams: dict[str, TeamConfig] = field(default_factory=dict)
     bots: dict[str, BotConfig] = field(default_factory=dict)
@@ -464,36 +473,20 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
 def _merge_observability(
     default: ObservabilityConfig, override: ObservabilityConfig
 ) -> ObservabilityConfig:
-    """Merge observability — override wins when not None, then default, then hardcoded fallback."""
+    """Merge observability — override wins when not None, else default."""
     return ObservabilityConfig(
         pulse_interval=override.pulse_interval
         if override.pulse_interval is not None
-        else (
-            default.pulse_interval
-            if default.pulse_interval is not None
-            else _OBS_DEFAULT_PULSE_INTERVAL
-        ),
+        else default.pulse_interval,
         reap_days=override.reap_days
         if override.reap_days is not None
-        else (
-            default.reap_days
-            if default.reap_days is not None
-            else _OBS_DEFAULT_REAP_DAYS
-        ),
+        else default.reap_days,
         activity_stuck_threshold=override.activity_stuck_threshold
         if override.activity_stuck_threshold is not None
-        else (
-            default.activity_stuck_threshold
-            if default.activity_stuck_threshold is not None
-            else _OBS_DEFAULT_ACTIVITY_STUCK_THRESHOLD
-        ),
+        else default.activity_stuck_threshold,
         dispatch_deadline=override.dispatch_deadline
         if override.dispatch_deadline is not None
-        else (
-            default.dispatch_deadline
-            if default.dispatch_deadline is not None
-            else _OBS_DEFAULT_DISPATCH_DEADLINE
-        ),
+        else default.dispatch_deadline,
     )
 
 
@@ -509,15 +502,41 @@ def _coerce_hooks(raw: dict | None) -> dict[str, list[dict[str, Any]]]:
     return out
 
 
-def _merge_hooks(
-    default: dict[str, list[dict[str, Any]]],
+def _hook_key(entry: dict) -> tuple[str, str]:
+    """Identity key for hook deduplication."""
+    return (entry.get("command", ""), entry.get("matcher", ""))
+
+
+def _merge_hooks_dedup(
+    base: dict[str, list[dict[str, Any]]],
     override: dict[str, list[dict[str, Any]]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Merge hooks — default entries first, bot entries appended per event."""
+    """Merge hooks, deduplicating by (command, matcher). Override wins on collision.
+
+    Preserves base-first ordering: base entries appear first,
+    override entries appended after. When a collision occurs (same
+    command+matcher in both layers), the override version replaces the
+    base version in-place.
+    """
     merged: dict[str, list[dict[str, Any]]] = {}
-    all_events = set(default) | set(override)
-    for event in sorted(all_events):
-        merged[event] = list(default.get(event, [])) + list(override.get(event, []))
+    for event in sorted(set(base) | set(override)):
+        override_map: dict[tuple[str, str], dict] = {}
+        for e in override.get(event, []):
+            override_map[_hook_key(e)] = e
+
+        seen: set[tuple[str, str]] = set()
+        entries: list[dict] = []
+        for e in base.get(event, []):
+            key = _hook_key(e)
+            if key not in seen:
+                seen.add(key)
+                entries.append(override_map.get(key, e))
+        for e in override.get(event, []):
+            key = _hook_key(e)
+            if key not in seen:
+                seen.add(key)
+                entries.append(e)
+        merged[event] = entries
     return merged
 
 
@@ -658,7 +677,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             _coerce_tools(defaults.get("tools")),
             _coerce_tools(raw.get("tools")),
         ),
-        hooks=_merge_hooks(
+        hooks=_merge_hooks_dedup(
             _coerce_hooks(defaults.get("hooks")),
             _coerce_hooks(raw.get("hooks")),
         ),
@@ -685,7 +704,61 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     )
 
 
-def load_fleet(fleet_yaml: Path) -> FleetConfig:
+def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
+    """Parse the ``fleet.system_defaults`` field.
+
+    Accepts ``false`` (kill switch), ``true`` (all on), or a mapping
+    with per-category booleans.
+    """
+    if raw is None or raw is True:
+        return SystemDefaultsConfig()
+    if raw is False:
+        return SystemDefaultsConfig(enabled=False)
+    if isinstance(raw, dict):
+        return SystemDefaultsConfig(
+            enabled=bool(raw.get("enabled", True)),
+            hooks=bool(raw.get("hooks", True)),
+            timers=bool(raw.get("timers", True)),
+            observability=bool(raw.get("observability", True)),
+        )
+    return SystemDefaultsConfig()
+
+
+def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
+    """Load system_defaults.yaml from the package directory (cached)."""
+    if "data" not in _cache:
+        pkg_dir = Path(__file__).parent
+        path = pkg_dir / "system_defaults.yaml"
+        if not path.is_file():
+            _cache["data"] = {}
+        else:
+            with path.open() as f:
+                _cache["data"] = yaml.safe_load(f) or {}
+    return _cache["data"]
+
+
+def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
+    """Merge system defaults under fleet defaults. Fleet defaults win."""
+    merged = {}
+    all_keys = set(system) | set(defaults)
+
+    for key in all_keys:
+        sys_val = system.get(key)
+        usr_val = defaults.get(key)
+
+        if key == "hooks":
+            merged[key] = _merge_hooks_dedup(sys_val or {}, usr_val or {})
+        elif key == "observability":
+            merged[key] = {**(sys_val or {}), **(usr_val or {})}
+        elif usr_val is not None:
+            merged[key] = usr_val
+        else:
+            merged[key] = sys_val
+
+    return merged
+
+
+def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
     if not fleet_yaml.is_file():
         raise FileNotFoundError(f"fleet.yaml not found at {fleet_yaml}")
 
@@ -710,12 +783,28 @@ def load_fleet(fleet_yaml: Path) -> FleetConfig:
 
     defaults = fleet.get("defaults", {}) or {}
 
+    # System defaults tier
+    system_defaults_cfg = _coerce_system_defaults(fleet.get("system_defaults"))
+    raw_system = _load_system_defaults()
+
+    if not system_defaults_cfg.enabled:
+        effective_system: dict = {}
+    else:
+        effective_system = {}
+        if system_defaults_cfg.hooks:
+            effective_system["hooks"] = raw_system.get("hooks", {})
+        if system_defaults_cfg.observability:
+            effective_system["observability"] = raw_system.get("observability", {})
+        # fleet_timers are not merged into defaults — consumed by compose_fleet_timers()
+
+    merged_defaults = _merge_system_into_defaults(effective_system, defaults)
+
     bots = {
-        bot_name: _coerce_bot(bot_name, bot_def, defaults)
+        bot_name: _coerce_bot(bot_name, bot_def, merged_defaults)
         for bot_name, bot_def in (fleet.get("bots", {}) or {}).items()
     }
 
-    return FleetConfig(
+    fleet_cfg = FleetConfig(
         name=fleet.get("name", "unnamed-fleet"),
         service_prefix=fleet.get("service_prefix", "claudlobby"),
         telegram_group_chat_id=fleet.get("telegram_group_chat_id"),
@@ -723,7 +812,9 @@ def load_fleet(fleet_yaml: Path) -> FleetConfig:
         accounts=fleet.get("accounts", {"default": "~/.claude"})
         or {"default": "~/.claude"},
         plugins=_coerce_plugins(fleet.get("plugins")),
-        defaults=defaults,
+        system_defaults=system_defaults_cfg,
+        defaults=merged_defaults,
         teams=teams,
         bots=bots,
     )
+    return fleet_cfg, merged_defaults

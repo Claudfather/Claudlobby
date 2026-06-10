@@ -67,7 +67,7 @@ class TestScaffoldEnvFilePermissions:
     def test_fleet_env_has_0o600(self, tmp_path):
         """Fleet .env created by scaffold_env_files has mode 0o600."""
         root, paths = self._setup_fleet(tmp_path)
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
 
         scaffold_env_files(fleet, paths, log=lambda m: None)
 
@@ -111,7 +111,7 @@ class TestScaffoldEnvFilePermissions:
         """)
         )
 
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
         scaffold_env_files(fleet, paths, log=lambda m: None)
 
         bot_env = root / "runtime" / "bots" / "worker" / ".env"
@@ -122,7 +122,7 @@ class TestScaffoldEnvFilePermissions:
     def test_existing_env_gets_tightened_on_rewrite(self, tmp_path):
         """A pre-existing world-readable .env gets chmod'd to 0o600 on re-scaffold."""
         root, paths = self._setup_fleet(tmp_path)
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
 
         # Create a world-readable .env (simulating legacy state)
         env_path = root / ".env"

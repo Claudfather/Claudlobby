@@ -19,7 +19,7 @@ class TestValidate:
         monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert not report.has_errors
@@ -30,7 +30,7 @@ class TestValidate:
         yaml_text = yaml_text.replace("orchestration", "nonexistent-role")
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert report.has_errors
@@ -50,14 +50,14 @@ class TestValidate:
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("GITHUB_PAT" in w for w in report.warnings)
 
     def test_missing_telegram_token_is_warning(self, fleet_dir, monkeypatch):
         monkeypatch.delenv("TELEGRAM_TOKEN_LEAD", raising=False)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("TELEGRAM_TOKEN_LEAD" in w for w in report.warnings)
@@ -75,7 +75,7 @@ class TestValidate:
         int_file = fleet_dir / "library" / "integrations" / "github.md"
         int_file.chmod(0o000)
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         # Must not crash — OSError is caught
         report = validate(fleet, paths)
@@ -89,7 +89,7 @@ class TestValidate:
 
     def test_empty_bots_is_error(self, fleet_dir):
         (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: empty\n  bots: {}\n")
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert report.has_errors
@@ -104,7 +104,7 @@ class TestValidate:
             "expertise: [software-engineering]\n      reports_to: nonexistent-bot",
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any(
@@ -120,7 +120,7 @@ class TestValidate:
             "expertise: [orchestration]\n      manages: [worker-1, ghost-bot]",
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("manages" in w and "ghost-bot" in w for w in report.warnings)
@@ -135,7 +135,7 @@ class TestValidate:
             "expertise: [software-engineering]\n      tools:\n        deny: [Write, Edit]",
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any(
@@ -156,7 +156,7 @@ class TestValidate:
             "expertise: [code-review]\n      tools:\n        deny: [Write, Edit]",
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         # code-review has no core tools that conflict with Write/Edit deny
@@ -170,7 +170,7 @@ class TestValidate:
             "expertise: [software-engineering]\n      tools:\n        deny: [Write]\n        allow: [Write, Read]",
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("both allow and deny" in w for w in report.warnings)
@@ -187,7 +187,7 @@ class TestBenchValidation:
     def test_multi_bot_no_bench_warns(self, fleet_dir, monkeypatch):
         """Multiple bots with no bench: true → warning."""
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert any("bench: true" in w for w in report.warnings)
@@ -195,7 +195,7 @@ class TestBenchValidation:
     def test_multi_bot_with_bench_no_warn(self, fleet_dir, monkeypatch):
         """Multiple bots with one bench: true → no warning."""
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].bench = True
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -216,7 +216,7 @@ class TestBenchValidation:
                   expertise: [orchestration]
         """)
         )
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert not any("bench: true" in w for w in report.warnings)
@@ -249,7 +249,7 @@ class TestPluginValidation:
         self._fake_installed(
             tmp_path, monkeypatch, {"claudna@Claudfather": {"version": "0.2.0"}}
         )
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         # Default plugins present but installed → no warnings about missing
@@ -267,7 +267,7 @@ class TestPluginValidation:
         monkeypatch.setenv("HOME", str(fake_home))
         from claudlobby.config import PluginsConfig
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.plugins = PluginsConfig(required=[], include_defaults=False)
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -282,7 +282,7 @@ class TestPluginValidation:
         monkeypatch.setenv("HOME", str(fake_home))
         from claudlobby.config import PluginsConfig
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.plugins = PluginsConfig(required=["claudna@Claudfather"])
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -296,7 +296,7 @@ class TestPluginValidation:
         )
         from claudlobby.config import PluginsConfig
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.plugins = PluginsConfig(
             required=["claudna@Claudfather", "telegram@claude-plugins-official"]
         )
@@ -318,7 +318,7 @@ class TestPluginValidation:
         )
         from claudlobby.config import PluginsConfig
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.plugins = PluginsConfig(required=["claudna@Claudfather"])
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -332,7 +332,7 @@ class TestPluginValidation:
         self._fake_installed(tmp_path, monkeypatch, {})
         from claudlobby.config import PluginsConfig
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.plugins = PluginsConfig(required=["bad-no-at-sign"])
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -346,7 +346,7 @@ class TestPluginValidation:
         self._fake_installed(tmp_path, monkeypatch, {})
         from claudlobby.config import PluginsConfig
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.plugins = PluginsConfig(
             required=[],
             marketplaces={
@@ -368,7 +368,7 @@ class TestObservabilityValidation:
 
     def test_default_observability_no_warnings(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].bench = True
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -376,7 +376,7 @@ class TestObservabilityValidation:
 
     def test_pulse_interval_zero_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].observability.pulse_interval = 0
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -386,7 +386,7 @@ class TestObservabilityValidation:
 
     def test_pulse_interval_over_3600_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["worker-1"].observability.pulse_interval = 7200
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -396,7 +396,7 @@ class TestObservabilityValidation:
 
     def test_reap_days_zero_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].observability.reap_days = 0
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -406,7 +406,7 @@ class TestObservabilityValidation:
 
     def test_reap_days_over_365_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["worker-1"].observability.reap_days = 500
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -423,7 +423,7 @@ class TestHookCommandValidation:
 
     def test_absolute_missing_command_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].hooks = {
             "PreToolUse": [{"command": "/nonexistent/path/hook.sh"}],
         }
@@ -436,7 +436,7 @@ class TestHookCommandValidation:
     def test_relative_command_not_checked(self, fleet_dir, monkeypatch):
         """Relative commands (like 'log.sh') are not validated — may be on PATH."""
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].hooks = {
             "PostToolUse": [{"command": "log.sh", "matcher": "Bash"}],
         }
@@ -446,7 +446,7 @@ class TestHookCommandValidation:
 
     def test_existing_absolute_command_no_warn(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         # /bin/true exists on all Unix systems
         fleet.bots["lead"].hooks = {
             "PreToolUse": [{"command": "/bin/true"}],
@@ -458,7 +458,7 @@ class TestHookCommandValidation:
     def test_prompt_type_hooks_skip_command_check(self, fleet_dir, monkeypatch):
         """Hooks with type: prompt don't have file-based commands."""
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].hooks = {
             "PreToolUse": [{"type": "prompt", "prompt": "Is this safe?"}],
         }
@@ -488,7 +488,7 @@ class TestCrossFleetCollisions:
         other_bots.mkdir(parents=True)
         (other_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
         report = validate(fleet, paths)
         assert any(
@@ -508,7 +508,7 @@ class TestCrossFleetCollisions:
         other_bots.mkdir(parents=True)
         (other_bots / "bot.conf").write_text("BOT_NAME=unique-bot\n")
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
@@ -521,7 +521,7 @@ class TestCrossFleetCollisions:
         own_bots.mkdir(parents=True)
         (own_bots / "bot.conf").write_text("BOT_NAME=lead\n")
 
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
@@ -529,7 +529,7 @@ class TestCrossFleetCollisions:
     def test_no_local_dir_no_crash(self, fleet_dir, monkeypatch):
         """No local/ directory at all — should not crash."""
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = Paths(root=fleet_dir, fleet_dir=None)
         report = validate(fleet, paths)
         assert not any("collide" in w for w in report.warnings)
@@ -564,7 +564,7 @@ class TestAutonomousRunnerValidation:
 
     def test_known_skill_no_warning(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet)
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -574,7 +574,7 @@ class TestAutonomousRunnerValidation:
 
     def test_unknown_skill_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet, skill="/claudna:nonexistent")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -585,7 +585,7 @@ class TestAutonomousRunnerValidation:
 
     def test_bad_cadence_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet, cadence="banana")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -593,7 +593,7 @@ class TestAutonomousRunnerValidation:
 
     def test_bad_target_repo_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet, target_repo="just-a-name")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -601,7 +601,7 @@ class TestAutonomousRunnerValidation:
 
     def test_github_issues_picker_without_label_is_error(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet, picker={"type": "github_issues", "label": None})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -609,7 +609,7 @@ class TestAutonomousRunnerValidation:
 
     def test_unknown_on_bypass_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet, bypass={"on_bypass": "explode"})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -617,7 +617,7 @@ class TestAutonomousRunnerValidation:
 
     def test_unknown_on_outcome_key_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet, on_outcome={"banana": "report"})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -625,7 +625,7 @@ class TestAutonomousRunnerValidation:
 
     def test_unknown_on_outcome_action_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet, on_outcome={"completed": "explode"})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -633,7 +633,7 @@ class TestAutonomousRunnerValidation:
 
     def test_non_claudna_hook_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet, pre_hooks=["random-skill"])
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -645,7 +645,7 @@ class TestAutonomousRunnerValidation:
     def test_no_autonomous_runner_no_warnings(self, fleet_dir, monkeypatch):
         """A bot without autonomous_runner produces no autonomous_runner warnings."""
         self._env_patch(monkeypatch)
-        fleet = load_fleet(fleet_dir / "fleet.yaml")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert not any("autonomous_runner" in w for w in report.warnings)

@@ -24,32 +24,32 @@ SEED_FLEET_YAML = REPO_ROOT / "fleet.yaml.seed"
 class TestSeedFleetConfig:
     def test_seed_fleet_loads(self):
         """fleet.yaml.seed parses without error."""
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         assert fleet.name == "seed"
         assert fleet.service_prefix == "com.claudlobby.seed"
 
     def test_seed_fleet_single_bot(self):
         """Exactly one bot named claudfather."""
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         assert list(fleet.bots.keys()) == ["claudfather"]
         assert fleet.bots["claudfather"].name == "Claudfather"
 
     def test_seed_bot_model_opus(self):
         """Claudfather uses opus per seed fleet config."""
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         assert fleet.bots["claudfather"].model == "opus"
 
     def test_seed_bot_no_skip_permissions(self):
         """Standard permissions — no dangerously_skip_permissions."""
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         assert fleet.bots["claudfather"].dangerously_skip_permissions is False
 
     def test_seed_bot_expertise(self):
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         assert "setup-assistant" in fleet.bots["claudfather"].expertise
 
     def test_seed_bot_skills(self):
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         skills = fleet.bots["claudfather"].skills
         assert "bootstrap" in skills
         assert "doctor" in skills
@@ -57,18 +57,18 @@ class TestSeedFleetConfig:
         assert "add-bot" in skills
 
     def test_seed_bot_voice(self):
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         assert fleet.bots["claudfather"].voice == "vito-corleone.md"
 
     def test_seed_bot_telegram(self):
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         tg = fleet.bots["claudfather"].telegram
         assert tg.handle == "REPLACE_ME"
         assert tg.token_env == "TELEGRAM_TOKEN_CLAUDFATHER"
         assert tg.require_mention is False
 
     def test_seed_bot_scope(self):
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         scope = fleet.bots["claudfather"].scope
         assert scope is not None
         assert scope.org == "Claudfather"
@@ -76,7 +76,7 @@ class TestSeedFleetConfig:
 
     def test_seed_fleet_no_teams(self):
         """Seed fleet has no teams — single-bot, no dispatch hierarchy."""
-        fleet = load_fleet(SEED_FLEET_YAML)
+        fleet, _md = load_fleet(SEED_FLEET_YAML)
         assert len(fleet.teams) == 0
 
 
@@ -224,7 +224,7 @@ class TestSeedFleetValidation:
 
         root = _setup_seed_tree(tmp_path)
         paths = Paths(root=root, seed=True)
-        fleet = load_fleet(paths.fleet_yaml)
+        fleet, _md = load_fleet(paths.fleet_yaml)
         report = validate(fleet, paths)
         assert not report.has_errors, f"Validation errors: {report.errors}"
 
@@ -241,7 +241,7 @@ class TestComposeSeedBot:
 
         root = _setup_seed_tree(tmp_path)
         paths = Paths(root=root, seed=True)
-        fleet = load_fleet(paths.fleet_yaml)
+        fleet, _md = load_fleet(paths.fleet_yaml)
         bot = fleet.bots["claudfather"]
 
         bot_dir = compose_bot(bot, fleet, paths)
@@ -259,7 +259,7 @@ class TestComposeSeedBot:
 
         root = _setup_seed_tree(tmp_path)
         paths = Paths(root=root, seed=True)
-        fleet = load_fleet(paths.fleet_yaml)
+        fleet, _md = load_fleet(paths.fleet_yaml)
         bot = fleet.bots["claudfather"]
 
         compose_bot(bot, fleet, paths)

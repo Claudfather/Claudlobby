@@ -97,7 +97,7 @@ class TestScaffoldEnvMerge:
 
     def test_creates_new_env_file(self, tmp_path):
         root, paths = self._setup_fleet(tmp_path)
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
 
         scaffold_env_files(fleet, paths, log=lambda m: None)
 
@@ -109,7 +109,7 @@ class TestScaffoldEnvMerge:
 
     def test_preserves_existing_values_and_appends_new(self, tmp_path):
         root, paths = self._setup_fleet(tmp_path)
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
 
         # Pre-populate with one var already set
         env_path = root / ".env"
@@ -135,7 +135,7 @@ class TestScaffoldEnvMerge:
 
     def test_idempotent_no_duplicates(self, tmp_path):
         root, paths = self._setup_fleet(tmp_path)
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
 
         # Run scaffold twice
         scaffold_env_files(fleet, paths, log=lambda m: None)
@@ -685,18 +685,23 @@ class TestHooksMergeAndSettings:
         """)
         )
 
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
         bot = fleet.bots["worker"]
 
-        # Verify merge: default PreToolUse + merged PostToolUse
+        # Verify merge: system defaults + fleet defaults + bot overrides.
+        # System injects bot-vitals.sh on PreToolUse & PostToolUse.
+        # Fleet defaults add log-pre.sh / log-post.sh.
+        # Bot stanza adds notify.sh on PostToolUse.
         assert "PreToolUse" in bot.hooks
-        assert len(bot.hooks["PreToolUse"]) == 1
-        assert bot.hooks["PreToolUse"][0]["command"] == "log-pre.sh"
+        pre_cmds = [h["command"] for h in bot.hooks["PreToolUse"]]
+        assert "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh" in pre_cmds
+        assert "log-pre.sh" in pre_cmds
 
         assert "PostToolUse" in bot.hooks
-        assert len(bot.hooks["PostToolUse"]) == 2  # default + bot override
-        assert bot.hooks["PostToolUse"][0]["command"] == "log-post.sh"
-        assert bot.hooks["PostToolUse"][1]["command"] == "notify.sh"
+        post_cmds = [h["command"] for h in bot.hooks["PostToolUse"]]
+        assert "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh" in post_cmds
+        assert "log-post.sh" in post_cmds
+        assert "notify.sh" in post_cmds
 
     def test_settings_local_includes_hooks(self, tmp_path):
         root = tmp_path / "claudlobby"
@@ -753,6 +758,7 @@ class TestHooksMergeAndSettings:
             fleet:
               name: test-fleet
               service_prefix: com.test
+              system_defaults: false
               bots:
                 worker:
                   expertise: [eng]
@@ -763,7 +769,7 @@ class TestHooksMergeAndSettings:
         """)
         )
 
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
         bot = fleet.bots["worker"]
         assert len(bot.hooks["PreToolUse"]) == 1
         assert bot.hooks["PreToolUse"][0]["matcher"] == "Write|Edit"
@@ -780,6 +786,7 @@ class TestHooksMergeAndSettings:
             fleet:
               name: test-fleet
               service_prefix: com.test
+              system_defaults: false
               defaults:
                 hooks:
                   PostToolUse:
@@ -790,7 +797,7 @@ class TestHooksMergeAndSettings:
         """)
         )
 
-        fleet = load_fleet(root / "fleet.yaml")
+        fleet, _md = load_fleet(root / "fleet.yaml")
         bot = fleet.bots["worker"]
         assert len(bot.hooks["PostToolUse"]) == 1
         assert bot.hooks["PostToolUse"][0]["command"] == "fleet-log.sh"
@@ -1857,7 +1864,17 @@ class TestComposeBotConfObservability:
         return compose_bot_conf(bot, fleet, paths)
 
     def test_default_observability_values(self, tmp_path):
-        conf = self._compose(tmp_path)
+        # After system defaults merge, fields are populated.
+        # Simulate by passing explicit values matching system_defaults.yaml.
+        from claudlobby.config import ObservabilityConfig
+
+        obs = ObservabilityConfig(
+            pulse_interval=300,
+            reap_days=7,
+            activity_stuck_threshold=1800,
+            dispatch_deadline=1800,
+        )
+        conf = self._compose(tmp_path, observability=obs)
         assert "export OBSERVABILITY_PULSE_INTERVAL=300" in conf
         assert "export OBSERVABILITY_REAP_DAYS=7" in conf
         assert "export OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1800" in conf
@@ -1879,8 +1896,15 @@ class TestComposeBotConfObservability:
         assert "export OBSERVABILITY_DISPATCH_DEADLINE=900" in conf
 
     def test_observability_section_header(self, tmp_path):
-        conf = self._compose(tmp_path)
+        from claudlobby.config import ObservabilityConfig
+
+        obs = ObservabilityConfig(pulse_interval=300)
+        conf = self._compose(tmp_path, observability=obs)
         assert "# Observability" in conf
+
+    def test_observability_section_skipped_when_all_none(self, tmp_path):
+        conf = self._compose(tmp_path)
+        assert "# Observability" not in conf
 
 
 class TestComposePermissions:

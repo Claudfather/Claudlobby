@@ -1,10 +1,8 @@
 #!/bin/bash
 # Install the fleet-wide keepalive as a systemd user timer (Linux).
 #
-# Companion to install-bot-systemd.sh. The per-bot units have
-# Restart=on-failure but won't bring back a tmux session that exited 0,
-# and they don't nudge an idle pane. This timer ticks every 60s and runs
-# keepalive-all.sh, which kickstarts dead sessions and nudges idle bots.
+# Thin wrapper: copies generated units from runtime/fleet/timers/ and enrolls.
+# Run `claudlobby generate` first to produce the units.
 #
 # Usage: install-keepalive-systemd.sh [<fleet-name>]
 set -euo pipefail
@@ -23,60 +21,35 @@ if [ -z "$FLEET" ]; then
     exit 2
 fi
 
+FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
+TIMER_DIR="$FLEET_DIR/runtime/fleet/timers"
+if [[ ! -d "$TIMER_DIR" ]]; then
+    echo "Error: $TIMER_DIR not found — run 'claudlobby generate' first." >&2
+    exit 1
+fi
+
 # Derive service prefix from bot.conf (all bots share the same SERVICE_PREFIX).
 if [ -z "${SERVICE_PREFIX:-}" ]; then
-    _first_conf="$(find "$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots" -name bot.conf -print -quit 2>/dev/null)"
+    _first_conf="$(find "$FLEET_DIR/runtime/bots" -name bot.conf -print -quit 2>/dev/null)"
     if [ -n "$_first_conf" ]; then
         SERVICE_PREFIX="$(extract_bot_conf_var "$_first_conf" SERVICE_PREFIX)"
     fi
 fi
 if [ -z "${SERVICE_PREFIX:-}" ]; then
     echo "install-keepalive-systemd.sh: SERVICE_PREFIX not set and no bot.conf found." >&2
-    echo "  Run 'claudlobby generate' first, or export SERVICE_PREFIX." >&2
     exit 2
 fi
 
 NAME="$SERVICE_PREFIX.keepalive"
-SERVICE_FILE="$HOME/.config/systemd/user/$NAME.service"
-TIMER_FILE="$HOME/.config/systemd/user/$NAME.timer"
-PROGRAM="$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
-
-if [ ! -x "$PROGRAM" ]; then
-    echo "error: $PROGRAM not executable (run: chmod +x $PROGRAM)" >&2
-    exit 1
-fi
 
 mkdir -p "$HOME/.config/systemd/user"
-
-cat > "$SERVICE_FILE" <<UNIT
-[Unit]
-Description=claudlobby fleet keepalive ($FLEET)
-
-[Service]
-Type=oneshot
-Environment=CLAUDLOBBY_ROOT=$CLAUDLOBBY_ROOT
-Environment=CLAUDLOBBY_FLEET=$FLEET
-ExecStart=$PROGRAM
-UNIT
-
-cat > "$TIMER_FILE" <<UNIT
-[Unit]
-Description=claudlobby fleet keepalive timer ($FLEET) — tick every 60s
-
-[Timer]
-OnBootSec=60
-OnUnitActiveSec=60
-AccuracySec=10
-
-[Install]
-WantedBy=timers.target
-UNIT
+cp "$TIMER_DIR/$NAME.service" "$HOME/.config/systemd/user/"
+cp "$TIMER_DIR/$NAME.timer" "$HOME/.config/systemd/user/"
 
 systemctl --user daemon-reload
 systemctl --user enable --now "$NAME.timer"
 
 echo "installed + started: $NAME.timer"
-echo "service: $SERVICE_FILE"
-echo "timer:   $TIMER_FILE"
+echo "source:  $TIMER_DIR/$NAME.{service,timer}"
 echo "status:  systemctl --user list-timers | grep $NAME"
 echo "logs:    journalctl --user -u $NAME.service -f"

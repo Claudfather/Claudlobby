@@ -9,6 +9,7 @@ new guardrail/protocol.
 v1: diff is unified-diff text output; promote is a stub that points
 the user at the right library/ file based on heuristics.
 """
+
 from __future__ import annotations
 import difflib
 import json
@@ -36,31 +37,93 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     actual_md = actual_md_path.read_text() if actual_md_path.is_file() else ""
     if expected_md != actual_md:
         parts.append(f"=== CLAUDE.md drift in {bot_name} ===")
-        parts.extend(difflib.unified_diff(
-            expected_md.splitlines(),
-            actual_md.splitlines(),
-            fromfile=f"library-composed (would be regenerated)",
-            tofile=f"runtime/bots/{bot_name}/CLAUDE.md (current)",
-            lineterm="",
-        ))
+        parts.extend(
+            difflib.unified_diff(
+                expected_md.splitlines(),
+                actual_md.splitlines(),
+                fromfile="library-composed (would be regenerated)",
+                tofile=f"runtime/bots/{bot_name}/CLAUDE.md (current)",
+                lineterm="",
+            )
+        )
 
     # .mcp.json
     expected_mcp = compose_mcp_json(bot, paths)
     actual_mcp_path = bot_dir / ".mcp.json"
-    actual_mcp = json.loads(actual_mcp_path.read_text()) if actual_mcp_path.is_file() else {}
+    actual_mcp = (
+        json.loads(actual_mcp_path.read_text()) if actual_mcp_path.is_file() else {}
+    )
     if expected_mcp != actual_mcp:
         parts.append(f"\n=== .mcp.json drift in {bot_name} ===")
-        parts.extend(difflib.unified_diff(
-            json.dumps(expected_mcp, indent=2).splitlines(),
-            json.dumps(actual_mcp, indent=2).splitlines(),
-            fromfile="library-composed",
-            tofile=f"runtime/bots/{bot_name}/.mcp.json",
-            lineterm="",
-        ))
+        parts.extend(
+            difflib.unified_diff(
+                json.dumps(expected_mcp, indent=2).splitlines(),
+                json.dumps(actual_mcp, indent=2).splitlines(),
+                fromfile="library-composed",
+                tofile=f"runtime/bots/{bot_name}/.mcp.json",
+                lineterm="",
+            )
+        )
 
     if not parts:
         return f"no drift in {bot_name}\n"
     return "\n".join(parts) + "\n"
+
+
+def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict) -> str:
+    """Diff fleet-level timer units against what generate would produce."""
+    from .composer import compose_fleet_timers
+    import tempfile
+
+    sd = fleet.system_defaults
+    if not sd.enabled or not sd.timers:
+        return ""
+
+    timers_dir = paths.runtime_fleet / "timers"
+    if not timers_dir.is_dir():
+        return "=== fleet timers: runtime/fleet/timers/ does not exist — run `claudlobby generate`\n"
+
+    # Generate expected timers to a temp dir, then compare
+    with tempfile.TemporaryDirectory() as tmpdir:
+        parts: list[str] = []
+
+        class _TmpPaths:
+            def __init__(self, real_paths):
+                self.root = real_paths.root
+                self.runtime_fleet = Path(tmpdir) / "expected_fleet"
+
+        tmp_p = _TmpPaths(paths)
+        compose_fleet_timers(fleet, tmp_p, merged_defaults)
+
+        expected_timers_dir = tmp_p.runtime_fleet / "timers"
+        if not expected_timers_dir.is_dir():
+            return ""
+
+        expected_files = {f.name for f in expected_timers_dir.iterdir()}
+        actual_files = {f.name for f in timers_dir.iterdir()}
+
+        for fname in sorted(expected_files | actual_files):
+            expected_path = expected_timers_dir / fname
+            actual_path = timers_dir / fname
+
+            expected_text = expected_path.read_text() if expected_path.is_file() else ""
+            actual_text = actual_path.read_text() if actual_path.is_file() else ""
+
+            if expected_text != actual_text:
+                parts.append(f"\n=== fleet timer drift: {fname} ===")
+                parts.extend(
+                    difflib.unified_diff(
+                        expected_text.splitlines(),
+                        actual_text.splitlines(),
+                        fromfile=f"expected ({fname})",
+                        tofile=f"runtime/fleet/timers/{fname} (current)",
+                        lineterm="",
+                    )
+                )
+
+        if not parts:
+            return ""
+        return "\n".join(parts) + "\n"
 
 
 def promote_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
@@ -73,7 +136,11 @@ def promote_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     voice_path = paths.root / bot.voice if bot.voice else None
     bot_md = paths.bot_runtime(bot_name) / "CLAUDE.md"
 
-    expertise_lines = "\n".join(f"     • {p}" for p in expertise_paths) if expertise_paths else "     (none — set expertise in fleet.yaml)"
+    expertise_lines = (
+        "\n".join(f"     • {p}" for p in expertise_paths)
+        if expertise_paths
+        else "     (none — set expertise in fleet.yaml)"
+    )
 
     return (
         f"Promote workflow for '{bot_name}' (v1 — manual):\n"
@@ -81,7 +148,11 @@ def promote_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
         f"1. Review drift:    claudlobby diff {bot_name}\n"
         f"2. Decide what to keep, then edit the source:\n"
         f"   - Expertise content →\n{expertise_lines}\n"
-        + (f"   - Voice / personality → {voice_path}\n" if voice_path else "   - Voice / personality → create a voices/<name>.md and reference it in fleet.yaml\n")
+        + (
+            f"   - Voice / personality → {voice_path}\n"
+            if voice_path
+            else "   - Voice / personality → create a voices/<name>.md and reference it in fleet.yaml\n"
+        )
         + f"   - Mission (one paragraph) → fleet.yaml `bots.{bot_name}.mission`\n"
         f"   - Scope override → fleet.yaml `bots.{bot_name}.scope`\n"
         f"   - Shared resource → new file under {paths.base_resources}/\n"

@@ -297,6 +297,10 @@ class Paths:
         return self.runtime / "bots"
 
     @property
+    def runtime_fleet(self) -> Path:
+        return self.runtime / "fleet"
+
+    @property
     def lib(self) -> Path:
         return self.root / "lib"
 

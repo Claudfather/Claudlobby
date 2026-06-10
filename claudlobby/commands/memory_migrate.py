@@ -14,7 +14,7 @@ log = logging.getLogger("claudlobby")
 def cmd_memory_migrate(args) -> int:
     """Migrate memory files from an existing bot setup to claudlobby per-bot memory dirs."""
     paths = _resolve_paths(args)
-    fleet = _load_fleet_or_exit(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
     claude_projects = Path.home() / ".claude" / "projects"
 
     if not claude_projects.is_dir():
