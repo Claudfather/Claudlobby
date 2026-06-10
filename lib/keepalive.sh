@@ -64,11 +64,16 @@ if ! check_tmux_session "$TMUX_SESSION"; then
         emit_keepalive_event "SKIP" "session reappeared (start-bot.sh likely won the race)"
         exit 0
     fi
-    if [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
-        echo "$(ts_iso) RESTART — session dead, systemctl --user restart $BOT_NAME" >> "$LOG"
-        emit_keepalive_event "RESTART" "session dead, systemctl --user restart $BOT_NAME"
+    if [ "$_OS" = "Linux" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/.config/systemd/user/$BOT_SERVICE.service" ]; then
+        echo "$(ts_iso) RESTART — session dead, systemctl --user restart $BOT_SERVICE" >> "$LOG"
+        emit_keepalive_event "RESTART" "session dead, systemctl --user restart $BOT_SERVICE"
+        systemctl --user restart "$BOT_SERVICE.service" >>"$LOG" 2>&1
+    elif [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
+        # Pre-rename unit still installed (fleet not regenerated yet).
+        echo "$(ts_iso) RESTART — session dead, systemctl --user restart $BOT_NAME (pre-rename)" >> "$LOG"
+        emit_keepalive_event "RESTART" "session dead, systemctl --user restart $BOT_NAME (pre-rename)"
         systemctl --user restart "$BOT_NAME.service" >>"$LOG" 2>&1
-    elif [ "$_OS" = "Darwin" ] && [ -n "$BOT_SERVICE" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
+    elif [ "$_OS" = "Darwin" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
         echo "$(ts_iso) RESTART — session dead, launchctl kickstart $BOT_SERVICE" >> "$LOG"
         emit_keepalive_event "RESTART" "session dead, launchctl kickstart $BOT_SERVICE"
         launchctl kickstart -k "gui/$(id -u)/$BOT_SERVICE" >>"$LOG" 2>&1
