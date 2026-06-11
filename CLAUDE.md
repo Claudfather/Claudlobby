@@ -87,6 +87,8 @@ Key lifecycle scripts in `lib/`:
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
+| `update-claude-code.sh` | Daily Claude Code update + fleet bounce |
+| `install-claude-update-systemd.sh` | Claude Code update timer enrollment (systemd) |
 
 ## Repository Hygiene — MANDATORY
 

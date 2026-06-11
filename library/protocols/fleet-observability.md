@@ -13,8 +13,9 @@ Pull-based observability for fleet managers. Two writers produce events; manager
 |--------|--------|-----------|--------------|
 | Bot vitals | `lib/bot-vitals.sh` | Every tool call (Claude Code hook) | `vitals` |
 | Fleet pulse | `lib/fleet-pulse.sh` | Cron (every 5 min) | `pulse` |
+| Keepalive idle marker | `lib/keepalive.sh` | Every keepalive run (60s timer) | Marker file (`data/.idle`), not JSONL |
 
-Both write the same schema to the same bot-local directory. Managers read one path per bot regardless of writer.
+Both write the same JSONL schema to the same bot-local directory. Managers read one path per bot regardless of writer. The idle marker is a special case: keepalive touches `data/.idle` when it classifies a pane as IDLE and removes it on BUSY. Fleet-pulse compares `.idle` mtime vs `.last-tool-call` mtime to determine idle state without parsing panes.
 
 ## Where to Read
 
@@ -59,7 +60,7 @@ Read bot event logs at these natural decision points — not continuously, not o
 
 | Event type | Source | Manager action |
 |------------|--------|---------------|
-| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold while *not* idle — it's animating but hung (e.g. a stalled main thread after a subagent returned). Investigate; restart only if `safe-worker-restart` guards pass. |
+| `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. |
 | `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal `[BOTREPORT]`. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
 | `mcp_error` | vitals | Attempt MCP server reconnect; flag human if persistent (>3 in 30 min) |

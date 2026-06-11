@@ -92,6 +92,8 @@ Bot activity
 | `runtime/bots/<bot>/keepalive.log` | Plaintext keepalive state log | Rotated by log-rotate.sh (500 lines) |
 | `runtime/bots/<bot>/data/events/fleet-*.jsonl` | Structured events from pulse + vitals | 7 days (configurable via `OBSERVABILITY_REAP_DAYS`) |
 | `runtime/bots/<bot>/data/events/keepalive-*.jsonl` | Keepalive JSONL events | 7 days (configurable) |
+| `runtime/bots/<bot>/data/.idle` | Idle marker — touched by keepalive.sh on IDLE, cleared on BUSY. Fleet-pulse reads mtime. | Transient (current state only) |
+| `runtime/bots/<bot>/data/.last-tool-call` | Tool-call marker — touched by bot-vitals.sh on every hook. Stale mtime + no `.idle` = activity_stuck candidate. | Transient (current state only) |
 | `state/fleet-state.json` | Per-bot current status + task | Persistent |
 | `state/pulse/pulse-summary.txt` | Last fleet-pulse human-readable output | Overwritten each run |
 | `state/pulse/<bot>.pane_hash` | Pane change detection markers | Persistent |
