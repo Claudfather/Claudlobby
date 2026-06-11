@@ -39,6 +39,8 @@ if [ ! -d "$BOTS_DIR" ]; then
     exit 1
 fi
 
+install_error_trap ""
+
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 for conf in "$BOTS_DIR"/*/bot.conf; do
