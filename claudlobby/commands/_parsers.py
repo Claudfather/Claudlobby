@@ -289,3 +289,31 @@ def register_subparsers(sub) -> None:
         help="Override pre-flight checks (e.g. active tmux session)",
     )
     pmb.set_defaults(func=cmd_move_bot)
+
+    pev = sub.add_parser(
+        "events",
+        help="Tail/filter JSONL events across all bots",
+    )
+    pev.add_argument("--bot", help="Filter by bot name")
+    pev.add_argument(
+        "--type", help="Filter by event type (e.g. service_down, tool_call)"
+    )
+    pev.add_argument(
+        "--source", help="Filter by source (vitals, pulse, keepalive, lib)"
+    )
+    pev.add_argument(
+        "--critical",
+        action="store_true",
+        help="Show only critical events (service_down, session_missing, etc.)",
+    )
+    pev.add_argument(
+        "--tail",
+        type=int,
+        default=50,
+        help="Show last N events (default: 50)",
+    )
+    pev.add_argument("--json", action="store_true", help="Output raw JSONL")
+
+    from .events import cmd_events  # local import to avoid circular at module top-level
+
+    pev.set_defaults(func=cmd_events)
