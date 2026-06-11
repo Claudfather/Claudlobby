@@ -144,6 +144,14 @@ assert_eq "spinner → BUSY" "BUSY" "$result"
 result=$(_test_classify_pane "user@host:~$ ")
 assert_eq "shell dollar prompt → IDLE" "IDLE" "$result"
 
+# Test 14: real Claude Code prompt with non-breaking space (U+00A0)
+result=$(_test_classify_pane "$(printf '\xe2\x9d\xaf\xc2\xa0')")
+assert_eq "real Claude Code prompt (❯ + NBSP) → IDLE" "IDLE" "$result"
+
+# Test 15: Remote Control active on status bar
+result=$(_test_classify_pane "  main | +100/-5 | Opus 4.6 | 51%   Remote Control active")
+assert_eq "status bar with Remote Control → IDLE" "IDLE" "$result"
+
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1

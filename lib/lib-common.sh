@@ -259,7 +259,13 @@ check_tmux_session() {
 # Base idle-detection regex — single source of truth for keepalive.sh
 # classify_pane and fleet-pulse pane_is_idle. Operators extend at runtime
 # via KEEPALIVE_IDLE_PATTERNS (appended by both consumers).
-_IDLE_PATTERN_BASE='(^\s*[>❯]\s*$|Remote Control active|Enter\/Esc to close|Yes\/No|Allow|Deny|y\/n\b)'
+#
+# Prompt glyph pattern: [>❯].{0,3}$ matches the glyph near end of line
+# with up to 3 trailing chars.  Claude Code's TUI puts a non-breaking space
+# (U+00A0) after ❯ which \s doesn't match — .{0,3}$ handles it plus any
+# other minor decoration.  The short suffix cap avoids false positives on
+# lines where > appears mid-content.
+_IDLE_PATTERN_BASE='([>❯].{0,3}$|Remote Control act|Enter.*to close|Yes\/No|Allow|Deny|y\/n\b|\$\s*$)'
 
 # pane_is_idle <pane_text>
 # Returns 0 if the pane is at a prompt / waiting-for-input, 1 otherwise.
