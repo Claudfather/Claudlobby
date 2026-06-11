@@ -16,6 +16,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BOT_DIR="${1:?Usage: keepalive.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
+install_error_trap "$BOT_DIR"
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 
 LOG="$BOT_DIR/keepalive.log"
@@ -26,13 +27,18 @@ KEEPALIVE_REAP_DAYS="${KEEPALIVE_REAP_DAYS:-7}"
 # Emit structured JSONL event for fleet-pulse / claudlobby uptime consumption.
 emit_keepalive_event() {
     local ev_state="$1"
+    local ev_detail="${2:-}"
     local events_dir="$BOT_DIR/data/events"
     mkdir -p "$events_dir"
     local events_file="$events_dir/keepalive-$(date +%Y-%m-%d).jsonl"
     local ts
     ts=$(ts_iso)
-    printf '{"ts":"%s","bot":"%s","type":"keepalive","source":"keepalive","data":{"state":"%s"}}\n' \
-        "$ts" "$BOT_NAME" "$ev_state" >> "$events_file"
+    local detail_json=""
+    if [ -n "$ev_detail" ]; then
+        detail_json=',"detail":"'"$(json_escape "$ev_detail")"'"'
+    fi
+    printf '{"ts":"%s","bot":"%s","type":"keepalive","source":"keepalive","data":{"state":"%s"%s}}\n' \
+        "$ts" "$BOT_NAME" "$ev_state" "$detail_json" >> "$events_file"
 
     # Reap old keepalive JSONL files beyond retention window.
     find "$events_dir" -name 'keepalive-*.jsonl' -type f -mtime +"$KEEPALIVE_REAP_DAYS" -delete 2>/dev/null || true
@@ -55,18 +61,20 @@ if ! check_tmux_session "$TMUX_SESSION"; then
     sleep 1
     if check_tmux_session "$TMUX_SESSION"; then
         echo "$(ts_iso) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"
-        emit_keepalive_event "SKIP"
+        emit_keepalive_event "SKIP" "session reappeared (start-bot.sh likely won the race)"
         exit 0
     fi
-    emit_keepalive_event "RESTART"
     if [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
         echo "$(ts_iso) RESTART — session dead, systemctl --user restart $BOT_NAME" >> "$LOG"
+        emit_keepalive_event "RESTART" "session dead, systemctl --user restart $BOT_NAME"
         systemctl --user restart "$BOT_NAME.service" >>"$LOG" 2>&1
     elif [ "$_OS" = "Darwin" ] && [ -n "$BOT_SERVICE" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
         echo "$(ts_iso) RESTART — session dead, launchctl kickstart $BOT_SERVICE" >> "$LOG"
+        emit_keepalive_event "RESTART" "session dead, launchctl kickstart $BOT_SERVICE"
         launchctl kickstart -k "gui/$(id -u)/$BOT_SERVICE" >>"$LOG" 2>&1
     else
         echo "$(ts_iso) RESTART — session dead, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
+        emit_keepalive_event "RESTART" "session dead, falling back to start-bot.sh"
         "$LIB_DIR/start-bot.sh" "$BOT_DIR" >>"$LOG" 2>&1
     fi
     exit 0
@@ -135,12 +143,12 @@ UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 case "$state" in
     BUSY)
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
-        emit_keepalive_event "BUSY"
+        emit_keepalive_event "BUSY" "active processing"
         rm -f "$UNKNOWN_COUNTER"
         ;;
     IDLE)
         echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
-        emit_keepalive_event "IDLE"
+        emit_keepalive_event "IDLE" "at prompt"
         rm -f "$UNKNOWN_COUNTER"
         ;;
     *)
@@ -150,11 +158,12 @@ case "$state" in
         count=$((prev + 1))
         _tmp_counter="$(safe_mktemp)"
         printf '%d' "$count" > "$_tmp_counter" && mv "$_tmp_counter" "$UNKNOWN_COUNTER"
-        emit_keepalive_event "UNKNOWN"
         if [ "$count" -ge "$UNKNOWN_THRESHOLD" ]; then
             echo "$(ts_iso) UNKNOWN — unrecognized pane state ($count consecutive, threshold $UNKNOWN_THRESHOLD) — investigate" >> "$LOG"
+            emit_keepalive_event "UNKNOWN" "unrecognized pane state ($count consecutive, threshold $UNKNOWN_THRESHOLD)"
         else
             echo "$(ts_iso) UNKNOWN — pane state did not match known patterns ($count consecutive)" >> "$LOG"
+            emit_keepalive_event "UNKNOWN" "pane state did not match known patterns ($count consecutive)"
         fi
         ;;
 esac

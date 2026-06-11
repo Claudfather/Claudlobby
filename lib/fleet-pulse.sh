@@ -24,6 +24,8 @@ if [ ! -d "$BOTS_DIR" ]; then
     exit 1
 fi
 
+install_error_trap ""
+
 today=$(date +%Y-%m-%d)
 ts=$(ts_iso)
 
@@ -49,16 +51,6 @@ emit_event() {
     local outfile="$events_dir/fleet-${today}.jsonl"
     printf '{"ts":"%s","bot":"%s","type":"%s","source":"pulse","data":%s}\n' \
         "$ts" "$bot_id" "$event_type" "$data_json" >> "$outfile"
-}
-
-# --- Helper: read a value from a bot's bot.conf (no side effects) ---
-bot_conf_get() {
-    local bot_dir="$1" key="$2" default="$3" val=""
-    if [ -f "$bot_dir/bot.conf" ]; then
-        val=$(grep "^\(export \)\?$key=" "$bot_dir/bot.conf" | head -1 \
-            | sed -E "s/^(export )?$key=//" | tr -d '"' || true)
-    fi
-    printf '%s' "${val:-$default}"
 }
 
 # --- Helper: actively notify a bot's manager via its tmux session ---
@@ -225,3 +217,65 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # Reap old event files for this bot
     reap_events "$bot_dir"
 done
+
+# --- Fleet-wide escalation: persistent critical events → Telegram -----------
+_ESCALATION_THRESHOLD="${FLEET_PULSE_ESCALATION_THRESHOLD:-2}"
+_ESCALATION_WINDOW="${FLEET_PULSE_ESCALATION_WINDOW:-10}"
+
+# Resolve Telegram chat ID for escalation (from first bot's config or env)
+_ESCALATION_CHAT_ID="${FLEET_PULSE_ESCALATION_CHAT_ID:-}"
+if [ -z "$_ESCALATION_CHAT_ID" ]; then
+    _first_bot_dir=$(ls -d "$BOTS_DIR"/*/ 2>/dev/null | head -1) || true
+    if [ -n "${_first_bot_dir:-}" ]; then
+        _ESCALATION_CHAT_ID=$(bot_conf_get "$_first_bot_dir" TELEGRAM_GROUP_CHAT_ID "")
+        _ESCALATION_STATE_DIR=$(bot_conf_get "$_first_bot_dir" TELEGRAM_STATE_DIR "")
+    fi
+fi
+
+if [ -n "$_ESCALATION_CHAT_ID" ]; then
+    # Compute window start (portable: GNU date then BSD date fallback)
+    _window_start=$(date -d "-${_ESCALATION_WINDOW} minutes" +%Y-%m-%dT%H:%M 2>/dev/null || \
+                    date -v-"${_ESCALATION_WINDOW}"M +%Y-%m-%dT%H:%M 2>/dev/null || echo "")
+
+    if [ -n "$_window_start" ]; then
+        for _crit_type in service_down session_missing; do
+            _affected_bots=""
+            _affected_count=0
+            for bot_dir in "$BOTS_DIR"/*/; do
+                [ -d "$bot_dir" ] || continue
+                _bid=$(basename "$bot_dir")
+                _efile="$bot_dir/data/events/fleet-${today}.jsonl"
+                [ -f "$_efile" ] || continue
+                # Check if this bot has this critical event type within the window
+                if grep -q "\"type\":\"$_crit_type\"" "$_efile" 2>/dev/null; then
+                    _latest_ts=$(grep "\"type\":\"$_crit_type\"" "$_efile" | tail -1 | \
+                        python3 -c "import sys,json; print(json.loads(sys.stdin.readline())['ts'])" 2>/dev/null || echo "")
+                    if [ -n "$_latest_ts" ] && [[ "$_latest_ts" > "$_window_start" ]]; then
+                        _affected_bots="$_affected_bots $_bid"
+                        _affected_count=$((_affected_count + 1))
+                    fi
+                fi
+            done
+
+            if [ "$_affected_count" -ge "$_ESCALATION_THRESHOLD" ]; then
+                _esc_marker="$state_dir/escalation_${_crit_type}"
+                # Debounce: only fire once per 10 minutes
+                _should_fire=1
+                if [ -f "$_esc_marker" ]; then
+                    _marker_age=$(( $(date +%s) - $(stat_mtime "$_esc_marker" 2>/dev/null || echo 0) ))
+                    [ "$_marker_age" -lt 600 ] && _should_fire=0
+                fi
+                if [ "$_should_fire" -eq 1 ]; then
+                    _msg="FLEET ALERT: $_crit_type on ${_affected_count} bots (${_affected_bots# }). Check fleet health immediately."
+                    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
+                    TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+                        "$LIB_DIR/tg-post.sh" "$_msg" 2>/dev/null || true
+                    touch "$_esc_marker"
+                fi
+            else
+                # Condition cleared — remove debounce marker
+                rm -f "$state_dir/escalation_${_crit_type}" 2>/dev/null || true
+            fi
+        done
+    fi
+fi

@@ -39,56 +39,42 @@ parse_bots() {
     ' "$1"
 }
 
-# Helper: extract fleet.service_prefix (used on Darwin to filter plists).
-parse_service_prefix() {
-    awk '
-        /^  service_prefix:/ {
-            sub(/^  service_prefix:[ \t]*/, "")
-            gsub(/["'\'']/, "")
-            print; exit
-        }
-    ' "$1"
-}
-
 # 1. Bots defined in this fleet's yaml (top-level keys under bots:)
 defined=$(parse_bots "$FLEET_YAML" | sort -u)
 
 # 2. tmux sessions on this host
 tmux_sessions=$(tmux ls 2>/dev/null | awk -F: '{print $1}' | sort -u || true)
 
-# 3. systemd-user unit files (Linux) OR launchd plists (macOS)
-units=""
-case "$_OS" in
-Linux)
-    units=$(ls "$HOME/.config/systemd/user/" 2>/dev/null \
-        | grep -v '^claudlobby-' \
-        | sed 's/\.service$//' \
-        | sort -u || true)
-    ;;
-Darwin)
-    # Filter to plists matching this fleet's service_prefix; without this,
-    # any plist whose last dot-segment happens to share a bot's name
-    # (e.g. com.spotify.helper → "helper") would falsely match.
-    SERVICE_PREFIX=$(parse_service_prefix "$FLEET_YAML")
-    if [ -z "$SERVICE_PREFIX" ]; then
-        echo "reconcile-fleet: fleet.service_prefix missing in $FLEET_YAML" >&2
-        exit 1
-    fi
-    units=$(ls "$HOME/Library/LaunchAgents/" 2>/dev/null \
-        | grep "^${SERVICE_PREFIX}\." \
-        | sed -e "s|^${SERVICE_PREFIX}\.||" -e 's|\.plist$||' \
-        | sort -u || true)
-    ;;
-esac
-
-# Build buckets
+# 3. Build buckets by checking each defined bot against tmux + host service state.
+#    Unit names come from bot.conf (BOT_SERVICE), not from parsing filenames.
 healthy=""; orphan=""; missing=""; unbound=""
 
 while IFS= read -r b; do
     [ -z "$b" ] && continue
+    bot_dir="$RUNTIME_DIR/$b"
+
     has_tmux=0; has_unit=0
     echo "$tmux_sessions" | grep -qx "$b" && has_tmux=1
-    echo "$units"         | grep -qx "$b" && has_unit=1
+
+    # Resolve unit name from bot.conf — single source of truth.
+    # Falls back to bot name if bot.conf is missing (pre-generate state).
+    local_svc=$(bot_conf_get "$bot_dir" BOT_SERVICE "$b")
+    case "$_OS" in
+    Linux)
+        # Check BOT_SERVICE unit first, fall back to bare bot name
+        if [ -f "$HOME/.config/systemd/user/$local_svc.service" ] || \
+           [ -f "$HOME/.config/systemd/user/$b.service" ]; then
+            has_unit=1
+        fi
+        ;;
+    Darwin)
+        if [ -f "$HOME/Library/LaunchAgents/$local_svc.plist" ] || \
+           [ -f "$HOME/Library/LaunchAgents/$b.plist" ]; then
+            has_unit=1
+        fi
+        ;;
+    esac
+
     if   [ $has_tmux = 1 ] && [ $has_unit = 1 ]; then healthy="$healthy $b"
     elif [ $has_tmux = 1 ] && [ $has_unit = 0 ]; then orphan="$orphan $b"
     elif [ $has_tmux = 0 ] && [ $has_unit = 1 ]; then missing="$missing $b"
@@ -112,16 +98,17 @@ echo "  ⚠ missing:  ${missing:-(none)}"
 echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before killing"
 
 # --- Root-cause diagnostics for missing bots ---------------------------------
-_DIAG_SERVICE_PREFIX=$(parse_service_prefix "$FLEET_YAML")
 _diagnose_missing_bot() {
     local bot="$1"
+    local bot_dir_diag="$RUNTIME_DIR/$bot"
 
     echo "  ── $bot ──"
 
     # 1. Service unit status
     case "$_OS" in
     Linux)
-        local unit_name="${bot}.service"
+        local unit_name
+        unit_name="$(bot_conf_get "$bot_dir_diag" BOT_SERVICE "$bot").service"
         local exit_status
         exit_status=$(systemctl --user show "$unit_name" --property=ExecMainStatus --value 2>/dev/null || echo "unknown")
         local active_state
@@ -139,7 +126,8 @@ _diagnose_missing_bot() {
         fi
         ;;
     Darwin)
-        local plist_label="${_DIAG_SERVICE_PREFIX}.${bot}"
+        local plist_label
+        plist_label=$(bot_conf_get "$bot_dir_diag" BOT_SERVICE "$bot")
         local launchctl_info
         launchctl_info=$(launchctl print "gui/$(id -u)/$plist_label" 2>/dev/null | head -15 || echo "(launchctl info unavailable)")
         if [ "$launchctl_info" != "(launchctl info unavailable)" ]; then

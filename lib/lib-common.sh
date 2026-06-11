@@ -399,3 +399,57 @@ extract_bot_conf_var() {
     local conf_file="$1" var_name="$2"
     grep -m1 "^export ${var_name}=" "$conf_file" | cut -d= -f2- | tr -d "'"
 }
+
+# --- Script error events ------------------------------------------------------
+
+# emit_script_error <bot_dir> <script_name> <exit_code> <message>
+# Write a script_error event to the bot's JSONL event log.
+# For scripts that run outside a bot context, pass "" for bot_dir and
+# the event is written to $CLAUDLOBBY_ROOT/state/events/.
+emit_script_error() {
+    local bot_dir="$1" script_name="$2" exit_code="$3" message="$4"
+    local events_dir bot_id
+
+    if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
+        events_dir="$bot_dir/data/events"
+        bot_id=$(basename "$bot_dir")
+    else
+        events_dir="${CLAUDLOBBY_ROOT}/state/events"
+        bot_id="fleet"
+    fi
+    mkdir -p "$events_dir"
+
+    local ts today escaped_msg
+    ts=$(ts_iso)
+    today=$(date +%Y-%m-%d)
+    escaped_msg=$(json_escape "$message")
+    printf '{"ts":"%s","bot":"%s","type":"script_error","source":"lib","data":{"script":"%s","exit_code":%d,"message":"%s"}}\n' \
+        "$ts" "$bot_id" "$script_name" "$exit_code" "$escaped_msg" \
+        >> "$events_dir/fleet-${today}.jsonl"
+}
+
+# install_error_trap <bot_dir>
+# Set an ERR trap that emits a script_error event on non-zero exit.
+# Call after sourcing lib-common.sh and resolving the bot directory.
+# Pass "" for fleet-level scripts that run outside a bot context.
+# NOTE: does NOT replace existing EXIT traps — only fires on ERR.
+install_error_trap() {
+    local _err_bot_dir="$1"
+    local _err_script
+    _err_script=$(basename "$0")
+    trap 'emit_script_error "'"$_err_bot_dir"'" "'"$_err_script"'" "$?" "non-zero exit at line $LINENO"' ERR
+}
+
+# bot_conf_get <bot_dir> <key> <default>
+# Read a single variable from a bot's bot.conf without sourcing the file
+# (no side effects on the caller's environment). Handles both `export VAR=val`
+# and plain `VAR=val` forms. Strips surrounding double quotes from values.
+# Returns <default> if the file is missing or the key isn't found.
+bot_conf_get() {
+    local bot_dir="$1" key="$2" default="$3" val=""
+    if [ -f "$bot_dir/bot.conf" ]; then
+        val=$(grep "^\(export \)\?$key=" "$bot_dir/bot.conf" | head -1 \
+            | sed -E "s/^(export )?$key=//" | tr -d '"' || true)
+    fi
+    printf '%s' "${val:-$default}"
+}

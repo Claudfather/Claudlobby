@@ -23,6 +23,7 @@ BOT_DIR="${1:?Usage: spin-up-bot.sh /path/to/bot/dir}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd)"
 
 load_bot_conf "$BOT_DIR" || exit 1
+install_error_trap "$BOT_DIR"
 
 case "$_OS" in
 Linux)
