@@ -150,11 +150,15 @@ case "$state" in
         echo "$(ts_iso) BUSY — active processing" >> "$LOG"
         emit_keepalive_event "BUSY" "active processing"
         rm -f "$UNKNOWN_COUNTER"
+        # Clear idle marker — bot is actively working
+        rm -f "$BOT_DIR/data/.idle"
         ;;
     IDLE)
         echo "$(ts_iso) IDLE — at prompt" >> "$LOG"
         emit_keepalive_event "IDLE" "at prompt"
         rm -f "$UNKNOWN_COUNTER"
+        # Touch idle marker — fleet-pulse reads this instead of parsing panes
+        touch "$BOT_DIR/data/.idle"
         ;;
     *)
         # Track consecutive UNKNOWN runs

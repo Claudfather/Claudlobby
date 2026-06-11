@@ -274,6 +274,20 @@ pane_is_idle() {
     printf '%s' "$text" | grep -qE "$_idle_pattern"
 }
 
+# marker_is_newer <marker_a> <marker_b>
+# Returns 0 if marker_a exists AND its mtime >= marker_b's mtime (or marker_b
+# is missing). Returns 1 otherwise. Used by fleet-pulse to compare .idle vs
+# .last-tool-call without parsing pane text.
+marker_is_newer() {
+    local a="$1" b="$2"
+    [ -f "$a" ] || return 1
+    [ -f "$b" ] || return 0
+    local a_epoch b_epoch
+    a_epoch=$(stat_mtime "$a" 2>/dev/null) || return 1
+    b_epoch=$(stat_mtime "$b" 2>/dev/null) || return 0
+    [ "$a_epoch" -ge "$b_epoch" ]
+}
+
 # --- Debounced notification ---------------------------------------------------
 
 # debounce_notify <state_dir> <bot_id> <marker_suffix> <notify_fn> <message>
