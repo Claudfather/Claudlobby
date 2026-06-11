@@ -10,8 +10,6 @@ CRITICAL_TYPES = {
     "session_missing",
     "service_down",
     "activity_stuck",
-    "pane_stuck",
-    "mcp_error",
     "script_error",
     "overdue_dispatch",
 }
