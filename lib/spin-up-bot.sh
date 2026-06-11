@@ -27,18 +27,36 @@ install_error_trap "$BOT_DIR"
 
 case "$_OS" in
 Linux)
-    UNIT_FILE="$HOME/.config/systemd/user/$BOT_NAME.service"
-    if [ -f "$UNIT_FILE" ]; then
-        echo "spin-up-bot: $BOT_NAME.service exists — restarting"
-        systemctl --user restart "$BOT_NAME.service"
+    # BOT_SERVICE is the canonical unit name (set by compositor in bot.conf).
+    # Fall back to BOT_NAME for fleets that haven't regenerated yet.
+    UNIT_DIR="$HOME/.config/systemd/user"
+    if [ -n "${BOT_SERVICE:-}" ] && [ -f "$UNIT_DIR/$BOT_SERVICE.service" ]; then
+        echo "spin-up-bot: $BOT_SERVICE.service exists — restarting"
+        systemctl --user restart "$BOT_SERVICE.service"
+    elif [ -f "$UNIT_DIR/$BOT_NAME.service" ]; then
+        # Pre-rename unit still installed. Restart it if the new unit file
+        # doesn't exist yet (fleet not regenerated); otherwise re-enroll
+        # to migrate to the new name.
+        if [ -n "${BOT_SERVICE:-}" ] && [ -f "$BOT_DIR/$BOT_SERVICE.service" ]; then
+            echo "spin-up-bot: migrating $BOT_NAME → $BOT_SERVICE"
+            "$LIB_DIR/install-bot-systemd.sh" "$BOT_DIR"
+        else
+            echo "spin-up-bot: $BOT_NAME.service exists (pre-rename) — restarting"
+            systemctl --user restart "$BOT_NAME.service"
+        fi
     else
+        # install-bot-systemd.sh handles stale unit cleanup + fresh install.
         echo "spin-up-bot: enrolling $BOT_NAME as systemd-user service"
         "$LIB_DIR/install-bot-systemd.sh" "$BOT_DIR"
     fi
     ;;
 Darwin)
-    PLIST_FILE="$HOME/Library/LaunchAgents/$BOT_SERVICE.plist"
-    if [ -f "$PLIST_FILE" ]; then
+    if [ -n "${BOT_SERVICE:-}" ]; then
+        PLIST_FILE="$HOME/Library/LaunchAgents/$BOT_SERVICE.plist"
+    else
+        PLIST_FILE=""
+    fi
+    if [ -n "$PLIST_FILE" ] && [ -f "$PLIST_FILE" ]; then
         echo "spin-up-bot: $BOT_SERVICE.plist exists — kickstart"
         launchctl kickstart -k "gui/$(id -u)/$BOT_SERVICE"
     else
