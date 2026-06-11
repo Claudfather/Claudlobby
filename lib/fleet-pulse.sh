@@ -226,7 +226,10 @@ _ESCALATION_WINDOW="${FLEET_PULSE_ESCALATION_WINDOW:-10}"
 _ESCALATION_CHAT_ID="${FLEET_PULSE_ESCALATION_CHAT_ID:-}"
 if [ -z "$_ESCALATION_CHAT_ID" ]; then
     _first_bot_dir=$(ls -d "$BOTS_DIR"/*/ 2>/dev/null | head -1) || true
-    [ -n "${_first_bot_dir:-}" ] && _ESCALATION_CHAT_ID=$(bot_conf_get "$_first_bot_dir" TELEGRAM_GROUP_CHAT_ID "")
+    if [ -n "${_first_bot_dir:-}" ]; then
+        _ESCALATION_CHAT_ID=$(bot_conf_get "$_first_bot_dir" TELEGRAM_GROUP_CHAT_ID "")
+        _ESCALATION_STATE_DIR=$(bot_conf_get "$_first_bot_dir" TELEGRAM_STATE_DIR "")
+    fi
 fi
 
 if [ -n "$_ESCALATION_CHAT_ID" ]; then
@@ -264,7 +267,9 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                 fi
                 if [ "$_should_fire" -eq 1 ]; then
                     _msg="FLEET ALERT: $_crit_type on ${_affected_count} bots (${_affected_bots# }). Check fleet health immediately."
-                    "$LIB_DIR/tg-post.sh" "$_msg" 2>/dev/null || true
+                    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
+                    TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+                        "$LIB_DIR/tg-post.sh" "$_msg" 2>/dev/null || true
                     touch "$_esc_marker"
                 fi
             else
