@@ -51,16 +51,6 @@ emit_event() {
         "$ts" "$bot_id" "$event_type" "$data_json" >> "$outfile"
 }
 
-# --- Helper: read a value from a bot's bot.conf (no side effects) ---
-bot_conf_get() {
-    local bot_dir="$1" key="$2" default="$3" val=""
-    if [ -f "$bot_dir/bot.conf" ]; then
-        val=$(grep "^\(export \)\?$key=" "$bot_dir/bot.conf" | head -1 \
-            | sed -E "s/^(export )?$key=//" | tr -d '"' || true)
-    fi
-    printf '%s' "${val:-$default}"
-}
-
 # --- Helper: actively notify a bot's manager via its tmux session ---
 # The system is pull-based by design, but silent stalls (the reason this exists)
 # mean the manager can't rely on polling. We push a one-line [FLEET-PULSE] note

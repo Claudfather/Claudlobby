@@ -46,13 +46,22 @@ for conf in "$BOTS_DIR"/*/bot.conf; do
     bot_dir="$(dirname "$conf")"
     bot_name="$(basename "$bot_dir")"
 
+    # Read BOT_SERVICE from bot.conf (falls back to bot_name for pre-generate fleets).
+    svc=$(bot_conf_get "$bot_dir" BOT_SERVICE "$bot_name")
+
     # Only touch bots whose service is registered with the host's init.
     if [ "$_OS" = "Darwin" ]; then
-        plist=$(find "$AGENTS_DIR" -maxdepth 1 -name "*.$bot_name.plist" 2>/dev/null | head -1) || true
-        [ -n "$plist" ] || continue
+        if [ ! -f "$AGENTS_DIR/$svc.plist" ]; then
+            # Fallback: check for legacy plist pattern (*.$bot_name.plist)
+            plist=$(find "$AGENTS_DIR" -maxdepth 1 -name "*.$bot_name.plist" 2>/dev/null | head -1) || true
+            [ -n "$plist" ] || continue
+        fi
     else
-        # Linux: rely on the user's session bus; assume registered if .service exists.
-        [ -f "$HOME/.config/systemd/user/$bot_name.service" ] || continue
+        # Linux: check BOT_SERVICE unit first, fall back to bot_name
+        if [ ! -f "$HOME/.config/systemd/user/$svc.service" ] && \
+           [ ! -f "$HOME/.config/systemd/user/$bot_name.service" ]; then
+            continue
+        fi
     fi
 
     "$KEEPALIVE" "$bot_dir" || echo "$TS WARN — keepalive.sh failed for $bot_name (exit $?)" >>"$LOG"

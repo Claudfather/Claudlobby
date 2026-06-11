@@ -399,3 +399,17 @@ extract_bot_conf_var() {
     local conf_file="$1" var_name="$2"
     grep -m1 "^export ${var_name}=" "$conf_file" | cut -d= -f2- | tr -d "'"
 }
+
+# bot_conf_get <bot_dir> <key> <default>
+# Read a single variable from a bot's bot.conf without sourcing the file
+# (no side effects on the caller's environment). Handles both `export VAR=val`
+# and plain `VAR=val` forms. Strips surrounding double quotes from values.
+# Returns <default> if the file is missing or the key isn't found.
+bot_conf_get() {
+    local bot_dir="$1" key="$2" default="$3" val=""
+    if [ -f "$bot_dir/bot.conf" ]; then
+        val=$(grep "^\(export \)\?$key=" "$bot_dir/bot.conf" | head -1 \
+            | sed -E "s/^(export )?$key=//" | tr -d '"' || true)
+    fi
+    printf '%s' "${val:-$default}"
+}
