@@ -259,7 +259,13 @@ check_tmux_session() {
 # Base idle-detection regex — single source of truth for keepalive.sh
 # classify_pane and fleet-pulse pane_is_idle. Operators extend at runtime
 # via KEEPALIVE_IDLE_PATTERNS (appended by both consumers).
-_IDLE_PATTERN_BASE='(^\s*[>❯]\s*$|Remote Control active|Enter\/Esc to close|Yes\/No|Allow|Deny|y\/n\b)'
+#
+# Prompt glyph pattern: [>❯].{0,3}$ matches the glyph near end of line
+# with up to 3 trailing chars.  Claude Code's TUI puts a non-breaking space
+# (U+00A0) after ❯ which \s doesn't match — .{0,3}$ handles it plus any
+# other minor decoration.  The short suffix cap avoids false positives on
+# lines where > appears mid-content.
+_IDLE_PATTERN_BASE='([>❯].{0,3}$|Remote Control act|Enter.*to close|Yes\/No|Allow|Deny|y\/n\b|\$\s*$)'
 
 # pane_is_idle <pane_text>
 # Returns 0 if the pane is at a prompt / waiting-for-input, 1 otherwise.
@@ -272,6 +278,20 @@ pane_is_idle() {
         _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
     fi
     printf '%s' "$text" | grep -qE "$_idle_pattern"
+}
+
+# marker_is_newer <marker_a> <marker_b>
+# Returns 0 if marker_a exists AND its mtime >= marker_b's mtime (or marker_b
+# is missing). Returns 1 otherwise. Used by fleet-pulse to compare .idle vs
+# .last-tool-call without parsing pane text.
+marker_is_newer() {
+    local a="$1" b="$2"
+    [ -f "$a" ] || return 1
+    [ -f "$b" ] || return 0
+    local a_epoch b_epoch
+    a_epoch=$(stat_mtime "$a" 2>/dev/null) || return 1
+    b_epoch=$(stat_mtime "$b" 2>/dev/null) || return 0
+    [ "$a_epoch" -ge "$b_epoch" ]
 }
 
 # --- Debounced notification ---------------------------------------------------

@@ -174,23 +174,28 @@ for bot_dir in "$BOTS_DIR"/*/; do
         done
     fi
 
-    # --- Check 5: activity stuck (animating but no tool calls) ---
-    # pane_stuck (Check 3) is fooled by the braille spinner, which animates even
-    # during a hang — the pane hash keeps changing, so it never fires. This check
-    # uses the .last-tool-call marker bot-vitals.sh touches on every tool call:
-    # session alive + not idle + no tool call for > threshold => activity_stuck.
+    # --- Check 5: activity stuck (no tool calls for extended period) ---
+    # Uses marker-file comparison instead of pane-regex idle detection.
+    # keepalive.sh touches data/.idle when it sees an idle pane; bot-vitals.sh
+    # touches data/.last-tool-call on every tool call. Comparing mtimes is
+    # deterministic and harness-agnostic (works for Claude Code, Codex, Cortex).
     marker="$bot_dir/data/.last-tool-call"
-    if [ -n "$_pane_buf" ] && [ -f "$marker" ]; then
-        threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
-        now_epoch=$(date +%s)
-        last_epoch=$(stat_mtime "$marker" 2>/dev/null || echo "$now_epoch")
-        gap=$(( now_epoch - last_epoch ))
-        pane_tail=$(echo "$_pane_buf" | tail -10)
-        if [ "$gap" -ge "$threshold" ] && ! pane_is_idle "$pane_tail"; then
-            emit_event "$bot_dir" "$bot_id" "activity_stuck" \
-                '{"last_tool_call_epoch":'"$last_epoch"',"elapsed_seconds":'"$gap"'}'
-            debounce_notify "$state_dir" "$bot_id" "activity_alerted" _notify_current_bot \
-                "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)"
+    idle_marker="$bot_dir/data/.idle"
+    if [ -f "$marker" ]; then
+        # If idle marker is newer than tool-call marker, bot is idle — skip
+        if ! marker_is_newer "$idle_marker" "$marker"; then
+            threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD 1800)
+            now_epoch=$(date +%s)
+            last_epoch=$(stat_mtime "$marker" 2>/dev/null || echo "$now_epoch")
+            gap=$(( now_epoch - last_epoch ))
+            if [ "$gap" -ge "$threshold" ]; then
+                emit_event "$bot_dir" "$bot_id" "activity_stuck" \
+                    '{"last_tool_call_epoch":'"$last_epoch"',"elapsed_seconds":'"$gap"'}'
+                debounce_notify "$state_dir" "$bot_id" "activity_alerted" _notify_current_bot \
+                    "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)"
+            else
+                debounce_clear "$state_dir" "$bot_id" "activity_alerted"
+            fi
         else
             debounce_clear "$state_dir" "$bot_id" "activity_alerted"
         fi
