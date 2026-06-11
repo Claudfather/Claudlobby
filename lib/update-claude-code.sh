@@ -29,24 +29,31 @@ fi
 
 echo "$ts UPDATE starting (current: ${old_version:-not installed})" >> "$LOG"
 
-# --- Detect install path: system-wide (/usr/*) vs user-level ---
+# --- Detect install path and run update directly (no eval) ---
 _claude_path=$(command -v claude 2>/dev/null || true)
-_update_cmd=""
+_use_sudo=0
 if [ -n "$_claude_path" ] && [[ "$_claude_path" == /usr/* ]]; then
-    _update_cmd="sudo npm install -g @anthropic-ai/claude-code@latest"
-elif [ -n "$_claude_path" ]; then
-    _update_cmd="npm install -g @anthropic-ai/claude-code@latest"
-else
-    _update_cmd="npm install -g @anthropic-ai/claude-code@latest"
+    _use_sudo=1
 fi
 
-echo "$ts UPDATE running: $_update_cmd" >> "$LOG"
-if eval "$_update_cmd" >> "$LOG" 2>&1; then
-    new_version=$(claude --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-    echo "$ts UPDATE success: $old_version → $new_version" >> "$LOG"
+if [ "$_use_sudo" -eq 1 ]; then
+    echo "$ts UPDATE running: sudo npm install -g @anthropic-ai/claude-code@latest" >> "$LOG"
+    if sudo npm install -g @anthropic-ai/claude-code@latest >> "$LOG" 2>&1; then
+        new_version=$(claude --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+        echo "$ts UPDATE success: $old_version → $new_version" >> "$LOG"
+    else
+        echo "$ts UPDATE FAILED — npm returned non-zero" >> "$LOG"
+        exit 1
+    fi
 else
-    echo "$ts UPDATE FAILED — npm returned non-zero" >> "$LOG"
-    exit 1
+    echo "$ts UPDATE running: npm install -g @anthropic-ai/claude-code@latest" >> "$LOG"
+    if npm install -g @anthropic-ai/claude-code@latest >> "$LOG" 2>&1; then
+        new_version=$(claude --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+        echo "$ts UPDATE success: $old_version → $new_version" >> "$LOG"
+    else
+        echo "$ts UPDATE FAILED — npm returned non-zero" >> "$LOG"
+        exit 1
+    fi
 fi
 
 # --- Check if version actually changed ---
