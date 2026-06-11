@@ -215,3 +215,38 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # Reap old event files for this bot
     reap_events "$bot_dir"
 done
+
+# --- Human-readable summary ---------------------------------------------------
+_summary_file="$state_dir/pulse-summary.txt"
+_summary_tmp=$(safe_mktemp)
+{
+    printf "Fleet pulse: %s — %s\n" "$fleet" "$ts"
+    printf "%-12s %-8s %-18s %s\n" "BOT" "SESSION" "SERVICE" "ALERTS"
+    printf "%-12s %-8s %-18s %s\n" "---" "-------" "-------" "------"
+    for _s_bot_dir in "$BOTS_DIR"/*/; do
+        [ -d "$_s_bot_dir" ] || continue
+        _s_bid=$(basename "$_s_bot_dir")
+
+        _s_session_status="up"
+        _s_session_name=$(tmux_session_name "$_s_bot_dir")
+        check_tmux_session "$_s_session_name" 2>/dev/null || _s_session_status="DOWN"
+
+        _s_svc=$(bot_conf_get "$_s_bot_dir" BOT_SERVICE "$_s_bid")
+        _s_svc_status="ok"
+        if [ "$_OS" = "Linux" ] && [ -n "$_s_svc" ]; then
+            systemctl --user is-active "$_s_svc" >/dev/null 2>&1 || _s_svc_status="DOWN"
+        fi
+
+        _s_alerts=""
+        _s_efile="$_s_bot_dir/data/events/fleet-${today}.jsonl"
+        if [ -f "$_s_efile" ]; then
+            for _s_ct in session_missing service_down activity_stuck; do
+                grep -q "\"type\":\"$_s_ct\"" "$_s_efile" 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
+            done
+        fi
+        _s_alerts="${_s_alerts:- none}"
+        printf "%-12s %-8s %-18s %s\n" "$_s_bid" "$_s_session_status" "$_s_svc_status" "$_s_alerts"
+    done
+} > "$_summary_tmp" && mv "$_summary_tmp" "$_summary_file"
+
+cat "$_summary_file"
