@@ -264,6 +264,18 @@ All fields are optional integers with sensible defaults. Can be set in `defaults
 
 Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`.
 
+### Fleet-pulse escalation (environment overrides)
+
+`lib/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`) affects multiple bots within a short window. These are tuned by environment variables read directly by the script — they are **not** `fleet.yaml` fields. Set them in your fleet's `.env` or the fleet-pulse systemd unit's environment.
+
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `FLEET_PULSE_ESCALATION_CHAT_ID` | _(fallback)_ | Telegram chat ID for fleet-wide critical alerts. When unset, fleet-pulse uses the first bot in the fleet that declares a non-empty `TELEGRAM_GROUP_CHAT_ID` (bots that omit it are skipped, not blindly trusted). If no bot declares one, escalation is disabled and fleet-pulse logs a warning rather than failing silently. |
+| `FLEET_PULSE_ESCALATION_THRESHOLD` | `2` | Number of distinct bots that must hit the same critical event within the window to trigger escalation. |
+| `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
+
+Set `FLEET_PULSE_ESCALATION_CHAT_ID` explicitly so alert targeting never depends on bot directory ordering.
+
 ### `bots.<name>.hooks`
 
 Per-bot Claude Code hooks, appended to fleet defaults. Each event (e.g., `PreToolUse`, `PostToolUse`) contains a list of hook entries:

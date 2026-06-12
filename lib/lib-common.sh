@@ -473,3 +473,24 @@ bot_conf_get() {
     fi
     printf '%s' "${val:-$default}"
 }
+
+# first_bot_with_conf <bots_dir> <key>
+# Echo the first bot directory (alphabetical) whose bot.conf declares a
+# non-empty value for <key>; return 1 with no output if none qualify.
+# Use this to resolve a fleet-wide fallback (e.g. an escalation Telegram chat
+# ID) from whichever bot actually defines it, rather than trusting the first
+# directory blindly — the first bot may lack the key and silently mute the
+# fallback. Reading multiple keys from the returned dir keeps them consistent
+# (all drawn from the same bot).
+first_bot_with_conf() {
+    local bots_dir="$1" key="$2" d
+    [ -d "$bots_dir" ] || return 1
+    for d in "$bots_dir"/*/; do
+        [ -d "$d" ] || continue
+        if [ -n "$(bot_conf_get "$d" "$key" "")" ]; then
+            printf '%s' "$d"
+            return 0
+        fi
+    done
+    return 1
+}
