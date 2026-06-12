@@ -31,6 +31,7 @@ MGR="valmgr"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate.XXXXXX")"
 # fleet-pulse resolves bots via resolve_bots_dir <fleet> = local/<fleet>/runtime/bots.
 BOT_DIR="$ROOT/local/$FLEET/runtime/bots/$BOT"
+install_error_trap "$BOT_DIR"
 EVENTS="$BOT_DIR/data/events"
 
 cleanup() {

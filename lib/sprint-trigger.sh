@@ -10,6 +10,7 @@ set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
+install_error_trap ""
 
 MANAGER_TMUX="${MANAGER_TMUX:-claude-bot}"
 LOG="${SPRINT_TRIGGER_LOG:-$CLAUDLOBBY_ROOT/logs/sprint-trigger.log}"

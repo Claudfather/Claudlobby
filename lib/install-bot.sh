@@ -21,6 +21,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BOT_DIR="${1:?Usage: install-bot.sh /path/to/bot/dir}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd)"
+install_error_trap "$BOT_DIR"
 
 if [ "$_OS" != "Darwin" ]; then
     echo "install-bot.sh: macOS only (saw uname=$_OS)" >&2

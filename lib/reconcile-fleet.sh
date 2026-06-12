@@ -17,6 +17,7 @@ ENROLL="${2:-}"
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
+install_error_trap ""
 FLEET_YAML="$CLAUDLOBBY_ROOT/local/$FLEET/fleet.yaml"
 RUNTIME_DIR=$(resolve_bots_dir "$FLEET")
 

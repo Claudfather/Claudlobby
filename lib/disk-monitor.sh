@@ -17,6 +17,7 @@ set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
+install_error_trap ""
 
 THRESHOLD=90
 MOUNT="/"

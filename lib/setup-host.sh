@@ -47,6 +47,7 @@ CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 export CLAUDLOBBY_ROOT
 # shellcheck source=lib-common.sh
 . "$SCRIPT_DIR/lib-common.sh"
+install_error_trap ""
 
 log()  { printf 'setup-host: %s\n' "$*"; }
 ok()   { printf 'setup-host: \xe2\x9c\x93 %s\n' "$*"; }   # checkmark
