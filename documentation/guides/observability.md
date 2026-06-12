@@ -44,7 +44,6 @@ Bot activity
 | `activity_stuck` | pulse | Bot is animating but hasn't made a tool call in >threshold seconds |
 | `overdue_dispatch` | pulse | A dispatched task passed its deadline with no report |
 | `script_error` | lib | A lifecycle script exited non-zero |
-| `mcp_error` | vitals | An MCP server tool call failed |
 
 ### Informational
 

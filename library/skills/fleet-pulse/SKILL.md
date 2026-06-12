@@ -56,7 +56,6 @@ Run external liveness checks against the fleet, summarize findings, and take cor
 | `service_down` | Re-enroll: `$CLAUDLOBBY_ROOT/lib/spin-up-bot.sh $BOT_DIR` |
 | `pane_stuck` (>5 min) | Capture pane content (`tmux capture-pane -t <session> -p`), inspect for genuine stuck state. If confirmed stuck, restart the bot. If output shows active work, skip. |
 | `wip_uncommitted` | Do NOT restart. Flag as task-in-flight. Check how long the WIP has been uncommitted — if >2 hours, flag to human as potentially stale. |
-| `mcp_error` | Attempt MCP reconnect. If >3 `mcp_error` events in the last 30 minutes, flag to human as persistent. |
 
 ## Report Format
 
