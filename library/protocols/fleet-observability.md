@@ -63,7 +63,6 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `activity_stuck` | pulse | Bot has made **no tool call** for longer than its threshold AND keepalive has not classified it as idle (no recent `data/.idle` marker). Uses marker-file mtime comparison, not pane regex. Investigate; restart only if `safe-worker-restart` guards pass. |
 | `overdue_dispatch` | pulse | A task you dispatched to this bot passed its deadline with no terminal `[BOTREPORT]`. Check the bot (cross-reference `activity_stuck`): if hung, recover it; if mis-scoped or wedged, re-dispatch or reassign; if it needs a human, escalate. Don't silently wait. |
 | `pane_stuck` (>5 min) | pulse | Investigate pane content, restart if confirmed stuck. Note: a live spinner animates the pane, so an animated-but-hung bot shows up as `activity_stuck`, not `pane_stuck`. |
-| `mcp_error` | vitals | Attempt MCP server reconnect; flag human if persistent (>3 in 30 min) |
 | `service_down` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `session_missing` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. Check for staleness instead. |
@@ -79,7 +78,10 @@ Reading events at decision points is the default, but silent stalls — the reas
 
 Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the table above and act. The push tells you *something needs attention*; the decision (investigate, restart, escalate to the human via Telegram) is still yours.
 
-**Not yet captured via hooks:** `context_warning` and `rate_limit` are not available in the Claude Code PreToolUse/PostToolUse hook payload. Managers must continue using live checks (capture-pane, direct query) for context percentage and rate limit status until these signals become available in the hook schema.
+**Not yet captured via hooks:** several fleet-health signals are not derivable from the Claude Code PreToolUse/PostToolUse hook payload. Managers must use live checks for these until the hook schema exposes them:
+
+- **`context_warning` / `rate_limit`** — not present in the payload at all. Use live checks (capture-pane, direct query) for context percentage and rate-limit status.
+- **`mcp_error`** — a failing tool call (including an MCP server returning `isError`) fires the `PostToolUseFailure` hook event rather than `PostToolUse`, and only that event carries an error field. The `bot-vitals.sh` hook is wired to Pre/PostToolUse, so no `mcp_error` event is produced. Detecting dead or erroring MCP servers requires a dedicated mechanism (e.g. a `PostToolUseFailure` hook or an out-of-band liveness probe).
 
 ## Reading Events
 
@@ -98,7 +100,7 @@ done
 Filter for actionable events:
 
 ```bash
-grep -Eh '"type":"pane_stuck"|"type":"service_down"|"type":"session_missing"|"type":"mcp_error"' \
+grep -Eh '"type":"pane_stuck"|"type":"service_down"|"type":"session_missing"' \
     "$bot_dir/data/events/fleet-${today}.jsonl" 2>/dev/null
 ```
 

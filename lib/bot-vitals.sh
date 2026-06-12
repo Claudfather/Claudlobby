@@ -5,7 +5,7 @@
 # the bot's data/events/fleet-YYYY-MM-DD.jsonl. Works as both
 # PreToolUse and PostToolUse hook.
 #
-# Captures: tool_call, mcp_error, session events.
+# Captures: tool_call, session events.
 # NOTE: context_warning and rate_limit are NOT available via the Claude Code
 # hook payload (PreToolUse/PostToolUse). Managers must use live checks for those.
 # Reaps event files older than 7 days on each invocation.
@@ -63,7 +63,6 @@ except (json.JSONDecodeError, ValueError):
 hook_event = p.get('hook_event_name', '')
 tool = p.get('tool_name', '')
 session = p.get('session_id', '')
-error = p.get('error', '')
 
 events = []
 
@@ -77,9 +76,11 @@ def evt(etype, data):
 if tool:
     evt('tool_call', {'tool': tool, 'event': hook_event, 'session': session})
 
-# Detect MCP errors (tool_name contains mcp prefix or error field present)
-if error and 'mcp' in tool.lower():
-    evt('mcp_error', {'server': tool, 'error': str(error)[:500]})
+# MCP tool errors are not observable from this hook. A failing tool call —
+# including an MCP server returning isError — fires the PostToolUseFailure
+# hook event, not PostToolUse, and only that event carries an error field.
+# This script is wired to Pre/PostToolUse, whose payload exposes no error or
+# tool-failure field, so an mcp_error signal cannot be derived here.
 
 # NOTE: context_warning and rate_limit are not available in the hook payload.
 # The PreToolUse/PostToolUse schema does not include context_window_percent
