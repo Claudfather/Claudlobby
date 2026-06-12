@@ -227,14 +227,25 @@ done
 _ESCALATION_THRESHOLD="${FLEET_PULSE_ESCALATION_THRESHOLD:-2}"
 _ESCALATION_WINDOW="${FLEET_PULSE_ESCALATION_WINDOW:-10}"
 
-# Resolve Telegram chat ID for escalation (from first bot's config or env)
+# Resolve the escalation Telegram target. Precedence:
+#   1. explicit FLEET_PULSE_ESCALATION_CHAT_ID (env / fleet config) — preferred,
+#      so alert targeting never depends on bot directory ordering
+#   2. the first bot in the fleet that actually declares TELEGRAM_GROUP_CHAT_ID
+# The state dir is read from the SAME bot so token resolution stays consistent.
 _ESCALATION_CHAT_ID="${FLEET_PULSE_ESCALATION_CHAT_ID:-}"
+_ESCALATION_STATE_DIR=""
 if [ -z "$_ESCALATION_CHAT_ID" ]; then
-    _first_bot_dir=$(ls -d "$BOTS_DIR"/*/ 2>/dev/null | head -1) || true
-    if [ -n "${_first_bot_dir:-}" ]; then
-        _ESCALATION_CHAT_ID=$(bot_conf_get "$_first_bot_dir" TELEGRAM_GROUP_CHAT_ID "")
-        _ESCALATION_STATE_DIR=$(bot_conf_get "$_first_bot_dir" TELEGRAM_STATE_DIR "")
+    _esc_bot_dir=$(first_bot_with_conf "$BOTS_DIR" TELEGRAM_GROUP_CHAT_ID) || true
+    if [ -n "${_esc_bot_dir:-}" ]; then
+        _ESCALATION_CHAT_ID=$(bot_conf_get "$_esc_bot_dir" TELEGRAM_GROUP_CHAT_ID "")
+        _ESCALATION_STATE_DIR=$(bot_conf_get "$_esc_bot_dir" TELEGRAM_STATE_DIR "")
     fi
+fi
+
+# No chat ID anywhere means the critical-alert safety net is mute. Say so
+# loudly rather than no-op silently.
+if [ -z "$_ESCALATION_CHAT_ID" ]; then
+    echo "fleet-pulse: WARNING — no escalation Telegram chat ID resolved; critical fleet alerts will NOT be delivered. Set FLEET_PULSE_ESCALATION_CHAT_ID, or ensure at least one bot's bot.conf defines TELEGRAM_GROUP_CHAT_ID." >&2
 fi
 
 if [ -n "$_ESCALATION_CHAT_ID" ]; then
