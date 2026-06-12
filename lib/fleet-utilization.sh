@@ -17,6 +17,7 @@ CLAUDLOBBY_ROOT="$(cd "$LIB_DIR/.." && pwd)"
 
 # shellcheck source=lib-common.sh
 source "$LIB_DIR/lib-common.sh"
+install_error_trap ""
 
 FLEET=""
 SUMMARY=false

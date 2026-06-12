@@ -12,6 +12,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
+install_error_trap "$BOT_DIR"
 load_bot_conf "$BOT_DIR"
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 

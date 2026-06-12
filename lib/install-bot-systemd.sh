@@ -25,6 +25,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BOT_DIR="${1:?Usage: install-bot-systemd.sh /path/to/bot/dir}"
 BOT_DIR="$(cd "$BOT_DIR" && pwd)"
+install_error_trap "$BOT_DIR"
 
 if [ "$_OS" != "Linux" ]; then
     echo "install-bot-systemd.sh: Linux only (saw uname=$_OS)" >&2

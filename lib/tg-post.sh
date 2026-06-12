@@ -15,6 +15,7 @@ set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
+install_error_trap ""
 
 MSG="${1:?Usage: tg-post.sh <message>}"
 CHAT_ID="${TELEGRAM_GROUP_CHAT_ID:-}"
