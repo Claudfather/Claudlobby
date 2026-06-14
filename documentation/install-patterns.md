@@ -22,6 +22,7 @@ lib/setup-mac-mini.sh --fleet <name> --enroll-all
 lib/install-bot.sh local/<fleet>/runtime/bots/<bot>     # one bot at a time
 lib/install-keepalive.sh <fleet>                         # fleet-wide 60s keepalive
 lib/install-creds-check.sh <fleet>                       # daily 09:00 cred probe
+lib/install-code-audit-sweep.sh <fleet>                  # nightly code-audit sweep (only if fleet.sweep set)
 ```
 
 Each bot becomes `com.claudlobby.<fleet>.<bot>` in `~/Library/LaunchAgents/`. View with `launchctl list | grep claudlobby` and tail logs at `<bot-dir>/logs/launchd.*.log`.
@@ -40,6 +41,7 @@ lib/install-bot-systemd.sh local/<fleet>/runtime/bots/<bot>
 # Fleet-wide timers
 lib/install-keepalive-systemd.sh <fleet>     # 60s keepalive timer
 lib/install-creds-check-systemd.sh           # daily 09:00 cred probe
+lib/install-code-audit-sweep-systemd.sh <fleet>  # nightly code-audit sweep (only if fleet.sweep set)
 ```
 
 Units land in `~/.config/systemd/user/`. View with `systemctl --user list-timers`, follow logs with `journalctl --user -u <name> -f`.

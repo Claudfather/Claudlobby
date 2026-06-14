@@ -36,13 +36,13 @@ Use `resolve_bots_dir` from `lib-common.sh` to find the bots directory, then ite
 ## Event Schema
 
 ```json
-{"ts": "...", "bot": "...", "type": "...", "source": "vitals|pulse", "data": {...}}
+{"ts": "...", "bot": "...", "type": "...", "source": "vitals|pulse|audit", "data": {...}}
 ```
 
 - **ts** — ISO 8601 timestamp
 - **bot** — bot identifier
 - **type** — event classification (open-ended, match on what you care about)
-- **source** — `vitals` (bot-emitted) or `pulse` (external check)
+- **source** — `vitals` (bot-emitted), `pulse` (external check), or `audit` (rolling code-audit sweep)
 - **data** — type-specific payload (open object)
 
 ## When to Read
@@ -67,6 +67,12 @@ Read bot event logs at these natural decision points — not continuously, not o
 | `session_missing` | pulse | Re-enroll via `lib/spin-up-bot.sh <bot-dir>` |
 | `wip_uncommitted` | pulse | Do NOT restart — task is in flight. Check for staleness instead. |
 | `session_event` | vitals | Informational — log awareness of session lifecycle |
+| `audit_selected` | audit | Informational — the rolling sweep picked this repo as stalest. |
+| `audit_dispatched` | audit | Informational — the audit was dispatched into the owner bot's session. |
+| `audit_deferred` | audit | Owner was busy; the sweep skipped this tick and retries next run. No action. |
+| `sweep_repo_unreachable` | audit | A `gh` query failed (auth/network); that repo was skipped, not mis-ranked. Check fleet GitHub auth if it persists. |
+| `audit_completed` | audit | Informational — the audit finished and filed `auto-audit`-labelled issues. |
+| `audit_failed` | audit | The audit could not dispatch or run. Investigate the owner bot / `gh` auth. |
 
 ## Active Notifications (push)
 

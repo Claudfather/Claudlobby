@@ -93,6 +93,25 @@ class ObservabilityConfig:
 
 
 @dataclass
+class SweepConfig:
+    """Fleet rolling code-audit sweep — opt-in via the fleet.yaml `sweep:` block.
+
+    A fleet-level nightly job like fleet-pulse/creds-check: the no-LLM selector
+    lib/code-audit-sweep.sh picks the stalest repo by GitHub `auto-audit` issue
+    timestamps and dispatches the audit into the owner bot's session.  Presence
+    of the block is opt-in; absence ⇒ FleetConfig.sweep is None ⇒ nothing
+    emitted (no env, no timer).
+    """
+
+    enabled: bool = False
+    owner_bot: str | None = None
+    repos: list[str] = field(default_factory=list)
+    label: str = "auto-audit"
+    schedule: str = "*-*-* 03:00:00"  # systemd OnCalendar; nightly 03:00
+    audit_types: list[str] = field(default_factory=lambda: ["tech-debt"])
+
+
+@dataclass
 class SandboxConfig:
     """Sandbox network/filesystem settings → .claude/settings.local.json.
 
@@ -263,6 +282,11 @@ class FleetConfig:
     defaults: dict[str, Any] = field(default_factory=dict)
     teams: dict[str, TeamConfig] = field(default_factory=dict)
     bots: dict[str, BotConfig] = field(default_factory=dict)
+    sweep: SweepConfig | None = None
+
+    def sweep_enabled(self) -> bool:
+        """True when the opt-in code-audit sweep is configured and enabled."""
+        return bool(self.sweep and self.sweep.enabled)
 
     def manager_bots(self) -> set[str]:
         """Bot names that manage at least one team."""
@@ -467,6 +491,22 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
         reap_days=int(rd) if rd is not None else None,
         activity_stuck_threshold=int(ast) if ast is not None else None,
         dispatch_deadline=int(dd) if dd is not None else None,
+    )
+
+
+def _coerce_sweep(raw: dict | None) -> SweepConfig | None:
+    """Coerce the fleet.yaml `sweep:` block. None when absent (opt-out)."""
+    if not raw:
+        return None
+    repos = [str(r) for r in (raw.get("repos") or [])]
+    audit_types = [str(t) for t in (raw.get("audit_types") or [])] or ["tech-debt"]
+    return SweepConfig(
+        enabled=bool(raw.get("enabled", True)),  # presence of the block = opt-in
+        owner_bot=raw.get("owner_bot"),
+        repos=repos,
+        label=str(raw.get("label", "auto-audit")),
+        schedule=str(raw.get("schedule", "*-*-* 03:00:00")),
+        audit_types=audit_types,
     )
 
 
@@ -816,5 +856,6 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         defaults=merged_defaults,
         teams=teams,
         bots=bots,
+        sweep=_coerce_sweep(fleet.get("sweep")),
     )
     return fleet_cfg, merged_defaults

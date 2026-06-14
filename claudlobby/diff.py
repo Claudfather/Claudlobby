@@ -76,7 +76,8 @@ def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict) -
     import tempfile
 
     sd = fleet.system_defaults
-    if not sd.enabled or not sd.timers:
+    sweep_on = fleet.sweep_enabled()
+    if (not sd.enabled or not sd.timers) and not sweep_on:
         return ""
 
     timers_dir = paths.runtime_fleet / "timers"

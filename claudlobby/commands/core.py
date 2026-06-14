@@ -82,9 +82,11 @@ def cmd_generate(args) -> int:
         out = compose_fleet(fleet, paths)
         log.info("composed %d bots → %s", len(out), paths.runtime_bots)
 
-    # Fleet-level timer generation (after per-bot loop)
+    # Fleet-level timer generation (after per-bot loop). compose_fleet_timers
+    # emits the system_defaults timers and/or the opt-in sweep timer, so call
+    # it when either is in play.
     sd = fleet.system_defaults
-    if sd.enabled and sd.timers:
+    if (sd.enabled and sd.timers) or fleet.sweep_enabled():
         timers_dir = compose_fleet_timers(fleet, paths, merged_defaults)
         log.info("composed fleet timers → %s", timers_dir)
 
