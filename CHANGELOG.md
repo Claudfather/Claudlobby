@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Removed
 
+- **`library/skills/ironclad/` skill** — `/ironclad` moved to the clauDNA plugin (`claudna:ironclad`, subagent-only; Claudfather/clauDNA#146), so the claudlobby library copy is redundant. Removed `SKILL.md`, `result-format.md`, and `auto-output.md`. Fleet bots get `/ironclad` via the clauDNA plugin; fleet dispatch behavior is preserved by the new `fleet-dispatch-capability` protocol. Consolidate-not-fork strip (no deprecation shim) — Phase 3e of the migration. Hold-for-release: merge after the clauDNA release so `/ironclad` is never unavailable to the fleet.
 - **`claudron/` subpackage** — extracted to its own repo ([Claudfather/Claudron](https://github.com/Claudfather/Claudron)). Removed source, CLI entry point, and all claudron-specific tests from this repo. `test_paths_integration.py` (which tests claudlobby's vault-aware path resolution, not claudron internals) moved to `tests/`.
 
 ### Added
