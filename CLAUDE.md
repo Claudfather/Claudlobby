@@ -89,6 +89,8 @@ Key lifecycle scripts in `lib/`:
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
 | `update-claude-code.sh` | Daily Claude Code update + fleet bounce |
 | `install-claude-update-systemd.sh` | Claude Code update timer enrollment (systemd) |
+| `reload-fleet.sh` | Daily live plugin/skill reload — `claude plugin update` + generate, then mark running bots for a keepalive-driven `/reload` (no restart) |
+| `install-reload-fleet-systemd.sh` | Reload-fleet daily timer enrollment (systemd) |
 
 ## Repository Hygiene — MANDATORY
 

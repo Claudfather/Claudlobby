@@ -31,3 +31,12 @@ fleet_timers:
     script: "$CLAUDLOBBY_ROOT/lib/creds-check.sh"
     schedule: "*-*-* 06:00:00"
     type: oneshot
+  # Mechanism 1 of the fleet update lifecycle: refresh plugins + composed skills
+  # live every day (claude plugin update + generate, then mark running bots for a
+  # keepalive-driven /reload). No restart, no context loss. Runs before the
+  # binary-update window so the plugin cache is warm. Enroll via
+  # install-reload-fleet-systemd.sh.
+  reload-fleet:
+    script: "$CLAUDLOBBY_ROOT/lib/reload-fleet.sh"
+    schedule: "*-*-* 03:30:00"
+    type: oneshot
