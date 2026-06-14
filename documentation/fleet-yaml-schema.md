@@ -171,6 +171,23 @@ Applied to every bot. Merge rules by type:
 
 Optional grouping. The generator uses team membership to inject a "Fleet You Manage" roster into manager personas.
 
+### `fleet.sweep`
+
+Opt-in rolling code-audit sweep. A fleet-level nightly timer runs a no-LLM selector (`lib/code-audit-sweep.sh`) that picks the **stalest** repo — by the timestamp of its most recent `auto-audit`-labelled GitHub issue — and dispatches an audit into the owner bot's session via `lib/bot-sweep-cron.sh`. The audit's filed issues become the next run's staleness signal, so GitHub is the only ledger (no local tracker, no drift). Presence of the block opts in; omit it and nothing is emitted.
+
+```yaml
+fleet:
+  sweep:
+    owner_bot: astrid              # bot whose session runs the audit (required)
+    repos: [acme/api, acme/web]    # optional; defaults to owner_bot's scope.repos
+    label: auto-audit              # staleness label (default: auto-audit)
+    schedule: "*-*-* 03:00:00"     # systemd OnCalendar (default: nightly 03:00)
+    audit_types: [tech-debt, security-audit]  # rotated per run (default: [tech-debt])
+    enabled: true                  # default true when the block is present
+```
+
+After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land in the owner's `data/events/` — see the `fleet-observability` protocol.
+
 ### `bots.<name>.expertise`
 
 **Required.** A list of area-of-expertise filenames from `library/expertise/`. The first file's H1 titles the bot; subsequent files' H1s are stripped and their bodies append below.

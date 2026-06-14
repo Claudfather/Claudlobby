@@ -428,6 +428,46 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
             )
 
 
+def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Validate the opt-in fleet.sweep (rolling code-audit) block."""
+    sweep = fleet.sweep
+    if sweep is None or not sweep.enabled:
+        return
+
+    # owner_bot must name a real bot in this fleet
+    if not sweep.owner_bot:
+        report.errors.append("sweep.owner_bot is required when sweep is enabled")
+    elif sweep.owner_bot not in fleet.bots:
+        suggestion = closest_match(sweep.owner_bot, set(fleet.bots))
+        hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+        report.errors.append(
+            f"sweep.owner_bot '{sweep.owner_bot}' is not a bot in this fleet{hint}"
+        )
+
+    # Repos: an explicit sweep.repos list OR the owner's scope.repos must exist,
+    # else the selector has nothing to audit.
+    owner = fleet.bots.get(sweep.owner_bot) if sweep.owner_bot else None
+    owner_scope = owner.scope.repos if (owner and owner.scope) else []
+    if not sweep.repos and not owner_scope:
+        report.errors.append(
+            f"sweep is enabled but has no repos — set sweep.repos or give owner "
+            f"'{sweep.owner_bot}' a scope.repos list"
+        )
+
+    for repo in sweep.repos:
+        if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+            report.warnings.append(
+                f"sweep.repos entry '{repo}' does not match <org>/<repo> format"
+            )
+
+    # schedule is a systemd OnCalendar expression — light sanity check only.
+    if not re.search(r"\d{1,2}:\d{2}", sweep.schedule):
+        report.warnings.append(
+            f"sweep.schedule '{sweep.schedule}' has no HH:MM time — expected a "
+            f"systemd OnCalendar expression like '*-*-* 03:00:00'"
+        )
+
+
 def _validate_cross_fleet_collisions(
     fleet: FleetConfig, paths: Paths, report: ValidationReport
 ) -> None:
@@ -469,6 +509,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
+    _validate_sweep(fleet, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
