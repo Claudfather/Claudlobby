@@ -122,8 +122,8 @@ fleet_events=$(ls "$ROOT/state/events"/fleet-*.jsonl 2>/dev/null | head -1 || tr
 [ -n "$fleet_events" ] && grep -q '"type":"reload_failed"' "$fleet_events" && r=yes || r=no
 check "reload-fleet emits reload_failed event on failure (loud, not silent)" "$r"
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
-printf '%s' "$mgr_pane" | grep -q 'RELOAD-FAIL' && r=yes || r=no
-check "reload-fleet alerts the manager on failure" "$r"
+printf '%s' "$mgr_pane" | grep -q 'reload_failed' && r=yes || r=no
+check "reload-fleet alerts the manager on failure (shared emit_failure_alert)" "$r"
 [ ! -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
 check "reload-fleet does not half-reload (no marker when download fails)" "$r"
 

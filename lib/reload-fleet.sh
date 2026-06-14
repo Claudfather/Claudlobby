@@ -37,46 +37,13 @@ BOTS_DIR="$(resolve_bots_dir "$FLEET")"
 mkdir -p "${CLAUDLOBBY_ROOT}/state"
 LOG="${CLAUDLOBBY_ROOT}/state/reload-fleet.log"
 
-# --- fleet-observability event (mirrors emit_script_error's fleet-level path) ---
-emit_reload_event() {
-    local event_type="$1" reason="$2"
-    local events_dir="${CLAUDLOBBY_ROOT}/state/events"
-    mkdir -p "$events_dir"
-    local ts today escaped
-    ts=$(ts_iso); today=$(date +%Y-%m-%d); escaped=$(json_escape "$reason")
-    printf '{"ts":"%s","bot":"fleet","type":"%s","source":"reload","data":{"reason":"%s"}}\n' \
-        "$ts" "$event_type" "$escaped" >> "$events_dir/fleet-${today}.jsonl"
-}
-
-# --- manager alert: tmux nudge + Telegram escalation (the fleet-pulse path) ---
-alert_manager() {
-    local msg="$1" mgr_bot mgr chat_bot chat_id state_dir
-    # tmux nudge to the fleet manager (resolve from whichever bot declares it).
-    mgr_bot=$(first_bot_with_conf "$BOTS_DIR" MANAGER_TMUX || true)
-    mgr=$(bot_conf_get "$mgr_bot" MANAGER_TMUX "")  # "" when no bot declares one
-    if [ -n "$mgr" ] && check_tmux_session "$mgr"; then
-        "$_TMUX_BIN" send-keys -t "$mgr" "[RELOAD-FAIL] $(sanitize_tmux_input "$msg")" Enter || true
-    fi
-    # Telegram escalation (loudest channel) — mirror fleet-pulse chat-id resolution.
-    chat_id="${FLEET_PULSE_ESCALATION_CHAT_ID:-}"
-    if [ -z "$chat_id" ]; then
-        chat_bot=$(first_bot_with_conf "$BOTS_DIR" TELEGRAM_GROUP_CHAT_ID || true)
-        if [ -n "$chat_bot" ]; then
-            chat_id=$(bot_conf_get "$chat_bot" TELEGRAM_GROUP_CHAT_ID "")
-            state_dir=$(bot_conf_get "$chat_bot" TELEGRAM_STATE_DIR "")
-        fi
-    fi
-    if [ -n "$chat_id" ]; then
-        TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
-            "$LIB_DIR/tg-post.sh" "FLEET RELOAD FAILED: $msg" >/dev/null 2>&1 || true
-    fi
-}
-
+# LOUD failure — emit the reload_failed event + alert the manager via the shared
+# lib-common primitive (emit_failure_alert is also used by Mechanism 2's
+# update-claude-code.sh, so the two mechanisms never fork the alert path).
 loud_fail() {
     local reason="$1"
     printf '%s reload_failed: %s\n' "$(ts_iso)" "$reason" >> "$LOG"
-    emit_reload_event "reload_failed" "$reason"
-    alert_manager "$reason"
+    emit_failure_alert "$BOTS_DIR" "reload_failed" "$reason"
 }
 
 # --- 1 + 2. download + generate, serialized under a fleet-wide lock ---
