@@ -1,12 +1,12 @@
 ---
 title: "Per-Bot tmux Socket Isolation"
 type: plan
-status: draft
+status: approved
 owner: clog
 tags: [runtime, supervision, tmux, reliability, dispatch]
 created: 2026-06-14
 updated: 2026-06-15
-ironclad: cycle-1 complete (CHANGES-NEEDED, 0 blockers); ALL 5 forks locked — F1/F3/F5 ratified by Chris 2026-06-15; lock-only pass pending
+ironclad: cycle-1 complete (CHANGES-NEEDED, 0 blockers); ALL 5 forks locked — F1/F3/F5 ratified by the fleet owner 2026-06-15; cycle-2 lock-only: CONVERGED — ready for /implement-plan
 ---
 
 # Per-Bot tmux Socket Isolation
@@ -121,7 +121,7 @@ Extend `validate-bot-change.sh` — its own setup/teardown uses **bare `tmux` ag
   - **(a)** Per-**bot** socket — blast radius = 1; maps 1:1 to the existing per-bot service; matches "distinct identities / isolated state."
   - **(b)** Per-**fleet** socket — fewer servers; but a server death still drops a whole fleet (up to a full team).
 - **Lean:** **(a) per-bot.** tmux servers cost only a few MB each. **Note (ironclad):** on a *single-fleet* host, per-fleet ≡ per-bot on blast radius at slightly lower plumbing cost — but **the reference host is multi-fleet**, so per-fleet would leave intra-fleet blast radius (a whole team) intact. Per-bot is the only option that fully removes shared fate on this host.
-- **Ratifier:** **Human (fleet owner) — LOCKED (Chris, 2026-06-15): per-bot.** Single-fleet-equivalence caveat acknowledged N/A (this host is multi-fleet).
+- **Ratifier:** **Human (fleet owner) — LOCKED (the fleet owner, 2026-06-15): per-bot.** Single-fleet-equivalence caveat acknowledged N/A (this host is multi-fleet).
 - **Status:** locked
 - **Evidence:** Incident analysis; ironclad cycle 1 (both lenses: lean holds); `PROJECT_MISSION.md`.
 
@@ -136,7 +136,7 @@ Extend `validate-bot-change.sh` — its own setup/teardown uses **bare `tmux` ag
 ### Fork F3: Manager-socket resolution source — **LOCKED (mirror)**
 - **Context:** `MANAGER_TMUX` derives from `fleet.teams` only; a sub-manager gets `MANAGER_TMUX=<self>`.
 - **Decision:** **(a) mirror existing `MANAGER_TMUX` resolution** — emit `MANAGER_TMUX_SOCKET` from the same value; no hierarchy redesign. **Explicit accepted limitation:** a sub-manager's `MANAGER_TMUX(_SOCKET)=self`, so a sub-manager's *upward* report-back is non-functional — this is **pre-existing, inherited, and out of scope** here (any upward-reporting fix is a separate decision). *(Live proof during review: the reviewing sub-manager's own `MANAGER_TMUX=self`; reporting up required an explicit override.)*
-- **Ratifier:** Manager — **LOCKED** (ironclad cycle 1; Chris confirmed the accepted limitation, 2026-06-15). 
+- **Ratifier:** Manager — **LOCKED** (ironclad cycle 1; the fleet owner confirmed the accepted limitation, 2026-06-15). 
 - **Status:** locked
 - **Evidence:** `composer.py:441-448`; `config.py:184-185,230-234`.
 
@@ -154,14 +154,14 @@ Extend `validate-bot-change.sh` — its own setup/teardown uses **bare `tmux` ag
   - **(d)** **Canary-then-big-bang, scoped** — migrate one bot **with no active peer-socket comms during the window** (a leaf worker quiesced, or the **manager migrated last**), validate, then big-bang the rest. Avoids the silent mixed-mode only if the canary genuinely has no peer sends.
   - (b) Rolling per-bot / (c) per-fleet staged — extended mixed-mode; not recommended.
 - **In-flight buffer loss (must address):** `pre-stop-handoff` preserves Claude **session context**, **not** unsubmitted tmux input buffers. The bounce loses any dispatch mid-typed or queued but not yet processed. The quiesce step must ensure no dispatch is in flight before stopping.
-- **Decision:** **(a) big-bang simultaneous, managers-started-first, with an explicit dispatch quiesce** (Chris, 2026-06-15). No prod canary; reach for (d) was declined.
-- **Ratifier:** **Human (operational) — LOCKED (Chris, 2026-06-15): option (a), managers-first.**
+- **Decision:** **(a) big-bang simultaneous, managers-started-first, with an explicit dispatch quiesce** (the fleet owner, 2026-06-15). No prod canary; reach for (d) was declined.
+- **Ratifier:** **Human (operational) — LOCKED (the fleet owner, 2026-06-15): option (a), managers-first.**
 - **Status:** locked
 - **Evidence:** Cross-socket dependency in `dispatch.sh`/`report-back.sh`; `pre-stop-handoff.sh`; ironclad Fork-F5.
 
-## Ratifier Decisions (for Chris)
+## Ratifier Decisions (for the fleet owner)
 
-All three resolved (Chris, 2026-06-15):
+All three resolved (the fleet owner, 2026-06-15):
 
 - **Q1 — F5 migration (operational):** **(a) big-bang simultaneous**, managers restart before workers. ✓ locked
 - **Q2 — F1 granularity:** **lock per-bot** (single-fleet-equivalence caveat N/A on this multi-fleet host). ✓ locked
@@ -242,10 +242,10 @@ Review: PR #414 comment ([issuecomment-4704311264](https://github.com/Claudfathe
 | F2 empty-`BOT_SERVICE` fallback collides → SPOF | F2 **locked** with fail-fast production guard |
 | R3 reconcile blindness window | Transient Phase-2 warning guard + Phase-4 socket-file scan |
 | R4 partial-migration/unset contract undefined | `bot_tmux()` unset contract + `MANAGER_TMUX_SOCKET` fallback defined (F4) |
-| F5 canary == mixed-mode; restart ordering; in-flight buffer loss | F5 **reworked**: option (d) added, managers-first, dispatch quiesce, buffer-loss noted; left OPEN for ratifier |
+| F5 canary == mixed-mode; restart ordering; in-flight buffer loss | F5 **reworked then LOCKED** (fleet owner, 2026-06-15): (a) big-bang, managers-first, dispatch quiesce, buffer-loss handled |
 | Gap: Phase-5 harness undersized | Resized **M→L**; socket-aware setup/teardown specified |
 | Gap: `bot-sweep-cron` resolution | Phase-3 interface change flagged (pass bot_dir or reverse-lookup) |
 | Gap: `.tmux-env` fate | Decided up front: keep v1, defer retirement |
-| F1/F3/F4 leans hold | F3/F4 **locked**; F1 left for human ratifier with the single-fleet caveat noted |
+| F1/F3/F4 leans hold | F3/F4 **locked** (cycle 1); F1 **locked** per-bot (fleet owner, 2026-06-15) — single-fleet caveat N/A on this multi-fleet host |
 
-**Convergence:** 0 blockers. **All 5 forks locked** — F2/F4 (framework) + F3 (manager) via ironclad cycle 1; F1/F3/F5 ratified by Chris 2026-06-15. Next: a lock-only `/ironclad` pass to confirm post-lock consistency, then ready for `/implement-plan`.
+**Convergence:** 0 blockers. **All 5 forks locked** — F2/F4 (framework) + F3 (manager) via ironclad cycle 1; F1/F3/F5 ratified by the fleet owner 2026-06-15. Next: a lock-only `/ironclad` pass to confirm post-lock consistency, then ready for `/implement-plan`.
