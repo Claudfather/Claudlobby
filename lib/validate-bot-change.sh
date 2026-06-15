@@ -29,6 +29,8 @@ FLEET="valfleet"
 BOT="valbot"
 MGR="valmgr"
 IBOT="validle"
+BUSY="valbusy"
+SBOT="valsubmit"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate.XXXXXX")"
 # fleet-pulse resolves bots via resolve_bots_dir <fleet> = local/<fleet>/runtime/bots.
 BOT_DIR="$ROOT/local/$FLEET/runtime/bots/$BOT"
@@ -39,6 +41,8 @@ cleanup() {
     tmux kill-session -t "$BOT" 2>/dev/null || true
     tmux kill-session -t "$MGR" 2>/dev/null || true
     tmux kill-session -t "$IBOT" 2>/dev/null || true
+    tmux kill-session -t "$BUSY" 2>/dev/null || true
+    tmux kill-session -t "$SBOT" 2>/dev/null || true
     rm -rf "$ROOT"
 }
 trap cleanup EXIT
@@ -155,11 +159,63 @@ check "keepalive sends /reload-skills to an idle bot with .reload-pending" "$r"
 [ ! -f "$IBOT_DIR/data/.reload-pending" ] && r=yes || r=no
 check "keepalive clears .reload-pending after firing the reload" "$r"
 
-# Safety: a BUSY bot with a pending reload must NOT be interrupted (ghost-text risk).
-touch "$BOT_DIR/data/.reload-pending"
-CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$BOT_DIR" >/dev/null 2>&1 || true
-[ -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
+# Safety: a BUSY bot with a pending reload must NOT be interrupted (ghost-text
+# risk). A dedicated busy fixture — an explicit spinner glyph then a long sleep —
+# makes the BUSY classification deterministic regardless of test run order, rather
+# than borrowing the fleet-pulse valbot, whose pane state is incidental here.
+BUSY_DIR="$ROOT/local/$FLEET/runtime/bots/$BUSY"
+mkdir -p "$BUSY_DIR/data"
+cat > "$BUSY_DIR/bot.conf" <<CONF
+BOT_NAME="$BUSY"
+BOT_ID="$BUSY"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+tmux new-session -d -s "$BUSY" 'printf "⠋ Thinking...\n"; sleep 600'
+sleep 1
+touch "$BUSY_DIR/data/.reload-pending"
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$BUSY_DIR" >/dev/null 2>&1 || true
+[ -f "$BUSY_DIR/data/.reload-pending" ] && r=yes || r=no
 check "keepalive leaves .reload-pending on a BUSY bot (no interrupt)" "$r"
+
+# Regression guard: send_reload_command must resend Enter ONLY when the TUI
+# swallowed it (command still on the input line), never after a clean submit.
+# This fixture consumes each submitted line and redraws a fresh prompt below it,
+# mimicking Claude Code — where a submitted command scrolls up into the transcript
+# but stays visible in the pane. A verify scoped to the whole pane matches that
+# scrolled-up text and fires a spurious empty Enter at the idle prompt; one scoped
+# to the bottom input line does not. Assert exactly one submission per reload
+# command (2 total) — i.e. zero spurious Enters. The idle checks above only assert
+# the commands appear, so without this a widened/deleted verify regresses silently.
+SBOT_DIR="$ROOT/local/$FLEET/runtime/bots/$SBOT"
+mkdir -p "$SBOT_DIR/data"
+cat > "$SBOT_DIR/bot.conf" <<CONF
+BOT_NAME="$SBOT"
+BOT_ID="$SBOT"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+SUBMIT_LOG="$SBOT_DIR/submits.log"
+: > "$SUBMIT_LOG"
+# Idle prompt so keepalive takes the reload branch; each read logs the submission,
+# then prints it and pushes it well above the bottom input line, so only a
+# genuinely-unsubmitted command is still at the prompt for the verify to match.
+cat > "$SBOT_DIR/fixture.sh" <<FIX
+#!/bin/bash
+printf '> \n'
+while IFS= read -r l; do
+    printf '%s\n' "\$l" >> "$SUBMIT_LOG"
+    printf 'sent[%s]\n\n\n\n\n\n\n> \n' "\$l"
+done
+FIX
+tmux new-session -d -s "$SBOT" "bash '$SBOT_DIR/fixture.sh'"
+sleep 1
+touch "$SBOT_DIR/data/.reload-pending"
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$SBOT_DIR" >/dev/null 2>&1 || true
+sleep 1
+submits=$(wc -l < "$SUBMIT_LOG")
+[ "$submits" -eq 2 ] && r=yes || r=no
+check "send_reload_command fires no spurious Enter on clean submit (verify scoped to prompt)" "$r"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="

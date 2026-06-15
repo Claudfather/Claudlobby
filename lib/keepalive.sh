@@ -61,8 +61,12 @@ send_reload_command() {
     "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
     sleep 0.3
     # If the command text is still sitting unsubmitted at the prompt, the TUI
-    # swallowed the Enter during a render — resend it once.
-    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -qF "$cmd"; then
+    # swallowed the Enter during a render — resend it once. Scope the match to the
+    # bottom of the pane (the input line), not the whole pane: after a clean submit
+    # the command scrolls up into the transcript and stays visible there, so a
+    # full-pane match would re-fire Enter on every successful submit and inject an
+    # empty message at the now-idle prompt.
+    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -3 | grep -qF "$cmd"; then
         "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter 2>/dev/null || true
     fi
 }
