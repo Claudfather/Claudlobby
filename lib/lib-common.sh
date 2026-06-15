@@ -448,6 +448,49 @@ emit_script_error() {
         >> "$events_dir/fleet-${today}.jsonl"
 }
 
+# emit_failure_alert <bots_dir> <event_type> <reason>
+# LOUD, never-silent failure path shared by the fleet update mechanisms
+# (reload-fleet.sh = Mechanism 1; update-claude-code.sh = Mechanism 2). It
+#   1. emits a fleet-observability event {type:<event_type>, source:"alert",
+#      data.reason} to $CLAUDLOBBY_ROOT/state/events/fleet-<date>.jsonl, and
+#   2. alerts the fleet manager via a tmux nudge AND the Telegram escalation
+#      (chat id resolved like fleet-pulse: env override, else the first bot that
+#      declares TELEGRAM_GROUP_CHAT_ID).
+# Both alert channels are best-effort and never abort the caller.
+emit_failure_alert() {
+    local bots_dir="$1" event_type="$2" reason="$3"
+
+    local events_dir="${CLAUDLOBBY_ROOT}/state/events"
+    mkdir -p "$events_dir"
+    local ts today escaped
+    ts=$(ts_iso); today=$(date +%Y-%m-%d); escaped=$(json_escape "$reason")
+    printf '{"ts":"%s","bot":"fleet","type":"%s","source":"alert","data":{"reason":"%s"}}\n' \
+        "$ts" "$event_type" "$escaped" >> "$events_dir/fleet-${today}.jsonl"
+
+    # manager tmux nudge (resolve from whichever bot declares MANAGER_TMUX)
+    local mgr_bot mgr
+    mgr_bot=$(first_bot_with_conf "$bots_dir" MANAGER_TMUX || true)
+    mgr=$(bot_conf_get "$mgr_bot" MANAGER_TMUX "")
+    if [ -n "$mgr" ] && check_tmux_session "$mgr"; then
+        "$_TMUX_BIN" send-keys -t "$mgr" "[FLEET-ALERT] $event_type: $(sanitize_tmux_input "$reason")" Enter || true
+    fi
+
+    # Telegram escalation (loudest channel) — mirror fleet-pulse chat-id resolution
+    local chat_bot chat_id state_dir
+    chat_id="${FLEET_PULSE_ESCALATION_CHAT_ID:-}"
+    if [ -z "$chat_id" ]; then
+        chat_bot=$(first_bot_with_conf "$bots_dir" TELEGRAM_GROUP_CHAT_ID || true)
+        if [ -n "$chat_bot" ]; then
+            chat_id=$(bot_conf_get "$chat_bot" TELEGRAM_GROUP_CHAT_ID "")
+            state_dir=$(bot_conf_get "$chat_bot" TELEGRAM_STATE_DIR "")
+        fi
+    fi
+    if [ -n "$chat_id" ]; then
+        TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
+            "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "FLEET ALERT [$event_type]: $reason" >/dev/null 2>&1 || true
+    fi
+}
+
 # install_error_trap <bot_dir>
 # Set an ERR trap that emits a script_error event on non-zero exit.
 # Call after sourcing lib-common.sh and resolving the bot directory.

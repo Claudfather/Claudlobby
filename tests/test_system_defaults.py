@@ -414,7 +414,7 @@ class TestComposeFleetTimers:
         timer_text = timer.read_text()
         assert "OnCalendar=" in timer_text
 
-    def test_all_four_timers_generated(self, tmp_path):
+    def test_all_default_timers_generated(self, tmp_path):
         from claudlobby.composer import compose_fleet_timers
 
         root = tmp_path / "claudlobby"
@@ -425,10 +425,38 @@ class TestComposeFleetTimers:
 
         timers_dir = compose_fleet_timers(fleet, paths, {})
 
-        for name in ["fleet-pulse", "keepalive", "log-rotation", "creds-check"]:
+        for name in [
+            "fleet-pulse",
+            "keepalive",
+            "log-rotation",
+            "creds-check",
+            "reload-fleet",
+        ]:
             assert (timers_dir / f"com.test.{name}.service").is_file()
             assert (timers_dir / f"com.test.{name}.timer").is_file()
             assert (timers_dir / f"com.test.{name}.plist").is_file()
+
+    def test_reload_fleet_daily_timer(self, tmp_path):
+        # Mechanism 1 of the fleet update lifecycle: a daily, calendar-scheduled
+        # reload-fleet timer that refreshes plugins + composed skills live (no
+        # restart). It must compose as a distinct timer alongside the others.
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+
+        timers_dir = compose_fleet_timers(fleet, paths, {})
+
+        svc = timers_dir / "com.test.reload-fleet.service"
+        timer = timers_dir / "com.test.reload-fleet.timer"
+        assert svc.is_file()
+        assert timer.is_file()
+        assert "reload-fleet.sh" in svc.read_text()
+        # Daily cadence is a systemd OnCalendar expression, not an interval.
+        assert "OnCalendar=" in timer.read_text()
 
 
 # ---------------------------------------------------------------------------

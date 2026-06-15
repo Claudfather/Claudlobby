@@ -2,11 +2,15 @@
 # Bot keepalive — restart dead sessions, log idle state.
 # Usage: keepalive.sh /path/to/bot/dir
 #
-# IMPORTANT: this script intentionally does NOT press Enter on idle panes.
-# Pressing Enter at the prompt submits any "ghost" text — including Claude
-# Code's greyed-out auto-completion suggestions — which causes the bot to
-# act on input the user never typed. If you want a nudge mechanism, build
-# one in your local overlay with eyes open about the input-injection risk.
+# IMPORTANT: this script does NOT press Enter on idle panes EXCEPT for the one
+# gated reload path below. Pressing Enter at an empty prompt submits any "ghost"
+# text — including Claude Code's greyed-out auto-completion suggestions — which
+# causes the bot to act on input the user never typed. The reload path is safe
+# because it types a FIXED slash command as the first input, then Enter (so Enter
+# submits that command, never ghost text), and fires ONLY when a fleet reload is
+# pending (data/.reload-pending) and the pane is confirmed IDLE. This is the
+# single activation point for Mechanism 1 of the fleet update lifecycle:
+# reload-fleet.sh marks bots; keepalive performs the /reload at the next idle tick.
 
 set -euo pipefail
 
@@ -42,6 +46,29 @@ emit_keepalive_event() {
 
     # Reap old keepalive JSONL files beyond retention window.
     find "$events_dir" -name 'keepalive-*.jsonl' -type f -mtime +"$KEEPALIVE_REAP_DAYS" -delete 2>/dev/null || true
+}
+
+# send_reload_command <slash-command>
+# Slash-safe send: a slash command must be the FIRST text in the input — the
+# 'set +H; ' prefix dispatch.sh uses would break Claude Code's slash-command
+# recognition. Two-step send (text, pause, Enter) plus a verify-retry on the
+# Enter, mirroring start-bot.sh's STARTUP_PROMPT pattern. Caller guarantees the
+# pane is IDLE (see the IDLE branch).
+send_reload_command() {
+    local cmd="$1"
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "$cmd"
+    sleep 0.3
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    sleep 0.3
+    # If the command text is still sitting unsubmitted at the prompt, the TUI
+    # swallowed the Enter during a render — resend it once. Scope the match to the
+    # bottom of the pane (the input line), not the whole pane: after a clean submit
+    # the command scrolls up into the transcript and stays visible there, so a
+    # full-pane match would re-fire Enter on every successful submit and inject an
+    # empty message at the now-idle prompt.
+    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -3 | grep -qF "$cmd"; then
+        "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter 2>/dev/null || true
+    fi
 }
 
 # Cron runs with a minimal env. `systemctl --user` needs XDG_RUNTIME_DIR to
@@ -159,6 +186,17 @@ case "$state" in
         rm -f "$UNKNOWN_COUNTER"
         # Touch idle marker — fleet-pulse reads this instead of parsing panes
         touch "$BOT_DIR/data/.idle"
+        # F2(b) consolidated reload activation: if reload-fleet.sh marked a live
+        # plugin/skill update pending, perform it now that the pane is IDLE, then
+        # clear the marker. This is the one place keepalive presses Enter on an
+        # idle pane — safe because it sends fixed slash commands, not ghost text.
+        if [ -f "$BOT_DIR/data/.reload-pending" ]; then
+            send_reload_command "/reload-plugins"
+            send_reload_command "/reload-skills"
+            rm -f "$BOT_DIR/data/.reload-pending"
+            echo "$(ts_iso) RELOAD — sent /reload-plugins + /reload-skills (live update)" >> "$LOG"
+            emit_keepalive_event "RELOAD" "sent /reload-plugins + /reload-skills"
+        fi
         ;;
     *)
         # Track consecutive UNKNOWN runs
