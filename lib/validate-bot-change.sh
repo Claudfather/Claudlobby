@@ -225,6 +225,13 @@ check "send_reload_command fires no spurious Enter on clean submit (verify scope
 RB_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-rb.XXXXXX")"
 RB_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valrb"
 mkdir -p "$RB_DIR/.claude" "$RB_DIR/logs" "$RB_ROOT/bin" "$RB_ROOT/tmp"
+# Controlled HOME with consent pre-accepted. start-bot.sh's consent block runs
+# with_lock on $HOME/.claude/settings.json.lock, which fails on a fresh HOME (no
+# .claude dir yet) under set -e — a CI runner's empty HOME would abort start-bot.sh
+# before the resume injection ever fires. Pinning HOME keeps the scenario hermetic.
+RB_HOME="$RB_ROOT/home"
+mkdir -p "$RB_HOME/.claude"
+printf '{"skipAutoPermissionPrompt":true,"skipDangerousModePermissionPrompt":true}\n' > "$RB_HOME/.claude/settings.json"
 cat > "$RB_ROOT/bin/claude" <<'STUB'
 #!/bin/bash
 printf 'remote-control is active\n'
@@ -250,7 +257,7 @@ _run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
     tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
     sleep 0.3
     TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 CLAUDE_BIN="$RB_ROOT/bin/claude" \
-        PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+        HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
         "$LIB_DIR/start-bot.sh" "$RB_DIR" >/dev/null 2>&1 || true
     sleep 1
     tmux capture-pane -t "$RB_SESSION" -p 2>/dev/null || true
