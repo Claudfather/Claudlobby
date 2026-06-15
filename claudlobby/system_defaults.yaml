@@ -40,3 +40,7 @@ fleet_timers:
     script: "$CLAUDLOBBY_ROOT/lib/reload-fleet.sh"
     schedule: "*-*-* 03:30:00"
     type: oneshot
+  weekly-worker-restart:
+    script: "$CLAUDLOBBY_ROOT/lib/weekly-worker-restart.sh"
+    schedule: "Sun *-*-* 05:00:00"
+    type: oneshot

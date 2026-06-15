@@ -153,7 +153,12 @@ if [ -z "${CLAUDE_FLAGS:-}" ]; then
     [ -n "${CLAUDE_EXTRA_FLAGS:-}" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $CLAUDE_EXTRA_FLAGS"
 fi
 
-CLAUDE_CMD=". '$BOT_ENV_FILE' && exec claude $CLAUDE_FLAGS --name \"$SESSION_NAME\""
+# The launched binary is overridable via CLAUDE_BIN so the validation harness
+# (validate-bot-change.sh) can inject a stub for a hermetic, auth-free start;
+# production leaves it unset and `claude` resolves on PATH inside the session.
+# Only the launched session honors this — the plugin-management calls below use
+# the real `claude` and are skipped under test via an empty FLEET_PLUGINS_REQUIRED.
+CLAUDE_CMD=". '$BOT_ENV_FILE' && exec ${CLAUDE_BIN:-claude} $CLAUDE_FLAGS --name \"$SESSION_NAME\""
 
 # Update third-party plugins before launch. Handles cold start (fresh
 # host with no plugins installed) through full lifecycle: register
@@ -222,6 +227,34 @@ fi
 # is fully initialized (MCP servers connected, channel plugin active). A fixed
 # sleep after that point is wasted CPU time — especially costly when 8 bots
 # start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
+
+# Resume prior context (lossless restart) before STARTUP_PROMPT. Every start —
+# intentional, crash, or weekly bounce — injects /claudna:session-resume --auto
+# as a first keystroke so the bot picks up its last handoff. Age-gated: resume
+# only from a checkpoint fresher than RESUME_MAX_AGE_S; a stale one (e.g. a bot
+# that crashed days ago) clean-starts rather than replaying dead state. Sent as
+# a slash command — NO 'set +H;' prefix: a slash command must be the FIRST text
+# in the TUI input or Claude Code won't recognize it (so this differs from the
+# STARTUP_PROMPT prose send below; it matches keepalive.sh's send_reload_command).
+# Sent first so it settles before STARTUP_PROMPT and the two never collide.
+_SESSION_MD="$BOT_DIR/.claude/session.md"
+_RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
+if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
+    echo "$(ts_iso) RESUME — injecting /claudna:session-resume --auto (fresh checkpoint)" >> "$LOG"
+    _RESUME_CMD='/claudna:session-resume --auto'
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "$_RESUME_CMD"
+    sleep 0.3
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    sleep 0.3
+    # Verify-retry scoped to the bottom of the pane (the input line): after a
+    # clean submit the command scrolls into the transcript and stays visible, so
+    # a full-pane match would re-fire Enter at the now-idle prompt.
+    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -3 | grep -qF "$_RESUME_CMD"; then
+        "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    fi
+elif [ -f "$_SESSION_MD" ]; then
+    echo "$(ts_iso) RESUME SKIP — checkpoint older than ${_RESUME_MAX_AGE_S}s, clean-starting" >> "$LOG"
+fi
 
 if [ -n "${STARTUP_PROMPT:-}" ]; then
     # Two-step send + Enter with verify-retry. The TUI's input buffer can race

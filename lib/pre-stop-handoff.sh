@@ -35,7 +35,7 @@ fi
 
 # Try to trigger a handoff via the running session
 if check_tmux_session "$TMUX_SESSION"; then
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" '/session-handoff --auto' Enter || true
+    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" '/claudna:session-handoff --auto' Enter || true
     # Wait up to 30 seconds for handoff to complete
     for _ in $(seq 1 30); do
         if [ -f "$HANDOFF_FILE" ]; then
@@ -49,3 +49,8 @@ if check_tmux_session "$TMUX_SESSION"; then
     done
     echo "Handoff timed out after 30s"
 fi
+
+# Best-effort handoff: never block the restart. Explicit exit 0 so the timeout
+# and no-running-session fall-throughs return success — intentional-restart
+# callers (the restart skill, weekly-worker-restart.sh) always proceed.
+exit 0

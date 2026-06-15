@@ -38,12 +38,10 @@ install_error_trap "$BOT_DIR"
 EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
-    tmux kill-session -t "$BOT" 2>/dev/null || true
-    tmux kill-session -t "$MGR" 2>/dev/null || true
-    tmux kill-session -t "$IBOT" 2>/dev/null || true
-    tmux kill-session -t "$BUSY" 2>/dev/null || true
-    tmux kill-session -t "$SBOT" 2>/dev/null || true
-    rm -rf "$ROOT"
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "${RB_SESSION:-}"; do
+        [ -n "$_s" ] && tmux kill-session -t "$_s" 2>/dev/null || true
+    done
+    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}"
 }
 trap cleanup EXIT
 
@@ -216,6 +214,100 @@ sleep 1
 submits=$(wc -l < "$SUBMIT_LOG")
 [ "$submits" -eq 2 ] && r=yes || r=no
 check "send_reload_command fires no spurious Enter on clean submit (verify scoped to prompt)" "$r"
+
+# === Scenario 2: lossless restart — age-gated resume injection on start ===
+# Drive the REAL start-bot.sh against a throwaway bot whose `claude` is a stub
+# injected via CLAUDE_BIN (prints the readiness string, then `cat` so send-keys
+# echo into the pane), with plugin management off (empty FLEET_PLUGINS_REQUIRED)
+# so the start is hermetic and fast — no real auth, MCP, or plugin network call.
+# A fresh session.md -> /claudna:session-resume is sent BEFORE STARTUP_PROMPT; a
+# stale one -> resume skipped (clean start).
+RB_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-rb.XXXXXX")"
+RB_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valrb"
+mkdir -p "$RB_DIR/.claude" "$RB_DIR/logs" "$RB_ROOT/bin" "$RB_ROOT/tmp"
+cat > "$RB_ROOT/bin/claude" <<'STUB'
+#!/bin/bash
+printf 'remote-control is active\n'
+exec cat
+STUB
+chmod +x "$RB_ROOT/bin/claude"
+cat > "$RB_DIR/bot.conf" <<CONF
+BOT_NAME="valrb"
+BOT_ID="valrb"
+BOT_LABEL="valrb"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+STARTUP_PROMPT="ZZZ_STARTUPMARK"
+FLEET_PLUGINS_REQUIRED=""
+CONF
+RB_SESSION="$(tmux_session_name "$RB_DIR")"
+
+_run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
+    local iso
+    if [ "$1" = fresh ]; then iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"; else iso="2020-01-01T00:00:00Z"; fi
+    printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "$iso" \
+        > "$RB_DIR/.claude/session.md"
+    tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+    sleep 0.3
+    TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 CLAUDE_BIN="$RB_ROOT/bin/claude" \
+        PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+        "$LIB_DIR/start-bot.sh" "$RB_DIR" >/dev/null 2>&1 || true
+    sleep 1
+    tmux capture-pane -t "$RB_SESSION" -p 2>/dev/null || true
+}
+
+echo ""
+echo "=== validate-bot-change: lossless restart (resume on start, age-gated) ==="
+pane_fresh="$(_run_startbot fresh)"
+printf '%s' "$pane_fresh" | grep -q '/claudna:session-resume' && r=yes || r=no
+check "fresh session.md -> /claudna:session-resume injected on start" "$r"
+_rln="$(printf '%s\n' "$pane_fresh" | grep -n '/claudna:session-resume' | head -1 | cut -d: -f1 || true)"
+_sln="$(printf '%s\n' "$pane_fresh" | grep -n 'ZZZ_STARTUPMARK' | head -1 | cut -d: -f1 || true)"
+{ [ -n "$_rln" ] && [ -n "$_sln" ] && [ "$_rln" -lt "$_sln" ]; } && r=yes || r=no
+check "resume keystroke precedes STARTUP_PROMPT in the pane" "$r"
+pane_stale="$(_run_startbot stale)"
+printf '%s' "$pane_stale" | grep -q '/claudna:session-resume' && r=no || r=yes
+check "stale session.md -> resume injection skipped (clean start)" "$r"
+grep -q 'RESUME SKIP' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "stale skip recorded in startup.log (RESUME SKIP)" "$r"
+
+# === Scenario 3: weekly worker-only restart — manager skip + loud failure ===
+# Run weekly-worker-restart.sh from a stub lib dir (stub spin-up-bot FAILS, so
+# the loud emit_failure_alert path is exercised too). The manager (MANAGER_TMUX==BOT_ID)
+# must be skipped; the worker must be processed.
+WR_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-wr.XXXXXX")"
+WR_LIB="$WR_ROOT/lib"
+mkdir -p "$WR_LIB"
+cp "$LIB_DIR/lib-common.sh" "$LIB_DIR/weekly-worker-restart.sh" "$WR_LIB/"
+printf '#!/bin/bash\nexit 0\n' > "$WR_LIB/pre-stop-handoff.sh"
+printf '#!/bin/bash\necho "stub spin-up: $1" >&2\nexit 7\n' > "$WR_LIB/spin-up-bot.sh"
+chmod +x "$WR_LIB/pre-stop-handoff.sh" "$WR_LIB/spin-up-bot.sh"
+WR_BOTS="$WR_ROOT/local/$FLEET/runtime/bots"
+mkdir -p "$WR_BOTS/wmgr/data" "$WR_BOTS/wworker/data"
+printf 'BOT_ID=wmgr\nMANAGER_TMUX=wmgr  # this bot is a manager\n' > "$WR_BOTS/wmgr/bot.conf"
+printf 'BOT_ID=wworker\nMANAGER_TMUX=wmgr\n' > "$WR_BOTS/wworker/bot.conf"
+CLAUDLOBBY_ROOT="$WR_ROOT" "$WR_LIB/weekly-worker-restart.sh" "$FLEET" >/dev/null 2>&1 || true
+wr_log="$WR_ROOT/state/weekly-worker-restart.log"
+wr_events="$(ls "$WR_ROOT/state/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)"
+
+echo ""
+echo "=== validate-bot-change: weekly worker-only restart ==="
+grep -q 'skip (manager): wmgr' "$wr_log" 2>/dev/null && r=yes || r=no
+check "weekly restart SKIPS the manager (MANAGER_TMUX==BOT_ID)" "$r"
+grep -q 'worker: wworker' "$wr_log" 2>/dev/null && r=yes || r=no
+check "weekly restart PROCESSES the worker" "$r"
+grep -q 'worker: wmgr' "$wr_log" 2>/dev/null && r=no || r=yes
+check "manager never entered the worker restart path" "$r"
+{ [ -n "$wr_events" ] && grep -q '"type":"restart_failed"' "$wr_events"; } && r=yes || r=no
+check "worker restart failure raises a restart_failed alert (shared emit_failure_alert)" "$r"
+
+# === Scenario 4: daily bounce retired from update-claude-code.sh (static) ===
+echo ""
+echo "=== validate-bot-change: daily bounce retired (download-only) ==="
+grep -Eq 'BOUNCE|spin-up-bot\.sh' "$LIB_DIR/update-claude-code.sh" && r=no || r=yes
+check "update-claude-code.sh no longer bounces the fleet" "$r"
+grep -q 'npm install -g @anthropic-ai/claude-code@latest' "$LIB_DIR/update-claude-code.sh" && r=yes || r=no
+check "update-claude-code.sh still downloads the binary daily" "$r"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
