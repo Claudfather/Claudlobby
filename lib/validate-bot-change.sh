@@ -38,7 +38,7 @@ install_error_trap "$BOT_DIR"
 EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "${RB_SESSION:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "${RB_SESSION:-}" "${IDLEK:-}"; do
         [ -n "$_s" ] && tmux kill-session -t "$_s" 2>/dev/null || true
     done
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}"
@@ -334,6 +334,73 @@ grep -Eq 'BOUNCE|spin-up-bot\.sh' "$LIB_DIR/update-claude-code.sh" && r=no || r=
 check "update-claude-code.sh no longer bounces the fleet" "$r"
 grep -q 'npm install -g @anthropic-ai/claude-code@latest' "$LIB_DIR/update-claude-code.sh" && r=yes || r=no
 check "update-claude-code.sh still downloads the binary daily" "$r"
+
+# ===========================================================================
+# #415 — fleet.yaml-authoritative discovery + pane_stuck idle-guard.
+#   (1) An UNDECLARED runtime dir (stale/cross-fleet residue — e.g. a bot moved
+#       to another fleet, leaving its old dir behind) must be SKIPPED: zero pulse
+#       events. RED before #415 — the filesystem-glob loop health-checked every
+#       dir and emitted session_missing/service_down/pane_stuck for orphans
+#       (the craig/greg bug).
+#   (2) pane_stuck must honor the .idle marker like activity_stuck does: a bot
+#       parked at an idle prompt has a stable pane — that is idle, not stuck.
+# ===========================================================================
+echo ""
+echo "=== validate #415: fleet.yaml discovery filter + pane_stuck idle-guard ==="
+
+F2="valf415"
+F2_BOTS="$ROOT/local/$F2/runtime/bots"
+KEEP="valkeep"; ORPH="valorphan"; IDLEK="validlek"
+mkdir -p "$ROOT/local/$F2" "$F2_BOTS/$KEEP/data" "$F2_BOTS/$ORPH/data" "$F2_BOTS/$IDLEK/data"
+
+# fleet.yaml declares KEEP + IDLEK but NOT ORPH (the residue analogue).
+cat > "$ROOT/local/$F2/fleet.yaml" <<YAML
+fleet:
+  name: $F2
+  bots:
+    $KEEP:
+      expertise: [software-engineering]
+    $IDLEK:
+      expertise: [software-engineering]
+YAML
+for b in "$KEEP" "$ORPH" "$IDLEK"; do
+    cat > "$F2_BOTS/$b/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+done
+
+# IDLEK gets a live idle pane so its pane-hash state can seed; KEEP + ORPH get no
+# session, so the old glob loop would emit session_missing for BOTH.
+tmux new-session -d -s "$IDLEK" 'printf "\n> \n"; sleep 600'
+sleep 1
+
+# Run 1: seeds IDLEK pane hash/ts; health-checks declared bots.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+
+# Make IDLEK idle (.idle newer than .last-tool-call) and backdate its pane ts so
+# the next sweep sees elapsed >= 300 without a real 5-minute wait.
+touch "$F2_BOTS/$IDLEK/data/.last-tool-call"; sleep 1; touch "$F2_BOTS/$IDLEK/data/.idle"
+_now415=$(date +%s); printf '%s' "$((_now415 - 400))" > "$ROOT/state/pulse/$IDLEK.pane_ts"
+
+# Run 2: IDLEK pane unchanged + elapsed 400 would trip pane_stuck — idle-guard must suppress.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+
+keep_ev=$(ls "$F2_BOTS/$KEEP/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+orph_ev=$(ls "$F2_BOTS/$ORPH/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+idlek_ev=$(ls "$F2_BOTS/$IDLEK/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+
+[ -n "$keep_ev" ] && grep -q '"type":"session_missing"' "$keep_ev" && r=yes || r=no
+check "#415 declared bot is still health-checked (session_missing fired for $KEEP)" "$r"
+
+if [ -z "$orph_ev" ]; then r=yes
+elif grep -qE '"type":"(session_missing|service_down|pane_stuck)"' "$orph_ev"; then r=no
+else r=yes; fi
+check "#415 undeclared orphan dir emits ZERO pulse events (filtered via fleet.yaml)" "$r"
+
+[ -n "$idlek_ev" ] && grep -q '"type":"pane_stuck"' "$idlek_ev" && r=no || r=yes
+check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard)" "$r"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="

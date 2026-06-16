@@ -41,12 +41,26 @@ fi
 
 install_error_trap ""
 
+# fleet.yaml is authoritative for which bots this fleet owns. Skip stale/cross-fleet
+# residue dirs that are no longer declared — otherwise two fleets' keepalive timers
+# both supervise a same-named bot. Derive the fleet.yaml from the fleet name, or
+# from the bots-dir parent when called with an explicit dir. Empty result (no/
+# unreadable fleet.yaml) → scan every dir, preserving prior behavior.
+_kf_fleet="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"
+if [ -n "$_kf_fleet" ]; then
+    _kf_yaml="$CLAUDLOBBY_ROOT/local/$_kf_fleet/fleet.yaml"
+else
+    _kf_yaml="$(dirname "$(dirname "$BOTS_DIR")")/fleet.yaml"
+fi
+declared_bots=$(parse_fleet_bots "$_kf_yaml")
+
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 for conf in "$BOTS_DIR"/*/bot.conf; do
     [ -f "$conf" ] || continue
     bot_dir="$(dirname "$conf")"
     bot_name="$(basename "$bot_dir")"
+    bot_in_fleet "$bot_name" "$declared_bots" || continue   # not in fleet.yaml → not ours to supervise
 
     # Read BOT_SERVICE from bot.conf (falls back to bot_name for pre-generate fleets).
     svc=$(bot_conf_get "$bot_dir" BOT_SERVICE "$bot_name")

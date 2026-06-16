@@ -26,19 +26,9 @@ if [ ! -f "$FLEET_YAML" ]; then
     exit 1
 fi
 
-# Helper: extract bot names from a fleet.yaml using awk.
-# Assumes claudlobby's documented schema: top-level `fleet:` with 2-space
-# child indent, `bots:` section, bot keys at 4-space indent. Bot names are
-# lowercase identifiers (matches new-bot scaffold convention).
-parse_bots() {
-    awk '
-        /^  bots:[ \t]*$/ {in_bots=1; next}
-        in_bots && /^    [a-zA-Z_][a-zA-Z0-9_-]*:[ \t]*$/ {
-            gsub(/[ \t:]/, "", $0); print
-        }
-        in_bots && /^  [a-zA-Z_]/ && !/^    / {in_bots=0}
-    ' "$1"
-}
+# Bot-name extraction lives in lib-common.sh (parse_fleet_bots) so fleet-pulse,
+# keepalive-all, and reconcile-fleet share ONE fleet.yaml parser — no drift.
+parse_bots() { parse_fleet_bots "$1"; }
 
 # 1. Bots defined in this fleet's yaml (top-level keys under bots:)
 defined=$(parse_bots "$FLEET_YAML" | sort -u)
