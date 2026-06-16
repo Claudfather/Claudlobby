@@ -158,7 +158,12 @@ fi
 # production leaves it unset and `claude` resolves on PATH inside the session.
 # Only the launched session honors this — the plugin-management calls below use
 # the real `claude` and are skipped under test via an empty FLEET_PLUGINS_REQUIRED.
-CLAUDE_CMD=". '$BOT_ENV_FILE' && exec ${CLAUDE_BIN:-claude} $CLAUDE_FLAGS --name \"$SESSION_NAME\""
+# Sequence with ';' not '&&': the env file ends with a conditional Telegram-token
+# export that returns nonzero when no token is configured. A '&&' would skip exec
+# on that benign nonzero — the pane process exits, the tmux session dies, and a
+# token-less bot lands in a keepalive restart loop. Masked when a prior tmux
+# server already exported the token into the new pane; bites on a fresh server.
+CLAUDE_CMD=". '$BOT_ENV_FILE'; exec ${CLAUDE_BIN:-claude} $CLAUDE_FLAGS --name \"$SESSION_NAME\""
 
 # Update third-party plugins before launch. Handles cold start (fresh
 # host with no plugins installed) through full lifecycle: register
