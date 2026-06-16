@@ -31,6 +31,7 @@ MGR="valmgr"
 IBOT="validle"
 BUSY="valbusy"
 SBOT="valsubmit"
+DBOT="valdeploy"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate.XXXXXX")"
 # fleet-pulse resolves bots via resolve_bots_dir <fleet> = local/<fleet>/runtime/bots.
 BOT_DIR="$ROOT/local/$FLEET/runtime/bots/$BOT"
@@ -38,7 +39,7 @@ install_error_trap "$BOT_DIR"
 EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "${RB_SESSION:-}" "${IDLEK:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$DBOT" "${RB_SESSION:-}" "${IDLEK:-}"; do
         [ -n "$_s" ] && tmux kill-session -t "$_s" 2>/dev/null || true
     done
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}"
@@ -401,6 +402,105 @@ check "#415 undeclared orphan dir emits ZERO pulse events (filtered via fleet.ya
 
 [ -n "$idlek_ev" ] && grep -q '"type":"pane_stuck"' "$idlek_ev" && r=no || r=yes
 check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard)" "$r"
+
+# ===========================================================================
+# auto-deploy (platform self-deploy) — safe, gated, ff-only pull + live reload.
+# Stands up a throwaway git origin + host checkout (the host gitignores local/ +
+# state/ so the scratch bot dir never dirties the tree) and drives the real
+# auto-deploy.sh against it. claude/claudlobby are stubbed on PATH and the CI
+# gate is disabled, so no Claude auth, gh, or real fleet is needed.
+# set +e here: a fixture git hiccup should surface as a failing check, never
+# abort the harness (the script's exit stays the final [ "$fail" -eq 0 ]).
+# ===========================================================================
+echo ""
+echo "=== validate auto-deploy (safe platform self-deploy) ==="
+set +e
+
+if command -v git >/dev/null 2>&1; then
+    DROOT="$ROOT/deploy"
+    mkdir -p "$DROOT"
+    # Reuse the stub bins from the reload-fleet section; reset claude to happy.
+    printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"; chmod +x "$STUB_BIN/claude"
+
+    # setup_deploy_host <host> — fresh checkout 1 commit behind its own origin,
+    # with one bot under local/ (gitignored) for reload-fleet to mark. Leaves the
+    # host at C1 with origin/main at C2.
+    setup_deploy_host() {
+        local host="$1" origin="$1.origin.git" bdir="$1/local/$FLEET/runtime/bots/$DBOT"
+        git -c init.defaultBranch=main init -q "$host" >/dev/null 2>&1
+        git -C "$host" checkout -q -B main >/dev/null 2>&1
+        printf 'local/\nstate/\n' > "$host/.gitignore"
+        printf 'v1\n' > "$host/VERSION"
+        git -C "$host" add -A >/dev/null 2>&1
+        git -C "$host" -c user.email=v@e.x -c user.name=v commit -q -m C1 >/dev/null 2>&1
+        git clone -q --bare "$host" "$origin" >/dev/null 2>&1
+        git -C "$host" remote add origin "$origin" >/dev/null 2>&1
+        git -C "$host" fetch -q origin >/dev/null 2>&1
+        git -C "$host" branch -q --set-upstream-to=origin/main main >/dev/null 2>&1
+        mkdir -p "$bdir/data"
+        {
+            echo "BOT_NAME=\"$DBOT\""; echo "BOT_ID=\"$DBOT\""; echo 'BOT_SERVICE=""'
+            echo "MANAGER_TMUX=\"$MGR\""; echo 'FLEET_PLUGINS_REQUIRED="claudna@Claudfather"'
+        } > "$bdir/bot.conf"
+        # advance origin one commit so the host is behind by 1
+        printf 'v2\n' > "$host/VERSION"
+        git -C "$host" -c user.email=v@e.x -c user.name=v commit -q -am C2 >/dev/null 2>&1
+        git -C "$host" push -q origin main >/dev/null 2>&1
+        git -C "$host" reset -q --hard HEAD~1 >/dev/null 2>&1
+    }
+    run_deploy_on() {  # <host> — run auto-deploy against a host, CI gate off, happy/!
+        CLAUDLOBBY_ROOT="$1" PATH="$STUB_BIN:$PATH" AUTO_DEPLOY_CI_GATE=0 \
+            "$LIB_DIR/auto-deploy.sh" "$FLEET" >/dev/null 2>&1
+    }
+
+    # --- Happy path: behind + clean + on main -> ff-only pull + live reload ---
+    HOSTA="$DROOT/hostA"; setup_deploy_host "$HOSTA"
+    tmux new-session -d -s "$DBOT" 'printf "\n> \n"; sleep 600'; sleep 1
+    oldA=$(git -C "$HOSTA" rev-parse HEAD)
+    run_deploy_on "$HOSTA"
+    [ "$(git -C "$HOSTA" rev-parse HEAD)" != "$oldA" ] && r=yes || r=no
+    check "auto-deploy fast-forwards a behind host (ff-only pull)" "$r"
+    [ -f "$HOSTA/local/$FLEET/runtime/bots/$DBOT/data/.reload-pending" ] && r=yes || r=no
+    check "auto-deploy applies live via reload-fleet (marks running bot, no restart)" "$r"
+
+    # --- No-op: already up to date ---
+    run_deploy_on "$HOSTA"
+    grep -q "no-op: already up to date" "$HOSTA/state/auto-deploy.log" && r=yes || r=no
+    check "auto-deploy no-ops when already up to date" "$r"
+
+    # --- Refusal: dirty working tree (behind, but local edits in flight) ---
+    HOSTC="$DROOT/hostC"; setup_deploy_host "$HOSTC"
+    oldC=$(git -C "$HOSTC" rev-parse HEAD)
+    printf 'dirty\n' >> "$HOSTC/VERSION"  # dirty a TRACKED file
+    run_deploy_on "$HOSTC"
+    [ "$(git -C "$HOSTC" rev-parse HEAD)" = "$oldC" ] && r=yes || r=no
+    check "auto-deploy refuses a dirty working tree (no pull over local edits)" "$r"
+
+    # --- Refusal: host parked on a feature branch (the #414 guard) ---
+    HOSTD="$DROOT/hostD"; setup_deploy_host "$HOSTD"
+    git -C "$HOSTD" checkout -q -b feature/wip
+    oldD=$(git -C "$HOSTD" rev-parse HEAD)
+    run_deploy_on "$HOSTD"
+    [ "$(git -C "$HOSTD" rev-parse HEAD)" = "$oldD" ] && r=yes || r=no
+    check "auto-deploy leaves a host on a feature branch untouched (never yanks WIP, e.g. #414)" "$r"
+
+    # --- Loud failure + rollback: reload fails after a successful pull ---
+    HOSTE="$DROOT/hostE"; setup_deploy_host "$HOSTE"
+    oldE=$(git -C "$HOSTE" rev-parse HEAD)
+    printf '#!/bin/bash\necho boom >&2; exit 1\n' > "$STUB_BIN/claude"; chmod +x "$STUB_BIN/claude"
+    run_deploy_on "$HOSTE"
+    printf '#!/bin/bash\nexit 0\n' > "$STUB_BIN/claude"; chmod +x "$STUB_BIN/claude"  # restore
+    [ "$(git -C "$HOSTE" rev-parse HEAD)" = "$oldE" ] && r=yes || r=no
+    check "auto-deploy rolls the checkout back when reload fails (no half-deploy)" "$r"
+    deploy_events=$(ls "$HOSTE/state/events"/fleet-*.jsonl 2>/dev/null | head -1)
+    [ -n "$deploy_events" ] && grep -q '"type":"deploy_failed"' "$deploy_events" && r=yes || r=no
+    check "auto-deploy emits deploy_failed event on failure (loud, not silent)" "$r"
+    mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null)
+    printf '%s' "$mgr_pane" | grep -q 'deploy_failed' && r=yes || r=no
+    check "auto-deploy alerts the manager on failure (shared emit_failure_alert)" "$r"
+else
+    echo "  SKIP  auto-deploy checks (git not available)"
+fi
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
