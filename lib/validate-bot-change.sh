@@ -258,13 +258,14 @@ _run_startbot() {  # $1 = fresh|stale -> echo the resulting pane
     sleep 0.3
     TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 CLAUDE_BIN="$RB_ROOT/bin/claude" \
         HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
-        "$LIB_DIR/start-bot.sh" "$RB_DIR" >/dev/null 2>&1 || true
+        "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.$1.out" 2>&1 || true
     sleep 1
     tmux capture-pane -t "$RB_SESSION" -p 2>/dev/null || true
 }
 
 echo ""
 echo "=== validate-bot-change: lossless restart (resume on start, age-gated) ==="
+_lossless_fail_before=$fail
 pane_fresh="$(_run_startbot fresh)"
 printf '%s' "$pane_fresh" | grep -q '/claudna:session-resume' && r=yes || r=no
 check "fresh session.md -> /claudna:session-resume injected on start" "$r"
@@ -277,6 +278,24 @@ printf '%s' "$pane_stale" | grep -q '/claudna:session-resume' && r=no || r=yes
 check "stale session.md -> resume injection skipped (clean start)" "$r"
 grep -q 'RESUME SKIP' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
 check "stale skip recorded in startup.log (RESUME SKIP)" "$r"
+
+# Surface hermeticity evidence when the lossless checks fail (e.g. a CI runner
+# where this scenario fails but a dev host passes): start-bot.sh's stderr is
+# otherwise swallowed to a file we discard, hiding WHY the resume block did not
+# run. Gated on failure so a passing run stays quiet.
+if [ "$fail" -gt "$_lossless_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: lossless checks failed; dumping start-bot evidence ---"
+    echo "  [tmux] $(tmux -V 2>&1)"
+    echo "  [start-bot fresh stdout+stderr]"
+    sed 's/^/    /' "$RB_ROOT/startbot.fresh.out" 2>/dev/null || echo "    (none)"
+    echo "  [start-bot stale stdout+stderr]"
+    sed 's/^/    /' "$RB_ROOT/startbot.stale.out" 2>/dev/null || echo "    (none)"
+    echo "  [startup.log]"
+    sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
+    echo "  [fresh pane]"; printf '%s\n' "$pane_fresh" | sed 's/^/    /'
+    echo "  [stale pane]"; printf '%s\n' "$pane_stale" | sed 's/^/    /'
+    echo "  ----------------------------------------------------------------"
+fi
 
 # === Scenario 3: weekly worker-only restart — manager skip + loud failure ===
 # Run weekly-worker-restart.sh from a stub lib dir (stub spin-up-bot FAILS, so
