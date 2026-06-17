@@ -252,8 +252,139 @@ tmux_session_name() {
 }
 
 check_tmux_session() {
-    local session="${1:?Usage: check_tmux_session <name>}"
-    "$_TMUX_BIN" has-session -t "$session" 2>/dev/null
+    local session="${1:?Usage: check_tmux_session <name> [socket]}"
+    local socket="${2:-}"
+    if [ -n "$socket" ]; then
+        bot_tmux "$socket" has-session -t "$session" 2>/dev/null
+    else
+        "$_TMUX_BIN" has-session -t "$session" 2>/dev/null
+    fi
+}
+
+# --- Per-bot tmux socket isolation ------------------------------------------
+# Each bot runs its own tmux server, reached via a private socket name (the
+# `-L` argument), so one server's death can only drop one bot — not the whole
+# fleet. The socket name is the third bot-identity axis, resolved from a single
+# helper exactly as BOT_SERVICE (unit name) and the dir slug (session name) are.
+
+# tmux_socket_for_bot <bot_dir>
+# Resolve a bot's private tmux socket name from its identity (SSOT). The socket
+# name is the bot's BOT_SERVICE — host-wide unique and fleet-prefixed — so every
+# script that can see a bot's dir agrees on its socket. Prefers the explicit
+# TMUX_SOCKET field; falls back to BOT_SERVICE for bots whose bot.conf predates
+# the field (un-regenerated).
+#
+# Production guard: an empty result while FLEET_NAME is set is a
+# misconfiguration that would collapse every such bot onto one bare socket and
+# reintroduce the shared-server SPOF — so fail fast. The bare-id fallback is
+# permitted ONLY for the test harness (FLEET_NAME unset), where bots carry no
+# service prefix.
+tmux_socket_for_bot() {
+    local bot_dir="${1:?Usage: tmux_socket_for_bot <bot_dir>}"
+    local sock
+    sock=$(bot_conf_get "$bot_dir" TMUX_SOCKET "")
+    [ -n "$sock" ] || sock=$(bot_conf_get "$bot_dir" BOT_SERVICE "")
+    if [ -n "$sock" ]; then
+        printf '%s' "$sock"
+        return 0
+    fi
+    if [ -n "${FLEET_NAME:-}" ]; then
+        echo "tmux_socket_for_bot: empty BOT_SERVICE for '$bot_dir' while FLEET_NAME is set — refusing a bare socket name that would collide across fleets and reintroduce the shared-server SPOF" >&2
+        return 1
+    fi
+    # Test-harness fallback (no fleet prefix): unique-enough by dir basename.
+    printf 'tmux-%s' "$(basename "$bot_dir")"
+}
+
+# tmux_socket_for_session <session> [bots_dir]
+# Reverse-resolve a socket from a session name (= bot dir basename) for the
+# cross-socket call sites that only know the peer's session name (dispatch.sh,
+# bot-sweep-cron.sh, the report-back fallback). Locates the sibling bot dir
+# under [bots_dir] — default: the caller's own runtime/bots dir, derived from
+# $BOT_DIR — and resolves its socket via tmux_socket_for_bot.
+tmux_socket_for_session() {
+    local session="${1:?Usage: tmux_socket_for_session <session> [bots_dir]}"
+    local bots_dir="${2:-}"
+    if [ -z "$bots_dir" ]; then
+        [ -n "${BOT_DIR:-}" ] || { echo "tmux_socket_for_session: no bots_dir given and BOT_DIR unset" >&2; return 1; }
+        bots_dir=$(dirname "$BOT_DIR")
+    fi
+    tmux_socket_for_bot "$bots_dir/$session"
+}
+
+# bot_tmux <socket> <tmux-args...>
+# The single chokepoint for socket-targeted tmux calls: runs a subcommand
+# against the per-bot server identified by <socket> (`tmux -L <socket> ...`).
+#
+# Unset-socket contract: an empty <socket> while FLEET_NAME is set is refused
+# (never `tmux -L ""`, which would silently fall back to the shared default
+# server and defeat isolation) — returns non-zero with a stderr error. When
+# FLEET_NAME is unset (test harness / pre-fleet), an empty socket passes through
+# to tmux's default socket for backward compatibility.
+bot_tmux() {
+    local socket="${1?Usage: bot_tmux <socket> <tmux-args...>}"; shift
+    if [ -z "$socket" ]; then
+        if [ -n "${FLEET_NAME:-}" ]; then
+            echo "bot_tmux: empty socket while FLEET_NAME is set — refusing 'tmux -L \"\"' (would defeat per-bot isolation)" >&2
+            return 2
+        fi
+        "$_TMUX_BIN" "$@"
+        return $?
+    fi
+    "$_TMUX_BIN" -L "$socket" "$@"
+}
+
+# _tmux_send_miss <session> <socket> <reason>
+# Emit a send_miss event to the CALLER bot's JSONL ledger (best-effort) plus a
+# stderr breadcrumb, so a dropped cross-socket send becomes observable instead
+# of silently swallowed. Internal to bot_tmux_send. Caller identity comes from
+# $BOT_DIR / $BOT_ID (the sender); falls back to the fleet-level ledger.
+_tmux_send_miss() {
+    local session="$1" socket="$2" reason="$3"
+    local bot_dir="${BOT_DIR:-}" bot_id="${BOT_ID:-}" events_dir
+    if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
+        events_dir="$bot_dir/data/events"
+        [ -n "$bot_id" ] || bot_id=$(basename "$bot_dir")
+    else
+        events_dir="${CLAUDLOBBY_ROOT}/state/events"
+        bot_id="${bot_id:-fleet}"
+    fi
+    mkdir -p "$events_dir" 2>/dev/null || return 0
+    local ts today
+    ts=$(ts_iso); today=$(date +%Y-%m-%d)
+    printf '{"ts":"%s","bot":"%s","type":"send_miss","source":"dispatch","data":{"target":"%s","socket":"%s","session":"%s","caller":"%s","reason":"%s"}}\n' \
+        "$ts" "$bot_id" "$(json_escape "$session")" "$(json_escape "$socket")" "$(json_escape "$session")" "$bot_id" "$reason" \
+        >> "$events_dir/fleet-${today}.jsonl" 2>/dev/null || true
+}
+
+# bot_tmux_send <peer_socket> <session> <text>
+# The ONE safe cross-socket send. Prechecks that <session> exists on
+# <peer_socket>, then sends <text> followed by Enter as two race-safe steps
+# (preserving sanitize_tmux_input). On a miss — empty socket, or session absent
+# on that socket — it emits a send_miss event + stderr breadcrumb and returns
+# non-zero, replacing the old silent `|| true` at every cross-socket call site.
+# Residual TOCTOU (the session dying between precheck and send) surfaces as a
+# non-zero send-keys exit, logged best-effort by the caller, never swallowed.
+bot_tmux_send() {
+    local peer_socket="${1?Usage: bot_tmux_send <peer_socket> <session> <text>}"
+    local session="${2:?Usage: bot_tmux_send <peer_socket> <session> <text>}"
+    local text="${3:?Usage: bot_tmux_send <peer_socket> <session> <text>}"
+
+    if [ -z "$peer_socket" ]; then
+        _tmux_send_miss "$session" "$peer_socket" "no-socket"
+        echo "bot_tmux_send: no socket resolved for session '$session' — send dropped (logged)" >&2
+        return 1
+    fi
+    if ! bot_tmux "$peer_socket" has-session -t "$session" 2>/dev/null; then
+        _tmux_send_miss "$session" "$peer_socket" "no-session"
+        echo "bot_tmux_send: session '$session' not found on socket '$peer_socket' — send dropped (logged)" >&2
+        return 1
+    fi
+    local safe
+    safe=$(sanitize_tmux_input "$text")
+    bot_tmux "$peer_socket" send-keys -t "$session" "$safe"
+    sleep 0.3
+    bot_tmux "$peer_socket" send-keys -t "$session" Enter
 }
 
 # Base idle-detection regex — single source of truth for keepalive.sh
