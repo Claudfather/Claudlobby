@@ -121,9 +121,13 @@ per_bot_summary() {
         [ -d "$bot_dir" ] || continue
         local bot_name
         bot_name=$(basename "$bot_dir")
+        # Each bot runs its own tmux server — resolve its socket from its dir
+        # (tolerant: a bad/un-regenerated bot is skipped, not fatal to the sweep).
+        local bot_socket
+        bot_socket=$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)
         # Find the tmux pane PID for this session, then sum child tree RSS
         local pane_pid rss_kb=0
-        pane_pid=$("$_TMUX_BIN" list-panes -t "$bot_name" -F '#{pane_pid}' 2>/dev/null | head -1) || true
+        pane_pid=$(bot_tmux "$bot_socket" list-panes -t "$bot_name" -F '#{pane_pid}' 2>/dev/null | head -1) || true
         if [ -n "$pane_pid" ]; then
             # Walk the process tree rooted at pane_pid
             rss_kb=$(ps --ppid "$pane_pid" -p "$pane_pid" -o rss= 2>/dev/null \
@@ -132,7 +136,7 @@ per_bot_summary() {
         local rss_mb
         rss_mb=$(( (rss_kb + 512) / 1024 ))
         printf '    %-20s %4d MB' "$bot_name" "$rss_mb"
-        if check_tmux_session "$bot_name" 2>/dev/null; then
+        if check_tmux_session "$bot_name" "$bot_socket" 2>/dev/null; then
             printf ' [running]'
         else
             printf ' [stopped]'

@@ -242,3 +242,10 @@ class TestComposerSocketFields:
         launchd = compose_launchd_plist(fleet.bots["worker-1"], fleet, paths)
         assert "Environment=TMUX_TMPDIR=/tmp" in systemd
         assert "<key>TMUX_TMPDIR</key><string>/tmp</string>" in launchd
+
+    def test_systemd_execstop_is_socket_aware(self, tmp_path):
+        """The generated ExecStop must kill the session on the bot's OWN server
+        (-L <socket>); the default-socket kill would silently no-op post-migration."""
+        fleet, paths = _fleet(tmp_path)
+        systemd = compose_systemd_unit(fleet.bots["worker-1"], fleet, paths)
+        assert "tmux -L com.test.worker-1 kill-session -t worker-1" in systemd
