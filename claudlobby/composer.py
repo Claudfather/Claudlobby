@@ -1547,10 +1547,9 @@ def compose_fleet_timers(
     sd = fleet.system_defaults
     emit_defaults = bool(sd.enabled and sd.timers and timers)
     sweep_on = fleet.sweep_enabled()
-    deploy_on = fleet.auto_deploy_enabled()
 
     timers_dir = paths.runtime_fleet / "timers"
-    if not emit_defaults and not sweep_on and not deploy_on:
+    if not emit_defaults and not sweep_on:
         return timers_dir
 
     timers_dir.mkdir(parents=True, exist_ok=True)
@@ -1573,20 +1572,6 @@ def compose_fleet_timers(
             "code-audit-sweep",
             {"type": "calendar", "expression": fleet.sweep.schedule},
             "$CLAUDLOBBY_ROOT/lib/code-audit-sweep.sh",
-            "oneshot",
-            fleet,
-            paths,
-        )
-
-    if deploy_on:
-        # Opt-in platform self-deploy timer: synthesized from fleet.auto_deploy,
-        # not system_defaults. Reuses the same emitter (consolidate, don't fork).
-        _write_timer_units(
-            timers_dir,
-            prefix,
-            "auto-deploy",
-            {"type": "calendar", "expression": fleet.auto_deploy.schedule},
-            "$CLAUDLOBBY_ROOT/lib/auto-deploy.sh",
             "oneshot",
             fleet,
             paths,

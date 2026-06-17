@@ -468,20 +468,6 @@ def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
-def _validate_auto_deploy(fleet: FleetConfig, report: ValidationReport) -> None:
-    """Validate the opt-in fleet.auto_deploy (platform self-deploy) block."""
-    auto_deploy = fleet.auto_deploy
-    if auto_deploy is None or not auto_deploy.enabled:
-        return
-
-    # schedule is a systemd OnCalendar expression — light sanity check only.
-    if not re.search(r"\d{1,2}:\d{2}", auto_deploy.schedule):
-        report.warnings.append(
-            f"auto_deploy.schedule '{auto_deploy.schedule}' has no HH:MM time — "
-            f"expected a systemd OnCalendar expression like '*-*-* 03:15:00'"
-        )
-
-
 def _validate_cross_fleet_collisions(
     fleet: FleetConfig, paths: Paths, report: ValidationReport
 ) -> None:
@@ -524,7 +510,6 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_sweep(fleet, report)
-    _validate_auto_deploy(fleet, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
