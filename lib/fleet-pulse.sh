@@ -123,9 +123,9 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # --- Capture pane once per bot (reused by Check 3 + Check 5) ---
     _pane_buf=""
     _session_alive=0
-    if check_tmux_session "$session_name"; then
+    if check_tmux_session "$session_name" "$BOT_SERVICE"; then
         _session_alive=1
-        _pane_buf=$("$_TMUX_BIN" capture-pane -t "$session_name" -p 2>/dev/null || true)
+        _pane_buf=$(bot_tmux "$BOT_SERVICE" capture-pane -t "$session_name" -p 2>/dev/null || true)
     fi
 
     # --- Check 1: tmux session exists ---
@@ -333,9 +333,8 @@ _summary_tmp=$(safe_mktemp)
 
         _s_session_status="up"
         _s_session_name=$(tmux_session_name "$_s_bot_dir")
-        check_tmux_session "$_s_session_name" 2>/dev/null || _s_session_status="DOWN"
-
         _s_svc=$(bot_conf_get "$_s_bot_dir" BOT_SERVICE "$_s_bid")
+        check_tmux_session "$_s_session_name" "$_s_svc" 2>/dev/null || _s_session_status="DOWN"
         _s_svc_status="ok"
         if [ "$_OS" = "Linux" ] && [ -n "$_s_svc" ]; then
             systemctl --user is-active "$_s_svc" >/dev/null 2>&1 || _s_svc_status="DOWN"

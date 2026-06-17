@@ -114,14 +114,25 @@ def cmd_move_bot(args) -> int:
 
     # --- Pre-flight: check tmux session activity ---
     if apply and not force:
+        # The bot runs on its own tmux server (-L <socket>, socket == BOT_SERVICE
+        # from its bot.conf); fall back to the default socket for an
+        # un-regenerated bot that predates per-bot sockets.
+        socket = ""
+        _conf = src_bot_dir / "bot.conf"
+        if _conf.is_file():
+            for _line in _conf.read_text().splitlines():
+                if _line.startswith("BOT_SERVICE="):
+                    socket = _line.split("=", 1)[1].strip().strip('"')
+                    break
+        _tmux = ["tmux", "-L", socket] if socket else ["tmux"]
         tmux_check = subprocess.run(
-            ["tmux", "has-session", "-t", bot_name],
+            [*_tmux, "has-session", "-t", bot_name],
             capture_output=True,
         )
         if tmux_check.returncode == 0:
             # Session exists — capture what it's doing
             pane_content = subprocess.run(
-                ["tmux", "capture-pane", "-t", bot_name, "-p", "-l", "5"],
+                [*_tmux, "capture-pane", "-t", bot_name, "-p", "-l", "5"],
                 capture_output=True,
                 text=True,
             )

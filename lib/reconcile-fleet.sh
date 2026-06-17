@@ -33,8 +33,10 @@ parse_bots() { parse_fleet_bots "$1"; }
 # 1. Bots defined in this fleet's yaml (top-level keys under bots:)
 defined=$(parse_bots "$FLEET_YAML" | sort -u)
 
-# 2. tmux sessions on this host
-tmux_sessions=$(tmux ls 2>/dev/null | awk -F: '{print $1}' | sort -u || true)
+# 2. Per-bot tmux servers. Each bot runs on its OWN server (-L <socket>), so a
+#    single `tmux ls` only sees the legacy default socket. has_tmux is resolved
+#    per-bot below against each bot's own socket; the unbound scan walks the
+#    socket files directly.
 
 # 3. Build buckets by checking each defined bot against tmux + host service state.
 #    Unit names come from bot.conf (BOT_SERVICE), not from parsing filenames.
@@ -45,7 +47,8 @@ while IFS= read -r b; do
     bot_dir="$RUNTIME_DIR/$b"
 
     has_tmux=0; has_unit=0
-    echo "$tmux_sessions" | grep -qx "$b" && has_tmux=1
+    bot_socket=$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)
+    check_tmux_session "$b" "$bot_socket" 2>/dev/null && has_tmux=1
 
     # Resolve unit name from bot.conf — single source of truth.
     # Falls back to bot name if bot.conf is missing (pre-generate state).
@@ -72,14 +75,23 @@ while IFS= read -r b; do
     fi
 done <<< "$defined"
 
-# Unbound: tmux sessions whose name matches no defined bot in ANY fleet.yaml
+# Unbound: a live session on ANY per-bot server whose name matches no defined
+# bot in ANY fleet.yaml. A rogue/leftover server is invisible to a default-socket
+# `tmux ls`, so walk the socket files under $TMUX_TMPDIR/tmux-$(id -u)/ directly
+# and list each server's sessions.
 all_defined=$(for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml; do
     [ -f "$fy" ] && parse_bots "$fy"
 done | sort -u)
-while IFS= read -r s; do
-    [ -z "$s" ] && continue
-    echo "$all_defined" | grep -qx "$s" || unbound="$unbound $s"
-done <<< "$tmux_sessions"
+_sock_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+if [ -d "$_sock_dir" ]; then
+    for _sf in "$_sock_dir"/*; do
+        [ -S "$_sf" ] || continue
+        while IFS= read -r s; do
+            [ -z "$s" ] && continue
+            echo "$all_defined" | grep -qx "$s" || unbound="$unbound $s"
+        done <<< "$("$_TMUX_BIN" -L "$(basename "$_sf")" ls 2>/dev/null | awk -F: '{print $1}' || true)"
+    done
+fi
 
 # Report
 echo "Fleet: $FLEET"
@@ -179,7 +191,8 @@ if [ "$ENROLL" = "--enroll" ] && [ -n "${orphan// /}" ]; then
         bot_dir="$RUNTIME_DIR/$b"
         if [ -d "$bot_dir" ]; then
             echo "→ $b"
-            "$_TMUX_BIN" kill-session -t "$b" 2>/dev/null || true
+            _osock=$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)
+            bot_tmux "$_osock" kill-session -t "$b" 2>/dev/null || true
             "$LIB_DIR/spin-up-bot.sh" "$bot_dir"
         else
             echo "→ $b SKIPPED (no runtime dir at $bot_dir; run 'claudlobby generate' first)"

@@ -201,7 +201,9 @@ def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
         tmux_ok = False
         try:
             result = subprocess.run(
-                ["tmux", "has-session", "-t", bot_id],
+                # Each bot runs on its own tmux server (-L <socket>, socket ==
+                # BOT_SERVICE == service_name); a default-socket check is blind.
+                ["tmux", "-L", service_name, "has-session", "-t", bot_id],
                 capture_output=True,
                 timeout=5,
             )
