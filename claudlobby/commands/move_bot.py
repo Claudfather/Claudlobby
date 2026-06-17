@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 from ..composer import compose_bot
-from ..paths import Paths
+from ..paths import Paths, tmux_socket_for_bot
 from ..validator import validate
 from ._helpers import _load_env, _load_fleet_or_exit
 
@@ -114,16 +114,10 @@ def cmd_move_bot(args) -> int:
 
     # --- Pre-flight: check tmux session activity ---
     if apply and not force:
-        # The bot runs on its own tmux server (-L <socket>, socket == BOT_SERVICE
-        # from its bot.conf); fall back to the default socket for an
+        # The bot runs on its own tmux server (-L <socket>); resolve it from the
+        # source bot.conf, falling back to the default socket for an
         # un-regenerated bot that predates per-bot sockets.
-        socket = ""
-        _conf = src_bot_dir / "bot.conf"
-        if _conf.is_file():
-            for _line in _conf.read_text().splitlines():
-                if _line.startswith("BOT_SERVICE="):
-                    socket = _line.split("=", 1)[1].strip().strip('"')
-                    break
+        socket = tmux_socket_for_bot(src_bot_dir)
         _tmux = ["tmux", "-L", socket] if socket else ["tmux"]
         tmux_check = subprocess.run(
             [*_tmux, "has-session", "-t", bot_name],

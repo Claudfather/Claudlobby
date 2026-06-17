@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import FleetConfig
-from .paths import Paths
+from .paths import Paths, tmux_socket_for_bot
 from .uptime import _fmt_duration
 
 log = logging.getLogger("claudlobby.status")
@@ -100,7 +100,7 @@ def _check_tmux_sessions(fleet, paths) -> set[str]:
     """
     alive: set[str] = set()
     for bot_id in fleet.bots:
-        socket = _read_service_label(paths.bot_runtime(bot_id)) or (
+        socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
             f"{fleet.service_prefix}.{bot_id}"
         )
         try:

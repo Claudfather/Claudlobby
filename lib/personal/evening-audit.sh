@@ -12,10 +12,12 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 MANAGER_SESSION="${1:-clog}"
+# The manager runs on its own tmux server — resolve its socket (cross-socket send).
+MANAGER_SOCKET="$(resolve_peer_socket "${MANAGER_TMUX_SOCKET:-}" "$MANAGER_SESSION")"
 
-if ! check_tmux_session "$MANAGER_SESSION"; then
+if ! check_tmux_session "$MANAGER_SESSION" "$MANAGER_SOCKET"; then
     echo "$(ts_iso): No manager session, skipping evening audit"
     exit 0
 fi
 
-"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" 'Run a rolling code audit. Check which repo/area is most stale using the audit tracker, then run /tech-debt or /security-audit on it. Log the results.' Enter
+bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" 'Run a rolling code audit. Check which repo/area is most stale using the audit tracker, then run /tech-debt or /security-audit on it. Log the results.' || true

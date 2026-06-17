@@ -74,8 +74,7 @@ notify_manager() {
     # from its session name among the sibling bots. Without targeting the
     # manager's own socket, the check below would hit the default socket and
     # always pass post-migration — silently killing pulse alerts.
-    mgr_socket=$(bot_conf_get "$bot_dir" MANAGER_TMUX_SOCKET "")
-    [ -n "$mgr_socket" ] || mgr_socket=$(tmux_socket_for_session "$mgr" "$(dirname "$bot_dir")" 2>/dev/null || true)
+    mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$bot_dir" MANAGER_TMUX_SOCKET "")" "$mgr" "$(dirname "$bot_dir")")
     check_tmux_session "$mgr" "$mgr_socket" || return 0
     # Attribute any send_miss to THIS bot's ledger — it is the one whose manager
     # could not be reached. bot_tmux_send sanitizes + two-step sends.

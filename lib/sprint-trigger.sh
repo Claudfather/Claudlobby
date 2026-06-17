@@ -15,8 +15,7 @@ install_error_trap ""
 MANAGER_TMUX="${MANAGER_TMUX:-claude-bot}"
 # Manager's private tmux server socket: prefer the composed field, else
 # reverse-look-up from its session name.
-MANAGER_SOCKET="${MANAGER_TMUX_SOCKET:-}"
-[ -n "$MANAGER_SOCKET" ] || MANAGER_SOCKET="$(tmux_socket_for_session "$MANAGER_TMUX" 2>/dev/null || true)"
+MANAGER_SOCKET="$(resolve_peer_socket "${MANAGER_TMUX_SOCKET:-}" "$MANAGER_TMUX")"
 LOG="${SPRINT_TRIGGER_LOG:-$CLAUDLOBBY_ROOT/logs/sprint-trigger.log}"
 setup_log_dir "$LOG"
 

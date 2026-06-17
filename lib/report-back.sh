@@ -24,8 +24,7 @@ install_error_trap ""
 MANAGER_SESSION="${MANAGER_TMUX:-claude-bot}"
 # The manager's private tmux server socket: prefer the composed field, else
 # reverse-look-up from its session name among the sibling bots.
-MANAGER_SOCKET="${MANAGER_TMUX_SOCKET:-}"
-[ -n "$MANAGER_SOCKET" ] || MANAGER_SOCKET="$(tmux_socket_for_session "$MANAGER_SESSION" 2>/dev/null || true)"
+MANAGER_SOCKET="$(resolve_peer_socket "${MANAGER_TMUX_SOCKET:-}" "$MANAGER_SESSION")"
 BOT="$1"
 STATUS="$2"
 SUMMARY="$3"

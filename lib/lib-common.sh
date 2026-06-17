@@ -317,6 +317,21 @@ tmux_socket_for_session() {
     tmux_socket_for_bot "$bots_dir/$session"
 }
 
+# resolve_peer_socket <explicit_socket> <peer_session> [bots_dir]
+# Resolve a peer bot's tmux socket for a cross-socket send: prefer an explicit
+# value (the composed MANAGER_TMUX_SOCKET field, however the caller read it),
+# else reverse-look it up from the peer's session name. The single home for the
+# "explicit field, else reverse-lookup" precedence shared by report-back,
+# sprint-trigger, fleet-pulse, evening-audit, and emit_failure_alert.
+resolve_peer_socket() {
+    local explicit="$1" session="$2" bots_dir="${3:-}"
+    if [ -n "$explicit" ]; then
+        printf '%s' "$explicit"
+        return 0
+    fi
+    tmux_socket_for_session "$session" "$bots_dir" 2>/dev/null || true
+}
+
 # bot_tmux <socket> <tmux-args...>
 # The single chokepoint for socket-targeted tmux calls: runs a subcommand
 # against the per-bot server identified by <socket> (`tmux -L <socket> ...`).
@@ -687,8 +702,7 @@ emit_failure_alert() {
     local mgr_bot mgr mgr_socket
     mgr_bot=$(first_bot_with_conf "$bots_dir" MANAGER_TMUX || true)
     mgr=$(bot_conf_get "$mgr_bot" MANAGER_TMUX "")
-    mgr_socket=$(bot_conf_get "$mgr_bot" MANAGER_TMUX_SOCKET "")
-    [ -n "$mgr_socket" ] || mgr_socket=$(tmux_socket_for_session "$mgr" "$bots_dir" 2>/dev/null || true)
+    mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$mgr_bot" MANAGER_TMUX_SOCKET "")" "$mgr" "$bots_dir")
     if [ -n "$mgr" ] && check_tmux_session "$mgr" "$mgr_socket"; then
         bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-ALERT] $event_type: $reason" || true
     fi
