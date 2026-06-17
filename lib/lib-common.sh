@@ -375,6 +375,51 @@ stat_mtime() {
     fi
 }
 
+iso_to_epoch() {
+    # Convert an ISO-8601 UTC timestamp (e.g. 2026-05-15T14:30:00Z) to epoch
+    # seconds. Portable across GNU date (Linux) and BSD date (Darwin). Prints
+    # nothing and returns non-zero if the input is empty or unparseable.
+    local iso="${1:-}"
+    [ -n "$iso" ] || return 1
+    if [ "$_OS" = "Darwin" ]; then
+        date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null
+    else
+        date -u -d "$iso" +%s 2>/dev/null
+    fi
+}
+
+session_md_handoff_epoch() {
+    # Echo a session.md's handoff time as epoch seconds. Prefers the doc-level
+    # `last_updated:` ISO-8601 UTC frontmatter field (written by /session-handoff
+    # and robust to file touches the way mtime is not); falls back to the file
+    # mtime for legacy artifacts that predate the field. Returns 1 if absent.
+    local file="${1:?Usage: session_md_handoff_epoch <file>}" iso epoch
+    [ -f "$file" ] || return 1
+    iso=$(grep -m1 '^last_updated:' "$file" 2>/dev/null \
+        | sed -E 's/^last_updated:[[:space:]]*//; s/[[:space:]]*$//')
+    if [ -n "$iso" ]; then
+        epoch=$(iso_to_epoch "$iso") && [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
+    fi
+    stat_mtime "$file" 2>/dev/null
+}
+
+should_resume_session() {
+    # F6 age gate: decide whether a handoff checkpoint is fresh enough to resume
+    # from. Returns 0 (resume) when the handoff timestamp is within
+    # <max_age_seconds> of now; returns 1 (skip — clean start) when older, or
+    # when the file is absent/unreadable. A future-dated checkpoint (clock skew)
+    # counts as fresh.
+    local file="${1:?Usage: should_resume_session <file> <max_age_seconds>}"
+    local max_age="${2:?Usage: should_resume_session <file> <max_age_seconds>}"
+    local epoch now age
+    [ -f "$file" ] || return 1
+    epoch=$(session_md_handoff_epoch "$file") || return 1
+    [ -n "$epoch" ] || return 1
+    now=$(date +%s)
+    age=$(( now - epoch ))
+    [ "$age" -lt "$max_age" ]
+}
+
 # --- Portable sed -i ---------------------------------------------------------
 
 sed_i() {
@@ -536,4 +581,19 @@ first_bot_with_conf() {
         fi
     done
     return 1
+}
+
+# bot_is_manager <bot_dir>
+# True (0) if <bot_dir> is a team manager, false (1) otherwise. The composer
+# sets a manager's MANAGER_TMUX to its own BOT_ID with an inline
+# `# this bot is a manager` comment; a worker's MANAGER_TMUX points at a
+# different bot. bot_conf_get does not strip that inline comment, so normalize
+# it (and surrounding whitespace) away before comparing MANAGER_TMUX == BOT_ID.
+bot_is_manager() {
+    local bot_dir="${1:?Usage: bot_is_manager <bot_dir>}" mgr bid
+    mgr=$(bot_conf_get "$bot_dir" MANAGER_TMUX "")
+    bid=$(bot_conf_get "$bot_dir" BOT_ID "$(basename "$bot_dir")")
+    mgr=${mgr%%#*}; mgr=${mgr//[[:space:]]/}
+    bid=${bid%%#*}; bid=${bid//[[:space:]]/}
+    [ -n "$bid" ] && [ "$mgr" = "$bid" ]
 }

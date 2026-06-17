@@ -87,10 +87,12 @@ Key lifecycle scripts in `lib/`:
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
-| `update-claude-code.sh` | Daily Claude Code update + fleet bounce |
+| `update-claude-code.sh` | Daily Claude Code binary download (download-only; no fleet bounce) |
 | `install-claude-update-systemd.sh` | Claude Code update timer enrollment (systemd) |
 | `reload-fleet.sh` | Daily live plugin/skill reload — `claude plugin update` + generate, then mark running bots for a keepalive-driven `/reload` (no restart) |
 | `install-reload-fleet-systemd.sh` | Reload-fleet daily timer enrollment (systemd) |
+| `weekly-worker-restart.sh` | Weekly lossless restart of worker bots (managers excluded) to apply a staged binary |
+| `install-weekly-worker-restart-systemd.sh` | Weekly-worker-restart timer enrollment (systemd) |
 
 ## Repository Hygiene — MANDATORY
 

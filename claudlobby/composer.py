@@ -1489,21 +1489,39 @@ def _write_timer_units(
             ]
         )
     else:
-        # Parse HH:MM from OnCalendar expression (e.g. "*-*-* 06:00:00")
+        # Parse HH:MM from OnCalendar expression (e.g. "*-*-* 06:00:00").
         cal_match = re.search(r"(\d{1,2}):(\d{2})", sched["expression"])
         hour = int(cal_match.group(1)) if cal_match else 6
         minute = int(cal_match.group(2)) if cal_match else 0
-        plist_lines.extend(
-            [
-                "  <key>StartCalendarInterval</key>",
-                "  <dict>",
-                "    <key>Hour</key>",
-                f"    <integer>{hour}</integer>",
-                "    <key>Minute</key>",
-                f"    <integer>{minute}</integer>",
-                "  </dict>",
+        cal_interval = ["  <key>StartCalendarInterval</key>", "  <dict>"]
+        # A leading systemd weekday (e.g. "Sun *-*-* 05:00:00") maps to a launchd
+        # Weekday so a weekly schedule stays weekly on macOS — without it launchd
+        # fires daily at the same HH:MM. Only a single weekday is mapped; systemd
+        # ranges/lists (e.g. Mon..Fri) have no single-dict launchd equivalent and
+        # fall back to firing daily.
+        weekdays = {
+            "Sun": 0,
+            "Mon": 1,
+            "Tue": 2,
+            "Wed": 3,
+            "Thu": 4,
+            "Fri": 5,
+            "Sat": 6,
+        }
+        wd_match = re.match(r"\s*(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\b", sched["expression"])
+        if wd_match:
+            cal_interval += [
+                "    <key>Weekday</key>",
+                f"    <integer>{weekdays[wd_match.group(1)]}</integer>",
             ]
-        )
+        cal_interval += [
+            "    <key>Hour</key>",
+            f"    <integer>{hour}</integer>",
+            "    <key>Minute</key>",
+            f"    <integer>{minute}</integer>",
+            "  </dict>",
+        ]
+        plist_lines.extend(cal_interval)
     plist_lines.extend(
         [
             "</dict>",

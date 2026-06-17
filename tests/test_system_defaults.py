@@ -337,6 +337,7 @@ class TestSystemDefaultsFile:
         assert "keepalive" in raw["fleet_timers"]
         assert "log-rotation" in raw["fleet_timers"]
         assert "creds-check" in raw["fleet_timers"]
+        assert "weekly-worker-restart" in raw["fleet_timers"]
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +415,10 @@ class TestComposeFleetTimers:
         timer_text = timer.read_text()
         assert "OnCalendar=" in timer_text
 
+        # A daily timer (no weekday in its OnCalendar) gets no launchd Weekday.
+        plist_text = (timers_dir / "com.test.creds-check.plist").read_text()
+        assert "<key>Weekday</key>" not in plist_text
+
     def test_all_default_timers_generated(self, tmp_path):
         from claudlobby.composer import compose_fleet_timers
 
@@ -431,6 +436,7 @@ class TestComposeFleetTimers:
             "log-rotation",
             "creds-check",
             "reload-fleet",
+            "weekly-worker-restart",
         ]:
             assert (timers_dir / f"com.test.{name}.service").is_file()
             assert (timers_dir / f"com.test.{name}.timer").is_file()
@@ -457,6 +463,35 @@ class TestComposeFleetTimers:
         assert "reload-fleet.sh" in svc.read_text()
         # Daily cadence is a systemd OnCalendar expression, not an interval.
         assert "OnCalendar=" in timer.read_text()
+
+    def test_weekly_worker_restart_timer(self, tmp_path):
+        """The weekly worker-restart timer composes with a weekday OnCalendar and
+        its script lands in the service ExecStart."""
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+
+        timers_dir = compose_fleet_timers(fleet, paths, {})
+
+        timer = timers_dir / "com.test.weekly-worker-restart.timer"
+        svc = timers_dir / "com.test.weekly-worker-restart.service"
+        assert timer.is_file()
+        assert svc.is_file()
+        assert "OnCalendar=Sun *-*-* 05:00:00" in timer.read_text()
+        svc_text = svc.read_text()
+        assert "weekly-worker-restart.sh" in svc_text
+        assert "Type=oneshot" in svc_text
+
+        # On macOS the launchd plist must also encode the weekday, else a weekly
+        # schedule silently fires daily at 05:00. Sunday -> launchd Weekday 0.
+        plist_text = (timers_dir / "com.test.weekly-worker-restart.plist").read_text()
+        assert "<key>StartCalendarInterval</key>" in plist_text
+        assert "<key>Weekday</key>\n    <integer>0</integer>" in plist_text
+        assert "<key>Hour</key>\n    <integer>5</integer>" in plist_text
 
 
 # ---------------------------------------------------------------------------
