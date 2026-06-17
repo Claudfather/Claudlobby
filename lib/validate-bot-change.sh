@@ -25,6 +25,31 @@ if ! command -v tmux >/dev/null 2>&1; then
     exit 2
 fi
 
+# --- Per-bot socket isolation (mirror production) ----------------------------
+# Each bot now runs its OWN tmux server. The scripts under test resolve a bot's
+# socket via tmux_socket_for_bot(); for these hand-written bot.confs (BOT_SERVICE
+# left empty) that resolves to the F2 test-harness fallback "tmux-<dir-slug>",
+# which only applies when FLEET_NAME is unset — so unset it here. Then shadow
+# `tmux` so every session op in THIS harness lands on that session's private
+# server (-L tmux-<name>), matching what the scripts resolve. The scripts call
+# "$_TMUX_BIN" in their own subprocesses, so this function never affects them.
+unset FLEET_NAME
+vsock() { printf 'tmux-%s' "$1"; }
+tmux() {
+    local i sock=""
+    local -a a=("$@")
+    for ((i = 0; i < ${#a[@]}; i++)); do
+        case "${a[i]}" in
+            -t | -s) [ $((i + 1)) -lt ${#a[@]} ] && sock="$(vsock "${a[i + 1]}")"; break ;;
+        esac
+    done
+    if [ -n "$sock" ]; then
+        command tmux -L "$sock" "$@"
+    else
+        command tmux "$@"
+    fi
+}
+
 FLEET="valfleet"
 BOT="valbot"
 MGR="valmgr"
@@ -38,8 +63,9 @@ install_error_trap "$BOT_DIR"
 EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
+    # Per-bot servers must be torn down with kill-server, or empty servers leak.
     for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "${RB_SESSION:-}" "${IDLEK:-}"; do
-        [ -n "$_s" ] && tmux kill-session -t "$_s" 2>/dev/null || true
+        [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}"
 }
@@ -401,6 +427,35 @@ check "#415 undeclared orphan dir emits ZERO pulse events (filtered via fleet.ya
 
 [ -n "$idlek_ev" ] && grep -q '"type":"pane_stuck"' "$idlek_ev" && r=no || r=yes
 check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard)" "$r"
+
+# ===========================================================================
+# Per-bot socket isolation (#414) — blast radius = 1 + observable misses.
+# valmgr + valbot are up on DISTINCT private servers (tmux-valmgr/tmux-valbot),
+# so a single server's death can no longer drop the whole fleet at once.
+# ===========================================================================
+echo ""
+echo "=== validate #414: per-bot socket isolation (blast radius + send-miss) ==="
+
+command tmux -L "$(vsock "$MGR")" has-session -t "$MGR" 2>/dev/null && r=yes || r=no
+check "#414 precondition: manager is up on its own private server" "$r"
+command tmux -L "$(vsock "$BOT")" has-session -t "$BOT" 2>/dev/null && r=yes || r=no
+check "#414 precondition: worker is up on a DISTINCT private server" "$r"
+
+# Crown jewel: kill ONE bot's whole server; only that bot dies.
+command tmux -L "$(vsock "$BOT")" kill-server 2>/dev/null || true
+sleep 0.3
+command tmux -L "$(vsock "$BOT")" has-session -t "$BOT" 2>/dev/null && r=no || r=yes
+check "#414 blast radius: the killed bot's server is gone" "$r"
+command tmux -L "$(vsock "$MGR")" has-session -t "$MGR" 2>/dev/null && r=yes || r=no
+check "#414 blast radius = 1: a peer SURVIVES the kill (shared-server SPOF removed)" "$r"
+
+# Observable miss: a cross-socket send to a dead target lands a send_miss event
+# in the caller's ledger — the silent `|| true` is gone.
+BOT_DIR="$BOT_DIR" BOT_ID="$BOT" bash -c \
+    '. "'"$LIB_DIR"'/lib-common.sh"; bot_tmux_send "tmux-valgone" "valgone" "ping"' \
+    >/dev/null 2>&1 || true
+{ ls "$EVENTS"/fleet-*.jsonl >/dev/null 2>&1 && grep -q '"type":"send_miss"' "$EVENTS"/fleet-*.jsonl; } && r=yes || r=no
+check "#414 send-miss: a cross-socket send to a dead target is logged, not silently dropped" "$r"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="

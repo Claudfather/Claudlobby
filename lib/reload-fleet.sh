@@ -79,7 +79,8 @@ marked=0
 if [ -d "$BOTS_DIR" ]; then
     for bot_dir in "$BOTS_DIR"/*/; do
         [ -d "$bot_dir" ] || continue
-        if check_tmux_session "$(tmux_session_name "$bot_dir")"; then
+        # "Running" = the bot's session is alive on its OWN per-bot server.
+        if check_tmux_session "$(tmux_session_name "$bot_dir")" "$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)"; then
             mkdir -p "$bot_dir/data"
             touch "$bot_dir/data/.reload-pending"
             marked=$((marked + 1))

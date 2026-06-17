@@ -581,6 +581,8 @@ df_pcent() {
 
 # --- Fleet path resolution ---------------------------------------------------
 
+# shellcheck disable=SC2120  # fleet arg is optional by design (env fallback);
+# tmux_socket_for_session calls it argless, other-file callers pass a fleet.
 resolve_bots_dir() {
     # Resolve the runtime/bots directory for a fleet.
     # Usage: BOTS_DIR=$(resolve_bots_dir [fleet-name])
@@ -678,12 +680,17 @@ emit_failure_alert() {
     printf '{"ts":"%s","bot":"fleet","type":"%s","source":"alert","data":{"reason":"%s"}}\n' \
         "$ts" "$event_type" "$escaped" >> "$events_dir/fleet-${today}.jsonl"
 
-    # manager tmux nudge (resolve from whichever bot declares MANAGER_TMUX)
-    local mgr_bot mgr
+    # manager tmux nudge (resolve from whichever bot declares MANAGER_TMUX) — on
+    # the manager's OWN socket (per-bot servers); a default-socket send would
+    # silently miss the manager post-migration. Routed through the one safe-send
+    # primitive so a miss is logged, not swallowed.
+    local mgr_bot mgr mgr_socket
     mgr_bot=$(first_bot_with_conf "$bots_dir" MANAGER_TMUX || true)
     mgr=$(bot_conf_get "$mgr_bot" MANAGER_TMUX "")
-    if [ -n "$mgr" ] && check_tmux_session "$mgr"; then
-        "$_TMUX_BIN" send-keys -t "$mgr" "[FLEET-ALERT] $event_type: $(sanitize_tmux_input "$reason")" Enter || true
+    mgr_socket=$(bot_conf_get "$mgr_bot" MANAGER_TMUX_SOCKET "")
+    [ -n "$mgr_socket" ] || mgr_socket=$(tmux_socket_for_session "$mgr" "$bots_dir" 2>/dev/null || true)
+    if [ -n "$mgr" ] && check_tmux_session "$mgr" "$mgr_socket"; then
+        bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-ALERT] $event_type: $reason" || true
     fi
 
     # Telegram escalation (loudest channel) — mirror fleet-pulse chat-id resolution
