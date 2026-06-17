@@ -93,9 +93,6 @@ Key lifecycle scripts in `lib/`:
 | `install-reload-fleet-systemd.sh` | Reload-fleet daily timer enrollment (systemd) |
 | `weekly-worker-restart.sh` | Weekly lossless restart of worker bots (managers excluded) to apply a staged binary |
 | `install-weekly-worker-restart-systemd.sh` | Weekly-worker-restart timer enrollment (systemd) |
-| `auto-deploy.sh` | Safe opt-in platform self-deploy — health-gated `git pull --ff-only` of the host checkout, applied live via `reload-fleet.sh`, with rollback + loud alert on failure |
-| `install-auto-deploy-systemd.sh` | Auto-deploy daily timer enrollment (systemd) |
-| `install-auto-deploy.sh` | Auto-deploy daily timer enrollment (launchd/macOS) |
 
 ## Repository Hygiene — MANDATORY
 

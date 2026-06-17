@@ -112,24 +112,6 @@ class SweepConfig:
 
 
 @dataclass
-class AutoDeployConfig:
-    """Platform self-deploy — opt-in via the fleet.yaml `auto_deploy:` block.
-
-    A fleet-level nightly timer (lib/auto-deploy.sh) keeps the host's claudlobby
-    checkout current with its remote and applies new code live via reload-fleet.sh
-    (no restart, no context loss). Like fleet.sweep, presence of the block is
-    opt-in; absence ⇒ FleetConfig.auto_deploy is None ⇒ nothing emitted (no timer).
-    The deploy branch and CI gate are script-level env knobs (AUTO_DEPLOY_BRANCH /
-    AUTO_DEPLOY_CI_GATE); this block governs whether and when the timer runs.
-    """
-
-    enabled: bool = False
-    # systemd OnCalendar; default just before reload-fleet (03:30) so a pulled
-    # release is on disk for the daily plugin/skill refresh.
-    schedule: str = "*-*-* 03:15:00"
-
-
-@dataclass
 class SandboxConfig:
     """Sandbox network/filesystem settings → .claude/settings.local.json.
 
@@ -301,15 +283,10 @@ class FleetConfig:
     teams: dict[str, TeamConfig] = field(default_factory=dict)
     bots: dict[str, BotConfig] = field(default_factory=dict)
     sweep: SweepConfig | None = None
-    auto_deploy: AutoDeployConfig | None = None
 
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
         return bool(self.sweep and self.sweep.enabled)
-
-    def auto_deploy_enabled(self) -> bool:
-        """True when the opt-in platform self-deploy is configured and enabled."""
-        return bool(self.auto_deploy and self.auto_deploy.enabled)
 
     def manager_bots(self) -> set[str]:
         """Bot names that manage at least one team."""
@@ -530,16 +507,6 @@ def _coerce_sweep(raw: dict | None) -> SweepConfig | None:
         label=str(raw.get("label", "auto-audit")),
         schedule=str(raw.get("schedule", "*-*-* 03:00:00")),
         audit_types=audit_types,
-    )
-
-
-def _coerce_auto_deploy(raw: dict | None) -> AutoDeployConfig | None:
-    """Coerce the fleet.yaml `auto_deploy:` block. None when absent (opt-out)."""
-    if not raw:
-        return None
-    return AutoDeployConfig(
-        enabled=bool(raw.get("enabled", True)),  # presence of the block = opt-in
-        schedule=str(raw.get("schedule", "*-*-* 03:15:00")),
     )
 
 
@@ -890,6 +857,5 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         teams=teams,
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
-        auto_deploy=_coerce_auto_deploy(fleet.get("auto_deploy")),
     )
     return fleet_cfg, merged_defaults

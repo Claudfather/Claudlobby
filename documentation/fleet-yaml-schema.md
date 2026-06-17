@@ -188,19 +188,6 @@ fleet:
 
 After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land in the owner's `data/events/` — see the `fleet-observability` protocol.
 
-### `fleet.auto_deploy`
-
-Opt-in platform self-deploy. A fleet-level nightly timer (`lib/auto-deploy.sh`) keeps the host's claudlobby checkout current with its remote and applies new code **live** via `reload-fleet.sh` (no restart, no context loss). It is **safety-gated** — it refuses rather than risk a bad deploy, and every refusal is a clean no-op the next run retries: it skips when the working tree is dirty, when the host is parked on a feature branch (so it never yanks a host off in-flight WIP), or when CI is red on the deploy branch; it no-ops when already current. Only after every gate passes does it `git pull --ff-only` and reload; a failed reload **rolls the checkout back** to the pre-deploy commit and is loud (a `deploy_failed` event + manager alert via the shared `emit_failure_alert` path). Presence of the block opts in; omit it and nothing is emitted.
-
-```yaml
-fleet:
-  auto_deploy:
-    schedule: "*-*-* 03:15:00"     # systemd OnCalendar (default: 03:15, before reload-fleet)
-    enabled: true                  # default true when the block is present
-```
-
-The deploy branch, git remote, and CI gate are script-level env knobs (`AUTO_DEPLOY_BRANCH` default `main`, `AUTO_DEPLOY_REMOTE` default `origin`, `AUTO_DEPLOY_CI_GATE` default `1`) — set them in the timer unit's environment if a host needs to track a non-default branch or skip the CI gate. After `claudlobby generate`, enroll the timer once per host: `lib/install-auto-deploy-systemd.sh <fleet>` (Linux) or `lib/install-auto-deploy.sh <fleet>` (macOS). It reuses `reload-fleet.sh` (Mechanism 1) for the apply step, so a host running auto-deploy gets the same idle-gated `/reload` as the daily reload timer.
-
 ### `bots.<name>.expertise`
 
 **Required.** A list of area-of-expertise filenames from `library/expertise/`. The first file's H1 titles the bot; subsequent files' H1s are stripped and their bodies append below.
