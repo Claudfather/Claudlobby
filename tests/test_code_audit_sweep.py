@@ -258,6 +258,9 @@ class TestSweepSelector:
         owner = root / "local" / "tf" / "runtime" / "bots" / "owner"
         (owner / "data" / "events").mkdir(parents=True)
         (owner / "bot.conf").write_text(
+            # BOT_SERVICE doubles as the per-bot tmux socket name; the sweep
+            # resolves it to dispatch on the owner's own server.
+            "export BOT_SERVICE=com.tf.owner\n"
             "export SWEEP_OWNER_BOT=owner\n"
             "export SWEEP_REPOS='acme/alpha acme/beta'\n"
             "export SWEEP_LABEL=auto-audit\n"
@@ -285,6 +288,9 @@ class TestSweepSelector:
         tmux.write_text(
             dedent("""\
             #!/usr/bin/env bash
+            # Skip a leading "-L <socket>" (per-bot server selection) to reach
+            # the real subcommand.
+            [ "$1" = "-L" ] && shift 2
             case "$1" in
                 has-session) exit 0;;
                 capture-pane) echo "idle - at prompt";;

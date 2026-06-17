@@ -67,11 +67,20 @@ emit_event() {
 # into the manager's session — the same channel report-back.sh uses — leaving
 # the human-facing escalation as the manager's decision (see fleet-observability).
 notify_manager() {
-    local bot_dir="$1" msg="$2" mgr=""
+    local bot_dir="$1" msg="$2" mgr="" mgr_socket=""
     mgr=$(bot_conf_get "$bot_dir" MANAGER_TMUX "")
     [ -n "$mgr" ] || return 0
-    check_tmux_session "$mgr" || return 0
-    "$_TMUX_BIN" send-keys -t "$mgr" "[FLEET-PULSE] $(sanitize_tmux_input "$msg")" Enter 2>/dev/null || true
+    # Manager's private socket: prefer the composed field, else reverse-look-up
+    # from its session name among the sibling bots. Without targeting the
+    # manager's own socket, the check below would hit the default socket and
+    # always pass post-migration — silently killing pulse alerts.
+    mgr_socket=$(bot_conf_get "$bot_dir" MANAGER_TMUX_SOCKET "")
+    [ -n "$mgr_socket" ] || mgr_socket=$(tmux_socket_for_session "$mgr" "$(dirname "$bot_dir")" 2>/dev/null || true)
+    check_tmux_session "$mgr" "$mgr_socket" || return 0
+    # Attribute any send_miss to THIS bot's ledger — it is the one whose manager
+    # could not be reached. bot_tmux_send sanitizes + two-step sends.
+    BOT_DIR="$bot_dir" BOT_ID="$(basename "$bot_dir")" \
+        bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-PULSE] $msg" || true
 }
 
 # Wrapper: notify_manager needs bot_dir, but debounce_notify passes only

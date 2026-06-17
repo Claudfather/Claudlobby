@@ -172,7 +172,9 @@ _log_before=0
 [ -f "$SWEEP_LOG" ] && _log_before=$(wc -l < "$SWEEP_LOG")
 
 dispatch_rc=0
-"$LIB_DIR/bot-sweep-cron.sh" "$OWNER_BOT" "$DISPATCH" || dispatch_rc=$?
+# Pass the owner's resolved socket explicitly (we have OWNER_DIR here); the
+# child falls back to a name-based reverse-lookup only if we hand it nothing.
+"$LIB_DIR/bot-sweep-cron.sh" "$OWNER_BOT" "$DISPATCH" "$(tmux_socket_for_bot "$OWNER_DIR" 2>/dev/null || true)" || dispatch_rc=$?
 
 _new_log=""
 [ -f "$SWEEP_LOG" ] && _new_log=$(tail -n +"$((_log_before + 1))" "$SWEEP_LOG" || true)

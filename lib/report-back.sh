@@ -22,6 +22,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install_error_trap ""
 
 MANAGER_SESSION="${MANAGER_TMUX:-claude-bot}"
+# The manager's private tmux server socket: prefer the composed field, else
+# reverse-look-up from its session name among the sibling bots.
+MANAGER_SOCKET="${MANAGER_TMUX_SOCKET:-}"
+[ -n "$MANAGER_SOCKET" ] || MANAGER_SOCKET="$(tmux_socket_for_session "$MANAGER_SESSION" 2>/dev/null || true)"
 BOT="$1"
 STATUS="$2"
 SUMMARY="$3"
@@ -63,9 +67,9 @@ done
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
-"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" "$MESSAGE" || true
-sleep 0.3
-"$_TMUX_BIN" send-keys -t "$MANAGER_SESSION" Enter || true
+# Cross-socket send via the one safe primitive: prechecks the manager session on
+# its socket, two-step send, and logs a send_miss (no silent drop) on a miss.
+bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" "$MESSAGE" || true
 
 # Append structured JSONL event to the fleet-level report-back ledger.
 # Path follows overlay convention: local/<fleet>/runtime/ or root runtime/.

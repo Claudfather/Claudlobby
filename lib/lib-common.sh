@@ -306,8 +306,13 @@ tmux_socket_for_session() {
     local session="${1:?Usage: tmux_socket_for_session <session> [bots_dir]}"
     local bots_dir="${2:-}"
     if [ -z "$bots_dir" ]; then
-        [ -n "${BOT_DIR:-}" ] || { echo "tmux_socket_for_session: no bots_dir given and BOT_DIR unset" >&2; return 1; }
-        bots_dir=$(dirname "$BOT_DIR")
+        # Prefer the caller's own sibling dir; otherwise fall back to the
+        # fleet-aware runtime/bots resolution (CLAUDLOBBY_FLEET / FLEET_NAME).
+        if [ -n "${BOT_DIR:-}" ]; then
+            bots_dir=$(dirname "$BOT_DIR")
+        else
+            bots_dir=$(resolve_bots_dir)
+        fi
     fi
     tmux_socket_for_bot "$bots_dir/$session"
 }
