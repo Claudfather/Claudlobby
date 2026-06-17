@@ -26,7 +26,11 @@ TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 LOG="$BOT_DIR/keepalive.log"
 
 # JSONL retention — delete keepalive event files older than this many days.
-KEEPALIVE_REAP_DAYS="${KEEPALIVE_REAP_DAYS:-7}"
+# Honors the one fleet-wide retention window (observability.reap_days, composed as
+# OBSERVABILITY_REAP_DAYS into bot.conf, loaded above) so every event writer
+# (keepalive, fleet-pulse, bot-vitals) reaps on the same horizon. An explicit
+# KEEPALIVE_REAP_DAYS still overrides; both fall back to 7.
+KEEPALIVE_REAP_DAYS="${KEEPALIVE_REAP_DAYS:-${OBSERVABILITY_REAP_DAYS:-7}}"
 
 # Emit structured JSONL event for fleet-pulse / claudlobby uptime consumption.
 emit_keepalive_event() {
