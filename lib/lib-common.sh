@@ -457,6 +457,36 @@ resolve_bots_dir() {
     fi
 }
 
+parse_fleet_bots() {
+    # Emit the bot names declared in a fleet.yaml (one per line) — the single
+    # source of truth for "which bots does this fleet own". Supervision scripts
+    # (fleet-pulse, keepalive-all, reconcile-fleet) filter their runtime-dir glob
+    # through this so stale/cross-fleet residue dirs are never health-checked.
+    # Mirrors claudlobby's documented schema: `bots:` at 2-space indent, bot keys
+    # at 4-space indent. Missing/unreadable file → no output, so callers fall back
+    # to scanning every dir (preserves root-mode and pre-fleet.yaml behavior).
+    local fleet_yaml="$1"
+    [ -f "$fleet_yaml" ] || return 0
+    awk '
+        /^  bots:[ \t]*$/ {in_bots=1; next}
+        in_bots && /^    [a-zA-Z_][a-zA-Z0-9_-]*:[ \t]*$/ {
+            gsub(/[ \t:]/, "", $0); print
+        }
+        in_bots && /^  [a-zA-Z_]/ && !/^    / {in_bots=0}
+    ' "$fleet_yaml"
+}
+
+bot_in_fleet() {
+    # Membership predicate for the declared-bots list from parse_fleet_bots.
+    # Usage: bot_in_fleet <bot-name> <newline-separated-declared-list>
+    # Stateless (the list is passed, not captured) so fleet-pulse, keepalive-all,
+    # and any future supervision script share ONE filter — no per-script drift.
+    # Empty list (no/unreadable fleet.yaml → root-mode) → 0, i.e. "declared":
+    # callers then scan every dir, preserving pre-fleet.yaml behavior.
+    [ -z "$2" ] && return 0
+    printf '%s\n' "$2" | grep -qx "$1"
+}
+
 # extract_bot_conf_var FILE VAR_NAME
 # Extract a variable's value from a bot.conf file (strips 'export' prefix and quotes).
 # Usage: SERVICE_PREFIX="$(extract_bot_conf_var "$conf_file" SERVICE_PREFIX)"

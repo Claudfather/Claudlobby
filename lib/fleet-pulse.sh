@@ -24,6 +24,14 @@ if [ ! -d "$BOTS_DIR" ]; then
     exit 1
 fi
 
+# fleet.yaml is authoritative for which bots this fleet owns. Filter the
+# runtime-dir glob through it so stale/cross-fleet residue dirs (e.g. a bot
+# moved to another fleet, leaving its old runtime dir behind) are never
+# health-checked — that mismatch produced false service_down + pane_stuck.
+# Empty list (no/unreadable fleet.yaml, e.g. root-mode) → bot_in_fleet returns
+# "declared" for every dir, so the sweep falls back to scanning all of them.
+declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$fleet/fleet.yaml")
+
 install_error_trap ""
 
 today=$(date +%Y-%m-%d)
@@ -95,6 +103,7 @@ fi
 for bot_dir in "$BOTS_DIR"/*/; do
     [ -d "$bot_dir" ] || continue
     bot_id=$(basename "$bot_dir")
+    bot_in_fleet "$bot_id" "$declared_bots" || continue   # skip undeclared (stale/cross-fleet) dirs
     _current_bot_dir="$bot_dir"
 
     # Load BOT_SERVICE via the helper (handles `export` prefix + no-match safely).
@@ -145,7 +154,11 @@ for bot_dir in "$BOTS_DIR"/*/; do
                     prev_ts=$(cat "$ts_file")
                     now_epoch=$(date +%s)
                     elapsed=$(( now_epoch - prev_ts ))
-                    if [ "$elapsed" -ge 300 ]; then
+                    # Idle-guard (mirrors Check 5 activity_stuck): a bot parked
+                    # at an idle prompt has a stable pane by definition — that is
+                    # idle, not stuck. keepalive.sh touches data/.idle when idle;
+                    # bot-vitals.sh touches data/.last-tool-call on each tool call.
+                    if [ "$elapsed" -ge 300 ] && ! marker_is_newer "$bot_dir/data/.idle" "$bot_dir/data/.last-tool-call"; then
                         emit_event "$bot_dir" "$bot_id" "pane_stuck" '{"unchanged_since_epoch":'"$prev_ts"',"elapsed_seconds":'"$elapsed"'}'
                     fi
                 else
@@ -260,6 +273,7 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
             for bot_dir in "$BOTS_DIR"/*/; do
                 [ -d "$bot_dir" ] || continue
                 _bid=$(basename "$bot_dir")
+                bot_in_fleet "$_bid" "$declared_bots" || continue
                 _efile="$bot_dir/data/events/fleet-${today}.jsonl"
                 [ -f "$_efile" ] || continue
                 # Check if this bot has this critical event type within the window
@@ -306,6 +320,7 @@ _summary_tmp=$(safe_mktemp)
     for _s_bot_dir in "$BOTS_DIR"/*/; do
         [ -d "$_s_bot_dir" ] || continue
         _s_bid=$(basename "$_s_bot_dir")
+        bot_in_fleet "$_s_bid" "$declared_bots" || continue
 
         _s_session_status="up"
         _s_session_name=$(tmux_session_name "$_s_bot_dir")
