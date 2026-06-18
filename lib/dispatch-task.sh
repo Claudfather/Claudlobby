@@ -47,6 +47,12 @@ shift
 TASK="$*"
 [ -n "$TASK" ] || { echo "dispatch-task: empty task" >&2; exit 1; }
 
+# Worker's private tmux server socket, reverse-resolved from its session name
+# (matches what dispatch.sh resolves for the actual send). Tolerant: an
+# unresolvable peer yields an empty socket so the check below reports a clean
+# "does not exist" rather than the resolver's guard crashing this script.
+WORKER_SOCKET="$(tmux_socket_for_session "$WORKER_SESSION" 2>/dev/null || true)"
+
 if [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] || [ -n "$DISPATCH_REF" ]; then
     CALLER="${BOT_NAME:-${MANAGER_TMUX:-unknown}}"
     DISPATCH_MSG="[BOTCOMMAND] $CALLER | task | $TASK"
@@ -58,7 +64,7 @@ else
 fi
 
 # Fail before recording if the worker isn't there — no orphan ledger entries.
-if ! check_tmux_session "$WORKER_SESSION"; then
+if ! check_tmux_session "$WORKER_SESSION" "$WORKER_SOCKET"; then
     echo "dispatch-task: session '$WORKER_SESSION' does not exist" >&2
     exit 1
 fi

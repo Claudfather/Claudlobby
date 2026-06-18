@@ -93,8 +93,18 @@ fi
 # Dispatch and monitoring scripts target sessions by this slug.
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 
+# Per-bot tmux server socket: this bot runs on its OWN tmux server (its own
+# -L <socket>), so one server's death drops only this bot, never the whole
+# fleet. Resolved via the SSOT helper (falls back to BOT_SERVICE for an
+# un-regenerated bot.conf); a misconfigured empty socket while FLEET_NAME is set
+# fails loud rather than silently sharing the default server.
+TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
+    echo "start-bot.sh: cannot resolve tmux socket for $BOT_DIR (check BOT_SERVICE in bot.conf)" >&2
+    exit 1
+}
+
 # Kill any prior session — expected to fail on first boot or after clean shutdown
-"$_TMUX_BIN" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+bot_tmux "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
 SESSION_NAME="$BOT_LABEL-$(date '+%Y%m%d-%H%M')"
 
@@ -203,7 +213,7 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
     done
 fi
 
-"$_TMUX_BIN" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
+bot_tmux "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
 
 # Wait for initialization (up to 90s) with observability
 LOG="$BOT_DIR/logs/startup.log"
@@ -212,11 +222,11 @@ _poll_start=$(date +%s)
 echo "$(ts_iso) POLL_START — waiting for remote-control readiness" >> "$LOG"
 _ready=0
 for _i in $(seq 1 180); do
-    if ! check_tmux_session "$TMUX_SESSION"; then
+    if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
         exit 1
     fi
-    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "remote-control is active"; then
+    if bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -q "remote-control is active"; then
         _elapsed=$(( $(date +%s) - _poll_start ))
         echo "$(ts_iso) READY — remote-control active after ${_elapsed}s" >> "$LOG"
         _ready=1
@@ -247,15 +257,15 @@ _RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
     echo "$(ts_iso) RESUME — injecting /claudna:session-resume --auto (fresh checkpoint)" >> "$LOG"
     _RESUME_CMD='/claudna:session-resume --auto'
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "$_RESUME_CMD"
+    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" "$_RESUME_CMD"
     sleep 0.3
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
     sleep 0.3
     # Verify-retry scoped to the bottom of the pane (the input line): after a
     # clean submit the command scrolls into the transcript and stays visible, so
     # a full-pane match would re-fire Enter at the now-idle prompt.
-    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -3 | grep -qF "$_RESUME_CMD"; then
-        "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    if bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -3 | grep -qF "$_RESUME_CMD"; then
+        bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
     fi
 elif [ -f "$_SESSION_MD" ]; then
     echo "$(ts_iso) RESUME SKIP — checkpoint older than ${_RESUME_MAX_AGE_S}s, clean-starting" >> "$LOG"
@@ -266,13 +276,13 @@ if [ -n "${STARTUP_PROMPT:-}" ]; then
     # on cold start, leaving the prompt typed but unsubmitted. Sleep between
     # text and Enter so the buffer settles, then verify the prompt text is gone
     # from the pane and resend Enter if it isn't.
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
+    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
     sleep 0.5
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
     sleep 1
     _probe="${STARTUP_PROMPT:0:80}"
-    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -qF "$_probe"; then
-        "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    if bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | grep -qF "$_probe"; then
+        bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
     fi
 fi
 

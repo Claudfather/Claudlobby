@@ -4,6 +4,8 @@ title: "Lesson: tmux's one-server-per-user rule and how it affects multi-bot env
 
 `tmux` runs **one server per user**, by default at socket `/tmp/tmux-$(id -u)/default`. Every `tmux new-session` invocation by that user attaches to the same server. Critically: **the server's environment is whatever the first process to start it had** — and every session spawned afterward inherits that frozen env, not the env of the *current* process running `new-session`.
 
+> **Update (per-bot socket isolation, #414):** the fleet no longer shares one server. Each bot's lifecycle now runs on its **own** tmux server — a private `-L <socket>` equal to its `BOT_SERVICE`, resolved via `tmux_socket_for_bot` in `lib-common.sh` — so the cross-bot env inheritance described below can no longer happen: a session only ever inherits *its own* bot's server env. The inline-pass / `.tmux-env` mechanism is **kept as belt-and-suspenders for v1** (retiring it is deferred); the rest of this lesson is the historical root cause the isolation removes.
+
 ## Why this matters for fleets
 
 Imagine two bots, `clog` and `kev`, each with their own `.env` containing distinct `TELEGRAM_BOT_TOKEN` values. Each one's `start-bot.sh`:

@@ -56,6 +56,30 @@ def _read_claudron_config(path: Path) -> dict[str, str]:
     return result
 
 
+def tmux_socket_for_bot(bot_dir: Path) -> str:
+    """Resolve a bot's per-bot tmux server socket name from its ``bot.conf``.
+
+    Mirrors the bash SSOT ``tmux_socket_for_bot`` (lib/lib-common.sh): prefer the
+    explicit ``TMUX_SOCKET`` field, fall back to ``BOT_SERVICE`` (equal by
+    construction). Returns "" when neither is present (an un-regenerated or
+    missing ``bot.conf``) — callers decide the fallback. The single Python reader
+    for the socket field, so ``status``/``move_bot`` don't each fork their own.
+    """
+    conf = bot_dir / "bot.conf"
+    if not conf.is_file():
+        return ""
+    found: dict[str, str] = {}
+    try:
+        for line in conf.read_text().splitlines():
+            line = line.strip().removeprefix("export ").strip()
+            for key in ("TMUX_SOCKET", "BOT_SERVICE"):
+                if line.startswith(f"{key}="):
+                    found[key] = line.split("=", 1)[1].strip().strip("'\"")
+    except OSError:
+        return ""
+    return found.get("TMUX_SOCKET") or found.get("BOT_SERVICE") or ""
+
+
 def _resolve_vault_fleet(root: Path, fleet: str) -> tuple[Path | None, Path | None]:
     """Resolve a fleet overlay through a vault.
 

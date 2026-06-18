@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import FleetConfig
-from .paths import Paths
+from .paths import Paths, tmux_socket_for_bot
 from .uptime import _fmt_duration
 
 log = logging.getLogger("claudlobby.status")
@@ -89,20 +89,31 @@ class BotStatus:
     current_task_age_secs: int | None = None
 
 
-def _check_tmux_sessions() -> set[str]:
-    """Return set of active tmux session names."""
-    try:
-        out = subprocess.run(
-            ["tmux", "ls", "-F", "#{session_name}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+def _check_tmux_sessions(fleet, paths) -> set[str]:
+    """Live bot session names across every per-bot tmux server.
+
+    Each bot runs its own server (``tmux -L <socket>``, socket == BOT_SERVICE),
+    so a single global ``tmux ls`` is blind to every other socket. Query each
+    declared bot's own socket and union the live sessions. Relies on the pinned
+    TMUX_TMPDIR (=/tmp, tmux's own default) so a socket name resolves to the
+    server start-bot.sh created it on.
+    """
+    alive: set[str] = set()
+    for bot_id in fleet.bots:
+        socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
+            f"{fleet.service_prefix}.{bot_id}"
         )
-        if out.returncode != 0:
-            return set()
-        return {line.strip() for line in out.stdout.splitlines() if line.strip()}
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return set()
+        try:
+            out = subprocess.run(
+                ["tmux", "-L", socket, "has-session", "-t", bot_id],
+                capture_output=True,
+                timeout=5,
+            )
+            if out.returncode == 0:
+                alive.add(bot_id)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return alive
 
 
 def _check_systemd_service(bot_id: str) -> tuple[bool, str]:
@@ -208,7 +219,7 @@ def collect_fleet_status(
 
     state_data = load_fleet_state(paths)
     bots_state = state_data.get("bots", {})
-    tmux_sessions = _check_tmux_sessions()
+    tmux_sessions = _check_tmux_sessions(fleet, paths)
     is_linux = platform.system() == "Linux"
     now = datetime.now(timezone.utc)
 

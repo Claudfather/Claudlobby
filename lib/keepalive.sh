@@ -22,6 +22,9 @@ BOT_DIR="${1:?Usage: keepalive.sh /path/to/bot/dir}"
 load_bot_conf "$BOT_DIR"
 install_error_trap "$BOT_DIR"
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
+# Per-bot tmux server socket (see start-bot.sh) — same SSOT resolver so the
+# watchdog checks the bot on its OWN server, not the shared default socket.
+TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")"
 
 LOG="$BOT_DIR/keepalive.log"
 
@@ -60,9 +63,9 @@ emit_keepalive_event() {
 # pane is IDLE (see the IDLE branch).
 send_reload_command() {
     local cmd="$1"
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" "$cmd"
+    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" "$cmd"
     sleep 0.3
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter
+    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
     sleep 0.3
     # If the command text is still sitting unsubmitted at the prompt, the TUI
     # swallowed the Enter during a render — resend it once. Scope the match to the
@@ -70,8 +73,8 @@ send_reload_command() {
     # the command scrolls up into the transcript and stays visible there, so a
     # full-pane match would re-fire Enter on every successful submit and inject an
     # empty message at the now-idle prompt.
-    if "$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -3 | grep -qF "$cmd"; then
-        "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" Enter 2>/dev/null || true
+    if bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -3 | grep -qF "$cmd"; then
+        bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter 2>/dev/null || true
     fi
 }
 
@@ -87,10 +90,10 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 #   Linux  → systemctl --user restart $BOT_NAME.service (user units, no sudo)
 #   macOS  → launchctl kickstart -k gui/<uid>/<label>   (LaunchAgent)
 #   else   → fall back to start-bot.sh directly (cron+tmux pattern)
-if ! check_tmux_session "$TMUX_SESSION"; then
+if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
     # Reduce (not eliminate) race with start-bot.sh
     sleep 1
-    if check_tmux_session "$TMUX_SESSION"; then
+    if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         echo "$(ts_iso) SKIP — session reappeared (start-bot.sh likely won the race)" >> "$LOG"
         emit_keepalive_event "SKIP" "session reappeared (start-bot.sh likely won the race)"
         exit 0
@@ -116,7 +119,7 @@ if ! check_tmux_session "$TMUX_SESSION"; then
     exit 0
 fi
 
-pane_content=$("$_TMUX_BIN" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
+pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
 last_lines=$(echo "$pane_content" | tail -10)
 
 # ---------------------------------------------------------------------------

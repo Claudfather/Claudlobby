@@ -67,11 +67,19 @@ emit_event() {
 # into the manager's session — the same channel report-back.sh uses — leaving
 # the human-facing escalation as the manager's decision (see fleet-observability).
 notify_manager() {
-    local bot_dir="$1" msg="$2" mgr=""
+    local bot_dir="$1" msg="$2" mgr="" mgr_socket=""
     mgr=$(bot_conf_get "$bot_dir" MANAGER_TMUX "")
     [ -n "$mgr" ] || return 0
-    check_tmux_session "$mgr" || return 0
-    "$_TMUX_BIN" send-keys -t "$mgr" "[FLEET-PULSE] $(sanitize_tmux_input "$msg")" Enter 2>/dev/null || true
+    # Manager's private socket: prefer the composed field, else reverse-look-up
+    # from its session name among the sibling bots. Without targeting the
+    # manager's own socket, the check below would hit the default socket and
+    # always pass post-migration — silently killing pulse alerts.
+    mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$bot_dir" MANAGER_TMUX_SOCKET "")" "$mgr" "$(dirname "$bot_dir")")
+    check_tmux_session "$mgr" "$mgr_socket" || return 0
+    # Attribute any send_miss to THIS bot's ledger — it is the one whose manager
+    # could not be reached. bot_tmux_send sanitizes + two-step sends.
+    BOT_DIR="$bot_dir" BOT_ID="$(basename "$bot_dir")" \
+        bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-PULSE] $msg" || true
 }
 
 # Wrapper: notify_manager needs bot_dir, but debounce_notify passes only
@@ -114,9 +122,9 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # --- Capture pane once per bot (reused by Check 3 + Check 5) ---
     _pane_buf=""
     _session_alive=0
-    if check_tmux_session "$session_name"; then
+    if check_tmux_session "$session_name" "$BOT_SERVICE"; then
         _session_alive=1
-        _pane_buf=$("$_TMUX_BIN" capture-pane -t "$session_name" -p 2>/dev/null || true)
+        _pane_buf=$(bot_tmux "$BOT_SERVICE" capture-pane -t "$session_name" -p 2>/dev/null || true)
     fi
 
     # --- Check 1: tmux session exists ---
@@ -324,9 +332,8 @@ _summary_tmp=$(safe_mktemp)
 
         _s_session_status="up"
         _s_session_name=$(tmux_session_name "$_s_bot_dir")
-        check_tmux_session "$_s_session_name" 2>/dev/null || _s_session_status="DOWN"
-
         _s_svc=$(bot_conf_get "$_s_bot_dir" BOT_SERVICE "$_s_bid")
+        check_tmux_session "$_s_session_name" "$_s_svc" 2>/dev/null || _s_session_status="DOWN"
         _s_svc_status="ok"
         if [ "$_OS" = "Linux" ] && [ -n "$_s_svc" ]; then
             systemctl --user is-active "$_s_svc" >/dev/null 2>&1 || _s_svc_status="DOWN"

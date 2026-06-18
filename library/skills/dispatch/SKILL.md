@@ -20,10 +20,10 @@ Update this table with your actual fleet:
 
 ## Dispatch Flow
 
-1. **Check bot is alive:** `tmux has-session -t <bot-session>`
-2. **Check bot is idle:** `tmux capture-pane -t <bot-session> -p | tail -5`
+1. **Check bot is alive:** `tmux -L <bot-service> has-session -t <bot-session>` (each bot is on its own server; the socket is its `BOT_SERVICE`)
+2. **Check bot is idle:** `tmux -L <bot-service> capture-pane -t <bot-session> -p | tail -5`
 3. **If busy:** report to user, wait or queue
-4. **If idle:** `tmux send-keys -t <bot-session> '<task prompt>' Enter`
+4. **If idle:** dispatch via the socket-aware helper — `$CLAUDLOBBY_ROOT/lib/dispatch.sh <bot-session> '<task prompt>'` (resolves the bot's socket + race-safe two-step send; never hand-type `tmux send-keys -t`)
 5. **Emit to Telegram:** notify the group that a task was dispatched
 
 ## Rules

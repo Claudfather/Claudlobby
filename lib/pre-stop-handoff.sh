@@ -15,6 +15,9 @@ BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
 install_error_trap "$BOT_DIR"
 load_bot_conf "$BOT_DIR"
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
+# Per-bot tmux server socket (see start-bot.sh) — handoff is sent on the bot's
+# OWN server.
+TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")"
 
 # Clean up .tmux-env on ALL exit paths (including early returns).
 # This file contains resolved secrets written by start-bot.sh.
@@ -34,8 +37,8 @@ if [ -f "$HANDOFF_FILE" ]; then
 fi
 
 # Try to trigger a handoff via the running session
-if check_tmux_session "$TMUX_SESSION"; then
-    "$_TMUX_BIN" send-keys -t "$TMUX_SESSION" '/claudna:session-handoff --auto' Enter || true
+if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
+    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" '/claudna:session-handoff --auto' Enter || true
     # Wait up to 30 seconds for handoff to complete
     for _ in $(seq 1 30); do
         if [ -f "$HANDOFF_FILE" ]; then

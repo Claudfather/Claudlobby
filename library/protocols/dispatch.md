@@ -4,7 +4,7 @@ title: Dispatch Protocol
 
 # Dispatch Protocol
 
-Manager → worker via `tmux send-keys`. The default payload format is `[BOTCOMMAND]` — a structured envelope that workers parse on receipt (see `worker-lifecycle` for the inbound spec).
+Manager → worker via the socket-aware `lib/dispatch.sh` helper (each bot runs on its **own** tmux server, so a raw `tmux send-keys -t <worker>` against the default per-user socket no longer reaches it). The default payload format is `[BOTCOMMAND]` — a structured envelope that workers parse on receipt (see `worker-lifecycle` for the inbound spec).
 
 ## [BOTCOMMAND] format
 
@@ -64,34 +64,28 @@ Manager → worker via `tmux send-keys`. The default payload format is `[BOTCOMM
 [BOTCOMMAND] ari | query | What's the current retry logic in payment_service.py? | repo:backend
 ```
 
-## Two-step tmux send-keys
+## Sending a dispatch (socket-aware)
 
-Split text and Enter into separate calls with a short pause. This prevents a race where Claude Code's TUI swallows keystrokes during render:
+Each bot runs on its **own** tmux server (a private `-L <socket>`), so a raw `tmux send-keys -t <worker> …` against the default per-user socket no longer reaches it. Dispatch through `lib/dispatch.sh`, which resolves the worker's socket from its session name and does the race-safe two-step send (text, pause, Enter) so Claude Code's TUI never swallows keystrokes during render:
 
 ```bash
-tmux send-keys -t <worker> 'set +H; [BOTCOMMAND] <manager> | task | <summary> | repo:<name>'
-sleep 0.3
-tmux send-keys -t <worker> Enter
+$CLAUDLOBBY_ROOT/lib/dispatch.sh <worker> '[BOTCOMMAND] <manager> | task | <summary> | repo:<name>'
 ```
 
 Full example:
 
 ```bash
-tmux send-keys -t eng-1 'set +H; [BOTCOMMAND] ari | task | Run security audit on storydump | repo:storydump | priority:high | ref:https://github.com/org/storydump/issues/99'
-sleep 0.3
-tmux send-keys -t eng-1 Enter
+$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on storydump | repo:storydump | priority:high | ref:https://github.com/org/storydump/issues/99'
 ```
 
-**Always prefix with `set +H;`** — disables bash history expansion, which silently mangles `!` characters in prompts.
+`dispatch.sh` prepends `set +H;` itself (disabling bash history expansion, which silently mangles `!` in prompts), sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
 
 ## Freeform fallback
 
-For ad-hoc prompts that don't fit the structured format (exploratory questions, multi-paragraph context), freeform dispatch still works. Workers treat any dispatch without a `[BOTCOMMAND]` prefix as a freeform task.
+For ad-hoc prompts that don't fit the structured format (exploratory questions, multi-paragraph context), freeform dispatch still works — any dispatch without a `[BOTCOMMAND]` prefix is treated as a freeform task:
 
 ```bash
-tmux send-keys -t eng-1 "set +H; Look at the flaky test in tests/test_auth.py -- it passes locally but fails in CI about 30% of the time. Root-cause it and fix."
-sleep 0.3
-tmux send-keys -t eng-1 Enter
+$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 "Look at the flaky test in tests/test_auth.py -- it passes locally but fails in CI about 30% of the time. Root-cause it and fix."
 ```
 
 Prefer `[BOTCOMMAND]` for anything with a clear type, repo, or priority. Use freeform for exploratory or context-heavy dispatches where the overhead of structured fields isn't worth it.

@@ -40,7 +40,7 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 
 ### Runtime model
 
-Bots run as supervised processes: systemd user units on Linux, launchd LaunchAgents on macOS. Each bot lives in its own tmux session. The manager dispatches work via `tmux send-keys`; workers report back via `lib/report-back.sh`.
+Bots run as supervised processes: systemd user units on Linux, launchd LaunchAgents on macOS. Each bot lives in its own tmux session on its **own** tmux server (a private `-L <socket>` == `BOT_SERVICE`), so one server's death drops only that bot, never the whole fleet. The manager dispatches work via the socket-aware `lib/dispatch.sh` helper (which resolves the worker's socket); workers report back via `lib/report-back.sh`.
 
 Key lifecycle scripts in `lib/`:
 

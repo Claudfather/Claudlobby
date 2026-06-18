@@ -20,15 +20,15 @@ Manage and dispatch tasks to engineer bots.
 
 ### dispatch <bot> <task>
 
-Send a task to an engineer bot via tmux (reliable, instant):
+Send a task to an engineer bot via the socket-aware helper — each bot is on its own tmux server, so a raw `tmux send-keys -t` against the default socket no longer reaches it (reliable, instant):
 
 ```bash
-tmux send-keys -t <bot-session> '<task prompt>' Enter
+$CLAUDLOBBY_ROOT/lib/dispatch.sh <bot-session> '<task prompt>'
 ```
 
-Before dispatching:
-1. Check the bot is alive: `tmux has-session -t <bot-session>`
-2. Check it's not already busy: `tmux capture-pane -t <bot-session> -p | tail -5`
+Before dispatching (each bot is on its own server; the socket is its `BOT_SERVICE`):
+1. Check the bot is alive: `tmux -L <bot-service> has-session -t <bot-session>`
+2. Check it's not already busy: `tmux -L <bot-service> capture-pane -t <bot-session> -p | tail -5`
 3. If busy, wait or tell the user
 
 After dispatching:
