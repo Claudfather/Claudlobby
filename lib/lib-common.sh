@@ -296,12 +296,52 @@ tmux_socket_for_bot() {
     printf 'tmux-%s' "$(basename "$bot_dir")"
 }
 
+# _resolve_cross_fleet_bot_dir <session>
+# Find a bot's directory by session name (= dir basename) across EVERY fleet
+# under $CLAUDLOBBY_ROOT/local/*/runtime/bots. This is the cross-fleet fallback
+# for tmux_socket_for_session: when a manager dispatches to a peer that lives in
+# a sibling fleet (e.g. a top-level orchestrator → a worker in another fleet),
+# the peer is absent from the caller's own bots_dir and only a fleet-wide search
+# locates it. Echoes the resolved bot dir, or nothing if no fleet owns <session>.
+#
+# Collision (same bot name owned by >1 fleet): prefer the match whose private
+# tmux server is LIVE on its socket — the running peer is the real dispatch
+# target. If none are live, warn and pick deterministically (sorted) so the
+# result is stable across calls rather than filesystem-glob-order dependent.
+_resolve_cross_fleet_bot_dir() {
+    local session="$1" d matches=()
+    for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots/"$session"; do
+        [ -d "$d" ] && matches+=("$d")
+    done
+    case ${#matches[@]} in
+        0) return 0 ;;
+        1) printf '%s' "${matches[0]}"; return 0 ;;
+    esac
+    local m sock
+    for m in "${matches[@]}"; do
+        sock=$(tmux_socket_for_bot "$m" 2>/dev/null) || continue
+        if [ -n "$sock" ] && bot_tmux "$sock" has-session -t "$session" 2>/dev/null; then
+            printf '%s' "$m"
+            return 0
+        fi
+    done
+    local pick
+    pick=$(printf '%s\n' "${matches[@]}" | sort | head -1)
+    echo "_resolve_cross_fleet_bot_dir: session '$session' exists in ${#matches[@]} fleets; none have a live tmux server — picking '$pick' deterministically" >&2
+    printf '%s' "$pick"
+}
+
 # tmux_socket_for_session <session> [bots_dir]
 # Reverse-resolve a socket from a session name (= bot dir basename) for the
 # cross-socket call sites that only know the peer's session name (dispatch.sh,
-# bot-sweep-cron.sh, the report-back fallback). Locates the sibling bot dir
-# under [bots_dir] — default: the caller's own runtime/bots dir, derived from
-# $BOT_DIR — and resolves its socket via tmux_socket_for_bot.
+# bot-sweep-cron.sh, the report-back fallback). Resolution order:
+#   1. Fast path — the peer in the caller's OWN fleet (sibling dir under
+#      [bots_dir], default derived from $BOT_DIR). The overwhelmingly common
+#      case; no cross-fleet scan when it hits.
+#   2. Cross-fleet fallback — the peer lives in a sibling fleet (cross-fleet
+#      dispatch); search every fleet's runtime/bots via _resolve_cross_fleet_bot_dir.
+#   3. Unknown peer — preserve original behavior (test-harness socket synthesis
+#      when FLEET_NAME is unset, or the production fail-fast on an empty socket).
 tmux_socket_for_session() {
     local session="${1:?Usage: tmux_socket_for_session <session> [bots_dir]}"
     local bots_dir="${2:-}"
@@ -314,7 +354,17 @@ tmux_socket_for_session() {
             bots_dir=$(resolve_bots_dir)
         fi
     fi
-    tmux_socket_for_bot "$bots_dir/$session"
+    # Own-fleet fast path by default; if the peer isn't in the caller's fleet,
+    # try the cross-fleet fallback; if that also misses, leave the own-fleet path
+    # unchanged so the unknown peer hits the original behavior (harness socket
+    # synthesis when FLEET_NAME is unset, else the production fail-fast).
+    local target="$bots_dir/$session"
+    if [ ! -d "$target" ]; then
+        local peer_dir
+        peer_dir=$(_resolve_cross_fleet_bot_dir "$session")
+        [ -n "$peer_dir" ] && target="$peer_dir"
+    fi
+    tmux_socket_for_bot "$target"
 }
 
 # resolve_peer_socket <explicit_socket> <peer_session> [bots_dir]

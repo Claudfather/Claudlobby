@@ -138,6 +138,67 @@ class TestSocketResolution:
         assert rc == 0
         assert out == "com.test.eng.beta"
 
+    def test_cross_fleet_reverse_lookup_resolves_peer_in_sibling_fleet(self, tmp_path):
+        """When the peer is absent from the caller's OWN fleet, resolution falls
+        back to a fleet-wide search under local/*/runtime/bots — the cross-fleet
+        dispatch path (a top-level manager reaching a worker in another fleet)."""
+        a = tmp_path / "local" / "fleet-a" / "runtime" / "bots"
+        b = tmp_path / "local" / "fleet-b" / "runtime" / "bots"
+        _write_bot_conf(a / "mgr", bot_service="com.test.a.mgr")
+        _write_bot_conf(b / "worker", bot_service="com.test.b.worker")
+        out, _, rc = _run_bash(
+            _src("tmux_socket_for_session worker"),
+            env={
+                "BOT_DIR": str(a / "mgr"),
+                "CLAUDLOBBY_ROOT": str(tmp_path),
+                "FLEET_NAME": "fleet-a",
+            },
+        )
+        assert rc == 0
+        assert out == "com.test.b.worker"
+
+    def test_own_fleet_fast_path_wins_over_cross_fleet_namesake(self, tmp_path):
+        """The own-fleet peer resolves directly even when a sibling fleet owns a
+        bot of the same name — the fast path runs first, no cross-fleet scan."""
+        a = tmp_path / "local" / "fleet-a" / "runtime" / "bots"
+        b = tmp_path / "local" / "fleet-b" / "runtime" / "bots"
+        _write_bot_conf(a / "mgr", bot_service="com.test.a.mgr")
+        _write_bot_conf(a / "dup", bot_service="com.test.a.dup")
+        _write_bot_conf(b / "dup", bot_service="com.test.b.dup")
+        out, _, rc = _run_bash(
+            _src("tmux_socket_for_session dup"),
+            env={
+                "BOT_DIR": str(a / "mgr"),
+                "CLAUDLOBBY_ROOT": str(tmp_path),
+                "FLEET_NAME": "fleet-a",
+            },
+        )
+        assert rc == 0
+        assert out == "com.test.a.dup"
+
+    def test_cross_fleet_collision_without_live_server_is_deterministic(self, tmp_path):
+        """A bot name owned by two sibling fleets, neither with a live tmux
+        server, resolves to the sorted-first match and warns — stable across
+        calls rather than filesystem-glob-order dependent."""
+        z = tmp_path / "local" / "fleet-z" / "runtime" / "bots"
+        b = tmp_path / "local" / "fleet-b" / "runtime" / "bots"
+        c = tmp_path / "local" / "fleet-c" / "runtime" / "bots"
+        _write_bot_conf(z / "mgr", bot_service="com.test.z.mgr")
+        _write_bot_conf(b / "dup", bot_service="com.test.b.dup")
+        _write_bot_conf(c / "dup", bot_service="com.test.c.dup")
+        out, err, rc = _run_bash(
+            _src("tmux_socket_for_session dup"),
+            env={
+                "BOT_DIR": str(z / "mgr"),
+                "CLAUDLOBBY_ROOT": str(tmp_path),
+                "FLEET_NAME": "fleet-z",
+                "TMUX_TMPDIR": str(tmp_path),  # no live servers here
+            },
+        )
+        assert rc == 0
+        assert out == "com.test.b.dup"  # fleet-b sorts before fleet-c
+        assert "deterministically" in err.lower()
+
 
 class TestSocketWrappers:
     def test_bot_tmux_refuses_empty_socket_in_production(self, tmp_path):
