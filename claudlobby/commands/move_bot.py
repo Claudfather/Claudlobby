@@ -118,7 +118,13 @@ def cmd_move_bot(args) -> int:
     # post-stop server teardown. Empty for an un-regenerated bot that predates
     # per-bot sockets — the pre-flight falls back to the default socket and the
     # teardown skips.
-    src_socket = tmux_socket_for_bot(src_bot_dir)
+    try:
+        src_socket = tmux_socket_for_bot(src_bot_dir)
+    except ValueError:
+        # Un-regenerated/misconfigured source bot: the SSOT resolver fail-fasts
+        # under FLEET_NAME. Preserve the tolerant pre-flight (empty → default
+        # socket, teardown skipped) rather than aborting the move here.
+        src_socket = ""
 
     # --- Pre-flight: check tmux session activity ---
     if apply and not force:

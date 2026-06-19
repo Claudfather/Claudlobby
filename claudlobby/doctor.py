@@ -193,14 +193,22 @@ def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
     is_mac = platform.system() == "Darwin"
     down = []
     not_enrolled = []
+    misconfigured = []
 
     for bot_id, bot in fleet.bots.items():
         service_name = f"{fleet.service_prefix}.{bot_id}"
         # Resolve the bot's per-bot tmux socket from its bot.conf via the SSOT
         # resolver (honors TMUX_SOCKET/BOT_SERVICE) rather than reconstructing it
         # from service_name — so the diagnostic checks the socket start-bot.sh
-        # actually binds. Falls back to service_name for an un-regenerated bot.
-        socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or service_name
+        # actually binds. In a fleet context (FLEET_NAME set) the resolver
+        # fail-fasts on a bot.conf with no socket field; record that as a finding
+        # (don't hide the misconfig) and fall back to service_name so the liveness
+        # probe still runs rather than aborting the whole sweep.
+        try:
+            socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or service_name
+        except ValueError:
+            misconfigured.append(bot_id)
+            socket = service_name
 
         # Check tmux session
         tmux_ok = False
@@ -252,6 +260,15 @@ def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
         )
     else:
         report.add("services", "pass", f"{len(fleet.bots)} bot(s) enrolled and running")
+
+    if misconfigured:
+        report.add(
+            "bot-sockets",
+            "fail",
+            f"{len(misconfigured)} bot(s) with no resolvable tmux socket "
+            f"(bot.conf missing TMUX_SOCKET/BOT_SERVICE — regenerate): "
+            f"{', '.join(misconfigured)}",
+        )
 
 
 # ----------------------------------------------------------------------
