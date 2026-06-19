@@ -12,16 +12,21 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
+
+# Clean up .tmux-env on ALL exit paths (including early returns and the
+# socket-resolution guard below). This file holds resolved secrets written by
+# start-bot.sh, so install the trap before anything that can exit early.
+trap 'rm -f "$BOT_DIR/.tmux-env"' EXIT
 install_error_trap "$BOT_DIR"
 load_bot_conf "$BOT_DIR"
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 # Per-bot tmux server socket (see start-bot.sh) — handoff is sent on the bot's
-# OWN server.
-TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")"
-
-# Clean up .tmux-env on ALL exit paths (including early returns).
-# This file contains resolved secrets written by start-bot.sh.
-trap 'rm -f "$BOT_DIR/.tmux-env"' EXIT
+# OWN server. Fail fast (like start-bot.sh) if it can't be resolved rather than
+# aborting silently on errexit.
+TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
+    echo "pre-stop-handoff.sh: cannot resolve tmux socket for $BOT_DIR (check BOT_SERVICE in bot.conf)" >&2
+    exit 1
+}
 
 # clauDNA's redesigned /session-handoff (May 2026) writes to <cwd>/.claude/session.md,
 # where cwd is the bot's runtime dir (start-bot.sh `cd "$BOT_DIR"` before tmux).

@@ -24,7 +24,12 @@ install_error_trap "$BOT_DIR"
 TMUX_SESSION="$(tmux_session_name "$BOT_DIR")"
 # Per-bot tmux server socket (see start-bot.sh) — same SSOT resolver so the
 # watchdog checks the bot on its OWN server, not the shared default socket.
-TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")"
+# Fail fast (like start-bot.sh) on an unresolvable socket rather than aborting
+# silently on errexit.
+TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
+    echo "keepalive.sh: cannot resolve tmux socket for $BOT_DIR (check BOT_SERVICE in bot.conf)" >&2
+    exit 1
+}
 
 LOG="$BOT_DIR/keepalive.log"
 

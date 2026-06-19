@@ -545,7 +545,10 @@ RemainAfterExit=yes
 KillMode=process
 WorkingDirectory={bot_dir}{stagger}
 ExecStart={paths.lib}/start-bot.sh {bot_dir}
-ExecStop=/bin/sh -c 'tmux -L {bot_service} kill-session -t {bot.bot_id} 2>/dev/null || true'
+# kill-server (not kill-session): this bot owns its tmux server. kill-server
+# tears the whole server down deterministically; kill-session leaves the emptied
+# server orphaned unless tmux's exit-empty default reaps it.
+ExecStop=/bin/sh -c 'tmux -L {bot_service} kill-server 2>/dev/null || true'
 ExecStopPost=/bin/rm -f {bot_dir}/.tmux-env
 # Restart= here only fires on non-zero exit of start-bot.sh — i.e., a config
 # failure before tmux ever spawned. Tmux dying after we've gone "active" is

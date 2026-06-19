@@ -125,6 +125,36 @@ class TestCheckServices:
         assert report.checks[0].status == "warn"
         assert "not enrolled" in report.checks[0].detail
 
+    def test_tmux_check_uses_ssot_socket_from_bot_conf(self, doctor_fleet, monkeypatch):
+        """The tmux check must use the socket resolved from the bot's bot.conf
+        (SSOT), not one reconstructed from service_prefix.bot_id."""
+        _, fleet, paths = doctor_fleet
+        # bot.conf whose TMUX_SOCKET differs from the service_prefix.bot_id default.
+        bot_dir = paths.bot_runtime("worker")
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        (bot_dir / "bot.conf").write_text(
+            "BOT_NAME=worker\nBOT_SERVICE=com.test.worker\nTMUX_SOCKET=custom.sock.worker\n"
+        )
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+
+            class _R:
+                returncode = 1
+                stdout = ""
+                stderr = ""
+
+            return _R()
+
+        monkeypatch.setattr("claudlobby.doctor.subprocess.run", fake_run)
+        check_services(fleet, paths, DoctorReport())
+
+        tmux_calls = [c for c in calls if c[:2] == ["tmux", "-L"]]
+        assert tmux_calls, "expected a 'tmux -L … has-session' call"
+        assert tmux_calls[0][2] == "custom.sock.worker"
+
 
 class TestFormatReport:
     def test_format_shows_pass_fail_counts(self):
