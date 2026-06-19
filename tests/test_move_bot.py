@@ -366,3 +366,46 @@ class TestMoveBotApply:
             ]
         )
         assert rc == 1  # validation error, no mutation occurred
+
+    def test_kills_source_tmux_server(self, tmp_path: Path, monkeypatch):
+        """move-bot --apply tears down the source bot's per-bot tmux server so the
+        move doesn't strand an orphaned server on the source host."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+
+        import claudlobby.commands.move_bot as move_bot_mod
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+
+            class _R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return _R()
+
+        monkeypatch.setattr(move_bot_mod.subprocess, "run", fake_run)
+
+        # --force skips the active-session pre-flight (the mock would otherwise
+        # report a live session and abort before teardown).
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+                "--force",
+            ]
+        )
+        assert rc == 0
+        assert ["tmux", "-L", "com.test.mybot", "kill-server"] in calls

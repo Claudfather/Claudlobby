@@ -112,13 +112,17 @@ def cmd_move_bot(args) -> int:
                 )
                 return 1
 
+    # The bot runs on its OWN per-bot tmux server (-L <socket>); resolve it once
+    # from the source bot.conf via the SSOT resolver (honors TMUX_SOCKET, then
+    # BOT_SERVICE). Reused for the pre-flight session check, the plan, and the
+    # post-stop server teardown. Empty for an un-regenerated bot that predates
+    # per-bot sockets — the pre-flight falls back to the default socket and the
+    # teardown skips.
+    src_socket = tmux_socket_for_bot(src_bot_dir)
+
     # --- Pre-flight: check tmux session activity ---
     if apply and not force:
-        # The bot runs on its own tmux server (-L <socket>); resolve it from the
-        # source bot.conf, falling back to the default socket for an
-        # un-regenerated bot that predates per-bot sockets.
-        socket = tmux_socket_for_bot(src_bot_dir)
-        _tmux = ["tmux", "-L", socket] if socket else ["tmux"]
+        _tmux = ["tmux", "-L", src_socket] if src_socket else ["tmux"]
         tmux_check = subprocess.run(
             [*_tmux, "has-session", "-t", bot_name],
             capture_output=True,
@@ -205,6 +209,8 @@ def cmd_move_bot(args) -> int:
     if old_unit and old_unit.is_file():
         steps.append(f"Stop + disable service ({old_unit.name})")
         steps.append(f"Delete old service file: {old_unit}")
+    if src_socket:
+        steps.append(f"Kill source tmux server (tmux -L {src_socket} kill-server)")
     steps.append(f"Regenerate target bot (claudlobby generate --bot {bot_name})")
     if access_json_path.is_file() and target_fleet.telegram_group_chat_id:
         steps.append(
@@ -300,6 +306,23 @@ def cmd_move_bot(args) -> int:
                 )
             old_unit.unlink()
             log.info("stopped + removed launchd plist %s", old_unit.name)
+
+    # Tear down the source tmux server explicitly. The bot runs on its OWN
+    # per-bot server (-L <socket>); we can't rely on the service's ExecStop to
+    # reap it — the source may have no unit at all, or an ExecStop that only
+    # kills the session. Best-effort: a missing server (non-zero rc) or an
+    # absent tmux binary is benign.
+    if src_socket:
+        try:
+            r = subprocess.run(
+                ["tmux", "-L", src_socket, "kill-server"],
+                capture_output=True,
+                text=True,
+            )
+            if r.returncode == 0:
+                log.info("killed source tmux server (-L %s)", src_socket)
+        except FileNotFoundError:
+            pass
 
     # 4. Regenerate target bot (validation already passed above)
     compose_bot(target_fleet.bots[bot_name], target_fleet, target_paths)

@@ -23,6 +23,8 @@ import shlex
 import subprocess
 import textwrap
 
+import pytest
+
 from claudlobby.composer import (
     compose_bot_conf,
     compose_launchd_plist,
@@ -244,8 +246,37 @@ class TestComposerSocketFields:
         assert "<key>TMUX_TMPDIR</key><string>/tmp</string>" in launchd
 
     def test_systemd_execstop_is_socket_aware(self, tmp_path):
-        """The generated ExecStop must kill the session on the bot's OWN server
-        (-L <socket>); the default-socket kill would silently no-op post-migration."""
+        """The generated ExecStop must tear down the bot's OWN tmux server with
+        kill-server (-L <socket>) — deterministic teardown that doesn't rely on
+        tmux's exit-empty default to reap the emptied server; a default-socket
+        kill is blind."""
         fleet, paths = _fleet(tmp_path)
         systemd = compose_systemd_unit(fleet.bots["worker-1"], fleet, paths)
-        assert "tmux -L com.test.worker-1 kill-session -t worker-1" in systemd
+        assert (
+            "ExecStop=/bin/sh -c 'tmux -L com.test.worker-1 kill-server "
+            "2>/dev/null || true'" in systemd
+        )
+
+
+class TestLifecycleScriptExitGuards:
+    """keepalive.sh and pre-stop-handoff.sh must fail fast (like start-bot.sh)
+    when the socket can't be resolved — an empty BOT_SERVICE while FLEET_NAME is
+    set — emitting a clear diagnostic instead of aborting silently on errexit."""
+
+    def _misconfigured_bot(self, tmp_path):
+        # bot.conf with BOT_NAME but no BOT_SERVICE/TMUX_SOCKET: an un-regenerated,
+        # misconfigured bot. With FLEET_NAME set, tmux_socket_for_bot returns 1.
+        d = tmp_path / "badbot"
+        (d / "data" / "events").mkdir(parents=True, exist_ok=True)
+        (d / "bot.conf").write_text(f'BOT_NAME=badbot\nBOT_DIR="{d}"\n')
+        return d
+
+    @pytest.mark.parametrize("script", ["keepalive.sh", "pre-stop-handoff.sh"])
+    def test_fails_fast_on_unresolvable_socket(self, tmp_path, script):
+        d = self._misconfigured_bot(tmp_path)
+        _, err, rc = _run_bash(
+            f'bash "{LIB_DIR}/{script}" "{d}"',
+            env={"FLEET_NAME": "test-fleet"},
+        )
+        assert rc != 0
+        assert "cannot resolve tmux socket" in err.lower()

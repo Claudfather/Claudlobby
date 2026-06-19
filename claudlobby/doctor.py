@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import dotenv
 from .config import FleetConfig
-from .paths import Paths
+from .paths import Paths, tmux_socket_for_bot
 from .validator import validate
 
 log = logging.getLogger(__name__)
@@ -196,14 +196,19 @@ def check_services(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> No
 
     for bot_id, bot in fleet.bots.items():
         service_name = f"{fleet.service_prefix}.{bot_id}"
+        # Resolve the bot's per-bot tmux socket from its bot.conf via the SSOT
+        # resolver (honors TMUX_SOCKET/BOT_SERVICE) rather than reconstructing it
+        # from service_name — so the diagnostic checks the socket start-bot.sh
+        # actually binds. Falls back to service_name for an un-regenerated bot.
+        socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or service_name
 
         # Check tmux session
         tmux_ok = False
         try:
             result = subprocess.run(
-                # Each bot runs on its own tmux server (-L <socket>, socket ==
-                # BOT_SERVICE == service_name); a default-socket check is blind.
-                ["tmux", "-L", service_name, "has-session", "-t", bot_id],
+                # Each bot runs on its own tmux server (-L <socket>); a
+                # default-socket check is blind.
+                ["tmux", "-L", socket, "has-session", "-t", bot_id],
                 capture_output=True,
                 timeout=5,
             )
