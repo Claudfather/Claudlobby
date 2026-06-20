@@ -57,6 +57,21 @@ def mock_fleet():
     )
 
 
+class TestCheckTmuxSessions:
+    def test_survives_misconfigured_bot_when_fleet_name_set(
+        self, mock_fleet, mock_paths, monkeypatch
+    ):
+        """The SSOT resolver fail-fasts on a bot with no socket while FLEET_NAME
+        is set; _check_tmux_sessions must catch that and not crash the dashboard
+        (the bots simply read as not-alive)."""
+        from claudlobby.status import _check_tmux_sessions
+
+        monkeypatch.setenv("FLEET_NAME", "test-fleet")
+        # alice/bob have no bot.conf → resolver raises; must be caught.
+        alive = _check_tmux_sessions(mock_fleet, mock_paths)
+        assert alive == set()
+
+
 # -- load_fleet_state (now in utilization.py) --------------------------------
 
 

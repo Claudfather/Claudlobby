@@ -117,8 +117,11 @@ class TestCheckMcpConfigs:
 
 
 class TestCheckServices:
-    def test_warn_when_not_enrolled(self, doctor_fleet):
+    def test_warn_when_not_enrolled(self, doctor_fleet, monkeypatch):
         _, fleet, paths = doctor_fleet
+        # CLI context (no FLEET_NAME): the resolver returns "" and the check
+        # reconstructs service_name — no misconfig finding, just the enrollment warn.
+        monkeypatch.delenv("FLEET_NAME", raising=False)
         report = DoctorReport()
         check_services(fleet, paths, report)
         # In test env, no systemd/launchd enrollment expected
@@ -155,6 +158,24 @@ class TestCheckServices:
         assert tmux_calls, "expected a 'tmux -L … has-session' call"
         assert tmux_calls[0][2] == "custom.sock.worker"
 
+    def test_surfaces_misconfigured_bot_when_fleet_name_set(
+        self, doctor_fleet, monkeypatch
+    ):
+        """In a fleet context (FLEET_NAME set) the SSOT resolver fail-fasts on a
+        bot with no resolvable socket; check_services must catch that, keep
+        sweeping, and SURFACE it as a finding rather than silently reconstructing
+        (so doctor doesn't report a misconfigured bot as healthy)."""
+        _, fleet, paths = doctor_fleet  # worker has no bot.conf → resolver raises
+        monkeypatch.setenv("FLEET_NAME", "test-fleet")
+        report = DoctorReport()
+        check_services(fleet, paths, report)  # must not raise
+        socket_findings = [c for c in report.checks if c.name == "bot-sockets"]
+        assert socket_findings, (
+            "expected a bot-sockets finding for the misconfigured bot"
+        )
+        assert socket_findings[0].status == "fail"
+        assert "worker" in socket_findings[0].detail
+
 
 class TestFormatReport:
     def test_format_shows_pass_fail_counts(self):
@@ -172,6 +193,7 @@ class TestRunDoctor:
     def test_returns_report_with_all_checks(self, doctor_fleet, monkeypatch):
         _, fleet, paths = doctor_fleet
         monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.delenv("FLEET_NAME", raising=False)
         report = run_doctor(fleet, paths)
         check_names = [c.name for c in report.checks]
         assert "fleet-yaml" in check_names

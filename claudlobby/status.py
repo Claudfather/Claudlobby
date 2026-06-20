@@ -100,9 +100,15 @@ def _check_tmux_sessions(fleet, paths) -> set[str]:
     """
     alive: set[str] = set()
     for bot_id in fleet.bots:
-        socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
-            f"{fleet.service_prefix}.{bot_id}"
-        )
+        try:
+            socket = tmux_socket_for_bot(paths.bot_runtime(bot_id)) or (
+                f"{fleet.service_prefix}.{bot_id}"
+            )
+        except ValueError:
+            # SSOT resolver fail-fasts on a misconfigured bot when FLEET_NAME is
+            # set; fall back to the canonical service-name socket so one bad bot
+            # doesn't blank the whole dashboard.
+            socket = f"{fleet.service_prefix}.{bot_id}"
         try:
             out = subprocess.run(
                 ["tmux", "-L", socket, "has-session", "-t", bot_id],

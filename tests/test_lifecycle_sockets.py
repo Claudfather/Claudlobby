@@ -31,7 +31,7 @@ from claudlobby.composer import (
     compose_systemd_unit,
 )
 from claudlobby.config import load_fleet
-from claudlobby.paths import Paths
+from claudlobby.paths import Paths, tmux_socket_for_bot
 
 
 # Resolve relative to this file so the test exercises the checkout's
@@ -200,6 +200,45 @@ class TestSocketResolution:
         assert rc == 0
         assert out == "com.test.b.dup"  # fleet-b sorts before fleet-c
         assert "deterministically" in err.lower()
+
+
+class TestPythonSocketResolution:
+    """The Python twin ``tmux_socket_for_bot`` (paths.py) must resolve and
+    fail-fast identically to the bash SSOT (lib-common.sh) — same FLEET_NAME
+    guard, so doctor/status error on a misconfigured bot instead of silently
+    resolving a wrong/bare socket."""
+
+    def test_resolves_from_tmux_socket_field(self, tmp_path):
+        d = _write_bot_conf(tmp_path / "alpha")
+        assert tmux_socket_for_bot(d) == "com.test.eng.alpha"
+
+    def test_falls_back_to_bot_service_when_unregenerated(self, tmp_path):
+        d = _write_bot_conf(tmp_path / "alpha", tmux_socket=None)
+        assert tmux_socket_for_bot(d) == "com.test.eng.alpha"
+
+    def test_empty_service_with_fleet_name_fails_fast(self, tmp_path, monkeypatch):
+        """Empty socket while FLEET_NAME is set must raise — never let a caller
+        silently fall back to a reconstructed/bare socket (mirrors the bash
+        twin's ``return 1`` + 'refusing' stderr)."""
+        monkeypatch.setenv("FLEET_NAME", "prod-fleet")
+        d = _write_bot_conf(tmp_path / "alpha", bot_service="", tmux_socket=None)
+        with pytest.raises(ValueError, match="refusing"):
+            tmux_socket_for_bot(d)
+
+    def test_missing_conf_with_fleet_name_fails_fast(self, tmp_path, monkeypatch):
+        """A missing bot.conf is also an empty socket — fail-fast under FLEET_NAME."""
+        monkeypatch.setenv("FLEET_NAME", "prod-fleet")
+        with pytest.raises(ValueError, match="refusing"):
+            tmux_socket_for_bot(tmp_path / "nonexistent")
+
+    def test_empty_service_without_fleet_name_returns_empty(
+        self, tmp_path, monkeypatch
+    ):
+        """Without FLEET_NAME (CLI / pre-fleet), an empty socket returns "" so the
+        caller decides its own fallback — preserved, no fail-fast."""
+        monkeypatch.delenv("FLEET_NAME", raising=False)
+        d = _write_bot_conf(tmp_path / "alpha", bot_service="", tmux_socket=None)
+        assert tmux_socket_for_bot(d) == ""
 
 
 class TestSocketWrappers:
