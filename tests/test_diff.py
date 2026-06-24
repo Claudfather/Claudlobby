@@ -1,11 +1,11 @@
 """Tests for claudlobby/diff.py — drift detection and promote guidance."""
+
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from claudlobby.config import load_fleet
-from claudlobby.diff import diff_bot, promote_bot
+from claudlobby.diff import diff_bot, diff_fleet_timers, promote_bot
 from claudlobby.composer import compose_bot
 from claudlobby.paths import Paths
 
@@ -49,8 +49,10 @@ class TestDiffBot:
     def test_mcp_json_drift_detected(self, fleet_dir, monkeypatch):
         # Add github mcp to lead bot
         from textwrap import dedent
+
         fleet_yaml = fleet_dir / "fleet.yaml"
-        fleet_yaml.write_text(dedent("""\
+        fleet_yaml.write_text(
+            dedent("""\
             fleet:
               name: test-fleet
               service_prefix: com.test
@@ -68,7 +70,8 @@ class TestDiffBot:
                   telegram:
                     handle: lead_bot
                     token_env: TELEGRAM_TOKEN_LEAD
-        """))
+        """)
+        )
         monkeypatch.setenv("GITHUB_PAT", "ghp_test")
         paths = Paths(root=fleet_dir)
         fleet, _md = load_fleet(paths.fleet_yaml)
@@ -115,8 +118,10 @@ class TestPromoteBot:
 
     def test_promote_with_voice(self, fleet_dir):
         from textwrap import dedent
+
         fleet_yaml = fleet_dir / "fleet.yaml"
-        fleet_yaml.write_text(dedent("""\
+        fleet_yaml.write_text(
+            dedent("""\
             fleet:
               name: test-fleet
               service_prefix: com.test
@@ -132,8 +137,51 @@ class TestPromoteBot:
                   telegram:
                     handle: lead_bot
                     token_env: TELEGRAM_TOKEN_LEAD
-        """))
+        """)
+        )
         paths = Paths(root=fleet_dir)
         fleet, _md = load_fleet(paths.fleet_yaml)
         result = promote_bot("lead", fleet, paths)
         assert "erlich.md" in result
+
+
+# ---------------------------------------------------------------------------
+# diff_fleet_timers — generate-vs-diff Paths-surface invariant (#441)
+# ---------------------------------------------------------------------------
+
+
+class TestDiffFleetTimers:
+    def test_passes_real_paths_not_partial_shadow(self, fleet_dir, monkeypatch):
+        """Regression for #441: diff_fleet_timers must hand compose_fleet_timers the
+        SAME real Paths object that generate uses — not a 2-attribute shadow.
+
+        A partial shadow exposes only root/runtime_fleet, so any paths.* access the
+        timer path grows later AttributeErrors under `claudlobby diff` while
+        `claudlobby generate` (real Paths) keeps working — a silent divergence.
+        """
+        paths = Paths(root=fleet_dir)
+        fleet, merged = load_fleet(paths.fleet_yaml)
+        # diff_fleet_timers early-returns unless the actual timers dir exists.
+        (paths.runtime_fleet / "timers").mkdir(parents=True, exist_ok=True)
+
+        captured: dict = {}
+
+        def fake_compose_fleet_timers(fleet_, paths_, merged_, output_dir=None):
+            captured["type"] = type(paths_).__name__
+            captured["is_real_paths"] = isinstance(paths_, Paths)
+            out = output_dir if output_dir is not None else paths_.runtime_fleet
+            (out / "timers").mkdir(parents=True, exist_ok=True)
+
+        # diff_fleet_timers imports compose_fleet_timers from .composer at call time,
+        # so patching the composer attribute is picked up.
+        monkeypatch.setattr(
+            "claudlobby.composer.compose_fleet_timers", fake_compose_fleet_timers
+        )
+
+        diff_fleet_timers(fleet, paths, merged)
+
+        assert captured.get("is_real_paths"), (
+            f"diff_fleet_timers passed a {captured.get('type')} instead of a real Paths; "
+            "any paths.* access beyond root/runtime_fleet AttributeErrors in diff "
+            "but not generate"
+        )
