@@ -195,10 +195,16 @@ class TestAggregateFleet:
         bot1 = tmp_path / "alpha"
         bot1.mkdir()
         (bot1 / "bot.conf").write_text("BOT_NAME=alpha\n")
+        # Relative timestamp so the entry always lands inside the now-relative
+        # 24h window, regardless of the calendar date the suite runs on.
+        # microsecond=0 to match _LOG_LINE_RE's second-precision timestamp format.
+        recent = (
+            (datetime.now(TZ) - timedelta(hours=1)).replace(microsecond=0).isoformat()
+        )
         _write_log(
             bot1 / "keepalive.log",
             [
-                f"{_ts(11)} IDLE \u2014 at prompt",
+                f"{recent} IDLE \u2014 at prompt",
             ],
         )
 
