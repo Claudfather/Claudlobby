@@ -12,7 +12,6 @@ from claudlobby.loader import (
     _parse_expertise_permissions,
     _strip_leading_title_heading,
     load_library_item,
-    load_library_items,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -257,21 +256,6 @@ class TestLoadLibraryItem:
         item = load_library_item(p)
         assert "# Test" not in item.body
         assert "### Sub" in item.body  # ## → ### after demotion
-
-
-# ── load_library_items ───────────────────────────────────────────────
-
-
-class TestLoadLibraryItems:
-    def test_loads_existing_skips_missing(self, tmp_path):
-        (tmp_path / "one.md").write_text("---\ntitle: One\n---\n\nBody one.")
-        # "two.md" deliberately missing
-        items = load_library_items(["one", "two"], tmp_path)
-        assert len(items) == 1
-        assert items[0].title == "One"
-
-    def test_empty_list(self, tmp_path):
-        assert load_library_items([], tmp_path) == []
 
 
 # ── load_library_items_overlay ───────────────────────────────────────

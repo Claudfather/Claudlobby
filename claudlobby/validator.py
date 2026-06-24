@@ -45,9 +45,6 @@ class ValidationReport:
     def has_issues(self) -> bool:
         return bool(self.errors or self.warnings)
 
-    def merged_for_strict(self) -> list[str]:
-        return self.errors + self.warnings
-
 
 def _available_names(paths: Paths, kind: str, ext: str = ".md") -> set[str]:
     """Scan library search dirs for available file stems of a given kind."""
