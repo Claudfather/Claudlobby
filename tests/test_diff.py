@@ -167,10 +167,7 @@ class TestDiffFleetTimers:
         captured: dict = {}
 
         def fake_compose_fleet_timers(fleet_, paths_, merged_, output_dir=None):
-            captured["type"] = type(paths_).__name__
-            captured["is_real_paths"] = isinstance(paths_, Paths)
-            out = output_dir if output_dir is not None else paths_.runtime_fleet
-            (out / "timers").mkdir(parents=True, exist_ok=True)
+            captured["paths"] = paths_
 
         # diff_fleet_timers imports compose_fleet_timers from .composer at call time,
         # so patching the composer attribute is picked up.
@@ -180,8 +177,8 @@ class TestDiffFleetTimers:
 
         diff_fleet_timers(fleet, paths, merged)
 
-        assert captured.get("is_real_paths"), (
-            f"diff_fleet_timers passed a {captured.get('type')} instead of a real Paths; "
-            "any paths.* access beyond root/runtime_fleet AttributeErrors in diff "
-            "but not generate"
+        assert isinstance(captured.get("paths"), Paths), (
+            f"diff_fleet_timers passed a {type(captured.get('paths')).__name__} instead of "
+            "a real Paths; any paths.* access beyond root/runtime_fleet AttributeErrors in "
+            "diff but not generate"
         )

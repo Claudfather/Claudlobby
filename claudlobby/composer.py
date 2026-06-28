@@ -1567,6 +1567,7 @@ def compose_fleet_timers(
     fleet: FleetConfig,
     paths: Paths,
     merged_defaults: dict,
+    *,
     output_dir: Path | None = None,
 ) -> Path:
     """Generate fleet-level systemd/launchd timer units into runtime/fleet/timers/.
