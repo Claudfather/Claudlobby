@@ -75,10 +75,17 @@ fi
 # $_reason_file lives under lib-common's _LC_TMPDIR, reaped by its EXIT trap.
 
 # --- 3. mark every RUNNING bot for a keepalive-driven live reload ---
+# fleet.yaml is authoritative for which bots this fleet owns. Filter the runtime
+# glob through it so stale/cross-fleet residue dirs are never marked for reload.
+# BOTS_DIR is resolve_bots_dir's local/<fleet>/runtime/bots (or runtime/bots in
+# root mode), so its grandparent holds fleet.yaml for both. Empty list (no/
+# unreadable fleet.yaml) → bot_in_fleet treats every dir as declared.
+declared_bots=$(parse_fleet_bots "$(dirname "$(dirname "$BOTS_DIR")")/fleet.yaml")
 marked=0
 if [ -d "$BOTS_DIR" ]; then
     for bot_dir in "$BOTS_DIR"/*/; do
         [ -d "$bot_dir" ] || continue
+        bot_in_fleet "$(basename "$bot_dir")" "$declared_bots" || continue   # departed/cross-fleet residue → skip
         # "Running" = the bot's session is alive on its OWN per-bot server.
         if check_tmux_session "$(tmux_session_name "$bot_dir")" "$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)"; then
             mkdir -p "$bot_dir/data"

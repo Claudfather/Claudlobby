@@ -13,6 +13,30 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install_error_trap ""
 
 DIR="${1:?Usage: git-pull-all.sh /path/to/projects/dir}"
+
+# When DIR is a fleet runtime projects path (.../runtime/bots/<bot>/projects), a
+# stale per-bot cron entry for a bot no longer declared in that fleet would — via
+# the log-dir mkdir below — resurrect the departed bot's runtime dir on every run,
+# which fleet supervision then flags as a cross-fleet orphan. Consult fleet.yaml
+# (the authoritative roster) and no-op for undeclared bots. Non-fleet paths have no
+# fleet.yaml alongside → bot_in_fleet treats the bot as declared → generic behavior
+# (pull any directory of repos) is unchanged.
+#
+# Defense-in-depth across both departure vectors: a bot removed via teardown /
+# move-bot is best handled by reaping its per-bot cron at teardown (a complementary
+# fix), but a bot dropped by editing fleet.yaml and re-generating runs no teardown —
+# so this authoritative-roster check is the durable line of defense for that case,
+# not a stopgap.
+_gpa_dir=${DIR%/}
+case "$_gpa_dir" in
+    */runtime/bots/*/projects)
+        _gpa_bot=$(basename "$(dirname "$_gpa_dir")")
+        _gpa_fleet_root=${_gpa_dir%/runtime/bots/*/projects}
+        bot_in_fleet "$_gpa_bot" "$(parse_fleet_bots "$_gpa_fleet_root/fleet.yaml")" \
+            || exit 0
+        ;;
+esac
+
 LOG="$(dirname "$DIR")/git-pull.log"
 setup_log_dir "$LOG"
 FAILURES=0
