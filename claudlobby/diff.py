@@ -84,19 +84,17 @@ def diff_fleet_timers(fleet: FleetConfig, paths: Paths, merged_defaults: dict) -
     if not timers_dir.is_dir():
         return "=== fleet timers: runtime/fleet/timers/ does not exist — run `claudlobby generate`\n"
 
-    # Generate expected timers to a temp dir, then compare
+    # Generate expected timers to a temp dir, then compare. Pass the REAL Paths
+    # (redirecting output via output_dir) so diff and generate exercise an
+    # identical Paths surface — a partial shadow would AttributeError here, but
+    # not in generate, the moment the timer path reads a new paths.* attribute.
     with tempfile.TemporaryDirectory() as tmpdir:
         parts: list[str] = []
 
-        class _TmpPaths:
-            def __init__(self, real_paths):
-                self.root = real_paths.root
-                self.runtime_fleet = Path(tmpdir) / "expected_fleet"
+        expected_fleet = Path(tmpdir) / "expected_fleet"
+        compose_fleet_timers(fleet, paths, merged_defaults, output_dir=expected_fleet)
 
-        tmp_p = _TmpPaths(paths)
-        compose_fleet_timers(fleet, tmp_p, merged_defaults)
-
-        expected_timers_dir = tmp_p.runtime_fleet / "timers"
+        expected_timers_dir = expected_fleet / "timers"
         if not expected_timers_dir.is_dir():
             return ""
 

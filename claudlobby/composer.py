@@ -1564,13 +1564,23 @@ def _write_timer_units(
 
 
 def compose_fleet_timers(
-    fleet: FleetConfig, paths: Paths, merged_defaults: dict
+    fleet: FleetConfig,
+    paths: Paths,
+    merged_defaults: dict,
+    *,
+    output_dir: Path | None = None,
 ) -> Path:
     """Generate fleet-level systemd/launchd timer units into runtime/fleet/timers/.
 
     Emits the system_defaults ``fleet_timers`` (when system_defaults is enabled)
     and, independently, the opt-in ``code-audit-sweep`` timer (when fleet.sweep
     is enabled).  Returns the timers dir.
+
+    ``output_dir`` overrides the destination directory (the ``timers/`` subdir is
+    written beneath it); it defaults to ``paths.runtime_fleet``. ``diff`` passes a
+    temp dir here so it can hand this function the real ``Paths`` — keeping the
+    diff and generate code paths on an identical ``Paths`` surface — while writing
+    the expected units somewhere other than ``runtime/``.
     """
     from .config import _load_system_defaults
 
@@ -1580,7 +1590,8 @@ def compose_fleet_timers(
     emit_defaults = bool(sd.enabled and sd.timers and timers)
     sweep_on = fleet.sweep_enabled()
 
-    timers_dir = paths.runtime_fleet / "timers"
+    base_dir = output_dir if output_dir is not None else paths.runtime_fleet
+    timers_dir = base_dir / "timers"
     if not emit_defaults and not sweep_on:
         return timers_dir
 
