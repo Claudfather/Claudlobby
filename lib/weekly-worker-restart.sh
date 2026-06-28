@@ -48,11 +48,19 @@ if [ ! -d "$BOTS_DIR" ]; then
     exit 0
 fi
 
+# fleet.yaml is authoritative for which bots this fleet owns. Filter the runtime
+# glob through it so a departed bot's leftover runtime dir is never bounced —
+# spin-up-bot.sh would otherwise re-enroll + restart a bot the fleet no longer
+# declares, resurrecting cross-fleet orphan residue. Empty list (no/unreadable
+# fleet.yaml) → bot_in_fleet treats every dir as declared, preserving prior behavior.
+declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET/fleet.yaml")
+
 echo "$ts RESTART starting weekly worker-only bounce: $FLEET" >> "$LOG"
 restarted=0; skipped=0; failed=0
 for bot_dir in "$BOTS_DIR"/*/; do
     [ -d "$bot_dir" ] || continue
     bot_id=$(basename "$bot_dir")
+    bot_in_fleet "$bot_id" "$declared_bots" || continue   # departed/cross-fleet residue → not ours to bounce
 
     # F5: managers are never auto-restarted.
     if bot_is_manager "$bot_dir"; then
