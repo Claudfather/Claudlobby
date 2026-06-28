@@ -171,20 +171,6 @@ def load_library_item(path: Path) -> LibraryItem | None:
     )
 
 
-def load_library_items(items: list[str], dir_path: Path) -> list[LibraryItem]:
-    """Load `<item>.md` from `dir_path` for each name in `items`. Skips missing.
-
-    LEGACY entry point — used by code that doesn't yet pass a Paths instance.
-    Prefer `load_library_items_overlay` for overlay-aware lookup.
-    """
-    out: list[LibraryItem] = []
-    for name in items:
-        loaded = load_library_item(dir_path / f"{name}.md")
-        if loaded is not None:
-            out.append(loaded)
-    return out
-
-
 def load_library_items_overlay(items: list[str], paths, kind: str) -> list[LibraryItem]:
     """Overlay-aware loader with folder expansion.
 

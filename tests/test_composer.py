@@ -2386,3 +2386,37 @@ class TestPermissionMode:
 
         with pytest.raises(ValueError, match="Invalid permission_mode"):
             _parse_enum("permission_mode", "yolo", VALID_PERMISSION_MODES)
+
+
+class TestComposeBotConfHandleValidation:
+    """compose_bot_conf validates telegram.handle against _TELEGRAM_HANDLE_RE."""
+
+    def _compose(self, tmp_path, handle):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = _make_bot(handle=handle)
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / bot.bot_id).mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        return compose_bot_conf(bot, _make_fleet(), _make_paths(root))
+
+    def test_valid_handles_accepted(self, tmp_path):
+        # "1bot" (leading digit) is intentionally accepted by the canonical rule.
+        for handle in ("w_bot", "Alex", "a-b", "x1", "1bot"):
+            conf = self._compose(tmp_path, handle)
+            assert f"export TELEGRAM_BOT_HANDLE={handle}" in conf
+
+    def test_invalid_handles_raise(self, tmp_path):
+        import pytest
+
+        for handle in ("-x", "a b", "a.b"):
+            with pytest.raises(ValueError, match="telegram handle"):
+                self._compose(tmp_path, handle)
+
+
+def test_compose_hooks_type_hints_resolve():
+    """_compose_hooks' typing.Any annotations must resolve via get_type_hints."""
+    import typing
+
+    hints = typing.get_type_hints(_compose_hooks)
+    assert "hooks" in hints

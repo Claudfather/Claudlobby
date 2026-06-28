@@ -14,6 +14,7 @@ import shlex
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 _log = logging.getLogger(__name__)
 
@@ -255,6 +256,9 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
 
 _SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
 _SHELL_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# Telegram handle: must start alnum/underscore, then alnum/underscore/dash.
+# One canonical rule used by both compose_bot_conf and compose_bot.
+_TELEGRAM_HANDLE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
 
 # Pinned fleet-wide tmux tmpdir. Per-bot sockets are reached via
 # `tmux -L <socket>`, which resolves to "$TMUX_TMPDIR/tmux-$(id -u)/<socket>".
@@ -280,7 +284,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     if not _SAFE_NAME_RE.match(bot.name):
         raise ValueError(f"bot name {bot.name!r} contains shell-unsafe characters")
     tg_handle = (bot.telegram.handle if bot.telegram else None) or bot.bot_id
-    if not _SAFE_NAME_RE.match(tg_handle):
+    if not _TELEGRAM_HANDLE_RE.match(tg_handle):
         raise ValueError(
             f"telegram handle {tg_handle!r} contains shell-unsafe characters"
         )
@@ -1191,7 +1195,8 @@ def compose_bot(
     access = compose_access_json(bot, fleet)
     if access is not None:
         handle = bot.telegram.handle
-        if not re.match(r"^[a-zA-Z0-9_][a-zA-Z0-9_-]*$", handle):
+        # compose_bot_conf already enforced this rule and raised; defensive re-check.
+        if not _TELEGRAM_HANDLE_RE.match(handle):
             _log.warning(
                 "bot %s has invalid telegram handle %r, skipping access.json",
                 bot.bot_id,

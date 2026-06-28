@@ -138,20 +138,6 @@ class McpEntry:
     name: str
     instances: list[str] = field(default_factory=lambda: ["default"])
 
-    @property
-    def is_multi(self) -> bool:
-        return len(self.instances) > 1 or self.instances != ["default"]
-
-    def server_names(self) -> list[str]:
-        """Output server names for .mcp.json."""
-        out = []
-        for inst in self.instances:
-            if inst == "default":
-                out.append(self.name)
-            else:
-                out.append(f"{self.name}-{inst}")
-        return out
-
     def instance_prefix(self, instance: str) -> str:
         """Env var prefix for an instance. E.g., gws/personal → GWS_PERSONAL_."""
         if instance == "default":
