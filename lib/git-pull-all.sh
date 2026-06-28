@@ -22,9 +22,11 @@ DIR="${1:?Usage: git-pull-all.sh /path/to/projects/dir}"
 # fleet.yaml alongside → bot_in_fleet treats the bot as declared → generic behavior
 # (pull any directory of repos) is unchanged.
 #
-# This is defense-in-depth: the durable fix is reaping a bot's per-bot cron entries
-# when it leaves a fleet (bot teardown / move-bot), since those outlive the bot and
-# keep firing. Until that lands, this guard neutralizes the stale entries.
+# Defense-in-depth across both departure vectors: a bot removed via teardown /
+# move-bot is best handled by reaping its per-bot cron at teardown (a complementary
+# fix), but a bot dropped by editing fleet.yaml and re-generating runs no teardown —
+# so this authoritative-roster check is the durable line of defense for that case,
+# not a stopgap.
 _gpa_dir=${DIR%/}
 case "$_gpa_dir" in
     */runtime/bots/*/projects)
