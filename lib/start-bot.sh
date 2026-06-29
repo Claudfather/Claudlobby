@@ -215,6 +215,12 @@ fi
 
 bot_tmux "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
 
+# Spawn marker — its mtime is this bot's last session (re)start. fleet-pulse
+# reads it to grace the Telegram bridge poller while it spins up, so a (re)start
+# — including a fleet-wide restart — doesn't trip a spurious bridge_down alert.
+mkdir -p "$BOT_DIR/data" 2>/dev/null || true
+touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
+
 # Wait for initialization (up to 90s) with observability
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"

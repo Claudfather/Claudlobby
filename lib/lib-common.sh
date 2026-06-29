@@ -373,6 +373,38 @@ bridge_state() {
     return 0
 }
 
+# bridge_down_state <bot_dir> [grace_seconds]
+# Decide whether an up-bot's Telegram bridge is actionably DOWN. Wraps
+# bridge_state with a post-(re)start grace window so a freshly-restarted poller
+# (e.g. right after a fleet-wide restart) isn't flagged before it can spin up.
+#
+# Collapses bridge_state's five states into one verdict:
+#   no_bridge | no_token      -> print the state, return 0  (caller alerts)
+#   up | no_handle | unknown  -> print nothing, return 1    (no alert)
+# `unknown` is never actionable: bridge_state emits it when ownership is
+# unprovable (unreadable /proc, non-Linux) and must not be healed OR alerted.
+#
+# Grace is measured from the data/.spawn marker (touched on every start-bot.sh
+# (re)start). A missing marker means no grace — a long-lived bot with a genuinely
+# dead bridge still alerts.
+bridge_down_state() {
+    local bot_dir="${1:?Usage: bridge_down_state <bot_dir> [grace_seconds]}"
+    local grace="${2:-300}"
+    local spawn_marker="$bot_dir/data/.spawn" spawn_epoch now state
+
+    spawn_epoch="$(stat_mtime "$spawn_marker" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    if [ "$spawn_epoch" -gt 0 ] && [ "$((now - spawn_epoch))" -lt "$grace" ]; then
+        return 1 # within post-(re)start grace; poller may still be coming up
+    fi
+
+    state="$(bridge_state "$bot_dir" 2>/dev/null || true)"
+    case "$state" in
+        no_bridge | no_token) printf '%s' "$state"; return 0 ;;
+        *) return 1 ;; # up / no_handle / unknown -> not an actionable bridge_down
+    esac
+}
+
 # --- Per-bot tmux socket isolation ------------------------------------------
 # Each bot runs its own tmux server, reached via a private socket name (the
 # `-L` argument), so one server's death can only drop one bot — not the whole
