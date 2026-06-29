@@ -82,6 +82,8 @@ BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD=1
 OBSERVABILITY_REAP_DAYS=7
+TELEGRAM_BOT_HANDLE="$BOT"
+OBSERVABILITY_BRIDGE_DOWN_GRACE=0
 CONF
 
 # --- Run: stand up a non-idle worker pane + a manager session to receive alerts ---
@@ -120,6 +122,8 @@ check "activity_stuck event emitted (animated-but-hung worker)" "$r"
 check "overdue_dispatch event emitted (deadline passed, no report)" "$r"
 printf '%s' "$mgr_pane" | grep -q '\[FLEET-PULSE\]' && r=yes || r=no
 check "manager notified via [FLEET-PULSE] push" "$r"
+[ -n "$events_file" ] && grep -q '"type":"bridge_down"' "$events_file" && r=yes || r=no
+check "bridge_down event emitted (live session, Telegram poller not delivering)" "$r"
 
 # #460: a never-closing dispatch must age out of the overdue set so fleet-pulse
 # stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI

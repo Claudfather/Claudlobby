@@ -116,15 +116,20 @@ for bot_dir in "$BOTS_DIR"/*/; do
 
     # Load BOT_SERVICE via the helper (handles `export` prefix + no-match safely).
     BOT_SERVICE=$(bot_conf_get "$bot_dir" BOT_SERVICE "")
+    # Resolve the bot's private tmux socket the same way keepalive/start-bot do
+    # (TMUX_SOCKET, else BOT_SERVICE) so session liveness is checked on the right
+    # server. In production this equals BOT_SERVICE; the indirection also lets the
+    # validate-bot-change harness (empty BOT_SERVICE) resolve its fallback socket.
+    _bot_socket=$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)
 
     session_name=$(tmux_session_name "$bot_dir")
 
     # --- Capture pane once per bot (reused by Check 3 + Check 5) ---
     _pane_buf=""
     _session_alive=0
-    if check_tmux_session "$session_name" "$BOT_SERVICE"; then
+    if check_tmux_session "$session_name" "$_bot_socket"; then
         _session_alive=1
-        _pane_buf=$(bot_tmux "$BOT_SERVICE" capture-pane -t "$session_name" -p 2>/dev/null || true)
+        _pane_buf=$(bot_tmux "$_bot_socket" capture-pane -t "$session_name" -p 2>/dev/null || true)
     fi
 
     # --- Check 1: tmux session exists ---
@@ -145,6 +150,25 @@ for bot_dir in "$BOTS_DIR"/*/; do
                 "$bot_id service_down — unit '$BOT_SERVICE' state=$state"
         else
             debounce_clear "$state_dir" "$bot_id" "service_alerted"
+        fi
+    fi
+
+    # --- Check 2b: Telegram bridge down (channel up-bots only) ---
+    # A live tmux session whose Telegram poller isn't delivering is invisible to
+    # the human — surface it. bridge_down_state only counts a bot as down past a
+    # post-(re)start grace, so a fleet-wide restart doesn't trip a spurious
+    # escalation while pollers respawn. Non-channel bots (no_handle) and
+    # indeterminate ownership (unknown) are not actionable and never fire.
+    if [ "$_session_alive" -eq 1 ]; then
+        # Grace is env-overridable now; fleet.yaml exposure + composer emission
+        # are deferred to the observability-config (system-defaults) tier.
+        _bridge_grace=$(bot_conf_get "$bot_dir" OBSERVABILITY_BRIDGE_DOWN_GRACE 300)
+        if _bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace"); then
+            emit_event "$bot_dir" "$bot_id" "bridge_down" '{"state":"'"$_bridge_st"'"}'
+            debounce_notify "$state_dir" "$bot_id" "bridge_alerted" _notify_current_bot \
+                "$bot_id bridge_down — Telegram bridge '$_bridge_st' (live session, poller not delivering)"
+        else
+            debounce_clear "$state_dir" "$bot_id" "bridge_alerted"
         fi
     fi
 
@@ -275,7 +299,7 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                     date -v-"${_ESCALATION_WINDOW}"M +%Y-%m-%dT%H:%M 2>/dev/null || echo "")
 
     if [ -n "$_window_start" ]; then
-        for _crit_type in service_down session_missing; do
+        for _crit_type in service_down session_missing bridge_down; do
             _affected_bots=""
             _affected_count=0
             for bot_dir in "$BOTS_DIR"/*/; do
@@ -342,7 +366,7 @@ _summary_tmp=$(safe_mktemp)
         _s_alerts=""
         _s_efile="$_s_bot_dir/data/events/fleet-${today}.jsonl"
         if [ -f "$_s_efile" ]; then
-            for _s_ct in session_missing service_down activity_stuck; do
+            for _s_ct in session_missing service_down bridge_down activity_stuck; do
                 grep -q "\"type\":\"$_s_ct\"" "$_s_efile" 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
             done
         fi
