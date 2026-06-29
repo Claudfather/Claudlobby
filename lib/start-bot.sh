@@ -295,4 +295,20 @@ fi
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
 [ -x "$LIB_DIR/fleet-state-update.sh" ] && "$LIB_DIR/fleet-state-update.sh" "$BOT_NAME" "idle" || true
 
+# Verify the Telegram inbound bridge actually spawned (Phase 3b/3c). "remote-
+# control is active" (above) is a SEPARATE subsystem from the channel poller, so a
+# bot can be marked ready/idle with a dark bridge. Done AFTER the bot is dispatch-
+# ready (resumed + prompted + marked idle) so a slow or absent bridge never delays
+# the bridge-INDEPENDENT tmux-dispatch path. start-bot does NOT bounce — it
+# verifies, drops/clears the durable .bridge-down marker, and escalates tmux-first;
+# keepalive owns the heal ladder (Fork F1=b). BRIDGE_READY_TIMEOUT_S (default 45)
+# is env-overridable for slow hosts.
+_bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" "${BRIDGE_READY_TIMEOUT_S:-}")"
+case "$_bridge_verdict" in
+    ready)     echo "$(ts_iso) BRIDGE_READY — Telegram poller up" >> "$LOG" ;;
+    missing:*) echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal" >> "$LOG" ;;
+    unknown)   echo "$(ts_iso) BRIDGE_UNKNOWN — ownership unprovable; not actionable" >> "$LOG" ;;
+    no_handle) : ;; # not a channel bot — nothing to verify
+esac
+
 echo "$BOT_LABEL started"

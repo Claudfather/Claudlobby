@@ -405,6 +405,69 @@ bridge_down_state() {
     esac
 }
 
+# bridge_bringup_verify <bot_dir> <bots_dir> [timeout_seconds]
+# One-shot post-boot Telegram-bridge verification for start-bot.sh (Phase 3b/3c).
+# "remote-control is active" is a SEPARATE subsystem from the channel poller, so a
+# bot can come up ready with a dark bridge — this proves the `bun server.ts` poller
+# actually spawned. Polls bridge_state up to <timeout>s (default 45) for `up`; on a
+# terminal non-up state it marks + escalates so a silently-dark bridge is loud at
+# bring-up.
+#
+# It NEVER bounces — keepalive owns the heal ladder (Fork F1=b); start-bot only
+# verifies, marks, and escalates. The durable data/.bridge-down marker is dropped on
+# a verified-missing bridge and cleared whenever bridge_state reads `up` (here, or
+# later by any consumer). Escalation is tmux-first via emit_failure_alert (the
+# manager nudge is bridge-independent — reporting a dead Telegram over Telegram is
+# the circular-escalation hazard). no_token escalates once but drops no marker (a
+# bounce can't heal a missing token). Non-channel bots (no_handle) and indeterminate
+# ownership (unknown) are silent — never actionable.
+#
+# Prints one status token for the caller to log:
+#   ready | missing:no_bridge | missing:no_token | unknown | no_handle
+bridge_bringup_verify() {
+    local bot_dir="${1:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
+    local bots_dir="${2:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
+    local timeout="${3:-45}"
+    local marker="$bot_dir/data/.bridge-down" state="" bot_id elapsed=0
+    bot_id="$(basename "$bot_dir")"
+
+    # Poll until `up`, a terminal state, or <timeout>s elapse (always checks at
+    # least once). up is success; no_token (token unset) and no_handle (not a
+    # channel bot) won't change by waiting, so don't burn the window on them.
+    # no_bridge keeps polling — a cold `bun install` may still be writing bot.pid.
+    # Count elapsed sleeps rather than reading the clock so the rare dark-bridge
+    # poll spawns no per-iteration `date`.
+    while :; do
+        state="$(bridge_state "$bot_dir" 2>/dev/null || true)"
+        case "$state" in
+            up | no_token | no_handle) break ;;
+        esac
+        if [ "$elapsed" -ge "$timeout" ]; then break; fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    case "$state" in
+        up)
+            rm -f "$marker" 2>/dev/null || true
+            printf '%s' "ready" ;;
+        no_handle)
+            printf '%s' "no_handle" ;;
+        no_token)
+            emit_failure_alert "$bots_dir" "bridge_down" \
+                "$bot_id Telegram bridge no_token at bring-up — token unset; escalate, cannot heal" || true
+            printf '%s' "missing:no_token" ;;
+        unknown)
+            printf '%s' "unknown" ;;
+        *) # no_bridge (or an empty read) — a verified-dark bridge
+            mkdir -p "$bot_dir/data" 2>/dev/null || true
+            : > "$marker" 2>/dev/null || true
+            emit_failure_alert "$bots_dir" "bridge_down" \
+                "$bot_id Telegram bridge down at bring-up — poller not delivering (tmux dispatch still works; keepalive will heal)" || true
+            printf '%s' "missing:no_bridge" ;;
+    esac
+}
+
 # --- Per-bot tmux socket isolation ------------------------------------------
 # Each bot runs its own tmux server, reached via a private socket name (the
 # `-L` argument), so one server's death can only drop one bot — not the whole
