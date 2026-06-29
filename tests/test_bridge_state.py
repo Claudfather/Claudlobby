@@ -95,24 +95,42 @@ def _wait_pidfile(pidfile: Path):
 
 def _spawn_bridge(bindir, state_dir, *, owned=True, env_state_dir=None):
     """Spawn a fake `bun server.ts` poller that writes its pid to
-    <state_dir>/bot.pid and stays alive. owned=True forks it under a live
-    `claude` (lineage holds); owned=False spawns it directly (orphan — its
-    parent is the test runner, not a `claude`). The trailing `; true` defeats
-    bash's last-command exec optimization that would otherwise turn this
-    `bun`-named bash into `sleep` (losing comm=bun). Returns the Popen heading
-    the process group (kill via _kill_tree)."""
+    <state_dir>/bot.pid and stays alive.
+
+    owned=True reproduces the PRODUCTION process tree, where `claude` is the
+    poller's GRANDPARENT, not its direct parent:
+
+        claude → bun (`bun … start`, the package.json start script bun runs in a
+                 child bun) → bun server.ts   ← bot.pid
+
+    The telegram plugin's MCP command is `bun … start`, so the leaf poller's
+    direct parent is always a `bun` spawn-shim. A fixture that forked the poller
+    directly under `claude` (claude == direct parent) hid a 100%-false-positive
+    lineage bug — every healthy live bridge read `no_bridge`. The tree is built
+    from script files (not nested `bash -c`) to dodge three-deep quote nesting;
+    each level backgrounds the next and `wait`s, and the leaf ends on a builtin
+    (`true`) so bash's last-command exec optimization can't replace comm=bun with
+    `sleep`.
+
+    owned=False spawns the leaf directly (orphan — its parent is the test
+    runner, a non-`claude`/non-shim process). Returns the Popen heading the
+    process group (kill via _kill_tree)."""
     state_dir.mkdir(parents=True, exist_ok=True)
     env_sd = env_state_dir if env_state_dir is not None else str(state_dir)
     bun = bindir / "bun"
     pidfile = state_dir / "bot.pid"
     env = {**os.environ, "TELEGRAM_STATE_DIR": env_sd}
-    bun_script = f'echo $$ > "{pidfile}"; sleep 60; true'
+    leaf = bindir / "leaf.sh"
+    leaf.write_text(f'echo $$ > "{pidfile}"\nsleep 60\ntrue\n')
     if owned:
         claude = bindir / "claude"
-        inner = f"\"{bun}\" -c '{bun_script}' server.ts & wait"
-        cmd = [str(claude), "-c", inner]
+        wrapper = bindir / "wrapper.sh"  # the `bun … start` shim (comm=bun)
+        wrapper.write_text(f'"{bun}" "{leaf}" server.ts &\nwait\n')
+        tree = bindir / "tree.sh"  # run by claude — spawns the wrapper bun
+        tree.write_text(f'"{bun}" "{wrapper}" start &\nwait\n')
+        cmd = [str(claude), str(tree)]
     else:
-        cmd = [str(bun), "-c", bun_script, "server.ts"]
+        cmd = [str(bun), str(leaf), "server.ts"]
     proc = subprocess.Popen(cmd, env=env, start_new_session=True)
     _wait_pidfile(pidfile)
     return proc
@@ -199,7 +217,11 @@ def test_no_bridge_when_pid_alive_but_not_bun(tmp_path):
 
 
 @requires_proc
-def test_up_when_owned_bun_with_claude_parent(tmp_path):
+def test_up_when_claude_is_grandparent_via_bun_shim(tmp_path):
+    """M4 lineage (production shape): the poller's DIRECT parent is the
+    `bun … start` shim and `claude` is the GRANDPARENT (see _spawn_bridge). The
+    lineage check must walk past bun shims to find the live `claude` ancestor —
+    a direct-parent-only check reads `no_bridge` for every healthy live bridge."""
     bindir = _fake_bins(tmp_path)
     sd = tmp_path / "state"
     bot = tmp_path / "bots" / "b1"
@@ -216,8 +238,12 @@ def test_up_when_owned_bun_with_claude_parent(tmp_path):
 
 @requires_proc
 def test_orphan_bun_without_claude_parent_is_not_up(tmp_path):
-    """M4 lineage: a bun whose parent is not a live `claude` (orphaned) holds the
-    single-consumer slot but delivers nothing → must NOT read up."""
+    """M4 lineage: a bun whose ancestry holds no live `claude` (orphaned →
+    reparented to the session subreaper) holds the single-consumer slot but
+    delivers nothing → must NOT read up. Doubles as the over-walk guard: the
+    leaf's first non-shim ancestor is the test runner, so a walk that chased a
+    distant unrelated `claude` (e.g. the pytest session's own) would wrongly
+    read `up` here — it must stop at the first non-shim ancestor."""
     bindir = _fake_bins(tmp_path)
     sd = tmp_path / "state"
     bot = tmp_path / "bots" / "b1"
