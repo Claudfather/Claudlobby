@@ -1268,6 +1268,89 @@ class TestMcpPermissionsInSettingsLocal:
         assert "mcp__gws-work__search_gmail_messages" not in allow
 
 
+class TestMcpTrustInSettingsLocal:
+    """compose_settings_local pre-trusts the bot's composed MCP servers.
+
+    The generated settings.local.json declares each project MCP server as
+    trusted (enabledMcpjsonServers) so Claude Code never re-prompts. Names are
+    derived from the composed .mcp.json, mirroring how enabledPlugins is derived
+    from fleet config.
+    """
+
+    def _setup_mcp_library(self, tmp_path: Path, fragments: dict[str, dict]) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        mcp_dir = root / "library" / "mcp"
+        mcp_dir.mkdir(parents=True)
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for name, content in fragments.items():
+            (mcp_dir / f"{name}.json").write_text(json.dumps(content))
+        return Paths(root=root, fleet_dir=root)
+
+    def test_multiple_servers_sorted(self, tmp_path):
+        from claudlobby.config import McpEntry
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "notion": {"notion": {"command": "npx", "args": ["-y", "notion-mcp"]}},
+                "github": {"github": {"command": "npx", "args": ["-y", "gh-mcp"]}},
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="notion"), McpEntry(name="github")],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["enabledMcpjsonServers"] == ["github", "notion"]
+
+    def test_multi_instance_names_trusted(self, tmp_path):
+        """Trust list uses the exact .mcp.json keys, including instance suffixes."""
+        from claudlobby.config import McpEntry
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {"gws": {"gws": {"command": "uvx", "args": ["workspace-mcp"]}}},
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="gws", instances=["personal", "work"])],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["enabledMcpjsonServers"] == ["gws-personal", "gws-work"]
+
+    def test_no_mcp_servers_omits_trust_key(self, tmp_path):
+        paths = self._setup_mcp_library(tmp_path, {})
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert "enabledMcpjsonServers" not in result
+
+    def test_blanket_flag_not_emitted(self, tmp_path):
+        """Least privilege: emit the explicit allowlist, never the blanket trust-all."""
+        from claudlobby.config import McpEntry
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {"github": {"github": {"command": "npx", "args": ["-y", "gh-mcp"]}}},
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github")],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert "enableAllProjectMcpServers" not in result
+
+
 class TestParseExpertisePermissions:
     """parse_expertise_file extracts permissions from YAML frontmatter."""
 
@@ -1834,6 +1917,60 @@ class TestComposeBotEventsDir:
 
         assert (bot_dir / "data").is_dir()
         assert (bot_dir / "data" / "events").is_dir()
+
+
+class TestMcpTrustDurableAcrossGenerate:
+    """Generated MCP trust matches .mcp.json and survives re-generate.
+
+    Regression for the Mode-B re-prompt: compose_bot unconditionally overwrites
+    settings.local.json, so trust must be re-derived from the composed .mcp.json
+    on every generate rather than relying on runtime-persisted approval.
+    """
+
+    def _setup(self, tmp_path: Path) -> Paths:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "library" / "mcp").mkdir(parents=True)
+        (root / "library" / "mcp" / "github.json").write_text(
+            json.dumps({"github": {"command": "npx", "args": ["-y", "gh-mcp"]}})
+        )
+        (root / "templates").mkdir()
+        (root / "templates" / "claude.md.j2").write_text(
+            "# {{ bot.name }}\n\n{{ expertise_body }}\n"
+        )
+        (root / "runtime" / "bots").mkdir(parents=True)
+        (root / "lib").mkdir()
+        (root / "voices").mkdir()
+        return Paths(root=root, fleet_dir=root)
+
+    def test_trust_matches_mcp_json_and_survives_regenerate(self, tmp_path):
+        from claudlobby.composer import compose_bot
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github")],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+
+        bot_dir = compose_bot(bot, fleet, paths, log=lambda m: None)
+        settings_path = bot_dir / ".claude" / "settings.local.json"
+        mcp_path = bot_dir / ".mcp.json"
+
+        settings = json.loads(settings_path.read_text())
+        mcp = json.loads(mcp_path.read_text())
+        # Trust covers exactly the composed servers — nothing left to re-prompt.
+        assert settings["enabledMcpjsonServers"] == sorted(mcp["mcpServers"].keys())
+
+        # Second generate (the bug: unconditional overwrite used to wipe trust).
+        compose_bot(bot, fleet, paths, log=lambda m: None)
+        regenerated = json.loads(settings_path.read_text())
+        assert regenerated["enabledMcpjsonServers"] == settings["enabledMcpjsonServers"]
 
 
 class TestComposeBotConfObservability:

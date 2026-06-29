@@ -1107,6 +1107,16 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     if fleet.plugins.marketplaces:
         settings["extraKnownMarketplaces"] = dict(fleet.plugins.marketplaces)
 
+    # MCP trust — pre-approve exactly the servers in the composed .mcp.json so
+    # Claude Code never re-prompts for project-scoped servers. Re-derived every
+    # generate (not persisted runtime trust), because compose_bot overwrites
+    # settings.local.json wholesale. Names come from compose_mcp_json (the single
+    # source of truth, incl. instance suffixes). Explicit allowlist over the
+    # blanket enableAllProjectMcpServers — least privilege, mirrors enabledPlugins.
+    mcp_servers = compose_mcp_json(bot, paths)["mcpServers"]
+    if mcp_servers:
+        settings["enabledMcpjsonServers"] = sorted(mcp_servers)
+
     return settings
 
 
