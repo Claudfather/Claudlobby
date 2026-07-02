@@ -120,6 +120,16 @@ check "overdue_dispatch event emitted (deadline passed, no report)" "$r"
 printf '%s' "$mgr_pane" | grep -q '\[FLEET-PULSE\]' && r=yes || r=no
 check "manager notified via [FLEET-PULSE] push" "$r"
 
+# #460: a never-closing dispatch must age out of the overdue set so fleet-pulse
+# stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI
+# fleet-pulse consumes) with a 25h-old, never-reported dispatch and assert nothing.
+aged_log="$ROOT/state/dispatch-log-aged.jsonl"
+printf '{"ts":"t","manager":"%s","bot":"%s","task":"x","dispatched_at":%s,"expected_by":%s}\n' \
+    "$MGR" "$BOT" "$((now - 90000))" "$((now - 89400))" > "$aged_log"
+aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$aged_log" "$ROOT/state/report-back.jsonl" "$now" 2>/dev/null || true)
+[ -z "$aged_out" ] && r=yes || r=no
+check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
+
 # ===========================================================================
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.
 # Stubs claude/claudlobby on PATH so this needs no Claude auth or real fleet.
