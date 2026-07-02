@@ -3,7 +3,8 @@
 # directory and runs keepalive.sh against each.
 #
 # Designed to be invoked every 60s by a launchd LaunchAgent (macOS) or
-# a systemd timer (Linux). See install-keepalive.sh for the macOS plist.
+# a systemd timer (Linux). Enrolled by setup-fleet via the generic
+# enrollers (install_fleet_timer.sh / install_fleet_timer_launchd.sh).
 #
 # Usage: keepalive-all.sh [<fleet-runtime-bots-dir>]
 #   default: $CLAUDLOBBY_ROOT/local/$CLAUDLOBBY_FLEET/runtime/bots

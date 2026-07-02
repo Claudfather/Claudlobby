@@ -7,6 +7,7 @@ from .core import (
     cmd_diff,
     cmd_doctor,
     cmd_generate,
+    cmd_host_timers,
     cmd_list_library,
     cmd_promote,
     cmd_report_back,
@@ -44,6 +45,12 @@ def register_subparsers(sub) -> None:
         "--strict", action="store_true", help="Refuse to generate on warnings"
     )
     pg.set_defaults(func=cmd_generate)
+
+    pht = sub.add_parser(
+        "host-timers",
+        help="Compose host-global timer units from system.yaml host.jobs",
+    )
+    pht.set_defaults(func=cmd_host_timers)
 
     pl = sub.add_parser(
         "list-library",

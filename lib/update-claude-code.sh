@@ -21,6 +21,12 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
 
+# Timer environments carry a minimal PATH; own tool resolution here so npm /
+# claude resolve identically under systemd, launchd, cron, or a shell.
+# _HOMEBREW (lib-common) covers brew-installed node on macOS.
+PATH="$HOME/.local/bin:$HOME/.npm-global/bin${_HOMEBREW:+:$_HOMEBREW/bin}:$PATH"
+export PATH
+
 FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
 BOTS_DIR="$(resolve_bots_dir "$FLEET")"
 LOG_DIR="${CLAUDLOBBY_ROOT}/state"

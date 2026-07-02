@@ -69,14 +69,16 @@ Key lifecycle scripts in `lib/`:
 | `bot-sweep-cron.sh` | Periodic bot sweep via cron |
 | `install-bot.sh` | Bot service enrollment (launchd) |
 | `install-bot-systemd.sh` | Bot service enrollment (systemd) |
-| `install-keepalive.sh` | Keepalive timer enrollment (launchd) |
-| `install-keepalive-systemd.sh` | Keepalive timer enrollment (systemd) |
+| `install_fleet_timer.sh` | Generic fleet/host timer enrollment (systemd) — copies composed units + enables |
+| `install_fleet_timer_launchd.sh` | Generic fleet/host timer enrollment (launchd) — copies composed plist + bootstraps |
+| `install-keepalive-systemd.sh` | Keepalive timer enrollment (systemd, thin wrapper) |
 | `install-cron.sh` | Cron job installation |
-| `install-creds-check.sh` | Creds-check timer enrollment (launchd) |
-| `install-creds-check-systemd.sh` | Creds-check timer enrollment (systemd) |
+| `install-creds-check-systemd.sh` | Creds-check timer enrollment (systemd, thin wrapper) |
 | `install-fleet-pulse-systemd.sh` | Fleet-pulse systemd timer enrollment (systemd) |
 | `setup-mac-mini.sh` | macOS host setup automation |
-| `setup-host.sh` | Host setup automation (cross-platform) |
+| `setup-system` | Setup backbone: host prereqs + system.yaml host-job enrollment (cross-platform) |
+| `setup-fleet` | Setup backbone: per-fleet apply+enroll — jobs, bots (skips healthy), reconcile |
+| `setup-fleets` | Run setup-fleet for every fleet on the host |
 | `bot-vitals.sh` | Bot vitals collection for observability |
 | `fleet-pulse.sh` | Fleet-wide heartbeat / status monitoring |
 | `tail-fleet.sh` | Fleet-wide log tail + grep filter |
@@ -87,8 +89,7 @@ Key lifecycle scripts in `lib/`:
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
-| `update-claude-code.sh` | Daily Claude Code binary download (download-only; no fleet bounce) |
-| `install-claude-update-systemd.sh` | Claude Code update timer enrollment (systemd) |
+| `update-claude-code.sh` | Daily Claude Code binary download (download-only; no fleet bounce) — runs as the `claude-update` host job (system.yaml `host.jobs`, enrolled by `setup-system`) |
 | `reload-fleet.sh` | Daily live plugin/skill reload — `claude plugin update` + generate, then mark running bots for a keepalive-driven `/reload` (no restart) |
 | `install-reload-fleet-systemd.sh` | Reload-fleet daily timer enrollment (systemd) |
 | `weekly-worker-restart.sh` | Weekly lossless restart of worker bots (managers excluded) to apply a staged binary |

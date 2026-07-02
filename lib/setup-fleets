@@ -1,0 +1,36 @@
+#!/bin/bash
+# setup-fleets — run setup-fleet for every fleet on the host (setup backbone).
+#
+# Discovers fleets the way reconcile-fleet does (local/*/fleet.yaml) and
+# applies each. Continues past per-fleet failures; exits non-zero if any
+# fleet failed (re-run converges).
+#
+# Usage: setup-fleets
+set -euo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+install_error_trap ""
+
+FAILED=""
+FOUND=0
+for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml; do
+    [ -f "$fy" ] || continue
+    FOUND=1
+    fleet="$(basename "$(dirname "$fy")")"
+    echo "=== setup-fleet $fleet ==="
+    if ! "$LIB_DIR/setup-fleet" "$fleet"; then
+        FAILED="$FAILED $fleet"
+    fi
+done
+
+if [ "$FOUND" = 0 ]; then
+    echo "setup-fleets: no fleets found under $CLAUDLOBBY_ROOT/local/*/fleet.yaml" >&2
+    exit 1
+fi
+if [ -n "${FAILED// /}" ]; then
+    echo "setup-fleets: FAILED:$FAILED — fix + re-run (idempotent)" >&2
+    exit 1
+fi
+echo "setup-fleets: all fleets applied"

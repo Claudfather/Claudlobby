@@ -2,7 +2,7 @@
 # Install the credential keepalive as a systemd user timer (Linux).
 #
 # Thin caller of install_fleet_timer.sh — all enrollment logic lives there.
-# On macOS, use install-creds-check.sh. Run `claudlobby generate` first.
+# On macOS: install_fleet_timer_launchd.sh creds-check. Run `claudlobby generate` first.
 #
 # Usage: install-creds-check-systemd.sh [<fleet-name>]
 set -euo pipefail

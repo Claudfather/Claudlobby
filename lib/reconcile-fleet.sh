@@ -49,25 +49,9 @@ while IFS= read -r b; do
     has_tmux=0; has_unit=0
     bot_socket=$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)
     check_tmux_session "$b" "$bot_socket" 2>/dev/null && has_tmux=1
-
-    # Resolve unit name from bot.conf — single source of truth.
-    # Falls back to bot name if bot.conf is missing (pre-generate state).
-    local_svc=$(bot_conf_get "$bot_dir" BOT_SERVICE "$b")
-    case "$_OS" in
-    Linux)
-        # Check BOT_SERVICE unit first, fall back to bare bot name
-        if [ -f "$HOME/.config/systemd/user/$local_svc.service" ] || \
-           [ -f "$HOME/.config/systemd/user/$b.service" ]; then
-            has_unit=1
-        fi
-        ;;
-    Darwin)
-        if [ -f "$HOME/Library/LaunchAgents/$local_svc.plist" ] || \
-           [ -f "$HOME/Library/LaunchAgents/$b.plist" ]; then
-            has_unit=1
-        fi
-        ;;
-    esac
+    # Unit presence via the shared predicate (bot_unit_present) — the same
+    # check setup-fleet's skip-healthy uses, so audit and apply never drift.
+    bot_unit_present "$b" "$bot_dir" && has_unit=1
 
     if   [ $has_tmux = 1 ] && [ $has_unit = 1 ]; then healthy="$healthy $b"
     elif [ $has_tmux = 1 ] && [ $has_unit = 0 ]; then orphan="$orphan $b"
@@ -99,6 +83,35 @@ echo "  ✓ healthy:  ${healthy:-(none)}"
 echo "  ⚠ orphan:   ${orphan:-(none)}"
 echo "  ⚠ missing:  ${missing:-(none)}"
 echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before killing"
+
+# --- Default-job drift --------------------------------------------------------
+# Every composed fleet timer (merged system.yaml defaults.jobs + opt-ins like
+# code-audit-sweep) should be enrolled on this host. A composed unit with no
+# live enrollment is drift — the default tier silently rotting.
+job_drift=""
+_timers_dir="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/fleet/timers"
+if [ -d "$_timers_dir" ]; then
+    case "$_OS" in
+    Linux)
+        for _t in "$_timers_dir"/*.timer; do
+            [ -e "$_t" ] || continue
+            _tb="$(basename "$_t")"
+            systemctl --user is-enabled "$_tb" >/dev/null 2>&1 || job_drift="$job_drift ${_tb%.timer}"
+        done
+        ;;
+    Darwin)
+        _uid="$(id -u)"
+        for _t in "$_timers_dir"/*.plist; do
+            [ -e "$_t" ] || continue
+            _tb="$(basename "$_t" .plist)"
+            # Live launchd state, not file presence — a copied-but-never-
+            # bootstrapped plist is still drift (mirrors is-enabled on Linux).
+            launchctl print "gui/$_uid/$_tb" >/dev/null 2>&1 || job_drift="$job_drift $_tb"
+        done
+        ;;
+    esac
+    echo "  ⚠ job-drift: ${job_drift:-(none)}   ← composed timers not enrolled (fix: lib/setup-fleet $FLEET)"
+fi
 
 # --- Root-cause diagnostics for missing bots ---------------------------------
 _diagnose_missing_bot() {

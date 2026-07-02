@@ -1,0 +1,136 @@
+#!/bin/bash
+# setup-fleet — apply the fleet layer: enroll composed fleet jobs, spin up
+# bots, reconcile (setup backbone).
+#
+# One idempotent per-fleet APPLY+ENROLL pass over what `claudlobby generate`
+# COMPOSED (this script never composes — run generate first):
+#   1. jobs   — enroll every composed fleet timer via the generic enroller
+#               (install_fleet_timer.sh / install_fleet_timer_launchd.sh),
+#               with SERVICE_PREFIX read from fleet.yaml so a cold start
+#               (no composed bot.conf yet) enrolls cleanly.
+#   2. bots   — spin-up-bot.sh per declared bot, SKIPPING already-healthy
+#               bots (unit present + tmux session alive — reconcile-fleet's
+#               healthy definition) so a re-run never bounces a working bot.
+#   3. audit  — reconcile-fleet.sh (healthy/orphan/missing/unbound buckets +
+#               default-job drift).
+#
+# Per-step failures are collected, not fatal: a re-run converges (idempotent,
+# resumable). Exits non-zero if anything failed.
+#
+# Usage: setup-fleet <fleet-name>
+set -euo pipefail
+
+FLEET="${1:?Usage: setup-fleet <fleet-name>}"
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-common.sh
+. "$LIB_DIR/lib-common.sh"
+install_error_trap ""
+
+FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
+FLEET_YAML="$FLEET_DIR/fleet.yaml"
+if [ ! -f "$FLEET_YAML" ]; then
+    echo "setup-fleet: $FLEET_YAML not found (overlay fleets only — the enrollment spine has no root-mode path)" >&2
+    exit 1
+fi
+BOTS_DIR="$(resolve_bots_dir "$FLEET")"
+TIMERS_DIR="$FLEET_DIR/runtime/fleet/timers"
+
+log() { printf 'setup-fleet[%s]: %s\n' "$FLEET" "$*"; }
+FAILURES=0
+
+# Cold-start fix: the prefix comes from fleet.yaml, not from scanning a
+# composed bot.conf — enrollment has no ordering dependency on bot output.
+# Passed per enroller invocation (not exported) so it never bleeds into
+# spin-up-bot.sh / reconcile-fleet.sh descendants.
+SERVICE_PREFIX="$(fleet_service_prefix "$FLEET_YAML")"
+log "service_prefix: $SERVICE_PREFIX (from fleet.yaml)"
+
+# --- 1. fleet jobs ------------------------------------------------------------
+enroll_jobs() {
+    log "step 1/3: enroll composed fleet jobs"
+    if [ ! -d "$TIMERS_DIR" ]; then
+        log "no composed timers at $TIMERS_DIR — run 'claudlobby generate' first"
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+    local enroller ext t base jobname found=0
+    if [ "$_OS" = "Linux" ]; then
+        enroller="$LIB_DIR/install_fleet_timer.sh"
+        ext="timer"
+    else
+        enroller="$LIB_DIR/install_fleet_timer_launchd.sh"
+        ext="plist"
+    fi
+    for t in "$TIMERS_DIR/$SERVICE_PREFIX".*."$ext"; do
+        [ -e "$t" ] || continue
+        found=1
+        base="$(basename "$t" ".$ext")" # <prefix>.<job>
+        jobname="${base#"$SERVICE_PREFIX".}"
+        if SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname" "$FLEET"; then
+            log "✓ job enrolled: $base"
+        else
+            log "○ job enrollment FAILED: $base (re-run converges)"
+            FAILURES=$((FAILURES + 1))
+        fi
+    done
+    [ "$found" = 1 ] || log "no $SERVICE_PREFIX.*.$ext units in $TIMERS_DIR"
+}
+
+# --- 2. bots (skip healthy) ----------------------------------------------------
+bot_is_healthy() {
+    # reconcile-fleet's healthy definition: unit present AND tmux session
+    # alive on the bot's own socket — built from the same shared predicates
+    # (bot_unit_present, check_tmux_session), so a bot setup-fleet skips is
+    # exactly one reconcile reports healthy, and spin-up-bot.sh (which
+    # restarts) only ever runs on unhealthy bots.
+    local bot="$1" bot_dir="$2" sock
+    sock=$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)
+    check_tmux_session "$bot" "$sock" 2>/dev/null || return 1
+    bot_unit_present "$bot" "$bot_dir"
+}
+
+spin_up_bots() {
+    log "step 2/3: spin up bots (skip healthy)"
+    local defined b bot_dir
+    defined=$(parse_fleet_bots "$FLEET_YAML")
+    if [ -z "$defined" ]; then
+        log "no bots declared in fleet.yaml"
+        return
+    fi
+    while IFS= read -r b; do
+        [ -z "$b" ] && continue
+        bot_dir="$BOTS_DIR/$b"
+        if [ ! -d "$bot_dir" ]; then
+            log "○ $b: no runtime dir at $bot_dir — run 'claudlobby generate' first"
+            FAILURES=$((FAILURES + 1))
+            continue
+        fi
+        if bot_is_healthy "$b" "$bot_dir"; then
+            log "✓ $b: already healthy — skipping (no restart)"
+            continue
+        fi
+        if "$LIB_DIR/spin-up-bot.sh" "$bot_dir"; then
+            log "✓ $b: spun up"
+        else
+            log "○ $b: spin-up FAILED (re-run converges)"
+            FAILURES=$((FAILURES + 1))
+        fi
+    done <<<"$defined"
+}
+
+# --- 3. reconcile audit ---------------------------------------------------------
+reconcile() {
+    log "step 3/3: reconcile audit"
+    "$LIB_DIR/reconcile-fleet.sh" "$FLEET" || FAILURES=$((FAILURES + 1))
+}
+
+enroll_jobs
+spin_up_bots
+reconcile
+
+if [ "$FAILURES" -gt 0 ]; then
+    log "done with $FAILURES failure(s) — fix + re-run (idempotent)"
+    exit 1
+fi
+log "done — jobs enrolled, bots up, reconcile ran"

@@ -1,13 +1,18 @@
 #!/bin/bash
-# Cross-platform host setup for a claudlobby fleet host.
+# setup-system — apply the host layer of system.yaml (setup backbone).
 #
-# Idempotent: detects what's already installed and only does the missing
-# work. Re-running is safe.
+# Cross-platform host setup for a claudlobby fleet host, plus enrollment of
+# the host-global jobs (system.yaml host.jobs) under their fixed
+# claudlobby-<name> identity. Idempotent: detects what's already in place and
+# only does the missing work. Re-running is safe.
+#
+# Boundary: `claudlobby generate` COMPOSES; setup-system APPLIES + ENROLLS.
+# Per-fleet bring-up is setup-fleet's job (this script is once-per-host).
 #
 # Usage:
-#   lib/setup-host.sh                 # install prereqs for any fleet
-#   lib/setup-host.sh --dry-run       # report what would change, do nothing
-#   lib/setup-host.sh --help          # show this usage text
+#   lib/setup-system                 # install prereqs + enroll host jobs
+#   lib/setup-system --dry-run       # report what would change, do nothing
+#   lib/setup-system --help          # show this usage text
 #
 # Supported hosts:
 #   - Raspberry Pi 5 (Debian bookworm arm64)
@@ -21,7 +26,8 @@
 #   5. claude         — claude CLI + authentication check
 #   6. plugins        — Telegram plugin + Claudfather plugin
 #   7. systemd        — Linux only: linger + XDG_RUNTIME_DIR
-#   8. report         — summary matrix + next steps
+#   8. host-jobs      — compose + enroll system.yaml host.jobs timers
+#   9. report         — summary matrix + next steps
 
 set -euo pipefail
 
@@ -31,11 +37,11 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)    DRY_RUN=1; shift ;;
         -h|--help)
-            sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
-            echo "setup-host: unknown arg: $1" >&2
+            echo "setup-system: unknown arg: $1" >&2
             exit 2
             ;;
     esac
@@ -49,12 +55,12 @@ export CLAUDLOBBY_ROOT
 . "$SCRIPT_DIR/lib-common.sh"
 install_error_trap ""
 
-log()  { printf 'setup-host: %s\n' "$*"; }
-ok()   { printf 'setup-host: \xe2\x9c\x93 %s\n' "$*"; }   # checkmark
-miss() { printf 'setup-host: \xe2\x97\x8b %s\n' "$*"; }   # circle
+log()  { printf 'setup-system: %s\n' "$*"; }
+ok()   { printf 'setup-system: \xe2\x9c\x93 %s\n' "$*"; }   # checkmark
+miss() { printf 'setup-system: \xe2\x97\x8b %s\n' "$*"; }   # circle
 run()  {
     if [ "$DRY_RUN" = 1 ]; then
-        printf 'setup-host: [dry-run] would run: %s\n' "$*"
+        printf 'setup-system: [dry-run] would run: %s\n' "$*"
     else
         "$@"
     fi
@@ -72,16 +78,16 @@ phase_preflight() {
     local arch
     arch="$(uname -m)"
     if [ "$_OS" != "Darwin" ] && [ "$_OS" != "Linux" ]; then
-        echo "setup-host: unsupported OS (uname=$_OS). Supported: Linux, Darwin." >&2
+        echo "setup-system: unsupported OS (uname=$_OS). Supported: Linux, Darwin." >&2
         exit 1
     fi
     if [ ! -d "$CLAUDLOBBY_ROOT" ]; then
-        echo "setup-host: claudlobby checkout not found at $CLAUDLOBBY_ROOT" >&2
-        echo "setup-host: clone the repo first, or set CLAUDLOBBY_ROOT to its location" >&2
+        echo "setup-system: claudlobby checkout not found at $CLAUDLOBBY_ROOT" >&2
+        echo "setup-system: clone the repo first, or set CLAUDLOBBY_ROOT to its location" >&2
         exit 1
     fi
     if [ ! -f "$CLAUDLOBBY_ROOT/lib/lib-common.sh" ]; then
-        echo "setup-host: $CLAUDLOBBY_ROOT does not look like a claudlobby repo (missing lib/lib-common.sh)" >&2
+        echo "setup-system: $CLAUDLOBBY_ROOT does not look like a claudlobby repo (missing lib/lib-common.sh)" >&2
         exit 1
     fi
     ok "$_OS $arch, CLAUDLOBBY_ROOT=$CLAUDLOBBY_ROOT"
@@ -139,7 +145,7 @@ phase_packages() {
                 sudo apt-get update -qq
                 sudo apt-get install -y -qq gh
             else
-                printf 'setup-host: [dry-run] would run: install gh from GitHub apt repo\n'
+                printf 'setup-system: [dry-run] would run: install gh from GitHub apt repo\n'
             fi
             PREREQ_OK+=("gh")
         fi
@@ -185,7 +191,7 @@ phase_node() {
                 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - >/dev/null 2>&1
                 sudo apt-get install -y -qq nodejs
             else
-                printf 'setup-host: [dry-run] would run: install node 20.x via NodeSource\n'
+                printf 'setup-system: [dry-run] would run: install node 20.x via NodeSource\n'
             fi
         elif [ "$_OS" = "Darwin" ]; then
             run brew install --quiet node
@@ -240,7 +246,7 @@ phase_python() {
             return
         }
     else
-        printf 'setup-host: [dry-run] would run: python3 -m pip install -e %s\n' "$CLAUDLOBBY_ROOT"
+        printf 'setup-system: [dry-run] would run: python3 -m pip install -e %s\n' "$CLAUDLOBBY_ROOT"
     fi
     ok "claudlobby package installed"
     PREREQ_OK+=("claudlobby-pip")
@@ -318,7 +324,7 @@ phase_plugins() {
                 return
             }
         else
-            printf 'setup-host: [dry-run] would run: claude plugin marketplace add Claudfather + install claudna\n'
+            printf 'setup-system: [dry-run] would run: claude plugin marketplace add Claudfather + install claudna\n'
         fi
         ok "claudna plugin installed"
     fi
@@ -329,10 +335,10 @@ phase_plugins() {
 # ---------------------------------------------------------------------------
 phase_systemd() {
     if [ "$_OS" != "Linux" ]; then
-        log "phase 7/8: systemd (skipped — not Linux)"
+        log "phase 7/9: systemd (skipped — not Linux)"
         return
     fi
-    log "phase 7/8: systemd setup"
+    log "phase 7/9: systemd setup"
 
     # Check loginctl linger
     local linger_status=""
@@ -355,10 +361,75 @@ phase_systemd() {
 }
 
 # ---------------------------------------------------------------------------
-# 8. report — summary matrix + next steps
+# 8. host-jobs — compose + enroll system.yaml host.jobs timers
+# ---------------------------------------------------------------------------
+phase_host_jobs() {
+    log "phase 8/9: host jobs"
+    local host_timers_dir="$CLAUDLOBBY_ROOT/runtime/_host/timers"
+
+    # Compose first — host units are package-owned (system.yaml host.jobs) and
+    # need no fleet.yaml, so a cold host gets them before any fleet exists.
+    # `claudlobby generate` also emits them; this is the same single source.
+    if command -v claudlobby >/dev/null 2>&1; then
+        run claudlobby host-timers
+    elif python3 -c 'import claudlobby' >/dev/null 2>&1; then
+        run python3 -m claudlobby host-timers
+    else
+        miss "claudlobby package not importable — cannot compose host jobs"
+        PREREQ_MISSING+=("host-jobs")
+        NEXT_STEPS+=("Install the package (phase 4), then re-run lib/setup-system")
+        return
+    fi
+
+    if [ "$DRY_RUN" = 1 ]; then
+        printf 'setup-system: [dry-run] would enroll host job timers from %s\n' "$host_timers_dir"
+        return
+    fi
+    if [ ! -d "$host_timers_dir" ]; then
+        log "no host jobs composed at $host_timers_dir — nothing to enroll"
+        return
+    fi
+
+    # Enroll through the shared enrollment spine (no inline copy logic):
+    # TIMER_DIR + UNIT_NAME env overrides point the generic enroller at the
+    # host units' fixed claudlobby-<name> identity. Per-job isolation: one
+    # failed enrollment never blocks the rest — a re-run converges.
+    local enroller ext t base jobname found=0
+    if [ "$_OS" = "Linux" ]; then
+        if ! command -v systemctl >/dev/null 2>&1; then
+            miss "systemctl unavailable — cannot enroll host jobs"
+            PREREQ_MISSING+=("host-jobs")
+            NEXT_STEPS+=("Re-run lib/setup-system on a host with systemd user services")
+            return
+        fi
+        enroller="$SCRIPT_DIR/install_fleet_timer.sh"
+        ext="timer"
+    else
+        enroller="$SCRIPT_DIR/install_fleet_timer_launchd.sh"
+        ext="plist"
+    fi
+    for t in "$host_timers_dir"/claudlobby-*."$ext"; do
+        [ -e "$t" ] || continue
+        found=1
+        base="$(basename "$t" ".$ext")" # claudlobby-<job>
+        jobname="${base#claudlobby-}"
+        if TIMER_DIR="$host_timers_dir" UNIT_NAME="$base" "$enroller" "$jobname"; then
+            ok "host job enrolled: $base"
+            PREREQ_OK+=("host-job-$jobname")
+        else
+            miss "host job enrollment failed: $base"
+            PREREQ_MISSING+=("host-job-$jobname")
+            NEXT_STEPS+=("Fix + re-run lib/setup-system to enroll $base (idempotent)")
+        fi
+    done
+    [ "$found" = 1 ] || log "no host job units in $host_timers_dir"
+}
+
+# ---------------------------------------------------------------------------
+# 9. report — summary matrix + next steps
 # ---------------------------------------------------------------------------
 phase_report() {
-    log "phase 8/8: summary"
+    log "phase 9/9: summary"
     local arch
     arch="$(uname -m)"
     echo
@@ -388,4 +459,5 @@ phase_python
 phase_claude
 phase_plugins
 phase_systemd
+phase_host_jobs
 phase_report

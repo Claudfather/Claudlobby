@@ -42,7 +42,7 @@ Also check that the Telegram plugin is installed:
 claude plugin list 2>/dev/null | grep -q telegram
 ```
 
-If `lib/setup-host.sh` exists, run `lib/setup-host.sh --dry-run` and parse its output instead of individual checks.
+If `lib/setup-system` exists, run `lib/setup-system --dry-run` and parse its output instead of individual checks.
 
 For any missing tool, offer to install it:
 - macOS: `brew install <pkg>`
