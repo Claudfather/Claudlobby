@@ -6,8 +6,11 @@
 # a systemd timer (Linux). Enrolled by setup-fleet via the generic
 # enrollers (install_fleet_timer.sh / install_fleet_timer_launchd.sh).
 #
-# Usage: keepalive-all.sh [<fleet-runtime-bots-dir>]
-#   default: $CLAUDLOBBY_ROOT/local/$CLAUDLOBBY_FLEET/runtime/bots
+# Usage: keepalive-all.sh [<fleet-name> | <fleet-runtime-bots-dir>]
+#   Composed fleet units pass the fleet NAME (the uniform fleet-job arg
+#   convention — reload-fleet, fleet-pulse, weekly-worker-restart all take a
+#   name); an absolute path selects a bots dir directly (manual use).
+#   Default: $CLAUDLOBBY_ROOT/local/$CLAUDLOBBY_FLEET/runtime/bots
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +18,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 if [ -n "${1:-}" ]; then
-    BOTS_DIR="$1"
+    case "$1" in
+        /*) BOTS_DIR="$1" ;;
+        *) BOTS_DIR=$(resolve_bots_dir "$1") ;;
+    esac
 else
     BOTS_DIR=$(resolve_bots_dir)
     if [ -z "${CLAUDLOBBY_FLEET:-}${FLEET_NAME:-}" ]; then

@@ -96,7 +96,7 @@ The `sleep 60` gives the network and Tailscale time to come up before Claude Cod
 These ship with claudlobby and are referenced by the cron block install above; they're useful standalone too:
 
 - `lib/keepalive.sh <bot-dir>` — restart a bot's service if its tmux session is dead; nudge an idle pane with `Enter`.
-- `lib/keepalive-all.sh [<runtime-bots-dir>]` — iterate every bot under `runtime/bots/` and run `keepalive.sh` per bot.
+- `lib/keepalive-all.sh [<fleet-name> | <abs-runtime-bots-dir>]` — iterate every declared bot in the fleet and run `keepalive.sh` per bot (composed units pass the fleet name; an absolute path selects a bots dir directly).
 - `lib/log-rotate.sh [--keep N] <log-path>...` — tail each log to last N lines (default 500). Cheap, idempotent.
 - `lib/disk-monitor.sh [--threshold N] [--mount /]` — log a warning when disk usage exceeds N% (default 90, mount `/`). Optional Telegram alert via `tg-post.sh`.
 - `lib/bot-sweep-cron.sh <bot-name> <dispatch-text>` — send a trigger string into a bot's tmux pane (skips if pane is busy). Use to wire periodic actions like `briefing morning` or `SWEEP DEEP`.

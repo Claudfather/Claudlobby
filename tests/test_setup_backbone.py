@@ -51,16 +51,39 @@ class Harness:
             )
         self.enrolled = tmp_path / "enrolled"
         self.enrolled.write_text("")
-        # is-enabled consults $STUB_ENROLLED (drift-audit tests); other verbs
-        # succeed unconditionally.
+        self.unit_files = tmp_path / "unit-files"
+        self.unit_files.write_text("")
+        self.active = tmp_path / "active"
+        self.active.write_text("")
+        self.start_fail = tmp_path / "start-fail"
+        self.start_fail.write_text("")
+        # is-enabled consults $STUB_ENROLLED (drift-audit tests); list-unit-files
+        # / is-active / start consult their own state files, and disable removes
+        # the unit from the registry like real systemd (keepalive-swap tests);
+        # other verbs succeed unconditionally. The unit is always the last arg.
         _write_exec(
             self.bin / "systemctl",
             "#!/bin/bash\n"
             'echo "systemctl $*" >> "$STUB_LOG"\n'
-            'if [ "${2:-}" = "is-enabled" ]; then\n'
-            '    grep -qx "${3:-}" "$STUB_ENROLLED" 2>/dev/null\n'
-            "    exit $?\n"
-            "fi\n"
+            'case "${2:-}" in\n'
+            "    is-enabled)\n"
+            '        grep -qx "${3:-}" "$STUB_ENROLLED" 2>/dev/null; exit $? ;;\n'
+            "    list-unit-files)\n"
+            '        if grep -qx "${!#}" "$STUB_UNIT_FILES" 2>/dev/null; then\n'
+            '            echo "${!#} enabled enabled"\n'
+            "        fi\n"
+            "        exit 0 ;;\n"
+            "    is-active)\n"
+            '        grep -qx "${!#}" "$STUB_ACTIVE" 2>/dev/null && exit 0\n'
+            "        exit 3 ;;\n"
+            "    start)\n"
+            '        grep -qx "${!#}" "$STUB_START_FAIL" 2>/dev/null && exit 1\n'
+            "        exit 0 ;;\n"
+            "    disable)\n"
+            '        grep -vx "${!#}" "$STUB_UNIT_FILES" > "$STUB_UNIT_FILES.tmp" 2>/dev/null || true\n'
+            '        mv "$STUB_UNIT_FILES.tmp" "$STUB_UNIT_FILES"\n'
+            "        exit 0 ;;\n"
+            "esac\n"
             "exit 0\n",
         )
         # has-session succeeds iff the -t target is listed in $TMUX_HEALTHY.
@@ -128,6 +151,28 @@ class Harness:
                 f.write(name + "\n")
         return bdir
 
+    @property
+    def unit_dir(self):
+        ud = self.home / ".config" / "systemd" / "user"
+        ud.mkdir(parents=True, exist_ok=True)
+        return ud
+
+    def legacy_keepalive(self, fleet_name, active=True):
+        # A prior release's keepalive: claudlobby-<fleet>-keepalive unit files
+        # in ~/.config/systemd/user + registered in the stub's unit registry.
+        base = f"claudlobby-{fleet_name}-keepalive"
+        (self.unit_dir / f"{base}.service").write_text("[Service]\n")
+        (self.unit_dir / f"{base}.timer").write_text("[Timer]\n")
+        with open(self.unit_files, "a") as f:
+            f.write(f"{base}.timer\n")
+        if active:
+            self.mark_active(f"{base}.timer")
+        return base
+
+    def mark_active(self, unit):
+        with open(self.active, "a") as f:
+            f.write(unit + "\n")
+
     def run(self, *argv, env_extra=None):
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}:{env['PATH']}"
@@ -136,6 +181,9 @@ class Harness:
         env["STUB_LOG"] = str(self.log)
         env["TMUX_HEALTHY"] = str(self.tmux_healthy)
         env["STUB_ENROLLED"] = str(self.enrolled)
+        env["STUB_UNIT_FILES"] = str(self.unit_files)
+        env["STUB_ACTIVE"] = str(self.active)
+        env["STUB_START_FAIL"] = str(self.start_fail)
         # Isolate the unbound-session socket walk from the host's real tmux.
         env["TMUX_TMPDIR"] = str(self.root / "no-tmux")
         for k in (
@@ -367,3 +415,88 @@ class TestReconcileJobDrift:
         assert r.returncode == 0, r.stdout + r.stderr
         drift_line = next(line for line in r.stdout.splitlines() if "job-drift" in line)
         assert "(none)" in drift_line
+
+
+class TestLegacyKeepaliveSwap:
+    """Phase 6 (F6=a): setup-fleet retires a prior release's
+    claudlobby-<fleet>-keepalive AFTER the composed <prefix>.keepalive is
+    enrolled, active, and has completed a verification run — never before.
+    Abort paths must leave the legacy unit fully untouched."""
+
+    def _swap_fleet(self, h, new_active=True):
+        h.fleet("f1", timers=("keepalive",))
+        legacy = h.legacy_keepalive("f1")
+        if new_active:
+            h.mark_active("test.prefix.keepalive.timer")
+        return legacy
+
+    def _log_index(self, h, needle):
+        log = h.stub_log()
+        assert needle in log, f"missing in stub log: {needle}\n{log}"
+        return log.index(needle)
+
+    def _assert_swap_aborted_legacy_intact(self, h, r, legacy):
+        assert r.returncode == 1
+        assert "swap ABORTED" in r.stdout
+        assert f"disable --now {legacy}.timer" not in h.stub_log()
+        assert (h.unit_dir / f"{legacy}.timer").is_file()
+        assert (h.unit_dir / f"{legacy}.service").is_file()
+
+    def test_swap_orders_enable_verify_disable(self, h):
+        legacy = self._swap_fleet(h)
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        enable_new = self._log_index(
+            h, "systemctl --user enable --now test.prefix.keepalive.timer"
+        )
+        verify_run = self._log_index(
+            h, "systemctl --user start test.prefix.keepalive.service"
+        )
+        disable_old = self._log_index(
+            h, f"systemctl --user disable --now {legacy}.timer"
+        )
+        # The atomic ordering contract: new live + verified BEFORE old retired.
+        assert enable_new < verify_run < disable_old
+        assert not (h.unit_dir / f"{legacy}.timer").exists()
+        assert not (h.unit_dir / f"{legacy}.service").exists()
+        assert "legacy keepalive retired" in r.stdout
+
+    def test_no_legacy_is_noop(self, h):
+        h.fleet("f1", timers=("keepalive",))
+        h.mark_active("test.prefix.keepalive.timer")
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "disable --now" not in h.stub_log()
+        assert "legacy keepalive" not in r.stdout
+
+    def test_new_timer_not_active_aborts_keeps_legacy(self, h):
+        legacy = self._swap_fleet(h, new_active=False)
+        r = h.run(_sf(h), "f1")
+        self._assert_swap_aborted_legacy_intact(h, r, legacy)
+
+    def test_verification_run_failure_aborts_keeps_legacy(self, h):
+        legacy = self._swap_fleet(h)
+        h.start_fail.write_text("test.prefix.keepalive.service\n")
+        r = h.run(_sf(h), "f1")
+        self._assert_swap_aborted_legacy_intact(h, r, legacy)
+
+    def test_swap_is_idempotent_after_success(self, h):
+        # Run 2's registry state is DERIVED: the stub's disable verb removes
+        # the unit line, mirroring real systemd after disable + daemon-reload.
+        self._swap_fleet(h)
+        r1 = h.run(_sf(h), "f1")
+        assert r1.returncode == 0, r1.stdout + r1.stderr
+        h.log.write_text("")
+        r2 = h.run(_sf(h), "f1")
+        assert r2.returncode == 0, r2.stdout + r2.stderr
+        assert "disable --now" not in h.stub_log()
+        assert "legacy keepalive" not in r2.stdout
+
+    def test_root_mode_skips_swap(self, h):
+        # Root mode has no fleet name, so the legacy naming scheme cannot
+        # apply — the swap must not even probe.
+        h.root_fleet(timers=("keepalive",))
+        h.mark_active("root.prefix.keepalive.timer")
+        r = h.run(_sf(h))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "list-unit-files" not in h.stub_log()

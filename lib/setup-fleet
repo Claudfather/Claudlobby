@@ -7,7 +7,9 @@
 #   1. jobs   — enroll every composed fleet timer via the generic enroller
 #               (install_fleet_timer.sh / install_fleet_timer_launchd.sh),
 #               with SERVICE_PREFIX read from fleet.yaml so a cold start
-#               (no composed bot.conf yet) enrolls cleanly.
+#               (no composed bot.conf yet) enrolls cleanly. Then retire a
+#               prior release's legacy keepalive (step 1b — see
+#               migrate_legacy_keepalive).
 #   2. bots   — spin-up-bot.sh per declared bot, SKIPPING already-healthy
 #               bots (unit present + tmux session alive — reconcile-fleet's
 #               healthy definition) so a re-run never bounces a working bot.
@@ -101,6 +103,52 @@ enroll_jobs() {
     [ "$found" = 1 ] || log "no $SERVICE_PREFIX.*.$ext units in $TIMERS_DIR"
 }
 
+# --- 1b. legacy keepalive migration (Phase 6 / F6=a) ---------------------------
+# A prior release enrolled keepalive as claudlobby-<fleet>-keepalive; the
+# composed name is <service_prefix>.keepalive. Once the new unit is enrolled,
+# ACTIVE, and has completed a verification run, retire the legacy unit — never
+# the reverse. During the swap supervision coverage is a union (both timers),
+# never zero; every abort path leaves the legacy unit fully untouched.
+# Rehearse first: lib/rehearse-keepalive-swap.sh (gate 1, journal-proven).
+migrate_legacy_keepalive() {
+    # Root mode has no fleet name, so the legacy scheme cannot apply. Scope is
+    # the systemd spelling only: every live legacy fleet is Linux, and macOS's
+    # own legacy label (pre-#289 com.claudlobby.<fleet>.keepalive) is a
+    # different scheme, out of F6 scope — extend here if one ever surfaces.
+    [ -n "$FLEET" ] || return 0
+    [ "$_OS" = "Linux" ] || return 0
+    local legacy="claudlobby-$FLEET-keepalive" new="$SERVICE_PREFIX.keepalive" out
+    # Probe the unit registry — never assume the legacy unit is present (F6).
+    out=$(systemctl --user list-unit-files --no-legend "$legacy.timer" 2>/dev/null || true)
+    [ -n "$out" ] || return 0
+    log "step 1b: legacy keepalive detected ($legacy) — staged swap to $new"
+    # Gate: the new timer must be live before the old one is touched.
+    if ! systemctl --user is-active "$new.timer" >/dev/null 2>&1; then
+        log "○ swap ABORTED: $new.timer is not active — legacy unit left running"
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+    # Gate: prove a supervision pass completes under the new unit NOW. The
+    # synchronous oneshot run also re-anchors OnUnitActiveSec, so the next
+    # tick is contractually <=60s out — the no-gap window closes before the
+    # legacy unit is disabled.
+    if ! systemctl --user start "$new.service"; then
+        log "○ swap ABORTED: $new.service verification run failed — legacy unit left running"
+        FAILURES=$((FAILURES + 1))
+        return
+    fi
+    if systemctl --user disable --now "$legacy.timer"; then
+        rm -f "$HOME/.config/systemd/user/$legacy.timer" \
+              "$HOME/.config/systemd/user/$legacy.service"
+        systemctl --user daemon-reload
+        log "✓ legacy keepalive retired: $legacy ($new verified live)"
+    else
+        # New unit IS live — worst case here is double coverage, never a gap.
+        log "○ legacy disable failed ($legacy) — $new is live (no gap); re-run to retry cleanup"
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
 # --- 2. bots (skip healthy) ----------------------------------------------------
 bot_is_healthy() {
     # reconcile-fleet's healthy definition: unit present AND tmux session
@@ -154,6 +202,7 @@ reconcile() {
 }
 
 enroll_jobs
+migrate_legacy_keepalive
 spin_up_bots
 reconcile
 

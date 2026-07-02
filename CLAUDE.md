@@ -77,7 +77,7 @@ Key lifecycle scripts in `lib/`:
 | `install-fleet-pulse-systemd.sh` | Fleet-pulse systemd timer enrollment (systemd) |
 | `setup-mac-mini.sh` | macOS host setup automation |
 | `setup-system` | Setup backbone: host prereqs + system.yaml host-job enrollment (cross-platform) |
-| `setup-fleet` | Setup backbone: per-fleet apply+enroll — default jobs (dormant opt-ins skipped), bots (skips healthy), reconcile; root mode when invoked without a fleet |
+| `setup-fleet` | Setup backbone: per-fleet apply+enroll — default jobs (dormant opt-ins skipped), atomic legacy-keepalive swap (enable-new → verify → disable-old), bots (skips healthy), reconcile; root mode when invoked without a fleet |
 | `setup-fleets` | Run setup-fleet for every fleet on the host |
 | `bot-vitals.sh` | Bot vitals collection for observability |
 | `fleet-pulse.sh` | Fleet-wide heartbeat / status monitoring |
@@ -89,6 +89,7 @@ Key lifecycle scripts in `lib/`:
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
+| `rehearse-keepalive-swap.sh` | Phase 6 gate 1 — rehearse the atomic legacy-keepalive swap on a throwaway fleet with real 60s timers; journal-derived no-gap assertion |
 | `update-claude-code.sh` | Daily Claude Code binary download (download-only; no fleet bounce) — runs as the `claude-update` host job (system.yaml `host.jobs`, enrolled by `setup-system`) |
 | `notify-behind.sh` | Daily source-currency nudge — FLEET NOTICE when the install is N commits behind origin/main (notify-only, never pulls) — runs as the `notify-behind` host job |
 | `reload-fleet.sh` | Daily live plugin/skill reload — `claude plugin update` + generate, then mark running bots for a keepalive-driven `/reload` (no restart) |
