@@ -343,7 +343,15 @@ _resolve_cross_fleet_bot_dir() {
 #   3. Unknown peer — preserve original behavior (test-harness socket synthesis
 #      when FLEET_NAME is unset, or the production fail-fast on an empty socket).
 tmux_socket_for_session() {
-    local session="${1:?Usage: tmux_socket_for_session <session> [bots_dir]}"
+    # Empty session degrades to rc 2, never a fatal ${1:?} — the expansion
+    # fault would kill the calling script from inside command substitution
+    # under set -e (silently, when stderr is redirected), and every caller
+    # already handles an empty-socket result.
+    local session="${1:-}"
+    if [ -z "$session" ]; then
+        echo "tmux_socket_for_session: empty session name" >&2
+        return 2
+    fi
     local bots_dir="${2:-}"
     if [ -z "$bots_dir" ]; then
         # Prefer the caller's own sibling dir; otherwise fall back to the
@@ -818,7 +826,7 @@ emit_script_error() {
         >> "$events_dir/fleet-${today}.jsonl"
 }
 
-# _emit_fleet_signal <bots_dir> <event_type> <reason> <ev_source> <tmux_prefix> <tg_prefix>
+# _emit_fleet_signal <bots_dir> <event_type> <reason> <ev_source> <WORD>
 # Shared body for emit_failure_alert / emit_fleet_notice. It
 #   1. emits a fleet-observability event {type:<event_type>, source:<ev_source>,
 #      data.reason} to $CLAUDLOBBY_ROOT/state/events/fleet-<date>.jsonl, and
@@ -826,9 +834,11 @@ emit_script_error() {
 #      (chat id resolved like fleet-pulse: env override, else the first bot that
 #      declares TELEGRAM_GROUP_CHAT_ID — falling back across every fleet on the
 #      host, since host-scope callers run fleet-less).
-# Both delivery channels are best-effort and never abort the caller.
+# <WORD> is the uppercase framing word (ALERT/NOTICE) the delivery prefixes
+# derive from. Both delivery channels are best-effort and never abort the caller.
 _emit_fleet_signal() {
-    local bots_dir="$1" event_type="$2" reason="$3" ev_source="$4" tmux_prefix="$5" tg_prefix="$6"
+    local bots_dir="$1" event_type="$2" reason="$3" ev_source="$4" word="$5"
+    local tmux_prefix="[FLEET-${word}]" tg_prefix="FLEET ${word}"
 
     local events_dir="${CLAUDLOBBY_ROOT}/state/events"
     mkdir -p "$events_dir"
@@ -840,9 +850,8 @@ _emit_fleet_signal() {
     # manager tmux nudge (resolve from whichever bot declares MANAGER_TMUX) — on
     # the manager's OWN socket (per-bot servers); a default-socket send would
     # silently miss the manager post-migration. Routed through the one safe-send
-    # primitive so a miss is logged, not swallowed. Skipped entirely when no bot
-    # on the host declares a manager — resolve_peer_socket faults fatally on an
-    # empty session name. Socket reverse-lookup uses the resolved manager's own
+    # primitive so a miss is logged, not swallowed. No manager anywhere →
+    # nothing to nudge. Socket reverse-lookup uses the resolved manager's own
     # bots dir, which may be a fallback fleet's.
     local mgr_bot mgr mgr_socket
     mgr_bot=$(first_bot_with_conf_any_fleet "$bots_dir" MANAGER_TMUX || true)
@@ -861,7 +870,7 @@ _emit_fleet_signal() {
         chat_bot=$(first_bot_with_conf_any_fleet "$bots_dir" TELEGRAM_GROUP_CHAT_ID || true)
         if [ -n "$chat_bot" ]; then
             chat_id=$(bot_conf_get "$chat_bot" TELEGRAM_GROUP_CHAT_ID "")
-            state_dir=$(bot_conf_get "$chat_bot" TELEGRAM_STATE_DIR "")
+            state_dir=$(bot_conf_get_path "$chat_bot" TELEGRAM_STATE_DIR "")
         fi
     fi
     if [ -n "$chat_id" ]; then
@@ -874,7 +883,7 @@ _emit_fleet_signal() {
 # LOUD, never-silent failure path shared by the fleet update mechanisms
 # (reload-fleet.sh = Mechanism 1; update-claude-code.sh = Mechanism 2).
 emit_failure_alert() {
-    _emit_fleet_signal "$1" "$2" "$3" "alert" "[FLEET-ALERT]" "FLEET ALERT"
+    _emit_fleet_signal "$1" "$2" "$3" "alert" "ALERT"
 }
 
 # emit_fleet_notice <bots_dir> <event_type> <message>
@@ -882,7 +891,7 @@ emit_failure_alert() {
 # but framed as a notice so routine nudges (e.g. notify-behind's "N commits
 # behind") never read as incidents or train operators to ignore FLEET ALERT.
 emit_fleet_notice() {
-    _emit_fleet_signal "$1" "$2" "$3" "notice" "[FLEET-NOTICE]" "FLEET NOTICE"
+    _emit_fleet_signal "$1" "$2" "$3" "notice" "NOTICE"
 }
 
 # install_error_trap <bot_dir>
@@ -909,6 +918,20 @@ bot_conf_get() {
             | sed -E "s/^(export )?$key=//" | tr -d '"' || true)
     fi
     printf '%s' "${val:-$default}"
+}
+
+# bot_conf_get_path <bot_dir> <key> <default>
+# bot_conf_get for path-valued keys. The composer writes bot.conf to be
+# SOURCED, so path values keep $HOME / $CLAUDLOBBY_ROOT as shell refs; a raw
+# grep read hands back the literal string. Expand the two composed prefixes
+# here, beside the contract they belong to, so every raw reader of a path key
+# gets a usable path.
+bot_conf_get_path() {
+    local val
+    val=$(bot_conf_get "$1" "$2" "$3")
+    val="${val/#\$HOME/$HOME}"
+    val="${val/#\$CLAUDLOBBY_ROOT/$CLAUDLOBBY_ROOT}"
+    printf '%s' "$val"
 }
 
 # first_bot_with_conf <bots_dir> <key>
@@ -946,6 +969,7 @@ first_bot_with_conf_any_fleet() {
         return 0
     fi
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
+        [ "$d" = "$bots_dir" ] && continue
         if first_bot_with_conf "$d" "$key"; then
             return 0
         fi

@@ -259,7 +259,7 @@ if [ -z "$_ESCALATION_CHAT_ID" ]; then
     _esc_bot_dir=$(first_bot_with_conf "$BOTS_DIR" TELEGRAM_GROUP_CHAT_ID) || true
     if [ -n "${_esc_bot_dir:-}" ]; then
         _ESCALATION_CHAT_ID=$(bot_conf_get "$_esc_bot_dir" TELEGRAM_GROUP_CHAT_ID "")
-        _ESCALATION_STATE_DIR=$(bot_conf_get "$_esc_bot_dir" TELEGRAM_STATE_DIR "")
+        _ESCALATION_STATE_DIR=$(bot_conf_get_path "$_esc_bot_dir" TELEGRAM_STATE_DIR "")
     fi
 fi
 

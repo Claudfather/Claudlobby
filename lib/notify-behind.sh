@@ -4,9 +4,9 @@
 # Reports how many commits the shared claudlobby install (CLAUDLOBBY_ROOT) is
 # behind origin/main. When behind, raises a FLEET NOTICE (fleet event + manager
 # tmux nudge + Telegram) telling the operator how to pull; when in sync, stays
-# silent. Read-only by contract: the ff-only auto-pull (root-self-update) is a
-# separate opt-in follow-up, deliberately NOT part of the default tier — this
-# nudge is the only default-on source-currency behavior.
+# silent. The ff-only auto-pull (root-self-update) is a separate opt-in
+# follow-up — this read-only nudge is the only default-on source-currency
+# behavior.
 #
 # Quiet-failure discipline: an offline host (fetch fails) or a non-git root
 # logs + exits 0, leaving a script_error breadcrumb in state/events — a missed
@@ -27,9 +27,8 @@ install_error_trap ""
 
 FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
 BOTS_DIR="$(resolve_bots_dir "$FLEET")"
-LOG_DIR="${CLAUDLOBBY_ROOT}/state"
-mkdir -p "$LOG_DIR"
-LOG="$LOG_DIR/notify-behind.log"
+LOG="${CLAUDLOBBY_ROOT}/state/notify-behind.log"
+setup_log_dir "$LOG"
 
 ts=$(ts_iso)
 

@@ -20,15 +20,12 @@ install_error_trap ""
 MSG="${1:?Usage: tg-post.sh <message>}"
 CHAT_ID="${TELEGRAM_GROUP_CHAT_ID:-}"
 STATE_DIR="${TELEGRAM_STATE_DIR:-$HOME/.claude/channels/telegram}"
-# bot.conf is written to be SOURCED, so its paths keep $HOME as a shell ref;
-# consumers that read it raw (bot_conf_get — the emit_* / fleet-pulse signal
-# paths) hand us the literal string. Expand it here, the one place it's used.
-STATE_DIR="${STATE_DIR/#\$HOME/$HOME}"
-STATE_DIR="${STATE_DIR/#\$\{HOME\}/$HOME}"
-# A bot channel that was never provisioned (no .env) must not silently mute a
-# fleet signal: fall back to the default channel's token. Delivery beats
-# per-bot identity for signals; a bot with its own token is unaffected.
+# An unprovisioned channel dir (no .env) must not silently mute the post: fall
+# back to the default channel's token. This applies to EVERY caller — the
+# message goes out under the default sender identity rather than not at all —
+# so leave a breadcrumb when it happens.
 if [ ! -f "$STATE_DIR/.env" ] && [ -f "$HOME/.claude/channels/telegram/.env" ]; then
+  echo "tg-post: no .env in $STATE_DIR — falling back to the default channel token" >&2
   STATE_DIR="$HOME/.claude/channels/telegram"
 fi
 

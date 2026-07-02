@@ -10,12 +10,14 @@ framing (not FLEET ALERT), and the working tree is NEVER pulled.
 
 import os
 import shutil
-import stat
 import subprocess
+
+from tests.conftest import _write_exec
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "lib", "notify-behind.sh")
 LIB_COMMON = os.path.join(REPO_ROOT, "lib", "lib-common.sh")
+TG_POST = os.path.join(REPO_ROOT, "lib", "tg-post.sh")
 
 # Identity/signing pinned per-invocation so tests never depend on host git config.
 GIT = [
@@ -28,9 +30,29 @@ GIT = [
     "commit.gpgsign=false",
 ]
 
+# Captures chat id, the (expanded) state dir the caller resolved, and the message.
 TG_STUB = (
-    '#!/bin/bash\nprintf "%s|%s\\n" "$TELEGRAM_GROUP_CHAT_ID" "$1" >> "$TG_CAPTURE"\n'
+    "#!/bin/bash\n"
+    'printf "%s|%s|%s\\n" "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "$1" >> "$TG_CAPTURE"\n'
 )
+
+CURL_STUB = (
+    "#!/bin/bash\n"
+    'echo "curl $*" >> "$CURL_CAPTURE"\n'
+    'printf \'{"ok":true,"result":{"message_id":7}}\\n\'\n'
+)
+
+
+def _scrubbed_env(**overrides):
+    """os.environ minus the bot-session vars that would short-circuit chat
+    resolution (FLEET_PULSE_ESCALATION_CHAT_ID et al) or repoint the root."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
+    }
+    env.update(overrides)
+    return env
 
 
 def _git(cwd, *args):
@@ -44,19 +66,14 @@ def _commit(repo, name):
     _git(repo, "commit", "-m", name)
 
 
-def _write_exec(path, content):
-    with open(path, "w") as f:
-        f.write(content)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
-
-
 class Harness:
     """origin repo + a clone acting as CLAUDLOBBY_ROOT (like the shared install).
 
     ``behind`` commits land in origin after the clone, so the root is exactly
     that many commits behind origin/main. A bot.conf declaring the Telegram
-    chat id is planted at ``bots_at`` (relative to root) and tg-post.sh is
-    stubbed to capture what would have been sent.
+    chat id (and a sourced-shape literal-$HOME state dir) is planted at
+    ``bots_at`` (relative to root) and tg-post.sh is stubbed to capture what
+    would have been sent.
     """
 
     def __init__(self, tmp_path, behind=0, bots_at="runtime/bots"):
@@ -79,18 +96,12 @@ class Harness:
         os.makedirs(bot_dir, exist_ok=True)
         with open(os.path.join(bot_dir, "bot.conf"), "w") as f:
             f.write('export TELEGRAM_GROUP_CHAT_ID="-100123"\n')
+            f.write(
+                'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-tbot"\n'
+            )
 
     def env(self):
-        # Scrub bot-session vars that would short-circuit chat resolution
-        # (FLEET_PULSE_ESCALATION_CHAT_ID et al) or repoint the root.
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
-        }
-        env["CLAUDLOBBY_ROOT"] = self.root
-        env["TG_CAPTURE"] = self.capture
-        return env
+        return _scrubbed_env(CLAUDLOBBY_ROOT=self.root, TG_CAPTURE=self.capture)
 
     def run(self, script=SCRIPT):
         return subprocess.run(
@@ -131,8 +142,11 @@ class TestNotifyBehind:
         assert r.returncode == 0, r.stderr
         lines = h.captured()
         assert len(lines) == 1
-        chat_id, msg = lines[0].split("|", 1)
+        chat_id, state_dir, msg = lines[0].split("|", 2)
         assert chat_id == "-100123"
+        # The bot.conf state dir is sourced-shape ($HOME literal); the signal
+        # path must hand tg-post an expanded, usable path.
+        assert state_dir == os.environ["HOME"] + "/.claude/channels/telegram-tbot"
         # A nudge, not an incident: FLEET NOTICE framing, never FLEET ALERT.
         assert "FLEET NOTICE [source_behind]:" in msg
         assert "FLEET ALERT" not in msg
@@ -178,13 +192,12 @@ class TestNotifyBehind:
     def test_non_git_root_skips(self, tmp_path):
         root = tmp_path / "plain"
         (root / "lib").mkdir(parents=True)
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
-        }
-        env["CLAUDLOBBY_ROOT"] = str(root)
-        r = subprocess.run(["bash", SCRIPT], env=env, capture_output=True, text=True)
+        r = subprocess.run(
+            ["bash", SCRIPT],
+            env=_scrubbed_env(CLAUDLOBBY_ROOT=str(root)),
+            capture_output=True,
+            text=True,
+        )
         assert r.returncode == 0, r.stderr
 
     def test_multifleet_fallback_delivers(self, tmp_path):
@@ -201,19 +214,9 @@ class TestNotifyBehind:
         assert "3 commit" in lines[0]
 
 
-CURL_STUB = (
-    "#!/bin/bash\n"
-    'echo "curl $*" >> "$CURL_CAPTURE"\n'
-    'printf \'{"ok":true,"result":{"message_id":7}}\\n\'\n'
-)
-
-TG_POST = os.path.join(REPO_ROOT, "lib", "tg-post.sh")
-
-
 class TestTgPostStateDirResolution:
-    """tg-post.sh must survive the two ways a real host breaks its token path:
-    bot.conf values read raw carry a literal $HOME, and per-bot channel dirs
-    may never have been provisioned with an .env."""
+    """tg-post.sh must not go mute when the per-bot channel dir was never
+    provisioned with an .env — it falls back to the default channel token."""
 
     def _env(self, tmp_path, state_dir_value):
         home = tmp_path / "home"
@@ -223,64 +226,100 @@ class TestTgPostStateDirResolution:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
         _write_exec(str(bin_dir / "curl"), CURL_STUB)
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
-        }
-        env["HOME"] = str(home)
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
-        env["TMPDIR"] = str(tmp_path)
-        env["CURL_CAPTURE"] = str(tmp_path / "curl-capture")
-        env["TELEGRAM_GROUP_CHAT_ID"] = "-100123"
-        env["TELEGRAM_STATE_DIR"] = state_dir_value
-        return env
+        return _scrubbed_env(
+            HOME=str(home),
+            PATH=f"{bin_dir}:{os.environ['PATH']}",
+            TMPDIR=str(tmp_path),
+            CURL_CAPTURE=str(tmp_path / "curl-capture"),
+            TELEGRAM_GROUP_CHAT_ID="-100123",
+            TELEGRAM_STATE_DIR=state_dir_value.replace("{home}", str(home)),
+        )
 
     def _run(self, env):
         return subprocess.run(
             ["bash", TG_POST, "hello"], env=env, capture_output=True, text=True
         )
 
-    def test_literal_home_prefix_expands(self, tmp_path):
-        env = self._env(tmp_path, "$HOME/.claude/channels/telegram-mybot")
+    def test_provisioned_dir_is_used(self, tmp_path):
+        env = self._env(tmp_path, "{home}/.claude/channels/telegram-mybot")
         chan = tmp_path / "home" / ".claude" / "channels" / "telegram-mybot"
         chan.mkdir(parents=True)
         (chan / ".env").write_text("TELEGRAM_BOT_TOKEN=bot-token\n")
         r = self._run(env)
         assert r.returncode == 0, r.stderr
         assert "hello" in (tmp_path / "curl-capture").read_text()
+        assert "falling back" not in r.stderr
 
     def test_unprovisioned_dir_falls_back_to_default_channel(self, tmp_path):
-        env = self._env(tmp_path, "$HOME/.claude/channels/telegram-ghost")
+        env = self._env(tmp_path, "{home}/.claude/channels/telegram-ghost")
         r = self._run(env)
         assert r.returncode == 0, r.stderr
         assert "hello" in (tmp_path / "curl-capture").read_text()
+        # Identity switches are observable, not silent.
+        assert "falling back" in r.stderr
 
     def test_no_token_anywhere_still_fails(self, tmp_path):
-        env = self._env(tmp_path, "$HOME/.claude/channels/telegram-ghost")
+        env = self._env(tmp_path, "{home}/.claude/channels/telegram-ghost")
         os.remove(os.path.join(env["HOME"], ".claude", "channels", "telegram", ".env"))
         r = self._run(env)
         assert r.returncode == 1
         assert "no TELEGRAM_BOT_TOKEN" in r.stderr
 
 
+class TestBotConfGetPath:
+    """bot.conf is written to be sourced; raw readers get literal $HOME /
+    $CLAUDLOBBY_ROOT prefixes. bot_conf_get_path expands them at the seam."""
+
+    def _get_path(self, tmp_path, conf_value):
+        bot = tmp_path / "bots" / "tbot"
+        bot.mkdir(parents=True)
+        (bot / "bot.conf").write_text(f'export SOME_PATH="{conf_value}"\n')
+        r = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'. "{LIB_COMMON}" && bot_conf_get_path "{bot}" SOME_PATH ""',
+            ],
+            env=_scrubbed_env(CLAUDLOBBY_ROOT=str(tmp_path)),
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+        return r.stdout
+
+    def test_expands_leading_home(self, tmp_path):
+        got = self._get_path(tmp_path, "$HOME/.claude/channels/telegram-x")
+        assert got == os.environ["HOME"] + "/.claude/channels/telegram-x"
+
+    def test_expands_leading_claudlobby_root(self, tmp_path):
+        got = self._get_path(tmp_path, "$CLAUDLOBBY_ROOT/state/x")
+        assert got == f"{tmp_path}/state/x"
+
+    def test_plain_value_passes_through(self, tmp_path):
+        assert self._get_path(tmp_path, "/abs/path") == "/abs/path"
+
+
 class TestFleetSignalPrimitives:
-    def test_failure_alert_framing_preserved(self, tmp_path):
-        # emit_failure_alert predates the notice variant; extracting the shared
-        # body must keep its wire format byte-identical for existing callers.
+    def _emit(self, tmp_path, fn, event_type, msg):
         h = Harness(tmp_path, behind=0)
         bots_dir = os.path.join(h.root, "runtime", "bots")
         r = subprocess.run(
             [
                 "bash",
                 "-c",
-                f'. "{LIB_COMMON}" && emit_failure_alert "{bots_dir}" "boom_type" "it broke"',
+                f'. "{LIB_COMMON}" && {fn} "{bots_dir}" "{event_type}" "{msg}"',
             ],
             env=h.env(),
             capture_output=True,
             text=True,
         )
         assert r.returncode == 0, r.stderr
+        return h
+
+    def test_failure_alert_framing_preserved(self, tmp_path):
+        # emit_failure_alert predates the notice variant; the shared body must
+        # keep its wire format byte-identical for existing callers.
+        h = self._emit(tmp_path, "emit_failure_alert", "boom_type", "it broke")
         lines = h.captured()
         assert len(lines) == 1
         assert "FLEET ALERT [boom_type]: it broke" in lines[0]
@@ -289,19 +328,7 @@ class TestFleetSignalPrimitives:
         assert '"source":"alert"' in events
 
     def test_notice_framing(self, tmp_path):
-        h = Harness(tmp_path, behind=0)
-        bots_dir = os.path.join(h.root, "runtime", "bots")
-        r = subprocess.run(
-            [
-                "bash",
-                "-c",
-                f'. "{LIB_COMMON}" && emit_fleet_notice "{bots_dir}" "heads_up" "fyi"',
-            ],
-            env=h.env(),
-            capture_output=True,
-            text=True,
-        )
-        assert r.returncode == 0, r.stderr
+        h = self._emit(tmp_path, "emit_fleet_notice", "heads_up", "fyi")
         lines = h.captured()
         assert len(lines) == 1
         assert "FLEET NOTICE [heads_up]: fyi" in lines[0]
