@@ -18,7 +18,7 @@
 # + manager tmux nudge + Telegram escalation) — the same alert path Mechanism 1
 # uses, so the two mechanisms never fork it.
 #
-# Runs weekly via systemd timer (see system_defaults.yaml fleet_timers). Also
+# Runs weekly via systemd timer (see system.yaml defaults.jobs). Also
 # invocable on demand: weekly-worker-restart.sh <fleet>.
 #
 # Usage: weekly-worker-restart.sh [<fleet-name>]

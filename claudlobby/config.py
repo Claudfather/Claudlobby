@@ -750,17 +750,40 @@ def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
     return SystemDefaultsConfig()
 
 
+def _resolve_system_yaml(pkg_dir: Path) -> Path | None:
+    """Locate the package-owned system.yaml.
+
+    Returns the path, or ``None`` when absent. Fails loud when a stale
+    ``system_defaults.yaml`` lingers (the file was renamed to ``system.yaml``):
+    silently ignoring it would drop every default hook / observability / job.
+    """
+    path = pkg_dir / "system.yaml"
+    if path.is_file():
+        return path
+    stale = pkg_dir / "system_defaults.yaml"
+    if stale.is_file():
+        raise RuntimeError(
+            f"{stale} is stale -- system defaults were renamed to system.yaml. "
+            "Remove the old system_defaults.yaml."
+        )
+    return None
+
+
 def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
-    """Load system_defaults.yaml from the package directory (cached)."""
+    """Load system.yaml from the package directory (cached)."""
     if "data" not in _cache:
-        pkg_dir = Path(__file__).parent
-        path = pkg_dir / "system_defaults.yaml"
-        if not path.is_file():
+        path = _resolve_system_yaml(Path(__file__).parent)
+        if path is None:
             _cache["data"] = {}
         else:
             with path.open() as f:
                 _cache["data"] = yaml.safe_load(f) or {}
     return _cache["data"]
+
+
+def _shallow_merge(base: dict | None, override: dict | None) -> dict:
+    """Shallow dict merge by key -- override wins on collision."""
+    return {**(base or {}), **(override or {})}
 
 
 def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
@@ -774,8 +797,12 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
 
         if key == "hooks":
             merged[key] = _merge_hooks_dedup(sys_val or {}, usr_val or {})
+        elif key == "jobs":
+            # Passthrough by job-name: a fleet entry overrides the system entry
+            # of the same name; sibling jobs are preserved (not hook-style dedup).
+            merged[key] = _shallow_merge(sys_val, usr_val)
         elif key == "observability":
-            merged[key] = {**(sys_val or {}), **(usr_val or {})}
+            merged[key] = _shallow_merge(sys_val, usr_val)
         elif usr_val is not None:
             merged[key] = usr_val
         else:
@@ -813,15 +840,19 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
     system_defaults_cfg = _coerce_system_defaults(fleet.get("system_defaults"))
     raw_system = _load_system_defaults()
 
+    system_section = raw_system.get("defaults", {}) or {}
     if not system_defaults_cfg.enabled:
         effective_system: dict = {}
     else:
         effective_system = {}
         if system_defaults_cfg.hooks:
-            effective_system["hooks"] = raw_system.get("hooks", {})
+            effective_system["hooks"] = system_section.get("hooks", {})
         if system_defaults_cfg.observability:
-            effective_system["observability"] = raw_system.get("observability", {})
-        # fleet_timers are not merged into defaults — consumed by compose_fleet_timers()
+            effective_system["observability"] = system_section.get("observability", {})
+        if system_defaults_cfg.timers:
+            # jobs flow through the defaults merge so fleet.yaml can override an
+            # individual job by name; compose_fleet_timers reads merged["jobs"].
+            effective_system["jobs"] = system_section.get("jobs", {})
 
     merged_defaults = _merge_system_into_defaults(effective_system, defaults)
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
 
 from claudlobby.config import (
     FleetConfig,
@@ -330,14 +331,16 @@ class TestLoadFleetSystemDefaults:
 class TestSystemDefaultsFile:
     def test_loads_from_package(self):
         raw = _load_system_defaults()
-        assert "hooks" in raw
-        assert "observability" in raw
-        assert "fleet_timers" in raw
-        assert "fleet-pulse" in raw["fleet_timers"]
-        assert "keepalive" in raw["fleet_timers"]
-        assert "log-rotation" in raw["fleet_timers"]
-        assert "creds-check" in raw["fleet_timers"]
-        assert "weekly-worker-restart" in raw["fleet_timers"]
+        assert "host" in raw
+        d = raw["defaults"]
+        assert "hooks" in d
+        assert "observability" in d
+        assert "jobs" in d
+        assert "fleet-pulse" in d["jobs"]
+        assert "keepalive" in d["jobs"]
+        assert "log-rotation" in d["jobs"]
+        assert "creds-check" in d["jobs"]
+        assert "weekly-worker-restart" in d["jobs"]
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +357,7 @@ class TestComposeFleetTimers:
         (root / "lib").mkdir()
         paths = Paths(root=root, fleet_dir=root)
         fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
-        merged = {"observability": {"pulse_interval": 300}}
+        merged = _default_merged()
 
         timers_dir = compose_fleet_timers(fleet, paths, merged)
         assert timers_dir.is_dir()
@@ -408,7 +411,7 @@ class TestComposeFleetTimers:
         paths = Paths(root=root, fleet_dir=root)
         fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
 
-        timers_dir = compose_fleet_timers(fleet, paths, {})
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
         timer = timers_dir / "com.test.creds-check.timer"
         assert timer.is_file()
@@ -428,7 +431,7 @@ class TestComposeFleetTimers:
         paths = Paths(root=root, fleet_dir=root)
         fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
 
-        timers_dir = compose_fleet_timers(fleet, paths, {})
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
         for name in [
             "fleet-pulse",
@@ -454,7 +457,7 @@ class TestComposeFleetTimers:
         paths = Paths(root=root, fleet_dir=root)
         fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
 
-        timers_dir = compose_fleet_timers(fleet, paths, {})
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
         svc = timers_dir / "com.test.reload-fleet.service"
         timer = timers_dir / "com.test.reload-fleet.timer"
@@ -475,7 +478,7 @@ class TestComposeFleetTimers:
         paths = Paths(root=root, fleet_dir=root)
         fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
 
-        timers_dir = compose_fleet_timers(fleet, paths, {})
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
 
         timer = timers_dir / "com.test.weekly-worker-restart.timer"
         svc = timers_dir / "com.test.weekly-worker-restart.service"
@@ -509,3 +512,214 @@ class TestPathsRuntimeFleet:
         fleet_dir.mkdir(parents=True)
         paths = Paths(root=tmp_path, fleet_dir=fleet_dir)
         assert paths.runtime_fleet == fleet_dir / "runtime" / "fleet"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1: system.yaml host:/defaults: structure + jobs 3-layer merge
+# ---------------------------------------------------------------------------
+
+_NO_OVERRIDE_FLEET = """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  bots:
+    worker:
+      expertise: [eng]
+"""
+
+_ALL_JOB_NAMES = {
+    "fleet-pulse",
+    "keepalive",
+    "log-rotation",
+    "creds-check",
+    "reload-fleet",
+    "weekly-worker-restart",
+}
+
+
+def _default_merged(**overrides):
+    """merged_defaults carrying the system default jobs + observability, as
+    ``load_fleet`` produces post-Phase-1 (``compose_fleet_timers`` reads
+    ``merged['jobs']``). Test helper for the direct-compose unit tests."""
+    section = _load_system_defaults().get("defaults", {})
+    merged = {
+        "jobs": section.get("jobs", {}),
+        "observability": section.get("observability", {}),
+    }
+    merged.update(overrides)
+    return merged
+
+
+class TestSystemYamlStructure:
+    def test_host_and_defaults_sections(self):
+        raw = _load_system_defaults()
+        assert "host" in raw, "system.yaml must declare a host: section"
+        assert "defaults" in raw, "system.yaml must declare a defaults: section"
+        d = raw["defaults"]
+        assert "hooks" in d
+        assert "observability" in d
+        assert "jobs" in d
+        for name in _ALL_JOB_NAMES:
+            assert name in d["jobs"], f"{name} missing from defaults.jobs"
+
+    def test_host_jobs_empty_in_phase_1(self):
+        # Phase 1 introduces host: as scaffolding; host jobs (claude-update,
+        # root-self-update, notify-behind) are populated + emitted in Phase 2/3.
+        raw = _load_system_defaults()
+        assert raw["host"].get("jobs", {}) == {}
+
+
+class TestResolveSystemYaml:
+    def test_returns_system_yaml_when_present(self, tmp_path):
+        from claudlobby.config import _resolve_system_yaml
+
+        (tmp_path / "system.yaml").write_text("defaults: {}\n")
+        assert _resolve_system_yaml(tmp_path).name == "system.yaml"
+
+    def test_none_when_absent(self, tmp_path):
+        from claudlobby.config import _resolve_system_yaml
+
+        assert _resolve_system_yaml(tmp_path) is None
+
+    def test_fail_loud_on_stale_system_defaults_yaml(self, tmp_path):
+        # A lingering system_defaults.yaml (the file was renamed to system.yaml)
+        # must fail loud, not be silently ignored — silence would drop every
+        # default hook / observability / job.
+        from claudlobby.config import _resolve_system_yaml
+
+        (tmp_path / "system_defaults.yaml").write_text("hooks: {}\n")
+        with pytest.raises(RuntimeError, match="system.yaml"):
+            _resolve_system_yaml(tmp_path)
+
+
+class TestJobsThreeLayerMerge:
+    def test_jobs_merge_is_passthrough_not_dedup(self):
+        # jobs merge by name via passthrough/shallow-spread: a fleet entry
+        # overrides the system entry of the same name; SIBLINGS are preserved
+        # (NOT dropped, as a wholesale "fleet wins" or hook-style dedup would).
+        system = {"jobs": {"a": {"interval": 1}, "b": {"interval": 2}}}
+        defaults = {"jobs": {"b": {"interval": 20}}}
+        merged = _merge_system_into_defaults(system, defaults)
+        assert merged["jobs"] == {"a": {"interval": 1}, "b": {"interval": 20}}
+
+    def test_load_fleet_threads_system_jobs_into_merged(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        _fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
+        assert set(merged["jobs"]) == _ALL_JOB_NAMES
+
+    def test_partial_override_preserves_siblings(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        _fleet, merged = load_fleet(
+            _write_fleet(
+                root,
+                """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  defaults:
+    jobs:
+      keepalive:
+        script: "$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
+        interval: 30
+        type: oneshot
+  bots:
+    worker:
+      expertise: [eng]
+""",
+            )
+        )
+        # keepalive overridden, all five system siblings preserved
+        assert set(merged["jobs"]) == _ALL_JOB_NAMES
+        assert merged["jobs"]["keepalive"]["interval"] == 30
+
+    def test_timers_off_zeroes_jobs(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        _fleet, merged = load_fleet(
+            _write_fleet(
+                root,
+                """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  system_defaults:
+    timers: false
+  bots:
+    worker:
+      expertise: [eng]
+""",
+            )
+        )
+        assert merged.get("jobs", {}) == {}
+
+
+class TestJobsComposition:
+    def _compose(self, tmp_path, fleet_yaml):
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        fleet, merged = load_fleet(_write_fleet(root, fleet_yaml))
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_fleet_timers(fleet, paths, merged)
+
+    def test_byte_identical_units_no_override(self, tmp_path):
+        # A fleet with NO jobs override composes exactly the system default job
+        # units — same names + content as the pre-Phase-1 fleet_timers.
+        timers_dir = self._compose(tmp_path, _NO_OVERRIDE_FLEET)
+        for name in _ALL_JOB_NAMES:
+            assert (timers_dir / f"com.test.{name}.service").is_file()
+            assert (timers_dir / f"com.test.{name}.timer").is_file()
+            assert (timers_dir / f"com.test.{name}.plist").is_file()
+        # keepalive static interval unchanged
+        assert "OnBootSec=60" in (timers_dir / "com.test.keepalive.timer").read_text()
+        # interval_from resolves end-to-end (observability.pulse_interval = 300)
+        assert (
+            "OnBootSec=300" in (timers_dir / "com.test.fleet-pulse.timer").read_text()
+        )
+        # weekly calendar expression unchanged
+        assert (
+            "OnCalendar=Sun *-*-* 05:00:00"
+            in (timers_dir / "com.test.weekly-worker-restart.timer").read_text()
+        )
+
+    def test_partial_override_still_emits_siblings(self, tmp_path):
+        timers_dir = self._compose(
+            tmp_path,
+            """
+fleet:
+  name: test-fleet
+  service_prefix: com.test
+  defaults:
+    jobs:
+      keepalive:
+        script: "$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
+        interval: 30
+        type: oneshot
+  bots:
+    worker:
+      expertise: [eng]
+""",
+        )
+        assert "OnBootSec=30" in (timers_dir / "com.test.keepalive.timer").read_text()
+        assert (timers_dir / "com.test.fleet-pulse.service").is_file()
+        assert (timers_dir / "com.test.reload-fleet.service").is_file()
+
+    def test_generate_and_diff_compose_identical_units(self, tmp_path):
+        # generate (default output_dir) and diff (output_dir redirect) must
+        # compose byte-identical job units from the same merged['jobs'] source
+        # — guards a bb02d56-class generate-vs-diff divergence.
+        import tempfile
+
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
+        paths = Paths(root=root, fleet_dir=root)
+
+        gen_dir = compose_fleet_timers(fleet, paths, merged)
+        gen = {f.name: f.read_text() for f in sorted(gen_dir.iterdir())}
+
+        with tempfile.TemporaryDirectory() as td:
+            diff_dir = compose_fleet_timers(fleet, paths, merged, output_dir=Path(td))
+            dd = {f.name: f.read_text() for f in sorted(diff_dir.iterdir())}
+
+        assert gen == dd
