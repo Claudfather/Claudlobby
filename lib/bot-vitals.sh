@@ -10,7 +10,6 @@
 # hook payload (PreToolUse/PostToolUse). Managers must use live checks for those.
 # Reaps event files older than 7 days on each invocation.
 #
-# Supersedes the older log-tool-call.sh reference hook.
 #
 # Usage in fleet.yaml:
 #   hooks:

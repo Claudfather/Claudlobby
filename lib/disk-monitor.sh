@@ -1,6 +1,8 @@
 #!/bin/bash
-# Daily disk-usage warn — checks root partition usage and logs a warning
-# when it exceeds the threshold. Optional Telegram alert via tg-post.sh.
+# Daily disk-usage warn — checks root partition usage and raises a FLEET
+# ALERT (fleet event + manager tmux nudge + Telegram) when it exceeds the
+# threshold. Runs as the disk-monitor host job (system.yaml host.jobs,
+# enrolled by setup-system).
 #
 # Usage:
 #   disk-monitor.sh [--threshold N] [--mount /]
@@ -8,10 +10,10 @@
 #
 # Defaults: --threshold 90, --mount /
 #
-# Output is a single line written to $CLAUDLOBBY_ROOT/lib/disk-monitor.log
-# (creating the dir if needed). When the threshold is crossed and tg-post.sh
-# is available + TG_CHAT_ID is set in the environment, also fires a Telegram
-# alert. Otherwise just logs and exits 0 — non-fatal.
+# Output is written to $CLAUDLOBBY_ROOT/lib/disk-monitor.log (creating the
+# dir if needed). Alerting rides the shared emit_failure_alert primitive, so
+# delivery works fleet-less (host job) via the cross-fleet fallback. Exits 0
+# on OK and on alert — non-fatal.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,29 +49,28 @@ if [ -z "$USAGE" ]; then
     exit 1
 fi
 
+FLEET="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"
+
 if [ "$USAGE" -gt "$THRESHOLD" ]; then
-    msg="WARN — disk usage at ${USAGE}% on $MOUNT (threshold ${THRESHOLD}%)"
-    echo "$TS $msg" >>"$LOG"
-    TG_POST="$CLAUDLOBBY_ROOT/lib/tg-post.sh"
-    if [ -x "$TG_POST" ] && [ -n "${TG_CHAT_ID:-}" ]; then
-        "$TG_POST" "$TG_CHAT_ID" "disk-monitor: $msg" >>"$LOG" 2>&1 || \
-            echo "$TS ERROR — tg-post failed for disk warning" >>"$LOG"
-    fi
+    msg="disk usage at ${USAGE}% on $MOUNT of $(hostname) (threshold ${THRESHOLD}%)"
+    echo "$TS WARN — $msg" >>"$LOG"
+    emit_failure_alert "$(resolve_bots_dir "$FLEET")" "disk_high" "$msg"
 else
     echo "$TS OK — disk usage at ${USAGE}% on $MOUNT" >>"$LOG"
 fi
 
-# Per-bot data/ directory sizes
-FLEET="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"
+# Per-bot data/ directory sizes. Fleet-scoped when a fleet is set; the host
+# job runs fleet-less and reports across every fleet on the host.
 if [ -n "$FLEET" ]; then
-    BOTS_DIR="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots"
+    BOTS_DIRS=("$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots")
 else
-    BOTS_DIR="$CLAUDLOBBY_ROOT/runtime/bots"
+    BOTS_DIRS=("$CLAUDLOBBY_ROOT/runtime/bots" "$CLAUDLOBBY_ROOT"/local/*/runtime/bots)
 fi
 
-if [ -d "$BOTS_DIR" ]; then
-    echo "$TS BOT DATA SIZES:" >>"$LOG"
-    for bot_dir in "$BOTS_DIR"/*/; do
+echo "$TS BOT DATA SIZES:" >>"$LOG"
+for bots_dir in "${BOTS_DIRS[@]}"; do
+    [ -d "$bots_dir" ] || continue
+    for bot_dir in "$bots_dir"/*/; do
         [ -d "$bot_dir" ] || continue
         data_dir="$bot_dir/data"
         bot_name="$(basename "$bot_dir")"
@@ -78,4 +79,5 @@ if [ -d "$BOTS_DIR" ]; then
             echo "  $bot_name/data: $size" >>"$LOG"
         fi
     done
-fi
+done
+exit 0

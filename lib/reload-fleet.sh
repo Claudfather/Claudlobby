@@ -46,6 +46,15 @@ loud_fail() {
     emit_failure_alert "$BOTS_DIR" "reload_failed" "$reason"
 }
 
+# --- 0. npx cache preflight (value-audit fold — piggyback, no new timer) ---
+# A cold npx cache turns MCP startup into an IO storm on SD-card hardware.
+# Verify before touching plugins; a degraded cache warms best-effort — cache
+# health must never abort the reload (#461).
+if ! "$LIB_DIR/check-npx-cache.sh" ${FLEET:+--fleet "$FLEET"} >> "$LOG" 2>&1; then
+    printf '%s npx cache degraded — warming (best-effort)\n' "$(ts_iso)" >> "$LOG"
+    claudlobby ${FLEET:+--fleet "$FLEET"} warm-cache >> "$LOG" 2>&1 || true
+fi
+
 # --- 1 + 2. download + generate, serialized under a fleet-wide lock ---
 PLUGINS=""
 _plugin_bot=$(first_bot_with_conf "$BOTS_DIR" FLEET_PLUGINS_REQUIRED || true)

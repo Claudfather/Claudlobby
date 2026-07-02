@@ -55,9 +55,11 @@ TS=$(ts_iso)
 avail_ram_mb() {
     if [ -f /proc/meminfo ]; then
         # MemAvailable is the kernel's own "this much is usable" figure.
-        # Fall back to MemFree if not present (very old kernels).
-        awk '/^MemAvailable:/ { printf "%d", $2/1024; found=1 }
-             /^MemFree:/      { if (!found) printf "%d", $2/1024 }' \
+        # Fall back to MemFree if not present (very old kernels). Decide in
+        # END — MemFree precedes MemAvailable in /proc/meminfo, so per-line
+        # printing would emit BOTH numbers concatenated.
+        awk '/^MemAvailable:/ { avail=$2 } /^MemFree:/ { free=$2 }
+             END { v = (avail ? avail : free); printf "%d", v/1024 }' \
             /proc/meminfo
     else
         # macOS: vm_stat reports pages; multiply by page size (usually 4096).
@@ -146,7 +148,6 @@ per_bot_summary() {
 }
 
 FLEET_RSS_MB=$(fleet_rss_mb)
-USED_MB=$(( TOTAL_MB - AVAIL_MB ))
 
 # Alert when available RAM drops below the reserve floor.
 # Threshold=80 means "alert when less than 20% of total RAM remains available."
@@ -170,16 +171,11 @@ per_bot_summary | tee -a "$LOG" || true
 # --- Alert --------------------------------------------------------------------
 
 if [ "$AVAIL_MB" -lt "$RESERVE_MB" ]; then
-    ALERT_MSG="fleet-memory-check: available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. Consider stopping idle bots."
+    ALERT_MSG="available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) on $(hostname) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. Consider stopping idle bots."
     echo "$TS ALERT — $ALERT_MSG" | tee -a "$LOG"
-
-    TG_POST="$CLAUDLOBBY_ROOT/lib/tg-post.sh"
-    if [ -x "$TG_POST" ] && [ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
-        "$TG_POST" "$ALERT_MSG" >> "$LOG" 2>&1 || \
-            echo "$TS WARN — tg-post failed for memory alert" >> "$LOG"
-    else
-        echo "$TS NOTE — TELEGRAM_GROUP_CHAT_ID not set; skipping Telegram alert" >> "$LOG"
-    fi
+    # Shared signal path (fleet event + manager tmux nudge + Telegram):
+    # delivery works fleet-less (host job) via the cross-fleet fallback.
+    emit_failure_alert "$(resolve_bots_dir "$FLEET_NAME")" "memory_high" "$ALERT_MSG"
 else
     echo "$TS OK — fleet RAM usage within threshold" | tee -a "$LOG"
 fi

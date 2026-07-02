@@ -534,6 +534,7 @@ _ALL_JOB_NAMES = {
     "creds-check",
     "reload-fleet",
     "weekly-worker-restart",
+    "data-sweep",
 }
 
 
@@ -572,6 +573,8 @@ class TestSystemYamlStructure:
         [
             ("claude-update", "update-claude-code.sh", "*-*-* 04:00:00"),
             ("notify-behind", "notify-behind.sh", "*-*-* 08:00:00"),
+            ("disk-monitor", "disk-monitor.sh", "*-*-* 05:00:00"),
+            ("fleet-memory-check", "fleet-memory-check.sh", "*-*-* 05:30:00"),
         ],
     )
     def test_host_jobs_declared(self, job, script, schedule):
@@ -584,6 +587,17 @@ class TestSystemYamlStructure:
         assert cfg["schedule"] == schedule
         assert cfg["persistent"] is True
         assert cfg["randomized_delay"] == 600
+
+    def test_data_sweep_declared_with_purge_args(self):
+        # The default fleet job PURGES (30-day default); a fleet overrides
+        # retention by overriding the job's script line (jobs merge by name).
+        from claudlobby.config import _load_system_defaults
+
+        jobs = _load_system_defaults()["defaults"]["jobs"]
+        ds = jobs["data-sweep"]
+        assert ds["script"].endswith("data-sweep.sh --purge")
+        assert ds["schedule"].startswith("Sat ")
+
 
 
 class TestResolveSystemYaml:
@@ -775,6 +789,8 @@ class TestComposeHostTimers:
         [
             ("claude-update", "update-claude-code.sh", "*-*-* 04:00:00"),
             ("notify-behind", "notify-behind.sh", "*-*-* 08:00:00"),
+            ("disk-monitor", "disk-monitor.sh", "*-*-* 05:00:00"),
+            ("fleet-memory-check", "fleet-memory-check.sh", "*-*-* 05:30:00"),
         ],
     )
     def test_emits_host_job_units(self, tmp_path, job, script, schedule):
@@ -827,6 +843,18 @@ class TestComposeHostTimers:
         default = {f.name: f.read_text() for f in sorted(default_dir.iterdir())}
         redirect = {f.name: f.read_text() for f in sorted(redirect_dir.iterdir())}
         assert default == redirect
+
+    def test_data_sweep_execstart_args_then_fleet(self, tmp_path):
+        # script-with-args composes as ExecStart=<script> --purge <fleet> —
+        # the arg order the script's parser contract expects (flags first,
+        # positional fleet name last, appended by the composer).
+        from claudlobby.composer import compose_fleet_timers
+
+        paths = self._paths(tmp_path)
+        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+        svc_text = (timers_dir / "com.test.data-sweep.service").read_text()
+        assert "data-sweep.sh --purge test-fleet" in svc_text
 
     def test_fleet_units_carry_no_host_knobs(self, tmp_path):
         # Guard: adding persistent/randomized_delay/env support must not

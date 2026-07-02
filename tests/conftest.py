@@ -10,6 +10,18 @@ from textwrap import dedent
 import pytest
 
 
+def _scrubbed_env(**overrides):
+    """os.environ minus the bot-session vars that would short-circuit chat
+    resolution (FLEET_PULSE_ESCALATION_CHAT_ID et al) or repoint the root."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
+    }
+    env.update(overrides)
+    return env
+
+
 def _write_exec(path, content):
     """Write a stub script and set its exec bits (shared shell-test harness helper)."""
     with open(path, "w") as f:

@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 
-from tests.conftest import _write_exec
+from tests.conftest import _scrubbed_env, _write_exec
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "lib", "notify-behind.sh")
@@ -41,18 +41,6 @@ CURL_STUB = (
     'echo "curl $*" >> "$CURL_CAPTURE"\n'
     'printf \'{"ok":true,"result":{"message_id":7}}\\n\'\n'
 )
-
-
-def _scrubbed_env(**overrides):
-    """os.environ minus the bot-session vars that would short-circuit chat
-    resolution (FLEET_PULSE_ESCALATION_CHAT_ID et al) or repoint the root."""
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
-    }
-    env.update(overrides)
-    return env
 
 
 def _git(cwd, *args):
