@@ -10,6 +10,7 @@ service_prefix is set.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import textwrap
 
@@ -139,3 +140,47 @@ class TestLifecycleNameAgreement:
         )
         assert rc == 0
         assert stdout == "myfallback"
+
+
+class TestKeepaliveAllArgConvention:
+    """The composed keepalive unit's ExecStart passes the fleet NAME
+    (`keepalive-all.sh <fleet>`), matching every other fleet job. Before the
+    Phase 6 fix keepalive-all treated $1 as a bots DIR, so the composed unit
+    FATALed on every tick — caught by the migration's verification gate."""
+
+    def _run(self, root, arg):
+        # keepalive-all resolves its worker script from CLAUDLOBBY_ROOT — give
+        # the tmp root a real lib/ so only the arg semantics are under test.
+        libdir = os.path.join(root, "lib")
+        os.makedirs(libdir, exist_ok=True)
+        for script in ("keepalive.sh", "lib-common.sh"):
+            dst = os.path.join(libdir, script)
+            if not os.path.exists(dst):
+                shutil.copy2(os.path.join(LIB_DIR, script), dst)
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDLOBBY_FLEET", "FLEET_NAME")}
+        env["CLAUDLOBBY_ROOT"] = str(root)
+        return subprocess.run(
+            ["bash", os.path.join(LIB_DIR, "keepalive-all.sh"), arg],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_fleet_name_arg_resolves_overlay_bots_dir(self, tmp_path):
+        bots = tmp_path / "local" / "f9" / "runtime" / "bots"
+        bots.mkdir(parents=True)
+        r = self._run(tmp_path, "f9")
+        assert r.returncode == 0, r.stderr
+        # A clean sweep writes no log lines; only FATALs would.
+        log = tmp_path / "lib" / "logs" / "keepalive-all.log"
+        assert "FATAL" not in (log.read_text() if log.exists() else "")
+
+    def test_absolute_dir_arg_still_honored(self, tmp_path):
+        bots = tmp_path / "elsewhere" / "bots"
+        bots.mkdir(parents=True)
+        r = self._run(tmp_path, str(bots))
+        assert r.returncode == 0, r.stderr
+
+    def test_unknown_fleet_name_still_fatals(self, tmp_path):
+        r = self._run(tmp_path, "ghost-fleet")
+        assert r.returncode == 1

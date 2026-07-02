@@ -77,7 +77,7 @@ Key lifecycle scripts in `lib/`:
 | `install-fleet-pulse-systemd.sh` | Fleet-pulse systemd timer enrollment (systemd) |
 | `setup-mac-mini.sh` | macOS host setup automation |
 | `setup-system` | Setup backbone: host prereqs + system.yaml host-job enrollment (cross-platform) |
-| `setup-fleet` | Setup backbone: per-fleet apply+enroll — default jobs (dormant opt-ins skipped), bots (skips healthy), reconcile; root mode when invoked without a fleet |
+| `setup-fleet` | Setup backbone: per-fleet apply+enroll — default jobs (dormant opt-ins skipped), atomic legacy-keepalive swap (enable-new → verify → disable-old), bots (skips healthy), reconcile; root mode when invoked without a fleet |
 | `setup-fleets` | Run setup-fleet for every fleet on the host |
 | `bot-vitals.sh` | Bot vitals collection for observability |
 | `fleet-pulse.sh` | Fleet-wide heartbeat / status monitoring |
