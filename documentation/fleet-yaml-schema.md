@@ -20,6 +20,10 @@ fleet:
     effort: max | default
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
+    disable_nonessential_traffic: true | false  # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (default: true)
+    spinner_tips_enabled: true | false  # settings.local spinnerTipsEnabled (default: false)
+    preferred_notif_channel: <string>   # settings.local preferredNotifChannel (default: notifications_disabled)
+    prefers_reduced_motion: true | false # settings.local prefersReducedMotion (default: true)
     expertise: [<list>]                 # appended to bot's expertise
     skills: [<list>]
     mcp: [<list>]
@@ -380,6 +384,22 @@ Boolean (default `true`). Controls whether the bot runs with `--remote-control`,
 ### `bots.<name>.prompt_suggestions`
 
 Boolean (default `false`). Controls `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` env var. When true, Claude Code shows autocomplete prompt suggestions. Headless bots don't need them — only enable for interactive use. Can be set in `defaults:`.
+
+### `bots.<name>.disable_nonessential_traffic`
+
+Boolean (default `true`). When true, emits `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in `bot.conf`, which disables Claude Code's satisfaction survey, the transcript-consent prompt, telemetry, and the built-in auto-updater — appropriate because claudlobby manages Claude Code updates itself. Set false to restore Claude Code's default traffic. Can be set in `defaults:`.
+
+### `bots.<name>.spinner_tips_enabled`
+
+Boolean (default `false`). Sets `spinnerTipsEnabled` in `settings.local.json`. When false, Claude Code omits the "Tip:" lines shown while working. Can be set in `defaults:`.
+
+### `bots.<name>.preferred_notif_channel`
+
+String (default `notifications_disabled`). Sets `preferredNotifChannel` in `settings.local.json` — the OS notification channel. A supervised headless bot has no desktop, so notifications are disabled by default. Can be set in `defaults:`.
+
+### `bots.<name>.prefers_reduced_motion`
+
+Boolean (default `true`). Sets `prefersReducedMotion` in `settings.local.json`, stopping Claude Code from drawing the animated spinner. Safe for supervised bots because keepalive liveness is marker-based (`data/.last-tool-call`), not spinner-based. Can be set in `defaults:`.
 
 ### `bots.<name>.channels`
 

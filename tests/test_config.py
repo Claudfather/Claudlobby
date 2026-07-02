@@ -96,11 +96,48 @@ class TestCoerceBot:
         assert bot.remote_control is True
         assert bot.dangerously_skip_permissions is True
         assert bot.prompt_suggestions is False
+        assert bot.disable_nonessential_traffic is True
+        assert bot.spinner_tips_enabled is False
+        assert bot.preferred_notif_channel == "notifications_disabled"
+        assert bot.prefers_reduced_motion is True
         assert bot.channels == ["plugin:telegram@claude-plugins-official"]
         assert bot.mcp == []
         assert bot.skills == []
         assert bot.guardrails == []
         assert bot.bench is False
+
+    def test_headless_config_defaults_overridable(self):
+        """The 4 headless config defaults are fleet.yaml-overridable per bot."""
+        # Per-bot value wins.
+        bot = _coerce_bot(
+            "t",
+            {
+                "expertise": ["eng"],
+                "disable_nonessential_traffic": False,
+                "spinner_tips_enabled": True,
+                "preferred_notif_channel": "iterm2",
+                "prefers_reduced_motion": False,
+            },
+            {},
+        )
+        assert bot.disable_nonessential_traffic is False
+        assert bot.spinner_tips_enabled is True
+        assert bot.preferred_notif_channel == "iterm2"
+        assert bot.prefers_reduced_motion is False
+
+    def test_headless_config_defaults_from_fleet(self):
+        """Fleet defaults apply when the bot is silent; unset falls back to headless default."""
+        bot = _coerce_bot(
+            "t",
+            {"expertise": ["eng"]},
+            {
+                "prefers_reduced_motion": False,
+                "preferred_notif_channel": "terminal_bell",
+            },
+        )
+        assert bot.prefers_reduced_motion is False
+        assert bot.preferred_notif_channel == "terminal_bell"
+        assert bot.disable_nonessential_traffic is True  # unset → headless default
 
     def test_bench_from_bot(self):
         bot = _coerce_bot("test", {"expertise": ["eng"], "bench": True}, {})

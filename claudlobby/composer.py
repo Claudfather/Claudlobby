@@ -354,6 +354,12 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append(
         f"export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION={_shq(str(bot.prompt_suggestions).lower())}"
     )
+    # Non-essential traffic — off by default kills the satisfaction survey, the
+    # transcript-consent prompt, telemetry, and the built-in auto-updater
+    # (claudlobby manages Claude Code updates itself). Emitted only when disabled:
+    # the env var is a presence flag, so an override to false must omit it, not "=0".
+    if bot.disable_nonessential_traffic:
+        lines.append("export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
     lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f"export FLEET_NAME={_shq(fleet.name)}")
@@ -1129,6 +1135,13 @@ def compose_settings_local(
     # MCP trust allowlist — see docstring for the derive-and-fail-closed rationale.
     if mcp_server_names:
         settings["enabledMcpjsonServers"] = sorted(mcp_server_names)
+
+    # Headless UX defaults (fleet.yaml-overridable per bot): silence the spinner
+    # tip lines, disable the notification prompts, and prefer reduced motion — safe
+    # now that keepalive liveness is marker-based rather than spinner-based.
+    settings["spinnerTipsEnabled"] = bot.spinner_tips_enabled
+    settings["preferredNotifChannel"] = bot.preferred_notif_channel
+    settings["prefersReducedMotion"] = bot.prefers_reduced_motion
 
     return settings
 

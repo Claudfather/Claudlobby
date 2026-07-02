@@ -335,6 +335,33 @@ class TestComposeSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" not in result
 
+    def test_headless_ux_defaults_emitted(self, tmp_path):
+        """The 3 settings.local headless UX keys are always emitted at their defaults."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["spinnerTipsEnabled"] is False
+        assert result["preferredNotifChannel"] == "notifications_disabled"
+        assert result["prefersReducedMotion"] is True
+
+    def test_headless_ux_defaults_overridable(self, tmp_path):
+        """Per-bot overrides flow through to settings.local."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="solo",
+            name="solo",
+            expertise=["eng"],
+            spinner_tips_enabled=True,
+            preferred_notif_channel="iterm2",
+            prefers_reduced_motion=False,
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["spinnerTipsEnabled"] is True
+        assert result["preferredNotifChannel"] == "iterm2"
+        assert result["prefersReducedMotion"] is False
+
     def test_sibling_isolation_only(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
         fleet = self._make_fleet_with_bots("bot-a", "bot-b")
@@ -523,6 +550,34 @@ class TestComposeBotConfExportedVars:
         paths = Paths(root=root, fleet_dir=root)
         conf = compose_bot_conf(bot, fleet, paths)
         assert "export BOT_ID=astrid" in conf
+
+    def test_disable_nonessential_traffic_default_and_override(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        def _conf(**kw):
+            bot = BotConfig(
+                bot_id="w",
+                name="w",
+                expertise=["eng"],
+                telegram=TelegramConfig(handle="w_bot"),
+                **kw,
+            )
+            fleet = FleetConfig(
+                name="test-fleet",
+                service_prefix="com.test",
+                telegram_group_chat_id="-100999",
+            )
+            root = tmp_path / "cl"
+            (root / "runtime" / "bots" / "w").mkdir(parents=True, exist_ok=True)
+            (root / "lib").mkdir(exist_ok=True)
+            return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root))
+
+        # Default on → emitted as a presence flag.
+        assert "export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" in _conf()
+        # Override off → omitted entirely (never "=0", which CC could read as truthy).
+        assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in _conf(
+            disable_nonessential_traffic=False
+        )
 
 
 class TestComposeBotConfServicePrefix:

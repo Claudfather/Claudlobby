@@ -48,6 +48,11 @@ fleet:
     effort: max
     account: default
     prompt_suggestions: false                # disable autocomplete suggestions (headless bots don't need them)
+    # Headless config defaults (all overridable per bot):
+    disable_nonessential_traffic: true       # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 — kills the survey, transcript-consent, telemetry, auto-updater (claudlobby manages CC updates)
+    spinner_tips_enabled: false              # settings.local spinnerTipsEnabled — silence the "Tip:" lines
+    preferred_notif_channel: notifications_disabled  # settings.local preferredNotifChannel — no desktop on a headless bot
+    prefers_reduced_motion: true             # settings.local prefersReducedMotion — safe now that keepalive liveness is marker-based
     mcp: [github]                             # MCP servers all bots use (bot stanza merges, not replaces)
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication, no-merge-own-pr]
     protocols: [report-back, context-management, telegram-routing, telegram-formatting]

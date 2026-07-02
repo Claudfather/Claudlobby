@@ -203,6 +203,14 @@ class BotConfig:
         default_factory=lambda: ["plugin:telegram@claude-plugins-official"]
     )  # --channels <name>
     prompt_suggestions: bool = False  # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION
+    # Headless config defaults (fleet.yaml-overridable per bot) — trim Claude Code
+    # affordances a supervised, non-interactive bot never uses.
+    # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (bot.conf env)
+    disable_nonessential_traffic: bool = True
+    spinner_tips_enabled: bool = False  # settings.local.json spinnerTipsEnabled
+    # settings.local.json preferredNotifChannel
+    preferred_notif_channel: str = "notifications_disabled"
+    prefers_reduced_motion: bool = True  # settings.local.json prefersReducedMotion
     extra_flags: list[str] = field(default_factory=list)  # any other claude CLI args
     skills: list[str] = field(default_factory=list)
     mcp: list[McpEntry] = field(default_factory=list)
@@ -649,6 +657,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             return bool(defaults[key])
         return fallback
 
+    def _str(key: str, fallback: str) -> str:
+        if key in raw:
+            return str(raw[key])
+        if key in defaults:
+            return str(defaults[key])
+        return fallback
+
     return BotConfig(
         bot_id=name,
         name=raw.get("name", name),
@@ -676,6 +691,12 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             VALID_PERMISSION_MODES,
         ),
         prompt_suggestions=_bool("prompt_suggestions", False),
+        disable_nonessential_traffic=_bool("disable_nonessential_traffic", True),
+        spinner_tips_enabled=_bool("spinner_tips_enabled", False),
+        preferred_notif_channel=_str(
+            "preferred_notif_channel", "notifications_disabled"
+        ),
+        prefers_reduced_motion=_bool("prefers_reduced_motion", True),
         channels=_as_list(raw.get("channels") or defaults.get("channels"))
         or ["plugin:telegram@claude-plugins-official"],
         extra_flags=_merge_lists(defaults.get("extra_flags"), raw.get("extra_flags")),
