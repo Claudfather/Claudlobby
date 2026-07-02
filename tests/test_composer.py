@@ -1865,7 +1865,7 @@ class TestComposeBotConfObservability:
 
     def test_default_observability_values(self, tmp_path):
         # After system defaults merge, fields are populated.
-        # Simulate by passing explicit values matching system_defaults.yaml.
+        # Simulate by passing explicit values matching system.yaml defaults.
         from claudlobby.config import ObservabilityConfig
 
         obs = ObservabilityConfig(
