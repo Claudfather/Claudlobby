@@ -59,6 +59,8 @@ class TestSetsPopulated:
         assert "sonnet" in KNOWN_MODELS
         assert "opus" in KNOWN_MODELS
         assert "haiku" in KNOWN_MODELS
+        assert "fable" in KNOWN_MODELS
+        assert "claude-fable-5" in KNOWN_MODELS
 
     def test_known_efforts(self):
         assert KNOWN_EFFORTS == frozenset({"low", "medium", "high", "max"})

@@ -486,6 +486,10 @@ class TestComposeBotConfModelStrategy:
         conf = self._compose(tmp_path, model="opus")
         assert "--model opus" in conf
 
+    def test_model_flag_fable_in_claude_flags(self, tmp_path):
+        conf = self._compose(tmp_path, model="fable")
+        assert "--model fable" in conf
+
     def test_model_strategy_section_header(self, tmp_path):
         from claudlobby.config import ModelStrategyConfig
 
