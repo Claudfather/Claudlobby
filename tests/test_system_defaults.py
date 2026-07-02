@@ -591,8 +591,6 @@ class TestSystemYamlStructure:
     def test_data_sweep_declared_with_purge_args(self):
         # The default fleet job PURGES (30-day default); a fleet overrides
         # retention by overriding the job's script line (jobs merge by name).
-        from claudlobby.config import _load_system_defaults
-
         jobs = _load_system_defaults()["defaults"]["jobs"]
         ds = jobs["data-sweep"]
         assert ds["script"].endswith("data-sweep.sh --purge")

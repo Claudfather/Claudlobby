@@ -10,15 +10,10 @@ import os
 import subprocess
 import time
 
-from tests.conftest import _scrubbed_env, _write_exec
+from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
-
-TG_STUB = (
-    '#!/bin/bash\nprintf "%s|%s\\n" "$TELEGRAM_GROUP_CHAT_ID" "$1" >> "$TG_CAPTURE"\n'
-)
-
 
 def _signal_root(tmp_path, bots_at="runtime/bots"):
     """Throwaway CLAUDLOBBY_ROOT with a tg-post stub + a chat-declaring bot,
@@ -50,16 +45,12 @@ def _captured(tmp_path):
     return cap.read_text() if cap.exists() else ""
 
 
-def _events(root):
-    events_dir = root / "state" / "events"
-    if not events_dir.is_dir():
-        return ""
-    return "".join(f.read_text() for f in sorted(events_dir.iterdir()))
+_events = read_fleet_events
 
 
 class TestDataSweep:
-    def _fleet_data(self, root, fleet="f7", bot="b1"):
-        data = root / "local" / fleet / "runtime" / "bots" / bot / "data"
+    def _fleet_data(self, root):
+        data = root / "local" / "f7" / "runtime" / "bots" / "b1" / "data"
         data.mkdir(parents=True)
         old = data / "old.jsonl"
         old.write_text("stale\n")
@@ -151,8 +142,9 @@ class TestFleetMemoryCheck:
 
 
 class TestReloadFleetNpxPreflight:
-    """The value-audit fold: check-npx-cache runs BEFORE plugin updates; a
-    degraded cache warms best-effort and never aborts the reload (#461)."""
+    """check-npx-cache runs BEFORE plugin updates, inside the reload lock; a
+    degraded cache warms best-effort (once per episode) and never aborts the
+    reload."""
 
     def _harness(self, tmp_path, npx_rc):
         root = tmp_path / "root"
@@ -187,33 +179,39 @@ class TestReloadFleetNpxPreflight:
         )
         return root, env
 
+    def _run_reload(self, root, env):
+        r = subprocess.run(
+            ["bash", str(root / "lib" / "reload-fleet.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr + r.stdout
+
     def _calls(self, tmp_path):
         log = tmp_path / "calls.log"
         return log.read_text() if log.exists() else ""
 
     def test_preflight_runs_before_plugin_update(self, tmp_path):
         root, env = self._harness(tmp_path, npx_rc=0)
-        r = subprocess.run(
-            ["bash", str(root / "lib" / "reload-fleet.sh")],
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        assert r.returncode == 0, r.stderr + r.stdout
+        self._run_reload(root, env)
         calls = self._calls(tmp_path)
         assert calls.index("check-npx-cache") < calls.index("claude plugin update")
         assert "warm-cache" not in calls
 
     def test_degraded_cache_warms_and_reload_continues(self, tmp_path):
         root, env = self._harness(tmp_path, npx_rc=1)
-        r = subprocess.run(
-            ["bash", str(root / "lib" / "reload-fleet.sh")],
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        assert r.returncode == 0, r.stderr + r.stdout
+        self._run_reload(root, env)
         calls = self._calls(tmp_path)
         assert "warm-cache" in calls
         assert calls.index("check-npx-cache") < calls.index("warm-cache")
         assert calls.index("warm-cache") < calls.index("claude plugin update")
+
+    def test_warm_is_debounced_within_a_degradation_episode(self, tmp_path):
+        # A permanently-missing package (e.g. a stale MCP fragment) must not
+        # become a daily warm loop: one warm attempt per episode, re-armed
+        # only after the check passes again.
+        root, env = self._harness(tmp_path, npx_rc=1)
+        self._run_reload(root, env)
+        self._run_reload(root, env)
+        assert self._calls(tmp_path).count("warm-cache") == 1

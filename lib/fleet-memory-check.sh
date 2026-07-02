@@ -105,18 +105,20 @@ fleet_rss_mb() {
           END { printf "%d", rss/1024 }'
 }
 
-# Per-bot breakdown via tmux session names (best-effort)
+# Per-bot breakdown via tmux session names (best-effort). Fleet-scoped when a
+# fleet is set; the host job runs fleet-less and reports every fleet's bots.
 per_bot_summary() {
-    local bot_root
+    local bot_roots=() _d
     if [ -n "$FLEET_NAME" ]; then
-        bot_root="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/runtime/bots"
+        bot_roots=("$(resolve_bots_dir "$FLEET_NAME")")
     else
-        bot_root="$CLAUDLOBBY_ROOT/runtime/bots"
+        # while-read, not mapfile: macOS ships bash 3.2.
+        while IFS= read -r _d; do bot_roots+=("$_d"); done < <(host_bots_dirs)
     fi
-
-    if [ ! -d "$bot_root" ]; then
-        return
-    fi
+    [ "${#bot_roots[@]}" -gt 0 ] || return 0
+    local bot_root
+    for bot_root in "${bot_roots[@]}"; do
+    [ -d "$bot_root" ] || continue
 
     echo "  Per-bot RSS estimates (by session PPID chain, approximate):"
     for bot_dir in "$bot_root"/*/; do
@@ -144,6 +146,7 @@ per_bot_summary() {
             printf ' [stopped]'
         fi
         echo
+    done
     done
 }
 

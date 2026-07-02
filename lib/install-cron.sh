@@ -111,13 +111,10 @@ TMPBLOCK=$(safe_mktemp)
     done
     echo "#"
     echo "# Weekly log rotation: Sunday 03:00 — keep last 500 lines of each log."
-    echo "0 3 * * 0 $LIB/log-rotate.sh $LIB/keepalive.log $LIB/keepalive-all.log $LIB/bot-sweep-cron.log $LIB/disk-monitor.log $LIB/creds-check.log"
+    echo "0 3 * * 0 $LIB/log-rotate.sh $LIB/keepalive.log $LIB/keepalive-all.log $LIB/bot-sweep-cron.log $LIB/creds-check.log"
     echo "#"
     echo "# Fleet pulse: external liveness + activity-stuck checks."
     echo "*/$PULSE_MIN * * * * $LIB/fleet-pulse.sh $FLEET"
-    echo "#"
-    echo "# Daily disk-usage monitor: 07:00 — warn if > 90%."
-    echo "0 7 * * * $LIB/disk-monitor.sh"
     if [ "$NO_CREDS_CHECK" != 1 ]; then
         echo "#"
         echo "# Daily credential keepalive: 09:00."

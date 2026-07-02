@@ -668,6 +668,22 @@ resolve_bots_dir() {
     fi
 }
 
+# host_bots_dirs
+# Emit every bots dir on this host (one per line): root-mode runtime/bots when
+# present, plus each local/<fleet>/runtime/bots. The named enumerator for
+# host-scope scripts that report across every fleet (disk-monitor,
+# fleet-memory-check). Signal routing's first_bot_with_conf_any_fleet keeps
+# its own caller-dir-first loop — a different contract (the caller's dir may
+# be any path, and root-mode is the caller's dir there, not a fallback).
+host_bots_dirs() {
+    local d
+    [ -d "$CLAUDLOBBY_ROOT/runtime/bots" ] && printf '%s\n' "$CLAUDLOBBY_ROOT/runtime/bots"
+    for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
+        [ -d "$d" ] && printf '%s\n' "$d"
+    done
+    return 0
+}
+
 parse_fleet_bots() {
     # Emit the bot names declared in a fleet.yaml (one per line) — the single
     # source of truth for "which bots does this fleet own". Supervision scripts
@@ -880,8 +896,9 @@ _emit_fleet_signal() {
 }
 
 # emit_failure_alert <bots_dir> <event_type> <reason>
-# LOUD, never-silent failure path shared by the fleet update mechanisms
-# (reload-fleet.sh = Mechanism 1; update-claude-code.sh = Mechanism 2).
+# LOUD, never-silent path for actionable incident signals — conditions an
+# operator must act on (failed update, failed restart, disk/memory pressure).
+# Routine informational nudges use emit_fleet_notice instead.
 emit_failure_alert() {
     _emit_fleet_signal "$1" "$2" "$3" "alert" "ALERT"
 }

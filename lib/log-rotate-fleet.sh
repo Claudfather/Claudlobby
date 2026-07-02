@@ -70,7 +70,7 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
                 LOGS+=("$f")
             done < <(find "${bot_dir}data" -maxdepth 3 -type f \
                 \( -name 'cron.log' -o -name 'git-pull.log' -o -name 'briefing*.log' \
-                   -o -name 'home-assistant.log' -o -name 'activity.jsonl' \) \
+                   -o -name 'home-assistant.log' -o \) \
                 -print0 2>/dev/null)
         fi
     done

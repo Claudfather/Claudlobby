@@ -62,9 +62,11 @@ fi
 # Per-bot data/ directory sizes. Fleet-scoped when a fleet is set; the host
 # job runs fleet-less and reports across every fleet on the host.
 if [ -n "$FLEET" ]; then
-    BOTS_DIRS=("$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots")
+    BOTS_DIRS=("$(resolve_bots_dir "$FLEET")")
 else
-    BOTS_DIRS=("$CLAUDLOBBY_ROOT/runtime/bots" "$CLAUDLOBBY_ROOT"/local/*/runtime/bots)
+    BOTS_DIRS=()
+    # while-read, not mapfile: macOS ships bash 3.2.
+    while IFS= read -r _d; do BOTS_DIRS+=("$_d"); done < <(host_bots_dirs)
 fi
 
 echo "$TS BOT DATA SIZES:" >>"$LOG"

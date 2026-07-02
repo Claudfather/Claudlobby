@@ -114,12 +114,8 @@ defaults:
       schedule: "Sun *-*-* 05:00:00"
       type: oneshot
     # Weekly per-bot data/ hygiene (event-JSONL bloat), analogous to
-    # log-rotation. Purges files older than 30 days; a fleet overrides
-    # retention by overriding this job's script line in fleet.yaml:
-    #   defaults:
-    #     jobs:
-    #       data-sweep:
-    #         script: "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge --days 60"
+    # log-rotation. Purges files older than 30 days; a fleet changes retention
+    # by overriding this job's script line (e.g. "... --purge --days 60").
     data-sweep:
       script: "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge"
       schedule: "Sat *-*-* 07:00:00"
