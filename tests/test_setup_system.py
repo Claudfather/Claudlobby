@@ -1,4 +1,4 @@
-"""Tests for lib/setup-system cross-platform host bootstrap (ex setup-host.sh)."""
+"""Tests for lib/setup-system — cross-platform host bootstrap + host-job enrollment."""
 
 import os
 import subprocess

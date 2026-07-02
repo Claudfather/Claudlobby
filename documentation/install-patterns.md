@@ -15,13 +15,17 @@ You can mix patterns across a fleet — e.g., bots on a Pi via cron, bots on a M
 ## Pattern 1 — macOS launchd
 
 ```bash
-# One-time host setup (idempotent, 9 phases)
-lib/setup-mac-mini.sh --fleet <name> --enroll-all
+# One-time host setup (idempotent, 9 phases incl. host-job enrollment)
+lib/setup-system
+
+# Per-fleet apply+enroll: composed jobs + bots + reconcile (idempotent,
+# skips already-healthy bots). Run `claudlobby generate` first.
+lib/setup-fleet <fleet>
 
 # Or piecewise:
-lib/install-bot.sh local/<fleet>/runtime/bots/<bot>     # one bot at a time
-lib/install-keepalive.sh <fleet>                         # fleet-wide 60s keepalive
-lib/install-creds-check.sh <fleet>                       # daily 09:00 cred probe
+lib/install-bot.sh local/<fleet>/runtime/bots/<bot>      # one bot at a time
+lib/install_fleet_timer_launchd.sh keepalive <fleet>     # any composed fleet timer by name
+lib/install_fleet_timer_launchd.sh creds-check <fleet>
 lib/install-code-audit-sweep.sh <fleet>                  # nightly code-audit sweep (only if fleet.sweep set)
 ```
 
@@ -32,15 +36,17 @@ See [mac-mini-setup-guide.md](./mac-mini-setup-guide.md) for full host setup (SS
 ## Pattern 2 — Linux systemd
 
 ```bash
-# One-time, per-host
-loginctl enable-linger $USER     # so user services persist past logout
+# One-time, per-host (packages, linger, host-job enrollment — idempotent)
+lib/setup-system
 
-# Per bot
+# Per-fleet apply+enroll: composed jobs + bots + reconcile (idempotent,
+# skips already-healthy bots). Run `claudlobby generate` first.
+lib/setup-fleet <fleet>
+
+# Or piecewise, per bot / per timer:
 lib/install-bot-systemd.sh local/<fleet>/runtime/bots/<bot>
-
-# Fleet-wide timers
-lib/install-keepalive-systemd.sh <fleet>     # 60s keepalive timer
-lib/install-creds-check-systemd.sh           # daily 09:00 cred probe
+lib/install_fleet_timer.sh keepalive <fleet>     # any composed fleet timer by name
+lib/install-creds-check-systemd.sh <fleet>       # per-timer thin wrappers still work
 lib/install-code-audit-sweep-systemd.sh <fleet>  # nightly code-audit sweep (only if fleet.sweep set)
 ```
 
