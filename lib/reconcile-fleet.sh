@@ -91,12 +91,19 @@ echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before 
 job_drift=""
 _timers_dir="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/fleet/timers"
 if [ -d "$_timers_dir" ]; then
+    # Composed-but-dormant units (DORMANT manifest; enroll: false jobs) are
+    # opt-in — not enrolled by design, so never drift.
+    _dormant=""
+    if [ -f "$_timers_dir/DORMANT" ]; then
+        _dormant="$(grep -v '^#' "$_timers_dir/DORMANT" || true)"
+    fi
     case "$_OS" in
     Linux)
         for _t in "$_timers_dir"/*.timer; do
             [ -e "$_t" ] || continue
-            _tb="$(basename "$_t")"
-            systemctl --user is-enabled "$_tb" >/dev/null 2>&1 || job_drift="$job_drift ${_tb%.timer}"
+            _tb="$(basename "$_t" .timer)"
+            printf '%s\n' "$_dormant" | grep -qx "$_tb" && continue
+            systemctl --user is-enabled "$_tb.timer" >/dev/null 2>&1 || job_drift="$job_drift $_tb"
         done
         ;;
     Darwin)
@@ -104,6 +111,7 @@ if [ -d "$_timers_dir" ]; then
         for _t in "$_timers_dir"/*.plist; do
             [ -e "$_t" ] || continue
             _tb="$(basename "$_t" .plist)"
+            printf '%s\n' "$_dormant" | grep -qx "$_tb" && continue
             # Live launchd state, not file presence — a copied-but-never-
             # bootstrapped plist is still drift (mirrors is-enabled on Linux).
             launchctl print "gui/$_uid/$_tb" >/dev/null 2>&1 || job_drift="$job_drift $_tb"

@@ -14,29 +14,42 @@
 #   3. audit  — reconcile-fleet.sh (healthy/orphan/missing/unbound buckets +
 #               default-job drift).
 #
+# Jobs listed in the composed timers/ DORMANT manifest (enroll: false in the
+# jobs config) are composed-but-dormant: skipped here until a fleet opts in
+# via fleet.yaml defaults.jobs.<name>.enroll: true.
+#
 # Per-step failures are collected, not fatal: a re-run converges (idempotent,
 # resumable). Exits non-zero if anything failed.
 #
-# Usage: setup-fleet <fleet-name>
+# Usage: setup-fleet [<fleet-name>]
+#   With a fleet name: overlay fleet at local/<fleet>/.
+#   Without: root mode (fleet.yaml at $CLAUDLOBBY_ROOT — the seed flow);
+#   reconcile-fleet is overlay-only and is skipped in root mode.
 set -euo pipefail
 
-FLEET="${1:?Usage: setup-fleet <fleet-name>}"
+FLEET="${1:-}"
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
 
-FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
+if [ -n "$FLEET" ]; then
+    FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
+    FLEET_LABEL="$FLEET"
+else
+    FLEET_DIR="$CLAUDLOBBY_ROOT"
+    FLEET_LABEL="root"
+fi
 FLEET_YAML="$FLEET_DIR/fleet.yaml"
 if [ ! -f "$FLEET_YAML" ]; then
-    echo "setup-fleet: $FLEET_YAML not found (overlay fleets only — the enrollment spine has no root-mode path)" >&2
+    echo "setup-fleet: $FLEET_YAML not found — pass an overlay fleet name, or run root mode from a repo with a root fleet.yaml" >&2
     exit 1
 fi
 BOTS_DIR="$(resolve_bots_dir "$FLEET")"
 TIMERS_DIR="$FLEET_DIR/runtime/fleet/timers"
 
-log() { printf 'setup-fleet[%s]: %s\n' "$FLEET" "$*"; }
+log() { printf 'setup-fleet[%s]: %s\n' "$FLEET_LABEL" "$*"; }
 FAILURES=0
 
 # Cold-start fix: the prefix comes from fleet.yaml, not from scanning a
@@ -54,7 +67,7 @@ enroll_jobs() {
         FAILURES=$((FAILURES + 1))
         return
     fi
-    local enroller ext t base jobname found=0
+    local enroller ext t base jobname found=0 dormant=""
     if [ "$_OS" = "Linux" ]; then
         enroller="$LIB_DIR/install_fleet_timer.sh"
         ext="timer"
@@ -62,12 +75,23 @@ enroll_jobs() {
         enroller="$LIB_DIR/install_fleet_timer_launchd.sh"
         ext="plist"
     fi
+    # Composed-but-dormant units (enroll: false) — composed, never enrolled
+    # by default; a fleet opts in via defaults.jobs.<name>.enroll: true.
+    if [ -f "$TIMERS_DIR/DORMANT" ]; then
+        dormant="$(grep -v '^#' "$TIMERS_DIR/DORMANT" || true)"
+    fi
     for t in "$TIMERS_DIR/$SERVICE_PREFIX".*."$ext"; do
         [ -e "$t" ] || continue
         found=1
         base="$(basename "$t" ".$ext")" # <prefix>.<job>
         jobname="${base#"$SERVICE_PREFIX".}"
-        if SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname" "$FLEET"; then
+        if printf '%s\n' "$dormant" | grep -qx "$base"; then
+            log "· dormant (opt-in): $base — enable via fleet.yaml defaults.jobs.$jobname.enroll: true"
+            continue
+        fi
+        # TIMER_DIR + SERVICE_PREFIX per invocation: one call shape for
+        # overlay and root mode (matches setup-system's host-jobs idiom).
+        if TIMER_DIR="$TIMERS_DIR" SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname"; then
             log "✓ job enrolled: $base"
         else
             log "○ job enrollment FAILED: $base (re-run converges)"
@@ -121,6 +145,10 @@ spin_up_bots() {
 
 # --- 3. reconcile audit ---------------------------------------------------------
 reconcile() {
+    if [ -z "$FLEET" ]; then
+        log "step 3/3: reconcile audit skipped — reconcile-fleet is overlay-only (root mode)"
+        return
+    fi
     log "step 3/3: reconcile audit"
     "$LIB_DIR/reconcile-fleet.sh" "$FLEET" || FAILURES=$((FAILURES + 1))
 }

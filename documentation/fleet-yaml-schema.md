@@ -166,6 +166,18 @@ Applied to every bot. Merge rules by type:
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
 - **Tools** — deny/allow lists are **unioned** across defaults and bot-level.
 - **Hooks** — bot-level entries are **appended after** defaults per event. Same-matcher hooks group together.
+- **Jobs** — `defaults.jobs` merges by job name over the system defaults (system.yaml → fleet.yaml, shallow per-entry spread; sibling jobs are preserved). Drives the composed fleet timer units.
+
+#### `fleet.defaults.jobs.<name>.enroll`
+
+System jobs flagged `enroll: false` (e.g. `weekly-worker-restart` — bouncing workers is disruptive) are **composed-but-dormant**: their units are generated and listed in the timers/ `DORMANT` manifest, but `setup-fleet` does not enroll them and reconcile's job-drift audit ignores them. Opt a fleet in per job:
+
+```yaml
+fleet:
+  defaults:
+    jobs:
+      weekly-worker-restart: { enroll: true }
+```
 
 ### `fleet.teams`
 

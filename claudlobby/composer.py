@@ -1631,6 +1631,12 @@ def compose_fleet_timers(
     and, independently, the opt-in ``code-audit-sweep`` timer (when fleet.sweep
     is enabled).  Returns the timers dir.
 
+    Jobs flagged ``enroll: false`` are composed-but-dormant: their units are
+    emitted like any other, but their basenames land in the ``DORMANT``
+    manifest beside the units, and the setup backbone (setup-fleet,
+    reconcile's job-drift audit) skips them. A fleet opts in per job via
+    ``defaults.jobs.<name>.enroll: true`` in fleet.yaml.
+
     ``output_dir`` overrides the destination directory (the ``timers/`` subdir is
     written beneath it); it defaults to ``paths.runtime_fleet``. ``diff`` passes a
     temp dir here so it can hand this function the real ``Paths`` — keeping the
@@ -1667,6 +1673,15 @@ def compose_fleet_timers(
                 persistent=bool(cfg.get("persistent", False)),
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
             )
+        dormant = sorted(
+            f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
+        )
+        manifest_lines = [
+            "# Composed-but-dormant units — the setup backbone does not enroll",
+            "# these. Opt in via fleet.yaml defaults.jobs.<name>.enroll: true.",
+            *dormant,
+        ]
+        (timers_dir / "DORMANT").write_text("\n".join(manifest_lines) + "\n")
 
     if sweep_on:
         # Opt-in sweep timer: synthesized from fleet.sweep, not system_defaults.
