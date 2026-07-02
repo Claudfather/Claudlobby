@@ -16,6 +16,7 @@
 #   safe_mktemp        — mktemp with automatic EXIT cleanup
 #   tmux_session_name  — derive tmux session name from bot directory
 #   check_tmux_session — tmux has-session wrapper (returns 0/1)
+#   bridge_state       — classify a bot's Telegram bridge (up/no_bridge/no_token/...)
 #   show_help          — extract comment header from calling script
 #   ts_iso             — portable ISO 8601 timestamp
 #   date_relative      — portable relative date arithmetic
@@ -259,6 +260,117 @@ check_tmux_session() {
     else
         "$_TMUX_BIN" has-session -t "$session" 2>/dev/null
     fi
+}
+
+# --- Telegram channel bridge state ------------------------------------------
+
+# bridge_state <bot_dir>
+# Classify a bot's Telegram inbound bridge — the `bun server.ts` MCP child its
+# `claude` spawns from the `--channels` flag. Prints exactly one state; returns
+# 0 only for `up`:
+#   up        a live `bun server.ts` poller OWNED by this bot (exact, NUL-delimited
+#             TELEGRAM_STATE_DIR env match) whose parent is a live `claude`.
+#   no_bridge handle + token configured, but no such live owned bridge.
+#   no_token  handle configured but the resolved token is empty (the plugin exits
+#             before writing bot.pid; a bounce cannot help — escalate, don't heal).
+#   no_handle the bot has no Telegram handle (not a channel bot; callers skip).
+#   unknown   a candidate poller exists but ownership can't be verified (its
+#             /proc/<pid>/environ is unreadable, or this is not Linux). Callers
+#             MUST NOT heal on `unknown`.
+# The token VALUE is not in bot.conf — only its var NAME (TELEGRAM_TOKEN_ENV_NAME)
+# is; the value lives in the .env chain, which keepalive/fleet-pulse never source.
+# Resolve it via source_env_tiered IN A SUBSHELL so the caller's env is untouched.
+bridge_state() {
+    local bot_dir="${1:?Usage: bridge_state /path/to/bot/dir}"
+    local handle state_dir token pidfile pid comm ppid pcomm environ args psline _anc _hop
+
+    handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "")" || true
+    if [ -z "$handle" ]; then printf '%s' "no_handle"; return 1; fi
+
+    # Resolve the token the way start-bot.sh does, but in a subshell: bot.conf
+    # names the var (TELEGRAM_TOKEN_ENV_NAME); the value is in the .env tiers.
+    token="$(
+        load_bot_conf "$bot_dir" >/dev/null 2>&1 || true
+        # shellcheck disable=SC2030  # subshell-local by design: never touch the caller's env
+        BOT_DIR="$bot_dir"
+        source_env_tiered 2>/dev/null || true
+        _te="${TELEGRAM_TOKEN_ENV_NAME:-}"
+        if [ -n "$_te" ]; then printf '%s' "${!_te:-}"; fi
+    )" || true
+    if [ -z "$token" ]; then printf '%s' "no_token"; return 1; fi
+
+    state_dir="$(bot_conf_get "$bot_dir" TELEGRAM_STATE_DIR "")" || true
+    # shellcheck disable=SC2016  # literal "$HOME" is intended: bot.conf stores it unexpanded
+    case "$state_dir" in
+        '$HOME'/*) state_dir="$HOME/${state_dir#\$HOME/}" ;;
+    esac
+    pidfile="$state_dir/bot.pid"
+    if [ -z "$state_dir" ] || [ ! -f "$pidfile" ]; then printf '%s' "no_bridge"; return 1; fi
+
+    pid="$(tr -cd '0-9' < "$pidfile" 2>/dev/null)" || true
+    if [ -z "$pid" ]; then printf '%s' "no_bridge"; return 1; fi
+
+    # One ps for the target pid (-ww: no arg truncation). A non-empty line proves
+    # the pid is alive and yields comm + ppid + full args in a single call.
+    psline="$(ps -ww -o comm=,ppid=,args= -p "$pid" 2>/dev/null)" || true
+    if [ -z "$psline" ]; then printf '%s' "no_bridge"; return 1; fi
+    read -r comm ppid args <<<"$psline"
+
+    # Footgun guard: a real bridge is a `bun` process running server.ts — never a
+    # shell that merely has "server.ts" on its command line (kills phantom counts).
+    case "$comm" in
+        bun | */bun) ;;
+        *) printf '%s' "no_bridge"; return 1 ;;
+    esac
+    case "$args" in
+        *server.ts*) ;;
+        *) printf '%s' "no_bridge"; return 1 ;;
+    esac
+
+    # Ownership: the poller's environ must hold EXACTLY this bot's
+    # TELEGRAM_STATE_DIR as a NUL-delimited KEY=VALUE entry — not a substring
+    # (telegram-data must not match telegram-data-eng). Unreadable environ
+    # (EACCES / non-Linux) → unknown; never treat unprovable ownership as ours.
+    environ="/proc/$pid/environ"
+    if [ ! -r "$environ" ]; then printf '%s' "unknown"; return 1; fi
+    if ! tr '\0' '\n' < "$environ" 2>/dev/null | grep -qxF "TELEGRAM_STATE_DIR=$state_dir"; then
+        printf '%s' "no_bridge"; return 1
+    fi
+
+    # Lineage: a poller whose `claude` died reparents to the session subreaper
+    # (systemd --user / init) and delivers nothing while still holding the
+    # single-consumer token slot — a deaf orphan that must NOT read `up`. Require
+    # a live `claude` ANCESTOR. The telegram plugin's MCP command is `bun … start`,
+    # so the real tree is  claude → bun (`bun … start`) → bun server.ts  — `claude`
+    # is the GRANDPARENT, reached THROUGH bun spawn-shims, never the poller's direct
+    # parent (a direct-parent-only check read `no_bridge` for every healthy bridge).
+    # Walk up: bun/sh/bash are transparent spawn-shims (the known set between claude
+    # and the poller — extend if the plugin runtime changes) so keep climbing; the
+    # FIRST non-shim ancestor decides — `claude` → owned & live, anything else
+    # (systemd, init, an unrelated proc) → no_bridge. Stopping at the first non-shim
+    # is what stops us chasing an unrelated `claude` higher up. One ps per hop,
+    # ppid-first so a spaced comm (`tmux: server`) can't corrupt the next pid;
+    # bounded (real depth 2–3) so a malformed /proc can't spin.
+    _anc="$ppid"
+    pcomm=""
+    for _hop in 1 2 3 4 5 6 7 8; do
+        [ -n "$_anc" ] && [ "$_anc" -gt 1 ] || break
+        psline="$(ps -o ppid=,comm= -p "$_anc" 2>/dev/null)" || true
+        [ -n "$psline" ] || break
+        read -r _anc pcomm <<<"$psline"                  # _anc advances to the parent
+        case "$pcomm" in
+            claude | */claude) break ;;                  # live claude ancestor → owned
+            bun | */bun | sh | */sh | bash | */bash) ;;  # spawn shim → keep walking up
+            *) pcomm=""; break ;;                         # first real ancestor isn't claude → orphan
+        esac
+    done
+    case "$pcomm" in
+        claude | */claude) ;;
+        *) printf '%s' "no_bridge"; return 1 ;;
+    esac
+
+    printf '%s' "up"
+    return 0
 }
 
 # --- Per-bot tmux socket isolation ------------------------------------------
