@@ -51,7 +51,7 @@ def cmd_validate(args) -> int:
 
 
 def cmd_generate(args) -> int:
-    from ..composer import compose_fleet_timers
+    from ..composer import compose_fleet_timers, compose_host_timers
 
     paths = _resolve_paths(args)
     _load_env(paths)
@@ -90,6 +90,30 @@ def cmd_generate(args) -> int:
         timers_dir = compose_fleet_timers(fleet, paths, merged_defaults)
         log.info("composed fleet timers → %s", timers_dir)
 
+    # Host-global jobs (system.yaml host:) are platform equipment, not fleet
+    # config — composed unconditionally, enrolled only by setup-system.
+    host_timers_dir = compose_host_timers(paths)
+    if host_timers_dir.is_dir():
+        log.info("composed host timers → %s", host_timers_dir)
+
+    return 0
+
+
+def cmd_host_timers(args) -> int:
+    """Compose host-global timer units from system.yaml host.jobs.
+
+    Needs no fleet.yaml — host jobs are package-owned. setup-system runs this
+    before enrollment so a cold host (no fleet composed yet) still gets its
+    host units.
+    """
+    from ..composer import compose_host_timers
+
+    paths = _resolve_paths(args)
+    host_timers_dir = compose_host_timers(paths)
+    if host_timers_dir.is_dir():
+        log.info("composed host timers → %s", host_timers_dir)
+    else:
+        log.info("no host jobs declared — nothing composed")
     return 0
 
 

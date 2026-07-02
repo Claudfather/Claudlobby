@@ -562,11 +562,21 @@ class TestSystemYamlStructure:
         for name in _ALL_JOB_NAMES:
             assert name in d["jobs"], f"{name} missing from defaults.jobs"
 
-    def test_host_jobs_empty_in_phase_1(self):
-        # Phase 1 introduces host: as scaffolding; host jobs (claude-update,
-        # root-self-update, notify-behind) are populated + emitted in Phase 2/3.
-        raw = _load_system_defaults()
-        assert raw["host"].get("jobs", {}) == {}
+    def test_host_jobs_declare_claude_update(self):
+        # host.jobs are host-global singletons, enrolled once by setup-system
+        # under a fixed claudlobby-<name> identity. claude-update carries the
+        # unit semantics of the retired self-generating installer: daily 04:00,
+        # persistent catch-up, 10-min jitter, npm-capable PATH.
+        from claudlobby.config import load_host_jobs
+
+        jobs = load_host_jobs()
+        assert "claude-update" in jobs
+        cu = jobs["claude-update"]
+        assert cu["script"].endswith("update-claude-code.sh")
+        assert cu["schedule"] == "*-*-* 04:00:00"
+        assert cu["persistent"] is True
+        assert cu["randomized_delay"] == 600
+        assert "PATH" in cu.get("env", {})
 
 
 class TestResolveSystemYaml:
@@ -723,3 +733,84 @@ fleet:
             dd = {f.name: f.read_text() for f in sorted(diff_dir.iterdir())}
 
         assert gen == dd
+
+
+# ---------------------------------------------------------------------------
+# Host timer generation (system.yaml host.jobs)
+# ---------------------------------------------------------------------------
+
+
+class TestComposeHostTimers:
+    def _paths(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        return Paths(root=root, fleet_dir=root)
+
+    def test_emits_claude_update_units(self, tmp_path):
+        from claudlobby.composer import compose_host_timers
+
+        paths = self._paths(tmp_path)
+        timers_dir = compose_host_timers(paths)
+        assert timers_dir == paths.root / "runtime" / "_host" / "timers"
+
+        svc = timers_dir / "claudlobby-claude-update.service"
+        timer = timers_dir / "claudlobby-claude-update.timer"
+        plist = timers_dir / "claudlobby-claude-update.plist"
+        assert svc.is_file()
+        assert timer.is_file()
+        assert plist.is_file()
+
+        svc_text = svc.read_text()
+        # Host scope: no fleet arg on ExecStart, no CLAUDLOBBY_FLEET env.
+        assert svc_text.rstrip().endswith("lib/update-claude-code.sh")
+        assert "CLAUDLOBBY_FLEET" not in svc_text
+        assert "Environment=PATH=" in svc_text
+        assert "$HOME" not in svc_text  # expanded at compose time
+
+        timer_text = timer.read_text()
+        assert "OnCalendar=*-*-* 04:00:00" in timer_text
+        assert "Persistent=true" in timer_text
+        assert "RandomizedDelaySec=600" in timer_text
+
+        plist_text = plist.read_text()
+        assert "<string>claudlobby-claude-update</string>" in plist_text
+        assert "CLAUDLOBBY_FLEET" not in plist_text
+        # systemd-only knobs never leak into the plist.
+        assert "Persistent" not in plist_text
+        assert "RandomizedDelay" not in plist_text
+
+    def test_no_jobs_no_dir(self, tmp_path, monkeypatch):
+        import claudlobby.composer as composer_mod
+
+        monkeypatch.setattr(composer_mod, "load_host_jobs", lambda: {})
+        paths = self._paths(tmp_path)
+        timers_dir = composer_mod.compose_host_timers(paths)
+        assert not timers_dir.exists()
+
+    def test_output_dir_redirect_matches_default(self, tmp_path):
+        # host-timers must stay single-sourced: a redirected compose (the
+        # diff-style path) emits byte-identical units to the default one.
+        from claudlobby.composer import compose_host_timers
+
+        paths = self._paths(tmp_path)
+        default_dir = compose_host_timers(paths)
+        redirect_dir = compose_host_timers(paths, output_dir=tmp_path / "redirect")
+        default = {f.name: f.read_text() for f in sorted(default_dir.iterdir())}
+        redirect = {f.name: f.read_text() for f in sorted(redirect_dir.iterdir())}
+        assert default == redirect
+
+    def test_fleet_units_carry_no_host_knobs(self, tmp_path):
+        # Guard: adding persistent/randomized_delay/env support must not
+        # change fleet units that don't declare them.
+        from claudlobby.composer import compose_fleet_timers
+
+        paths = self._paths(tmp_path)
+        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+        units = list(timers_dir.glob("*.timer"))
+        assert units
+        for unit in units:
+            text = unit.read_text()
+            assert "Persistent=" not in text
+            assert "RandomizedDelaySec=" not in text

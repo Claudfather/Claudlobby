@@ -781,6 +781,16 @@ def _load_system_defaults(_cache: dict = {}) -> dict:  # noqa: B006
     return _cache["data"]
 
 
+def load_host_jobs() -> dict:
+    """Return ``host.jobs`` from system.yaml.
+
+    Host jobs are host-global singletons (one instance per host, fixed
+    ``claudlobby-<name>`` unit identity) and deliberately bypass the fleet
+    defaults merge -- a fleet does not override platform equipment.
+    """
+    return (_load_system_defaults().get("host") or {}).get("jobs") or {}
+
+
 def _shallow_merge(base: dict | None, override: dict | None) -> dict:
     """Shallow dict merge by key -- override wins on collision."""
     return {**(base or {}), **(override or {})}
