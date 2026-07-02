@@ -1425,7 +1425,7 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
 
 def _write_timer_units(
     timers_dir: Path,
-    prefix: str,
+    service_name: str,
     name: str,
     sched: dict,
     script: str,
@@ -1433,24 +1433,22 @@ def _write_timer_units(
     fleet_name: str | None,
     paths: Paths,
     *,
-    unit_name: str | None = None,
     persistent: bool = False,
     randomized_delay: int = 0,
-    env: dict[str, str] | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
     One emitter shared by the system_defaults timer loop, the opt-in
     fleet.sweep branch, and the host-global jobs (consolidate, don't fork).
 
-    ``fleet_name=None`` emits a host-scoped unit: no CLAUDLOBBY_FLEET env and
-    no fleet argument on ExecStart. ``unit_name`` overrides the default
-    ``<prefix>.<name>`` basename (host singletons use ``claudlobby-<name>``).
-    ``persistent`` / ``randomized_delay`` map to the systemd ``Persistent=`` /
+    ``service_name`` is the full unit basename, computed by the caller:
+    ``<service_prefix>.<name>`` for fleet timers, ``claudlobby-<name>`` for
+    host singletons. ``fleet_name=None`` emits a host-scoped unit: no
+    CLAUDLOBBY_FLEET env and no fleet argument on ExecStart. ``persistent`` /
+    ``randomized_delay`` map to the systemd ``Persistent=`` /
     ``RandomizedDelaySec=`` timer knobs; launchd has no equivalent, so the
     plist ignores them.
     """
-    service_name = unit_name or f"{prefix}.{name}"
     scope = fleet_name if fleet_name is not None else "host"
     script_expanded = script.replace("$CLAUDLOBBY_ROOT", str(paths.root))
     exec_start = f"{script_expanded} {fleet_name}" if fleet_name else script_expanded
@@ -1467,8 +1465,6 @@ def _write_timer_units(
     ]
     if fleet_name:
         service_lines.append(f"Environment=CLAUDLOBBY_FLEET={fleet_name}")
-    for key, val in (env or {}).items():
-        service_lines.append(f"Environment={key}={_expand_unit_vars(val, paths)}")
     service_lines.append(f"ExecStart={exec_start}")
     (timers_dir / f"{service_name}.service").write_text("\n".join(service_lines) + "\n")
 
@@ -1544,13 +1540,6 @@ def _write_timer_units(
             [
                 "    <key>CLAUDLOBBY_FLEET</key>",
                 f"    <string>{fleet_name}</string>",
-            ]
-        )
-    for key, val in (env or {}).items():
-        plist_lines.extend(
-            [
-                f"    <key>{key}</key>",
-                f"    <string>{_expand_unit_vars(val, paths)}</string>",
             ]
         )
     plist_lines.append("  </dict>")
@@ -1643,7 +1632,7 @@ def compose_fleet_timers(
             svc_type = cfg.get("type", "oneshot")
             _write_timer_units(
                 timers_dir,
-                prefix,
+                f"{prefix}.{name}",
                 name,
                 sched,
                 script,
@@ -1651,15 +1640,14 @@ def compose_fleet_timers(
                 fleet.name,
                 paths,
                 persistent=bool(cfg.get("persistent", False)),
-                randomized_delay=int(cfg.get("randomized_delay", 0) or 0),
-                env=cfg.get("env") or None,
+                randomized_delay=int(cfg.get("randomized_delay") or 0),
             )
 
     if sweep_on:
         # Opt-in sweep timer: synthesized from fleet.sweep, not system_defaults.
         _write_timer_units(
             timers_dir,
-            prefix,
+            f"{prefix}.code-audit-sweep",
             "code-audit-sweep",
             {"type": "calendar", "expression": fleet.sweep.schedule},
             "$CLAUDLOBBY_ROOT/lib/code-audit-sweep.sh",
@@ -1669,17 +1657,6 @@ def compose_fleet_timers(
         )
 
     return timers_dir
-
-
-def _expand_unit_vars(value: str, paths: Paths) -> str:
-    """Expand $CLAUDLOBBY_ROOT / $HOME in a unit env value at compose time.
-
-    Units are host-local artifacts (runtime/ is gitignored), so baking
-    absolute paths is safe and keeps systemd and launchd behavior identical.
-    """
-    return value.replace("$CLAUDLOBBY_ROOT", str(paths.root)).replace(
-        "$HOME", str(Path.home())
-    )
 
 
 def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path:
@@ -1706,17 +1683,15 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
         sched = _resolve_timer_schedule(cfg, {})
         _write_timer_units(
             timers_dir,
-            "claudlobby",
+            f"claudlobby-{name}",
             name,
             sched,
             cfg.get("script", ""),
             cfg.get("type", "oneshot"),
             None,
             paths,
-            unit_name=f"claudlobby-{name}",
             persistent=bool(cfg.get("persistent", False)),
-            randomized_delay=int(cfg.get("randomized_delay", 0) or 0),
-            env=cfg.get("env") or None,
+            randomized_delay=int(cfg.get("randomized_delay") or 0),
         )
     return timers_dir
 

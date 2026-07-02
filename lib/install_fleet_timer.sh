@@ -32,39 +32,8 @@ if [ "$_OS" != "Linux" ]; then
     echo "install_fleet_timer.sh: Linux only (systemd). On macOS, use the launchd installer." >&2
     exit 1
 fi
-FLEET_DIR=""
-if [ -z "${TIMER_DIR:-}" ]; then
-    FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"
-    if [ -z "$FLEET" ]; then
-        echo "install_fleet_timer.sh: pass a fleet name, set CLAUDLOBBY_FLEET, or set TIMER_DIR" >&2
-        exit 2
-    fi
-    FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
-    TIMER_DIR="$FLEET_DIR/runtime/fleet/timers"
-fi
-if [[ ! -d "$TIMER_DIR" ]]; then
-    echo "Error: $TIMER_DIR not found — run 'claudlobby generate' first." >&2
-    exit 1
-fi
-
-if [ -z "${UNIT_NAME:-}" ]; then
-    # Derive service prefix from bot.conf (all bots share the same
-    # SERVICE_PREFIX). setup-fleet passes SERVICE_PREFIX from fleet.yaml
-    # instead, so a cold start (no bot.conf composed yet) still enrolls.
-    if [ -z "${SERVICE_PREFIX:-}" ] && [ -n "$FLEET_DIR" ]; then
-        _first_conf="$(find "$FLEET_DIR/runtime/bots" -name bot.conf -print -quit 2>/dev/null)"
-        if [ -n "$_first_conf" ]; then
-            SERVICE_PREFIX="$(extract_bot_conf_var "$_first_conf" SERVICE_PREFIX)"
-        fi
-    fi
-    if [ -z "${SERVICE_PREFIX:-}" ]; then
-        echo "install_fleet_timer.sh: SERVICE_PREFIX not set and no bot.conf found." >&2
-        exit 2
-    fi
-    NAME="$SERVICE_PREFIX.$TIMER"
-else
-    NAME="$UNIT_NAME"
-fi
+resolve_timer_unit "$(basename "$0")" "$TIMER" "${1:-}" || exit $?
+NAME="$UNIT_BASENAME"
 
 # An opt-in timer (e.g. code-audit-sweep) only has units when its fleet.yaml
 # block is enabled — give a clear pointer rather than a bare cp failure.

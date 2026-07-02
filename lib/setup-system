@@ -392,9 +392,9 @@ phase_host_jobs() {
 
     # Enroll through the shared enrollment spine (no inline copy logic):
     # TIMER_DIR + UNIT_NAME env overrides point the generic enroller at the
-    # host units' fixed claudlobby-<name> identity.
-    local enroller t base jobname
-    local -a units=()
+    # host units' fixed claudlobby-<name> identity. Per-job isolation: one
+    # failed enrollment never blocks the rest — a re-run converges.
+    local enroller ext t base jobname found=0
     if [ "$_OS" = "Linux" ]; then
         if ! command -v systemctl >/dev/null 2>&1; then
             miss "systemctl unavailable — cannot enroll host jobs"
@@ -403,37 +403,26 @@ phase_host_jobs() {
             return
         fi
         enroller="$SCRIPT_DIR/install_fleet_timer.sh"
-        for t in "$host_timers_dir"/claudlobby-*.timer; do
-            [ -e "$t" ] || continue
-            units+=("$t")
-        done
+        ext="timer"
     else
         enroller="$SCRIPT_DIR/install_fleet_timer_launchd.sh"
-        for t in "$host_timers_dir"/claudlobby-*.plist; do
-            [ -e "$t" ] || continue
-            units+=("$t")
-        done
+        ext="plist"
     fi
-    if [ "${#units[@]}" -eq 0 ]; then
-        log "no host job units in $host_timers_dir"
-        return
-    fi
-
-    for t in "${units[@]}"; do
-        base="$(basename "$t")"
-        base="${base%.*}"                 # claudlobby-<job>
+    for t in "$host_timers_dir"/claudlobby-*."$ext"; do
+        [ -e "$t" ] || continue
+        found=1
+        base="$(basename "$t" ".$ext")" # claudlobby-<job>
         jobname="${base#claudlobby-}"
         if TIMER_DIR="$host_timers_dir" UNIT_NAME="$base" "$enroller" "$jobname"; then
             ok "host job enrolled: $base"
             PREREQ_OK+=("host-job-$jobname")
         else
-            # Per-job isolation: one failed enrollment must not block the
-            # rest; a re-run converges (idempotent, resumable).
             miss "host job enrollment failed: $base"
             PREREQ_MISSING+=("host-job-$jobname")
             NEXT_STEPS+=("Fix + re-run lib/setup-system to enroll $base (idempotent)")
         fi
     done
+    [ "$found" = 1 ] || log "no host job units in $host_timers_dir"
 }
 
 # ---------------------------------------------------------------------------

@@ -706,6 +706,73 @@ fleet_service_prefix() {
     printf '%s' "${val:-claudlobby}"
 }
 
+# bot_unit_present <bot-name> <bot_dir>
+# True when the bot's host service unit exists (systemd unit file / launchd
+# plist), under BOT_SERVICE from bot.conf or the bare bot name (pre-generate
+# fallback). The unit-presence half of the fleet's "healthy" definition —
+# reconcile-fleet (audit) and setup-fleet (skip-healthy) share this ONE
+# predicate so the two can never drift.
+bot_unit_present() {
+    local bot="$1" bot_dir="$2" svc
+    svc=$(bot_conf_get "$bot_dir" BOT_SERVICE "$bot")
+    case "$_OS" in
+    Linux)
+        [ -f "$HOME/.config/systemd/user/$svc.service" ] ||
+            [ -f "$HOME/.config/systemd/user/$bot.service" ]
+        ;;
+    Darwin)
+        [ -f "$HOME/Library/LaunchAgents/$svc.plist" ] ||
+            [ -f "$HOME/Library/LaunchAgents/$bot.plist" ]
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+# resolve_timer_unit <caller-name> <timer-name> [<fleet-name>]
+# Shared resolution for the generic timer enrollers (systemd + launchd):
+# honors the setup-backbone env overrides (TIMER_DIR / UNIT_NAME /
+# SERVICE_PREFIX), else resolves the fleet's composed-timers dir and the
+# <service_prefix>.<timer> basename. On success sets:
+#   TIMER_DIR      — source dir of composed units
+#   UNIT_BASENAME  — unit basename (systemd unit name / launchd Label)
+resolve_timer_unit() {
+    local caller="$1" timer="$2" fleet="${3:-${CLAUDLOBBY_FLEET:-}}"
+    local fleet_dir=""
+    if [ -z "${TIMER_DIR:-}" ]; then
+        if [ -z "$fleet" ]; then
+            echo "$caller: pass a fleet name, set CLAUDLOBBY_FLEET, or set TIMER_DIR" >&2
+            return 2
+        fi
+        fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+        TIMER_DIR="$fleet_dir/runtime/fleet/timers"
+    fi
+    if [ ! -d "$TIMER_DIR" ]; then
+        echo "Error: $TIMER_DIR not found — run 'claudlobby generate' first." >&2
+        return 1
+    fi
+    if [ -n "${UNIT_NAME:-}" ]; then
+        UNIT_BASENAME="$UNIT_NAME"
+        return 0
+    fi
+    # Derive service prefix from bot.conf (all bots share the same
+    # SERVICE_PREFIX). setup-fleet passes SERVICE_PREFIX from fleet.yaml
+    # instead, so a cold start (no bot.conf composed yet) still enrolls.
+    if [ -z "${SERVICE_PREFIX:-}" ] && [ -n "$fleet_dir" ]; then
+        local _first_conf
+        _first_conf="$(find "$fleet_dir/runtime/bots" -name bot.conf -print -quit 2>/dev/null)"
+        if [ -n "$_first_conf" ]; then
+            SERVICE_PREFIX="$(extract_bot_conf_var "$_first_conf" SERVICE_PREFIX)"
+        fi
+    fi
+    if [ -z "${SERVICE_PREFIX:-}" ]; then
+        echo "$caller: SERVICE_PREFIX not set and no bot.conf found." >&2
+        return 2
+    fi
+    UNIT_BASENAME="$SERVICE_PREFIX.$timer"
+}
+
 # extract_bot_conf_var FILE VAR_NAME
 # Extract a variable's value from a bot.conf file (strips 'export' prefix and quotes).
 # Usage: SERVICE_PREFIX="$(extract_bot_conf_var "$conf_file" SERVICE_PREFIX)"

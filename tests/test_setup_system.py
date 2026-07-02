@@ -3,8 +3,18 @@
 import os
 import subprocess
 
+import pytest
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "lib", "setup-system")
+
+
+@pytest.fixture(scope="module")
+def dry_run():
+    """One --dry-run per module — the 9-phase script probes real tools."""
+    return subprocess.run(
+        [SCRIPT, "--dry-run"], capture_output=True, text=True, timeout=30
+    )
 
 
 def test_setup_system_exists():
@@ -20,23 +30,17 @@ def test_setup_system_sources_lib_common():
     assert "lib-common.sh" in content
 
 
-def test_setup_system_dry_run():
+def test_setup_system_dry_run(dry_run):
     """--dry-run completes without error on current OS."""
-    result = subprocess.run(
-        [SCRIPT, "--dry-run"], capture_output=True, text=True, timeout=30
-    )
-    assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert "dry-run" in result.stdout.lower() or "dry-run" in result.stderr.lower()
+    assert dry_run.returncode == 0, f"stderr: {dry_run.stderr}"
+    assert "dry-run" in dry_run.stdout.lower() or "dry-run" in dry_run.stderr.lower()
 
 
-def test_setup_system_dry_run_reaches_host_jobs_phase():
+def test_setup_system_dry_run_reaches_host_jobs_phase(dry_run):
     """The host-jobs phase runs in sequence (the 9-phase pipeline is intact)."""
-    result = subprocess.run(
-        [SCRIPT, "--dry-run"], capture_output=True, text=True, timeout=30
-    )
-    assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert "phase 8/9: host jobs" in result.stdout
-    assert "phase 9/9: summary" in result.stdout
+    assert dry_run.returncode == 0, f"stderr: {dry_run.stderr}"
+    assert "phase 8/9: host jobs" in dry_run.stdout
+    assert "phase 9/9: summary" in dry_run.stdout
 
 
 def test_setup_system_has_help():

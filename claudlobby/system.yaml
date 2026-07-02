@@ -17,24 +17,21 @@
 #
 # Job entries accept optional systemd timer knobs: `persistent: true`
 # (catch up missed runs) and `randomized_delay: <seconds>` (start jitter);
-# launchd has no equivalent, so plists ignore them. An optional `env:` map
-# adds Environment= lines ($CLAUDLOBBY_ROOT / $HOME expanded at compose time).
+# launchd has no equivalent, so plists ignore them.
 
 host:
   jobs:
     # Stage the latest Claude Code binary daily (download-only; the staged
     # binary is applied on a bot's next natural restart or the weekly worker
-    # bounce -- never a live fleet bounce). PATH spans system + user npm
-    # prefixes so the timer environment resolves npm/claude regardless of
-    # install style.
+    # bounce -- never a live fleet bounce). The script owns its PATH (npm /
+    # claude resolution), so the unit needs no environment beyond
+    # CLAUDLOBBY_ROOT.
     claude-update:
       script: "$CLAUDLOBBY_ROOT/lib/update-claude-code.sh"
       schedule: "*-*-* 04:00:00"
       type: oneshot
       persistent: true
       randomized_delay: 600
-      env:
-        PATH: "/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.npm-global/bin"
 
 defaults:
   hooks:

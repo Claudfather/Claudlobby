@@ -576,7 +576,6 @@ class TestSystemYamlStructure:
         assert cu["schedule"] == "*-*-* 04:00:00"
         assert cu["persistent"] is True
         assert cu["randomized_delay"] == 600
-        assert "PATH" in cu.get("env", {})
 
 
 class TestResolveSystemYaml:
@@ -765,8 +764,6 @@ class TestComposeHostTimers:
         # Host scope: no fleet arg on ExecStart, no CLAUDLOBBY_FLEET env.
         assert svc_text.rstrip().endswith("lib/update-claude-code.sh")
         assert "CLAUDLOBBY_FLEET" not in svc_text
-        assert "Environment=PATH=" in svc_text
-        assert "$HOME" not in svc_text  # expanded at compose time
 
         timer_text = timer.read_text()
         assert "OnCalendar=*-*-* 04:00:00" in timer_text

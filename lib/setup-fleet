@@ -33,7 +33,7 @@ if [ ! -f "$FLEET_YAML" ]; then
     echo "setup-fleet: $FLEET_YAML not found (overlay fleets only — the enrollment spine has no root-mode path)" >&2
     exit 1
 fi
-BOTS_DIR="$FLEET_DIR/runtime/bots"
+BOTS_DIR="$(resolve_bots_dir "$FLEET")"
 TIMERS_DIR="$FLEET_DIR/runtime/fleet/timers"
 
 log() { printf 'setup-fleet[%s]: %s\n' "$FLEET" "$*"; }
@@ -41,8 +41,9 @@ FAILURES=0
 
 # Cold-start fix: the prefix comes from fleet.yaml, not from scanning a
 # composed bot.conf — enrollment has no ordering dependency on bot output.
+# Passed per enroller invocation (not exported) so it never bleeds into
+# spin-up-bot.sh / reconcile-fleet.sh descendants.
 SERVICE_PREFIX="$(fleet_service_prefix "$FLEET_YAML")"
-export SERVICE_PREFIX
 log "service_prefix: $SERVICE_PREFIX (from fleet.yaml)"
 
 # --- 1. fleet jobs ------------------------------------------------------------
@@ -66,7 +67,7 @@ enroll_jobs() {
         found=1
         base="$(basename "$t" ".$ext")" # <prefix>.<job>
         jobname="${base#"$SERVICE_PREFIX".}"
-        if "$enroller" "$jobname" "$FLEET"; then
+        if SERVICE_PREFIX="$SERVICE_PREFIX" "$enroller" "$jobname" "$FLEET"; then
             log "✓ job enrolled: $base"
         else
             log "○ job enrollment FAILED: $base (re-run converges)"
@@ -79,21 +80,14 @@ enroll_jobs() {
 # --- 2. bots (skip healthy) ----------------------------------------------------
 bot_is_healthy() {
     # reconcile-fleet's healthy definition: unit present AND tmux session
-    # alive on the bot's own socket. Same primitives, same taxonomy — a bot
-    # setup-fleet skips is exactly one reconcile reports healthy, and
-    # spin-up-bot.sh (which restarts) only ever runs on unhealthy bots.
-    local bot="$1" bot_dir="$2"
-    local sock svc
+    # alive on the bot's own socket — built from the same shared predicates
+    # (bot_unit_present, check_tmux_session), so a bot setup-fleet skips is
+    # exactly one reconcile reports healthy, and spin-up-bot.sh (which
+    # restarts) only ever runs on unhealthy bots.
+    local bot="$1" bot_dir="$2" sock
     sock=$(tmux_socket_for_bot "$bot_dir" 2>/dev/null || true)
     check_tmux_session "$bot" "$sock" 2>/dev/null || return 1
-    svc=$(bot_conf_get "$bot_dir" BOT_SERVICE "$bot")
-    if [ "$_OS" = "Linux" ]; then
-        [ -f "$HOME/.config/systemd/user/$svc.service" ] ||
-            [ -f "$HOME/.config/systemd/user/$bot.service" ]
-    else
-        [ -f "$HOME/Library/LaunchAgents/$svc.plist" ] ||
-            [ -f "$HOME/Library/LaunchAgents/$bot.plist" ]
-    fi
+    bot_unit_present "$bot" "$bot_dir"
 }
 
 spin_up_bots() {
