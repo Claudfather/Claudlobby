@@ -611,6 +611,22 @@ class TestJobsThreeLayerMerge:
         merged = _merge_system_into_defaults(system, defaults)
         assert merged["jobs"] == {"a": {"interval": 1}, "b": {"interval": 20}}
 
+    def test_job_entry_fields_spread_not_replaced(self):
+        # A one-line fleet toggle must overlay the system entry's fields, not
+        # replace the entry wholesale — `{enroll: true}` opts in WITHOUT
+        # re-declaring script/schedule (else the composed unit loses its
+        # ExecStart).
+        system = {
+            "jobs": {"w": {"enroll": False, "script": "w.sh", "schedule": "daily"}}
+        }
+        defaults = {"jobs": {"w": {"enroll": True}}}
+        merged = _merge_system_into_defaults(system, defaults)
+        assert merged["jobs"]["w"] == {
+            "enroll": True,
+            "script": "w.sh",
+            "schedule": "daily",
+        }
+
     def test_load_fleet_threads_system_jobs_into_merged(self, tmp_path):
         root = tmp_path / "claudlobby"
         _fleet, merged = load_fleet(_write_fleet(root, _NO_OVERRIDE_FLEET))
@@ -811,3 +827,48 @@ class TestComposeHostTimers:
             text = unit.read_text()
             assert "Persistent=" not in text
             assert "RandomizedDelaySec=" not in text
+
+
+# ---------------------------------------------------------------------------
+# DORMANT manifest (F4: composed-but-dormant opt-in jobs)
+# ---------------------------------------------------------------------------
+
+
+class TestDormantManifest:
+    def _compose(self, tmp_path, merged):
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        return compose_fleet_timers(fleet, paths, merged)
+
+    def test_manifest_lists_enroll_false_jobs(self, tmp_path):
+        timers_dir = self._compose(tmp_path, _default_merged())
+        manifest = (timers_dir / "DORMANT").read_text()
+        entries = [
+            line for line in manifest.splitlines() if line and not line.startswith("#")
+        ]
+        assert entries == ["com.test.weekly-worker-restart"]
+        # Composed-but-dormant: the units are still emitted (F4 lock).
+        assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()
+        assert (timers_dir / "com.test.weekly-worker-restart.service").is_file()
+
+    def test_fleet_enroll_true_clears_dormant_entry(self, tmp_path):
+        merged = _default_merged()
+        jobs = dict(merged["jobs"])
+        jobs["weekly-worker-restart"] = {
+            **jobs["weekly-worker-restart"],
+            "enroll": True,
+        }
+        merged = {**merged, "jobs": jobs}
+        timers_dir = self._compose(tmp_path, merged)
+        manifest = (timers_dir / "DORMANT").read_text()
+        entries = [
+            line for line in manifest.splitlines() if line and not line.startswith("#")
+        ]
+        assert entries == []
+        # Still composed, of course.
+        assert (timers_dir / "com.test.weekly-worker-restart.timer").is_file()

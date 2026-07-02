@@ -54,9 +54,19 @@ class Harness:
                 self.root / "lib" / name,
                 f'#!/bin/bash\necho "{name} $*" >> "$STUB_LOG"\nexit 0\n',
             )
+        self.enrolled = tmp_path / "enrolled"
+        self.enrolled.write_text("")
+        # is-enabled consults $STUB_ENROLLED (drift-audit tests); other verbs
+        # succeed unconditionally.
         _write_exec(
             self.bin / "systemctl",
-            '#!/bin/bash\necho "systemctl $*" >> "$STUB_LOG"\nexit 0\n',
+            "#!/bin/bash\n"
+            'echo "systemctl $*" >> "$STUB_LOG"\n'
+            'if [ "${2:-}" = "is-enabled" ]; then\n'
+            '    grep -qx "${3:-}" "$STUB_ENROLLED" 2>/dev/null\n'
+            "    exit $?\n"
+            "fi\n"
+            "exit 0\n",
         )
         # has-session succeeds iff the -t target is listed in $TMUX_HEALTHY.
         _write_exec(
@@ -68,21 +78,37 @@ class Harness:
             'grep -qx "$session" "$TMUX_HEALTHY" 2>/dev/null\n',
         )
 
-    def fleet(self, name, service_prefix="test.prefix", bots=(), timers=()):
-        fdir = self.root / "local" / name
-        (fdir / "runtime" / "bots").mkdir(parents=True)
+    def _populate(self, fdir, name, service_prefix, bots, timers, dormant):
+        (fdir / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
         lines = ["fleet:", f"  name: {name}", f"  service_prefix: {service_prefix}"]
         lines.append("  bots:")
         lines.extend(f"    {b}:" for b in bots)
         (fdir / "fleet.yaml").write_text("\n".join(lines) + "\n")
         tdir = fdir / "runtime" / "fleet" / "timers"
-        tdir.mkdir(parents=True)
+        tdir.mkdir(parents=True, exist_ok=True)
         for t in timers:
             base = f"{service_prefix}.{t}"
             (tdir / f"{base}.service").write_text("[Service]\n")
             (tdir / f"{base}.timer").write_text("[Timer]\n")
             (tdir / f"{base}.plist").write_text("<plist/>\n")
+        manifest = ["# dormant units"] + [f"{service_prefix}.{d}" for d in dormant]
+        (tdir / "DORMANT").write_text("\n".join(manifest) + "\n")
         return fdir
+
+    def fleet(self, name, service_prefix="test.prefix", bots=(), timers=(), dormant=()):
+        return self._populate(
+            self.root / "local" / name, name, service_prefix, bots, timers, dormant
+        )
+
+    def root_fleet(self, service_prefix="root.prefix", bots=(), timers=(), dormant=()):
+        # Root mode: fleet.yaml + runtime/ live at CLAUDLOBBY_ROOT (seed flow).
+        return self._populate(self.root, "seed", service_prefix, bots, timers, dormant)
+
+    def use_real_reconcile(self):
+        shutil.copy2(
+            os.path.join(LIB, "reconcile-fleet.sh"),
+            self.root / "lib" / "reconcile-fleet.sh",
+        )
 
     def bot(
         self, fleet_dir, name, service_prefix="test.prefix", healthy=False, unit=True
@@ -114,6 +140,9 @@ class Harness:
         env["HOME"] = str(self.home)
         env["STUB_LOG"] = str(self.log)
         env["TMUX_HEALTHY"] = str(self.tmux_healthy)
+        env["STUB_ENROLLED"] = str(self.enrolled)
+        # Isolate the unbound-session socket walk from the host's real tmux.
+        env["TMUX_TMPDIR"] = str(self.root / "no-tmux")
         for k in (
             "FLEET_NAME",
             "CLAUDLOBBY_FLEET",
@@ -262,3 +291,84 @@ class TestFleetServicePrefixHelper:
 
     def test_default_when_missing(self, h):
         assert self._prefix(h, "fleet:\n  name: z\n") == "claudlobby"
+
+
+class TestRootMode:
+    def test_no_arg_enrolls_from_root_fleet_yaml(self, h):
+        # The seed flow (setup skill Step 5): fleet.yaml at CLAUDLOBBY_ROOT,
+        # no overlay, no bot.conf anywhere — prefix from the root fleet.yaml.
+        h.root_fleet(bots=(), timers=("keepalive", "fleet-pulse"))
+        r = h.run(_sf(h))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "service_prefix: root.prefix (from fleet.yaml)" in r.stdout
+        log = h.stub_log()
+        assert "systemctl --user enable --now root.prefix.keepalive.timer" in log
+        assert "systemctl --user enable --now root.prefix.fleet-pulse.timer" in log
+        # reconcile-fleet is overlay-only: skipped with a log line, not run.
+        assert "reconcile audit skipped" in r.stdout
+        assert "reconcile-fleet.sh" not in log
+
+    def test_root_mode_skips_healthy_bot(self, h):
+        h.root_fleet(bots=("claudfather",), timers=())
+        h.bot(h.root, "claudfather", service_prefix="root.prefix", healthy=True)
+        r = h.run(_sf(h))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "claudfather: already healthy — skipping (no restart)" in r.stdout
+        assert "spin-up-bot.sh" not in h.stub_log()
+
+    def test_no_root_fleet_yaml_is_an_error(self, h):
+        r = h.run(_sf(h))
+        assert r.returncode == 1
+        assert "fleet.yaml not found" in r.stderr
+
+
+class TestDormantGate:
+    def test_dormant_units_composed_but_not_enrolled(self, h):
+        # F4: enroll:false jobs are composed-but-dormant — the unit files
+        # exist, the DORMANT manifest lists them, setup-fleet skips them.
+        h.fleet(
+            "f1",
+            timers=("keepalive", "weekly-worker-restart"),
+            dormant=("weekly-worker-restart",),
+        )
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        log = h.stub_log()
+        assert "enable --now test.prefix.keepalive.timer" in log
+        assert "test.prefix.weekly-worker-restart" not in log
+        assert "dormant (opt-in): test.prefix.weekly-worker-restart" in r.stdout
+        assert "defaults.jobs.weekly-worker-restart.enroll: true" in r.stdout
+
+    def test_opted_in_fleet_enrolls_it(self, h):
+        # A fleet that opted in composes WITHOUT the manifest entry — the
+        # unit enrolls like any default job.
+        h.fleet("f1", timers=("keepalive", "weekly-worker-restart"), dormant=())
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "enable --now test.prefix.weekly-worker-restart.timer" in h.stub_log()
+
+
+class TestReconcileJobDrift:
+    def test_drift_flags_unenrolled_but_skips_dormant(self, h):
+        # Real reconcile-fleet.sh: keepalive composed but NOT enrolled →
+        # drift; weekly-worker-restart composed + dormant → NOT drift.
+        h.use_real_reconcile()
+        h.fleet(
+            "f1",
+            timers=("keepalive", "weekly-worker-restart"),
+            dormant=("weekly-worker-restart",),
+        )
+        r = h.run(str(h.root / "lib" / "reconcile-fleet.sh"), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        drift_line = next(line for line in r.stdout.splitlines() if "job-drift" in line)
+        assert "test.prefix.keepalive" in drift_line
+        assert "weekly-worker-restart" not in drift_line
+
+    def test_enrolled_units_are_not_drift(self, h):
+        h.use_real_reconcile()
+        h.fleet("f1", timers=("keepalive",), dormant=())
+        h.enrolled.write_text("test.prefix.keepalive.timer\n")
+        r = h.run(str(h.root / "lib" / "reconcile-fleet.sh"), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        drift_line = next(line for line in r.stdout.splitlines() if "job-drift" in line)
+        assert "(none)" in drift_line

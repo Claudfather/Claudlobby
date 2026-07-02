@@ -808,9 +808,19 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
         if key == "hooks":
             merged[key] = _merge_hooks_dedup(sys_val or {}, usr_val or {})
         elif key == "jobs":
-            # Passthrough by job-name: a fleet entry overrides the system entry
-            # of the same name; sibling jobs are preserved (not hook-style dedup).
-            merged[key] = _shallow_merge(sys_val, usr_val)
+            # Merge by job-name; sibling jobs are preserved (not hook-style
+            # dedup). Within a job, fleet fields overlay the system entry
+            # (field-level spread) so a one-line toggle like
+            # `weekly-worker-restart: { enroll: true }` opts in without
+            # re-declaring the job's script/schedule.
+            merged_jobs = dict(sys_val or {})
+            for jname, jval in (usr_val or {}).items():
+                base = merged_jobs.get(jname)
+                if isinstance(base, dict) and isinstance(jval, dict):
+                    merged_jobs[jname] = _shallow_merge(base, jval)
+                else:
+                    merged_jobs[jname] = jval
+            merged[key] = merged_jobs
         elif key == "observability":
             merged[key] = _shallow_merge(sys_val, usr_val)
         elif usr_val is not None:

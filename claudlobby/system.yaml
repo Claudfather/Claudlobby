@@ -18,6 +18,13 @@
 # Job entries accept optional systemd timer knobs: `persistent: true`
 # (catch up missed runs) and `randomized_delay: <seconds>` (start jitter);
 # launchd has no equivalent, so plists ignore them.
+#
+# `enroll: false` marks a job composed-but-dormant: its units are still
+# emitted, but they are listed in the timers/ DORMANT manifest and the setup
+# backbone does not enroll them. A fleet opts in per job via fleet.yaml:
+#   defaults:
+#     jobs:
+#       weekly-worker-restart: { enroll: true }
 
 host:
   jobs:
@@ -71,7 +78,11 @@ defaults:
       script: "$CLAUDLOBBY_ROOT/lib/reload-fleet.sh"
       schedule: "*-*-* 03:30:00"
       type: oneshot
+    # Composed-but-dormant: bouncing workers onto the staged binary is
+    # disruptive, so enrollment is a per-fleet opt-in (enroll: true in
+    # fleet.yaml), never a cold-start default.
     weekly-worker-restart:
+      enroll: false
       script: "$CLAUDLOBBY_ROOT/lib/weekly-worker-restart.sh"
       schedule: "Sun *-*-* 05:00:00"
       type: oneshot
