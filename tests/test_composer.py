@@ -18,6 +18,7 @@ from claudlobby.composer import (
     _compose_hooks,
     _reconcile_access_json,
     compose_access_json,
+    compose_mcp_json,
     compose_settings_local,
     compose_systemd_unit,
     scaffold_env_files,
@@ -1159,6 +1160,52 @@ class TestMcpPermissionsInSettingsLocal:
         for name, content in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(content))
         return Paths(root=root, fleet_dir=root)
+
+    def test_mcp_trust_allowlist_sorted_no_blanket(self, tmp_path):
+        """enabledMcpjsonServers = sorted server set; blanket enableAllProjectMcpServers never emitted."""
+        paths = self._setup_mcp_library(tmp_path, {})
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        result = compose_settings_local(bot, fleet, paths, ["notion", "github"])
+        assert result["enabledMcpjsonServers"] == ["github", "notion"]
+        assert "enableAllProjectMcpServers" not in result
+
+    def test_mcp_trust_absent_without_servers(self, tmp_path):
+        """No project MCP servers → neither trust key is emitted (nothing to trust)."""
+        paths = self._setup_mcp_library(tmp_path, {})
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        for names in (None, []):
+            result = compose_settings_local(bot, fleet, paths, names)
+            assert "enabledMcpjsonServers" not in result
+            assert "enableAllProjectMcpServers" not in result
+
+    def test_mcp_trust_allowlist_matches_composed_mcp_json(self, tmp_path):
+        """The allowlist equals the composed .mcp.json server keys exactly — no drift."""
+        from claudlobby.config import McpEntry
+
+        paths = self._setup_mcp_library(
+            tmp_path,
+            {
+                "github": {
+                    "_permissions_contract": {"tools": ["search_code"]},
+                    "github": {"command": "npx", "args": ["-y", "gh-mcp"]},
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github")],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        mcp = compose_mcp_json(bot, paths)
+        result = compose_settings_local(
+            bot, fleet, paths, list(mcp["mcpServers"].keys())
+        )
+        assert result["enabledMcpjsonServers"] == sorted(mcp["mcpServers"].keys())
+        assert result["enabledMcpjsonServers"] == ["github"]
 
     def test_mcp_permissions_in_allow_list(self, tmp_path):
         """Wildcard is emitted for github MCP in settings.local allow list."""

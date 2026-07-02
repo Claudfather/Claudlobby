@@ -399,6 +399,33 @@ class TestComposeBot:
         settings = json.loads(settings_path.read_text())
         assert "permissions" in settings
 
+    def test_mcp_trust_survives_regenerate(self, fleet_dir):
+        """MCP trust is re-derived every generate; blanket flag + stray runtime keys are dropped."""
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["worker-1"]
+        bot.mcp = [McpEntry(name="github")]  # fixture ships library/mcp/github.json
+
+        bot_dir = compose_bot(bot, fleet, paths)
+        settings_path = bot_dir / ".claude" / "settings.local.json"
+        first = json.loads(settings_path.read_text())
+        assert first["enabledMcpjsonServers"] == ["github"]
+        assert "enableAllProjectMcpServers" not in first
+
+        # Simulate what Claude Code persists at runtime: a blanket grant + an unrelated key,
+        # and the allowlist removed — the exact state a naive overwrite would strip.
+        first["enableAllProjectMcpServers"] = True
+        first["runtimeOnlyKey"] = "x"
+        del first["enabledMcpjsonServers"]
+        settings_path.write_text(json.dumps(first))
+
+        # Regenerate: trust is re-derived (survives); blanket + stray gone (narrow full-overwrite).
+        compose_bot(bot, fleet, paths)
+        second = json.loads(settings_path.read_text())
+        assert second["enabledMcpjsonServers"] == ["github"]
+        assert "enableAllProjectMcpServers" not in second
+        assert "runtimeOnlyKey" not in second
+
     def test_returns_bot_dir_path(self, fleet_dir):
         paths = _make_paths(fleet_dir)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
