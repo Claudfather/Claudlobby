@@ -10,10 +10,12 @@
 #               (no composed bot.conf yet) enrolls cleanly. Then retire a
 #               prior release's legacy keepalive (step 1b — see
 #               migrate_legacy_keepalive).
-#   2. bots   — spin-up-bot.sh per declared bot, SKIPPING already-healthy
+#   2. warm   — pre-download the fleet's npx MCP packages so the first boot is a
+#               cache hit, not a simultaneous npm-install dogpile (WS-2).
+#   3. bots   — spin-up-bot.sh per declared bot, SKIPPING already-healthy
 #               bots (unit present + tmux session alive — reconcile-fleet's
 #               healthy definition) so a re-run never bounces a working bot.
-#   3. audit  — reconcile-fleet.sh (healthy/orphan/missing/unbound buckets +
+#   4. audit  — reconcile-fleet.sh (healthy/orphan/missing/unbound buckets +
 #               default-job drift).
 #
 # Jobs listed in the composed timers/ DORMANT manifest (enroll: false in the
@@ -66,7 +68,7 @@ log "service_prefix: $SERVICE_PREFIX (from fleet.yaml)"
 
 # --- 1. fleet jobs ------------------------------------------------------------
 enroll_jobs() {
-    log "step 1/3: enroll composed fleet jobs"
+    log "step 1/4: enroll composed fleet jobs"
     if [ ! -d "$TIMERS_DIR" ]; then
         log "no composed timers at $TIMERS_DIR — run 'claudlobby generate' first"
         FAILURES=$((FAILURES + 1))
@@ -149,7 +151,39 @@ migrate_legacy_keepalive() {
     fi
 }
 
-# --- 2. bots (skip healthy) ----------------------------------------------------
+# --- 2. warm npx cache (before spin-up) ---------------------------------------
+warm_npx_cache() {
+    # Skip when every declared bot is already healthy — those running bots are
+    # executing these MCP servers now, so the cache is provably warm. Matches the
+    # script's skip-when-healthy discipline (spin_up_bots) and confines the warm
+    # to actual cold-boot paths — the only time the dogpile can fire.
+    local defined b need=0
+    defined=$(parse_fleet_bots "$FLEET_YAML")
+    while IFS= read -r b; do
+        [ -z "$b" ] && continue
+        if ! bot_is_healthy "$b" "$BOTS_DIR/$b" 2>/dev/null; then need=1; break; fi
+    done <<<"$defined"
+    if [ "$need" = 0 ]; then
+        log "step 2/4: warm npx cache — all bots healthy, cache already warm (skip)"
+        return
+    fi
+    log "step 2/4: warm npx cache (pre-boot)"
+    # Bots launch their MCP servers via `npx -y <pkg>` on spin-up. On a cold
+    # ~/.npm/_npx cache a whole fleet booting together dogpiles the same
+    # npm-install simultaneously (cold ~10-30s each on a Pi) — the cold-start MCP
+    # dogpile that can leave servers dark on reboot. Warm the fleet's packages
+    # here, right before spin-up, so the first boot is a cache HIT. Non-fatal
+    # (mirrors reload-fleet): a miss just means the first MCP init cold-downloads;
+    # the cache is host-shared (~/.npm/_npx), so only the first fetch hits network.
+    # shellcheck disable=SC2086
+    if claudlobby ${FLEET:+--fleet "$FLEET"} warm-cache >/dev/null 2>&1; then
+        log "✓ npx cache warmed"
+    else
+        log "○ warm-cache skipped/failed (non-fatal — first MCP init cold-downloads)"
+    fi
+}
+
+# --- 3. bots (skip healthy) ----------------------------------------------------
 bot_is_healthy() {
     # reconcile-fleet's healthy definition: unit present AND tmux session
     # alive on the bot's own socket — built from the same shared predicates
@@ -163,7 +197,7 @@ bot_is_healthy() {
 }
 
 spin_up_bots() {
-    log "step 2/3: spin up bots (skip healthy)"
+    log "step 3/4: spin up bots (skip healthy)"
     local defined b bot_dir
     defined=$(parse_fleet_bots "$FLEET_YAML")
     if [ -z "$defined" ]; then
@@ -191,18 +225,19 @@ spin_up_bots() {
     done <<<"$defined"
 }
 
-# --- 3. reconcile audit ---------------------------------------------------------
+# --- 4. reconcile audit ---------------------------------------------------------
 reconcile() {
     if [ -z "$FLEET" ]; then
-        log "step 3/3: reconcile audit skipped — reconcile-fleet is overlay-only (root mode)"
+        log "step 4/4: reconcile audit skipped — reconcile-fleet is overlay-only (root mode)"
         return
     fi
-    log "step 3/3: reconcile audit"
+    log "step 4/4: reconcile audit"
     "$LIB_DIR/reconcile-fleet.sh" "$FLEET" || FAILURES=$((FAILURES + 1))
 }
 
 enroll_jobs
 migrate_legacy_keepalive
+warm_npx_cache
 spin_up_bots
 reconcile
 

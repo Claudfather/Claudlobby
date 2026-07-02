@@ -95,6 +95,11 @@ class Harness:
             'for a in "$@"; do [ "$prev" = "-t" ] && session="$a"; prev="$a"; done\n'
             'grep -qx "$session" "$TMUX_HEALTHY" 2>/dev/null\n',
         )
+        # claudlobby: logs its invocation so warm-cache ordering is assertable.
+        _write_exec(
+            self.bin / "claudlobby",
+            '#!/bin/bash\necho "claudlobby $*" >> "$STUB_LOG"\nexit 0\n',
+        )
 
     def _populate(self, fdir, name, service_prefix, bots, timers, dormant):
         (fdir / "runtime" / "bots").mkdir(parents=True, exist_ok=True)
@@ -227,6 +232,30 @@ class TestSetupFleetColdStart:
         unit_dir = h.home / ".config" / "systemd" / "user"
         assert (unit_dir / "test.prefix.fleet-pulse.timer").is_file()
         assert (unit_dir / "test.prefix.fleet-pulse.service").is_file()
+
+    def test_warms_npx_cache_before_spinning_up_bots(self, h):
+        # WS-2: warm the fleet's npx cache (step 2/4) BEFORE bots spin up (step
+        # 3/4), so a cold-cache fleet boot doesn't dogpile npm-install and leave
+        # MCP servers dark on reboot. Non-fatal, so it never blocks spin-up.
+        f = h.fleet("f1", bots=("b1",), timers=("fleet-pulse",))
+        h.bot(f, "b1", healthy=False)  # unhealthy → spin_up_bots will spin it up
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "step 2/4: warm npx cache" in r.stdout
+        log = h.stub_log()
+        # warm-cache invoked for the fleet, and BEFORE the bot spun up.
+        assert "claudlobby --fleet f1 warm-cache" in log
+        assert log.index("warm-cache") < log.index("spin-up-bot.sh")
+
+    def test_skips_warm_when_all_bots_healthy(self, h):
+        # Skip-when-healthy discipline: if every bot is already running (its MCP
+        # servers are live = cache warm), don't re-spawn npx warms on a re-apply.
+        f = h.fleet("f1", bots=("b1",), timers=("fleet-pulse",))
+        h.bot(f, "b1", healthy=True)  # already healthy → no spin-up, no warm
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "all bots healthy, cache already warm (skip)" in r.stdout
+        assert "warm-cache" not in h.stub_log()  # warm-cache NOT invoked
 
     def test_missing_timers_dir_fails_with_generate_pointer(self, h):
         f = h.fleet("f1", bots=(), timers=())
