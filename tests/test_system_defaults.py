@@ -577,6 +577,20 @@ class TestSystemYamlStructure:
         assert cu["persistent"] is True
         assert cu["randomized_delay"] == 600
 
+    def test_host_jobs_declare_notify_behind(self):
+        # The F5 source-currency nudge: a read-only host job that reports how
+        # many commits the shared install is behind origin/main. Notify-only —
+        # the script never pulls (auto-pull is a decoupled opt-in follow-up).
+        from claudlobby.config import load_host_jobs
+
+        jobs = load_host_jobs()
+        assert "notify-behind" in jobs
+        nb = jobs["notify-behind"]
+        assert nb["script"].endswith("notify-behind.sh")
+        assert nb["schedule"] == "*-*-* 08:00:00"
+        assert nb["persistent"] is True
+        assert nb["randomized_delay"] == 600
+
 
 class TestResolveSystemYaml:
     def test_returns_system_yaml_when_present(self, tmp_path):
@@ -792,6 +806,29 @@ class TestComposeHostTimers:
         # systemd-only knobs never leak into the plist.
         assert "Persistent" not in plist_text
         assert "RandomizedDelay" not in plist_text
+
+    def test_emits_notify_behind_units(self, tmp_path):
+        from claudlobby.composer import compose_host_timers
+
+        paths = self._paths(tmp_path)
+        timers_dir = compose_host_timers(paths)
+
+        svc = timers_dir / "claudlobby-notify-behind.service"
+        timer = timers_dir / "claudlobby-notify-behind.timer"
+        plist = timers_dir / "claudlobby-notify-behind.plist"
+        assert svc.is_file()
+        assert timer.is_file()
+        assert plist.is_file()
+
+        svc_text = svc.read_text()
+        # Host scope: no fleet arg on ExecStart, no CLAUDLOBBY_FLEET env.
+        assert svc_text.rstrip().endswith("lib/notify-behind.sh")
+        assert "CLAUDLOBBY_FLEET" not in svc_text
+
+        timer_text = timer.read_text()
+        assert "OnCalendar=*-*-* 08:00:00" in timer_text
+        assert "Persistent=true" in timer_text
+        assert "RandomizedDelaySec=600" in timer_text
 
     def test_no_jobs_no_dir(self, tmp_path, monkeypatch):
         import claudlobby.composer as composer_mod

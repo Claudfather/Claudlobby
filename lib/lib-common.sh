@@ -818,42 +818,47 @@ emit_script_error() {
         >> "$events_dir/fleet-${today}.jsonl"
 }
 
-# emit_failure_alert <bots_dir> <event_type> <reason>
-# LOUD, never-silent failure path shared by the fleet update mechanisms
-# (reload-fleet.sh = Mechanism 1; update-claude-code.sh = Mechanism 2). It
-#   1. emits a fleet-observability event {type:<event_type>, source:"alert",
+# _emit_fleet_signal <bots_dir> <event_type> <reason> <ev_source> <tmux_prefix> <tg_prefix>
+# Shared body for emit_failure_alert / emit_fleet_notice. It
+#   1. emits a fleet-observability event {type:<event_type>, source:<ev_source>,
 #      data.reason} to $CLAUDLOBBY_ROOT/state/events/fleet-<date>.jsonl, and
-#   2. alerts the fleet manager via a tmux nudge AND the Telegram escalation
+#   2. signals the fleet manager via a tmux nudge AND the Telegram channel
 #      (chat id resolved like fleet-pulse: env override, else the first bot that
-#      declares TELEGRAM_GROUP_CHAT_ID).
-# Both alert channels are best-effort and never abort the caller.
-emit_failure_alert() {
-    local bots_dir="$1" event_type="$2" reason="$3"
+#      declares TELEGRAM_GROUP_CHAT_ID — falling back across every fleet on the
+#      host, since host-scope callers run fleet-less).
+# Both delivery channels are best-effort and never abort the caller.
+_emit_fleet_signal() {
+    local bots_dir="$1" event_type="$2" reason="$3" ev_source="$4" tmux_prefix="$5" tg_prefix="$6"
 
     local events_dir="${CLAUDLOBBY_ROOT}/state/events"
     mkdir -p "$events_dir"
     local ts today escaped
     ts=$(ts_iso); today=$(date +%Y-%m-%d); escaped=$(json_escape "$reason")
-    printf '{"ts":"%s","bot":"fleet","type":"%s","source":"alert","data":{"reason":"%s"}}\n' \
-        "$ts" "$event_type" "$escaped" >> "$events_dir/fleet-${today}.jsonl"
+    printf '{"ts":"%s","bot":"fleet","type":"%s","source":"%s","data":{"reason":"%s"}}\n' \
+        "$ts" "$event_type" "$ev_source" "$escaped" >> "$events_dir/fleet-${today}.jsonl"
 
     # manager tmux nudge (resolve from whichever bot declares MANAGER_TMUX) — on
     # the manager's OWN socket (per-bot servers); a default-socket send would
     # silently miss the manager post-migration. Routed through the one safe-send
-    # primitive so a miss is logged, not swallowed.
+    # primitive so a miss is logged, not swallowed. Skipped entirely when no bot
+    # on the host declares a manager — resolve_peer_socket faults fatally on an
+    # empty session name. Socket reverse-lookup uses the resolved manager's own
+    # bots dir, which may be a fallback fleet's.
     local mgr_bot mgr mgr_socket
-    mgr_bot=$(first_bot_with_conf "$bots_dir" MANAGER_TMUX || true)
+    mgr_bot=$(first_bot_with_conf_any_fleet "$bots_dir" MANAGER_TMUX || true)
     mgr=$(bot_conf_get "$mgr_bot" MANAGER_TMUX "")
-    mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$mgr_bot" MANAGER_TMUX_SOCKET "")" "$mgr" "$bots_dir")
-    if [ -n "$mgr" ] && check_tmux_session "$mgr" "$mgr_socket"; then
-        bot_tmux_send "$mgr_socket" "$mgr" "[FLEET-ALERT] $event_type: $reason" || true
+    if [ -n "$mgr" ]; then
+        mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$mgr_bot" MANAGER_TMUX_SOCKET "")" "$mgr" "$(dirname "$mgr_bot")")
+        if check_tmux_session "$mgr" "$mgr_socket"; then
+            bot_tmux_send "$mgr_socket" "$mgr" "$tmux_prefix $event_type: $reason" || true
+        fi
     fi
 
-    # Telegram escalation (loudest channel) — mirror fleet-pulse chat-id resolution
+    # Telegram (loudest channel) — mirror fleet-pulse chat-id resolution
     local chat_bot chat_id state_dir
     chat_id="${FLEET_PULSE_ESCALATION_CHAT_ID:-}"
     if [ -z "$chat_id" ]; then
-        chat_bot=$(first_bot_with_conf "$bots_dir" TELEGRAM_GROUP_CHAT_ID || true)
+        chat_bot=$(first_bot_with_conf_any_fleet "$bots_dir" TELEGRAM_GROUP_CHAT_ID || true)
         if [ -n "$chat_bot" ]; then
             chat_id=$(bot_conf_get "$chat_bot" TELEGRAM_GROUP_CHAT_ID "")
             state_dir=$(bot_conf_get "$chat_bot" TELEGRAM_STATE_DIR "")
@@ -861,8 +866,23 @@ emit_failure_alert() {
     fi
     if [ -n "$chat_id" ]; then
         TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
-            "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "FLEET ALERT [$event_type]: $reason" >/dev/null 2>&1 || true
+            "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" >/dev/null 2>&1 || true
     fi
+}
+
+# emit_failure_alert <bots_dir> <event_type> <reason>
+# LOUD, never-silent failure path shared by the fleet update mechanisms
+# (reload-fleet.sh = Mechanism 1; update-claude-code.sh = Mechanism 2).
+emit_failure_alert() {
+    _emit_fleet_signal "$1" "$2" "$3" "alert" "[FLEET-ALERT]" "FLEET ALERT"
+}
+
+# emit_fleet_notice <bots_dir> <event_type> <message>
+# Informational sibling of emit_failure_alert: same channels, same durability,
+# but framed as a notice so routine nudges (e.g. notify-behind's "N commits
+# behind") never read as incidents or train operators to ignore FLEET ALERT.
+emit_fleet_notice() {
+    _emit_fleet_signal "$1" "$2" "$3" "notice" "[FLEET-NOTICE]" "FLEET NOTICE"
 }
 
 # install_error_trap <bot_dir>
@@ -906,6 +926,27 @@ first_bot_with_conf() {
         [ -d "$d" ] || continue
         if [ -n "$(bot_conf_get "$d" "$key" "")" ]; then
             printf '%s' "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# first_bot_with_conf_any_fleet <bots_dir> <key>
+# first_bot_with_conf, falling back across every local/<fleet>/runtime/bots on
+# the host when <bots_dir> has no declaring bot. Host-scope scripts (system.yaml
+# host.jobs) run fleet-less, so their resolve_bots_dir lands on the root-mode
+# runtime/bots — empty on multi-fleet hosts. Signal routing uses this so a
+# fleet event is delivered *somewhere* rather than silently dropped; a
+# fleet-scoped caller only reaches the fallback when its own fleet declares no
+# receiver at all.
+first_bot_with_conf_any_fleet() {
+    local bots_dir="$1" key="$2" d
+    if first_bot_with_conf "$bots_dir" "$key"; then
+        return 0
+    fi
+    for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
+        if first_bot_with_conf "$d" "$key"; then
             return 0
         fi
     done
