@@ -57,6 +57,25 @@ result=$(marker_is_newer "$TMPBOT/data/.idle" "$TMPBOT/data/.last-tool-call" && 
 assert_eq "equal mtime → returns true (tie = idle)" "yes" "$result"
 
 echo ""
+echo "=== marker_age_within tests (keepalive liveness signal) ==="
+
+# Fresh marker within the window → busy (rendering-immune BUSY signal)
+touch "$TMPBOT/data/.last-tool-call"
+result=$(marker_age_within "$TMPBOT/data/.last-tool-call" 180 && echo "busy" || echo "idle")
+assert_eq "fresh tool-call marker within window → busy" "busy" "$result"
+
+# Marker older than the window → not busy
+touch -d "10 minutes ago" "$TMPBOT/data/.last-tool-call" 2>/dev/null || \
+    touch -t "$(date -v-10M +%Y%m%d%H%M.%S 2>/dev/null)" "$TMPBOT/data/.last-tool-call"
+result=$(marker_age_within "$TMPBOT/data/.last-tool-call" 180 && echo "busy" || echo "idle")
+assert_eq "tool-call marker older than window → not busy" "idle" "$result"
+
+# Missing marker → not busy (conservative — keepalive falls back to pane parsing)
+rm -f "$TMPBOT/data/.last-tool-call"
+result=$(marker_age_within "$TMPBOT/data/.last-tool-call" 180 && echo "busy" || echo "idle")
+assert_eq "missing tool-call marker → not busy (fall back to pane)" "idle" "$result"
+
+echo ""
 echo "=== fleet-pulse activity_stuck marker logic tests ==="
 
 # Simulate the fleet-pulse decision logic as a function
@@ -110,14 +129,12 @@ echo "=== classify_pane idle detection tests ==="
 # Test classify_pane logic using the same patterns from lib-common.sh
 _test_classify_pane() {
     local text="$1"
-    local _busy_spinner='[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]'
-    local _busy_verbs='(Running|Thinking|Reading|Writing|Editing|Searching|Generating|Pondering)'
-    local _busy_pattern="$_busy_spinner|$_busy_verbs"
+    local _busy_pattern='[Ee]sc to interrupt'
     local _idle_pattern="$_IDLE_PATTERN_BASE"
 
-    if echo "$text" | grep -qE "$_busy_pattern"; then
+    if printf '%s' "$text" | grep -qE "$_busy_pattern"; then
         echo "BUSY"
-    elif echo "$text" | grep -qE "$_idle_pattern"; then
+    elif printf '%s' "$text" | grep -qE "$_idle_pattern"; then
         echo "IDLE"
     else
         echo "UNKNOWN"
@@ -136,9 +153,15 @@ assert_eq "prompt with box-drawing → IDLE" "IDLE" "$result"
 result=$(_test_classify_pane "> ")
 assert_eq "angle-bracket prompt → IDLE" "IDLE" "$result"
 
-# Test 12: spinner present → BUSY
-result=$(_test_classify_pane "⠹ Reading file.txt")
-assert_eq "spinner → BUSY" "BUSY" "$result"
+# Test 12: active-turn affordance → BUSY (the stable signal, not spinner/verb)
+result=$(_test_classify_pane "⠹ Reading file.txt (esc to interrupt)")
+assert_eq "esc-to-interrupt affordance → BUSY" "BUSY" "$result"
+
+# A spinner/verb WITHOUT the affordance is intentionally NOT matched: the marker
+# covers active tool-calling, the affordance covers long thinks, and chasing the
+# verb/glyph list is the brittleness this fix removes.
+result=$(_test_classify_pane "⠹ Pondering the answer")
+assert_eq "spinner/verb without affordance → UNKNOWN" "UNKNOWN" "$result"
 
 # Test 13: shell $ prompt
 result=$(_test_classify_pane "user@host:~$ ")

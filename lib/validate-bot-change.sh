@@ -56,6 +56,7 @@ MGR="valmgr"
 IBOT="validle"
 BUSY="valbusy"
 SBOT="valsubmit"
+MBOT="valmarker"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate.XXXXXX")"
 # fleet-pulse resolves bots via resolve_bots_dir <fleet> = local/<fleet>/runtime/bots.
 BOT_DIR="$ROOT/local/$FLEET/runtime/bots/$BOT"
@@ -64,7 +65,7 @@ EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "${RB_SESSION:-}" "${IDLEK:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${RB_SESSION:-}" "${IDLEK:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}"
@@ -193,10 +194,11 @@ check "keepalive sends /reload-skills to an idle bot with .reload-pending" "$r"
 [ ! -f "$IBOT_DIR/data/.reload-pending" ] && r=yes || r=no
 check "keepalive clears .reload-pending after firing the reload" "$r"
 
-# Safety: a BUSY bot with a pending reload must NOT be interrupted (ghost-text
-# risk). A dedicated busy fixture — an explicit spinner glyph then a long sleep —
-# makes the BUSY classification deterministic regardless of test run order, rather
-# than borrowing the fleet-pulse valbot, whose pane state is incidental here.
+# WS-1 (#7) long-think path: a bot mid-thought (or a long single tool call) with
+# NO recent tool-call marker — the pane's "esc to interrupt" active-turn affordance
+# is the only active signal. classify_pane must read it BUSY so the reload is NOT
+# injected (ghost-text into a working bot). No .last-tool-call → exercises the
+# pane fallback, not the marker.
 BUSY_DIR="$ROOT/local/$FLEET/runtime/bots/$BUSY"
 mkdir -p "$BUSY_DIR/data"
 cat > "$BUSY_DIR/bot.conf" <<CONF
@@ -205,12 +207,36 @@ BOT_ID="$BUSY"
 BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 CONF
-tmux new-session -d -s "$BUSY" 'printf "⠋ Thinking...\n"; sleep 600'
+tmux new-session -d -s "$BUSY" 'printf "⠋ Thinking… (esc to interrupt)\n"; sleep 600'
 sleep 1
 touch "$BUSY_DIR/data/.reload-pending"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$BUSY_DIR" >/dev/null 2>&1 || true
 [ -f "$BUSY_DIR/data/.reload-pending" ] && r=yes || r=no
-check "keepalive leaves .reload-pending on a BUSY bot (no interrupt)" "$r"
+check "keepalive long-think: esc-to-interrupt pane (no recent marker) → BUSY, NOT reloaded (#7)" "$r"
+
+# WS-1 (#7) marker path: a bot whose pane looks IDLE (a bare prompt glyph, no
+# active-turn affordance) but made a tool call moments ago — a long op between
+# calls. Only the fresh data/.last-tool-call says active; pane parsing alone would
+# call it IDLE and inject reload keystrokes. The marker must classify it BUSY.
+MBOT_DIR="$ROOT/local/$FLEET/runtime/bots/$MBOT"
+mkdir -p "$MBOT_DIR/data"
+cat > "$MBOT_DIR/bot.conf" <<CONF
+BOT_NAME="$MBOT"
+BOT_ID="$MBOT"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+# Identical idle-looking pane to the idle bot above — the ONLY difference is the
+# fresh marker, isolating the marker's effect.
+tmux new-session -d -s "$MBOT" 'printf "\n❯ \n"; sleep 600'
+sleep 1
+touch "$MBOT_DIR/data/.reload-pending"
+touch "$MBOT_DIR/data/.last-tool-call"   # fresh marker = active recently
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$MBOT_DIR" >/dev/null 2>&1 || true
+[ -f "$MBOT_DIR/data/.reload-pending" ] && r=yes || r=no
+check "keepalive marker path: idle-looking pane + fresh .last-tool-call → BUSY, NOT reloaded (#7)" "$r"
+[ ! -f "$MBOT_DIR/data/.idle" ] && r=yes || r=no
+check "keepalive marker path: .idle marker not set (fleet-pulse stays consistent)" "$r"
 
 # Regression guard: send_reload_command must resend Enter ONLY when the TUI
 # swallowed it (command still on the input line), never after a clean submit.
