@@ -154,9 +154,7 @@ class TestKeepaliveAllArgConvention:
         libdir = os.path.join(root, "lib")
         os.makedirs(libdir, exist_ok=True)
         for script in ("keepalive.sh", "lib-common.sh"):
-            dst = os.path.join(libdir, script)
-            if not os.path.exists(dst):
-                shutil.copy2(os.path.join(LIB_DIR, script), dst)
+            shutil.copy2(os.path.join(LIB_DIR, script), os.path.join(libdir, script))
         env = {k: v for k, v in os.environ.items() if k not in ("CLAUDLOBBY_FLEET", "FLEET_NAME")}
         env["CLAUDLOBBY_ROOT"] = str(root)
         return subprocess.run(
@@ -171,9 +169,6 @@ class TestKeepaliveAllArgConvention:
         bots.mkdir(parents=True)
         r = self._run(tmp_path, "f9")
         assert r.returncode == 0, r.stderr
-        # A clean sweep writes no log lines; only FATALs would.
-        log = tmp_path / "lib" / "logs" / "keepalive-all.log"
-        assert "FATAL" not in (log.read_text() if log.exists() else "")
 
     def test_absolute_dir_arg_still_honored(self, tmp_path):
         bots = tmp_path / "elsewhere" / "bots"

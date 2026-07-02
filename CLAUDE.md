@@ -89,6 +89,7 @@ Key lifecycle scripts in `lib/`:
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
+| `rehearse-keepalive-swap.sh` | Phase 6 gate 1 — rehearse the atomic legacy-keepalive swap on a throwaway fleet with real 60s timers; journal-derived no-gap assertion |
 | `update-claude-code.sh` | Daily Claude Code binary download (download-only; no fleet bounce) — runs as the `claude-update` host job (system.yaml `host.jobs`, enrolled by `setup-system`) |
 | `notify-behind.sh` | Daily source-currency nudge — FLEET NOTICE when the install is N commits behind origin/main (notify-only, never pulls) — runs as the `notify-behind` host job |
 | `reload-fleet.sh` | Daily live plugin/skill reload — `claude plugin update` + generate, then mark running bots for a keepalive-driven `/reload` (no restart) |

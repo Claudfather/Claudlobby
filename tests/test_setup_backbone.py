@@ -58,8 +58,9 @@ class Harness:
         self.start_fail = tmp_path / "start-fail"
         self.start_fail.write_text("")
         # is-enabled consults $STUB_ENROLLED (drift-audit tests); list-unit-files
-        # / is-active / start consult their own state files (keepalive-swap
-        # tests); other verbs succeed unconditionally.
+        # / is-active / start consult their own state files, and disable removes
+        # the unit from the registry like real systemd (keepalive-swap tests);
+        # other verbs succeed unconditionally. The unit is always the last arg.
         _write_exec(
             self.bin / "systemctl",
             "#!/bin/bash\n"
@@ -73,10 +74,14 @@ class Harness:
             "        fi\n"
             "        exit 0 ;;\n"
             "    is-active)\n"
-            '        grep -qx "${3:-}" "$STUB_ACTIVE" 2>/dev/null && exit 0\n'
+            '        grep -qx "${!#}" "$STUB_ACTIVE" 2>/dev/null && exit 0\n'
             "        exit 3 ;;\n"
             "    start)\n"
-            '        grep -qx "${3:-}" "$STUB_START_FAIL" 2>/dev/null && exit 1\n'
+            '        grep -qx "${!#}" "$STUB_START_FAIL" 2>/dev/null && exit 1\n'
+            "        exit 0 ;;\n"
+            "    disable)\n"
+            '        grep -vx "${!#}" "$STUB_UNIT_FILES" > "$STUB_UNIT_FILES.tmp" 2>/dev/null || true\n'
+            '        mv "$STUB_UNIT_FILES.tmp" "$STUB_UNIT_FILES"\n'
             "        exit 0 ;;\n"
             "esac\n"
             "exit 0\n",
@@ -146,19 +151,22 @@ class Harness:
                 f.write(name + "\n")
         return bdir
 
+    @property
+    def unit_dir(self):
+        ud = self.home / ".config" / "systemd" / "user"
+        ud.mkdir(parents=True, exist_ok=True)
+        return ud
+
     def legacy_keepalive(self, fleet_name, active=True):
         # A prior release's keepalive: claudlobby-<fleet>-keepalive unit files
         # in ~/.config/systemd/user + registered in the stub's unit registry.
         base = f"claudlobby-{fleet_name}-keepalive"
-        ud = self.home / ".config" / "systemd" / "user"
-        ud.mkdir(parents=True, exist_ok=True)
-        (ud / f"{base}.service").write_text("[Service]\n")
-        (ud / f"{base}.timer").write_text("[Timer]\n")
+        (self.unit_dir / f"{base}.service").write_text("[Service]\n")
+        (self.unit_dir / f"{base}.timer").write_text("[Timer]\n")
         with open(self.unit_files, "a") as f:
             f.write(f"{base}.timer\n")
         if active:
-            with open(self.active, "a") as f:
-                f.write(f"{base}.timer\n")
+            self.mark_active(f"{base}.timer")
         return base
 
     def mark_active(self, unit):
@@ -415,18 +423,27 @@ class TestLegacyKeepaliveSwap:
     enrolled, active, and has completed a verification run — never before.
     Abort paths must leave the legacy unit fully untouched."""
 
-    def _swap_fleet(self, h):
+    def _swap_fleet(self, h, new_active=True):
         h.fleet("f1", timers=("keepalive",))
-        return h.legacy_keepalive("f1")
+        legacy = h.legacy_keepalive("f1")
+        if new_active:
+            h.mark_active("test.prefix.keepalive.timer")
+        return legacy
 
     def _log_index(self, h, needle):
         log = h.stub_log()
         assert needle in log, f"missing in stub log: {needle}\n{log}"
         return log.index(needle)
 
+    def _assert_swap_aborted_legacy_intact(self, h, r, legacy):
+        assert r.returncode == 1
+        assert "swap ABORTED" in r.stdout
+        assert f"disable --now {legacy}.timer" not in h.stub_log()
+        assert (h.unit_dir / f"{legacy}.timer").is_file()
+        assert (h.unit_dir / f"{legacy}.service").is_file()
+
     def test_swap_orders_enable_verify_disable(self, h):
         legacy = self._swap_fleet(h)
-        h.mark_active("test.prefix.keepalive.timer")
         r = h.run(_sf(h), "f1")
         assert r.returncode == 0, r.stdout + r.stderr
         enable_new = self._log_index(
@@ -440,9 +457,8 @@ class TestLegacyKeepaliveSwap:
         )
         # The atomic ordering contract: new live + verified BEFORE old retired.
         assert enable_new < verify_run < disable_old
-        ud = h.home / ".config" / "systemd" / "user"
-        assert not (ud / f"{legacy}.timer").exists()
-        assert not (ud / f"{legacy}.service").exists()
+        assert not (h.unit_dir / f"{legacy}.timer").exists()
+        assert not (h.unit_dir / f"{legacy}.service").exists()
         assert "legacy keepalive retired" in r.stdout
 
     def test_no_legacy_is_noop(self, h):
@@ -454,35 +470,22 @@ class TestLegacyKeepaliveSwap:
         assert "legacy keepalive" not in r.stdout
 
     def test_new_timer_not_active_aborts_keeps_legacy(self, h):
-        legacy = self._swap_fleet(h)
-        # STUB_ACTIVE deliberately does NOT list the new timer.
+        legacy = self._swap_fleet(h, new_active=False)
         r = h.run(_sf(h), "f1")
-        assert r.returncode == 1
-        assert "swap ABORTED" in r.stdout
-        assert f"disable --now {legacy}.timer" not in h.stub_log()
-        ud = h.home / ".config" / "systemd" / "user"
-        assert (ud / f"{legacy}.timer").is_file()
-        assert (ud / f"{legacy}.service").is_file()
+        self._assert_swap_aborted_legacy_intact(h, r, legacy)
 
     def test_verification_run_failure_aborts_keeps_legacy(self, h):
         legacy = self._swap_fleet(h)
-        h.mark_active("test.prefix.keepalive.timer")
         h.start_fail.write_text("test.prefix.keepalive.service\n")
         r = h.run(_sf(h), "f1")
-        assert r.returncode == 1
-        assert "swap ABORTED" in r.stdout
-        assert f"disable --now {legacy}.timer" not in h.stub_log()
-        ud = h.home / ".config" / "systemd" / "user"
-        assert (ud / f"{legacy}.timer").is_file()
+        self._assert_swap_aborted_legacy_intact(h, r, legacy)
 
     def test_swap_is_idempotent_after_success(self, h):
-        legacy = self._swap_fleet(h)
-        h.mark_active("test.prefix.keepalive.timer")
+        # Run 2's registry state is DERIVED: the stub's disable verb removes
+        # the unit line, mirroring real systemd after disable + daemon-reload.
+        self._swap_fleet(h)
         r1 = h.run(_sf(h), "f1")
         assert r1.returncode == 0, r1.stdout + r1.stderr
-        # Second run: the unit registry no longer lists the legacy timer
-        # (mirrors real systemd state after disable + rm + daemon-reload).
-        h.unit_files.write_text("")
         h.log.write_text("")
         r2 = h.run(_sf(h), "f1")
         assert r2.returncode == 0, r2.stdout + r2.stderr

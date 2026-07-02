@@ -8,8 +8,8 @@
 #               (install_fleet_timer.sh / install_fleet_timer_launchd.sh),
 #               with SERVICE_PREFIX read from fleet.yaml so a cold start
 #               (no composed bot.conf yet) enrolls cleanly. Then retire a
-#               prior release's claudlobby-<fleet>-keepalive via the atomic
-#               staged swap (enable-new → verify-live → disable-old; F6=a).
+#               prior release's legacy keepalive (step 1b — see
+#               migrate_legacy_keepalive).
 #   2. bots   — spin-up-bot.sh per declared bot, SKIPPING already-healthy
 #               bots (unit present + tmux session alive — reconcile-fleet's
 #               healthy definition) so a re-run never bounces a working bot.
@@ -109,9 +109,12 @@ enroll_jobs() {
 # ACTIVE, and has completed a verification run, retire the legacy unit — never
 # the reverse. During the swap supervision coverage is a union (both timers),
 # never zero; every abort path leaves the legacy unit fully untouched.
+# Rehearse first: lib/rehearse-keepalive-swap.sh (gate 1, journal-proven).
 migrate_legacy_keepalive() {
-    # Root mode has no fleet name, so the legacy scheme cannot apply; the
-    # legacy units are systemd-only (launchd never shipped them).
+    # Root mode has no fleet name, so the legacy scheme cannot apply. Scope is
+    # the systemd spelling only: every live legacy fleet is Linux, and macOS's
+    # own legacy label (pre-#289 com.claudlobby.<fleet>.keepalive) is a
+    # different scheme, out of F6 scope — extend here if one ever surfaces.
     [ -n "$FLEET" ] || return 0
     [ "$_OS" = "Linux" ] || return 0
     local legacy="claudlobby-$FLEET-keepalive" new="$SERVICE_PREFIX.keepalive" out
