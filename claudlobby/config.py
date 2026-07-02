@@ -817,7 +817,7 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
             for jname, jval in (usr_val or {}).items():
                 base = merged_jobs.get(jname)
                 if isinstance(base, dict) and isinstance(jval, dict):
-                    merged_jobs[jname] = {**base, **jval}
+                    merged_jobs[jname] = _shallow_merge(base, jval)
                 else:
                     merged_jobs[jname] = jval
             merged[key] = merged_jobs

@@ -46,7 +46,10 @@ if [ ! -f "$FLEET_YAML" ]; then
     echo "setup-fleet: $FLEET_YAML not found — pass an overlay fleet name, or run root mode from a repo with a root fleet.yaml" >&2
     exit 1
 fi
-BOTS_DIR="$(resolve_bots_dir "$FLEET")"
+# Derived from FLEET_DIR (not resolve_bots_dir): the env fallback there
+# (CLAUDLOBBY_FLEET/FLEET_NAME, exported by every bot.conf) would split-brain
+# a root-mode run from inside a bot session onto another fleet's bots dir.
+BOTS_DIR="$FLEET_DIR/runtime/bots"
 TIMERS_DIR="$FLEET_DIR/runtime/fleet/timers"
 
 log() { printf 'setup-fleet[%s]: %s\n' "$FLEET_LABEL" "$*"; }
@@ -67,7 +70,7 @@ enroll_jobs() {
         FAILURES=$((FAILURES + 1))
         return
     fi
-    local enroller ext t base jobname found=0 dormant=""
+    local enroller ext t base jobname found=0
     if [ "$_OS" = "Linux" ]; then
         enroller="$LIB_DIR/install_fleet_timer.sh"
         ext="timer"
@@ -75,17 +78,14 @@ enroll_jobs() {
         enroller="$LIB_DIR/install_fleet_timer_launchd.sh"
         ext="plist"
     fi
-    # Composed-but-dormant units (enroll: false) — composed, never enrolled
-    # by default; a fleet opts in via defaults.jobs.<name>.enroll: true.
-    if [ -f "$TIMERS_DIR/DORMANT" ]; then
-        dormant="$(grep -v '^#' "$TIMERS_DIR/DORMANT" || true)"
-    fi
     for t in "$TIMERS_DIR/$SERVICE_PREFIX".*."$ext"; do
         [ -e "$t" ] || continue
         found=1
         base="$(basename "$t" ".$ext")" # <prefix>.<job>
         jobname="${base#"$SERVICE_PREFIX".}"
-        if printf '%s\n' "$dormant" | grep -qx "$base"; then
+        # Composed-but-dormant (enroll: false) — a fleet opts in via
+        # defaults.jobs.<name>.enroll: true.
+        if unit_is_dormant "$TIMERS_DIR" "$base"; then
             log "· dormant (opt-in): $base — enable via fleet.yaml defaults.jobs.$jobname.enroll: true"
             continue
         fi

@@ -18,7 +18,7 @@ Before each step, check filesystem state. Skip completed steps:
 | `.env` exists with `TELEGRAM_TOKEN_CLAUDFATHER` filled in | Step 4 |
 | `fleet.yaml` exists | Step 4 (validate + generate) |
 | `runtime/bots/claudfather/CLAUDE.md` exists | Step 5 |
-| tmux session `claudfather` running | Report success, exit |
+| tmux session `claudfather` running | Step 5 (setup-fleet is idempotent: converges timer enrollment, skips the healthy bot), then report success |
 
 If `--check-only` was passed, run Step 1 only and exit.
 
@@ -141,14 +141,17 @@ Use `sed` or direct file editing to patch values. Do not rewrite the entire file
 ## Step 5: Apply + Enroll (setup backbone)
 
 ```bash
-lib/setup-fleet          # root mode: enrolls default fleet timers + spins up claudfather
+claudlobby warm-cache 2>&1 || true   # pre-download npx MCP packages; non-fatal
+lib/setup-fleet                      # root mode: enrolls default fleet timers + spins up claudfather
 ```
 
-One idempotent call replaces the old warm-cache + per-bot spin-up loop:
-`setup-fleet` enrolls the composed default jobs (keepalive, fleet-pulse,
+`setup-fleet` replaces the old per-bot spin-up loop with one idempotent
+call: it enrolls the composed default jobs (keepalive, fleet-pulse,
 reload-fleet, creds-check, log-rotation — opt-in jobs stay dormant), then
 spins up every declared bot, skipping bots that are already healthy, so
-re-running never restarts a working claudfather.
+re-running never restarts a working claudfather. warm-cache stays as a
+network prefetch so first boot doesn't pay a cold npx download inside the
+readiness window.
 
 After `setup-fleet`, poll for the tmux session to confirm claudfather is alive:
 

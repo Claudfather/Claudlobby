@@ -730,6 +730,15 @@ bot_unit_present() {
     esac
 }
 
+# unit_is_dormant <timers-dir> <unit-basename>
+# True when the composed DORMANT manifest lists the unit (an enroll: false
+# job — composed-but-dormant, opt-in via fleet.yaml). One predicate shared by
+# setup-fleet and reconcile-fleet so enrollment and audit can never drift.
+# Missing manifest → nothing is dormant; -x keeps comment lines inert.
+unit_is_dormant() {
+    grep -qxF "${2:?unit basename required}" "${1:?timers dir required}/DORMANT" 2>/dev/null
+}
+
 # resolve_timer_unit <caller-name> <timer-name> [<fleet-name>]
 # Shared resolution for the generic timer enrollers (systemd + launchd):
 # honors the setup-backbone env overrides (TIMER_DIR / UNIT_NAME /

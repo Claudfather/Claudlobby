@@ -120,14 +120,21 @@ The skill subdirectories should be symlinks into `library/skills/`.
 
 ## 6. Start bots
 
-The easiest way to start a bot is `lib/spin-up-bot.sh` — it's idempotent and handles service enrollment + startup:
+The easiest way to bring up a fleet is `lib/setup-fleet` — one idempotent call that enrolls the composed default timers (keepalive, fleet-pulse, reload-fleet, creds-check, log-rotation; opt-in jobs stay dormant) and spins up every declared bot, skipping bots that are already healthy:
+
+```bash
+lib/setup-fleet                    # root mode (fleet.yaml at the repo root)
+lib/setup-fleet my-fleet           # overlay mode (local/my-fleet/)
+```
+
+To start a single bot without touching the rest, `lib/spin-up-bot.sh` remains the per-bot primitive (note: it restarts the bot if it's already running):
 
 ```bash
 lib/spin-up-bot.sh runtime/bots/lead                         # root mode
 lib/spin-up-bot.sh local/my-fleet/runtime/bots/lead           # overlay mode
 ```
 
-This detects your OS, links the service unit (systemd on Linux, launchd on macOS), enables it, and starts the bot. Run it for each bot.
+Both detect your OS, link the service unit (systemd on Linux, launchd on macOS), enable it, and start the bot.
 
 ### Manual service install (alternative)
 
