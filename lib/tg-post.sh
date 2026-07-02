@@ -34,7 +34,10 @@ if [ -z "$CHAT_ID" ]; then
   exit 2
 fi
 
-TOKEN=$(grep ^TELEGRAM_BOT_TOKEN "$STATE_DIR/.env" 2>/dev/null | sed 's/^TELEGRAM_BOT_TOKEN=//' || true)
+# Bot sessions already carry the token in the environment (start-bot.sh
+# resolves it via the TELEGRAM_TOKEN_ENV_NAME indirection) — prefer it; the
+# channel-dir .env files are the fallback for env-less callers (host timers).
+TOKEN="${TELEGRAM_BOT_TOKEN:-$(grep ^TELEGRAM_BOT_TOKEN "$STATE_DIR/.env" 2>/dev/null | sed 's/^TELEGRAM_BOT_TOKEN=//' || true)}"
 if [ -z "$TOKEN" ]; then
   echo "tg-post: no TELEGRAM_BOT_TOKEN in $STATE_DIR/.env" >&2
   exit 1

@@ -265,6 +265,17 @@ class TestTgPostStateDirResolution:
         assert r.returncode == 1
         assert "no TELEGRAM_BOT_TOKEN" in r.stderr
 
+    def test_env_token_wins_over_env_files(self, tmp_path):
+        # Bot sessions carry TELEGRAM_BOT_TOKEN in the environment
+        # (start-bot.sh's TELEGRAM_TOKEN_ENV_NAME indirection) — tg-post must
+        # use it without needing any channel-dir .env on disk.
+        env = self._env(tmp_path, "{home}/.claude/channels/telegram-ghost")
+        os.remove(os.path.join(env["HOME"], ".claude", "channels", "telegram", ".env"))
+        env["TELEGRAM_BOT_TOKEN"] = "env-token"
+        r = self._run(env)
+        assert r.returncode == 0, r.stderr
+        assert "hello" in (tmp_path / "curl-capture").read_text()
+
 
 class TestBotConfGetPath:
     """bot.conf is written to be sourced; raw readers get literal $HOME /
