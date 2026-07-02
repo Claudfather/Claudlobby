@@ -100,6 +100,32 @@ echo "  ⚠ orphan:   ${orphan:-(none)}"
 echo "  ⚠ missing:  ${missing:-(none)}"
 echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before killing"
 
+# --- Default-job drift --------------------------------------------------------
+# Every composed fleet timer (merged system.yaml defaults.jobs + opt-ins like
+# code-audit-sweep) should be enrolled on this host. A composed unit with no
+# live enrollment is drift — the default tier silently rotting.
+job_drift=""
+_timers_dir="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/fleet/timers"
+if [ -d "$_timers_dir" ]; then
+    case "$_OS" in
+    Linux)
+        for _t in "$_timers_dir"/*.timer; do
+            [ -e "$_t" ] || continue
+            _tb="$(basename "$_t")"
+            systemctl --user is-enabled "$_tb" >/dev/null 2>&1 || job_drift="$job_drift ${_tb%.timer}"
+        done
+        ;;
+    Darwin)
+        for _t in "$_timers_dir"/*.plist; do
+            [ -e "$_t" ] || continue
+            _tb="$(basename "$_t")"
+            [ -f "$HOME/Library/LaunchAgents/$_tb" ] || job_drift="$job_drift ${_tb%.plist}"
+        done
+        ;;
+    esac
+    echo "  ⚠ job-drift: ${job_drift:-(none)}   ← composed timers not enrolled (fix: lib/setup-fleet $FLEET)"
+fi
+
 # --- Root-cause diagnostics for missing bots ---------------------------------
 _diagnose_missing_bot() {
     local bot="$1"

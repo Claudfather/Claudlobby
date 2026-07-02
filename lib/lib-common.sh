@@ -690,6 +690,22 @@ bot_in_fleet() {
     printf '%s\n' "$2" | grep -qx "$1"
 }
 
+# fleet_service_prefix <fleet.yaml-path>
+# Emit the fleet's service_prefix (composer default "claudlobby" when unset).
+# Mirrors claudlobby's documented schema — `service_prefix:` at 2-space indent
+# under `fleet:` — the same assumption parse_fleet_bots codifies. Reading
+# fleet.yaml directly (instead of a composed bot.conf) is what lets timer
+# enrollment run on a cold host before any bot output exists.
+fleet_service_prefix() {
+    local fleet_yaml="$1" val=""
+    if [ -f "$fleet_yaml" ]; then
+        val=$(sed -n 's/^  service_prefix:[[:space:]]*//p' "$fleet_yaml" | head -1)
+        val=${val%%#*}
+        val=$(printf '%s' "$val" | tr -d '\042\047' | sed 's/[[:space:]]*$//')
+    fi
+    printf '%s' "${val:-claudlobby}"
+}
+
 # extract_bot_conf_var FILE VAR_NAME
 # Extract a variable's value from a bot.conf file (strips 'export' prefix and quotes).
 # Usage: SERVICE_PREFIX="$(extract_bot_conf_var "$conf_file" SERVICE_PREFIX)"
