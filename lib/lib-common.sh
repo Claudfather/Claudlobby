@@ -503,6 +503,21 @@ marker_is_newer() {
     [ "$a_epoch" -ge "$b_epoch" ]
 }
 
+# marker_age_within <marker> <max_age_s>
+# Returns 0 if <marker> exists AND (now - its mtime) <= max_age_s, else 1.
+# Treats a recently-touched marker as a rendering-immune liveness signal: e.g.
+# data/.last-tool-call (bot-vitals.sh touches it on every tool call) lets a
+# supervisor tell a working bot from an idle one without parsing pane glyphs,
+# which churn with Claude Code's verb/spinner rendering.
+marker_age_within() {
+    local marker="$1" max_age="$2"
+    [ -f "$marker" ] || return 1
+    local m_epoch now_epoch
+    m_epoch=$(stat_mtime "$marker" 2>/dev/null) || return 1
+    now_epoch=$(date +%s)
+    [ "$(( now_epoch - m_epoch ))" -le "$max_age" ]
+}
+
 # --- Debounced notification ---------------------------------------------------
 
 # debounce_notify <state_dir> <bot_id> <marker_suffix> <notify_fn> <message>

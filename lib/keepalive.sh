@@ -124,22 +124,28 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
     exit 0
 fi
 
-pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
-last_lines=$(echo "$pane_content" | tail -10)
-
 # ---------------------------------------------------------------------------
 # Pane-state classification
 # ---------------------------------------------------------------------------
 # Detection strategy (ordered by reliability):
 #
-#   BUSY  — Spinner characters (braille: ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) present in the last
-#           10 lines. These are the most version-stable signal — Claude Code
-#           shows a braille spinner whenever it's processing, regardless of
-#           which verb label it uses.  Fallback: a configurable verb pattern
-#           catches labelled activity lines.
+# Liveness errs toward BUSY — a false idle reloads a working bot, far worse than
+# a skipped reload — so a bot is BUSY if EITHER signal fires:
 #
-#   IDLE  — Last non-blank line ends with a prompt glyph (>, ❯) or contains
-#           known waiting-for-input markers, AND no spinner is visible.
+#   BUSY (primary) — A recent data/.last-tool-call marker (bot-vitals.sh touches
+#           it on every tool call). A fresh marker means the bot is active —
+#           rendering-immune, so it survives Claude Code verb/spinner churn and
+#           prefersReducedMotion, which pane parsing cannot. Window:
+#           KEEPALIVE_ACTIVE_WINDOW_S (default 180s ≈ 3 keepalive cycles).
+#           Same marker fleet-pulse trusts (lib-common.sh).
+#
+#   BUSY (fallback) — classify_pane matches the "esc to interrupt" active-turn
+#           affordance, catching a long think or long single tool call that
+#           emits no marker for minutes (stable across releases, unlike the
+#           spinner/verb list).
+#
+#   IDLE  — No recent tool-call marker, AND classify_pane matches a prompt glyph
+#           (>, ❯) or a known waiting-for-input marker (no active affordance).
 #
 #   UNKNOWN — Neither signal matched.  Consecutive UNKNOWNs are tracked in
 #             a counter file; crossing a threshold logs a warning so fleet
@@ -156,10 +162,13 @@ last_lines=$(echo "$pane_content" | tail -10)
 classify_pane() {
     local text="$1"
 
-    # --- BUSY: spinner characters first, then verb pattern ---
-    local _busy_spinner='[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]'
-    local _busy_verbs='(Running|Thinking|Reading|Writing|Editing|Searching|Generating|Pondering)'
-    local _busy_pattern="$_busy_spinner|$_busy_verbs"
+    # --- BUSY: the active-turn affordance ---
+    # "esc to interrupt" is drawn during ANY active turn — including a long think
+    # or a long single tool call that emits no marker for minutes — and is stable
+    # across Claude Code releases and prefersReducedMotion. This deliberately does
+    # NOT match the braille spinner or the churning verb list
+    # (Thinking/Pondering/Marinating/…), which silently degrade on UI changes.
+    local _busy_pattern='[Ee]sc to interrupt'
     if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
         _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
     fi
@@ -171,16 +180,27 @@ classify_pane() {
         _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
     fi
 
-    if echo "$text" | grep -qE "$_busy_pattern"; then
+    if printf '%s' "$text" | grep -qE "$_busy_pattern"; then
         echo "BUSY"
-    elif echo "$text" | grep -qE "$_idle_pattern"; then
+    elif printf '%s' "$text" | grep -qE "$_idle_pattern"; then
         echo "IDLE"
     else
         echo "UNKNOWN"
     fi
 }
 
-state=$(classify_pane "$last_lines")
+# Liveness = active recently OR active now (err toward BUSY; see header). Primary:
+# a data/.last-tool-call marker within the recency window — rendering-immune, and
+# a short-circuit so a busy bot skips the pane capture entirely. Fallback: the
+# pane's "esc to interrupt" affordance, for a long think/long single call that
+# left no recent marker. The pane is only captured on the fallback path.
+if marker_age_within "$BOT_DIR/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-180}"; then
+    state=BUSY
+else
+    pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
+    last_lines=$(echo "$pane_content" | tail -10)
+    state=$(classify_pane "$last_lines")
+fi
 UNKNOWN_COUNTER="$BOT_DIR/.keepalive-unknown-count"
 UNKNOWN_THRESHOLD="${KEEPALIVE_UNKNOWN_THRESHOLD:-3}"
 
