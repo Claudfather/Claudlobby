@@ -1006,8 +1006,27 @@ def _resolve_expertise_permissions(
 BASE_TOOLS = ["Read", "Grep", "Glob"]
 
 
-def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> dict:
-    """Generate .claude/settings.local.json with memory dir, sibling isolation, tools, sandbox, and hooks."""
+def compose_settings_local(
+    bot: BotConfig,
+    fleet: FleetConfig,
+    paths: Paths,
+    mcp_server_names: list[str] | None = None,
+) -> dict:
+    """Generate .claude/settings.local.json with memory dir, sibling isolation, tools, sandbox, and hooks.
+
+    ``mcp_server_names`` is the bot's composed project MCP-server set (the keys of
+    :func:`compose_mcp_json`), threaded in from :func:`compose_bot` so it is computed
+    once. When non-empty it is emitted as ``enabledMcpjsonServers`` — a per-server trust
+    allowlist that pre-approves exactly the fleet-configured servers, so a headless
+    ``claude`` boot never stalls on the interactive MCP-approval prompt (``--permission-mode
+    auto`` does not answer it). Because this file is fully overwritten every generate, this
+    key is what makes MCP trust durable: it is re-derived each run rather than preserved as
+    runtime state. The set comes from fleet config, not the on-disk ``.mcp.json``, so a
+    server absent from fleet config stays untrusted and a regenerate drops any entry added
+    to the on-disk file (fails closed). The blanket ``enableAllProjectMcpServers`` is
+    deliberately NOT emitted: it would trust any server present on disk, including one
+    carried by a checked-out repo's ``.mcp.json``.
+    """
     bot_dir = paths.bot_runtime(bot.bot_id)
     memory_dir = str(bot_dir / "memory")
 
@@ -1107,6 +1126,10 @@ def compose_settings_local(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> 
     if fleet.plugins.marketplaces:
         settings["extraKnownMarketplaces"] = dict(fleet.plugins.marketplaces)
 
+    # MCP trust allowlist — see docstring for the derive-and-fail-closed rationale.
+    if mcp_server_names:
+        settings["enabledMcpjsonServers"] = sorted(mcp_server_names)
+
     return settings
 
 
@@ -1181,7 +1204,9 @@ def compose_bot(
 
     (bot_dir / "bot.conf").write_text(compose_bot_conf(bot, fleet, paths))
 
-    settings_local = compose_settings_local(bot, fleet, paths)
+    settings_local = compose_settings_local(
+        bot, fleet, paths, list(mcp["mcpServers"].keys())
+    )
     (bot_dir / ".claude" / "settings.local.json").write_text(
         json.dumps(settings_local, indent=2) + "\n"
     )
