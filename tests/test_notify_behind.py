@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 
-from tests.conftest import _write_exec
+from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "lib", "notify-behind.sh")
@@ -30,29 +30,11 @@ GIT = [
     "commit.gpgsign=false",
 ]
 
-# Captures chat id, the (expanded) state dir the caller resolved, and the message.
-TG_STUB = (
-    "#!/bin/bash\n"
-    'printf "%s|%s|%s\\n" "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "$1" >> "$TG_CAPTURE"\n'
-)
-
 CURL_STUB = (
     "#!/bin/bash\n"
     'echo "curl $*" >> "$CURL_CAPTURE"\n'
     'printf \'{"ok":true,"result":{"message_id":7}}\\n\'\n'
 )
-
-
-def _scrubbed_env(**overrides):
-    """os.environ minus the bot-session vars that would short-circuit chat
-    resolution (FLEET_PULSE_ESCALATION_CHAT_ID et al) or repoint the root."""
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
-    }
-    env.update(overrides)
-    return env
 
 
 def _git(cwd, *args):
@@ -125,14 +107,7 @@ class Harness:
             return [line.strip() for line in f if line.strip()]
 
     def events(self):
-        events_dir = os.path.join(self.root, "state", "events")
-        if not os.path.isdir(events_dir):
-            return ""
-        chunks = []
-        for name in sorted(os.listdir(events_dir)):
-            with open(os.path.join(events_dir, name)) as f:
-                chunks.append(f.read())
-        return "".join(chunks)
+        return read_fleet_events(self.root)
 
 
 class TestNotifyBehind:

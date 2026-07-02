@@ -3,9 +3,10 @@
 # remove files older than N days.
 #
 # Usage:
-#   data-sweep.sh                        # report only
-#   data-sweep.sh --purge                # delete files older than 30 days
-#   data-sweep.sh --purge --days 14      # delete files older than 14 days
+#   data-sweep.sh [--purge] [--days N] [<fleet-name>]
+#     (report only by default; --purge deletes files older than N days,
+#      default 30. Composed fleet units pass flags first and the fleet name
+#      last — the uniform fleet-job arg convention.)
 #
 # Reports sizes to stdout and to $CLAUDLOBBY_ROOT/lib/logs/data-sweep.log.
 # Purge mode only removes regular files — directories are left intact.
@@ -18,6 +19,7 @@ install_error_trap ""
 
 PURGE=0
 DAYS=30
+FLEET=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --purge) PURGE=1; shift ;;
@@ -32,10 +34,11 @@ while [ $# -gt 0 ]; do
             show_help
             exit 0
             ;;
-        *)
+        -*)
             echo "data-sweep: unknown arg: $1" >&2
             exit 2
             ;;
+        *) FLEET="$1"; shift ;;
     esac
 done
 
@@ -43,7 +46,7 @@ LOG="$CLAUDLOBBY_ROOT/lib/logs/data-sweep.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
 
-BOTS_DIR=$(resolve_bots_dir)
+BOTS_DIR=$(resolve_bots_dir "$FLEET")
 
 if [ ! -d "$BOTS_DIR" ]; then
     echo "$TS ERROR — bots dir not found: $BOTS_DIR" | tee -a "$LOG"

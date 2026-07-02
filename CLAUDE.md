@@ -57,11 +57,10 @@ Key lifecycle scripts in `lib/`:
 | `lib-common.sh` | Shared helpers: OS detection, bot.conf loading, safe mktemp |
 | `log-rotate-fleet.sh` | Fleet-wide log rotation |
 | `log-rotate.sh` | Single-bot log rotation |
-| `log-tool-call.sh` | Reference hook script for tool-call logging |
 | `git-pull-all.sh` | Pull all repos in a bot's projects/ directory |
 | `tg-post.sh` | Bash helper for posting to Telegram |
-| `disk-monitor.sh` | Check disk usage, alert if high |
-| `fleet-memory-check.sh` | Fleet memory planning and monitoring |
+| `disk-monitor.sh` | Daily disk-usage check, FLEET ALERT past threshold — runs as the `disk-monitor` host job |
+| `fleet-memory-check.sh` | Daily fleet RSS vs available-RAM check, FLEET ALERT past reserve floor — runs as the `fleet-memory-check` host job |
 | `bench-cold-start.sh` | Cold-start timing baseline and regression tracking |
 | `check-npx-cache.sh` | Verify npx package cache state for MCP servers |
 | `sprint-trigger.sh` | Schedule-driven autonomous sprint nudger |
@@ -83,7 +82,7 @@ Key lifecycle scripts in `lib/`:
 | `fleet-pulse.sh` | Fleet-wide heartbeat / status monitoring |
 | `tail-fleet.sh` | Fleet-wide log tail + grep filter |
 | `ci-health-check.sh` | Pre-push CI health canary for target branch |
-| `data-sweep.sh` | Data directory sweep and cleanup |
+| `data-sweep.sh` | Weekly per-bot data/ purge (30d default, fleet-overridable) — runs as the `data-sweep` fleet job |
 | `dispatch.sh` | Dispatch helper for manager → worker |
 | `dispatch-task.sh` | Task dispatch helper |
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |

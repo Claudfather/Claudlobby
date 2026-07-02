@@ -10,6 +10,34 @@ from textwrap import dedent
 import pytest
 
 
+# Captures chat id, the (expanded) state dir the caller resolved, and the
+# message — the observation point for the emit_* fleet-signal paths.
+TG_STUB = (
+    "#!/bin/bash\n"
+    'printf "%s|%s|%s\\n" "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "$1" >> "$TG_CAPTURE"\n'
+)
+
+
+def read_fleet_events(root):
+    """Concatenated fleet-event JSONL under <root>/state/events (or '')."""
+    events_dir = Path(root) / "state" / "events"
+    if not events_dir.is_dir():
+        return ""
+    return "".join(f.read_text() for f in sorted(events_dir.iterdir()))
+
+
+def _scrubbed_env(**overrides):
+    """os.environ minus the bot-session vars that would short-circuit chat
+    resolution (FLEET_PULSE_ESCALATION_CHAT_ID et al) or repoint the root."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
+    }
+    env.update(overrides)
+    return env
+
+
 def _write_exec(path, content):
     """Write a stub script and set its exec bits (shared shell-test harness helper)."""
     with open(path, "w") as f:

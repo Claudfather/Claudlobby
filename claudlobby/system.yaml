@@ -50,6 +50,22 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 600
+    # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
+    # north star): daily root-usage check, FLEET ALERT past the threshold.
+    disk-monitor:
+      script: "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh"
+      schedule: "*-*-* 05:00:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
+    # OOM guard on constrained hosts: daily fleet RSS vs available-RAM check,
+    # FLEET ALERT when the reserve floor is breached.
+    fleet-memory-check:
+      script: "$CLAUDLOBBY_ROOT/lib/fleet-memory-check.sh"
+      schedule: "*-*-* 05:30:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
 
 defaults:
   hooks:
@@ -96,4 +112,11 @@ defaults:
       enroll: false
       script: "$CLAUDLOBBY_ROOT/lib/weekly-worker-restart.sh"
       schedule: "Sun *-*-* 05:00:00"
+      type: oneshot
+    # Weekly per-bot data/ hygiene (event-JSONL bloat), analogous to
+    # log-rotation. Purges files older than 30 days; a fleet changes retention
+    # by overriding this job's script line (e.g. "... --purge --days 60").
+    data-sweep:
+      script: "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge"
+      schedule: "Sat *-*-* 07:00:00"
       type: oneshot

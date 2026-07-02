@@ -52,7 +52,23 @@ _plugin_bot=$(first_bot_with_conf "$BOTS_DIR" FLEET_PLUGINS_REQUIRED || true)
 [ -n "$_plugin_bot" ] && PLUGINS=$(bot_conf_get "$_plugin_bot" FLEET_PLUGINS_REQUIRED "")
 _reason_file=$(safe_mktemp)
 
+_warm_npx() {
+    printf '%s npx cache degraded — warming (best-effort, once per episode)\n' "$(ts_iso)" >> "$LOG"
+    claudlobby ${FLEET:+--fleet "$FLEET"} warm-cache >> "$LOG" 2>&1 || true
+}
+
 _reload_critical() {
+    # step 0: npx cache preflight. A cold cache turns MCP startup into an IO
+    # storm on SD-card hardware, so verify before touching plugins — inside
+    # the lock, because warm-cache mutates the host-shared ~/.npm/_npx.
+    # Cache health never aborts the reload, and a degraded cache warms at
+    # most once per episode (debounced): a permanently-missing package must
+    # not become a daily warm loop.
+    if "$LIB_DIR/check-npx-cache.sh" ${FLEET:+--fleet "$FLEET"} >> "$LOG" 2>&1; then
+        debounce_clear "${CLAUDLOBBY_ROOT}/state" "npx" "warm-attempted"
+    else
+        debounce_notify "${CLAUDLOBBY_ROOT}/state" "npx" "warm-attempted" _warm_npx ""
+    fi
     local _p
     for _p in $PLUGINS; do
         if ! claude plugin update "$_p" >> "$LOG" 2>&1; then
