@@ -10,10 +10,11 @@ systemd or tmux state.
 
 import os
 import shutil
-import stat
 import subprocess
 
 import pytest
+
+from tests.conftest import _write_exec
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
@@ -27,12 +28,6 @@ REAL_SCRIPTS = [
 ]
 # Replaced with invocation-logging stubs — their behavior is not under test.
 STUB_SCRIPTS = ["spin-up-bot.sh", "reconcile-fleet.sh"]
-
-
-def _write_exec(path, content):
-    with open(path, "w") as f:
-        f.write(content)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
 class Harness:

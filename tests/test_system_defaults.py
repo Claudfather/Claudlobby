@@ -562,20 +562,28 @@ class TestSystemYamlStructure:
         for name in _ALL_JOB_NAMES:
             assert name in d["jobs"], f"{name} missing from defaults.jobs"
 
-    def test_host_jobs_declare_claude_update(self):
-        # host.jobs are host-global singletons, enrolled once by setup-system
-        # under a fixed claudlobby-<name> identity. claude-update carries the
-        # unit semantics of the retired self-generating installer: daily 04:00,
-        # persistent catch-up, 10-min jitter, npm-capable PATH.
+    # host.jobs are host-global singletons, enrolled once by setup-system under
+    # a fixed claudlobby-<name> identity, all daily/persistent with 10-min
+    # jitter. claude-update stages the Claude binary (semantics of the retired
+    # self-generating installer); notify-behind is the F5 source-currency nudge
+    # (read-only — the auto-pull is a decoupled opt-in follow-up).
+    @pytest.mark.parametrize(
+        "job,script,schedule",
+        [
+            ("claude-update", "update-claude-code.sh", "*-*-* 04:00:00"),
+            ("notify-behind", "notify-behind.sh", "*-*-* 08:00:00"),
+        ],
+    )
+    def test_host_jobs_declared(self, job, script, schedule):
         from claudlobby.config import load_host_jobs
 
         jobs = load_host_jobs()
-        assert "claude-update" in jobs
-        cu = jobs["claude-update"]
-        assert cu["script"].endswith("update-claude-code.sh")
-        assert cu["schedule"] == "*-*-* 04:00:00"
-        assert cu["persistent"] is True
-        assert cu["randomized_delay"] == 600
+        assert job in jobs
+        cfg = jobs[job]
+        assert cfg["script"].endswith(script)
+        assert cfg["schedule"] == schedule
+        assert cfg["persistent"] is True
+        assert cfg["randomized_delay"] == 600
 
 
 class TestResolveSystemYaml:
@@ -762,32 +770,39 @@ class TestComposeHostTimers:
         (root / "lib").mkdir()
         return Paths(root=root, fleet_dir=root)
 
-    def test_emits_claude_update_units(self, tmp_path):
+    @pytest.mark.parametrize(
+        "job,script,schedule",
+        [
+            ("claude-update", "update-claude-code.sh", "*-*-* 04:00:00"),
+            ("notify-behind", "notify-behind.sh", "*-*-* 08:00:00"),
+        ],
+    )
+    def test_emits_host_job_units(self, tmp_path, job, script, schedule):
         from claudlobby.composer import compose_host_timers
 
         paths = self._paths(tmp_path)
         timers_dir = compose_host_timers(paths)
         assert timers_dir == paths.root / "runtime" / "_host" / "timers"
 
-        svc = timers_dir / "claudlobby-claude-update.service"
-        timer = timers_dir / "claudlobby-claude-update.timer"
-        plist = timers_dir / "claudlobby-claude-update.plist"
+        svc = timers_dir / f"claudlobby-{job}.service"
+        timer = timers_dir / f"claudlobby-{job}.timer"
+        plist = timers_dir / f"claudlobby-{job}.plist"
         assert svc.is_file()
         assert timer.is_file()
         assert plist.is_file()
 
         svc_text = svc.read_text()
         # Host scope: no fleet arg on ExecStart, no CLAUDLOBBY_FLEET env.
-        assert svc_text.rstrip().endswith("lib/update-claude-code.sh")
+        assert svc_text.rstrip().endswith(f"lib/{script}")
         assert "CLAUDLOBBY_FLEET" not in svc_text
 
         timer_text = timer.read_text()
-        assert "OnCalendar=*-*-* 04:00:00" in timer_text
+        assert f"OnCalendar={schedule}" in timer_text
         assert "Persistent=true" in timer_text
         assert "RandomizedDelaySec=600" in timer_text
 
         plist_text = plist.read_text()
-        assert "<string>claudlobby-claude-update</string>" in plist_text
+        assert f"<string>claudlobby-{job}</string>" in plist_text
         assert "CLAUDLOBBY_FLEET" not in plist_text
         # systemd-only knobs never leak into the plist.
         assert "Persistent" not in plist_text

@@ -39,6 +39,17 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 600
+    # Source-currency nudge (read-only): report how many commits the shared
+    # install is behind origin/main and notify the operator to pull. It never
+    # pulls -- the ff-only auto-pull (root-self-update) is a separate opt-in
+    # follow-up, so "the operator knows to pull" is the whole default-tier
+    # source-currency behavior.
+    notify-behind:
+      script: "$CLAUDLOBBY_ROOT/lib/notify-behind.sh"
+      schedule: "*-*-* 08:00:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
 
 defaults:
   hooks:

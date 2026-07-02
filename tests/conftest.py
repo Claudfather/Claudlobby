@@ -1,10 +1,20 @@
 """Shared fixtures for claudlobby tests."""
+
 from __future__ import annotations
 import json
+import os
+import stat
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
+
+
+def _write_exec(path, content):
+    """Write a stub script and set its exec bits (shared shell-test harness helper)."""
+    with open(path, "w") as f:
+        f.write(content)
+    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
 MINIMAL_FLEET_YAML = dedent("""\
@@ -51,8 +61,16 @@ def fleet_dir(tmp_path: Path) -> Path:
     (root / "fleet.yaml").write_text(MINIMAL_FLEET_YAML)
 
     # Minimal library
-    for kind in ("expertise", "guardrails", "protocols", "integrations",
-                 "mcp", "skills", "resources", "lessons"):
+    for kind in (
+        "expertise",
+        "guardrails",
+        "protocols",
+        "integrations",
+        "mcp",
+        "skills",
+        "resources",
+        "lessons",
+    ):
         (root / "library" / kind).mkdir(parents=True)
 
     # Expertise files the fleet references
@@ -81,7 +99,8 @@ def fleet_dir(tmp_path: Path) -> Path:
     (root / "library" / "mcp" / "github.json").write_text(json.dumps(mcp_frag))
 
     # Integration doc with env_contract
-    (root / "library" / "integrations" / "github.md").write_text(dedent("""\
+    (root / "library" / "integrations" / "github.md").write_text(
+        dedent("""\
         ---
         title: GitHub MCP
         env_contract:
@@ -93,7 +112,8 @@ def fleet_dir(tmp_path: Path) -> Path:
         # GitHub MCP
 
         Use GitHub MCP for repo operations.
-    """))
+    """)
+    )
 
     # Template
     (root / "templates").mkdir()
