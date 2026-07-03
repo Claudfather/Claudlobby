@@ -10,6 +10,14 @@ from textwrap import dedent
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_claudlobby_root(monkeypatch):
+    """Bot sessions and timer jobs export CLAUDLOBBY_ROOT, and Paths.detect()
+    honors it over the cwd walk-up — strip it so hint-less detection in tests
+    is hermetic. Tests that need it set it explicitly via monkeypatch.setenv."""
+    monkeypatch.delenv("CLAUDLOBBY_ROOT", raising=False)
+
+
 # Captures chat id, the (expanded) state dir the caller resolved, and the
 # message — the observation point for the emit_* fleet-signal paths.
 TG_STUB = (

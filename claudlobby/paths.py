@@ -356,7 +356,11 @@ class Paths:
 
     @classmethod
     def detect(cls, hint: Path | None = None, fleet: str | None = None) -> "Paths":
-        """Find the claudlobby root, walking up from `hint` (or CWD).
+        """Find the claudlobby root, walking up from the detection start.
+
+        Start precedence: explicit `hint` > ``CLAUDLOBBY_ROOT`` env var > CWD.
+        Supervised contexts (timer units, bot sessions) run from an arbitrary
+        cwd but export CLAUDLOBBY_ROOT, so the env var beats the cwd walk-up.
 
         Marker: a directory containing both `library/` and `lib/`.
 
@@ -364,15 +368,23 @@ class Paths:
         for a vault path. If the vault contains a fleet overlay for *fleet*,
         use that. Otherwise fall back to ``<root>/local/<fleet>/``.
         """
-        start = (hint or Path.cwd()).resolve()
+        start = Path(hint or os.environ.get("CLAUDLOBBY_ROOT") or Path.cwd()).resolve()
         root = None
         for candidate in [start] + list(start.parents):
             if (candidate / "library").is_dir() and (candidate / "lib").is_dir():
                 root = candidate
                 break
         if root is None:
+            source = (
+                "hint"
+                if hint
+                else "CLAUDLOBBY_ROOT env"
+                if os.environ.get("CLAUDLOBBY_ROOT")
+                else "cwd"
+            )
             raise FileNotFoundError(
-                f"Could not find claudlobby root (looked for library/ + lib/) starting at {start}"
+                f"Could not find claudlobby root (looked for library/ + lib/) "
+                f"starting at {start} (from {source})"
             )
 
         fleet_dir = None
