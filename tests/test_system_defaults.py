@@ -467,6 +467,24 @@ class TestComposeFleetTimers:
         # Daily cadence is a systemd OnCalendar expression, not an interval.
         assert "OnCalendar=" in timer.read_text()
 
+    def test_timer_units_pin_working_directory_to_root(self, tmp_path):
+        """Timer units pin WorkingDirectory=<root> (systemd + launchd twin) so
+        jobs never depend on the supervisor's spawn cwd."""
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+
+        svc_text = (timers_dir / "com.test.reload-fleet.service").read_text()
+        assert f"WorkingDirectory={root}" in svc_text
+        plist_text = (timers_dir / "com.test.reload-fleet.plist").read_text()
+        assert f"<key>WorkingDirectory</key>\n  <string>{root}</string>" in plist_text
+
     def test_weekly_worker_restart_timer(self, tmp_path):
         """The weekly worker-restart timer composes with a weekday OnCalendar and
         its script lands in the service ExecStart."""
@@ -595,7 +613,6 @@ class TestSystemYamlStructure:
         ds = jobs["data-sweep"]
         assert ds["script"].endswith("data-sweep.sh --purge")
         assert ds["schedule"].startswith("Sat ")
-
 
 
 class TestResolveSystemYaml:

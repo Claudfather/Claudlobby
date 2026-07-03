@@ -1499,6 +1499,9 @@ def _write_timer_units(
         "",
         "[Service]",
         f"Type={svc_type}",
+        # Pin cwd to the install root so jobs never depend on the
+        # supervisor's spawn cwd.
+        f"WorkingDirectory={paths.root}",
         f"Environment=CLAUDLOBBY_ROOT={paths.root}",
     ]
     if fleet_name:
@@ -1581,6 +1584,12 @@ def _write_timer_units(
             ]
         )
     plist_lines.append("  </dict>")
+    plist_lines.extend(
+        [
+            "  <key>WorkingDirectory</key>",
+            f"  <string>{paths.root}</string>",
+        ]
+    )
     if sched["type"] == "interval":
         plist_lines.extend(
             [
