@@ -1,12 +1,13 @@
 ---
 title: "Per-Bot tmux Socket Isolation"
 type: plan
-status: approved
+status: completed
 owner: clog
 tags: [runtime, supervision, tmux, reliability, dispatch]
 created: 2026-06-14
-updated: 2026-06-15
+updated: 2026-07-06
 ironclad: cycle-1 complete (CHANGES-NEEDED, 0 blockers); ALL 5 forks locked — F1/F3/F5 ratified by the fleet owner 2026-06-15; cycle-2 lock-only: CONVERGED — ready for /implement-plan
+shipped: All 5 phases merged 2026-06-17 (#422), hardened by 3 same-week follow-ups (#424, #426, #429). CLAUDE.md's runtime-model description and CHANGELOG.md's "Per-bot tmux socket isolation (#414)" entry both reflect this as current behavior.
 ---
 
 # Per-Bot tmux Socket Isolation
