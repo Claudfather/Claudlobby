@@ -4,10 +4,12 @@ type: decision
 status: ratified
 owner: clog
 created: 2026-05-11
-tags: [knowledge-system, indexing, shared-docs]
+tags: [knowledge-system, indexing, shared-docs, unadopted]
 ---
 
 # INDEX.md Auto-Discovery Convention
+
+> **Status note (added 2026-07, post-ratification audit):** this convention is ratified below and has real consumers wired into the library (`library/protocols/dispatch.md` and `library/skills/precedent-check/SKILL.md` both read `shared/.../INDEX.md`), but it has **zero adoption in this repo**. No `INDEX.md` file exists anywhere in claudlobby (`find . -iname INDEX.md` returns nothing), and no `/index` skill -- the convention's designated sole writer -- exists under `library/skills/` here. A producer may exist in a sibling plugin repo, but that is unverifiable from claudlobby alone. Treat this as an aspirational/orphaned convention within this repo until a producer skill ships here.
 
 ## Decision
 

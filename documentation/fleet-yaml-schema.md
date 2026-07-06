@@ -15,9 +15,12 @@ fleet:
     default: ~/.claude
     work: ~/.claude-work
 
+  system_defaults: true | false | { enabled: bool, hooks: bool, timers: bool, observability: bool }
+                                         # OPTIONAL — gate system.yaml injection into defaults (default: true)
+
   defaults:                             # applied to every bot unless overridden
-    model: opus | sonnet | haiku
-    effort: max | default
+    model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-6
+    effort: low | medium | high | max
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
     disable_nonessential_traffic: true | false  # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (default: true)
@@ -160,11 +163,30 @@ plugins:
 
 **`include_defaults`** — Boolean (default `true`). Set to `false` to disable the built-in default plugins and marketplaces. Unusual — the validator warns when this is set.
 
+### `fleet.system_defaults`
+
+Gates how much of the package's `system.yaml` (shared hooks, observability defaults, and job timers merged into every fleet) gets folded into this fleet's `defaults`. A value set directly in `fleet.defaults` always wins over the system tier for the same key — this field only controls whether the system tier is consulted at all.
+
+```yaml
+fleet:
+  system_defaults: false   # kill switch — no system.yaml injection at all
+
+# Per-category opt-out (all default true):
+fleet:
+  system_defaults:
+    enabled: true          # false here == the bare `false` shorthand
+    hooks: true            # merge system.yaml hooks
+    timers: true           # merge system.yaml job timers
+    observability: true    # merge system.yaml observability defaults
+```
+
+Omit the field entirely for the common case — everything defaults to `true`. Useful for a fleet that wants to supply its own hooks/observability tuning without the package defaults layered underneath.
+
 ### `fleet.defaults`
 
 Applied to every bot. Merge rules by type:
 
-- **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
+- **Lists** (skills, expertise, guardrails, protocols, resources, lessons, principles, permissions, post_actions, mcp, integrations) — bot-level **appends to** defaults (deduped, order-preserved).
 - **Scalars** (model, effort, account, mission) — bot-level **overrides** defaults.
 - **Telegram** — merged **field-by-field**. Bot-level fields override individual defaults fields (e.g., a bot can override `require_mention` while inheriting `token_env`).
 - **Sandbox** — lists (network_allowed_domains, filesystem_allow_write) are **unioned**; booleans (auto_allow_bash) use bot-level value.
@@ -256,7 +278,7 @@ List of skill basenames from `library/skills/`. Generator symlinks each into `ru
 
 `integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
 
-### `bots.<name>.guardrails` / `protocols` / `resources` / `lessons` / `principles` / `post_actions`
+### `bots.<name>.guardrails` / `protocols` / `resources` / `lessons` / `principles` / `permissions` / `post_actions`
 
 Lists of basenames from the corresponding `library/<dir>/`. Each gets appended to CLAUDE.md as its own section. Bot accumulates `defaults.<list>` + bot-level (deduped, order-preserved).
 
@@ -293,7 +315,7 @@ observability:
   dispatch_deadline: 1800       # seconds after manager dispatch before flagged overdue (default: 1800)
 ```
 
-All fields are optional integers with sensible defaults. Can be set in `defaults:` to apply fleet-wide; bot-level overrides. The validator warns if `pulse_interval` is less than 30 or `activity_stuck_threshold` is less than 60.
+All fields are optional integers with sensible defaults. Can be set in `defaults:` to apply fleet-wide; bot-level overrides. The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), and if `reap_days` is `<= 0` or greater than `365`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 
 Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`.
 
@@ -474,27 +496,32 @@ The generator assembles `runtime/bots/<name>/CLAUDE.md` in this exact order:
 1. **Expertise** — concatenated. First file's H1 titles the bot; subsequent files' H1s are stripped and bodies append.
 2. **Voice overlay** — injected after the H1 line and the first blank line.
 3. **Mission** — `## Mission` section with the paragraph from `fleet.yaml`.
-4. **Scope** — `## Scope` section if `scope:` is set.
-5. **Model strategy** — `## Model Strategy` section if `model_strategy:` is set.
-6. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
-7. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
-8. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
-9. **Principles** — `## Principles` section.
-10. **Protocols** — `## Protocols` section.
-11. **Guardrails** — `## Guardrails` section.
-12. **Lessons** — `## Lessons` section.
-13. **Post-actions** — `## Post-actions` section.
+4. **Autonomous Runner** — `## Autonomous Runner — Your Continuous Job` section if `autonomous_runner:` is set.
+5. **Scope** — `## Scope` section if `scope:` is set.
+6. **Shared Documentation** — `## Shared Documentation` section when the fleet has a shared docs directory configured.
+7. **Model strategy** — `## Model Strategy` section if `model_strategy:` is set.
+8. **Org Structure** — `## Org Structure` section if `reports_to` or `manages` is set.
+9. **Team roster** — `## Fleet You Manage` table for managers (auto-generated from `teams`).
+10. **Resources** — `## Resources` section, each `library/resources/<name>.md` concatenated.
+11. **Integrations** — `## Integrations` section (auto-paired with mcp by default).
+12. **Principles** — `## Principles` section.
+13. **Permissions** — `## Permissions` section.
+14. **Protocols** — `## Protocols` section.
+15. **Guardrails** — `## Guardrails` section.
+16. **Lessons** — `## Lessons` section.
+17. **Post-actions** — `## Post-actions` section.
 
 The result is a single CLAUDE.md you can read top-to-bottom. Each section's origin is obvious from the markdown headers.
 
 In addition to CLAUDE.md, the generator produces:
 
-- **bot.conf** — env vars sourced at startup (model flags, Telegram config, model strategy, mounts)
+- **bot.conf** — env vars sourced at startup (model flags, Telegram config, model strategy)
 - **.mcp.json** — merged MCP server configs with env-var placeholders
 - **.claude/settings.local.json** — memory dir, sibling isolation, tool permissions, sandbox config, hooks
 - **access.json** — Telegram channel config (requireMention, DM policy, human allowlist)
 - **\<bot\>.service / .plist** — systemd / launchd supervision units
 - **.claude/skills/** — symlinked skill directories
+- **mounts/** — symlinks to external host paths under `<bot-dir>/mounts/<name>`
 
 ## Validation rules
 

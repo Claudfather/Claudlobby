@@ -15,31 +15,38 @@
 - **Workflow patterns** — that's protocols (`dispatch`, `report-back`)
 - **Capability / domain knowledge** — that's expertise
 
+## Structure: flat, or nested by topic
+
+Most lessons live in a topic subdirectory — `dbt/`, `design/`, `migration/`, `orchestration/`, `railway/`, `raspberry-pi/`, `review/`, `snowflake/`, `telegram/` — once a topic accumulates more than one or two lessons. A handful of general, cross-cutting lessons stay flat at `library/lessons/*.md` (e.g. `messaging-channel-discipline.md`, `tmux-dispatch-shell-expansion.md`).
+
+Reference a nested lesson in `fleet.yaml` by its path relative to `library/lessons/`, without the extension: `lessons: [review/empirical-verification, dbt/dim-first-architecture]`. Folder expansion also works — `lessons: [review/]` pulls in every lesson under `review/`.
+
+## Frontmatter and heading convention (deliberately differs from the rest of the library)
+
+Each lesson file has `title:` (+ optional `description:`) frontmatter like most of the library, but **the body has no leading heading at all** — no H1, no H2. This is intentional, not an oversight: the compositor already renders `### <title>` from the frontmatter when it appends the item under `## Lessons` (see Composition below), so a heading in the body would either duplicate that or, worse, read as two stacked headings with different wording. Write the frontmatter title, then go straight into prose — every lesson file in the repo follows this.
+
 ## Composition
 
-Each `<lesson>.md` is appended under a `## Lessons` section, in the order listed in `fleet.yaml` `lessons:`.
+Each `<lesson>.md` is appended under a `## Lessons` section, in the order listed in `fleet.yaml` `lessons:`. The compositor renders the heading from frontmatter (`### <title>`) followed by the body — don't repeat the title as a heading inside the body itself.
 
 A bot only needs the lessons relevant to its role and tooling — a designer doesn't need to know about Snowflake auth quirks.
 
 ## Example
 
-`library/lessons/credential-keepalive.md`:
+`library/lessons/messaging-channel-discipline.md`:
 
 ```markdown
-## Lesson: silently-expiring credentials
+---
+title: Messaging channel discipline
+description: Substantive replies must go via the messaging channel tool — session output never reaches the user
+---
 
-The fleet hit a stretch where multiple service tokens (PaaS deploy keys, MCP
-auth tokens) expired on different schedules. Each expiration only surfaced
-when the next bot tried to use the credential — meaning bots failed at random
-times for reasons that had nothing to do with what they were working on.
+Every substantive response to the user must be sent through the messaging channel tool (Telegram reply, Slack post, etc.). Inline text in the terminal/session output never reaches the user's device.
 
-**Fix:** `lib/creds-check.sh` runs daily, probes each fleet credential,
-alerts Telegram on state transitions.
-
-**What this means for you:** if you see a credential failure, check
-`state/creds-check-state.json` and the Telegram archive — the failure may
-already be known and tracked.
+- Any response beyond a trivial "ack" goes through the messaging tool.
 ```
+
+A nested lesson follows the same shape, just filed under a topic folder — see `library/lessons/review/empirical-verification.md` (referenced in `fleet.yaml` as `review/empirical-verification`).
 
 ## Tone
 

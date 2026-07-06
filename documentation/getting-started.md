@@ -6,7 +6,7 @@ Bring a fresh fleet up in about 30 minutes (excluding waiting on Telegram BotFat
 
 - An Anthropic account with a Claude Code subscription (Claude Max, Team, or Enterprise) or an `ANTHROPIC_API_KEY`
 - A host you control: Mac mini, Linux box, or Raspberry Pi 5
-- `python3` (3.10+), `git`, `tmux`, `jq`, `curl` installed
+- `python3` (3.10+), `git`, `tmux`, `jq`, `curl`, `node` (18+) installed
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in
 - The Telegram channel plugin: `claude plugin install telegram@claude-plugins-official`
 - A Telegram account (to create bots via [@BotFather](https://t.me/BotFather))
@@ -144,22 +144,22 @@ If you prefer manual control:
 ```bash
 mkdir -p ~/Library/LaunchAgents
 for bot in $(ls runtime/bots/); do
-  ln -sf "$PWD/runtime/bots/$bot/$bot.plist" ~/Library/LaunchAgents/com.example.claudlobby.$bot.plist
+  ln -sf "$PWD/runtime/bots/$bot/com.example.claudlobby.$bot.plist" ~/Library/LaunchAgents/com.example.claudlobby.$bot.plist
   launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.example.claudlobby.$bot.plist
 done
 ```
 
-(Replace `com.example.claudlobby` with your `service_prefix`.)
+(Replace `com.example.claudlobby` with your `service_prefix`. The composed unit filename is always `<service_prefix>.<bot>.plist` / `.service` — never a bare `<bot>.plist`.)
 
 **Linux (systemd user):**
 ```bash
 mkdir -p ~/.config/systemd/user
 for bot in $(ls runtime/bots/); do
-  ln -sf "$PWD/runtime/bots/$bot/$bot.service" ~/.config/systemd/user/$bot.service
+  ln -sf "$PWD/runtime/bots/$bot/com.example.claudlobby.$bot.service" ~/.config/systemd/user/com.example.claudlobby.$bot.service
 done
 systemctl --user daemon-reload
 for bot in $(ls runtime/bots/); do
-  systemctl --user enable --now $bot.service
+  systemctl --user enable --now com.example.claudlobby.$bot.service
 done
 ```
 
@@ -169,16 +169,16 @@ For Pi-style always-on operation: `loginctl enable-linger $USER` so user service
 
 ```bash
 # Service status
-systemctl --user status lead       # Linux
-launchctl print gui/$(id -u)/com.example.claudlobby.lead   # macOS
+systemctl --user status com.example.claudlobby.lead        # Linux
+launchctl print gui/$(id -u)/com.example.claudlobby.lead    # macOS
 
 # tmux session
 tmux list-sessions
 
 # Bot logs
 tail -f runtime/bots/lead/.claude/logs/* 2>/dev/null
-journalctl --user -u lead -f       # Linux
-tail -f runtime/bots/lead/logs/*.log  # launchd stdout/stderr logs (macOS)
+journalctl --user -u com.example.claudlobby.lead -f         # Linux
+tail -f lib/logs/lead.out.log lib/logs/lead.err.log          # launchd stdout/stderr logs (macOS)
 ```
 
 Send a Telegram message to your bot. It should respond within a few seconds.
@@ -192,7 +192,7 @@ claudlobby validate                              # or --fleet my-fleet
 claudlobby generate                              # regenerates all bots
 claudlobby generate --bot lead                   # regenerate one bot
 # Then restart the affected bot:
-systemctl --user restart lead                    # Linux
+systemctl --user restart com.example.claudlobby.lead             # Linux
 launchctl kickstart -k gui/$(id -u)/com.example.claudlobby.lead  # macOS
 ```
 

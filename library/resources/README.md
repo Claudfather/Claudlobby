@@ -15,9 +15,13 @@ Shared **environment facts** that bots need to know about — non-secret identif
 - **Capability / how-to** — that's expertise or protocols
 - **Rules** — that's guardrails (`no-push-main`, `pii-protection`)
 
+## Frontmatter (optional)
+
+Unlike most of the library, frontmatter isn't required here — the two real files in this category disagree with each other. `timezone.md` has none and opens directly with an H1 (`# Timezone`); `frontmatter-schema.md` has full `title:`/`description:` frontmatter with a matching H1. Both compose cleanly either way: if you skip frontmatter, the compositor derives a title from the filename (e.g. `team-task-tracker.md` → "Team task tracker") and strips a leading H1 that matches it, exactly as it would strip a matching `title:`. Pick either shape, but make sure your leading heading (if you have one) matches whichever title — explicit or filename-derived — the compositor will use.
+
 ## Composition
 
-Each `<resource>.md` is appended verbatim under a `## Resources` section in the bot's CLAUDE.md, in the order listed in `fleet.yaml` `resources:` (and `defaults.resources:`).
+Each `<resource>.md` is appended under a `## Resources` section in the bot's CLAUDE.md, in the order listed in `fleet.yaml` `resources:` (and `defaults.resources:`). The compositor wraps each file's body in `### <title>`; it isn't pasted in as a verbatim top-level blob.
 
 ```yaml
 defaults:
@@ -29,19 +33,19 @@ bots:
 
 ## Example
 
-`library/resources/team-task-tracker.md`:
+`library/resources/timezone.md` (real content — no frontmatter; the filename-derived title "Timezone" matches the H1, so it composes cleanly):
 
 ```markdown
-## Notion: Team Task Tracker
+# Timezone
 
-- **Database ID:** `<your-database-uuid>`
-- **Data-source ID:** `<your-data-source-uuid>`
-- **Required fields:** Title (text), Status (select), Owner (person), Sprint (select)
+The host system clock may run in UTC. Always check the human's timezone from the bot's `TZ` environment variable (set in fleet.yaml `env:`), and convert all times before presenting.
 
-The Notion API splits *databases* from *queryable data sources* — both IDs are required: the database ID for `pages.create`, the data-source ID for `dataSources.query`. Pass the data-source ID, not the database ID, into `query_data_source`.
+When displaying times: use the human's local format (e.g., "2:30 PM ET" not "18:30 UTC"). When computing "today", "tomorrow", or "this week", run `TZ='$TZ' date` to anchor to the human's timezone, not the system clock.
 ```
 
-When a bot lists this in its `resources:`, the markdown above lands in the bot's CLAUDE.md verbatim.
+When a bot lists `timezone` in its `resources:`, this body lands under a `### Timezone` heading in the bot's CLAUDE.md.
+
+**Note:** `library/resources/frontmatter-schema.md` is an outlier in this category. Despite living here, it documents the frontmatter schema for the fleet's *shared documentation* corpus (`shared/knowledge/`, `shared/planning/`) — `protocols/shared-documentation.md` calls it "the Documentation Frontmatter Schema resource" — not an environment fact a bot needs. Use `timezone.md`, not `frontmatter-schema.md`, as the model for what belongs in `library/resources/`.
 
 ## Templating
 

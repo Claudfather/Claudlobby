@@ -55,18 +55,20 @@ Performance halves (~90 → ~45 MB/s sequential) — irrelevant for a fleet work
 
 ### Node.js + npm
 
-Required for MCP servers (most use `npx`).
+Required for MCP servers (most use `npx`). Install via [nvm](https://github.com/nvm-sh/nvm) and track the current LTS rather than pinning a NodeSource major version by hand — Node majors go end-of-life roughly every year (20.x already has, as of this writing), so a hardcoded version here goes stale on a fixed clock. nvm also gives you a user-owned install, so global `npm install -g` never needs sudo.
 
 ```bash
-# Install Node.js 20.x via NodeSource
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
+# Install nvm (check https://github.com/nvm-sh/nvm for the current release tag)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.5/install.sh | bash
+source ~/.bashrc   # or restart your shell
 
-# Create global npm directory (avoids sudo for global installs)
-mkdir -p ~/.npm-global
-npm config set prefix '~/.npm-global'
-echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
+# Install and switch to the current LTS (floor: Node >=20)
+nvm install --lts
+nvm use --lts
+
+# verify
+node --version
+npm --version
 ```
 
 ### Bun (for Telegram plugin)
@@ -92,6 +94,14 @@ source ~/.bashrc
 sudo apt install -y tmux
 ```
 
+### jq
+
+Required by several `lib/` scripts (dispatch, reconcile-fleet, report-back, creds-check, keepalive helpers, etc.) for JSON parsing.
+
+```bash
+sudo apt install -y jq
+```
+
 ### Claude Code
 
 ```bash
@@ -106,9 +116,11 @@ claude auth login
 ### GitHub CLI
 
 ```bash
-# Install
-curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+# Install (current official instructions — /etc/apt/keyrings/, not the older /usr/share/keyrings/ path)
+sudo mkdir -p -m 755 /etc/apt/keyrings
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
 sudo apt update && sudo apt install -y gh
 
 # Authenticate
@@ -146,9 +158,10 @@ neonctl auth
 ### DigitalOcean CLI (doctl)
 
 ```bash
-# Download latest release
-wget https://github.com/digitalocean/doctl/releases/download/v1.104.0/doctl-1.104.0-linux-arm64.tar.gz
-tar xf doctl-1.104.0-linux-arm64.tar.gz
+# Install the latest doctl release (check https://github.com/digitalocean/doctl/releases for the current version)
+DOCTL_VERSION=$(curl -fsSL https://api.github.com/repos/digitalocean/doctl/releases/latest | grep -m1 '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+wget "https://github.com/digitalocean/doctl/releases/download/v${DOCTL_VERSION}/doctl-${DOCTL_VERSION}-linux-arm64.tar.gz"
+tar xf "doctl-${DOCTL_VERSION}-linux-arm64.tar.gz"
 sudo mv doctl /usr/local/bin/
 doctl auth init
 # Paste API token from DO dashboard
@@ -294,7 +307,7 @@ sudo dphys-swapfile swapon
 
 ## Installing the fleet (pick one pattern)
 
-Two supported patterns on Linux. Pick the one that fits — both produce a working fleet, neither blocks the other later. Full reference: [install-patterns.md](./install-patterns.md).
+Two supported patterns on Linux. Pick the one that fits — both produce a working fleet, neither blocks the other later. Full reference: [install-patterns.md](../install-patterns.md).
 
 ### Pattern A — cron + tmux (simplest, what most Pi setups use)
 

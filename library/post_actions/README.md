@@ -23,21 +23,31 @@ These instructions tell the bot **what to do at each lifecycle moment** — the 
 
 ## Example
 
-`library/post_actions/pre-stop-handoff.md`:
+No `post_actions/*.md` files exist in the library yet. The mechanism is fully wired —
+`config.py` (`post_actions:` field), `composer.py` (composes them into a `## Post-actions`
+section), `validator.py`, `commands/core.py` (`claudlobby list-library`), and
+`fleet.yaml.example` all support it — but nobody has committed real content, so there's
+no file to point to as a working sample yet. The block below is illustrative only: it
+shows the shape a file would need, not something present in the repo today.
+
+`library/post_actions/post-restart-announce.md` (hypothetical):
 
 ```markdown
-## Pre-stop handoff
+## Post-restart announce
 
-Before your session ends (signal: SIGTERM, or `/restart`), do these in order:
+When your session (re)starts — after idling, a restart, or keepalive recovery — post a
+one-line Telegram update summarizing what state you're picking up: what you were last
+working on, and whether anything needs the human's attention.
 
-1. Run `$CLAUDLOBBY_ROOT/lib/pre-stop-handoff.sh` — writes a structured
-   `handoff.json` capturing your current task, blockers, and recent work.
-2. Post a one-line Telegram update: "Restarting — handoff saved."
-3. Exit cleanly within 30s. The supervisor will SIGKILL after that.
-
-The next session starts by reading `handoff.json` (your `STARTUP_PROMPT`
-includes this), so anything you don't capture here is lost.
+Keep it to one line. This is a presence signal, not a status report — if there's real
+news, send that as a separate message.
 ```
+
+Note that `lib/pre-stop-handoff.sh` — the script a `pre-stop-handoff.md` post_action would
+naturally wrap — already exists and runs today, invoked directly via the bot's systemd
+`ExecStop` (see the script's own header comment). A `post_actions/pre-stop-handoff.md`
+file would add bot-facing prose on top of that existing mechanism; it just hasn't been
+written yet.
 
 ## Naming
 

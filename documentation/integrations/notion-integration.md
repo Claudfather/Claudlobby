@@ -16,44 +16,35 @@ Each Notion workspace needs its own integration token. Bots only see workspaces 
 4. Associate it with the correct workspace
 5. Submit and copy the **Internal Integration Secret** (starts with `ntn_`)
 
-### 2. Add to .mcp.json
+### 2. Wire It Up via fleet.yaml
 
-```json
-{
-  "mcpServers": {
-    "notion": {
-      "command": "npx",
-      "args": ["-y", "@notionhq/notion-mcp-server"],
-      "env": {
-        "NOTION_TOKEN": "ntn_your_token_here"
-      }
-    }
-  }
-}
+`.mcp.json` is **generated output** — `claudlobby generate` produces it from `fleet.yaml` plus `library/mcp/notion.json`. Never hand-edit `.mcp.json` directly; the next `generate` overwrites hand edits. Instead:
+
+1. Add `notion` to the bot's `mcp:` list in `fleet.yaml`:
+
+   ```yaml
+   fleet:
+     bots:
+       my-bot:
+         mcp: [notion]
+   ```
+
+2. Run `claudlobby generate --bot my-bot` (root mode) or `claudlobby --fleet <name> generate --bot my-bot` (overlay mode); drop `--bot` to regenerate the whole fleet. This scaffolds a `NOTION_TOKEN=` stub into the fleet's `.env` — idempotent, won't clobber a value you've already set — and writes the resolved `notion` server entry into the bot's `.mcp.json`.
+3. Fill in the real token in `local/<fleet>/.env` (or the root `.env` in root-mode): `NOTION_TOKEN=ntn_your_token_here`.
+4. Run `claudlobby generate` again so the compositor resolves the token into `.mcp.json`.
+
+For bots that access multiple Notion workspaces, use the `instances:` form instead of hand-picking separate server names — the compositor derives the server names and the canonical env var names for you:
+
+```yaml
+fleet:
+  bots:
+    my-bot:
+      mcp:
+        - notion:
+            instances: [personal, work]
 ```
 
-For bots that access multiple Notion workspaces, use separate server names:
-
-```json
-{
-  "mcpServers": {
-    "notion-personal": {
-      "command": "npx",
-      "args": ["-y", "@notionhq/notion-mcp-server"],
-      "env": {
-        "NOTION_TOKEN": "ntn_personal_workspace_token"
-      }
-    },
-    "notion-work": {
-      "command": "npx",
-      "args": ["-y", "@notionhq/notion-mcp-server"],
-      "env": {
-        "NOTION_TOKEN": "ntn_work_workspace_token"
-      }
-    }
-  }
-}
-```
+This produces two `.mcp.json` entries (`notion-personal`, `notion-work`) and expects two distinct env vars: `NOTION_PERSONAL_TOKEN` and `NOTION_WORK_TOKEN`. (`library/mcp/notion.json`'s `${TOKEN}` placeholder is instance-scoped, so it's namespaced per instance — see `claudlobby/mcp_resolve.py`.) Set both in `.env`, then `claudlobby generate`.
 
 ### 3. Share Pages with the Integration
 
@@ -65,8 +56,17 @@ The integration can only see pages explicitly shared with it:
 
 ### 4. Restart the Bot
 
+MCP servers are wired up at Claude Code startup, so applying the new `.mcp.json` needs a real restart, not just a reload. The cross-platform, idempotent way (picks systemd vs. launchd for you):
+
 ```bash
-sudo systemctl restart your-bot
+lib/spin-up-bot.sh runtime/bots/my-bot
+```
+
+Or restart the supervised unit directly:
+
+```bash
+systemctl --user restart <BOT_SERVICE>              # Linux
+launchctl kickstart -k gui/$(id -u)/<BOT_SERVICE>    # macOS
 ```
 
 ## Creating Databases Programmatically

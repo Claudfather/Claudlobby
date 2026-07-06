@@ -24,7 +24,7 @@ Access repos, PRs, issues, code search. The most common integration — nearly e
 
 ### Notion
 
-Task management, databases, kanban boards. See [notion-integration.md](notion-integration.md) for full guide.
+Task management, databases, kanban boards. See [notion-integration.md](integrations/notion-integration.md) for full guide.
 
 ```json
 {
@@ -213,48 +213,53 @@ Access meeting notes and transcripts from Granola.
 
 ## DevOps / Infrastructure
 
+These are CLI-based integrations, not MCP servers — there's no `library/mcp/*.json` fragment for any of them. Each ships a set of clauDNA skills plus a token env-contract instead of an interactive CLI login: a bot is headless, so there's no browser around to complete an OAuth flow in. List the service under the bot's `integrations:` key in `fleet.yaml` (it isn't auto-paired via `mcp:` the way GitHub/Notion/etc. are) — see [library/integrations/README.md](../library/integrations/README.md) for the full mechanism.
+
 ### Vercel
 
 Deployments, domains, environment variables.
 
-```bash
-# CLI setup (not MCP — used via Bash tool)
-npm install -g vercel && vercel login
-```
+**Skills:** `/claudna:vercel-status` (deployments, domains, env vars), `/claudna:vercel-logs` (view/debug logs), `/claudna:vercel-deploy` (deploy to production or preview).
+
+**Setup:** the host's Vercel CLI needs to already be logged in as the right user (`vercel whoami` to check) — this is a one-time host-level login, not a per-bot token. See [library/integrations/vercel.md](../library/integrations/vercel.md).
 
 ### Railway
 
 Services, deployments, environments, logs.
 
-```bash
-npm install -g @railway/cli && railway login
-```
+**Skills:** `/claudna:railway-status` (service overview), `/claudna:railway-logs` (view/debug logs), `/claudna:railway-deploy` (deploy/update services).
+
+**Setup:** set `RAILWAY_API_TOKEN` (work workspace) and/or `RAILWAY_PERSONAL_TOKEN` (personal workspace) — fleet-tier env vars, no `railway login` needed. See [library/integrations/railway.md](../library/integrations/railway.md).
+
+### Modal
+
+Serverless GPU/CPU compute — deployed apps, functions, containers.
+
+**Skills:** `/modal-status` (workspace overview), `/modal-logs` (view/debug logs), `/modal-deploy` (deploy apps).
+
+**Setup:** host-level `modal` CLI auth (workspace-scoped secrets/volumes). See [library/integrations/modal.md](../library/integrations/modal.md).
 
 ### Neon (PostgreSQL)
 
 Database branches, queries, project management.
 
-```bash
-npm install -g neonctl && neonctl auth
-```
+**Skills:** `/claudna:neon-info` (schema overview), `/claudna:neon-query` (run SQL), `/claudna:neon-branch` (create/list/delete branches — copy-on-write, cents per branch).
+
+**Setup:** set `NEON_API_KEY` — fleet-tier env var, no `neonctl auth` needed. See [library/integrations/neon.md](../library/integrations/neon.md).
 
 ### DigitalOcean
 
 Droplets, apps, databases.
 
-```bash
-# See pi-setup-guide.md for install
-doctl auth init
-```
+Raw `doctl` commands (`doctl compute droplet list`, `doctl apps logs <id>`, `doctl databases list`) — no clauDNA skill wrapper yet. Assumes `doctl` is already authenticated on the host; see [pi-setup-guide.md](runbooks/pi-setup-guide.md) for the install/auth steps. See [library/integrations/digitalocean.md](../library/integrations/digitalocean.md).
 
-### dbt + Snowflake
+### Snowflake
 
-Data modeling and warehouse queries.
+Warehouse queries and schema exploration.
 
-```bash
-pip install dbt-snowflake
-# Configure profiles.yml with Snowflake credentials
-```
+**Skills:** `/claudna:snowflake-query` (run SQL / explore schema), `/claudna:snowflake-cutover` (migrate a project's connection to RSA key-pair auth).
+
+**Setup:** RSA key-pair auth via a 7-var env-contract — `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_ROLE`, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_PRIVATE_KEY_PATH`, `SNOWFLAKE_PRIVATE_KEY` — no dbt or `profiles.yml` involved. **READ ONLY by default:** SELECT queries only, unless a human explicitly approves DDL/DML. See [library/integrations/snowflake.md](../library/integrations/snowflake.md).
 
 ## Integration Patterns
 

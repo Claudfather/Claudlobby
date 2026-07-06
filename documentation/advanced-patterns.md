@@ -2,1405 +2,415 @@
 
 Patterns that extend a running claudlobby fleet beyond basic dispatch and briefings. Each section is self-contained — implement whichever ones fit your setup.
 
-Prerequisites: a working fleet with at least a manager bot and one worker, systemd services, tmux sessions, and the shared `lib/` scripts. See the main [README](../README.md) if you're not there yet.
+Prerequisites: a working fleet with at least a manager bot and one worker, supervised services (systemd user units on Linux, launchd LaunchAgents on macOS), and the shared `lib/` scripts. See [getting-started](getting-started.md) if you're not there yet.
+
+Two mechanics run through most of these patterns. Read them once here:
+
+- **Every bot runs on its own tmux server.** A bot's session lives on a *private* tmux server addressed by `-L <socket>`, where the socket name is the bot's `BOT_SERVICE` (also written to `bot.conf` as `TMUX_SOCKET`). One server's death drops only that bot, never the fleet. The practical consequence for these patterns: a bare `tmux -t <bot>` or `tmux send-keys -t <bot>` targets the *default* tmux server, which has none of your bots on it — the call silently no-ops rather than erroring. Always dispatch through the socket-aware helpers (`lib/dispatch.sh`, `lib/report-back.sh`, `lib/bot-sweep-cron.sh`) or address the socket explicitly (`tmux -L <bot-service> ...`). Section 5 covers the dispatch/report-back model.
+
+- **Several patterns below ship as library skills, not recipes.** Where a pattern is a real skill, you enable it by adding its name to a bot's `skills:` list in `fleet.yaml` and running `claudlobby generate` — the compositor symlinks `library/skills/<name>/` into that bot's `.claude/skills/<name>/`. Because the symlink points at the shared library file, edits to `library/skills/<name>/SKILL.md` propagate live to every bot using it. Never hand-author a `SKILL.md` into a generated bot directory: the next `generate` overwrites it, and it defeats the whole point of composition. For those patterns, this doc gives you the *why*, the one-line wiring, and how to schedule it — the skill file itself is the source of truth for the steps, so we point at it rather than copy it.
 
 ---
 
 ## 1. Lifecycle Orchestration (/lifecycle)
 
-A full development pipeline managed by the manager bot: implement, review, iterate, merge, retro, create issues. One slash command kicks off the entire cycle.
+**Shipped skill — `library/skills/lifecycle/SKILL.md`.**
+
+A full development pipeline run by the manager bot: dispatch an engineer to implement, dispatch a reviewer, route the review (merge / send back for mechanical fixes / flag a human on ambiguous concerns), then run a retro and file follow-up issues — pulling a human in only when there's a real judgment call.
 
 ### Why
 
-Without this, you manually dispatch the engineer, wait, dispatch the reviewer, wait, read the review, decide what to do, merge, and forget to capture learnings. `/lifecycle` automates the entire chain and only pulls you in when a human judgment call is needed.
+Without this, you manually dispatch the engineer, wait, dispatch the reviewer, wait, read the review, decide, merge, and forget to capture learnings. `/lifecycle` automates the chain and only interrupts you when a human decision is genuinely needed.
 
-### Flow
+### Enable it
 
-```
-/lifecycle "Add rate limiting to the auth endpoint" --repo org/api --eng eng-a-bot --reviewer code-reviewer-bot
+Add `lifecycle` to the manager bot's `skills:` and run `claudlobby generate`:
 
-  1. Manager dispatches engineer via tmux
-  2. Engineer implements, creates PR, reports back
-  3. Manager dispatches code reviewer to the PR
-  4. Reviewer posts review:
-     a. Approved          → Manager merges the PR
-     b. Mechanical fixes  → Manager sends back to engineer automatically
-     c. Ambiguous concern → Manager flags the human via Telegram
-  5. After merge: Manager runs /development-retro
-  6. Manager creates GitHub issues for retro findings
-  7. If 3+ review cycles on the same PR → flag human regardless
+```yaml
+bots:
+  lead:
+    skills: [dispatch, lifecycle, ...]
 ```
 
-### SKILL.md
+The example fleet already wires this on its `lead` bot. The phase-by-phase decision table (approve → merge, mechanical → send back, ambiguous → flag human, 3+ cycles → flag human) lives in `library/skills/lifecycle/SKILL.md`; that file is the source of truth, so it isn't restated here.
 
-```markdown
----
-name: lifecycle
-description: "Full dev pipeline: implement → review → iterate → merge → retro → issues. Flags human only when needed."
-argument-hint: "<task description> --repo <owner/repo> --eng <engineer-bot> --reviewer <reviewer-bot>"
----
+### How it dispatches
 
-# Lifecycle
-
-Orchestrate a complete development cycle.
-
-## Steps
-
-1. **Dispatch engineer**
-   - Validate bot is alive: `tmux has-session -t <eng-bot>`
-   - Send task: `tmux send-keys -t <eng-bot> '<prompt>' Enter`
-   - Prompt must include: task description, target repo, instruction to create PR and report back
-
-2. **Wait for engineer report**
-   - Watch for `[BOTREPORT] <eng-bot> | completed | ...` in your tmux pane
-   - Extract PR URL from `pr:<url>` field
-   - If status is `failed` or `blocked`, notify user and stop
-
-3. **Dispatch code reviewer**
-   - Send: `tmux send-keys -t <reviewer-bot> 'Review PR at <url>. Use /review-pr.' Enter`
-   - Wait for reviewer report
-
-4. **Route the review**
-   - **Approved:** Merge the PR via GitHub MCP. Post confirmation to Telegram.
-   - **Mechanical fixes** (formatting, naming, missing tests — things with clear right answers):
-     Send engineer back with specific instructions from the review.
-   - **Ambiguous concerns** (architecture questions, design tradeoffs, scope debates):
-     Post to Telegram: "Review of PR #N raised concerns that need human input: [summary]"
-   - Parse this from the reviewer's report or read the PR review comments via GitHub MCP.
-
-5. **Cycle guard**
-   - Track review round count. If this is round 3+, flag the human:
-     "PR #N has been through 3 review cycles. Intervening."
-
-6. **Post-merge retro**
-   - After merge, run `/development-retro` against the PR
-   - Create GitHub issues for any findings (tech debt, patterns to extract, docs to update)
-   - Post retro summary to Telegram
-
-## Dispatch Prompt Template
-
-For the engineer:
-```
-Implement the following in <owner/repo>:
-
-<task description>
-
-Work in a git worktree. Branch from main. Create a PR when done.
-Report back via: ~/claudlobby/lib/report-back.sh "<eng-bot>" "completed" "<summary>" "pr:<pr-url>"
-If blocked, report immediately with status "blocked".
-```
-
-## Rules
-
-- Never merge without a review
-- Never auto-resolve ambiguous feedback
-- Always run retro after merge
-- If engineer reports blocked, notify human immediately
-```
-
-### Wiring
-
-Add `/lifecycle` to the manager bot's project skills:
-
-```
-~/claudlobby/manager-bot/.claude/skills/lifecycle/SKILL.md
-```
-
-Reference in the manager's CLAUDE.md:
-
-```markdown
-- **Full lifecycle** — `/lifecycle` orchestrates implement → review → merge → retro
-```
+Lifecycle hands work to the engineer and reviewer through the same socket-aware path every fleet dispatch uses — `lib/dispatch.sh` (or `lib/dispatch-task.sh`, which additionally records the task to the dispatch ledger with a deadline so an overdue task surfaces as `overdue_dispatch`). Workers signal progress and completion with `lib/report-back.sh`, which the manager reads in its own pane. See Section 5 for both.
 
 ### Gotchas
 
-- The manager needs to be patient between steps. Each dispatch can take 5-30 minutes. The manager should not poll — it waits for the `[BOTREPORT]` message.
-- "Mechanical fix" vs "ambiguous concern" is a judgment call the manager makes by reading the review. Bias toward flagging humans early — false escalations are cheaper than bad merges.
-- The 3-cycle guard exists because infinite review loops waste bot time. If a PR can't converge in 3 rounds, something is wrong with the task scoping or the code.
+- The manager waits for the `[BOTREPORT]` message rather than polling. Each dispatch can take minutes to tens of minutes; the report sits in the manager's pane buffer until it reaches a natural pause.
+- "Mechanical fix" vs "ambiguous concern" is a judgment the manager makes by reading the review. Bias toward flagging a human early — a false escalation is cheaper than a bad merge.
 
 ---
 
 ## 2. Alert Sweep (/data-alert-sweep)
 
-Batch-process alerts from a monitoring channel. Pull alerts, check existing work, investigate, and either approve existing PRs or start new fixes — without creating competing PRs.
+**Shipped skill — `library/skills/data-alert-sweep/SKILL.md`.**
+
+Batch-process alerts from a monitoring channel: pull recent alerts, read each thread, check whether a PR already exists, investigate independently, then approve the existing fix, comment with a differing conclusion, or open a new PR — never a competing one.
 
 ### Why
 
-Monitoring channels (Slack, Discord, Datadog, etc.) accumulate alerts faster than anyone triages them. This pattern processes them in bulk: investigate each one, check if someone already filed a PR, and either contribute to the existing fix or start a new one.
+Monitoring channels (Slack, Datadog, etc.) accumulate alerts faster than anyone triages them. This pattern works through them in bulk and, critically, refuses to create a second PR for a problem someone already has a PR for.
 
-### Flow
+### Enable it
 
-```
-/data-alert-sweep --channel #data-alerts --lookback 24h
+Add `data-alert-sweep` to the bot that owns the monitoring integrations (typically the manager, or a business bot with Slack + GitHub MCP) and run `claudlobby generate`. The skill's core principle — *always investigate independently; existing PRs and team comments are inputs, not conclusions; never open a competing PR* — is defined in the skill file.
 
-  1. Pull recent alerts from the channel
-  2. For each alert:
-     a. Read the full thread (including bot/human replies)
-     b. Check if a PR already exists for this alert
-     c. Run investigation AND review existing PR in parallel
-     d. Compare findings:
-        - Same conclusion → approve PR, reply to thread
-        - Different conclusion → post as discussion on existing PR
-        - No existing PR → create fix, open new PR, reply to thread
-     e. Never create a competing PR if one already exists
-  3. Reply to each alert thread: 1-2 line summary + PR link
-```
+### Scheduling
 
-### SKILL.md
-
-```markdown
----
-name: data-alert-sweep
-description: "Batch-process alerts from a monitoring channel. Investigate, check for existing PRs, fix or approve, reply to threads."
-argument-hint: "--channel <channel-name> [--lookback <duration>]"
----
-
-# Data Alert Sweep
-
-Process monitoring alerts in bulk.
-
-## Steps
-
-1. **Pull alerts**
-   - Use Slack MCP (or relevant integration) to read recent messages from the alert channel
-   - Default lookback: 24 hours. Configurable via `--lookback`.
-   - Filter to alert messages (skip bot responses, reactions, human chatter)
-
-2. **Read thread context**
-   - For each alert, read the full thread
-   - Note: has a human already acknowledged it? Has a bot already investigated?
-   - If fully resolved (human confirmed fix, PR merged), skip
-
-3. **Check for existing PRs**
-   - Search GitHub for PRs referencing the alert text, error message, or affected file
-   - Also check if any open PRs touch the files/functions mentioned in the alert
-   - Record: `existing_pr_url` or `null`
-
-4. **Parallel investigation**
-   For each unresolved alert, run two tasks in parallel:
-   - **Independent investigation:** Read the codebase, understand the root cause, draft a fix
-   - **Review existing PR** (if one exists): Read the PR diff, understand the approach
-
-5. **Compare and act**
-   - **Existing PR + same conclusion:** Approve the PR. Add a comment: "Independent investigation confirms this approach."
-   - **Existing PR + different conclusion:** Post findings as a discussion comment on the PR. Do NOT create a competing PR.
-   - **No existing PR:** Create the fix in a worktree, open a PR, link it to the alert.
-
-6. **Reply to alert threads**
-   - Post a 1-2 line summary in each alert thread
-   - Include PR link (new or existing)
-   - Format: `Investigated — [root cause]. PR: [link]`
-
-## Rules
-
-- NEVER create a competing PR. One PR per alert, always.
-- If investigation is inconclusive, reply to the thread with findings and flag for human review.
-- Process alerts oldest-first so fixes build on each other.
-- If an alert maps to multiple repos, pick the most likely root cause repo.
-```
-
-### Wiring
-
-Manager bot skill:
-
-```
-~/claudlobby/manager-bot/.claude/skills/data-alert-sweep/SKILL.md
-```
-
-The manager can run this directly (if it has Slack + GitHub MCP) or dispatch it to an engineer bot. For complex alerts, the manager can dispatch investigation to an engineer and review to the code reviewer in parallel, then reconcile.
-
-### Cron (optional)
-
-```crontab
-# Sweep alerts twice daily
-0 10 * * * /home/YOUR_USER/claudlobby/manager-bot/alert-sweep-cron.sh
-0 16 * * * /home/YOUR_USER/claudlobby/manager-bot/alert-sweep-cron.sh
-```
-
-```bash
-#!/bin/bash
-# alert-sweep-cron.sh
-BOT_SESSION="manager-bot"
-if /usr/bin/tmux has-session -t "$BOT_SESSION" 2>/dev/null; then
-    /usr/bin/tmux send-keys -t "$BOT_SESSION" "/data-alert-sweep --channel #data-alerts --lookback 12h" Enter
-fi
-```
+To run it on a cadence, use the socket-aware sweep dispatcher rather than a raw tmux keystroke: `lib/bot-sweep-cron.sh <bot-session> "/data-alert-sweep recent"` resolves the bot's private socket, skips the tick if the pane looks busy, and does the race-safe send. Wire that as a fleet job (a `jobs:` entry composed into a systemd/launchd timer — the same mechanism behind `data-sweep` and `disk-monitor`; see [fleet-yaml-schema](fleet-yaml-schema.md)) so enrollment is managed rather than living in a personal crontab.
 
 ### Gotchas
 
-- Thread replies in Slack MCP can be slow for channels with hundreds of alerts. Use `--lookback` to limit scope.
-- The "no competing PRs" rule is critical. Two PRs fixing the same thing causes merge conflicts and wasted review time. Always search thoroughly before creating.
-- Some alerts are symptoms of the same root cause. The bot should try to group related alerts, but this is hard to get perfect. Err on the side of one PR per alert rather than one PR for a cluster.
+- Reading full threads for a busy channel is slow; scope the lookback (the skill takes `recent|today|all-open`).
+- Related alerts often share a root cause. The skill errs toward one PR per alert rather than trying to cluster perfectly — accept some manual reconciliation.
 
 ---
 
 ## 3. Triage (/triage)
 
-Surface untracked items from unstructured inputs (emails, meeting notes, messages) and move them into a structured system (Notion, GitHub Issues, etc.).
+**Shipped skill — `library/skills/triage/SKILL.md`.**
+
+Surface untracked work hiding in unstructured inputs (email, meeting notes, alert channels), enrich each item with external data (order lookups, existing issues, contact records), deduplicate against your tracker (Notion), and create structured tasks with source links.
 
 ### Why
 
-Work hides in inboxes. Emails contain action items that never become tasks. Meeting notes mention follow-ups that nobody tracks. This pattern reads unstructured inputs, enriches them with external data, deduplicates against existing tasks, and creates new tracked items.
+Action items hide in inboxes and meeting notes and never become tracked tasks. This pattern reads those inputs and moves the net-new items into a structured system with context attached.
 
-### Flow
+### Enable it
 
-```
-/triage --source email --lookback 48h
+Add `triage` to a bot with the right integrations — the manager, or a business bot with Gmail + Notion + Shopify MCP — and run `claudlobby generate`. The source-to-enrichment mapping and the dedup-before-create rule are in the skill file.
 
-  1. Read unstructured inputs (email, meeting notes, Slack DMs)
-  2. Extract action items, requests, follow-ups
-  3. Enrich with external data:
-     - Customer email → look up their order history (Shopify)
-     - Bug report → check existing GitHub issues
-     - Meeting note → cross-reference calendar for attendees
-  4. Deduplicate against existing Notion tasks
-  5. Create new tasks with linked contacts/records
-  6. Report what was created
-```
+### Scheduling
 
-### SKILL.md
-
-```markdown
----
-name: triage
-description: "Surface untracked items from emails, meeting notes, or messages. Enrich with external data, deduplicate, create tasks."
-argument-hint: "--source <email|meetings|slack> [--lookback <duration>]"
----
-
-# Triage
-
-Find untracked work hiding in unstructured inputs.
-
-## Sources
-
-| Source | MCP Server | What to Extract |
-|--------|-----------|-----------------|
-| Email | Gmail | Action items, customer requests, follow-ups |
-| Meeting notes | Granola / Calendar | Decisions, assigned tasks, follow-ups |
-| Slack DMs | Slack | Direct requests, questions needing answers |
-
-## Steps
-
-1. **Read inputs**
-   - Email: search for messages in the lookback window, skip newsletters/automated
-   - Meetings: read recent meeting transcripts or notes
-   - Slack: read DMs and priority channels
-
-2. **Extract items**
-   - Look for: explicit requests, questions awaiting response, promised deliverables,
-     deadlines mentioned, people waiting on something
-   - Each item needs: summary, source (email/meeting/slack), urgency, related people
-
-3. **Enrich**
-   - If item mentions a customer → look up in Shopify/CRM for order history, account status
-   - If item mentions a bug or feature → search GitHub issues for existing reports
-   - If item mentions a person → search contacts database for context
-   - Attach enrichment data to the item
-
-4. **Deduplicate**
-   - Search Notion tasks database for similar items (by keyword, contact, description)
-   - If a matching task already exists and is open → skip (or update with new context)
-   - If a matching task exists but is closed → note it, may need reopening
-
-5. **Create tasks**
-   - Create Notion task for each new item
-   - Link to source (email URL, meeting date, Slack permalink)
-   - Link to related contacts/records
-   - Set initial status, priority based on urgency signals
-
-6. **Report**
-   Post to Telegram:
-   ```
-   Triage complete (48h email scan):
-   - 3 new tasks created
-   - 2 duplicates skipped (already tracked)
-   - 1 item flagged for review (ambiguous priority)
-   ```
-
-## Variants
-
-### Customer Service Triage
-Email → order context (Shopify) → task with customer record
-
-### Engineering Triage
-Alert/bug report → investigation → GitHub issue with reproduction steps
-
-### Meeting Follow-Up Triage
-Meeting notes → action items → tasks assigned to attendees
-```
-
-### Wiring
-
-Works best on the manager bot (which has the most MCP integrations) or a business bot (which has Shopify + Gmail + Notion).
-
-```
-~/claudlobby/manager-bot/.claude/skills/triage/SKILL.md
-```
-
-Can be run on-demand or scheduled:
-
-```crontab
-# Triage email every morning before the briefing
-0 8 * * * /home/YOUR_USER/claudlobby/manager-bot/triage-cron.sh
-```
-
-```bash
-#!/bin/bash
-# triage-cron.sh
-BOT_SESSION="manager-bot"
-if /usr/bin/tmux has-session -t "$BOT_SESSION" 2>/dev/null; then
-    /usr/bin/tmux send-keys -t "$BOT_SESSION" "/triage --source email --lookback 24h" Enter
-fi
-```
+Same as the alert sweep: dispatch it on a cadence via `lib/bot-sweep-cron.sh <bot-session> "/triage email"` wired as a fleet job, so the send is socket-aware and the schedule is managed by a composed timer rather than a hand-edited crontab.
 
 ### Gotchas
 
-- Deduplication is the hardest part. Exact-match on subject line misses rephrased duplicates. Fuzzy matching (searching Notion by keywords) works better but occasionally creates near-duplicates. Accept ~90% accuracy and clean up manually.
-- Enrichment calls (Shopify order lookup, GitHub search) add latency. For a 48h email triage with 50+ emails, expect 5-10 minutes.
-- Be careful with auto-creating tasks from meeting notes — transcription errors can produce phantom action items. If using meeting transcripts, flag items as "from meeting notes (verify)" rather than treating them as confirmed tasks.
+- Deduplication is the hard part. Fuzzy matching against the tracker beats exact subject-line matching but still lets near-duplicates through occasionally — expect to clean up manually.
+- Meeting-transcript items can be phantom (transcription errors). Have the bot mark them "from meeting notes (verify)" rather than treating them as confirmed.
 
 ---
 
-## 4. Pre-Stop Handoff
+## 4. Graceful Restart & Pre-Stop Handoff
 
-Graceful shutdown with context preservation. When systemd stops a bot, it captures the bot's current context before killing the process, so the next startup can resume seamlessly.
+Capture a bot's working context before a restart kills its process, so the next session can resume where it left off. The mechanism is real and current (`lib/pre-stop-handoff.sh`), but it is *not* wired to systemd `ExecStop` — it's invoked by whatever is doing the restart.
 
 ### Why
 
-A raw `systemctl stop` or `systemctl restart` kills the bot mid-thought. Any work in progress, mental context about ongoing tasks, or partial investigations is lost. Pre-stop handoff gives the bot a few seconds to write down what it's doing before it dies.
+A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thought. Any in-flight reasoning about ongoing tasks is lost. A handoff gives the bot a few seconds to write down what it's doing first; the fresh session reads it back and picks up.
 
-### How It Works
+### Two entry points
 
-```
-systemctl stop my-bot
-  → systemd calls ExecStop=pre-stop-handoff.sh
-    → Script checks for recent session-handoff (< 5 min old)
-    → If none: sends /session-handoff --auto to bot via tmux, waits
-    → Bot writes handoff file to planning/
-    → systemd proceeds with SIGTERM
+Which path runs the handoff depends on *who* is restarting the bot:
 
-systemctl start my-bot
-  → Bot starts, reads CLAUDE.md
-  → CLAUDE.md or startup prompt includes: run /session-resume
-  → Bot reads handoff file and picks up where it left off
-```
+- **In-session restart (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from an automated caller — the `restart` skill invokes `/claudna:session-handoff` **directly** in that session, notifies the channel, then delegates the actual bounce to `lib/spin-up-bot.sh` (which picks systemd vs launchd for you). It deliberately does *not* shell out to `pre-stop-handoff.sh`: that script sends the handoff as a tmux keystroke and waits for it, so from inside the very session being restarted it would queue the handoff *behind* the restart and lose it. See `library/skills/restart/SKILL.md`.
 
-### Script: pre-stop-handoff.sh
+- **External restarter (`lib/pre-stop-handoff.sh`).** When something *outside* the session bounces the bot and can't invoke a skill directly, it calls `lib/pre-stop-handoff.sh <bot-dir>` first. The canonical caller is `lib/weekly-worker-restart.sh`, which bounces worker bots weekly to pick up a staged Claude Code binary; it runs the handoff, then `spin-up-bot.sh`.
 
-```bash
-#!/bin/bash
-# pre-stop-handoff.sh — called by systemd ExecStop before killing the bot
-# Usage: pre-stop-handoff.sh /path/to/bot/dir
+### What `pre-stop-handoff.sh` actually does
 
-BOT_DIR="${1:?Usage: pre-stop-handoff.sh /path/to/bot/dir}"
-source "$BOT_DIR/bot.conf"
+Given a bot directory, the script:
 
-# clauDNA's /session-handoff (schema v2) writes to <cwd>/.claude/session.md.
-# start-bot.sh cd's into BOT_DIR before launching tmux, so cwd == BOT_DIR.
-HANDOFF_FILE="$BOT_DIR/.claude/session.md"
-MAX_AGE_SECONDS=300  # 5 minutes
+1. Loads the bot's config and resolves its tmux session name and **private socket** (`tmux_socket_for_bot`) — the handoff is sent on the bot's own server, not the default one.
+2. Checks `<bot-dir>/.claude/session.md` (where clauDNA's `/session-handoff` writes). If a handoff was written in the last 5 minutes, it's fresh enough — skip and exit.
+3. Otherwise, if the session is live, sends `/claudna:session-handoff --auto` and waits up to ~30 seconds for a new `session.md` to land.
+4. Always exits 0. The handoff is best-effort and never blocks the restart: a timed-out or unreachable bot just proceeds to the bounce. (It also cleans up the transient `.tmux-env` secrets file on every exit path.)
 
-# Check if a recent handoff already exists (e.g., user ran /session-handoff manually)
-if [ -f "$HANDOFF_FILE" ]; then
-    FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$HANDOFF_FILE" 2>/dev/null || stat -f %m "$HANDOFF_FILE" 2>/dev/null) ))
-    if [ "$FILE_AGE" -lt "$MAX_AGE_SECONDS" ]; then
-        echo "Recent handoff exists ($FILE_AGE seconds old), skipping"
-        exit 0
-    fi
-fi
+### Resume on the next start
 
-# Check if bot tmux session is alive
-if ! /usr/bin/tmux has-session -t "$BOT_NAME" 2>/dev/null; then
-    echo "Bot session not running, nothing to hand off"
-    exit 0
-fi
-
-# Send handoff command
-echo "Requesting session handoff..."
-/usr/bin/tmux send-keys -t "$BOT_NAME" "/session-handoff --auto" Enter
-
-# Wait for handoff file to appear (up to 45 seconds)
-for i in $(seq 1 45); do
-    if [ -f "$HANDOFF_FILE" ]; then
-        FILE_AGE=$(( $(date +%s) - $(stat -c %Y "$HANDOFF_FILE" 2>/dev/null || stat -f %m "$HANDOFF_FILE" 2>/dev/null) ))
-        if [ "$FILE_AGE" -lt 60 ]; then
-            echo "Handoff captured: $HANDOFF_FILE"
-            exit 0
-        fi
-    fi
-    sleep 1
-done
-
-echo "WARN: Handoff timed out after 45s, proceeding with stop"
-exit 0
-```
-
-### Systemd Service Changes
-
-Update the bot's `.service` file to call pre-stop on shutdown:
-
-```ini
-[Service]
-Type=oneshot
-ExecStart=/home/YOUR_USER/claudlobby/lib/start-bot.sh /home/YOUR_USER/claudlobby/my-bot
-ExecStop=/home/YOUR_USER/claudlobby/lib/pre-stop-handoff.sh /home/YOUR_USER/claudlobby/my-bot
-RemainAfterExit=yes
-TimeoutStopSec=90
-```
-
-Note `TimeoutStopSec=90` — enough time for the handoff script (45s max) plus cleanup.
-
-### Startup Resume
-
-Add to the bot's `STARTUP_PROMPT` in `bot.conf`:
-
-```bash
-STARTUP_PROMPT="You just restarted. Read your CLAUDE.md. Then run /session-resume --auto to check for a session handoff. If one exists, pick up where you left off. If not, greet the team."
-```
-
-Or add it to the bot's CLAUDE.md:
-
-```markdown
-## On Startup
-
-After reading this file, always run `/session-resume` to check for pending handoffs.
-```
+You don't configure resume separately. `lib/start-bot.sh` injects `/claudna:session-resume --auto` as the new session's first keystroke; resume is age-gated (it only resumes from a checkpoint fresher than ~24h, else clean-starts). This no longer depends on the bot's `STARTUP_PROMPT` carrying a resume instruction.
 
 ### Gotchas
 
-- `TimeoutStopSec` must be longer than the handoff wait time, or systemd will SIGKILL the bot before the handoff completes.
-- The `--auto` flag on `/session-handoff` is important — it runs non-interactively so the bot doesn't prompt for confirmation.
-- If the bot is deeply stuck (infinite loop, unresponsive MCP server), the handoff will time out. That's fine — the script exits gracefully and systemd proceeds with the kill.
-- `stat -c` vs `stat -f` handles both Linux and macOS. On a Pi you'll only need the Linux variant, but the script is portable.
+- **Don't add `ExecStop=.../pre-stop-handoff.sh` to a bot's `.service` file.** Bot units are generated by `claudlobby generate` (the file header says *do not hand-edit*), and the generated `ExecStop` simply tears down the bot's tmux server. Hand-edits are overwritten on the next generate. The handoff belongs at the *restarter*, per the two entry points above.
+- Best-effort by design: if a bot is deeply stuck (unresponsive MCP, tight loop), the handoff times out and the restart proceeds anyway. That's the intended behavior.
+- The `--auto` flag matters — it runs the handoff non-interactively so the bot doesn't stop to ask for confirmation.
 
 ---
 
-## 5. Inter-Bot Communication Protocol (report-back.sh)
+## 5. Inter-Bot Communication (dispatch.sh + report-back.sh)
 
-Structured messaging between bots via tmux. Workers call `report-back.sh` when done, and the manager parses the structured message to decide next steps.
+Structured, deterministic messaging between bots over tmux. The manager dispatches work to a worker; the worker reports back when it has something to say. Telegram is unreliable for bot-to-bot traffic (messages drop); a direct send into the peer's pane is instant and observable.
 
-### Why
+Because each bot is on its own tmux server (see the intro), both directions go through helpers that **resolve the peer's socket** and send safely — they never assume a shared default server.
 
-Bots need a reliable way to tell each other "I'm done" with enough context for the receiver to act. Telegram is unreliable for bot-to-bot communication (messages drop). tmux send-keys is instant and deterministic. The structured format makes parsing straightforward.
-
-### Message Format
-
-```
-[BOTREPORT] <bot-name> | <status> | <summary> [| pr:<url>] [| issues:<url1>,<url2>]
-```
-
-**Statuses:**
-- `completed` — task finished successfully
-- `failed` — task failed, summary explains why
-- `blocked` — task can't proceed, needs human or different bot
-
-**Optional fields:**
-- `pr:<url>` — PR created or reviewed
-- `issues:<url1>,<url2>` — GitHub issues created
-
-### Script: report-back.sh
-
-This already exists in `lib/`. Here's how bots use it:
+### Dispatch: manager → worker
 
 ```bash
-# Engineer finished a task, created a PR
-~/claudlobby/lib/report-back.sh "eng-a" "completed" "Added rate limiting to auth endpoint" "pr:https://github.com/org/api/pull/87"
-
-# Engineer hit a blocker
-~/claudlobby/lib/report-back.sh "eng-a" "blocked" "Need DB migration permissions — cannot alter production schema"
-
-# Reviewer finished a review, also filed issues
-~/claudlobby/lib/report-back.sh "code-reviewer" "completed" "Reviewed PR #87 — approved with minor comments" "pr:https://github.com/org/api/pull/87" "issues:https://github.com/org/api/issues/88"
+# Resolve the worker's socket, precheck the session, race-safe two-step send:
+$CLAUDLOBBY_ROOT/lib/dispatch.sh <worker-session> "Implement X in org/repo. Branch + PR. Report back when done."
 ```
 
-### How the Manager Processes Reports
+`dispatch.sh` reverse-resolves the worker's private socket from its session name, confirms the session exists on that socket, and sends the text and Enter as two steps (so a rendering TUI can't swallow the keystroke). If the peer can't be reached it logs a `send_miss` event and exits non-zero instead of silently dropping the message.
 
-The manager bot sees `[BOTREPORT]` messages arrive in its tmux pane. Its CLAUDE.md should include instructions for handling them:
+`lib/dispatch-task.sh` wraps `dispatch.sh` with accountability: it appends the task to `state/dispatch-log.jsonl` with a deadline (`expected_by`) before sending, so the fleet-pulse watchdog can flag the task `overdue_dispatch` if no terminal report arrives in time. Optional `--repo` / `--priority` / `--ref` flags wrap the task in a `[BOTCOMMAND]` envelope.
 
-```markdown
-## Bot Reports
-
-When you see a message starting with `[BOTREPORT]`, parse it:
-
-Format: `[BOTREPORT] <bot> | <status> | <summary> [| pr:<url>] [| issues:<urls>]`
-
-### Actions by status:
-
-**completed:**
-- If this was part of a /lifecycle cycle, proceed to the next step (dispatch reviewer, merge, etc.)
-- If standalone dispatch, post the summary to Telegram
-- If a PR was created, note it for the next briefing
-
-**failed:**
-- Post failure to Telegram with the summary
-- Suggest next steps (retry, different approach, escalate)
-
-**blocked:**
-- Post to Telegram immediately — this needs human attention
-- Include the blocker reason so the human can unblock without context-switching
-
-### Example
-
-You see: `[BOTREPORT] eng-a | completed | Added rate limiting to auth endpoint | pr:https://github.com/org/api/pull/87`
-
-Action: Dispatch code-reviewer-bot to review PR #87. Post to Telegram: "eng-a completed rate limiting. PR #87 — dispatching review."
-```
-
-### Configuring the Manager Session Name
-
-Workers need to know which tmux session to send reports to. Set `MANAGER_BOT_NAME` in each worker's `bot.conf`:
+### Report-back: worker → manager
 
 ```bash
-# In eng-a-bot/bot.conf
-MANAGER_BOT_NAME="manager-bot"
+$CLAUDLOBBY_ROOT/lib/report-back.sh <bot> <status> "<summary>" [flags...]
 ```
 
-Or export it in the worker's `.env`:
+Message format written into the manager's pane:
+
+```
+[BOTREPORT] <bot> | <status> | <summary> [| progress:<N>] [| pr:<url>] [| artifact:<url>]
+```
+
+**Statuses:** `completed`, `progress`, `blocked`, `failed`. (`progress` — paired with `--progress N` — lets a long-running task report a percentage without claiming it's done.)
+
+**Optional fields:** `--pr <url>`, `--issues <url,url>`, `--skill <name>`, `--progress <N>`, `--artifact <url>` (source-of-findings provenance, repeatable). Older positional forms like a bare `pr:<url>` argument still work.
 
 ```bash
-export MANAGER_BOT_NAME="manager-bot"
+# Completed with a PR:
+$CLAUDLOBBY_ROOT/lib/report-back.sh eng-1 completed "Added rate limiting to auth endpoint" --pr https://github.com/org/api/pull/87
+
+# Blocked:
+$CLAUDLOBBY_ROOT/lib/report-back.sh eng-1 blocked "Need DB migration permissions — cannot alter production schema"
+
+# Mid-task progress:
+$CLAUDLOBBY_ROOT/lib/report-back.sh eng-1 progress "Refactoring auth" --progress 40
 ```
 
-The `report-back.sh` script reads this variable (defaulting to `claude-bot` if unset).
+Beyond the pane message, `report-back.sh` appends a structured JSONL event to the fleet report-back ledger and mirrors the bot's state (idle/working/blocked) to `fleet-state`, so completion is queryable via `claudlobby report-back` even if the manager missed the pane message.
+
+### Where the manager address comes from — you don't set it by hand
+
+`report-back.sh` sends to the session named in `MANAGER_TMUX` (default `claude-bot`) on the socket in `MANAGER_TMUX_SOCKET`. **The compositor sets both for you** from your `teams:` wiring: a bot listed in a team's `workers` gets `MANAGER_TMUX=<that team's manager>` and the manager's socket; a manager bot gets its own id. You configure the relationship in `fleet.yaml` (`teams:`), not the env var.
+
+> If you're following an older guide that mentions `MANAGER_BOT_NAME`: that variable never existed in the shipping code and was a documented bug. The real variable is `MANAGER_TMUX`, and it's composed automatically.
 
 ### Gotchas
 
-- The pipe (`|`) delimiter means summaries must not contain pipes. Keep summaries to one sentence.
-- tmux send-keys has a practical length limit. Keep the total message under ~500 characters. If you need to convey more detail, include a link (PR URL, issue URL) and let the manager read the details via GitHub MCP.
-- Reports arrive as text in the manager's pane. If the manager is mid-task, it may not process the report immediately. This is fine — the report sits in the pane buffer and the manager handles it when it reaches a natural pause point.
+- The `|` delimiter means summaries must not contain pipes. Keep summaries to one sentence.
+- `send-keys` has a practical length limit — keep the whole message well under ~500 characters. For detail, include a PR/issue URL and let the manager read it via GitHub MCP.
+- A dropped cross-socket send is no longer silent: it emits a `send_miss` event to the sender's `data/events/` stream, so you can see when a report failed to land (e.g. the manager's session was down).
 
 ---
 
 ## 6. Git Pull Scheduler
 
-Keep cloned repos fresh across all bots without manual intervention.
+Keep cloned repos fresh across all bots so they aren't creating PRs against stale code. `lib/git-pull-all.sh` handles it.
 
-### Why
-
-Bots work from cloned repos on the Pi. If those repos are stale, bots create PRs against old code, miss recently-merged changes, and produce merge conflicts. A scheduled git pull keeps everything current.
-
-### Script: git-pull-all.sh
+### What the script does
 
 ```bash
-#!/bin/bash
-# git-pull-all.sh — pull all repos in a directory using --ff-only
-# Usage: git-pull-all.sh /path/to/repos/
-#
-# Only uses --ff-only so it fails safely if there are local changes.
-# Intended to run via cron.
-
-REPOS_DIR="${1:?Usage: git-pull-all.sh /path/to/repos/}"
-LOG="${REPOS_DIR}/git-pull.log"
-
-echo "$(date -Iseconds) === Starting git pull sweep ===" >> "$LOG"
-
-for repo in "$REPOS_DIR"/*/; do
-    [ -d "$repo/.git" ] || continue
-    REPO_NAME=$(basename "$repo")
-
-    cd "$repo"
-    BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
-
-    if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
-        echo "$(date -Iseconds) SKIP $REPO_NAME — on branch $BRANCH (not main/master)" >> "$LOG"
-        continue
-    fi
-
-    OUTPUT=$(git pull --ff-only 2>&1)
-    STATUS=$?
-
-    if [ $STATUS -eq 0 ]; then
-        if echo "$OUTPUT" | grep -q "Already up to date"; then
-            echo "$(date -Iseconds) OK   $REPO_NAME — up to date" >> "$LOG"
-        else
-            echo "$(date -Iseconds) PULL $REPO_NAME — updated" >> "$LOG"
-        fi
-    else
-        echo "$(date -Iseconds) FAIL $REPO_NAME — ff-only failed (local changes?)" >> "$LOG"
-        echo "  $OUTPUT" >> "$LOG"
-    fi
-done
-
-echo "$(date -Iseconds) === Sweep complete ===" >> "$LOG"
+$CLAUDLOBBY_ROOT/lib/git-pull-all.sh /path/to/projects/dir
 ```
 
-### Cron Setup
+It runs `git pull --ff-only` on every immediate subdirectory that is a git repo, logging results to `git-pull.log` **one level above** the target dir. `--ff-only` is the entire safety mechanism: if a repo has uncommitted local changes, or is on a branch that has diverged from its upstream, the pull fails harmlessly for that repo (logged as a failure) rather than creating a merge commit. It does **not** inspect the branch name or skip non-`main` repos — it attempts a fast-forward on every repo and lets `--ff-only` be the guard.
+
+When the target path is a fleet runtime projects dir (`.../runtime/bots/<bot>/projects`), the script consults the fleet's `fleet.yaml` roster and no-ops for a bot no longer declared in that fleet — so a stale scheduled entry can't resurrect a departed bot's runtime directory (which fleet supervision would then flag as an orphan). For any other directory of repos it behaves generically.
+
+### Scheduling
 
 ```crontab
-# Daily pull for less active repos (4 AM)
-0 4 * * * /home/YOUR_USER/claudlobby/lib/git-pull-all.sh /home/YOUR_USER/repos
-
-# 3x/day for active repos (8 AM, 1 PM, 6 PM)
-0 8,13,18 * * * /home/YOUR_USER/claudlobby/lib/git-pull-all.sh /home/YOUR_USER/active-repos
+# Daily, staggered so pulls don't collide with active work:
+30 6 * * *  /path/to/claudlobby/lib/git-pull-all.sh /path/to/projects
 ```
+
+Cron is fine here — the script is plain bash with no tmux involved. If you'd rather have enrollment managed alongside the rest of the fleet's timers, wire it as a `jobs:` entry instead of a personal crontab.
 
 ### Gotchas
 
-- `--ff-only` is the key safety mechanism. If a bot has local uncommitted changes or is on a feature branch, the pull fails harmlessly rather than creating a merge commit.
-- The script skips repos not on main/master. Bots working in worktrees won't be affected — worktrees are separate directories.
-- Don't run git pull while a bot is actively working in a repo. Schedule pulls during off-hours or check bot status first. The staggered cron times (4 AM, 8 AM) help avoid conflicts.
-- If a pull fails repeatedly, check the log. Common causes: bot left uncommitted changes, force-pushed remote, or network issues.
+- Don't pull while a bot is actively working in a repo. Schedule during off-hours or stagger the times; a mid-work pull that can't fast-forward just fails safe, but it's noise.
+- If a repo fails repeatedly, check the log — usually uncommitted changes, a force-pushed remote, or a diverged branch. `--ff-only` will never resolve those for you, by design.
 
 ---
 
 ## 7. Automated Code Audits
 
-Scheduled code reviews without human initiation. The fleet systematically audits repos for tech debt, security issues, and staleness.
+Scheduled code reviews the fleet initiates on its own, so audits actually happen instead of waiting for someone to remember. This is a **shipped, opt-in feature** — the rolling code-audit sweep — not something to build from scratch.
 
 ### Why
 
-Manual audits happen when someone remembers to do them — which means they don't happen. Automated audits run on a schedule, track what's been audited, and ensure no part of the codebase goes stale.
+Manual audits happen when someone remembers, which means they don't. A scheduled sweep works through your repos on a cadence and guarantees no repo goes stale unnoticed.
 
-### Components
+### How it works (and how to turn it on)
 
-1. **Evening audit cron** — triggers the manager bot to run audit skills
-2. **Rolling audit script** — suggests which repo/directory to audit next
-3. **Audit tracker** — logs completed audits with timestamps and issue URLs
+Add a `fleet.sweep:` block to `fleet.yaml` and give the owner bot the `code-audit-sweep` skill:
 
-### Cron: audit-cron.sh
-
-```bash
-#!/bin/bash
-# audit-cron.sh — trigger a code audit on the next stale area
-# Called by cron, runs in the manager bot's tmux session
-
-BOT_SESSION="manager-bot"
-AUDIT_TRACKER="/home/YOUR_USER/claudlobby/manager-bot/planning/audit-tracker.json"
-REPOS_DIR="/home/YOUR_USER/repos"
-
-if ! /usr/bin/tmux has-session -t "$BOT_SESSION" 2>/dev/null; then
-    exit 0
-fi
-
-# Get the next audit target from the rolling script
-TARGET=$(python3 /home/YOUR_USER/claudlobby/lib/next-audit-target.py \
-    --tracker "$AUDIT_TRACKER" \
-    --repos "$REPOS_DIR")
-
-if [ -z "$TARGET" ]; then
-    exit 0
-fi
-
-REPO=$(echo "$TARGET" | cut -d'|' -f1)
-AREA=$(echo "$TARGET" | cut -d'|' -f2)
-AUDIT_TYPE=$(echo "$TARGET" | cut -d'|' -f3)
-
-/usr/bin/tmux send-keys -t "$BOT_SESSION" \
-    "Run /$AUDIT_TYPE on $REPO (focus: $AREA). Create GitHub issues for findings. Then update the audit tracker at $AUDIT_TRACKER." Enter
+```yaml
+fleet:
+  sweep:
+    owner_bot: astrid              # bot whose session runs the audit
+    repos: [acme/api, acme/web]    # optional; defaults to owner_bot's scope.repos
+    audit_types: [tech-debt, security-audit]  # rotated per run
+    # label / schedule / enabled have sensible defaults
 ```
 
-### Rolling Target Selector: next-audit-target.py
+On a timer, the no-LLM selector `lib/code-audit-sweep.sh` asks GitHub for the most recent issue on each repo carrying the staleness label (default `auto-audit`), picks the **stalest** repo (oldest newest-audit, or never audited), and dispatches `/code-audit-sweep <org/repo> <audit-type>` into the owner bot's session via `lib/bot-sweep-cron.sh`. The `code-audit-sweep` skill runs the corresponding `/claudna:<audit-type>` audit and **guarantees the `auto-audit` label on every issue it files**.
 
-```python
-#!/usr/bin/env python3
-"""
-Suggest the next repo/directory to audit based on staleness.
+The design's key property: **GitHub is the only ledger.** The labelled issues *are* the staleness record — an audit's own filed issues make its repo look "fresh" for the next run — so there's no local tracker file to maintain and nothing to drift out of sync. (Earlier guidance here described a hand-built `next-audit-target.py` + `audit-tracker.json`; that approach was replaced precisely because a local tracker drifts.)
 
-Reads the audit tracker to find what hasn't been audited recently,
-then picks the stalest target.
-"""
-
-import argparse
-import json
-import os
-from datetime import datetime, timezone
-from pathlib import Path
-
-
-def load_tracker(path):
-    if os.path.exists(path):
-        with open(path) as f:
-            return json.load(f)
-    return {"audits": []}
-
-
-def get_repos(repos_dir):
-    """List repos and their top-level directories as audit targets."""
-    targets = []
-    for repo in sorted(Path(repos_dir).iterdir()):
-        if not (repo / ".git").exists():
-            continue
-        repo_name = repo.name
-        # Add repo-level targets
-        targets.append({"repo": repo_name, "area": ".", "types": ["tech-debt", "security-audit"]})
-        # Add directory-level targets for larger repos
-        for subdir in sorted(repo.iterdir()):
-            if subdir.is_dir() and not subdir.name.startswith("."):
-                targets.append({"repo": repo_name, "area": subdir.name, "types": ["tech-debt"]})
-    return targets
-
-
-def find_stalest(targets, tracker):
-    """Find the target that was audited longest ago (or never)."""
-    audit_map = {}
-    for audit in tracker.get("audits", []):
-        key = f"{audit['repo']}|{audit['area']}|{audit['type']}"
-        audit_map[key] = audit["timestamp"]
-
-    stalest = None
-    stalest_time = None
-
-    for target in targets:
-        for audit_type in target["types"]:
-            key = f"{target['repo']}|{target['area']}|{audit_type}"
-            last_audit = audit_map.get(key)
-
-            if last_audit is None:
-                # Never audited — highest priority
-                return f"{target['repo']}|{target['area']}|{audit_type}"
-
-            if stalest_time is None or last_audit < stalest_time:
-                stalest_time = last_audit
-                stalest = f"{target['repo']}|{target['area']}|{audit_type}"
-
-    return stalest
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--tracker", required=True, help="Path to audit-tracker.json")
-    parser.add_argument("--repos", required=True, help="Path to repos directory")
-    args = parser.parse_args()
-
-    tracker = load_tracker(args.tracker)
-    targets = get_repos(args.repos)
-
-    if not targets:
-        return
-
-    result = find_stalest(targets, tracker)
-    if result:
-        print(result)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-### Audit Tracker Format: audit-tracker.json
-
-```json
-{
-  "audits": [
-    {
-      "repo": "my-api",
-      "area": "src/auth",
-      "type": "security-audit",
-      "timestamp": "2025-01-15T22:00:00Z",
-      "issues": [
-        "https://github.com/org/my-api/issues/91",
-        "https://github.com/org/my-api/issues/92"
-      ]
-    },
-    {
-      "repo": "my-api",
-      "area": ".",
-      "type": "tech-debt",
-      "timestamp": "2025-01-10T22:00:00Z",
-      "issues": []
-    }
-  ]
-}
-```
-
-The manager bot updates this file after each audit. Include instructions in the manager's CLAUDE.md:
-
-```markdown
-## Audit Tracking
-
-After completing a code audit, update the audit tracker at `planning/audit-tracker.json`:
-- Add an entry with repo, area, type, timestamp (ISO 8601), and issue URLs
-- This file is read by the rolling audit scheduler to determine what to audit next
-```
-
-### Cron
-
-```crontab
-# Evening audit — runs one audit per night (Mon-Fri, 9 PM)
-0 21 * * 1-5 /home/YOUR_USER/claudlobby/manager-bot/audit-cron.sh
-```
-
-### Querying Audit Status
-
-The manager bot can check what needs attention:
-
-```markdown
-## Checking Audit Coverage
-
-To see what areas haven't been audited recently, read `planning/audit-tracker.json`
-and identify entries older than 30 days or repos/areas with no entries at all.
-Post the findings when asked about audit coverage.
-```
+After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). Full field reference and the emitted observability events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) are in [fleet-yaml-schema](fleet-yaml-schema.md).
 
 ### Gotchas
 
-- Run audits during off-hours (evenings, weekends) so they don't compete with daytime engineering work for bot time.
-- One audit per night is a good cadence. Running multiple audits back-to-back risks overwhelming the issue tracker with noise.
-- The tracker file can grow large over time. Periodically prune entries older than 90 days — the issues they created are the permanent record.
-- Security audits should run against the full repo (`.`), not subdirectories — vulnerabilities often span module boundaries.
+- The `auto-audit` label is load-bearing. If the audit run can't guarantee it (auth/rate-limit failure), the run reports failure rather than silently leaving the repo looking never-audited.
+- Cap new issues per run (the skill targets ~10) so a single audit doesn't flood the tracker.
+- Schedule it for off-hours so it doesn't compete with daytime engineering for the owner bot's session; the busy-pane guard in `bot-sweep-cron.sh` will defer a tick if the owner is mid-task, and the next run retries naturally.
 
 ---
 
-## 8. Telegram Formatting Guide
+## 8. Telegram Formatting
 
-Shared formatting guidance for consistent output across all bots.
+Consistent, reliable message output across all bots. The fleet-wide policy is **plain text by default** — and this reverses what older guidance recommended, for a concrete reason.
 
-### Why
+### The policy: plain text, no `parseMode`
 
-Telegram's markdown support is limited and different from GitHub/standard markdown. Bots that format messages assuming full markdown produce broken output. A shared reference ensures every bot formats consistently.
+Do **not** pass `parseMode`, and do **not** wrap output in `**bold**`, `_italic_`, or `` `backticks` ``. Send plain text. Technical identifiers (`chart_uuid`, `~/path`) then render correctly with no escaping, and there are no silent failures from a missed escape character. The bash helper `$CLAUDLOBBY_ROOT/lib/tg-post.sh` sends plain text by default; the Telegram MCP `reply` tool should be called *without* `parseMode`.
 
-### What Works in Telegram
+This is codified as a shipped protocol — `library/protocols/telegram-formatting.md` — which the example fleet composes into every bot via `defaults.protocols: [..., telegram-formatting]`. There's also a shared partial (`library/skills/_telegram-formatting.md`) that skills can reference.
 
-| Format | Syntax | Renders? |
-|--------|--------|----------|
-| **Bold** | `*bold*` | Yes |
-| *Italic* | `_italic_` | Yes |
-| `Code` | `` `code` `` | Yes |
-| Code block | ` ```code``` ` | Yes |
-| [Link](url) | `[text](url)` | Yes |
-| # Header | `# Header` | No |
-| - Bullet | `- item` | Renders as plain text with dash |
-| > Quote | `> text` | Partial (some clients) |
-| Tables | `\| col \|` | No |
+### Why it reversed
 
-### Reference File: _telegram-formatting.md
+On 2026-04-18 the fleet hit "Markdown escape hell": legacy `parseMode: Markdown` treats `_` as an italic delimiter, escaping it with `\_` renders the backslash literally, and `chart_uuid` displayed to users as `chart\_uuid` across nearly every technical reply. The fix, documented in `library/lessons/telegram/plain-text-escape-incident.md`, was to default to plain text fleet-wide. Following the old `*bold*`/`_italic_` advice today would reintroduce exactly that bug.
 
-Place this in each bot's directory or in a shared location and reference it from CLAUDE.md:
+### When rich formatting is genuinely needed
 
-```markdown
-# Telegram Formatting Reference
-
-## Rules
-
-1. NO markdown headers — they render as literal `#` characters
-2. Use *bold* for section labels instead of headers
-3. Use `code blocks` for any structured data, numbers, or tables
-4. Keep messages SHORT — Telegram is a mobile-first platform
-5. One message per topic — don't combine unrelated updates
-6. Use line breaks to separate sections (blank line between blocks)
-
-## Patterns
-
-### Status Update
-```
-*Fleet Status*
-
-eng-a-bot: ALIVE (idle)
-code-reviewer: ALIVE (working)
-
-RAM: 4.2G / 16G | Temp: 58C
-```
-
-### Task Report
-```
-*Task Completed*
-
-Bot: eng-a-bot
-PR: https://github.com/org/repo/pull/42
-Summary: Added rate limiting to auth endpoint
-```
-
-### Briefing Section
-```
-*Morning Briefing*
-
-_Calendar_
-- 10:00 Standup
-- 14:00 Design review
-
-_Email_
-3 unread, 1 action needed
-
-_GitHub_
-2 PRs awaiting review
-```
-
-### Data Table (use code block)
-```
-*Revenue Summary*
-
-` ` `
-Period     Revenue    Orders
-Today      $1,234     18
-Yesterday  $987       14
-This Week  $5,421     72
-` ` `
-```
-(Remove spaces between backticks — shown here for escaping.)
-
-## Anti-Patterns
-
-- Don't use headers: `## Summary` renders as `## Summary`
-- Don't use numbered lists with periods: `1.` can trigger unexpected formatting
-- Don't embed images — Telegram can display them but the bot can't send them inline via text
-- Don't write walls of text — break into multiple messages if needed
-```
-
-### Wiring
-
-Reference in each bot's CLAUDE.md:
-
-```markdown
-## Telegram Formatting
-
-When writing Telegram messages, follow the formatting guide in `_telegram-formatting.md`.
-Key rule: no markdown headers, use *bold* for labels, keep messages concise for mobile.
-```
-
-Or symlink a shared copy:
-
-```bash
-# Shared formatting reference
-cp _telegram-formatting.md ~/claudlobby/lib/
-# Symlink into each bot
-ln -s ~/claudlobby/lib/_telegram-formatting.md ~/claudlobby/my-bot/_telegram-formatting.md
-```
+Use **MarkdownV2**, and only in a skill that has been hardened for it — meaning it escapes all 17 special characters (`_ * [ ] ( ) ~ `` ` `` > # + - = | { } . !`). Missing even one causes the message to fail silently. Use this sparingly; plain text is the default because content carries emphasis and formatting is mostly noise.
 
 ### Gotchas
 
-- Telegram's markdown parser varies slightly between clients (desktop, iOS, Android). Test formatting on your primary device.
-- Code blocks with triple backticks work, but nested code blocks do not.
-- Very long messages (4096+ characters) get truncated. Split long outputs into multiple messages.
-- The bot can send messages with formatting, but when reading user messages, formatting markers may or may not be present depending on the client.
+- Very long messages (4096+ characters) get truncated — split long output into multiple messages.
+- Telegram renders bullets and dashes as plain text, which is fine. Don't reach for headers or tables; they don't render.
 
 ---
 
 ## 9. Visual Crawl (Designer Bot)
 
-Autonomous frontend quality assurance. A bot crawls a deployed web app, screenshots every page at multiple viewports, compares against design system tokens, tests basic interactions, and files GitHub issues for findings.
+**Shipped skill — `library/skills/visual-crawl/SKILL.md`.**
+
+Autonomous frontend QA: a bot crawls a deployed web app, screenshots each route at mobile/tablet/desktop viewports, checks against design tokens, exercises basic interactions, and files GitHub issues (with screenshot evidence) for findings.
 
 ### Why
 
-Frontend QA is tedious and gets skipped. A designer bot can systematically check every page at every viewport, catch regressions that humans miss, and file issues with screenshot evidence. Run it on-demand after deploys or on a schedule.
+Frontend QA is tedious and gets skipped. A designer bot checks every page at every viewport systematically and files issues with evidence — run it after a deploy or on a nightly schedule.
 
-### Flow
+### Enable it
 
-```
-/visual-crawl --url https://staging.example.com --repo org/frontend
+Add `visual-crawl` to a designer/QA bot and run `claudlobby generate`. The skill takes `[--url <base-url>] [--auto] [--output github|session]`. The [Designer / Visual QA Bot archetype](bot-archetypes.md) describes a good persona for the bot that runs it (typically an Opus bot doing visual QA across the fleet's frontends).
 
-  1. Discover all routes (crawl links from the homepage, read sitemap, or use a route list)
-  2. For each route:
-     a. Load at 3 viewports: mobile (375px), tablet (768px), desktop (1440px)
-     b. Screenshot each viewport
-     c. Compare against design system tokens (colors, spacing, typography)
-     d. Test basic interactions (click buttons, hover states, form inputs)
-     e. Check accessibility (contrast, alt text, focus states)
-  3. File GitHub issues for every finding:
-     - Include screenshot evidence
-     - Tag with viewport, severity, affected component
-  4. Post summary to Telegram
-```
+### Browser automation
 
-### SKILL.md
+The skill needs a way to drive a browser. There is no `library/mcp/` fragment for this — browser control comes from the separate `claude-in-chrome` MCP server/skill (or, as a fallback, Playwright/Puppeteer invoked via Bash). Wire that into the designer bot, not via a `mcp:` library fragment.
 
-```markdown
----
-name: visual-crawl
-description: "Crawl a deployed web app, screenshot all pages at 3 viewports, compare against design tokens, file issues for findings."
-argument-hint: "--url <base-url> --repo <owner/repo> [--routes <file>]"
----
+### Scheduling
 
-# Visual Crawl
-
-Autonomous frontend quality audit.
-
-## Setup
-
-This skill requires a browser automation tool. Options:
-- Chrome MCP server (if available on the bot)
-- Playwright via Bash (`npx playwright`)
-- Puppeteer via Bash (`npx puppeteer`)
-
-The bot also needs the design system tokens — either as a file in the repo
-(e.g., `tokens.json`, `theme.ts`) or loaded via the `/design-norms` skill.
-
-## Steps
-
-### 1. Route Discovery
-
-Start from the base URL and discover pages:
-
-```bash
-# Option A: crawl links from homepage
-# The bot reads the page, extracts all internal links, builds a route list
-
-# Option B: read from sitemap
-curl -s https://staging.example.com/sitemap.xml
-
-# Option C: provide a route list file
-# --routes routes.txt (one path per line)
-```
-
-### 2. Screenshot Capture
-
-For each route, capture at three viewports:
-
-| Viewport | Width | Use Case |
-|----------|-------|----------|
-| Mobile | 375px | iPhone SE / small phones |
-| Tablet | 768px | iPad / mid-size |
-| Desktop | 1440px | Standard laptop |
-
-Save screenshots to a temp directory with naming:
-`<route-slug>-<viewport>.png`
-
-### 3. Design Token Comparison
-
-Load design system tokens (from repo or `/design-norms`):
-- **Colors:** Check that backgrounds, text, and borders use approved palette
-- **Typography:** Verify font families, sizes, weights, line heights
-- **Spacing:** Check margins and padding against the spacing scale
-- **Components:** Compare common elements (buttons, inputs, cards) against specs
-
-### 4. Interaction Testing
-
-For each page, test:
-- Clickable elements respond (buttons, links, nav items)
-- Hover states appear where expected
-- Form inputs accept text, show focus states
-- Modals/dropdowns open and close
-- No console errors during interaction
-
-### 5. Issue Filing
-
-For each finding, create a GitHub issue:
-
-Title: `[Visual QA] <component/page> — <issue description>`
-Body:
-```
-**Page:** /about
-**Viewport:** Mobile (375px)
-**Severity:** Medium
-
-**Finding:**
-Button text overflows container at mobile width.
-
-**Expected:** Text wraps or truncates within button bounds
-**Actual:** Text extends beyond button, overlaps adjacent content
-
-**Screenshot:**
-[attached screenshot]
-
-**Design Token Reference:**
-Button max-width should be 100% at mobile per tokens.spacing.mobile
-```
-
-### 6. Summary
-
-Post to Telegram:
-```
-*Visual Crawl Complete*
-
-URL: staging.example.com
-Pages: 12 crawled
-Findings: 7 issues filed
-
-Critical: 1 (broken layout on /checkout mobile)
-Medium: 4 (color mismatches, spacing issues)
-Low: 2 (minor alignment, hover states)
-
-Issues: https://github.com/org/frontend/issues?q=label:visual-qa
-```
-
-## Rules
-
-- Always include screenshot evidence in issues
-- Tag issues with `visual-qa` label for easy filtering
-- Don't file issues for known/intentional deviations (check existing issues first)
-- Group related findings (e.g., same component broken across pages = one issue, not N issues)
-```
-
-### Wiring
-
-Designer bot skill:
-
-```
-~/claudlobby/designer-bot/.claude/skills/visual-crawl/SKILL.md
-```
-
-**On-demand** (manager dispatches):
-```bash
-tmux send-keys -t designer-bot '/visual-crawl --url https://staging.example.com --repo org/frontend' Enter
-```
-
-**Scheduled** (post-deploy or nightly):
-```crontab
-# Nightly visual audit of staging (11 PM)
-0 23 * * * /home/YOUR_USER/claudlobby/designer-bot/visual-crawl-cron.sh
-```
-
-```bash
-#!/bin/bash
-# visual-crawl-cron.sh
-BOT_SESSION="designer-bot"
-if /usr/bin/tmux has-session -t "$BOT_SESSION" 2>/dev/null; then
-    /usr/bin/tmux send-keys -t "$BOT_SESSION" \
-        "/visual-crawl --url https://staging.example.com --repo org/frontend" Enter
-fi
-```
+For a nightly or post-deploy run, dispatch through the socket-aware sweep dispatcher (`lib/bot-sweep-cron.sh <designer-session> "/visual-crawl --url https://staging.example.com --auto"`) wired as a fleet job — not a raw tmux keystroke, which would target the wrong server.
 
 ### Gotchas
 
-- Browser automation on a Pi is memory-intensive. Chromium alone uses 300-500 MB. Run visual crawls when other bots are idle, or on a separate Pi.
-- Screenshots need to be uploaded to GitHub issues. The bot can do this via the GitHub API (create issue with image attachment) or by committing screenshots to a branch and linking them.
-- Crawling can discover hundreds of routes on large apps. Use `--routes` with a curated list for targeted audits, or let the full crawl run overnight.
-- Design token comparison is only as good as the tokens file. If the tokens are outdated or incomplete, findings will be noisy. Keep the design tokens in the repo and up to date.
+- Browser automation is memory-hungry (Chromium alone is 300-500 MB). Run visual crawls when other bots are idle, or on a host with headroom.
+- A full crawl can discover hundreds of routes. Scope it (curated route list, or `--output session` for a dry run) for targeted checks, or let a full crawl run overnight.
+- The skill groups related findings into single issues rather than filing N near-duplicates, and skips known/intentional deviations — quality of the design-token reference drives how noisy the findings are.
 
 ---
 
-## 10. Multi-Account Setup (CLAUDE_CONFIG_DIR)
+## 10. Multi-Account Setup (fleet.accounts)
 
-Running bots under different Claude subscriptions. Useful when you need more concurrent sessions than one account provides, or when work and personal bots should use separate billing.
+Run some bots under a different Claude account — to get more concurrent sessions than one account allows, or to keep work and personal billing separate. This is a **first-class `fleet.yaml` primitive**; you declare accounts once and reference them per bot, rather than hand-editing generated files.
 
-### Why
+### The fleet.yaml side
 
-A single Claude account has concurrency limits. If your fleet has 5+ bots, you may hit session caps. Running some bots under a second account doubles your capacity. It also provides clean separation — your employer's account pays for work bots, your personal account pays for personal bots.
+Declare the alternate config directories at the fleet level, then point a bot at one with `account:`:
 
-### How It Works
-
-Each Claude Code installation stores its auth, plugins, and channel state in a config directory (default: `~/.claude/`). Setting `CLAUDE_CONFIG_DIR` to a different path gives a bot its own identity.
-
-### Step-by-Step Setup
-
-#### 1. Create the Config Directory
-
-```bash
-mkdir -p ~/.claude-work
+```yaml
+fleet:
+  accounts:
+    default: ~/.claude
+    work: ~/.claude-work
+  bots:
+    work-bot:
+      account: work        # → compositor writes CLAUDE_CONFIG_DIR into this bot's bot.conf
 ```
 
-#### 2. Authenticate
+When a bot's `account` is not `default`, `claudlobby generate` writes `CLAUDE_CONFIG_DIR=<that dir>` into its `bot.conf`; `lib/start-bot.sh` exports it before launching Claude Code, so the bot authenticates, installs plugins, and stores channel state under that directory. You do **not** hand-write `CLAUDE_CONFIG_DIR` into `bot.conf` — that file is generated and the `accounts:` mechanism manages the value. (`TELEGRAM_STATE_DIR` is likewise always derived and emitted for every bot, multi-account or not; it isn't a separate thing you toggle for multi-account setups.)
+
+### The host side (one-time, per account)
+
+The compositor points a bot at a config directory, but it can't authenticate that account for you. Each additional account needs a one-time host setup:
 
 ```bash
+# Authenticate the second account into its config dir:
 CLAUDE_CONFIG_DIR=~/.claude-work claude auth login
-# Complete OAuth flow — this creates auth tokens in ~/.claude-work/
+
+# Plugins are per-config-dir — install into the second account too:
+CLAUDE_CONFIG_DIR=~/.claude-work claude plugin install <plugin>@<marketplace>
 ```
 
-#### 3. Install Plugins
-
-```bash
-CLAUDE_CONFIG_DIR=~/.claude-work claude plugin install telegram@claude-plugins-official
-```
-
-#### 4. Symlink Shared Skills
-
-Global skills should be available to both accounts:
+If you want globally-installed skills visible to both accounts, symlink them:
 
 ```bash
 ln -s ~/.claude/skills ~/.claude-work/skills
 ```
 
-This means skills installed to `~/.claude/skills/` (by clauDNA or manually) are visible to bots using either config dir.
-
-#### 5. Set Up Telegram State
-
-When using a separate `CLAUDE_CONFIG_DIR`, Telegram state goes into that config dir's `channels/` directory:
-
-```bash
-mkdir -p ~/.claude-work/channels/telegram-work-bot/{approved,inbox}
-
-# Write bot token
-echo "TELEGRAM_BOT_TOKEN=your_work_bot_token" > ~/.claude-work/channels/telegram-work-bot/.env
-chmod 600 ~/.claude-work/channels/telegram-work-bot/.env
-
-# Write access config
-cat > ~/.claude-work/channels/telegram-work-bot/access.json << 'EOF'
-{
-  "dmPolicy": "allowlist",
-  "allowFrom": ["YOUR_TELEGRAM_USER_ID"],
-  "groups": {
-    "YOUR_GROUP_CHAT_ID": {
-      "requireMention": false,
-      "allowFrom": []
-    }
-  },
-  "pending": {}
-}
-EOF
-```
-
-When using `CLAUDE_CONFIG_DIR`, you may not need to set `TELEGRAM_STATE_DIR` separately — the Telegram plugin looks for state relative to the config dir. Test this: if the bot finds its token without `TELEGRAM_STATE_DIR`, you can skip it. If not, set both.
-
-#### 6. Configure bot.conf
-
-```bash
-BOT_NAME="work-bot"
-BOT_SERVICE="work-bot"
-BOT_LABEL="WORK-BOT"
-BOT_DIR="/home/YOUR_USER/claudlobby/work-bot"
-CLAUDE_CONFIG_DIR="/home/YOUR_USER/.claude-work"
-TELEGRAM_STATE_DIR="/home/YOUR_USER/.claude-work/channels/telegram-work-bot"
-```
-
-#### 7. Verify
-
-```bash
-# Test that the bot starts with the right account
-CLAUDE_CONFIG_DIR=~/.claude-work claude --version
-# Should work without re-authenticating
-
-# Check that skills are visible
-ls ~/.claude-work/skills/
-# Should show symlinked skills
-```
-
-### Directory Layout
-
-```
-~/.claude/                        # Account 1 (personal)
-├── auth/                         # Personal account auth
-├── skills/                       # Global skills (canonical copy)
-├── channels/
-│   ├── telegram-assistant/       # Personal assistant bot
-│   └── telegram-engineer/        # Personal engineer bot
-└── ...
-
-~/.claude-work/                   # Account 2 (work)
-├── auth/                         # Work account auth
-├── skills -> ~/.claude/skills    # Symlink to shared skills
-├── channels/
-│   ├── telegram-work-bot/        # Work manager bot
-│   └── telegram-work-eng/        # Work engineer bot
-└── ...
-```
-
 ### Gotchas
 
-- Each account needs its own `claude auth login`. If auth expires, you need to re-auth with the correct `CLAUDE_CONFIG_DIR` set.
-- Symlinking skills means changes to one are visible to both. If you need account-specific skills, use a separate directory instead of a symlink.
-- Plugin installation is per-config-dir. If you install a new plugin on your default account, you need to install it again with `CLAUDE_CONFIG_DIR` set for the other account.
-- `start-bot.sh` already handles `CLAUDE_CONFIG_DIR` — it reads it from `bot.conf` and exports it before launching Claude. No script changes needed.
+- Auth, plugins, and (if not symlinked) skills are all per-config-dir. If auth expires or you add a plugin on the default account, repeat the step with `CLAUDE_CONFIG_DIR` set for the other account.
+- Symlinked skills are shared both ways — edits to one are seen by both. If you need account-specific skills, use a real directory instead of a symlink.
+- Everything else (which bot uses which account, service naming, Telegram state) is driven by `fleet.yaml` + `claudlobby generate`. Keep account membership there, not in hand-edited runtime files.
 
 ---
 
 ## 11. Finance/Data Pre-Sync Pattern
 
-Pre-fetch data before scheduled briefings so they run fast.
+Pre-fetch slow or rate-limited data before a scheduled briefing so the briefing reads a snapshot instead of making live calls. Unlike most patterns here, this has no shipped equivalent — it's a genuine build-it-yourself template. (Note: `lib/data-sweep.sh` is unrelated — it's a retention job that *purges* old `data/` files, not a pre-fetch cache.)
 
 ### Why
 
-Briefings that make API calls in real-time (portfolio data, order totals, analytics) are slow and sometimes fail due to rate limits or timeouts. Pre-syncing fetches the data ahead of time and saves a snapshot. When the briefing runs, it reads the snapshot instead of making live calls.
+Briefings that make live API calls (portfolio data, order totals, analytics) are slow and occasionally fail on rate limits or timeouts. Pre-syncing fetches the data ahead of time and saves a snapshot; the briefing reads the snapshot and completes in seconds.
 
-### How It Works
+### The sync script
 
-```
-7:00 AM — Cron runs data-sync.sh
-           → Fetches portfolio data, order summaries, weather, etc.
-           → Saves JSON snapshot to a known location
-
-7:30 AM — Cron triggers /briefing morning
-           → Bot reads the pre-synced snapshot
-           → Briefing completes in seconds instead of minutes
-```
-
-### Script: data-sync.sh
+A plain bash script (no Claude, no MCP — direct API access) that fetches each source and writes a JSON snapshot plus a small metadata file:
 
 ```bash
 #!/bin/bash
-# data-sync.sh — pre-fetch data for upcoming briefing
-# Called by cron ~30 min before each scheduled briefing
+# data-sync.sh — pre-fetch data for the upcoming briefing.
+# Source secrets from the bot's .env (this runs outside Claude, so no MCP).
+set -euo pipefail
+source "$BOT_DIR/.env"                 # FINANCE_API_KEY, SHOPIFY_TOKEN, ...
 
-SYNC_DIR="/home/YOUR_USER/claudlobby/manager-bot/planning/data-sync"
+SYNC_DIR="$BOT_DIR/data/data-sync"
 mkdir -p "$SYNC_DIR"
-TIMESTAMP=$(date -Iseconds)
 
-# --- Portfolio data (example: fetch from a finance API) ---
-# Replace with your actual data source
-PORTFOLIO_DATA=$(curl -s "https://api.example.com/portfolio" \
-    -H "Authorization: Bearer $FINANCE_API_KEY" 2>/dev/null)
-
-if [ $? -eq 0 ] && [ -n "$PORTFOLIO_DATA" ]; then
-    echo "$PORTFOLIO_DATA" > "$SYNC_DIR/portfolio.json"
-    echo "$(date -Iseconds) OK portfolio" >> "$SYNC_DIR/sync.log"
-else
-    echo "$(date -Iseconds) FAIL portfolio" >> "$SYNC_DIR/sync.log"
+# One block per source; on failure, log it and keep going so a partial
+# briefing is still possible.
+if DATA=$(curl -sf "https://api.example.com/portfolio" -H "Authorization: Bearer $FINANCE_API_KEY"); then
+    printf '%s' "$DATA" > "$SYNC_DIR/portfolio.json"
 fi
+# ... repeat for orders, weather, etc.
 
-# --- Order summary (example: aggregate from Shopify API) ---
-ORDER_DATA=$(curl -s "https://your-store.myshopify.com/admin/api/2024-01/orders.json?status=any&limit=50" \
-    -H "X-Shopify-Access-Token: $SHOPIFY_TOKEN" 2>/dev/null)
-
-if [ $? -eq 0 ] && [ -n "$ORDER_DATA" ]; then
-    echo "$ORDER_DATA" > "$SYNC_DIR/orders.json"
-    echo "$(date -Iseconds) OK orders" >> "$SYNC_DIR/sync.log"
-else
-    echo "$(date -Iseconds) FAIL orders" >> "$SYNC_DIR/sync.log"
-fi
-
-# --- Weather (example) ---
-WEATHER=$(curl -s "https://api.weather.example.com/forecast?location=YOUR_CITY" 2>/dev/null)
-
-if [ $? -eq 0 ] && [ -n "$WEATHER" ]; then
-    echo "$WEATHER" > "$SYNC_DIR/weather.json"
-    echo "$(date -Iseconds) OK weather" >> "$SYNC_DIR/sync.log"
-else
-    echo "$(date -Iseconds) FAIL weather" >> "$SYNC_DIR/sync.log"
-fi
-
-# --- Write sync metadata ---
-cat > "$SYNC_DIR/sync-meta.json" << EOF
-{
-  "timestamp": "$TIMESTAMP",
-  "files": ["portfolio.json", "orders.json", "weather.json"]
-}
-EOF
-
-echo "$(date -Iseconds) === Sync complete ===" >> "$SYNC_DIR/sync.log"
+printf '{"timestamp":"%s","files":["portfolio.json"]}\n' "$(date -Iseconds)" > "$SYNC_DIR/sync-meta.json"
 ```
 
-### CLAUDE.md Instructions
+Write snapshots under the bot's own `data/` directory (bot-owned persistent state), and `chmod 600` anything sensitive (portfolio values, customer orders).
 
-Tell the manager bot to use pre-synced data in briefings:
+### Telling the bot to use it
+
+In the briefing skill or the bot's `CLAUDE.md`:
 
 ```markdown
 ## Data Pre-Sync
 
-Before composing briefings, check for pre-synced data at `planning/data-sync/`.
-
-Read `sync-meta.json` to see when data was last fetched and which files are available.
-If the sync is recent (< 1 hour old), use the snapshot files instead of making live API calls.
-If the sync is stale or missing, fall back to live data via MCP servers.
-
-Available snapshots:
-- `portfolio.json` — investment portfolio positions and values
-- `orders.json` — recent Shopify orders
-- `weather.json` — local weather forecast
+Before composing a briefing, check `data/data-sync/sync-meta.json`. If the sync is
+recent (< 1 hour), read the snapshot files instead of making live calls. If it's
+stale or missing, fall back to live data via MCP. Always produce a briefing from
+whatever data succeeded — a failed source shouldn't block the rest.
 ```
 
-### Briefing Skill Integration
+### Scheduling
 
-Update the briefing SKILL.md to reference pre-synced data:
-
-```markdown
-## Data Sources (updated)
-
-1. **Pre-synced data** (preferred) — read `planning/data-sync/*.json` if fresh
-2. **Calendar** — always live (via Google Calendar MCP)
-3. **Email** — always live (via Gmail MCP)
-4. **Notion** — always live (via Notion MCP)
-5. **GitHub** — always live (via GitHub MCP)
-
-Use pre-synced data for anything that involves external API calls with rate limits or slow responses.
-Use live MCP data for things that change minute-to-minute (calendar, email, tasks).
-```
-
-### Cron Setup
-
-```crontab
-# Pre-sync data 30 min before each briefing
-0 8 * * * /home/YOUR_USER/claudlobby/manager-bot/data-sync.sh
-30 12 * * * /home/YOUR_USER/claudlobby/manager-bot/data-sync.sh
-0 18 * * * /home/YOUR_USER/claudlobby/manager-bot/data-sync.sh
-
-# Briefings (30 min after sync)
-30 8 * * * /home/YOUR_USER/claudlobby/manager-bot/briefing-cron.sh morning
-0 13 * * * /home/YOUR_USER/claudlobby/manager-bot/briefing-cron.sh midday
-30 18 * * * /home/YOUR_USER/claudlobby/manager-bot/briefing-cron.sh evening
-```
+Run the sync ~30 minutes before each briefing. Because it's plain bash with no tmux, either a host cron entry or a fleet `jobs:` timer works; prefer a `jobs:` entry if you want the schedule managed alongside the fleet's other timers rather than in a personal crontab. Secrets must be available to whatever runs it — source the bot's `.env` at the top of the script, as above.
 
 ### Gotchas
 
-- Secrets for external APIs (`FINANCE_API_KEY`, `SHOPIFY_TOKEN`) need to be available to the cron environment. Source them from the bot's `.env` file at the top of `data-sync.sh`: `source /home/YOUR_USER/claudlobby/manager-bot/.env`
-- Snapshot files can contain sensitive data (portfolio values, customer orders). Set permissions: `chmod 600 planning/data-sync/*.json`
-- The sync script runs outside Claude — it's a plain bash script with curl calls. This means it doesn't use MCP servers. You need direct API access (tokens, endpoints) for each data source.
-- If a data source fails, the bot should still produce a briefing using whatever data succeeded. The `sync.log` tells the bot which sources are available.
-- Clean up old snapshots. They're overwritten each run, but the log file grows. Add log rotation to your maintenance cron.
+- The script runs outside Claude, so it can't use MCP servers — you need direct API access (tokens, endpoints) for each source.
+- Snapshots are overwritten each run, but logs grow — add them to your log rotation.
+- If a source fails, the snapshot for it is simply absent; the bot's instructions should treat a missing file as "fall back to live" rather than an error.

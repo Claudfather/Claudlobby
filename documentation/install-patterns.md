@@ -1,6 +1,6 @@
 # Install Patterns
 
-claudlobby's compositor generates the host-side service definitions for each bot — `<bot>.plist` (launchd) and `<bot>.service` (systemd) — but you choose how to register and run them. There are three supported patterns. Pick the one that fits your host.
+claudlobby's compositor generates the host-side service definitions for each bot — `<service_prefix>.<bot>.plist` (launchd) and `<service_prefix>.<bot>.service` (systemd) — but you choose how to register and run them. There are three supported patterns. Pick the one that fits your host.
 
 ## When to use which
 
@@ -29,7 +29,7 @@ lib/install_fleet_timer_launchd.sh creds-check <fleet>
 lib/install-code-audit-sweep.sh <fleet>                  # nightly code-audit sweep (only if fleet.sweep set)
 ```
 
-Each bot becomes `com.claudlobby.<fleet>.<bot>` in `~/Library/LaunchAgents/`. View with `launchctl list | grep claudlobby` and tail logs at `<bot-dir>/logs/launchd.*.log`.
+Each bot becomes `com.claudlobby.<fleet>.<bot>` in `~/Library/LaunchAgents/`. View with `launchctl list | grep claudlobby` and tail logs at `lib/logs/<bot>.{out,err}.log`.
 
 See [mac-mini-setup-guide.md](./mac-mini-setup-guide.md) for full host setup (SSH, Homebrew, Tailscale, Claude Code).
 
@@ -59,8 +59,8 @@ See [pi-setup-guide.md](./pi-setup-guide.md) for full host setup.
 ```bash
 # One-time, per fleet — installs everything as crontab entries:
 #   - Per-bot keepalive (every 30 min, staggered)
-#   - Weekly log rotation (Sunday 03:00)
-#   - Daily disk-usage monitor (07:00)
+#   - Weekly log rotation (Sunday 03:00) — lib/-level logs only, see note below
+#   - Fleet pulse (every 5 min by default, derived from OBSERVABILITY_PULSE_INTERVAL)
 #   - Daily creds-check (09:00) — pass --no-creds-check to skip
 lib/install-cron.sh --fleet <name>
 
@@ -80,6 +80,10 @@ Bots are still tmux sessions — start them once with `lib/start-bot.sh <bot-dir
 
 Anything outside that block is preserved on re-run. To remove the block entirely, edit `crontab -e` and delete it.
 
+**Scope notes:**
+- The weekly log rotation only targets five `lib/`-level log files (`keepalive.log`, `keepalive-all.log`, `bot-sweep-cron.log`, `disk-monitor.log`, `creds-check.log`) — it does not rotate per-bot logs (`runtime/bots/<bot>/keepalive.log`, `<bot>/logs/startup.log`, `<bot>/data/events/*.jsonl`). For the same comprehensive per-bot coverage Patterns 1/2 get automatically from their composed `log-rotation` timer, add a weekly cron line for `lib/log-rotate-fleet.sh --fleet <name>` yourself.
+- Disk-usage monitoring and the other host-wide jobs (`disk-monitor`, `claude-update`, `notify-behind`, `fleet-memory-check`) are **not** installed by `install-cron.sh` — they're host jobs enrolled once per host by `lib/setup-system` (`disk-monitor` runs daily at 05:00), independent of which bot-supervision pattern you use. Run `lib/setup-system` on this host if you haven't already.
+
 ### Adding bot startup at reboot (cron)
 
 Cron does not auto-start tmux sessions on boot. To bring bots up after a Pi reboot:
@@ -98,6 +102,7 @@ These ship with claudlobby and are referenced by the cron block install above; t
 - `lib/keepalive.sh <bot-dir>` — restart a bot's service if its tmux session is dead; nudge an idle pane with `Enter`.
 - `lib/keepalive-all.sh [<fleet-name> | <abs-runtime-bots-dir>]` — iterate every declared bot in the fleet and run `keepalive.sh` per bot (composed units pass the fleet name; an absolute path selects a bots dir directly).
 - `lib/log-rotate.sh [--keep N] <log-path>...` — tail each log to last N lines (default 500). Cheap, idempotent.
+- `lib/log-rotate-fleet.sh [--keep N] [--fleet <name>]` — discovers and rotates all bot logs (walks `runtime/bots/<bot>/` per fleet, plus `lib/logs/`) using `log-rotate.sh` under the hood; without `--fleet`, rotates every fleet under `local/`. This is what Patterns 1/2's composed `log-rotation` timer runs — Pattern 3's cron block does not call it by default (see Scope notes above).
 - `lib/disk-monitor.sh [--threshold N] [--mount /]` — FLEET ALERT when disk usage exceeds N% (default 90, mount `/`); reports per-bot data sizes. Runs daily as the `disk-monitor` host job.
 - `lib/bot-sweep-cron.sh <bot-name> <dispatch-text>` — send a trigger string into a bot's tmux pane (skips if pane is busy). Use to wire periodic actions like `briefing morning` or `SWEEP DEEP`.
 - `lib/creds-check.sh` — probe fleet-critical credentials, alert Telegram on state transitions.

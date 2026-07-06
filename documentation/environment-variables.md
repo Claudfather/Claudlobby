@@ -9,6 +9,7 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 | `BOT_ID` | `bots.<name>` key | Bot identifier (same as fleet.yaml key) |
 | `BOT_NAME` | `bots.<name>` key | Bot name (same as BOT_ID) |
 | `BOT_SERVICE` | Derived | systemd/launchd service name (e.g., `com.example.fleet.botname`) |
+| `TMUX_SOCKET` | Derived | Per-bot tmux server socket name (`-L` argument) — equals `BOT_SERVICE`. One tmux server per bot, so one server's death drops only that bot. Peer scripts resolve it via `tmux_socket_for_bot()` (`lib/lib-common.sh`) |
 | `BOT_LABEL` | Derived | Human-readable label for the service |
 | `BOT_DIR` | Derived | Absolute path to the bot's runtime directory |
 | `CLAUDLOBBY_ROOT` | Detected | Absolute path to the claudlobby repository root |
@@ -21,6 +22,8 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 | `SERVICE_PREFIX` | `fleet.service_prefix` | Service name prefix for systemd/launchd units |
 | `FLEET_STATE_PATH` | Derived | Path to `fleet-state.json` for atomic state updates |
 | `MANAGER_TMUX` | `teams` config | tmux session name of this bot's manager (if in a team) |
+| `MANAGER_TMUX_SOCKET` | Derived | tmux socket (`BOT_SERVICE`) of this bot's manager, or its own socket when this bot is itself a manager. Used for cross-socket sends via `bot_tmux_send()` |
+| `TMUX_TMPDIR` | Pinned constant | tmux's tmpdir (`/tmp`), pinned so every script's `tmux -L <socket>` resolves to the same server — drift here would silently spawn a duplicate server for the same socket name |
 
 ## Telegram
 
@@ -39,6 +42,7 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 | `CLAUDE_FLAGS` | Multiple fields | Composed CLI flags string (--remote-control, --permission-mode, --model, --channels, etc.) |
 | `CLAUDE_CONFIG_DIR` | `bots.<name>.account` | Custom Claude config directory (only set for non-default accounts) |
 | `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` | `bots.<name>.prompt_suggestions` | Whether to show prompt suggestions (true/false) |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `bots.<name>.disable_nonessential_traffic` | When set (default: enabled), disables Claude Code's satisfaction survey, transcript-consent prompt, telemetry, and built-in auto-updater. Presence flag — only emitted (`=1`) when true; a false override omits the line entirely rather than writing `=0` |
 | `STARTUP_PROMPT` | `bots.<name>.startup_prompt` | Initial prompt sent to bot on startup |
 
 ## Model Strategy
@@ -61,6 +65,17 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 | `OBSERVABILITY_REAP_DAYS` | `bots.<name>.observability.reap_days` | Days to retain event files (default: 7) |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | `bots.<name>.observability.activity_stuck_threshold` | Seconds of inactivity before flagged stuck (default: 1800) |
 | `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue (default: 1800) |
+
+## Code-Audit Sweep
+
+Emitted only into the `fleet.sweep.owner_bot`'s `bot.conf` (see `fleet.sweep` in the fleet.yaml schema reference) — the fleet-level nightly selector (`lib/code-audit-sweep.sh`) needs to resolve exactly one owner.
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `SWEEP_OWNER_BOT` | `fleet.sweep.owner_bot` | Bot ID whose session runs the audit (set only in this bot's own `bot.conf`) |
+| `SWEEP_REPOS` | `fleet.sweep.repos` | Space-separated repo list to audit — falls back to the owner's `scope.repos` when `sweep.repos` is unset |
+| `SWEEP_LABEL` | `fleet.sweep.label` | GitHub label used to track audit staleness (default: `auto-audit`) |
+| `SWEEP_AUDIT_TYPES` | `fleet.sweep.audit_types` | Space-separated audit types rotated per run (default: `tech-debt`) |
 
 ## Ecosystem
 

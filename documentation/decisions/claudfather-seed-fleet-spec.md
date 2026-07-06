@@ -1,3 +1,12 @@
+---
+title: Claudfather Bot — Consolidated Implementation Spec
+type: decision
+status: shipped
+owner: chris
+created: 2026-05-11
+tags: [claudfather, seed-fleet, bootstrap, onboarding, setup-assistant]
+---
+
 # Claudfather Bot — Consolidated Implementation Spec
 
 Synthesizes Mason's original plan, Greg's engineer plan, Branden's operator plan, and Rajan's adversarial review, filtered through Chris's final design direction.
@@ -36,14 +45,14 @@ claudlobby/
     bot.conf                              # env vars, CLI flags
     .mcp.json                             # MCP server config
     claudfather.service                   # systemd unit
-    com.claudfather.seed.claudfather.plist # launchd plist
+    com.claudlobby.seed.claudfather.plist # launchd plist (service_prefix: com.claudlobby.seed)
     .claude/skills/                       # symlinked skills
     memory/                               # persistent state
     data/                                 # scripts, state files
   library/expertise/setup-assistant.md    # new expertise file
   library/skills/bootstrap/SKILL.md       # new skill
   library/skills/doctor/SKILL.md          # new skill
-  lib/setup-host.sh                       # new: Linux + macOS host setup
+  lib/setup-host.sh                       # never shipped -- superseded by lib/setup-system + lib/setup-fleet (see §10)
 ```
 
 ### Relationship to user fleets
@@ -58,7 +67,7 @@ Claudfather knows how to help users create fleets in `local/<name>/`. It reads t
 ```yaml
 fleet:
   name: seed
-  service_prefix: com.claudfather.seed
+  service_prefix: com.claudlobby.seed
 
   accounts:
     default: ~/.claude
@@ -88,7 +97,8 @@ fleet:
         create fleets, validate configurations, diagnose problems, and learn the
         system. You specialize in everything within this repo. You do not dispatch
         work or manage other bots -- you teach users to build their own fleets.
-      model: sonnet
+      model: opus
+      effort: max
       skills: [bootstrap, doctor, fleet-status]
       mcp: [github]
       guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
@@ -107,7 +117,7 @@ fleet:
 
 **Design notes:**
 
-- `model: sonnet` for cost efficiency. Claudfather's tasks (reading docs, running diagnostics, guiding config) do not require Opus. (Branden's recommendation.)
+- `model: opus`, `effort: max` -- shipped this way since commit `d97d709` (2026-05-12), the day after this spec was written. The original recommendation here was `sonnet` "for cost efficiency" (Branden), on the theory that reading docs, running diagnostics, and guiding config do not require Opus -- but the always-on repo-guide role was judged to warrant Opus-level reasoning, and the fleet config was flipped the next day and never reverted. The fleet-level `defaults.model` remains `sonnet`; claudfather's own bot stanza overrides it. (Superseded -- see §14.)
 - No `dangerously_skip_permissions` -- standard permissions by default. The user approves commands during bootstrap. (Greg's position, supported by Rajan.)
 - No `teams` -- single-bot fleet, no dispatch hierarchy.
 - `require_mention: false` -- claudfather is the only bot in the seed fleet's group, so it listens to everything.
@@ -138,7 +148,7 @@ Claudfather is a **repo expert, bootstrap guide, fleet doctor, and tutor**. It r
 
 - Host readiness checks (deps: tmux, node, claude CLI, plugins, python, jq)
 - Fleet.yaml scaffolding (guided or flag-driven via `claudlobby new-bot`)
-- Credential validation (is_filled() pattern: detect placeholders vs. real tokens)
+- Credential validation (`REPLACE_ME` sentinel for seed-fleet fields, prose placeholder-substring check for user-fleet tokens -- see §8)
 - Service enrollment guidance (systemd on Linux, launchd on macOS)
 - Diagnostics: reconcile-fleet, creds-check, disk-monitor, npx-cache, plugin-cache
 - Repo exploration: reads and explains library/, docs/, lib/, templates/, claudlobby/
@@ -176,9 +186,9 @@ pip install -e .
 
 **Step 2: Host setup**
 ```bash
-lib/setup-host.sh
+lib/setup-system
 ```
-Installs dependencies: tmux, node, jq, gh, claude CLI, Telegram plugin. Idempotent -- detects what is already installed and skips it. Works on both Linux and macOS. (See section 10 for `setup-host.sh` details.)
+Installs dependencies: tmux, node, jq, gh, claude CLI, Telegram plugin. Idempotent -- detects what is already installed and skips it. Works on both Linux and macOS. **Note:** this spec originally proposed a dedicated `lib/setup-host.sh`; that script was never built. The shipped mechanism is `lib/setup-system` (host prereqs + `system.yaml` host-job enrollment) alongside `lib/setup-fleet` and `lib/setup-fleets` (per-fleet apply/enroll), landed 2026-07-02 via the Phase 3 setup backbone (#464). See section 10 for details.
 
 ### Phase B: The /setup skill (interactive terminal)
 
@@ -336,7 +346,7 @@ The /setup skill is the matchmaker. It runs once, in an ephemeral Claude session
 ### What /setup does NOT do
 
 - Does not guide fleet creation (that's claudfather's /bootstrap skill)
-- Does not install host dependencies (that's setup-host.sh, run before `claude`)
+- Does not install host dependencies (that's `lib/setup-system`, run before `claude` -- see section 10)
 - Does not persist -- it runs in the user's ephemeral session and exits
 
 ### Implementation
@@ -389,7 +399,12 @@ Optional convenience command that sends `/doctor` to claudfather's tmux session.
 
 ### Graduated assessment
 
-The `/bootstrap` skill does not use a binary "is bootstrap done?" check. Instead, it probes each layer independently (Branden's is_filled() pattern):
+The `/bootstrap` skill does not use a binary "is bootstrap done?" check. Instead, it probes each layer independently (Branden's placeholder-detection pattern). **Note:** this shipped differently than originally specced below -- no literal `is_filled()` function exists anywhere in the repo (grep confirms). Two lighter mechanisms cover the same need instead:
+
+- **Seed-fleet fields** (`telegram_group_chat_id`, `human_telegram_id`, the claudfather bot's `telegram.handle`) ship in `fleet.yaml.seed` as a literal `REPLACE_ME` sentinel. The `/setup` skill (`.claude/skills/setup/SKILL.md`) patches these once real values are collected -- a field still reading `REPLACE_ME` means that step hasn't run yet.
+- **User-fleet credentials** (`.env` token values) are assessed by the `/bootstrap` skill's prose placeholder-substring check (`library/skills/bootstrap/SKILL.md`): a value counts as a placeholder if it contains `xxxx`, `AAAA`, `your_token_here`, `REPLACE`, `ghp_xxxxxxxxxxxxxxxxxxxx`, or `8888888:AAAAAAAAAAAAAAAAAAAA`.
+
+Originally proposed (never implemented as a literal function):
 
 ```python
 def is_filled(env_var_value: str) -> bool:
@@ -412,7 +427,7 @@ def is_filled(env_var_value: str) -> bool:
 | Repo cloned | `test -d $CLAUDLOBBY_ROOT` | Directory exists |
 | Pip installed | `claudlobby --version` | Returns version |
 | Host deps | `command -v tmux node claude jq` | All found |
-| .env populated | `is_filled($TELEGRAM_BOT_TOKEN_CLAUDFATHER)` | Real token |
+| .env populated | Telegram token env var does not contain a known placeholder substring (see above) | Real token |
 | Fleet generated | `test -f runtime/seed/bots/claudfather/bot.conf` | File exists |
 | Bot enrolled | `systemctl --user is-active claudfather` or launchd equivalent | Active |
 | Bot responsive | `tmux has-session -t claudfather` | Session exists |
@@ -459,7 +474,7 @@ This adds `--dangerously-skip-permissions` to claudfather's CLAUDE_FLAGS for tha
 - Tokens never appear in bash history: use temp files for curl-based validation, not inline args
 - `.env` is gitignored at every level (repo root, local/, runtime/)
 - Claudfather never echoes back token values -- confirms "token set" or "token missing"
-- `is_filled()` checks token format without logging the value
+- Placeholder-substring checks (see §8) validate token format without logging the value
 
 ### Supply chain
 
@@ -491,7 +506,11 @@ Everything needed for "git clone to claudfather alive on Telegram."
 | `tests/test_setup_host.py` | Create | ~80 |
 | **Total** | | **~1060** |
 
-#### setup-host.sh details
+#### setup-host.sh details (superseded)
+
+**This script as specced was never built.** `lib/setup-host.sh` does not exist in the repo. Instead, a later and more comprehensive mechanism shipped: `lib/setup-system` (host prereqs + `system.yaml` host-job enrollment) plus `lib/setup-fleet` (idempotent per-fleet apply + enroll -- default jobs, atomic legacy-keepalive swap, bot enrollment, reconcile) and `lib/setup-fleets` (runs `setup-fleet` for every fleet on the host). These landed via the Phase 3 setup backbone (#464, 2026-07-02) -- five weeks after this spec -- and own considerably more scope than this section's original sketch (see root `CLAUDE.md`'s `lib/` table for the current command set). `setup-mac-mini.sh` still exists but is now an unused stub (124 bytes). `tests/test_setup_host.py` was never created; `tests/test_setup_backbone.py` covers the shipped backbone instead.
+
+Original plan (kept for historical record):
 
 Generalizes `setup-mac-mini.sh` for both Linux and macOS. Phases:
 
@@ -509,7 +528,7 @@ Key differences from setup-mac-mini.sh:
 - No --with-data (data CLIs are fleet-specific, not bootstrap)
 - Simpler: fewer phases, focused on minimum viable host
 
-Required for Pi users (Branden's position, supported by Rajan). Cannot be deferred to Phase 2.
+Required for Pi users (Branden's position, supported by Rajan) in the original plan. Not deferred to Phase 2 -- but in practice it landed later than any other Phase 1 item, superseded by the Phase 3 setup backbone described above.
 
 #### Tests
 
@@ -613,7 +632,7 @@ Checklist:
 
 1. **Seed fleet name:** Currently `seed` in this spec. Alternatives: `claudfather`, `bootstrap`. "seed" is neutral and avoids conflating the fleet name with the bot name. Awaiting human decision.
 
-2. **Service prefix:** Currently `com.claudfather.seed`. Could be `com.claudlobby.seed` to match the repo name. Minor -- affects systemd unit names and launchd labels only.
+2. ~~**Service prefix:** Currently `com.claudfather.seed`. Could be `com.claudlobby.seed` to match the repo name. Minor -- affects systemd unit names and launchd labels only.~~ **RESOLVED:** shipped as `service_prefix: com.claudlobby.seed` (matches the repo name -- confirmed in `fleet.yaml.seed`). See §14.
 
 3. **Claudfather in user's Telegram group:** Should claudfather be added to the user's fleet Telegram group too, or only DM? DM-only is simpler and avoids noise. Group presence could be useful for cross-fleet diagnostics. Recommendation: DM-only for Phase 1; group access as opt-in later.
 
@@ -628,15 +647,16 @@ Checklist:
 |---|---|---|
 | Is claudfather a fleet bot or a separate entity? | Fleet bot. Uses standard compose_bot() pipeline. No second template. | Greg (unanimously supported) |
 | Where does the seed fleet.yaml live? | `fleet.yaml.seed` at repo root, committed. Separate from fleet.yaml.example. | Mason (original), Greg (refined) |
+| Service prefix: `com.claudfather.seed` or `com.claudlobby.seed`? | `com.claudlobby.seed` -- matches the repo name. Affects systemd unit names and launchd labels. (Listed as an open question in §13 above; already resolved in shipped `fleet.yaml.seed`.) | Implementation (unattributed in spec) |
 | Telegram from day one or deferred? | Day one. User creates BotFather bot, pastes token, claudfather is on Telegram. User fleet Telegram setup is guided conversationally. | Chris (design direction) |
 | Supervised or run-and-forget? | Supervised. systemd/launchd unit, keepalive timer. Always listening. | Branden |
 | One claudfather per org or per clone? | Per clone. Each host gets its own seed fleet instance. | Chris (design direction) |
 | --dangerously-skip-permissions default? | Off. Standard permissions. User approves commands. --fast flag for power users. | Greg (position), Rajan (security review) |
-| setup-host.sh in Phase 1 or deferred? | Phase 1. Required for Pi users who do not have tmux/node/claude pre-installed. | Branden (position), Rajan (supported) |
-| Cost model for always-on? | Sonnet model. Claudfather's tasks do not require Opus. | Branden |
+| setup-host.sh in Phase 1 or deferred? | Phase 1, as planned -- but the script itself was never built under this name. Superseded by the `lib/setup-system` / `lib/setup-fleet` / `lib/setup-fleets` backbone (landed 2026-07-02, #464; see §10). | Branden (position), Rajan (supported) |
+| Cost model for always-on? | Reversed one day after this was written: shipped as `model: opus`, `effort: max` since commit `d97d709` (2026-05-12) and never reverted. Branden's original sonnet recommendation did not hold in practice. | Branden (superseded) |
 | New expertise type or reuse orchestration? | New: `setup-assistant`. Orchestration expertise includes dispatch/tmux mechanics that do not apply. | Mason (original), Greg (refined) |
 | Should claudfather auto-merge or auto-push? | No. It has no-push-main and no-destructive-git guardrails. It teaches, not implements. | Rajan (adversarial review) |
 | How does bootstrap resume from partial state? | Graduated assessment. Probe each layer independently, resume from the first incomplete layer. | Branden (is_filled pattern), Greg (implementation) |
-| Token validation approach? | is_filled() pattern: detect known placeholders by substring match. No network calls to validate tokens during assessment (network validation happens in /doctor). | Branden |
+| Token validation approach? | Placeholder detection by substring match -- `REPLACE_ME` sentinel for seed-fleet fields, prose substring list for user-fleet tokens (see §8). No network calls to validate tokens during assessment (network validation happens in /doctor). Shipped as described, not as a literal `is_filled()` function. | Branden |
 | Bootstrap entry point: CLI command or skill? | Project-level /setup skill at `.claude/skills/setup/SKILL.md`. User runs `claude` in repo root, then `/setup`. CLI `claudlobby bootstrap` deferred to Phase 2 as sugar. | Chris (design direction) |
 | Where does /setup live: clauDNA or claudlobby? | Project-level in claudlobby. It is repo-specific, not a general-purpose clauDNA skill. | Chris (explicit) |

@@ -1,14 +1,18 @@
 ---
 title: Fleet Update Lifecycle — No-Context-Loss by Default
 type: plan
-status: draft
+status: completed
 owner: alex
 tags: [updates, plugins, skills, reload, restart, session-handoff, session-resume, composer, lifecycle, no-context-loss]
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-07-06
 ---
 
 # Fleet Update Lifecycle — Implementation Plan
+
+## Implementation Status (2026-07-06)
+
+**All phases shipped.** Phases 0–3 and decision forks F1–F6 landed in two merged PRs — **#410** (Mechanism 1: daily live plugin/skill reload) and **#413** (Mechanism 2: lossless restart + weekly worker-only binary bounce) — and have been running in production since 2026-06-16. Each was empirically validated per this repo's mandatory bot-behavior-change loop (`lib/validate-bot-change.sh` scenarios + dedicated unit tests in `tests/test_lossless_restart.py`), not just composed. **Phase 4** (this doc's own deliverable — a canonical `documentation/fleet-update-lifecycle.md` reference) was the one outstanding item; it has now been written. See per-phase and per-fork markers below for evidence.
 
 > **For agentic workers / reviewers:** This is a `/forge`-style plan. **Decision Forks** are resolved by `[FORK-LOCK F<N>]` PR comments from the designated ratifier before their phases are implemented. Phase steps use `- [ ]` checkboxes. Sizing is **S/M/L per phase — no calendar estimates** (fleet convention). This is **plan-only**; no implementation in this PR. Destined for a `/ironclad` re-scan to converge.
 
@@ -85,11 +89,17 @@ Every claim below is verified against the checkout at plan time (`projects/claud
 ## Decision Forks
 
 ### F1 — clauDNA `--plugin-dir` delivery flip · **DROPPED**
+
+**Implementation status: COMPLETED (by omission, correctly)** — no `--plugin-dir` checkout/flip code exists anywhere in `lib/`, `claudlobby/`, or `library/` (`grep -rn "plugin-dir" lib/ claudlobby/ library/` → zero hits); the flip was proven unnecessary before build.
+
 - **Was:** flip the fleet's clauDNA from marketplace-install to a fleet-global `--plugin-dir` local checkout for live reload.
 - **Why dropped:** the fork assumed marketplace plugins were restart-bound. **Empirically false** (proof above) — marketplace plugins live-reload via `claude plugin update` + `/reload-plugins`. The flip bought nothing the marketplace path already gives, at the cost of a pristine fleet-checkout, an abort-on-dirty invariant, checkout-currency management, and new `composer.py`/`start-bot.sh` wiring. **All removed.** Dropping F1 also **moots** ironclad Blocker 1's checkout-abort surface, Risk 8 (checkout identity), and the `pull --ff-only` / read-only-enforcement questions.
 - **Disposition:** out of scope. Marketplace remains the unchanged delivery channel.
 
 ### F2 — Daily reload-broadcast busy-pane policy · *Status: open, leaning (b) — framework*
+
+**Implementation status: COMPLETED — lean (b) shipped.** `lib/keepalive.sh`'s idle branch checks `data/.reload-pending`, sends `/reload-plugins` + `/reload-skills`, and clears the marker; its header comment calls this out as "the single activation point for Mechanism 1."
+
 - **Context (reframed, re-opened by the daily-automatic cadence):** Mechanism 1's broadcast fires **daily into a live fleet**. A bot mid-task must not be interrupted — `Enter` into a busy pane can submit ghost autocompletion text (`keepalive.sh:5-9`). With the broadcast now automatic and recurring, busy-pane safety + eventual convergence are load-bearing (this is the home of ironclad Risks 5 & 7).
 - **Options:**
   - **(a) broadcaster idle-checks + defer marker** — `reload-fleet.sh` classifies each running bot via live `pane_is_idle` (`lib-common.sh:274`, re-checked right before the Enter), dispatches `/reload-*` to idle bots now via `dispatch.sh`, and drops `data/.reload-pending` for busy bots; `keepalive.sh` fires the deferred reload at the bot's next idle tick. *Trade-off:* a residual idle-check→Enter TOCTOU window (small, low-harm) remains in the broadcaster.
@@ -101,11 +111,17 @@ Every claim below is verified against the checkout at plan time (`projects/claud
 - **Evidence:** `dispatch.sh:26-28`, `lib-common.sh:108-124,:274-295`, `keepalive.sh:148-162`, `fleet-pulse.sh:95-111`, `composer.py:585-590`.
 
 ### F3 — Trigger model · **RESOLVED**
+
+**Implementation status: COMPLETED.** `claudlobby/system.yaml`'s `reload-fleet` job runs `schedule: "*-*-* 03:30:00"`, `type: oneshot`; `lib/reload-fleet.sh` is also runnable on-demand per its header comment. The git-hook option correctly stayed dropped.
+
 - **Was:** what fires the reload broadcaster — on-demand / git hook / timer.
 - **Resolution:** **a daily timer (primary) + on-demand (the same `reload-fleet.sh`, invocable to push a release immediately).** The reload path is now Mechanism 1's automatic daily cadence — a `fleet_timers` entry (Phase 2). The **weekly worker-restart** is a *separate* timer for Mechanism 2 (Phase 3) — different mechanism, different intent. The **git-hook option stays dropped** (YAGNI; would be the repo's first git hook, fires unpredictably, lives in untracked `.git/`).
 - **Disposition:** closed.
 
 ### F4 — Lossless restart (handoff → resume) · **RATIFIED — the primary piece of Mechanism 2**
+
+**Implementation status: COMPLETED.** `lib/start-bot.sh` injects `/claudna:session-resume --auto` before `STARTUP_PROMPT` with two-step-send+verify, age-gated via `should_resume_session` (`lib/lib-common.sh`); `lib/pre-stop-handoff.sh` exits 0 on timeout/no-session (never blocks); `library/skills/restart/SKILL.md` generalized to delegate to `spin-up-bot.sh`. Optional `ExecStop` hardening remains un-wired — deferred by design, not a gap.
+
 - **Context:** the binary cannot hot-reload, so its pickup is a restart. Every restart that applies it (the weekly worker bounce, a keepalive crash-restart, an operator restart) must cost as little context as possible. The machinery is ~80% built and disconnected (Current State).
 - **Ratified shape (by dispatch):**
   - **Resume-universal** — `start-bot.sh` injects `/claudna:session-resume --auto` as a separate first keystroke **before** `STARTUP_PROMPT` (~`:220`, reusing the two-step-send+verify pattern at `:231-238`), gated by F6's age policy. Fires on **every** start — intentional, crash, and weekly — because all bots set custom `startup_prompt` (the `else`-default `composer.py:466-469` reaches none).
@@ -118,6 +134,9 @@ Every claim below is verified against the checkout at plan time (`projects/claud
 - **Evidence:** `start-bot.sh:226-239`, `pre-stop-handoff.sh:25-50`, `keepalive.sh:70-85`, `spin-up-bot.sh:29/:53/:67`, `library/skills/restart/SKILL.md`, `composer.py:463-469/:521`.
 
 ### F5 — Manager-exclusion mechanism for the weekly *binary* restart · *Status: open, leaning (a)*
+
+**Implementation status: COMPLETED — lean (a) shipped.** `bot_is_manager()` (`lib/lib-common.sh`) tests `MANAGER_TMUX == BOT_ID`; `lib/weekly-worker-restart.sh` calls it to skip managers. No new `fleet.yaml` boolean was added.
+
 - **Context:** the weekly bounce (Phase 3) restarts **workers only**; managers stay up to preserve their (least-summarizable) orchestration context. The script needs a signal to skip managers. (Note: this exclusion applies **only** to the weekly binary restart — managers still get Mechanism 1's daily live plugin/skill reload.)
 - **Options:**
   - **(a) reuse `MANAGER_TMUX == BOT_ID`** — already emitted for every bot (`composer.py:455-460`); the restart loop reads it via `bot_conf_get` (the `fleet-pulse.sh:63` pattern) and skips managers. **Zero new config, zero composer change.** *Trade-off:* couples "excluded from auto-restart" to "is a team manager" — the same set today.
@@ -129,6 +148,9 @@ Every claim below is verified against the checkout at plan time (`projects/claud
 - **Evidence:** `composer.py:455-460`, `config.py:291-293`, `lib-common.sh:468`, `fleet-pulse.sh:63`, `update-claude-code.sh:80-89`.
 
 ### F6 — Stale-checkpoint resume policy (the age gate) · *Status: open, leaning (c)*
+
+**Implementation status: COMPLETED — lean (c), T≈24h shipped.** `lib/start-bot.sh` defaults `RESUME_MAX_AGE_S=86400` (24h); `should_resume_session` reads the handoff's `last_updated` frontmatter field with an mtime fallback. Dedicated unit tests in `tests/test_lossless_restart.py`.
+
 - **Context:** `/claudna:session-resume --auto` has **no age gate** (verified) and the reaper exempts `Next Steps` from TTL (`reaper-rules.md:28`). On a days-old `session.md`, `--auto` resume **replays dead state** — re-attempting a finished task or acting on an already-merged PR (ironclad Risk 4, worse than a clean start). F4 makes resume fire on *every* start (including crash-restarts off a possibly-stale checkpoint), so this gate is load-bearing.
 - **Options (what `start-bot.sh` does when `session.md` mtime is older than threshold `T`):**
   - **(a) resume anyway, flag staleness** — inject resume but prepend a loud "checkpoint is N old — verify before acting" note.
@@ -166,11 +188,17 @@ lib/validate-bot-change.sh                                              # EDIT �
 ## Phases
 
 ### Phase 0 — Ratify · **Gate** · **S**
+
+**Status: COMPLETED (implicit)** — no standalone ratification artifact, but every fork's lean was carried into shipped code exactly as recorded above.
+
 - [ ] Record the ratified premise in-thread: **goal = no-context-loss** (answers the ironclad MAJOR question).
 - [ ] Lock **F5** (manager-exclusion) and **F6** (stale-resume policy) — Chris. Lock **F2** (busy-pane policy) — framework. **F4** is ratified (primary); **F1** dropped; **F3** resolved.
 - [ ] No weekly-restart enablement (Phase 3) until **F5 + Phase 1** land; no resume-on-every-start until **F6** sets the age bar.
 
 ### Phase 1 — Lossless restart (F4 — spine of Mechanism 2) · **M** · *gated by F4 (ratified) + F6*
+
+**Status: COMPLETED** — shipped in PR #413 (`3245151`, `c81318a`) together with Phase 3b; dedicated tests in `tests/test_lossless_restart.py`.
+
 - **Files:** `lib/start-bot.sh`, `lib/pre-stop-handoff.sh`, `library/skills/restart/SKILL.md`, `library/protocols/worker-lifecycle.md`, `claudlobby/composer.py` (optional ExecStop), `lib/validate-bot-change.sh`
 - [ ] **Resume-universal:** inject `/claudna:session-resume --auto` as a first keystroke before `STARTUP_PROMPT` (`start-bot.sh:~220`), mirroring the two-step-send+verify at `:231-238`; ensure it settles before `STARTUP_PROMPT` (input-buffer collision).
 - [ ] **Age gate (F6):** before injecting resume, `stat_mtime` `session.md` and apply the ratified policy (lean: skip+clean-start when `mtime ≥ T≈24h`, else resume).
@@ -181,6 +209,9 @@ lib/validate-bot-change.sh                                              # EDIT �
 - [ ] **Validate:** *(harness)* new pane shows `/session-resume` sent first; with a stale `session.md`, injection is skipped/flagged per F6; `session.md` written pre-stop on an intentional restart. *(live auth)* the resume briefing actually loads into context. Cite both.
 
 ### Phase 2 — Mechanism 1: daily live plugin + skill reload · **M** · *gated by F2*
+
+**Status: COMPLETED** — shipped in PR #410 (`7f02335`); `lib/reload-fleet.sh` + `lib/install-reload-fleet-systemd.sh` new, `reload-fleet` timer job at `03:30`, `lib/keepalive.sh` extended per F2(b). Validated via `lib/validate-bot-change.sh`.
+
 - **Files:** `lib/reload-fleet.sh` (new), `lib/install-reload-fleet-systemd.sh` (new), `claudlobby/system_defaults.yaml` (`fleet_timers`), `lib/keepalive.sh` (if F2(b)), CLAUDE.md `lib/` table + lifecycle doc, `lib/validate-bot-change.sh`
 - [ ] `lib/reload-fleet.sh <fleet>`: source `lib-common.sh`; **under `with_lock`** (`lib-common.sh:108-124`) run `claude plugin update` for each `FLEET_PLUGINS_REQUIRED` (refresh the shared cache) then `claudlobby --fleet "$fleet" generate` to **completion** — **abort loud** on any non-zero (`emit_script_error` + manager notify; mirrors the binary-download failure path). Then activate per F2: **(b lean)** drop `data/.reload-pending` on every running bot and let `keepalive` fire `/reload-plugins`+`/reload-skills` at each bot's next idle tick and clear the marker; **(a)** dispatch to idle bots now via `dispatch.sh` and defer busy via the marker.
 - [ ] Daily trigger: add a `reload-fleet` entry to `fleet_timers` (`system_defaults.yaml:17-33`) — `schedule: "*-*-* 03:30:00"` (daily, before the 04:00 binary download so the cache is warm; tunable), `type: oneshot`; `compose_fleet_timers` generates the unit (`composer.py:1516-1562`). Add a thin `install-reload-fleet-systemd.sh` cloning `install-fleet-pulse-systemd.sh`. `reload-fleet.sh` is also invocable **on-demand** (push a release immediately).
@@ -191,6 +222,9 @@ lib/validate-bot-change.sh                                              # EDIT �
 - [ ] **Validate:** *(harness — what it CAN prove)* extend `validate-bot-change.sh`: an idle test bot receives the reload (keystroke or marker→keepalive); a busy bot is not interrupted (no ghost text); `generate` completes before any reload; a simulated `claude plugin update`/`generate` failure emits the event + notifies the manager. *(manual, live auth)* the plugin/skill actually reloaded in-session. State the split.
 
 ### Phase 3 — Mechanism 2: retire the daily binary bounce; weekly worker-only restart · **M** · *3b gated by Phase 1 + F5*
+
+**Status: COMPLETED (3a + 3b)** — `lib/update-claude-code.sh` is download-only (bounce loop removed); `lib/weekly-worker-restart.sh` + `lib/install-weekly-worker-restart-systemd.sh` new; `weekly-worker-restart` timer job at `Sun 05:00` (composed-but-dormant, `enroll: false` by default — a safety refinement beyond the plan's literal text). Shipped in PR #413.
+
 - **Files:** `lib/update-claude-code.sh` (edit), `lib/weekly-worker-restart.sh` (new), `lib/install-weekly-worker-restart-systemd.sh` (new), `claudlobby/system_defaults.yaml`, CLAUDE.md `lib/` table + lifecycle doc, `lib/validate-bot-change.sh`
 - [ ] **3a (S, independent) — downloader only + loud failure:** remove the bounce loop (`update-claude-code.sh:80-89`); keep the daily binary `npm install` (`:42/:51`). On a non-zero install, `emit_script_error "$bot_dir" update-claude-code.sh <code> "<msg>"` **and** notify the manager (`report-back.sh … failed` / the `notify_manager` pattern); reserve `tg-post.sh` for total failure. (Script is now download-only — keep the name to avoid timer-installer churn; document the role shift.)
 - [ ] **3b (M, gated by Phase 1 + F5) — weekly worker-only lossless restart:** `lib/weekly-worker-restart.sh <fleet>`: skeleton from `update-claude-code.sh:74,81-88` (`resolve_bots_dir` + `for bot_dir` loop); **skip managers** per F5 (`MANAGER_TMUX == BOT_ID`); for each **worker**, run the lossless intentional restart (`pre-stop-handoff.sh` → `spin-up-bot.sh` → resume-on-start from Phase 1). Loud on a worker that fails to come back.
@@ -199,6 +233,9 @@ lib/validate-bot-change.sh                                              # EDIT �
 - [ ] **Validate:** *(harness)* assert a **worker** bot was restarted and a **manager** bot (`MANAGER_TMUX==BOT_ID`) was **skipped**; the bounce loop is gone from `update-claude-code.sh`; a simulated download failure emits the event + notifies. *(live)* a worker picks up a staged binary after the weekly restart with its context intact (resume briefing present). Cite both.
 
 ### Phase 4 — Codify the lifecycle · **S** · *depends on 1–3*
+
+**Status: COMPLETED (2026-07-06)** — `documentation/fleet-update-lifecycle.md` written, covering both mechanisms, the manager/worker asymmetry, resume-on-every-start + the age gate, the loud-failure contract, and reconciliation with PR #399.
+
 - **Files:** `documentation/fleet-update-lifecycle.md` (new), CLAUDE.md, `documentation/fleet-yaml-schema.md`
 - [ ] Write the canonical "Fleet Update Lifecycle" doc, north star = **no context loss**: the **two mechanisms** (plugins/skills = daily live reload, no restart; binary = download daily, apply via rare lossless restart); **why managers get the daily reload but not the weekly binary restart**; **resume-on-every-start + the age gate**; the **loud-failure** contract; the **on-demand** reload escape hatch. Reconcile with PR #399 (its daily bounce is **replaced** by the weekly lossless restart; its daily binary **download survives**). One documented lifecycle, not folk practice.
 
