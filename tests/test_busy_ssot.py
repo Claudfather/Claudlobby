@@ -65,6 +65,11 @@ def test_fixture_contents_still_match_their_names():
     assert "esc to interrupt" in ESC_PANE
     assert "esc to interrupt" not in VERB_PANE and "Thinking" in VERB_PANE
     assert IDLE_PANE.rstrip("\n").endswith(">")
+    for pane in (ESC_PANE, VERB_PANE, IDLE_PANE):
+        # These interpolate into bash double-quoted strings in _sourced calls.
+        assert not set(pane) & set('"$`\\'), (
+            "pane fixtures must stay bash-double-quote-safe"
+        )
 
 
 def test_pane_is_busy_capitalized_esc():
