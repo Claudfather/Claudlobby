@@ -700,6 +700,81 @@ pane_is_idle() {
     printf '%s' "$text" | grep -qE "$_idle_pattern"
 }
 
+# Base busy-detection regex — single source of truth for keepalive.sh
+# classify_pane and every "should I inject keystrokes?" consumer
+# (sprint-trigger, bot-sweep-cron). "esc to interrupt" is drawn during ANY
+# active turn and is stable across Claude Code releases and
+# prefersReducedMotion; the churning verb lists (Thinking/Running/…) that
+# consumers previously grepped silently degrade on UI changes and must not
+# reappear (gate: tests/test_busy_ssot.py). Operators extend at runtime via
+# KEEPALIVE_BUSY_PATTERNS.
+_BUSY_PATTERN_BASE='[Ee]sc to interrupt'
+
+# pane_is_busy <pane_text>
+# Returns 0 if the pane shows an active turn, 1 otherwise. Mirror of
+# pane_is_idle. Operators extend via KEEPALIVE_BUSY_PATTERNS.
+pane_is_busy() {
+    local text="$1"
+    local _busy_pattern="$_BUSY_PATTERN_BASE"
+    if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
+        _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
+    fi
+    printf '%s' "$text" | grep -qE "$_busy_pattern"
+}
+
+# bot_dir_for_session <session> [bots_dir]
+# Session name -> bot runtime dir, on stdout. The same resolution
+# tmux_socket_for_session uses (own fleet first, then cross-fleet), exposed
+# so marker-based checks can find a bot's data/ from just its session name.
+# Returns 1 (empty stdout) when no fleet has such a bot; rc 2 on empty arg.
+bot_dir_for_session() {
+    local session="${1:-}"
+    if [ -z "$session" ]; then
+        echo "bot_dir_for_session: empty session name" >&2
+        return 2
+    fi
+    local bots_dir="${2:-}"
+    if [ -z "$bots_dir" ]; then
+        if [ -n "${BOT_DIR:-}" ]; then
+            bots_dir=$(dirname "$BOT_DIR")
+        else
+            bots_dir=$(resolve_bots_dir)
+        fi
+    fi
+    local target="$bots_dir/$session"
+    if [ ! -d "$target" ]; then
+        local peer_dir
+        peer_dir=$(_resolve_cross_fleet_bot_dir "$session")
+        [ -n "$peer_dir" ] && target="$peer_dir"
+    fi
+    [ -d "$target" ] || return 1
+    printf '%s' "$target"
+}
+
+# bot_is_busy <socket> <session> [bot_dir]
+# THE busy check for keystroke injectors. Marker-first: a data/.last-tool-call
+# fresher than KEEPALIVE_ACTIVE_WINDOW_S (180s) reads BUSY without touching
+# tmux (rendering-immune, and the common case for a working bot). Fallback:
+# capture the pane and apply pane_is_busy. bot_dir is resolved from the
+# session name when not supplied; when unresolvable the pane alone decides.
+# Returns 0 = busy (do NOT inject), 1 = not busy.
+bot_is_busy() {
+    local socket="${1:-}" session="${2:-}" bot_dir="${3:-}"
+    if [ -z "$session" ]; then
+        echo "bot_is_busy: empty session name" >&2
+        return 2
+    fi
+    if [ -z "$bot_dir" ]; then
+        bot_dir=$(bot_dir_for_session "$session" 2>/dev/null) || true
+    fi
+    if [ -n "$bot_dir" ] && marker_age_within "$bot_dir/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-180}"; then
+        return 0
+    fi
+    local pane
+    pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null | tail -10) || true
+    pane_is_busy "$pane"
+}
+
 # marker_is_newer <marker_a> <marker_b>
 # Returns 0 if marker_a exists AND its mtime >= marker_b's mtime (or marker_b
 # is missing). Returns 1 otherwise. Used by fleet-pulse to compare .idle vs

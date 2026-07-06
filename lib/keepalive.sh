@@ -168,7 +168,9 @@ classify_pane() {
     # across Claude Code releases and prefersReducedMotion. This deliberately does
     # NOT match the braille spinner or the churning verb list
     # (Thinking/Pondering/Marinating/…), which silently degrade on UI changes.
-    local _busy_pattern='[Ee]sc to interrupt'
+    # Pattern lives in lib-common.sh (_BUSY_PATTERN_BASE) — the busy SSOT shared
+    # with pane_is_busy/bot_is_busy consumers.
+    local _busy_pattern="$_BUSY_PATTERN_BASE"
     if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
         _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
     fi

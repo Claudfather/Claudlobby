@@ -40,9 +40,11 @@ if ! check_tmux_session "$BOT_NAME" "$BOT_SOCKET"; then
     exit 1
 fi
 
-# Don't interrupt in-flight work — skip if pane shows active processing.
-PANE_TAIL=$(bot_tmux "$BOT_SOCKET" capture-pane -t "$BOT_NAME" -p 2>&1 | tail -3) || true
-if echo "$PANE_TAIL" | grep -qiE '(thinking|running|reading|writing|calling|editing)'; then
+# Don't interrupt in-flight work — busy check via the SSOT (marker-first,
+# pane fallback; resolves the bot dir from the session name internally).
+# The old private verb regex lived here; patterns now live only in
+# lib-common.sh (_BUSY_PATTERN_BASE).
+if bot_is_busy "$BOT_SOCKET" "$BOT_NAME"; then
     echo "$TS WARN — $BOT_NAME appears busy; skipping this tick ($DISPATCH)" >>"$LOG"
     exit 0
 fi

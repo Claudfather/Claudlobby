@@ -26,8 +26,10 @@ if ! check_tmux_session "$MANAGER_TMUX" "$MANAGER_SOCKET"; then
   exit 0
 fi
 
-pane=$(bot_tmux "$MANAGER_SOCKET" capture-pane -t "$MANAGER_TMUX" -p | tail -3) || true
-if echo "$pane" | grep -qE '(Thinking|Running|Reading|Writing|Editing|Spelunking|Prestidigitating|esc to interrupt)'; then
+# Busy check via the SSOT (marker-first, pane fallback) — do not inject into
+# an active turn. The old private verb regex lived here; patterns now live
+# only in lib-common.sh (_BUSY_PATTERN_BASE).
+if bot_is_busy "$MANAGER_SOCKET" "$MANAGER_TMUX"; then
   echo "$TS SKIP — manager busy" >> "$LOG"
   exit 0
 fi
