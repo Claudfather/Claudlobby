@@ -1003,7 +1003,7 @@ def _resolve_expertise_permissions(
     for cmd in merged_bash:
         allow_patterns.append(f"Bash({cmd} *)")
 
-    deny_patterns = [f"{t}(**)" for t in merged_deny]
+    deny_patterns = list(merged_deny)
     return allow_patterns, deny_patterns
 
 
@@ -1055,7 +1055,7 @@ def compose_settings_local(
 
     # Layer 7: Bot-level deny (from fleet.yaml tools.deny) — wins over everything
     for tool in bot.tools.deny:
-        deny_patterns.append(f"{tool}(**)")
+        deny_patterns.append(tool)
 
     # Build allow list: layers 2-7
     allow_patterns: list[str] = []

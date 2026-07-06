@@ -12,6 +12,9 @@ CRITICAL_TYPES = {
     "activity_stuck",
     "script_error",
     "overdue_dispatch",
+    "bridge_down",
+    "reload_failed",
+    "restart_failed",
 }
 
 

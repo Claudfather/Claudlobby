@@ -30,9 +30,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Scan the shared library — the canonical source of npx package names.
-# Fleet overlays (local/<fleet>/library/mcp/) would override individual
-# fragments, but the base library drives the package list for warm-cache.
+# Scan the shared library — the canonical source of npx package names —
+# plus the fleet's local overlay (local/<fleet>/library/mcp/), which can add
+# or override fragments with packages the base library doesn't know about.
 MCP_DIR="$CLAUDLOBBY_ROOT/library/mcp"
 
 if [ ! -d "$MCP_DIR" ]; then
@@ -40,12 +40,19 @@ if [ ! -d "$MCP_DIR" ]; then
     exit 2
 fi
 
-# Extract npx packages from MCP fragments
+MCP_DIRS=("$MCP_DIR")
+if [ -n "$FLEET" ]; then
+    FLEET_MCP_DIR="$CLAUDLOBBY_ROOT/local/$FLEET/library/mcp"
+    [ -d "$FLEET_MCP_DIR" ] && MCP_DIRS+=("$FLEET_MCP_DIR")
+fi
+
+# Extract npx packages from MCP fragments (base + overlay, deduped by name)
 PACKAGES=()
-for frag in "$MCP_DIR"/*.json; do
-    [ -f "$frag" ] || continue
-    # Extract package names from "args": ["-y", "<package>", ...] patterns
-    pkg=$(python3 - "$frag" <<'PYEOF'
+for dir in "${MCP_DIRS[@]}"; do
+    for frag in "$dir"/*.json; do
+        [ -f "$frag" ] || continue
+        # Extract package names from "args": ["-y", "<package>", ...] patterns
+        pkg=$(python3 - "$frag" <<'PYEOF'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -61,8 +68,15 @@ try:
 except Exception:
     pass
 PYEOF
-    )
-    [ -n "$pkg" ] && PACKAGES+=("$pkg")
+        )
+        if [ -n "$pkg" ]; then
+            already=0
+            for existing in "${PACKAGES[@]+"${PACKAGES[@]}"}"; do
+                [ "$existing" = "$pkg" ] && already=1 && break
+            done
+            [ $already -eq 0 ] && PACKAGES+=("$pkg")
+        fi
+    done
 done
 
 if [ ${#PACKAGES[@]} -eq 0 ]; then

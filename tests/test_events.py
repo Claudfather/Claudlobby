@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from claudlobby.commands.events import collect_events, format_event_table
+from claudlobby.commands.events import CRITICAL_TYPES, collect_events, format_event_table
 
 
 @pytest.fixture
@@ -90,6 +90,32 @@ class TestCollectEvents:
         assert "keepalive" not in types
         assert "session_missing" in types
         assert "service_down" in types
+
+    def test_filter_critical_only_includes_bridge_and_lifecycle_failures(self, tmp_path):
+        """bridge_down/reload_failed/restart_failed are emit_failure_alert events —
+        operator-actionable, so they must surface under --critical like service_down."""
+        bot_dir = tmp_path / "alpha"
+        events = bot_dir / "data" / "events"
+        events.mkdir(parents=True)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        events_file = events / f"fleet-{today}.jsonl"
+        lines = [
+            json.dumps({"ts": "2026-07-06T10:00:00-04:00", "bot": "alpha", "type": t, "source": "s", "data": {}})
+            for t in ("bridge_down", "reload_failed", "restart_failed", "send_miss")
+        ]
+        events_file.write_text("\n".join(lines) + "\n")
+
+        result = collect_events(tmp_path, critical_only=True)
+        types = {e["type"] for e in result}
+        assert "bridge_down" in types
+        assert "reload_failed" in types
+        assert "restart_failed" in types
+        # send_miss is informational (emit_fleet_notice), not operator-actionable
+        assert "send_miss" not in types
+
+    def test_critical_types_set_contents(self):
+        assert {"bridge_down", "reload_failed", "restart_failed"} <= CRITICAL_TYPES
+        assert "send_miss" not in CRITICAL_TYPES
 
     def test_events_sorted_by_timestamp(self, events_dir):
         events = collect_events(events_dir)
