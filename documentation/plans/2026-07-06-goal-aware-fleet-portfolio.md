@@ -6,7 +6,7 @@ owner: claude
 tags: [product-vision, config, orchestration, observability, autonomy]
 created: 2026-07-06
 updated: 2026-07-06
-ironclad: pending — forks F1–F6 open; F2/F5/F6 need the fleet owner, F1/F3/F4 lockable by manager
+ironclad: cycle-1 pending — ALL 6 forks LOCKED (ratified by the fleet owner, 2026-07-06, interactive session); lens pass next
 ---
 
 # Goal-Aware Fleet: Fleet Mission, Projects Tier, Workstream Registry, Task IDs, Ignition
@@ -88,48 +88,51 @@ Dormant `morning-brief` fleet job: renders the portfolio (active workstreams wit
 
 ## Decision Forks
 
-### Fork F1: Where the projects tier lives
+### Fork F1: Where the projects tier lives — **LOCKED (a: separate projects.yaml)**
 - **Context:** Per-project config needs a home that scales independently of bot topology and stays out of OSS.
 - **Options:** **(a)** separate `projects.yaml` beside fleet.yaml (overlay + root modes), loaded/validated/composed through the fleet.yaml pathway; (b) a `projects:` block inside fleet.yaml; (c) per-repo only (extend `PROJECT_MISSION.md` with machine-readable frontmatter).
-- **Lean:** **(a).** Mirrors how the system tier was introduced; keeps fleet.yaml about *bots*; (c) fails for repos the fleet doesn't own the conventions of, and puts operator config in target repos.
-- **Ratifier:** framework/manager. **Status:** open.
+- **Decision:** **(a) separate `projects.yaml`.** Mirrors how the system tier was introduced; keeps fleet.yaml about *bots*; (c) fails for repos the fleet doesn't own the conventions of, and puts operator config in target repos.
+- **Ratifier:** **fleet owner — LOCKED (2026-07-06).** **Status:** locked.
 
-### Fork F2: Workstream SSOT substrate
+### Fork F2: Workstream SSOT substrate — **LOCKED (a: local JSON + lease/cap/reaper)**
 - **Context:** The code-audit-sweep plan sunset a local JSON tracker for GitHub-as-ledger (drift + select→run→log races). Why is a local file right here?
 - **Options:** **(a)** `state/workstreams.json` behind a single-writer locked helper + lease/cap/reaper lifecycle; (b) GitHub issues in a private ops repo; (c) markdown files in `shared/workstreams/` as primary.
-- **Lean:** **(a).** The audit tracker's failure modes were *multi-writer no-lock* and *no lifecycle* — both addressed by construction here. (b) leaks operator ventures into GitHub and adds a hosted dependency to a local-first core loop (and a private-repo variant still couples portfolio state to network availability); (c) is unbounded prose — the "getting lost" failure. Markdown demotes to optional attachment.
-- **Ratifier:** **fleet owner** (this is the "managed robustly without oversight" requirement). **Status:** open.
+- **Decision:** **(a) local JSON SSOT + lease/cap/reaper.** The audit tracker's failure modes were *multi-writer no-lock* and *derived second copy of truth that authoritatively lived elsewhere* (plus no lifecycle) — all addressed by construction here: single-writer locked helper (the proven `fleet-state-update.sh` pattern, the *successful* local-state precedent alongside the dispatch/report ledgers), and workstreams have **no external authority to defer to** — the file *is* the truth, not a cache of it. (b) leaks operator ventures into GitHub and adds a hosted dependency to a local-first core loop (and a private-repo variant still couples portfolio state to network availability); (c) is unbounded prose — the "getting lost" failure. Markdown demotes to optional attachment. A hybrid JSON+issue-mirror was considered and rejected: it recreates the exact two-copies problem the audit sweep died from. Residual risk accepted: state is host-local until vault sync carries `state/workstreams.json` (future Claudron wiring).
+- **Ratifier:** **fleet owner — LOCKED (2026-07-06)** after challenging the lean against the audit-tracker precedent; distinction above recorded as the ratification basis. **Status:** locked.
 
-### Fork F3: task_id minting authority + format
+### Fork F3: task_id minting authority + format — **LOCKED (a: entry-point mints t-<epoch>-<4hex>)**
 - **Context:** Identity must exist before the worker sees the task, survive offline operation, and be echo-able through a tmux text envelope.
 - **Options:** **(a)** entry point mints (`dispatch-task.sh`; runner/manager mint at their entry) as `t-<epochsecs>-<4hex>`, ledger row is SSOT; (b) GitHub issue/PR number as id; (c) UUIDv4.
-- **Lean:** **(a).** (b) fails for non-issue work and offline; (c) is hostile to grep/eyeballs in a text protocol. GitHub refs ride along as foreign keys.
-- **Ratifier:** framework/manager. **Status:** open.
+- **Decision:** **(a) entry point mints `t-<epochsecs>-<4hex>`.** (b) fails for non-issue work and offline; (c) is hostile to grep/eyeballs in a text protocol. GitHub refs ride along as foreign keys. **Granularity ruling (locked with this fork):** a task is **dispatch-level** — one admitted unit of work (one `[BOTCOMMAND]`, one runner issue-pick, or one accepted operator ask) through one *terminal* report; non-terminal `progress` reports reuse the id; sessions are orthogonal (the id lives in the ledger, so a task survives bot restarts); events (`data/events/*.jsonl`) sit below tasks and never get ids.
+- **Ratifier:** **fleet owner — LOCKED (2026-07-06).** **Status:** locked.
 
-### Fork F4: Validation-tier enforcement point
+### Fork F4: Validation-tier enforcement point — **LOCKED (a: skill enforces + pulse surfaces)**
 - **Context:** Where is a closure gate actually enforced — skill procedure, lib script, or watchdog?
 - **Options:** **(a)** skill-procedure enforcement (sprint/runner resolve tier and follow it) + mechanical `gate_pending` fleet-pulse surfacing as backstop; (b) a lib-script hard gate that refuses to record a terminal report below the bar; (c) pulse-only (detect after the fact).
-- **Lean:** **(a).** Matches how every closure behavior works today (skills own procedure; pulse owns visibility); (b) turns `report-back.sh` into a policy engine and blocks legitimate `failed`/`blocked` reports; (c) closes the barn door late. The harness asserts (a)'s observable half.
-- **Ratifier:** framework/manager. **Status:** open.
+- **Decision:** **(a) skill-procedure enforcement + `gate_pending` pulse surfacing.** Matches how every closure behavior works today (skills own procedure; pulse owns visibility); (b) turns `report-back.sh` into a policy engine and blocks legitimate `failed`/`blocked` reports; (c) closes the barn door late. The harness asserts (a)'s observable half.
+- **Ratifier:** **fleet owner — LOCKED (2026-07-06).** **Status:** locked.
 
-### Fork F5: Ignition default state
+### Fork F5: Ignition default state — **LOCKED (a: dormant, per-fleet opt-in)**
 - **Context:** Should self-start machinery be live by default for every fleet once merged?
 - **Options:** **(a)** dormant (`enroll: false`) with per-fleet opt-in — the `weekly-worker-restart` precedent; (b) enabled by default with a kill switch.
-- **Lean:** **(a).** Autonomous work initiation is the single most surprising behavior a default could ship; the dormant-gate pattern exists precisely for this class. Revisit the default after the loop has run for weeks on a reference fleet.
-- **Ratifier:** **fleet owner.** **Status:** open.
+- **Decision:** **(a) dormant (`enroll: false`), per-fleet opt-in.** Autonomous work initiation is the single most surprising behavior a default could ship; the dormant-gate pattern exists precisely for this class. Revisit the default after the loop has run for weeks on a reference fleet.
+- **Ratifier:** **fleet owner — LOCKED (2026-07-06).** **Status:** locked.
 
-### Fork F6: Fleet-mission composition audience
+### Fork F6: Fleet-mission composition audience — **LOCKED (a: paragraph for all, file body managers-only)**
 - **Context:** Who gets the fleet mission in CLAUDE.md — every bot always, or managers fully and workers minimally?
 - **Options:** **(a)** every bot gets `## Fleet Mission` with the inline paragraph; `mission_file` body composes for managers only, workers get the path reference; (b) managers only; (c) full text for everyone.
-- **Lean:** **(a).** Workers picking autonomous work need the anchor (a paragraph is cheap); a multi-page mission_file in every worker's context is exactly the bloat Fork F2's cap exists to prevent; (b) starves runner-driven workers of the goal chain.
-- **Ratifier:** **fleet owner** (context-budget call). **Status:** open.
+- **Decision:** **(a) inline paragraph for every bot; `mission_file` body composes for managers only, workers get the path reference.** Workers picking autonomous work need the anchor (a paragraph is cheap); a multi-page mission_file in every worker's context is exactly the bloat Fork F2's cap exists to prevent; (b) starves runner-driven workers of the goal chain.
+- **Ratifier:** **fleet owner — LOCKED (2026-07-06).** **Status:** locked.
+
+## Ratifier Decisions (fleet owner, 2026-07-06)
+
+All six forks resolved in one interactive pass, each on its lean: **F1(a)** separate projects.yaml · **F2(a)** local JSON SSOT + lease/cap/reaper (ratified after an explicit challenge against the audit-tracker precedent; distinction recorded in-fork) · **F3(a)** entry-point-minted `t-<epoch>-<4hex>`, dispatch-level granularity · **F4(a)** skill-enforced gates + `gate_pending` surfacing · **F5(a)** dormant ignition, per-fleet opt-in · **F6(a)** paragraph-for-all, file-body-managers-only. ✓ all locked — no implementation blockers remain at the fork layer.
 
 ## Dependencies
 
 | Dependency | Blocks | Risk |
 |---|---|---|
-| F1, F3, F4 locked (manager-lockable) | Phase 1 schema; Phase 3 format; Phase 5d gates | Low |
-| F2, F5, F6 ratified (fleet owner) | Phase 4 substrate; Phase 5 default; Phase 2 composition | Low — options are well-separated |
+| All forks F1–F6 — **LOCKED 2026-07-06** | — | Closed |
 | Phase 1 (projects tier) | Phase 5d (gates resolve tiers); Phase 4 (`project` refs validate) | Low — additive schema |
 | Phase 3 (task ids) | Phase 4 (`task_ids[]`, progress stamps) | Med — touches dispatch hot path, mitigated by fallback matching |
 | Phase 4 (registry) | Phase 6 (brief reads it); Phase 5 (sprint opens/updates workstreams) | Med |
