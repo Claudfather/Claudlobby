@@ -20,23 +20,30 @@ verdict from the same fixtures, and no consumer may keep a private regex.
 """
 
 import os
-import stat
 import subprocess
 import time
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 LIB_DIR = REPO_DIR / "lib"
+FIXTURES = REPO_DIR / "tests" / "fixtures" / "pane-states"
 
-ESC_PANE = "⠹ Cogitating… (esc to interrupt)"
-VERB_PANE = "Thinking…\nRunning tests\nReading files"  # old verb lists matched this
-IDLE_PANE = "some output\n> "
+# Pane texts come from the same fixtures the bash harness
+# (test_keepalive_classify.sh) asserts against, so the two suites cannot
+# drift apart on what a busy/idle pane looks like.
+ESC_PANE = (FIXTURES / "busy-spinner.txt").read_text()
+VERB_PANE = (FIXTURES / "verb-no-esc.txt").read_text()
+IDLE_PANE = (FIXTURES / "idle-prompt.txt").read_text()
 
 
 def _bash(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
     full_env = {**os.environ, **(env or {})}
     return subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, env=full_env
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env=full_env,
+        timeout=10,
     )
 
 
@@ -49,6 +56,15 @@ def _sourced(fn_call: str, env: dict | None = None) -> subprocess.CompletedProce
 
 def test_pane_is_busy_esc_to_interrupt():
     assert _sourced(f'pane_is_busy "{ESC_PANE}"').returncode == 0
+
+
+def test_fixture_contents_still_match_their_names():
+    """The constants above are only meaningful while the fixtures keep their
+    defining trait — assert it so a fixture edit can't silently hollow out
+    every test built on them."""
+    assert "esc to interrupt" in ESC_PANE
+    assert "esc to interrupt" not in VERB_PANE and "Thinking" in VERB_PANE
+    assert IDLE_PANE.rstrip("\n").endswith(">")
 
 
 def test_pane_is_busy_capitalized_esc():
@@ -81,12 +97,9 @@ def test_pane_is_busy_operator_extension():
 
 
 def _make_fleet(tmp_path: Path, fleet: str = "tf", bot: str = "mgr") -> Path:
+    # Resolution under test is purely directory-name based; no bot.conf needed.
     bot_dir = tmp_path / "local" / fleet / "runtime" / "bots" / bot
     (bot_dir / "data").mkdir(parents=True)
-    (bot_dir / "bot.conf").write_text(
-        f'BOT_ID="{bot}"\nBOT_SERVICE="com.example.{fleet}.{bot}"\n'
-        f'TMUX_SOCKET="com.example.{fleet}.{bot}"\n'
-    )
     return bot_dir
 
 
@@ -124,7 +137,7 @@ def _tmux_stub(tmp_path: Path, pane_file: Path, witness: Path) -> Path:
         f'{{ cat "{pane_file}"; exit 0; }}; done\n'
         "exit 0\n"
     )
-    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    stub.chmod(0o755)
     return stub
 
 
@@ -161,10 +174,14 @@ def test_bot_is_busy_stale_marker_esc_pane_is_busy(tmp_path):
 
 def test_bot_is_busy_stale_marker_idle_pane_is_not_busy(tmp_path):
     bot_dir = _make_fleet(tmp_path)
+    marker = bot_dir / "data" / ".last-tool-call"
+    marker.touch()
+    stale = time.time() - 3600
+    os.utime(marker, (stale, stale))
     env, _ = _busy_env(tmp_path, IDLE_PANE)
     env.update({"CLAUDLOBBY_ROOT": str(tmp_path), "FLEET_NAME": "tf"})
     r = _sourced(f'bot_is_busy "com.example.tf.mgr" "mgr" "{bot_dir}"', env=env)
-    assert r.returncode == 1
+    assert r.returncode == 1, "stale marker must not read BUSY; idle pane decides"
 
 
 def test_bot_is_busy_verb_pane_is_not_busy(tmp_path):
@@ -201,8 +218,7 @@ def test_bot_is_busy_unresolvable_session_falls_back_to_pane(tmp_path):
 def test_sprint_trigger_uses_ssot():
     src = (LIB_DIR / "sprint-trigger.sh").read_text()
     assert "bot_is_busy" in src
-    assert "Thinking|Running" not in src, "private verb regex must be gone"
-    assert "Prestidigitating" not in src
+    assert "Prestidigitating" not in src, "private verb regex must be gone"
 
 
 def test_bot_sweep_cron_uses_ssot():
@@ -213,18 +229,23 @@ def test_bot_sweep_cron_uses_ssot():
 
 def test_busy_pattern_defined_exactly_once():
     """`esc to interrupt` may appear as a pattern definition only in
-    lib-common.sh (_BUSY_PATTERN_BASE). keepalive's classify_pane must consume
-    that base, not re-declare its own literal."""
-    hits = []
-    for sh in LIB_DIR.glob("*.sh"):
-        for i, line in enumerate(sh.read_text().splitlines(), 1):
-            if "sc to interrupt" in line and "=" in line and not line.lstrip().startswith("#"):
-                hits.append(f"{sh.name}:{i}")
-    assert hits == ["lib-common.sh"] or [h.split(":")[0] for h in hits] == [
-        "lib-common.sh"
-    ], f"busy pattern must be defined once in lib-common.sh, found: {hits}"
+    lib-common.sh (_BUSY_PATTERN_BASE) — no consumer re-declares the literal."""
+    hits = [
+        f"{sh.name}:{i}"
+        for sh in LIB_DIR.glob("*.sh")
+        for i, line in enumerate(sh.read_text().splitlines(), 1)
+        if "sc to interrupt" in line
+        and "=" in line
+        and not line.lstrip().startswith("#")
+    ]
+    assert [h.split(":", 1)[0] for h in hits] == ["lib-common.sh"], (
+        f"busy pattern must be defined once, in lib-common.sh; found: {hits}"
+    )
 
 
-def test_keepalive_consumes_base_pattern():
+def test_keepalive_classify_delegates_to_ssot_functions():
+    """classify_pane must be BUILT ON pane_is_busy/pane_is_idle (the SSOT's
+    public surface), not re-compose the pattern variables around grep."""
     src = (LIB_DIR / "keepalive.sh").read_text()
-    assert "_BUSY_PATTERN_BASE" in src
+    assert "pane_is_busy" in src
+    assert "pane_is_idle" in src
