@@ -1,16 +1,27 @@
 ---
 title: "System Defaults Tier"
 type: plan
-status: revised-v2
+status: partially-completed
 owner: mason
 created: 2026-06-09
-updated: 2026-06-10
+updated: 2026-07-06
 tags: [claudlobby, compositor, system-defaults, observability, infrastructure]
+shipped: Core engineering (three-layer merge, SystemDefaultsConfig opt-out, hook dedup, compose_fleet_timers(), runtime/fleet/ output, thin-wrapper installs, fleet.yaml.example migration) shipped as spec'd in f6874d7 (PR #392, merged 2026-06-10) with 34+ tests -- all 4 decision forks (F1-F4) locked exactly as below. Later renamed system_defaults.yaml -> system.yaml and fleet_timers -> jobs, plus added a new host tier this doc doesn't describe (see "Post-Ship Evolution" below). Never shipped -- the 4 proposed claudlobby doctor checks and claudlobby validate informational output (doctor.py/validator.py have zero system-defaults awareness); fleet.system_defaults also lacks a field-reference entry in fleet-yaml-schema.md.
 ---
 
 # System Defaults Tier
 
 Compositor-hardcoded infrastructure that every fleet gets automatically. Adds a system defaults layer below fleet.yaml so new fleets start with working observability, keepalive, and log rotation without manual configuration.
+
+## Post-Ship Evolution
+
+**Read this before implementing against any name below -- the shipped system uses different names than this plan.** The engineering core here shipped essentially as written (commit `f6874d7`, PR #392, merged 2026-06-10, 34 new tests) -- all four decision forks (F1-F4) locked exactly as proposed below. A later, undocumented initiative then evolved the concept past this plan:
+
+- **`claudlobby/system_defaults.yaml` was renamed to `claudlobby/system.yaml`.** `claudlobby/config.py`'s `_resolve_system_yaml()` actively guards against the old name -- it raises `RuntimeError` if a stale `system_defaults.yaml` is found on disk, telling the caller it was renamed.
+- **`fleet_timers:` was renamed to `jobs:`** (nested under `defaults:` in `system.yaml`).
+- **A new top-level `host:` tier was added to `system.yaml`** for host-global singleton jobs (`claude-update`, `notify-behind`, `disk-monitor`, `fleet-memory-check`) -- enrolled once per host by `setup-system`, not per-fleet. This plan predates the `host:` tier and does not describe it anywhere below.
+
+The mechanics below (three-layer merge, `SystemDefaultsConfig`, hook dedup, opt-out, `compose_fleet_timers()`) are still an accurate description of how the shipped system works in spirit -- only the file name and the `fleet_timers` key renamed. **For the current, authoritative field names and schema, see `documentation/fleet-yaml-schema.md` and `claudlobby/config.py`'s `SystemDefaultsConfig` class and system.yaml-loading code (`_resolve_system_yaml`, `_merge_system_into_defaults`).** The rest of this document is left as originally written/revised, preserved as the historical record of what was proposed -- do not write new code against `system_defaults.yaml` or `fleet_timers`.
 
 ## Problem
 
@@ -29,6 +40,8 @@ Add a system defaults tier to the compositor. System defaults are always injecte
 ## Architecture
 
 ### Three-Layer Merge Order
+
+**Ship status: COMPLETED** -- `claudlobby/config.py:820` `_merge_system_into_defaults()`; `config.py:855-919` `load_fleet()` calls it before `_coerce_bot()`; `_OBS_DEFAULT_*` constants fully removed from `config.py`/`composer.py` (zero grep matches). Commit `f6874d7` (PR #392).
 
 ```
 system_defaults.yaml    (lowest priority -- platform infrastructure)
@@ -87,6 +100,8 @@ fleet.yaml bot stanza -----------------------------------------------+       |
 ```
 
 ## system_defaults.yaml
+
+**Ship status: COMPLETED, but renamed/evolved.** Shipped at this exact path in `f6874d7`, then renamed to `claudlobby/system.yaml` in `e90ac90` (#458). `config.py:774-790` `_resolve_system_yaml()` raises `RuntimeError` if a stale `system_defaults.yaml` is found on disk. The renamed file also gained a new `host:` tier and a `fleet_timers` -> `jobs` rename -- see "Post-Ship Evolution" above.
 
 Lives at `claudlobby/system_defaults.yaml`. Shipped with the repo, versioned. Declarative, readable -- users can inspect it to understand what the platform injects.
 
@@ -167,6 +182,8 @@ This runs once in `load_fleet()`, before any per-bot coercion.
 
 **Decision Fork F1.** Lean: (a) command-based dedup.
 
+**Ship status: COMPLETED** -- `claudlobby/config.py:544` `_merge_hooks_dedup()` (replaces `_merge_hooks()`), used at merge points including bot-level (`config.py:727`) and system-into-defaults (`config.py:830`). Matches locked option (a) exactly.
+
 Hooks are deduplicated by `(command, matcher)` tuple. When merging layers, if a higher-priority layer declares a hook with the same command and matcher, the lower-priority version is dropped.
 
 ```python
@@ -217,6 +234,8 @@ This replaces the existing `_merge_hooks()` which concatenates without dedup. Th
 ## Opt-Out
 
 **Decision Fork F2.** Lean: (c) both kill switch and per-category.
+
+**Ship status: COMPLETED** -- `claudlobby/config.py:62-69` `SystemDefaultsConfig` dataclass (`enabled`, `hooks`, `timers`, `observability`); `config.py:754-771` `_coerce_system_defaults()` parses `fleet.system_defaults` as bool or dict; wired into `load_fleet()` at `config.py:881-896`. Matches this section's design almost verbatim.
 
 Fleet.yaml gains a `system_defaults` field at the fleet level:
 
@@ -282,6 +301,8 @@ class FleetConfig:
 
 **Decision Fork F3.** Lean: (a) `generate` emits them.
 **Decision Fork F4.** Lean: (a) `runtime/fleet/` directory.
+
+**Ship status: COMPLETED** -- `claudlobby/composer.py:1643` `compose_fleet_timers()`; called from `claudlobby/commands/core.py:85-90` (F3). `claudlobby/paths.py:345` `runtime_fleet` property (F4). Both forks resolved exactly as locked.
 
 `compose_fleet_timers()` is a new top-level function in `composer.py`. It is called once in `__main__.py`'s `generate` command, after the per-bot `compose_bot()` loop completes. It emits systemd service+timer units and launchd plists into `runtime/fleet/timers/`.
 
@@ -394,6 +415,8 @@ Timer unit generation uses the schedule type to pick the right systemd directive
 
 ### Install Script Changes
 
+**Ship status: COMPLETED (and further consolidated)** -- `lib/install-fleet-pulse-systemd.sh`, `lib/install-keepalive-systemd.sh`, `lib/install-creds-check-systemd.sh` are now ~11-line wrappers that all `exec lib/install_fleet_timer.sh <name> "$@"` -- a single shared helper, even thinner than what's proposed below.
+
 Existing `install-fleet-pulse-systemd.sh` and `install-keepalive-systemd.sh` become thin wrappers. Instead of generating units inline, they copy from `runtime/fleet/` and enroll:
 
 ```bash
@@ -415,6 +438,8 @@ Install scripts guard against missing `runtime/fleet/timers/` — if it doesn't 
 
 ### claudlobby diff
 
+**Ship status: COMPLETED** -- `claudlobby/diff.py:73` `diff_fleet_timers()`, wired into `commands/core.py:209-220`. A real bug (passing a 2-attr shadow instead of real `Paths`) was caught and fixed post-ship in `bb02d56`/`88731f1` -- exactly the kind of gap the empirical-validation loop exists to catch.
+
 Extended to diff fleet-level timer units:
 
 ```python
@@ -429,6 +454,8 @@ Called from the existing `diff` command alongside per-bot diffs.
 
 ### claudlobby doctor
 
+**Ship status: PENDING -- not shipped.** `claudlobby/doctor.py` (439 lines) has exactly 6 checks (`env-vars`, `mcp-configs`, `npx-cache`, `services`, `credentials`, `fleet-yaml`); zero matches for `system_defaults`/`system-defaults`/`timer`/`hook`. None of the 4 checks below exist under any name.
+
 New checks:
 
 | Check | Status | Detail |
@@ -439,6 +466,8 @@ New checks:
 | `system-defaults-disabled` | info | "system defaults disabled: hooks, timers" (when user opts out) |
 
 ### claudlobby validate
+
+**Ship status: PENDING -- not shipped.** `claudlobby/validator.py` (519 lines) has no `system_defaults`/`system-defaults` references and no generic `[info]`-style override-detection output.
 
 Informational output appended to validation report:
 
@@ -451,6 +480,8 @@ Informational output appended to validation report:
 No errors or warnings from system defaults -- purely informational.
 
 ## fleet.yaml.example Migration
+
+**Ship status: COMPLETED** -- `fleet.yaml.example:71-82` -- hooks/observability removed from `defaults:`, replaced with explanatory comments matching the block below almost verbatim.
 
 Remove hooks and observability from the defaults section. Replace with comments explaining system defaults:
 
@@ -488,6 +519,7 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 - **(b) Named hook IDs** -- System hooks get explicit `_id` fields. User overrides by matching `_id`. More explicit but adds schema complexity.
 - **Locked:** (a). Command-based dedup by `(command, matcher)` tuple. Higher-priority layer wins on collision.
 - **Ratifier:** Human
+- **Shipped:** COMPLETED -- `claudlobby/config.py:544` `_merge_hooks_dedup()`, matching locked option (a) exactly.
 
 ### F2: Opt-out granularity
 
@@ -496,6 +528,7 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 - **(c) Both** -- Top-level bool for kill-all, per-category for surgical control.
 - **Locked:** (c). Master switch + category overrides via `SystemDefaultsConfig` with 4 booleans.
 - **Ratifier:** Human
+- **Shipped:** COMPLETED -- `claudlobby/config.py:62-69` `SystemDefaultsConfig` dataclass, matching almost verbatim.
 
 ### F3: Timer generation ownership
 
@@ -503,6 +536,7 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 - **(b) Keep generation in lib/ install scripts.** `doctor` warns if not installed.
 - **Locked:** (a). `generate` emits fleet-level timer units. Install scripts become thin copy+enroll wrappers.
 - **Ratifier:** Human
+- **Shipped:** COMPLETED -- `claudlobby/composer.py:1643` `compose_fleet_timers()`, called from `commands/core.py:85-90`.
 
 ### F4: Fleet-level unit location
 
@@ -510,6 +544,7 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 - **(b) `runtime/timers/`** -- More specific name.
 - **Locked:** (a). `runtime/fleet/` as the fleet-level output directory, with `timers/` subdirectory for generated units. Structure: `runtime/fleet/timers/<prefix>.<name>.service|timer|plist`. Parallels `runtime/bots/` cleanly and leaves room for future fleet-level artifacts.
 - **Ratifier:** Human
+- **Shipped:** COMPLETED -- `claudlobby/paths.py:345` `runtime_fleet` property; `compose_fleet_timers()` writes to `<runtime_fleet>/timers/`.
 
 ## Files Changed
 
@@ -533,9 +568,13 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 | `tests/test_config.py` | Extended: three-layer merge, hook dedup, SystemDefaultsConfig parsing. |
 | `tests/test_composer.py` | Extended: fleet timer generation, opt-out skips timers. |
 
+**Status note (2026-07-06):** Most rows above shipped as planned. Divergences: `claudlobby/validator.py` and `claudlobby/doctor.py` rows are **PENDING** -- neither file gained any system-defaults awareness (see Visibility section above). `documentation/fleet-yaml-schema.md` is **PARTIALLY** shipped -- it documents the `jobs`/`enroll` merge mechanics but has no dedicated `fleet.system_defaults` field-reference entry. `tests/test_config.py` and `tests/test_composer.py` were **not** extended as this table describes -- coverage was instead consolidated into the new `tests/test_system_defaults.py` (932 lines, 14 test classes), a filing deviation with no coverage gap.
+
 ## Testing Strategy
 
 ### Unit Tests (pytest)
+
+**Ship status: COMPLETED, filing deviated.** `tests/test_system_defaults.py` (932 lines, 14 test classes) covers everything below and more (host timers, dormant manifest). But per the status note above, `test_config.py`/`test_composer.py` were not extended as the Files Changed table describes -- all coverage landed in the one new file instead.
 
 - **Merge precedence:** system < fleet-defaults < bot-stanza for hooks, observability.
 - **Hook dedup:** same command+matcher dedupes; different matcher keeps both; user version wins on collision.
@@ -545,14 +584,14 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 
 ### Empirical Validation (lib/ changes)
 
-- `validate-bot-change.sh`: verify bot-vitals hooks fire from system defaults (not fleet.yaml declaration).
+- `validate-bot-change.sh`: verify bot-vitals hooks fire from system defaults (not fleet.yaml declaration). **Not evidenced** -- `grep -n "system.default\|bot-vitals\|hook" lib/validate-bot-change.sh` returns zero matches; no direct evidence this check was added to the harness.
 - Spin up a fleet with no hooks/observability in fleet.yaml, confirm events land in `data/events/`.
-- `reconcile-fleet.sh`: verify fleet-level timers appear in health audit.
+- `reconcile-fleet.sh`: verify fleet-level timers appear in health audit. **COMPLETED** -- `lib/reconcile-fleet.sh:88-94` reads `$CLAUDLOBBY_ROOT/local/$FLEET/runtime/fleet/timers`, checking merged `system.yaml` `defaults.jobs` + opt-ins and dormant units.
 
 ## Constraints
 
 - No backwards-compat shims. Clean cut.
 - Existing fleets that already declare hooks get zero behavioral change (dedup).
-- System defaults visible in `claudlobby diff` / `claudlobby doctor`.
+- System defaults visible in `claudlobby diff` / `claudlobby doctor`. **(Partially true: `diff` shipped; `doctor` did not -- see Visibility section above.)**
 - Works on both Linux (systemd) and macOS (launchd).
 - No PII or real credentials in system_defaults.yaml (uses `$CLAUDLOBBY_ROOT` placeholder).

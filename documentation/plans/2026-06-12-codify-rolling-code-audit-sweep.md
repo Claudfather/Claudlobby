@@ -1,12 +1,26 @@
 ---
 title: Codify the Rolling Code-Audit Sweep as a First-Class claudlobby Feature
 type: plan
-status: draft
+status: partially-completed
 owner: astrid
 tags: [sweep, code-audit, composer, timers, observability, tech-debt]
+created: 2026-06-12
+updated: 2026-07-06
 ---
 
 # Codify the Rolling Code-Audit Sweep — Implementation Plan
+
+## Implementation Status
+
+*Updated 2026-07-06.* **Shipped in PR #408** (commit `e1f754a`, "feat(sweep): rolling code-audit sweep as opt-in claudlobby feature"): Phases 1–5 and nearly all of Phase 7 are complete and live — `SweepConfig` (`claudlobby/config.py`), the `_write_timer_units` compositor consolidation, `_validate_sweep` (`claudlobby/validator.py`), the `lib/code-audit-sweep.sh` selector, the `library/skills/code-audit-sweep/SKILL.md` real skill, cross-platform installers, the observability event vocabulary, and a 321-line test suite (`tests/test_code_audit_sweep.py`) all exist and match this plan's spec closely. Every Decision Fork (F1–F6) was resolved by adopting its Lean (a) option in the shipped code — no formal `[FORK-LOCK]` PR-comment ratification is visible in the git-visible repo, but the decisions were made and shipped, so the banner immediately below is stale/historical (kept for the record of what was proposed).
+
+**Outstanding: Phase 6 (sunset)**, explicitly deferred by the implementing commit's own message ("coordinate via ari... overlaps alex's concurrent skill-removal work"). Four items remain:
+1. Delete `library/skills/sweep/` and `library/skills/sweep-personal/`.
+2. Remove `sweep` from `fleet.yaml.example`'s skill list (`fleet.yaml.example:96`).
+3. Update `documentation/advanced-patterns.md`'s hand-rolled `audit-tracker.json` description (still documents the old cron/Python-tracker pattern in full, ~lines 668-830).
+4. Update `documentation/runbooks/pi-setup-guide.md` to add the sweep installer step (also a Phase 7 gap — never touched for this feature).
+
+Per-phase status markers with evidence are inline below. `status: partially-completed` (frontmatter) reflects the split: Phase 6 is a load-bearing "no shims" requirement, not a nice-to-have, so this is deliberately not `status: completed`.
 
 > **For agentic workers / reviewers:** This is a `/forge`-style PLAN. The **Decision Forks** below are **OPEN** pending human ratification (`[FORK-LOCK F<N>]` comments on the PR). **Do not implement until the forks that gate a phase are locked.** Steps use checkbox (`- [ ]`) syntax. Sizing is **S/M/L per phase — no calendar estimates** (fleet convention).
 >
@@ -128,10 +142,16 @@ Each fork has a recommended **Lean**. Forks are locked via `[FORK-LOCK F<N>]` PR
 ## Phases
 
 ### Phase 0 — Ratify forks &nbsp;·&nbsp; **Gate** &nbsp;·&nbsp; **S**
+
+**Status: COMPLETED** — no formal `[FORK-LOCK]` PR comments found for this plan in the git-visible repo, but commit `e1f754a` shipped every fork's Lean (a) option, so ratification happened de facto through implementation rather than through the ceremony below.
+
 - [ ] Post forks F1–F6 to the PR; collect `[FORK-LOCK]` ratifications from the human.
 - [ ] Do not start a phase whose gating fork is still `open`. (F1/F4 gate Phase 2; F5/F6 gate Phase 1's dispatch step.)
 
 ### Phase 1 — Selector script + real skill (the engine) &nbsp;·&nbsp; **M** &nbsp;·&nbsp; *gated by F2, F5, F6*
+
+**Status: COMPLETED** — `lib/code-audit-sweep.sh` and `library/skills/code-audit-sweep/SKILL.md` both exist and match the spec (delegates dispatch to `lib/bot-sweep-cron.sh`; skill guarantees the `auto-audit` label explicitly, not by trusting delegation).
+
 **Files:** Create `lib/code-audit-sweep.sh`; create `library/skills/code-audit-sweep/SKILL.md`.
 
 - [ ] **Selector skeleton** — copy the job-script shape from `lib/fleet-pulse.sh:1-29`: `#!/usr/bin/env bash`, `set -euo pipefail`, source `lib-common.sh`, `FLEET="${1:-${CLAUDLOBBY_FLEET:-}}"`, `install_error_trap ""`, `ts=$(ts_iso)`, `today=$(date +%Y-%m-%d)`.
@@ -146,6 +166,9 @@ Each fork has a recommended **Lean**. Forks are locked via `[FORK-LOCK F<N>]` PR
 - [ ] **Test** the selector in isolation against a fixture repo set (Phase 5 wires the assertion).
 
 ### Phase 2 — Compositor integration (config → env + timer) &nbsp;·&nbsp; **M** &nbsp;·&nbsp; *gated by F1, F4*
+
+**Status: COMPLETED** — `SweepConfig`/`_coerce_sweep`/`sweep_enabled()` in `claudlobby/config.py` (lines 96, 279, 281, 491, 917); `_write_timer_units` extracted in `composer.py:1464`, called from both the `system_defaults` loop and the opt-in `fleet.sweep` branch (`composer.py:1686,1710,1746`), gated on `fleet.sweep_enabled()`.
+
 **Files:** Modify `claudlobby/config.py`, `composer.py`, `system_defaults.yaml`.
 
 - [ ] **`SweepConfig` dataclass** (`config.py` after `:93`): fields `enabled: bool`, `owner_bot: str | None`, `repos: list[str]`, `label: str = "auto-audit"`, `schedule: str = "*-*-* 03:00:00"`, `audit_types: list[str]`. All `None`/empty-defaulted so absence ⇒ nothing emitted.
@@ -156,6 +179,9 @@ Each fork has a recommended **Lean**. Forks are locked via `[FORK-LOCK F<N>]` PR
 - [ ] **Test:** `claudlobby --fleet <f> generate` with a `sweep:` block ⇒ assert `runtime/fleet/timers/<prefix>.code-audit-sweep.{service,timer,plist}` exist; without the block ⇒ assert they do **not**.
 
 ### Phase 3 — Installers (cross-platform enrollment) &nbsp;·&nbsp; **S**
+
+**Status: COMPLETED** — `lib/install_fleet_timer.sh` (shared helper), `lib/install-code-audit-sweep-systemd.sh` (Linux), and `lib/install-code-audit-sweep.sh` (macOS) all exist; `lib/install-fleet-pulse-systemd.sh` and `lib/install-creds-check-systemd.sh` are now thin one-line callers of the shared helper — the "one enroll implementation, three callers" consolidation landed as specified.
+
 **Files:** Create `lib/install_fleet_timer.sh` (shared enroll helper), `lib/install-code-audit-sweep-systemd.sh`, `lib/install-code-audit-sweep.sh`; refactor `lib/install-fleet-pulse-systemd.sh` + `lib/install-creds-check-systemd.sh` to call the helper.
 
 - [ ] **Linux** — **extract a shared `lib/install_fleet_timer.sh <name>` helper** holding the copy-generated-`.service`/`.timer` → `~/.config/systemd/user/` + `daemon-reload` + `enable --now` + the "run `claudlobby generate` first" guard, parameterized on `NAME="$SERVICE_PREFIX.<name>"`. Make `install-code-audit-sweep-systemd.sh` a thin caller (`install_fleet_timer.sh code-audit-sweep`), and **refactor the two existing installers** (`install-fleet-pulse-systemd.sh`, `install-creds-check-systemd.sh`) — today byte-identical except their `NAME=` line — to call it too. One enroll implementation, three callers (the installer-side mirror of the Phase 2 `_write_timer_units` consolidation).
@@ -163,17 +189,26 @@ Each fork has a recommended **Lean**. Forks are locked via `[FORK-LOCK F<N>]` PR
 - [ ] **Wire into docs** (Phase 7): the installer is a deliberate, separate operator step — generation never auto-enrolls (matches every existing fleet timer).
 
 ### Phase 4 — Logging / observability wiring &nbsp;·&nbsp; **S**
+
+**Status: COMPLETED** — event vocabulary (`audit_selected`, `audit_dispatched`, `audit_deferred`, `sweep_repo_unreachable`, `audit_completed`, `audit_failed`) documented in `library/protocols/fleet-observability.md:70-75`; retention piggybacks on the existing 7-day `fleet-*.jsonl` reapers, no bespoke log file added.
+
 - [ ] Confirm events land in `<owner-bot>/data/events/fleet-<date>.jsonl` with the canonical shape `{ts,bot,type,source:"audit",data}` (`fleet-observability` protocol).
 - [ ] **Retention is free** — the existing 7-day reapers (`bot-vitals.sh:106`, `fleet-pulse.sh:76-84`) match `fleet-*.jsonl`; no rotation wiring needed. **Do not** add a bespoke `.log` in `data/` (unregistered ⇒ never rotated); if a human-readable rollup is wanted, use `$CLAUDLOBBY_ROOT/state/code-audit/` like `state/pulse/`.
 - [ ] Event vocabulary: `audit_selected`, `audit_dispatched`, `sweep_repo_unreachable`, `audit_completed`, `audit_failed`. Document near the emission helper (convention-over-event: no timestamped comments).
 
 ### Phase 5 — Validation harness + tests &nbsp;·&nbsp; **MANDATORY** &nbsp;·&nbsp; **M**
+
+**Status: COMPLETED** — `tests/test_code_audit_sweep.py` exists (321 lines); the implementing commit message claims 15 tests, all passing, including a hermetic end-to-end selector test (`gh`/tmux shimmed, no network). Not re-executed live during this doc audit — file presence and commit-message claim only.
+
 - [ ] **Unit (composition):** config parse, env emission, timer-file generation, opt-out emits nothing, validator errors. Add to the compositor test suite (`pytest`).
 - [ ] **Validator:** `_validate_sweep` (`validator.py:469-472`) — hard error when `enabled` and no `repos` and owner has no `scope.repos` (mirror `:309-314`); warn on bad `schedule`/`org/repo` format (mirror `:180-198`, `:303-307`); `closest_match` typo hints (`:27`).
 - [ ] **Behavior (the gate that actually proves it):** extend `lib/validate-bot-change.sh` — stand up a throwaway bot + tmux session, point `SWEEP_REPOS` at a small real repo set, run `lib/code-audit-sweep.sh <fleet>`, and **assert**: (1) the stalest repo was selected via the live `gh` query; (2) an `audit_selected` event was appended to `data/events/`; (3) the dispatch string reached the owner pane. **Cite the observation verbatim in the PR body** (claimed evidence is not evidence).
 - [ ] **`diff.py`:** assert the new timer does not show as drift (`:73-119`).
 
 ### Phase 6 — Sunset the hand-rolled tooling &nbsp;·&nbsp; **M** &nbsp;·&nbsp; *no shims, no parallel run*
+
+**Status: PENDING** — explicitly deferred in the implementing commit's own message ("coordinate via ari... overlaps alex's concurrent skill-removal work"). Still on disk: `library/skills/sweep/SKILL.md` and `library/skills/sweep-personal/SKILL.md` (both untouched since May 15, pre-dating the sweep feature); `fleet.yaml.example:96` still lists `sweep` in a bot's `skills:` array; `documentation/advanced-patterns.md` (~lines 668-830) still documents the old hand-rolled `audit-tracker.json` pattern this phase is meant to delete. See "Implementation Status" near the top for the full outstanding checklist.
+
 - [ ] **Delete the placeholder skills** `library/skills/sweep/` and `library/skills/sweep-personal/` and **remove their `fleet.yaml` skill entries** (exact files in the fleet doc).
 - [ ] **Delete the hand-rolled engine** (gitignored, host-local): the selector, the Python tracker, the JSON state, the decoy `/sweep` trigger, and the run log (exact paths in the fleet doc).
 - [ ] **Remove the cron trigger** — delete the hand-added crontab line; the composer-installed timer replaces it. No overlap window.
@@ -182,6 +217,9 @@ Each fork has a recommended **Lean**. Forks are locked via `[FORK-LOCK F<N>]` PR
 - [ ] **Backfill: NONE.** GitHub already holds the `auto-audit` history (proven in Empirical Validation). The deleted JSON is not migrated — it shares no key with the GitHub query. **Cold-start:** never-audited repos read max-stale and drain one-per-run with the deterministic tiebreak; converges in N runs. *Optional 10-minute polish:* relabel the most recent real audit issue per never-labeled repo with `auto-audit` to seed a realistic baseline (a GitHub-side label op, not a state file). Recommend ship-without; seed only if the thundering-herd ordering matters to the operator.
 
 ### Phase 7 — Docs + schema &nbsp;·&nbsp; **S**
+
+**Status: IN PROGRESS** — `fleet-yaml-schema.md:190-199`, `install-patterns.md:29,50`, and the `fleet-observability` protocol's event vocabulary are all documented. Gap: `documentation/runbooks/pi-setup-guide.md` was never updated for this feature (its last touch predates this plan entirely) — the one outstanding checklist item below.
+
 - [ ] `fleet-yaml-schema.md`: document `fleet.sweep` (mirror `### fleet.plugins` `:131-157`).
 - [ ] `install-patterns.md` / `pi-setup-guide.md`: add the sweep installer step.
 - [ ] Document the event vocabulary in the `fleet-observability` protocol.

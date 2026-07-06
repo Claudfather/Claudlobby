@@ -1,8 +1,17 @@
-# Research: Claude Code Permissions Model
+---
+title: Claude Code Permissions Model — Compositor Reference
+type: decision
+status: shipped
+owner: chris
+created: 2026-05-18
+tags: [permissions, settings, composer, security]
+---
 
-Research for the smart permissions compositor feature.
+# Claude Code Permissions Model — Compositor Reference
 
-Sources: Claude Code official documentation, current `~/.claude/settings.json` reference implementation, `claudlobby/composer.py` existing code.
+Reference for how `claudlobby`'s smart-permissions compositor generates each bot's `settings.local.json`. Originated as pre-implementation research; the design below shipped in `claudlobby/composer.py` (MCP tool contracts, skill patterns, Telegram channel auto-include, `bash_allow`) and is kept here as the durable syntax reference plus a record of what was and wasn't adopted.
+
+Sources: Claude Code official documentation, `~/.claude/settings.json` reference implementation, `claudlobby/composer.py`.
 
 ---
 
@@ -473,18 +482,18 @@ Same 22 tools, namespaced under `mcp__gws-work__`.
 
 ---
 
-## Key Findings for Compositor Implementation
+## Implementation Status
 
-1. **settings.local.json replaces (not merges) permission arrays from global settings.** The compositor must emit a complete, self-contained allow list. This is the #1 design constraint.
+1. **Shipped.** `settings.local.json` is emitted as a complete, self-contained allow list — the compositor never relies on global-settings patterns carrying through.
 
-2. **The current `f"{tool}(**)"` pattern in `compose_settings_local()` is wrong.** Plain tool names should be emitted as-is (`Read`, not `Read(**)`). Path-scoped patterns are only meaningful for Read/Edit/Write.
+2. **Partially shipped.** The `f"{tool}(**)"` bug this doc flagged is fixed on the **allow** side (plain tool names now emit as-is). The same defect still exists on the **deny** side as of this writing — worth a follow-up fix.
 
-3. **MCP tool contracts are the highest-value Phase 1 target.** Each MCP fragment can declare its tools; the compositor resolves instance-qualified patterns. This eliminates the most painful manual work (10-30 tool names per MCP server).
+3. **Shipped.** MCP tool contracts are the primary mechanism: every MCP fragment in `library/mcp/` declares a `_permissions_contract`, and the compositor resolves instance-qualified patterns from it.
 
-4. **Skill patterns always need both forms.** `Skill(name)` + `Skill(name:*)`. Folder-expanded skills must be resolved to leaf names.
+4. **Shipped.** Skill patterns emit both `Skill(name)` and `Skill(name:*)` forms.
 
-5. **Telegram plugin tools should auto-include when `bot.telegram.handle` is set.** The 4 plugin tools are static and well-known.
+5. **Shipped.** Telegram plugin tools auto-include when `bot.telegram.handle` is set. `bash_allow` (the expertise-driven Bash pattern feature) is used by essentially every expertise file.
 
-6. **Sandbox paths merge but permission arrays replace.** This means sandbox filesystem restrictions can be layered (global + local), but permission allow/deny must be complete at each scope.
+6. **Not separately verified** — sandbox path merge behavior is a Claude Code platform fact, not compositor-specific; treat as still accurate.
 
-7. **Deny always wins.** The composition order in the design doc (base → expertise → MCP → channel → skill → fleet defaults → bot overrides) is correct, but deny should be accumulated across all layers, never overridden by a later allow.
+7. **Shipped**, with one known gap: the Edit/Write sibling-deny enhancement this doc proposed (extending sibling-dir denial beyond `Read`) was never adopted — sibling isolation still only blocks `Read`.

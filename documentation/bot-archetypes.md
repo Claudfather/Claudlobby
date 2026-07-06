@@ -10,7 +10,7 @@ Skills come from two sources:
 
 2. **Project skills** (`~/claudlobby/my-bot/.claude/skills/`) — specific to one bot. Only visible when Claude runs in that bot's directory.
 
-This separation means engineer bots inherit `/review-pr` and `/worktree` from the global layer without needing their own copies, while a business bot's `/orders` skill stays invisible to everyone else.
+This separation means engineer bots inherit `/review-pr` and `/worktree` from the global layer without needing their own copies, while a business bot's shop-specific skills (e.g. an order-lookup tool living in that fleet's local library overlay) stay invisible to everyone else.
 
 ### Global Skills (via your global-skills repo)
 
@@ -73,6 +73,11 @@ The brain of the fleet. Converses freely, delegates to workers, monitors health.
 | `/dispatch` | Send tasks to fleet bots via tmux with structured tracking |
 | `/lifecycle` | Full pipeline: implement → review → iterate → merge → retro → issues |
 | `/fleet-status` | Health check across all bots (alive/dead, context %, idle/working) |
+| `/fleet-pulse` | Actionable fleet health — restart dead workers, flag stuck panes, protect WIP |
+| `/prs` | PR activity across repos: authored, review requests, CI status |
+| `/status` | Self-diagnostic — session health, MCP connectivity, tmux fleet state, fleet-state ledger |
+| `/sweep` | Periodic code-quality sweep across fleet repos (cron or on demand) |
+| `/restart` | Graceful self-restart |
 | `/briefing` | Scheduled daily digests (morning/midday/evening) |
 | `/data-alert-sweep` | Batch-process alerts: Slack → investigate → fix → PR → reply |
 | `/pi-status` | Full Pi system health (all bots, RAM, disk, temp, crons) |
@@ -237,13 +242,9 @@ Customer-facing bot with personality. Handles orders, emails, fulfillment, task 
 
 | Skill | Purpose |
 |-------|---------|
-| `/orders` | Shopify order lookup and management |
-| `/products` | Product catalog browsing |
-| `/printify` | Fulfillment status and management |
 | `/emails` | Customer email inbox, drafting, sending |
 | `/tasks` | Notion task/issue management |
 | `/triage` | Surface issues from email → enrich with order data → create tasks |
-| `/analytics` | Revenue/order analytics (optional) |
 | `/restart` | Graceful self-restart |
 | `/status` | Self-diagnostic |
 

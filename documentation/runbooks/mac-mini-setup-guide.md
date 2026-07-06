@@ -158,12 +158,15 @@ In the [Tailscale admin console](https://login.tailscale.com), rename the device
 
 ## Phase 5: Install Node + Claude Code
 
+`jq` is also required here — several `lib/` scripts (dispatch, reconcile-fleet, report-back, creds-check, etc.) depend on it for JSON parsing.
+
 ```bash
-brew install node
+brew install node jq
 npm install -g @anthropic-ai/claude-code
 
 # verify
 node --version
+jq --version
 claude --version
 
 # first run — completes OAuth
@@ -299,6 +302,7 @@ Run these on the mini to confirm everything's good:
 xcode-select -p             # /Library/Developer/CommandLineTools
 brew --version              # Homebrew x.x.x
 node --version              # vXX.X.X
+jq --version                # jq-X.X.X
 claude --version            # claude code version
 tailscale status            # shows your tailnet, mini listed with --ssh
 tailscale ip -4             # 100.x.x.x
@@ -317,7 +321,7 @@ If all of those work, you're set.
 
 ## Next Steps
 
-Once the mini is reachable and Claude Code is installed, follow the [getting-started guide](../getting-started.md) to clone claudlobby and compose your first bot fleet. Then run `lib/setup-mac-mini.sh --fleet <name>` to install the keepalive + creds-check LaunchAgents.
+Once the mini is reachable and Claude Code is installed, follow the [getting-started guide](../getting-started.md) to clone claudlobby and compose your first bot fleet. Then run `lib/setup-fleet <name>` to enroll the fleet's composed jobs (keepalive, creds-check, etc.), warm the npx cache, and spin up your bots.
 
-- For details on launchd vs systemd vs cron install patterns, see [install-patterns.md](./install-patterns.md).
+- For details on launchd vs systemd vs cron install patterns, see [install-patterns.md](../install-patterns.md).
 - For the Pi equivalent of this guide, see [pi-setup-guide.md](./pi-setup-guide.md).

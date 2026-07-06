@@ -382,9 +382,9 @@ class TestComposeSettingsLocal:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"reviewer": bot})
         result = compose_settings_local(bot, fleet, paths)
         deny = result["permissions"]["deny"]
-        assert "Write(**)" in deny
-        assert "Edit(**)" in deny
-        assert "NotebookEdit(**)" in deny
+        assert "Write" in deny
+        assert "Edit" in deny
+        assert "NotebookEdit" in deny
 
     def test_tool_allow_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -411,7 +411,7 @@ class TestComposeSettingsLocal:
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"lead": bot})
         result = compose_settings_local(bot, fleet, paths)
-        assert "Write(**)" in result["permissions"]["deny"]
+        assert "Write" in result["permissions"]["deny"]
         assert "Agent" in result["permissions"]["allow"]
 
     def test_tool_deny_merged_with_sibling_isolation(self, tmp_path):
@@ -438,7 +438,7 @@ class TestComposeSettingsLocal:
         deny = result["permissions"]["deny"]
         # Should have both sibling isolation and tool deny
         assert any("Read(" in d and "bot-b" in d for d in deny)
-        assert "Write(**)" in deny
+        assert "Write" in deny
 
 
 class TestComposeBotConfModelStrategy:
@@ -1021,7 +1021,7 @@ class TestChannelSkillInSettingsLocal:
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
-        assert "Write(**)" in result["permissions"]["deny"]
+        assert "Write" in result["permissions"]["deny"]
         # Auto-derived still in allow
         assert "mcp__plugin_telegram_telegram__reply" in result["permissions"]["allow"]
 
@@ -1340,8 +1340,8 @@ class TestMcpPermissionsInSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         deny = result["permissions"]["deny"]
         allow = result["permissions"]["allow"]
-        assert "Write(**)" in deny
-        assert "Edit(**)" in deny
+        assert "Write" in deny
+        assert "Edit" in deny
         assert "mcp__github__*" in allow
 
     def test_multi_instance_in_settings_local(self, tmp_path):
@@ -1501,8 +1501,8 @@ class TestResolveExpertisePermissions:
         bot = BotConfig(bot_id="w", name="w", expertise=["eng", "reviewer"])
         allow, deny = _resolve_expertise_permissions(bot, paths)
         # Write and Edit should be in deny, not in allow
-        assert "Write(**)" in deny
-        assert "Edit(**)" in deny
+        assert "Write" in deny
+        assert "Edit" in deny
         assert "Write" not in allow
         assert "Edit" not in allow
         # Other tools still allowed
@@ -1617,8 +1617,8 @@ class TestExpertisePermissionsInSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         deny = result["permissions"]["deny"]
         allow = result["permissions"]["allow"]
-        assert "Write(**)" in deny
-        assert "Edit(**)" in deny
+        assert "Write" in deny
+        assert "Edit" in deny
         assert "Bash(git *)" in allow
         assert "Bash(gh *)" in allow
 
@@ -1640,8 +1640,8 @@ class TestExpertisePermissionsInSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         deny = result["permissions"]["deny"]
         allow = result["permissions"]["allow"]
-        assert "Write(**)" in deny
-        assert "Edit(**)" in deny
+        assert "Write" in deny
+        assert "Edit" in deny
         # Bot deny removes from allow
         assert "Write" not in allow
         assert "Edit" not in allow
@@ -1729,9 +1729,9 @@ class TestExpertisePermissionsInSettingsLocal:
         assert "WebFetch" in allow
         assert "WebSearch" in allow
         # Reviewer must not write code
-        assert "Write(**)" in deny
-        assert "Edit(**)" in deny
-        assert "NotebookEdit(**)" in deny
+        assert "Write" in deny
+        assert "Edit" in deny
+        assert "NotebookEdit" in deny
         assert "Write" not in allow
         assert "Edit" not in allow
         assert "NotebookEdit" not in allow

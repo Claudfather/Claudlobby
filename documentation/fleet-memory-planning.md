@@ -98,7 +98,7 @@ The script:
 3. If available RAM drops below the reserve floor (`total * (100 - threshold) / 100`),
    raises a FLEET ALERT via the shared signal path (fleet event + manager tmux
    nudge + Telegram) — no per-script env needed; delivery works fleet-less.
-4. Writes a one-line status entry to `lib/fleet-memory-check.log`.
+4. Writes a fleet-wide summary line (fleet RSS, available RAM/%, reserve floor) to `lib/fleet-memory-check.log`, followed by a per-bot RSS breakdown — one line per bot directory, walked via that bot's tmux session process tree. Not a single line: the alert/OK verdict line is appended after.
 5. Exits 0 unconditionally — monitoring must not abort the timer chain.
 
 ## What the 80% Threshold Means
@@ -151,7 +151,7 @@ decision.
 | `lib/fleet-memory-check.sh` | Fleet RSS %              | FLEET ALERT    |
 | `lib/keepalive.sh`          | Bot session liveness     | Log only       |
 | `lib/reconcile-fleet.sh`    | Supervision state        | stdout         |
-| `lib/creds-check.sh`        | Token expiry             | Log + stdout   |
+| `lib/creds-check.sh`        | Token expiry             | Log + Telegram (on ok↔fail transition) |
 
 Run `disk-monitor.sh` and `fleet-memory-check.sh` together in the same cron
 block for a complete host-health snapshot.
