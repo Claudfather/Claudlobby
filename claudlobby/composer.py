@@ -369,6 +369,10 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # drift would silently spawn a duplicate server for the same socket name.
     lines.append(f"export TMUX_TMPDIR={_shq(_TMUX_TMPDIR)}")
     lines.append('export FLEET_STATE_PATH="$CLAUDLOBBY_ROOT/state/fleet-state.json"')
+    if fleet.mission_file:
+        # Overlay-relative pointer to the fleet charter — skills resolve it
+        # against the fleet dir at runtime (goal-chain reads on demand).
+        lines.append(f"export FLEET_MISSION_FILE={_shq(fleet.mission_file)}")
     chat_id = ctx["TELEGRAM_GROUP_CHAT_ID"]
     if chat_id:
         lines.append(f"export TELEGRAM_GROUP_CHAT_ID={_shq(str(chat_id))}")
@@ -882,6 +886,15 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"to render it into CLAUDE.md (run claudlobby validate)"
             )
 
+    # Fleet-mission charter body: managers compose the full mission_file
+    # content; workers get the paragraph + a path pointer (locked F6 — the
+    # same context-budget gating as the projects table above).
+    fleet_mission_body = None
+    if fleet.mission_file and bot.bot_id in fleet.manager_bots():
+        charter = paths.fleet_yaml.parent / fleet.mission_file
+        if charter.is_file():
+            fleet_mission_body = charter.read_text()
+
     env = _build_jinja_env(paths)
     template = env.get_template("claude.md.j2")
     rendered = template.render(
@@ -892,6 +905,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         voice=voice_item,
         teams=teams,
         projects=projects,
+        fleet_mission_body=fleet_mission_body,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         resources=_items(bot.resources, "resources"),

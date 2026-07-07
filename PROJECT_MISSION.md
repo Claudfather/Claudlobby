@@ -12,7 +12,9 @@ The reference runtime for operating Claude Code bots in production. Bots install
 
 ## North star
 
-Trivial to run a fleet of distinct, cooperating bots on cheap hardware.
+Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and to point that fleet at a goal. A fleet doesn't just *run*; it runs *toward something*: it knows the mission it serves, picks work that advances it, and closes that work at the rigor each project declares.
+
+*(The "run → run toward something" extension was ratified by the fleet owner on 2026-07-06 with the goal-aware-fleet plan — `documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md`, decision forks F1–F6 locked. Those locks also satisfy this document's approval gate for the associated dispatch and lifecycle changes.)*
 
 ## Guiding principles
 

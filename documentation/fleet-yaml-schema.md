@@ -11,6 +11,9 @@ fleet:
   telegram_group_chat_id: "<chat-id>"   # default group; bots can override per-bot
   human_telegram_id: "<user-id>"        # OPTIONAL — human's Telegram ID for DM allowlisting
 
+  mission: <one paragraph>              # OPTIONAL — fleet-level goal anchor, composed into EVERY bot
+  mission_file: <relative-path>         # OPTIONAL — fuller charter (managers compose it in full); REQUIRES mission
+
   accounts:                             # OPTIONAL — alternate Claude Code config dirs (multi-auth)
     default: ~/.claude
     work: ~/.claude-work
@@ -134,6 +137,10 @@ Alternate Claude Code config directories. Useful when some bots authenticate aga
 ### `fleet.human_telegram_id`
 
 The human operator's Telegram user ID. When set, the compositor writes this into every bot's `access.json` `allowFrom` list, so the human can DM any bot without pending approval.
+
+### `fleet.mission` / `fleet.mission_file`
+
+The top of the goal hierarchy (fleet mission → project mission → workstream → task). `mission` is **one paragraph** (no newlines — validator-enforced, since it renders into every bot's composed instructions): the goal anchor EVERY bot receives as a `## Fleet Mission` section, above per-bot `## Mission`. `mission_file` optionally points at a fuller charter, relative to `fleet.yaml` — managers compose its full body; workers get the paragraph plus the path (and `FLEET_MISSION_FILE` in `bot.conf`) to read on demand. `mission_file` **requires** `mission`, so a file-only config can never leave workers goal-blind. Keep real mission content in the fleet overlay (`local/<fleet>/`) — it is operator-specific and never belongs in the committed repo.
 
 ### `fleet.plugins`
 

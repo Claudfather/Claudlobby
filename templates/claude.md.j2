@@ -30,6 +30,18 @@
 {% endif -%}
 {{ expertise_body }}
 
+{%- if fleet.mission %}
+
+## Fleet Mission
+
+{{ fleet.mission | trim }}
+{% if fleet_mission_body -%}
+{{ fleet_mission_body | trim }}
+{% elif fleet.mission_file -%}
+Full charter: {{ fleet.mission_file }} (read when picking or prioritizing work).
+{% endif -%}
+{% endif -%}
+
 {%- if bot.mission %}
 
 ## Mission

@@ -1,0 +1,145 @@
+# system.yaml — HOW the platform runs (reference copy).
+#
+# The three config tiers:
+#   system.yaml   — HOW the platform runs   (this tier: host jobs + per-fleet defaults)
+#   fleet.yaml    — WHO the bots are        (see fleet.yaml.example)
+#   projects.yaml — WHAT the work is        (see projects.yaml.example)
+#
+# UNLIKE the other two examples, this file is NOT meant to be copied and
+# edited: the live tier is package-owned (claudlobby/system.yaml) and ships
+# with the compositor, so upgrades can evolve platform defaults without
+# touching your fleet. This root copy exists so the three-tier story is
+# readable in one place.
+#
+# To override a system default, do it from fleet.yaml (your version wins):
+#   - per-category kill switches:  system_defaults: {hooks: false}
+#   - single-job opt-in/out:       defaults: {jobs: {weekly-worker-restart: {enroll: true}}}
+#   - value overrides:             declare hooks:/observability:/jobs: in defaults:
+#
+# The section below is kept byte-identical to claudlobby/system.yaml by
+# tests/test_fleet_mission.py::test_system_yaml_example_matches_package_file —
+# if you are editing the package file, regenerate this copy.
+#
+# --- verbatim copy of the package tier below ---
+# System defaults -- platform infrastructure layered into every fleet.
+# These represent HOW claudlobby works, not WHAT a specific fleet does.
+#
+# Package-owned and pristine: fleet.yaml `defaults:` layers on top
+# (system < fleet < bot), and fleet.yaml `system_defaults:` toggles remove
+# whole categories.
+#
+#   host:      Host-global singletons -- one instance per host, NOT layered,
+#              fixed `claudlobby-<name>` unit identity (no fleet prefix).
+#              Composed into runtime/_host/timers/ and enrolled once per host
+#              by `setup-system`. Opt-in host jobs (e.g. root-self-update)
+#              ship behind explicit toggles via their own plans, never here.
+#   defaults:  Per-fleet defaults, mirroring fleet.yaml's `defaults:` shape and
+#              deep-merged down into every bot. `jobs:` drives fleet timer units
+#              (a fleet may override an individual job by name); `hooks:` and
+#              `observability:` compose into each bot.
+#
+# Job entries accept optional systemd timer knobs: `persistent: true`
+# (catch up missed runs) and `randomized_delay: <seconds>` (start jitter);
+# launchd has no equivalent, so plists ignore them.
+#
+# `enroll: false` marks a job composed-but-dormant: its units are still
+# emitted, but they are listed in the timers/ DORMANT manifest and the setup
+# backbone does not enroll them. A fleet opts in per job via fleet.yaml:
+#   defaults:
+#     jobs:
+#       weekly-worker-restart: { enroll: true }
+
+host:
+  jobs:
+    # Stage the latest Claude Code binary daily (download-only; the staged
+    # binary is applied on a bot's next natural restart or the weekly worker
+    # bounce -- never a live fleet bounce). The script owns its PATH (npm /
+    # claude resolution), so the unit needs no environment beyond
+    # CLAUDLOBBY_ROOT.
+    claude-update:
+      script: "$CLAUDLOBBY_ROOT/lib/update-claude-code.sh"
+      schedule: "*-*-* 04:00:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
+    # Source-currency nudge (read-only): report how many commits the shared
+    # install is behind origin/main and notify the operator to pull. It never
+    # pulls -- the ff-only auto-pull (root-self-update) is a separate opt-in
+    # follow-up, so "the operator knows to pull" is the whole default-tier
+    # source-currency behavior.
+    notify-behind:
+      script: "$CLAUDLOBBY_ROOT/lib/notify-behind.sh"
+      schedule: "*-*-* 08:00:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
+    # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
+    # north star): daily root-usage check, FLEET ALERT past the threshold.
+    disk-monitor:
+      script: "$CLAUDLOBBY_ROOT/lib/disk-monitor.sh"
+      schedule: "*-*-* 05:00:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
+    # OOM guard on constrained hosts: daily fleet RSS vs available-RAM check,
+    # FLEET ALERT when the reserve floor is breached.
+    fleet-memory-check:
+      script: "$CLAUDLOBBY_ROOT/lib/fleet-memory-check.sh"
+      schedule: "*-*-* 05:30:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
+
+defaults:
+  hooks:
+    PreToolUse:
+      - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+    PostToolUse:
+      - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+
+  observability:
+    pulse_interval: 300
+    reap_days: 7
+    activity_stuck_threshold: 1800
+    dispatch_deadline: 1800
+
+  jobs:
+    fleet-pulse:
+      script: "$CLAUDLOBBY_ROOT/lib/fleet-pulse.sh"
+      interval_from: observability.pulse_interval
+      type: oneshot
+    keepalive:
+      script: "$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
+      interval: 60
+      type: oneshot
+    log-rotation:
+      script: "$CLAUDLOBBY_ROOT/lib/log-rotate-fleet.sh"
+      interval: 86400
+      type: oneshot
+    creds-check:
+      script: "$CLAUDLOBBY_ROOT/lib/creds-check.sh"
+      schedule: "*-*-* 06:00:00"
+      type: oneshot
+    # Mechanism 1 of the fleet update lifecycle: refresh plugins + composed
+    # skills live every day (claude plugin update + generate, then mark running
+    # bots for a keepalive-driven /reload). No restart, no context loss. Runs
+    # before the binary-update window so the plugin cache is warm.
+    reload-fleet:
+      script: "$CLAUDLOBBY_ROOT/lib/reload-fleet.sh"
+      schedule: "*-*-* 03:30:00"
+      type: oneshot
+    # Composed-but-dormant: bouncing workers onto the staged binary is
+    # disruptive, so enrollment is a per-fleet opt-in (enroll: true in
+    # fleet.yaml), never a cold-start default.
+    weekly-worker-restart:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/weekly-worker-restart.sh"
+      schedule: "Sun *-*-* 05:00:00"
+      type: oneshot
+    # Weekly per-bot data/ hygiene (event-JSONL bloat), analogous to
+    # log-rotation. Purges files older than 30 days; a fleet changes retention
+    # by overriding this job's script line (e.g. "... --purge --days 60").
+    data-sweep:
+      script: "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge"
+      schedule: "Sat *-*-* 07:00:00"
+      type: oneshot

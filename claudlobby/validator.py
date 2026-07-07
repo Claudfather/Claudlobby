@@ -370,6 +370,36 @@ def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
                 )
 
 
+def _validate_mission(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport
+) -> None:
+    """Fleet mission (goal-aware plan P3) — B2 pairing rule under locked F6:
+    the charter file requires the paragraph, so the every-bot anchor can
+    never be starved by a file-only config."""
+    if fleet.mission_file and not fleet.mission:
+        report.errors.append(
+            "fleet.mission_file requires fleet.mission (the one-paragraph "
+            "anchor every bot receives)"
+        )
+    if fleet.mission and "\n" in fleet.mission:
+        report.errors.append(
+            "fleet.mission must be a single paragraph without newlines — it "
+            "is rendered into every bot's composed CLAUDE.md (put long-form "
+            "content in mission_file)"
+        )
+    if fleet.mission_file:
+        if Path(fleet.mission_file).is_absolute():
+            report.warnings.append(
+                f"fleet.mission_file '{fleet.mission_file}' is absolute — "
+                f"must be relative to fleet.yaml"
+            )
+        elif not (paths.fleet_yaml.parent / fleet.mission_file).is_file():
+            report.warnings.append(
+                f"fleet.mission_file '{fleet.mission_file}' not found under "
+                f"{paths.fleet_yaml.parent}"
+            )
+
+
 def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
     """Fleet-level dependency checks."""
     # Warn about disabling defaults — unusual, worth flagging
@@ -622,6 +652,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
+    _validate_mission(fleet, paths, report)
     _validate_sweep(fleet, report)
     _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
