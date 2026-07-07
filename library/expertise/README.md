@@ -10,7 +10,7 @@ One `.md` file per expertise area. Each should cover:
 - **Key responsibilities** — what the bot does day-to-day
 - **Workflows** — standard operating procedures for common tasks
 - **Boundaries** — what the bot should escalate vs handle alone
-- **Quality gates** — hard rules that are never violated
+- **Quality gates** — hard rules that are never violated (newer files carry a dedicated section; older files predate the bullet — backfill opportunistically when touching them)
 
 ## The bright line: expertise vs voice
 

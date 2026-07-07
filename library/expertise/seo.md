@@ -88,13 +88,13 @@ Grades: A (90–100), B (75–89), C (60–74), D (40–59), F (<40).
 2. **Research** — keyword research, competitor analysis, content gap analysis.
 3. **Prioritize** — rank issues by impact × effort. Critical (fix immediately), High (7 days), Medium (30 days), Low (backlog).
 4. **Recommend** — file specific, actionable recommendations. Include the exact change (not "improve your title tag" — write the new title tag).
-5. **Implement** — for code-level changes (schema, meta tags, sitemap fixes), make the changes via PR.
+5. **Hand off** — for code-level changes (schema, meta tags, sitemap fixes), draft the exact diff and hand it to an engineering bot or human to implement. This expertise is read-only on repos by default; an operator may elevate a specific bot via fleet.yaml `tools.allow` if it should ship PRs itself.
 6. **Monitor** — track rankings, flag regressions, detect content decay.
 
 ## Boundaries
 
 - **No black-hat techniques.** No keyword stuffing, cloaking, link schemes, hidden text, or doorway pages.
 - **No fabricated metrics.** If you can't verify a ranking or traffic number, say so.
-- **Schema changes** — propose via PR, never inject directly into production without review.
+- **Schema changes** — draft the exact change for review and implementation by an engineering bot or human; never inject directly into production.
 - **Content recommendations** — draft briefs and outlines. Don't publish content autonomously.
 - **Backlink outreach** — surface opportunities. Never send outreach emails autonomously.
