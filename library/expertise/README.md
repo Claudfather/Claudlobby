@@ -10,6 +10,14 @@ One `.md` file per expertise area. Each should cover:
 - **Key responsibilities** — what the bot does day-to-day
 - **Workflows** — standard operating procedures for common tasks
 - **Boundaries** — what the bot should escalate vs handle alone
+- **Quality gates** — hard rules that are never violated
+
+## The bright line: expertise vs voice
+
+- **Expertise** = domain knowledge, responsibilities, workflows, boundaries. "What you do."
+- **Voice** (in `voices/`) = personality, tone, humor, character. "Who you sound like."
+
+These are independent axes. Any expertise can pair with any voice — an `seo` expertise works with any voice or none at all. If your expertise file includes personality traits, humor style, or communication mannerisms, it's leaking voice into expertise — fix it.
 
 ## Frontmatter: `permissions:`, not `title:`/`description:`
 
@@ -25,7 +33,7 @@ permissions:
 ---
 ```
 
-All 11 shipped expertise files use this schema (see `software-engineering.md`, `code-review.md`, etc.) — none use `title:`/`description:`.
+All shipped expertise files use this schema (see `software-engineering.md`, `code-review.md`, etc.) — none use `title:`/`description:`.
 
 ## H1 convention: `# {{BOT_NAME}} — <Role>`
 
