@@ -19,9 +19,8 @@
 #   MCP_PROBE_URL                 — optional: streamable-HTTP MCP endpoint
 #   MCP_PROBE_TOKEN               — optional: bearer for the MCP probe
 #
-# Telegram: every bot with a TELEGRAM_BOT_HANDLE in its bot.conf gets a
-# per-bot getMe validation (token resolved from the tiered .env the same
-# way bridge_state resolves it). Empty-resolving or wrong-bot tokens FAIL.
+# Telegram: every declared bot with a TELEGRAM_BOT_HANDLE gets a per-bot
+# getMe validation — see check_telegram_tokens.
 #
 # To probe additional fleet-specific MCPs, copy `check_streamable_mcp`
 # below into a fleet overlay script and pass per-MCP env var names.
@@ -29,10 +28,11 @@
 set -euo pipefail
 
 # Composed fleet timers pass the fleet name positionally on ExecStart
-# (composer contract — same as fleet-pulse/log-rotate-fleet). Used by the
-# per-bot Telegram check to enumerate the right fleet; other checks are
-# fleet-agnostic.
-FLEET_ARG="${1:-}"
+# (composer contract — same as fleet-pulse/log-rotate-fleet); the composed
+# unit env also carries CLAUDLOBBY_FLEET, the fallback for argless runs.
+# Used by the per-bot Telegram check to enumerate + namespace the right
+# fleet; other checks are fleet-agnostic.
+FLEET_ARG="${1:-${CLAUDLOBBY_FLEET:-}}"
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +57,7 @@ mkdir -p "$(dirname "$LOG")"
 
 ts() { date -Iseconds; }
 log() { printf '%s %s\n' "$(ts)" "$*" >> "$LOG"; }
+_lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }  # bash 3.2 has no ${var,,}
 
 # ---------------------------------------------------------------------
 # State + alert plumbing
@@ -236,7 +237,7 @@ check_telegram_tokens() {
     local declared_bots
     declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET_ARG/fleet.yaml")
 
-    local d bot handle token resp okflag username errcode url_cfg curl_err_file
+    local d bot key handle token resp okflag username errcode url_cfg curl_err_file
     for d in "$bots_dir"/*/; do
         [ -f "$d/bot.conf" ] || continue
         bot="$(basename "$d")"
@@ -244,12 +245,17 @@ check_telegram_tokens() {
         handle="$(bot_conf_get "$d" TELEGRAM_BOT_HANDLE "")" || true
         [ -n "$handle" ] || continue  # not a channel bot
 
+        # Fleet-namespaced state key: multi-fleet hosts share one state file,
+        # fleets may legitimately reuse bot names, and the alert text must say
+        # which fleet's bot failed. Root mode keeps the bare key.
+        key="telegram_${FLEET_ARG:+${FLEET_ARG}_}${bot}"
+
         token="$(resolve_bot_telegram_token "$d")" || true
 
         if [ -z "$token" ]; then
             # Configured for Telegram but no credential reaches it: an
             # outage, not a skip — alert.
-            record_and_alert "telegram_$bot" "fail" \
+            record_and_alert "$key" "fail" \
                 "token resolves empty across env tiers (var named in bot.conf)"
             continue
         fi
@@ -262,7 +268,7 @@ check_telegram_tokens() {
         # Token-bearing — shred eagerly rather than waiting for the EXIT trap.
         rm -f "$url_cfg"
         if [ -z "$resp" ]; then
-            record_and_alert "telegram_$bot" "fail" \
+            record_and_alert "$key" "fail" \
                 "getMe no response ($(head -c 120 "$curl_err_file"))"
             continue
         fi
@@ -270,19 +276,19 @@ check_telegram_tokens() {
         okflag="$(printf '%s' "$resp" | "$JQ" -r '.ok // false' 2>/dev/null)" || okflag=false
         if [ "$okflag" != "true" ]; then
             errcode="$(printf '%s' "$resp" | "$JQ" -r '.error_code // "?"' 2>/dev/null)" || errcode="?"
-            record_and_alert "telegram_$bot" "fail" "getMe error_code=$errcode"
+            record_and_alert "$key" "fail" "getMe error_code=$errcode"
             continue
         fi
 
         username="$(printf '%s' "$resp" | "$JQ" -r '.result.username // ""' 2>/dev/null)" || username=""
-        if [ -n "$username" ] && [ "$(printf '%s' "$username" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$handle" | tr '[:upper:]' '[:lower:]')" ]; then
+        if [ -n "$username" ] && [ "$(_lc "$username")" != "$(_lc "$handle")" ]; then
             # Valid token for the WRONG bot — cross-wired .env.
-            record_and_alert "telegram_$bot" "fail" \
+            record_and_alert "$key" "fail" \
                 "getMe answers @$username but bot.conf handle is @$handle (cross-wired token)"
             continue
         fi
 
-        record_and_alert "telegram_$bot" "ok" "getMe ok (@$username)"
+        record_and_alert "$key" "ok" "getMe ok (@$username)"
     done
 }
 

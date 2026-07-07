@@ -1,15 +1,14 @@
 """creds-check: per-bot Telegram token validation (#502).
 
-creds-check validated GitHub/Railway/MCP but never Telegram bot tokens, so
-a channel bot could sit deaf (revoked token, or a token resolving *empty*
-through the env tiers, #492) with zero credential alerts. The new
-check_telegram_tokens resolves each channel bot's token exactly the way
-bridge_state does (bot.conf names the var; value from the tiered .env,
-shell-sourced so quoting can't mislead) and getMe-validates it.
+A channel bot could sit deaf — revoked token, or a token resolving *empty*
+through the env tiers (#492) — with zero credential alerts. The check's
+mechanics (SSOT token resolution shared with bridge_state, getMe via curl
+config file) are documented at check_telegram_tokens in lib/creds-check.sh;
+this suite runs the real script end-to-end against a scratch fleet with a
+canned-response curl stub.
 
-Runs the real script against a scratch fleet with a canned-response curl
-stub (token never hits argv — the check passes the URL via a curl config
-file, so the stub reads it from there).
+State keys are fleet-namespaced (telegram_<fleet>_<bot>): multi-fleet hosts
+share one state file, and the alert text must say whose bot failed.
 """
 
 import json
@@ -25,14 +24,17 @@ SCRIPT = REPO_ROOT / "lib" / "creds-check.sh"
 VALID_TOKEN = "111111:validAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 WRONGBOT_TOKEN = "222222:wrongbotAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 REVOKED_TOKEN = "333333:revokedAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+ALL_TOKENS = (VALID_TOKEN, WRONGBOT_TOKEN, REVOKED_TOKEN)
 
 
 def _curl_stub(bindir: Path) -> None:
-    """Fake curl: reads the URL out of the --config file, answers getMe by
-    token; records every URL-bearing config so tests can assert no-argv-leak."""
+    """Fake curl: appends its argv to argv.log (so tests can prove no token
+    ever rides the command line), then reads the URL out of the --config
+    file and answers getMe by token."""
     _write_exec(
         bindir / "curl",
         f"""#!/bin/bash
+echo "$*" >> "$(dirname "$0")/argv.log"
 cfg=""
 prev=""
 for a in "$@"; do
@@ -106,7 +108,7 @@ def _fleet(tmp_path: Path) -> dict:
         }
     )
     (tmp_path / "home").mkdir()
-    return {"root": root, "env": env, "state": state, "tg_log": tg_log}
+    return {"root": root, "env": env, "state": state, "tg_log": tg_log, "bindir": bindir}
 
 
 def _run(f: dict) -> dict:
@@ -123,14 +125,14 @@ def _run(f: dict) -> dict:
 
 def test_valid_token_matching_handle_ok(tmp_path):
     state = _run(_fleet(tmp_path))
-    assert state["telegram_bot1"]["status"] == "ok"
+    assert state["telegram_f_bot1"]["status"] == "ok"
 
 
 def test_revoked_token_fails_with_error_code(tmp_path):
     f = _fleet(tmp_path)
     state = _run(f)
-    assert state["telegram_bot2"]["status"] == "fail"
-    assert "401" in state["telegram_bot2"]["detail"]
+    assert state["telegram_f_bot2"]["status"] == "fail"
+    assert "401" in state["telegram_f_bot2"]["detail"]
     assert REVOKED_TOKEN not in f["state"].read_text(), "token must never be recorded"
 
 
@@ -138,21 +140,21 @@ def test_empty_token_fails_not_skips(tmp_path):
     """#492 class: a bot *configured* for Telegram whose token resolves empty
     is an outage, not a skip — it must alert."""
     state = _run(_fleet(tmp_path))
-    assert state["telegram_bot3"]["status"] == "fail"
-    assert "empty" in state["telegram_bot3"]["detail"].lower()
+    assert state["telegram_f_bot3"]["status"] == "fail"
+    assert "empty" in state["telegram_f_bot3"]["detail"].lower()
 
 
 def test_handle_mismatch_fails(tmp_path):
     """A valid token for the WRONG bot (cross-wired .env) must fail loudly."""
     state = _run(_fleet(tmp_path))
-    assert state["telegram_bot5"]["status"] == "fail"
-    d = state["telegram_bot5"]["detail"]
+    assert state["telegram_f_bot5"]["status"] == "fail"
+    d = state["telegram_f_bot5"]["detail"]
     assert "some_other_bot" in d and "bot_five_bot" in d
 
 
 def test_non_channel_bot_not_checked(tmp_path):
     state = _run(_fleet(tmp_path))
-    assert "telegram_bot4" not in state
+    assert "telegram_f_bot4" not in state
 
 
 def test_undeclared_residue_dir_not_checked(tmp_path):
@@ -160,7 +162,7 @@ def test_undeclared_residue_dir_not_checked(tmp_path):
     be getMe-checked or alerted — declared-bots filter, same as fleet-pulse."""
     f = _fleet(tmp_path)
     state = _run(f)
-    assert "telegram_ghost" not in state
+    assert "telegram_f_ghost" not in state
     posts = f["tg_log"].read_text() if f["tg_log"].exists() else ""
     assert "ghost" not in posts
 
@@ -169,13 +171,20 @@ def test_fail_alerts_via_tg_post_once(tmp_path):
     f = _fleet(tmp_path)
     _run(f)
     posts = f["tg_log"].read_text() if f["tg_log"].exists() else ""
-    assert "telegram_bot2 FAIL" in posts
+    assert "telegram_f_bot2 FAIL" in posts
     _run(f)  # second tick: still failing -> edge-alert stays quiet
     assert posts == f["tg_log"].read_text(), "repeat fail must not re-alert"
 
 
 def test_token_never_on_curl_argv(tmp_path):
-    """The stub only learns the URL via --config; if the check ever put the
-    token on argv the stub would miss it and answer 404 -> bot1 not ok."""
-    state = _run(_fleet(tmp_path))
-    assert state["telegram_bot1"]["status"] == "ok"
+    """Two independent proofs: (a) the stub only learns the URL via --config,
+    so argv-passed tokens would 404 and break the ok assertion; (b) the stub
+    records every argv it receives — no token may appear in any of them."""
+    f = _fleet(tmp_path)
+    state = _run(f)
+    assert state["telegram_f_bot1"]["status"] == "ok"
+    argv_log = f["bindir"] / "argv.log"
+    assert argv_log.exists(), "stub must have been invoked"
+    argv = argv_log.read_text()
+    for tok in ALL_TOKENS:
+        assert tok not in argv, "token leaked onto curl argv"
