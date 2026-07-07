@@ -140,7 +140,7 @@ The human operator's Telegram user ID. When set, the compositor writes this into
 
 ### `fleet.mission` / `fleet.mission_file`
 
-The top of the goal hierarchy (fleet mission → project mission → workstream → task). `mission` is **one paragraph** (no newlines — validator-enforced, since it renders into every bot's composed instructions): the goal anchor EVERY bot receives as a `## Fleet Mission` section, above per-bot `## Mission`. `mission_file` optionally points at a fuller charter, relative to `fleet.yaml` — managers compose its full body; workers get the paragraph plus the path (and `FLEET_MISSION_FILE` in `bot.conf`) to read on demand. `mission_file` **requires** `mission`, so a file-only config can never leave workers goal-blind. Keep real mission content in the fleet overlay (`local/<fleet>/`) — it is operator-specific and never belongs in the committed repo.
+The top of the goal hierarchy (fleet mission → project mission → the work itself). `mission` is **one paragraph** (no newlines — validator-enforced, since it renders into every bot's composed instructions): the goal anchor EVERY bot receives as a `## Fleet Mission` section, above per-bot `## Mission`. `mission_file` optionally points at a fuller charter, relative to `fleet.yaml` — managers compose its full body; workers get the paragraph plus the path (and `FLEET_MISSION_FILE` in `bot.conf`) to read on demand. `mission_file` **requires** `mission`, so a file-only config can never leave workers goal-blind. Keep real mission content in the fleet overlay (`local/<fleet>/`) — it is operator-specific and never belongs in the committed repo.
 
 ### `fleet.plugins`
 

@@ -15,7 +15,7 @@ This skill is invoked on each cadence tick (the tick wiring ships with the goal-
 
 ## Resolve the goal chain first
 
-Anchor every pick top-down: **Fleet Mission → project mission → issue**. Your `## Fleet Mission` section states what the fleet serves — when the picker weighs `mission_alignment`, that paragraph is the top of the chain, above the target repo's `PROJECT_MISSION.md`. If `FLEET_MISSION_FILE` is set in your environment, read the charter (path relative to the fleet directory) before the first pick of a session.
+Anchor every pick top-down: **Fleet Mission → project mission → issue**. Your `## Fleet Mission` section states what the fleet serves — when the picker weighs `mission_alignment`, that paragraph is the top of the chain, above the target repo's `PROJECT_MISSION.md`. If `FLEET_MISSION_FILE` is set in your environment, read that file before the first pick of a session.
 
 ## Required config in fleet.yaml
 

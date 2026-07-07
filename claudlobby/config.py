@@ -404,10 +404,11 @@ class FleetConfig:
     bots: dict[str, BotConfig] = field(default_factory=dict)
     sweep: SweepConfig | None = None
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
-    # Fleet-level mission (goal-aware plan P3, locked fork F6 + B2 pairing):
-    # `mission` is the one-paragraph anchor EVERY bot receives; `mission_file`
-    # points at a fuller charter (overlay-relative) composed for managers
-    # only. mission_file REQUIRES mission (validator-enforced).
+    # Fleet-level mission: `mission` is the one-paragraph anchor EVERY bot
+    # receives; `mission_file` points at a fuller charter (fleet-relative)
+    # composed for managers only; mission_file REQUIRES mission (validator-
+    # enforced). Rationale + locked decisions (F6/B2):
+    # documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md
     mission: str | None = None
     mission_file: str | None = None
 

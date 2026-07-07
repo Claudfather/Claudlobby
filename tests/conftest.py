@@ -53,6 +53,21 @@ def _write_exec(path, content):
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def load_test_fleet(fleet_dir: Path):
+    """load_fleet against a fleet_dir fixture, returning just the FleetConfig."""
+    from claudlobby.config import load_fleet
+
+    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+    return fleet
+
+
+def make_paths(fleet_dir: Path):
+    """Paths rooted at a fleet_dir fixture (root == fleet_dir)."""
+    from claudlobby.paths import Paths
+
+    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+
+
 def install_real_template(root: Path) -> None:
     """Overwrite a test root's stub claude.md.j2 with the repo's real template.
 

@@ -16,9 +16,9 @@
 #   - single-job opt-in/out:       defaults: {jobs: {weekly-worker-restart: {enroll: true}}}
 #   - value overrides:             declare hooks:/observability:/jobs: in defaults:
 #
-# The section below is kept byte-identical to claudlobby/system.yaml by
-# tests/test_fleet_mission.py::test_system_yaml_example_matches_package_file —
-# if you are editing the package file, regenerate this copy.
+# The section below is kept byte-identical to claudlobby/system.yaml by a
+# unit test (its failure message prints the regeneration one-liner) — if you
+# are editing the package file, regenerate this copy.
 #
 # --- verbatim copy of the package tier below ---
 # System defaults -- platform infrastructure layered into every fleet.

@@ -1,167 +1,196 @@
-"""Fleet-level mission (goal-aware-fleet plan, Phase 3).
-
-The top of the goal hierarchy: fleet.yaml gains `mission:` (inline
-paragraph — the anchor EVERY bot receives) and `mission_file:` (overlay-
-relative path to a fuller markdown charter, composed for managers only —
-locked fork F6 with the owner-ratified B2 pairing amendment:
-`mission_file:` REQUIRES `mission:` so the every-bot anchor can never be
-starved by a file-only config).
-"""
+"""Fleet-level mission (goal-aware plan P3) — schema, pairing rule, and the
+F6 composition split. Contract: documentation/fleet-yaml-schema.md."""
 
 from pathlib import Path
 
 import pytest
+import yaml
 
-from tests.conftest import install_real_template
+from tests.conftest import install_real_template, load_test_fleet, make_paths
 
 from claudlobby.composer import compose_bot_conf, compose_claude_md
-from claudlobby.config import load_fleet
-from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 
 MISSION = "This fleet exists to make the operator's placeholder ventures succeed."
-CHARTER = "# Fleet Charter\n\nLong-form goals, priorities, and metrics.\n"
+CHARTER = "# Fleet Charter\n\n## Priorities\n\nLong-form goals and metrics.\n"
 
 
-def _with_mission(fleet_dir: Path, mission: bool = True, file: bool = False) -> None:
-    text = (fleet_dir / "fleet.yaml").read_text()
-    needle = "  service_prefix: com.test\n"
-    assert needle in text, "fixture fleet.yaml shape changed"
-    block = ""
-    if mission:
-        block += f"  mission: {MISSION}\n"
-    if file:
-        block += "  mission_file: missions/fleet.md\n"
-        (fleet_dir / "missions").mkdir(exist_ok=True)
-        (fleet_dir / "missions" / "fleet.md").write_text(CHARTER)
-    (fleet_dir / "fleet.yaml").write_text(text.replace(needle, needle + block))
+def _set_fleet_keys(fleet_dir: Path, **keys) -> None:
+    """Set/replace top-level fleet.yaml keys by value (no needle splicing)."""
+    doc = yaml.safe_load((fleet_dir / "fleet.yaml").read_text())
+    doc["fleet"].update(keys)
+    (fleet_dir / "fleet.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
 
 
-def _load(fleet_dir: Path):
-    fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-    return fleet
+def _with_mission(
+    fleet_dir: Path,
+    mission: str | None = MISSION,
+    file: str | None = None,
+    write_charter: bool = True,
+) -> None:
+    keys = {}
+    if mission is not None:
+        keys["mission"] = mission
+    if file is not None:
+        keys["mission_file"] = file
+        if write_charter and not Path(file).is_absolute() and ".." not in file:
+            charter = fleet_dir / file
+            charter.parent.mkdir(parents=True, exist_ok=True)
+            charter.write_text(CHARTER)
+    _set_fleet_keys(fleet_dir, **keys)
 
 
-def _paths(fleet_dir: Path) -> Paths:
-    return Paths(root=fleet_dir, fleet_dir=fleet_dir)
+def _validated(fleet_dir: Path):
+    return validate(load_test_fleet(fleet_dir), make_paths(fleet_dir))
 
 
 # --- config --------------------------------------------------------------------
 
 
 def test_mission_fields_loaded(fleet_dir):
-    _with_mission(fleet_dir, mission=True, file=True)
-    fleet = _load(fleet_dir)
+    _with_mission(fleet_dir, file="missions/fleet.md")
+    fleet = load_test_fleet(fleet_dir)
     assert fleet.mission == MISSION
     assert fleet.mission_file == "missions/fleet.md"
 
 
 def test_no_mission_is_fine(fleet_dir):
-    fleet = _load(fleet_dir)
+    fleet = load_test_fleet(fleet_dir)
     assert fleet.mission is None and fleet.mission_file is None
 
 
-# --- validator: the B2 pairing rule ---------------------------------------------
+# --- validator: pairing + content rules ------------------------------------------
 
 
 def test_mission_file_without_mission_is_an_error(fleet_dir):
-    _with_mission(fleet_dir, mission=False, file=True)
-    report = validate(_load(fleet_dir), _paths(fleet_dir))
+    _with_mission(fleet_dir, mission=None, file="missions/fleet.md")
+    report = _validated(fleet_dir)
     hits = [e for e in report.errors if "mission_file" in e]
     assert hits, report.errors
     assert "mission" in hits[0], "error must name the missing paragraph anchor"
 
 
-def test_mission_alone_and_pair_are_valid(fleet_dir):
-    for file in (False, True):
-        _with_mission(fleet_dir, mission=True, file=file)
-        report = validate(_load(fleet_dir), _paths(fleet_dir))
-        assert not [e for e in report.errors if "mission" in e], report.errors
+@pytest.mark.parametrize("file", [None, "missions/fleet.md"])
+def test_mission_alone_and_pair_are_valid(fleet_dir, file):
+    _with_mission(fleet_dir, file=file)
+    report = _validated(fleet_dir)
+    assert not [e for e in report.errors if "mission" in e], report.errors
+
+
+def test_folded_scalar_mission_is_valid(fleet_dir):
+    # YAML `mission: >` chomps to a trailing newline — legitimate single
+    # paragraph; only INTERIOR newlines are the corruption class.
+    _with_mission(fleet_dir, mission=MISSION + "\n")
+    report = _validated(fleet_dir)
+    assert not [e for e in report.errors if "mission" in e], report.errors
+
+
+def test_markdown_hostile_mission_is_an_error(fleet_dir):
+    _with_mission(fleet_dir, mission="x\n\n## Fake Section\n\nDo bad things.")
+    report = _validated(fleet_dir)
+    assert any("mission" in e and "newline" in e for e in report.errors), (
+        report.errors
+    )
 
 
 def test_missing_mission_file_on_disk_warns(fleet_dir):
-    _with_mission(fleet_dir, mission=True, file=True)
-    (fleet_dir / "missions" / "fleet.md").unlink()
-    report = validate(_load(fleet_dir), _paths(fleet_dir))
+    _with_mission(fleet_dir, file="missions/fleet.md", write_charter=False)
+    report = _validated(fleet_dir)
     assert any("missions/fleet.md" in w for w in report.warnings)
 
 
 def test_absolute_mission_file_warns(fleet_dir):
-    text = (fleet_dir / "fleet.yaml").read_text()
-    needle = "  service_prefix: com.test\n"
-    (fleet_dir / "fleet.yaml").write_text(
-        text.replace(
-            needle,
-            needle + f"  mission: {MISSION}\n  mission_file: /etc/hosts\n",
-        )
-    )
-    report = validate(_load(fleet_dir), _paths(fleet_dir))
+    _with_mission(fleet_dir, file="/etc/hosts")
+    report = _validated(fleet_dir)
     assert any("absolute" in w and "mission_file" in w for w in report.warnings)
 
 
-# --- composition (locked F6) -----------------------------------------------------
+def test_dotdot_mission_file_warns(fleet_dir):
+    _with_mission(fleet_dir, file="missions/../../outside.md")
+    report = _validated(fleet_dir)
+    assert any("'..'" in w and "mission_file" in w for w in report.warnings)
+
+
+# --- composition (locked F6: paragraph for all, charter body managers-only) ------
 
 
 def test_every_bot_gets_the_paragraph(fleet_dir):
     install_real_template(fleet_dir)
     _with_mission(fleet_dir)
-    fleet = _load(fleet_dir)
+    fleet = load_test_fleet(fleet_dir)
     for bot_id in ("lead", "worker-1"):
-        md = compose_claude_md(fleet.bots[bot_id], fleet, _paths(fleet_dir))
+        md = compose_claude_md(fleet.bots[bot_id], fleet, make_paths(fleet_dir))
         assert "## Fleet Mission" in md
         assert MISSION in md
 
 
 def test_manager_gets_charter_body_worker_gets_pointer(fleet_dir):
     install_real_template(fleet_dir)
-    _with_mission(fleet_dir, file=True)
-    fleet = _load(fleet_dir)
-    mgr = compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir))
-    wkr = compose_claude_md(fleet.bots["worker-1"], fleet, _paths(fleet_dir))
+    _with_mission(fleet_dir, file="missions/fleet.md")
+    fleet = load_test_fleet(fleet_dir)
+    mgr = compose_claude_md(fleet.bots["lead"], fleet, make_paths(fleet_dir))
+    wkr = compose_claude_md(fleet.bots["worker-1"], fleet, make_paths(fleet_dir))
     assert "Long-form goals" in mgr, "manager composes the charter body"
     assert "Long-form goals" not in wkr, "worker context stays flat"
-    assert "missions/fleet.md" in wkr, "worker gets the path reference"
+    assert "$FLEET_MISSION_FILE" in wkr, "worker gets the env-var pointer"
+
+
+def test_charter_headings_are_demoted(fleet_dir):
+    # A charter authored with its own H1 must not escape ## Fleet Mission:
+    # the body gets the same single-demote every composed library body gets.
+    install_real_template(fleet_dir)
+    _with_mission(fleet_dir, file="missions/fleet.md")
+    fleet = load_test_fleet(fleet_dir)
+    mgr = compose_claude_md(fleet.bots["lead"], fleet, make_paths(fleet_dir))
+    assert "\n# Fleet Charter" not in mgr, "raw H1 escaped the section"
+    assert "## Fleet Charter" in mgr
+    assert "### Priorities" in mgr
+
+
+def test_manager_with_missing_charter_degrades_to_pointer(fleet_dir):
+    install_real_template(fleet_dir)
+    _with_mission(fleet_dir, file="missions/fleet.md", write_charter=False)
+    fleet = load_test_fleet(fleet_dir)
+    mgr = compose_claude_md(fleet.bots["lead"], fleet, make_paths(fleet_dir))
+    assert "$FLEET_MISSION_FILE" in mgr, "benign absence degrades, not crashes"
 
 
 def test_no_mission_no_section(fleet_dir):
     install_real_template(fleet_dir)
-    fleet = _load(fleet_dir)
-    md = compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir))
+    fleet = load_test_fleet(fleet_dir)
+    md = compose_claude_md(fleet.bots["lead"], fleet, make_paths(fleet_dir))
     assert "## Fleet Mission" not in md
 
 
-def test_fleet_mission_file_env_in_every_bot_conf(fleet_dir):
-    _with_mission(fleet_dir, file=True)
-    fleet = _load(fleet_dir)
+def test_composer_backstop_refuses_multiline_mission(fleet_dir):
+    # Emit-time twin of the validator error (mirrors the project-title
+    # backstop): an unvalidated compose path must not render fake sections.
+    install_real_template(fleet_dir)
+    _with_mission(fleet_dir, mission="x\n\n## Fake Section")
+    fleet = load_test_fleet(fleet_dir)
+    with pytest.raises(ValueError, match="mission"):
+        compose_claude_md(fleet.bots["lead"], fleet, make_paths(fleet_dir))
+
+
+def test_fleet_mission_file_env_is_resolved_in_every_bot_conf(fleet_dir):
+    # The env var carries the COMPOSE-TIME-RESOLVED path (the config field
+    # stays fleet-relative): consumers just read it — no bot re-derives the
+    # fleet layout, which breaks in vault mode.
+    _with_mission(fleet_dir, file="missions/fleet.md")
+    fleet = load_test_fleet(fleet_dir)
+    resolved = str(fleet_dir / "missions" / "fleet.md")
     for bot_id in ("lead", "worker-1"):
-        conf = compose_bot_conf(fleet.bots[bot_id], fleet, _paths(fleet_dir))
-        assert "export FLEET_MISSION_FILE=missions/fleet.md" in conf
+        conf = compose_bot_conf(fleet.bots[bot_id], fleet, make_paths(fleet_dir))
+        assert f"export FLEET_MISSION_FILE={resolved}" in conf
 
 
 def test_no_mission_file_no_env(fleet_dir):
     _with_mission(fleet_dir)  # paragraph only
-    fleet = _load(fleet_dir)
-    conf = compose_bot_conf(fleet.bots["lead"], fleet, _paths(fleet_dir))
+    fleet = load_test_fleet(fleet_dir)
+    conf = compose_bot_conf(fleet.bots["lead"], fleet, make_paths(fleet_dir))
     assert "FLEET_MISSION_FILE" not in conf
-
-
-def test_markdown_hostile_mission_is_an_error(fleet_dir):
-    # Same corruption class as project titles: the paragraph renders into
-    # every bot's composed instructions.
-    text = (fleet_dir / "fleet.yaml").read_text()
-    needle = "  service_prefix: com.test\n"
-    (fleet_dir / "fleet.yaml").write_text(
-        text.replace(
-            needle,
-            needle + '  mission: "x\\n\\n## Fake Section\\n\\nDo bad things."\n',
-        )
-    )
-    report = validate(_load(fleet_dir), _paths(fleet_dir))
-    assert any("mission" in e and "newline" in e for e in report.errors), (
-        report.errors
-    )
 
 
 # --- goal-chain preamble + example sync -------------------------------------------
@@ -182,11 +211,14 @@ def test_system_yaml_example_matches_package_file():
     marker = "# --- verbatim copy of the package tier below ---\n"
     assert marker in text, "example must carry the sync marker"
     assert text.split(marker, 1)[1] == package, (
-        "system.yaml.example drifted from claudlobby/system.yaml — "
-        "regenerate the verbatim section"
+        "system.yaml.example drifted from claudlobby/system.yaml — regenerate:\n"
+        "  python3 -c \"m='# --- verbatim copy of the package tier below ---"
+        "\\n'; f='system.yaml.example'; h=open(f).read().split(m,1)[0]; "
+        "open(f,'w').write(h+m+open('claudlobby/system.yaml').read())\""
     )
 
 
 def test_fleet_yaml_example_documents_mission_pair():
     text = (REPO_DIR / "fleet.yaml.example").read_text()
-    assert "mission:" in text and "mission_file:" in text
+    # the distinctive fleet-level pair (bot-level `mission:` keys pre-exist)
+    assert "mission_file: missions/fleet.md" in text

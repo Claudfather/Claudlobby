@@ -370,34 +370,49 @@ def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
                 )
 
 
+def _check_relative_file(
+    label: str, value: str, base: Path, report: ValidationReport
+) -> None:
+    """Shared check for config paths defined as relative-to-their-config-file
+    (fleet.mission_file, project mission_file): warn on absolute (pathlib's
+    / operator would silently discard base), on `..` components (escapes the
+    overlay the same way), and on a missing target."""
+    p = Path(value)
+    if p.is_absolute():
+        report.warnings.append(
+            f"{label} '{value}' is absolute — must be relative to {base}"
+        )
+    elif ".." in p.parts:
+        report.warnings.append(
+            f"{label} '{value}' contains '..' — must stay under {base}"
+        )
+    elif not (base / value).is_file():
+        report.warnings.append(f"{label} '{value}' not found under {base}")
+
+
 def _validate_mission(
     fleet: FleetConfig, paths: Paths, report: ValidationReport
 ) -> None:
-    """Fleet mission (goal-aware plan P3) — B2 pairing rule under locked F6:
-    the charter file requires the paragraph, so the every-bot anchor can
-    never be starved by a file-only config."""
+    """Fleet mission — pairing rule: the charter file requires the paragraph,
+    so the every-bot anchor can never be starved by a file-only config."""
     if fleet.mission_file and not fleet.mission:
         report.errors.append(
             "fleet.mission_file requires fleet.mission (the one-paragraph "
             "anchor every bot receives)"
         )
-    if fleet.mission and "\n" in fleet.mission:
+    if fleet.mission and "\n" in fleet.mission.strip():
+        # .strip(): a YAML folded scalar (mission: >) legitimately ends with
+        # a chomped newline — only INTERIOR newlines are the corruption.
         report.errors.append(
             "fleet.mission must be a single paragraph without newlines — it "
             "is rendered into every bot's composed CLAUDE.md (put long-form "
             "content in mission_file)"
         )
     if fleet.mission_file:
-        if Path(fleet.mission_file).is_absolute():
-            report.warnings.append(
-                f"fleet.mission_file '{fleet.mission_file}' is absolute — "
-                f"must be relative to fleet.yaml"
-            )
-        elif not (paths.fleet_yaml.parent / fleet.mission_file).is_file():
-            report.warnings.append(
-                f"fleet.mission_file '{fleet.mission_file}' not found under "
-                f"{paths.fleet_yaml.parent}"
-            )
+        _check_relative_file(
+            "fleet.mission_file", fleet.mission_file, paths.fleet_config_dir,
+            report,
+        )
 
 
 def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
@@ -536,21 +551,10 @@ def _validate_projects(
             else:
                 repo_owners[repo] = key
 
-        # mission_file is relative to projects.yaml (resolved through the
-        # Paths property so the co-location rule has one home); pathlib's /
-        # operator discards base on an absolute right side, so absolute
-        # paths are rejected rather than silently escaping.
-        if project.mission_file and Path(project.mission_file).is_absolute():
-            report.warnings.append(
-                f"{label}: mission_file '{project.mission_file}' is "
-                f"absolute — must be relative to projects.yaml"
-            )
-        elif project.mission_file and not (
-            paths.projects_yaml.parent / project.mission_file
-        ).is_file():
-            report.warnings.append(
-                f"{label}: mission_file '{project.mission_file}' not "
-                f"found under {paths.projects_yaml.parent}"
+        if project.mission_file:
+            _check_relative_file(
+                f"{label}: mission_file", project.mission_file,
+                paths.fleet_config_dir, report,
             )
 
         for unknown in sorted(project.raw):
