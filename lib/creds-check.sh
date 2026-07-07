@@ -19,10 +19,20 @@
 #   MCP_PROBE_URL                 — optional: streamable-HTTP MCP endpoint
 #   MCP_PROBE_TOKEN               — optional: bearer for the MCP probe
 #
+# Telegram: every bot with a TELEGRAM_BOT_HANDLE in its bot.conf gets a
+# per-bot getMe validation (token resolved from the tiered .env the same
+# way bridge_state resolves it). Empty-resolving or wrong-bot tokens FAIL.
+#
 # To probe additional fleet-specific MCPs, copy `check_streamable_mcp`
 # below into a fleet overlay script and pass per-MCP env var names.
 
 set -euo pipefail
+
+# Composed fleet timers pass the fleet name positionally on ExecStart
+# (composer contract — same as fleet-pulse/log-rotate-fleet). Used by the
+# per-bot Telegram check to enumerate the right fleet; other checks are
+# fleet-agnostic.
+FLEET_ARG="${1:-}"
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -208,11 +218,80 @@ check_streamable_mcp() {
     fi
 }
 
+check_telegram_tokens() {
+    # Per-bot Telegram token validation (#502). A channel bot whose token
+    # was revoked/regenerated — or resolves EMPTY through the env tiers
+    # (#492, an empty later-tier stub shadowing a lower-tier value) — sits
+    # deaf with no credential signal. Resolve each token exactly the way
+    # bridge_state does (bot.conf names the var; value shell-sourced from
+    # the tiered .env, so quoting cannot mislead), then getMe-validate.
+    # One getMe per channel bot per daily tick; the token rides a curl
+    # config file, never argv; only ok/error_code is ever recorded.
+    local bots_dir
+    bots_dir="$(resolve_bots_dir "$FLEET_ARG")"
+    [ -d "$bots_dir" ] || return 0
+
+    local d bot handle token resp okflag username errcode
+    for d in "$bots_dir"/*/; do
+        [ -f "$d/bot.conf" ] || continue
+        bot="$(basename "$d")"
+        handle="$(bot_conf_get "$d" TELEGRAM_BOT_HANDLE "")" || true
+        [ -n "$handle" ] || continue  # not a channel bot
+
+        # Subshell resolution — never touch this script's env.
+        token="$(
+            load_bot_conf "$d" >/dev/null 2>&1 || true
+            BOT_DIR="$d"
+            source_env_tiered 2>/dev/null || true
+            _te="${TELEGRAM_TOKEN_ENV_NAME:-}"
+            if [ -n "$_te" ]; then printf '%s' "${!_te:-}"; fi
+        )" || true
+
+        if [ -z "$token" ]; then
+            # Configured for Telegram but no credential reaches it: an
+            # outage, not a skip — alert.
+            record_and_alert "telegram_$bot" "fail" \
+                "token resolves empty across env tiers (var named in bot.conf)"
+            continue
+        fi
+
+        local url_cfg curl_err_file
+        url_cfg=$(safe_mktemp)
+        curl_err_file=$(safe_mktemp)
+        printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$token" > "$url_cfg"
+        resp="$("$CURL" -sS --max-time 10 --config "$url_cfg" 2>"$curl_err_file")" \
+            || resp=""
+        rm -f "$url_cfg"
+        if [ -z "$resp" ]; then
+            record_and_alert "telegram_$bot" "fail" \
+                "getMe no response ($(head -c 80 "$curl_err_file"))"
+            continue
+        fi
+
+        okflag="$(printf '%s' "$resp" | "$JQ" -r '.ok // false' 2>/dev/null)" || okflag=false
+        if [ "$okflag" != "true" ]; then
+            errcode="$(printf '%s' "$resp" | "$JQ" -r '.error_code // "?"' 2>/dev/null)" || errcode="?"
+            record_and_alert "telegram_$bot" "fail" "getMe error_code=$errcode"
+            continue
+        fi
+
+        username="$(printf '%s' "$resp" | "$JQ" -r '.result.username // ""' 2>/dev/null)" || username=""
+        if [ -n "$username" ] && [ "$(printf '%s' "$username" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$handle" | tr '[:upper:]' '[:lower:]')" ]; then
+            # Valid token for the WRONG bot — cross-wired .env.
+            record_and_alert "telegram_$bot" "fail" \
+                "getMe answers @$username but bot.conf handle is @$handle (cross-wired token)"
+            continue
+        fi
+
+        record_and_alert "telegram_$bot" "ok" "getMe ok (@$username)"
+    done
+}
+
 # ---------------------------------------------------------------------
 # Run all checks
 # ---------------------------------------------------------------------
 
-CHECKS=(check_github_pat check_railway_token check_streamable_mcp)
+CHECKS=(check_github_pat check_railway_token check_streamable_mcp check_telegram_tokens)
 
 for fn in "${CHECKS[@]}"; do
     "$fn" || log "$fn raised (non-fatal)"
