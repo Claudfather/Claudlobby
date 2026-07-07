@@ -291,7 +291,11 @@ bridge_state() {
     # names the var (TELEGRAM_TOKEN_ENV_NAME); the value is in the .env tiers.
     token="$(
         load_bot_conf "$bot_dir" >/dev/null 2>&1 || true
-        # shellcheck disable=SC2030  # subshell-local by design: never touch the caller's env
+        # shellcheck disable=SC2030  # subshell-local by design: never touch the calling env
+        # NO apostrophes in comments inside $( ) — bash 3.2 (macOS /bin/bash) does not
+        # strip comments when scanning a command substitution, so a stray apostrophe
+        # opens a string and corrupts quoting for the rest of the file. Gate:
+        # tests/test_bash_parse.py
         BOT_DIR="$bot_dir"
         source_env_tiered 2>/dev/null || true
         _te="${TELEGRAM_TOKEN_ENV_NAME:-}"
