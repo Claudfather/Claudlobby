@@ -431,6 +431,27 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(obs.dispatch_deadline)}"
             )
 
+    # Project validation tiers (projects.yaml) — the repo -> closure-bar map,
+    # emitted into EVERY bot's conf: any sprint/runner bot must resolve a
+    # working repo's tier locally (there is no "sprint owner" concept).
+    if fleet.projects:
+        lines.append("")
+        lines.append("# Projects (projects.yaml) — repo -> validation tier")
+        for key in sorted(fleet.projects):
+            project = fleet.projects[key]
+            slug = key.upper().replace("-", "_")
+            if not _SHELL_IDENT_RE.match(f"PROJECT_TIER_{slug}"):
+                raise ValueError(
+                    f"project key '{key}' does not yield a valid env name "
+                    f"(run claudlobby validate)"
+                )
+            lines.append(
+                f"export PROJECT_TIER_{slug}={_shq(project.validation.tier)}"
+            )
+            lines.append(
+                f"export PROJECT_REPOS_{slug}={_shq(' '.join(project.repos))}"
+            )
+
     # Rolling code-audit sweep — emitted only into the owner bot's conf, so the
     # fleet-level selector (lib/code-audit-sweep.sh) resolves exactly one owner.
     # repos default to the owner's scope.repos when sweep.repos is unset.
@@ -837,6 +858,14 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
 
+    # Projects table composes for managers only (F6-style context budget:
+    # workers resolve tiers from the bot.conf env map, not prose).
+    projects = (
+        sorted(fleet.projects.values(), key=lambda p: p.key)
+        if bot.bot_id in fleet.manager_bots()
+        else []
+    )
+
     env = _build_jinja_env(paths)
     template = env.get_template("claude.md.j2")
     rendered = template.render(
@@ -846,6 +875,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         expertise_body=expertise_body,
         voice=voice_item,
         teams=teams,
+        projects=projects,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         resources=_items(bot.resources, "resources"),

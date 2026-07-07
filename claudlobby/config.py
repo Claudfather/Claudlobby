@@ -111,6 +111,80 @@ class SweepConfig:
     audit_types: list[str] = field(default_factory=lambda: ["tech-debt"])
 
 
+# Validation tiers a project may demand before work in its repos closes:
+#   auto    — green CI suffices
+#   review  — reviewer verdict marker required
+#   preview — preview link posted to Telegram + operator ack recorded
+#   human   — explicit operator approval
+VALID_TIERS = ("auto", "review", "preview", "human")
+
+
+@dataclass
+class ProjectValidationConfig:
+    """Per-project closure bar — what "done" requires (projects.yaml)."""
+
+    tier: str = "review"
+    preview: dict[str, Any] = field(default_factory=dict)  # e.g. {source, require_ack}
+    notes: str | None = None
+
+
+@dataclass
+class ProjectConfig:
+    """One entry in projects.yaml — WHAT the work is, per project.
+
+    The third config tier: system.yaml (HOW the platform runs) ->
+    fleet.yaml (WHO the bots are) -> projects.yaml (WHAT the work is and
+    what "done" requires). `repos` is the join key: sprint/runner closure
+    rules resolve a working repo to its project's validation tier.
+    """
+
+    key: str  # dict key — slug, same charset as bot ids
+    title: str
+    repos: list[str] = field(default_factory=list)
+    mission_file: str | None = None  # overlay-relative pointer to a PROJECT_MISSION.md
+    validation: ProjectValidationConfig = field(
+        default_factory=ProjectValidationConfig
+    )
+    # Unrecognized top-level keys, preserved verbatim so the validator can
+    # warn on them (metrics: lives here — reserved for the metrics plan).
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+_PROJECT_KNOWN_KEYS = {"title", "repos", "mission_file", "validation"}
+
+
+def _coerce_project(key: str, d: dict) -> ProjectConfig:
+    d = d or {}
+    v = d.get("validation") or {}
+    validation = ProjectValidationConfig(
+        tier=str(v.get("tier", "review")),
+        preview=dict(v.get("preview") or {}),
+        notes=v.get("notes"),
+    )
+    return ProjectConfig(
+        key=key,
+        title=str(d.get("title", key)),
+        repos=[str(r) for r in (d.get("repos") or [])],
+        mission_file=d.get("mission_file"),
+        validation=validation,
+        raw={k: val for k, val in d.items() if k not in _PROJECT_KNOWN_KEYS},
+    )
+
+
+def load_projects(projects_yaml: Path) -> dict[str, ProjectConfig]:
+    """Parse projects.yaml (sits beside fleet.yaml). Absent file => {}."""
+    if not projects_yaml.is_file():
+        return {}
+    with projects_yaml.open() as f:
+        doc = yaml.safe_load(f)
+    if not isinstance(doc, dict) or "projects" not in doc:
+        raise ValueError(f"{projects_yaml}: top-level key 'projects' missing")
+    return {
+        key: _coerce_project(key, pdef)
+        for key, pdef in (doc.get("projects") or {}).items()
+    }
+
+
 @dataclass
 class SandboxConfig:
     """Sandbox network/filesystem settings → .claude/settings.local.json.
@@ -277,6 +351,7 @@ class FleetConfig:
     teams: dict[str, TeamConfig] = field(default_factory=dict)
     bots: dict[str, BotConfig] = field(default_factory=dict)
     sweep: SweepConfig | None = None
+    projects: dict[str, ProjectConfig] = field(default_factory=dict)
 
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
@@ -915,5 +990,6 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         teams=teams,
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
+        projects=load_projects(fleet_yaml.parent / "projects.yaml"),
     )
     return fleet_cfg, merged_defaults

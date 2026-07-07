@@ -1,5 +1,9 @@
 # Example fleet.yaml — copy to fleet.yaml and customize.
-# See docs/fleet-yaml-schema.md for the full reference.
+# See documentation/fleet-yaml-schema.md for the full reference.
+#
+# The three config tiers: system.yaml (HOW the platform runs) → this file
+# (WHO the bots are, what the fleet serves) → projects.yaml (WHAT the work
+# is and what "done" requires per project — see projects.yaml.example).
 
 # ---------------------------------------------------------------------------
 # YAML Anchors — define reusable blocks above `fleet:`, reference with *anchor.

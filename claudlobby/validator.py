@@ -15,7 +15,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 from . import dotenv
-from .config import FleetConfig
+from .config import VALID_TIERS, FleetConfig
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
@@ -425,6 +425,74 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
             )
 
 
+# projects.yaml keys become PROJECT_TIER_<SLUG> env names — same charset as
+# bot ids so the upper/underscore transform always yields a shell identifier.
+_PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+_PROJECT_SUGGESTABLE_KEYS = {"title", "repos", "mission_file", "validation"}
+
+
+def _validate_projects(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport
+) -> None:
+    """Validate the optional projects.yaml tier (goal-aware fleet, P2)."""
+    repo_owners: dict[str, str] = {}
+    for key, project in fleet.projects.items():
+        label = f"project '{key}'"
+
+        if not _PROJECT_KEY_RE.match(key):
+            report.errors.append(
+                f"project key '{key}' is invalid — use lowercase kebab-case "
+                f"([a-z][a-z0-9-]*), it becomes the PROJECT_TIER_* env name"
+            )
+
+        if project.validation.tier not in VALID_TIERS:
+            suggestion = closest_match(project.validation.tier, set(VALID_TIERS))
+            hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            report.errors.append(
+                f"{label}: validation.tier '{project.validation.tier}' is not "
+                f"one of {'/'.join(VALID_TIERS)}{hint}"
+            )
+
+        if not project.repos:
+            report.errors.append(
+                f"{label}: repos is empty — repos is the join key that maps "
+                f"work to this project's closure bar"
+            )
+        for repo in project.repos:
+            if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+                report.warnings.append(
+                    f"{label}: repos entry '{repo}' does not match "
+                    f"<org>/<repo> format"
+                )
+            elif repo in repo_owners:
+                report.warnings.append(
+                    f"repo '{repo}' is claimed by both '{repo_owners[repo]}' "
+                    f"and '{key}' — tier resolution is ambiguous"
+                )
+            else:
+                repo_owners[repo] = key
+
+        if project.mission_file:
+            base = paths.fleet_dir or paths.root
+            if not (base / project.mission_file).is_file():
+                report.warnings.append(
+                    f"{label}: mission_file '{project.mission_file}' not found "
+                    f"under {base}"
+                )
+
+        for unknown in sorted(project.raw):
+            if unknown == "metrics":
+                report.warnings.append(
+                    f"{label}: 'metrics' is reserved for the metrics plan and "
+                    f"not part of the v1 schema — ignored"
+                )
+            else:
+                suggestion = closest_match(unknown, _PROJECT_SUGGESTABLE_KEYS)
+                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                report.warnings.append(f"{label}: unknown key '{unknown}'{hint}")
+
+
 def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
     """Validate the opt-in fleet.sweep (rolling code-audit) block."""
     sweep = fleet.sweep
@@ -507,6 +575,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_sweep(fleet, report)
+    _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
