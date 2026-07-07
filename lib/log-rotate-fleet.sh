@@ -5,8 +5,9 @@
 # plus lib/logs/ for package-level logs.
 #
 # Usage:
-#   log-rotate-fleet.sh [--keep N] [--fleet <name>]
+#   log-rotate-fleet.sh [--keep N] [--fleet <name>] [<name>]
 #   log-rotate-fleet.sh --keep 200 --fleet crog
+#   log-rotate-fleet.sh crog          # composed-timer form (positional fleet)
 #
 # Without --fleet, rotates logs for ALL fleets under local/.
 # Defaults to keeping the last 500 lines per file.
@@ -27,7 +28,12 @@ while [ $# -gt 0 ]; do
             sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
-        *) echo "log-rotate-fleet: unknown arg: $1" >&2; exit 2 ;;
+        -*) echo "log-rotate-fleet: unknown arg: $1" >&2; exit 2 ;;
+        *)
+            # Bare fleet name — the composed timer contract: _write_timer_units
+            # appends the fleet positionally to every fleet job's ExecStart
+            # (composer.py), same as fleet-pulse.sh / data-sweep.sh receive it.
+            FLEET="$1"; shift ;;
     esac
 done
 
