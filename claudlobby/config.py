@@ -127,6 +127,12 @@ class ProjectValidationConfig:
     tier: str = "review"
     preview: dict[str, Any] = field(default_factory=dict)  # e.g. {source, require_ack}
     notes: str | None = None
+    # Unrecognized validation-block keys — same .raw treatment as the top
+    # level, so a tier typo ('teir') warns instead of silently defaulting.
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+_PROJECT_VALIDATION_KEYS = {"tier", "preview", "notes"}
 
 
 @dataclass
@@ -158,16 +164,30 @@ class ProjectConfig:
 
 def _coerce_project(key: str, d: dict) -> ProjectConfig:
     d = d or {}
+    if not isinstance(d, dict):
+        raise ValueError(f"project '{key}': entry must be a mapping, got {type(d).__name__}")
     v = d.get("validation") or {}
+    if not isinstance(v, dict):
+        raise ValueError(
+            f"project '{key}': validation must be a mapping "
+            f"(e.g. validation: {{tier: review}}), got {type(v).__name__}"
+        )
+    repos = d.get("repos") or []
+    if not isinstance(repos, list):
+        raise ValueError(
+            f"project '{key}': repos must be a list (e.g. repos: [org/repo]), "
+            f"got {type(repos).__name__}"
+        )
     validation = ProjectValidationConfig(
         tier=str(v.get("tier", "review")),
         preview=dict(v.get("preview") or {}),
         notes=v.get("notes"),
+        raw={k: val for k, val in v.items() if k not in _PROJECT_VALIDATION_KEYS},
     )
     return ProjectConfig(
         key=key,
         title=str(d.get("title", key)),
-        repos=[str(r) for r in (d.get("repos") or [])],
+        repos=[str(r) for r in repos],
         mission_file=d.get("mission_file"),
         validation=validation,
         raw={k: val for k, val in d.items() if k not in PROJECT_KEYS},
@@ -184,10 +204,13 @@ def load_projects(projects_yaml: Path) -> dict[str, ProjectConfig]:
         return {}  # an all-comments file is still an optional file
     if not isinstance(doc, dict) or "projects" not in doc:
         raise ValueError(f"{projects_yaml}: top-level key 'projects' missing")
-    return {
-        key: _coerce_project(key, pdef)
-        for key, pdef in (doc.get("projects") or {}).items()
-    }
+    projects = doc.get("projects") or {}
+    if not isinstance(projects, dict):
+        raise ValueError(
+            f"{projects_yaml}: 'projects' must be a mapping of "
+            f"<project-key>: <fields>, got {type(projects).__name__}"
+        )
+    return {key: _coerce_project(key, pdef) for key, pdef in projects.items()}
 
 
 @dataclass

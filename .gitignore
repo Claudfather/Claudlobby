@@ -63,5 +63,6 @@ library/skills/*/config.json
 # Claudron vault pointer (machine-specific)
 .claudron
 
-# Active fleet config (root mode) — fleet.yaml.example is the canonical template
+# Active fleet config (root mode) — the .example files are the canonical templates
 fleet.yaml
+projects.yaml

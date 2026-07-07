@@ -207,13 +207,26 @@ def cmd_new_bot(args) -> int:
     paths.fleet_yaml.write_text(new_text)
     log.info("  ✓ Updated %s", paths.fleet_yaml)
 
-    # Auto-generate
+    # Auto-generate — gate on validate() exactly like `claudlobby generate`
+    # and move_bot do; composing past validation errors writes bad config
+    # (e.g. an invalid project tier) verbatim into bot.conf.
     if args.auto_generate:
         log.info("=== Running `claudlobby generate --bot %s` ===", inp.name)
         from ..composer import compose_bot
-        from ..config import load_fleet
+        from ..validator import validate
+        from ._helpers import _load_fleet_or_exit
 
-        fleet, _md = load_fleet(paths.fleet_yaml)
+        fleet, _md = _load_fleet_or_exit(paths)
+        report = validate(fleet, paths)
+        if report.has_errors:
+            for err in report.errors:
+                log.error("%s", err)
+            log.error(
+                "validation failed — fix the errors above, then run "
+                "`claudlobby generate --bot %s`",
+                inp.name,
+            )
+            return 1
         bot = fleet.bots.get(inp.name)
         if bot is None:
             log.error("bot '%s' not found in fleet.yaml after insertion", inp.name)

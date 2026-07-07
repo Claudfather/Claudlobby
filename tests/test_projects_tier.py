@@ -211,6 +211,118 @@ def test_worker_claude_md_has_no_projects_table(fleet_dir):
     assert "## Projects" not in md
 
 
+# --- review hardening (PR #490 multi-lens findings) ----------------------------
+
+
+def test_nested_validation_typo_warns_with_did_you_mean(fleet_dir):
+    # 'teir' typo must NOT silently resolve to the default tier.
+    _write_projects(
+        fleet_dir,
+        "projects:\n  p:\n    title: P\n    repos: [a/b]\n"
+        "    validation: {teir: human}\n",
+    )
+    report = _validated(fleet_dir)
+    hits = [w for w in report.warnings if "teir" in w]
+    assert hits, f"nested unknown key must warn; got {report.warnings}"
+    assert "tier" in hits[0], "should suggest the closest validation key"
+
+
+def test_repo_duplicated_within_one_project_no_self_ambiguity(fleet_dir):
+    _write_projects(
+        fleet_dir, "projects:\n  p1: {title: P, repos: [acme/x, acme/x]}\n"
+    )
+    report = _validated(fleet_dir)
+    assert not any(
+        "claimed by both 'p1' and 'p1'" in w for w in report.warnings
+    ), report.warnings
+
+
+def test_projects_as_list_is_a_clean_error(fleet_dir):
+    _write_projects(fleet_dir, "projects:\n  - p\n")
+    try:
+        _load(fleet_dir)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "mapping" in str(e)
+
+
+def test_validation_as_scalar_is_a_clean_error(fleet_dir):
+    _write_projects(
+        fleet_dir, "projects:\n  p:\n    repos: [a/b]\n    validation: preview\n"
+    )
+    try:
+        _load(fleet_dir)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "validation" in str(e) and "mapping" in str(e)
+
+
+def test_repos_as_bare_string_is_a_clean_error(fleet_dir):
+    # Forgetting brackets must not iterate the string character-by-character.
+    _write_projects(fleet_dir, "projects:\n  p:\n    repos: acme/shop\n")
+    try:
+        _load(fleet_dir)
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "repos" in str(e) and "list" in str(e)
+
+
+def test_absolute_mission_file_warns(fleet_dir):
+    _write_projects(
+        fleet_dir,
+        "projects:\n  p:\n    repos: [a/b]\n    mission_file: /etc/hosts\n",
+    )
+    report = _validated(fleet_dir)
+    assert any(
+        "mission_file" in w and "absolute" in w for w in report.warnings
+    ), report.warnings
+
+
+def test_repo_with_whitespace_is_an_error(fleet_dir):
+    # PROJECT_REPOS_* is consumed with unquoted word-splitting downstream;
+    # a space inside one entry would silently corrupt the repo list.
+    _write_projects(fleet_dir, 'projects:\n  p:\n    repos: ["acme/a b"]\n')
+    report = _validated(fleet_dir)
+    assert any(
+        "acme/a b" in e and "whitespace" in e for e in report.errors
+    ), report.errors
+
+
+def test_root_mode_projects_yaml_is_gitignored():
+    gitignore = (REPO_DIR / ".gitignore").read_text().splitlines()
+    assert "projects.yaml" in gitignore, (
+        "root-mode projects.yaml carries fleet-specific data — same bright "
+        "line as the fleet.yaml ignore"
+    )
+
+
+def test_new_bot_auto_generate_refuses_on_validation_errors(fleet_dir, monkeypatch):
+    # scaffolding --auto-generate must gate on validate() like move_bot does;
+    # an invalid tier must block composition, not reach bot.conf verbatim.
+    from claudlobby.__main__ import main
+
+    _write_projects(
+        fleet_dir,
+        "projects:\n  p:\n    repos: [a/b]\n    validation: {tier: revew}\n",
+    )
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(fleet_dir))
+    rc = main(
+        [
+            "--root",
+            str(fleet_dir),
+            "new-bot",
+            "--name",
+            "newbie",
+            "--expertise",
+            "orchestration",
+            "--auto-generate",
+            "--yes",
+        ]
+    )
+    assert rc != 0, "auto-generate must refuse while validate() reports errors"
+    assert not (fleet_dir / "runtime" / "bots" / "newbie" / "bot.conf").exists()
+
+
 # --- root example files --------------------------------------------------------
 
 

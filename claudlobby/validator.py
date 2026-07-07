@@ -15,7 +15,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 from . import dotenv
-from .config import FleetConfig
+from .config import _PROJECT_VALIDATION_KEYS, FleetConfig
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
@@ -461,12 +461,19 @@ def _validate_projects(
                 f"work to this project's closure bar"
             )
         for repo in project.repos:
-            if not _ORG_REPO_RE.match(repo):
+            if any(c.isspace() for c in repo):
+                # PROJECT_REPOS_* is word-split when consumed in shell — an
+                # embedded space silently corrupts the list. Hard error.
+                report.errors.append(
+                    f"{label}: repos entry '{repo}' contains whitespace — "
+                    f"it would word-split when PROJECT_REPOS_* is consumed"
+                )
+            elif not _ORG_REPO_RE.match(repo):
                 report.warnings.append(
                     f"{label}: repos entry '{repo}' does not match "
                     f"<org>/<repo> format"
                 )
-            elif repo in repo_owners:
+            elif repo in repo_owners and repo_owners[repo] != key:
                 report.warnings.append(
                     f"repo '{repo}' is claimed by both '{repo_owners[repo]}' "
                     f"and '{key}' — tier resolution is ambiguous"
@@ -475,14 +482,22 @@ def _validate_projects(
                 repo_owners[repo] = key
 
         if project.mission_file:
-            # mission_file is relative to projects.yaml — resolve through the
-            # Paths property so the co-location rule has one home.
-            base = paths.projects_yaml.parent
-            if not (base / project.mission_file).is_file():
+            if Path(project.mission_file).is_absolute():
+                # pathlib's / operator discards base on an absolute right side;
+                # mission_file is defined as projects.yaml-relative.
                 report.warnings.append(
-                    f"{label}: mission_file '{project.mission_file}' not found "
-                    f"under {base}"
+                    f"{label}: mission_file '{project.mission_file}' is "
+                    f"absolute — must be relative to projects.yaml"
                 )
+            else:
+                # mission_file is relative to projects.yaml — resolve through
+                # the Paths property so the co-location rule has one home.
+                base = paths.projects_yaml.parent
+                if not (base / project.mission_file).is_file():
+                    report.warnings.append(
+                        f"{label}: mission_file '{project.mission_file}' not "
+                        f"found under {base}"
+                    )
 
         for unknown in sorted(project.raw):
             if unknown == "metrics":
@@ -494,6 +509,13 @@ def _validate_projects(
                 suggestion = closest_match(unknown, set(PROJECT_KEYS))
                 hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(f"{label}: unknown key '{unknown}'{hint}")
+
+        for unknown in sorted(project.validation.raw):
+            suggestion = closest_match(unknown, _PROJECT_VALIDATION_KEYS)
+            hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+            report.warnings.append(
+                f"{label}: unknown validation key '{unknown}'{hint}"
+            )
 
 
 def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
