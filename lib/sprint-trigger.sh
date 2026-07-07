@@ -26,8 +26,8 @@ if ! check_tmux_session "$MANAGER_TMUX" "$MANAGER_SOCKET"; then
   exit 0
 fi
 
-pane=$(bot_tmux "$MANAGER_SOCKET" capture-pane -t "$MANAGER_TMUX" -p | tail -3) || true
-if echo "$pane" | grep -qE '(Thinking|Running|Reading|Writing|Editing|Spelunking|Prestidigitating|esc to interrupt)'; then
+# Skip if busy — never inject into an active turn (bot_is_busy, lib-common SSOT).
+if bot_is_busy "$MANAGER_SOCKET" "$MANAGER_TMUX"; then
   echo "$TS SKIP — manager busy" >> "$LOG"
   exit 0
 fi

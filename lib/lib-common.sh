@@ -554,16 +554,28 @@ _resolve_cross_fleet_bot_dir() {
 #   3. Unknown peer — preserve original behavior (test-harness socket synthesis
 #      when FLEET_NAME is unset, or the production fail-fast on an empty socket).
 tmux_socket_for_session() {
-    # Empty session degrades to rc 2, never a fatal ${1:?} — the expansion
+    local target
+    target=$(_session_candidate_dir tmux_socket_for_session "$@") || return $?
+    tmux_socket_for_bot "$target"
+}
+
+# _session_candidate_dir <caller> <session> [bots_dir]
+# The ONE session-name -> candidate-bot-dir resolution, shared by
+# tmux_socket_for_session and bot_dir_for_session. Always prints the
+# candidate path — even when it does not exist — so each caller keeps its
+# own miss contract (socket synthesis / fail-fast vs. rc-1 empty).
+_session_candidate_dir() {
+    local caller="$1"
+    # Empty session degrades to rc 2, never a fatal ${2:?} — the expansion
     # fault would kill the calling script from inside command substitution
     # under set -e (silently, when stderr is redirected), and every caller
-    # already handles an empty-socket result.
-    local session="${1:-}"
+    # already handles an empty result.
+    local session="${2:-}"
     if [ -z "$session" ]; then
-        echo "tmux_socket_for_session: empty session name" >&2
+        echo "$caller: empty session name" >&2
         return 2
     fi
-    local bots_dir="${2:-}"
+    local bots_dir="${3:-}"
     if [ -z "$bots_dir" ]; then
         # Prefer the caller's own sibling dir; otherwise fall back to the
         # fleet-aware runtime/bots resolution (CLAUDLOBBY_FLEET / FLEET_NAME).
@@ -574,16 +586,15 @@ tmux_socket_for_session() {
         fi
     fi
     # Own-fleet fast path by default; if the peer isn't in the caller's fleet,
-    # try the cross-fleet fallback; if that also misses, leave the own-fleet path
-    # unchanged so the unknown peer hits the original behavior (harness socket
-    # synthesis when FLEET_NAME is unset, else the production fail-fast).
+    # try the cross-fleet fallback; if that also misses, print the own-fleet
+    # path unchanged so an unknown peer hits the caller's original behavior.
     local target="$bots_dir/$session"
     if [ ! -d "$target" ]; then
         local peer_dir
         peer_dir=$(_resolve_cross_fleet_bot_dir "$session")
         [ -n "$peer_dir" ] && target="$peer_dir"
     fi
-    tmux_socket_for_bot "$target"
+    printf '%s' "$target"
 }
 
 # resolve_peer_socket <explicit_socket> <peer_session> [bots_dir]
@@ -698,6 +709,71 @@ pane_is_idle() {
         _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
     fi
     printf '%s' "$text" | grep -qE "$_idle_pattern"
+}
+
+# Base busy-detection regex — single source of truth for keepalive.sh
+# classify_pane and every "should I inject keystrokes?" consumer
+# (sprint-trigger, bot-sweep-cron). "esc to interrupt" is drawn during ANY
+# active turn and is stable across Claude Code releases and
+# prefersReducedMotion; the churning verb lists (Thinking/Running/…) that
+# consumers previously grepped silently degrade on UI changes and must not
+# reappear (gate: tests/test_busy_ssot.py). Operators extend at runtime via
+# KEEPALIVE_BUSY_PATTERNS.
+_BUSY_PATTERN_BASE='[Ee]sc to interrupt'
+
+# Default recency window (seconds) for the data/.last-tool-call liveness
+# marker — one home, consumed by bot_is_busy and keepalive.sh so the two
+# can never silently disagree about "recently active". Override per fleet
+# via KEEPALIVE_ACTIVE_WINDOW_S.
+_ACTIVE_WINDOW_DEFAULT=180
+
+# pane_is_busy <pane_text>
+# Returns 0 if the pane shows an active turn, 1 otherwise. Mirror of
+# pane_is_idle. Operators extend via KEEPALIVE_BUSY_PATTERNS.
+pane_is_busy() {
+    local text="$1"
+    local _busy_pattern="$_BUSY_PATTERN_BASE"
+    if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
+        _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
+    fi
+    printf '%s' "$text" | grep -qE "$_busy_pattern"
+}
+
+# bot_dir_for_session <session> [bots_dir]
+# Session name -> bot runtime dir, on stdout — _session_candidate_dir (the
+# resolution shared with tmux_socket_for_session) plus an existence gate,
+# so marker-based checks can find a bot's data/ from just its session name.
+# Returns 1 (empty stdout) when no fleet has such a bot; rc 2 on empty arg.
+bot_dir_for_session() {
+    local target
+    target=$(_session_candidate_dir bot_dir_for_session "$@") || return $?
+    [ -d "$target" ] || return 1
+    printf '%s' "$target"
+}
+
+# bot_is_busy <socket> <session> [bot_dir]
+# THE busy check for keystroke injectors. Marker-first: a data/.last-tool-call
+# fresher than KEEPALIVE_ACTIVE_WINDOW_S (default _ACTIVE_WINDOW_DEFAULT)
+# reads BUSY without touching tmux (rendering-immune, and the common case for
+# a working bot). Fallback: capture the pane and apply pane_is_busy. bot_dir
+# is resolved from the session name when not supplied; when unresolvable the
+# pane alone decides.
+# Returns 0 = busy (do NOT inject), 1 = not busy; rc 2 on empty session.
+bot_is_busy() {
+    local socket="${1:-}" session="${2:-}" bot_dir="${3:-}"
+    if [ -z "$session" ]; then
+        echo "bot_is_busy: empty session name" >&2
+        return 2
+    fi
+    if [ -z "$bot_dir" ]; then
+        bot_dir=$(bot_dir_for_session "$session" 2>/dev/null) || true
+    fi
+    if [ -n "$bot_dir" ] && marker_age_within "$bot_dir/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}"; then
+        return 0
+    fi
+    local pane
+    pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null | tail -10) || true
+    pane_is_busy "$pane"
 }
 
 # marker_is_newer <marker_a> <marker_b>

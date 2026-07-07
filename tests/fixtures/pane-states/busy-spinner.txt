@@ -1,6 +1,4 @@
-
   claudlobby/composer.py
 
-⠹ Reading composer.py
-
+⠹ Reading composer.py… (esc to interrupt)
 

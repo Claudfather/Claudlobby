@@ -11,9 +11,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURE_DIR="$SCRIPT_DIR/fixtures/pane-states"
 
+# classify_pane delegates to lib-common's pane_is_busy/pane_is_idle, so
+# lib-common.sh must be sourced first.
+# shellcheck source=../lib/lib-common.sh
+. "$REPO_DIR/lib/lib-common.sh"
+
 # Source only the classify_pane function from keepalive.sh.
-# keepalive.sh sources lib-common.sh and runs bot-level setup at the top
-# level, so we extract just the function definition.
+# keepalive.sh runs bot-level setup at the top level, so we extract just
+# the function definition.
 eval "$(sed -n '/^classify_pane()/,/^}/p' "$REPO_DIR/lib/keepalive.sh")"
 
 passed=0
@@ -42,9 +47,13 @@ assert_state() {
 echo "=== keepalive pane-state classification tests ==="
 echo ""
 
-# BUSY fixtures
+# BUSY fixtures — an active turn always renders the "esc to interrupt"
+# affordance; that line (not the spinner or verb) is the BUSY signal.
 assert_state "busy-spinner.txt" "BUSY"
-assert_state "busy-verb.txt" "BUSY"
+
+# Deliberately-not-BUSY regression: verbs without the esc affordance are
+# UNKNOWN (see _BUSY_PATTERN_BASE in lib-common.sh for the rationale).
+assert_state "verb-no-esc.txt" "UNKNOWN"
 
 # IDLE fixtures
 assert_state "idle-prompt.txt" "IDLE"

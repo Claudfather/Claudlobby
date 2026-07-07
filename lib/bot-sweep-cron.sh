@@ -27,7 +27,19 @@ DISPATCH="${2:?Usage: bot-sweep-cron.sh <bot-name> <dispatch-text> [socket]}"
 # code-audit-sweep.sh) pass it as $3; otherwise reverse-resolve from the name.
 # (Sanitization now lives in bot_tmux_send, the one safe-send primitive.)
 BOT_SOCKET="${3:-}"
-[ -n "$BOT_SOCKET" ] || BOT_SOCKET="$(tmux_socket_for_session "$BOT_NAME" 2>/dev/null || true)"
+BOT_DIR_RESOLVED=""
+if [ -z "$BOT_SOCKET" ]; then
+    # Resolve session -> dir ONCE; the socket derives from the dir, and the
+    # dir feeds the busy check below (no second resolution). On a miss, fall
+    # back to the legacy session->socket path (harness socket synthesis /
+    # production fail-fast semantics unchanged).
+    BOT_DIR_RESOLVED="$(bot_dir_for_session "$BOT_NAME" 2>/dev/null || true)"
+    if [ -n "$BOT_DIR_RESOLVED" ]; then
+        BOT_SOCKET="$(tmux_socket_for_bot "$BOT_DIR_RESOLVED" 2>/dev/null || true)"
+    else
+        BOT_SOCKET="$(tmux_socket_for_session "$BOT_NAME" 2>/dev/null || true)"
+    fi
+fi
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
 LOG="$CLAUDLOBBY_ROOT/lib/bot-sweep-cron.log"
@@ -40,9 +52,8 @@ if ! check_tmux_session "$BOT_NAME" "$BOT_SOCKET"; then
     exit 1
 fi
 
-# Don't interrupt in-flight work — skip if pane shows active processing.
-PANE_TAIL=$(bot_tmux "$BOT_SOCKET" capture-pane -t "$BOT_NAME" -p 2>&1 | tail -3) || true
-if echo "$PANE_TAIL" | grep -qiE '(thinking|running|reading|writing|calling|editing)'; then
+# Skip if busy — never inject into an active turn (bot_is_busy, lib-common SSOT).
+if bot_is_busy "$BOT_SOCKET" "$BOT_NAME" "$BOT_DIR_RESOLVED"; then
     echo "$TS WARN — $BOT_NAME appears busy; skipping this tick ($DISPATCH)" >>"$LOG"
     exit 0
 fi

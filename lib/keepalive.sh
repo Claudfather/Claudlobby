@@ -157,32 +157,16 @@ fi
 # ---------------------------------------------------------------------------
 
 # classify_pane <pane_text>
-# Prints BUSY, IDLE, or UNKNOWN to stdout.  Sourced by tests — keep this as
-# the single source of truth for pattern definitions.
+# Prints BUSY, IDLE, or UNKNOWN to stdout. Pattern definitions and operator
+# extension (KEEPALIVE_*_PATTERNS) live in lib-common.sh — pane_is_busy /
+# pane_is_idle are the single source of truth; this adds only the three-way
+# verdict keepalive needs (IDLE drives reload activation, UNKNOWN drives the
+# consecutive-counter warning).
 classify_pane() {
     local text="$1"
-
-    # --- BUSY: the active-turn affordance ---
-    # "esc to interrupt" is drawn during ANY active turn — including a long think
-    # or a long single tool call that emits no marker for minutes — and is stable
-    # across Claude Code releases and prefersReducedMotion. This deliberately does
-    # NOT match the braille spinner or the churning verb list
-    # (Thinking/Pondering/Marinating/…), which silently degrade on UI changes.
-    local _busy_pattern='[Ee]sc to interrupt'
-    if [ -n "${KEEPALIVE_BUSY_PATTERNS:-}" ]; then
-        _busy_pattern="$_busy_pattern|$KEEPALIVE_BUSY_PATTERNS"
-    fi
-
-    # --- IDLE: prompt glyph or waiting-for-input marker ---
-    # Uses _IDLE_PATTERN_BASE from lib-common.sh (single source of truth).
-    local _idle_pattern="$_IDLE_PATTERN_BASE"
-    if [ -n "${KEEPALIVE_IDLE_PATTERNS:-}" ]; then
-        _idle_pattern="$_idle_pattern|$KEEPALIVE_IDLE_PATTERNS"
-    fi
-
-    if printf '%s' "$text" | grep -qE "$_busy_pattern"; then
+    if pane_is_busy "$text"; then
         echo "BUSY"
-    elif printf '%s' "$text" | grep -qE "$_idle_pattern"; then
+    elif pane_is_idle "$text"; then
         echo "IDLE"
     else
         echo "UNKNOWN"
@@ -194,7 +178,7 @@ classify_pane() {
 # a short-circuit so a busy bot skips the pane capture entirely. Fallback: the
 # pane's "esc to interrupt" affordance, for a long think/long single call that
 # left no recent marker. The pane is only captured on the fallback path.
-if marker_age_within "$BOT_DIR/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-180}"; then
+if marker_age_within "$BOT_DIR/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}"; then
     state=BUSY
 else
     pane_content=$(bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null) || true
