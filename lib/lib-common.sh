@@ -280,6 +280,27 @@ check_tmux_session() {
 # The token VALUE is not in bot.conf — only its var NAME (TELEGRAM_TOKEN_ENV_NAME)
 # is; the value lives in the .env chain, which keepalive/fleet-pulse never source.
 # Resolve it via source_env_tiered IN A SUBSHELL so the caller's env is untouched.
+# resolve_bot_telegram_token <bot_dir>
+# Print the bot's Telegram token, resolved the way start-bot.sh resolves it:
+# bot.conf names the var (TELEGRAM_TOKEN_ENV_NAME); the value lives in the
+# tiered .env chain. Runs in a subshell so the calling env is untouched.
+# Empty output = no token reaches this bot. The ONE resolution shared by
+# bridge_state and creds-check — if they resolved differently, creds-check
+# would validate a token no bot actually runs with.
+resolve_bot_telegram_token() {
+    local bot_dir="${1:?Usage: resolve_bot_telegram_token /path/to/bot/dir}"
+    (
+        load_bot_conf "$bot_dir" >/dev/null 2>&1 || true
+        # shellcheck disable=SC2030  # subshell-local by design: never touch the calling env
+        # NO apostrophes in comments inside subshells scanned by bash 3.2 —
+        # see the warning at bridge_state; gate: tests/test_bash_parse.py
+        BOT_DIR="$bot_dir"
+        source_env_tiered 2>/dev/null || true
+        _te="${TELEGRAM_TOKEN_ENV_NAME:-}"
+        if [ -n "$_te" ]; then printf '%s' "${!_te:-}"; fi
+    ) || true
+}
+
 bridge_state() {
     local bot_dir="${1:?Usage: bridge_state /path/to/bot/dir}"
     local handle state_dir token pidfile pid comm ppid pcomm environ args psline _anc _hop
@@ -287,20 +308,7 @@ bridge_state() {
     handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "")" || true
     if [ -z "$handle" ]; then printf '%s' "no_handle"; return 1; fi
 
-    # Resolve the token the way start-bot.sh does, but in a subshell: bot.conf
-    # names the var (TELEGRAM_TOKEN_ENV_NAME); the value is in the .env tiers.
-    token="$(
-        load_bot_conf "$bot_dir" >/dev/null 2>&1 || true
-        # shellcheck disable=SC2030  # subshell-local by design: never touch the calling env
-        # NO apostrophes in comments inside $( ) — bash 3.2 (macOS /bin/bash) does not
-        # strip comments when scanning a command substitution, so a stray apostrophe
-        # opens a string and corrupts quoting for the rest of the file. Gate:
-        # tests/test_bash_parse.py
-        BOT_DIR="$bot_dir"
-        source_env_tiered 2>/dev/null || true
-        _te="${TELEGRAM_TOKEN_ENV_NAME:-}"
-        if [ -n "$_te" ]; then printf '%s' "${!_te:-}"; fi
-    )" || true
+    token="$(resolve_bot_telegram_token "$bot_dir")" || true
     if [ -z "$token" ]; then printf '%s' "no_token"; return 1; fi
 
     state_dir="$(bot_conf_get "$bot_dir" TELEGRAM_STATE_DIR "")" || true

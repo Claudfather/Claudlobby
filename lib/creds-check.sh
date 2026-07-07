@@ -222,30 +222,29 @@ check_telegram_tokens() {
     # Per-bot Telegram token validation (#502). A channel bot whose token
     # was revoked/regenerated — or resolves EMPTY through the env tiers
     # (#492, an empty later-tier stub shadowing a lower-tier value) — sits
-    # deaf with no credential signal. Resolve each token exactly the way
-    # bridge_state does (bot.conf names the var; value shell-sourced from
-    # the tiered .env, so quoting cannot mislead), then getMe-validate.
-    # One getMe per channel bot per daily tick; the token rides a curl
-    # config file, never argv; only ok/error_code is ever recorded.
+    # deaf with no credential signal. Token resolution is the lib-common
+    # SSOT shared with bridge_state (resolve_bot_telegram_token), so this
+    # check validates exactly the token the bot runs with. One getMe per
+    # channel bot per daily tick; the token rides a curl config file,
+    # never argv; only ok/error_code is ever recorded.
     local bots_dir
     bots_dir="$(resolve_bots_dir "$FLEET_ARG")"
     [ -d "$bots_dir" ] || return 0
 
-    local d bot handle token resp okflag username errcode
+    # Filter through the declared-bots SSOT (same as fleet-pulse/keepalive-all)
+    # so stale/cross-fleet residue dirs never fire false token alerts.
+    local declared_bots
+    declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET_ARG/fleet.yaml")
+
+    local d bot handle token resp okflag username errcode url_cfg curl_err_file
     for d in "$bots_dir"/*/; do
         [ -f "$d/bot.conf" ] || continue
         bot="$(basename "$d")"
+        bot_in_fleet "$bot" "$declared_bots" || continue
         handle="$(bot_conf_get "$d" TELEGRAM_BOT_HANDLE "")" || true
         [ -n "$handle" ] || continue  # not a channel bot
 
-        # Subshell resolution — never touch this script's env.
-        token="$(
-            load_bot_conf "$d" >/dev/null 2>&1 || true
-            BOT_DIR="$d"
-            source_env_tiered 2>/dev/null || true
-            _te="${TELEGRAM_TOKEN_ENV_NAME:-}"
-            if [ -n "$_te" ]; then printf '%s' "${!_te:-}"; fi
-        )" || true
+        token="$(resolve_bot_telegram_token "$d")" || true
 
         if [ -z "$token" ]; then
             # Configured for Telegram but no credential reaches it: an
@@ -255,16 +254,16 @@ check_telegram_tokens() {
             continue
         fi
 
-        local url_cfg curl_err_file
         url_cfg=$(safe_mktemp)
         curl_err_file=$(safe_mktemp)
         printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$token" > "$url_cfg"
         resp="$("$CURL" -sS --max-time 10 --config "$url_cfg" 2>"$curl_err_file")" \
             || resp=""
+        # Token-bearing — shred eagerly rather than waiting for the EXIT trap.
         rm -f "$url_cfg"
         if [ -z "$resp" ]; then
             record_and_alert "telegram_$bot" "fail" \
-                "getMe no response ($(head -c 80 "$curl_err_file"))"
+                "getMe no response ($(head -c 120 "$curl_err_file"))"
             continue
         fi
 

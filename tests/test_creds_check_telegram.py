@@ -14,11 +14,10 @@ file, so the stub reads it from there).
 
 import json
 import os
-import stat
 import subprocess
 from pathlib import Path
 
-from tests.conftest import _scrubbed_env
+from tests.conftest import _scrubbed_env, _write_exec
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "lib" / "creds-check.sh"
@@ -26,11 +25,6 @@ SCRIPT = REPO_ROOT / "lib" / "creds-check.sh"
 VALID_TOKEN = "111111:validAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 WRONGBOT_TOKEN = "222222:wrongbotAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 REVOKED_TOKEN = "333333:revokedAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-
-
-def _write_exec(path: Path, body: str) -> None:
-    path.write_text(body)
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
 def _curl_stub(bindir: Path) -> None:
@@ -86,6 +80,18 @@ def _fleet(tmp_path: Path) -> dict:
     bot("bot3", "bot_three_bot", "T_BOT3_TOKEN", None)  # configured, no value
     bot("bot4", None, "UNUSED", None)  # not a channel bot
     bot("bot5", "bot_five_bot", "T_BOT5_TOKEN", WRONGBOT_TOKEN)
+    # Residue dir: a departed bot whose runtime dir (with bot.conf + handle)
+    # survives on disk but is NOT declared in fleet.yaml — the stale-dir class
+    # the declared-bots filter exists to skip (no getMe, no false alert).
+    bot("ghost", "ghost_bot", "T_GHOST_TOKEN", VALID_TOKEN)
+
+    # Declared-bots SSOT the filter reads (parse_fleet_bots schema: bots: at
+    # 2-space indent, bot keys at 4-space indent). ghost is absent.
+    (root / "local" / "f" / "fleet.yaml").write_text(
+        "fleet:\n  name: f\n  bots:\n"
+        + "".join(f"    {b}:\n      expertise: [x]\n" for b in
+                  ("bot1", "bot2", "bot3", "bot4", "bot5"))
+    )
 
     state = root / "state" / "creds-check-state.json"
     env = _scrubbed_env()
@@ -147,6 +153,16 @@ def test_handle_mismatch_fails(tmp_path):
 def test_non_channel_bot_not_checked(tmp_path):
     state = _run(_fleet(tmp_path))
     assert "telegram_bot4" not in state
+
+
+def test_undeclared_residue_dir_not_checked(tmp_path):
+    """A departed bot's leftover runtime dir (valid token and all) must not
+    be getMe-checked or alerted — declared-bots filter, same as fleet-pulse."""
+    f = _fleet(tmp_path)
+    state = _run(f)
+    assert "telegram_ghost" not in state
+    posts = f["tg_log"].read_text() if f["tg_log"].exists() else ""
+    assert "ghost" not in posts
 
 
 def test_fail_alerts_via_tg_post_once(tmp_path):
