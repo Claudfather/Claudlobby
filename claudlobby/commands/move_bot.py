@@ -13,8 +13,7 @@ from pathlib import Path
 
 from ..composer import compose_bot
 from ..paths import Paths, tmux_socket_for_bot
-from ..validator import validate
-from ._helpers import _load_env, _load_fleet_or_exit
+from ._helpers import _load_env, _load_fleet_or_exit, _validation_gate
 
 log = logging.getLogger("claudlobby")
 
@@ -237,11 +236,8 @@ def cmd_move_bot(args) -> int:
     # --- Pre-apply validation (before any mutation) ---
     target_paths = Paths(root=root, fleet_dir=target_fleet_dir)
     _load_env(target_paths)
-    report = validate(target_fleet, target_paths)
-    if report.has_errors:
-        log.error("target fleet has validation errors — aborting before any changes")
-        for e in report.errors:
-            log.error("  %s", e)
+    if not _validation_gate(target_fleet, target_paths, context="re-run move-bot"):
+        log.error("target fleet has validation errors — aborted before any changes")
         return 1
 
     # --- Execute ---

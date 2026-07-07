@@ -1,0 +1,58 @@
+# Example projects.yaml — copy to projects.yaml (beside your fleet.yaml) and
+# customize. See documentation/projects-yaml-schema.md for the full reference.
+#
+# The third config tier:
+#   system.yaml   — HOW the platform runs   (package-owned; see system.yaml.example)
+#   fleet.yaml    — WHO the bots are        (see fleet.yaml.example)
+#   projects.yaml — WHAT the work is, and what "done" requires per project
+#
+# Placement mirrors fleet.yaml: overlay mode local/<fleet>/projects.yaml,
+# root mode <root>/projects.yaml. The file is optional — no projects.yaml
+# means no project tier map is composed.
+#
+# `repos` is the join key: when a sprint or autonomous-runner bot closes work,
+# it resolves the working repo to a project and refuses to close below that
+# project's validation tier. The compositor emits the whole map into EVERY
+# bot's bot.conf as PROJECT_TIER_<SLUG> / PROJECT_REPOS_<SLUG>.
+#
+# tier: auto | review | preview | human — semantics in
+# documentation/projects-yaml-schema.md (each project below illustrates one).
+
+projects:
+  # A revenue-facing storefront: nothing ships without the operator seeing
+  # a preview link and acking it in Telegram.
+  acme-shop:
+    title: Acme Shop storefront
+    repos: [acme/storefront, acme/autopilot]
+    # Optional pointer to the project's mission doc (path relative to this
+    # file's directory — the fleet overlay, so it stays out of git).
+    mission_file: missions/acme-shop.md
+    validation:
+      tier: preview
+      preview:
+        source: vercel        # where preview links come from
+        require_ack: true     # hold the close until the operator 👍s
+      notes: revenue-facing; preview link + operator ack before close
+
+    # metrics: — RESERVED for the metrics plan (not part of the v1 schema).
+    #   Declaring it today is ignored with a validator warning. It will map
+    #   business metrics to commands/queries with targets, e.g.:
+    # metrics:
+    #   - name: weekly_revenue
+    #     source: "scripts/shop-revenue.sh"
+    #     target: "2000/mo"
+    #     cadence: weekly
+
+  # A production SaaS: reviewer sign-off is enough to close.
+  post-scheduler:
+    title: Post Scheduler SaaS
+    repos: [acme/post-scheduler]
+    validation:
+      tier: review
+
+  # Internal tooling: green CI is the whole bar.
+  internal-tools:
+    title: Internal CLI tools
+    repos: [acme/dev-tools]
+    validation:
+      tier: auto

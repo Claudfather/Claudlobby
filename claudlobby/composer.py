@@ -431,6 +431,34 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(obs.dispatch_deadline)}"
             )
 
+    # Project validation tiers (projects.yaml) — the repo -> closure-bar map,
+    # emitted into EVERY bot's conf: any sprint/runner bot must resolve a
+    # working repo's tier locally (there is no "sprint owner" concept).
+    if fleet.projects:
+        lines.append("")
+        lines.append("# Projects (projects.yaml) — repo -> validation tier")
+        for key, project in sorted(fleet.projects.items()):
+            tier_var = f"PROJECT_TIER_{project.env_slug}"
+            if not _SHELL_IDENT_RE.match(tier_var):
+                raise ValueError(
+                    f"project key '{key}' does not yield a valid env name "
+                    f"(run claudlobby validate)"
+                )
+            for repo in project.repos:
+                # Emit-time corruption backstop (mirrors the slug raise
+                # above): the value is a space-delimited list by contract,
+                # so an entry containing whitespace cannot be represented.
+                if any(c.isspace() for c in repo):
+                    raise ValueError(
+                        f"project '{key}': repos entry '{repo}' contains "
+                        f"whitespace (run claudlobby validate)"
+                    )
+            lines.append(f"export {tier_var}={_shq(project.validation.tier)}")
+            lines.append(
+                f"export PROJECT_REPOS_{project.env_slug}="
+                f"{_shq(' '.join(project.repos))}"
+            )
+
     # Rolling code-audit sweep — emitted only into the owner bot's conf, so the
     # fleet-level selector (lib/code-audit-sweep.sh) resolves exactly one owner.
     # repos default to the owner's scope.repos when sweep.repos is unset.
@@ -837,6 +865,23 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
 
+    # Projects table composes for managers only (F6-style context budget:
+    # workers resolve tiers from the bot.conf env map, not prose).
+    projects = (
+        sorted(fleet.projects.values(), key=lambda p: p.key)
+        if bot.bot_id in fleet.manager_bots()
+        else []
+    )
+    for p in projects:
+        # Emit-time corruption backstop (validator owns the UX error): a
+        # newline in a title would inject fake sections into the composed
+        # instructions; a pipe breaks the table.
+        if "\n" in p.title or "|" in p.title:
+            raise ValueError(
+                f"project '{p.key}': title contains newline or '|' — refusing "
+                f"to render it into CLAUDE.md (run claudlobby validate)"
+            )
+
     env = _build_jinja_env(paths)
     template = env.get_template("claude.md.j2")
     rendered = template.render(
@@ -846,6 +891,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         expertise_body=expertise_body,
         voice=voice_item,
         teams=teams,
+        projects=projects,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         resources=_items(bot.resources, "resources"),

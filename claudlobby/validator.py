@@ -15,7 +15,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 from . import dotenv
-from .config import FleetConfig
+from .config import _PROJECT_VALIDATION_KEYS, FleetConfig
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
@@ -24,12 +24,16 @@ from .known_values import (
     KNOWN_MODELS,
     OUTCOME_ACTIONS,
     OUTCOME_KEYS,
+    PROJECT_KEYS,
+    VALID_TIERS,
     closest_match,
+    hint,
 )
 from .mcp_resolve import required_vars as _mcp_required_vars
 from .paths import Paths
 
 _CADENCE_RE = re.compile(r"^\d+[mhd]$")
+_ORG_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
 @dataclass
@@ -387,7 +391,7 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
         if isinstance(src, dict):
             src_type = src.get("source", "")
             src_repo = src.get("repo", "")
-            if src_type == "github" and not re.match(r"^[\w.-]+/[\w.-]+$", src_repo):
+            if src_type == "github" and not _ORG_REPO_RE.match(src_repo):
                 report.warnings.append(
                     f"marketplace '{mp_name}': repo '{src_repo}' does not match "
                     "expected <org>/<repo> format"
@@ -425,6 +429,118 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
             )
 
 
+# projects.yaml keys become PROJECT_TIER_<SLUG> env names — same charset as
+# bot ids so ProjectConfig.env_slug always yields a shell identifier.
+_PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def _validate_projects(
+    fleet: FleetConfig, paths: Paths, report: ValidationReport
+) -> None:
+    """Validate the optional projects.yaml tier (goal-aware fleet, P2)."""
+    if fleet.projects:
+        # bot env: blocks are emitted AFTER the projects tier map in
+        # bot.conf, so an env: key in this namespace silently overrides the
+        # project's declared closure bar at source time (last assignment
+        # wins — a human-tier project flips to auto with zero warning).
+        # Reserved namespace, hard error.
+        for bot_name, bot in fleet.bots.items():
+            for env_key in bot.env:
+                if env_key.startswith(("PROJECT_TIER_", "PROJECT_REPOS_")):
+                    report.errors.append(
+                        f"bot '{bot_name}': env key '{env_key}' is in the "
+                        f"reserved projects namespace — it would clobber the "
+                        f"tier map composed from projects.yaml"
+                    )
+
+    repo_owners: dict[str, str] = {}
+    for key, project in fleet.projects.items():
+        label = f"project '{key}'"
+
+        if not _PROJECT_KEY_RE.match(key):
+            report.errors.append(
+                f"project key '{key}' is invalid — use lowercase kebab-case "
+                f"([a-z][a-z0-9-]*), it becomes the PROJECT_TIER_* env name"
+            )
+
+        # title renders verbatim into the manager's composed CLAUDE.md table:
+        # a newline is a prompt-injection surface (fake sections in the
+        # agent's own instructions), a pipe breaks the table. Corruption
+        # class -> error, with a composer backstop for unvalidated paths.
+        if "\n" in project.title or "|" in project.title:
+            report.errors.append(
+                f"{label}: title must not contain newlines or '|' — it is "
+                f"rendered into the composed CLAUDE.md projects table"
+            )
+
+        if project.validation.tier not in VALID_TIERS:
+            report.errors.append(
+                f"{label}: validation.tier '{project.validation.tier}' is not "
+                f"one of {'/'.join(VALID_TIERS)}"
+                f"{hint(project.validation.tier, VALID_TIERS)}"
+            )
+
+        if not project.repos:
+            report.errors.append(
+                f"{label}: repos is empty — repos is the join key that maps "
+                f"work to this project's closure bar"
+            )
+        for repo in project.repos:
+            if any(c.isspace() for c in repo):
+                # PROJECT_REPOS_* is word-split when consumed in shell — an
+                # embedded space silently corrupts the list.
+                report.errors.append(
+                    f"{label}: repos entry '{repo}' contains whitespace — "
+                    f"it would word-split when PROJECT_REPOS_* is consumed"
+                )
+            elif not _ORG_REPO_RE.match(repo):
+                report.warnings.append(
+                    f"{label}: repos entry '{repo}' does not match "
+                    f"<org>/<repo> format"
+                )
+            elif repo in repo_owners and repo_owners[repo] != key:
+                report.warnings.append(
+                    f"repo '{repo}' is claimed by both '{repo_owners[repo]}' "
+                    f"and '{key}' — tier resolution is ambiguous"
+                )
+            else:
+                repo_owners[repo] = key
+
+        # mission_file is relative to projects.yaml (resolved through the
+        # Paths property so the co-location rule has one home); pathlib's /
+        # operator discards base on an absolute right side, so absolute
+        # paths are rejected rather than silently escaping.
+        if project.mission_file and Path(project.mission_file).is_absolute():
+            report.warnings.append(
+                f"{label}: mission_file '{project.mission_file}' is "
+                f"absolute — must be relative to projects.yaml"
+            )
+        elif project.mission_file and not (
+            paths.projects_yaml.parent / project.mission_file
+        ).is_file():
+            report.warnings.append(
+                f"{label}: mission_file '{project.mission_file}' not "
+                f"found under {paths.projects_yaml.parent}"
+            )
+
+        for unknown in sorted(project.raw):
+            if unknown == "metrics":
+                report.warnings.append(
+                    f"{label}: 'metrics' is reserved for the metrics plan and "
+                    f"not part of the v1 schema — ignored"
+                )
+            else:
+                report.warnings.append(
+                    f"{label}: unknown key '{unknown}'{hint(unknown, PROJECT_KEYS)}"
+                )
+
+        for unknown in sorted(project.validation.raw):
+            report.warnings.append(
+                f"{label}: unknown validation key "
+                f"'{unknown}'{hint(unknown, _PROJECT_VALIDATION_KEYS)}"
+            )
+
+
 def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
     """Validate the opt-in fleet.sweep (rolling code-audit) block."""
     sweep = fleet.sweep
@@ -452,7 +568,7 @@ def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
     for repo in sweep.repos:
-        if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+        if not _ORG_REPO_RE.match(repo):
             report.warnings.append(
                 f"sweep.repos entry '{repo}' does not match <org>/<repo> format"
             )
@@ -507,6 +623,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_sweep(fleet, report)
+    _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot

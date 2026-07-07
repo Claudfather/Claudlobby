@@ -12,7 +12,12 @@ from typing import Any
 
 import yaml
 
-from .known_values import KNOWN_EFFORTS, VALID_PERMISSION_MODES, closest_match
+from .known_values import (
+    KNOWN_EFFORTS,
+    PROJECT_KEYS,
+    VALID_PERMISSION_MODES,
+    closest_match,
+)
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +114,127 @@ class SweepConfig:
     label: str = "auto-audit"
     schedule: str = "*-*-* 03:00:00"  # systemd OnCalendar; nightly 03:00
     audit_types: list[str] = field(default_factory=lambda: ["tech-debt"])
+
+
+@dataclass
+class ProjectValidationConfig:
+    """Per-project closure bar — what "done" requires (projects.yaml).
+
+    Tier semantics: documentation/projects-yaml-schema.md (VALID_TIERS in
+    known_values.py).
+    """
+
+    tier: str = "review"
+    preview: dict[str, Any] = field(default_factory=dict)  # e.g. {source, require_ack}
+    notes: str | None = None
+    # Unrecognized validation-block keys — same .raw treatment as the top
+    # level, so a tier typo ('teir') warns instead of silently defaulting.
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+_PROJECT_VALIDATION_KEYS = {"tier", "preview", "notes"}
+
+
+@dataclass
+class ProjectConfig:
+    """One entry in projects.yaml — the third config tier; see
+    documentation/projects-yaml-schema.md. `repos` is the join key mapping
+    work to this project's validation tier."""
+
+    key: str  # dict key — slug, same charset as bot ids
+    title: str
+    repos: list[str] = field(default_factory=list)
+    mission_file: str | None = None  # overlay-relative pointer to a PROJECT_MISSION.md
+    validation: ProjectValidationConfig = field(
+        default_factory=ProjectValidationConfig
+    )
+    # Unrecognized top-level keys, preserved verbatim so the validator can
+    # warn on them (metrics: lives here — reserved for the metrics plan).
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def env_slug(self) -> str:
+        """The PROJECT_TIER_<SLUG>/PROJECT_REPOS_<SLUG> env-name fragment.
+
+        The one Python home for the kebab->ENV transform; later phases add
+        the bash twin in lib-common (first consumer: fleet-pulse gate_pending).
+        """
+        return self.key.upper().replace("-", "_")
+
+
+def _shaped(label: str, value: Any, want: type, example: str) -> Any:
+    """Generic YAML shape guard: None -> the type's empty default; wrong
+    type -> ValueError naming the field and the expected shape. One
+    mechanism for the whole family (a bool where a mapping goes, a list
+    where a string goes, …) instead of per-repro patches."""
+    if value is None:
+        return want()
+    if want is str:
+        # exact-type: YAML scalars like 123/true are NOT silently stringified
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{label} must be a string (e.g. {example}), "
+                f"got {type(value).__name__}"
+            )
+        return value
+    if not isinstance(value, want):
+        shape = "a mapping" if want is dict else "a list"
+        raise ValueError(
+            f"{label} must be {shape} (e.g. {example}), got {type(value).__name__}"
+        )
+    return value
+
+
+def _coerce_project(key: Any, d: Any) -> ProjectConfig:
+    key = _shaped("project key", key, str, "acme-shop")
+    d = _shaped(f"project '{key}'", d, dict, "a mapping of fields")
+    v = _shaped(f"project '{key}': validation", d.get("validation"), dict,
+                "validation: {tier: review}")
+    repos_raw = _shaped(f"project '{key}': repos", d.get("repos"), list,
+                        "repos: [org/repo]")
+    repos = [
+        _shaped(f"project '{key}': repos entry", r, str, "org/repo")
+        for r in repos_raw
+    ]
+    validation = ProjectValidationConfig(
+        tier=_shaped(f"project '{key}': validation.tier",
+                     v.get("tier"), str, "tier: review") or "review",
+        preview=_shaped(f"project '{key}': validation.preview",
+                        v.get("preview"), dict, "preview: {source: vercel}"),
+        notes=_shaped(f"project '{key}': validation.notes",
+                      v.get("notes"), str, "notes: why this bar") or None,
+        raw={k: val for k, val in v.items() if k not in _PROJECT_VALIDATION_KEYS},
+    )
+    return ProjectConfig(
+        key=key,
+        title=_shaped(f"project '{key}': title", d.get("title"), str,
+                      "title: Acme Shop") or key,
+        repos=repos,
+        mission_file=_shaped(f"project '{key}': mission_file",
+                             d.get("mission_file"), str,
+                             "missions/acme.md") or None,
+        validation=validation,
+        raw={k: val for k, val in d.items() if k not in PROJECT_KEYS},
+    )
+
+
+def load_projects(projects_yaml: Path) -> dict[str, ProjectConfig]:
+    """Parse projects.yaml (sits beside fleet.yaml). Absent file => {}."""
+    if not projects_yaml.is_file():
+        return {}
+    with projects_yaml.open() as f:
+        doc = yaml.safe_load(f)
+    if doc is None:
+        return {}  # an all-comments file is still an optional file
+    if not isinstance(doc, dict) or "projects" not in doc:
+        raise ValueError(f"{projects_yaml}: top-level key 'projects' missing")
+    projects = doc.get("projects") or {}
+    if not isinstance(projects, dict):
+        raise ValueError(
+            f"{projects_yaml}: 'projects' must be a mapping of "
+            f"<project-key>: <fields>, got {type(projects).__name__}"
+        )
+    return {key: _coerce_project(key, pdef) for key, pdef in projects.items()}
 
 
 @dataclass
@@ -277,6 +403,7 @@ class FleetConfig:
     teams: dict[str, TeamConfig] = field(default_factory=dict)
     bots: dict[str, BotConfig] = field(default_factory=dict)
     sweep: SweepConfig | None = None
+    projects: dict[str, ProjectConfig] = field(default_factory=dict)
 
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
@@ -915,5 +1042,6 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         teams=teams,
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
+        projects=load_projects(fleet_yaml.parent / "projects.yaml"),
     )
     return fleet_cfg, merged_defaults

@@ -322,6 +322,13 @@ class Paths:
         return self.root / "fleet.yaml"
 
     @property
+    def projects_yaml(self) -> Path:
+        """projects.yaml sits beside fleet.yaml — the one home for that
+        co-location rule (load_fleet derives it from the raw fleet.yaml
+        path; every Paths-aware consumer should use this property)."""
+        return self.fleet_yaml.parent / "projects.yaml"
+
+    @property
     def env_file(self) -> Path:
         # .env stays at the repo root (shared across fleets) by default.
         # If a fleet wants its own, it can keep one at fleet_dir/.env.

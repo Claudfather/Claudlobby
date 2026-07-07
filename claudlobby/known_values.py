@@ -43,6 +43,18 @@ VALID_PERMISSION_MODES: frozenset[str] = frozenset(
     {"default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"}
 )
 
+# ── Projects tier (projects.yaml) ────────────────────────────────
+# Validation tiers — a project's closure bar, weakest to strictest.
+# Semantics live in documentation/projects-yaml-schema.md. Tuple: error
+# messages join them in this stable order.
+VALID_TIERS: tuple[str, ...] = ("auto", "review", "preview", "human")
+
+# The v1 project schema — config.py splits unknown keys into .raw with
+# this set; validator.py uses the same set for did-you-mean suggestions.
+PROJECT_KEYS: frozenset[str] = frozenset(
+    {"title", "repos", "mission_file", "validation"}
+)
+
 # ── Autonomous runner ────────────────────────────────────────────
 # clauDNA skills known to support --auto.
 AUTO_ELIGIBLE_SKILLS: frozenset[str] = frozenset(
@@ -98,3 +110,14 @@ def closest_match(
         value.lower(), sorted(lower_to_original.keys()), n=n, cutoff=cutoff
     )
     return lower_to_original[matches[0]] if matches else None
+
+
+def hint(value: str, known: set[str] | frozenset[str] | tuple[str, ...]) -> str:
+    """The " — did you mean 'x'?" suffix, or "" when nothing is close.
+
+    One home for the suggestion voice (the closest_match + f-string pair
+    is copy-pasted ~10x across validator.py/config.py; new call sites use
+    this, old ones migrate opportunistically).
+    """
+    suggestion = closest_match(value, set(known))
+    return f" — did you mean '{suggestion}'?" if suggestion else ""
