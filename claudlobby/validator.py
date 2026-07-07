@@ -27,6 +27,7 @@ from .known_values import (
     PROJECT_KEYS,
     VALID_TIERS,
     closest_match,
+    hint,
 )
 from .mcp_resolve import required_vars as _mcp_required_vars
 from .paths import Paths
@@ -448,11 +449,10 @@ def _validate_projects(
             )
 
         if project.validation.tier not in VALID_TIERS:
-            suggestion = closest_match(project.validation.tier, set(VALID_TIERS))
-            hint = f" — did you mean '{suggestion}'?" if suggestion else ""
             report.errors.append(
                 f"{label}: validation.tier '{project.validation.tier}' is not "
-                f"one of {'/'.join(VALID_TIERS)}{hint}"
+                f"one of {'/'.join(VALID_TIERS)}"
+                f"{hint(project.validation.tier, VALID_TIERS)}"
             )
 
         if not project.repos:
@@ -463,7 +463,7 @@ def _validate_projects(
         for repo in project.repos:
             if any(c.isspace() for c in repo):
                 # PROJECT_REPOS_* is word-split when consumed in shell — an
-                # embedded space silently corrupts the list. Hard error.
+                # embedded space silently corrupts the list.
                 report.errors.append(
                     f"{label}: repos entry '{repo}' contains whitespace — "
                     f"it would word-split when PROJECT_REPOS_* is consumed"
@@ -481,23 +481,22 @@ def _validate_projects(
             else:
                 repo_owners[repo] = key
 
-        if project.mission_file:
-            if Path(project.mission_file).is_absolute():
-                # pathlib's / operator discards base on an absolute right side;
-                # mission_file is defined as projects.yaml-relative.
-                report.warnings.append(
-                    f"{label}: mission_file '{project.mission_file}' is "
-                    f"absolute — must be relative to projects.yaml"
-                )
-            else:
-                # mission_file is relative to projects.yaml — resolve through
-                # the Paths property so the co-location rule has one home.
-                base = paths.projects_yaml.parent
-                if not (base / project.mission_file).is_file():
-                    report.warnings.append(
-                        f"{label}: mission_file '{project.mission_file}' not "
-                        f"found under {base}"
-                    )
+        # mission_file is relative to projects.yaml (resolved through the
+        # Paths property so the co-location rule has one home); pathlib's /
+        # operator discards base on an absolute right side, so absolute
+        # paths are rejected rather than silently escaping.
+        if project.mission_file and Path(project.mission_file).is_absolute():
+            report.warnings.append(
+                f"{label}: mission_file '{project.mission_file}' is "
+                f"absolute — must be relative to projects.yaml"
+            )
+        elif project.mission_file and not (
+            paths.projects_yaml.parent / project.mission_file
+        ).is_file():
+            report.warnings.append(
+                f"{label}: mission_file '{project.mission_file}' not "
+                f"found under {paths.projects_yaml.parent}"
+            )
 
         for unknown in sorted(project.raw):
             if unknown == "metrics":
@@ -506,15 +505,14 @@ def _validate_projects(
                     f"not part of the v1 schema — ignored"
                 )
             else:
-                suggestion = closest_match(unknown, set(PROJECT_KEYS))
-                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
-                report.warnings.append(f"{label}: unknown key '{unknown}'{hint}")
+                report.warnings.append(
+                    f"{label}: unknown key '{unknown}'{hint(unknown, PROJECT_KEYS)}"
+                )
 
         for unknown in sorted(project.validation.raw):
-            suggestion = closest_match(unknown, _PROJECT_VALIDATION_KEYS)
-            hint = f" — did you mean '{suggestion}'?" if suggestion else ""
             report.warnings.append(
-                f"{label}: unknown validation key '{unknown}'{hint}"
+                f"{label}: unknown validation key "
+                f"'{unknown}'{hint(unknown, _PROJECT_VALIDATION_KEYS)}"
             )
 
 

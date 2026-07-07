@@ -444,6 +444,15 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                     f"project key '{key}' does not yield a valid env name "
                     f"(run claudlobby validate)"
                 )
+            for repo in project.repos:
+                # Emit-time corruption backstop (mirrors the slug raise
+                # above): the value is a space-delimited list by contract,
+                # so an entry containing whitespace cannot be represented.
+                if any(c.isspace() for c in repo):
+                    raise ValueError(
+                        f"project '{key}': repos entry '{repo}' contains "
+                        f"whitespace (run claudlobby validate)"
+                    )
             lines.append(f"export {tier_var}={_shq(project.validation.tier)}")
             lines.append(
                 f"export PROJECT_REPOS_{project.env_slug}="

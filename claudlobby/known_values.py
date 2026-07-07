@@ -110,3 +110,14 @@ def closest_match(
         value.lower(), sorted(lower_to_original.keys()), n=n, cutoff=cutoff
     )
     return lower_to_original[matches[0]] if matches else None
+
+
+def hint(value: str, known: set[str] | frozenset[str] | tuple[str, ...]) -> str:
+    """The " — did you mean 'x'?" suffix, or "" when nothing is close.
+
+    One home for the suggestion voice (the closest_match + f-string pair
+    is copy-pasted ~10x across validator.py/config.py; new call sites use
+    this, old ones migrate opportunistically).
+    """
+    suggestion = closest_match(value, set(known))
+    return f" — did you mean '{suggestion}'?" if suggestion else ""

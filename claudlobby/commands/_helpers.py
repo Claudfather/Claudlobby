@@ -68,6 +68,27 @@ def _load_fleet_or_exit(paths: Paths) -> tuple["FleetConfig", dict]:
         sys.exit(1)
 
 
+def _validation_gate(fleet: "FleetConfig", paths: Paths, *, context: str) -> bool:
+    """Run validate() and report; return True when composing may proceed.
+
+    The shared load->validate->log gate for every command that composes
+    outside `claudlobby generate` (new-bot --auto-generate, move-bot).
+    Warnings are surfaced (not just errors) so did-you-mean hints reach
+    the user on these paths too.
+    """
+    from ..validator import validate
+
+    report = validate(fleet, paths)
+    for warning in report.warnings:
+        log.warning("%s", warning)
+    if report.has_errors:
+        for err in report.errors:
+            log.error("%s", err)
+        log.error("validation failed — fix the errors above, then %s", context)
+        return False
+    return True
+
+
 def _parse_rename_map(entries: list[str]) -> dict[str, str]:
     """Parse --map entries ('fleet-bot=src-dir'). Raises ValueError on bad format."""
     rename_map: dict[str, str] = {}

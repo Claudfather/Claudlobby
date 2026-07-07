@@ -8,6 +8,8 @@ bot.conf.
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from tests.conftest import install_real_template
 
 from claudlobby.composer import compose_bot_conf, compose_claude_md
@@ -239,32 +241,36 @@ def test_repo_duplicated_within_one_project_no_self_ambiguity(fleet_dir):
 
 def test_projects_as_list_is_a_clean_error(fleet_dir):
     _write_projects(fleet_dir, "projects:\n  - p\n")
-    try:
+    with pytest.raises(ValueError, match="mapping"):
         _load(fleet_dir)
-        raise AssertionError("expected ValueError")
-    except ValueError as e:
-        assert "mapping" in str(e)
 
 
 def test_validation_as_scalar_is_a_clean_error(fleet_dir):
     _write_projects(
         fleet_dir, "projects:\n  p:\n    repos: [a/b]\n    validation: preview\n"
     )
-    try:
+    with pytest.raises(ValueError, match=r"validation.*mapping"):
         _load(fleet_dir)
-        raise AssertionError("expected ValueError")
-    except ValueError as e:
-        assert "validation" in str(e) and "mapping" in str(e)
 
 
 def test_repos_as_bare_string_is_a_clean_error(fleet_dir):
     # Forgetting brackets must not iterate the string character-by-character.
     _write_projects(fleet_dir, "projects:\n  p:\n    repos: acme/shop\n")
-    try:
+    with pytest.raises(ValueError, match=r"repos.*list"):
         _load(fleet_dir)
-        raise AssertionError("expected ValueError")
-    except ValueError as e:
-        assert "repos" in str(e) and "list" in str(e)
+
+
+def test_falsy_wrong_shapes_hit_the_guards_too(fleet_dir):
+    # Empty-but-wrong shapes must not coalesce to defaults ('or {}' would
+    # silently swallow them): only YAML null gets the default treatment.
+    for yaml_text, match in [
+        ("projects:\n  p: []\n", "mapping"),
+        ("projects:\n  p:\n    repos: [a/b]\n    validation: []\n", r"validation.*mapping"),
+        ("projects:\n  p:\n    repos: {}\n", r"repos.*list"),
+    ]:
+        _write_projects(fleet_dir, yaml_text)
+        with pytest.raises(ValueError, match=match):
+            _load(fleet_dir)
 
 
 def test_absolute_mission_file_warns(fleet_dir):
@@ -288,6 +294,15 @@ def test_repo_with_whitespace_is_an_error(fleet_dir):
     ), report.errors
 
 
+def test_composer_backstop_refuses_whitespace_repo(fleet_dir):
+    # Emit-time twin of the validator error (mirrors the slug raise): an
+    # unvalidated compose path must not write a corrupting PROJECT_REPOS_*.
+    _write_projects(fleet_dir, 'projects:\n  p:\n    repos: ["acme/a b"]\n')
+    fleet = _load(fleet_dir)
+    with pytest.raises(ValueError, match="whitespace"):
+        compose_bot_conf(fleet.bots["lead"], fleet, _paths(fleet_dir))
+
+
 def test_root_mode_projects_yaml_is_gitignored():
     gitignore = (REPO_DIR / ".gitignore").read_text().splitlines()
     assert "projects.yaml" in gitignore, (
@@ -296,8 +311,8 @@ def test_root_mode_projects_yaml_is_gitignored():
     )
 
 
-def test_new_bot_auto_generate_refuses_on_validation_errors(fleet_dir, monkeypatch):
-    # scaffolding --auto-generate must gate on validate() like move_bot does;
+def test_new_bot_auto_generate_refuses_on_validation_errors(fleet_dir):
+    # scaffolding --auto-generate must gate on validate() like generate does;
     # an invalid tier must block composition, not reach bot.conf verbatim.
     from claudlobby.__main__ import main
 
@@ -305,7 +320,6 @@ def test_new_bot_auto_generate_refuses_on_validation_errors(fleet_dir, monkeypat
         fleet_dir,
         "projects:\n  p:\n    repos: [a/b]\n    validation: {tier: revew}\n",
     )
-    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(fleet_dir))
     rc = main(
         [
             "--root",

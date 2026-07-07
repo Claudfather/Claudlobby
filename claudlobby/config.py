@@ -163,16 +163,24 @@ class ProjectConfig:
 
 
 def _coerce_project(key: str, d: dict) -> ProjectConfig:
-    d = d or {}
+    # isinstance BEFORE None-coalescing: `p: []` / `validation: ""` /
+    # `repos: {}` are wrong shapes and must hit the guards, not silently
+    # coalesce to defaults (only YAML null gets the default).
+    if d is None:
+        d = {}
     if not isinstance(d, dict):
         raise ValueError(f"project '{key}': entry must be a mapping, got {type(d).__name__}")
-    v = d.get("validation") or {}
+    v = d.get("validation")
+    if v is None:
+        v = {}
     if not isinstance(v, dict):
         raise ValueError(
             f"project '{key}': validation must be a mapping "
             f"(e.g. validation: {{tier: review}}), got {type(v).__name__}"
         )
-    repos = d.get("repos") or []
+    repos = d.get("repos")
+    if repos is None:
+        repos = []
     if not isinstance(repos, list):
         raise ValueError(
             f"project '{key}': repos must be a list (e.g. repos: [org/repo]), "
