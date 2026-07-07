@@ -872,6 +872,15 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if bot.bot_id in fleet.manager_bots()
         else []
     )
+    for p in projects:
+        # Emit-time corruption backstop (validator owns the UX error): a
+        # newline in a title would inject fake sections into the composed
+        # instructions; a pipe breaks the table.
+        if "\n" in p.title or "|" in p.title:
+            raise ValueError(
+                f"project '{p.key}': title contains newline or '|' — refusing "
+                f"to render it into CLAUDE.md (run claudlobby validate)"
+            )
 
     env = _build_jinja_env(paths)
     template = env.get_template("claude.md.j2")

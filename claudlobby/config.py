@@ -162,41 +162,57 @@ class ProjectConfig:
         return self.key.upper().replace("-", "_")
 
 
-def _coerce_project(key: str, d: dict) -> ProjectConfig:
-    # isinstance BEFORE None-coalescing: `p: []` / `validation: ""` /
-    # `repos: {}` are wrong shapes and must hit the guards, not silently
-    # coalesce to defaults (only YAML null gets the default).
-    if d is None:
-        d = {}
-    if not isinstance(d, dict):
-        raise ValueError(f"project '{key}': entry must be a mapping, got {type(d).__name__}")
-    v = d.get("validation")
-    if v is None:
-        v = {}
-    if not isinstance(v, dict):
+def _shaped(label: str, value: Any, want: type, example: str) -> Any:
+    """Generic YAML shape guard: None -> the type's empty default; wrong
+    type -> ValueError naming the field and the expected shape. One
+    mechanism for the whole family (a bool where a mapping goes, a list
+    where a string goes, …) instead of per-repro patches."""
+    if value is None:
+        return want()
+    if want is str:
+        # exact-type: YAML scalars like 123/true are NOT silently stringified
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{label} must be a string (e.g. {example}), "
+                f"got {type(value).__name__}"
+            )
+        return value
+    if not isinstance(value, want):
+        shape = "a mapping" if want is dict else "a list"
         raise ValueError(
-            f"project '{key}': validation must be a mapping "
-            f"(e.g. validation: {{tier: review}}), got {type(v).__name__}"
+            f"{label} must be {shape} (e.g. {example}), got {type(value).__name__}"
         )
-    repos = d.get("repos")
-    if repos is None:
-        repos = []
-    if not isinstance(repos, list):
-        raise ValueError(
-            f"project '{key}': repos must be a list (e.g. repos: [org/repo]), "
-            f"got {type(repos).__name__}"
-        )
+    return value
+
+
+def _coerce_project(key: Any, d: Any) -> ProjectConfig:
+    key = _shaped("project key", key, str, "acme-shop")
+    d = _shaped(f"project '{key}'", d, dict, "a mapping of fields")
+    v = _shaped(f"project '{key}': validation", d.get("validation"), dict,
+                "validation: {tier: review}")
+    repos_raw = _shaped(f"project '{key}': repos", d.get("repos"), list,
+                        "repos: [org/repo]")
+    repos = [
+        _shaped(f"project '{key}': repos entry", r, str, "org/repo")
+        for r in repos_raw
+    ]
     validation = ProjectValidationConfig(
-        tier=str(v.get("tier", "review")),
-        preview=dict(v.get("preview") or {}),
-        notes=v.get("notes"),
+        tier=_shaped(f"project '{key}': validation.tier",
+                     v.get("tier"), str, "tier: review") or "review",
+        preview=_shaped(f"project '{key}': validation.preview",
+                        v.get("preview"), dict, "preview: {source: vercel}"),
+        notes=_shaped(f"project '{key}': validation.notes",
+                      v.get("notes"), str, "notes: why this bar") or None,
         raw={k: val for k, val in v.items() if k not in _PROJECT_VALIDATION_KEYS},
     )
     return ProjectConfig(
         key=key,
-        title=str(d.get("title", key)),
-        repos=[str(r) for r in repos],
-        mission_file=d.get("mission_file"),
+        title=_shaped(f"project '{key}': title", d.get("title"), str,
+                      "title: Acme Shop") or key,
+        repos=repos,
+        mission_file=_shaped(f"project '{key}': mission_file",
+                             d.get("mission_file"), str,
+                             "missions/acme.md") or None,
         validation=validation,
         raw={k: val for k, val in d.items() if k not in PROJECT_KEYS},
     )

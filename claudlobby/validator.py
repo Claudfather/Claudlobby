@@ -438,6 +438,21 @@ def _validate_projects(
     fleet: FleetConfig, paths: Paths, report: ValidationReport
 ) -> None:
     """Validate the optional projects.yaml tier (goal-aware fleet, P2)."""
+    if fleet.projects:
+        # bot env: blocks are emitted AFTER the projects tier map in
+        # bot.conf, so an env: key in this namespace silently overrides the
+        # project's declared closure bar at source time (last assignment
+        # wins — a human-tier project flips to auto with zero warning).
+        # Reserved namespace, hard error.
+        for bot_name, bot in fleet.bots.items():
+            for env_key in bot.env:
+                if env_key.startswith(("PROJECT_TIER_", "PROJECT_REPOS_")):
+                    report.errors.append(
+                        f"bot '{bot_name}': env key '{env_key}' is in the "
+                        f"reserved projects namespace — it would clobber the "
+                        f"tier map composed from projects.yaml"
+                    )
+
     repo_owners: dict[str, str] = {}
     for key, project in fleet.projects.items():
         label = f"project '{key}'"
@@ -446,6 +461,16 @@ def _validate_projects(
             report.errors.append(
                 f"project key '{key}' is invalid — use lowercase kebab-case "
                 f"([a-z][a-z0-9-]*), it becomes the PROJECT_TIER_* env name"
+            )
+
+        # title renders verbatim into the manager's composed CLAUDE.md table:
+        # a newline is a prompt-injection surface (fake sections in the
+        # agent's own instructions), a pipe breaks the table. Corruption
+        # class -> error, with a composer backstop for unvalidated paths.
+        if "\n" in project.title or "|" in project.title:
+            report.errors.append(
+                f"{label}: title must not contain newlines or '|' — it is "
+                f"rendered into the composed CLAUDE.md projects table"
             )
 
         if project.validation.tier not in VALID_TIERS:
