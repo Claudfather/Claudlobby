@@ -437,19 +437,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     if fleet.projects:
         lines.append("")
         lines.append("# Projects (projects.yaml) — repo -> validation tier")
-        for key in sorted(fleet.projects):
-            project = fleet.projects[key]
-            slug = key.upper().replace("-", "_")
-            if not _SHELL_IDENT_RE.match(f"PROJECT_TIER_{slug}"):
+        for key, project in sorted(fleet.projects.items()):
+            tier_var = f"PROJECT_TIER_{project.env_slug}"
+            if not _SHELL_IDENT_RE.match(tier_var):
                 raise ValueError(
                     f"project key '{key}' does not yield a valid env name "
                     f"(run claudlobby validate)"
                 )
+            lines.append(f"export {tier_var}={_shq(project.validation.tier)}")
             lines.append(
-                f"export PROJECT_TIER_{slug}={_shq(project.validation.tier)}"
-            )
-            lines.append(
-                f"export PROJECT_REPOS_{slug}={_shq(' '.join(project.repos))}"
+                f"export PROJECT_REPOS_{project.env_slug}="
+                f"{_shq(' '.join(project.repos))}"
             )
 
     # Rolling code-audit sweep — emitted only into the owner bot's conf, so the

@@ -15,7 +15,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 from . import dotenv
-from .config import VALID_TIERS, FleetConfig
+from .config import FleetConfig
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
@@ -24,12 +24,15 @@ from .known_values import (
     KNOWN_MODELS,
     OUTCOME_ACTIONS,
     OUTCOME_KEYS,
+    PROJECT_KEYS,
+    VALID_TIERS,
     closest_match,
 )
 from .mcp_resolve import required_vars as _mcp_required_vars
 from .paths import Paths
 
 _CADENCE_RE = re.compile(r"^\d+[mhd]$")
+_ORG_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
 @dataclass
@@ -387,7 +390,7 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
         if isinstance(src, dict):
             src_type = src.get("source", "")
             src_repo = src.get("repo", "")
-            if src_type == "github" and not re.match(r"^[\w.-]+/[\w.-]+$", src_repo):
+            if src_type == "github" and not _ORG_REPO_RE.match(src_repo):
                 report.warnings.append(
                     f"marketplace '{mp_name}': repo '{src_repo}' does not match "
                     "expected <org>/<repo> format"
@@ -426,10 +429,8 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
 
 
 # projects.yaml keys become PROJECT_TIER_<SLUG> env names — same charset as
-# bot ids so the upper/underscore transform always yields a shell identifier.
+# bot ids so ProjectConfig.env_slug always yields a shell identifier.
 _PROJECT_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-
-_PROJECT_SUGGESTABLE_KEYS = {"title", "repos", "mission_file", "validation"}
 
 
 def _validate_projects(
@@ -460,7 +461,7 @@ def _validate_projects(
                 f"work to this project's closure bar"
             )
         for repo in project.repos:
-            if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+            if not _ORG_REPO_RE.match(repo):
                 report.warnings.append(
                     f"{label}: repos entry '{repo}' does not match "
                     f"<org>/<repo> format"
@@ -474,7 +475,9 @@ def _validate_projects(
                 repo_owners[repo] = key
 
         if project.mission_file:
-            base = paths.fleet_dir or paths.root
+            # mission_file is relative to projects.yaml — resolve through the
+            # Paths property so the co-location rule has one home.
+            base = paths.projects_yaml.parent
             if not (base / project.mission_file).is_file():
                 report.warnings.append(
                     f"{label}: mission_file '{project.mission_file}' not found "
@@ -488,7 +491,7 @@ def _validate_projects(
                     f"not part of the v1 schema — ignored"
                 )
             else:
-                suggestion = closest_match(unknown, _PROJECT_SUGGESTABLE_KEYS)
+                suggestion = closest_match(unknown, set(PROJECT_KEYS))
                 hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(f"{label}: unknown key '{unknown}'{hint}")
 
@@ -520,7 +523,7 @@ def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
     for repo in sweep.repos:
-        if not re.match(r"^[\w.-]+/[\w.-]+$", repo):
+        if not _ORG_REPO_RE.match(repo):
             report.warnings.append(
                 f"sweep.repos entry '{repo}' does not match <org>/<repo> format"
             )

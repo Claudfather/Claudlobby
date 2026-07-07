@@ -14,6 +14,7 @@ from claudlobby.config import (
     ToolsConfig,
     load_fleet,
 )
+from tests.conftest import install_real_template
 from claudlobby.composer import (
     _compose_hooks,
     _reconcile_access_json,
@@ -2027,13 +2028,7 @@ class TestComposePermissions:
         perm_dir.mkdir(parents=True)
         for name, content in permissions_files.items():
             (perm_dir / f"{name}.md").write_text(content)
-        (root / "templates").mkdir()
-        import shutil
-
-        shutil.copy(
-            Path(__file__).parent.parent / "templates" / "claude.md.j2",
-            root / "templates" / "claude.md.j2",
-        )
+        install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
         (root / "voices").mkdir()
         paths = Paths(root=root, fleet_dir=root)
@@ -2277,13 +2272,7 @@ class TestComposeAutonomousRunner:
         root.mkdir()
         (root / "library" / "expertise").mkdir(parents=True)
         (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
-        (root / "templates").mkdir()
-        import shutil
-
-        shutil.copy(
-            Path(__file__).parent.parent / "templates" / "claude.md.j2",
-            root / "templates" / "claude.md.j2",
-        )
+        install_real_template(root)
         (root / "runtime" / "bots").mkdir(parents=True)
         (root / "voices").mkdir()
         paths = Paths(root=root, fleet_dir=root)

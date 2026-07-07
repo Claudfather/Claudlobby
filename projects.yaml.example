@@ -15,11 +15,8 @@
 # project's validation tier. The compositor emits the whole map into EVERY
 # bot's bot.conf as PROJECT_TIER_<SLUG> / PROJECT_REPOS_<SLUG>.
 #
-# Validation tiers (the closure bar):
-#   auto    — green CI suffices
-#   review  — reviewer verdict marker required
-#   preview — preview link posted to Telegram + operator ack recorded
-#   human   — explicit operator approval
+# tier: auto | review | preview | human — semantics in
+# documentation/projects-yaml-schema.md (each project below illustrates one).
 
 projects:
   # A revenue-facing storefront: nothing ships without the operator seeing

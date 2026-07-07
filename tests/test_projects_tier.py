@@ -1,24 +1,27 @@
 """projects.yaml — the third config tier (goal-aware-fleet plan, Phase 2).
 
-system.yaml says HOW the platform runs, fleet.yaml says WHO the bots are,
-projects.yaml says WHAT the work is and what "done" requires per project.
-The file lives beside fleet.yaml (overlay or root mode), parses through the
-same load->validate->compose pathway, and composes a repo->validation-tier
-map into EVERY bot's bot.conf (there is no "sprint owner" — any sprint or
-runner bot must resolve a repo's closure bar locally).
+Schema + semantics: documentation/projects-yaml-schema.md. Load -> validate
+-> compose, mirroring fleet.yaml; the repo->tier map lands in EVERY bot's
+bot.conf.
 """
 
 from pathlib import Path
 from textwrap import dedent
 
-import pytest
+from tests.conftest import install_real_template
 
 from claudlobby.composer import compose_bot_conf, compose_claude_md
-from claudlobby.config import VALID_TIERS, load_fleet
+from claudlobby.config import load_fleet
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
 REPO_DIR = Path(__file__).resolve().parent.parent
+
+# Shared fixture: 'surprise' is an unknown key; 'metrics' is the reserved one.
+UNKNOWN_KEYS_YAML = (
+    "projects:\n  p:\n    title: P\n    repos: [a/b]\n    surprise: 1\n"
+    "    metrics: [{name: x}]\n"
+)
 
 PROJECTS_YAML = dedent("""\
     projects:
@@ -84,20 +87,10 @@ def test_validation_block_optional_default_tier_review(fleet_dir):
     assert fleet.projects["bare"].validation.tier == "review"
 
 
-def test_unknown_project_keys_preserved_for_validator(fleet_dir):
-    _write_projects(
-        fleet_dir,
-        "projects:\n  p:\n    title: P\n    repos: [a/b]\n    surprise: 1\n"
-        "    metrics: [{name: x}]\n",
-    )
-    p = _load(fleet_dir).projects["p"]
-    assert "surprise" in p.raw
-    # metrics: is reserved for the metrics plan — not schema in v1
-    assert "metrics" in p.raw
-
-
-def test_tiers_enum_exported():
-    assert VALID_TIERS == ("auto", "review", "preview", "human")
+def test_all_comments_projects_yaml_is_still_optional(fleet_dir):
+    # A fully commented-out file parses to None — must behave like absence.
+    _write_projects(fleet_dir, "# projects:\n#   p:\n#     repos: [a/b]\n")
+    assert _load(fleet_dir).projects == {}
 
 
 # --- validator -----------------------------------------------------------------
@@ -144,11 +137,10 @@ def test_bad_project_key_errors(fleet_dir):
 
 
 def test_unknown_key_warns_and_metrics_warns_reserved(fleet_dir):
-    _write_projects(
-        fleet_dir,
-        "projects:\n  p:\n    title: P\n    repos: [a/b]\n    surprise: 1\n"
-        "    metrics: [{name: x}]\n",
-    )
+    _write_projects(fleet_dir, UNKNOWN_KEYS_YAML)
+    # Load preserves unknowns in .raw (the precondition the warnings read from)
+    p = _load(fleet_dir).projects["p"]
+    assert set(p.raw) == {"surprise", "metrics"}
     report = _validated(fleet_dir)
     assert any("surprise" in w for w in report.warnings)
     metrics_w = [w for w in report.warnings if "metrics" in w]
@@ -201,16 +193,8 @@ def test_no_projects_no_project_env(fleet_dir):
     assert "PROJECT_TIER_" not in conf
 
 
-def _install_real_template(fleet_dir: Path) -> None:
-    # The conftest fixture stubs a minimal claude.md.j2; the Projects table
-    # lives in the real template, so these tests exercise that one.
-    (fleet_dir / "templates" / "claude.md.j2").write_text(
-        (REPO_DIR / "templates" / "claude.md.j2").read_text()
-    )
-
-
 def test_manager_claude_md_gets_projects_table(fleet_dir):
-    _install_real_template(fleet_dir)
+    install_real_template(fleet_dir)
     _write_projects(fleet_dir)
     fleet = _load(fleet_dir)
     md = compose_claude_md(fleet.bots["lead"], fleet, _paths(fleet_dir))
@@ -220,7 +204,7 @@ def test_manager_claude_md_gets_projects_table(fleet_dir):
 
 
 def test_worker_claude_md_has_no_projects_table(fleet_dir):
-    _install_real_template(fleet_dir)
+    install_real_template(fleet_dir)
     _write_projects(fleet_dir)
     fleet = _load(fleet_dir)
     md = compose_claude_md(fleet.bots["worker-1"], fleet, _paths(fleet_dir))

@@ -43,6 +43,18 @@ VALID_PERMISSION_MODES: frozenset[str] = frozenset(
     {"default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"}
 )
 
+# ── Projects tier (projects.yaml) ────────────────────────────────
+# Validation tiers — a project's closure bar, weakest to strictest.
+# Semantics live in documentation/projects-yaml-schema.md. Tuple: error
+# messages join them in this stable order.
+VALID_TIERS: tuple[str, ...] = ("auto", "review", "preview", "human")
+
+# The v1 project schema — config.py splits unknown keys into .raw with
+# this set; validator.py uses the same set for did-you-mean suggestions.
+PROJECT_KEYS: frozenset[str] = frozenset(
+    {"title", "repos", "mission_file", "validation"}
+)
+
 # ── Autonomous runner ────────────────────────────────────────────
 # clauDNA skills known to support --auto.
 AUTO_ELIGIBLE_SKILLS: frozenset[str] = frozenset(

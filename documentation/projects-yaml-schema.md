@@ -1,4 +1,4 @@
-# projects.yaml Schema Reference
+# projects.yaml — schema reference
 
 `projects.yaml` is the third config tier — **WHAT the work is, and what
 "done" requires per project** (`system.yaml` = HOW the platform runs,
@@ -44,9 +44,9 @@ projects:
 | `human` | the operator explicitly approved |
 
 A repo claimed by two projects draws a validator warning — tier resolution
-would be ambiguous. A repo matching no project resolves to the fleet default
-tier, loudly (`tier:default(<tier>)` in the terminal report; see the
-goal-aware-fleet plan).
+would be ambiguous. *(Planned, ships with the closure gates — goal-aware-fleet
+plan P6:)* a repo matching no project resolves to the fleet default tier,
+loudly (`tier:default(<tier>)` in the terminal report).
 
 ## Reserved
 

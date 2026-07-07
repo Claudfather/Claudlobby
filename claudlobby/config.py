@@ -12,7 +12,12 @@ from typing import Any
 
 import yaml
 
-from .known_values import KNOWN_EFFORTS, VALID_PERMISSION_MODES, closest_match
+from .known_values import (
+    KNOWN_EFFORTS,
+    PROJECT_KEYS,
+    VALID_PERMISSION_MODES,
+    closest_match,
+)
 
 log = logging.getLogger(__name__)
 
@@ -111,17 +116,13 @@ class SweepConfig:
     audit_types: list[str] = field(default_factory=lambda: ["tech-debt"])
 
 
-# Validation tiers a project may demand before work in its repos closes:
-#   auto    — green CI suffices
-#   review  — reviewer verdict marker required
-#   preview — preview link posted to Telegram + operator ack recorded
-#   human   — explicit operator approval
-VALID_TIERS = ("auto", "review", "preview", "human")
-
-
 @dataclass
 class ProjectValidationConfig:
-    """Per-project closure bar — what "done" requires (projects.yaml)."""
+    """Per-project closure bar — what "done" requires (projects.yaml).
+
+    Tier semantics: documentation/projects-yaml-schema.md (VALID_TIERS in
+    known_values.py).
+    """
 
     tier: str = "review"
     preview: dict[str, Any] = field(default_factory=dict)  # e.g. {source, require_ack}
@@ -130,13 +131,9 @@ class ProjectValidationConfig:
 
 @dataclass
 class ProjectConfig:
-    """One entry in projects.yaml — WHAT the work is, per project.
-
-    The third config tier: system.yaml (HOW the platform runs) ->
-    fleet.yaml (WHO the bots are) -> projects.yaml (WHAT the work is and
-    what "done" requires). `repos` is the join key: sprint/runner closure
-    rules resolve a working repo to its project's validation tier.
-    """
+    """One entry in projects.yaml — the third config tier; see
+    documentation/projects-yaml-schema.md. `repos` is the join key mapping
+    work to this project's validation tier."""
 
     key: str  # dict key — slug, same charset as bot ids
     title: str
@@ -149,8 +146,14 @@ class ProjectConfig:
     # warn on them (metrics: lives here — reserved for the metrics plan).
     raw: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def env_slug(self) -> str:
+        """The PROJECT_TIER_<SLUG>/PROJECT_REPOS_<SLUG> env-name fragment.
 
-_PROJECT_KNOWN_KEYS = {"title", "repos", "mission_file", "validation"}
+        The one Python home for the kebab->ENV transform; later phases add
+        the bash twin in lib-common (first consumer: fleet-pulse gate_pending).
+        """
+        return self.key.upper().replace("-", "_")
 
 
 def _coerce_project(key: str, d: dict) -> ProjectConfig:
@@ -167,7 +170,7 @@ def _coerce_project(key: str, d: dict) -> ProjectConfig:
         repos=[str(r) for r in (d.get("repos") or [])],
         mission_file=d.get("mission_file"),
         validation=validation,
-        raw={k: val for k, val in d.items() if k not in _PROJECT_KNOWN_KEYS},
+        raw={k: val for k, val in d.items() if k not in PROJECT_KEYS},
     )
 
 
@@ -177,6 +180,8 @@ def load_projects(projects_yaml: Path) -> dict[str, ProjectConfig]:
         return {}
     with projects_yaml.open() as f:
         doc = yaml.safe_load(f)
+    if doc is None:
+        return {}  # an all-comments file is still an optional file
     if not isinstance(doc, dict) or "projects" not in doc:
         raise ValueError(f"{projects_yaml}: top-level key 'projects' missing")
     return {

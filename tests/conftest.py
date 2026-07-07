@@ -53,6 +53,18 @@ def _write_exec(path, content):
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def install_real_template(root: Path) -> None:
+    """Overwrite a test root's stub claude.md.j2 with the repo's real template.
+
+    The fleet_dir fixture ships a minimal stub; tests asserting real template
+    sections (Projects table, Fleet You Manage, …) install the real one.
+    """
+    (root / "templates").mkdir(exist_ok=True)
+    (root / "templates" / "claude.md.j2").write_text(
+        (Path(__file__).parent.parent / "templates" / "claude.md.j2").read_text()
+    )
+
+
 MINIMAL_FLEET_YAML = dedent("""\
     fleet:
       name: test-fleet
