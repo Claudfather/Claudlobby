@@ -871,20 +871,26 @@ class TestComposeHostTimers:
         svc_text = (timers_dir / "com.test.data-sweep.service").read_text()
         assert "data-sweep.sh --purge test-fleet" in svc_text
 
-    def test_fleet_units_carry_no_host_knobs(self, tmp_path):
-        # Guard: adding persistent/randomized_delay/env support must not
-        # change fleet units that don't declare them.
+    def test_fleet_units_knobs_match_declarations(self, tmp_path):
+        # Guard: persistent/randomized_delay appear in a fleet unit IFF the
+        # job declares them — undeclared jobs must not silently grow host
+        # knobs, and declared ones (creds-check jitter) must not lose them.
         from claudlobby.composer import compose_fleet_timers
 
         paths = self._paths(tmp_path)
         fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
-        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+        merged = _default_merged()
+        timers_dir = compose_fleet_timers(fleet, paths, merged)
         units = list(timers_dir.glob("*.timer"))
         assert units
         for unit in units:
+            job = unit.name.removeprefix("com.test.").removesuffix(".timer")
+            cfg = merged["jobs"].get(job, {})
             text = unit.read_text()
-            assert "Persistent=" not in text
-            assert "RandomizedDelaySec=" not in text
+            assert ("Persistent=" in text) == bool(cfg.get("persistent")), job
+            assert ("RandomizedDelaySec=" in text) == bool(
+                cfg.get("randomized_delay")
+            ), job
 
 
 # ---------------------------------------------------------------------------
