@@ -281,6 +281,28 @@ class TestMoveBotApply:
         assert "orphaned" in out
         assert str(src_bot) in out
         assert "rm -rf" in out
+        # The prospective plan-time note is dry-run-only — on --apply the
+        # post-apply warning is the single source, not duplicated here.
+        assert "will be LEFT" not in out
+
+    def test_dryrun_notes_orphan_when_no_cleanup(self, tmp_path: Path, capsys):
+        """Dry-run (no --cleanup-source) previews the orphan up front so the
+        operator can add the flag before applying. This note is dry-run-only;
+        the apply path relies on the post-apply warning instead."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+        src_bot = src_fleet / "runtime" / "bots" / "mybot"
+
+        rc = main(
+            ["--root", str(root), "move-bot", "mybot", "--to", "fleet-b", "--from", "fleet-a"]
+        )
+        assert rc == 0
+        assert src_bot.is_dir()  # dry-run mutates nothing
+        out = capsys.readouterr().out
+        assert "will be LEFT in place (orphaned)" in out
+        assert "Dry run" in out
 
     def test_enrollment_runs_spin_up_bot(self, tmp_path: Path):
         """spin-up-bot.sh is called and its exit code determines success."""

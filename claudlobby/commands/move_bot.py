@@ -229,13 +229,16 @@ def cmd_move_bot(args) -> int:
         print(f"  {i}. {step}")
     print()
 
-    if not cleanup:
-        print(
-            f"  Note: source dir will be LEFT in place (orphaned): {src_bot_dir}"
-            "\n        Pass --cleanup-source to remove it after the move.\n"
-        )
-
     if not apply:
+        # Dry-run only: preview the orphan up front so the operator can add
+        # --cleanup-source before applying. On a real --apply the post-apply
+        # warning owns this message instead — printing it here too would both
+        # duplicate it and fire prematurely if validation later aborts the move.
+        if not cleanup:
+            print(
+                f"  Note: source dir will be LEFT in place (orphaned): {src_bot_dir}"
+                "\n        Pass --cleanup-source to remove it after the move.\n"
+            )
         print("Dry run — pass --apply to execute.\n")
         return 0
 
