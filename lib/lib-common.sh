@@ -23,7 +23,7 @@
 #   stat_mtime         — portable file mtime (epoch seconds)
 #   sed_i              — portable in-place sed
 #   df_pcent           — portable disk usage percentage
-#   json_escape        — escape backslash + double-quote for JSON values
+#   json_escape        — JSON-string escaping incl. control chars (#530)
 #   debounce_notify    — fire-once notification with file-based marker
 #   debounce_clear     — clear a debounce marker for re-firing
 #   resolve_bots_dir   — fleet-aware runtime/bots path resolution
@@ -229,10 +229,22 @@ safe_mktemp() {
 # --- JSON helpers ------------------------------------------------------------
 
 # json_escape <string>
-# Escape backslashes and double quotes for safe embedding in JSON values.
-# Prints the escaped string to stdout.
+# Escape a value for safe embedding in a JSON string. Prints to stdout.
+# Fast path (the overwhelmingly common shape): backslash + double-quote via
+# sed. Values containing newline/CR/tab take the python3 path — sed is
+# line-oriented and cannot escape the newline it never sees, and a raw
+# newline splits a single-line JSONL ledger row, which the line-oriented
+# rotation then truncates into permanently invalid JSON (#530). json.dumps
+# produces exact JSON string escaping for every control character.
 json_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+    case "$1" in
+        *[$'\n\r\t']*)
+            printf '%s' "$1" | python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.stdin.read())[1:-1])'
+            ;;
+        *)
+            printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+            ;;
+    esac
 }
 
 # --- Task identity -------------------------------------------------------------
