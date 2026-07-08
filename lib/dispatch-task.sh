@@ -16,13 +16,23 @@
 # id-less: an id recorded but never transmitted would guarantee a
 # false-positive overdue, since the worker cannot echo what it never saw.
 #
-# Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by}
-# to state/dispatch-log.jsonl (self-rotated via rotate_jsonl_by_ts) so the
-# fleet-pulse watchdog can flag `overdue_dispatch` if no terminal [BOTREPORT]
-# (completed|failed|blocked) arrives by expected_by.
+# Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by,
+# claudron_hits} to state/dispatch-log.jsonl (self-rotated via
+# rotate_jsonl_by_ts) so the fleet-pulse watchdog can flag `overdue_dispatch`
+# if no terminal [BOTREPORT] (completed|failed|blocked) arrives by expected_by.
 # Manager identity is this bot's $BOT_ID; the deadline defaults to
 # $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can be
 # overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
+#
+# Claudron query-before preflight (plan P1e, fork F7) — env-knobbed, off by
+# default:
+#   CLAUDRON_QUERY_BEFORE=1  enable the preflight
+#   CLAUDRON_QUERY_LIMIT     max fleet-memory pointers to inject (default 3)
+# When enabled and the claudron CLI + CLAUDRON_VAULT_PATH resolve, the task
+# text gains a single-line "[fleet memory: <title> (<abs path>); ...]" prefix
+# of lookup pointers (titles + paths only, never note bodies — the worker
+# reads the files itself). claudron_hits in the ledger row records how many
+# pointers were injected ("" = preflight did not run, "0" = ran, no hits).
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,6 +88,61 @@ TASK="$*"
 # "does not exist" rather than the resolver's guard crashing this script.
 WORKER_SOCKET="$(tmux_socket_for_session "$WORKER_SESSION" 2>/dev/null || true)"
 
+# Fail before recording if the worker isn't there — no orphan ledger entries,
+# and no preflight subprocesses spent on a dead-session dispatch.
+if ! check_tmux_session "$WORKER_SESSION" "$WORKER_SOCKET"; then
+    echo "dispatch-task: session '$WORKER_SESSION' does not exist" >&2
+    exit 1
+fi
+
+# --- Claudron query-before preflight (plan P1e, fork F7) --------------------
+# Prepends compact fleet-memory pointers to the task before the envelope is
+# built, so both enveloped and raw-text dispatches carry them and the ledger
+# records the enriched task. The wedge must never block a dispatch: any
+# missing prerequisite, lookup failure, or unparseable output degrades to a
+# plain send. At the pinned claudron the CLI does not read
+# CLAUDRON_VAULT_PATH itself and a missing vault still exits 0, so the vault
+# is passed explicitly via --vault and stdout is parsed defensively.
+CLAUDRON_HITS=""
+_claudron_query_before() {
+    [ "${CLAUDRON_QUERY_BEFORE:-}" = "1" ] || return 0
+    [ -d "${CLAUDRON_VAULT_PATH:-}" ] || return 0
+    # The documented opt-in precondition (and the common no-op on
+    # claudron-less hosts); every failure past here is caught by the
+    # 2>/dev/null + return-0 net on the invocations themselves.
+    command -v claudron >/dev/null 2>&1 || return 0
+    local raw parsed pointers
+    # The whole task is one quoted query argument (lookup tokenizes
+    # internally; quoting avoids glob expansion of task text).
+    raw=$(claudron --vault "$CLAUDRON_VAULT_PATH" lookup --json \
+        --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$TASK" 2>/dev/null) || return 0
+    # Emits "<count>\t<title (abs path); ...>". Pipes in titles/paths are
+    # replaced with "/" so the pointer segment cannot break the
+    # pipe-delimited [BOTCOMMAND] envelope.
+    parsed=$(printf '%s' "$raw" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+results = data.get("results") or []
+root = sys.argv[1].rstrip("/")
+pointers = []
+for r in results:
+    title = str(r.get("title", "")).replace("|", "/").strip()
+    path = str(r.get("path", "")).replace("|", "/").strip()
+    if title and path:
+        pointers.append("%s (%s/%s)" % (title, root, path))
+sys.stdout.write("%d\t%s" % (len(pointers), "; ".join(pointers)))
+' "$CLAUDRON_VAULT_PATH" 2>/dev/null) || return 0
+    CLAUDRON_HITS="${parsed%%$'\t'*}"
+    pointers="${parsed#*$'\t'}"
+    if [ -n "$pointers" ]; then
+        TASK="[fleet memory: $pointers] $TASK"
+    fi
+}
+_claudron_query_before
+
 TASK_ID=""
 if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] \
    || [ -n "$DISPATCH_REF" ] || [ -n "$DISPATCH_WORKSTREAM" ]; then
@@ -91,12 +156,6 @@ if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORI
     DISPATCH_MSG="$DISPATCH_MSG | task:$TASK_ID"
 else
     DISPATCH_MSG="$TASK"
-fi
-
-# Fail before recording if the worker isn't there — no orphan ledger entries.
-if ! check_tmux_session "$WORKER_SESSION" "$WORKER_SOCKET"; then
-    echo "dispatch-task: session '$WORKER_SESSION' does not exist" >&2
-    exit 1
 fi
 
 if [ -n "$DEADLINE_MIN" ]; then
@@ -119,11 +178,12 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 safe_task=$(json_escape "$TASK")
 
 _append_ledger() {
-    # Schema-uniform rows: task_id/workstream always emitted (empty = absent,
-    # matching the report ledger's always-emit convention; every consumer
-    # treats "" as falsy).
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" >> "$LEDGER"
+    # Schema-uniform rows: task_id/workstream/claudron_hits always emitted
+    # (empty = absent, matching the report ledger's always-emit convention;
+    # every consumer treats "" as falsy). claudron_hits is digits-or-empty by
+    # construction (the preflight parser prints a count), so no escaping.
+    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s"}\n' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" "$CLAUDRON_HITS" >> "$LEDGER"
     rotate_jsonl_by_ts "$LEDGER"
 }
 with_lock "$LEDGER.lock" _append_ledger
