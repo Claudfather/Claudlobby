@@ -15,8 +15,8 @@
 #   --events          Include data/events/*.jsonl (off by default — can be noisy)
 #
 # Examples:
-#   tail-fleet.sh --fleet crog-eng-team
-#   tail-fleet.sh --fleet crog-eng-team --grep ERROR
+#   tail-fleet.sh --fleet my-fleet
+#   tail-fleet.sh --fleet my-fleet --grep ERROR
 #   tail-fleet.sh --bot astrid --lines 50 --events
 set -euo pipefail
 

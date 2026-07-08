@@ -53,6 +53,57 @@ def _write_exec(path, content):
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def load_lib_module(name: str):
+    """Import a lib/*.py script as a module (they have no package)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        name.replace("-", "_"), Path(__file__).parent.parent / "lib" / f"{name}.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def write_jsonl(path: Path, rows: list) -> None:
+    import json
+
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def dispatch_row(bot, dispatched_at, expected_by, task_id=None, **extra):
+    """Ledger-schema fixture for dispatch-log.jsonl rows (task_id optional)."""
+    row = {
+        "ts": "2026-05-27T10:00:00Z",
+        "manager": "lead",
+        "bot": bot,
+        "task": "do x",
+        "dispatched_at": dispatched_at,
+        "expected_by": expected_by,
+    }
+    if task_id is not None:
+        row["task_id"] = task_id
+    row.update(extra)
+    return row
+
+
+def report_row(bot, ts, status="completed", task_id=None, **extra):
+    """Ledger-schema fixture for report-back.jsonl rows (task_id optional)."""
+    row = {
+        "ts": ts,
+        "bot": bot,
+        "status": status,
+        "summary": "done",
+        "pr_url": "",
+        "issues": "",
+        "skill": "",
+    }
+    if task_id is not None:
+        row["task_id"] = task_id
+    row.update(extra)
+    return row
+
+
 def load_test_fleet(fleet_dir: Path):
     """load_fleet against a fleet_dir fixture, returning just the FleetConfig."""
     from claudlobby.config import load_fleet

@@ -96,7 +96,7 @@ touch "$BOT_DIR/data/.last-tool-call"
 
 # A task was dispatched and is already past its deadline, with no report.
 now=$(date +%s)
-printf '{"ts":"2026-05-27T10:00:00Z","manager":"%s","bot":"%s","task":"do x","dispatched_at":%s,"expected_by":%s}\n' \
+printf '{"ts":"2026-05-27T10:00:00Z","manager":"%s","bot":"%s","task_id":"t-1-aaaa","task":"do x","dispatched_at":%s,"expected_by":%s}\n' \
     "$MGR" "$BOT" "$((now - 600))" "$((now - 10))" > "$ROOT/state/dispatch-log.jsonl"
 
 sleep 2  # ensure activity gap > threshold (1s)
@@ -134,6 +134,20 @@ printf '{"ts":"t","manager":"%s","bot":"%s","task":"x","dispatched_at":%s,"expec
 aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$aged_log" "$ROOT/state/report-back.jsonl" "$now" 2>/dev/null || true)
 [ -z "$aged_out" ] && r=yes || r=no
 check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
+
+# ===========================================================================
+# Task-id end-to-end (goal-aware plan P4) — the dispatch row seeded above
+# carries task_id t-1-aaaa; the REAL fleet-pulse run consumed it. Assert the
+# id made it through the pipeline: into the emitted overdue event, and into
+# the manager nudge with the self-heal echo instruction. (Join-matrix unit
+# semantics live in tests/test_dispatch_overdue.py — not re-run here.)
+echo ""
+echo "=== validate task-id end-to-end (P4: event + nudge carry the id) ==="
+[ -n "$events_file" ] && grep -q '"type":"overdue_dispatch"' "$events_file" \
+    && grep '"type":"overdue_dispatch"' "$events_file" | grep -q '"task_id":"t-1-aaaa"' && r=yes || r=no
+check "overdue_dispatch event carries the dispatch task_id" "$r"
+printf '%s' "$mgr_pane" | grep -q 'report-back --task' && printf '%s' "$mgr_pane" | grep -q 't-1-aaaa' && r=yes || r=no
+check "manager nudge names the open id (self-heal echo instruction)" "$r"
 
 # ===========================================================================
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.

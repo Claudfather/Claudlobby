@@ -21,14 +21,22 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
 
-MANAGER_SESSION="${MANAGER_TMUX:-claude-bot}"
-# The manager's private tmux server socket: prefer the composed field, else
-# reverse-look-up from its session name among the sibling bots.
-MANAGER_SOCKET="$(resolve_peer_socket "${MANAGER_TMUX_SOCKET:-}" "$MANAGER_SESSION")"
+# Explicit arg guard FIRST (before any resolution work) — NOT bare $1/$2/$3
+# under set -u: macOS bash 3.2 exits 0 through lib-common's EXIT trap (its
+# `|| true` cleanup tail resets the reported status), masking usage errors.
+if [ $# -lt 3 ]; then
+    echo "Usage: report-back.sh <bot> <status> <summary> [extras...]" >&2
+    exit 1
+fi
 BOT="$1"
 STATUS="$2"
 SUMMARY="$3"
 shift 3
+
+MANAGER_SESSION="${MANAGER_TMUX:-claude-bot}"
+# The manager's private tmux server socket: prefer the composed field, else
+# reverse-look-up from its session name among the sibling bots.
+MANAGER_SOCKET="$(resolve_peer_socket "${MANAGER_TMUX_SOCKET:-}" "$MANAGER_SESSION")"
 
 # Validate status against allowed set
 case "$STATUS" in
@@ -45,6 +53,7 @@ SUMMARY="$(sanitize_tmux_input "$SUMMARY")"
 # Parse optional flags and positional extras
 PROGRESS=""
 ARTIFACTS=""
+TASK_ID=""
 POSITIONAL_EXTRAS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -53,6 +62,7 @@ while [ $# -gt 0 ]; do
         --pr)        POSITIONAL_EXTRAS+=("pr:$2"); shift 2 ;;
         --issues)    POSITIONAL_EXTRAS+=("issues:$2"); shift 2 ;;
         --skill)     POSITIONAL_EXTRAS+=("skill:$2"); shift 2 ;;
+        --task)      TASK_ID="$2"; shift 2 ;;
         *)           POSITIONAL_EXTRAS+=("$1"); shift ;;
     esac
 done
@@ -63,6 +73,9 @@ for arg in "${POSITIONAL_EXTRAS[@]+"${POSITIONAL_EXTRAS[@]}"}"; do
     EXTRAS="$EXTRAS | $arg"
 done
 [ -n "$ARTIFACTS" ] && EXTRAS="$EXTRAS | artifact:$ARTIFACTS"
+# Echo the dispatch envelope's task id — the overdue watchdog's join key
+# (semantics: overdue_all in dispatch-overdue.py).
+[ -n "$TASK_ID" ] && EXTRAS="$EXTRAS | task:$TASK_ID"
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
@@ -99,16 +112,9 @@ _emit_ledger_event() {
     safe_summary=$(json_escape "$SUMMARY")
 
     _write_and_rotate() {
-        printf '{"ts":"%s","bot":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s","progress":"%s","artifact":"%s"}\n' \
-            "$ts" "$BOT" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" >> "$ledger"
-
-        # Rotate: keep only last 7 days of entries (consistent with fleet-pulse reap).
-        local cutoff
-        cutoff=$(date_relative "-7 days" "%Y-%m-%dT%H:%M:%SZ") 2>/dev/null || return 0
-        local tmp
-        tmp=$(safe_mktemp)
-        awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\""); if (a[1] >= cutoff) print }' "$ledger" > "$tmp" \
-            && mv "$tmp" "$ledger"
+        printf '{"ts":"%s","bot":"%s","task_id":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s","progress":"%s","artifact":"%s"}\n' \
+            "$ts" "$BOT" "$(json_escape "$TASK_ID")" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" >> "$ledger"
+        rotate_jsonl_by_ts "$ledger"
     }
     with_lock "$ledger.lock" _write_and_rotate
 }

@@ -54,7 +54,7 @@ UNIT_DIR="$HOME/.config/systemd/user"
 mkdir -p "$UNIT_DIR" "$BOT_DIR/logs"
 
 # --- Cleanup stale units ---------------------------------------------------
-# After a service_prefix rename (e.g. ari.service → com.crog.eng.ari.service),
+# After a service_prefix rename (e.g. ari.service → com.example.eng.ari.service),
 # old units linger in the bot dir and in systemd. Stop, disable, and remove
 # any .service files that don't match the current BOT_SERVICE name.
 

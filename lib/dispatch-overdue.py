@@ -88,7 +88,7 @@ def overdue(
     report_ledger: str,
     now: int,
     max_age: int = DEFAULT_OVERDUE_MAX_AGE_S,
-) -> list[tuple[int, int, int]]:
+) -> list[tuple[int, int, int, str]]:
     """Single-bot variant — delegates to overdue_all and filters."""
     return overdue_all(dispatch_log, report_ledger, now, max_age).get(bot.lower(), [])
 
@@ -98,21 +98,42 @@ def overdue_all(
     report_ledger: str,
     now: int,
     max_age: int = DEFAULT_OVERDUE_MAX_AGE_S,
-) -> dict[str, list[tuple[int, int, int]]]:
-    """Return overdue dispatches for ALL bots, reading each file once."""
+) -> dict[str, list[tuple[int, int, int, str]]]:
+    """Return overdue dispatches for ALL bots, reading each file once.
+
+    Each entry is (dispatched_at, expected_by, elapsed_past_deadline,
+    task_id) — task_id is "-" for legacy id-less rows, so shell consumers
+    can always read a stable 4th field.
+
+    Join matrix (goal-aware plan P4): an id'd dispatch is closed ONLY by a
+    terminal report echoing the same task_id — an id-less terminal report
+    never closes it (LLM echo non-compliance is normal, and blanket-closing
+    was exactly the #447 bug class). An id-less dispatch — raw-mode sends
+    mint these permanently, not just pre-migration rows — keeps the
+    (bot, ts >= dispatched_at) semantics, and any terminal report — id'd or
+    not — satisfies it. No flag-day.
+    """
     dispatches = _load_jsonl(dispatch_log)
     reports = _load_jsonl(report_ledger)
 
-    # Build per-bot report epochs index
+    # Per-bot terminal-report epochs (legacy join) + terminal (bot, id) set.
+    # The id join is scoped by bot exactly like the legacy join: a peer
+    # echoing (or mishearing) another bot's task id must not silence the
+    # watchdog on the real owner's still-open dispatch (#518 review).
     report_index: dict[str, list[int]] = {}
+    reported_ids: set[tuple[str, str]] = set()
     for r in reports:
+        if r.get("status") not in _TERMINAL:
+            continue
         bot_key = str(r.get("bot", "")).lower()
-        if r.get("status") in _TERMINAL:
-            ep = _iso_to_epoch(r.get("ts", ""))
-            if ep is not None:
-                report_index.setdefault(bot_key, []).append(ep)
+        tid = r.get("task_id")
+        if tid:
+            reported_ids.add((bot_key, str(tid)))
+        ep = _iso_to_epoch(r.get("ts", ""))
+        if ep is not None:
+            report_index.setdefault(bot_key, []).append(ep)
 
-    out: dict[str, list[tuple[int, int, int]]] = {}
+    out: dict[str, list[tuple[int, int, int, str]]] = {}
     for d in dispatches:
         bot_key = str(d.get("bot", "")).lower()
         exp, da = d.get("expected_by"), d.get("dispatched_at")
@@ -120,7 +141,11 @@ def overdue_all(
             continue
         if now <= exp:
             continue
-        if any(e >= da for e in report_index.get(bot_key, [])):
+        tid = d.get("task_id")
+        if tid:
+            if (bot_key, str(tid)) in reported_ids:
+                continue
+        elif any(e >= da for e in report_index.get(bot_key, [])):
             continue
         # Expiry cap (#460): once a still-open dispatch is older than max_age, the
         # watchdog stops flagging it so fleet-pulse quits re-emitting every cycle.
@@ -128,8 +153,22 @@ def overdue_all(
         # expired. max_age <= 0 disables the cap.
         if max_age > 0 and (now - da) > max_age:
             continue
-        out.setdefault(bot_key, []).append((da, exp, now - exp))
+        out.setdefault(bot_key, []).append(
+            (da, exp, now - exp, str(tid) if tid else "-")
+        )
     return out
+
+
+def missing_id_count(report_ledger: str) -> int:
+    """Terminal reports carrying no task_id. NOTE: while raw (id-less)
+    dispatch remains a legitimate mode, this counts raw-mode reports AND
+    echo erosion together — the P7 brief must contextualize it (or refine
+    to id'd-dispatches-that-aged-out) before treating it as pure erosion."""
+    return sum(
+        1
+        for r in _load_jsonl(report_ledger)
+        if r.get("status") in _TERMINAL and not r.get("task_id")
+    )
 
 
 def main() -> int:
@@ -147,8 +186,8 @@ def main() -> int:
             else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
         )
         for bot_id, entries in sorted(overdue_all(dlog, rlog, now, max_age).items()):
-            for da, exp, elapsed in entries:
-                print(f"{bot_id} {da} {exp} {elapsed}")
+            for da, exp, elapsed, tid in entries:
+                print(f"{bot_id} {da} {exp} {elapsed} {tid}")
         return 0
 
     if len(sys.argv) < 4:
@@ -160,8 +199,8 @@ def main() -> int:
         if len(sys.argv) > 4
         else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     )
-    for da, exp, elapsed in overdue(bot, dlog, rlog, now, max_age):
-        print(f"{da} {exp} {elapsed}")
+    for da, exp, elapsed, tid in overdue(bot, dlog, rlog, now, max_age):
+        print(f"{da} {exp} {elapsed} {tid}")
     return 0
 
 

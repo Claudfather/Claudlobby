@@ -22,7 +22,7 @@ Managers send structured commands to workers via tmux:
 Example:
 
 ```
-[BOTCOMMAND] ari | task | "Run security audit on storydump" | repo:storydump | report:clog
+[BOTCOMMAND] ari | task | "Run security audit on repo-a" | repo:repo-a | report:lead
 ```
 
 Workers parse `[BOTCOMMAND]`, ack within 5 seconds, then execute. If the manager receives no ack within 10 seconds, it retries once. A second silence triggers escalation to the human.
@@ -81,6 +81,12 @@ Report-back:
 ```bash
 $CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> progress "Acked: <summary>"
 ```
+
+**Echo the task id.** If the `[BOTCOMMAND]` carried a `task:<id>` field, EVERY
+report-back for that task — this ack, progress updates, and the terminal
+report — must pass it through: `--task <id>`. The overdue watchdog closes
+your dispatch by that id; a report without it does not count for an id'd
+task, and the manager will nudge you to re-report with the id.
 
 **This step happens BEFORE any other tool call.** Before reading files, before spawning subagents, before git operations. The ack is the first thing.
 

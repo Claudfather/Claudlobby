@@ -80,7 +80,7 @@ bots on a single host.
 lib/fleet-memory-check.sh
 
 # With a fleet overlay
-lib/fleet-memory-check.sh --fleet crog-eng-team
+lib/fleet-memory-check.sh --fleet my-fleet
 
 # Custom threshold (warn at 85% instead of 80%)
 lib/fleet-memory-check.sh --threshold 85

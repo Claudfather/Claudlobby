@@ -235,6 +235,40 @@ json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# --- Task identity -------------------------------------------------------------
+
+# mint_task_id
+# THE task-id mint, shared by every work-admission entry point (dispatch-task,
+# and later the runner/manager admission paths). Format t-<epochsecs>-<4hex> —
+# pinned grammar ^t-[0-9]+-[0-9a-f]{4}$: collision-safe without coordination,
+# mintable offline, greppable in panes and ledgers, and survives
+# sanitize_tmux_input untouched (plain [a-z0-9-]). The ledger row that records
+# the id is the SSOT; the id is echoed through [BOTCOMMAND] -> [BOTREPORT].
+# No fallback branch: /dev/urandom is POSIX-guaranteed on target platforms,
+# and under set -e a pipeline failure would abort the caller loudly anyway
+# (a fallback line after a failed assignment is unreachable under -e).
+mint_task_id() {
+    printf 't-%s-%s\n' "$(date +%s)" "$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
+}
+
+# rotate_jsonl_by_ts <ledger>
+# Shared self-rotation for ts-keyed JSONL ledgers (dispatch-log.jsonl,
+# report-back.jsonl): keep entries newer than OBSERVABILITY_REAP_DAYS
+# (default 7). Call inside the caller's with_lock critical section.
+# CONSTRAINT: keep DISPATCH_OVERDUE_MAX_AGE_S (default 24h) BELOW this
+# window — a max_age raised past it would let rotation silently prune a
+# still-alerting dispatch row.
+rotate_jsonl_by_ts() {
+    local ledger="$1"
+    local reap_days="${OBSERVABILITY_REAP_DAYS:-7}"
+    local cutoff
+    cutoff=$(date_relative "-${reap_days} days" "%Y-%m-%dT%H:%M:%SZ") || return 0
+    local tmp
+    tmp=$(safe_mktemp)
+    awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\"") ; if (a[1] >= cutoff) print }' "$ledger" > "$tmp" \
+        && mv "$tmp" "$ledger"
+}
+
 # --- tmux helpers ------------------------------------------------------------
 
 # Strip control chars and escape sequences dangerous in tmux send-keys.

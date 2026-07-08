@@ -24,7 +24,7 @@ Per-phase status markers with evidence are inline below. `status: partially-comp
 
 > **For agentic workers / reviewers:** This is a `/forge`-style PLAN. The **Decision Forks** below are **OPEN** pending human ratification (`[FORK-LOCK F<N>]` comments on the PR). **Do not implement until the forks that gate a phase are locked.** Steps use checkbox (`- [ ]`) syntax. Sizing is **S/M/L per phase — no calendar estimates** (fleet convention).
 >
-> **Fleet-specific execution detail** (concrete repo list, exact sunset paths, cold-start seeding, briefing re-wire) lives in the cross-linked fleet planning doc: `crog-eng-team/shared/planning/active/2026-06-12-codify-rolling-code-audit-sweep.md`. This committed doc is the **generic, reusable design** any claudlobby deployment can adopt.
+> **Fleet-specific execution detail** (concrete repo list, exact sunset paths, cold-start seeding, briefing re-wire) lives in the cross-linked fleet planning doc: `<fleet>/shared/planning/active/2026-06-12-codify-rolling-code-audit-sweep.md` (in the fleet overlay vault). This committed doc is the **generic, reusable design** any claudlobby deployment can adopt.
 
 **Goal:** Replace the hand-rolled, fragile rolling code-audit sweep with a first-class, **opt-in**, composer-integrated claudlobby feature whose staleness signal is **authoritative** (GitHub `auto-audit` issue timestamps), whose logging reuses the existing **events-JSONL** pattern, and whose nightly trigger is installed via the existing **composer → systemd/launchd timer** mechanism — then delete the hand-rolled tooling cleanly with no shims.
 

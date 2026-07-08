@@ -7,18 +7,22 @@
 #   --repo NAME        Target repo (adds repo:<NAME> to envelope)
 #   --priority LEVEL   Priority level (adds priority:<LEVEL> to envelope)
 #   --ref URL          Reference URL (adds ref:<URL> to envelope)
+#   --workstream ID    Workstream this task advances (envelope + ledger)
+#   --botcommand       Force the [BOTCOMMAND] envelope with no other fields
 #
-# When --repo, --priority, or --ref is given, the task text is wrapped in a
-# structured [BOTCOMMAND] envelope:
-#   [BOTCOMMAND] <caller> | task | <summary> | repo:<repo> | priority:<pri> | ref:<url>
-# When none of those flags are passed, the raw task text is sent as-is.
+# Envelope sends MINT a task id (mint_task_id, lib-common), record it in the
+# ledger row AND transmit it as `task:<id>` — join semantics live in
+# dispatch-overdue.py (overdue_all docstring). Raw-text sends (no flags) stay
+# id-less: an id recorded but never transmitted would guarantee a
+# false-positive overdue, since the worker cannot echo what it never saw.
 #
-# Appends {ts,manager,bot,task,dispatched_at,expected_by} to
-# state/dispatch-log.jsonl so the fleet-pulse watchdog can flag the task
-# `overdue_dispatch` if no terminal [BOTREPORT] (completed|failed|blocked)
-# arrives by expected_by. Manager identity is this bot's $BOT_ID; the deadline
-# defaults to $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can
-# be overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
+# Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by}
+# to state/dispatch-log.jsonl (self-rotated via rotate_jsonl_by_ts) so the
+# fleet-pulse watchdog can flag `overdue_dispatch` if no terminal [BOTREPORT]
+# (completed|failed|blocked) arrives by expected_by.
+# Manager identity is this bot's $BOT_ID; the deadline defaults to
+# $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can be
+# overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,19 +34,40 @@ DEADLINE_MIN=""
 DISPATCH_REPO=""
 DISPATCH_PRIORITY=""
 DISPATCH_REF=""
+DISPATCH_WORKSTREAM=""
+FORCE_ENVELOPE=""
+
+# _flag_val <flag> <value?> — explicit missing-value guard (NOT ${2:?}: see
+# the arg-guard note below — expansion faults exit 0 through the EXIT trap).
+_flag_val() {
+    if [ -z "${2:-}" ]; then
+        echo "dispatch-task: $1 needs a value" >&2
+        exit 1
+    fi
+    printf '%s' "$2"
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --deadline-min) DEADLINE_MIN="${2:?--deadline-min needs a value}"; shift 2 ;;
-        --repo)         DISPATCH_REPO="${2:?--repo needs a value}"; shift 2 ;;
-        --priority)     DISPATCH_PRIORITY="${2:?--priority needs a value}"; shift 2 ;;
-        --ref)          DISPATCH_REF="${2:?--ref needs a value}"; shift 2 ;;
+        --deadline-min) DEADLINE_MIN=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --repo)         DISPATCH_REPO=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --priority)     DISPATCH_PRIORITY=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --ref)          DISPATCH_REF=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --workstream)   DISPATCH_WORKSTREAM=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --botcommand)   FORCE_ENVELOPE=1; shift ;;
         -*)             echo "dispatch-task: unknown flag '$1'" >&2; exit 1 ;;
         *)              break ;;
     esac
 done
 
-WORKER_SESSION="${1:?Usage: dispatch-task.sh [flags] <worker-session> <task...>}"
+# Explicit arg guard — NOT ${1:?}: under macOS bash 3.2 an expansion fault
+# exits 0 through lib-common's EXIT trap (its `|| true` cleanup tail resets
+# the reported status), silently masking usage errors.
+if [ $# -lt 1 ]; then
+    echo "Usage: dispatch-task.sh [flags] <worker-session> <task...>" >&2
+    exit 1
+fi
+WORKER_SESSION="$1"
 shift
 TASK="$*"
 [ -n "$TASK" ] || { echo "dispatch-task: empty task" >&2; exit 1; }
@@ -53,12 +78,17 @@ TASK="$*"
 # "does not exist" rather than the resolver's guard crashing this script.
 WORKER_SOCKET="$(tmux_socket_for_session "$WORKER_SESSION" 2>/dev/null || true)"
 
-if [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] || [ -n "$DISPATCH_REF" ]; then
+TASK_ID=""
+if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] \
+   || [ -n "$DISPATCH_REF" ] || [ -n "$DISPATCH_WORKSTREAM" ]; then
+    TASK_ID=$(mint_task_id)
     CALLER="${BOT_NAME:-${MANAGER_TMUX:-unknown}}"
     DISPATCH_MSG="[BOTCOMMAND] $CALLER | task | $TASK"
-    [ -n "$DISPATCH_REPO" ]     && DISPATCH_MSG="$DISPATCH_MSG | repo:$DISPATCH_REPO"
-    [ -n "$DISPATCH_PRIORITY" ] && DISPATCH_MSG="$DISPATCH_MSG | priority:$DISPATCH_PRIORITY"
-    [ -n "$DISPATCH_REF" ]      && DISPATCH_MSG="$DISPATCH_MSG | ref:$DISPATCH_REF"
+    [ -n "$DISPATCH_REPO" ]       && DISPATCH_MSG="$DISPATCH_MSG | repo:$DISPATCH_REPO"
+    [ -n "$DISPATCH_PRIORITY" ]   && DISPATCH_MSG="$DISPATCH_MSG | priority:$DISPATCH_PRIORITY"
+    [ -n "$DISPATCH_REF" ]        && DISPATCH_MSG="$DISPATCH_MSG | ref:$DISPATCH_REF"
+    [ -n "$DISPATCH_WORKSTREAM" ] && DISPATCH_MSG="$DISPATCH_MSG | workstream:$DISPATCH_WORKSTREAM"
+    DISPATCH_MSG="$DISPATCH_MSG | task:$TASK_ID"
 else
     DISPATCH_MSG="$TASK"
 fi
@@ -89,8 +119,12 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 safe_task=$(json_escape "$TASK")
 
 _append_ledger() {
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task":"%s","dispatched_at":%s,"expected_by":%s}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$safe_task" "$now_epoch" "$expected_by" >> "$LEDGER"
+    # Schema-uniform rows: task_id/workstream always emitted (empty = absent,
+    # matching the report ledger's always-emit convention; every consumer
+    # treats "" as falsy).
+    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s}\n' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" >> "$LEDGER"
+    rotate_jsonl_by_ts "$LEDGER"
 }
 with_lock "$LEDGER.lock" _append_ledger
 

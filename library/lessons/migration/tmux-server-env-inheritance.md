@@ -8,12 +8,12 @@ title: "Lesson: tmux's one-server-per-user rule and how it affects multi-bot env
 
 ## Why this matters for fleets
 
-Imagine two bots, `clog` and `kev`, each with their own `.env` containing distinct `TELEGRAM_BOT_TOKEN` values. Each one's `start-bot.sh`:
+Imagine two bots, `bot-a` and `bot-b`, each with their own `.env` containing distinct `TELEGRAM_BOT_TOKEN` values. Each one's `start-bot.sh`:
 
 1. Sources its own `.env` → `TELEGRAM_BOT_TOKEN` is in start-bot.sh's process env.
 2. Runs `tmux new-session -d -s <bot> "claude ..."`.
 
-If `clog`'s start-bot.sh runs **first** on a fresh boot, the tmux server is created with clog's env (clog's `TELEGRAM_BOT_TOKEN`). Later when kev's start-bot.sh runs, the server is already running — kev's `new-session` reuses it. The new session inherits **clog's** env. Kev's claude posts to Telegram under `@crogs_assistant_bot`. Same surface for any inherited identity var. (Real bug observed 2026-05-04 — all 7 worker bots posted as the manager.)
+If `bot-a`'s start-bot.sh runs **first** on a fresh boot, the tmux server is created with bot-a's env (bot-a's `TELEGRAM_BOT_TOKEN`). Later when bot-b's start-bot.sh runs, the server is already running — bot-b's `new-session` reuses it. The new session inherits **bot-a's** env. Bot-b's claude posts to Telegram under bot-a's handle. Same surface for any inherited identity var. (Real bug observed 2026-05-04 — all 7 worker bots posted as the manager.)
 
 ## The fix that works (PR #29)
 

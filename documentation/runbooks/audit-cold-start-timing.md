@@ -15,7 +15,7 @@ Empirical profiling of fleet cold start. All numbers measured on production hard
 | Sequential read | ~3.6 GB/s (page cache; raw card ~90-100 MB/s typical) |
 | Kernel | 6.12.75+rpt-rpi-2712 PREEMPT |
 
-At steady state with 8 crog-eng-team bots + 2 tl-enterprises bots running:
+At steady state with 8 fleet-a bots + 2 fleet-b bots running:
 - **RAM used:** 7.7 Gi / 15 Gi (51%)
 - **Claude processes:** ~11, totaling ~5.1 GB RSS
 - **Node/MCP processes:** ~21, totaling ~1.1 GB RSS
@@ -91,7 +91,7 @@ The `sleep 5` was a flat 5-second penalty on every start. It fired after the rem
 
 - Cache location: `~/.cache/uv/`
 - Cache size: **3.2 GB**
-- Not currently used by crog-eng-team bots (only by tl-enterprises)
+- Not currently used by fleet-a bots (only by fleet-b)
 
 ### Cache risk
 

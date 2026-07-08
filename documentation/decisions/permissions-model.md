@@ -273,8 +273,8 @@ Used for sibling bot isolation (deny reading other bots' dirs):
 ```json
 {
   "deny": [
-    "Read(/home/crog/claudlobby/local/fleet/runtime/bots/sibling-a/**)",
-    "Read(/home/crog/claudlobby/local/fleet/runtime/bots/sibling-b/**)"
+    "Read(/home/user/claudlobby/local/fleet/runtime/bots/sibling-a/**)",
+    "Read(/home/user/claudlobby/local/fleet/runtime/bots/sibling-b/**)"
   ]
 }
 ```

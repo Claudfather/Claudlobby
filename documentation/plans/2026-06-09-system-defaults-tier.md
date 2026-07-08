@@ -349,22 +349,22 @@ For each timer in `system_defaults.yaml`'s `fleet_timers`:
 | `runtime/fleet/timers/<prefix>.<name>.timer` | systemd timer unit |
 | `runtime/fleet/timers/<prefix>.<name>.plist` | launchd LaunchAgent |
 
-Example for fleet-pulse with `service_prefix=com.crog.eng`:
+Example for fleet-pulse with `service_prefix=com.example.eng`:
 
 ```ini
-# com.crog.eng.fleet-pulse.service
+# com.example.eng.fleet-pulse.service
 [Unit]
-Description=claudlobby fleet-pulse (crog-eng-team)
+Description=claudlobby fleet-pulse (my-fleet)
 
 [Service]
 Type=oneshot
-Environment=CLAUDLOBBY_ROOT=/home/crog/claudlobby
-Environment=CLAUDLOBBY_FLEET=crog-eng-team
-ExecStart=/home/crog/claudlobby/lib/fleet-pulse.sh crog-eng-team
+Environment=CLAUDLOBBY_ROOT=/home/user/claudlobby
+Environment=CLAUDLOBBY_FLEET=my-fleet
+ExecStart=/home/user/claudlobby/lib/fleet-pulse.sh my-fleet
 
-# com.crog.eng.fleet-pulse.timer
+# com.example.eng.fleet-pulse.timer
 [Unit]
-Description=claudlobby fleet-pulse timer (crog-eng-team) -- tick every 300s
+Description=claudlobby fleet-pulse timer (my-fleet) -- tick every 300s
 
 [Timer]
 OnBootSec=300

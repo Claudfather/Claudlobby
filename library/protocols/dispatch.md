@@ -31,6 +31,8 @@ Manager → worker via the socket-aware `lib/dispatch.sh` helper (each bot runs 
 | `report:<target>` | Bot name or channel | Where to send the `[BOTREPORT]` |
 | `priority:<level>` | `high` / `normal` / `low` | Task priority |
 | `ref:<url>` | Issue or PR URL | Originating issue or context link |
+| `workstream:<ws-id>` | Workstream id | Registry entry this task advances |
+| `task:<task-id>` | `t-<epoch>-<hex4>` | **Task identity** — minted by `dispatch-task.sh`, recorded in the dispatch ledger. The worker MUST echo it in every `[BOTREPORT]` for this task (`report-back.sh --task <id>`): the overdue watchdog joins on it, and an id-less report can never close an id'd dispatch. |
 
 ### Examples
 
@@ -75,7 +77,7 @@ $CLAUDLOBBY_ROOT/lib/dispatch.sh <worker> '[BOTCOMMAND] <manager> | task | <summ
 Full example:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on storydump | repo:storydump | priority:high | ref:https://github.com/org/storydump/issues/99'
+$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on repo-a | repo:repo-a | priority:high | ref:https://github.com/org/repo-a/issues/99'
 ```
 
 `dispatch.sh` prepends `set +H;` itself (disabling bash history expansion, which silently mangles `!` in prompts), sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
@@ -94,7 +96,14 @@ After dispatch, monitor: capture the worker's pane after ~2-3 min if you haven't
 
 ## Tracked dispatch & the overdue watchdog
 
-For tasks you want tracked, dispatch via `lib/dispatch-task.sh <worker> <task…>` instead of raw `send-keys`. It records the dispatch (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) to `state/dispatch-log.jsonl`, then sends. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself.
+For tasks you want tracked, dispatch via `lib/dispatch-task.sh` instead of raw `send-keys` — and pass at least `--botcommand` (or any envelope flag: `--repo`, `--priority`, `--ref`, `--workstream`) so the send mints a task id:
+
+```bash
+$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --botcommand <worker> "<task>"
+$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> <worker> "<task>"
+```
+
+Envelope sends mint a `task:<id>`, record it (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) to `state/dispatch-log.jsonl`, and transmit it — the overdue watchdog then joins on identity, and the worker's terminal report closes exactly that task. A bare `dispatch-task.sh <worker> <task…>` still works but stays id-less (matched by bot+time, one report closes all open dispatches for that bot) — prefer the id-minting form for anything you want individually tracked. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself.
 
 When you get an `overdue_dispatch` alert: check the worker (cross-reference `activity_stuck` — it may be hung, see `fleet-observability`). Then recover it, re-dispatch/reassign if it's wedged or mis-scoped, or escalate to the human. The watchdog tells you *something is overdue*; the call on what to do is yours. A worker's terminal report closes the dispatch automatically — no manual bookkeeping.
 
