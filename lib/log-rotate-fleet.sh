@@ -6,8 +6,8 @@
 #
 # Usage:
 #   log-rotate-fleet.sh [--keep N] [--fleet <name>] [<name>]
-#   log-rotate-fleet.sh --keep 200 --fleet crog
-#   log-rotate-fleet.sh crog          # composed-timer form (positional fleet)
+#   log-rotate-fleet.sh --keep 200 --fleet my-fleet
+#   log-rotate-fleet.sh my-fleet      # composed-timer form (positional fleet)
 #
 # Without --fleet, rotates logs for ALL fleets under local/.
 # Defaults to keeping the last 500 lines per file.

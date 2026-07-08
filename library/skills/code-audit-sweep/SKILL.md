@@ -20,7 +20,7 @@ exists to kill.
 
 ## Arguments
 
-`$ARGUMENTS` is `<org/repo> <audit-type>`, e.g. `chrisrogers37/storydump tech-debt`.
+`$ARGUMENTS` is `<org/repo> <audit-type>`, e.g. `my-org/repo-a tech-debt`.
 
 - `<org/repo>` — the single repo to audit. Never cross repo boundaries.
 - `<audit-type>` — one of the clauDNA audit skills below.

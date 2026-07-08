@@ -8,7 +8,7 @@
 # Usage:
 #   fleet-memory-check.sh [--threshold N] [--fleet <name>]
 #   fleet-memory-check.sh --threshold 85
-#   fleet-memory-check.sh --fleet crog-eng-team
+#   fleet-memory-check.sh --fleet my-fleet
 #
 # Reads from environment:
 #   CLAUDLOBBY_ROOT         — repo root (default: ~/claudlobby)
