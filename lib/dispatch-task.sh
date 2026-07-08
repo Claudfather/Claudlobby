@@ -10,20 +10,16 @@
 #   --workstream ID    Workstream this task advances (envelope + ledger)
 #   --botcommand       Force the [BOTCOMMAND] envelope with no other fields
 #
-# When any envelope flag is given, the task is wrapped:
-#   [BOTCOMMAND] <caller> | task | <summary> [| repo:..] [| priority:..]
-#     [| ref:..] [| workstream:..] | task:<task-id>
-# Envelope sends MINT a task id (mint_task_id, lib-common) — the id is
-# recorded in the ledger row AND transmitted, so the worker can echo it in
-# its [BOTREPORT] and the overdue watchdog joins on identity. Raw-text sends
-# (no flags) stay fully legacy: no id anywhere, matched by (bot, ts) — an id
-# recorded but never transmitted would guarantee a false-positive overdue,
-# since the worker cannot echo what it never saw.
+# Envelope sends MINT a task id (mint_task_id, lib-common), record it in the
+# ledger row AND transmit it as `task:<id>` — join semantics live in
+# dispatch-overdue.py (overdue_all docstring). Raw-text sends (no flags) stay
+# id-less: an id recorded but never transmitted would guarantee a
+# false-positive overdue, since the worker cannot echo what it never saw.
 #
-# Appends {ts,manager,bot,task,task_id?,dispatched_at,expected_by} to
-# state/dispatch-log.jsonl (self-rotated on OBSERVABILITY_REAP_DAYS, like the
-# report ledger) so the fleet-pulse watchdog can flag `overdue_dispatch` if no
-# terminal [BOTREPORT] (completed|failed|blocked) arrives by expected_by.
+# Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by}
+# to state/dispatch-log.jsonl (self-rotated via rotate_jsonl_by_ts) so the
+# fleet-pulse watchdog can flag `overdue_dispatch` if no terminal [BOTREPORT]
+# (completed|failed|blocked) arrives by expected_by.
 # Manager identity is this bot's $BOT_ID; the deadline defaults to
 # $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can be
 # overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
@@ -41,21 +37,32 @@ DISPATCH_REF=""
 DISPATCH_WORKSTREAM=""
 FORCE_ENVELOPE=""
 
+# _flag_val <flag> <value?> — explicit missing-value guard (NOT ${2:?}: see
+# the arg-guard note below — expansion faults exit 0 through the EXIT trap).
+_flag_val() {
+    if [ -z "${2:-}" ]; then
+        echo "dispatch-task: $1 needs a value" >&2
+        exit 1
+    fi
+    printf '%s' "$2"
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --deadline-min) DEADLINE_MIN="${2:?--deadline-min needs a value}"; shift 2 ;;
-        --repo)         DISPATCH_REPO="${2:?--repo needs a value}"; shift 2 ;;
-        --priority)     DISPATCH_PRIORITY="${2:?--priority needs a value}"; shift 2 ;;
-        --ref)          DISPATCH_REF="${2:?--ref needs a value}"; shift 2 ;;
-        --workstream)   DISPATCH_WORKSTREAM="${2:?--workstream needs a value}"; shift 2 ;;
+        --deadline-min) DEADLINE_MIN=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --repo)         DISPATCH_REPO=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --priority)     DISPATCH_PRIORITY=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --ref)          DISPATCH_REF=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --workstream)   DISPATCH_WORKSTREAM=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --botcommand)   FORCE_ENVELOPE=1; shift ;;
         -*)             echo "dispatch-task: unknown flag '$1'" >&2; exit 1 ;;
         *)              break ;;
     esac
 done
 
-# Explicit arg guard — NOT ${1:?}: under macOS bash 3.2 the expansion error
-# path exits 0 through the error trap, silently masking usage errors.
+# Explicit arg guard — NOT ${1:?}: under macOS bash 3.2 an expansion fault
+# exits 0 through lib-common's EXIT trap (its `|| true` cleanup tail resets
+# the reported status), silently masking usage errors.
 if [ $# -lt 1 ]; then
     echo "Usage: dispatch-task.sh [flags] <worker-session> <task...>" >&2
     exit 1
@@ -112,26 +119,12 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 safe_task=$(json_escape "$TASK")
 
 _append_ledger() {
-    local id_field=""
-    [ -n "$TASK_ID" ] && id_field="\"task_id\":\"$TASK_ID\","
-    local ws_field=""
-    [ -n "$DISPATCH_WORKSTREAM" ] && ws_field="\"workstream\":\"$(json_escape "$DISPATCH_WORKSTREAM")\","
-    printf '{"ts":"%s","manager":"%s","bot":"%s",%s%s"task":"%s","dispatched_at":%s,"expected_by":%s}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$id_field" "$ws_field" "$safe_task" "$now_epoch" "$expected_by" >> "$LEDGER"
-
-    # Self-rotate on the fleet retention window (mirrors report-back.jsonl —
-    # closes the unbounded-growth half of #467). Entries older than the
-    # window have long since either closed or aged past the overdue cap.
-    # CONSTRAINT: keep DISPATCH_OVERDUE_MAX_AGE_S (default 24h) BELOW this
-    # window (default 7d) — a max_age raised past the reap window would let
-    # rotation silently prune a still-alerting dispatch row.
-    local reap_days="${OBSERVABILITY_REAP_DAYS:-7}"
-    local cutoff
-    cutoff=$(date_relative "-${reap_days} days" "%Y-%m-%dT%H:%M:%SZ") 2>/dev/null || return 0
-    local tmp
-    tmp=$(safe_mktemp)
-    awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\""); if (a[1] >= cutoff) print }' "$LEDGER" > "$tmp" \
-        && mv "$tmp" "$LEDGER"
+    # Schema-uniform rows: task_id/workstream always emitted (empty = absent,
+    # matching the report ledger's always-emit convention; every consumer
+    # treats "" as falsy).
+    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s}\n' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" >> "$LEDGER"
+    rotate_jsonl_by_ts "$LEDGER"
 }
 with_lock "$LEDGER.lock" _append_ledger
 

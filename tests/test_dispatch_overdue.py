@@ -1,48 +1,16 @@
-"""Unit tests for lib/dispatch-overdue.py — the dispatch watchdog matcher.
-
-A dispatch is overdue when now > expected_by AND no terminal report
-(completed|failed|blocked) for the same bot with ts >= dispatched_at exists.
-"""
+"""Unit tests for lib/dispatch-overdue.py — the dispatch watchdog matcher,
+including the P4 task-id join matrix (semantics: overdue_all docstring)."""
 
 from __future__ import annotations
 
-import importlib.util
-import json
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-_spec = importlib.util.spec_from_file_location(
-    "dispatch_overdue", REPO_ROOT / "lib" / "dispatch-overdue.py"
+from tests.conftest import (
+    dispatch_row as _dispatch,
+    load_lib_module,
+    report_row as _report,
+    write_jsonl as _write_jsonl,
 )
-dispatch_overdue = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(dispatch_overdue)
 
-
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
-
-
-def _dispatch(bot, dispatched_at, expected_by):
-    return {
-        "ts": "2026-05-27T10:00:00Z",
-        "manager": "lead",
-        "bot": bot,
-        "task": "do x",
-        "dispatched_at": dispatched_at,
-        "expected_by": expected_by,
-    }
-
-
-def _report(bot, ts, status="completed"):
-    return {
-        "ts": ts,
-        "bot": bot,
-        "status": status,
-        "summary": "done",
-        "pr_url": "",
-        "issues": "",
-        "skill": "",
-    }
+dispatch_overdue = load_lib_module("dispatch-overdue")
 
 
 class TestOverdue:
@@ -178,3 +146,107 @@ class TestExpiryCap:
         assert (
             dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 1000 + 999999) == []
         )
+
+
+# --- join matrix (dispatch-overdue.py) --------------------------------------------
+
+
+class TestJoinMatrix:
+    NOW = 2000
+
+    def _run(self, tmp_path, dispatches, reports):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, reports)
+        return dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW)
+
+    def test_id_report_closes_exactly_its_own_dispatch(self, tmp_path):
+        out = self._run(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+                _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
+            ],
+            [_report("w1", "1970-01-01T00:05:00Z", task_id="t-100-aaaa")],
+        )
+        assert [d[0] for d in out.get("w1", [])] == [200], (
+            "the un-reported sibling dispatch must stay open"
+        )
+
+    def test_idless_terminal_never_closes_an_id_dispatch(self, tmp_path):
+        # The #447 fix, preserved: one id-less report must not blanket-close.
+        out = self._run(
+            tmp_path,
+            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+            [_report("w1", "1970-01-01T00:05:00Z")],  # no task_id
+        )
+        assert out.get("w1"), "id'd dispatch must remain overdue"
+
+    def test_idless_terminal_closes_idless_dispatch(self, tmp_path):
+        # Legacy rows keep the pre-migration (bot, ts) semantics — no flag-day.
+        out = self._run(
+            tmp_path,
+            [_dispatch("w1", 100, 1000)],
+            [_report("w1", "1970-01-01T00:05:00Z")],
+        )
+        assert not out.get("w1")
+
+    def test_id_report_closes_idless_dispatch_too(self, tmp_path):
+        # An id-carrying terminal report still satisfies a legacy dispatch
+        # (it is strictly more informative than the old contract required).
+        out = self._run(
+            tmp_path,
+            [_dispatch("w1", 100, 1000)],
+            [_report("w1", "1970-01-01T00:05:00Z", task_id="t-999-ffff")],
+        )
+        assert not out.get("w1")
+
+    def test_report_from_wrong_bot_does_not_close(self, tmp_path):
+        # Review finding (#518): the id join must be scoped by (bot, id) —
+        # a peer echoing (or mishearing) another bot's task id must not
+        # silence the watchdog on the real owner's still-open dispatch.
+        out = self._run(
+            tmp_path,
+            [_dispatch("worker-a", 100, 1000, task_id="t-100-aaaa")],
+            [_report("worker-b", "1970-01-01T00:05:00Z", task_id="t-100-aaaa")],
+        )
+        assert out.get("worker-a"), (
+            "wrong-bot report must not close the dispatch"
+        )
+
+    def test_wrong_id_does_not_close(self, tmp_path):
+        out = self._run(
+            tmp_path,
+            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+            [_report("w1", "1970-01-01T00:05:00Z", task_id="t-777-dddd")],
+        )
+        assert out.get("w1")
+
+    def test_progress_report_with_id_does_not_close(self, tmp_path):
+        out = self._run(
+            tmp_path,
+            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+            [
+                _report(
+                    "w1", "1970-01-01T00:05:00Z", status="progress",
+                    task_id="t-100-aaaa",
+                )
+            ],
+        )
+        assert out.get("w1"), "non-terminal progress reuses the id, never closes"
+
+
+class TestMissingIdCounter:
+    def test_counts_idless_terminal_reports(self, tmp_path):
+        rlog = tmp_path / "r.jsonl"
+        _write_jsonl(
+            rlog,
+            [
+                _report("w1", "1970-01-01T00:05:00Z"),
+                _report("w1", "1970-01-01T00:06:00Z", task_id="t-1-aaaa"),
+                _report("w2", "1970-01-01T00:07:00Z", status="progress"),
+                _report("w2", "1970-01-01T00:08:00Z", status="failed"),
+            ],
+        )
+        # terminal + id-less: w1's first report and w2's failed report
+        assert dispatch_overdue.missing_id_count(str(rlog)) == 2

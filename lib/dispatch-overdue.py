@@ -108,9 +108,10 @@ def overdue_all(
     Join matrix (goal-aware plan P4): an id'd dispatch is closed ONLY by a
     terminal report echoing the same task_id — an id-less terminal report
     never closes it (LLM echo non-compliance is normal, and blanket-closing
-    was exactly the #447 bug class). An id-less (legacy) dispatch keeps the
-    pre-migration (bot, ts >= dispatched_at) semantics, and any terminal
-    report — id'd or not — satisfies it. No flag-day.
+    was exactly the #447 bug class). An id-less dispatch — raw-mode sends
+    mint these permanently, not just pre-migration rows — keeps the
+    (bot, ts >= dispatched_at) semantics, and any terminal report — id'd or
+    not — satisfies it. No flag-day.
     """
     dispatches = _load_jsonl(dispatch_log)
     reports = _load_jsonl(report_ledger)
@@ -159,8 +160,10 @@ def overdue_all(
 
 
 def missing_id_count(report_ledger: str) -> int:
-    """Terminal reports carrying no task_id — the echo-erosion signal the
-    morning brief surfaces (P7) so silent fallback degradation is visible."""
+    """Terminal reports carrying no task_id. NOTE: while raw (id-less)
+    dispatch remains a legitimate mode, this counts raw-mode reports AND
+    echo erosion together — the P7 brief must contextualize it (or refine
+    to id'd-dispatches-that-aged-out) before treating it as pure erosion."""
     return sum(
         1
         for r in _load_jsonl(report_ledger)
