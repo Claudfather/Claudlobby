@@ -119,6 +119,9 @@ defaults:
     creds-check:
       script: "$CLAUDLOBBY_ROOT/lib/creds-check.sh"
       schedule: "*-*-* 06:00:00"
+      # Desync multi-fleet hosts: every fleet ticks this against one shared
+      # state file + the Telegram API (systemd-only; launchd ignores it).
+      randomized_delay: 600
       type: oneshot
     # Mechanism 1 of the fleet update lifecycle: refresh plugins + composed
     # skills live every day (claude plugin update + generate, then mark running
