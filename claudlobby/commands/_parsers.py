@@ -288,7 +288,8 @@ def register_subparsers(sub) -> None:
     pmb.add_argument(
         "--cleanup-source",
         action="store_true",
-        help="Remove source bot directory after move",
+        help="Remove source bot directory after move (default: left in place, "
+        "which orphans the source dir — move-bot warns when this is omitted)",
     )
     pmb.add_argument(
         "--force",

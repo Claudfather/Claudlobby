@@ -229,6 +229,12 @@ def cmd_move_bot(args) -> int:
         print(f"  {i}. {step}")
     print()
 
+    if not cleanup:
+        print(
+            f"  Note: source dir will be LEFT in place (orphaned): {src_bot_dir}"
+            "\n        Pass --cleanup-source to remove it after the move.\n"
+        )
+
     if not apply:
         print("Dry run — pass --apply to execute.\n")
         return 0
@@ -401,7 +407,10 @@ def cmd_move_bot(args) -> int:
         )
         return 1
 
-    # 7. Cleanup source
+    # 7. Cleanup source (opt-in). When skipped, the source dir survives on disk
+    # but is no longer in the source fleet's roster — an orphan stub that
+    # supervision skips and audits flag. Make that outcome loud so operators
+    # don't discover stale bot dirs weeks later.
     if cleanup:
         shutil.rmtree(src_bot_dir)
         log.info("removed source bot dir: %s", src_bot_dir)
@@ -409,4 +418,11 @@ def cmd_move_bot(args) -> int:
     print(
         f"\nDone. Bot '{bot_name}' moved from '{source_fleet_name}' → '{target_fleet_name}'.\n"
     )
+    if not cleanup:
+        print(
+            f"  ⚠ Source dir left in place (orphaned): {src_bot_dir}"
+            f"\n    '{bot_name}' is no longer in '{source_fleet_name}' — supervision "
+            "skips it, but it lingers on disk."
+            f"\n    Remove when ready:  rm -rf {src_bot_dir}\n"
+        )
     return 0
