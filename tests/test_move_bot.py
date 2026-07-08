@@ -221,7 +221,7 @@ class TestMoveBotApply:
         assert (target_bot / ".env").read_text() == "SECRET=abc123\n"
         assert (target_bot / "memory" / "note.md").read_text() == "remember this"
 
-    def test_cleanup_removes_source(self, tmp_path: Path):
+    def test_cleanup_removes_source(self, tmp_path: Path, capsys):
         root = _scaffold_root(tmp_path)
         local = root / "local"
         src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
@@ -246,6 +246,63 @@ class TestMoveBotApply:
         )
         assert rc == 0
         assert not src_bot.exists()
+        # With cleanup, there is no orphan — the warning must NOT appear.
+        assert "orphaned" not in capsys.readouterr().out
+
+    def test_leaves_source_warns_when_no_cleanup(self, tmp_path: Path, capsys):
+        """--apply without --cleanup-source keeps the source dir AND warns that
+        it is now an orphan, with the exact path and remediation — so operators
+        do not discover stale bot dirs weeks later (the craig/greg incident)."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+
+        src_bot = src_fleet / "runtime" / "bots" / "mybot"
+
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+            ]
+        )
+        assert rc == 0
+        # Source dir survives (cleanup is opt-in) ...
+        assert src_bot.is_dir()
+        # ... and the orphan is made loud, with path + remediation.
+        out = capsys.readouterr().out
+        assert "orphaned" in out
+        assert str(src_bot) in out
+        assert "rm -rf" in out
+        # The prospective plan-time note is dry-run-only — on --apply the
+        # post-apply warning is the single source, not duplicated here.
+        assert "will be LEFT" not in out
+
+    def test_dryrun_notes_orphan_when_no_cleanup(self, tmp_path: Path, capsys):
+        """Dry-run (no --cleanup-source) previews the orphan up front so the
+        operator can add the flag before applying. This note is dry-run-only;
+        the apply path relies on the post-apply warning instead."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+        src_bot = src_fleet / "runtime" / "bots" / "mybot"
+
+        rc = main(
+            ["--root", str(root), "move-bot", "mybot", "--to", "fleet-b", "--from", "fleet-a"]
+        )
+        assert rc == 0
+        assert src_bot.is_dir()  # dry-run mutates nothing
+        out = capsys.readouterr().out
+        assert "will be LEFT in place (orphaned)" in out
+        assert "Dry run" in out
 
     def test_enrollment_runs_spin_up_bot(self, tmp_path: Path):
         """spin-up-bot.sh is called and its exit code determines success."""
