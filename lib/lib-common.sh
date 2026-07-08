@@ -235,6 +235,24 @@ json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+# --- Task identity -------------------------------------------------------------
+
+# mint_task_id
+# THE task-id mint, shared by every work-admission entry point (dispatch-task,
+# and later the runner/manager admission paths). Format t-<epochsecs>-<4hex> —
+# pinned grammar ^t-[0-9]+-[0-9a-f]{4}$: collision-safe without coordination,
+# mintable offline, greppable in panes and ledgers, and survives
+# sanitize_tmux_input untouched (plain [a-z0-9-]). The ledger row that records
+# the id is the SSOT; the id is echoed through [BOTCOMMAND] -> [BOTREPORT].
+mint_task_id() {
+    local hex
+    hex=$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+    # Fallback when /dev/urandom is unreadable (never expected, but the mint
+    # must not fail a dispatch): derive from PID + subsecond clock.
+    [ -n "$hex" ] && [ ${#hex} -eq 4 ] || hex=$(printf '%04x' $(( ($$ + $(date +%s)) % 65536 )))
+    printf 't-%s-%s\n' "$(date +%s)" "$hex"
+}
+
 # --- tmux helpers ------------------------------------------------------------
 
 # Strip control chars and escape sequences dangerous in tmux send-keys.

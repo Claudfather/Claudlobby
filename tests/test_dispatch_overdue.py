@@ -58,7 +58,7 @@ class TestOverdue:
         _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2000)])
         _write_jsonl(rlog, [])
         res = dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), 2600)
-        assert res == [(1000, 2000, 600)]
+        assert res == [(1000, 2000, 600, "-")]
 
     def test_closed_by_terminal_report(self, tmp_path):
         dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
@@ -126,7 +126,7 @@ class TestExpiryCap:
         # age (3000s) < cap (3600s), past deadline → still overdue.
         assert dispatch_overdue.overdue(
             "eng-1", str(dlog), str(rlog), 4000, max_age=3600
-        ) == [(1000, 2000, 2000)]
+        ) == [(1000, 2000, 2000, "-")]
 
     def test_default_cap_is_24h(self, tmp_path):
         dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"

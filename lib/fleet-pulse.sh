@@ -251,14 +251,23 @@ for bot_dir in "$BOTS_DIR"/*/; do
         overdue_lines=$(grep "^${bot_id} " "$_overdue_cache" || true)
         if [ -n "$overdue_lines" ]; then
             oldest_elapsed=0
-            while read -r _bot _da _exp _elapsed; do
+            overdue_ids=""
+            while read -r _bot _da _exp _elapsed _tid; do
                 [ -n "${_elapsed:-}" ] || continue
                 emit_event "$bot_dir" "$bot_id" "overdue_dispatch" \
-                    '{"dispatched_at":'"$_da"',"expected_by":'"$_exp"',"elapsed_seconds":'"$_elapsed"'}'
+                    '{"dispatched_at":'"$_da"',"expected_by":'"$_exp"',"elapsed_seconds":'"$_elapsed"',"task_id":"'"${_tid:--}"'"}'
                 [ "$_elapsed" -gt "$oldest_elapsed" ] && oldest_elapsed="$_elapsed"
+                if [ -n "${_tid:-}" ] && [ "$_tid" != "-" ]; then
+                    overdue_ids="${overdue_ids:+$overdue_ids }$_tid"
+                fi
             done <<< "$overdue_lines"
+            # Self-heal: name the open task ids so the nudge that reaches the
+            # worker says exactly what to echo — an id-less re-report cannot
+            # close an id'd dispatch.
+            _idhint=""
+            [ -n "$overdue_ids" ] && _idhint=" — worker must report-back --task <id> for: $overdue_ids"
             debounce_notify "$state_dir" "$bot_id" "dispatch_alerted" _notify_current_bot \
-                "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report"
+                "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report$_idhint"
         else
             debounce_clear "$state_dir" "$bot_id" "dispatch_alerted"
         fi

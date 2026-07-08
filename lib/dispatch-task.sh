@@ -7,18 +7,26 @@
 #   --repo NAME        Target repo (adds repo:<NAME> to envelope)
 #   --priority LEVEL   Priority level (adds priority:<LEVEL> to envelope)
 #   --ref URL          Reference URL (adds ref:<URL> to envelope)
+#   --workstream ID    Workstream this task advances (envelope + ledger)
+#   --botcommand       Force the [BOTCOMMAND] envelope with no other fields
 #
-# When --repo, --priority, or --ref is given, the task text is wrapped in a
-# structured [BOTCOMMAND] envelope:
-#   [BOTCOMMAND] <caller> | task | <summary> | repo:<repo> | priority:<pri> | ref:<url>
-# When none of those flags are passed, the raw task text is sent as-is.
+# When any envelope flag is given, the task is wrapped:
+#   [BOTCOMMAND] <caller> | task | <summary> [| repo:..] [| priority:..]
+#     [| ref:..] [| workstream:..] | task:<task-id>
+# Envelope sends MINT a task id (mint_task_id, lib-common) — the id is
+# recorded in the ledger row AND transmitted, so the worker can echo it in
+# its [BOTREPORT] and the overdue watchdog joins on identity. Raw-text sends
+# (no flags) stay fully legacy: no id anywhere, matched by (bot, ts) — an id
+# recorded but never transmitted would guarantee a false-positive overdue,
+# since the worker cannot echo what it never saw.
 #
-# Appends {ts,manager,bot,task,dispatched_at,expected_by} to
-# state/dispatch-log.jsonl so the fleet-pulse watchdog can flag the task
-# `overdue_dispatch` if no terminal [BOTREPORT] (completed|failed|blocked)
-# arrives by expected_by. Manager identity is this bot's $BOT_ID; the deadline
-# defaults to $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can
-# be overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
+# Appends {ts,manager,bot,task,task_id?,dispatched_at,expected_by} to
+# state/dispatch-log.jsonl (self-rotated on OBSERVABILITY_REAP_DAYS, like the
+# report ledger) so the fleet-pulse watchdog can flag `overdue_dispatch` if no
+# terminal [BOTREPORT] (completed|failed|blocked) arrives by expected_by.
+# Manager identity is this bot's $BOT_ID; the deadline defaults to
+# $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can be
+# overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +38,8 @@ DEADLINE_MIN=""
 DISPATCH_REPO=""
 DISPATCH_PRIORITY=""
 DISPATCH_REF=""
+DISPATCH_WORKSTREAM=""
+FORCE_ENVELOPE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,12 +47,20 @@ while [ $# -gt 0 ]; do
         --repo)         DISPATCH_REPO="${2:?--repo needs a value}"; shift 2 ;;
         --priority)     DISPATCH_PRIORITY="${2:?--priority needs a value}"; shift 2 ;;
         --ref)          DISPATCH_REF="${2:?--ref needs a value}"; shift 2 ;;
+        --workstream)   DISPATCH_WORKSTREAM="${2:?--workstream needs a value}"; shift 2 ;;
+        --botcommand)   FORCE_ENVELOPE=1; shift ;;
         -*)             echo "dispatch-task: unknown flag '$1'" >&2; exit 1 ;;
         *)              break ;;
     esac
 done
 
-WORKER_SESSION="${1:?Usage: dispatch-task.sh [flags] <worker-session> <task...>}"
+# Explicit arg guard — NOT ${1:?}: under macOS bash 3.2 the expansion error
+# path exits 0 through the error trap, silently masking usage errors.
+if [ $# -lt 1 ]; then
+    echo "Usage: dispatch-task.sh [flags] <worker-session> <task...>" >&2
+    exit 1
+fi
+WORKER_SESSION="$1"
 shift
 TASK="$*"
 [ -n "$TASK" ] || { echo "dispatch-task: empty task" >&2; exit 1; }
@@ -53,12 +71,17 @@ TASK="$*"
 # "does not exist" rather than the resolver's guard crashing this script.
 WORKER_SOCKET="$(tmux_socket_for_session "$WORKER_SESSION" 2>/dev/null || true)"
 
-if [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] || [ -n "$DISPATCH_REF" ]; then
+TASK_ID=""
+if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] \
+   || [ -n "$DISPATCH_REF" ] || [ -n "$DISPATCH_WORKSTREAM" ]; then
+    TASK_ID=$(mint_task_id)
     CALLER="${BOT_NAME:-${MANAGER_TMUX:-unknown}}"
     DISPATCH_MSG="[BOTCOMMAND] $CALLER | task | $TASK"
-    [ -n "$DISPATCH_REPO" ]     && DISPATCH_MSG="$DISPATCH_MSG | repo:$DISPATCH_REPO"
-    [ -n "$DISPATCH_PRIORITY" ] && DISPATCH_MSG="$DISPATCH_MSG | priority:$DISPATCH_PRIORITY"
-    [ -n "$DISPATCH_REF" ]      && DISPATCH_MSG="$DISPATCH_MSG | ref:$DISPATCH_REF"
+    [ -n "$DISPATCH_REPO" ]       && DISPATCH_MSG="$DISPATCH_MSG | repo:$DISPATCH_REPO"
+    [ -n "$DISPATCH_PRIORITY" ]   && DISPATCH_MSG="$DISPATCH_MSG | priority:$DISPATCH_PRIORITY"
+    [ -n "$DISPATCH_REF" ]        && DISPATCH_MSG="$DISPATCH_MSG | ref:$DISPATCH_REF"
+    [ -n "$DISPATCH_WORKSTREAM" ] && DISPATCH_MSG="$DISPATCH_MSG | workstream:$DISPATCH_WORKSTREAM"
+    DISPATCH_MSG="$DISPATCH_MSG | task:$TASK_ID"
 else
     DISPATCH_MSG="$TASK"
 fi
@@ -89,8 +112,26 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 safe_task=$(json_escape "$TASK")
 
 _append_ledger() {
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task":"%s","dispatched_at":%s,"expected_by":%s}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$safe_task" "$now_epoch" "$expected_by" >> "$LEDGER"
+    local id_field=""
+    [ -n "$TASK_ID" ] && id_field="\"task_id\":\"$TASK_ID\","
+    local ws_field=""
+    [ -n "$DISPATCH_WORKSTREAM" ] && ws_field="\"workstream\":\"$(json_escape "$DISPATCH_WORKSTREAM")\","
+    printf '{"ts":"%s","manager":"%s","bot":"%s",%s%s"task":"%s","dispatched_at":%s,"expected_by":%s}\n' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$id_field" "$ws_field" "$safe_task" "$now_epoch" "$expected_by" >> "$LEDGER"
+
+    # Self-rotate on the fleet retention window (mirrors report-back.jsonl —
+    # closes the unbounded-growth half of #467). Entries older than the
+    # window have long since either closed or aged past the overdue cap.
+    # CONSTRAINT: keep DISPATCH_OVERDUE_MAX_AGE_S (default 24h) BELOW this
+    # window (default 7d) — a max_age raised past the reap window would let
+    # rotation silently prune a still-alerting dispatch row.
+    local reap_days="${OBSERVABILITY_REAP_DAYS:-7}"
+    local cutoff
+    cutoff=$(date_relative "-${reap_days} days" "%Y-%m-%dT%H:%M:%SZ") 2>/dev/null || return 0
+    local tmp
+    tmp=$(safe_mktemp)
+    awk -F'"ts":"' -v cutoff="$cutoff" 'NF>1 { split($2, a, "\""); if (a[1] >= cutoff) print }' "$LEDGER" > "$tmp" \
+        && mv "$tmp" "$LEDGER"
 }
 with_lock "$LEDGER.lock" _append_ledger
 

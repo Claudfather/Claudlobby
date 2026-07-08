@@ -31,6 +31,8 @@ Manager → worker via the socket-aware `lib/dispatch.sh` helper (each bot runs 
 | `report:<target>` | Bot name or channel | Where to send the `[BOTREPORT]` |
 | `priority:<level>` | `high` / `normal` / `low` | Task priority |
 | `ref:<url>` | Issue or PR URL | Originating issue or context link |
+| `workstream:<ws-id>` | Workstream id | Registry entry this task advances |
+| `task:<task-id>` | `t-<epoch>-<hex4>` | **Task identity** — minted by `dispatch-task.sh`, recorded in the dispatch ledger. The worker MUST echo it in every `[BOTREPORT]` for this task (`report-back.sh --task <id>`): the overdue watchdog joins on it, and an id-less report can never close an id'd dispatch. |
 
 ### Examples
 
@@ -75,7 +77,7 @@ $CLAUDLOBBY_ROOT/lib/dispatch.sh <worker> '[BOTCOMMAND] <manager> | task | <summ
 Full example:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on storydump | repo:storydump | priority:high | ref:https://github.com/org/storydump/issues/99'
+$CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 '[BOTCOMMAND] ari | task | Run security audit on repo-a | repo:repo-a | priority:high | ref:https://github.com/org/repo-a/issues/99'
 ```
 
 `dispatch.sh` prepends `set +H;` itself (disabling bash history expansion, which silently mangles `!` in prompts), sanitizes the input, and — on a miss (the worker's session is gone on its socket) — logs a `send_miss` event rather than silently dropping. You never hand-type `tmux send-keys -t`.
