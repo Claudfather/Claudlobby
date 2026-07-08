@@ -404,6 +404,13 @@ class FleetConfig:
     bots: dict[str, BotConfig] = field(default_factory=dict)
     sweep: SweepConfig | None = None
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
+    # Fleet-level mission: `mission` is the one-paragraph anchor EVERY bot
+    # receives; `mission_file` points at a fuller charter (fleet-relative)
+    # composed for managers only; mission_file REQUIRES mission (validator-
+    # enforced). Rationale + locked decisions (F6/B2):
+    # documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md
+    mission: str | None = None
+    mission_file: str | None = None
 
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
@@ -1043,5 +1050,9 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
         projects=load_projects(fleet_yaml.parent / "projects.yaml"),
+        mission=_shaped("fleet.mission", fleet.get("mission"), str,
+                        "mission: one paragraph") or None,
+        mission_file=_shaped("fleet.mission_file", fleet.get("mission_file"),
+                             str, "missions/fleet.md") or None,
     )
     return fleet_cfg, merged_defaults

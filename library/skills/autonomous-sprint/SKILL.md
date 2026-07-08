@@ -8,6 +8,14 @@ argument-hint: "<repo> [--max-issues N] [--dry-run] [--focus <area>]"
 
 The conductor skill. Reads a project's north star, evaluates the current backlog, identifies the highest-impact work, and dispatches the fleet to build it — all with Telegram visibility for the user.
 
+## Resolve the goal chain first
+
+Before assessing any backlog, anchor top-down: **Fleet Mission → project mission → issue**.
+
+1. Your `## Fleet Mission` section (composed from `fleet.yaml mission:`) states what the fleet as a whole serves — every pick must advance it. If `FLEET_MISSION_FILE` is set in your environment, read that file for priorities and trade-offs before scoring.
+2. The target repo's `PROJECT_MISSION.md` is the project-level constitution consumed below.
+3. When two candidate issues score similarly at the project level, the fleet mission is the tiebreaker.
+
 ## Arguments
 
 Parse `$ARGUMENTS`:

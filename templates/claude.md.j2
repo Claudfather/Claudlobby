@@ -10,6 +10,9 @@
     expertise_body     — string, concatenated expertise file bodies
     voice              — None or { name, body }
     teams              — list of TeamConfig (only if bot is a manager)
+    projects           — list of ProjectConfig (managers only; empty otherwise)
+    fleet_mission_extra — string or None: charter body (managers) or
+                          $FLEET_MISSION_FILE pointer line (workers)
     resources          — list of { title, description, body }
     integrations       — list of { title, description, body }
     principles         — list of { title, description, body }
@@ -29,6 +32,16 @@
 
 {% endif -%}
 {{ expertise_body }}
+
+{%- if fleet.mission %}
+
+## Fleet Mission
+
+{{ fleet.mission | trim }}
+{% if fleet_mission_extra %}
+{{ fleet_mission_extra | trim }}
+{% endif -%}
+{% endif -%}
 
 {%- if bot.mission %}
 

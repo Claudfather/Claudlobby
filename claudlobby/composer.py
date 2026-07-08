@@ -25,6 +25,7 @@ from . import dotenv
 from .config import BotConfig, FleetConfig, load_host_jobs
 from .loader import (
     LibraryItem,
+    _demote_headings,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -369,6 +370,16 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # drift would silently spawn a duplicate server for the same socket name.
     lines.append(f"export TMUX_TMPDIR={_shq(_TMUX_TMPDIR)}")
     lines.append('export FLEET_STATE_PATH="$CLAUDLOBBY_ROOT/state/fleet-state.json"')
+    if fleet.mission_file and fleet.mission:
+        # Gated on the PAIR, mirroring the CLAUDE.md section: in the
+        # pairing-forbidden state (file without paragraph) no composed prose
+        # references the var, so emitting it would dangle. Resolved at
+        # compose time (the config field stays fleet-relative): consumers
+        # just read the path — no bot has to re-derive the fleet layout,
+        # which breaks in vault mode. Same anchored-path pattern as
+        # FLEET_STATE_PATH above.
+        charter_path = paths.fleet_config_dir / fleet.mission_file
+        lines.append(f"export FLEET_MISSION_FILE={_shq(str(charter_path))}")
     chat_id = ctx["TELEGRAM_GROUP_CHAT_ID"]
     if chat_id:
         lines.append(f"export TELEGRAM_GROUP_CHAT_ID={_shq(str(chat_id))}")
@@ -865,12 +876,12 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
 
+    is_manager = bot.bot_id in fleet.manager_bots()
+
     # Projects table composes for managers only (F6-style context budget:
     # workers resolve tiers from the bot.conf env map, not prose).
     projects = (
-        sorted(fleet.projects.values(), key=lambda p: p.key)
-        if bot.bot_id in fleet.manager_bots()
-        else []
+        sorted(fleet.projects.values(), key=lambda p: p.key) if is_manager else []
     )
     for p in projects:
         # Emit-time corruption backstop (validator owns the UX error): a
@@ -880,6 +891,35 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             raise ValueError(
                 f"project '{p.key}': title contains newline or '|' — refusing "
                 f"to render it into CLAUDE.md (run claudlobby validate)"
+            )
+
+    # Fleet-mission extra content under the paragraph, decided in ONE place:
+    # managers compose the full charter body (headings demoted, like every
+    # composed library body); workers — and a manager whose charter file is
+    # missing (validator already warned; benign absence) — get a pointer to
+    # $FLEET_MISSION_FILE. None when no mission_file is configured.
+    fleet_mission_extra = None
+    if fleet.mission and "\n" in fleet.mission.strip():
+        # Emit-time corruption backstop (validator owns the UX error): a
+        # multi-line mission would inject sections into EVERY bot's
+        # composed instructions.
+        raise ValueError(
+            "fleet.mission contains newlines — refusing to render it into "
+            "CLAUDE.md (run claudlobby validate)"
+        )
+    if fleet.mission_file:
+        charter = paths.fleet_config_dir / fleet.mission_file
+        if is_manager and charter.is_file():
+            # Double demote: the body nests under the H2 "## Fleet Mission"
+            # section, so the charter's own H1 must land at H3 (a single
+            # demote would leave it an H2 sibling, escaping the section).
+            fleet_mission_extra = _demote_headings(
+                _demote_headings(charter.read_text())
+            )
+        else:
+            fleet_mission_extra = (
+                "Full charter: read $FLEET_MISSION_FILE when picking or "
+                "prioritizing work."
             )
 
     env = _build_jinja_env(paths)
@@ -892,6 +932,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         voice=voice_item,
         teams=teams,
         projects=projects,
+        fleet_mission_extra=fleet_mission_extra,
         org_structure=org_structure,
         shared_docs_path=str(paths.shared_docs) if paths.shared_docs else None,
         resources=_items(bot.resources, "resources"),

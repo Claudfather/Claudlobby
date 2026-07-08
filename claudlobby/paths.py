@@ -326,7 +326,14 @@ class Paths:
         """projects.yaml sits beside fleet.yaml — the one home for that
         co-location rule (load_fleet derives it from the raw fleet.yaml
         path; every Paths-aware consumer should use this property)."""
-        return self.fleet_yaml.parent / "projects.yaml"
+        return self.fleet_config_dir / "projects.yaml"
+
+    @property
+    def fleet_config_dir(self) -> Path:
+        """The directory holding fleet.yaml — the base every fleet-relative
+        config path (mission_file, projects.yaml) resolves against, across
+        root/overlay/seed/vault modes."""
+        return self.fleet_yaml.parent
 
     @property
     def env_file(self) -> Path:

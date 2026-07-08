@@ -35,6 +35,12 @@ fleet:
   telegram_group_chat_id: "-1001234567890"   # replace with your group ID
   # human_telegram_id: "1234567890"          # your Telegram user ID — enables DM allowlisting for all bots
 
+  # Fleet mission — one paragraph composed into EVERY bot as its goal anchor;
+  # mission_file: adds a fuller charter (managers compose it; workers get a
+  # pointer) and REQUIRES mission. See documentation/fleet-yaml-schema.md.
+  # mission: This fleet exists to make the operator's ventures succeed — grow acme-shop revenue, ship post-scheduler reliably.
+  # mission_file: missions/fleet.md
+
   accounts:
     default: ~/.claude
     # work: ~/.claude-work                    # uncomment if you have a 2nd Claude account
