@@ -14,27 +14,33 @@ ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 INTEGRATION_DOC = ROOT / "documentation" / "integrations" / "claudron-integration.md"
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # requires-python floor is 3.10; tomllib is 3.11+
+    import tomli as tomllib  # type: ignore[no-redef]
 
-def _vault_requirement() -> str:
-    text = PYPROJECT.read_text()
-    match = re.search(r'^vault\s*=\s*\["([^"]+)"\]', text, re.MULTILINE)
-    assert match, "pyproject.toml [vault] extra not found"
-    return match.group(1)
+
+def _vault_requirements() -> list[str]:
+    with PYPROJECT.open("rb") as f:
+        data = tomllib.load(f)
+    return data["project"]["optional-dependencies"]["vault"]
 
 
 def test_vault_extra_is_pinned():
-    """The claudron dependency must name a SHA, tag, or version range — never
+    """Every claudron requirement must name a SHA, tag, or version range — never
     a bare git URL tracking HEAD (F1 lock)."""
-    req = _vault_requirement()
-    if "git+" in req:
-        assert re.search(
-            r"@(?:[0-9a-f]{40}|v?\d+\.\d+(?:\.\d+)?)$", req
-        ), f"[vault] extra tracks an unpinned git HEAD: {req}"
-    else:
-        # PyPI form — require a version specifier.
-        assert re.search(
-            r"(?:==|>=|~=)\s*\d", req
-        ), f"[vault] extra has no version bound: {req}"
+    reqs = _vault_requirements()
+    assert reqs, "pyproject.toml [vault] extra is empty"
+    for req in reqs:
+        if "git+" in req:
+            assert re.search(
+                r"@(?:[0-9a-f]{40}|v?\d+\.\d+(?:\.\d+)?)$", req
+            ), f"[vault] extra tracks an unpinned git HEAD: {req}"
+        else:
+            # PyPI form — require a version specifier.
+            assert re.search(
+                r"(?:==|>=|~=)\s*\d", req
+            ), f"[vault] extra has no version bound: {req}"
 
 
 def test_compat_floor_well_formed():
@@ -46,12 +52,11 @@ def test_compat_floor_well_formed():
 
 
 def test_integration_doc_renders_compat_floor():
-    """The doc is the human rendering of COMPAT_FLOOR — every capability and
-    slated release must appear there, and the doc must name the module as SSOT."""
+    """The doc table is the human rendering of COMPAT_FLOOR — each capability
+    must appear as a full row (all three columns bound, so rows can't drift
+    independently), and the doc must name the module as SSOT."""
     doc = INTEGRATION_DOC.read_text()
     assert "claudlobby/claudron_compat.py" in doc
     for cap in COMPAT_FLOOR:
-        assert cap.requires in doc, f"doc missing capability: {cap.requires!r}"
-        assert (
-            cap.default_order_release in doc
-        ), f"doc missing release annotation: {cap.default_order_release!r}"
+        row = f"| {cap.feature} | {cap.requires} | {cap.default_order_release} |"
+        assert row in doc, f"doc table missing or stale row: {row}"

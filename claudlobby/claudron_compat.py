@@ -19,9 +19,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ClaudronCapability:
     feature: str  # the claudlobby surface that consumes it
-    requires: str  # what claudron must ship
+    requires: str  # what claudron must ship (pure capability — no epic ordinals)
     default_order_release: str  # Claudron's slated release, or "pinned SHA"
-    shipped_at_pin: bool  # True when the pinned SHA already provides it
 
 
 COMPAT_FLOOR: tuple[ClaudronCapability, ...] = (
@@ -29,24 +28,20 @@ COMPAT_FLOOR: tuple[ClaudronCapability, ...] = (
         feature="vault-based fleet overlay resolution (paths.py .claudron bridge)",
         requires="claudron.vault.detect / Vault.fleets API",
         default_order_release="pinned SHA",
-        shipped_at_pin=True,
     ),
     ClaudronCapability(
         feature="interim CLI query wedge (dispatch-task.sh preflight, plan P1e)",
         requires="claudron lookup CLI",
         default_order_release="pinned SHA",
-        shipped_at_pin=True,
     ),
     ClaudronCapability(
         feature="MCP fragment library/mcp/claudron.json (plan P2)",
-        requires="claudron-mcp stdio server (their E3)",
+        requires="claudron-mcp stdio server",
         default_order_release="0.3.0",
-        shipped_at_pin=False,
     ),
     ClaudronCapability(
         feature="librarian review sweep (plan P5)",
-        requires="claudron review --json (their E5)",
+        requires="claudron review --json",
         default_order_release="0.5.0",
-        shipped_at_pin=False,
     ),
 )

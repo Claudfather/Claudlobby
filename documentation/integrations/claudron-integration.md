@@ -24,8 +24,8 @@ SSOT: `claudlobby/claudron_compat.py` (doctor's claudron check reads it; a unit 
 |---|---|---|
 | vault-based fleet overlay resolution (paths.py .claudron bridge) | claudron.vault.detect / Vault.fleets API | pinned SHA |
 | interim CLI query wedge (dispatch-task.sh preflight, plan P1e) | claudron lookup CLI | pinned SHA |
-| MCP fragment library/mcp/claudron.json (plan P2) | claudron-mcp stdio server (their E3) | 0.3.0 |
-| librarian review sweep (plan P5) | claudron review --json (their E5) | 0.5.0 |
+| MCP fragment library/mcp/claudron.json (plan P2) | claudron-mcp stdio server | 0.3.0 |
+| librarian review sweep (plan P5) | claudron review --json | 0.5.0 |
 
 ## Gated surfaces (not yet available)
 
