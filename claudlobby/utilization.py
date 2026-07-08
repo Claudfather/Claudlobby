@@ -1,13 +1,19 @@
 """Worker utilization rollup — busy/idle % per bot over rolling windows.
 
 Reads existing data sources (keepalive logs, fleet-state.json) to compute
-per-bot busy/idle percentages. Output written to state/fleet-utilization.json
-for two consumers:
+per-bot busy/idle percentages. No new data collection — pure aggregation of
+existing keepalive samples.
 
-1. The manager bot — dispatch decisions (busy %, idle duration, task age)
-2. ``claudlobby status`` — new columns (BUSY%, IDLE, TASK AGE)
+Two access paths, deliberately distinct:
 
-No new data collection — pure aggregation of existing keepalive samples.
+1. ``claudlobby status`` calls ``compute_bot_utilization`` directly, recomputing
+   at display time to render its BUSY%/IDLE/TASK-AGE columns. It does NOT read
+   the JSON below — its numbers never depend on that file being fresh.
+2. ``fleet-utilization.sh`` persists the rollup to
+   ``state/fleet-utilization.json`` (``--summary`` emits a one-line digest).
+   That file is the intended feed for a manager-bot dispatch consumer that is
+   not yet wired; until that consumer exists the writer stays on-demand — no
+   timer schedules it and nothing reads the file.
 """
 
 from __future__ import annotations
