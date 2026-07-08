@@ -38,14 +38,17 @@ INDEX.md format (one line per doc, scan-friendly):
 - **Creating:** write the doc with frontmatter → run `/index` to update INDEX.md.
 - **Updating:** edit the doc, bump `updated:` in frontmatter → run `/index`.
 - **Completing:** change `status:` to completed/superseded → move from `active/` to `completed/` if applicable → run `/index` in both directories.
-- **Stale docs:** knowledge docs default to 90-day TTL via `expires:` field. A librarian cron runs `/index --stale` weekly to surface expired docs.
+- **Stale docs:** knowledge docs default to 90-day TTL via `expires:` field. Surface expired docs by scanning frontmatter directly; when a Claudron release with `claudron review --json` is wired, a weekly librarian job takes this over.
 
 ## Promotion Flow
 
-Knowledge graduates through tiers based on audience:
+Two separate tracks graduate content out of a fleet.
+
+**Knowledge** (facts, learnings, decisions, runbooks) promotes by audience:
 
 1. `memory/` — single bot (preferences, feedback)
 2. `shared/` — fleet-wide (repo knowledge, workflow patterns)
-3. `library/` — any claudlobby deployment (universal learnings, via PR)
+3. Vault `_shared/` — visible to every fleet on the vault (only when a Claudron vault is wired; fleets without one stop at rung 2)
+4. Claudron packs — cross-deployment, shared via git (only once Claudron ships packs; until then the ladder ends at rung 3)
 
-When a shared doc proves universally useful, promote it to `library/` via a standard branch + PR.
+**Reusable building blocks** (skills, protocols, guardrails, expertise) are not knowledge-tier content. When a fleet-local pattern proves useful to any claudlobby deployment, promote it to `library/` via a standard branch + PR to the open-source repo — a separate track, not a rung above `shared/`.

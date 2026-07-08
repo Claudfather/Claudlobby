@@ -17,7 +17,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
-vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git"]
+# Pinned to a Claudron main SHA (F1 lock, plan 2026-07-07-claudron-consumption 1c).
+# Move to the version tag / PyPI range at Claudron's first tagged release; bump per
+# release after vault-mode tests pass. Compat floor: claudlobby/claudron_compat.py.
+vault = ["claudron @ git+https://github.com/Claudfather/Claudron.git@bb84ee3ab9325c3a49c4f0274069c29eb2270768"]
 
 [project.scripts]
 claudlobby = "claudlobby.__main__:main"
