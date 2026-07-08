@@ -907,7 +907,12 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     if fleet.mission_file:
         charter = paths.fleet_config_dir / fleet.mission_file
         if is_manager and charter.is_file():
-            fleet_mission_extra = _demote_headings(charter.read_text())
+            # Double demote: the body nests under the H2 "## Fleet Mission"
+            # section, so the charter's own H1 must land at H3 (a single
+            # demote would leave it an H2 sibling, escaping the section).
+            fleet_mission_extra = _demote_headings(
+                _demote_headings(charter.read_text())
+            )
         else:
             fleet_mission_extra = (
                 "Full charter: read $FLEET_MISSION_FILE when picking or "

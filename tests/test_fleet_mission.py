@@ -137,16 +137,18 @@ def test_manager_gets_charter_body_worker_gets_pointer(fleet_dir):
     assert "$FLEET_MISSION_FILE" in wkr, "worker gets the env-var pointer"
 
 
-def test_charter_headings_are_demoted(fleet_dir):
-    # A charter authored with its own H1 must not escape ## Fleet Mission:
-    # the body gets the same single-demote every composed library body gets.
+def test_charter_headings_are_demoted_below_the_section(fleet_dir):
+    # A charter authored with its own H1 must NEST UNDER ## Fleet Mission —
+    # H1 lands at H3 (an H2 would be a sibling section, still escaping;
+    # caught live during review, after a single-demote version passed here).
     install_real_template(fleet_dir)
     _with_mission(fleet_dir, file="missions/fleet.md")
     fleet = load_test_fleet(fleet_dir)
     mgr = compose_claude_md(fleet.bots["lead"], fleet, make_paths(fleet_dir))
     assert "\n# Fleet Charter" not in mgr, "raw H1 escaped the section"
-    assert "## Fleet Charter" in mgr
-    assert "### Priorities" in mgr
+    assert "\n## Fleet Charter" not in mgr, "H2 sibling still escapes"
+    assert "### Fleet Charter" in mgr
+    assert "#### Priorities" in mgr
 
 
 def test_manager_with_missing_charter_degrades_to_pointer(fleet_dir):
