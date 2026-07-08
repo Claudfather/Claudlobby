@@ -370,10 +370,13 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # drift would silently spawn a duplicate server for the same socket name.
     lines.append(f"export TMUX_TMPDIR={_shq(_TMUX_TMPDIR)}")
     lines.append('export FLEET_STATE_PATH="$CLAUDLOBBY_ROOT/state/fleet-state.json"')
-    if fleet.mission_file:
-        # Resolved at compose time (the config field stays fleet-relative):
-        # consumers just read the path — no bot has to re-derive the fleet
-        # layout, which breaks in vault mode. Same anchored-path pattern as
+    if fleet.mission_file and fleet.mission:
+        # Gated on the PAIR, mirroring the CLAUDE.md section: in the
+        # pairing-forbidden state (file without paragraph) no composed prose
+        # references the var, so emitting it would dangle. Resolved at
+        # compose time (the config field stays fleet-relative): consumers
+        # just read the path — no bot has to re-derive the fleet layout,
+        # which breaks in vault mode. Same anchored-path pattern as
         # FLEET_STATE_PATH above.
         charter_path = paths.fleet_config_dir / fleet.mission_file
         lines.append(f"export FLEET_MISSION_FILE={_shq(str(charter_path))}")

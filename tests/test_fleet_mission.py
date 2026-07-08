@@ -195,6 +195,16 @@ def test_no_mission_file_no_env(fleet_dir):
     assert "FLEET_MISSION_FILE" not in conf
 
 
+def test_unpaired_mission_file_emits_no_env(fleet_dir):
+    # The pairing-forbidden state (mission_file without mission) must not
+    # leave a dangling env var nothing references — bot.conf emission gates
+    # on the PAIR, mirroring the CLAUDE.md section (review finding, #515).
+    _with_mission(fleet_dir, mission=None, file="missions/fleet.md")
+    fleet = load_test_fleet(fleet_dir)
+    conf = compose_bot_conf(fleet.bots["lead"], fleet, make_paths(fleet_dir))
+    assert "FLEET_MISSION_FILE" not in conf
+
+
 # --- goal-chain preamble + example sync -------------------------------------------
 
 
