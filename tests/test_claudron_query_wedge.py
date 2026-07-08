@@ -154,6 +154,54 @@ def test_pipes_in_titles_cannot_break_the_envelope(tmp_path):
     assert "priority:evil |" not in sent
 
 
+def test_newlines_in_titles_cannot_corrupt_the_ledger(tmp_path):
+    # Review #528 Major: an embedded newline in a claudron-returned title
+    # survived into $TASK; the line-oriented ledger rotation then truncated
+    # the row into permanently invalid JSON. All whitespace runs in
+    # claudron-supplied strings must collapse to single spaces.
+    evil = {
+        "query": "q",
+        "results": [
+            {
+                "title": "Rate\nlimits\r\nwith\ttabs",
+                "path": "pi-fleet/shared/knowledge/a\nb.md",
+            }
+        ],
+    }
+    env = _wedge_env(tmp_path, json.dumps(evil))
+    r, sent, row = _run_dispatch(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    # _run_dispatch already json.loads the last ledger line — reaching here
+    # means the row round-tripped. Belt-and-braces on the payloads:
+    assert row["claudron_hits"] == "1"
+    assert "\n" not in sent and "\r" not in sent and "\t" not in sent
+    assert "Rate limits with tabs" in sent
+    assert "\n" not in row["task"]
+
+
+def test_non_dict_json_shapes_degrade_cleanly(tmp_path):
+    # Review #528 nit: a non-dict top-level value (or non-dict result item)
+    # must exit the parser cleanly, not traceback past the except.
+    for i, payload in enumerate(("[1, 2, 3]", '"just a string"', '{"results": [42, null]}')):
+        case_dir = tmp_path / f"case{i}"
+        case_dir.mkdir()
+        env = _wedge_env(case_dir, payload)
+        r, sent, row = _run_dispatch(case_dir, env)
+        assert r.returncode == 0, (payload, r.stderr)
+        assert "[fleet memory:" not in sent
+        assert row["claudron_hits"] in ("", "0"), (payload, row)
+
+
+def test_query_limit_env_overrides_default(tmp_path):
+    # Review #528 minor: CLAUDRON_QUERY_LIMIT must reach the lookup argv.
+    env = _wedge_env(tmp_path, json.dumps({"query": "q", "results": []}))
+    env["CLAUDRON_QUERY_LIMIT"] = "7"
+    r, _, _ = _run_dispatch(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    argv = (tmp_path / "claudron-argv.txt").read_text().splitlines()
+    assert "--limit" in argv and argv[argv.index("--limit") + 1] == "7", argv
+
+
 def test_task_passed_as_single_quoted_query_arg(tmp_path):
     env = _wedge_env(tmp_path, json.dumps({"query": "q", "results": []}))
     r, _, _ = _run_dispatch(tmp_path, env, task="use * wisely")
