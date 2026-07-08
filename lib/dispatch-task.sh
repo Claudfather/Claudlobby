@@ -116,23 +116,29 @@ _claudron_query_before() {
     # internally; quoting avoids glob expansion of task text).
     raw=$(claudron --vault "$CLAUDRON_VAULT_PATH" lookup --json \
         --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$TASK" 2>/dev/null) || return 0
-    # Emits "<count>\t<title (abs path); ...>". Pipes in titles/paths are
-    # replaced with "/" so the pointer segment cannot break the
-    # pipe-delimited [BOTCOMMAND] envelope.
+    # Emits "<count>\t<title (abs path); ...>". Claudron-supplied strings are
+    # sanitized before use: pipes become "/" (the [BOTCOMMAND] envelope is
+    # pipe-delimited) and whitespace runs collapse to single spaces — an
+    # embedded newline would split the single-line ledger row into invalid
+    # JSON that the line-oriented rotation then truncates (review #528).
+    # Any unexpected JSON shape exits 1 into the return-0 net.
     parsed=$(printf '%s' "$raw" | python3 -c '
-import json, sys
+import json, re, sys
+
+def clean(value):
+    return re.sub(r"\s+", " ", str(value).replace("|", "/")).strip()
+
 try:
     data = json.load(sys.stdin)
+    root = clean(sys.argv[1].rstrip("/"))
+    pointers = []
+    for r in data.get("results") or []:
+        title = clean(r.get("title", ""))
+        path = clean(r.get("path", ""))
+        if title and path:
+            pointers.append("%s (%s/%s)" % (title, root, path))
 except Exception:
     sys.exit(1)
-results = data.get("results") or []
-root = sys.argv[1].rstrip("/")
-pointers = []
-for r in results:
-    title = str(r.get("title", "")).replace("|", "/").strip()
-    path = str(r.get("path", "")).replace("|", "/").strip()
-    if title and path:
-        pointers.append("%s (%s/%s)" % (title, root, path))
 sys.stdout.write("%d\t%s" % (len(pointers), "; ".join(pointers)))
 ' "$CLAUDRON_VAULT_PATH" 2>/dev/null) || return 0
     CLAUDRON_HITS="${parsed%%$'\t'*}"
