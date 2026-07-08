@@ -84,6 +84,8 @@ Emitted only into the `fleet.sweep.owner_bot`'s `bot.conf` (see `fleet.sweep` in
 | `CLAUDNA_VERSION` | `bots.<name>.claudna_version` | clauDNA plugin version pin |
 | `CLAUDRON_VAULT_PATH` | `bots.<name>.claudron_vault_path` | Claudron vault path for scoped queries |
 | `CLAUDOSSEUM_TENANT_ID` | `bots.<name>.claudosseum_tenant_id` | Claudosseum telemetry tenant ID |
+| `CLAUDRON_QUERY_BEFORE` | `bots.<name>.env` (manual opt-in) | `1` enables the dispatch query-before preflight: `dispatch-task.sh` prepends fleet-memory pointers (titles + paths from `claudron lookup`) to dispatched tasks. Off by default; needs the claudron CLI on PATH and `CLAUDRON_VAULT_PATH` set |
+| `CLAUDRON_QUERY_LIMIT` | `bots.<name>.env` (manual opt-in) | Max fleet-memory pointers injected per dispatch (default 3) |
 
 ## Plugins
 
