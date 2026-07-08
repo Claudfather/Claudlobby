@@ -360,6 +360,15 @@ class Paths:
         return self.runtime / "fleet"
 
     @property
+    def fleet_state(self) -> Path:
+        """Directory for fleet-scoped runtime state (report-back.jsonl,
+        workstreams.json): the fleet's own ``runtime/`` in overlay mode, the
+        shared ``runtime/fleet/`` in root mode. The single home for that
+        overlay-vs-root rule on the Python side (bash twin: ``fleet_runtime_dir``
+        in lib-common.sh)."""
+        return self.runtime if self.fleet_dir else self.runtime_fleet
+
+    @property
     def lib(self) -> Path:
         return self.root / "lib"
 

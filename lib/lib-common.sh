@@ -1012,6 +1012,20 @@ resolve_bots_dir() {
     fi
 }
 
+# fleet_runtime_dir
+# Directory for fleet-scoped runtime state (report-back.jsonl, workstreams.json):
+# overlay local/<fleet>/runtime, else root runtime/fleet. The bash twin of
+# Paths.fleet_state — the one home for this overlay-vs-root rule.
+# Usage: DIR=$(fleet_runtime_dir [fleet-name])
+fleet_runtime_dir() {
+    local fleet="${1:-${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}}"
+    if [ -n "$fleet" ]; then
+        printf '%s' "$CLAUDLOBBY_ROOT/local/$fleet/runtime"
+    else
+        printf '%s' "$CLAUDLOBBY_ROOT/runtime/fleet"
+    fi
+}
+
 # host_bots_dirs
 # Emit every bots dir on this host (one per line): root-mode runtime/bots when
 # present, plus each local/<fleet>/runtime/bots. The named enumerator for

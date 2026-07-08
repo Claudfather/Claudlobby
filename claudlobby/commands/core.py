@@ -270,11 +270,9 @@ def cmd_report_back(args) -> int:
     """Query the report-back ledger — human-readable table of bot work events."""
     paths = _resolve_paths(args)
 
-    # Resolve ledger path (mirrors shell logic in report-back.sh)
-    if paths.fleet_dir:
-        ledger = paths.runtime / "report-back.jsonl"
-    else:
-        ledger = paths.root / "runtime" / "fleet" / "report-back.jsonl"
+    # Resolve ledger path (fleet_state owns the overlay-vs-root rule; the shell
+    # twin is fleet_runtime_dir in lib-common.sh, used by report-back.sh)
+    ledger = paths.fleet_state / "report-back.jsonl"
 
     if not ledger.is_file():
         log.info("no report-back ledger found at %s", ledger)
@@ -345,6 +343,24 @@ def cmd_report_back(args) -> int:
         print(f"{ts:<22} {bot:<12} {status:<10} {summary:<50} {pr}")
 
     print(f"\n{len(entries)} event(s)")
+    return 0
+
+
+def cmd_workstreams(args) -> int:
+    """Read-only view of the fleet workstream registry. Writes go exclusively
+    through lib/workstream-update.sh and the /workstream manager skill."""
+    from ..workstreams import format_list, format_show, load_workstreams
+
+    paths = _resolve_paths(args)
+    workstreams = load_workstreams(paths)
+    if getattr(args, "ws_command", "list") == "show":
+        entry = workstreams.get(args.id)
+        if not entry:
+            log.error("no such workstream: %s", args.id)
+            return 1
+        print(format_show(entry))
+    else:
+        print(format_list(workstreams))
     return 0
 
 

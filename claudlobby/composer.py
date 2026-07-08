@@ -470,6 +470,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"{_shq(' '.join(project.repos))}"
             )
 
+    # Workstream registry bounds (fleet.workstreams). Read from the env by the
+    # single-writer helper (lib/workstream-update.sh) at open/renew time.
+    # Emitted into EVERY bot.conf rather than manager-gated so the fleet-wide
+    # cap/lease applies regardless of team topology — a teamless fleet would
+    # silently lose its config under a manager-only gate. Defaults (12/14) apply
+    # when the fleet omits the block.
+    lines.append("")
+    lines.append("# Workstream registry (fleet.workstreams)")
+    lines.append(f"export WORKSTREAM_MAX_ACTIVE={fleet.workstreams.max_active}")
+    lines.append(f"export WORKSTREAM_LEASE_DAYS={fleet.workstreams.lease_days}")
+
     # Rolling code-audit sweep — emitted only into the owner bot's conf, so the
     # fleet-level selector (lib/code-audit-sweep.sh) resolves exactly one owner.
     # repos default to the owner's scope.repos when sweep.repos is unset.

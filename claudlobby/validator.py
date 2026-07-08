@@ -15,7 +15,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 from . import dotenv
-from .config import _PROJECT_VALIDATION_KEYS, FleetConfig
+from .config import _PROJECT_VALIDATION_KEYS, FleetConfig, is_pos_int
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
@@ -415,6 +415,29 @@ def _validate_mission(
         )
 
 
+_WORKSTREAMS_KEYS = {"max_active", "lease_days"}
+
+
+def _validate_workstreams(fleet: FleetConfig, report: ValidationReport) -> None:
+    """fleet.workstreams — positive-int bounds; unknown keys warn. The loader is
+    tolerant (a bad value falls back to the default); this is where the operator
+    hears about it."""
+    raw = fleet.workstreams.raw
+    if not raw:
+        return
+    for key in sorted(_WORKSTREAMS_KEYS):
+        if key in raw and not is_pos_int(raw[key]):
+            report.errors.append(
+                f"fleet.workstreams.{key} must be a positive integer, got "
+                f"{raw[key]!r} (the default was used instead)"
+            )
+    for unknown in sorted(k for k in raw if k not in _WORKSTREAMS_KEYS):
+        report.warnings.append(
+            f"fleet.workstreams: unknown key '{unknown}'"
+            f"{hint(unknown, _WORKSTREAMS_KEYS)}"
+        )
+
+
 def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
     """Fleet-level dependency checks."""
     # Warn about disabling defaults — unusual, worth flagging
@@ -657,6 +680,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
     _validate_mission(fleet, paths, report)
+    _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)
     _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
