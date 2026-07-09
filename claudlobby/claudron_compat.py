@@ -27,12 +27,12 @@ COMPAT_FLOOR: tuple[ClaudronCapability, ...] = (
     ClaudronCapability(
         feature="vault-based fleet overlay resolution (paths.py .claudron bridge)",
         requires="claudron.vault.detect / Vault.fleets API",
-        default_order_release="pinned SHA",
+        default_order_release="0.2.0",
     ),
     ClaudronCapability(
         feature="interim CLI query wedge (dispatch-task.sh preflight, plan P1e)",
         requires="claudron lookup CLI",
-        default_order_release="pinned SHA",
+        default_order_release="0.2.0",
     ),
     ClaudronCapability(
         feature="MCP fragment library/mcp/claudron.json (plan P2)",

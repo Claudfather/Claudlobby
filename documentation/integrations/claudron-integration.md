@@ -12,7 +12,7 @@ The full receiving-side plan is `documentation/plans/2026-07-07-claudron-consump
 
 ## Version pin and bump policy
 
-The `[vault]` extra in `pyproject.toml` is **pinned** — to a Claudron main SHA today, moving to the version tag (or a PyPI range like `claudron>=0.2,<0.3`) at Claudron's first tagged release. The extra tracks the **compositor's API consumption** (currently `claudron.vault.detect`); bump it per Claudron release *after* claudlobby's vault-mode tests pass against the new version. Never revert to a bare git URL — `tests/test_claudron_compat.py` enforces the pin.
+The `[vault]` extra in `pyproject.toml` is **pinned** to a released Claudron tag — `@v0.2.0` today (git tag; Claudron is not on PyPI yet, so the pin stays a `git+…@<tag>` URL rather than a `claudron>=0.2,<0.3` range until a PyPI publish lands). The extra tracks the **compositor's API consumption** (currently `claudron.vault.detect` / `Vault.fleets`); bump it per Claudron release *after* claudlobby's vault-mode tests (`tests/test_paths_integration.py`, run with claudron installed) pass against the new tag. Never revert to a bare git URL — `tests/test_claudron_compat.py` enforces the pin.
 
 The MCP *server* install is deliberately **not** coupled to this extra: bots don't run in claudlobby's venv. The server is a host-level install (see Gated surfaces below).
 
@@ -22,8 +22,8 @@ SSOT: `claudlobby/claudron_compat.py` (doctor's claudron check reads it; a unit 
 
 | Claudlobby surface | Requires (capability) | Slated release |
 |---|---|---|
-| vault-based fleet overlay resolution (paths.py .claudron bridge) | claudron.vault.detect / Vault.fleets API | pinned SHA |
-| interim CLI query wedge (dispatch-task.sh preflight, plan P1e) | claudron lookup CLI | pinned SHA |
+| vault-based fleet overlay resolution (paths.py .claudron bridge) | claudron.vault.detect / Vault.fleets API | 0.2.0 |
+| interim CLI query wedge (dispatch-task.sh preflight, plan P1e) | claudron lookup CLI | 0.2.0 |
 | MCP fragment library/mcp/claudron.json (plan P2) | claudron-mcp stdio server | 0.3.0 |
 | librarian review sweep (plan P5) | claudron review --json | 0.5.0 |
 
