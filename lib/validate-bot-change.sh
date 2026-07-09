@@ -300,7 +300,7 @@ check "send_reload_command fires no spurious Enter on clean submit (verify scope
 # injected via CLAUDE_BIN (prints the readiness string, then `cat` so send-keys
 # echo into the pane), with plugin management off (empty FLEET_PLUGINS_REQUIRED)
 # so the start is hermetic and fast — no real auth, MCP, or plugin network call.
-# A fresh session.md -> /claudna:session-resume is sent BEFORE STARTUP_PROMPT; a
+# A fresh session.md -> /claudna:session resume is sent BEFORE STARTUP_PROMPT; a
 # stale one -> resume skipped (clean start).
 RB_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-rb.XXXXXX")"
 RB_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valrb"
@@ -347,14 +347,14 @@ echo ""
 echo "=== validate-bot-change: lossless restart (resume on start, age-gated) ==="
 _lossless_fail_before=$fail
 pane_fresh="$(_run_startbot fresh)"
-printf '%s' "$pane_fresh" | grep -q '/claudna:session-resume' && r=yes || r=no
-check "fresh session.md -> /claudna:session-resume injected on start" "$r"
-_rln="$(printf '%s\n' "$pane_fresh" | grep -n '/claudna:session-resume' | head -1 | cut -d: -f1 || true)"
+printf '%s' "$pane_fresh" | grep -q '/claudna:session resume' && r=yes || r=no
+check "fresh session.md -> /claudna:session resume injected on start" "$r"
+_rln="$(printf '%s\n' "$pane_fresh" | grep -n '/claudna:session resume' | head -1 | cut -d: -f1 || true)"
 _sln="$(printf '%s\n' "$pane_fresh" | grep -n 'ZZZ_STARTUPMARK' | head -1 | cut -d: -f1 || true)"
 { [ -n "$_rln" ] && [ -n "$_sln" ] && [ "$_rln" -lt "$_sln" ]; } && r=yes || r=no
 check "resume keystroke precedes STARTUP_PROMPT in the pane" "$r"
 pane_stale="$(_run_startbot stale)"
-printf '%s' "$pane_stale" | grep -q '/claudna:session-resume' && r=no || r=yes
+printf '%s' "$pane_stale" | grep -q '/claudna:session resume' && r=no || r=yes
 check "stale session.md -> resume injection skipped (clean start)" "$r"
 grep -q 'RESUME SKIP' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
 check "stale skip recorded in startup.log (RESUME SKIP)" "$r"

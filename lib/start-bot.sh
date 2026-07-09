@@ -263,7 +263,7 @@ fi
 # start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
 
 # Resume prior context (lossless restart) before STARTUP_PROMPT. Every start —
-# intentional, crash, or weekly bounce — injects /claudna:session-resume --auto
+# intentional, crash, or weekly bounce — injects /claudna:session resume --auto
 # as a first keystroke so the bot picks up its last handoff. Age-gated: resume
 # only from a checkpoint fresher than RESUME_MAX_AGE_S; a stale one (e.g. a bot
 # that crashed days ago) clean-starts rather than replaying dead state. Sent as
@@ -274,8 +274,8 @@ fi
 _SESSION_MD="$BOT_DIR/.claude/session.md"
 _RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
-    echo "$(ts_iso) RESUME — injecting /claudna:session-resume --auto (fresh checkpoint)" >> "$LOG"
-    _RESUME_CMD='/claudna:session-resume --auto'
+    echo "$(ts_iso) RESUME — injecting /claudna:session resume --auto (fresh checkpoint)" >> "$LOG"
+    _RESUME_CMD='/claudna:session resume --auto'
     bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" "$_RESUME_CMD"
     sleep 0.3
     bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
