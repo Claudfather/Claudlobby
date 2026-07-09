@@ -114,7 +114,12 @@ class TestCollectEvents:
         assert "send_miss" not in types
 
     def test_critical_types_set_contents(self):
-        assert {"bridge_down", "reload_failed", "restart_failed"} <= CRITICAL_TYPES
+        assert {
+            "bridge_down",
+            "reload_failed",
+            "restart_failed",
+            "rc_timeout",
+        } <= CRITICAL_TYPES
         assert "send_miss" not in CRITICAL_TYPES
 
     def test_events_sorted_by_timestamp(self, events_dir):

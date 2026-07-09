@@ -377,6 +377,54 @@ if [ "$fail" -gt "$_lossless_fail_before" ]; then
     echo "  ----------------------------------------------------------------"
 fi
 
+# === Scenario 2b: RC readiness probe — READY vs TIMEOUT + rc_timeout event (#533) ===
+# Same REAL start-bot.sh. Positive path first (the fresh/stale runs above used a
+# stub that prints the readiness string): READY must be logged and NO rc_timeout
+# event emitted. Then the negative path: a stub that never prints the string
+# simulates the #478 regression (RC never came up) — the probe must TIMEOUT and
+# emit an rc_timeout event to the ledger fleet-pulse escalates. This is the
+# empirical proof of #533 items 3-4 (unit tests prove composition; only running
+# start-bot proves the event actually fires). RC_READY_TIMEOUT_S=1 keeps the
+# TIMEOUT fast — the 90s default is untestable in a harness.
+echo ""
+echo "=== validate-bot-change: RC readiness alerting (#533 items 3-4) ==="
+_rc_fail_before=$fail
+grep -q 'READY — remote-control active' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "RC string present -> READY recorded in startup.log" "$r"
+grep -rq '"type":"rc_timeout"' "$RB_DIR/data/events/" 2>/dev/null && r=no || r=yes
+check "RC present -> no rc_timeout event (no false alarm)" "$r"
+
+cat > "$RB_ROOT/bin/claude" <<'STUB'
+#!/bin/bash
+exec cat
+STUB
+chmod +x "$RB_ROOT/bin/claude"
+rm -rf "$RB_DIR/data/events" 2>/dev/null || true
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "2020-01-01T00:00:00Z" \
+    > "$RB_DIR/.claude/session.md"
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 CLAUDE_BIN="$RB_ROOT/bin/claude" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
+sleep 1
+grep -q 'TIMEOUT' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "no RC string -> TIMEOUT recorded in startup.log" "$r"
+_rcev="$(grep -rl '"type":"rc_timeout"' "$RB_DIR/data/events/" 2>/dev/null | head -1 || true)"
+[ -n "$_rcev" ] && r=yes || r=no
+check "TIMEOUT emits an rc_timeout fleet event (fleet-pulse escalation input)" "$r"
+if [ -n "$_rcev" ]; then
+    python3 -c "import sys,json; e=json.loads(open('$_rcev').readline()); sys.exit(0 if e['type']=='rc_timeout' and e['ts'] else 1)" 2>/dev/null && r=yes || r=no
+else r=no; fi
+check "rc_timeout event is valid JSON with ts+type (fleet-pulse-readable)" "$r"
+
+if [ "$fail" -gt "$_rc_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: RC readiness checks failed ---"
+    echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
+    echo "  [events]"; sed 's/^/    /' "$RB_DIR/data/events/"fleet-*.jsonl 2>/dev/null || echo "    (none)"
+    echo "  [start-bot timeout stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.timeout.out" 2>/dev/null || echo "    (none)"
+fi
+
 # === Scenario 3: weekly worker-only restart — manager skip + loud failure ===
 # Run weekly-worker-restart.sh from a stub lib dir (stub spin-up-bot FAILS, so
 # the loud emit_failure_alert path is exercised too). The manager (MANAGER_TMUX==BOT_ID)

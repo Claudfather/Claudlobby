@@ -305,7 +305,12 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                     date -v-"${_ESCALATION_WINDOW}"M +%Y-%m-%dT%H:%M 2>/dev/null || echo "")
 
     if [ -n "$_window_start" ]; then
-        for _crit_type in service_down session_missing bridge_down; do
+        # rc_timeout is startup-sourced (start-bot.sh emits it once when the
+        # remote-control readiness probe times out), unlike the others which
+        # fleet-pulse re-emits each run. Its events therefore cluster in the
+        # restart window — which is exactly the #533 fleet-wide-rollout case
+        # this must catch; a long-idle single bot won't re-page (keepalive's job).
+        for _crit_type in service_down session_missing bridge_down rc_timeout; do
             _affected_bots=""
             _affected_count=0
             for bot_dir in "$BOTS_DIR"/*/; do

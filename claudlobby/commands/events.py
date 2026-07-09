@@ -15,6 +15,7 @@ CRITICAL_TYPES = {
     "bridge_down",
     "reload_failed",
     "restart_failed",
+    "rc_timeout",
 }
 
 

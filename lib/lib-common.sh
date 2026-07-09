@@ -690,6 +690,37 @@ bot_tmux() {
     "$_TMUX_BIN" -L "$socket" "$@"
 }
 
+# Append one event to a bot's JSONL ledger (data/events/fleet-YYYY-MM-DD.jsonl)
+# — the SAME ledger fleet-pulse reads and escalates. Best-effort: never fails
+# the caller, because startup/observability paths must not abort on a log write.
+# Identity defaults to $BOT_DIR/$BOT_ID; falls back to the fleet-level ledger
+# when no bot context is set. data_json must be a valid JSON value (default {}).
+# Usage: emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
+# The general form of fleet-pulse / code-audit-sweep's emit_event and the
+# _tmux_send_miss below (which predate it; migrate opportunistically).
+emit_fleet_event() {
+    local event_type="${1:?emit_fleet_event: <type> required}"
+    local event_source="${2:-unknown}"
+    local data_json="${3:-}"
+    local bot_dir="${4:-${BOT_DIR:-}}"
+    local bot_id="${5:-${BOT_ID:-}}"
+    [ -n "$data_json" ] || data_json='{}'
+    local events_dir
+    if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
+        events_dir="$bot_dir/data/events"
+        [ -n "$bot_id" ] || bot_id=$(basename "$bot_dir")
+    else
+        events_dir="${CLAUDLOBBY_ROOT:-}/state/events"
+        bot_id="${bot_id:-fleet}"
+    fi
+    mkdir -p "$events_dir" 2>/dev/null || return 0
+    local ts today
+    ts=$(ts_iso); today=$(date +%Y-%m-%d)
+    printf '{"ts":"%s","bot":"%s","type":"%s","source":"%s","data":%s}\n' \
+        "$ts" "$bot_id" "$event_type" "$event_source" "$data_json" \
+        >> "$events_dir/fleet-${today}.jsonl" 2>/dev/null || true
+}
+
 # _tmux_send_miss <session> <socket> <reason>
 # Emit a send_miss event to the CALLER bot's JSONL ledger (best-effort) plus a
 # stderr breadcrumb, so a dropped cross-socket send becomes observable instead
