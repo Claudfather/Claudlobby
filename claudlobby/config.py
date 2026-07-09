@@ -396,10 +396,11 @@ class WorkstreamsConfig:
 
     max_active: the manager-attention-span cap on concurrently active
     workstreams (`workstream-update.sh open` refuses past it). lease_days:
-    how long a workstream keeps its slot without progress before fleet-pulse
-    flags it. Both compose into every bot.conf as WORKSTREAM_MAX_ACTIVE /
-    WORKSTREAM_LEASE_DAYS so the single-writer helper and the pulse checks read
-    one fleet-wide value. `raw` keeps the original block for validation.
+    how long a workstream keeps its slot without progress before the
+    (follow-up PR) fleet-pulse stall check will flag it. Both compose into
+    every bot.conf as WORKSTREAM_MAX_ACTIVE / WORKSTREAM_LEASE_DAYS so the
+    single-writer helper (and the future pulse checks) read one fleet-wide
+    value. `raw` keeps the original block for validation.
     """
 
     max_active: int = 12

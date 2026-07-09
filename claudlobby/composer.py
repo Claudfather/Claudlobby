@@ -478,8 +478,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # when the fleet omits the block.
     lines.append("")
     lines.append("# Workstream registry (fleet.workstreams)")
-    lines.append(f"export WORKSTREAM_MAX_ACTIVE={fleet.workstreams.max_active}")
-    lines.append(f"export WORKSTREAM_LEASE_DAYS={fleet.workstreams.lease_days}")
+    lines.append(f"export WORKSTREAM_MAX_ACTIVE={_shq(fleet.workstreams.max_active)}")
+    lines.append(f"export WORKSTREAM_LEASE_DAYS={_shq(fleet.workstreams.lease_days)}")
 
     # Rolling code-audit sweep — emitted only into the owner bot's conf, so the
     # fleet-level selector (lib/code-audit-sweep.sh) resolves exactly one owner.

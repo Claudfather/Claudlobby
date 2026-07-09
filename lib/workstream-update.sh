@@ -1,11 +1,12 @@
 #!/bin/bash
 # workstream-update.sh — single-writer mutator for the per-fleet workstream
 # registry (workstreams.json). The fleet tracks a bounded portfolio of work
-# across unrelated repos here; stalls surface via fleet-pulse reading this file.
+# across unrelated repos here; stalls will surface via fleet-pulse reading this
+# file (the pulse consumer lands in a follow-up PR).
 #
-# This helper is the ONLY writer. Hand-editing is forbidden; the /workstream
-# manager skill and dispatch-task.sh --workstream both wrap it. Reads go through
-# the read-only `claudlobby workstreams` CLI.
+# This helper is the ONLY writer. Hand-editing is forbidden; it will be wrapped
+# by the /workstream manager skill and dispatch-task.sh --workstream (both
+# follow-up PRs). Reads go through the read-only `claudlobby workstreams` CLI.
 #
 # Usage:
 #   workstream-update.sh open <title> [--project P] [--owner BOT] [--next TEXT] [--id ws-<slug>]
@@ -54,6 +55,20 @@ mkdir -p "$(dirname "$REGISTRY")"
 
 LEASE_DAYS="${WORKSTREAM_LEASE_DAYS:-14}"
 MAX_ACTIVE="${WORKSTREAM_MAX_ACTIVE:-12}"
+
+# Fail fast on a bad env: a non-numeric MAX_ACTIVE makes `[ n -ge $MAX ]` error
+# and silently skip the cap (fails open, unbounded); a non-numeric/negative
+# LEASE_DAYS aborts the lease-epoch arithmetic under set -u but set -e does not
+# propagate out of the `$(...)` assignment, so an entry lands with an empty or
+# past lease. The single writer must defend its own invariants, not trust the
+# composed value blindly.
+_require_pos_int() {
+    # _require_pos_int <name> <value> — validated below, once _die is defined.
+    case "$2" in
+        ''|*[!0-9]*) _die "$1 must be a positive integer, got '$2'" ;;
+    esac
+    [ "$2" -ge 1 ] || _die "$1 must be >= 1, got '$2'"
+}
 
 _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -106,6 +121,10 @@ _apply() {
 }
 
 _die() { echo "workstream-update: $1" >&2; exit "${2:-2}"; }
+
+# Validate the bounds now that _die exists (fail fast, before any mutation).
+_require_pos_int WORKSTREAM_MAX_ACTIVE "$MAX_ACTIVE"
+_require_pos_int WORKSTREAM_LEASE_DAYS "$LEASE_DAYS"
 
 # --- Subcommand dispatch ------------------------------------------------------
 CMD="${1:-}"
@@ -191,8 +210,12 @@ progress)
             *) _die "progress: unknown arg: $1" ;;
         esac
     done
-    _registry_has "$ID" || _die "progress: no such workstream: $ID" 1
+    # Existence check runs INSIDE the lock (as open does): a pre-lock check
+    # would be check-then-act — a concurrent prune could delete the entry
+    # between the check and the write, and jq's `.workstreams[$id].x = y`
+    # would then auto-vivify a partial zombie entry (no id/status/title).
     _progress_ws() {
+        _registry_has "$ID" || { echo "workstream-update: progress: no such workstream: $ID" >&2; return 1; }
         local now expiry
         now="$(_now_iso)"; expiry="$(_lease_expiry_iso)"
         _apply "$now" '.workstreams[$id].last_progress_ts = $now
@@ -200,7 +223,7 @@ progress)
                 | (if $next != "" then .workstreams[$id].next = $next else . end)' \
             --arg id "$ID" --arg now "$now" --arg expiry "$expiry" --arg next "$NEXT"
     }
-    with_lock "$REGISTRY.lock" _progress_ws
+    with_lock "$REGISTRY.lock" _progress_ws || exit $?
     ;;
 
 renew)
@@ -213,17 +236,18 @@ renew)
         esac
     done
     [ -n "$NOTE" ] || _die "renew: --note is required (renew without progress must be justified)"
-    _registry_has "$ID" || _die "renew: no such workstream: $ID" 1
     # Note: deliberately does NOT advance last_progress_ts — the stall check
-    # keys on that, so serial renew-without-progress stays visible.
+    # keys on that, so serial renew-without-progress stays visible. Existence
+    # checked inside the lock (see progress) to avoid the auto-vivify race.
     _renew_ws() {
+        _registry_has "$ID" || { echo "workstream-update: renew: no such workstream: $ID" >&2; return 1; }
         local now expiry
         now="$(_now_iso)"; expiry="$(_lease_expiry_iso)"
         _apply "$now" '.workstreams[$id].lease_expires_ts = $expiry
                 | .workstreams[$id].renewals += [{ts: $now, note: $note}]' \
             --arg id "$ID" --arg now "$now" --arg expiry "$expiry" --arg note "$NOTE"
     }
-    with_lock "$REGISTRY.lock" _renew_ws
+    with_lock "$REGISTRY.lock" _renew_ws || exit $?
     ;;
 
 block)
@@ -235,13 +259,14 @@ block)
             *) _die "block: unknown arg: $1" ;;
         esac
     done
-    _registry_has "$ID" || _die "block: no such workstream: $ID" 1
+    # Existence checked inside the lock (see progress) to avoid the auto-vivify race.
     _block_ws() {
+        _registry_has "$ID" || { echo "workstream-update: block: no such workstream: $ID" >&2; return 1; }
         _apply "$(_now_iso)" '.workstreams[$id].status = "blocked"
                 | (if $note != "" then .workstreams[$id].next = $note else . end)' \
             --arg id "$ID" --arg note "$NOTE"
     }
-    with_lock "$REGISTRY.lock" _block_ws
+    with_lock "$REGISTRY.lock" _block_ws || exit $?
     ;;
 
 close)
@@ -254,14 +279,15 @@ close)
         esac
     done
     case "$STATUS" in done|abandoned) ;; *) _die "close: --status must be done|abandoned, got '$STATUS'" ;; esac
-    _registry_has "$ID" || _die "close: no such workstream: $ID" 1
+    # Existence checked inside the lock (see progress) to avoid the auto-vivify race.
     _close_ws() {
+        _registry_has "$ID" || { echo "workstream-update: close: no such workstream: $ID" >&2; return 1; }
         local now; now="$(_now_iso)"
         _apply "$now" '.workstreams[$id].status = $status
                 | .workstreams[$id].closed_ts = $now' \
             --arg id "$ID" --arg status "$STATUS" --arg now "$now"
     }
-    with_lock "$REGISTRY.lock" _close_ws
+    with_lock "$REGISTRY.lock" _close_ws || exit $?
     ;;
 
 prune)
@@ -275,18 +301,28 @@ prune)
     [ -n "$ARCHIVE" ] || ARCHIVE="$(dirname "$REGISTRY")/workstreams-archive.jsonl"
     _prune_ws() {
         _init_registry
-        local terminal
+        local terminal tmp
         terminal=$(jq -r '[.workstreams[] | select(.status=="done" or .status=="abandoned")] | length' "$REGISTRY")
         [ "$terminal" -gt 0 ] || return 0
-        # Append terminal entries (one JSON object per line) to the archive,
-        # then drop them from the live registry — under the same lock.
-        jq -c '.workstreams[] | select(.status=="done" or .status=="abandoned")' "$REGISTRY" >> "$ARCHIVE"
+        # Archive-then-drop, never the reverse: a crash between the two steps
+        # must duplicate an audit row, never lose a terminal entry. Materialize
+        # the terminal entries into a temp first so a crash mid-write cannot
+        # leave a truncated line in the append-only archive; append the complete
+        # temp in one shot, then drop from the live registry. A crash strictly
+        # between the append and the drop re-archives on the next run — an
+        # at-most-once-extra audit row, deduped by id at read time.
+        tmp=$(safe_mktemp)
+        jq -c '.workstreams[] | select(.status=="done" or .status=="abandoned")' "$REGISTRY" > "$tmp" \
+            || { rm -f "$tmp"; echo "workstream-update: prune: failed to collect terminal entries" >&2; return 1; }
+        cat "$tmp" >> "$ARCHIVE" \
+            || { rm -f "$tmp"; echo "workstream-update: prune: failed to append $ARCHIVE" >&2; return 1; }
+        rm -f "$tmp"
         _apply "$(_now_iso)" \
             '.workstreams |= with_entries(select(.value.status != "done" and .value.status != "abandoned"))' \
             || return 1
         echo "Pruned $terminal terminal workstream(s) to $ARCHIVE"
     }
-    with_lock "$REGISTRY.lock" _prune_ws
+    with_lock "$REGISTRY.lock" _prune_ws || exit $?
     ;;
 
 *)

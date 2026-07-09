@@ -24,9 +24,15 @@ def load_workstreams(paths: Paths) -> dict:
     if not p.is_file():
         return {}
     try:
-        return json.loads(p.read_text()).get("workstreams", {})
+        data = json.loads(p.read_text())
     except (json.JSONDecodeError, OSError):
         return {}
+    # Valid JSON but not the expected object (e.g. a hand-mangled file that is a
+    # list or scalar) → treat as empty rather than raising AttributeError.
+    if not isinstance(data, dict):
+        return {}
+    ws = data.get("workstreams", {})
+    return ws if isinstance(ws, dict) else {}
 
 
 def _day(ts: str | None) -> str:

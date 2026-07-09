@@ -7,13 +7,21 @@ mirroring how test_creds_check_telegram.py exercises the real script.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "lib" / "workstream-update.sh"
+
+# The helper shells out to jq; skip cleanly on hosts without it rather than
+# erroring the whole suite (matches the sibling bash-driving tests).
+pytestmark = pytest.mark.skipif(
+    shutil.which("jq") is None, reason="workstream-update.sh requires jq"
+)
 
 
 def _run(tmp_path: Path, *args: str, env_extra: dict | None = None):
@@ -191,3 +199,65 @@ class TestErrors:
         r = _run(tmp_path, "frobnicate")
         assert r.returncode != 0
         assert "unknown subcommand" in r.stderr
+
+
+class TestConcurrency:
+    def test_parallel_opens_mint_distinct_ids(self, tmp_path: Path):
+        # The single-writer guarantee, regression-protected: N concurrent opens
+        # under the lock mint N distinct ids and never lose an update (the
+        # id-mint-under-lock TOCTOU fix — previously only manually observed).
+        n = 20
+        # Cap raised above n so this isolates id-minting, not the cap (the cap
+        # holding under concurrency is covered by the sequential cap tests).
+        hi_cap = {"WORKSTREAM_MAX_ACTIVE": "50"}
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            results = list(ex.map(
+                lambda i: _run(tmp_path, "open", f"work item {i}", env_extra=hi_cap), range(n)
+            ))
+        assert all(r.returncode == 0 for r in results), [r.stderr for r in results if r.returncode]
+        ids = [r.stdout.strip() for r in results]
+        assert len(set(ids)) == n, f"id collision under concurrency: {sorted(ids)}"
+        assert len(_registry(tmp_path)["workstreams"]) == n, "lost update: fewer entries than opens"
+
+    @pytest.mark.parametrize("cmd,extra", [
+        ("progress", []), ("renew", ["--note", "n"]), ("block", []), ("close", []),
+    ])
+    def test_mutator_never_autovivifies_a_missing_id(self, tmp_path: Path, cmd, extra):
+        # B1 regression: the existence check runs INSIDE the lock, so a mutator
+        # on an absent id errors and leaves the registry untouched — jq never
+        # runs `.workstreams[$id].x = y` on a missing key (which would create a
+        # partial zombie: no id/status/title).
+        keeper = _open(tmp_path, "keeper")
+        r = _run(tmp_path, cmd, "ws-ghost", *extra)
+        assert r.returncode != 0
+        workstreams = _registry(tmp_path)["workstreams"]
+        assert "ws-ghost" not in workstreams, f"{cmd} auto-vivified a zombie entry"
+        assert set(workstreams) == {keeper}, f"{cmd} disturbed the registry"
+
+    def test_concurrent_mutate_and_prune_stay_wellformed(self, tmp_path: Path):
+        # Stress the exact B1 interleaving: race a mutator against prune on a
+        # terminal entry. Whatever the ordering, every surviving entry must be
+        # a full record (its map key equals its .id) — no status-only zombie.
+        for _ in range(15):
+            ws = _open(tmp_path, "racer")
+            _run(tmp_path, "close", ws)
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f1 = ex.submit(_run, tmp_path, "prune")
+                f2 = ex.submit(_run, tmp_path, "renew", ws, "--note", "race")
+                f1.result(); f2.result()
+            for wid, entry in _registry(tmp_path)["workstreams"].items():
+                assert entry.get("id") == wid, f"zombie entry {wid!r}: {entry}"
+
+
+class TestBadEnvBounds:
+    # M2/M3: the single writer validates its own bounds; a bad env must _die
+    # before any mutation, not silently disable the cap or write an empty lease.
+    @pytest.mark.parametrize("var", ["WORKSTREAM_MAX_ACTIVE", "WORKSTREAM_LEASE_DAYS"])
+    @pytest.mark.parametrize("bad", ["lots", "-3", "0"])
+    def test_non_positive_int_bound_dies(self, tmp_path: Path, var: str, bad: str):
+        r = _run(tmp_path, "open", "t", env_extra={var: bad})
+        assert r.returncode != 0
+        assert "positive integer" in r.stderr or "must be >= 1" in r.stderr
+        reg_file = tmp_path / "workstreams.json"
+        if reg_file.exists():
+            assert _registry(tmp_path)["workstreams"] == {}, "entry created despite bad bound"
