@@ -122,6 +122,16 @@ _apply() {
 
 _die() { echo "workstream-update: $1" >&2; exit "${2:-2}"; }
 
+# _require_exists <cmd> — inside a locked mutator, fail (return 1) if the
+# ambient $ID is absent. Runs under the lock so the check-then-act is atomic:
+# a pre-lock check would let a concurrent prune delete the entry before the
+# write, and jq would then auto-vivify a partial zombie.
+_require_exists() {
+    _registry_has "$ID" && return 0
+    echo "workstream-update: $1: no such workstream: $ID" >&2
+    return 1
+}
+
 # Validate the bounds now that _die exists (fail fast, before any mutation).
 _require_pos_int WORKSTREAM_MAX_ACTIVE "$MAX_ACTIVE"
 _require_pos_int WORKSTREAM_LEASE_DAYS "$LEASE_DAYS"
@@ -215,7 +225,7 @@ progress)
     # between the check and the write, and jq's `.workstreams[$id].x = y`
     # would then auto-vivify a partial zombie entry (no id/status/title).
     _progress_ws() {
-        _registry_has "$ID" || { echo "workstream-update: progress: no such workstream: $ID" >&2; return 1; }
+        _require_exists progress || return 1
         local now expiry
         now="$(_now_iso)"; expiry="$(_lease_expiry_iso)"
         _apply "$now" '.workstreams[$id].last_progress_ts = $now
@@ -240,7 +250,7 @@ renew)
     # keys on that, so serial renew-without-progress stays visible. Existence
     # checked inside the lock (see progress) to avoid the auto-vivify race.
     _renew_ws() {
-        _registry_has "$ID" || { echo "workstream-update: renew: no such workstream: $ID" >&2; return 1; }
+        _require_exists renew || return 1
         local now expiry
         now="$(_now_iso)"; expiry="$(_lease_expiry_iso)"
         _apply "$now" '.workstreams[$id].lease_expires_ts = $expiry
@@ -261,7 +271,7 @@ block)
     done
     # Existence checked inside the lock (see progress) to avoid the auto-vivify race.
     _block_ws() {
-        _registry_has "$ID" || { echo "workstream-update: block: no such workstream: $ID" >&2; return 1; }
+        _require_exists block || return 1
         _apply "$(_now_iso)" '.workstreams[$id].status = "blocked"
                 | (if $note != "" then .workstreams[$id].next = $note else . end)' \
             --arg id "$ID" --arg note "$NOTE"
@@ -281,7 +291,7 @@ close)
     case "$STATUS" in done|abandoned) ;; *) _die "close: --status must be done|abandoned, got '$STATUS'" ;; esac
     # Existence checked inside the lock (see progress) to avoid the auto-vivify race.
     _close_ws() {
-        _registry_has "$ID" || { echo "workstream-update: close: no such workstream: $ID" >&2; return 1; }
+        _require_exists close || return 1
         local now; now="$(_now_iso)"
         _apply "$now" '.workstreams[$id].status = $status
                 | .workstreams[$id].closed_ts = $now' \
