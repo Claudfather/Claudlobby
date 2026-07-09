@@ -391,6 +391,24 @@ DEFAULT_PLUGINS: list[str] = [
 
 
 @dataclass
+class WorkstreamsConfig:
+    """fleet.workstreams knobs — the anti-rot bounds for the P5 registry.
+
+    max_active: the manager-attention-span cap on concurrently active
+    workstreams (`workstream-update.sh open` refuses past it). lease_days:
+    how long a workstream keeps its slot without progress before the
+    (follow-up PR) fleet-pulse stall check will flag it. Both compose into
+    every bot.conf as WORKSTREAM_MAX_ACTIVE / WORKSTREAM_LEASE_DAYS so the
+    single-writer helper (and the future pulse checks) read one fleet-wide
+    value. `raw` keeps the original block for validation.
+    """
+
+    max_active: int = 12
+    lease_days: int = 14
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
 class FleetConfig:
     name: str
     service_prefix: str
@@ -411,6 +429,9 @@ class FleetConfig:
     # documentation/plans/2026-07-06-goal-aware-fleet-portfolio.md
     mission: str | None = None
     mission_file: str | None = None
+    # Workstream registry bounds (P5). Always present (defaults apply when the
+    # fleet omits the block) so the composer can emit WORKSTREAM_* unconditionally.
+    workstreams: WorkstreamsConfig = field(default_factory=WorkstreamsConfig)
 
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
@@ -542,6 +563,30 @@ def _coerce_scope(raw: dict | None) -> ScopeConfig | None:
             for k, v in raw.items()
             if k not in {"org", "repos", "snowflake_targets"}
         },
+    )
+
+
+def is_pos_int(v: object) -> bool:
+    """True for a positive int. bool is excluded — it is an int subclass, so
+    `True`/`False` would otherwise slip through as 1/0. Shared by the tolerant
+    loader (below) and the validator so 'valid' is defined in exactly one place."""
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def _coerce_workstreams(raw: dict | None) -> WorkstreamsConfig:
+    """Parse fleet.workstreams. Tolerant: a bad value falls back to the default
+    so `generate` never crashes — `claudlobby validate` surfaces the error."""
+    if not raw:
+        return WorkstreamsConfig()
+
+    def _pos_int(key: str, default: int) -> int:
+        val = raw.get(key, default)
+        return val if is_pos_int(val) else default
+
+    return WorkstreamsConfig(
+        max_active=_pos_int("max_active", WorkstreamsConfig.max_active),
+        lease_days=_pos_int("lease_days", WorkstreamsConfig.lease_days),
+        raw=dict(raw),
     )
 
 
@@ -1064,5 +1109,6 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
                         "mission: one paragraph") or None,
         mission_file=_shaped("fleet.mission_file", fleet.get("mission_file"),
                              str, "missions/fleet.md") or None,
+        workstreams=_coerce_workstreams(fleet.get("workstreams")),
     )
     return fleet_cfg, merged_defaults
