@@ -275,6 +275,25 @@ def cmd_move_bot(args) -> int:
             sum(1 for _ in target_memory.rglob("*") if _.is_file()),
         )
 
+    # Step 3 ends supervision of the source (unit unlinked, tmux server
+    # killed) — from there on the source dir is an orphan on disk, so every
+    # exit, incomplete or done, states its disposition. --cleanup-source
+    # removal only happens after full success (step 7).
+    def _print_source_disposition(*, complete: bool) -> None:
+        if not cleanup:
+            print(
+                f"  ⚠ Source dir left in place (orphaned): {src_bot_dir}"
+                f"\n    '{bot_name}' is no longer in '{source_fleet_name}' — supervision "
+                "skips it, but it lingers on disk."
+                f"\n    Remove when ready:  rm -rf {src_bot_dir}\n"
+            )
+        elif not complete:
+            print(
+                f"  Note: --cleanup-source deferred — migration incomplete; "
+                f"source dir kept: {src_bot_dir}"
+                f"\n        Complete the migration, then remove:  rm -rf {src_bot_dir}\n"
+            )
+
     # 3. Stop + disable old service
     if old_unit and old_unit.is_file():
         if is_linux:
@@ -374,6 +393,7 @@ def cmd_move_bot(args) -> int:
                 "may point to the wrong group."
                 f"\nFix manually: {access_json_path}\n"
             )
+            _print_source_disposition(complete=False)
             return 1
 
     # 6. Re-enroll via spin-up-bot
@@ -400,6 +420,7 @@ def cmd_move_bot(args) -> int:
                 "but enrollment failed."
                 f"\nRun manually:  {spin_up} {target_bot_dir}\n"
             )
+            _print_source_disposition(complete=False)
             return 1
     else:
         log.error("spin-up-bot.sh not found at %s — enroll manually", spin_up)
@@ -408,6 +429,7 @@ def cmd_move_bot(args) -> int:
             "but not enrolled."
             f"\nExpected: {spin_up}\n"
         )
+        _print_source_disposition(complete=False)
         return 1
 
     # 7. Cleanup source (opt-in). When skipped, the source dir survives on disk
@@ -421,11 +443,5 @@ def cmd_move_bot(args) -> int:
     print(
         f"\nDone. Bot '{bot_name}' moved from '{source_fleet_name}' → '{target_fleet_name}'.\n"
     )
-    if not cleanup:
-        print(
-            f"  ⚠ Source dir left in place (orphaned): {src_bot_dir}"
-            f"\n    '{bot_name}' is no longer in '{source_fleet_name}' — supervision "
-            "skips it, but it lingers on disk."
-            f"\n    Remove when ready:  rm -rf {src_bot_dir}\n"
-        )
+    _print_source_disposition(complete=True)
     return 0

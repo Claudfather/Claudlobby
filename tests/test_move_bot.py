@@ -296,7 +296,16 @@ class TestMoveBotApply:
         src_bot = src_fleet / "runtime" / "bots" / "mybot"
 
         rc = main(
-            ["--root", str(root), "move-bot", "mybot", "--to", "fleet-b", "--from", "fleet-a"]
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+            ]
         )
         assert rc == 0
         assert src_bot.is_dir()  # dry-run mutates nothing
@@ -326,12 +335,17 @@ class TestMoveBotApply:
         )
         assert rc == 0  # stub exits 0
 
-    def test_enrollment_failure_returns_nonzero(self, tmp_path: Path):
-        """spin-up-bot.sh failure should cause move-bot to return 1."""
+    def test_enrollment_failure_returns_nonzero_and_warns_orphan(
+        self, tmp_path: Path, capsys
+    ):
+        """spin-up-bot.sh failure returns 1 AND states the source disposition —
+        the source is already orphaned, and the operator is distracted fixing
+        enrollment, which is exactly when a silent orphan gets forgotten (#546)."""
         root = _scaffold_root(tmp_path)
         local = root / "local"
-        _scaffold_fleet(local, "fleet-a", ["mybot"])
+        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
         _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+        src_bot = src_fleet / "runtime" / "bots" / "mybot"
 
         # Replace stub with one that fails
         stub = root / "lib" / "spin-up-bot.sh"
@@ -351,6 +365,118 @@ class TestMoveBotApply:
             ]
         )
         assert rc == 1
+        assert src_bot.is_dir()
+        out = capsys.readouterr().out
+        assert "INCOMPLETE MIGRATION" in out
+        assert "orphaned" in out
+        assert str(src_bot) in out
+        assert "rm -rf" in out
+
+    def test_enrollment_failure_defers_cleanup(self, tmp_path: Path, capsys):
+        """--cleanup-source never removes the source of a half-done migration;
+        the deferral is stated instead of silently skipped (#546)."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+        src_bot = src_fleet / "runtime" / "bots" / "mybot"
+
+        stub = root / "lib" / "spin-up-bot.sh"
+        stub.write_text("#!/bin/bash\nexit 1\n")
+
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+                "--cleanup-source",
+            ]
+        )
+        assert rc == 1
+        assert src_bot.is_dir()
+        out = capsys.readouterr().out
+        assert "--cleanup-source deferred" in out
+        assert str(src_bot) in out
+
+    def test_access_json_failure_still_warns_orphan(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """The access.json INCOMPLETE MIGRATION exit happens after step 3 has
+        already ended source supervision — the disposition must print there
+        too, not only on the spin-up branches (#546)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(
+            local,
+            "fleet-b",
+            ["mybot"],
+            create_bot_dirs=False,
+            telegram_group_chat_id="-100777",
+        )
+        src_bot = src_fleet / "runtime" / "bots" / "mybot"
+
+        channel_dir = tmp_path / ".claude" / "channels" / "telegram-mybot"
+        channel_dir.mkdir(parents=True)
+        (channel_dir / "access.json").write_text("{ not json")
+
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+            ]
+        )
+        assert rc == 1
+        assert src_bot.is_dir()
+        out = capsys.readouterr().out
+        assert "access.json update failed" in out
+        assert "orphaned" in out
+        assert str(src_bot) in out
+
+    def test_missing_spinup_still_warns_orphan(self, tmp_path: Path, capsys):
+        """The not-enrolled branch (spin-up-bot.sh absent) states the orphan
+        disposition too (#546)."""
+        root = _scaffold_root(tmp_path)
+        local = root / "local"
+        src_fleet = _scaffold_fleet(local, "fleet-a", ["mybot"])
+        _scaffold_fleet(local, "fleet-b", ["mybot"], create_bot_dirs=False)
+        src_bot = src_fleet / "runtime" / "bots" / "mybot"
+
+        (root / "lib" / "spin-up-bot.sh").unlink()
+
+        rc = main(
+            [
+                "--root",
+                str(root),
+                "move-bot",
+                "mybot",
+                "--to",
+                "fleet-b",
+                "--from",
+                "fleet-a",
+                "--apply",
+            ]
+        )
+        assert rc == 1
+        assert src_bot.is_dir()
+        out = capsys.readouterr().out
+        assert "not enrolled" in out
+        assert "orphaned" in out
+        assert str(src_bot) in out
 
     def test_memory_copy_is_atomic(self, tmp_path: Path):
         """Memory copy uses temp-dir-then-rename for rollback safety."""
