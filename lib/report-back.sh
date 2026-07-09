@@ -84,14 +84,11 @@ MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" "$MESSAGE" || true
 
 # Append structured JSONL event to the fleet-level report-back ledger.
-# Path follows overlay convention: local/<fleet>/runtime/ or root runtime/.
+# Path follows overlay convention: local/<fleet>/runtime/ or root runtime/fleet/
+# (fleet_runtime_dir owns that rule; Python twin: Paths.fleet_state).
 _emit_ledger_event() {
     local ledger_dir
-    if [ -n "${FLEET_NAME:-}" ]; then
-        ledger_dir="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/runtime"
-    else
-        ledger_dir="$CLAUDLOBBY_ROOT/runtime/fleet"
-    fi
+    ledger_dir="$(fleet_runtime_dir)"
     mkdir -p "$ledger_dir"
     local ledger="$ledger_dir/report-back.jsonl"
     local ts

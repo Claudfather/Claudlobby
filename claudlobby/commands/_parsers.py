@@ -11,6 +11,7 @@ from .core import (
     cmd_list_library,
     cmd_promote,
     cmd_report_back,
+    cmd_workstreams,
     cmd_status,
     cmd_uptime,
     cmd_validate,
@@ -92,6 +93,16 @@ def register_subparsers(sub) -> None:
         "--json", action="store_true", help="Output raw JSONL instead of table"
     )
     prb.set_defaults(func=cmd_report_back)
+
+    pws = sub.add_parser(
+        "workstreams",
+        help="Read-only view of the fleet workstream registry",
+    )
+    pws.set_defaults(func=cmd_workstreams, ws_command="list")
+    ws_sub = pws.add_subparsers(dest="ws_command")
+    ws_sub.add_parser("list", help="List all workstreams (default)")
+    pws_show = ws_sub.add_parser("show", help="Show one workstream by id")
+    pws_show.add_argument("id", help="Workstream id (e.g. ws-ship-the-widget)")
 
     pu = sub.add_parser(
         "uptime",

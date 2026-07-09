@@ -573,12 +573,14 @@ class TestComposeBotConfExportedVars:
             (root / "lib").mkdir(exist_ok=True)
             return compose_bot_conf(bot, fleet, Paths(root=root, fleet_dir=root))
 
-        # Default on → emitted as a presence flag.
-        assert "export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" in _conf()
+        # Default on → the RC-safe granular set, never the umbrella (which
+        # silently disables --remote-control — #533).
+        conf = _conf()
+        assert "export DISABLE_AUTOUPDATER=1" in conf
+        assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in conf
+        assert "DISABLE_TELEMETRY" not in conf
         # Override off → omitted entirely (never "=0", which CC could read as truthy).
-        assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in _conf(
-            disable_nonessential_traffic=False
-        )
+        assert "DISABLE_AUTOUPDATER" not in _conf(disable_nonessential_traffic=False)
 
 
 class TestComposeBotConfServicePrefix:

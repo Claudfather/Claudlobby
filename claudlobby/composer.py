@@ -23,6 +23,7 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from . import dotenv
 from .config import BotConfig, FleetConfig, load_host_jobs
+from .known_values import HEADLESS_TRIM_VARS
 from .loader import (
     LibraryItem,
     _demote_headings,
@@ -355,12 +356,14 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append(
         f"export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION={_shq(str(bot.prompt_suggestions).lower())}"
     )
-    # Non-essential traffic — off by default kills the satisfaction survey, the
-    # transcript-consent prompt, telemetry, and the built-in auto-updater
-    # (claudlobby manages Claude Code updates itself). Emitted only when disabled:
-    # the env var is a presence flag, so an override to false must omit it, not "=0".
+    # Headless traffic trim — kills the satisfaction survey, /bug, Sentry
+    # error reporting, and the auto-updater (claudlobby self-manages updates).
+    # Granular by design: see HEADLESS_TRIM_VARS / RC_KILLING_ENV_VARS for why
+    # the umbrella vars stay off (they break remote-control, #533). Presence
+    # flags — an override to false omits them, never emits "=0".
     if bot.disable_nonessential_traffic:
-        lines.append("export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
+        for var in HEADLESS_TRIM_VARS:
+            lines.append(f"export {var}=1")
     lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f"export FLEET_NAME={_shq(fleet.name)}")
@@ -469,6 +472,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"export PROJECT_REPOS_{project.env_slug}="
                 f"{_shq(' '.join(project.repos))}"
             )
+
+    # Workstream registry bounds (fleet.workstreams). Read from the env by the
+    # single-writer helper (lib/workstream-update.sh) at open/renew time.
+    # Emitted into EVERY bot.conf rather than manager-gated so the fleet-wide
+    # cap/lease applies regardless of team topology — a teamless fleet would
+    # silently lose its config under a manager-only gate. Defaults (12/14) apply
+    # when the fleet omits the block.
+    lines.append("")
+    lines.append("# Workstream registry (fleet.workstreams)")
+    lines.append(f"export WORKSTREAM_MAX_ACTIVE={_shq(fleet.workstreams.max_active)}")
+    lines.append(f"export WORKSTREAM_LEASE_DAYS={_shq(fleet.workstreams.lease_days)}")
 
     # Rolling code-audit sweep — emitted only into the owner bot's conf, so the
     # fleet-level selector (lib/code-audit-sweep.sh) resolves exactly one owner.
