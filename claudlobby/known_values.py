@@ -43,6 +43,32 @@ VALID_PERMISSION_MODES: frozenset[str] = frozenset(
     {"default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"}
 )
 
+# ── Headless env vars (bot.conf) ─────────────────────────────────
+# Two sets partitioning the headless-trim env space by effect on Claude
+# Code's --remote-control. Empirically verified on Claude Code 2.1.198
+# (2026-07-09, Pi fleet): each HEADLESS_TRIM var alone AND all together
+# leave remote-control active, while either RC_KILLING var suppresses it —
+# RC is feature-flag-gated and flag evaluation rides the telemetry channel,
+# so disabling telemetry silently drops every channel reply while inbound
+# still arrives (the July 2026 fleet-wide Telegram outage, #533).
+#
+# Emitted by the composer when disable_nonessential_traffic is true. Both
+# survey spellings are set — the documented name drifts across binary versions.
+HEADLESS_TRIM_VARS: tuple[str, ...] = (
+    "DISABLE_AUTOUPDATER",
+    "DISABLE_ERROR_REPORTING",
+    "DISABLE_BUG_COMMAND",
+    "DISABLE_FEEDBACK_SURVEY",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+)
+
+# Never composed; the validator errors when a bot that needs remote-control
+# carries one in its env (#533 guard).
+RC_KILLING_ENV_VARS: tuple[str, ...] = (
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_TELEMETRY",
+)
+
 # ── Projects tier (projects.yaml) ────────────────────────────────
 # Validation tiers — a project's closure bar, weakest to strictest.
 # Semantics live in documentation/projects-yaml-schema.md. Tuple: error

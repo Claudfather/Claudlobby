@@ -25,6 +25,7 @@ from .known_values import (
     OUTCOME_ACTIONS,
     OUTCOME_KEYS,
     PROJECT_KEYS,
+    RC_KILLING_ENV_VARS,
     VALID_TIERS,
     closest_match,
     hint,
@@ -244,20 +245,16 @@ def _validate_bots(
                         f"bot '{bot_name}': hook {event} command '{cmd}' not found on disk"
                     )
 
-        # RC-killing env vars vs remote-control/channels (error). These vars
-        # disable Claude Code feature-flag evaluation, which silently disables
-        # --remote-control — channel replies drop while inbound still arrives
-        # (the July 2026 fleet-wide Telegram outage, #533). extra_flags is
-        # checked too so a raw "--remote-control" there gets the same guard.
+        # RC-killing env vs remote-control/channels (error, #533). extra_flags
+        # is checked too so a raw "--remote-control" there gets the same guard.
+        # See RC_KILLING_ENV_VARS for why these vars break channel replies.
         needs_rc = (
             bot.remote_control
             or bot.channels
             or any("--remote-control" in f for f in bot.extra_flags)
         )
         if needs_rc:
-            from .composer import _RC_KILLING_ENV_VARS
-
-            for var in _RC_KILLING_ENV_VARS:
+            for var in RC_KILLING_ENV_VARS:
                 if var in bot.env:
                     report.errors.append(
                         f"bot '{bot_name}': env sets {var} but the bot uses "

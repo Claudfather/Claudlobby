@@ -7,11 +7,8 @@ still arrives. The composer must never emit those on any bot; the validator
 must reject operator env that reintroduces them on an RC bot.
 """
 
-from claudlobby.composer import (
-    _HEADLESS_TRIM_VARS,
-    _RC_KILLING_ENV_VARS,
-    compose_bot_conf,
-)
+from claudlobby.composer import compose_bot_conf
+from claudlobby.known_values import HEADLESS_TRIM_VARS, RC_KILLING_ENV_VARS
 from claudlobby.validator import validate
 from tests.conftest import MINIMAL_FLEET_YAML, load_test_fleet, make_paths
 
@@ -31,21 +28,21 @@ def _append_bot_yaml(fleet_dir, *lines: str) -> None:
 
 def test_trim_default_emits_granular_never_umbrella(fleet_dir):
     conf = _bot_conf(fleet_dir)
-    for var in _HEADLESS_TRIM_VARS:
+    for var in HEADLESS_TRIM_VARS:
         assert f"export {var}=1" in conf, var
-    for var in _RC_KILLING_ENV_VARS:
+    for var in RC_KILLING_ENV_VARS:
         assert var not in conf, f"RC-killing {var} must never be composed"
 
 
 def test_trim_off_omits_all(fleet_dir):
     _append_bot_yaml(fleet_dir, "disable_nonessential_traffic: false")
     conf = _bot_conf(fleet_dir)
-    for var in _HEADLESS_TRIM_VARS + _RC_KILLING_ENV_VARS:
+    for var in HEADLESS_TRIM_VARS + RC_KILLING_ENV_VARS:
         assert var not in conf, var
 
 
 def test_validator_rejects_rc_killing_env_on_rc_bot(fleet_dir):
-    for var in _RC_KILLING_ENV_VARS:
+    for var in RC_KILLING_ENV_VARS:
         _append_bot_yaml(fleet_dir, "env:", f'  {var}: "1"')
         fleet = load_test_fleet(fleet_dir)
         report = validate(fleet, make_paths(fleet_dir))
@@ -55,7 +52,7 @@ def test_validator_rejects_rc_killing_env_on_rc_bot(fleet_dir):
 
 
 def test_validator_allows_rc_killing_env_on_non_rc_bot(fleet_dir):
-    var = _RC_KILLING_ENV_VARS[0]
+    var = RC_KILLING_ENV_VARS[0]
     _append_bot_yaml(
         fleet_dir,
         "remote_control: false",
