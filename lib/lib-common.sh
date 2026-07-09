@@ -231,14 +231,16 @@ safe_mktemp() {
 # json_escape <string>
 # Escape a value for safe embedding in a JSON string. Prints to stdout.
 # Fast path (the overwhelmingly common shape): backslash + double-quote via
-# sed. Values containing newline/CR/tab take the python3 path — sed is
-# line-oriented and cannot escape the newline it never sees, and a raw
-# newline splits a single-line JSONL ledger row, which the line-oriented
-# rotation then truncates into permanently invalid JSON (#530). json.dumps
-# produces exact JSON string escaping for every control character.
+# sed. Values containing ANY control character take the python3 path — JSON
+# forbids raw chars below 0x20 in strings, sed is line-oriented and cannot
+# escape the newline it never sees, and a raw newline splits a single-line
+# JSONL ledger row, which the line-oriented rotation then truncates into
+# permanently invalid JSON (#530). json.dumps produces exact JSON string
+# escaping for every control character; [[:cntrl:]] (POSIX class, bash 3.2
+# case-glob safe) routes them all, not just the common \n\r\t.
 json_escape() {
     case "$1" in
-        *[$'\n\r\t']*)
+        *[[:cntrl:]]*)
             printf '%s' "$1" | python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.stdin.read())[1:-1])'
             ;;
         *)

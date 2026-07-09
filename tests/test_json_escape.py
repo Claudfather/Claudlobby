@@ -50,6 +50,16 @@ def test_control_characters_roundtrip():
     assert _roundtrip(value) == value
 
 
+def test_exotic_control_characters_roundtrip():
+    # JSON forbids ALL raw chars below 0x20, not just \n\r\t — a \x0b or
+    # \x01 must also route to the escaping path (simplify-pass finding:
+    # the original detection pattern let these through the sed fast path).
+    for value in ("vert\x0btab", "soh\x01byte", "esc\x1bseq", "ff\x0cfeed"):
+        out = _escaped(value)
+        assert not any(ord(c) < 0x20 for c in out), (value, out)
+        assert _roundtrip(value) == value
+
+
 def test_dispatch_ledger_survives_newline_in_task(tmp_path):
     # End-to-end: operator-supplied task text with an embedded newline must
     # land as one valid JSON ledger row (the wedge fixed the claudron-supplied
