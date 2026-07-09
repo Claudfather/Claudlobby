@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
 from textwrap import dedent
 
@@ -51,6 +52,22 @@ def _write_exec(path, content):
     with open(path, "w") as f:
         f.write(content)
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def call_lib_fn(fn: str, value: str) -> str:
+    """Source lib-common.sh and call one function on a single value, returning
+    stdout. The value travels as a positional arg so the shell never
+    interprets it."""
+    lib = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+    r = subprocess.run(
+        ["bash", "-c", f'. "{lib}"; {fn} "$1"', "_", value],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ),
+        timeout=10,
+    )
+    assert r.returncode == 0, r.stderr
+    return r.stdout
 
 
 def load_lib_module(name: str):

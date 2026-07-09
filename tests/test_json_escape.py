@@ -10,24 +10,13 @@ writer, any caller-supplied text).
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 
+from tests.conftest import call_lib_fn
 from tests.test_claudron_query_wedge import _run_dispatch, _wedge_env
-from tests.test_task_id_dispatch import LIB_DIR
 
 
 def _escaped(value: str) -> str:
-    # The value travels as a positional arg so the shell never interprets it.
-    r = subprocess.run(
-        ["bash", "-c", f'. "{LIB_DIR}/lib-common.sh"; json_escape "$1"', "_", value],
-        capture_output=True,
-        text=True,
-        env=os.environ,
-        timeout=10,
-    )
-    assert r.returncode == 0, r.stderr
-    return r.stdout
+    return call_lib_fn("json_escape", value)
 
 
 def _roundtrip(value: str) -> str:

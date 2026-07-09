@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 
+from tests.conftest import call_lib_fn
 from tests.test_task_id_dispatch import _bash, _fake_lib
 
 CAPTURE_STUB = """#!/bin/bash
@@ -232,3 +233,47 @@ def test_task_passed_as_single_quoted_query_arg(tmp_path):
     argv = (tmp_path / "claudron-argv.txt").read_text().splitlines()
     # --vault <path> lookup --json --limit 3 "<whole task>"
     assert argv[-1] == "use * wisely", argv
+
+
+def test_control_chars_in_titles_sanitize_clean(tmp_path):
+    # #544: a hostile-but-valid YAML "\e" title reaches the wedge as raw ESC.
+    # Non-whitespace controls must not survive into the ledger or the send,
+    # and CSI sequences must strip WHOLE — collapsing the ESC alone leaves
+    # printable "[31m" residue in the pointer text.
+    evil = {
+        "query": "q",
+        "results": [
+            {
+                "title": "quagga \x1b[31mred\x1b[0m stripes\x01lore",
+                "path": "pi-fleet/shared/knowledge/q.md",
+            }
+        ],
+    }
+    env = _wedge_env(tmp_path, json.dumps(evil))
+    r, sent, row = _run_dispatch(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert row["claudron_hits"] == "1"
+    for payload in (sent, row["task"]):
+        assert "\x1b" not in payload and "\x01" not in payload
+        assert "[31m" not in payload and "[0m" not in payload
+    assert "quagga red stripes lore" in row["task"]
+
+
+def test_clean_output_is_fixed_point_of_tmux_sanitizer(tmp_path):
+    # The ledger must record what the worker receives: clean() output must
+    # pass the send-side sanitizer unchanged. Widening one sanitizer without
+    # the other (e.g. OSC handling) fails here before it desyncs a fleet.
+    evil = {
+        "query": "q",
+        "results": [
+            {
+                "title": "Rate\n| li\x1b[31mmi\x1b[0mts\twith\x01controls",
+                "path": "pi-fleet/shared/knowledge/x.md",
+            }
+        ],
+    }
+    env = _wedge_env(tmp_path, json.dumps(evil))
+    r, sent, row = _run_dispatch(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert row["claudron_hits"] == "1"
+    assert call_lib_fn("sanitize_tmux_input", row["task"]) == row["task"]
