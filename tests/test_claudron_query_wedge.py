@@ -41,6 +41,17 @@ TWO_HITS = {
     ],
 }
 
+# claudron 0.2.0 wraps the payload in the CLI-contract envelope. The wedge
+# must read data.results here (TWO_HITS above is the 0.1.x flat shape the
+# other tests exercise via the parser's fallback).
+TWO_HITS_ENVELOPED = {
+    "ok": True,
+    "command": "lookup",
+    "data": TWO_HITS,
+    "warnings": [],
+    "errors": [],
+}
+
 
 def _wedge_env(tmp_path: Path, claudron_stdout: str) -> dict:
     """Env enabling the wedge, with a stub `claudron` on PATH that prints
@@ -84,6 +95,18 @@ def test_off_by_default(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
     assert row["claudron_hits"] == ""
+
+
+def test_injects_from_0_2_0_envelope(tmp_path):
+    # Regression: claudron 0.2.0's {ok, data:{results}} envelope. Before the
+    # parser read data.results, this silently produced claudron_hits="0" —
+    # zero G1 evidence against every 0.2.0 vault.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS_ENVELOPED))
+    r, sent, row = _run_dispatch(tmp_path, env)
+    assert r.returncode == 0, r.stderr
+    assert "[fleet memory: Spotify API Rate Limits" in sent
+    assert "Telegram Formatting Pitfalls" in sent
+    assert row["claudron_hits"] == "2"
 
 
 def test_injects_pointers_and_counts(tmp_path):

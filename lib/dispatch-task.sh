@@ -103,6 +103,11 @@ fi
 # plain send. At the pinned claudron the CLI does not read
 # CLAUDRON_VAULT_PATH itself and a missing vault still exits 0, so the vault
 # is passed explicitly via --vault and stdout is parsed defensively.
+# Result shape: claudron 0.2.0 wraps the payload in the CLI-contract envelope
+# {ok, command, data:{query, results}, ...}; 0.1.x returned {results} flat.
+# The parser reads data.results then top-level results, so a version skew
+# between the repo pin and a fleet's installed claudron degrades gracefully
+# instead of silently injecting nothing.
 CLAUDRON_HITS=""
 _claudron_query_before() {
     [ "${CLAUDRON_QUERY_BEFORE:-}" = "1" ] || return 0
@@ -130,9 +135,12 @@ def clean(value):
 
 try:
     data = json.load(sys.stdin)
+    # 0.2.0 envelope {data:{results}} first, then 0.1.x flat {results}.
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    results = inner.get("results") or []
     root = clean(sys.argv[1].rstrip("/"))
     pointers = []
-    for r in data.get("results") or []:
+    for r in results:
         title = clean(r.get("title", ""))
         path = clean(r.get("path", ""))
         if title and path:
