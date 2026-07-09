@@ -100,9 +100,16 @@ fi
 # built, so both enveloped and raw-text dispatches carry them and the ledger
 # records the enriched task. The wedge must never block a dispatch: any
 # missing prerequisite, lookup failure, or unparseable output degrades to a
-# plain send. At the pinned claudron the CLI does not read
-# CLAUDRON_VAULT_PATH itself and a missing vault still exits 0, so the vault
-# is passed explicitly via --vault and stdout is parsed defensively.
+# plain send. The claudron CLI does not read CLAUDRON_VAULT_PATH itself, so
+# the vault is passed explicitly via --vault, and a missing vault does not
+# return clean JSON (0.1.x exits 0 with a non-JSON message; 0.2.0 exits 3) —
+# both are absorbed by the `2>/dev/null || return 0` net and the parser's
+# JSON validation, so stdout is parsed defensively either way.
+# Result shape: claudron 0.2.0 wraps the payload in the CLI-contract envelope
+# {ok, command, data:{query, results}, ...}; 0.1.x returned {results} flat.
+# The parser reads data.results then top-level results (line 138), so a
+# version skew between the repo pin and a fleet's installed claudron degrades
+# gracefully instead of silently injecting nothing.
 CLAUDRON_HITS=""
 _claudron_query_before() {
     [ "${CLAUDRON_QUERY_BEFORE:-}" = "1" ] || return 0
@@ -130,9 +137,13 @@ def clean(value):
 
 try:
     data = json.load(sys.stdin)
+    # 0.2.0 envelope {data:{results}} first, then 0.1.x flat {results};
+    # any other shape hits the except below via .get/.rstrip failing.
+    inner = data.get("data") or data
+    results = inner.get("results") or []
     root = clean(sys.argv[1].rstrip("/"))
     pointers = []
-    for r in data.get("results") or []:
+    for r in results:
         title = clean(r.get("title", ""))
         path = clean(r.get("path", ""))
         if title and path:

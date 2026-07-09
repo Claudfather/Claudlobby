@@ -4,15 +4,15 @@ How claudlobby connects to [Claudron](https://github.com/Claudfather/Claudron) �
 
 The full receiving-side plan is `documentation/plans/2026-07-07-claudron-consumption.md` (EPIC #509); Claudron's side is Claudfather/Claudron#14.
 
-## What works today (at the pinned SHA)
+## What works today (at v0.2.0)
 
 - **Vault-based fleet overlays.** A `.claudron` file at the claudlobby root (shell-sourceable, gitignored) points at a vault; `claudlobby --fleet <name>` resolves the fleet overlay from `vault/<name>/` before falling back to `local/<name>/`. Uses claudron's `claudron.vault.detect` / `Vault.fleets` API when the `[vault]` extra is installed, with a manual bridge-file fallback otherwise.
 - **Per-bot vault env.** `claudron_vault_path` in fleet.yaml (per-bot or `defaults:`) composes `CLAUDRON_VAULT_PATH` into `bot.conf`.
-- **CLI lookup + the dispatch query wedge.** `claudron lookup` works over a vault at the pinned SHA, and `dispatch-task.sh` can use it as a query-before preflight: set `CLAUDRON_QUERY_BEFORE=1` (plus `CLAUDRON_VAULT_PATH`, claudron CLI on PATH) in the manager's env and every dispatched task gains a single-line `[fleet memory: <title> (<path>); …]` pointer prefix — titles and paths only, never note bodies; the worker reads the files itself. The ledger's `claudron_hits` field counts injected pointers per dispatch (`""` = preflight off, `"0"` = ran with no hits) — the fleet query-volume evidence Claudron's Gate G1 asks for. Note the dispatch ledger self-reaps (default `OBSERVABILITY_REAP_DAYS=7`), which is shorter than a two-week soak window: sample the counts weekly, or raise the reap window on the dispatching manager for the soak. Off by default; any lookup failure degrades to a plain send. Two pinned-CLI quirks the wedge works around (fed back on Claudfather/Claudron#17): the CLI does not read `CLAUDRON_VAULT_PATH` itself (the wedge passes `--vault` explicitly), and a missing vault exits 0 with non-JSON stdout (the wedge validates output before injecting).
+- **CLI lookup + the dispatch query wedge.** `claudron lookup` works over a vault, and `dispatch-task.sh` can use it as a query-before preflight: set `CLAUDRON_QUERY_BEFORE=1` (plus `CLAUDRON_VAULT_PATH`, claudron CLI on PATH) in the manager's env and every dispatched task gains a single-line `[fleet memory: <title> (<path>); …]` pointer prefix — titles and paths only, never note bodies; the worker reads the files itself. The ledger's `claudron_hits` field counts injected pointers per dispatch (`""` = preflight off, `"0"` = ran with no hits) — the fleet query-volume evidence Claudron's Gate G1 asks for. Note the dispatch ledger self-reaps (default `OBSERVABILITY_REAP_DAYS=7`), which is shorter than a two-week soak window: sample the counts weekly, or raise the reap window on the dispatching manager for the soak. Off by default; any lookup failure degrades to a plain send. The wedge reads 0.2.0's `{ok, data:{results}}` lookup envelope (falling back to 0.1.x's flat `{results}`, so a version skew between the repo pin and a fleet's installed CLI degrades gracefully). Two CLI behaviours it accommodates (fed back on Claudfather/Claudron#17): the CLI does not read `CLAUDRON_VAULT_PATH` itself (the wedge passes `--vault` explicitly), and a missing vault does not return clean JSON (0.1.x exits 0 with a non-JSON message, 0.2.0 exits 3 per the CLI contract) — the wedge validates output before injecting.
 
 ## Version pin and bump policy
 
-The `[vault]` extra in `pyproject.toml` is **pinned** — to a Claudron main SHA today, moving to the version tag (or a PyPI range like `claudron>=0.2,<0.3`) at Claudron's first tagged release. The extra tracks the **compositor's API consumption** (currently `claudron.vault.detect`); bump it per Claudron release *after* claudlobby's vault-mode tests pass against the new version. Never revert to a bare git URL — `tests/test_claudron_compat.py` enforces the pin.
+The `[vault]` extra in `pyproject.toml` is **pinned** to a released Claudron tag — `@v0.2.0` today (git tag; Claudron is not on PyPI yet, so the pin stays a `git+…@<tag>` URL rather than a `claudron>=0.2,<0.3` range until a PyPI publish lands). The extra tracks the **compositor's API consumption** (currently `claudron.vault.detect` / `Vault.fleets`); bump it per Claudron release *after* claudlobby's vault-mode tests (`tests/test_paths_integration.py`, run with claudron installed) pass against the new tag. Never revert to a bare git URL — `tests/test_claudron_compat.py` enforces the pin.
 
 The MCP *server* install is deliberately **not** coupled to this extra: bots don't run in claudlobby's venv. The server is a host-level install (see Gated surfaces below).
 
@@ -22,8 +22,8 @@ SSOT: `claudlobby/claudron_compat.py` (doctor's claudron check reads it; a unit 
 
 | Claudlobby surface | Requires (capability) | Slated release |
 |---|---|---|
-| vault-based fleet overlay resolution (paths.py .claudron bridge) | claudron.vault.detect / Vault.fleets API | pinned SHA |
-| interim CLI query wedge (dispatch-task.sh preflight, plan P1e) | claudron lookup CLI | pinned SHA |
+| vault-based fleet overlay resolution (paths.py .claudron bridge) | claudron.vault.detect / Vault.fleets API | 0.2.0 |
+| interim CLI query wedge (dispatch-task.sh preflight, plan P1e) | claudron lookup CLI | 0.2.0 |
 | MCP fragment library/mcp/claudron.json (plan P2) | claudron-mcp stdio server | 0.3.0 |
 | librarian review sweep (plan P5) | claudron review --json | 0.5.0 |
 
