@@ -52,6 +52,7 @@ Bot activity
 | `bridge_down` | pulse / alert | Live tmux session, but the bot's Telegram bridge (channel poller) isn't delivering. Raised per-pulse by `fleet-pulse.sh` once down past `OBSERVABILITY_BRIDGE_DOWN_GRACE` seconds, and separately by `start-bot.sh` at bring-up on a verified-dark bridge or missing token |
 | `reload_failed` | alert | Daily `reload-fleet.sh` plugin/skill update or `claudlobby generate` failed |
 | `restart_failed` | alert | Weekly worker bounce (`weekly-worker-restart.sh`) failed to bring the bot back up |
+| `rc_timeout` | startup / alert | `start-bot.sh`'s remote-control readiness probe hit its `RC_READY_TIMEOUT_S` ceiling — the bot came up without `--remote-control`, so channel replies drop while inbound still arrives (the #533 outage class). Emitted once per (re)start; `fleet-pulse.sh` escalates it like its other crit types, so a fleet-wide TIMEOUT pages instead of sitting silent in every `startup.log` |
 
 > **Not yet caught by `--critical`:** `bridge_down`, `reload_failed`, and `restart_failed` are operationally critical — all three page the manager via a tmux nudge + Telegram through `emit_failure_alert`/`emit_fleet_notice` — but aren't in `claudlobby/commands/events.py`'s `CRITICAL_TYPES` set, so `claudlobby events --critical` won't surface them. Query them explicitly (`claudlobby events --type bridge_down`). `reload_failed`, `restart_failed`, and `bridge_down` raised at bot bring-up also write to the fleet-root `state/events/` directory (see File Locations below), which `claudlobby events` doesn't read at all — only the pulse-sourced `bridge_down` lands in the normal per-bot `data/events/` path.
 
@@ -121,3 +122,4 @@ Event behavior is controlled via `fleet.yaml` `observability:` block, which land
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | 1800 | Seconds before flagging activity_stuck |
 | `OBSERVABILITY_DISPATCH_DEADLINE` | 1800 | Seconds before flagging overdue_dispatch |
 | `OBSERVABILITY_BRIDGE_DOWN_GRACE` | 300 | Seconds of post-(re)start grace before an actionable `bridge_down` fires (avoids flagging a poller still coming up after a restart) |
+| `RC_READY_TIMEOUT_S` | 90 | Seconds `start-bot.sh` waits for the `remote-control is active` readiness string before logging TIMEOUT and emitting `rc_timeout`. A raw `start-bot.sh` env knob — **not** composed from the `observability:` block; lower it only to exercise the TIMEOUT path in tests, or raise it for slow hosts |

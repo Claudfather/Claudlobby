@@ -221,13 +221,21 @@ bot_tmux "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
 mkdir -p "$BOT_DIR/data" 2>/dev/null || true
 touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
 
-# Wait for initialization (up to 90s) with observability
+# Wait for initialization with observability. The readiness ceiling is
+# RC_READY_TIMEOUT_S (default 90s, polled every 0.5s) — overridable; see
+# documentation/environment-variables.md.
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"
+_rc_timeout_s="${RC_READY_TIMEOUT_S:-90}"
+# Coerce a non-numeric/empty override to the default: a bad value would crash
+# start-bot under `set -u` ($(( abc * 2 )) → "abc: unbound variable"), crash-
+# looping the bot. Fail safe to 90s.
+case "$_rc_timeout_s" in ""|*[!0-9]*) _rc_timeout_s=90 ;; esac
+_rc_iters=$(( _rc_timeout_s * 2 ))
 _poll_start=$(date +%s)
-echo "$(ts_iso) POLL_START — waiting for remote-control readiness" >> "$LOG"
+echo "$(ts_iso) POLL_START — waiting for remote-control readiness (ceiling ${_rc_timeout_s}s)" >> "$LOG"
 _ready=0
-for _i in $(seq 1 180); do
+for _i in $(seq 1 "$_rc_iters"); do
     if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
         exit 1
@@ -241,7 +249,12 @@ for _i in $(seq 1 180); do
     sleep 0.5
 done
 if [ "$_ready" -eq 0 ]; then
-    echo "$(ts_iso) TIMEOUT — 90s elapsed, remote-control string not found, proceeding anyway" >> "$LOG"
+    echo "$(ts_iso) TIMEOUT — ${_rc_timeout_s}s elapsed, remote-control string not found, proceeding anyway" >> "$LOG"
+    # Emit a fleet event so a readiness regression reaches fleet-pulse's
+    # escalation instead of just appending to a log. A fleet-wide TIMEOUT must
+    # page: the #533 outage sat in every startup.log for a week with nothing
+    # alerting.
+    emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s}}"
 fi
 
 # No sleep here: the remote-control wait loop above already confirms Claude Code

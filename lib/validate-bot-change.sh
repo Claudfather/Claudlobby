@@ -377,6 +377,117 @@ if [ "$fail" -gt "$_lossless_fail_before" ]; then
     echo "  ----------------------------------------------------------------"
 fi
 
+# === Scenario 2b: RC readiness probe — READY vs TIMEOUT + rc_timeout event (#533) ===
+# Same REAL start-bot.sh. Positive path first (the fresh/stale runs above used a
+# stub that prints the readiness string): READY must be logged and NO rc_timeout
+# event emitted. Then the negative path: a stub that never prints the string
+# simulates the #478 regression (RC never came up) — the probe must TIMEOUT and
+# emit an rc_timeout event to the ledger fleet-pulse escalates. This is the
+# empirical proof of #533 items 3-4 (unit tests prove composition; only running
+# start-bot proves the event actually fires). RC_READY_TIMEOUT_S=1 keeps the
+# TIMEOUT fast — the 90s default is untestable in a harness.
+echo ""
+echo "=== validate-bot-change: RC readiness alerting (#533 items 3-4) ==="
+_rc_fail_before=$fail
+grep -q 'READY — remote-control active' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "RC string present -> READY recorded in startup.log" "$r"
+grep -rq '"type":"rc_timeout"' "$RB_DIR/data/events/" 2>/dev/null && r=no || r=yes
+check "RC present -> no rc_timeout event (no false alarm)" "$r"
+
+cat > "$RB_ROOT/bin/claude" <<'STUB'
+#!/bin/bash
+exec cat
+STUB
+chmod +x "$RB_ROOT/bin/claude"
+rm -rf "$RB_DIR/data/events" 2>/dev/null || true
+tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
+sleep 0.3
+printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "2020-01-01T00:00:00Z" \
+    > "$RB_DIR/.claude/session.md"
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 CLAUDE_BIN="$RB_ROOT/bin/claude" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
+sleep 1
+grep -q 'TIMEOUT' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "no RC string -> TIMEOUT recorded in startup.log" "$r"
+_rcev="$(grep -rl '"type":"rc_timeout"' "$RB_DIR/data/events/" 2>/dev/null | head -1 || true)"
+[ -n "$_rcev" ] && r=yes || r=no
+check "TIMEOUT emits an rc_timeout fleet event (fleet-pulse escalation input)" "$r"
+if [ -n "$_rcev" ]; then
+    python3 -c "import sys,json; e=json.loads(open('$_rcev').readline()); sys.exit(0 if e['type']=='rc_timeout' and e['ts'] else 1)" 2>/dev/null && r=yes || r=no
+else r=no; fi
+check "rc_timeout event is valid JSON with ts+type (fleet-pulse-readable)" "$r"
+
+if [ "$fail" -gt "$_rc_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: RC readiness checks failed ---"
+    echo "  [startup.log]"; sed 's/^/    /' "$RB_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
+    echo "  [events]"; sed 's/^/    /' "$RB_DIR/data/events/"fleet-*.jsonl 2>/dev/null || echo "    (none)"
+    echo "  [start-bot timeout stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.timeout.out" 2>/dev/null || echo "    (none)"
+fi
+
+# === Scenario 2c: RC readiness ESCALATION — fleet-pulse pages on an rc_timeout burst (#533) ===
+# 2b proved start-bot EMITS rc_timeout. This proves the downstream half: fleet-pulse reads
+# that event from >= threshold bots within the window and FIRES the escalation page. The real
+# fleet-pulse runs from a stub lib dir whose tg-post.sh RECORDS the page instead of sending it,
+# so the assertion is the alert message the burst-detector actually produced. A single bot
+# (below threshold) must stay silent. 2b + 2c together cover #533 items 3-4 end-to-end: emit
+# then escalate. The incidental service_down / session_missing pages are the sandbox bots
+# having no live session; the assertions target the rc_timeout line.
+echo ""
+echo "=== validate-bot-change: RC readiness ESCALATION page (#533 items 3-4) ==="
+_esc_fail_before=$fail
+_esc_fleet="valesc"
+_esc_lib="$ROOT/esclib"
+mkdir -p "$_esc_lib"
+ln -s "$LIB_DIR/fleet-pulse.sh" "$_esc_lib/fleet-pulse.sh"
+ln -s "$LIB_DIR/lib-common.sh"  "$_esc_lib/lib-common.sh"
+_esc_pages="$ROOT/esc-pages.log"
+: > "$_esc_pages"
+cat > "$_esc_lib/tg-post.sh" <<STUB
+#!/bin/bash
+printf '%s\n' "\$1" >> "$_esc_pages"
+STUB
+chmod +x "$_esc_lib/tg-post.sh"
+_esc_bots="$ROOT/local/$_esc_fleet/runtime/bots"
+
+esc_seed() {  # <bot> <emit rc_timeout: yes|no> — seed a sandbox bot, optionally with a timeout event
+    mkdir -p "$_esc_bots/$1"
+    printf 'BOT_SERVICE=%s\n' "$1" > "$_esc_bots/$1/bot.conf"
+    # Route the seed through the SAME helper start-bot.sh emits rc_timeout with, so the
+    # seeded ledger row can never drift from the real emitter schema (it computes ts + the
+    # fleet-<today>.jsonl path internally, matching what fleet-pulse then reads).
+    if [ "$2" = yes ]; then
+        emit_fleet_event rc_timeout startup '{}' "$_esc_bots/$1" "$1"
+    fi
+    return 0
+}
+esc_run() {
+    CLAUDLOBBY_ROOT="$ROOT" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        "$_esc_lib/fleet-pulse.sh" "$_esc_fleet" >/dev/null 2>&1 || true
+}
+
+# Positive: 2 bots TIMEOUT within the window (== default threshold) -> page fires.
+esc_seed escone yes
+esc_seed esctwo yes
+esc_run
+grep -q 'FLEET ALERT: rc_timeout on 2 bots' "$_esc_pages" && r=yes || r=no
+check "rc_timeout burst on >= threshold bots FIRES the escalation page" "$r"
+
+# Negative: only 1 bot with rc_timeout -> below threshold -> no rc_timeout page.
+rm -rf "$_esc_bots"
+mkdir -p "$_esc_bots"
+: > "$_esc_pages"
+esc_seed escone yes
+esc_seed esctwo no
+esc_run
+grep -q 'rc_timeout' "$_esc_pages" && r=no || r=yes
+check "a single rc_timeout (below threshold) does NOT page (no false alarm)" "$r"
+
+if [ "$fail" -gt "$_esc_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: escalation pages recorded ---"
+    sed 's/^/    /' "$_esc_pages" 2>/dev/null || echo "    (none)"
+fi
+
 # === Scenario 3: weekly worker-only restart — manager skip + loud failure ===
 # Run weekly-worker-restart.sh from a stub lib dir (stub spin-up-bot FAILS, so
 # the loud emit_failure_alert path is exercised too). The manager (MANAGER_TMUX==BOT_ID)

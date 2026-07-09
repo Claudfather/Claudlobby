@@ -42,7 +42,7 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 | `CLAUDE_FLAGS` | Multiple fields | Composed CLI flags string (--remote-control, --permission-mode, --model, --channels, etc.) |
 | `CLAUDE_CONFIG_DIR` | `bots.<name>.account` | Custom Claude config directory (only set for non-default accounts) |
 | `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` | `bots.<name>.prompt_suggestions` | Whether to show prompt suggestions (true/false) |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `bots.<name>.disable_nonessential_traffic` | When set (default: enabled), disables Claude Code's satisfaction survey, transcript-consent prompt, telemetry, and built-in auto-updater. Presence flag — only emitted (`=1`) when true; a false override omits the line entirely rather than writing `=0` |
+| `DISABLE_AUTOUPDATER`, `DISABLE_ERROR_REPORTING`, `DISABLE_BUG_COMMAND`, `DISABLE_FEEDBACK_SURVEY`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY` | `bots.<name>.disable_nonessential_traffic` | When true (default), emits this granular RC-safe set to suppress the built-in auto-updater (claudlobby self-manages updates), Sentry error reporting, `/bug`, and the satisfaction survey. Deliberately **not** the `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` umbrella nor `DISABLE_TELEMETRY` — those also disable feature-flag evaluation and with it `--remote-control`, silently dropping channel replies (#533). Presence flags — a false override omits them, never `=0` |
 | `STARTUP_PROMPT` | `bots.<name>.startup_prompt` | Initial prompt sent to bot on startup |
 
 ## Model Strategy
@@ -65,6 +65,7 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 | `OBSERVABILITY_REAP_DAYS` | `bots.<name>.observability.reap_days` | Days to retain event files (default: 7) |
 | `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD` | `bots.<name>.observability.activity_stuck_threshold` | Seconds of inactivity before flagged stuck (default: 1800) |
 | `OBSERVABILITY_DISPATCH_DEADLINE` | `bots.<name>.observability.dispatch_deadline` | Seconds after dispatch before flagged overdue (default: 1800) |
+| `RC_READY_TIMEOUT_S` | env override (`start-bot.sh`) | Seconds to wait for the `remote-control is active` readiness string before logging TIMEOUT and emitting the `rc_timeout` event (default: 90). Not composed from fleet.yaml — a raw override for slow hosts and the test harness |
 
 ## Code-Audit Sweep
 
