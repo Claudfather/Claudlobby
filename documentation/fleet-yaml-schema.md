@@ -26,7 +26,7 @@ fleet:
     effort: low | medium | high | max
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)
-    disable_nonessential_traffic: true | false  # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (default: true)
+    disable_nonessential_traffic: true | false  # RC-safe headless trim set (default: true)
     spinner_tips_enabled: true | false  # settings.local spinnerTipsEnabled (default: false)
     preferred_notif_channel: <string>   # settings.local preferredNotifChannel (default: notifications_disabled)
     prefers_reduced_motion: true | false # settings.local prefersReducedMotion (default: true)
@@ -416,7 +416,7 @@ Boolean (default `false`). Controls `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` env v
 
 ### `bots.<name>.disable_nonessential_traffic`
 
-Boolean (default `true`). When true, emits `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in `bot.conf`, which disables Claude Code's satisfaction survey, the transcript-consent prompt, telemetry, and the built-in auto-updater — appropriate because claudlobby manages Claude Code updates itself. Set false to restore Claude Code's default traffic. Can be set in `defaults:`.
+Boolean (default `true`). When true, emits the **RC-safe granular trim set** into `bot.conf` — `DISABLE_AUTOUPDATER` (claudlobby manages Claude Code updates itself), `DISABLE_ERROR_REPORTING`, `DISABLE_BUG_COMMAND`, and both feedback-survey spellings — suppressing the interactive prompts and background jobs a supervised bot must never see. It deliberately does **not** emit `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` or `DISABLE_TELEMETRY`: Claude Code gates remote-control behind feature-flag evaluation that rides the telemetry channel, so either of those silently disables `--remote-control` and every channel reply with it (the July 2026 fleet-wide Telegram outage — #533). Telemetry therefore stays enabled on channel/RC bots; the validator errors if either RC-killing var is reintroduced via `env:` on a bot that uses remote-control or channels. Set false to omit the trim set entirely. Can be set in `defaults:`.
 
 ### `bots.<name>.spinner_tips_enabled`
 
@@ -432,7 +432,7 @@ Boolean (default `true`). Sets `prefersReducedMotion` in `settings.local.json`, 
 
 ### `bots.<name>.channels`
 
-List of channel plugin identifiers (default `["plugin:telegram@claude-plugins-official"]`). Each entry generates a `--channels <name>` CLI flag. Override to use a different messaging plugin or disable channels entirely with an empty list. Can be set in `defaults:`.
+List of channel plugin identifiers (default `["plugin:telegram@claude-plugins-official"]`). Each entry generates a `--channels <name>` CLI flag. Override to use a different messaging plugin or disable channels entirely with an empty list — an explicit `channels: []` wins over the default (presence-based override, fixed alongside #533; previously the empty list was silently ignored). Can be set in `defaults:`.
 
 ### `bots.<name>.extra_flags`
 
