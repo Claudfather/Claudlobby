@@ -3,7 +3,7 @@
 # Schedule via cron: 0 21 * * 1-5 (weekday evenings)
 #
 # The manager bot picks up the prompt and uses global skills
-# like /tech-debt or /security-audit to run the audit.
+# like /claudna:audit tech-debt or /claudna:audit security to run the audit.
 
 set -euo pipefail
 
@@ -20,4 +20,4 @@ if ! check_tmux_session "$MANAGER_SESSION" "$MANAGER_SOCKET"; then
     exit 0
 fi
 
-bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" 'Run a rolling code audit. Check which repo/area is most stale using the audit tracker, then run /tech-debt or /security-audit on it. Log the results.' || true
+bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" 'Run a rolling code audit. Check which repo/area is most stale using the audit tracker, then run /claudna:audit tech-debt or /claudna:audit security on it. Log the results.' || true

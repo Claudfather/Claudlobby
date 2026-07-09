@@ -56,12 +56,12 @@ fleet:
 
 Every bot start — intentional (restart skill, weekly bounce), crash (keepalive), or an operator's manual restart — is a potential context loss. `lib/start-bot.sh` closes that gap:
 
-- Before `STARTUP_PROMPT`, it injects `/claudna:session-resume --auto` as the first keystroke, gated by `should_resume_session()` (`lib/lib-common.sh`).
+- Before `STARTUP_PROMPT`, it injects `/claudna:session resume --auto` as the first keystroke, gated by `should_resume_session()` (`lib/lib-common.sh`).
 - `should_resume_session` reads the handoff's `last_updated:` frontmatter field from `.claude/session.md` (falling back to file mtime for older artifacts) and compares its age against `RESUME_MAX_AGE_S` (env-overridable; default `86400` seconds = 24h).
 - **Fresh** checkpoint (age < threshold) → resume fires, the bot picks up its last handoff.
 - **Stale** checkpoint (age ≥ threshold) or none → resume is skipped and the bot clean-starts rather than replaying dead state (e.g. re-attempting an already-merged PR).
 
-On the intentional-restart paths (`library/skills/restart`, `weekly-worker-restart.sh`), `lib/pre-stop-handoff.sh` writes a fresh handoff (`/claudna:session-handoff --auto`) before the restart, non-blocking (always exits 0, even on a 30s timeout) — so the restart never stalls on a slow or failed handoff. Crash-restarts (`keepalive.sh`) skip straight to resume-from-last-checkpoint, since there's no live session left to hand off from.
+On the intentional-restart paths (`library/skills/restart`, `weekly-worker-restart.sh`), `lib/pre-stop-handoff.sh` writes a fresh handoff (`/claudna:session handoff --auto`) before the restart, non-blocking (always exits 0, even on a 30s timeout) — so the restart never stalls on a slow or failed handoff. Crash-restarts (`keepalive.sh`) skip straight to resume-from-last-checkpoint, since there's no live session left to hand off from.
 
 ## Relationship to PR #399
 
@@ -77,7 +77,7 @@ PR #399 added `lib/update-claude-code.sh` with a daily **fleet-wide bounce** —
 | `lib/weekly-worker-restart.sh` | Mechanism 2: weekly worker-only lossless restart |
 | `lib/install-weekly-worker-restart-systemd.sh` | Enrolls the weekly restart timer (dormant by default) |
 | `lib/keepalive.sh` | Consumes `data/.reload-pending` at each idle tick; also the crash-restart entrypoint |
-| `lib/start-bot.sh` | Injects age-gated `/claudna:session-resume --auto` before `STARTUP_PROMPT` on every start |
+| `lib/start-bot.sh` | Injects age-gated `/claudna:session resume --auto` before `STARTUP_PROMPT` on every start |
 | `lib/pre-stop-handoff.sh` | Best-effort, non-blocking handoff before an intentional restart |
 
 Full design history, decision forks, and rationale: `documentation/plans/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.

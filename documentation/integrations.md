@@ -219,7 +219,7 @@ These are CLI-based integrations, not MCP servers — there's no `library/mcp/*.
 
 Deployments, domains, environment variables.
 
-**Skills:** `/claudna:vercel-status` (deployments, domains, env vars), `/claudna:vercel-logs` (view/debug logs), `/claudna:vercel-deploy` (deploy to production or preview).
+**Skills:** `/claudna:vercel status` (deployments, domains, env vars), `/claudna:vercel logs` (view/debug logs), `/claudna:vercel deploy` (deploy to production or preview).
 
 **Setup:** the host's Vercel CLI needs to already be logged in as the right user (`vercel whoami` to check) — this is a one-time host-level login, not a per-bot token. See [library/integrations/vercel.md](../library/integrations/vercel.md).
 
@@ -227,7 +227,7 @@ Deployments, domains, environment variables.
 
 Services, deployments, environments, logs.
 
-**Skills:** `/claudna:railway-status` (service overview), `/claudna:railway-logs` (view/debug logs), `/claudna:railway-deploy` (deploy/update services).
+**Skills:** `/claudna:railway status` (service overview), `/claudna:railway logs` (view/debug logs), `/claudna:railway deploy` (deploy/update services).
 
 **Setup:** set `RAILWAY_API_TOKEN` (work workspace) and/or `RAILWAY_PERSONAL_TOKEN` (personal workspace) — fleet-tier env vars, no `railway login` needed. See [library/integrations/railway.md](../library/integrations/railway.md).
 
@@ -235,7 +235,7 @@ Services, deployments, environments, logs.
 
 Serverless GPU/CPU compute — deployed apps, functions, containers.
 
-**Skills:** `/modal-status` (workspace overview), `/modal-logs` (view/debug logs), `/modal-deploy` (deploy apps).
+**Skills:** `/claudna:modal status` (workspace overview), `/claudna:modal logs` (view/debug logs), `/claudna:modal deploy` (deploy apps).
 
 **Setup:** host-level `modal` CLI auth (workspace-scoped secrets/volumes). See [library/integrations/modal.md](../library/integrations/modal.md).
 
@@ -243,7 +243,7 @@ Serverless GPU/CPU compute — deployed apps, functions, containers.
 
 Database branches, queries, project management.
 
-**Skills:** `/claudna:neon-info` (schema overview), `/claudna:neon-query` (run SQL), `/claudna:neon-branch` (create/list/delete branches — copy-on-write, cents per branch).
+**Skills:** `/claudna:neon info` (schema overview), `/claudna:neon query` (run SQL), `/claudna:neon branch` (create/list/delete branches — copy-on-write, cents per branch).
 
 **Setup:** set `NEON_API_KEY` — fleet-tier env var, no `neonctl auth` needed. See [library/integrations/neon.md](../library/integrations/neon.md).
 

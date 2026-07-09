@@ -13,12 +13,12 @@ env_contract:
 # Railway
 
 
-**Skills (clauDNA):** `/claudna:railway-status` (service overview), `/claudna:railway-logs` (view/debug logs), `/claudna:railway-deploy` (deploy/update services)
+**Skills (clauDNA):** `/claudna:railway status` (service overview), `/claudna:railway logs` (view/debug logs), `/claudna:railway deploy` (deploy/update services)
 
 **When to use:**
-- Checking deploy health or service status → `/claudna:railway-status`
-- Debugging crashes or errors → `/claudna:railway-logs`
-- Deploying or updating a service → `/claudna:railway-deploy`
+- Checking deploy health or service status → `/claudna:railway status`
+- Debugging crashes or errors → `/claudna:railway logs`
+- Deploying or updating a service → `/claudna:railway deploy`
 
 **Gotchas:**
 - Multiple tokens possible: `RAILWAY_API_TOKEN` (work) and `RAILWAY_PERSONAL_TOKEN` (personal) — use the right one for the target workspace
