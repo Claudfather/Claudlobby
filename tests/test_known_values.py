@@ -5,6 +5,8 @@ from __future__ import annotations
 
 
 from claudlobby.known_values import (
+    _AUTO_ELIGIBLE_RENAMES,
+    _AUTO_ELIGIBLE_STANDALONE,
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
     EXPERTISE_CORE_TOOLS,
@@ -75,8 +77,32 @@ class TestSetsPopulated:
         assert "bypassPermissions" in VALID_PERMISSION_MODES
 
     def test_auto_eligible_skills(self):
-        assert "/claudna:tech-debt" in AUTO_ELIGIBLE_SKILLS
-        assert "/claudna:security-audit" in AUTO_ELIGIBLE_SKILLS
+        # Pin the dead -> live rename map exactly — keys AND values. The
+        # consolidated token is not the old name minus prefix (security-audit ->
+        # `security`, docs-review -> `docs`, frontend-performance-audit ->
+        # `frontend-perf`), so the values must be pinned literally.
+        assert _AUTO_ELIGIBLE_RENAMES == {
+            "/claudna:tech-debt": "/claudna:audit tech-debt",
+            "/claudna:security-audit": "/claudna:audit security",
+            "/claudna:docs-review": "/claudna:audit docs",
+            "/claudna:access-path-audit": "/claudna:audit access-path",
+            "/claudna:frontend-performance-audit": "/claudna:audit frontend-perf",
+            "/claudna:session-handoff": "/claudna:session handoff",
+        }
+        # The four un-consolidated standalones survive under their own names.
+        assert _AUTO_ELIGIBLE_STANDALONE == frozenset(
+            {
+                "/claudna:product-enhance",
+                "/claudna:product-vision",
+                "/claudna:visual-crawl",
+                "/claudna:implement-plan",
+            }
+        )
+        # SSOT invariant: eligible == the live rename targets + the survivors, so
+        # a dead hyphen-name can never be eligible.
+        assert AUTO_ELIGIBLE_SKILLS == (
+            frozenset(_AUTO_ELIGIBLE_RENAMES.values()) | _AUTO_ELIGIBLE_STANDALONE
+        )
 
     def test_outcome_keys(self):
         assert "completed" in OUTCOME_KEYS

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 
 from claudlobby.config import load_fleet
+from claudlobby.known_values import _AUTO_ELIGIBLE_RENAMES
 from claudlobby.paths import Paths
 from claudlobby.validator import validate
 
@@ -551,7 +553,7 @@ class TestAutonomousRunnerValidation:
         )
 
         defaults = dict(
-            skill="/claudna:tech-debt", cadence="1h", target_repo="org/repo"
+            skill="/claudna:audit tech-debt", cadence="1h", target_repo="org/repo"
         )
         defaults.update(kwargs)
         picker = defaults.pop("picker", None)
@@ -562,15 +564,22 @@ class TestAutonomousRunnerValidation:
             bypass=AutonomousRunnerBypass(**bypass) if bypass else None,
         )
 
+    def _auto_eligible_warned(self, report):
+        return any(
+            "autonomous_runner.skill" in w and "--auto-eligible" in w
+            for w in report.warnings
+        )
+
     def test_known_skill_no_warning(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         self._attach(fleet)
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any(
-            "autonomous_runner.skill" in w and "tech-debt" in w for w in report.warnings
-        )
+        # The live default form (/claudna:audit tech-debt) is eligible — no
+        # --auto-eligible warning. (Both dead and live strings contain
+        # "tech-debt", so match on the warning phrase, not the token.)
+        assert not self._auto_eligible_warned(report)
 
     def test_unknown_skill_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
@@ -578,10 +587,24 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, skill="/claudna:nonexistent")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any(
-            "autonomous_runner.skill" in w and "--auto-eligible" in w
-            for w in report.warnings
-        )
+        assert self._auto_eligible_warned(report)
+
+    @pytest.mark.parametrize("dead,live", list(_AUTO_ELIGIBLE_RENAMES.items()))
+    def test_consolidation_rename_inversion(self, fleet_dir, monkeypatch, dead, live):
+        # The dead -> live rename must validate one way only: the live
+        # (consolidated space-form) is eligible, the dead (pre-consolidation
+        # hyphen-name) is not. Locks the inversion shut for every rename.
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+
+        self._attach(fleet, skill=live)
+        report = validate(fleet, paths)
+        assert not self._auto_eligible_warned(report)
+
+        self._attach(fleet, skill=dead)
+        report = validate(fleet, paths)
+        assert self._auto_eligible_warned(report)
 
     def test_bad_cadence_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)

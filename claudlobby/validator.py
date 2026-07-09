@@ -313,10 +313,12 @@ def _validate_bots(
         ar = bot.autonomous_runner
         if ar is not None:
             if ar.skill not in AUTO_ELIGIBLE_SKILLS:
+                suggestion = closest_match(ar.skill, AUTO_ELIGIBLE_SKILLS)
+                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(
                     f"bot '{bot_name}': autonomous_runner.skill '{ar.skill}' is not on the "
                     f"--auto-eligible list — the wrapper will still invoke it, but unknown "
-                    f"clauDNA skills may not emit a structured result"
+                    f"clauDNA skills may not emit a structured result{hint}"
                 )
 
             if not _CADENCE_RE.match(ar.cadence):
