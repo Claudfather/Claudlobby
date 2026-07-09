@@ -248,6 +248,9 @@ def _validate_bots(
         # RC-killing env vs remote-control/channels (error, #533). extra_flags
         # is checked too so a raw "--remote-control" there gets the same guard.
         # See RC_KILLING_ENV_VARS for why these vars break channel replies.
+        # Scope: bot.env is exactly what composes today (config.py doesn't merge
+        # defaults.env; the composer emits only bot.env) — if defaults.env ever
+        # merges, this check must follow it or it becomes a silent hole.
         needs_rc = (
             bot.remote_control
             or bot.channels
