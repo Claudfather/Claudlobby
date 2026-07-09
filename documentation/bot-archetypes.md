@@ -10,7 +10,7 @@ Skills come from two sources:
 
 2. **Project skills** (`~/claudlobby/my-bot/.claude/skills/`) — specific to one bot. Only visible when Claude runs in that bot's directory.
 
-This separation means engineer bots inherit `/review-pr` and `/worktree` from the global layer without needing their own copies, while a business bot's shop-specific skills (e.g. an order-lookup tool living in that fleet's local library overlay) stay invisible to everyone else.
+This separation means engineer bots inherit `/review-work pr` and `/worktree` from the global layer without needing their own copies, while a business bot's shop-specific skills (e.g. an order-lookup tool living in that fleet's local library overlay) stay invisible to everyone else.
 
 ### Global Skills (via your global-skills repo)
 
@@ -18,29 +18,29 @@ These are available to every bot on the system:
 
 | Skill | Purpose |
 |-------|---------|
-| `/review-pr` | Structured PR code review |
+| `/review-work pr` | Structured PR code review |
 | `/commit-push-pr` | Stage, commit, push, and open PR in one step |
 | `/quick-commit` | Fast conventional commit |
 | `/worktree` | Git worktree management for parallel work |
-| `/tech-debt` | Find and plan tech debt remediation |
-| `/security-audit` | Security vulnerability scanning |
-| `/docs-review` | Documentation audit against codebase |
-| `/design-review` | Visual/UX audit of deployed apps |
-| `/frontend-performance-audit` | Performance analysis |
+| `/audit tech-debt` | Find and plan tech debt remediation |
+| `/audit security` | Security vulnerability scanning |
+| `/audit docs` | Documentation audit against codebase |
+| `/audit design` | Visual/UX audit of deployed apps |
+| `/audit frontend-perf` | Performance analysis |
 | `/product-vision` | Architecture-aware product roadmapping |
 | `/implement-plan` | Execute a written plan step-by-step |
-| `/session-handoff` | Capture context for session continuity |
-| `/session-resume` | Restore context from a previous session |
+| `/session handoff` | Capture context for session continuity |
+| `/session resume` | Restore context from a previous session |
 | `/investigate-app` | Debug production issues |
-| `/repo-health` | Cross-repo health overview |
+| `/audit repo-health` | Cross-repo health overview |
 | `/lessons` | Capture and review learnings |
 | `/notes` | Persistent notes across sessions |
 
 Infrastructure skills (install based on what you use):
-- `/vercel-deploy`, `/vercel-status`, `/vercel-logs`
-- `/railway-deploy`, `/railway-status`, `/railway-logs`
-- `/neon-query`, `/neon-branch`, `/neon-info`
-- `/modal-deploy`, `/modal-status`, `/modal-logs`
+- `/vercel deploy`, `/vercel status`, `/vercel logs`
+- `/railway deploy`, `/railway status`, `/railway logs`
+- `/neon query`, `/neon branch`, `/neon info`
+- `/modal deploy`, `/modal status`, `/modal logs`
 - `/snowflake-query`, `/snowflake-cutover`
 - `/dbt` — dbt command runner
 
@@ -123,7 +123,7 @@ Focused executor. Takes tasks from the manager, works in worktrees, creates PRs.
 | `/restart` | Graceful self-restart |
 | `/eng-status` | Self-diagnostic (uptime, memory, session) |
 
-**Inherits from global:** `/review-pr`, `/worktree`, `/commit-push-pr`, `/tech-debt`, `/security-audit`, `/implement-plan`
+**Inherits from global:** `/review-work pr`, `/worktree`, `/commit-push-pr`, `/audit tech-debt`, `/audit security`, `/implement-plan`
 
 ### CLAUDE.md Essentials
 
@@ -164,7 +164,7 @@ Dedicated PR reviewer. Fast, thorough, runs on Sonnet to save cost.
 | `/restart` | Graceful self-restart |
 | `/review-status` | Self-diagnostic |
 
-**Inherits from global:** `/review-pr` (the core skill)
+**Inherits from global:** `/review-work pr` (the core skill)
 
 ### CLAUDE.md Essentials
 
@@ -172,7 +172,7 @@ Dedicated PR reviewer. Fast, thorough, runs on Sonnet to save cost.
 ## How You Work
 
 - You only do code reviews — nothing else
-- When given a PR, use /review-pr
+- When given a PR, use /review-work pr
 - Focus on correctness, clean design, test coverage, maintainability
 - Be constructive, not pedantic — flag what matters
 - Approve, request changes, or comment — always give a clear verdict
@@ -206,7 +206,7 @@ Visual quality auditor. Crawls deployed apps, screenshots at multiple viewports,
 | `/visual-crawl` | Autonomous crawl + screenshot + issue-filing |
 | `/restart` | Graceful self-restart |
 
-**Inherits from global:** `/design-review`, `/frontend-performance-audit`
+**Inherits from global:** `/audit design`, `/audit frontend-perf`
 
 ### CLAUDE.md Essentials
 

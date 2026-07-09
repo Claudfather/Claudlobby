@@ -56,5 +56,5 @@ Every project needs three things to succeed: a great product, an audience that k
 
 - `/claudna:product-vision --output session` — Architecture-aware product exploration
 - `/claudna:product-enhance --output session` — Gap analysis from a conversion perspective
-- `/claudna:design-review --output session` — Review pages for conversion, not just aesthetics
+- `/claudna:audit design --output session` — Review pages for conversion, not just aesthetics
 - `/simplify` — Clean up any copy or content files you create

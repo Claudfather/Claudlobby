@@ -5,12 +5,12 @@ type: cli
 
 # Modal
 
-**Skills (clauDNA):** `/modal-status` (workspace overview), `/modal-logs` (view/debug logs), `/modal-deploy` (deploy apps)
+**Skills (clauDNA):** `/claudna:modal status` (workspace overview), `/claudna:modal logs` (view/debug logs), `/claudna:modal deploy` (deploy apps)
 
 **When to use:**
-- Checking deployed apps and containers → `/modal-status`
-- Debugging function failures → `/modal-logs`
-- Deploying or updating a Modal app → `/modal-deploy`
+- Checking deployed apps and containers → `/claudna:modal status`
+- Debugging function failures → `/claudna:modal logs`
+- Deploying or updating a Modal app → `/claudna:modal deploy`
 
 **Gotchas:**
 - Modal apps are serverless — cold starts are normal, not failures

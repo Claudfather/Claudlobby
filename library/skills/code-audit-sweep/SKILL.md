@@ -27,10 +27,10 @@ exists to kill.
 
 | audit-type | Skill run | Finds |
 |---|---|---|
-| `tech-debt` | `/claudna:tech-debt` | Dead code, god modules, deprecated patterns |
-| `security-audit` | `/claudna:security-audit` | Credential leaks, injection, auth gaps |
-| `docs-review` | `/claudna:docs-review` | Stale or missing documentation |
-| `data-model-audit` | `/claudna:data-model-audit` | Schema / app mismatches |
+| `tech-debt` | `/claudna:audit tech-debt` | Dead code, god modules, deprecated patterns |
+| `security-audit` | `/claudna:audit security` | Credential leaks, injection, auth gaps |
+| `docs-review` | `/claudna:audit docs` | Stale or missing documentation |
+| `data-model-audit` | `/claudna:audit data-model` | Schema / app mismatches |
 | `product-enhance` | `/claudna:product-enhance` | UX gaps, missing features |
 
 ## Steps
