@@ -82,20 +82,40 @@ PROJECT_KEYS: frozenset[str] = frozenset(
 )
 
 # ── Autonomous runner ────────────────────────────────────────────
-# clauDNA skills known to support --auto.
-AUTO_ELIGIBLE_SKILLS: frozenset[str] = frozenset(
+# clauDNA's verb-mode consolidation folded several standalone skills into the
+# `audit` and `session` engines, invoked as `/claudna:<engine> <token>` (e.g.
+# /claudna:security-audit -> /claudna:audit security). This map is the source of
+# truth for the dead -> live rename of the --auto-eligible skills; the live
+# values (the whole space-form) are what validator.py exact-matches. NB the lens
+# token is not the old name minus prefix (security-audit -> `security`,
+# docs-review -> `docs`, frontend-performance-audit -> `frontend-perf`).
+_AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
+    "/claudna:tech-debt": "/claudna:audit tech-debt",
+    "/claudna:security-audit": "/claudna:audit security",
+    "/claudna:docs-review": "/claudna:audit docs",
+    "/claudna:access-path-audit": "/claudna:audit access-path",
+    "/claudna:frontend-performance-audit": "/claudna:audit frontend-perf",
+    "/claudna:session-handoff": "/claudna:session handoff",
+}
+
+# --auto-capable clauDNA skills that were NOT consolidated (still invoked by
+# their own name). Kept separate from the rename map so their live names never
+# read as a dead-form value.
+_AUTO_ELIGIBLE_STANDALONE: frozenset[str] = frozenset(
     {
-        "/claudna:tech-debt",
-        "/claudna:security-audit",
         "/claudna:product-enhance",
-        "/claudna:frontend-performance-audit",
-        "/claudna:docs-review",
-        "/claudna:access-path-audit",
         "/claudna:product-vision",
-        "/claudna:session-handoff",
         "/claudna:visual-crawl",
         "/claudna:implement-plan",
     }
+)
+
+# clauDNA skills known to support --auto (validator.py checks
+# autonomous_runner.skill against this). Derived from the rename map's live
+# values + the un-consolidated standalones, so the consolidated space-forms
+# validate and the dead hyphen-names cannot.
+AUTO_ELIGIBLE_SKILLS: frozenset[str] = (
+    frozenset(_AUTO_ELIGIBLE_RENAMES.values()) | _AUTO_ELIGIBLE_STANDALONE
 )
 
 OUTCOME_KEYS: frozenset[str] = frozenset(
