@@ -286,10 +286,24 @@ rotate_jsonl_by_ts() {
 # --- tmux helpers ------------------------------------------------------------
 
 # Strip control chars and escape sequences dangerous in tmux send-keys.
+# Mirrors the clean() policy in dispatch-task.sh so the dispatch ledger
+# records what the worker receives — widen both together (parity test:
+# tests/test_claudron_query_wedge.py fixed-point case).
 sanitize_tmux_input() {
-    local input="$1"
-    input=$(printf '%s' "$input" | tr -d '\000-\037\177')
-    input=$(printf '%s' "$input" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+    local input="$1" _esc
+    # Strip whole plain-CSI sequences FIRST — once the ESC byte is converted
+    # below, only the printable remainder ("[31m") would be left to leak into
+    # the sent text. Other escape families (OSC, charset, private-marker CSI)
+    # still degrade to space + printable residue; controls are neutralized
+    # either way. Literal ESC byte via printf: BSD sed has no \x escapes.
+    _esc=$(printf '\033')
+    input=$(printf '%s' "$input" | sed "s/${_esc}\[[0-9;]*[a-zA-Z]//g")
+    # The two substitutions must stay separate: the outer capture swallows
+    # the newline BSD sed appends to an unterminated last line.
+    # Two-operand tr -s: controls become spaces rather than being deleted
+    # (deletion merges words across newlines: "do x<NL>then" -> "do xthen"),
+    # and the resulting runs squeeze to one space.
+    input=$(printf '%s' "$input" | tr -s '\000-\037\177' ' ')
     printf '%s' "$input"
 }
 

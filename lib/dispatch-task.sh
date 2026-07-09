@@ -124,16 +124,22 @@ _claudron_query_before() {
     raw=$(claudron --vault "$CLAUDRON_VAULT_PATH" lookup --json \
         --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$TASK" 2>/dev/null) || return 0
     # Emits "<count>\t<title (abs path); ...>". Claudron-supplied strings are
-    # sanitized before use: pipes become "/" (the [BOTCOMMAND] envelope is
-    # pipe-delimited) and whitespace runs collapse to single spaces — an
-    # embedded newline would split the single-line ledger row into invalid
-    # JSON that the line-oriented rotation then truncates (review #528).
+    # sanitized to printable-by-construction before use: pipes become "/"
+    # (the [BOTCOMMAND] envelope is pipe-delimited) and runs of whitespace OR
+    # control bytes collapse to single spaces — an embedded newline would
+    # split the single-line ledger row into invalid JSON that line-oriented
+    # rotation then truncates, and a non-whitespace control (a YAML "\e" in a
+    # note title reaches here as a raw ESC) would ledger bytes the worker
+    # never receives once the tmux-side sanitizer strips them.
     # Any unexpected JSON shape exits 1 into the return-0 net.
     parsed=$(printf '%s' "$raw" | python3 -c '
 import json, re, sys
 
 def clean(value):
-    return re.sub(r"\s+", " ", str(value).replace("|", "/")).strip()
+    # Whole CSI sequences first — collapsing the ESC alone would leave the
+    # printable remainder ("[31m") as residue in the pointer text.
+    value = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(value))
+    return re.sub(r"[\s\x00-\x1f\x7f]+", " ", value.replace("|", "/")).strip()
 
 try:
     data = json.load(sys.stdin)
