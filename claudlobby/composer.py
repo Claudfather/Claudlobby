@@ -23,6 +23,7 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from . import dotenv
 from .config import BotConfig, FleetConfig, load_host_jobs
+from .known_values import HEADLESS_TRIM_VARS
 from .loader import (
     LibraryItem,
     _demote_headings,
@@ -355,12 +356,14 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append(
         f"export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION={_shq(str(bot.prompt_suggestions).lower())}"
     )
-    # Non-essential traffic — off by default kills the satisfaction survey, the
-    # transcript-consent prompt, telemetry, and the built-in auto-updater
-    # (claudlobby manages Claude Code updates itself). Emitted only when disabled:
-    # the env var is a presence flag, so an override to false must omit it, not "=0".
+    # Headless traffic trim — kills the satisfaction survey, /bug, Sentry
+    # error reporting, and the auto-updater (claudlobby self-manages updates).
+    # Granular by design: see HEADLESS_TRIM_VARS / RC_KILLING_ENV_VARS for why
+    # the umbrella vars stay off (they break remote-control, #533). Presence
+    # flags — an override to false omits them, never emits "=0".
     if bot.disable_nonessential_traffic:
-        lines.append("export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
+        for var in HEADLESS_TRIM_VARS:
+            lines.append(f"export {var}=1")
     lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f"export FLEET_NAME={_shq(fleet.name)}")
@@ -1389,6 +1392,15 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
             frag = json.loads(frag_path.read_text())
             contract = frag.get("_env_contract", {})
             for var_name, meta in contract.items():
+                # provided_by: "composer" — the var is composed into bot.conf
+                # (e.g. CLAUDRON_VAULT_PATH), never operator-supplied. Skipping
+                # here covers both consumers of this collection: .env
+                # scaffolding would write a misleading empty stub, and
+                # doctor's env check would false-alarm on a var no operator
+                # ever sets. The per-bot pairing check lives in the
+                # ecosystem-specific doctor checks instead (plan P2d).
+                if meta.get("provided_by") == "composer":
+                    continue
                 tier = meta.get("tier", "fleet")
                 scope = meta.get("scope", "shared")
                 if scope == "instance":

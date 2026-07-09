@@ -6,9 +6,9 @@ description: Required frontmatter fields for all fleet shared documentation
 # Documentation Frontmatter Schema
 
 > **SSOT: [Claudron `SCHEMA.md`](https://github.com/Claudfather/Claudron/blob/main/SCHEMA.md).**
-> As of Claudron 0.2.0 the note schema is ratified there and enforced in code
-> (`claudron validate`); this file is claudlobby's operational reference to
-> the same contract. **Schema changes must PR Claudron first**, then sync
+> The note schema is ratified there (their E1, slated for the 0.2.0 release)
+> and enforced in code (`claudron validate`); this file is claudlobby's
+> operational reference to the same contract. **Schema changes must PR Claudron first**, then sync
 > here. Everything below remains valid — Claudron's vocabulary was built as
 > a superset of it (see the mapping notes).
 

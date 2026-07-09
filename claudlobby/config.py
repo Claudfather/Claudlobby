@@ -876,8 +876,18 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "preferred_notif_channel", "notifications_disabled"
         ),
         prefers_reduced_motion=_bool("prefers_reduced_motion", True),
-        channels=_as_list(raw.get("channels") or defaults.get("channels"))
-        or ["plugin:telegram@claude-plugins-official"],
+        # Presence-based via `.get` defaults (not `x or default`): an explicit
+        # `channels: []` must win over the fleet default — the documented way
+        # to make a bot channel-less, e.g. to pair with RC-killing env (see the
+        # validator's #533 guard). A deliberate one-off: sibling fields use
+        # `x or default`, but channels is the only one whose explicit-empty is
+        # a load-bearing contract worth the exception.
+        channels=_as_list(
+            raw.get(
+                "channels",
+                defaults.get("channels", "plugin:telegram@claude-plugins-official"),
+            )
+        ),
         extra_flags=_merge_lists(defaults.get("extra_flags"), raw.get("extra_flags")),
         skills=_merge_lists(defaults.get("skills"), raw.get("skills")),
         mcp=_merge_mcp_lists(

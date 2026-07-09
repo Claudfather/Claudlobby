@@ -142,10 +142,10 @@ All six forks resolved in one interactive pass, each on its lean: **F1(a)** · *
 
 Every phase carries its asserts in-phase (ironclad: no back-loaded validation); this is the consolidated exit list:
 
-- [ ] P1: cross-script busy-verdict agreement test green (incl. the two keepalive regression cases).
-- [ ] P2: `claudlobby validate` catches bad tier / unknown key / misspelled project with did-you-mean; every bot.conf carries the full `PROJECT_TIER_*`/`PROJECT_REPOS_*` map.
-- [ ] P3: mission pairing validator (file-without-paragraph fails); worker vs manager CLAUDE.md composition per F6; `system.yaml.example` sync test.
-- [ ] P4: join-matrix unit tests; harness round-trip — id'd dispatch closed by own terminal report, sibling id'd dispatch survives, id-less terminal closes only id-less rows.
+- [x] P1 (landed #488): cross-script busy-verdict agreement test green (incl. the two keepalive regression cases).
+- [x] P2 (landed #490): `claudlobby validate` catches bad tier / unknown key / misspelled project with did-you-mean; every bot.conf carries the full `PROJECT_TIER_*`/`PROJECT_REPOS_*` map.
+- [x] P3 (landed #515): mission pairing validator (file-without-paragraph fails); worker vs manager CLAUDE.md composition per F6; `system.yaml.example` sync test.
+- [x] P4 (landed #518): join-matrix unit tests; harness round-trip — id'd dispatch closed by own terminal report, sibling id'd dispatch survives, id-less terminal closes only id-less rows.
 - [ ] P5: helper unit tests (cap message, lease, renew-loophole); harness `workstream_stalled` + `lease_expired` fire → manager notified.
 - [ ] P6: harness — dormant→enrolled sprint-trigger composes on systemd + launchd, fires only on idle manager, `gate_pending` fires; **soak checklist** (2 weeks reference fleet: cited mission-aligned-pick observation, zero below-tier closes, ~0 false fires).
 - [ ] P7: `brief.py` fixture tests (chunking, missing-id counter, pending-gates section); end-to-end harness chain (dispatch→progress→gate→close→brief).

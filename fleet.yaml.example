@@ -239,6 +239,15 @@ fleet:
 #     claudron_vault_path: "vaults/my-fleet/eng-1" # Claudron vault scope for this bot
 #     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
 #
+#     # Vault-wired MANAGER bots can also opt into the Claudron query-before
+#     # preflight: dispatch-task.sh prepends fleet-memory pointers (titles +
+#     # paths from `claudron lookup`) to every dispatched task. Needs the
+#     # claudron CLI on the host PATH. Off unless set — see
+#     # documentation/integrations/claudron-integration.md.
+#     env:
+#       CLAUDRON_QUERY_BEFORE: "1"
+#       CLAUDRON_QUERY_LIMIT: "3"                  # max pointers per dispatch (default 3)
+#
 #     # autonomous_runner — turns a bot into an Autonomous Worker that picks
 #     # GitHub issues from a target repo per a cadence and runs a clauDNA --auto
 #     # skill (typically /claudna:implement-plan) to resolve them. The bot's
