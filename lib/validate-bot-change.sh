@@ -425,6 +425,69 @@ if [ "$fail" -gt "$_rc_fail_before" ]; then
     echo "  [start-bot timeout stdout+stderr]"; sed 's/^/    /' "$RB_ROOT/startbot.timeout.out" 2>/dev/null || echo "    (none)"
 fi
 
+# === Scenario 2c: RC readiness ESCALATION — fleet-pulse pages on an rc_timeout burst (#533) ===
+# 2b proved start-bot EMITS rc_timeout. This proves the downstream half: fleet-pulse reads
+# that event from >= threshold bots within the window and FIRES the escalation page. The real
+# fleet-pulse runs from a stub lib dir whose tg-post.sh RECORDS the page instead of sending it,
+# so the assertion is the alert message the burst-detector actually produced. A single bot
+# (below threshold) must stay silent. 2b + 2c together cover #533 items 3-4 end-to-end: emit
+# then escalate. The incidental service_down / session_missing pages are the sandbox bots
+# having no live session; the assertions target the rc_timeout line.
+echo ""
+echo "=== validate-bot-change: RC readiness ESCALATION page (#533 items 3-4) ==="
+_esc_fail_before=$fail
+_esc_fleet="valesc"
+_esc_lib="$ROOT/esclib"
+mkdir -p "$_esc_lib"
+ln -s "$LIB_DIR/fleet-pulse.sh" "$_esc_lib/fleet-pulse.sh"
+ln -s "$LIB_DIR/lib-common.sh"  "$_esc_lib/lib-common.sh"
+_esc_pages="$ROOT/esc-pages.log"
+: > "$_esc_pages"
+cat > "$_esc_lib/tg-post.sh" <<STUB
+#!/bin/bash
+printf '%s\n' "\$1" >> "$_esc_pages"
+STUB
+chmod +x "$_esc_lib/tg-post.sh"
+_esc_bots="$ROOT/local/$_esc_fleet/runtime/bots"
+
+esc_seed() {  # <bot> <emit rc_timeout: yes|no> — seed a sandbox bot, optionally with a timeout event
+    mkdir -p "$_esc_bots/$1"
+    printf 'BOT_SERVICE=%s\n' "$1" > "$_esc_bots/$1/bot.conf"
+    # Route the seed through the SAME helper start-bot.sh emits rc_timeout with, so the
+    # seeded ledger row can never drift from the real emitter schema (it computes ts + the
+    # fleet-<today>.jsonl path internally, matching what fleet-pulse then reads).
+    if [ "$2" = yes ]; then
+        emit_fleet_event rc_timeout startup '{}' "$_esc_bots/$1" "$1"
+    fi
+    return 0
+}
+esc_run() {
+    CLAUDLOBBY_ROOT="$ROOT" FLEET_PULSE_ESCALATION_CHAT_ID="-100999" \
+        "$_esc_lib/fleet-pulse.sh" "$_esc_fleet" >/dev/null 2>&1 || true
+}
+
+# Positive: 2 bots TIMEOUT within the window (== default threshold) -> page fires.
+esc_seed escone yes
+esc_seed esctwo yes
+esc_run
+grep -q 'FLEET ALERT: rc_timeout on 2 bots' "$_esc_pages" && r=yes || r=no
+check "rc_timeout burst on >= threshold bots FIRES the escalation page" "$r"
+
+# Negative: only 1 bot with rc_timeout -> below threshold -> no rc_timeout page.
+rm -rf "$_esc_bots"
+mkdir -p "$_esc_bots"
+: > "$_esc_pages"
+esc_seed escone yes
+esc_seed esctwo no
+esc_run
+grep -q 'rc_timeout' "$_esc_pages" && r=no || r=yes
+check "a single rc_timeout (below threshold) does NOT page (no false alarm)" "$r"
+
+if [ "$fail" -gt "$_esc_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: escalation pages recorded ---"
+    sed 's/^/    /' "$_esc_pages" 2>/dev/null || echo "    (none)"
+fi
+
 # === Scenario 3: weekly worker-only restart — manager skip + loud failure ===
 # Run weekly-worker-restart.sh from a stub lib dir (stub spin-up-bot FAILS, so
 # the loud emit_failure_alert path is exercised too). The manager (MANAGER_TMUX==BOT_ID)
