@@ -988,7 +988,7 @@ iso_to_epoch() {
 
 session_md_handoff_epoch() {
     # Echo a session.md's handoff time as epoch seconds. Prefers the doc-level
-    # `last_updated:` ISO-8601 UTC frontmatter field (written by /session-handoff
+    # `last_updated:` ISO-8601 UTC frontmatter field (written by /claudna:session handoff
     # and robust to file touches the way mtime is not); falls back to the file
     # mtime for legacy artifacts that predate the field. Returns 1 if absent.
     local file="${1:?Usage: session_md_handoff_epoch <file>}" iso epoch

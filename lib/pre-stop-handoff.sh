@@ -28,7 +28,7 @@ TMUX_SOCKET="$(tmux_socket_for_bot "$BOT_DIR")" || {
     exit 1
 }
 
-# clauDNA's redesigned /session-handoff (May 2026) writes to <cwd>/.claude/session.md,
+# clauDNA's /claudna:session handoff writes to <cwd>/.claude/session.md,
 # where cwd is the bot's runtime dir (start-bot.sh `cd "$BOT_DIR"` before tmux).
 HANDOFF_FILE="$BOT_DIR/.claude/session.md"
 
@@ -43,7 +43,7 @@ fi
 
 # Try to trigger a handoff via the running session
 if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
-    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" '/claudna:session-handoff --auto' Enter || true
+    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" '/claudna:session handoff --auto' Enter || true
     # Wait up to 30 seconds for handoff to complete
     for _ in $(seq 1 30); do
         if [ -f "$HANDOFF_FILE" ]; then
