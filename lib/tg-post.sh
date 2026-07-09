@@ -4,7 +4,7 @@
 # Use when:
 #   - Worker is dispatched via tmux (no inbound Telegram to "reply" to)
 #   - Plugin reply tool is flaking
-#   - You need to guarantee Markdown renders (parse_mode=Markdown)
+#   - An env-less / host-timer job needs to deliver (creds-check, fleet-pulse escalation)
 #
 # Reads TELEGRAM_BOT_TOKEN from the bot's per-bot channel state dir.
 # Posts to TELEGRAM_GROUP_CHAT_ID (env) or the default in bot.conf.
@@ -46,8 +46,12 @@ fi
 URL_CFG=$(safe_mktemp)
 printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" > "$URL_CFG"
 
+# Plain text — no parse_mode. Telegram parses Markdown/MarkdownV2 entities only
+# when asked; forcing a mode makes the API reject any message with unbalanced
+# markup (underscores in identifiers, em-dashes) as "can't parse entities",
+# silently dropping the post. Callers that need rich formatting escape for
+# MarkdownV2 and pass it themselves (see telegram-formatting protocol).
 curl -s -X POST --config "$URL_CFG" \
   -d "chat_id=${CHAT_ID}" \
   --data-urlencode "text=${MSG}" \
-  -d "parse_mode=Markdown" \
   -d "disable_web_page_preview=true" | jq -r '{ok, msg_id: .result.message_id, error: .description}'

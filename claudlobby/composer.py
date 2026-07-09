@@ -1583,6 +1583,7 @@ def _write_timer_units(
     *,
     persistent: bool = False,
     randomized_delay: int = 0,
+    telegram_group_chat_id: str | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -1616,6 +1617,15 @@ def _write_timer_units(
     ]
     if fleet_name:
         service_lines.append(f"Environment=CLAUDLOBBY_FLEET={fleet_name}")
+    # Fleet timers run in a minimal scheduler env (systemd/launchd start with
+    # almost nothing). Carry the fleet Telegram group so a scheduled job can
+    # deliver an alert from that env — creds-check's tg-post exits without it,
+    # silently dropping the dead-credential alert while the unit still exits 0
+    # (false-healthy). See lib/creds-check.sh record_and_alert.
+    if fleet_name and telegram_group_chat_id:
+        service_lines.append(
+            f"Environment=TELEGRAM_GROUP_CHAT_ID={telegram_group_chat_id}"
+        )
     service_lines.append(f"ExecStart={exec_start}")
     (timers_dir / f"{service_name}.service").write_text("\n".join(service_lines) + "\n")
 
@@ -1691,6 +1701,13 @@ def _write_timer_units(
             [
                 "    <key>CLAUDLOBBY_FLEET</key>",
                 f"    <string>{fleet_name}</string>",
+            ]
+        )
+    if fleet_name and telegram_group_chat_id:
+        plist_lines.extend(
+            [
+                "    <key>TELEGRAM_GROUP_CHAT_ID</key>",
+                f"    <string>{telegram_group_chat_id}</string>",
             ]
         )
     plist_lines.append("  </dict>")
@@ -1804,6 +1821,7 @@ def compose_fleet_timers(
                 paths,
                 persistent=bool(cfg.get("persistent", False)),
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
+                telegram_group_chat_id=fleet.telegram_group_chat_id,
             )
         dormant = sorted(
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
@@ -1826,6 +1844,7 @@ def compose_fleet_timers(
             "oneshot",
             fleet.name,
             paths,
+            telegram_group_chat_id=fleet.telegram_group_chat_id,
         )
 
     return timers_dir
