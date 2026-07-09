@@ -227,6 +227,10 @@ touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"
 _rc_timeout_s="${RC_READY_TIMEOUT_S:-90}"
+# Coerce a non-numeric/empty override to the default: a bad value would crash
+# start-bot under `set -u` ($(( abc * 2 )) → "abc: unbound variable"), crash-
+# looping the bot. Fail safe to 90s.
+case "$_rc_timeout_s" in ""|*[!0-9]*) _rc_timeout_s=90 ;; esac
 _rc_iters=$(( _rc_timeout_s * 2 ))
 _poll_start=$(date +%s)
 echo "$(ts_iso) POLL_START — waiting for remote-control readiness (ceiling ${_rc_timeout_s}s)" >> "$LOG"
