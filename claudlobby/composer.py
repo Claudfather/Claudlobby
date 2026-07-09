@@ -268,6 +268,31 @@ _TELEGRAM_HANDLE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
 # drift here would silently spawn a second server for the same socket name.
 _TMUX_TMPDIR = "/tmp"
 
+# The RC-safe headless trim set (disable_nonessential_traffic: true emits
+# these). Empirically verified on Claude Code 2.1.198 (2026-07-09, Pi fleet):
+# each var alone AND all together leave `--remote-control` active, while both
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC and DISABLE_TELEMETRY suppress it
+# (RC is feature-flag-gated; flag evaluation rides the telemetry channel).
+# Those two are therefore RC-killing and belong in _RC_KILLING_ENV_VARS, not
+# here (validator enforces). Both survey spellings are set: the documented
+# name has drifted across binary versions.
+_HEADLESS_TRIM_VARS = (
+    "DISABLE_AUTOUPDATER",
+    "DISABLE_ERROR_REPORTING",
+    "DISABLE_BUG_COMMAND",
+    "DISABLE_FEEDBACK_SURVEY",
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+)
+
+# Env vars that disable Claude Code feature-flag evaluation and with it
+# remote-control / channel replies. The validator errors when a bot that
+# needs RC (remote_control or channels configured) carries one of these in
+# its env — the combination silently drops every channel reply (#533).
+_RC_KILLING_ENV_VARS = (
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_TELEMETRY",
+)
+
 
 def _shq(v: object) -> str:
     """Shell-quote a value for safe embedding in sourced bash scripts.
@@ -355,12 +380,20 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     lines.append(
         f"export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION={_shq(str(bot.prompt_suggestions).lower())}"
     )
-    # Non-essential traffic — off by default kills the satisfaction survey, the
-    # transcript-consent prompt, telemetry, and the built-in auto-updater
-    # (claudlobby manages Claude Code updates itself). Emitted only when disabled:
-    # the env var is a presence flag, so an override to false must omit it, not "=0".
+    # Headless traffic trim — off by default kills the satisfaction survey,
+    # the /bug command, Sentry error reporting, and the built-in auto-updater
+    # (claudlobby manages Claude Code updates itself). Emitted as GRANULAR
+    # vars, never the CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC umbrella, and
+    # never DISABLE_TELEMETRY: the binary gates remote-control behind
+    # feature-flag evaluation that shares the telemetry channel, so either of
+    # those silently kills --remote-control — channel replies drop while
+    # inbound still arrives (the July 2026 fleet-wide Telegram outage; #533).
+    # Telemetry therefore stays ON for RC bots — a deliberate, documented
+    # trade until upstream decouples flags from telemetry. Presence flags:
+    # an override to false omits them, not "=0".
     if bot.disable_nonessential_traffic:
-        lines.append("export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
+        for var in _HEADLESS_TRIM_VARS:
+            lines.append(f"export {var}=1")
     lines.append("")
     lines.append("# Exports for skills + scripts")
     lines.append(f"export FLEET_NAME={_shq(fleet.name)}")

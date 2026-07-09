@@ -244,6 +244,30 @@ def _validate_bots(
                         f"bot '{bot_name}': hook {event} command '{cmd}' not found on disk"
                     )
 
+        # RC-killing env vars vs remote-control/channels (error). These vars
+        # disable Claude Code feature-flag evaluation, which silently disables
+        # --remote-control — channel replies drop while inbound still arrives
+        # (the July 2026 fleet-wide Telegram outage, #533). extra_flags is
+        # checked too so a raw "--remote-control" there gets the same guard.
+        needs_rc = (
+            bot.remote_control
+            or bot.channels
+            or any("--remote-control" in f for f in bot.extra_flags)
+        )
+        if needs_rc:
+            from .composer import _RC_KILLING_ENV_VARS
+
+            for var in _RC_KILLING_ENV_VARS:
+                if var in bot.env:
+                    report.errors.append(
+                        f"bot '{bot_name}': env sets {var} but the bot uses "
+                        f"remote-control/channels — this var disables Claude Code's "
+                        f"feature-flag evaluation and with it remote-control, so "
+                        f"channel replies are silently dropped (#533). Remove it, or "
+                        f"set remote_control: false and channels: [] if this bot "
+                        f"genuinely needs it."
+                    )
+
         # Ecosystem: Claudron MCP ↔ vault path cross-check (warn)
         has_claudron_mcp = any(entry.name == "claudron" for entry in bot.mcp)
         if bot.claudron_vault_path and not has_claudron_mcp:
