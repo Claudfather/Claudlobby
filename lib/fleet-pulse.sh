@@ -305,11 +305,16 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                     date -v-"${_ESCALATION_WINDOW}"M +%Y-%m-%dT%H:%M 2>/dev/null || echo "")
 
     if [ -n "$_window_start" ]; then
-        # rc_timeout is startup-sourced (start-bot.sh emits it once when the
-        # remote-control readiness probe times out), unlike the others which
-        # fleet-pulse re-emits each run. Its events therefore cluster in the
-        # restart window — which is exactly the #533 fleet-wide-rollout case
-        # this must catch; a long-idle single bot won't re-page (keepalive's job).
+        # rc_timeout is startup-sourced: start-bot.sh emits it once on readiness
+        # TIMEOUT and never re-emits it — unlike service_down / bridge_down,
+        # which fleet-pulse re-emits from current state each run. Through this
+        # window loop it is therefore a BURST detector: it pages when the
+        # threshold of bots TIMEOUT within one escalation window — the #533
+        # fleet-wide-rollout signature (a mass restart clusters every bot's
+        # TIMEOUT). A single or slowly-staggered RC-dark bot spread beyond the
+        # window is NOT caught here, and nothing re-checks a live-but-RC-dark
+        # session (keepalive only heals DEAD ones); the durable-marker parity
+        # fix (mirror bridge_down's startup+pulse legs) is the deferred follow-up.
         for _crit_type in service_down session_missing bridge_down rc_timeout; do
             _affected_bots=""
             _affected_count=0
@@ -377,7 +382,7 @@ _summary_tmp=$(safe_mktemp)
         _s_alerts=""
         _s_efile="$_s_bot_dir/data/events/fleet-${today}.jsonl"
         if [ -f "$_s_efile" ]; then
-            for _s_ct in session_missing service_down bridge_down activity_stuck; do
+            for _s_ct in session_missing service_down bridge_down activity_stuck rc_timeout; do
                 grep -q "\"type\":\"$_s_ct\"" "$_s_efile" 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
             done
         fi

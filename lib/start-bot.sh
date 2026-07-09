@@ -222,10 +222,8 @@ mkdir -p "$BOT_DIR/data" 2>/dev/null || true
 touch "$BOT_DIR/data/.spawn" 2>/dev/null || true
 
 # Wait for initialization with observability. The readiness ceiling is
-# RC_READY_TIMEOUT_S (default 90s), polled every 0.5s. Overridable so
-# validate-bot-change.sh can exercise the TIMEOUT path fast (the 90s default is
-# untestable) and slow hosts can be tuned — see documentation/environment-variables.md
-# and the rc_timeout event in documentation/guides/observability.md.
+# RC_READY_TIMEOUT_S (default 90s, polled every 0.5s) — overridable; see
+# documentation/environment-variables.md.
 LOG="$BOT_DIR/logs/startup.log"
 setup_log_dir "$LOG"
 _rc_timeout_s="${RC_READY_TIMEOUT_S:-90}"
@@ -251,7 +249,7 @@ if [ "$_ready" -eq 0 ]; then
     # Emit a fleet event so a readiness regression reaches fleet-pulse's
     # escalation instead of just appending to a log. A fleet-wide TIMEOUT must
     # page: the #533 outage sat in every startup.log for a week with nothing
-    # alerting. fleet-pulse aggregates rc_timeout like its other crit types.
+    # alerting.
     emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s}}"
 fi
 
