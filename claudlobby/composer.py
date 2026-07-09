@@ -1378,6 +1378,15 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
             frag = json.loads(frag_path.read_text())
             contract = frag.get("_env_contract", {})
             for var_name, meta in contract.items():
+                # provided_by: "composer" — the var is composed into bot.conf
+                # (e.g. CLAUDRON_VAULT_PATH), never operator-supplied. Skipping
+                # here covers both consumers of this collection: .env
+                # scaffolding would write a misleading empty stub, and
+                # doctor's env check would false-alarm on a var no operator
+                # ever sets. The per-bot pairing check lives in the
+                # ecosystem-specific doctor checks instead (plan P2d).
+                if meta.get("provided_by") == "composer":
+                    continue
                 tier = meta.get("tier", "fleet")
                 scope = meta.get("scope", "shared")
                 if scope == "instance":
