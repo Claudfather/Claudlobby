@@ -83,6 +83,117 @@ send_reload_command() {
     fi
 }
 
+# restart_bot_service <reason>
+# The ONE restart ladder — reused by the dead-session watchdog below AND the
+# bridge-heal path (Fork F1=b: consolidate, do not fork a second ladder). Picks the
+# platform control plane, logs + emits a RESTART event tagged with <reason>, and
+# falls back to start-bot.sh. Does NOT exit — callers own their control flow.
+# NOTE: every branch re-runs start-bot.sh (directly, or as the systemd/launchd
+# ExecStart), which re-touches data/.spawn. The bridge-heal path leans on that —
+# bridge_down_state graces from .spawn, so the touch is what SPACES heal retries.
+# Keep it true for any new restart branch, or retries collapse to once-per-tick.
+restart_bot_service() {
+    local reason="$1" desc
+    if [ "$_OS" = "Linux" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/.config/systemd/user/$BOT_SERVICE.service" ]; then
+        desc="systemctl --user restart $BOT_SERVICE"
+        echo "$(ts_iso) RESTART — $reason, $desc" >> "$LOG"
+        emit_keepalive_event "RESTART" "$reason, $desc"
+        systemctl --user restart "$BOT_SERVICE.service" >>"$LOG" 2>&1
+    elif [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
+        # Pre-rename unit still installed (fleet not regenerated yet).
+        desc="systemctl --user restart $BOT_NAME (pre-rename)"
+        echo "$(ts_iso) RESTART — $reason, $desc" >> "$LOG"
+        emit_keepalive_event "RESTART" "$reason, $desc"
+        systemctl --user restart "$BOT_NAME.service" >>"$LOG" 2>&1
+    elif [ "$_OS" = "Darwin" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
+        desc="launchctl kickstart $BOT_SERVICE"
+        echo "$(ts_iso) RESTART — $reason, $desc" >> "$LOG"
+        emit_keepalive_event "RESTART" "$reason, $desc"
+        launchctl kickstart -k "gui/$(id -u)/$BOT_SERVICE" >>"$LOG" 2>&1
+    else
+        echo "$(ts_iso) RESTART — $reason, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
+        emit_keepalive_event "RESTART" "$reason, falling back to start-bot.sh"
+        "$LIB_DIR/start-bot.sh" "$BOT_DIR" >>"$LOG" 2>&1
+    fi
+}
+
+# _bridge_heal
+# Tier-2 auto-heal for a dark Telegram inbound bridge (Fork F6b). GATED OFF unless
+# OBSERVABILITY_BRIDGE_HEAL=1 — enabling the bounce fleet-wide waits on the
+# production bounce-to-recovery telemetry that clears the F6b gate. The bun
+# server.ts poller is an MCP stdio CHILD of claude, so nothing but a claude restart
+# respawns it: the heal action is a full bot bounce (there is no claude-mcp-restart,
+# and a standalone bun would 409 on Telegram's single-consumer slot). Called ONLY
+# from the IDLE branch, so the BUSY-gate is implicit — a working bot is never
+# bounced for an inbound-only outage it may not need this minute.
+_bridge_heal() {
+    [ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ] || return 0
+
+    local grace down
+    grace="${OBSERVABILITY_BRIDGE_DOWN_GRACE:-300}"
+    # bridge_down_state graces from data/.spawn, so a freshly (re)started bot —
+    # including one we just bounced — is not re-bounced while its poller spins up.
+    # That grace is what SPACES retries (the Fork F4 backoff intent); the persisted
+    # attempt counter is what CAPS them. Reuses the SAME grace fleet-pulse alerts on,
+    # so detection and heal never disagree about whether a bot is down.
+    down="$(bridge_down_state "$BOT_DIR" "$grace" 2>/dev/null || true)"
+    case "$down" in
+        no_bridge)
+            # Actionably dark past grace. Bounce under a per-bot lock so two
+            # overlapping ticks cannot double-fire (M3) — belt-and-suspenders atop
+            # the persisted counter + spawn grace.
+            with_lock "$BOT_DIR/data/.bridge-heal.lock" _bridge_heal_bounce
+            ;;
+        no_token)
+            : # A bounce cannot conjure a missing token — never heal (Fork F2/5e);
+              # bring-up verify + fleet-pulse already escalate the misconfig.
+            ;;
+        *)
+            # up / within-grace / no_handle / unknown — nothing to bounce. If a heal
+            # ladder was in flight and the poller is genuinely back, reset it so a
+            # future outage starts clean (unconditional marker clear on up, m3).
+            if [ -f "$BOT_DIR/data/.bridge-heal" ] && [ "$(bridge_state "$BOT_DIR" 2>/dev/null || true)" = "up" ]; then
+                rm -f "$BOT_DIR/data/.bridge-heal" "$BOT_DIR/data/.bridge-heal-escalated" "$BOT_DIR/data/.bridge-down" 2>/dev/null || true
+                echo "$(ts_iso) BRIDGE_HEAL — poller recovered, ladder reset" >> "$LOG"
+                emit_keepalive_event "BRIDGE_HEAL" "poller recovered, ladder reset"
+            fi
+            ;;
+    esac
+}
+
+# _bridge_heal_bounce
+# The capped bounce, run under the per-bot heal lock. keepalive is stateless across
+# ticks, so the attempt budget is persisted on disk (data/.bridge-heal) — a plain
+# in-memory counter would reset every tick and bounce forever.
+_bridge_heal_bounce() {
+    local statef="$BOT_DIR/data/.bridge-heal" max attempt
+    max="${BRIDGE_HEAL_MAX_ATTEMPTS:-3}"
+    attempt=0
+    [ -f "$statef" ] && attempt="$(tr -cd '0-9' < "$statef" 2>/dev/null)"
+    [ -n "$attempt" ] || attempt=0
+
+    if [ "$attempt" -ge "$max" ]; then
+        # Budget exhausted — escalate ONCE (Fork F3 escalate-only) and stop churning.
+        # The bot still serves tmux dispatch; a human/manager takes it from here.
+        if [ ! -f "$BOT_DIR/data/.bridge-heal-escalated" ]; then
+            emit_failure_alert "$(dirname "$BOT_DIR")" "bridge_down" \
+                "$BOT_NAME Telegram bridge still dark after $attempt heal bounces — escalate-only; manual attention needed" || true
+            : > "$BOT_DIR/data/.bridge-heal-escalated" 2>/dev/null || true
+            echo "$(ts_iso) BRIDGE_HEAL — budget exhausted ($attempt/$max), escalated" >> "$LOG"
+            emit_keepalive_event "BRIDGE_HEAL" "budget exhausted ($attempt/$max), escalated"
+        fi
+        return 0
+    fi
+
+    # Record BEFORE the bounce so a crash mid-restart still advances the cap — never
+    # an unbounded bounce loop.
+    attempt=$((attempt + 1))
+    printf '%s' "$attempt" > "$statef" 2>/dev/null || true
+    echo "$(ts_iso) BRIDGE_HEAL — poller dark, bounce attempt $attempt/$max" >> "$LOG"
+    emit_keepalive_event "BRIDGE_HEAL" "poller dark, bounce attempt $attempt/$max"
+    restart_bot_service "bridge poller dark (heal $attempt/$max)"
+}
+
 # Cron runs with a minimal env. `systemctl --user` needs XDG_RUNTIME_DIR to
 # reach the user bus, otherwise it fails silently with "Failed to connect to
 # bus" while we still log a "RESTART" line — so the bot looks supervised
@@ -103,24 +214,7 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         emit_keepalive_event "SKIP" "session reappeared (start-bot.sh likely won the race)"
         exit 0
     fi
-    if [ "$_OS" = "Linux" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/.config/systemd/user/$BOT_SERVICE.service" ]; then
-        echo "$(ts_iso) RESTART — session dead, systemctl --user restart $BOT_SERVICE" >> "$LOG"
-        emit_keepalive_event "RESTART" "session dead, systemctl --user restart $BOT_SERVICE"
-        systemctl --user restart "$BOT_SERVICE.service" >>"$LOG" 2>&1
-    elif [ "$_OS" = "Linux" ] && [ -f "$HOME/.config/systemd/user/$BOT_NAME.service" ]; then
-        # Pre-rename unit still installed (fleet not regenerated yet).
-        echo "$(ts_iso) RESTART — session dead, systemctl --user restart $BOT_NAME (pre-rename)" >> "$LOG"
-        emit_keepalive_event "RESTART" "session dead, systemctl --user restart $BOT_NAME (pre-rename)"
-        systemctl --user restart "$BOT_NAME.service" >>"$LOG" 2>&1
-    elif [ "$_OS" = "Darwin" ] && [ -n "${BOT_SERVICE:-}" ] && [ -f "$HOME/Library/LaunchAgents/$BOT_SERVICE.plist" ]; then
-        echo "$(ts_iso) RESTART — session dead, launchctl kickstart $BOT_SERVICE" >> "$LOG"
-        emit_keepalive_event "RESTART" "session dead, launchctl kickstart $BOT_SERVICE"
-        launchctl kickstart -k "gui/$(id -u)/$BOT_SERVICE" >>"$LOG" 2>&1
-    else
-        echo "$(ts_iso) RESTART — session dead, falling back to start-bot.sh $BOT_DIR" >> "$LOG"
-        emit_keepalive_event "RESTART" "session dead, falling back to start-bot.sh"
-        "$LIB_DIR/start-bot.sh" "$BOT_DIR" >>"$LOG" 2>&1
-    fi
+    restart_bot_service "session dead"
     exit 0
 fi
 
@@ -213,6 +307,9 @@ case "$state" in
             echo "$(ts_iso) RELOAD — sent /reload-plugins + /reload-skills (live update)" >> "$LOG"
             emit_keepalive_event "RELOAD" "sent /reload-plugins + /reload-skills"
         fi
+        # Tier-2 Telegram-bridge self-heal — gated OFF by default (F6b). Runs here, on
+        # a confirmed-IDLE pane, so a heal bounce never interrupts in-flight work.
+        _bridge_heal
         ;;
     *)
         # Track consecutive UNKNOWN runs
