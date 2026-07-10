@@ -260,12 +260,13 @@ class TestSocketWrappers:
         )
         assert rc != 0
         assert "dropped" in err.lower()
-        # The send_miss event landed in the caller's ledger.
+        # The send_miss event landed in the sending bot's ledger, attributed to
+        # it via the event's top-level "bot" field.
         events = list((d / "data" / "events").glob("fleet-*.jsonl"))
         assert events, "expected a fleet-*.jsonl event file"
         body = events[0].read_text()
         assert '"type":"send_miss"' in body
-        assert '"caller":"alpha"' in body
+        assert '"bot":"alpha"' in body
 
 
 # --- composition assertions -------------------------------------------------
