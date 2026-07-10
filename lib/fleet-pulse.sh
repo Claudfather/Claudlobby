@@ -289,20 +289,16 @@ _readback_efiles() {
 _ESCALATION_THRESHOLD="${FLEET_PULSE_ESCALATION_THRESHOLD:-2}"
 _ESCALATION_WINDOW="${FLEET_PULSE_ESCALATION_WINDOW:-10}"
 
-# Resolve the escalation Telegram target. Precedence:
-#   1. explicit FLEET_PULSE_ESCALATION_CHAT_ID (env / fleet config) — preferred,
-#      so alert targeting never depends on bot directory ordering
-#   2. the first bot in the fleet that actually declares TELEGRAM_GROUP_CHAT_ID
-# The state dir is read from the SAME bot so token resolution stays consistent.
-_ESCALATION_CHAT_ID="${FLEET_PULSE_ESCALATION_CHAT_ID:-}"
-_ESCALATION_STATE_DIR=""
-if [ -z "$_ESCALATION_CHAT_ID" ]; then
-    _esc_bot_dir=$(first_bot_with_conf "$BOTS_DIR" TELEGRAM_GROUP_CHAT_ID) || true
-    if [ -n "${_esc_bot_dir:-}" ]; then
-        _ESCALATION_CHAT_ID=$(bot_conf_get "$_esc_bot_dir" TELEGRAM_GROUP_CHAT_ID "")
-        _ESCALATION_STATE_DIR=$(bot_conf_get_path "$_esc_bot_dir" TELEGRAM_STATE_DIR "")
-    fi
-fi
+# Resolve the escalation Telegram target via the shared fleet-alert resolver, so
+# this path, lib-common _emit_fleet_signal, and creds-check all resolve the same
+# chat-id (override → composed fleet env → bot.conf scan). Fleet-scoped: a fleet's
+# escalation must not page a peer fleet's channel, and an empty result keeps the
+# loud no-receiver warning below.
+resolve_alert_target "$BOTS_DIR" fleet   # sets _alert_chat_id / _alert_state_dir (sourced lib-common)
+# shellcheck disable=SC2154
+_ESCALATION_CHAT_ID="$_alert_chat_id"
+# shellcheck disable=SC2154
+_ESCALATION_STATE_DIR="$_alert_state_dir"
 
 # No chat ID anywhere means the critical-alert safety net is mute. Say so
 # loudly rather than no-op silently.

@@ -332,7 +332,7 @@ Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OB
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `FLEET_PULSE_ESCALATION_CHAT_ID` | _(fallback)_ | Telegram chat ID for fleet-wide critical alerts. When unset, fleet-pulse uses the first bot in the fleet that declares a non-empty `TELEGRAM_GROUP_CHAT_ID` (bots that omit it are skipped, not blindly trusted). If no bot declares one, escalation is disabled and fleet-pulse logs a warning rather than failing silently. |
+| `FLEET_PULSE_ESCALATION_CHAT_ID` | _(fallback)_ | Operator override for the fleet-wide alert chat ID, honored by **all** env-less alert paths (fleet-pulse escalation, creds-check, and lib-common `_emit_fleet_signal`) via the shared `resolve_alert_target` resolver. Full precedence: this override → the composed `TELEGRAM_GROUP_CHAT_ID` (baked into every fleet timer unit) → a scan of the fleet's bots for the first non-empty `TELEGRAM_GROUP_CHAT_ID` in bot.conf (bots that omit it are skipped). If none resolves, fleet-pulse escalation is disabled and logs a warning rather than failing silently. |
 | `FLEET_PULSE_ESCALATION_THRESHOLD` | `2` | Number of distinct bots that must hit the same critical event within the window to trigger escalation. |
 | `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
 

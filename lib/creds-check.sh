@@ -313,10 +313,12 @@ _telegram_getme() {
 # tokens). Validated so a bot whose own token is dead — exactly what this script
 # exists to catch — cannot become the silent alert channel.
 #
-# NOTE (#552): fleet-pulse escalation and lib-common _emit_fleet_signal deliver
-# fleet alerts from the same env-less context on the fragile channel-dir token.
-# #552 should promote this + _telegram_getme to lib-common and point those two
-# paths at it, giving all three one validated delivery path.
+# NOTE: the chat-id side is now unified — this path, fleet-pulse escalation, and
+# _emit_fleet_signal all resolve the target chat-id via lib-common's
+# resolve_alert_target (#572). The TOKEN side is not yet: this validated resolver
+# + _telegram_getme still live here, while the other two paths lean on tg-post's
+# fragile channel-dir token. Promoting this pair to lib-common and pointing all
+# three at it would give them one validated delivery path (follow-up: #552).
 resolve_delivery_token() {
     local _dir _declared _d _tok
     _dir="$(resolve_bots_dir "$FLEET_ARG")"
@@ -335,9 +337,9 @@ resolve_delivery_token() {
     done
 }
 
-# Chat id comes from the composed unit env (TELEGRAM_GROUP_CHAT_ID). Resolve a
-# delivery token before the checks run so record_and_alert can deliver; skip
-# when the env already carries one (bot-session callers keep their own).
+# Resolve a delivery token before the checks run so record_and_alert can deliver;
+# skip when the env already carries one (bot-session callers keep their own). The
+# target chat-id itself is resolved just below.
 if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
     _dtok="$(resolve_delivery_token)" || true
     if [ -n "${_dtok:-}" ]; then
@@ -348,6 +350,17 @@ if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
         log "alert delivery token resolved for scheduled Telegram alerts"
     fi
 fi
+
+# Chat id: resolve via the shared fleet-alert resolver so creds-check honors the
+# same override → composed-env → bot.conf-scan precedence as fleet-pulse
+# escalation and _emit_fleet_signal (previously it saw only the composed env,
+# ignoring the FLEET_PULSE_ESCALATION_CHAT_ID override and the scan). Fleet-scoped
+# so one fleet's creds alert never routes to another fleet's channel; the resolver
+# returns the composed env unchanged when that is the source, so tg-post still
+# sees the same chat id in the common case.
+resolve_alert_target "$(resolve_bots_dir "$FLEET_ARG")" fleet
+# shellcheck disable=SC2154  # _alert_chat_id is set by resolve_alert_target (sourced lib-common)
+[ -n "$_alert_chat_id" ] && export TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id"
 
 # ---------------------------------------------------------------------
 # Run all checks
