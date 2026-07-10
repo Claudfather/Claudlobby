@@ -707,8 +707,11 @@ bot_tmux() {
 # Append one event to a bot's JSONL ledger (data/events/fleet-YYYY-MM-DD.jsonl)
 # — the SAME ledger fleet-pulse reads and escalates. Best-effort: never fails
 # the caller, because startup/observability paths must not abort on a log write.
-# Identity defaults to $BOT_DIR/$BOT_ID; falls back to the fleet-level ledger
-# when no bot context is set. data_json must be a valid JSON value (default {}).
+# Identity: explicit bot_dir/bot_id win, else ambient $BOT_DIR/$BOT_ID. An
+# explicitly EMPTY bot_dir ("") forces the fleet-level ledger (state/events,
+# bot:"fleet") and ignores ambient identity — used by _emit_fleet_signal and by
+# emit_script_error's host-context (no bot dir) path. data_json must be a valid
+# JSON value (default {}).
 # Usage: emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
 # The shared per-source event write behind fleet-pulse / code-audit-sweep's
 # checks and _tmux_send_miss below; each passes its own <source> and emits here.
@@ -716,16 +719,20 @@ emit_fleet_event() {
     local event_type="${1:?emit_fleet_event: <type> required}"
     local event_source="${2:-unknown}"
     local data_json="${3:-}"
-    local bot_dir="${4:-${BOT_DIR:-}}"
-    local bot_id="${5:-${BOT_ID:-}}"
+    # No-colon ${4-…}: an explicitly EMPTY bot_dir stays empty (forcing the
+    # fleet-level branch) instead of falling back to ambient $BOT_DIR.
+    local bot_dir="${4-${BOT_DIR:-}}"
+    local bot_id="${5-}"
     [ -n "$data_json" ] || data_json='{}'
     local events_dir
     if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
         events_dir="$bot_dir/data/events"
-        [ -n "$bot_id" ] || bot_id=$(basename "$bot_dir")
+        [ -n "$bot_id" ] || bot_id="${BOT_ID:-$(basename "$bot_dir")}"
     else
+        # Fleet-level ledger: identity is the explicit bot_id or "fleet" — never
+        # ambient $BOT_ID, so a host job's alert is not misattributed to a bot.
         events_dir="${CLAUDLOBBY_ROOT:-}/state/events"
-        bot_id="${bot_id:-fleet}"
+        [ -n "$bot_id" ] || bot_id="fleet"
     fi
     mkdir -p "$events_dir" 2>/dev/null || return 0
     local ts today
@@ -736,23 +743,16 @@ emit_fleet_event() {
 }
 
 # _tmux_send_miss <session> <socket> <reason>
-# Emit a send_miss event to the CALLER bot's JSONL ledger (best-effort) plus a
+# Emit a send_miss event to the caller bot's JSONL ledger (best-effort) plus a
 # stderr breadcrumb, so a dropped cross-socket send becomes observable instead
-# of silently swallowed. Internal to bot_tmux_send. Delegates the ledger write
-# to emit_fleet_event; resolves bot_id the same way the primitive does so the
-# payload's "caller" equals the event's top-level "bot".
+# of silently swallowed. Internal to bot_tmux_send. The sending bot is the
+# event's top-level "bot", resolved by emit_fleet_event from BOT_DIR / BOT_ID.
 _tmux_send_miss() {
     local session="$1" socket="$2" reason="$3"
-    local bot_dir="${BOT_DIR:-}" bot_id="${BOT_ID:-}"
-    if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
-        [ -n "$bot_id" ] || bot_id=$(basename "$bot_dir")
-    else
-        bot_id="${bot_id:-fleet}"
-    fi
     local data
-    data=$(printf '{"target":"%s","socket":"%s","session":"%s","caller":"%s","reason":"%s"}' \
-        "$(json_escape "$session")" "$(json_escape "$socket")" "$(json_escape "$session")" "$bot_id" "$reason")
-    emit_fleet_event send_miss dispatch "$data" "$bot_dir" "$bot_id"
+    data=$(printf '{"socket":"%s","session":"%s","reason":"%s"}' \
+        "$(json_escape "$socket")" "$(json_escape "$session")" "$reason")
+    emit_fleet_event send_miss dispatch "$data"
 }
 
 # bot_tmux_send <peer_socket> <session> <text>
@@ -1236,24 +1236,15 @@ extract_bot_conf_var() {
 # the event is written to $CLAUDLOBBY_ROOT/state/events/.
 emit_script_error() {
     local bot_dir="$1" script_name="$2" exit_code="$3" message="$4"
-    local events_dir bot_id
-
-    if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
-        events_dir="$bot_dir/data/events"
-        bot_id=$(basename "$bot_dir")
-    else
-        events_dir="${CLAUDLOBBY_ROOT}/state/events"
-        bot_id="fleet"
-    fi
-    mkdir -p "$events_dir"
-
-    local ts today escaped_msg
-    ts=$(ts_iso)
-    today=$(date +%Y-%m-%d)
-    escaped_msg=$(json_escape "$message")
-    printf '{"ts":"%s","bot":"%s","type":"script_error","source":"lib","data":{"script":"%s","exit_code":%d,"message":"%s"}}\n' \
-        "$ts" "$bot_id" "$script_name" "$exit_code" "$escaped_msg" \
-        >> "$events_dir/fleet-${today}.jsonl"
+    local data
+    data=$(printf '{"script":"%s","exit_code":%d,"message":"%s"}' \
+        "$script_name" "$exit_code" "$(json_escape "$message")")
+    # Pass bot_id explicitly (bot_dir's own basename) so a bot-context error
+    # attributes to that dir — never the ambient $BOT_ID of whatever installed
+    # the trap (a manager script or shell trapping a different bot's dir). An
+    # empty bot_dir yields an empty bot_id, so the primitive's fleet-level branch
+    # attributes it to "fleet".
+    emit_fleet_event script_error lib "$data" "$bot_dir" "${bot_dir:+$(basename "$bot_dir")}"
 }
 
 # _emit_fleet_signal <bots_dir> <event_type> <reason> <ev_source> <WORD>
@@ -1270,12 +1261,9 @@ _emit_fleet_signal() {
     local bots_dir="$1" event_type="$2" reason="$3" ev_source="$4" word="$5"
     local tmux_prefix="[FLEET-${word}]" tg_prefix="FLEET ${word}"
 
-    local events_dir="${CLAUDLOBBY_ROOT}/state/events"
-    mkdir -p "$events_dir"
-    local ts today escaped
-    ts=$(ts_iso); today=$(date +%Y-%m-%d); escaped=$(json_escape "$reason")
-    printf '{"ts":"%s","bot":"fleet","type":"%s","source":"%s","data":{"reason":"%s"}}\n' \
-        "$ts" "$event_type" "$ev_source" "$escaped" >> "$events_dir/fleet-${today}.jsonl"
+    local data
+    data=$(printf '{"reason":"%s"}' "$(json_escape "$reason")")
+    emit_fleet_event "$event_type" "$ev_source" "$data" "" fleet
 
     # manager tmux nudge (resolve from whichever bot declares MANAGER_TMUX) — on
     # the manager's OWN socket (per-bot servers); a default-socket send would
