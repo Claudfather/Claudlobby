@@ -264,6 +264,27 @@ for bot_dir in "$BOTS_DIR"/*/; do
     reap_events "$bot_dir"
 done
 
+# Read-back date span for the escalation + summary below. emit_fleet_event
+# stamps each event with a per-call date, so a sweep that straddles midnight
+# lands late events in the NEXT day's ledger — past the single script-start
+# $today this read-back would otherwise scan. Covering the script-start day plus
+# the read-back day (identical unless the sweep crossed midnight; a sub-24h
+# sweep spans at most these two) closes that gap. The span tracks the sweep's
+# own run, not the escalation window: the summary below has no time filter and
+# leans on this span alone for "recent", while the escalation ADDITIONALLY
+# filters by _window_start — so a narrower span there can only under-count
+# (miss), never over-escalate.
+_rb_today=$(date +%Y-%m-%d)
+# Echo a bot's existing ledger file(s) across that span, oldest first so a
+# downstream `tail -1` still yields the chronologically latest event.
+_readback_efiles() {
+    local _bd="$1" _d _f
+    for _d in "$today" "$_rb_today"; do
+        _f="$_bd/data/events/fleet-${_d}.jsonl"
+        [ -f "$_f" ] && printf '%s\n' "$_f"
+    done | sort -u
+}
+
 # --- Fleet-wide escalation: persistent critical events → Telegram -----------
 _ESCALATION_THRESHOLD="${FLEET_PULSE_ESCALATION_THRESHOLD:-2}"
 _ESCALATION_WINDOW="${FLEET_PULSE_ESCALATION_WINDOW:-10}"
@@ -312,11 +333,13 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                 [ -d "$bot_dir" ] || continue
                 _bid=$(basename "$bot_dir")
                 bot_in_fleet "$_bid" "$declared_bots" || continue
-                _efile="$bot_dir/data/events/fleet-${today}.jsonl"
-                [ -f "$_efile" ] || continue
+                _efiles=$(_readback_efiles "$bot_dir")
+                [ -n "$_efiles" ] || continue
                 # Check if this bot has this critical event type within the window
-                if grep -q "\"type\":\"$_crit_type\"" "$_efile" 2>/dev/null; then
-                    _latest_ts=$(grep "\"type\":\"$_crit_type\"" "$_efile" | tail -1 | \
+                # shellcheck disable=SC2086  # _efiles: newline list of ledger paths, intentional split
+                if grep -q "\"type\":\"$_crit_type\"" $_efiles 2>/dev/null; then
+                    # shellcheck disable=SC2086
+                    _latest_ts=$(grep -h "\"type\":\"$_crit_type\"" $_efiles | tail -1 | \
                         python3 -c "import sys,json; print(json.loads(sys.stdin.readline())['ts'])" 2>/dev/null || echo "")
                     if [ -n "$_latest_ts" ] && [[ "$_latest_ts" > "$_window_start" ]]; then
                         _affected_bots="$_affected_bots $_bid"
@@ -370,10 +393,11 @@ _summary_tmp=$(safe_mktemp)
         fi
 
         _s_alerts=""
-        _s_efile="$_s_bot_dir/data/events/fleet-${today}.jsonl"
-        if [ -f "$_s_efile" ]; then
+        _s_efiles=$(_readback_efiles "$_s_bot_dir")
+        if [ -n "$_s_efiles" ]; then
             for _s_ct in session_missing service_down bridge_down activity_stuck rc_timeout; do
-                grep -q "\"type\":\"$_s_ct\"" "$_s_efile" 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
+                # shellcheck disable=SC2086  # _s_efiles: newline list of ledger paths, intentional split
+                grep -q "\"type\":\"$_s_ct\"" $_s_efiles 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
             done
         fi
         _s_alerts="${_s_alerts:- none}"
