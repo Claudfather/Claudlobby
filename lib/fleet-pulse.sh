@@ -51,16 +51,6 @@ else
     report_ledger="${CLAUDLOBBY_ROOT}/runtime/fleet/report-back.jsonl"
 fi
 
-# --- Helper: emit a single event to a bot's event log ---
-emit_event() {
-    local bot_dir="$1" bot_id="$2" event_type="$3" data_json="$4"
-    local events_dir="$bot_dir/data/events"
-    mkdir -p "$events_dir"
-    local outfile="$events_dir/fleet-${today}.jsonl"
-    printf '{"ts":"%s","bot":"%s","type":"%s","source":"pulse","data":%s}\n' \
-        "$ts" "$bot_id" "$event_type" "$data_json" >> "$outfile"
-}
-
 # --- Helper: actively notify a bot's manager via its tmux session ---
 # The system is pull-based by design, but silent stalls (the reason this exists)
 # mean the manager can't rely on polling. We push a one-line [FLEET-PULSE] note
@@ -134,7 +124,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
 
     # --- Check 1: tmux session exists ---
     if [ "$_session_alive" -eq 0 ]; then
-        emit_event "$bot_dir" "$bot_id" "session_missing" '{"session":"'"$session_name"'"}'
+        emit_fleet_event "session_missing" "pulse" '{"session":"'"$session_name"'"}' "$bot_dir" "$bot_id"
         debounce_notify "$state_dir" "$bot_id" "session_alerted" _notify_current_bot \
             "$bot_id session_missing — tmux session '$session_name' is gone"
     else
@@ -145,7 +135,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     if [ -n "$BOT_SERVICE" ] && [ "$_OS" = "Linux" ]; then
         if ! systemctl --user is-active "$BOT_SERVICE" >/dev/null 2>&1; then
             state=$(systemctl --user show -p ActiveState --value "$BOT_SERVICE" 2>/dev/null | tr -d '[:cntrl:]' || echo "unknown")
-            emit_event "$bot_dir" "$bot_id" "service_down" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'"}'
+            emit_fleet_event "service_down" "pulse" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'"}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "service_alerted" _notify_current_bot \
                 "$bot_id service_down — unit '$BOT_SERVICE' state=$state"
         else
@@ -164,7 +154,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
         # are deferred to the observability-config (system-defaults) tier.
         _bridge_grace=$(bot_conf_get "$bot_dir" OBSERVABILITY_BRIDGE_DOWN_GRACE 300)
         if _bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace"); then
-            emit_event "$bot_dir" "$bot_id" "bridge_down" '{"state":"'"$_bridge_st"'"}'
+            emit_fleet_event "bridge_down" "pulse" '{"state":"'"$_bridge_st"'"}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "bridge_alerted" _notify_current_bot \
                 "$bot_id bridge_down — Telegram bridge '$_bridge_st' (live session, poller not delivering)"
         else
@@ -191,7 +181,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
                     # idle, not stuck. keepalive.sh touches data/.idle when idle;
                     # bot-vitals.sh touches data/.last-tool-call on each tool call.
                     if [ "$elapsed" -ge 300 ] && ! marker_is_newer "$bot_dir/data/.idle" "$bot_dir/data/.last-tool-call"; then
-                        emit_event "$bot_dir" "$bot_id" "pane_stuck" '{"unchanged_since_epoch":'"$prev_ts"',"elapsed_seconds":'"$elapsed"'}'
+                        emit_fleet_event "pane_stuck" "pulse" '{"unchanged_since_epoch":'"$prev_ts"',"elapsed_seconds":'"$elapsed"'}' "$bot_dir" "$bot_id"
                     fi
                 else
                     # Hash changed — update timestamp
@@ -214,7 +204,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
             if [ -n "$wip" ]; then
                 repo_name=$(basename "$repo_dir")
                 file_count=$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-                emit_event "$bot_dir" "$bot_id" "wip_uncommitted" '{"repo":"'"$repo_name"'","dirty_files":'"$file_count"'}'
+                emit_fleet_event "wip_uncommitted" "pulse" '{"repo":"'"$repo_name"'","dirty_files":'"$file_count"'}' "$bot_dir" "$bot_id"
             fi
         done
     fi
@@ -234,8 +224,8 @@ for bot_dir in "$BOTS_DIR"/*/; do
             last_epoch=$(stat_mtime "$marker" 2>/dev/null || echo "$now_epoch")
             gap=$(( now_epoch - last_epoch ))
             if [ "$gap" -ge "$threshold" ]; then
-                emit_event "$bot_dir" "$bot_id" "activity_stuck" \
-                    '{"last_tool_call_epoch":'"$last_epoch"',"elapsed_seconds":'"$gap"'}'
+                emit_fleet_event "activity_stuck" "pulse" \
+                    '{"last_tool_call_epoch":'"$last_epoch"',"elapsed_seconds":'"$gap"'}' "$bot_dir" "$bot_id"
                 debounce_notify "$state_dir" "$bot_id" "activity_alerted" _notify_current_bot \
                     "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)"
             else
@@ -254,8 +244,8 @@ for bot_dir in "$BOTS_DIR"/*/; do
             overdue_ids=""
             while read -r _bot _da _exp _elapsed _tid; do
                 [ -n "${_elapsed:-}" ] || continue
-                emit_event "$bot_dir" "$bot_id" "overdue_dispatch" \
-                    '{"dispatched_at":'"$_da"',"expected_by":'"$_exp"',"elapsed_seconds":'"$_elapsed"',"task_id":"'"${_tid:--}"'"}'
+                emit_fleet_event "overdue_dispatch" "pulse" \
+                    '{"dispatched_at":'"$_da"',"expected_by":'"$_exp"',"elapsed_seconds":'"$_elapsed"',"task_id":"'"${_tid:--}"'"}' "$bot_dir" "$bot_id"
                 [ "$_elapsed" -gt "$oldest_elapsed" ] && oldest_elapsed="$_elapsed"
                 if [ "${_tid:--}" != "-" ]; then
                     overdue_ids="${overdue_ids:+$overdue_ids }$_tid"

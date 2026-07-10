@@ -710,8 +710,8 @@ bot_tmux() {
 # Identity defaults to $BOT_DIR/$BOT_ID; falls back to the fleet-level ledger
 # when no bot context is set. data_json must be a valid JSON value (default {}).
 # Usage: emit_fleet_event <type> <source> [data_json] [bot_dir] [bot_id]
-# The general form of fleet-pulse / code-audit-sweep's emit_event and the
-# _tmux_send_miss below (which predate it; migrate opportunistically).
+# The shared per-source event write behind fleet-pulse / code-audit-sweep's
+# checks and _tmux_send_miss below; each passes its own <source> and emits here.
 emit_fleet_event() {
     local event_type="${1:?emit_fleet_event: <type> required}"
     local event_source="${2:-unknown}"
@@ -738,24 +738,21 @@ emit_fleet_event() {
 # _tmux_send_miss <session> <socket> <reason>
 # Emit a send_miss event to the CALLER bot's JSONL ledger (best-effort) plus a
 # stderr breadcrumb, so a dropped cross-socket send becomes observable instead
-# of silently swallowed. Internal to bot_tmux_send. Caller identity comes from
-# $BOT_DIR / $BOT_ID (the sender); falls back to the fleet-level ledger.
+# of silently swallowed. Internal to bot_tmux_send. Delegates the ledger write
+# to emit_fleet_event; resolves bot_id the same way the primitive does so the
+# payload's "caller" equals the event's top-level "bot".
 _tmux_send_miss() {
     local session="$1" socket="$2" reason="$3"
-    local bot_dir="${BOT_DIR:-}" bot_id="${BOT_ID:-}" events_dir
+    local bot_dir="${BOT_DIR:-}" bot_id="${BOT_ID:-}"
     if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
-        events_dir="$bot_dir/data/events"
         [ -n "$bot_id" ] || bot_id=$(basename "$bot_dir")
     else
-        events_dir="${CLAUDLOBBY_ROOT}/state/events"
         bot_id="${bot_id:-fleet}"
     fi
-    mkdir -p "$events_dir" 2>/dev/null || return 0
-    local ts today
-    ts=$(ts_iso); today=$(date +%Y-%m-%d)
-    printf '{"ts":"%s","bot":"%s","type":"send_miss","source":"dispatch","data":{"target":"%s","socket":"%s","session":"%s","caller":"%s","reason":"%s"}}\n' \
-        "$ts" "$bot_id" "$(json_escape "$session")" "$(json_escape "$socket")" "$(json_escape "$session")" "$bot_id" "$reason" \
-        >> "$events_dir/fleet-${today}.jsonl" 2>/dev/null || true
+    local data
+    data=$(printf '{"target":"%s","socket":"%s","session":"%s","caller":"%s","reason":"%s"}' \
+        "$(json_escape "$session")" "$(json_escape "$socket")" "$(json_escape "$session")" "$bot_id" "$reason")
+    emit_fleet_event send_miss dispatch "$data" "$bot_dir" "$bot_id"
 }
 
 # bot_tmux_send <peer_socket> <session> <text>
