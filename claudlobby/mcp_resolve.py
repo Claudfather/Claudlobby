@@ -92,6 +92,13 @@ def required_vars(
         for var_name, meta in contract.items():
             if not isinstance(meta, dict):
                 continue
+            # provided_by: "composer" — the compositor emits this var into
+            # bot.conf from fleet.yaml; it is never operator-supplied, so it must
+            # not surface as a "requires X but it's not set — MCP will fail"
+            # warning. Mirrors collect_env_contracts (composer.py) so validate,
+            # .env scaffolding, and doctor stay consistent (#547 / #532).
+            if meta.get("provided_by") == "composer":
+                continue
             tier = meta.get("tier", "fleet")
             scope = meta.get("scope", "shared")
             if scope == "instance":

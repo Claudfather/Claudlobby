@@ -100,7 +100,9 @@ class TestRoundTrip:
     """Composer's resolve_placeholders and validator's required_vars must
     agree on canonical var names — this is the whole point of the extraction."""
 
-    def _make_fleet_dir(self, tmp_path: Path) -> tuple[Path, Paths]:
+    def _make_fleet_dir(
+        self, tmp_path: Path, *, composer_var: str | None = None
+    ) -> tuple[Path, Paths]:
         root = tmp_path / "claudlobby"
         root.mkdir()
 
@@ -135,6 +137,28 @@ class TestRoundTrip:
 
         (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
 
+        contract = {
+            "TOKEN": {
+                "scope": "instance",
+                "tier": "bot",
+                "description": "API token",
+            },
+            "OAUTH_CLIENT_ID": {
+                "scope": "shared",
+                "tier": "fleet",
+                "description": "OAuth ID",
+            },
+        }
+        if composer_var:
+            # provided_by:composer — compositor-supplied, never operator-set.
+            # In the contract only (not the server env block) so the
+            # composer/validator agreement test still sees matched name sets.
+            contract[composer_var] = {
+                "scope": "shared",
+                "tier": "fleet",
+                "provided_by": "composer",
+                "description": "compositor-supplied",
+            }
         frag = {
             "notion-server": {
                 "command": "npx",
@@ -144,18 +168,7 @@ class TestRoundTrip:
                     "OAUTH_ID": "${OAUTH_CLIENT_ID}",
                 },
             },
-            "_env_contract": {
-                "TOKEN": {
-                    "scope": "instance",
-                    "tier": "bot",
-                    "description": "API token",
-                },
-                "OAUTH_CLIENT_ID": {
-                    "scope": "shared",
-                    "tier": "fleet",
-                    "description": "OAuth ID",
-                },
-            },
+            "_env_contract": contract,
         }
         (root / "library" / "mcp" / "notion.json").write_text(json.dumps(frag))
 
@@ -165,6 +178,16 @@ class TestRoundTrip:
         (root / "runtime" / "bots").mkdir(parents=True)
 
         return root, Paths(root=root, fleet_dir=None)
+
+    def test_required_vars_skips_provided_by_composer(self, tmp_path):
+        """required_vars must exclude provided_by:composer vars — they are
+        compositor-supplied, never operator-set, so validate must not false-warn
+        'requires X but not set' (#547; mirrors collect_env_contracts)."""
+        root, paths = self._make_fleet_dir(tmp_path, composer_var="VAULT_PATH")
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        names = {name for name, *_ in required_vars(fleet.bots["worker"], paths)}
+        assert "OAUTH_CLIENT_ID" in names  # operator var still required
+        assert "VAULT_PATH" not in names  # composer-provided var skipped
 
     def test_composer_and_validator_agree(self, tmp_path):
         root, paths = self._make_fleet_dir(tmp_path)
