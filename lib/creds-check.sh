@@ -237,7 +237,7 @@ check_telegram_tokens() {
     local declared_bots
     declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET_ARG/fleet.yaml")
 
-    local d bot key handle token resp okflag username errcode url_cfg curl_err_file
+    local d bot key handle token resp okflag username errcode
     for d in "$bots_dir"/*/; do
         [ -f "$d/bot.conf" ] || continue
         bot="$(basename "$d")"
@@ -260,16 +260,9 @@ check_telegram_tokens() {
             continue
         fi
 
-        url_cfg=$(safe_mktemp)
-        curl_err_file=$(safe_mktemp)
-        printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$token" > "$url_cfg"
-        resp="$("$CURL" -sS --max-time 10 --config "$url_cfg" 2>"$curl_err_file")" \
-            || resp=""
-        # Token-bearing — shred eagerly rather than waiting for the EXIT trap.
-        rm -f "$url_cfg"
+        resp="$(_telegram_getme "$token")"
         if [ -z "$resp" ]; then
-            record_and_alert "$key" "fail" \
-                "getMe no response ($(head -c 120 "$curl_err_file"))"
+            record_and_alert "$key" "fail" "getMe no response (network or timeout)"
             continue
         fi
 
@@ -291,6 +284,67 @@ check_telegram_tokens() {
         record_and_alert "$key" "ok" "getMe ok (@$username)"
     done
 }
+
+# ---------------------------------------------------------------------
+# getMe probe (shared)
+# ---------------------------------------------------------------------
+# Echo the Telegram getMe response body (empty on no response). The token rides
+# a curl config file, never argv. Shared by check_telegram_tokens (per-bot
+# credential validation) and resolve_delivery_token (alert-channel selection)
+# so the argv-safety + timeout invariant lives in one place.
+_telegram_getme() {
+    local _tok="$1" _cfg _resp
+    _cfg="$(safe_mktemp)"
+    printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$_tok" > "$_cfg"
+    _resp="$("$CURL" -sS --max-time 10 --config "$_cfg" 2>/dev/null)" || _resp=""
+    rm -f "$_cfg"
+    printf '%s' "$_resp"
+}
+
+# ---------------------------------------------------------------------
+# Alert delivery token (#542)
+# ---------------------------------------------------------------------
+# record_and_alert delivers via tg-post, which needs a valid bot token. A
+# scheduled run carries none in its env, and tg-post's channel-dir fallback is
+# unreliable — a dead or absent default-channel token drops every alert silently
+# while the run still exits 0. resolve_delivery_token echoes the first declared
+# channel bot's token that getMe confirms is live (empty if none), resolved via
+# the token SSOT (resolve_bot_telegram_token, which reaches the fleet's real
+# tokens). Validated so a bot whose own token is dead — exactly what this script
+# exists to catch — cannot become the silent alert channel.
+#
+# NOTE (#552): fleet-pulse escalation and lib-common _emit_fleet_signal deliver
+# fleet alerts from the same env-less context on the fragile channel-dir token.
+# #552 should promote this + _telegram_getme to lib-common and point those two
+# paths at it, giving all three one validated delivery path.
+resolve_delivery_token() {
+    local _dir _declared _d _tok
+    _dir="$(resolve_bots_dir "$FLEET_ARG")"
+    [ -d "$_dir" ] || return 0
+    _declared="$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET_ARG/fleet.yaml")"
+    for _d in "$_dir"/*/; do
+        [ -f "$_d/bot.conf" ] || continue
+        bot_in_fleet "$(basename "$_d")" "$_declared" || continue
+        [ -n "$(bot_conf_get "$_d" TELEGRAM_BOT_HANDLE "")" ] || continue
+        _tok="$(resolve_bot_telegram_token "$_d")" || true
+        [ -n "$_tok" ] || continue
+        if [ "$(_telegram_getme "$_tok" | "$JQ" -r '.ok // false' 2>/dev/null)" = "true" ]; then
+            printf '%s' "$_tok"
+            return 0
+        fi
+    done
+}
+
+# Chat id comes from the composed unit env (TELEGRAM_GROUP_CHAT_ID). Resolve a
+# delivery token before the checks run so record_and_alert can deliver; skip
+# when the env already carries one (bot-session callers keep their own).
+if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+    _dtok="$(resolve_delivery_token)" || true
+    if [ -n "${_dtok:-}" ]; then
+        export TELEGRAM_BOT_TOKEN="$_dtok"
+        log "alert delivery token resolved for scheduled Telegram alerts"
+    fi
+fi
 
 # ---------------------------------------------------------------------
 # Run all checks

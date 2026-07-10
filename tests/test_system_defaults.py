@@ -378,6 +378,45 @@ class TestComposeFleetTimers:
         assert "OnBootSec=300" in timer_text
         assert "OnUnitActiveSec=300" in timer_text
 
+    def test_timer_units_carry_telegram_group_chat_id(self, tmp_path):
+        """Fleet timers must carry the fleet Telegram group so scheduled jobs
+        (e.g. creds-check) can deliver alerts via tg-post from their minimal
+        scheduler env (#542). Both the systemd .service and launchd .plist."""
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-1009999999999",
+        )
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+
+        svc = (timers_dir / "com.test.creds-check.service").read_text()
+        assert "Environment=TELEGRAM_GROUP_CHAT_ID=-1009999999999" in svc
+
+        plist = (timers_dir / "com.test.creds-check.plist").read_text()
+        assert "<key>TELEGRAM_GROUP_CHAT_ID</key>" in plist
+        assert "<string>-1009999999999</string>" in plist
+
+    def test_timer_units_omit_chat_id_when_absent(self, tmp_path):
+        """No fleet chat id -> no TELEGRAM_GROUP_CHAT_ID env (chat-less fleets,
+        host jobs). The var is only emitted when the fleet declares one."""
+        from claudlobby.composer import compose_fleet_timers
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        fleet = FleetConfig(name="test-fleet", service_prefix="com.test")
+        timers_dir = compose_fleet_timers(fleet, paths, _default_merged())
+
+        svc = (timers_dir / "com.test.creds-check.service").read_text()
+        assert "TELEGRAM_GROUP_CHAT_ID" not in svc
+
     def test_interval_from_resolves(self, tmp_path):
         from claudlobby.composer import _resolve_timer_schedule
 
