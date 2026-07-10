@@ -6,6 +6,7 @@ manager notification) actually fire end-to-end. Gating it here means "the
 behavior fires" stays under CI, not just "the config composes". Skips when tmux
 isn't available (the harness needs it to back the observe step).
 """
+
 from __future__ import annotations
 
 import shutil
@@ -18,7 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "lib" / "validate-bot-change.sh"
 
 
-@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux required for the observe step")
+@pytest.mark.skipif(
+    shutil.which("tmux") is None, reason="tmux required for the observe step"
+)
 def test_validate_bot_change_harness():
     result = subprocess.run(
         ["bash", str(HARNESS)],
@@ -31,3 +34,6 @@ def test_validate_bot_change_harness():
     assert "activity_stuck event emitted" in result.stdout
     assert "overdue_dispatch event emitted" in result.stdout
     assert "manager notified" in result.stdout
+    # #591 P1: the bridge-hijack scenario either runs or SKIPs with a printed
+    # reason (bun/plugin absent) — it must never silently disappear.
+    assert "bridge-hijack" in result.stdout
