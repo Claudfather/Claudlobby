@@ -37,21 +37,6 @@ fi
 
 install_error_trap ""
 
-today=$(date +%Y-%m-%d)
-ts=$(ts_iso)
-
-# --- Helper: emit one audit event to the owner bot's event log ---
-# Mirrors fleet-pulse.sh's emit_event but stamps source:"audit". data_json is a
-# raw JSON object fragment, interpolated unescaped.
-emit_event() {
-    local bot_dir="$1" bot_id="$2" event_type="$3" data_json="$4"
-    local events_dir="$bot_dir/data/events"
-    mkdir -p "$events_dir"
-    printf '{"ts":"%s","bot":"%s","type":"%s","source":"audit","data":%s}\n' \
-        "$ts" "$bot_id" "$event_type" "$data_json" \
-        >> "$events_dir/fleet-${today}.jsonl"
-}
-
 # --- Helper: read a bot.conf value the way it was written ---
 # The compositor emits shell-quoted values (e.g. single-quoted SWEEP_REPOS
 # lists), but bot_conf_get strips only double quotes. Sourcing in a subshell is
@@ -117,8 +102,8 @@ for repo in $REPOS; do
         REACHABLE=$((REACHABLE + 1))
     else
         # Auth/network/timeout: never guess "fresh" or "stale" (no-fabrication).
-        emit_event "$OWNER_DIR" "$OWNER_BOT" "sweep_repo_unreachable" \
-            '{"repo":"'"$repo"'","label":"'"$LABEL"'"}'
+        emit_fleet_event "sweep_repo_unreachable" "audit" \
+            '{"repo":"'"$repo"'","label":"'"$LABEL"'"}' "$OWNER_DIR" "$OWNER_BOT"
         continue
     fi
 
@@ -157,8 +142,8 @@ staleness_days() {
 }
 DAYS=$(staleness_days "$STALEST_LAST")
 
-emit_event "$OWNER_DIR" "$OWNER_BOT" "audit_selected" \
-    '{"repo":"'"$STALEST_REPO"'","last_audit":"'"$STALEST_LAST"'","staleness_days":'"$DAYS"',"audit_type":"'"$AUDIT_TYPE"'"}'
+emit_fleet_event "audit_selected" "audit" \
+    '{"repo":"'"$STALEST_REPO"'","last_audit":"'"$STALEST_LAST"'","staleness_days":'"$DAYS"',"audit_type":"'"$AUDIT_TYPE"'"}' "$OWNER_DIR" "$OWNER_BOT"
 
 # --- Dispatch to the owner's session via the shared dispatcher ---
 # bot-sweep-cron.sh owns sanitize + the busy-pane double-dispatch guard +
@@ -180,14 +165,14 @@ _new_log=""
 [ -f "$SWEEP_LOG" ] && _new_log=$(tail -n +"$((_log_before + 1))" "$SWEEP_LOG" || true)
 
 if [ "$dispatch_rc" -ne 0 ] || printf '%s' "$_new_log" | grep -q 'ERROR'; then
-    emit_event "$OWNER_DIR" "$OWNER_BOT" "audit_failed" \
-        '{"repo":"'"$STALEST_REPO"'","audit_type":"'"$AUDIT_TYPE"'","reason":"dispatch_failed"}'
+    emit_fleet_event "audit_failed" "audit" \
+        '{"repo":"'"$STALEST_REPO"'","audit_type":"'"$AUDIT_TYPE"'","reason":"dispatch_failed"}' "$OWNER_DIR" "$OWNER_BOT"
     exit 1
 elif printf '%s' "$_new_log" | grep -q 'busy'; then
     # Owner mid-task: the guard skipped this tick. Next run retries naturally.
-    emit_event "$OWNER_DIR" "$OWNER_BOT" "audit_deferred" \
-        '{"repo":"'"$STALEST_REPO"'","audit_type":"'"$AUDIT_TYPE"'","reason":"owner_busy"}'
+    emit_fleet_event "audit_deferred" "audit" \
+        '{"repo":"'"$STALEST_REPO"'","audit_type":"'"$AUDIT_TYPE"'","reason":"owner_busy"}' "$OWNER_DIR" "$OWNER_BOT"
 else
-    emit_event "$OWNER_DIR" "$OWNER_BOT" "audit_dispatched" \
-        '{"repo":"'"$STALEST_REPO"'","audit_type":"'"$AUDIT_TYPE"'"}'
+    emit_fleet_event "audit_dispatched" "audit" \
+        '{"repo":"'"$STALEST_REPO"'","audit_type":"'"$AUDIT_TYPE"'"}' "$OWNER_DIR" "$OWNER_BOT"
 fi
