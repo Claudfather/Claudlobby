@@ -58,6 +58,20 @@ BUSY="valbusy"
 SBOT="valsubmit"
 MBOT="valmarker"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate.XXXXXX")"
+# #586: a per-run tmux namespace. Concurrent runs (parallel reviews, pytest)
+# otherwise share ${TMUX_TMPDIR:-/tmp}/tmux-<uid>/ and collide on the fixed
+# per-session socket names (tmux-<name>) — duplicate-session aborts, and one
+# run's cleanup kill-server tears down the other's live sessions. Exporting
+# TMUX_TMPDIR moves every socket — the harness's own clients AND the scripts
+# under test, which inherit the env when resolving the same names — into a
+# run-private dir. Literal /tmp, not $TMPDIR: socket paths must stay within
+# sun_path (108 bytes) on hosts with long TMPDIRs (macOS /var/folders,
+# per-session scratch dirs). Contract for the fixture bot.confs below: they
+# must NOT carry the composed "export TMUX_TMPDIR=/tmp" pin (composer.py) —
+# keepalive/start-bot SOURCE bot.conf, and a sourced pin would yank the
+# scripts under test back into the shared namespace mid-run.
+TMUX_TMPDIR="$(mktemp -d /tmp/claudlobby-validate-sock.XXXXXX)"
+export TMUX_TMPDIR
 # fleet-pulse resolves bots via resolve_bots_dir <fleet> = local/<fleet>/runtime/bots.
 BOT_DIR="$ROOT/local/$FLEET/runtime/bots/$BOT"
 install_error_trap "$BOT_DIR"
@@ -68,7 +82,7 @@ cleanup() {
     for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${IDLEK:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
-    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}"
+    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 
