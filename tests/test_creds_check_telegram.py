@@ -9,10 +9,15 @@ canned-response curl stub.
 
 State keys are fleet-namespaced (telegram_<fleet>_<bot>): multi-fleet hosts
 share one state file, and the alert text must say whose bot failed.
+
+Also covers resolve_delivery_token (#542): alert-channel selection must skip a
+bot whose own token is dead — the real tg-post.sh runs via the `real_tgpost`
+fixture switch and the curl stub records every sendMessage URL in send.log.
 """
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -47,18 +52,32 @@ case "$url" in
   *bot{VALID_TOKEN}/getMe*)    printf '{{"ok":true,"result":{{"username":"bot_one_bot"}}}}' ;;
   *bot{WRONGBOT_TOKEN}/getMe*) printf '{{"ok":true,"result":{{"username":"some_other_bot"}}}}' ;;
   *bot{REVOKED_TOKEN}/getMe*)  printf '{{"ok":false,"error_code":401,"description":"Unauthorized"}}' ;;
+  *sendMessage*) echo "$url" >> "$(dirname "$0")/send.log"; printf '{{"ok":true,"result":{{"message_id":1}}}}' ;;
   *) printf '{{"ok":false,"error_code":404,"description":"Not Found"}}' ;;
 esac
 """,
     )
 
 
-def _fleet(tmp_path: Path) -> dict:
+def _fleet(
+    tmp_path: Path,
+    real_tgpost: bool = False,
+    roster: list[tuple[str, str | None, str, str | None]] | None = None,
+) -> dict:
     root = tmp_path / "root"
     (root / "lib").mkdir(parents=True)
     (root / "state").mkdir()
     tg_log = root / "tg-posts.log"
-    _write_exec(root / "lib" / "tg-post.sh", f'#!/bin/bash\necho "$*" >> "{tg_log}"\n')
+    if real_tgpost:
+        # Real delivery path: creds-check resolves + exports the delivery
+        # token, the real tg-post.sh posts under it, the curl stub records
+        # the sendMessage URL (which embeds the token) in send.log.
+        for helper in ("tg-post.sh", "lib-common.sh"):
+            shutil.copy(REPO_ROOT / "lib" / helper, root / "lib" / helper)
+    else:
+        _write_exec(
+            root / "lib" / "tg-post.sh", f'#!/bin/bash\necho "$*" >> "{tg_log}"\n'
+        )
     bindir = tmp_path / "bin"
     bindir.mkdir()
     _curl_stub(bindir)
@@ -77,22 +96,30 @@ def _fleet(tmp_path: Path) -> dict:
             (d / ".env").write_text(f'{token_var}="{token}"\n')
         return d
 
-    bot("bot1", "bot_one_bot", "T_BOT1_TOKEN", VALID_TOKEN)
-    bot("bot2", "bot_two_bot", "T_BOT2_TOKEN", REVOKED_TOKEN)
-    bot("bot3", "bot_three_bot", "T_BOT3_TOKEN", None)  # configured, no value
-    bot("bot4", None, "UNUSED", None)  # not a channel bot
-    bot("bot5", "bot_five_bot", "T_BOT5_TOKEN", WRONGBOT_TOKEN)
-    # Residue dir: a departed bot whose runtime dir (with bot.conf + handle)
-    # survives on disk but is NOT declared in fleet.yaml — the stale-dir class
-    # the declared-bots filter exists to skip (no getMe, no false alert).
-    bot("ghost", "ghost_bot", "T_GHOST_TOKEN", VALID_TOKEN)
+    if roster is None:
+        bot("bot1", "bot_one_bot", "T_BOT1_TOKEN", VALID_TOKEN)
+        bot("bot2", "bot_two_bot", "T_BOT2_TOKEN", REVOKED_TOKEN)
+        bot("bot3", "bot_three_bot", "T_BOT3_TOKEN", None)  # configured, no value
+        bot("bot4", None, "UNUSED", None)  # not a channel bot
+        bot("bot5", "bot_five_bot", "T_BOT5_TOKEN", WRONGBOT_TOKEN)
+        # Residue dir: a departed bot whose runtime dir (with bot.conf + handle)
+        # survives on disk but is NOT declared in fleet.yaml — the stale-dir class
+        # the declared-bots filter exists to skip (no getMe, no false alert).
+        bot("ghost", "ghost_bot", "T_GHOST_TOKEN", VALID_TOKEN)
+        declared = ("bot1", "bot2", "bot3", "bot4", "bot5")
+    else:
+        # Delivery-selection tests need roster control: resolve_delivery_token
+        # walks the bots dir in GLOB order (not fleet.yaml order), so bot
+        # names decide who is probed first.
+        for spec in roster:
+            bot(*spec)
+        declared = tuple(name for name, *_ in roster)
 
     # Declared-bots SSOT the filter reads (parse_fleet_bots schema: bots: at
     # 2-space indent, bot keys at 4-space indent). ghost is absent.
     (root / "local" / "f" / "fleet.yaml").write_text(
         "fleet:\n  name: f\n  bots:\n"
-        + "".join(f"    {b}:\n      expertise: [x]\n" for b in
-                  ("bot1", "bot2", "bot3", "bot4", "bot5"))
+        + "".join(f"    {b}:\n      expertise: [x]\n" for b in declared)
     )
 
     state = root / "state" / "creds-check-state.json"
@@ -107,13 +134,24 @@ def _fleet(tmp_path: Path) -> dict:
             "CLAUDLOBBY_CREDS_STATE": str(state),
         }
     )
+    if real_tgpost:
+        # The real tg-post.sh aborts without a chat id — bind the placeholder
+        # to the one mode that posts for real.
+        env["TELEGRAM_GROUP_CHAT_ID"] = "-1001234567890"
     (tmp_path / "home").mkdir()
-    return {"root": root, "env": env, "state": state, "tg_log": tg_log, "bindir": bindir}
+    return {
+        "root": root,
+        "env": env,
+        "state": state,
+        "tg_log": tg_log,
+        "bindir": bindir,
+    }
 
 
 def _run(f: dict) -> dict:
+    # Positional fleet arg — the composed-timer contract.
     r = subprocess.run(
-        ["bash", str(SCRIPT), "f"],  # positional fleet arg — the composed-timer contract
+        ["bash", str(SCRIPT), "f"],
         capture_output=True,
         text=True,
         env=f["env"],
@@ -174,6 +212,58 @@ def test_fail_alerts_via_tg_post_once(tmp_path):
     assert "telegram_f_bot2 FAIL" in posts
     _run(f)  # second tick: still failing -> edge-alert stays quiet
     assert posts == f["tg_log"].read_text(), "repeat fail must not re-alert"
+
+
+def test_delivery_token_skips_dead_bot_picks_live(tmp_path):
+    """#542 invariant: a bot whose OWN token is dead cannot become the alert
+    channel. The revoked bot sorts first in the bots-dir glob, so
+    resolve_delivery_token must probe and SKIP it, exporting the later live
+    bot's token — the dead bot's own FAIL alert is the post that proves which
+    token carried the delivery."""
+    f = _fleet(
+        tmp_path,
+        real_tgpost=True,
+        roster=[
+            ("abot", "a_bot", "T_ABOT_TOKEN", REVOKED_TOKEN),
+            ("bbot", "bot_one_bot", "T_BBOT_TOKEN", VALID_TOKEN),
+        ],
+    )
+    _run(f)
+    send_log = f["bindir"] / "send.log"
+    assert send_log.exists(), "abot's FAIL alert must reach sendMessage"
+    sends = send_log.read_text()
+    # The env is scrubbed and no channel-dir fallback exists in the fixture,
+    # so VALID_TOKEN reaching sendMessage proves the export end-to-end.
+    assert VALID_TOKEN in sends, "live bot's token must carry the alert"
+    assert REVOKED_TOKEN not in sends, "dead-token bot became the alert channel"
+    # Plain-text contract: tg-post must never force a parse_mode.
+    assert "parse_mode" not in sends
+    assert "parse_mode" not in (f["bindir"] / "argv.log").read_text()
+
+
+def test_no_live_channel_exports_no_delivery_token(tmp_path):
+    """All-dead fleet: no token may be exported and nothing posted — a silent
+    no-send beats a confident post under a dead token (the #542 failure
+    class this selection exists to prevent)."""
+    f = _fleet(
+        tmp_path,
+        real_tgpost=True,
+        roster=[
+            ("abot", "a_bot", "T_ABOT_TOKEN", REVOKED_TOKEN),
+            ("bbot", "b_bot", "T_BBOT_TOKEN", None),
+        ],
+    )
+    _run(f)
+    assert not (f["bindir"] / "send.log").exists(), (
+        "dead-only fleet must not reach sendMessage"
+    )
+    # The export-fired breadcrumb is the guard's ONLY observable: an exported
+    # EMPTY token is indistinguishable downstream (tg-post's ${VAR:-fallback}
+    # treats empty as unset), so this absence is what catches a dropped
+    # [ -n "$_dtok" ] guard. Wording is a tested contract, pinned at the log
+    # call in lib/creds-check.sh.
+    log_text = (f["root"] / "creds-check.log").read_text()
+    assert "alert delivery token resolved" not in log_text
 
 
 def test_token_never_on_curl_argv(tmp_path):

@@ -342,6 +342,9 @@ if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
     _dtok="$(resolve_delivery_token)" || true
     if [ -n "${_dtok:-}" ]; then
         export TELEGRAM_BOT_TOKEN="$_dtok"
+        # Wording is a tested contract (test_creds_check_telegram.py): this
+        # breadcrumb firing iff a token was exported is the only observable
+        # that distinguishes a dropped empty-token guard.
         log "alert delivery token resolved for scheduled Telegram alerts"
     fi
 fi
