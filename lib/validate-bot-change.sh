@@ -361,6 +361,43 @@ run_heal
 [ "$(cat "$HREC" 2>/dev/null || echo 0)" = "0" ] && r=yes || r=no
 check "heal never bounces on no_token (a bounce cannot conjure a missing token)" "$r"
 
+# ===========================================================================
+# #579 — the dead-session path must emit a RESTART line the uptime parser reads.
+# navi's #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
+# nothing drove keepalive's real dead-session branch to prove it EMITS a line the
+# parser recognizes — so the #577 restart_bot_service extraction left that wording
+# one refactor from silently drifting out of uptime.py's _LOG_LINE_RE. Drive the
+# real path (a session-less bot, via the HLIB recorder stub so nothing truly
+# restarts) and assert the REAL parser extracts a RESTART from the emitted log.
+echo ""
+echo "=== validate dead-session RESTART line (#579: keepalive emitter ⇄ uptime parser) ==="
+DBOT="valdead"
+DDIR="$ROOT/local/$FLEET/runtime/bots/$DBOT"
+mkdir -p "$DDIR/data"
+cat > "$DDIR/bot.conf" <<CONF
+BOT_NAME="$DBOT"
+BOT_ID="$DBOT"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+# No tmux session for valdead → keepalive takes the dead-session branch. The RESTART
+# log line is echoed before the restart action fires, so it lands regardless of the
+# (stubbed) restart.
+CLAUDLOBBY_ROOT="$ROOT" "$HLIB/keepalive.sh" "$DDIR" >/dev/null 2>&1 || true
+grep -qE 'RESTART.*session dead' "$DDIR/keepalive.log" 2>/dev/null && r=yes || r=no
+check "keepalive dead-session path emits a RESTART … session dead log line" "$r"
+# Load-bearing assertion: the REAL uptime parser (parse_keepalive_log, backed by
+# _LOG_LINE_RE) must extract a RESTART from that emitted line — the emitter⇄parser
+# coupling navi flagged as guarded only by a hand-written fixture until now.
+dead_restarts=$(python3 -c "
+import sys; sys.path.insert(0, '$LIB_DIR/..')
+from claudlobby.uptime import parse_keepalive_log
+from pathlib import Path
+print(sum(1 for _, s in parse_keepalive_log(Path('$DDIR/keepalive.log')) if s == 'RESTART'))
+" 2>/dev/null || echo 0)
+[ "${dead_restarts:-0}" -ge 1 ] && r=yes || r=no
+check "uptime parser extracts a RESTART from the real emitted keepalive.log (#579)" "$r"
+
 # Regression guard: send_reload_command must resend Enter ONLY when the TUI
 # swallowed it (command still on the input line), never after a clean submit.
 # This fixture consumes each submitted line and redraws a fresh prompt below it,
