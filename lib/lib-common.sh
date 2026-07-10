@@ -1281,16 +1281,12 @@ _emit_fleet_signal() {
         fi
     fi
 
-    # Telegram (loudest channel) — mirror fleet-pulse chat-id resolution
-    local chat_bot chat_id state_dir
-    chat_id="${FLEET_PULSE_ESCALATION_CHAT_ID:-}"
-    if [ -z "$chat_id" ]; then
-        chat_bot=$(first_bot_with_conf_any_fleet "$bots_dir" TELEGRAM_GROUP_CHAT_ID || true)
-        if [ -n "$chat_bot" ]; then
-            chat_id=$(bot_conf_get "$chat_bot" TELEGRAM_GROUP_CHAT_ID "")
-            state_dir=$(bot_conf_get_path "$chat_bot" TELEGRAM_STATE_DIR "")
-        fi
-    fi
+    # Telegram (loudest channel) — the one shared fleet-alert target resolver, so
+    # this path, fleet-pulse escalation, and creds-check all pick the same chat-id.
+    local chat_id state_dir
+    resolve_alert_target "$bots_dir"
+    # shellcheck disable=SC2154  # _alert_* are set by resolve_alert_target above
+    chat_id="$_alert_chat_id"; state_dir="$_alert_state_dir"
     if [ -n "$chat_id" ]; then
         TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
             "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" >/dev/null 2>&1 || true
@@ -1394,6 +1390,48 @@ first_bot_with_conf_any_fleet() {
         fi
     done
     return 1
+}
+
+# resolve_alert_target [bots_dir]
+# THE single fleet-alert delivery-target resolver. Sets _alert_chat_id and
+# _alert_state_dir (either may be empty) so every env-less fleet-alert path —
+# fleet-pulse escalation, _emit_fleet_signal, and creds-check — resolves the
+# SAME Telegram chat-id from one precedence:
+#   1. FLEET_PULSE_ESCALATION_CHAT_ID  — operator override (route alerts anywhere)
+#   2. TELEGRAM_GROUP_CHAT_ID (env)    — the FLEET-level value the composer bakes
+#      into every fleet timer unit; preferred over the bot.conf scan so a per-bot
+#      chat_id override never hijacks a fleet-wide alert
+#   3. bot.conf scan for TELEGRAM_GROUP_CHAT_ID — for host jobs with no composed
+#      env. scan_scope "any" (default) is cross-fleet (host-scope callers run
+#      fleet-less); "fleet" restricts to <bots_dir> so a fleet-scoped caller
+#      neither pages another fleet's channel nor loses its no-receiver warning.
+# The state dir is resolved INDEPENDENTLY of the chat-id branch: the composed
+# timer env carries the chat-id but NOT TELEGRAM_STATE_DIR, and tg-post reads the
+# delivery token from that dir — so an env-supplied chat-id still scans a
+# declaring bot for its live channel dir, else delivery falls to tg-post's dead
+# default dir. Outputs via globals (bash 3.2 has no namerefs; mirrors detect_os).
+resolve_alert_target() {
+    local bots_dir="${1:-}" scan_scope="${2:-any}" _bot
+    _alert_chat_id=""
+    _alert_state_dir="${TELEGRAM_STATE_DIR:-}"
+    if [ -n "${FLEET_PULSE_ESCALATION_CHAT_ID:-}" ]; then
+        _alert_chat_id="$FLEET_PULSE_ESCALATION_CHAT_ID"
+    elif [ -n "${TELEGRAM_GROUP_CHAT_ID:-}" ]; then
+        _alert_chat_id="$TELEGRAM_GROUP_CHAT_ID"
+    fi
+    # Scan a declaring bot when the chat-id is still unresolved, OR to source a
+    # live channel state dir the env did not carry (tg-post's token lives there).
+    if [ -z "$_alert_chat_id" ] || [ -z "$_alert_state_dir" ]; then
+        if [ "$scan_scope" = "fleet" ]; then
+            _bot=$(first_bot_with_conf "$bots_dir" TELEGRAM_GROUP_CHAT_ID 2>/dev/null || true)
+        else
+            _bot=$(first_bot_with_conf_any_fleet "$bots_dir" TELEGRAM_GROUP_CHAT_ID 2>/dev/null || true)
+        fi
+        if [ -n "$_bot" ]; then
+            [ -n "$_alert_chat_id" ] || _alert_chat_id=$(bot_conf_get "$_bot" TELEGRAM_GROUP_CHAT_ID "")
+            [ -n "$_alert_state_dir" ] || _alert_state_dir=$(bot_conf_get_path "$_bot" TELEGRAM_STATE_DIR "")
+        fi
+    fi
 }
 
 # bot_is_manager <bot_dir>

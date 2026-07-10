@@ -21,7 +21,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from tests.conftest import _scrubbed_env, _write_exec
+from tests.conftest import TG_STUB, _scrubbed_env, _write_exec
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "lib" / "creds-check.sh"
@@ -278,3 +278,101 @@ def test_token_never_on_curl_argv(tmp_path):
     argv = argv_log.read_text()
     for tok in ALL_TOKENS:
         assert tok not in argv, "token leaked onto curl argv"
+
+
+def test_composed_env_alldead_exports_scanned_state_dir(tmp_path):
+    """#572/#588 state-dir gap: creds-check must export the scanned live channel
+    dir as TELEGRAM_STATE_DIR, not just the chat id.
+
+    The exact worst case creds-check exists to alert on. The composed timer env
+    carries the fleet TELEGRAM_GROUP_CHAT_ID but NOT TELEGRAM_STATE_DIR, and
+    every fleet token is dead so resolve_delivery_token exports none — so
+    tg-post cannot short-circuit on TELEGRAM_BOT_TOKEN and must read its
+    delivery token from TELEGRAM_STATE_DIR/.env. resolve_alert_target resolves
+    the live dir by scanning a declaring bot; without the matching export
+    (present for the chat id, missing for the state dir before #588) tg-post
+    falls to its dead default channel and the every-credential-dead alert never
+    reaches the fleet's real channel. This proves creds-check hands the scanned
+    dir to tg-post."""
+    root = tmp_path / "root"
+    (root / "lib").mkdir(parents=True)
+    (root / "state").mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _curl_stub(bindir)
+    (root / ".env").write_text("")  # no PAT/Railway -> those checks skip
+
+    # One declared channel bot whose OWN token is revoked: resolve_delivery_token
+    # probes and skips it, so no live delivery token is exported (the
+    # all-credentials-dead condition). bot.conf declares both the chat id (so the
+    # fleet scan finds the bot) and the state dir — the value under test, which
+    # the resolver must export so the alert routes to this live channel dir.
+    bot = root / "local" / "f" / "runtime" / "bots" / "chanbot"
+    bot.mkdir(parents=True)
+    channel = bot / "channel"  # the dir the scan resolves; its path is the assertion
+    (bot / "bot.conf").write_text(
+        'export BOT_ID="chanbot"\n'
+        'export BOT_SERVICE="com.t.f.chanbot"\n'
+        'export TELEGRAM_BOT_HANDLE="chan_bot"\n'
+        'export TELEGRAM_TOKEN_ENV_NAME="T_CHAN_TOKEN"\n'
+        'export TELEGRAM_GROUP_CHAT_ID="-100SCANCHAT"\n'
+        "export TELEGRAM_STATE_DIR="
+        '"$CLAUDLOBBY_ROOT/local/f/runtime/bots/chanbot/channel"\n'
+    )
+    (bot / ".env").write_text(f'T_CHAN_TOKEN="{REVOKED_TOKEN}"\n')  # own token dead
+    (root / "local" / "f" / "fleet.yaml").write_text(
+        "fleet:\n  name: f\n  bots:\n    chanbot:\n      expertise: [x]\n"
+    )
+
+    # tg-post stub records the chat id + the (expanded) state dir creds-check
+    # exported + the message — the shared fleet-signal observation point.
+    _write_exec(root / "lib" / "tg-post.sh", TG_STUB)
+    capture = root / "tg-capture.log"
+    state = root / "state" / "creds-check-state.json"
+
+    env = _scrubbed_env()
+    env.update(
+        {
+            "PATH": f"{bindir}:{env.get('PATH', os.defpath)}",
+            "HOME": str(tmp_path / "home"),
+            "CLAUDLOBBY_ROOT": str(root),
+            "CLAUDLOBBY_ENV": str(root / ".env"),
+            "CLAUDLOBBY_CREDS_LOG": str(root / "creds-check.log"),
+            "CLAUDLOBBY_CREDS_STATE": str(state),
+            "TG_CAPTURE": str(capture),
+            # Composed timer env: fleet chat id present, state dir ABSENT.
+            "TELEGRAM_GROUP_CHAT_ID": "-100COMPOSEDENV",
+            # _scrubbed_env only strips TELEGRAM/CLAUDLOBBY/FLEET, so a host token
+            # would leak in and fail the unrelated github/railway/mcp checks
+            # against the curl stub. Empty every var they read (github falls back
+            # through three names) so only the telegram check fires.
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "",
+            "GITHUB_TOKEN": "",
+            "GITHUB_PAT": "",
+            "RAILWAY_API_TOKEN": "",
+            "MCP_PROBE_URL": "",
+        }
+    )
+    (tmp_path / "home").mkdir()
+
+    _run({"env": env, "state": state})
+
+    # Precondition: all fleet tokens dead -> no delivery token exported, so the
+    # state-dir gap actually bites (tg-post can't short-circuit on a token).
+    log = (root / "creds-check.log").read_text()
+    assert "alert delivery token resolved" not in log, "a live token would mask the gap"
+
+    # The other checks skip, so chanbot's revoked-token FAIL is the one alert;
+    # the stub recorded the chat id + the state dir creds-check handed to
+    # tg-post. A dropped export shows here as an empty/default state dir.
+    assert capture.exists(), "chanbot FAIL must reach tg-post"
+    lines = capture.read_text().strip().splitlines()
+    assert len(lines) == 1, f"expected exactly chanbot's FAIL alert, got {lines}"
+    chat_id, state_dir, msg = lines[0].split("|", 2)
+    assert "telegram_f_chanbot FAIL" in msg  # the every-credential-dead scenario
+    assert chat_id == "-100COMPOSEDENV", "composed-env chat id must win"
+    assert state_dir == str(channel), (
+        f"tg-post received state_dir={state_dir!r}; expected the scanned live "
+        f"channel dir {str(channel)!r}. Empty/default means _alert_state_dir "
+        f"was never exported (the #588 gap)."
+    )
