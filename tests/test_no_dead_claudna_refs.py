@@ -12,6 +12,8 @@ form (``/claudna:security-audit``) and the bare doc-idiom form
 import re
 from pathlib import Path
 
+from claudlobby.known_values import CLAUDNA_SKILL_RENAMES
+
 REPO_DIR = Path(__file__).resolve().parent.parent
 
 # (directory, glob) pairs — .j2 covered so template regressions fail too.
@@ -32,14 +34,21 @@ SNOWFLAKE_DEFERRED = (
     "documentation/bot-archetypes.md",
 )
 
+# Enumerated dead names derive from the canonical rename map, so this guard
+# can never drift from known_values.py or the session guard (#570). Guard-local
+# pattern families stay here: the integration CLI names are prefix globs, never
+# enumerated renames, and `session-[a-z-]+` bans hyphen-typos of the live
+# space-form session verbs (e.g. /claudna:session-checkpoint) that have no
+# dead ancestor in the map.
+_DEAD_NAMES = "|".join(
+    sorted(re.escape(k.removeprefix("/claudna:")) for k in CLAUDNA_SKILL_RENAMES)
+)
 DEAD_REF = re.compile(
     r"/(?:claudna:)?(?:"
     r"(?:vercel|neon|railway|modal)-[a-z-]+"
     r"|snowflake-(?:query|cutover)"
-    r"|security-audit|tech-debt|docs-review|data-model-audit|design-review"
-    r"|frontend-performance-audit|access-path-audit|repo-health"
-    r"|session-handoff|session-resume|name-session"
-    r"|review-pr|review-changes|skill-health|product-brainstorm"
+    r"|session-[a-z-]+"
+    rf"|{_DEAD_NAMES}"
     r")\b"
 )
 

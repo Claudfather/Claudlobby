@@ -9,6 +9,7 @@ from claudlobby.known_values import (
     _AUTO_ELIGIBLE_STANDALONE,
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
+    CLAUDNA_SKILL_RENAMES,
     EXPERTISE_CORE_TOOLS,
     KNOWN_EFFORTS,
     KNOWN_HOOK_EVENTS,
@@ -117,6 +118,73 @@ class TestSetsPopulated:
     def test_expertise_core_tools(self):
         assert "Write" in EXPERTISE_CORE_TOOLS["software-engineering"]
         assert "Agent" in EXPERTISE_CORE_TOOLS["orchestration"]
+
+
+# ── SSOT cross-check: guards derive from the canonical rename map ─
+
+
+class TestClaudnaRenameSSOT:
+    """The dead-name CI guards and the auto-eligible subset must stay views of
+    CLAUDNA_SKILL_RENAMES — hand-retyped guard lists are the drift class this
+    pins against (#570)."""
+
+    def test_doc_guard_covers_every_dead_name(self):
+        from tests.test_no_dead_claudna_refs import DEAD_REF
+
+        for dead in CLAUDNA_SKILL_RENAMES:
+            bare = "/" + dead.removeprefix("/claudna:")
+            assert DEAD_REF.search(dead), dead
+            assert DEAD_REF.search(bare), bare
+
+    def test_session_guard_covers_every_dead_session_name(self):
+        from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
+
+        session_dead = {
+            k
+            for k, live in CLAUDNA_SKILL_RENAMES.items()
+            if live.startswith("/claudna:session ")
+        }
+        # The three standalones the session engine replaced — pinned literally,
+        # like the auto-eligible map above.
+        assert session_dead == {
+            "/claudna:session-handoff",
+            "/claudna:session-resume",
+            "/claudna:name-session",
+        }
+        for dead in session_dead:
+            bare = "/" + dead.removeprefix("/claudna:")
+            assert _DEAD_SESSION_CMD.search(dead), dead
+            assert _DEAD_SESSION_CMD.search(bare), bare
+
+    def test_live_values_never_read_as_dead(self):
+        from tests.test_no_dead_claudna_refs import DEAD_REF
+        from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
+
+        for live in CLAUDNA_SKILL_RENAMES.values():
+            assert not DEAD_REF.search(live), live
+            assert not _DEAD_SESSION_CMD.search(live), live
+
+    def test_auto_eligible_is_subset_of_canonical(self):
+        assert _AUTO_ELIGIBLE_RENAMES.items() <= CLAUDNA_SKILL_RENAMES.items()
+
+    def test_session_hyphen_typo_policy_agrees_across_guards(self):
+        """The session-hyphen typo family (live verbs with no dead standalone,
+        e.g. `checkpoint`) is guard-local pattern policy — pin the guards'
+        intended split so it cannot drift silently: both ban the namespaced
+        form; the bare form is doc-guard territory, and lib/ coverage for it
+        rides on the doc guard scanning lib/*.sh."""
+        from tests.test_no_dead_claudna_refs import DEAD_REF, SCAN_GLOBS
+        from tests.test_no_dead_session_command import _DEAD_SESSION_CMD
+
+        assert DEAD_REF.search("/claudna:session-checkpoint")
+        assert _DEAD_SESSION_CMD.search("/claudna:session-checkpoint")
+        assert DEAD_REF.search("/session-checkpoint")
+        assert ("lib", "*.sh") in SCAN_GLOBS
+        # Neither guard flags the live space-form or the unrelated bare tmux
+        # `session-name` (no leading slash).
+        for benign in ("/claudna:session resume", "tmux session-name x"):
+            assert not DEAD_REF.search(benign), benign
+            assert not _DEAD_SESSION_CMD.search(benign), benign
 
 
 # ── _parse_enum (config.py) ──────────────────────────────────────

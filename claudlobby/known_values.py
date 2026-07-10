@@ -81,21 +81,57 @@ PROJECT_KEYS: frozenset[str] = frozenset(
     {"title", "repos", "mission_file", "validation"}
 )
 
-# ── Autonomous runner ────────────────────────────────────────────
-# clauDNA's verb-mode consolidation folded several standalone skills into the
-# `audit` and `session` engines, invoked as `/claudna:<engine> <token>` (e.g.
-# /claudna:security-audit -> /claudna:audit security). This map is the source of
-# truth for the dead -> live rename of the --auto-eligible skills; the live
-# values (the whole space-form) are what validator.py exact-matches. NB the lens
-# token is not the old name minus prefix (security-audit -> `security`,
-# docs-review -> `docs`, frontend-performance-audit -> `frontend-perf`).
-_AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
-    "/claudna:tech-debt": "/claudna:audit tech-debt",
+# ── clauDNA skill renames ────────────────────────────────────────
+# Canonical dead -> live map for clauDNA's verb-mode consolidation, which
+# collapsed standalone skills into engine verbs (/claudna:security-audit ->
+# /claudna:audit security) with no aliases. Single source of truth: the
+# --auto-eligible subset below and both dead-name CI guards
+# (tests/test_no_dead_claudna_refs.py, tests/test_no_dead_session_command.py)
+# derive from this map, so one clauDNA consolidation updates one list.
+#
+# Every key is a name that actually shipped and was renamed away, verified
+# against the installed plugin's "Replaces" lists. Hyphen-typos of live verbs
+# that never existed as skills (e.g. /claudna:session-checkpoint — `checkpoint`
+# is a net-new verb, not a rename) are pattern policy the guards cover with
+# family globs, never entries here. NB the live token is not the dead name
+# minus prefix (security-audit -> `security`, docs-review -> `docs`,
+# frontend-performance-audit -> `frontend-perf`).
+CLAUDNA_SKILL_RENAMES: dict[str, str] = {
+    # audit engine lenses
     "/claudna:security-audit": "/claudna:audit security",
+    "/claudna:tech-debt": "/claudna:audit tech-debt",
     "/claudna:docs-review": "/claudna:audit docs",
+    "/claudna:design-review": "/claudna:audit design",
+    "/claudna:data-model-audit": "/claudna:audit data-model",
     "/claudna:access-path-audit": "/claudna:audit access-path",
     "/claudna:frontend-performance-audit": "/claudna:audit frontend-perf",
+    "/claudna:repo-health": "/claudna:audit repo-health",
+    # session engine verbs
     "/claudna:session-handoff": "/claudna:session handoff",
+    "/claudna:session-resume": "/claudna:session resume",
+    "/claudna:name-session": "/claudna:session name",
+    # whole-skill successors
+    "/claudna:review-pr": "/claudna:review-work",
+    "/claudna:review-changes": "/claudna:review-work",
+    "/claudna:skill-health": "/claudna:using-claudna",
+    "/claudna:product-brainstorm": "/claudna:product-vision",
+}
+
+# ── Autonomous runner ────────────────────────────────────────────
+# The --auto-eligible subset of the renamed skills; the live values (the whole
+# space-form) are what validator.py exact-matches. Selected from the canonical
+# map by key so the two can never disagree — a dropped or misspelled key here
+# fails loudly at import.
+_AUTO_ELIGIBLE_RENAMES: dict[str, str] = {
+    k: CLAUDNA_SKILL_RENAMES[k]
+    for k in (
+        "/claudna:security-audit",
+        "/claudna:tech-debt",
+        "/claudna:docs-review",
+        "/claudna:access-path-audit",
+        "/claudna:frontend-performance-audit",
+        "/claudna:session-handoff",
+    )
 }
 
 # --auto-capable clauDNA skills that were NOT consolidated (still invoked by
