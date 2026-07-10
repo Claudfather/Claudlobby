@@ -361,6 +361,11 @@ fi
 resolve_alert_target "$(resolve_bots_dir "$FLEET_ARG")" fleet
 # shellcheck disable=SC2154  # _alert_chat_id is set by resolve_alert_target (sourced lib-common)
 [ -n "$_alert_chat_id" ] && export TELEGRAM_GROUP_CHAT_ID="$_alert_chat_id"
+# Export the resolved state dir too, else record_and_alert falls to tg-post's
+# dead default channel exactly when the token scan above found nothing — the
+# every-credential-dead case creds-check exists to alert on (see resolve_alert_target).
+# shellcheck disable=SC2154  # _alert_state_dir is set by resolve_alert_target (sourced lib-common)
+[ -n "$_alert_state_dir" ] && export TELEGRAM_STATE_DIR="$_alert_state_dir"
 
 # ---------------------------------------------------------------------
 # Run all checks
