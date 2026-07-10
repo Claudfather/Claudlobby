@@ -15,7 +15,7 @@ import difflib
 import json
 from pathlib import Path
 
-from .composer import compose_claude_md, compose_mcp_json
+from .composer import compose_bot_conf, compose_claude_md, compose_mcp_json
 from .config import FleetConfig
 from .paths import Paths
 
@@ -61,6 +61,25 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
                 json.dumps(actual_mcp, indent=2).splitlines(),
                 fromfile="library-composed",
                 tofile=f"runtime/bots/{bot_name}/.mcp.json",
+                lineterm="",
+            )
+        )
+
+    # bot.conf — a generated file (env vars sourced by the bot session AND the
+    # supervisor scripts, e.g. keepalive). A fleet.yaml change that adds an env
+    # var drifts it; omitting it here lets a stale bot.conf read as "no drift"
+    # while runtime is out of sync.
+    expected_conf = compose_bot_conf(bot, fleet, paths)
+    actual_conf_path = bot_dir / "bot.conf"
+    actual_conf = actual_conf_path.read_text() if actual_conf_path.is_file() else ""
+    if expected_conf != actual_conf:
+        parts.append(f"\n=== bot.conf drift in {bot_name} ===")
+        parts.extend(
+            difflib.unified_diff(
+                expected_conf.splitlines(),
+                actual_conf.splitlines(),
+                fromfile="library-composed (would be regenerated)",
+                tofile=f"runtime/bots/{bot_name}/bot.conf (current)",
                 lineterm="",
             )
         )

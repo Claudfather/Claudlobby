@@ -579,3 +579,21 @@ class TestObservabilityConfig:
         bot = _coerce_bot("test", raw, defaults)
         assert bot.observability.bridge_heal is True  # inherited from defaults
         assert bot.observability.bridge_heal_max_attempts == 2  # bot overrides
+
+    def test_system_merge_preserves_fleet_only_observability_key(self):
+        """The system-defaults tier merges system.yaml observability UNDER the
+        fleet's. A fleet-only key (bridge_heal, absent from system.yaml's
+        observability) must survive that merge — the full defaults→generate
+        layer #593's unit tests skipped (they exercised _coerce_bot, not the
+        system tier). This is what let the deployed bot.conf lack the flag look
+        like a code gap."""
+        from claudlobby.config import _merge_system_into_defaults
+
+        system = {"observability": {"pulse_interval": 300, "reap_days": 7}}
+        defaults = {
+            "observability": {"pulse_interval": 300, "bridge_heal": True},
+        }
+        merged = _merge_system_into_defaults(system, defaults)
+        # fleet-only key survives; system-only key still contributes its default.
+        assert merged["observability"]["bridge_heal"] is True
+        assert merged["observability"]["reap_days"] == 7

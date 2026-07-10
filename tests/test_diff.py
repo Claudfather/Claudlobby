@@ -46,6 +46,22 @@ class TestDiffBot:
         assert "CLAUDE.md drift" in result
         assert "Hand-edited section" in result
 
+    def test_bot_conf_drift_detected(self, fleet_dir):
+        """bot.conf is a generated file; a stale one (missing an env line the
+        composer now emits — e.g. a new fleet.yaml observability field) must
+        show as drift. Without this, `diff` reads "no drift" while runtime
+        bot.conf is out of sync — the false signal that hid the #591
+        bridge_heal deploy."""
+        paths = Paths(root=fleet_dir)
+        fleet, _md = load_fleet(paths.fleet_yaml)
+        compose_bot(fleet.bots["lead"], fleet, paths)
+        conf_path = paths.bot_runtime("lead") / "bot.conf"
+        # A stale line the composer would not produce → drift the tool must surface.
+        conf_path.write_text(conf_path.read_text() + "\nexport STALE_DRIFT_MARKER=1\n")
+        result = diff_bot("lead", fleet, paths)
+        assert "bot.conf drift" in result
+        assert "STALE_DRIFT_MARKER" in result
+
     def test_mcp_json_drift_detected(self, fleet_dir, monkeypatch):
         # Add github mcp to lead bot
         from textwrap import dedent
