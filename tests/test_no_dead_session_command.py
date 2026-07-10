@@ -6,9 +6,11 @@ the old spellings were hard-removed. `start-bot.sh` and `pre-stop-handoff.sh` in
 these commands as live keystrokes into the bot's Claude REPL on restart/stop, so a dead
 spelling resolves to "Unknown command" and the restart silently loses its handoff (#543).
 
-Two dead spellings must never reappear in lib/:
-  - the namespaced hyphen-form `/claudna:session-resume` / `/claudna:session-handoff`, and
-  - the prefix-less old standalone names `/session-resume` / `/session-handoff`.
+Two dead spelling classes must never reappear in lib/:
+  - any namespaced hyphen-form `/claudna:session-<verb>` — a rename or a typo of
+    the live space-form alike, and
+  - the renamed-away standalone names from the canonical map (`/session-handoff`,
+    `/session-resume`, `/name-session`), bare or namespaced.
 
 The correct form is always `/claudna:session <verb>` — a space, never a hyphen.
 """
@@ -17,13 +19,25 @@ import re
 
 import pytest
 
+from claudlobby.known_values import CLAUDNA_SKILL_RENAMES
 from tests.test_bash_parse import LIB_SCRIPTS
 
-# Dead session-skill spellings. Scoped so it never flags the correct space-form
-# `/claudna:session resume` (space, not hyphen) nor the unrelated tmux
-# `session-name` resolution in lib-common.sh (bare, no leading slash).
+# The enumerated alternation derives from the canonical rename map, so this
+# guard can never drift from the doc guard again (#570). The `claudna:session-`
+# catch-all is guard-local pattern policy: it also bans hyphen-typos of live
+# verbs that were never skills (session-checkpoint, session-name). Scoped so it
+# never flags the correct space-form `/claudna:session resume` nor the
+# unrelated tmux `session-name` resolution in lib-common.sh (bare, no leading
+# slash).
+_DEAD_SESSION_NAMES = "|".join(
+    sorted(
+        re.escape(k.removeprefix("/claudna:"))
+        for k, live in CLAUDNA_SKILL_RENAMES.items()
+        if live.startswith("/claudna:session ")
+    )
+)
 _DEAD_SESSION_CMD = re.compile(
-    r"claudna:session-|/session-(?:handoff|resume|checkpoint|name)\b"
+    rf"claudna:session-|/(?:claudna:)?(?:{_DEAD_SESSION_NAMES})\b"
 )
 
 
