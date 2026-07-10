@@ -22,24 +22,12 @@ SCAN_GLOBS = (
     ("lib", "*.sh"),
 )
 
-# Deferred #541 follow-ups (non-mechanical) and #543 (alex's in-flight lib/
-# session-ref fix). Drop entries as those land; the guard then covers them.
-EXCLUDE_FILES = (
-    # #541 follow-up: coupled to known_values.AUTO_ELIGIBLE_SKILLS decision
-    "library/skills/autonomous-runner/SKILL.md",
-    "library/skills/autonomous-runner/archetype.md",
-    # #541 follow-up: snowflake skills have no post-consolidation equivalent
-    "library/integrations/snowflake.md",
-    # #543: lib/ session-ref renames (alex)
-    "lib/start-bot.sh",
-    "lib/pre-stop-handoff.sh",
-    "lib/validate-bot-change.sh",
-    "lib/lib-common.sh",
-)
-
-# Files allowed to keep /snowflake-* refs only (no rename target exists yet —
-# #541 follow-up). Every other dead name in these files still fails the guard.
+# Files allowed to keep /snowflake-* refs only: snowflake skills have no
+# post-consolidation equivalent, so those refs have no rename target yet
+# (#541 follow-up). Every OTHER dead name in these files still fails the guard —
+# a strictly tighter deferral than a whole-file skip.
 SNOWFLAKE_DEFERRED = (
+    "library/integrations/snowflake.md",
     "documentation/integrations.md",
     "documentation/bot-archetypes.md",
 )
@@ -61,7 +49,7 @@ def test_no_dead_claudna_skill_refs():
     for base, pattern in SCAN_GLOBS:
         for path in sorted((REPO_DIR / base).rglob(pattern)):
             rel = path.relative_to(REPO_DIR).as_posix()
-            if rel in EXCLUDE_FILES or rel.startswith("documentation/plans/"):
+            if rel.startswith("documentation/plans/"):
                 continue
             for lineno, line in enumerate(path.read_text().splitlines(), 1):
                 match = DEAD_REF.search(line)

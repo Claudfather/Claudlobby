@@ -7,7 +7,7 @@ This archetype is the recipe for composing a bot around the `autonomous-runner` 
 ## When to use
 
 - You have a clauDNA-installed bot fleet
-- You have a target repository with a healthy backlog of well-formed issues (each containing an `## Implementation Plan` section, ideally produced by `/claudna:tech-debt --auto` or similar)
+- You have a target repository with a healthy backlog of well-formed issues (each containing an `## Implementation Plan` section, ideally produced by `/claudna:audit tech-debt --auto` or similar)
 - You want overnight or cadence-based PR generation without per-issue human intervention
 - You're OK with PRs awaiting a human review before merge (the contract is hard: this bot never merges)
 

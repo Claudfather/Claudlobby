@@ -54,7 +54,7 @@ See `library/skills/autonomous-runner/archetype.md` ("Autonomous Worker") for ex
 
 ## How clauDNA skills are invoked
 
-clauDNA is installed as a Claude Code plugin (`Claudfather/claudna` from the Claudfather marketplace). Skills are invoked by name via the Skill tool, **not** by reading a filesystem path. Throughout this procedure, `<skill-name>` refers to a plugin-namespaced clauDNA skill name (e.g., `/claudna:implement-plan`, `/claudna:tech-debt`).
+clauDNA is installed as a Claude Code plugin (`Claudfather/claudna` from the Claudfather marketplace). Skills are invoked by name via the Skill tool, **not** by reading a filesystem path. Throughout this procedure, `<skill-name>` refers to a plugin-namespaced clauDNA skill name (e.g., `/claudna:implement-plan`, `/claudna:audit tech-debt`).
 
 When dispatching subagents to execute a clauDNA skill, instruct the subagent to invoke the skill via the Skill tool with the constructed argument string. Do **not** pass filesystem paths — the plugin's on-disk location is managed by Claude Code and may change between versions.
 
@@ -110,7 +110,7 @@ Score each issue per `picker.score_by`:
 
 If no eligible work item is found, beacon to Telegram "No eligible work for this cadence tick" and EXIT.
 
-If `autonomous_runner.picker` is NOT configured (e.g., the target skill is `/claudna:tech-debt` which doesn't need a specific item), skip Step 3.
+If `autonomous_runner.picker` is NOT configured (e.g., the target skill is `/claudna:audit tech-debt` which doesn't need a specific item), skip Step 3.
 
 ### Step 4: Risk classification (qualitative bypass)
 
@@ -178,7 +178,7 @@ Construct the invocation:
 <skill> --source github <issue#> --auto <args>
 ```
 
-For `/claudna:implement-plan` and similar issue-consuming skills, `<issue#>` comes from Step 3. For non-issue skills (e.g., `/claudna:tech-debt`), omit `--source github <issue#>`.
+For `/claudna:implement-plan` and similar issue-consuming skills, `<issue#>` comes from Step 3. For non-issue skills (e.g., `/claudna:audit tech-debt`), omit `--source github <issue#>`.
 
 `<args>` is the verbatim `autonomous_runner.args` string from fleet.yaml.
 
@@ -307,7 +307,7 @@ Currently `report`, `report_and_pause`, `silent`. To add (e.g., `escalate` that 
 |---|---|
 | Running the main skill subagent and then parsing prose instead of the JSON block | The JSON block is the LAST fenced ```json block. Parse only that. Reject runs that don't have one |
 | Forgetting to release the lockfile if the procedure exits early | Use `trap` (bash) or `try/finally` (Python) to ensure release |
-| Bypassing the risk classifier for skills that don't have a work item (e.g., `/claudna:tech-debt`) | The classifier doesn't apply when there is no picked work item. Skip it for non-picker configs |
+| Bypassing the risk classifier for skills that don't have a work item (e.g., `/claudna:audit tech-debt`) | The classifier doesn't apply when there is no picked work item. Skip it for non-picker configs |
 | Running pre-hooks AFTER the main skill | Pre-hooks run BEFORE; post-hooks after. The names are not arbitrary |
 | Posting verbose JSON to Telegram | Post the `summary` field only. JSON is for the orchestrator, not the human |
 | Picking work items in parallel across multiple cadence ticks | The idle check (Step 1) prevents overlap. If you see multiple runs going, the lockfile mechanism is broken |
