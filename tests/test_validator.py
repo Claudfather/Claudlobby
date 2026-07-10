@@ -414,6 +414,25 @@ class TestObservabilityValidation:
         report = validate(fleet, paths)
         assert any("reap_days > 365" in w and "worker-1" in w for w in report.warnings)
 
+    def test_bridge_heal_max_attempts_out_of_range_warns(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["worker-1"].observability.bridge_heal_max_attempts = 11
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any(
+            "bridge_heal_max_attempts" in w and "worker-1" in w for w in report.warnings
+        )
+
+    def test_bridge_heal_valid_no_warn(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["worker-1"].observability.bridge_heal = True
+        fleet.bots["worker-1"].observability.bridge_heal_max_attempts = 3
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert not any("bridge_heal" in w for w in report.warnings)
+
 
 class TestHookCommandValidation:
     """Hook command path existence validation."""

@@ -426,6 +426,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             obs.reap_days,
             obs.activity_stuck_threshold,
             obs.dispatch_deadline,
+            obs.bridge_heal,
+            obs.bridge_heal_max_attempts,
         ]
     ):
         lines.append("")
@@ -443,6 +445,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if obs.dispatch_deadline is not None:
             lines.append(
                 f"export OBSERVABILITY_DISPATCH_DEADLINE={_shq(obs.dispatch_deadline)}"
+            )
+        if obs.bridge_heal is not None:
+            # keepalive.sh gates on the string "1"; emit a shell boolean (1/0),
+            # NOT _shq(bool) which renders "True"/"False" and would leave the
+            # gate closed.
+            lines.append(
+                f"export OBSERVABILITY_BRIDGE_HEAL={'1' if obs.bridge_heal else '0'}"
+            )
+        if obs.bridge_heal_max_attempts is not None:
+            lines.append(
+                f"export BRIDGE_HEAL_MAX_ATTEMPTS={_shq(obs.bridge_heal_max_attempts)}"
             )
 
     # Project validation tiers (projects.yaml) — the repo -> closure-bar map,

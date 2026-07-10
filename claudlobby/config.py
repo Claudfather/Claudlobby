@@ -95,6 +95,12 @@ class ObservabilityConfig:
     # seconds after a manager dispatch before an unanswered task is flagged
     # overdue_dispatch (manager-side watchdog)
     dispatch_deadline: int | None = None
+    # enable the keepalive bridge-heal ladder for this bot. Routed
+    # through structured observability config — not fleet-tier .env — because
+    # keepalive loads bot.conf only; this is the one path that reaches its gate.
+    bridge_heal: bool | None = None
+    # heal bounce cap before the ladder escalates to a human (keepalive default 3)
+    bridge_heal_max_attempts: int | None = None
 
 
 @dataclass
@@ -659,11 +665,15 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
     rd = raw.get("reap_days")
     ast = raw.get("activity_stuck_threshold")
     dd = raw.get("dispatch_deadline")
+    bh = raw.get("bridge_heal")
+    bhma = raw.get("bridge_heal_max_attempts")
     return ObservabilityConfig(
         pulse_interval=int(pi) if pi is not None else None,
         reap_days=int(rd) if rd is not None else None,
         activity_stuck_threshold=int(ast) if ast is not None else None,
         dispatch_deadline=int(dd) if dd is not None else None,
+        bridge_heal=bool(bh) if bh is not None else None,
+        bridge_heal_max_attempts=int(bhma) if bhma is not None else None,
     )
 
 
@@ -700,6 +710,12 @@ def _merge_observability(
         dispatch_deadline=override.dispatch_deadline
         if override.dispatch_deadline is not None
         else default.dispatch_deadline,
+        bridge_heal=override.bridge_heal
+        if override.bridge_heal is not None
+        else default.bridge_heal,
+        bridge_heal_max_attempts=override.bridge_heal_max_attempts
+        if override.bridge_heal_max_attempts is not None
+        else default.bridge_heal_max_attempts,
     )
 
 

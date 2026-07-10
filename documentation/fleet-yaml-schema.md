@@ -320,11 +320,15 @@ observability:
   reap_days: 7                  # days to retain event files before reaping (default: 7)
   activity_stuck_threshold: 1800  # seconds of no tool-call activity before flagged (default: 1800)
   dispatch_deadline: 1800       # seconds after manager dispatch before flagged overdue (default: 1800)
+  bridge_heal: true             # enable the keepalive Telegram-bridge auto-heal ladder (default: off)
+  bridge_heal_max_attempts: 3   # heal bounce cap before escalation (keepalive default: 3)
 ```
 
-All fields are optional integers with sensible defaults. Can be set in `defaults:` to apply fleet-wide; bot-level overrides. The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), and if `reap_days` is `<= 0` or greater than `365`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
+The four threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 
-Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`.
+**`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`lib/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
+
+Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`.
 
 ### Fleet-pulse escalation (environment overrides)
 

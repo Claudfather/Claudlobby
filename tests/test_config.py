@@ -546,3 +546,36 @@ class TestObservabilityConfig:
         raw = {"expertise": ["eng"], "observability": {"pulse_interval": 300}}
         bot = _coerce_bot("test", raw, defaults)
         assert bot.observability.pulse_interval == 300  # bot wins, not fleet's 120
+
+    def test_bridge_heal_from_defaults(self):
+        """defaults.observability.bridge_heal merges fleet-wide — the #591 fix that
+        routes the keepalive-heal enable through the one path keepalive reads
+        (bot.conf), unlike defaults.env which is dropped."""
+        defaults = {
+            "observability": {"bridge_heal": True, "bridge_heal_max_attempts": 3}
+        }
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, defaults)
+        assert bot.observability.bridge_heal is True
+        assert bot.observability.bridge_heal_max_attempts == 3
+
+    def test_bridge_heal_none_when_unset(self):
+        bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
+        assert bot.observability.bridge_heal is None
+        assert bot.observability.bridge_heal_max_attempts is None
+
+    def test_bridge_heal_bot_can_override_default_true_to_false(self):
+        """None-sentinel bool: a per-bot false must opt out of a fleet default-true
+        (a naive bool() coerce would read absent as False and never inherit)."""
+        defaults = {"observability": {"bridge_heal": True}}
+        raw = {"expertise": ["eng"], "observability": {"bridge_heal": False}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.observability.bridge_heal is False
+
+    def test_bridge_heal_partial_inherits_default(self):
+        defaults = {
+            "observability": {"bridge_heal": True, "bridge_heal_max_attempts": 3}
+        }
+        raw = {"expertise": ["eng"], "observability": {"bridge_heal_max_attempts": 2}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.observability.bridge_heal is True  # inherited from defaults
+        assert bot.observability.bridge_heal_max_attempts == 2  # bot overrides

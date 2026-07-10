@@ -198,6 +198,13 @@ def _validate_bots(
                 report.warnings.append(
                     f"bot '{bot_name}': observability.reap_days > 365 is unusually long — got {obs.reap_days}"
                 )
+        if obs.bridge_heal_max_attempts is not None and not (
+            1 <= obs.bridge_heal_max_attempts <= 10
+        ):
+            report.warnings.append(
+                f"bot '{bot_name}': observability.bridge_heal_max_attempts must be "
+                f"1..10 (got {obs.bridge_heal_max_attempts})"
+            )
 
         # Model validation (warn + pass-through)
         if bot.model and bot.model not in KNOWN_MODELS:
