@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from .config import BotConfig, McpEntry
     from .paths import Paths
 
@@ -62,6 +64,52 @@ def resolve_placeholders(
     return val
 
 
+class ContractVar(NamedTuple):
+    """One operator-facing env var enumerated from an MCP ``_env_contract`` entry."""
+
+    canonical_name: (
+        str  # instance-renamed when instance-scoped, else the raw contract key
+    )
+    tier: str  # "fleet" | "bot"
+    instance: str | None  # instance label when instance-scoped, else None (shared)
+    description: str  # meta.get("description", "")
+
+
+def iter_operator_contract_vars(
+    contract: dict, entry: McpEntry
+) -> Iterator[ContractVar]:
+    """Single home for the operator-facing MCP ``_env_contract`` walk.
+
+    Yields one ContractVar per operator-supplied var in *contract*, applying the
+    ``isinstance`` guard, the ``provided_by == "composer"`` skip, tier/scope
+    defaults, and per-instance canonical naming. Every enumerator that surfaces
+    vars to an operator — ``required_vars`` (validate), ``collect_env_contracts``
+    (.env scaffolding + doctor) — consumes this, so the skip and naming rules can
+    never drift again (#568, finishes #233).
+
+    NOT for ``compose_mcp_json``: that must KEEP composer-provided vars to
+    substitute them into the real ``.mcp.json``, so it reads the contract directly.
+    """
+    for var_name, meta in contract.items():
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("provided_by") == "composer":
+            continue
+        tier = meta.get("tier", "fleet")
+        scope = meta.get("scope", "shared")
+        description = meta.get("description", "")
+        if scope == "instance":
+            for inst in entry.instances:
+                yield ContractVar(
+                    canonical_var_name(var_name, contract, entry, inst),
+                    tier,
+                    inst,
+                    description,
+                )
+        else:
+            yield ContractVar(var_name, tier, None, description)
+
+
 def required_vars(
     bot: BotConfig, paths: Paths
 ) -> list[tuple[str, str, str, str | None]]:
@@ -89,30 +137,11 @@ def required_vars(
             _log.warning("failed to parse %s, skipping", frag_path)
             continue
         contract = frag.get("_env_contract", {})
-        for var_name, meta in contract.items():
-            if not isinstance(meta, dict):
-                continue
-            # provided_by: "composer" — the compositor emits this var into
-            # bot.conf from fleet.yaml; it is never operator-supplied, so it must
-            # not surface as a "requires X but it's not set — MCP will fail"
-            # warning. Mirrors collect_env_contracts (composer.py) so validate,
-            # .env scaffolding, and doctor stay consistent (#547 / #532).
-            if meta.get("provided_by") == "composer":
-                continue
-            tier = meta.get("tier", "fleet")
-            scope = meta.get("scope", "shared")
-            if scope == "instance":
-                for inst in entry.instances:
-                    out.append(
-                        (
-                            canonical_var_name(var_name, contract, entry, inst),
-                            tier,
-                            f"mcp/{entry.name}",
-                            inst,
-                        )
-                    )
-            else:
-                out.append((var_name, tier, f"mcp/{entry.name}", None))
+        # Shared operator-facing walk: skips provided_by:composer + applies
+        # instance naming (one home, no drift — #568, was #547). Map to the
+        # validator's (var, tier, source, instance) tuple shape.
+        for cv in iter_operator_contract_vars(contract, entry):
+            out.append((cv.canonical_name, cv.tier, f"mcp/{entry.name}", cv.instance))
 
     # --- Integration doc contracts (auto-pair fallback matches composer) ---
     integration_names = bot.integrations or [
