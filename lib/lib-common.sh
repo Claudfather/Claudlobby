@@ -1239,7 +1239,12 @@ emit_script_error() {
     local data
     data=$(printf '{"script":"%s","exit_code":%d,"message":"%s"}' \
         "$script_name" "$exit_code" "$(json_escape "$message")")
-    emit_fleet_event script_error lib "$data" "$bot_dir"
+    # Pass bot_id explicitly (bot_dir's own basename) so a bot-context error
+    # attributes to that dir — never the ambient $BOT_ID of whatever installed
+    # the trap (a manager script or shell trapping a different bot's dir). An
+    # empty bot_dir yields an empty bot_id, so the primitive's fleet-level branch
+    # attributes it to "fleet".
+    emit_fleet_event script_error lib "$data" "$bot_dir" "${bot_dir:+$(basename "$bot_dir")}"
 }
 
 # _emit_fleet_signal <bots_dir> <event_type> <reason> <ev_source> <WORD>
