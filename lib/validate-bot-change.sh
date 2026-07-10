@@ -809,13 +809,12 @@ check "#414 send-miss: a cross-socket send to a dead target is logged, not silen
 echo ""
 echo "=== validate bridge-hijack mechanism (#591 Phase 1: last-writer-wins reap) ==="
 
-# Newest installed plugin version, never a pinned one (#591 P1 step 2).
-BH_BASE="$HOME/.claude/plugins/cache/claude-plugins-official/telegram"
-BH_PLUGIN=""
-if [ -d "$BH_BASE" ]; then
-    _bh_ver="$(ls -1 "$BH_BASE" 2>/dev/null | sort -V | tail -n1 || true)"
-    [ -n "$_bh_ver" ] && BH_PLUGIN="$BH_BASE/$_bh_ver"
-fi
+# Newest installed plugin version, never a pinned one (#591 P1 step 2). The
+# cache root honors CLAUDE_CONFIG_DIR — multi-account bots keep their plugin
+# cache under the account dir, same seam as start-bot.sh. A missing or empty
+# cache just yields a path whose server.ts fails the probe below → SKIP.
+BH_BASE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/claude-plugins-official/telegram"
+BH_PLUGIN="$BH_BASE/$(ls -1 "$BH_BASE" 2>/dev/null | sort -V | tail -n1 || true)"
 BH_SKIP=""
 command -v bun >/dev/null 2>&1 || BH_SKIP="bun not installed"
 [ -n "$BH_SKIP" ] || [ -f "$BH_PLUGIN/server.ts" ] || BH_SKIP="telegram plugin not installed under $BH_BASE"
@@ -836,8 +835,7 @@ else
     # and skip the spawns: a changed reap makes them meaningless, and
     # cascading FAILs would bury the real message. Deliberately a FAIL, not
     # a SKIP — a present-but-different plugin must never read as "covered".
-    bh_anchor_probe() {
-        python3 - "$BH_PLUGIN/server.ts" <<'PY'
+    python3 - "$BH_PLUGIN/server.ts" 2>/dev/null <<'PY' && r=yes || r=no
 import sys
 src = open(sys.argv[1]).read()
 block = """    process.kill(stale, 0)
@@ -845,8 +843,6 @@ block = """    process.kill(stale, 0)
     process.kill(stale, 'SIGTERM')"""
 sys.exit(0 if src.count(block) == 1 else 1)
 PY
-    }
-    if bh_anchor_probe 2>/dev/null; then r=yes; else r=no; fi
     check "plugin reap anchor present exactly once (drift fails loud, never tests nothing)" "$r"
 
     if [ "$r" != "yes" ]; then
@@ -859,7 +855,6 @@ PY
         # numbers via eval keep this parseable by bash 3.2 (macOS /bin/bash;
         # exec {var}> auto-allocation is bash 4.1+). Sets BH_PID from
         # bot.pid, waiting for a value different from prev_pid.
-        BH_PID=""
         BH_PIDS=""
         spawn_poller() {
             local label="$1" fd="$2" prev="${3:-}" fifo i cur
@@ -878,52 +873,45 @@ PY
             [ -n "$BH_PID" ] && BH_PIDS="$BH_PIDS $BH_PID"
             return 0
         }
-        bh_alive() { ps -p "$1" >/dev/null 2>&1 && echo yes || echo no; }
-        bh_dead_after() { # <pid> <max_s>
-            local i
-            for i in $(seq 1 $(( $2 * 4 ))); do
-                ps -p "$1" >/dev/null 2>&1 || { echo yes; return; }
+        bh_until() { # <max_s> <cmd...> — poll at 0.25s ticks; yes on success
+            local i n=$(( $1 * 4 ))
+            shift
+            for i in $(seq 1 "$n"); do
+                "$@" 2>/dev/null && { echo yes; return; }
                 sleep 0.25
             done
             echo no
         }
-        bh_grep_within() { # <pattern> <file> <max_s> — poll buffered stderr
-            local i
-            for i in $(seq 1 $(( $3 * 4 ))); do
-                grep -q "$1" "$2" 2>/dev/null && { echo yes; return; }
-                sleep 0.25
-            done
-            echo no
-        }
+        bh_gone() { ! ps -p "$1" >/dev/null 2>&1; }
 
         spawn_poller A 8
         BH_A="$BH_PID"
-        { [ -n "$BH_A" ] && [ "$(bh_alive "$BH_A")" = "yes" ]; } && r=yes || r=no
+        { [ -n "$BH_A" ] && ps -p "$BH_A" >/dev/null 2>&1; } && r=yes || r=no
         check "victim poller A up and holding bot.pid (real plugin, fake token)" "$r"
 
         spawn_poller B 9 "$BH_A"
         BH_B="$BH_PID"
-        [ "$(bh_grep_within "replacing stale poller pid=$BH_A" "$BH_DIR/B.err" 6)" = "yes" ] && r=yes || r=no
+        [ "$(bh_until 6 grep -q "replacing stale poller pid=$BH_A" "$BH_DIR/B.err")" = "yes" ] && r=yes || r=no
         check "newcomer B SIGTERMs the LIVE holder (last-writer-wins reap fired)" "$r"
 
-        { [ "$(bh_dead_after "$BH_A" 5)" = "yes" ] && [ "$(bh_grep_within "shutting down" "$BH_DIR/A.err" 5)" = "yes" ]; } && r=yes || r=no
+        { [ "$(bh_until 5 bh_gone "$BH_A")" = "yes" ] && [ "$(bh_until 5 grep -q "shutting down" "$BH_DIR/A.err")" = "yes" ]; } && r=yes || r=no
         check "victim A exits via the graceful shutdown path" "$r"
 
         { [ -n "$BH_B" ] && [ "$(cat "$BH_STATE/bot.pid" 2>/dev/null)" = "$BH_B" ]; } && r=yes || r=no
         check "slot taken over: bot.pid now = newcomer B" "$r"
 
-        eval "exec 9>&-"   # transient B loses its client: stdin EOF
-        [ "$(bh_dead_after "$BH_B" 6)" = "yes" ] && r=yes || r=no
+        exec 9>&-   # transient B loses its client: stdin EOF
+        [ "$(bh_until 6 bh_gone "$BH_B")" = "yes" ] && r=yes || r=no
         check "transient B exits when its client goes away (stdin EOF)" "$r"
 
         [ ! -f "$BH_STATE/bot.pid" ] && r=yes || r=no
         check "B unlinks bot.pid on exit — slot ABANDONED" "$r"
 
-        sleep 2
-        { [ ! -f "$BH_STATE/bot.pid" ] && [ "$(bh_alive "${BH_A:-0}")" = "no" ] && [ "$(bh_alive "${BH_B:-0}")" = "no" ]; } && r=yes || r=no
+        sleep 1   # settle window for the negative assertion below
+        { [ ! -f "$BH_STATE/bot.pid" ] && bh_gone "${BH_A:-0}" && bh_gone "${BH_B:-0}"; } && r=yes || r=no
         check "victim never returns: slot stays dark after settle (no respawn, no reclaim)" "$r"
 
-        eval "exec 8>&-"   # release the dead victim's writer fd
+        exec 8>&-   # release the dead victim's writer fd
 
         if [ "$fail" -gt "$_bh_fail_before" ]; then
             echo "  --- DIAGNOSTIC: bridge-hijack poller stderr ---"
