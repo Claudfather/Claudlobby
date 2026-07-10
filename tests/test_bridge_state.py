@@ -276,3 +276,50 @@ def test_sibling_prefix_env_does_not_match(tmp_path):
         assert out == "no_bridge", f"sibling-prefix must not match; got {out!r}"
     finally:
         _kill_tree(proc)
+
+
+# --- the heal trigger: kill a live bridge, confirm it becomes actionable-down ---
+
+
+@requires_proc
+def test_killed_bridge_flips_to_no_bridge_and_actionable_down(tmp_path):
+    """The #453 Phase 5 heal trigger. A live owned bridge reads `up`; once its
+    poller is killed (a deterministic, Mode-A-shaped kill), bridge_state flips to
+    `no_bridge` AND bridge_down_state (grace 0) returns the actionable `no_bridge`
+    verdict that keepalive's _bridge_heal consumes to bounce the bot. This is the
+    unit-level companion to the end-to-end heal proof in validate-bot-change.sh."""
+    bindir = _fake_bins(tmp_path)
+    sd = tmp_path / "state"
+    bot = tmp_path / "bots" / "b1"
+    _write_bot_conf(bot, handle="b1", state_dir=sd, token_env="B1_TG_TOKEN")
+    (bot / ".env").write_text("B1_TG_TOKEN=x\n")
+    proc = _spawn_bridge(bindir, sd)
+    try:
+        out, _ = _bridge_state(bot, tmp_path)
+        assert out == "up", f"live bridge should read up; got {out!r}"
+    finally:
+        _kill_tree(proc)
+
+    # Poller dead (bot.pid now points at a dead pid) → classifier flips to down.
+    out2, rc2 = _bridge_state(bot, tmp_path)
+    assert out2 == "no_bridge", f"killed bridge must read no_bridge; got {out2!r}"
+    assert rc2 != 0
+
+    # bridge_down_state with no grace surfaces it as the actionable heal trigger.
+    env = {**os.environ, "HOME": str(tmp_path)}
+    down = subprocess.run(
+        [
+            "bash",
+            "-c",
+            '. "$1"; bridge_down_state "$2" 0',
+            "_",
+            str(LIB_COMMON),
+            str(bot),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=20,
+    )
+    assert down.stdout.strip() == "no_bridge", f"got {down.stdout!r}"
+    assert down.returncode == 0
