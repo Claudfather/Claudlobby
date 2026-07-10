@@ -31,7 +31,7 @@ from .loader import (
     load_voice,
     parse_expertise_file,
 )
-from .mcp_resolve import resolve_placeholders
+from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
 from .paths import Paths
 
 
@@ -1391,40 +1391,24 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                 continue
             frag = json.loads(frag_path.read_text())
             contract = frag.get("_env_contract", {})
-            for var_name, meta in contract.items():
-                # provided_by: "composer" — the var is composed into bot.conf
-                # (e.g. CLAUDRON_VAULT_PATH), never operator-supplied. Skipping
-                # here covers both consumers of this collection: .env
-                # scaffolding would write a misleading empty stub, and
-                # doctor's env check would false-alarm on a var no operator
-                # ever sets. The per-bot pairing check lives in the
-                # ecosystem-specific doctor checks instead (plan P2d).
-                if meta.get("provided_by") == "composer":
+            # Operator-facing vars only: the shared kernel skips
+            # provided_by:composer (a composer-emitted var like CLAUDRON_VAULT_PATH
+            # would otherwise scaffold a misleading empty .env stub and false-alarm
+            # doctor) and applies instance naming — one home so validate + this
+            # collection can never drift again (#568, finishes #233). Dedup by
+            # canonical name and the .env description label are this consumer's job.
+            for cv in iter_operator_contract_vars(contract, entry):
+                if cv.canonical_name in vars:
                     continue
-                tier = meta.get("tier", "fleet")
-                scope = meta.get("scope", "shared")
-                if scope == "instance":
-                    for instance in entry.instances:
-                        prefix = entry.instance_prefix(instance)
-                        canonical = prefix + var_name
-                        if canonical not in vars:
-                            inst_label = (
-                                f" ({instance})" if instance != "default" else ""
-                            )
-                            vars[canonical] = EnvVar(
-                                name=canonical,
-                                description=f"{meta.get('description', '')}{inst_label}",
-                                tier=tier,
-                                source=f"mcp/{entry.name}",
-                            )
-                else:
-                    if var_name not in vars:
-                        vars[var_name] = EnvVar(
-                            name=var_name,
-                            description=meta.get("description", ""),
-                            tier=tier,
-                            source=f"mcp/{entry.name}",
-                        )
+                inst_label = (
+                    f" ({cv.instance})" if cv.instance not in (None, "default") else ""
+                )
+                vars[cv.canonical_name] = EnvVar(
+                    name=cv.canonical_name,
+                    description=f"{cv.description}{inst_label}",
+                    tier=cv.tier,
+                    source=f"mcp/{entry.name}",
+                )
 
         # Integration doc contracts
         integration_names = resolve_effective_integrations(bot, paths)
