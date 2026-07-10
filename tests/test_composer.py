@@ -2015,6 +2015,43 @@ class TestComposeBotConfObservability:
         conf = self._compose(tmp_path)
         assert "# Observability" not in conf
 
+    def test_bridge_heal_emits_shell_1_not_python_true(self, tmp_path):
+        """keepalive.sh:130 gates on the string '1'; a bool True rendered via the
+        int-field pattern (_shq) would emit 'True' and silently recreate the
+        cycle-1 no-op. It must land as 1."""
+        from claudlobby.config import ObservabilityConfig
+
+        obs = ObservabilityConfig(bridge_heal=True, bridge_heal_max_attempts=3)
+        conf = self._compose(tmp_path, observability=obs)
+        assert "export OBSERVABILITY_BRIDGE_HEAL=1" in conf
+        assert "OBSERVABILITY_BRIDGE_HEAL=True" not in conf
+        assert "export BRIDGE_HEAL_MAX_ATTEMPTS=3" in conf
+
+    def test_bridge_heal_emits_0_when_false(self, tmp_path):
+        from claudlobby.config import ObservabilityConfig
+
+        obs = ObservabilityConfig(bridge_heal=False)
+        conf = self._compose(tmp_path, observability=obs)
+        assert "export OBSERVABILITY_BRIDGE_HEAL=0" in conf
+        assert "OBSERVABILITY_BRIDGE_HEAL=False" not in conf
+
+    def test_bridge_heal_absent_when_none(self, tmp_path):
+        from claudlobby.config import ObservabilityConfig
+
+        obs = ObservabilityConfig(bridge_heal=None)
+        conf = self._compose(tmp_path, observability=obs)
+        assert "OBSERVABILITY_BRIDGE_HEAL" not in conf
+
+    def test_bridge_heal_alone_emits_observability_section(self, tmp_path):
+        """The section guard must include bridge_heal so the block emits even when
+        the four int fields are all None."""
+        from claudlobby.config import ObservabilityConfig
+
+        obs = ObservabilityConfig(bridge_heal=True)
+        conf = self._compose(tmp_path, observability=obs)
+        assert "# Observability" in conf
+        assert "export OBSERVABILITY_BRIDGE_HEAL=1" in conf
+
 
 class TestComposePermissions:
     """compose_claude_md renders library/permissions/ into CLAUDE.md."""
