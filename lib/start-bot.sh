@@ -166,14 +166,17 @@ fi
 # The launched binary is overridable via CLAUDE_BIN so the validation harness
 # (validate-bot-change.sh) can inject a stub for a hermetic, auth-free start;
 # production leaves it unset and `claude` resolves on PATH inside the session.
-# Only the launched session honors this — the plugin-management calls below use
-# the real `claude` and are skipped under test via an empty FLEET_PLUGINS_REQUIRED.
+# The plugin-management calls below honor the same override: the PATH rebuild
+# above discards any harness-prepended stub dir, so this seam is the only way
+# to drive that block hermetically (without it, tests can only skip the block
+# via an empty FLEET_PLUGINS_REQUIRED).
 # Sequence with ';' not '&&': the env file ends with a conditional Telegram-token
 # export that returns nonzero when no token is configured. A '&&' would skip exec
 # on that benign nonzero — the pane process exits, the tmux session dies, and a
 # token-less bot lands in a keepalive restart loop. Masked when a prior tmux
 # server already exported the token into the new pane; bites on a fresh server.
-CLAUDE_CMD=". '$BOT_ENV_FILE'; exec ${CLAUDE_BIN:-claude} $CLAUDE_FLAGS --name \"$SESSION_NAME\""
+CLAUDE="${CLAUDE_BIN:-claude}"
+CLAUDE_CMD=". '$BOT_ENV_FILE'; exec $CLAUDE $CLAUDE_FLAGS --name \"$SESSION_NAME\""
 
 # Update third-party plugins before launch. Handles cold start (fresh
 # host with no plugins installed) through full lifecycle: register
@@ -181,21 +184,41 @@ CLAUDE_CMD=". '$BOT_ENV_FILE'; exec ${CLAUDE_BIN:-claude} $CLAUDE_FLAGS --name \
 # and FLEET_PLUGINS_MARKETPLACES come from bot.conf (composed from
 # fleet.yaml plugins config). The shared cache at ~/.claude/plugins/cache/
 # means only the first bot to start actually fetches; others get a no-op.
-# || true on each step so a network failure never blocks bot startup.
-if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
+# Failures never block bot startup (a network blip must not down the
+# fleet) — but marketplace registration is verified against the registry
+# and surfaced as a fleet event when it did not land, never swallowed.
+if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; then
     LOG="$BOT_DIR/logs/startup.log"
     setup_log_dir "$LOG"
 
-    # Step 1: Register marketplaces if not already known
+    # Step 1: Register marketplaces if not already known. The add is
+    # positional — `claude plugin marketplace add <owner>/<repo>` — and the
+    # CLI takes the marketplace NAME from the repo marketplace.json, so the
+    # name declared in fleet.yaml must match it: the known-check keys on the
+    # declared name, and plugin pins (plugin@name) resolve through it.
+    _mp_known() { grep -q "\"$1\"" "$HOME/.claude/plugins/known_marketplaces.json" 2>/dev/null; }
     if [ -n "${FLEET_PLUGINS_MARKETPLACES:-}" ]; then
         for _mp_pair in $FLEET_PLUGINS_MARKETPLACES; do
             _mp_name="${_mp_pair%%=*}"
             _mp_source="${_mp_pair#*=}"
             _mp_repo="${_mp_source#*:}"
-            if [ ! -f "$HOME/.claude/plugins/known_marketplaces.json" ] || \
-               ! grep -q "\"$_mp_name\"" "$HOME/.claude/plugins/known_marketplaces.json" 2>/dev/null; then
+            if ! _mp_known "$_mp_name"; then
                 echo "$(ts_iso) PLUGIN registering marketplace $_mp_name ($_mp_repo)" >> "$LOG"
-                with_timeout 30 claude plugin marketplace add "$_mp_name" --source github --repo "$_mp_repo" >> "$LOG" 2>&1 || true
+                with_timeout 60 "$CLAUDE" plugin marketplace add "$_mp_repo" >> "$LOG" 2>&1 \
+                    || echo "$(ts_iso) PLUGIN marketplace add $_mp_repo exited nonzero" >> "$LOG"
+                # 60s bounds a cold clone (known marketplaces never
+                # reach the add). Verify against the registry, not the exit
+                # code: an unregistered marketplace means every plugin pinned
+                # to it resolves to whatever matching plugin is already
+                # installed — the bot comes up healthy-looking on the wrong plugin.
+                if _mp_known "$_mp_name"; then
+                    echo "$(ts_iso) PLUGIN marketplace $_mp_name registered" >> "$LOG"
+                else
+                    echo "$(ts_iso) PLUGIN ERROR marketplace $_mp_name ($_mp_repo) not registered — plugins pinned to $_mp_name will fall back to installed versions" >> "$LOG"
+                    _mp_data=$(printf '{"marketplace":"%s","repo":"%s"}' \
+                        "$(json_escape "$_mp_name")" "$(json_escape "$_mp_repo")")
+                    emit_fleet_event "plugin_marketplace_failed" "startup" "$_mp_data"
+                fi
             fi
         done
     fi
@@ -205,10 +228,10 @@ if command -v claude >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ]; th
         if [ ! -f "$HOME/.claude/plugins/installed_plugins.json" ] || \
            ! grep -q "\"$_plugin\"" "$HOME/.claude/plugins/installed_plugins.json" 2>/dev/null; then
             echo "$(ts_iso) PLUGIN installing $_plugin (cold start)" >> "$LOG"
-            with_timeout 30 claude plugin install "$_plugin" >> "$LOG" 2>&1 || true
+            with_timeout 30 "$CLAUDE" plugin install "$_plugin" >> "$LOG" 2>&1 || true
         else
             echo "$(ts_iso) PLUGIN updating $_plugin" >> "$LOG"
-            with_timeout 30 claude plugin update "$_plugin" >> "$LOG" 2>&1 || true
+            with_timeout 30 "$CLAUDE" plugin update "$_plugin" >> "$LOG" 2>&1 || true
         fi
     done
 fi

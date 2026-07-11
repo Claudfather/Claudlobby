@@ -79,7 +79,7 @@ EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${IDLEK:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -646,6 +646,73 @@ check "a single rc_timeout (below threshold) does NOT page (no false alarm)" "$r
 if [ "$fail" -gt "$_esc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: escalation pages recorded ---"
     sed 's/^/    /' "$_esc_pages" 2>/dev/null || echo "    (none)"
+fi
+
+# === Scenario 2d: plugin marketplace registration — positional add, verified, loud on failure (#596) ===
+# Same REAL start-bot.sh, plugin management ON (non-empty FLEET_PLUGINS_REQUIRED)
+# with `claude` stubbed via the CLAUDE_BIN seam (the PATH rebuild inside
+# start-bot discards a stub dir, so the seam is the only hermetic route; the
+# same stub serves the pane). ONE run covers both paths: valmarket registers
+# (the stub writes the registry like the real CLI), valmarketbad fails (stub
+# exits 1, registers nothing). start-bot must use the positional
+# `plugin marketplace add <owner>/<repo>` form (dead flags are how a fleet
+# silently lands on the wrong plugin), verify + log valmarket, and for
+# valmarketbad log PLUGIN ERROR + emit a plugin_marketplace_failed fleet
+# event — loud, but never startup-blocking.
+echo ""
+echo "=== validate-bot-change: marketplace registration (#596: positional + verified + loud) ==="
+_mp_fail_before=$fail
+MP_DIR="$RB_ROOT/local/$FLEET/runtime/bots/valmp"
+mkdir -p "$MP_DIR/.claude" "$MP_DIR/logs"
+cat > "$MP_DIR/bot.conf" <<CONF
+BOT_NAME="valmp"
+BOT_ID="valmp"
+BOT_LABEL="valmp"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+FLEET_PLUGINS_REQUIRED="demo@valmarket"
+FLEET_PLUGINS_MARKETPLACES="valmarket=github:ExampleOrg/example-plugins valmarketbad=github:ExampleOrg/does-not-exist"
+CONF
+MP_SESSION="$(tmux_session_name "$MP_DIR")"
+cat > "$RB_ROOT/bin/claude" <<STUB
+#!/bin/bash
+if [ "\$1" = plugin ]; then
+    printf '%s\n' "\$*" >> "$RB_ROOT/plugin-argv.log"
+    if [ "\$2" = marketplace ] && [ "\$3" = add ]; then
+        [ "\$4" = ExampleOrg/does-not-exist ] && exit 1
+        mkdir -p "\$HOME/.claude/plugins"
+        printf '{"valmarket":{}}\n' > "\$HOME/.claude/plugins/known_marketplaces.json"
+    fi
+    exit 0
+fi
+printf 'remote-control is active\n'
+exec cat
+STUB
+chmod +x "$RB_ROOT/bin/claude"
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=10 CLAUDE_BIN="$RB_ROOT/bin/claude" \
+    HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
+    "$LIB_DIR/start-bot.sh" "$MP_DIR" >"$RB_ROOT/startbot.mp.out" 2>&1 || true
+grep -qx 'plugin marketplace add ExampleOrg/example-plugins' "$RB_ROOT/plugin-argv.log" 2>/dev/null && r=yes || r=no
+check "marketplace add uses the positional owner/repo form (no dead flags)" "$r"
+grep -q 'PLUGIN marketplace valmarket registered' "$MP_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "registration verified against known_marketplaces.json + logged" "$r"
+grep -q 'PLUGIN ERROR marketplace valmarketbad' "$MP_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "failed registration logs PLUGIN ERROR (not swallowed)" "$r"
+_mpev="$(grep -rl '"type":"plugin_marketplace_failed"' "$MP_DIR/data/events/" 2>/dev/null | head -1 || true)"
+[ -n "$_mpev" ] && r=yes || r=no
+check "failed registration emits plugin_marketplace_failed fleet event (loud, not silent)" "$r"
+if [ -n "$_mpev" ]; then
+    python3 -c "import sys,json; evs=[json.loads(l) for l in open('$_mpev') if 'plugin_marketplace_failed' in l]; sys.exit(0 if len(evs)==1 and evs[0]['data']['marketplace']=='valmarketbad' else 1)" 2>/dev/null && r=yes || r=no
+else r=no; fi
+check "exactly one failure event, and it names valmarketbad (success stays quiet)" "$r"
+grep -q 'READY — remote-control active' "$MP_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "registration failure does NOT block startup (session still comes up)" "$r"
+
+if [ "$fail" -gt "$_mp_fail_before" ]; then
+    echo "  --- DIAGNOSTIC: marketplace registration checks failed ---"
+    echo "  [plugin argv]"; sed 's/^/    /' "$RB_ROOT/plugin-argv.log" 2>/dev/null || echo "    (none)"
+    echo "  [valmp startup.log]"; sed 's/^/    /' "$MP_DIR/logs/startup.log" 2>/dev/null || echo "    (none)"
+    echo "  [valmp events]"; sed 's/^/    /' "$MP_DIR/data/events/"fleet-*.jsonl 2>/dev/null || echo "    (none)"
 fi
 
 # === Scenario 3: weekly worker-only restart — manager skip + loud failure ===
