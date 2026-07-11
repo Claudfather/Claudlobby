@@ -105,7 +105,7 @@ fleet:
       # voice: voices/erlich-bachman.md                 # uncomment to add a personality overlay
       skills: [dispatch, fleet-pulse, fleet-status, lifecycle, prs, status, sweep, restart]
       mcp: [github, notion, slack]              # merges with defaults — github from defaults, notion+slack added
-      protocols: [dispatch, consensus-loop, fleet-observability, fleet-dispatch-capability]
+      protocols: [dispatch, consensus-loop, fleet-observability, fleet-dispatch-capability, canary-rollout]
       guardrails: [merge-policy-human]
       telegram:
         handle: my_lead_bot
