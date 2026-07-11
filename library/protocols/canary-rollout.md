@@ -48,4 +48,4 @@ Once you have decided to canary:
 
 ## Why this exists
 
-On 2026-07-11 a bridge-fork change was canaried on a single worker before the fleet. The canary restart surfaced a `start-bot.sh` marketplace-add bug (#596) on **one** bot, in the open, instead of during a fleet-wide restart that would have hit every bot at once. That is the whole point: fail on the canary, not on the fleet.
+A fleet-wide-breaking bug is far cheaper caught on one bot, in the open, than during a fleet-wide restart that hits every bot at once. The fleet has repeatedly paid to keep blast radius at one: per-bot socket isolation, so a dead tmux server drops a single bot instead of every session on the host (#422); and a bridge-fork rollout whose `start-bot.sh` marketplace-add bug surfaced on the canary bot rather than across the fleet (#596). Rolling a framework change blind bets the whole fleet; canarying it bets one bot. That is the whole point: fail on the canary, not on the fleet.
