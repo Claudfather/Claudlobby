@@ -166,7 +166,7 @@ plugins:
 
 **`additional`** — Plugin identifiers in `name@marketplace` format, appended to the defaults. Deduplicated.
 
-**`marketplaces`** — Third-party marketplace registrations, merged with defaults. The official Anthropic marketplace is built in and doesn't need a declaration. Each entry maps a marketplace name to a source descriptor (the nested `source` key is the Claude Code marketplace schema — `github`, `url`, `git`, or `local` types).
+**`marketplaces`** — Third-party marketplace registrations, merged with defaults. The official Anthropic marketplace is built in and doesn't need a declaration. Each entry maps a marketplace name to a source descriptor (the nested `source` key is the Claude Code marketplace schema — `github`, `url`, `git`, or `local` types). The declared name must match the `name` field in the repo's `.claude-plugin/marketplace.json`: Claude Code registers marketplaces under that name, and both the start-time known-check and `plugin@name` pins in `additional` resolve through it.
 
 **`include_defaults`** — Boolean (default `true`). Set to `false` to disable the built-in default plugins and marketplaces. Unusual — the validator warns when this is set.
 

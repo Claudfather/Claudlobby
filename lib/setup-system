@@ -317,14 +317,14 @@ phase_plugins() {
     else
         miss "claudna plugin missing — adding marketplace + installing"
         if [ "$DRY_RUN" != 1 ]; then
-            "$claude_bin" plugin marketplace add Claudfather --source github --repo Claudfather/clauDNA 2>/dev/null || true
+            "$claude_bin" plugin marketplace add Claudfather/clauDNA || true
             "$claude_bin" plugin install "claudna@Claudfather" 2>/dev/null || {
                 miss "claudna plugin install failed — may need manual install"
-                NEXT_STEPS+=("Run 'claude plugin marketplace add Claudfather --source github --repo Claudfather/clauDNA && claude plugin install claudna@Claudfather' manually")
+                NEXT_STEPS+=("Run 'claude plugin marketplace add Claudfather/clauDNA && claude plugin install claudna@Claudfather' manually")
                 return
             }
         else
-            printf 'setup-system: [dry-run] would run: claude plugin marketplace add Claudfather + install claudna\n'
+            printf 'setup-system: [dry-run] would run: claude plugin marketplace add Claudfather/clauDNA + install claudna\n'
         fi
         ok "claudna plugin installed"
     fi

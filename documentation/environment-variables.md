@@ -93,8 +93,8 @@ Emitted only into the `fleet.sweep.owner_bot`'s `bot.conf` (see `fleet.sweep` in
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `CLAUDE_CODE_SYNC_PLUGIN_INSTALL` | `fleet.plugins` | Semicolon-separated plugin install commands |
-| `FLEET_PLUGINS_REQUIRED` | `fleet.plugins.additional` | Comma-separated list of required plugins |
-| `FLEET_PLUGINS_MARKETPLACES` | `fleet.plugins.marketplaces` | Comma-separated marketplace URLs |
+| `FLEET_PLUGINS_REQUIRED` | `fleet.plugins.additional` | Space-separated required plugins (`name@marketplace`) |
+| `FLEET_PLUGINS_MARKETPLACES` | `fleet.plugins.marketplaces` | Space-separated `name=type:repo` pairs (e.g. `mymarket=github:MyOrg/my-plugins`) |
 
 ## Bot-Specific Env
 
