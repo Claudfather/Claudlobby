@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from textwrap import dedent
 
 import pytest
 
@@ -579,3 +580,42 @@ class TestObservabilityConfig:
         bot = _coerce_bot("test", raw, defaults)
         assert bot.observability.bridge_heal is True  # inherited from defaults
         assert bot.observability.bridge_heal_max_attempts == 2  # bot overrides
+
+    def test_system_merge_threads_fleet_only_observability_to_per_bot(self, tmp_path):
+        """A fleet-only observability key (bridge_heal, absent from the system-
+        defaults tier) must survive the system→fleet merge AND thread all the way
+        to a per-bot config through load_fleet's real defaults→_coerce_bot chain.
+        #593's unit tests exercised the merge helper (and _coerce_bot) in
+        isolation, so they could not catch a break in how load_fleet wires them —
+        the shape that would surface "the deployed bot.conf lacks the flag" if the
+        bug were in the merge/thread path (rather than, as #591's was, operational).
+
+        The package system.yaml supplies observability.reap_days but NOT
+        bridge_heal, so the two assertions pin both halves of the wiring the
+        isolated test missed: bridge_heal reaches the bot ONLY via the fleet-
+        defaults side of the merge, and reap_days reaches it ONLY by threading the
+        system tier through merged_defaults into _coerce_bot.
+        """
+        root = tmp_path / "claudlobby"
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "fleet.yaml").write_text(
+            dedent("""\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  defaults:
+                    observability:
+                      bridge_heal: true
+                  bots:
+                    lead:
+                      expertise: [eng]
+            """)
+        )
+
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        obs = fleet.bots["lead"].observability
+        # Fleet-only key survives the merge and reaches the per-bot config.
+        assert obs.bridge_heal is True
+        # System-only key threads through merged_defaults into _coerce_bot.
+        assert obs.reap_days == 7
