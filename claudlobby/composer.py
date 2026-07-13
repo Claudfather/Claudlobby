@@ -340,10 +340,18 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         flags.append(f"--channels {ch}")
     if bot.remote_control:
         flags.append("--remote-control")
+    # Permission model, in precedence order:
+    #   1. explicit permission_mode always wins;
+    #   2. else an explicit dangerously_skip_permissions opt-in bypasses prompts;
+    #   3. else the conservative default — acceptEdits auto-accepts edits while
+    #      still honoring the composed allow/deny lists (headless-safe, and unlike
+    #      dangerously-skip it does not bypass the cross-bot read isolation).
     if bot.permission_mode:
         flags.append(f"--permission-mode {bot.permission_mode}")
     elif bot.dangerously_skip_permissions:
         flags.append("--dangerously-skip-permissions")
+    else:
+        flags.append("--permission-mode acceptEdits")
     if bot.model:
         flags.append(f"--model {bot.model}")
     if bot.effort:

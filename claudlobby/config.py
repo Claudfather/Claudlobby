@@ -327,10 +327,11 @@ class BotConfig:
     effort: str | None = None
     # Claude Code CLI flags — composed into CLAUDE_FLAGS in bot.conf.
     remote_control: bool = True  # --remote-control
-    dangerously_skip_permissions: bool = True  # --dangerously-skip-permissions
-    permission_mode: str | None = (
-        None  # --permission-mode (overrides dangerously_skip_permissions)
-    )
+    # Conservative default: with neither field set the composer emits
+    # `--permission-mode acceptEdits` (see compose_bot_conf). dangerously_skip is
+    # an explicit opt-in.
+    dangerously_skip_permissions: bool = False  # --dangerously-skip-permissions
+    permission_mode: str | None = None  # --permission-mode (wins over the skip flag)
     channels: list[str] = field(
         default_factory=lambda: ["plugin:telegram@claude-plugins-official"]
     )  # --channels <name>
@@ -879,7 +880,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "effort", raw.get("effort", defaults.get("effort")), KNOWN_EFFORTS
         ),
         remote_control=_bool("remote_control", True),
-        dangerously_skip_permissions=_bool("dangerously_skip_permissions", True),
+        dangerously_skip_permissions=_bool("dangerously_skip_permissions", False),
         permission_mode=_parse_enum(
             "permission_mode",
             raw.get("permission_mode") or defaults.get("permission_mode"),

@@ -211,14 +211,19 @@ fleet:
 #     # Multi-bot fleets should set bench: true on exactly one bot.
 #     bench: true
 #
-#     # permission_mode — Claude Code --permission-mode flag (default: unset)
+#     # Permission model — set AT MOST ONE of the two fields below; they do NOT
+#     # combine. permission_mode wins whenever it is set. With neither set, the
+#     # compositor default is --permission-mode acceptEdits.
+#     #
+#     # Option A (preferred) — permission_mode: Claude Code --permission-mode flag.
 #     # Values: default, acceptEdits, bypassPermissions, plan, dontAsk, auto
-#     # When set, overrides dangerously_skip_permissions. Preferred for fleet use.
 #     permission_mode: auto
 #
-#     # dangerously_skip_permissions — legacy flag (default: true)
-#     # Ignored when permission_mode is set. Use permission_mode instead.
-#     dangerously_skip_permissions: false
+#     # Option B — dangerously_skip_permissions: explicit opt-in to
+#     # --dangerously-skip-permissions (default: false). Bypasses ALL permission
+#     # prompts AND the allow/deny lists. Takes effect ONLY when permission_mode is
+#     # unset (omit Option A above to use this).
+#     dangerously_skip_permissions: true
 #
 #     # remote_control — enable --remote-control flag (default: true)
 #     # Allows dispatch via tmux send-keys. Disable for standalone bots.

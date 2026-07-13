@@ -2464,7 +2464,7 @@ class TestPermissionMode:
     """compose_bot_conf handles permission_mode vs dangerously_skip_permissions."""
 
     def _compose(
-        self, tmp_path, permission_mode=None, dangerously_skip_permissions=True
+        self, tmp_path, permission_mode=None, dangerously_skip_permissions=False
     ):
         from claudlobby.composer import compose_bot_conf
 
@@ -2498,19 +2498,33 @@ class TestPermissionMode:
         assert "--permission-mode bypassPermissions" in conf
         assert "--dangerously-skip-permissions" not in conf
 
-    def test_no_permission_mode_falls_back_to_skip(self, tmp_path):
+    def test_explicit_dangerously_skip_opt_in(self, tmp_path):
+        # dangerously-skip stays available as an EXPLICIT opt-in: set it true
+        # (with no permission_mode) and the dangerous flag is still emitted.
         conf = self._compose(
             tmp_path, permission_mode=None, dangerously_skip_permissions=True
         )
         assert "--dangerously-skip-permissions" in conf
         assert "--permission-mode" not in conf
 
-    def test_neither_set(self, tmp_path):
-        conf = self._compose(
-            tmp_path, permission_mode=None, dangerously_skip_permissions=False
-        )
+    def test_default_is_acceptedits(self, tmp_path):
+        # A bot that configures neither field gets the conservative default:
+        # --permission-mode acceptEdits (headless-safe, respects allow/deny lists),
+        # NOT --dangerously-skip-permissions.
+        conf = self._compose(tmp_path)
+        assert "--permission-mode acceptEdits" in conf
         assert "--dangerously-skip-permissions" not in conf
-        assert "--permission-mode" not in conf
+
+    def test_permission_mode_wins_when_both_set(self, tmp_path):
+        # Behavior 2: an explicit permission_mode takes precedence over an explicit
+        # dangerously_skip_permissions when BOTH are set. Kills the if/elif
+        # order-swap mutation — every other permission_mode test leaves
+        # dangerously_skip at the default False, so only this one sets both.
+        conf = self._compose(
+            tmp_path, permission_mode="plan", dangerously_skip_permissions=True
+        )
+        assert "--permission-mode plan" in conf
+        assert "--dangerously-skip-permissions" not in conf
 
     def test_invalid_permission_mode_raises(self):
         from claudlobby.config import _parse_enum
