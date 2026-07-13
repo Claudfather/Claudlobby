@@ -10,6 +10,10 @@
 #   fleet-state-update.sh prune <fleet-yaml-path>
 #     Remove bot entries not present in the given fleet.yaml.
 #
+#   fleet-state-update.sh delete <bot>...
+#     Surgically remove one or more named bot rows (leaves all others). The
+#     single-key inverse of prune — used by spin-down-bot.sh to reap a throwaway.
+#
 # Scaling note: the single-file + lock design works well for <50 bots.
 # Beyond that, consider per-bot state files (state/<bot>.json) or a
 # lightweight SQLite database to reduce lock contention.
@@ -57,6 +61,25 @@ if [ "${1:-}" = "prune" ]; then
         echo "Pruned from fleet-state: $pruned"
     }
     with_lock "$STATE.lock" _prune_state
+    exit 0
+fi
+
+# --- Delete subcommand --------------------------------------------------------
+# Surgically remove named bot rows only (never other bots) — the single-key
+# inverse of prune. Idempotent: a missing key or absent state file is a no-op.
+if [ "${1:-}" = "delete" ]; then
+    shift
+    [ "$#" -ge 1 ] || { echo "Usage: fleet-state-update.sh delete <bot>..." >&2; exit 2; }
+    [ -f "$STATE" ] || exit 0  # nothing to delete
+    _delete_state() {
+        local tmp keys
+        keys=$(printf '%s\n' "$@" | jq -Rnc '[inputs | select(length > 0)]')
+        tmp=$(safe_mktemp)
+        jq --argjson keys "$keys" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            'reduce $keys[] as $b (.; del(.bots[$b])) | .updated = $ts' "$STATE" > "$tmp" \
+            && mv "$tmp" "$STATE" || { echo "fleet-state-update: failed to write $STATE" >&2; rm -f "$tmp"; return 1; }
+    }
+    with_lock "$STATE.lock" _delete_state "$@"
     exit 0
 fi
 
