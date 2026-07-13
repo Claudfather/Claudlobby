@@ -15,11 +15,13 @@ the flat assertions guard against regression.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from claudlobby.commands._helpers import _resolve_paths
 from claudlobby.config import load_fleet
-from claudlobby.paths import Paths
+from claudlobby.paths import Paths, _find_fleet_dir
 from claudlobby.validator import validate
 
 
@@ -163,3 +165,68 @@ def test_name_at_both_depths_raises_global_unique_violation(tmp_path: Path):
 
     with pytest.raises(ValueError, match="globally unique"):
         Paths.detect(hint=root, fleet="dup")
+
+
+# --- F5 husk tolerance: a bare flat husk must yield to a real nested fleet ---
+
+
+def test_husk_flat_dir_yields_to_nested_fleet(tmp_path: Path):
+    """A bare flat husk (leftover gitignored ``runtime/``, NO fleet.yaml) must
+    YIELD to a real nested fleet of the same name — not falsely raise F5.
+
+    Reproduces the git-mv migration trap: ``git mv local/foo local/sys1/foo``
+    moves only tracked files, leaving the gitignored ``local/foo/runtime/``
+    behind as a bare husk. Pre-fix that husk (no fleet.yaml) still tripped the
+    both-depths raise, bricking every ``--fleet foo`` command mid-migration.
+    """
+    local = tmp_path / "local"
+    husk = local / "foo"
+    (husk / "runtime").mkdir(parents=True)  # bare husk — NO fleet.yaml
+    nested = local / "sys1" / "foo"
+    nested.mkdir(parents=True)
+    (nested / "fleet.yaml").write_text("fleet:\n  name: foo\n")
+
+    assert _find_fleet_dir(local, "foo") == nested
+
+
+def test_name_under_two_systems_raises_global_unique_violation(tmp_path: Path):
+    """The same fleet name nested under TWO system containers is a genuine F5
+    collision — raise, never silently pick one. No flat arm here: this pins the
+    two-systems branch the both-depths test never exercises.
+    """
+    local = tmp_path / "local"
+    s1 = local / "s1" / "foo"
+    s1.mkdir(parents=True)
+    (s1 / "fleet.yaml").write_text("fleet:\n  name: foo\n")
+    s2 = local / "s2" / "foo"
+    s2.mkdir(parents=True)
+    (s2 / "fleet.yaml").write_text("fleet:\n  name: foo\n")
+
+    with pytest.raises(ValueError, match="multiple systems"):
+        _find_fleet_dir(local, "foo")
+
+
+# --- the default CLI path guards _find_fleet_dir's ValueError (not a traceback) ---
+
+
+def test_default_path_surfaces_f5_as_clean_exit(tmp_path: Path, monkeypatch):
+    """A genuine F5 collision on the DEFAULT ``claudlobby --fleet <dup>`` path
+    (no --root, so ``_resolve_paths`` → ``Paths.detect``) must exit(1) via
+    log.error — the twin of the --root guard at _helpers.py:30-34 — not throw a
+    raw ValueError traceback at the user.
+    """
+    root = _make_root(tmp_path)
+    flat = root / "local" / "dup"
+    flat.mkdir(parents=True)
+    (flat / "fleet.yaml").write_text("fleet:\n  name: dup\n")
+    nested = root / "local" / "sys1" / "dup"
+    nested.mkdir(parents=True)
+    (nested / "fleet.yaml").write_text("fleet:\n  name: dup\n")
+
+    # Default branch: no --root, so Paths.detect() resolves the root via env.
+    monkeypatch.setenv("CLAUDLOBBY_ROOT", str(root))
+    args = SimpleNamespace(fleet="dup", seed=False, root=None)
+
+    with pytest.raises(SystemExit) as exc:
+        _resolve_paths(args)
+    assert exc.value.code == 1

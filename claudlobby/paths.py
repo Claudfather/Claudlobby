@@ -179,10 +179,14 @@ def _find_fleet_dir(local_dir: Path, fleet: str) -> Path | None:
     depth.
 
     Raises ``ValueError`` on an F5 global-unique-name violation: the same name
-    present as both a flat overlay and a nested fleet, or under two systems —
-    never silently pick one.
+    present as both a flat *fleet* (a dir carrying ``fleet.yaml``) and a nested
+    fleet, or under two systems — never silently pick one. A bare flat *husk*
+    (a dir with no ``fleet.yaml`` — e.g. the gitignored ``local/<fleet>/runtime/``
+    a flat→nested ``git mv`` leaves behind) is NOT a real fleet: it yields to
+    the nested fleet rather than falsely colliding.
     """
     flat = local_dir / fleet
+    flat_is_fleet = (flat / "fleet.yaml").is_file()
     flat_match = flat if flat.is_dir() else None
 
     nested_matches: list[Path] = []
@@ -196,7 +200,10 @@ def _find_fleet_dir(local_dir: Path, fleet: str) -> Path | None:
             if (candidate / "fleet.yaml").is_file():
                 nested_matches.append(candidate)
 
-    if flat_match and nested_matches:
+    # A genuine F5 both-depths collision requires the flat arm to be a REAL
+    # fleet. A bare husk (flat dir without fleet.yaml) must NOT trigger it —
+    # otherwise a leftover gitignored runtime/ husk bricks nested resolution.
+    if flat_is_fleet and nested_matches:
         raise ValueError(
             f"fleet '{fleet}' resolves at two depths — flat ({flat_match}) and "
             f"nested ({nested_matches[0]}); fleet names must be globally unique "
@@ -208,9 +215,15 @@ def _find_fleet_dir(local_dir: Path, fleet: str) -> Path | None:
             f"fleet '{fleet}' resolves under multiple systems ({joined}); "
             f"fleet names must be globally unique across the vault"
         )
+    if nested_matches and not flat_is_fleet:
+        # Flat is a husk (or absent) → the real nested fleet wins.
+        return nested_matches[0]
     if flat_match:
+        # A real flat fleet with no nested sibling, OR a bare flat dir ALONE
+        # (the byte-identical scaffolding corner: a marker-less overlay still
+        # resolves when nothing collides).
         return flat_match
-    return nested_matches[0] if nested_matches else None
+    return None
 
 
 @dataclass(frozen=True)

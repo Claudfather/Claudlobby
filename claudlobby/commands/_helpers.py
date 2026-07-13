@@ -41,7 +41,14 @@ def _resolve_paths(args) -> Paths:
             )
             sys.exit(1)
         return Paths(root=root, fleet_dir=fleet_dir)
-    return Paths.detect(fleet=fleet)
+    # Default branch: Paths.detect() resolves the fleet via _find_fleet_dir too,
+    # which raises ValueError on an F5 collision — guard it the same way as the
+    # --root twin above so a genuine collision exits cleanly, not as a traceback.
+    try:
+        return Paths.detect(fleet=fleet)
+    except ValueError as e:
+        log.error("%s", e)
+        sys.exit(1)
 
 
 def _load_env(paths: Paths) -> None:
