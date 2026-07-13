@@ -15,7 +15,7 @@ install_error_trap ""
 
 FAILED=""
 FOUND=0
-for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml; do
+for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml "$CLAUDLOBBY_ROOT"/local/*/*/fleet.yaml; do
     [ -f "$fy" ] || continue
     FOUND=1
     fleet="$(basename "$(dirname "$fy")")"

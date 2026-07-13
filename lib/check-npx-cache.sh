@@ -42,7 +42,8 @@ fi
 
 MCP_DIRS=("$MCP_DIR")
 if [ -n "$FLEET" ]; then
-    FLEET_MCP_DIR="$CLAUDLOBBY_ROOT/local/$FLEET/library/mcp"
+    _fleet_dir=$(resolve_fleet_dir "$FLEET") || _fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET"
+    FLEET_MCP_DIR="$_fleet_dir/library/mcp"
     [ -d "$FLEET_MCP_DIR" ] && MCP_DIRS+=("$FLEET_MCP_DIR")
 fi
 

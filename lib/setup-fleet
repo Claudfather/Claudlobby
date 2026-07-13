@@ -39,7 +39,9 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install_error_trap ""
 
 if [ -n "$FLEET" ]; then
-    FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
+    # Flat local/<fleet> resolves byte-identically; nested local/<system>/<fleet>
+    # resolves too. Everything below (FLEET_YAML/BOTS_DIR/TIMERS_DIR) hangs off this.
+    FLEET_DIR=$(resolve_fleet_dir "$FLEET") || FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
     FLEET_LABEL="$FLEET"
 else
     FLEET_DIR="$CLAUDLOBBY_ROOT"

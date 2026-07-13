@@ -45,9 +45,12 @@ done
 
 # Resolve fleet directories
 if [ -n "$FLEET" ]; then
-    FLEET_DIRS=("$CLAUDLOBBY_ROOT/local/$FLEET")
+    _fleet_dir=$(resolve_fleet_dir "$FLEET") || _fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET"
+    FLEET_DIRS=("$_fleet_dir")
 else
-    FLEET_DIRS=("$CLAUDLOBBY_ROOT"/local/*)
+    # Both depths: flat local/<fleet> AND nested local/<system>/<fleet>. The
+    # per-dir runtime/bots guard below drops containers + flat-fleet subdirs.
+    FLEET_DIRS=("$CLAUDLOBBY_ROOT"/local/* "$CLAUDLOBBY_ROOT"/local/*/*)
 fi
 
 _found=0

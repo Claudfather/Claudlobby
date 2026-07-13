@@ -991,6 +991,62 @@ PY
     fi
 fi
 
+# ===========================================================================
+# Nested-fleet supervision (#602 P2 slice 2). The recursive-containment vault
+# may nest a fleet one level under a system container:
+#     flat    local/<fleet>/...            (the live Pi today — must stay identical)
+#     nested  local/<system>/<fleet>/...   (opt-in; the container has no fleet.yaml)
+# This proves the bash supervision layer resolves + health-checks a NESTED bot
+# end-to-end, WITHOUT disturbing the flat path (the byte-identical invariant).
+# ===========================================================================
+echo ""
+echo "=== validate #602 P2: nested-fleet resolution + supervision ==="
+
+NSYS="valsys"; NF="valnest"; NBOT="valnestbot"
+NF_DIR="$ROOT/local/$NSYS/$NF"
+NF_BOTS="$NF_DIR/runtime/bots"
+mkdir -p "$NF_BOTS/$NBOT/data"
+cat > "$NF_DIR/fleet.yaml" <<YAML
+fleet:
+  name: $NF
+  bots:
+    $NBOT:
+      expertise: [software-engineering]
+YAML
+cat > "$NF_BOTS/$NBOT/bot.conf" <<CONF
+BOT_NAME="$NBOT"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+
+# Direct resolver assertions run in THIS shell (lib-common sourced at the top),
+# so point CLAUDLOBBY_ROOT at the throwaway root for the duration, then restore.
+_prev_root="${CLAUDLOBBY_ROOT:-}"
+CLAUDLOBBY_ROOT="$ROOT"
+
+[ "$(resolve_fleet_dir "$NF")" = "$NF_DIR" ] && r=yes || r=no
+check "#602 resolve_fleet_dir finds a fleet nested under a system container" "$r"
+
+[ "$(resolve_bots_dir "$NF")" = "$NF_BOTS" ] && r=yes || r=no
+check "#602 resolve_bots_dir returns the nested runtime/bots" "$r"
+
+host_bots_dirs | grep -qxF "$NF_BOTS" && r=yes || r=no
+check "#602 host_bots_dirs enumerates the nested bots dir" "$r"
+
+# Byte-identical invariant: the FLAT valfleet must STILL resolve flat, unchanged.
+[ "$(resolve_fleet_dir "$FLEET")" = "$ROOT/local/$FLEET" ] && r=yes || r=no
+check "#602 flat fleet STILL resolves flat (byte-identical invariant holds)" "$r"
+
+CLAUDLOBBY_ROOT="$_prev_root"
+
+# End-to-end: the REAL fleet-pulse supervision script must find + health-check
+# the nested bot (no live session -> session_missing), proving resolve_bots_dir
+# and the nested fleet.yaml discovery both fire through a production script.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$NF" >/dev/null 2>&1 || true
+nbot_ev=$(ls "$NF_BOTS/$NBOT/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+[ -n "$nbot_ev" ] && grep -q '"type":"session_missing"' "$nbot_ev" && r=yes || r=no
+check "#602 fleet-pulse health-checks a bot in a NESTED fleet (session_missing fired)" "$r"
+
 echo ""
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

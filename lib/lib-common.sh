@@ -187,9 +187,11 @@ source_env_tiered() {
         echo "DEPRECATED: $CLAUDLOBBY_ROOT/.env detected — move secrets to ~/.env or local/<fleet>/.env" >&2
         parse_env_file "$CLAUDLOBBY_ROOT/.env"
     fi
-    # Fleet
+    # Fleet — flat local/<fleet>/.env byte-identically, or the nested fleet dir.
     if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
-        local fleet_env="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/.env"
+        local fleet_dir fleet_env
+        fleet_dir=$(resolve_fleet_dir "$FLEET_NAME") || fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_NAME"
+        fleet_env="$fleet_dir/.env"
         [ -f "$fleet_env" ] && parse_env_file "$fleet_env"
     fi
     # Bot
@@ -592,6 +594,11 @@ tmux_socket_for_bot() {
 _resolve_cross_fleet_bot_dir() {
     local session="$1" d matches=()
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots/"$session"; do
+        [ -d "$d" ] && matches+=("$d")
+    done
+    # Nested vault: a fleet under a system container is one level deeper. The
+    # [ -d ] guard drops the literal glob when nothing matches (flat = additive).
+    for d in "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots/"$session"; do
         [ -d "$d" ] && matches+=("$d")
     done
     case ${#matches[@]} in
@@ -1054,6 +1061,27 @@ df_pcent() {
 
 # --- Fleet path resolution ---------------------------------------------------
 
+# resolve_fleet_dir <fleet> — echo the fleet overlay dir, flat OR nested.
+# Flat local/<fleet>/ wins (byte-identical to pre-nesting). Else the unique
+# local/<system>/<fleet>/ carrying a fleet.yaml (one level under a container).
+# Marker-agnostic: a fleet is a dir with fleet.yaml. Empty output + nonzero if
+# none. The bash twin of Python paths._find_fleet_dir — the ONE home for the
+# flat-vs-nested rule every supervision path routes through.
+resolve_fleet_dir() {
+    local fleet="$1" root="${CLAUDLOBBY_ROOT:?}" flat d
+    flat="$root/local/$fleet"
+    # Flat wins first — byte-identical: a bare dir resolves (scaffolding relies on it).
+    if [ -d "$flat" ]; then printf '%s\n' "$flat"; return 0; fi
+    # Nested: the unique local/<system>/<fleet>/ that carries a fleet.yaml.
+    local match="" n=0
+    for d in "$root"/local/*/"$fleet"; do
+        [ -f "$d/fleet.yaml" ] || continue
+        match="$d"; n=$((n+1))
+    done
+    if [ "$n" -eq 1 ]; then printf '%s\n' "$match"; return 0; fi
+    return 1   # none, or ambiguous (F5 — caller decides; keep flat-first semantics)
+}
+
 # shellcheck disable=SC2120  # fleet arg is optional by design (env fallback);
 # tmux_socket_for_session calls it argless, other-file callers pass a fleet.
 resolve_bots_dir() {
@@ -1061,8 +1089,12 @@ resolve_bots_dir() {
     # Usage: BOTS_DIR=$(resolve_bots_dir [fleet-name])
     # Falls back to CLAUDLOBBY_FLEET / FLEET_NAME env vars, then root-mode runtime/bots.
     local fleet="${1:-${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}}"
+    local fleet_dir
     if [ -n "$fleet" ]; then
-        printf '%s' "$CLAUDLOBBY_ROOT/local/$fleet/runtime/bots"
+        # resolve_fleet_dir returns local/<fleet> for flat (byte-identical) or the
+        # nested local/<system>/<fleet>; flat fallback keeps the pre-create path.
+        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+        printf '%s' "$fleet_dir/runtime/bots"
     else
         printf '%s' "$CLAUDLOBBY_ROOT/runtime/bots"
     fi
@@ -1075,8 +1107,10 @@ resolve_bots_dir() {
 # Usage: DIR=$(fleet_runtime_dir [fleet-name])
 fleet_runtime_dir() {
     local fleet="${1:-${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}}"
+    local fleet_dir
     if [ -n "$fleet" ]; then
-        printf '%s' "$CLAUDLOBBY_ROOT/local/$fleet/runtime"
+        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+        printf '%s' "$fleet_dir/runtime"
     else
         printf '%s' "$CLAUDLOBBY_ROOT/runtime/fleet"
     fi
@@ -1093,6 +1127,11 @@ host_bots_dirs() {
     local d
     [ -d "$CLAUDLOBBY_ROOT/runtime/bots" ] && printf '%s\n' "$CLAUDLOBBY_ROOT/runtime/bots"
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
+        [ -d "$d" ] && printf '%s\n' "$d"
+    done
+    # Nested vault: a fleet under a system container is one level deeper. The
+    # [ -d ] guard drops the literal glob when nothing matches (flat = additive).
+    for d in "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots; do
         [ -d "$d" ] && printf '%s\n' "$d"
     done
     return 0
@@ -1192,7 +1231,7 @@ resolve_timer_unit() {
             echo "$caller: pass a fleet name, set CLAUDLOBBY_FLEET, or set TIMER_DIR" >&2
             return 2
         fi
-        fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
         TIMER_DIR="$fleet_dir/runtime/fleet/timers"
     fi
     if [ ! -d "$TIMER_DIR" ]; then
@@ -1384,6 +1423,14 @@ first_bot_with_conf_any_fleet() {
         return 0
     fi
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
+        [ "$d" = "$bots_dir" ] && continue
+        if first_bot_with_conf "$d" "$key"; then
+            return 0
+        fi
+    done
+    # Nested vault: a fleet under a system container is one level deeper.
+    # first_bot_with_conf guards a nonexistent dir, so the literal glob is inert.
+    for d in "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots; do
         [ "$d" = "$bots_dir" ] && continue
         if first_bot_with_conf "$d" "$key"; then
             return 0

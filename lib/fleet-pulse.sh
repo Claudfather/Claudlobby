@@ -23,6 +23,9 @@ if [ ! -d "$BOTS_DIR" ]; then
     echo "fleet-pulse: bots directory not found: $BOTS_DIR" >&2
     exit 1
 fi
+# Fleet overlay dir (flat local/<fleet> byte-identically, or nested
+# local/<system>/<fleet>) — the home for fleet.yaml + the report ledger below.
+fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
 
 # fleet.yaml is authoritative for which bots this fleet owns. Filter the
 # runtime-dir glob through it so stale/cross-fleet residue dirs (e.g. a bot
@@ -30,7 +33,7 @@ fi
 # health-checked — that mismatch produced false service_down + pane_stuck.
 # Empty list (no/unreadable fleet.yaml, e.g. root-mode) → bot_in_fleet returns
 # "declared" for every dir, so the sweep falls back to scanning all of them.
-declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$fleet/fleet.yaml")
+declared_bots=$(parse_fleet_bots "$fleet_dir/fleet.yaml")
 
 install_error_trap ""
 
@@ -45,8 +48,8 @@ mkdir -p "$state_dir"
 # worker-written report ledger (overlay path first, root fallback — matches
 # report-back.sh). The overdue matcher cross-references them per bot.
 dispatch_log="${CLAUDLOBBY_ROOT}/state/dispatch-log.jsonl"
-if [ -d "${CLAUDLOBBY_ROOT}/local/${fleet}/runtime" ]; then
-    report_ledger="${CLAUDLOBBY_ROOT}/local/${fleet}/runtime/report-back.jsonl"
+if [ -d "$fleet_dir/runtime" ]; then
+    report_ledger="$fleet_dir/runtime/report-back.jsonl"
 else
     report_ledger="${CLAUDLOBBY_ROOT}/runtime/fleet/report-back.jsonl"
 fi

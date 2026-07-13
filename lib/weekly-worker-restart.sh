@@ -53,7 +53,8 @@ fi
 # spin-up-bot.sh would otherwise re-enroll + restart a bot the fleet no longer
 # declares, resurrecting cross-fleet orphan residue. Empty list (no/unreadable
 # fleet.yaml) → bot_in_fleet treats every dir as declared, preserving prior behavior.
-declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET/fleet.yaml")
+_wr_fleet_dir=$(resolve_fleet_dir "$FLEET") || _wr_fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET"
+declared_bots=$(parse_fleet_bots "$_wr_fleet_dir/fleet.yaml")
 
 echo "$ts RESTART starting weekly worker-only bounce: $FLEET" >> "$LOG"
 restarted=0; skipped=0; failed=0
