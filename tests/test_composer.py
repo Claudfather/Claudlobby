@@ -2515,6 +2515,17 @@ class TestPermissionMode:
         assert "--permission-mode acceptEdits" in conf
         assert "--dangerously-skip-permissions" not in conf
 
+    def test_permission_mode_wins_when_both_set(self, tmp_path):
+        # Behavior 2: an explicit permission_mode takes precedence over an explicit
+        # dangerously_skip_permissions when BOTH are set. Kills the if/elif
+        # order-swap mutation — every other permission_mode test leaves
+        # dangerously_skip at the default False, so only this one sets both.
+        conf = self._compose(
+            tmp_path, permission_mode="plan", dangerously_skip_permissions=True
+        )
+        assert "--permission-mode plan" in conf
+        assert "--dangerously-skip-permissions" not in conf
+
     def test_invalid_permission_mode_raises(self):
         from claudlobby.config import _parse_enum
         from claudlobby.known_values import VALID_PERMISSION_MODES
