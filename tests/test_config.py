@@ -95,7 +95,10 @@ class TestCoerceBot:
         assert bot.account == "default"
         assert bot.model is None
         assert bot.remote_control is True
-        assert bot.dangerously_skip_permissions is True
+        # Conservative default: a bot that opts into nothing is NOT dangerous —
+        # the composer turns this (no permission_mode + no skip) into acceptEdits.
+        assert bot.dangerously_skip_permissions is False
+        assert bot.permission_mode is None
         assert bot.prompt_suggestions is False
         assert bot.disable_nonessential_traffic is True
         assert bot.spinner_tips_enabled is False

@@ -211,14 +211,15 @@ fleet:
 #     # Multi-bot fleets should set bench: true on exactly one bot.
 #     bench: true
 #
-#     # permission_mode — Claude Code --permission-mode flag (default: unset)
+#     # permission_mode — Claude Code --permission-mode flag (default: unset → acceptEdits)
 #     # Values: default, acceptEdits, bypassPermissions, plan, dontAsk, auto
 #     # When set, overrides dangerously_skip_permissions. Preferred for fleet use.
 #     permission_mode: auto
 #
-#     # dangerously_skip_permissions — legacy flag (default: true)
-#     # Ignored when permission_mode is set. Use permission_mode instead.
-#     dangerously_skip_permissions: false
+#     # dangerously_skip_permissions — explicit opt-in to --dangerously-skip-permissions
+#     # (default: false). Bypasses ALL permission prompts and the allow/deny lists.
+#     # Ignored when permission_mode is set; with neither set the default is acceptEdits.
+#     dangerously_skip_permissions: true
 #
 #     # remote_control — enable --remote-control flag (default: true)
 #     # Allows dispatch via tmux send-keys. Disable for standalone bots.

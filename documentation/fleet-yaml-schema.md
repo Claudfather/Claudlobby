@@ -114,7 +114,7 @@ fleet:
         chat_id: "<override>"
       startup_prompt: <string>
       bench: true | false                 # OPTIONAL — benchmarking target (default: false)
-      dangerously_skip_permissions: true | false  # OPTIONAL — skip permission prompts (default: true)
+      dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
       remote_control: true | false        # OPTIONAL — enable --remote-control (default: true)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
@@ -391,7 +391,7 @@ Boolean (default `false`). Marks this bot as the fleet's benchmarking target for
 
 ### `bots.<name>.permission_mode`
 
-String (default `null`). Sets the `--permission-mode` flag on the Claude Code CLI, providing more granular control than `dangerously_skip_permissions`. When set, this field takes precedence over `dangerously_skip_permissions`.
+String (default `null`). Sets the `--permission-mode` flag on the Claude Code CLI, providing more granular control than `dangerously_skip_permissions`. When set, this field takes precedence over `dangerously_skip_permissions`. When **neither** this nor `dangerously_skip_permissions` is set, the compositor emits a conservative default of `--permission-mode acceptEdits` — edits are auto-accepted while the composed allow/deny lists are still enforced.
 
 Valid values:
 
@@ -408,7 +408,7 @@ Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
 
 ### `bots.<name>.dangerously_skip_permissions`
 
-Boolean (default `true`). Controls whether the bot runs with `--dangerously-skip-permissions`, which skips tool-call permission prompts. Set to `false` for bots that should require human approval before executing tools. Superseded by `permission_mode` when both are set. Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
+Boolean (default `false`). Set to `true` to run the bot with `--dangerously-skip-permissions`, which bypasses all tool-call permission prompts **and** the composed allow/deny lists. This is an explicit opt-in: when neither this nor `permission_mode` is set, the compositor's conservative default is `--permission-mode acceptEdits`, which is headless-safe without bypassing the permission lists. Superseded by `permission_mode` when both are set. Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
 
 ### `bots.<name>.remote_control`
 
