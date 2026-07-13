@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 from ..composer import compose_bot
-from ..paths import Paths, tmux_socket_for_bot
+from ..paths import Paths, _find_fleet_dir, _iter_fleet_dirs, tmux_socket_for_bot
 from ._helpers import _load_env, _load_fleet_or_exit, _validation_gate
 
 log = logging.getLogger("claudlobby")
@@ -34,22 +34,29 @@ def cmd_move_bot(args) -> int:
         return 1
 
     # --- Auto-detect source fleet ---
+    # Fleets resolve at flat (local/<fleet>/) OR nested
+    # (local/<system>/<fleet>/) depth throughout.
     source_fleet_name = getattr(args, "from_fleet", None)
     if source_fleet_name:
-        src_bot_dir = local_dir / source_fleet_name / "runtime" / "bots" / bot_name
-        if not src_bot_dir.is_dir():
+        try:
+            src_fleet_dir = _find_fleet_dir(local_dir, source_fleet_name)
+        except ValueError as e:
+            log.error("%s", e)
+            return 1
+        src_bot_dir = (
+            src_fleet_dir / "runtime" / "bots" / bot_name if src_fleet_dir else None
+        )
+        if src_bot_dir is None or not src_bot_dir.is_dir():
             log.error(
                 "bot '%s' not found in fleet '%s' at %s",
                 bot_name,
                 source_fleet_name,
-                src_bot_dir,
+                src_bot_dir or local_dir / source_fleet_name / "runtime" / "bots" / bot_name,
             )
             return 1
     else:
         candidates = []
-        for fleet_dir in sorted(local_dir.iterdir()):
-            if not fleet_dir.is_dir():
-                continue
+        for fleet_dir in _iter_fleet_dirs(local_dir):
             bot_dir = fleet_dir / "runtime" / "bots" / bot_name
             if bot_dir.is_dir() and (bot_dir / "bot.conf").is_file():
                 candidates.append((fleet_dir.name, bot_dir))
@@ -71,10 +78,16 @@ def cmd_move_bot(args) -> int:
         return 1
 
     # --- Verify target fleet has the bot stanza ---
-    target_fleet_dir = local_dir / target_fleet_name
-    if not target_fleet_dir.is_dir():
+    try:
+        target_fleet_dir = _find_fleet_dir(local_dir, target_fleet_name)
+    except ValueError as e:
+        log.error("%s", e)
+        return 1
+    if target_fleet_dir is None or not target_fleet_dir.is_dir():
         log.error(
-            "target fleet '%s' not found at %s", target_fleet_name, target_fleet_dir
+            "target fleet '%s' not found at %s",
+            target_fleet_name,
+            target_fleet_dir or local_dir / target_fleet_name,
         )
         return 1
     target_fleet_yaml = target_fleet_dir / "fleet.yaml"

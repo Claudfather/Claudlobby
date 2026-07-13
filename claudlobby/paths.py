@@ -28,6 +28,7 @@ Vault integration:
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -128,6 +129,88 @@ def _resolve_vault_fleet(root: Path, fleet: str) -> tuple[Path | None, Path | No
     if (vault_fleet / "fleet.yaml").is_file():
         return vault_fleet, vault_path
     return None, None
+
+
+# --- nested-containment fleet enumeration (Claudlobby#602 P2) -----------------
+#
+# A vault may nest fleets one level under a ``<system>/`` container: flat
+# ``local/<fleet>/`` OR nested ``local/<system>/<fleet>/``. The rule is
+# marker-agnostic — Claudlobby needs no knowledge of the system marker: a
+# *fleet* is a directory holding ``fleet.yaml``; a *container* is a depth-1 dir
+# with no ``fleet.yaml`` of its own. Both helpers below are the single place
+# that nested-awareness lives, so the four resolution sites (Paths.detect, the
+# --root CLI twin, the validator collision scan, move-bot) stay DRY.
+
+
+def _iter_fleet_dirs(local_dir: Path) -> Iterator[Path]:
+    """Yield candidate fleet overlay dirs under *local_dir*, flat AND nested.
+
+    Enumerates depth 1 (``local/<fleet>/``) and depth 2
+    (``local/<system>/<fleet>/`` — one level under a system container). Only
+    *containers* (depth-1 dirs with no ``fleet.yaml`` of their own) are
+    descended into; never past two levels.
+
+    Depth-1 dirs are always yielded, with no ``fleet.yaml`` gate — the
+    pre-nesting enumeration did not require one, and callers (the collision
+    scan, move-bot autodetect) already filter to real fleets via their own
+    ``runtime/bots`` / ``fleet.yaml`` checks. This keeps the flat case
+    byte-identical while making nested siblings visible.
+    """
+    if not local_dir.is_dir():
+        return
+    for entry in sorted(local_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        yield entry
+        if not (entry / "fleet.yaml").is_file():
+            for child in sorted(entry.iterdir()):
+                if child.is_dir():
+                    yield child
+
+
+def _find_fleet_dir(local_dir: Path, fleet: str) -> Path | None:
+    """Resolve a fleet *name* to its overlay dir, flat OR nested.
+
+    Flat (``local/<fleet>/``) is tried first and wins — byte-identical to the
+    pre-nesting behavior: a bare dir resolves even without a ``fleet.yaml``
+    (scaffolding and the existing suite rely on this). Otherwise the unique
+    ``local/<system>/<fleet>/`` that carries a ``fleet.yaml`` (one level under
+    a container) resolves. Returns None when the name is present at neither
+    depth.
+
+    Raises ``ValueError`` on an F5 global-unique-name violation: the same name
+    present as both a flat overlay and a nested fleet, or under two systems —
+    never silently pick one.
+    """
+    flat = local_dir / fleet
+    flat_match = flat if flat.is_dir() else None
+
+    nested_matches: list[Path] = []
+    if local_dir.is_dir():
+        for entry in sorted(local_dir.iterdir()):
+            # Containers only: a dir with a fleet.yaml is itself a flat fleet
+            # (handled by flat_match), not a system container to descend.
+            if not entry.is_dir() or (entry / "fleet.yaml").is_file():
+                continue
+            candidate = entry / fleet
+            if (candidate / "fleet.yaml").is_file():
+                nested_matches.append(candidate)
+
+    if flat_match and nested_matches:
+        raise ValueError(
+            f"fleet '{fleet}' resolves at two depths — flat ({flat_match}) and "
+            f"nested ({nested_matches[0]}); fleet names must be globally unique "
+            f"across the vault"
+        )
+    if len(nested_matches) > 1:
+        joined = ", ".join(str(m) for m in nested_matches)
+        raise ValueError(
+            f"fleet '{fleet}' resolves under multiple systems ({joined}); "
+            f"fleet names must be globally unique across the vault"
+        )
+    if flat_match:
+        return flat_match
+    return nested_matches[0] if nested_matches else None
 
 
 @dataclass(frozen=True)
@@ -389,7 +472,9 @@ class Paths:
 
         If `fleet` is given, first check ``.claudron`` config at claudlobby root
         for a vault path. If the vault contains a fleet overlay for *fleet*,
-        use that. Otherwise fall back to ``<root>/local/<fleet>/``.
+        use that. Otherwise fall back to ``local/`` — resolving the fleet at
+        flat (``<root>/local/<fleet>/``) OR nested
+        (``<root>/local/<system>/<fleet>/``) depth.
         """
         start = Path(hint or os.environ.get("CLAUDLOBBY_ROOT") or Path.cwd()).resolve()
         root = None
@@ -417,12 +502,13 @@ class Paths:
             # Try vault-based fleet resolution (.claudron bridge → claudron API)
             fleet_dir, vault_root = _resolve_vault_fleet(root, fleet)
 
-            # Fall back to local/<fleet>/
+            # Fall back to local/ — flat OR nested (one level under a container).
             if fleet_dir is None:
-                fleet_dir = root / "local" / fleet
-                if not fleet_dir.is_dir():
+                fleet_dir = _find_fleet_dir(root / "local", fleet)
+                if fleet_dir is None:
+                    flat = root / "local" / fleet
                     raise FileNotFoundError(
-                        f"Fleet overlay not found: {fleet_dir} (run `claudlobby new-fleet {fleet}` to scaffold)"
+                        f"Fleet overlay not found: {flat} (run `claudlobby new-fleet {fleet}` to scaffold)"
                     )
 
         return cls(root=root, fleet_dir=fleet_dir, vault_root=vault_root)

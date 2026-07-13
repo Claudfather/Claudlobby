@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .. import dotenv
 from ..config import load_fleet
-from ..paths import Paths
+from ..paths import Paths, _find_fleet_dir
 
 log = logging.getLogger("claudlobby")
 
@@ -25,12 +25,18 @@ def _resolve_paths(args) -> Paths:
         return Paths(root=root, seed=True)
     if args.root:
         root = Path(args.root).resolve()
-        fleet_dir = (root / "local" / fleet) if fleet else None
-        if fleet and fleet_dir and not fleet_dir.is_dir():
+        # Resolve the fleet at flat OR nested depth (local/<fleet>/ or
+        # local/<system>/<fleet>/), mirroring Paths.detect().
+        try:
+            fleet_dir = _find_fleet_dir(root / "local", fleet) if fleet else None
+        except ValueError as e:
+            log.error("%s", e)
+            sys.exit(1)
+        if fleet and fleet_dir is None:
             log.error(
                 "fleet overlay not found: %s — run `claudlobby new-fleet %s` to scaffold"
                 " (or remove --fleet to use root mode)",
-                fleet_dir,
+                root / "local" / fleet,
                 fleet,
             )
             sys.exit(1)
