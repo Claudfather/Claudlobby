@@ -1,6 +1,8 @@
 """Tests for lib/setup-system — cross-platform host bootstrap + host-job enrollment."""
 
+import json
 import os
+import re
 import subprocess
 
 import pytest
@@ -11,7 +13,7 @@ SCRIPT = os.path.join(REPO_ROOT, "lib", "setup-system")
 
 @pytest.fixture(scope="module")
 def dry_run():
-    """One --dry-run per module — the 9-phase script probes real tools."""
+    """One --dry-run per module — the 10-phase script probes real tools."""
     return subprocess.run(
         [SCRIPT, "--dry-run"], capture_output=True, text=True, timeout=30
     )
@@ -37,10 +39,41 @@ def test_setup_system_dry_run(dry_run):
 
 
 def test_setup_system_dry_run_reaches_host_jobs_phase(dry_run):
-    """The host-jobs phase runs in sequence (the 9-phase pipeline is intact)."""
+    """The host-jobs phase runs in sequence (the 10-phase pipeline is intact)."""
     assert dry_run.returncode == 0, f"stderr: {dry_run.stderr}"
-    assert "phase 8/9: host jobs" in dry_run.stdout
-    assert "phase 9/9: summary" in dry_run.stdout
+    assert "phase 9/10: host jobs" in dry_run.stdout
+    assert "phase 10/10: summary" in dry_run.stdout
+
+
+def test_setup_system_dry_run_reaches_managed_settings_phase(dry_run):
+    """The managed-settings phase runs in sequence and would write the approvals.
+
+    The approval list is inline in the script, so the phase always has
+    something to write; --dry-run must report the target + count and touch
+    nothing. The list's contents are checked by test_managed_channel_approvals.
+    """
+    assert dry_run.returncode == 0, f"stderr: {dry_run.stderr}"
+    assert "phase 7/10: managed settings" in dry_run.stdout
+    assert "would write" in dry_run.stdout
+    assert "channel-plugin approvals" in dry_run.stdout
+
+
+def test_managed_channel_approvals_lists_official_and_fork_telegram():
+    """The inline allowedChannelPlugins list is valid JSON and — because setting
+    it REPLACES claude-code's built-in ledger — must carry BOTH the official
+    marketplace (else official telegram de-approves) and the fork whose inbound
+    we are keeping alive."""
+    with open(SCRIPT, encoding="utf-8") as fh:
+        m = re.search(r"MANAGED_CHANNEL_APPROVALS='(\{.*\})'", fh.read())
+    assert m, "MANAGED_CHANNEL_APPROVALS assignment not found in setup-system"
+    payload = json.loads(m.group(1))
+    markets = {
+        e["marketplace"]
+        for e in payload["allowedChannelPlugins"]
+        if e["plugin"] == "telegram"
+    }
+    assert "claude-plugins-official" in markets
+    assert "claudfather-plugins" in markets
 
 
 def test_setup_system_has_help():
