@@ -100,4 +100,32 @@ got="$(resolve_fleet_dir web)"
 [ "$got" = "$ROOT/local/web" ] || fail "(e) resolve_fleet_dir web = '$got', want '$ROOT/local/web'"
 pass "(e) rollback restored flat local/web fully (incl runtime); resolve_fleet_dir web -> local/web"
 
-echo "PASS: all migrate-fleet-to-system file-op tests passed"
+# --- mfs_verify health gate: _mfs_not_healthy (M1 regression) -----------------
+# The pure helper the migration verify polls on — fed canned reconcile reports,
+# no real bots. Proves the false-GREEN fix: reconcile-fleet.sh has NO bucket for
+# a bot that is both down AND unsupervised, so orphan/missing read (none) while
+# it is dead; only a POSITIVE healthy-membership check catches it.
+_report() {  # <healthy> <orphan> <missing>
+    printf 'Fleet: web\n  healthy:  %s\n  orphan:   %s\n  missing:  %s\n  unbound: (none)\n' "$1" "$2" "$3"
+}
+
+[ -z "$(_mfs_not_healthy "b1 b2" "$(_report "b1 b2" "(none)" "(none)")")" ] \
+    || fail "(v1) all declared bots healthy should report none outstanding"
+pass "(v1) all declared bots in healthy -> none outstanding"
+
+got="$(_mfs_not_healthy "b1" "$(_report "(none)" "(none)" "(none)")")"
+[ "$got" = "b1" ] \
+    || fail "(v2) false-GREEN: a down+unsupervised bot (NO bucket, orphan/missing both none) must be flagged, got '$got'"
+pass "(v2) down+unsupervised bot (orphan/missing both none) -> caught not-healthy"
+
+got="$(_mfs_not_healthy "b1 b2 b3" "$(_report "b1 b2" "(none)" "(none)")")"
+[ "$got" = "b3" ] \
+    || fail "(v3) a not-yet-healthy tail bot (serial boot) must be reported, got '$got'"
+pass "(v3) tail bot not yet healthy -> reported (drives the settle-poll)"
+
+got="$(_mfs_not_healthy "b1" "$(_report "(none)" "b1" "(none)")")"
+[ "$got" = "b1" ] \
+    || fail "(v4) an orphan bot is NOT healthy, got '$got'"
+pass "(v4) orphan bot -> not-healthy (orphan != healthy)"
+
+echo "PASS: all migrate-fleet-to-system file-op + verify-gate tests passed"

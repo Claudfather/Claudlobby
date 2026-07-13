@@ -66,12 +66,17 @@ _mfs_ensure_marker() {
     } > "$marker"
 }
 
-# _mfs_stage <root>
-# Stage the tracked move in the vault git repo — do NOT commit. Best-effort:
-# a non-repo local/ (or a git that rejects) is benign and must not fail the move.
+# _mfs_stage <root> <fleet> <system>
+# Stage the tracked move in the vault git repo — do NOT commit, and scope the
+# pathspec to the affected fleet + system dirs ONLY. The real vault is one repo
+# holding every fleet plus _shared/; a bare add -A would sweep other fleets
+# uncommitted bot-written knowledge into the index, which the operator commit
+# then bundles into the migration. Best-effort: a non-repo local/ is benign.
 _mfs_stage() {
-    local root="${1:?Usage: _mfs_stage <root>}"
-    git -C "$root/local" add -A >/dev/null 2>&1 || true
+    local root="${1:?Usage: _mfs_stage <root> <fleet> <system>}"
+    local fleet="${2:?Usage: _mfs_stage <root> <fleet> <system>}"
+    local system="${3:?Usage: _mfs_stage <root> <fleet> <system>}"
+    git -C "$root/local" add -A -- "$fleet" "$system" >/dev/null 2>&1 || true
 }
 
 # _mfs_system_has_fleets <sysdir>
@@ -153,7 +158,7 @@ mfs_move_dir() {
     # Idempotent-safe: already nested (src gone, dst present) is success.
     if [ ! -d "$src" ] && [ -d "$dst" ]; then
         _mfs_ensure_marker "$sysdir"
-        _mfs_stage "$root"
+        _mfs_stage "$root" "$fleet" "$system"
         echo "migrate-fleet-to-system: already nested at '$dst' — no-op"
         return 0
     fi
@@ -168,18 +173,20 @@ mfs_move_dir() {
 
     local lock
     lock="$(_mfs_lock_path "$root" "$fleet")"
-    with_lock "$lock" _mfs_move_locked "$src" "$sysdir" "$dst" "$root"
+    with_lock "$lock" _mfs_move_locked "$src" "$sysdir" "$dst" "$root" "$fleet" "$system"
 }
 
-# _mfs_move_locked <src> <sysdir> <dst> <root>  (runs inside with_lock)
+# _mfs_move_locked <src> <sysdir> <dst> <root> <fleet> <system>  (in with_lock)
 _mfs_move_locked() {
-    local src="$1" sysdir="$2" dst="$3" root="$4"
-    mkdir -p "$sysdir"
+    local src="$1" sysdir="$2" dst="$3" root="$4" fleet="$5" system="$6"
+    mkdir -p "$sysdir" || return 1
     _mfs_ensure_marker "$sysdir"
     # PLAIN mv (not git mv): one atomic same-fs rename moves the tracked tree AND
-    # the gitignored runtime/ state+logs together — no husk left behind.
-    mv "$src" "$dst"
-    _mfs_stage "$root"
+    # the gitignored runtime/ state+logs together — no husk left behind. Guard the
+    # rename explicitly: the with_lock no-flock fallback suppresses set -e, so an
+    # unguarded mv failure would be masked and wrongly reported as a done move.
+    mv "$src" "$dst" || return 1
+    _mfs_stage "$root" "$fleet" "$system"
 }
 
 # mfs_rollback_dir <fleet> <system>
@@ -196,7 +203,7 @@ mfs_rollback_dir() {
 
     # Idempotent-safe: already flat (dst gone, flat present) is success.
     if [ ! -d "$dst" ] && [ -d "$flat" ]; then
-        _mfs_stage "$root"
+        _mfs_stage "$root" "$fleet" "$system"
         echo "migrate-fleet-to-system: already flat at '$flat' — no-op"
         return 0
     fi
@@ -211,20 +218,20 @@ mfs_rollback_dir() {
 
     local lock
     lock="$(_mfs_lock_path "$root" "$fleet")"
-    with_lock "$lock" _mfs_rollback_locked "$dst" "$flat" "$sysdir" "$root"
+    with_lock "$lock" _mfs_rollback_locked "$dst" "$flat" "$sysdir" "$root" "$fleet" "$system"
 }
 
-# _mfs_rollback_locked <dst> <flat> <sysdir> <root>  (runs inside with_lock)
+# _mfs_rollback_locked <dst> <flat> <sysdir> <root> <fleet> <system>  (in with_lock)
 _mfs_rollback_locked() {
-    local dst="$1" flat="$2" sysdir="$3" root="$4"
-    mv "$dst" "$flat"
+    local dst="$1" flat="$2" sysdir="$3" root="$4" fleet="$5" system="$6"
+    mv "$dst" "$flat" || return 1
     # Leave the container + marker for any OTHER fleets it still holds; remove
     # both only when it is empty of fleets, so the flat layout is restored exactly.
     if ! _mfs_system_has_fleets "$sysdir"; then
         rm -f "$sysdir/.claudron-system" 2>/dev/null || true
         rmdir "$sysdir" 2>/dev/null || true
     fi
-    _mfs_stage "$root"
+    _mfs_stage "$root" "$fleet" "$system"
 }
 
 # --- per-bot supervision teardown / re-enroll --------------------------------
@@ -329,37 +336,69 @@ mfs_reenroll_bots() {
 
 # --- verify ------------------------------------------------------------------
 
+# _mfs_not_healthy "<declared bots>" "<reconcile report>"
+# Echo the declared bots NOT present in the report healthy: line (space-listed;
+# empty = all healthy). PURE — unit-testable with a canned reconcile string.
+# This is the POSITIVE check: it does not trust orphan/missing being (none),
+# because reconcile-fleet.sh has NO bucket for a bot that is both down and
+# unsupervised (has_tmux=0 AND has_unit=0 falls through its if/elif/elif), so
+# such a bot is invisible to orphan/missing. Requiring presence in healthy is
+# the only gate that catches it.
+_mfs_not_healthy() {
+    local declared="$1" report="$2" healthy notyet="" b
+    healthy="$(printf '%s\n' "$report" | grep 'healthy:' | sed -e 's/.*healthy:[[:space:]]*//' | head -1)"
+    [ "$healthy" = "(none)" ] && healthy=""
+    for b in $declared; do
+        case " $healthy " in
+            *" $b "*) ;;
+            *) notyet="$notyet $b" ;;
+        esac
+    done
+    printf '%s' "${notyet# }"
+}
+
 # mfs_verify <fleet>
-# Reconcile the fleet and assert health: no orphan and no missing bots.
-# reconcile-fleet.sh exits 0 regardless of bucket contents, so we parse its
-# report rather than trust its exit code. On failure, emit a loud fleet alert
-# and return nonzero (the caller must NOT proceed).
+# Assert every DECLARED bot is HEALTHY, polling until they settle or a timeout.
+# Closes two failure modes of a one-shot orphan/missing==(none) check:
+#   * false-GREEN — a bot that never re-enrolled (down AND unsupervised) is in
+#     reconcile-fleet.sh no bucket, so orphan/missing read (none) while it is
+#     dead. _mfs_not_healthy requires the positive (present in healthy:).
+#   * false-RED — bots boot serially behind a per-bot boot-lock, so one
+#     zero-settle reconcile sees the tail as session-absent. Poll up to
+#     MFS_VERIFY_TIMEOUT_S (default 180) before declaring failure.
+# reconcile-fleet.sh exits 0 regardless of contents, so we parse its report.
 mfs_verify() {
     local fleet="${1:?Usage: mfs_verify <fleet>}"
-    local bots_dir out orphan_line missing_line ok
+    local timeout="${MFS_VERIFY_TIMEOUT_S:-180}" interval="${MFS_VERIFY_INTERVAL_S:-3}" waited=0
+    local fleet_dir fleet_yaml bots_dir declared out notyet
+    fleet_dir="$(resolve_fleet_dir "$fleet")" || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+    fleet_yaml="$fleet_dir/fleet.yaml"
     bots_dir="$(resolve_bots_dir "$fleet")"
+    declared="$(parse_fleet_bots "$fleet_yaml" 2>/dev/null | sort -u | tr '\n' ' ')"
 
-    out="$("$LIB_DIR/reconcile-fleet.sh" "$fleet" 2>&1)" || true
-    printf '%s\n' "$out"
-
-    orphan_line="$(printf '%s\n' "$out" | grep 'orphan:' || true)"
-    missing_line="$(printf '%s\n' "$out" | grep 'missing:' || true)"
-
-    ok=1
-    # Must positively see the healthy shape: both lines present AND (none).
-    [ -n "$orphan_line" ] || ok=0
-    [ -n "$missing_line" ] || ok=0
-    case "$orphan_line" in *'(none)'*) ;; *) ok=0 ;; esac
-    case "$missing_line" in *'(none)'*) ;; *) ok=0 ;; esac
-
-    if [ "$ok" -ne 1 ]; then
-        emit_failure_alert "$bots_dir" "migrate_verify_failed" \
-            "fleet '$fleet' migration verify FAILED — reconcile shows orphan/missing bots; do NOT proceed, inspect and roll back" || true
-        _mfs_die "verify failed for fleet '$fleet' — see reconcile output above"
-        return 1
+    if [ -z "${declared// /}" ]; then
+        echo "migrate-fleet-to-system: verify — fleet '$fleet' declares no bots (vacuously healthy)"
+        return 0
     fi
-    echo "migrate-fleet-to-system: verify OK — fleet '$fleet' healthy (no orphan/missing)"
-    return 0
+
+    while :; do
+        out="$("$LIB_DIR/reconcile-fleet.sh" "$fleet" 2>&1)" || true
+        notyet="$(_mfs_not_healthy "$declared" "$out")"
+        if [ -z "$notyet" ]; then
+            printf '%s\n' "$out"
+            echo "migrate-fleet-to-system: verify OK — every declared bot healthy for '$fleet'"
+            return 0
+        fi
+        if [ "$waited" -ge "$timeout" ]; then
+            printf '%s\n' "$out"
+            emit_failure_alert "$bots_dir" "migrate_verify_failed" \
+                "fleet '$fleet' verify FAILED after ${timeout}s — not healthy: $notyet. Bots may be down/unsupervised; inspect and roll back: --rollback $fleet" || true
+            _mfs_die "verify failed for '$fleet' — not healthy after ${timeout}s: $notyet"
+            return 1
+        fi
+        sleep "$interval"
+        waited=$((waited + interval))
+    done
 }
 
 # --- orchestration -----------------------------------------------------------
@@ -390,9 +429,12 @@ main() {
     esac
 
     local mode="forward"
-    if [ "${1:-}" = "--rollback" ]; then mode="rollback"; shift; fi
-    local fleet="${1:?Usage: migrate-fleet-to-system.sh [--rollback] <fleet> <system>}"
-    local system="${2:?Usage: migrate-fleet-to-system.sh [--rollback] <fleet> <system>}"
+    case "${1:-}" in
+        --rollback) mode="rollback"; shift ;;
+        --resume)   mode="resume";   shift ;;
+    esac
+    local fleet="${1:?Usage: migrate-fleet-to-system.sh [--rollback|--resume] <fleet> <system>}"
+    local system="${2:?Usage: migrate-fleet-to-system.sh [--rollback|--resume] <fleet> <system>}"
 
     if [ "$mode" = "forward" ]; then
         echo "== migrate-fleet-to-system: $fleet -> $system/$fleet =="
@@ -406,15 +448,38 @@ main() {
             return 1
         fi
         if ! _mfs_generate "$fleet"; then
-            _mfs_die "generate failed AFTER move — fleet is nested at local/$system/$fleet but not regenerated. Fix and re-run, or roll back: $0 --rollback $fleet $system"
+            _mfs_die "generate failed AFTER move — fleet is nested at local/$system/$fleet but not regenerated; bots are stopped. A forward re-run is refused (fleet is no longer flat) — complete it once fixed: $0 --resume $fleet $system   — or revert: $0 --rollback $fleet $system"
             return 1
         fi
         if ! mfs_reenroll_bots "$fleet"; then
-            _mfs_die "re-enroll failed AFTER move+generate — some bots not supervised. Re-run install-bot for the failed bot(s), or roll back: $0 --rollback $fleet $system"
+            _mfs_die "re-enroll failed AFTER move+generate — some bots not supervised. Retry forward: $0 --resume $fleet $system   — or revert: $0 --rollback $fleet $system"
             return 1
         fi
         mfs_verify "$fleet" || return 1
         echo "== DONE: $fleet migrated to $system/$fleet and re-enrolled =="
+        return 0
+    fi
+
+    if [ "$mode" = "resume" ]; then
+        # Complete a half-migrated fleet (dir already nested, bots not yet
+        # re-enrolled — e.g. a mid-migration death after the move). No move; just
+        # generate -> re-enroll -> verify. The forward path refuses this (preflight
+        # sees the fleet as non-flat), so --resume is the correct forward recovery.
+        echo "== RESUME: completing $system/$fleet (generate + re-enroll + verify; no move) =="
+        if [ ! -d "$CLAUDLOBBY_ROOT/local/$system/$fleet" ]; then
+            _mfs_die "resume: fleet is not nested at local/$system/$fleet — nothing to resume (run the forward migration first)"
+            return 1
+        fi
+        if ! _mfs_generate "$fleet"; then
+            _mfs_die "resume: generate failed — fix and re-run $0 --resume $fleet $system, or revert with --rollback"
+            return 1
+        fi
+        if ! mfs_reenroll_bots "$fleet"; then
+            _mfs_die "resume: re-enroll failed — re-run $0 --resume $fleet $system, or revert with --rollback"
+            return 1
+        fi
+        mfs_verify "$fleet" || return 1
+        echo "== RESUME DONE: $fleet fully migrated to $system/$fleet =="
         return 0
     fi
 
