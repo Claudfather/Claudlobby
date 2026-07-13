@@ -19,15 +19,16 @@
 #   - macOS Sonoma+ (arm64 / x86_64)
 #
 # Phases (each no-ops if its target is already in place):
-#   1. preflight      — OS/arch detection, repo root check
-#   2. packages       — package manager + core CLI tools (tmux, jq, gh)
-#   3. node           — node + npm; note bun availability
-#   4. python         — python3 3.10+ check, pip install claudlobby
-#   5. claude         — claude CLI + authentication check
-#   6. plugins        — Telegram plugin + Claudfather plugin
-#   7. systemd        — Linux only: linger + XDG_RUNTIME_DIR
-#   8. host-jobs      — compose + enroll system.yaml host.jobs timers
-#   9. report         — summary matrix + next steps
+#    1. preflight        — OS/arch detection, repo root check
+#    2. packages         — package manager + core CLI tools (tmux, jq, gh)
+#    3. node             — node + npm; note bun availability
+#    4. python           — python3 3.10+ check, pip install claudlobby
+#    5. claude           — claude CLI + authentication check
+#    6. plugins          — Telegram plugin + Claudfather plugin
+#    7. managed-settings — claude-code channel-plugin approvals (managed file)
+#    8. systemd          — Linux only: linger + XDG_RUNTIME_DIR
+#    9. host-jobs        — compose + enroll system.yaml host.jobs timers
+#   10. report           — summary matrix + next steps
 
 set -euo pipefail
 
@@ -74,7 +75,7 @@ NEXT_STEPS=()
 # 1. preflight — OS/arch detection, repo root check
 # ---------------------------------------------------------------------------
 phase_preflight() {
-    log "phase 1/8: preflight"
+    log "phase 1/10: preflight"
     local arch
     arch="$(uname -m)"
     if [ "$_OS" != "Darwin" ] && [ "$_OS" != "Linux" ]; then
@@ -121,7 +122,7 @@ ensure_brew_pkg() {
 }
 
 phase_packages() {
-    log "phase 2/8: package manager + core CLI tools"
+    log "phase 2/10: package manager + core CLI tools"
     if [ "$_OS" = "Linux" ]; then
         # Ensure apt cache is reasonably fresh
         if [ "$DRY_RUN" != 1 ]; then
@@ -166,7 +167,7 @@ phase_packages() {
 # 3. node — check for node; install if missing; note bun
 # ---------------------------------------------------------------------------
 phase_node() {
-    log "phase 3/8: node"
+    log "phase 3/10: node"
     local need_install=0
     if command -v node >/dev/null 2>&1; then
         local node_version node_major
@@ -213,7 +214,7 @@ phase_node() {
 # 4. python — ensure python3 3.10+, install claudlobby package
 # ---------------------------------------------------------------------------
 phase_python() {
-    log "phase 4/8: python"
+    log "phase 4/10: python"
     if ! command -v python3 >/dev/null 2>&1; then
         miss "python3 not found"
         PREREQ_MISSING+=("python3")
@@ -256,7 +257,7 @@ phase_python() {
 # 5. claude — CLI check + auth status
 # ---------------------------------------------------------------------------
 phase_claude() {
-    log "phase 5/8: claude CLI"
+    log "phase 5/10: claude CLI"
     local claude_bin=""
     if [ -x "$HOME/.local/bin/claude" ]; then
         claude_bin="$HOME/.local/bin/claude"
@@ -292,7 +293,7 @@ phase_claude() {
 # 6. plugins — Telegram + Claudfather
 # ---------------------------------------------------------------------------
 phase_plugins() {
-    log "phase 6/8: plugins"
+    log "phase 6/10: plugins"
     local claude_bin=""
     claude_bin="$(command -v claude 2>/dev/null)" || true
     if [ -z "$claude_bin" ]; then
@@ -331,14 +332,80 @@ phase_plugins() {
 }
 
 # ---------------------------------------------------------------------------
-# 7. systemd — Linux only: linger + XDG_RUNTIME_DIR
+# 7. managed-settings — claude-code channel-plugin approvals (managed file)
+# ---------------------------------------------------------------------------
+# WHY: claude-code gates channel-plugin INBOUND notification registration on an
+# allowlist compiled into the binary. The ONLY runtime override is
+# allowedChannelPlugins in MANAGED settings — project/user settings.json are
+# ignored for this key, and the env-path override is ignored for the top-level
+# session. So this managed file is the one surface that keeps a channel plugin
+# from a non-ledger marketplace (a fork, e.g. our prefer-live-holder telegram
+# fork) inbound-alive; without it, such a plugin silently goes deaf on every
+# session (re)start, including the daily reload.
+#
+# The approval list is INLINE, not fleet config: it is the fixed set of channel
+# marketplaces this claudlobby build ships for, and it changes only when that
+# set does (a code change, reviewed). Setting allowedChannelPlugins REPLACES
+# claude-code's built-in ledger wholesale, so the list MUST enumerate the
+# official marketplace too, never just the fork, or official channels get
+# de-approved. We deep-merge into the OS file (preserving unrelated managed
+# keys) and dedupe the list, so re-runs are byte-stable.
+MANAGED_CHANNEL_APPROVALS='{"allowedChannelPlugins":[{"marketplace":"claude-plugins-official","plugin":"telegram"},{"marketplace":"claudfather-plugins","plugin":"telegram"}]}'
+
+phase_managed_settings() {
+    log "phase 7/10: managed settings"
+
+    local dir target count
+    if [ "$_OS" = "Darwin" ]; then
+        dir="/Library/Application Support/ClaudeCode"
+    else
+        dir="/etc/claude-code"
+    fi
+    target="$dir/managed-settings.json"
+    count="$(printf '%s' "$MANAGED_CHANNEL_APPROVALS" | jq '.allowedChannelPlugins | length')"
+
+    if [ "$DRY_RUN" = 1 ]; then
+        printf 'setup-system: [dry-run] would write %s with %s channel-plugin approvals\n' "$target" "$count"
+        return
+    fi
+
+    # Idempotent merge: preserve any unrelated top-level keys already in the
+    # managed file (deep-merge via jq `*`), then set allowedChannelPlugins to
+    # the deduped union of existing + desired. `unique` sorts, so repeated runs
+    # converge on the same bytes. The file is root-owned -> read via sudo cat
+    # (absent -> treat as {}), write via the sudo-tee idiom.
+    local existing
+    existing="$(sudo cat "$target" 2>/dev/null || printf '{}')"
+    [ -n "$existing" ] || existing='{}'
+
+    local merged
+    if ! merged="$(jq -n --argjson existing "$existing" --argjson desired "$MANAGED_CHANNEL_APPROVALS" \
+        '$existing * $desired
+         | .allowedChannelPlugins = (
+             (($existing.allowedChannelPlugins // []) + $desired.allowedChannelPlugins)
+             | unique)')"; then
+        miss "managed settings merge failed (unparseable $target?) — left untouched"
+        NEXT_STEPS+=("Inspect $target for invalid JSON, then re-run lib/setup-system")
+        return
+    fi
+
+    local tmp
+    tmp="$(safe_mktemp)"
+    printf '%s\n' "$merged" > "$tmp"
+    sudo mkdir -p "$dir"
+    sudo tee "$target" >/dev/null < "$tmp"
+    ok "managed settings written: $target ($count channel-plugin approvals)"
+}
+
+# ---------------------------------------------------------------------------
+# 8. systemd — Linux only: linger + XDG_RUNTIME_DIR
 # ---------------------------------------------------------------------------
 phase_systemd() {
     if [ "$_OS" != "Linux" ]; then
-        log "phase 7/9: systemd (skipped — not Linux)"
+        log "phase 8/10: systemd (skipped — not Linux)"
         return
     fi
-    log "phase 7/9: systemd setup"
+    log "phase 8/10: systemd setup"
 
     # Check loginctl linger
     local linger_status=""
@@ -361,10 +428,10 @@ phase_systemd() {
 }
 
 # ---------------------------------------------------------------------------
-# 8. host-jobs — compose + enroll system.yaml host.jobs timers
+# 9. host-jobs — compose + enroll system.yaml host.jobs timers
 # ---------------------------------------------------------------------------
 phase_host_jobs() {
-    log "phase 8/9: host jobs"
+    log "phase 9/10: host jobs"
     local host_timers_dir="$CLAUDLOBBY_ROOT/runtime/_host/timers"
 
     # Compose first — host units are package-owned (system.yaml host.jobs) and
@@ -426,10 +493,10 @@ phase_host_jobs() {
 }
 
 # ---------------------------------------------------------------------------
-# 9. report — summary matrix + next steps
+# 10. report — summary matrix + next steps
 # ---------------------------------------------------------------------------
 phase_report() {
-    log "phase 9/9: summary"
+    log "phase 10/10: summary"
     local arch
     arch="$(uname -m)"
     echo
@@ -458,6 +525,7 @@ phase_node
 phase_python
 phase_claude
 phase_plugins
+phase_managed_settings
 phase_systemd
 phase_host_jobs
 phase_report

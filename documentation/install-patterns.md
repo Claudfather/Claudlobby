@@ -15,7 +15,7 @@ You can mix patterns across a fleet — e.g., bots on a Pi via cron, bots on a M
 ## Pattern 1 — macOS launchd
 
 ```bash
-# One-time host setup (idempotent, 9 phases incl. host-job enrollment)
+# One-time host setup (idempotent, 10 phases incl. channel-plugin approvals + host-job enrollment)
 lib/setup-system
 
 # Per-fleet apply+enroll: composed jobs + bots + reconcile (idempotent,
