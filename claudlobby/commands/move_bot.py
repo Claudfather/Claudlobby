@@ -83,11 +83,11 @@ def cmd_move_bot(args) -> int:
     except ValueError as e:
         log.error("%s", e)
         return 1
-    if target_fleet_dir is None or not target_fleet_dir.is_dir():
+    if target_fleet_dir is None:
         log.error(
             "target fleet '%s' not found at %s",
             target_fleet_name,
-            target_fleet_dir or local_dir / target_fleet_name,
+            local_dir / target_fleet_name,
         )
         return 1
     target_fleet_yaml = target_fleet_dir / "fleet.yaml"
