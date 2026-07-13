@@ -1,59 +1,103 @@
 #!/bin/bash
-# File-op validation for lib/migrate-fleet-to-system.sh (Claudlobby #602 P3).
-# Proves the RISKY operations on plain throwaway dirs -- no bots, no generate,
-# no launchd: atomic whole-dir move carries the gitignored runtime/ (no husk),
-# the marker lands, resolve_fleet_dir tracks the move, and rollback is exact.
-# The full real-bot migration is validated LIVE in P4 (staged, per-bot).
-set -uo pipefail
-LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+# test_migrate_fleet_fileops.sh — file-op core of migrate-fleet-to-system.sh on
+# plain throwaway dirs (no bots, no services): move + no-husk + rollback + the
+# resolve_fleet_dir flat<->nested flip. Standalone; runs under macOS /bin/bash
+# (bash 3.2). Not collected by pytest (only test_*.py is). The full real-bot
+# migration is validated LIVE in P4 (staged, per-bot).
+set -euo pipefail
 
-pass=0; fail=0
-ok()   { printf '  PASS  %s\n' "$1"; pass=$((pass+1)); }
-no()   { printf '  FAIL  %s\n' "$1"; fail=$((fail+1)); }
-chk()  { if eval "$2"; then ok "$1"; else no "$1  [$2]"; fi; }
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-CLAUDLOBBY_ROOT="$(mktemp -d)"; export CLAUDLOBBY_ROOT
-trap 'rm -rf "$CLAUDLOBBY_ROOT"' EXIT
-L="$CLAUDLOBBY_ROOT/local"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+pass() { echo "  ok: $*"; }
 
-# --- a flat fleet with tracked config + a GITIGNORED runtime/ (as in prod) ---
-mkdir -p "$L/web/runtime/bots/b1/data" "$L/web/shared/knowledge"
-printf 'bots: {}\n'        > "$L/web/fleet.yaml"
-printf 'BOT_SERVICE=web-b1\n' > "$L/web/runtime/bots/b1/bot.conf"
-printf 'state\n'          > "$L/web/runtime/bots/b1/data/live.state"
-printf '# note\n'        > "$L/web/shared/knowledge/note.md"
-( cd "$L" && git init -q && printf '*/runtime/\n' > .gitignore \
-   && git add -A && git -c user.email=t@t -c user.name=t commit -qm init )
+# Throwaway vault root.
+ROOT="$(mktemp -d)"
+trap 'rm -rf "$ROOT"' EXIT
+export CLAUDLOBBY_ROOT="$ROOT"
 
-# runtime/ must be untracked (gitignored) -- the husk git mv would strand
-git -C "$L" status --porcelain web/runtime >/dev/null 2>&1
-chk "precondition: runtime/ is gitignored (untracked)" \
-    '[ -z "$(git -C "$L" ls-files web/runtime)" ]'
+# --- fixture: a FLAT fleet with tracked config + a gitignored runtime husk ----
+mkdir -p "$ROOT/local/web/runtime/bots/b1/data"
+mkdir -p "$ROOT/local/web/shared/knowledge"
+cat > "$ROOT/local/web/fleet.yaml" <<'YAML'
+fleet:
+  name: web
+bots:
+  b1:
+    expertise: [software-engineering]
+YAML
+echo "durable-note" > "$ROOT/local/web/shared/knowledge/note.md"
+# gitignored-style runtime state + a marker file to prove it moves too.
+echo "RUNTIME-STATE-MARKER" > "$ROOT/local/web/runtime/bots/b1/data/state.txt"
 
-# shellcheck source=/dev/null
-. "$LIB/migrate-fleet-to-system.sh"
+# Vault git repo: commit the tracked bits; gitignore runtime/ so it is UNTRACKED
+# (the exact husk a `git mv` would strand).
+(
+  cd "$ROOT/local"
+  git init -q
+  git config user.email t@e.st
+  git config user.name test
+  printf '%s\n' 'runtime/' > .gitignore
+  git add -A
+  git commit -qm 'seed flat web fleet (runtime/ untracked)'
+)
 
-echo "=== #602 P3: atomic move flat -> nested (carries gitignored runtime) ==="
-mfs_move_dir web sys1 >/dev/null
-chk "nested fleet.yaml present"                  '[ -f "$L/sys1/web/fleet.yaml" ]'
-chk "gitignored runtime/ state MOVED (no husk)"  '[ -f "$L/sys1/web/runtime/bots/b1/data/live.state" ]'
-chk "shared/ knowledge moved"                    '[ -f "$L/sys1/web/shared/knowledge/note.md" ]'
-chk "old flat path is GONE (nothing stranded)"   '[ ! -e "$L/web" ]'
-chk "system marker created"                      '[ -f "$L/sys1/.claudron-system" ]'
-chk "resolve_fleet_dir now finds nested"         '[ "$(resolve_fleet_dir web)" = "$L/sys1/web" ]'
+# Prove the runtime state really is untracked before we start.
+if ( cd "$ROOT/local" && git ls-files --error-unmatch web/runtime/bots/b1/data/state.txt >/dev/null 2>&1 ); then
+    fail "runtime state.txt is TRACKED — fixture wrong (should be gitignored/untracked)"
+fi
+pass "fixture: runtime/ is untracked (a real husk that git mv would strand)"
 
-echo "=== #602 P3: rollback is the exact inverse ==="
-mfs_rollback_dir web sys1 >/dev/null
-chk "flat fleet.yaml restored"                   '[ -f "$L/web/fleet.yaml" ]'
-chk "flat runtime/ state restored"              '[ -f "$L/web/runtime/bots/b1/data/live.state" ]'
-chk "nested path gone after rollback"            '[ ! -e "$L/sys1/web" ]'
-chk "empty system container removed"             '[ ! -e "$L/sys1" ]'
-chk "resolve_fleet_dir finds flat again"         '[ "$(resolve_fleet_dir web)" = "$L/web" ]'
+# --- source the tool (defines mfs_* WITHOUT running main) ---------------------
+# lib-common installs its own EXIT trap on source; re-assert ours afterwards so
+# the throwaway root is always cleaned (and still clean up lib-common's tmp).
+. "$REPO_ROOT/lib/migrate-fleet-to-system.sh"
+trap 'rm -rf "$ROOT"; _lc_cleanup 2>/dev/null || true' EXIT
 
-echo "=== #602 P3: preflight refuses an already-nested fleet ==="
-mfs_move_dir web sys1 >/dev/null
-chk "preflight rejects a non-flat fleet"         '! mfs_preflight web sys2 2>/dev/null'
-mfs_rollback_dir web sys1 >/dev/null
+# --- preflight PASSES on the flat fleet ---------------------------------------
+mfs_preflight web sys1 || fail "preflight rejected a valid flat fleet"
+pass "preflight: flat fleet accepted"
 
-printf '\n=== %d passed, %d failed ===\n' "$pass" "$fail"
-[ "$fail" -eq 0 ]
+# --- THE MOVE -----------------------------------------------------------------
+mfs_move_dir web sys1 >/dev/null || fail "mfs_move_dir returned nonzero"
+
+# (a) nested dir exists with fleet.yaml AND the gitignored runtime husk.
+[ -f "$ROOT/local/sys1/web/fleet.yaml" ] || fail "(a) sys1/web/fleet.yaml missing"
+[ -d "$ROOT/local/sys1/web/runtime/bots/b1/data" ] || fail "(a) runtime/bots/b1/data did not move"
+[ "$(cat "$ROOT/local/sys1/web/runtime/bots/b1/data/state.txt")" = "RUNTIME-STATE-MARKER" ] \
+    || fail "(a) runtime state content lost in the move"
+[ -f "$ROOT/local/sys1/web/shared/knowledge/note.md" ] || fail "(a) shared/knowledge/note.md did not move"
+pass "(a) nested sys1/web has fleet.yaml + gitignored runtime moved too (no husk)"
+
+# (b) the flat dir is entirely GONE — nothing stranded.
+[ ! -e "$ROOT/local/web" ] || fail "(b) local/web still exists — content stranded"
+pass "(b) local/web is gone — nothing stranded"
+
+# (c) the interim system marker exists.
+[ -f "$ROOT/local/sys1/.claudron-system" ] || fail "(c) .claudron-system marker missing"
+pass "(c) local/sys1/.claudron-system marker present"
+
+# (d) resolve_fleet_dir now returns the nested path.
+got="$(resolve_fleet_dir web)"
+[ "$got" = "$ROOT/local/sys1/web" ] || fail "(d) resolve_fleet_dir web = '$got', want '$ROOT/local/sys1/web'"
+pass "(d) resolve_fleet_dir web -> local/sys1/web"
+
+# preflight now REFUSES (fleet no longer flat).
+if mfs_preflight web sys1 2>/dev/null; then fail "preflight accepted an already-nested fleet"; fi
+pass "preflight: already-nested fleet refused"
+
+# --- ROLLBACK -----------------------------------------------------------------
+mfs_rollback_dir web sys1 >/dev/null || fail "mfs_rollback_dir returned nonzero"
+
+# (e) flat restored fully (incl runtime); nested gone; empty container cleaned.
+[ -f "$ROOT/local/web/fleet.yaml" ] || fail "(e) rollback did not restore fleet.yaml"
+[ "$(cat "$ROOT/local/web/runtime/bots/b1/data/state.txt")" = "RUNTIME-STATE-MARKER" ] \
+    || fail "(e) rollback lost the runtime state"
+[ -f "$ROOT/local/web/shared/knowledge/note.md" ] || fail "(e) rollback lost shared/knowledge"
+[ ! -e "$ROOT/local/sys1/web" ] || fail "(e) nested sys1/web still present after rollback"
+[ ! -e "$ROOT/local/sys1" ] || fail "(e) empty system container not cleaned up"
+got="$(resolve_fleet_dir web)"
+[ "$got" = "$ROOT/local/web" ] || fail "(e) resolve_fleet_dir web = '$got', want '$ROOT/local/web'"
+pass "(e) rollback restored flat local/web fully (incl runtime); resolve_fleet_dir web -> local/web"
+
+echo "PASS: all migrate-fleet-to-system file-op tests passed"
