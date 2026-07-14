@@ -276,13 +276,18 @@ done
 # (miss), never over-escalate.
 _rb_today=$(date +%Y-%m-%d)
 # Echo a bot's existing ledger file(s) across that span, oldest first so a
-# downstream `tail -1` still yields the chronologically latest event.
+# downstream `tail -1` still yields the chronologically latest event. An empty
+# result (bot emitted nothing in the span) is a normal state, not an error:
+# without the explicit return, a missing file on the span's last date makes the
+# failed `[ -f ]` the pipeline's exit status under pipefail, and the `$(...)`
+# assignment call sites abort the whole pulse via set -e (#610).
 _readback_efiles() {
     local _bd="$1" _d _f
     for _d in "$today" "$_rb_today"; do
         _f="$_bd/data/events/fleet-${_d}.jsonl"
         [ -f "$_f" ] && printf '%s\n' "$_f"
     done | sort -u
+    return 0
 }
 
 # --- Fleet-wide escalation: persistent critical events → Telegram -----------

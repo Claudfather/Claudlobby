@@ -1223,9 +1223,13 @@ resolve_timer_unit() {
 # extract_bot_conf_var FILE VAR_NAME
 # Extract a variable's value from a bot.conf file (strips 'export' prefix and quotes).
 # Usage: SERVICE_PREFIX="$(extract_bot_conf_var "$conf_file" SERVICE_PREFIX)"
+# An absent var is a normal state (empty output, exit 0): without the explicit
+# return, grep's no-match status becomes the pipeline's under pipefail and the
+# $(...) assignment call sites abort strict callers — same class as #610.
 extract_bot_conf_var() {
     local conf_file="$1" var_name="$2"
     grep -m1 "^export ${var_name}=" "$conf_file" | cut -d= -f2- | tr -d "'"
+    return 0
 }
 
 # --- Script error events ------------------------------------------------------

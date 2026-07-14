@@ -37,11 +37,12 @@ def read_fleet_events(root):
 
 def _scrubbed_env(**overrides):
     """os.environ minus the bot-session vars that would short-circuit chat
-    resolution (FLEET_PULSE_ESCALATION_CHAT_ID et al) or repoint the root."""
+    resolution (FLEET_PULSE_ESCALATION_CHAT_ID et al), repoint the root, or
+    reroute per-bot socket/identity resolution (BOT_*)."""
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET"))
+        if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET", "BOT_"))
     }
     env.update(overrides)
     return env
