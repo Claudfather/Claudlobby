@@ -8,12 +8,11 @@ semantics live with the matcher: tests/test_dispatch_overdue.py.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
 
-from tests.conftest import dispatch_row as _dispatch
+from tests.conftest import _scrubbed_env, dispatch_row as _dispatch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_DIR = REPO_ROOT / "lib"
@@ -22,11 +21,15 @@ TASK_ID_RE = re.compile(r"^t-[0-9]+-[0-9a-f]{4}$")
 
 
 def _bash(script: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    # Build the subprocess env from the scrubbed base so an inherited
+    # FLEET_NAME / CLAUDLOBBY_* / BOT_* / TELEGRAM* (leaked from a live bot
+    # session) can't reroute the script's path resolution — hermetic
+    # regardless of the runner's env. Tests supply what they need via `env`.
     return subprocess.run(
         ["bash", "-c", script],
         capture_output=True,
         text=True,
-        env={**os.environ, **(env or {})},
+        env=_scrubbed_env(**(env or {})),
         timeout=10,
     )
 
@@ -88,9 +91,7 @@ def test_dispatch_task_mints_ledgers_and_envelopes(tmp_path):
         tmp_path,
         f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n',
     )
-    r = _bash(
-        f'"{libdir}/dispatch-task.sh" --botcommand w1 "fix the widget"', env=env
-    )
+    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "fix the widget"', env=env)
     assert r.returncode == 0, r.stderr
     row = json.loads(
         (tmp_path / "state" / "dispatch-log.jsonl").read_text().splitlines()[-1]
@@ -117,8 +118,7 @@ def test_report_back_echoes_task_id_to_ledger(tmp_path):
         "TMUX_BIN": "/usr/bin/true",
     }
     r = _bash(
-        f'"{LIB_DIR}/report-back.sh" w1 completed "widget shipped" '
-        f"--task t-123-abcd",
+        f'"{LIB_DIR}/report-back.sh" w1 completed "widget shipped" --task t-123-abcd',
         env=env,
     )
     assert r.returncode == 0, r.stderr
