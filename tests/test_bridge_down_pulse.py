@@ -39,7 +39,9 @@ def _bridge_down_state(bot_dir: Path, home: Path, grace: int = 300) -> tuple[str
     return proc.stdout.strip(), proc.returncode
 
 
-def _write_bot_conf(bot_dir, *, handle="b1", state_dir=None, token_env=None):
+def _write_bot_conf(
+    bot_dir, *, handle="b1", state_dir=None, token_env=None, expect_no_token=False
+):
     """Minimal bot.conf. The token VALUE is never written here — bot.conf only
     names the var via TELEGRAM_TOKEN_ENV_NAME (as composer does)."""
     bot_dir.mkdir(parents=True, exist_ok=True)
@@ -54,6 +56,8 @@ def _write_bot_conf(bot_dir, *, handle="b1", state_dir=None, token_env=None):
         lines.append(f'TELEGRAM_STATE_DIR="{state_dir}"')
     if token_env is not None:
         lines.append(f"export TELEGRAM_TOKEN_ENV_NAME={token_env}")
+    if expect_no_token:
+        lines.append("export EXPECT_NO_TOKEN=1")
     (bot_dir / "bot.conf").write_text("\n".join(lines) + "\n")
 
 
@@ -118,3 +122,22 @@ def test_past_grace_alerts(tmp_path):
     out, rc = _bridge_down_state(bot, tmp_path, grace=300)
     assert out == "no_token"
     assert rc == 0
+
+
+def test_no_token_canary_marker_not_actionable(tmp_path):
+    """#608: a declared throwaway (EXPECT_NO_TOKEN=1) has no token by design, so
+    fleet-pulse must NOT count it as bridge_down — no alert. Same setup as
+    test_past_grace_alerts (past grace, so the grace window is not what suppresses)
+    except for the marker: it is the marker, not timing, that exempts it."""
+    bot = tmp_path / "bots" / "b1"
+    _write_bot_conf(
+        bot,
+        handle="b1",
+        state_dir=tmp_path / "state",
+        token_env="B1_TG_TOKEN",
+        expect_no_token=True,
+    )
+    _set_spawn(bot, age_seconds=1000)
+    out, rc = _bridge_down_state(bot, tmp_path, grace=300)
+    assert out == ""
+    assert rc != 0

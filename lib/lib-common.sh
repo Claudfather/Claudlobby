@@ -363,6 +363,19 @@ resolve_bot_telegram_token() {
     ) || true
 }
 
+# bot_expects_no_token <bot_dir>
+# True when a bot intentionally runs WITHOUT a Telegram token — a canary or
+# throwaway spun to exercise a boot/reaper path, not a real channel bot. Marked
+# by EXPECT_NO_TOKEN=1 in its bot.conf. A missing token is a genuine fault for a
+# real bot (unmarked — the no_token alert still fires) but the declared, expected
+# state for a throwaway, where that same alert is pure bring-up noise. Read from
+# bot.conf via bot_conf_get (not the process env) so the verdict is identical in
+# fleet-pulse, which classifies bots without sourcing any bot.conf.
+bot_expects_no_token() {
+    local bot_dir="${1:?Usage: bot_expects_no_token /path/to/bot/dir}"
+    [ "$(bot_conf_get "$bot_dir" EXPECT_NO_TOKEN "")" = "1" ]
+}
+
 bridge_state() {
     local bot_dir="${1:?Usage: bridge_state /path/to/bot/dir}"
     local handle state_dir token pidfile pid comm ppid pcomm environ args psline _anc _hop
@@ -457,6 +470,8 @@ bridge_state() {
 #   up | no_handle | unknown  -> print nothing, return 1    (no alert)
 # `unknown` is never actionable: bridge_state emits it when ownership is
 # unprovable (unreadable /proc, non-Linux) and must not be healed OR alerted.
+# no_token is likewise not actionable for a bot that declares EXPECT_NO_TOKEN=1
+# (a canary/throwaway with no token by design) — it collapses to no-alert.
 #
 # Grace is measured from the data/.spawn marker (touched on every start-bot.sh
 # (re)start). A missing marker means no grace — a long-lived bot with a genuinely
@@ -474,7 +489,12 @@ bridge_down_state() {
 
     state="$(bridge_state "$bot_dir" 2>/dev/null || true)"
     case "$state" in
-        no_bridge | no_token) printf '%s' "$state"; return 0 ;;
+        no_token)
+            # Exempt a declared throwaway (EXPECT_NO_TOKEN=1, per the header note);
+            # real bots (no marker) still surface as no_token for the caller to alert.
+            bot_expects_no_token "$bot_dir" && return 1
+            printf '%s' "$state"; return 0 ;;
+        no_bridge) printf '%s' "$state"; return 0 ;;
         *) return 1 ;; # up / no_handle / unknown -> not an actionable bridge_down
     esac
 }
@@ -528,9 +548,16 @@ bridge_bringup_verify() {
         no_handle)
             printf '%s' "no_handle" ;;
         no_token)
-            emit_failure_alert "$bots_dir" "bridge_down" \
-                "$bot_id Telegram bridge no_token at bring-up — token unset; escalate, cannot heal" || true
-            printf '%s' "missing:no_token" ;;
+            if bot_expects_no_token "$bot_dir"; then
+                # Declared throwaway/canary (EXPECT_NO_TOKEN=1): a missing token is
+                # its intended state, so this alert would be pure bring-up noise.
+                # A real bot never carries the marker and still escalates below.
+                printf '%s' "expected:no_token"
+            else
+                emit_failure_alert "$bots_dir" "bridge_down" \
+                    "$bot_id Telegram bridge no_token at bring-up — token unset; escalate, cannot heal" || true
+                printf '%s' "missing:no_token"
+            fi ;;
         unknown)
             printf '%s' "unknown" ;;
         *) # no_bridge (or an empty read) — a verified-dark bridge

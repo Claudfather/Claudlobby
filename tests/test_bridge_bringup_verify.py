@@ -95,6 +95,28 @@ def test_no_token_escalates_without_marker(tmp_path):
     assert alerts == 1
 
 
+def test_no_token_canary_marker_exempts(tmp_path):
+    """#608: a declared throwaway/canary (EXPECT_NO_TOKEN=1 in bot.conf) has no
+    token by design — the no_token bring-up alert would be pure noise, so it is
+    suppressed and the verdict is expected:no_token, not missing:no_token."""
+    bot = _mk_bot(tmp_path)
+    (bot / "bot.conf").write_text("export EXPECT_NO_TOKEN=1\n")
+    verdict, marker, alerts = _verify(bot, state="no_token", timeout=1)
+    assert verdict == "expected:no_token"
+    assert not marker
+    assert alerts == 0  # the whole point — no fleet alert for an intentional throwaway
+
+
+def test_no_token_marker_must_be_one(tmp_path):
+    """The marker is exact: EXPECT_NO_TOKEN=0 (or any non-1 value) is a real bot,
+    so a missing token still escalates — a stray 0 cannot silence a genuine fault."""
+    bot = _mk_bot(tmp_path)
+    (bot / "bot.conf").write_text("export EXPECT_NO_TOKEN=0\n")
+    verdict, marker, alerts = _verify(bot, state="no_token", timeout=1)
+    assert verdict == "missing:no_token"
+    assert alerts == 1
+
+
 def test_unknown_is_silent(tmp_path):
     """unknown = ownership unprovable (EACCES / non-Linux) — never actionable."""
     bot = _mk_bot(tmp_path)
