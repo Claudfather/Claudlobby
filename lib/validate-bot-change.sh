@@ -79,7 +79,7 @@ EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -819,6 +819,91 @@ check "#415 undeclared orphan dir emits ZERO pulse events (filtered via fleet.ya
 
 [ -n "$idlek_ev" ] && grep -q '"type":"pane_stuck"' "$idlek_ev" && r=no || r=yes
 check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard)" "$r"
+
+# ===========================================================================
+# #611 summary socket resolution + pane_stuck busy-guard (this PR).
+#   (a) #611: the SUMMARY must resolve the tmux socket the SAME way the main loop
+#       does (tmux_socket_for_bot), else a bot whose TMUX_SOCKET != BOT_SERVICE
+#       shows a false SESSION DOWN in the summary while the main loop sees it up.
+#   (b) pane_stuck must NOT fire on a WORKING bot: a fresh data/.last-tool-call
+#       (mid-tool-call) or an "esc to interrupt" pane (active turn / waiting on a
+#       subagent) is busy, not stuck.
+# ===========================================================================
+echo ""
+echo "=== validate #611 summary socket + pane_stuck busy-guard (this PR) ==="
+
+# (a) #611 repro: TMUX_SOCKET points at the live server, BOT_SERVICE is a
+#     DIFFERENT string. The shadow tmux() puts the session on tmux-valsock.
+SOCKB="valsock"
+mkdir -p "$F2_BOTS/$SOCKB/data"
+cat > "$F2_BOTS/$SOCKB/bot.conf" <<CONF
+BOT_NAME="$SOCKB"
+BOT_SERVICE="com.diverge.$SOCKB"
+TMUX_SOCKET="tmux-$SOCKB"
+MANAGER_TMUX="$MGR"
+CONF
+tmux new-session -d -s "$SOCKB" 'printf "\n> \n"; sleep 600'
+
+# (b) pane_stuck busy repros: BUSYM = fresh .last-tool-call (mid-tool-call),
+#     BUSYP = "esc to interrupt" pane (active turn). Both static + backdated.
+BUSYM="valbusym"; BUSYP="valbusyp"
+mkdir -p "$F2_BOTS/$BUSYM/data" "$F2_BOTS/$BUSYP/data"
+for b in "$BUSYM" "$BUSYP"; do
+    cat > "$F2_BOTS/$b/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+done
+tmux new-session -d -s "$BUSYM" 'printf "\n> \n"; sleep 600'
+tmux new-session -d -s "$BUSYP" 'printf "\nWorking (esc to interrupt)\n"; sleep 600'
+sleep 1
+
+# Declare the three new bots so fleet-pulse does not filter them as orphans (#415).
+cat > "$ROOT/local/$F2/fleet.yaml" <<YAML
+fleet:
+  name: $F2
+  bots:
+    $KEEP:
+      expertise: [software-engineering]
+    $IDLEK:
+      expertise: [software-engineering]
+    $SOCKB:
+      expertise: [software-engineering]
+    $BUSYM:
+      expertise: [software-engineering]
+    $BUSYP:
+      expertise: [software-engineering]
+YAML
+
+# Run 3: seed pane hashes/ts for the new bots.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+
+# Mark BUSYM "working" (fresh marker, no .idle) and backdate both busy bots past
+# the 300s pane threshold; BUSYP stays marker-less (its esc-to-interrupt pane is
+# the only busy signal).
+_n611=$(date +%s)
+touch "$F2_BOTS/$BUSYM/data/.last-tool-call"
+printf '%s' "$((_n611 - 400))" > "$ROOT/state/pulse/$BUSYM.pane_ts"
+printf '%s' "$((_n611 - 400))" > "$ROOT/state/pulse/$BUSYP.pane_ts"
+
+# Run 4: the sweep where pane_stuck would trip for the busy bots + the summary runs.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+
+busym_ev=$(ls "$F2_BOTS/$BUSYM/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+busyp_ev=$(ls "$F2_BOTS/$BUSYP/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+{ [ -n "$busym_ev" ] && grep -q '"type":"pane_stuck"' "$busym_ev"; } && r=no || r=yes
+check "pane_stuck NOT fired for a working bot (fresh .last-tool-call, mid-tool-call)" "$r"
+{ [ -n "$busyp_ev" ] && grep -q '"type":"pane_stuck"' "$busyp_ev"; } && r=no || r=yes
+check "pane_stuck NOT fired for a working bot (esc-to-interrupt pane, active turn)" "$r"
+
+# #611: the summary must show the TMUX_SOCKET-only bot as up, not a false DOWN.
+_sumfile="$ROOT/state/pulse/pulse-summary.txt"
+printf '%s' "$(grep "^$SOCKB " "$_sumfile" 2>/dev/null || true)" | awk '{print $2}' | grep -qx up && r=yes || r=no
+check "#611 summary session=up for a bot whose TMUX_SOCKET != BOT_SERVICE" "$r"
+# related: a BOT_SERVICE-less bot must not show a false SERVICE DOWN in the summary.
+printf '%s' "$(grep "^$IDLEK " "$_sumfile" 2>/dev/null || true)" | awk '{print $3}' | grep -qx ok && r=yes || r=no
+check "#611 summary service=ok (not false DOWN) for a BOT_SERVICE-less bot" "$r"
 
 # ===========================================================================
 # Per-bot socket isolation (#414) — blast radius = 1 + observable misses.
