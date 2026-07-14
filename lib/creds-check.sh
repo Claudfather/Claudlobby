@@ -253,6 +253,13 @@ check_telegram_tokens() {
         token="$(resolve_bot_telegram_token "$d")" || true
 
         if [ -z "$token" ]; then
+            # A declared throwaway/canary (EXPECT_NO_TOKEN=1) has no token by
+            # design — an expected skip, not an outage. Real channel bots (no
+            # marker) still alert below: an empty credential IS a fault.
+            if bot_expects_no_token "$d"; then
+                record_and_alert "$key" "skip" "EXPECT_NO_TOKEN — no Telegram token by design"
+                continue
+            fi
             # Configured for Telegram but no credential reaches it: an
             # outage, not a skip — alert.
             record_and_alert "$key" "fail" \

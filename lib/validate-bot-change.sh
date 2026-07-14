@@ -380,6 +380,59 @@ run_heal
 check "heal never bounces on no_token (a bounce cannot conjure a missing token)" "$r"
 
 # ===========================================================================
+# #608 — a tokenless canary/throwaway (EXPECT_NO_TOKEN=1) must NOT fire the
+# no_token alert at BRING-UP or via FLEET-PULSE; a REAL bot with no token still
+# MUST. Both hit the SAME classification (handle set, token unresolvable →
+# no_token); the ONLY difference is the marker, so any divergence below IS the
+# exemption. Drive the REAL bringup + down-state deciders (the exact functions
+# that choose to alert), so the fix is OBSERVED end-to-end — not just composed.
+echo ""
+echo "=== validate no_token canary exemption (#608: EXPECT_NO_TOKEN gates the alert) ==="
+NTBOTS="$ROOT/local/$FLEET/runtime/bots"
+NTC="$NTBOTS/valcanary"   # EXPECT_NO_TOKEN=1 → exempt throwaway
+NTR="$NTBOTS/valreal"     # no marker → real bot, a missing token is a fault
+NTEV="$ROOT/state/events"
+_nt_conf() {   # $1 = bot dir   $2 = y|n (carry the canary marker?). Handle set, token absent.
+    local d="$1" b; b="$(basename "$1")"
+    mkdir -p "$d/data"
+    cat > "$d/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_ID="$b"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+TELEGRAM_BOT_HANDLE="$b"
+TELEGRAM_TOKEN_ENV_NAME=NT_ABSENT_TOKEN
+CONF
+    [ "$2" = y ] && printf 'EXPECT_NO_TOKEN=1\n' >> "$d/bot.conf" || true
+}
+_nt_conf "$NTC" y
+_nt_conf "$NTR" n
+
+# Sanity: identical token-absent input — both classify as no_token.
+{ [ "$(bridge_state "$NTC" 2>/dev/null || true)" = "no_token" ] \
+  && [ "$(bridge_state "$NTR" 2>/dev/null || true)" = "no_token" ]; } && r=yes || r=no
+check "#608 canary + real both classify no_token (same token-absent input)" "$r"
+
+# --- Bring-up path (bridge_bringup_verify): canary silent, real escalates ---
+ntv="$(CLAUDLOBBY_ROOT="$ROOT" bridge_bringup_verify "$NTC" "$(dirname "$NTC")" 0 2>/dev/null || true)"
+[ "$ntv" = "expected:no_token" ] && r=yes || r=no
+check "#608 canary bring-up verdict is expected:no_token (marker exempts)" "$r"
+grep -q 'valcanary Telegram bridge no_token' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=no || r=yes
+check "#608 canary bring-up emits NO bridge_down alert (no fleet event)" "$r"
+
+ntv="$(CLAUDLOBBY_ROOT="$ROOT" bridge_bringup_verify "$NTR" "$(dirname "$NTR")" 0 2>/dev/null || true)"
+[ "$ntv" = "missing:no_token" ] && r=yes || r=no
+check "#608 real-bot bring-up verdict is missing:no_token (still a fault)" "$r"
+grep -q 'valreal Telegram bridge no_token at bring-up' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=yes || r=no
+check "#608 real-bot bring-up DOES emit the no_token bridge_down alert" "$r"
+
+# --- Fleet-pulse path (bridge_down_state, grace 0): canary not-down, real down ---
+CLAUDLOBBY_ROOT="$ROOT" bridge_down_state "$NTC" 0 >/dev/null 2>&1 && r=no || r=yes  # rc 0 = down
+check "#608 canary is NOT actionably down for fleet-pulse (no pulse alert)" "$r"
+[ "$(CLAUDLOBBY_ROOT="$ROOT" bridge_down_state "$NTR" 0 2>/dev/null || true)" = "no_token" ] && r=yes || r=no
+check "#608 real bot IS actionably down (no_token) for fleet-pulse" "$r"
+
+# ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
 # navi's #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
 # nothing drove keepalive's real dead-session branch to prove it EMITS a line the
