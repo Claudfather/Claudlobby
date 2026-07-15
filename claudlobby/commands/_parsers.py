@@ -190,9 +190,9 @@ def register_subparsers(sub) -> None:
         "--no-remote-control", action="store_true", help="Disable --remote-control flag"
     )
     pn.add_argument(
-        "--no-dangerously-skip-permissions",
+        "--dangerously-skip-permissions",
         action="store_true",
-        help="Disable --dangerously-skip-permissions",
+        help="Opt in to --dangerously-skip-permissions (default: conservative acceptEdits)",
     )
     pn.add_argument("--extra-flags", help="Comma-separated extra claude CLI flags")
     pn.add_argument("--scope-org", help="GitHub org for scope")

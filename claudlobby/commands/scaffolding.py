@@ -142,8 +142,8 @@ def cmd_new_bot(args) -> int:
             lessons=_csv(args.lessons),
             integrations=_csv(args.integrations),
             remote_control=False if args.no_remote_control else None,
-            dangerously_skip_permissions=False
-            if args.no_dangerously_skip_permissions
+            dangerously_skip_permissions=True
+            if args.dangerously_skip_permissions
             else None,
             extra_flags=_csv(args.extra_flags),
             scope_org=args.scope_org,
