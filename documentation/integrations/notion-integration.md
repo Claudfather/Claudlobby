@@ -54,6 +54,8 @@ The integration can only see pages explicitly shared with it:
 2. Click `...` (top right) → **Connections** → add your integration
 3. The integration now has read/write access to that page and its children
 
+> **If you skip this step, the token still authenticates but every query returns empty results (or a 404), and the bot reports that the database/page "doesn't exist."** The token is fine — the page just isn't shared with the integration. This is the single most common Notion setup mistake.
+
 ### 4. Restart the Bot
 
 MCP servers are wired up at Claude Code startup, so applying the new `.mcp.json` needs a real restart, not just a reload. The cross-platform, idempotent way (picks systemd vs. launchd for you):
