@@ -48,6 +48,7 @@ fleet:
       token_env: <env-var-name>
       require_mention: true | false
     sandbox:                            # sandbox network/filesystem allowlists
+      enabled: true | false             # omit/None = inherit global settings.json
       auto_allow_bash: true | false
       network_allowed_domains: [<list>]
       filesystem_allow_write: [<list>]
@@ -233,6 +234,19 @@ fleet:
 
 After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land in the owner's `data/events/` — see the `fleet-observability` protocol.
 
+### `fleet.workstreams`
+
+Bounds for the per-fleet workstream registry (`workstreams.json`) — the fleet's bounded portfolio of concurrent work across unrelated repos. Optional; the defaults apply when the block is omitted.
+
+```yaml
+fleet:
+  workstreams:
+    max_active: 12    # cap on concurrently active workstreams — `open` refuses past it (default: 12)
+    lease_days: 14    # lease length in days before a workstream needs renewal (default: 14)
+```
+
+Both values emit into every bot's `bot.conf` (`WORKSTREAM_MAX_ACTIVE`, `WORKSTREAM_LEASE_DAYS`) and are read by the single-writer helper `lib/workstream-update.sh` at open/renew time. Parsed by `config.py` (`_coerce_workstreams`); the validator warns on non-positive values or unknown keys. Reads go through the read-only `claudlobby workstreams` CLI; see `advanced-patterns.md` for the workstream lifecycle.
+
 ### `bots.<name>.expertise`
 
 **Required.** A list of area-of-expertise filenames from `library/expertise/`. The first file's H1 titles the bot; subsequent files' H1s are stripped and their bodies append below.
@@ -282,6 +296,16 @@ List of skill basenames from `library/skills/`. Generator symlinks each into `ru
 ### `bots.<name>.mcp` and `bots.<name>.integrations`
 
 `mcp:` lists MCP fragments from `library/mcp/`. The generator merges them into `.mcp.json`.
+
+For a bot that needs **multiple instances** of the same server (e.g. two Notion workspaces), use the mapping form with an `instances:` list instead of a bare string:
+
+```yaml
+mcp:
+  - notion:
+      instances: [default, work]
+```
+
+This emits one `.mcp.json` server per instance — `notion` (the `default`) and `notion-work` — and namespaces each instance's env-var placeholders by an uppercased prefix: the `default` instance keeps `NOTION_` (so it reads `NOTION_TOKEN`), while `work` becomes `NOTION_WORK_` (so it reads `NOTION_WORK_TOKEN`). Set one env var per instance in `.env`. Parsed by `config.py` (`_parse_mcp_list` → `McpEntry`); placeholder resolution lives in `claudlobby/mcp_resolve.py`. See the Notion integration guide for a worked example.
 
 `integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
 
@@ -370,6 +394,7 @@ The compositor transforms the flat fleet.yaml format into Claude Code's nested m
 
 Sandbox network and filesystem allowlists, written to `settings.local.json`. Merged with defaults (lists unioned, bools overridden).
 
+- `enabled` — turn the sandbox layer on or off for this bot. Omitting it (or `None`) inherits the global `settings.json` sandbox setting; `true`/`false` overrides it per-bot.
 - `network_allowed_domains` — hostnames the bot may access (e.g., `api.github.com`, `"*.anthropic.com"`)
 - `filesystem_allow_write` — additional writable paths beyond the bot directory
 - `auto_allow_bash` — skip Bash tool permission prompts when running in sandbox mode

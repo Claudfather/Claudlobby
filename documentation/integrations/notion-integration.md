@@ -164,3 +164,32 @@ Use the notion MCP server for all database operations.
 | Work Engineer | `notion-work` | Work Org | Work tracker only |
 
 Each bot only has tokens for its own workspace(s). There's no way for a bot to access a workspace it doesn't have a token for.
+
+## Direct API fallback
+
+When the MCP layer misbehaves — the server fails to start, a tool hangs, or a fresh `.mcp.json` hasn't been picked up yet — the same `NOTION_TOKEN` authenticates directly against Notion's REST API. This is the escape hatch that keeps a bot productive while the MCP server is down:
+
+```bash
+# Auth / connectivity check
+curl -s -H "Authorization: Bearer $NOTION_TOKEN" \
+     -H "Notion-Version: 2022-06-28" \
+     https://api.notion.com/v1/users/me
+
+# Retrieve a page
+curl -s -H "Authorization: Bearer $NOTION_TOKEN" \
+     -H "Notion-Version: 2022-06-28" \
+     https://api.notion.com/v1/pages/<page-id>
+
+# List everything the integration can see (POST /v1/search with an empty body)
+curl -s -X POST -H "Authorization: Bearer $NOTION_TOKEN" \
+     -H "Notion-Version: 2022-06-28" \
+     -H "Content-Type: application/json" \
+     https://api.notion.com/v1/search -d '{}'
+```
+
+For a multi-instance bot use the instance-scoped token instead (e.g. `$NOTION_WORK_TOKEN`). The token and page-sharing rules are identical to the MCP path — a 404 or empty result still means the page isn't shared with the integration, not that the token is wrong.
+
+## Upstream docs
+
+- Notion API reference — https://developers.notion.com
+- MCP server (`@notionhq/notion-mcp-server`) — https://github.com/makenotion/notion-mcp-server
