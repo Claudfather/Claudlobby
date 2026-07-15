@@ -32,8 +32,8 @@ Create `.env` at the repo root (gitignored):
 # GitHub — single PAT shared by the fleet
 GITHUB_PAT=ghp_xxxxxxxxxxxxxxxxxxxx
 
-# Notion (if any bot uses Notion)
-NOTION_TOKEN=secret_xxxxxxxxxxxxxxxxxxxx
+# Notion (if any bot uses Notion) — full walkthrough in documentation/integrations/notion-integration.md
+NOTION_TOKEN=ntn_xxxxxxxxxxxxxxxxxxxx
 
 # Slack (optional)
 SLACK_TOKEN=xoxp-xxxxxxxxxxxxxxxxxxxx
