@@ -29,3 +29,14 @@ The `.mcp.json` points to the local build at `~/your-fork/printify-mcp/dist/inde
 - Printify fulfillment status doesn't always sync back to Shopify — monitor for orphaned unfulfilled orders in Shopify
 - Order creation requires a `send_order_to_production` call after `submit_order` — two-step process
 - Blueprint browsing returns large payloads — use specific blueprint IDs when possible rather than listing all
+
+### API / developer reference
+
+Full REST reference: **https://developers.printify.com/**. When the MCP tools are lossy (the fork's `list_products` can drop the product array from its formatted output), hit the API directly — auth is `Authorization: Bearer $PRINTIFY_API_KEY`, shop from `$PRINTIFY_SHOP_ID` (both fleet-tier `.env`).
+
+Endpoints worth knowing:
+
+- `GET /v1/shops/{shop_id}/products.json?limit=N&page=P` — list products (paginated; response carries `total` + `last_page`). **Payload gotcha:** `limit=100` returns full product objects and can time out or truncate before the client parses it — use `limit=20–30` with a longer timeout and paginate.
+- `GET /v1/shops/{shop_id}/products/{product_id}.json` — one product with `variants[]`; each variant has `price` (retail, cents) and `cost` (production, cents), so **unit margin = `price − cost`**.
+- `PUT /v1/shops/{shop_id}/products/{product_id}.json` — update; pass the `variants` array with a new `price` (cents) to re-price, then `POST …/products/{id}/publish.json` to push the change to Shopify.
+- **Shopify linkage:** a Printify product's `external.id` is the Shopify **product** id (numeric) — match on it to reconcile the two catalogs. A product can be **orphaned**: deleted in Printify but still live in Shopify at its last-synced price. It won't appear in the Printify products list, and Shopify becomes its sole source of truth (re-price it directly in Shopify — nothing will sync over the top).
