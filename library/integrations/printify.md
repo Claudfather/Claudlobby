@@ -14,7 +14,7 @@ env_contract:
 
 ### Printify MCP
 
-Wire config: fleet-local (no shared `library/mcp/printify.json` — configure via local overlay or direct `.mcp.json`).
+Wire config: shipped as the shared fragment `library/mcp/printify.json` — add `printify` to a bot's `mcp:` list and the compositor merges it into `.mcp.json`. It runs the published package (`npx -y printify-mcp`) and reads `PRINTIFY_API_KEY` + `PRINTIFY_SHOP_ID` (both fleet-tier `.env`). To get order-management tools, override it locally with a fork (below).
 
 #### Forked MCP with Order Tools
 
