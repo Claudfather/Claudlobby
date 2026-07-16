@@ -22,7 +22,22 @@ MESSAGE="$*"
 # an unresolvable peer yields an empty socket → bot_tmux_send logs the miss and
 # we exit 1 below, rather than the resolver's guard crashing the dispatcher.
 WORKER_SOCKET="$(tmux_socket_for_session "$WORKER_SESSION" 2>/dev/null || true)"
-if ! bot_tmux_send "$WORKER_SOCKET" "$WORKER_SESSION" "set +H; $MESSAGE"; then
+
+# A leading slash command must reach the pane as its FIRST characters so Claude
+# Code slash-command recognition fires; the set +H; history-expansion guard would
+# swallow it (the live briefing-cron bug; cf. keepalive.sh send_reload_command,
+# start-bot.sh STARTUP_PROMPT). Match a real command token — an alpha-led word
+# terminated by whitespace-or-end — NOT any leading slash, so file-path prose
+# (/home/crog, /etc/hosts) and leading-whitespace keep the guard. POSIX
+# [[:space:]] class (not the GNU escape) for bash 3.2 / macOS /bin/bash.
+# ROLLBACK: replace this if/else with the one line: PAYLOAD="set +H; $MESSAGE"
+if [[ "$MESSAGE" =~ ^/[A-Za-z][A-Za-z0-9:_-]*([[:space:]]|$) ]]; then
+    PAYLOAD="$MESSAGE"
+else
+    PAYLOAD="set +H; $MESSAGE"
+fi
+
+if ! bot_tmux_send "$WORKER_SOCKET" "$WORKER_SESSION" "$PAYLOAD"; then
     echo "dispatch: session '$WORKER_SESSION' could not be reached on socket '$WORKER_SOCKET'" >&2
     exit 1
 fi
