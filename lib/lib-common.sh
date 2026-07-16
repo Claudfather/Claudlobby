@@ -249,6 +249,75 @@ json_escape() {
     esac
 }
 
+# --- MCP trust seeding (dev checkouts) ---------------------------------------
+
+# _home_mcp_allowlist <bot_home>
+# Echo the bot composed enabledMcpjsonServers allowlist (a JSON array) from its
+# home settings.local.json, or return non-zero when there is nothing to trust
+# (no home settings, or an empty/absent allowlist). The composer is the SOLE
+# deriver of this set (fleet-config-driven, fail-closed); callers only PROPAGATE
+# the value it wrote, so they can never drift from the composer rules.
+_home_mcp_allowlist() {
+    local home_settings="$1/.claude/settings.local.json" allowlist
+    [ -f "$home_settings" ] || return 1
+    allowlist="$(jq -c '.enabledMcpjsonServers // empty' "$home_settings" 2>/dev/null || true)"
+    case "$allowlist" in
+        ""|"null"|"[]") return 1 ;;
+    esac
+    printf '%s' "$allowlist"
+}
+
+# seed_checkout_mcp_trust <checkout_dir> <allowlist_json>
+# Write the given MCP-trust allowlist into a projects/ checkout so an interactive
+# `claude` session rooted there pre-trusts the same fleet-configured MCP servers
+# and never stalls on the MCP-server-trust prompt (which no --permission-mode
+# answers). Idempotent and non-destructive (merges into any existing
+# settings.local.json). Callers derive <allowlist_json> once via
+# _home_mcp_allowlist and pass it in. Plain projects/ checkouts only.
+seed_checkout_mcp_trust() {
+    local checkout_dir="$1" allowlist="$2"
+    [ -d "$checkout_dir" ] || return 0
+    case "$allowlist" in
+        ""|"null"|"[]") return 0 ;;
+    esac
+
+    local checkout_settings="$checkout_dir/.claude/settings.local.json" tmp created=0
+    mkdir -p "$checkout_dir/.claude"
+    tmp="$(safe_mktemp)"
+    # Merge into an existing valid file to preserve any developer keys; a missing
+    # or unparseable file is (re)written fresh.
+    if [ ! -f "$checkout_settings" ] \
+       || ! jq --argjson al "$allowlist" '.enabledMcpjsonServers = $al' "$checkout_settings" > "$tmp" 2>/dev/null; then
+        printf '{"enabledMcpjsonServers":%s}\n' "$allowlist" > "$tmp"
+        created=1
+    fi
+    mv "$tmp" "$checkout_settings"
+
+    # A file we created is invisible to git only if excluded; an existing file
+    # was already visible to whoever wrote it. The per-clone info/exclude never
+    # touches tracked files and stops an accidental `git add -A` from staging the
+    # dev-context seed. (The callers gate on a real .git directory.)
+    if [ "$created" = 1 ]; then
+        local exclude="$checkout_dir/.git/info/exclude"
+        grep -qxF ".claude/settings.local.json" "$exclude" 2>/dev/null \
+            || printf '%s\n' ".claude/settings.local.json" >> "$exclude"
+    fi
+}
+
+# seed_all_checkouts <bot_dir>
+# Seed every projects/ checkout under a bot home with the bot composed MCP-trust
+# allowlist (see seed_checkout_mcp_trust). Reads the allowlist once. No-ops
+# cleanly when the bot has no projects/ dir, no checkouts, or nothing to trust.
+seed_all_checkouts() {
+    local bot_dir="$1" repo allowlist
+    [ -d "$bot_dir/projects" ] || return 0
+    allowlist="$(_home_mcp_allowlist "$bot_dir")" || return 0
+    for repo in "$bot_dir"/projects/*/; do
+        [ -d "$repo/.git" ] || continue
+        seed_checkout_mcp_trust "$repo" "$allowlist" || true
+    done
+}
+
 # --- Task identity -------------------------------------------------------------
 
 # mint_task_id

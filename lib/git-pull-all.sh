@@ -43,6 +43,11 @@ FAILURES=0
 
 echo "$(ts_iso) Starting git pull for repos in $DIR" >> "$LOG"
 
+# Derive this bot composed MCP-trust allowlist once, to pre-trust the same
+# servers in each checkout below (empty for a generic, non-fleet projects dir ->
+# seeding no-ops). See seed_checkout_mcp_trust.
+MCP_ALLOWLIST="$(_home_mcp_allowlist "$(dirname "$_gpa_dir")" 2>/dev/null || true)"
+
 for repo in "$DIR"/*/; do
     if [ -d "$repo/.git" ]; then
         REPO_NAME=$(basename "$repo")
@@ -52,6 +57,10 @@ for repo in "$DIR"/*/; do
             echo "$(ts_iso) $REPO_NAME: FAILED — $RESULT" >> "$LOG"
             FAILURES=$((FAILURES + 1))
         fi
+        # Pre-trust the bot MCP servers for sessions rooted in this checkout so
+        # dev sessions boot clean (see seed_checkout_mcp_trust). Independent of
+        # pull success; skipped when there is nothing to trust.
+        [ -n "$MCP_ALLOWLIST" ] && seed_checkout_mcp_trust "$repo" "$MCP_ALLOWLIST" || true
     fi
 done
 
