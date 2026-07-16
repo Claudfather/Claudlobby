@@ -30,8 +30,12 @@ WORKER_SOCKET="$(tmux_socket_for_session "$WORKER_SESSION" 2>/dev/null || true)"
 # terminated by whitespace-or-end — NOT any leading slash, so file-path prose
 # (/home/crog, /etc/hosts) and leading-whitespace keep the guard. POSIX
 # [[:space:]] class (not the GNU escape) for bash 3.2 / macOS /bin/bash.
+# Also keep the guard when the payload contains a bang: prose that starts with a
+# slash-word yet carries a bang (/reports is missing) matches the token but still
+# needs the guard, and a rare genuine slash command with a bang in its args keeps
+# it too (amended F6). The bang-free glob test is bash-3.2 safe.
 # ROLLBACK: replace this if/else with the one line: PAYLOAD="set +H; $MESSAGE"
-if [[ "$MESSAGE" =~ ^/[A-Za-z][A-Za-z0-9:_-]*([[:space:]]|$) ]]; then
+if [[ "$MESSAGE" =~ ^/[A-Za-z][A-Za-z0-9:_-]*([[:space:]]|$) ]] && [[ "$MESSAGE" != *"!"* ]]; then
     PAYLOAD="$MESSAGE"
 else
     PAYLOAD="set +H; $MESSAGE"

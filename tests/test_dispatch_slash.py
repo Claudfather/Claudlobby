@@ -73,3 +73,19 @@ def test_prose_keeps_history_expansion_guard(tmp_path: Path, message: str):
     assert payload == f"set +H; {message}", (
         f"prose must keep set +H; guard, got: {payload!r}"
     )
+
+
+# Amended F6 (rajan's edge case): a payload that STARTS with a slash-word but
+# contains '!' matches the slash regex yet must KEEP the guard — bare-sending it
+# would re-expose bash history-expansion on the '!'. Covers prose-with-slash-word
+# (/reports ...) and the accepted tradeoff of a genuine slash command whose args
+# carry '!' (it keeps the guard rather than risk a swallowed send).
+BANG_KEEPS_GUARD = ["/reports is missing !!", "/deploy the fix now!"]
+
+
+@pytest.mark.parametrize("message", BANG_KEEPS_GUARD)
+def test_slashword_payload_with_bang_keeps_history_guard(tmp_path: Path, message: str):
+    payload = _dispatched_payload(tmp_path, message)
+    assert payload == f"set +H; {message}", (
+        f"payload with '!' must keep set +H; guard, got: {payload!r}"
+    )
