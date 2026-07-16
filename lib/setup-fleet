@@ -203,12 +203,21 @@ reconcile_briefing_timers() {
     done
     [ "${#orphans[@]}" -gt 0 ] || return 0
 
-    # Abort-on-degenerate (verify-before-disable): nothing composed yet live units
-    # exist means a bad or not-yet-run generate — refuse the wholesale disable,
-    # dry-run-log, leave them running. A real full removal is done by hand from
-    # this log (rare; the generate side already pruned the unit files).
-    if [ "${#composed[@]}" -eq 0 ]; then
-        log "○ briefing reconcile ABORTED (degenerate): composed set empty while ${#enrolled[@]} briefing timer(s) live — NOT disabling; re-run 'claudlobby generate' or remove by hand"
+    # Config-truth expected count from the BRIEFING_EXPECTED manifest (generate
+    # writes it every run, same Python-writes/bash-reads pattern as DORMANT).
+    local expected=""
+    if [ -f "$TIMERS_DIR/BRIEFING_EXPECTED" ]; then
+        expected=$(grep -cF "$SERVICE_PREFIX.briefing-" "$TIMERS_DIR/BRIEFING_EXPECTED" 2>/dev/null || true)
+    fi
+
+    # Abort-on-partial (verify-before-disable): refuse the wholesale disable when
+    # the composed set is SHORTER than the config-declared count — a torn/partial
+    # generate, of which "none composed" is only the limit case — or when there is
+    # no manifest at all to prove the set (a pre-feature dir a later generate
+    # self-heals; unproven, so do not disable). A manifest-confirmed full removal
+    # (expected 0, composed 0) is not a shortfall and proceeds.
+    if [ -z "$expected" ] || [ "${#composed[@]}" -lt "$expected" ]; then
+        log "○ briefing reconcile ABORTED (partial/unproven): composed=${#composed[@]} expected=${expected:-none} while ${#enrolled[@]} briefing timer(s) live — NOT disabling; re-run 'claudlobby generate' or remove by hand"
         for e in "${orphans[@]}"; do log "  would-disable (skipped): $e"; done
         return 0
     fi

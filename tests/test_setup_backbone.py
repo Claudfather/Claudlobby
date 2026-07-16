@@ -68,10 +68,15 @@ class Harness:
             'case "${2:-}" in\n'
             "    is-enabled)\n"
             '        grep -qx "${3:-}" "$STUB_ENROLLED" 2>/dev/null; exit $? ;;\n'
+            # Emulate systemd glob expansion for list-unit-files: the last arg
+            # may be a pattern (e.g. <prefix>.briefing-*.timer); a literal name
+            # still exact-matches, keeping existing callers unchanged.
             "    list-unit-files)\n"
-            '        if grep -qx "${!#}" "$STUB_UNIT_FILES" 2>/dev/null; then\n'
-            '            echo "${!#} enabled enabled"\n'
-            "        fi\n"
+            "        while IFS= read -r _u; do\n"
+            '            [ -n "$_u" ] || continue\n'
+            "            # shellcheck disable=SC2254\n"
+            '            case "$_u" in ${!#}) echo "$_u enabled enabled" ;; esac\n'
+            '        done < "$STUB_UNIT_FILES" 2>/dev/null\n'
             "        exit 0 ;;\n"
             "    is-active)\n"
             '        grep -qx "${!#}" "$STUB_ACTIVE" 2>/dev/null && exit 0\n'
@@ -529,3 +534,92 @@ class TestLegacyKeepaliveSwap:
         r = h.run(_sf(h))
         assert r.returncode == 0, r.stdout + r.stderr
         assert "list-unit-files" not in h.stub_log()
+
+
+class TestBriefingReconcileGuard:
+    """setup-fleet's reconcile_briefing_timers: a partial composed timers dir (an
+    interrupted/torn generate) must never disable a live briefing timer. The
+    guard reads the config-truth BRIEFING_EXPECTED manifest (DORMANT precedent)
+    for an independent expected count — a shortfall aborts, not just a fully
+    empty set. Runs the real setup-fleet end-to-end with systemctl stubbed."""
+
+    _FOUR = [
+        "briefing-kev-morning",
+        "briefing-kev-evening",
+        "briefing-ari-morning",
+        "briefing-ari-evening",
+    ]
+
+    def _seed(self, h, fdir, *, on_disk, expected, live):
+        tdir = fdir / "runtime" / "fleet" / "timers"
+        tdir.mkdir(parents=True, exist_ok=True)
+        for u in on_disk:
+            base = f"test.prefix.{u}"
+            (tdir / f"{base}.service").write_text("[Service]\n")
+            (tdir / f"{base}.timer").write_text("[Timer]\n")
+            (tdir / f"{base}.plist").write_text("<plist/>\n")
+        if expected is not None:  # None simulates a pre-feature dir (no manifest)
+            lines = ["# config-declared briefing units"]
+            lines += [f"test.prefix.{u}" for u in expected]
+            (tdir / "BRIEFING_EXPECTED").write_text("\n".join(lines) + "\n")
+        with open(h.unit_files, "a") as f:
+            for u in live:
+                f.write(f"test.prefix.{u}.timer\n")
+
+    def test_partial_composed_never_disables_live_timer(self, h):
+        # 3-of-4 on disk (ari-evening dropped by a torn generate) while config
+        # declares all 4 and all 4 are live — the shortfall must abort, and the
+        # dropped live timer must survive untouched.
+        fdir = h.fleet("f1", bots=("kev",))
+        h.bot(fdir, "kev", healthy=True)
+        self._seed(
+            h, fdir, on_disk=self._FOUR[:3], expected=self._FOUR, live=self._FOUR
+        )
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert (
+            "disable --now test.prefix.briefing-ari-evening.timer" not in h.stub_log()
+        )
+        assert "briefing reconcile ABORTED" in r.stdout
+
+    def test_clean_compose_still_disables_real_orphan(self, h):
+        # All 4 declared compose cleanly (== expected); a 5th stale live unit is a
+        # genuine config-removed orphan and IS disabled — the guard must not
+        # over-abort and strand real orphans.
+        fdir = h.fleet("f1", bots=("kev",))
+        h.bot(fdir, "kev", healthy=True)
+        self._seed(
+            h,
+            fdir,
+            on_disk=self._FOUR,
+            expected=self._FOUR,
+            live=self._FOUR + ["briefing-ari-noon"],
+        )
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "disable --now test.prefix.briefing-ari-noon.timer" in h.stub_log()
+        assert "briefing reconcile ABORTED" not in r.stdout
+
+    def test_confirmed_full_removal_proceeds(self, h):
+        # Briefing fully removed from config: the manifest confirms zero expected,
+        # so a still-live unit is a legitimate orphan and the teardown proceeds —
+        # composed 0 is not a shortfall when 0 is also declared.
+        fdir = h.fleet("f1", bots=("kev",))
+        h.bot(fdir, "kev", healthy=True)
+        self._seed(h, fdir, on_disk=[], expected=[], live=["briefing-kev-morning"])
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "disable --now test.prefix.briefing-kev-morning.timer" in h.stub_log()
+
+    def test_missing_manifest_refuses_to_disable(self, h):
+        # No BRIEFING_EXPECTED at all (a pre-feature timers dir a later generate
+        # self-heals): the declared set is unproven, so the reconciler must NOT
+        # disable — no backwards-compat empty-only shim that could act on a torn
+        # dir it cannot verify.
+        fdir = h.fleet("f1", bots=("kev",))
+        h.bot(fdir, "kev", healthy=True)
+        self._seed(h, fdir, on_disk=self._FOUR[:3], expected=None, live=self._FOUR)
+        r = h.run(_sf(h), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "disable --now test.prefix.briefing-" not in h.stub_log()
+        assert "briefing reconcile ABORTED" in r.stdout

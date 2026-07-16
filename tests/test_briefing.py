@@ -331,6 +331,33 @@ class TestBriefingReconcile:
             for r in caplog.records
         )
 
+    def test_abort_on_partial_composed_set(self, tmp_path, caplog):
+        # navi's #630 gap: config declares 4 (bot,slot) units but only 3 composed
+        # (an interrupted/torn generate leaves runtime/fleet/timers/ short one) —
+        # the reconciler must NOT prune the live 4th, exactly as it refuses a
+        # fully-empty set. Empty is just partial's limit case; any shortfall is
+        # the same composition-bug signal, so the guard is quantitative.
+        self._seed(
+            tmp_path,
+            "com.test.briefing-kev-morning",
+            "com.test.briefing-kev-evening",
+            "com.test.briefing-ari-morning",
+            "com.test.briefing-ari-evening",  # live 4th — absent from composed
+        )
+        composed = {
+            "com.test.briefing-kev-morning",
+            "com.test.briefing-kev-evening",
+            "com.test.briefing-ari-morning",
+        }
+        with caplog.at_level("WARNING"):
+            pruned = _reconcile_briefing_units(tmp_path, "com.test", composed, 4)
+        assert pruned == []
+        assert (tmp_path / "com.test.briefing-ari-evening.timer").exists()
+        assert any(
+            "partial" in r.message.lower() or "skipping" in r.message.lower()
+            for r in caplog.records
+        )
+
     def test_generate_reconcile_prunes_renamed_slot(self, tmp_path):
         # End-to-end through compose_fleet_timers: pre-seed a stale slot unit,
         # then compose the current fleet — the stale one is gone, current remain.
@@ -341,6 +368,53 @@ class TestBriefingReconcile:
         compose_fleet_timers(fleet, paths, md)
         assert not (timers / "com.test.briefing-kev-midday.timer").exists()
         assert (timers / "com.test.briefing-kev-morning.timer").exists()
+
+    def test_generate_writes_briefing_expected_manifest(self, tmp_path):
+        # generate emits a config-truth BRIEFING_EXPECTED manifest (DORMANT
+        # precedent) listing every declared (bot,slot) unit, so setup-fleet's
+        # reconcile has an independent count to catch a partial/torn timers dir.
+        fleet, md = load_fleet(_write(tmp_path / "f", _BRIEFING_FLEET))
+        paths = _make_paths(tmp_path / "f")
+        compose_fleet_timers(fleet, paths, md)
+        manifest = paths.runtime_fleet / "timers" / "BRIEFING_EXPECTED"
+        listed = {
+            ln
+            for ln in manifest.read_text().splitlines()
+            if ln.startswith("com.test.briefing-")
+        }
+        assert listed == {
+            "com.test.briefing-kev-morning",
+            "com.test.briefing-kev-evening",
+        }
+
+    def test_briefing_manifest_removed_when_stanza_gone(self, tmp_path):
+        # A fleet that once equipped briefing but no longer declares any: the
+        # manifest must report zero expected units so setup-fleet allows the
+        # full teardown (composed 0 == expected 0 → prune, not abort).
+        fleet, md = load_fleet(
+            _write(
+                tmp_path / "f",
+                """\
+                fleet:
+                  name: t
+                  service_prefix: com.test
+                  system_defaults: false
+                  bots:
+                    kev:
+                      expertise: [eng]
+                """,
+            )
+        )
+        paths = _make_paths(tmp_path / "f")
+        timers = paths.runtime_fleet / "timers"
+        self._seed(timers, "com.test.briefing-kev-morning")  # leftover from before
+        compose_fleet_timers(fleet, paths, md)
+        manifest = timers / "BRIEFING_EXPECTED"
+        assert manifest.exists()
+        assert not any(
+            ln.startswith("com.test.briefing-")
+            for ln in manifest.read_text().splitlines()
+        )
 
 
 # ---------------------------------------------------------------------------

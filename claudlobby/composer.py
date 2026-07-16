@@ -1801,10 +1801,10 @@ def _write_timer_units(
 
 
 def _reconcile_briefing_units(
-    timers_dir: Path, prefix: str, composed: set[str], n_declared: int
+    timers_dir: Path, prefix: str, composed: set[str], n_expected: int
 ) -> list[str]:
     """Prune stale ``<prefix>.briefing-*`` unit files — glob-bounded, with a
-    verify-before-disable degenerate guard (F3).
+    verify-before-disable partial/degenerate guard (F3).
 
     The briefing family is the first dynamic per-(bot,slot) timer set, so a
     renamed/removed slot leaves an enrolled orphan that fires forever unless
@@ -1813,16 +1813,17 @@ def _reconcile_briefing_units(
     ``composed``.
 
     ``composed`` is the set of unit basenames just written this generate.
-    ``n_declared`` is how many bots actually declare a briefing stanza — the
-    config truth a composition bug can't fake.
+    ``n_expected`` is how many (bot,slot) briefing units the fleet config
+    declares — the config truth a composition bug can't fake.
 
-    Abort-on-degenerate (modeled on ``migrate_legacy_keepalive``'s
-    verify-before-disable): if config declares briefing bots yet nothing was
-    composed, a bug dropped the set — SKIP the prune, leave every unit untouched,
-    and warn loudly, so a generate bug can never wholesale-delete live briefing
-    timers. A legitimate full removal (``n_declared == 0``) prunes everything.
-    The glob bound means it can never touch a non-briefing unit. Returns the
-    pruned unit basenames.
+    Abort-on-partial (modeled on ``migrate_legacy_keepalive``'s
+    verify-before-disable): if fewer units composed than config declares
+    (``len(composed) < n_expected``, of which a fully-empty set is the limit
+    case), a bug or an interrupted generate dropped part of the set — SKIP the
+    prune, leave every unit untouched, and warn loudly, so a compose shortfall
+    can never wholesale-delete live briefing timers. A legitimate full removal
+    passes ``n_expected == 0`` and prunes everything. The glob bound means it can
+    never touch a non-briefing unit. Returns the pruned unit basenames.
     """
     if not timers_dir.is_dir():
         return []
@@ -1830,15 +1831,18 @@ def _reconcile_briefing_units(
     stale = existing - composed
     if not stale:
         return []
-    # Degenerate: config HAS briefing bots but the composed set is empty — a
-    # composition bug, not an intended teardown. Refuse the wholesale prune.
-    if not composed and n_declared > 0:
+    # Partial/degenerate: config declares n_expected (bot,slot) units but fewer
+    # composed — a torn or interrupted compose, not an intended teardown. Refuse
+    # the prune so a shortfall can never wholesale-delete live timers. Empty is
+    # the limit case (0 < n_expected); a real full removal passes n_expected == 0.
+    if len(composed) < n_expected:
         _log.warning(
-            "briefing reconcile: DEGENERATE composed set (empty) while %d bot(s) "
-            "declare briefing — SKIPPING prune of %d existing unit(s) to avoid a "
-            "generate-bug wholesale delete; units left untouched (re-run once the "
-            "composition is fixed)",
-            n_declared,
+            "briefing reconcile: PARTIAL composed set (%d of %d declared unit(s)) "
+            "— SKIPPING prune of %d existing unit(s) to avoid a compose-shortfall "
+            "wholesale delete; units left untouched (re-run once composition is "
+            "fixed)",
+            len(composed),
+            n_expected,
             len(stale),
         )
         return []
@@ -1850,6 +1854,45 @@ def _reconcile_briefing_units(
                 f.unlink()
         pruned.append(base)
     return pruned
+
+
+def _write_timers_manifest(
+    timers_dir: Path, name: str, header: list[str], units: set[str] | list[str]
+) -> None:
+    """Atomically write a timers-dir sidecar manifest (``DORMANT``,
+    ``BRIEFING_EXPECTED``): comment ``header`` lines followed by one unit
+    basename per line, sorted.
+
+    The setup backbone reads these mid-run (``unit_is_dormant``,
+    ``reconcile_briefing_timers``), so the write is atomic (temp + ``replace``) —
+    a torn file would under-list and either wrongly enroll a dormant unit or
+    under-count the reconcile guard. A no-op when the timers dir does not exist
+    (nothing composed, so nothing to annotate).
+    """
+    if not timers_dir.is_dir():
+        return
+    body = "\n".join([*header, *sorted(units)]) + "\n"
+    tmp = timers_dir / f"{name}.tmp"
+    tmp.write_text(body)
+    tmp.replace(timers_dir / name)
+
+
+def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
+    """Write the config-truth ``BRIEFING_EXPECTED`` manifest — the declared
+    ``<prefix>.briefing-<bot>-<slot>`` basenames setup-fleet's reconcile reads as
+    the independent expected count (a composed dir shorter than this is a
+    partial/torn generate, and the live-timer disable is refused). Thin
+    briefing-header wrapper over the shared atomic manifest writer.
+    """
+    _write_timers_manifest(
+        timers_dir,
+        "BRIEFING_EXPECTED",
+        [
+            "# Config-declared briefing (bot,slot) units. setup-fleet reconcile",
+            "# refuses to disable live briefing timers when fewer than these compose.",
+        ],
+        expected,
+    )
 
 
 def compose_fleet_timers(
@@ -1892,8 +1935,11 @@ def compose_fleet_timers(
     timers_dir = base_dir / "timers"
     if not emit_defaults and not sweep_on and not briefing_on:
         # Nothing to emit — but a prior generate may have left briefing units a
-        # now-removed stanza should prune. Reconcile only if the dir exists.
+        # now-removed stanza should prune. Reconcile only if the dir exists, and
+        # record zero declared units so setup-fleet confirms the teardown is
+        # intended (config truth) rather than a torn compose.
         _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0)
+        _write_briefing_manifest(timers_dir, set())
         return timers_dir
 
     timers_dir.mkdir(parents=True, exist_ok=True)
@@ -1917,15 +1963,18 @@ def compose_fleet_timers(
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
             )
-        dormant = sorted(
+        dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
-        )
-        manifest_lines = [
-            "# Composed-but-dormant units — the setup backbone does not enroll",
-            "# these. Opt in via fleet.yaml defaults.jobs.<name>.enroll: true.",
-            *dormant,
         ]
-        (timers_dir / "DORMANT").write_text("\n".join(manifest_lines) + "\n")
+        _write_timers_manifest(
+            timers_dir,
+            "DORMANT",
+            [
+                "# Composed-but-dormant units — the setup backbone does not enroll",
+                "# these. Opt in via fleet.yaml defaults.jobs.<name>.enroll: true.",
+            ],
+            dormant,
+        )
 
     if sweep_on:
         # Opt-in sweep timer: synthesized from fleet.sweep, not system_defaults.
@@ -1946,8 +1995,18 @@ def compose_fleet_timers(
     # <prefix>.briefing-<bot>-<slot> OnCalendar unit whose ExecStart hands the
     # slash-aware trigger `<fleet> <bot> <slot>`. Reconcile runs unconditionally
     # (even with zero briefing bots) so a removed stanza's stale units are pruned;
-    # the degenerate guard blocks a wholesale delete when config declares bots
-    # but none composed.
+    # the count-check guard blocks a wholesale delete when fewer units compose
+    # than config declares (a torn/partial generate), of which "none composed" is
+    # only the limit case. The BRIEFING_EXPECTED manifest — the config truth a
+    # partial compose can't fake — is emitted BEFORE the per-unit write loop so an
+    # interrupted generate still leaves the full declared count for setup-fleet's
+    # reconcile to compare a short timers dir against.
+    expected_briefing = {
+        f"{prefix}.briefing-{bot_id}-{slot}"
+        for bot_id, bot in briefing_bots
+        for slot in bot.briefing.slots
+    }
+    _write_briefing_manifest(timers_dir, expected_briefing)
     composed_briefing: set[str] = set()
     for bot_id, bot in briefing_bots:
         for slot, expr in bot.briefing.slots.items():
@@ -1965,7 +2024,9 @@ def compose_fleet_timers(
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
             )
             composed_briefing.add(unit)
-    _reconcile_briefing_units(timers_dir, prefix, composed_briefing, len(briefing_bots))
+    _reconcile_briefing_units(
+        timers_dir, prefix, composed_briefing, len(expected_briefing)
+    )
 
     return timers_dir
 
