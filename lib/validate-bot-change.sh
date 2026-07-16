@@ -79,7 +79,7 @@ EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -1128,6 +1128,123 @@ PY
         fi
     fi
 fi
+
+# ===========================================================================
+# Scenario: equippable briefing trigger (#627 P3/P4/P6). The timer-fired
+# /briefing dispatch must (a) fire a briefing_dispatched event, (b) land as a
+# REAL bare slash command — NOT set +H; prose (the F6 regression canary) — and
+# (c) defer on a busy bot; the shared dispatch.sh classifier must keep the
+# set +H; guard on (d) prose, (e) file-path prose + a leading-whitespace slash;
+# and (f) the /briefing skill's documented env-read must resolve the CONFIGURED
+# sections, not the canonical default. This is BEHAVIOR a unit test cannot
+# prove. The composed-timer plumbing (compose -> enroll -> journal fire ->
+# reconcile prune, incl. the launchd .plist prune) is the sibling
+# lib/rehearse-briefing-timer.sh (real systemd timer, ~2 min, run separately).
+# ===========================================================================
+echo ""
+echo "=== validate-bot-change: equippable briefing trigger (#627 P6) ==="
+
+BRIEF="valbrief"; BRIEFBUSY="valbriefbusy"; SINK="valsink"
+BRIEF_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEF"
+BRIEFBUSY_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEFBUSY"
+# data/ holds the busy bot's .last-tool-call marker and is where the trigger
+# emits events; briefing-trigger.sh + emit_fleet_event create logs/ + data/events
+# on demand. SINK is a pure classifier sink (pane-only) — no dir needed; its
+# socket resolves by the basename fallback.
+mkdir -p "$BRIEF_DIR/data" "$BRIEFBUSY_DIR/data"
+
+# Composed-SHAPE bot.conf: BOT_SERVICE empty so tmux_socket_for_bot resolves the
+# harness fallback tmux-<name> (the socket the tmux() shim targets). BRIEFING_*
+# mirror the composer emission (compose_bot_conf); BRIEFING_SECTIONS_MORNING is
+# UPPER-CASED exactly as composer.py emits it — the var the /briefing skill reads
+# by upper-casing the dispatched slot — with a NON-default section list so (f)
+# can tell config-tracking from the canonical morning default. (Emission case is
+# unit-tested in tests/test_briefing.py; this scenario proves the read-side.)
+for _d in "$BRIEF_DIR" "$BRIEFBUSY_DIR"; do
+    _n="$(basename "$_d")"
+    cat > "$_d/bot.conf" <<CONF
+BOT_NAME="$_n"
+BOT_ID="$_n"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+BRIEFING_SLOTS="morning"
+BRIEFING_SOURCES="github"
+BRIEFING_SECTIONS_MORNING="wrap tomorrow overnight"
+CONF
+done
+
+# Idle briefing bot: plain pane, no esc-to-interrupt, no fresh .last-tool-call
+# -> bot_is_busy reads not-busy -> the trigger dispatches.
+tmux new-session -d -s "$BRIEF" "sleep 600"
+# Busy briefing bot: a fresh data/.last-tool-call -> bot_is_busy reads BUSY via
+# the rendering-immune marker branch (no pane-render race) -> the trigger defers.
+tmux new-session -d -s "$BRIEFBUSY" "sleep 600"
+touch "$BRIEFBUSY_DIR/data/.last-tool-call"
+# Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
+# computed PAYLOAD (bare vs set +H;) is observable verbatim in the captured pane.
+tmux new-session -d -s "$SINK" "sleep 600"
+sleep 1  # let panes render
+
+# --- Observe: the real trigger against the idle + busy briefing bots ----------
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEF" morning >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEFBUSY" morning >/dev/null 2>&1 || true
+# Prose + classifier-edge payloads straight through dispatch.sh: prose with a
+# bang, file-path prose, and a leading-whitespace slash must ALL keep set +H;.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" "deploy failed alert !!" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" "/home/crog/x is broken" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" " /leading-space-prose" >/dev/null 2>&1 || true
+sleep 1  # let the sends render into the panes
+
+# --- Assert ---
+brief_events=$(ls "$BRIEF_DIR"/data/events/fleet-*.jsonl 2>/dev/null | head -1 || true)
+briefbusy_events=$(ls "$BRIEFBUSY_DIR"/data/events/fleet-*.jsonl 2>/dev/null | head -1 || true)
+brief_pane=$(tmux capture-pane -t "$BRIEF" -p 2>/dev/null || true)
+busy_pane=$(tmux capture-pane -t "$BRIEFBUSY" -p 2>/dev/null || true)
+sink_pane=$(tmux capture-pane -t "$SINK" -p 2>/dev/null || true)
+
+# (a) the trigger fires — briefing_dispatched on the idle bot's ledger
+{ [ -n "$brief_events" ] && grep -q '"type":"briefing_dispatched"' "$brief_events"; } && r=yes || r=no
+check "briefing trigger fires: briefing_dispatched event emitted (idle bot)" "$r"
+
+# (b) bare-slash lands — /briefing morning present, NO set +H; prefix (F6 canary)
+{ printf '%s' "$brief_pane" | grep -q '/briefing morning' \
+    && ! printf '%s' "$brief_pane" | grep -q 'set +H'; } && r=yes || r=no
+check "briefing dispatch lands as a BARE slash command (no set +H; — F6 regression canary)" "$r"
+
+# (c) busy-defer — briefing_deferred/bot_busy, and NOTHING sent to the busy pane
+printf '%s' "$busy_pane" | grep -q '/briefing' && _sent=yes || _sent=no
+{ [ -n "$briefbusy_events" ] \
+    && grep -q '"type":"briefing_deferred".*"reason":"bot_busy"' "$briefbusy_events" \
+    && [ "$_sent" = no ]; } && r=yes || r=no
+check "briefing defers on a busy bot: briefing_deferred/bot_busy, no dispatch" "$r"
+
+# (d) prose control — a non-slash payload keeps the set +H; guard
+printf '%s' "$sink_pane" | grep -qE 'set \+H; deploy failed alert' && r=yes || r=no
+check "dispatch classifier keeps set +H; on prose (deploy failed !!)" "$r"
+
+# (e) classifier edges — file-path prose + leading-whitespace slash keep the guard
+printf '%s' "$sink_pane" | grep -qE 'set \+H; /home/crog/x is broken' && r=yes || r=no
+check "dispatch classifier keeps set +H; on file-path prose (/home/... not a slash cmd)" "$r"
+printf '%s' "$sink_pane" | grep -qE 'set \+H; +/leading-space-prose' && r=yes || r=no
+check "dispatch classifier keeps set +H; on a leading-whitespace slash (not anchored ^/)" "$r"
+
+# (f) skill env-consumption (F4). The /briefing skill must actually CONSUME the
+# configured sections — the F4 "silently-ignored section list" risk. SKILL.md is
+# model-facing prose with no runnable artifact in this model-free harness, so
+# prove the consumption CONTRACT lives in the REAL library skill file: its
+# actionable "## Instructions" must READ BRIEFING_SECTIONS_<SLOT> and RENDER the
+# configured sections (a mention in a reference table is not consumption). TEETH:
+# gutting SKILL.md's BRIEFING_SECTIONS handling makes this go RED (mutation-
+# verified). A live model honoring the instruction is the P7 human canary; this
+# is the deterministic file-contract gate. NOTE: the prior version re-read a
+# bot.conf var the test itself wrote and never touched SKILL.md, so a gutted
+# skill stayed green — hollow (#640, rajan request-changes).
+_skill="$LIB_DIR/../library/skills/briefing/SKILL.md"
+_instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null)
+{ [ -f "$_skill" ] \
+    && printf '%s\n' "$_instr" | grep -q 'BRIEFING_SECTIONS' \
+    && printf '%s\n' "$_instr" | grep -qi 'configured section'; } && r=yes || r=no
+check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (read the var + render the configured sections)" "$r"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
