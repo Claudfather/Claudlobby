@@ -1228,20 +1228,23 @@ check "dispatch classifier keeps set +H; on file-path prose (/home/... not a sla
 printf '%s' "$sink_pane" | grep -qE 'set \+H; +/leading-space-prose' && r=yes || r=no
 check "dispatch classifier keeps set +H; on a leading-whitespace slash (not anchored ^/)" "$r"
 
-# (f) skill env-consumption (F4) — the /briefing skill's documented rule
-# (upper-case the dispatched slot, read $BRIEFING_SECTIONS_<SLOT>, else the
-# canonical default) must resolve the CONFIGURED list, so a silently-ignored
-# section list can't pass every gate but the human canary.
-_consumed=$(
-    load_bot_conf "$BRIEF_DIR"
-    _slot_u=$(printf '%s' morning | tr '[:lower:]' '[:upper:]')
-    _var="BRIEFING_SECTIONS_$_slot_u"
-    printf '%s' "${!_var:-}"
-)
-# Equality to the configured list is the whole proof: a silently-ignored section
-# list would leave _consumed empty or the canonical default — either fails this.
-[ "$_consumed" = "wrap tomorrow overnight" ] && r=yes || r=no
-check "briefing skill env-read resolves the CONFIGURED sections, not the canonical default" "$r"
+# (f) skill env-consumption (F4). The /briefing skill must actually CONSUME the
+# configured sections — the F4 "silently-ignored section list" risk. SKILL.md is
+# model-facing prose with no runnable artifact in this model-free harness, so
+# prove the consumption CONTRACT lives in the REAL library skill file: its
+# actionable "## Instructions" must READ BRIEFING_SECTIONS_<SLOT> and RENDER the
+# configured sections (a mention in a reference table is not consumption). TEETH:
+# gutting SKILL.md's BRIEFING_SECTIONS handling makes this go RED (mutation-
+# verified). A live model honoring the instruction is the P7 human canary; this
+# is the deterministic file-contract gate. NOTE: the prior version re-read a
+# bot.conf var the test itself wrote and never touched SKILL.md, so a gutted
+# skill stayed green — hollow (#640, rajan request-changes).
+_skill="$LIB_DIR/../library/skills/briefing/SKILL.md"
+_instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null)
+{ [ -f "$_skill" ] \
+    && printf '%s\n' "$_instr" | grep -q 'BRIEFING_SECTIONS' \
+    && printf '%s\n' "$_instr" | grep -qi 'configured section'; } && r=yes || r=no
+check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (read the var + render the configured sections)" "$r"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
