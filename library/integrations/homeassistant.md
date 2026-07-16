@@ -1,5 +1,7 @@
 ---
 title: Home Assistant
+tool_grants:
+  - "mcp__homeassistant__*"
 ---
 
 # Home Assistant

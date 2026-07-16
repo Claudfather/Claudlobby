@@ -1,6 +1,8 @@
 ---
 title: Slack
 type: mcp
+tool_grants:
+  - "mcp__slack__*"
 ---
 
 # Slack

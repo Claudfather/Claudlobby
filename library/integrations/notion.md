@@ -1,5 +1,7 @@
 ---
 title: Notion MCP
+tool_grants:
+  - "mcp__notion__*"
 ---
 
 # Notion MCP

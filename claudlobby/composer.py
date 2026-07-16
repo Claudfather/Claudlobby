@@ -173,10 +173,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
 
         # Generate one server entry per instance
         for instance in entry.instances:
-            if instance == "default":
-                output_name = entry.name
-            else:
-                output_name = f"{entry.name}-{instance}"
+            output_name = entry.output_name(instance)
 
             instance_config = copy.deepcopy(server_config)
 
@@ -241,15 +238,58 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
         if not tools:
             continue
         for instance in entry.instances:
-            if instance == "default":
-                output_name = entry.name
-            else:
-                output_name = f"{entry.name}-{instance}"
+            output_name = entry.output_name(instance)
             # Emit a server-level wildcard when ALL contract tools are allowed.
             # This is always the case currently (no partial allow mechanism),
             # so the wildcard is emitted for every server with a non-empty tools list.
             patterns.append(f"mcp__{output_name}__*")
     return patterns
+
+
+def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
+    """Resolve MCP tool-permission grants from equipped integrations' ``tool_grants``.
+
+    Reads ``tool_grants`` frontmatter from each of the bot's effective
+    integrations (see :func:`resolve_effective_integrations`) and expands it
+    into settings.local.json allow entries. One rule produces three shapes,
+    keyed on whether a ``bot.mcp`` entry shares the integration's name (a
+    fragment-backed integration is named after its mcp server):
+
+    - **fragment-backed** with a matching ``bot.mcp`` entry — the
+      ``mcp__<name>__`` prefix is rewritten per instance (``default`` →
+      ``mcp__<name>__``; named → ``mcp__<name>-<instance>__``), reproducing
+      :func:`_resolve_mcp_permissions` output byte-for-byte;
+    - **fragment-backed equipped without a matching mcp entry** — the grant is
+      emitted literally (the default ``mcp__<name>__*``); the validator warns
+      that the paired server is not configured;
+    - **connector-backed** (no matching mcp entry, e.g. ``mcp__claude_ai_*``) —
+      emitted literally;
+    - **CLI-backed** (no ``tool_grants``) — nothing.
+    """
+    from .loader import parse_frontmatter
+
+    grants: list[str] = []
+    for name in resolve_effective_integrations(bot, paths):
+        int_path = paths.find_library_file("integrations", name, ".md")
+        if int_path is None:
+            continue
+        fm, _ = parse_frontmatter(int_path.read_text())
+        tool_grants = fm.get("tool_grants")
+        if not isinstance(tool_grants, list) or not tool_grants:
+            continue
+        entry = next((e for e in bot.mcp if e.name == name), None)
+        if entry is None:
+            grants.extend(tool_grants)
+            continue
+        prefix = f"mcp__{name}__"
+        for grant in tool_grants:
+            if grant.startswith(prefix):
+                rest = grant[len(prefix) :]
+                for instance in entry.instances:
+                    grants.append(f"mcp__{entry.output_name(instance)}__{rest}")
+            else:
+                grants.append(grant)
+    return grants
 
 
 # ----------------------------------------------------------------------
@@ -883,19 +923,30 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
     """Return the list of integration names to use for a bot.
 
-    If bot.integrations is explicitly set, use it verbatim. Otherwise,
-    derive from bot.mcp: any MCP entry whose name has a matching
-    integrations/<name>.md file (in the overlay or base library) is
-    auto-paired. This avoids requiring authors to repeat integration names
-    that are already implied by the MCP config.
+    Returns the UNION of explicit ``bot.integrations`` and the auto-paired
+    mcp names (any MCP entry whose name has a matching integrations/<name>.md
+    file in the overlay or base library), with explicit integrations first and
+    order preserved. When ``bot.integrations`` is unset this is exactly the
+    auto-paired set.
+
+    The union is load-bearing: returning ``bot.integrations`` verbatim would
+    strip the mcp-derived permission grants the moment a bot sets integrations:
+    explicitly, because grant resolution keys off the effective-integration set.
+    Explicit connector integrations must be *additive* to the mcp-paired set,
+    never a replacement.
     """
-    if bot.integrations:
-        return bot.integrations
-    return [
+    auto_paired = [
         e.name
         for e in bot.mcp
         if paths.find_library_file("integrations", e.name, ".md") is not None
     ]
+    if not bot.integrations:
+        return auto_paired
+    result = list(bot.integrations)
+    for name in auto_paired:
+        if name not in result:
+            result.append(name)
+    return result
 
 
 # ----------------------------------------------------------------------
@@ -1155,6 +1206,25 @@ def _resolve_expertise_permissions(
 BASE_TOOLS = ["Read", "Grep", "Glob"]
 
 
+def _assert_grant_superset(bot_id: str, legacy: list[str], new: list[str]) -> None:
+    """Fail generation unless the new integration ``tool_grants`` cover every legacy grant.
+
+    The migration keeps both grant sources live (see :func:`compose_settings_local`),
+    so no live grant can vanish mid-window even if the new resolver has an edge bug.
+    This gate proves the *stronger* property the ``_permissions_contract`` cut depends
+    on: the new :func:`_resolve_integration_grants` output alone is already a superset
+    of :func:`_resolve_mcp_permissions`. Compared as normalized sets (order-independent)
+    and raised before any settings.local.json is written.
+    """
+    missing = sorted(set(legacy) - set(new))
+    if missing:
+        raise ValueError(
+            f"bot {bot_id!r}: integration tool_grants would drop legacy MCP grants "
+            f"{missing} — every fragment-backed mcp entry needs a paired integration "
+            "file whose tool_grants cover it before the _permissions_contract cut."
+        )
+
+
 def compose_settings_local(
     bot: BotConfig,
     fleet: FleetConfig,
@@ -1206,8 +1276,17 @@ def compose_settings_local(
     # Layer 2: Expertise allow (plain tool names + bash command patterns)
     allow_patterns.extend(expertise_allow)
 
-    # Layer 3: MCP tool contracts (auto-derived from fragment _permissions_contract)
-    allow_patterns.extend(_resolve_mcp_permissions(bot, paths))
+    # Layer 3: MCP tool grants — union of the legacy fragment _permissions_contract
+    # resolver and the new integration tool_grants resolver. Both stay live through
+    # the migration window (belt-and-suspenders — no live grant can vanish even if the
+    # new resolver has an edge bug). _assert_grant_superset proves the new resolver
+    # alone already covers legacy, the precondition for cutting _permissions_contract.
+    legacy_grants = _resolve_mcp_permissions(bot, paths)
+    integration_grants = _resolve_integration_grants(bot, paths)
+    _assert_grant_superset(bot.bot_id, legacy_grants, integration_grants)
+    for grant in (*legacy_grants, *integration_grants):
+        if grant not in allow_patterns:
+            allow_patterns.append(grant)
 
     # Layer 4: Channel/plugin tools (auto-derived from config)
     allow_patterns.extend(_resolve_channel_permissions(bot))

@@ -294,6 +294,12 @@ class McpEntry:
             return f"{self.name.upper().replace('-', '_')}_"
         return f"{self.name.upper().replace('-', '_')}_{instance.upper().replace('-', '_')}_"
 
+    def output_name(self, instance: str) -> str:
+        """Server name for an instance — the composed .mcp.json server key and the
+        ``mcp__<name>__*`` grant prefix both derive from this one convention, so they
+        stay in lockstep. E.g., gws/personal → ``gws-personal``; default → ``gws``."""
+        return self.name if instance == "default" else f"{self.name}-{instance}"
+
 
 @dataclass
 class AutonomousRunnerPicker:
