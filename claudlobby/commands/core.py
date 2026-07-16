@@ -82,12 +82,12 @@ def cmd_generate(args) -> int:
         out = compose_fleet(fleet, paths)
         log.info("composed %d bots → %s", len(out), paths.runtime_bots)
 
-    # Fleet-level timer generation (after per-bot loop). compose_fleet_timers
-    # emits the system_defaults timers and/or the opt-in sweep timer, so call
-    # it when either is in play.
-    sd = fleet.system_defaults
-    if (sd.enabled and sd.timers) or fleet.sweep_enabled():
-        timers_dir = compose_fleet_timers(fleet, paths, merged_defaults)
+    # Fleet-level timer generation (after per-bot loop). Called unconditionally:
+    # compose_fleet_timers early-returns cheaply (no mkdir) when nothing is
+    # configured, and owns the "prune a removed stanza's stale units" reconcile
+    # on that path — a caller-side guard would skip that cleanup.
+    timers_dir = compose_fleet_timers(fleet, paths, merged_defaults)
+    if timers_dir.is_dir():
         log.info("composed fleet timers → %s", timers_dir)
 
     # Host-global jobs (system.yaml host:) are platform equipment, not fleet

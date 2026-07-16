@@ -148,6 +148,16 @@ def _validate_bots(
                     f"bot '{bot_name}': integration '{integ}' not in any library/integrations/ — skipped"
                 )
 
+        # Briefing source coverage (warn). A briefing-equipped bot with no
+        # integrations and no mcp servers has nothing to summarize — the skill
+        # would render only self-derivable sections. Parse-time already
+        # hard-rejects malformed slot names / cron (config._coerce_briefing).
+        if bot.briefing and not bot.integrations and not bot.mcp:
+            report.warnings.append(
+                f"bot '{bot_name}': briefing equipped but no integrations/mcp "
+                "source coverage — sections that read external data will be empty"
+            )
+
         # Guardrails / protocols / resources / lessons / post_actions (warn).
         # Each entry can be `name`, `dir/name`, or `dir/` (folder expansion).
         for ref, kind in [

@@ -15,6 +15,7 @@ import yaml
 from .known_values import (
     KNOWN_EFFORTS,
     PROJECT_KEYS,
+    SHELL_IDENT_RE,
     VALID_PERMISSION_MODES,
     closest_match,
 )
@@ -120,6 +121,23 @@ class SweepConfig:
     label: str = "auto-audit"
     schedule: str = "*-*-* 03:00:00"  # systemd OnCalendar; nightly 03:00
     audit_types: list[str] = field(default_factory=lambda: ["tech-debt"])
+
+
+@dataclass
+class BriefingConfig:
+    """Bot-level ``briefing:`` feature stanza (#627).
+
+    Presence equips the bot: the composer expands each slot into a per-(bot,slot)
+    OnCalendar timer (``<prefix>.briefing-<bot>-<slot>``) and emits ``BRIEFING_*``
+    into the bot's bot.conf. Slot names are free identifiers (a bot may run a
+    custom ``analytics`` slot) but MUST be shell identifiers (known_values
+    SHELL_IDENT_RE) — they become the ``BRIEFING_SECTIONS_<SLOT>`` env-var suffix
+    — and each value is a systemd OnCalendar expression, never 5-field cron.
+    """
+
+    slots: dict[str, str] = field(default_factory=dict)  # slot -> OnCalendar
+    sections: dict[str, list[str]] = field(default_factory=dict)  # slot -> sections
+    sources: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -371,6 +389,7 @@ class BotConfig:
     claudron_vault_path: str | None = None
     claudosseum_tenant_id: str | None = None
     autonomous_runner: AutonomousRunnerConfig | None = None
+    briefing: BriefingConfig | None = None  # equippable briefing feature (#627)
 
 
 @dataclass
@@ -443,6 +462,10 @@ class FleetConfig:
     def sweep_enabled(self) -> bool:
         """True when the opt-in code-audit sweep is configured and enabled."""
         return bool(self.sweep and self.sweep.enabled)
+
+    def briefing_enabled(self) -> bool:
+        """True when any bot equips the briefing feature (bots.<bot>.briefing)."""
+        return any(b.briefing and b.briefing.slots for b in self.bots.values())
 
     def manager_bots(self) -> set[str]:
         """Bot names that manage at least one team."""
@@ -692,6 +715,60 @@ def _coerce_sweep(raw: dict | None) -> SweepConfig | None:
         schedule=str(raw.get("schedule", "*-*-* 03:00:00")),
         audit_types=audit_types,
     )
+
+
+def _coerce_briefing(raw: dict | None) -> BriefingConfig | None:
+    """Coerce a bot's ``briefing:`` block. None when absent (opt-out).
+
+    Hard-rejects at parse time (surfaced friendly by ``_load_fleet_or_exit``) so
+    a bad stanza fails ``validate`` AND ``generate`` before it can corrupt
+    bot.conf or a timer: empty/non-map slots, a non-shell-identifier slot name
+    (would break ``BRIEFING_SECTIONS_<SLOT>`` sourcing), or a 5-field cron value
+    (the timer chain speaks OnCalendar, not cron).
+    """
+    if not raw:
+        return None
+    raw = _shaped("briefing", raw, dict, "briefing: {slots: {morning: ...}}")
+    slots_raw = _shaped(
+        "briefing.slots", raw.get("slots"), dict, "slots: {morning: '*-*-* 08:30:00'}"
+    )
+    if not slots_raw:
+        raise ValueError(
+            "briefing.slots must declare at least one slot "
+            "(e.g. slots: {morning: '*-*-* 08:30:00'})"
+        )
+    slots: dict[str, str] = {}
+    for name, expr in slots_raw.items():
+        name = str(name)
+        if not SHELL_IDENT_RE.match(name):
+            raise ValueError(
+                f"briefing slot name {name!r} is not a shell identifier "
+                "([A-Za-z_][A-Za-z0-9_]*) — it becomes the BRIEFING_SECTIONS_<SLOT> "
+                "env-var suffix"
+            )
+        expr = _shaped(f"briefing.slots.{name}", expr, str, "'*-*-* 08:30:00'")
+        if len(expr.split()) == 5:
+            raise ValueError(
+                f"briefing slot {name!r} value {expr!r} looks like 5-field cron; "
+                "use a systemd OnCalendar expression (e.g. '*-*-* 08:30:00')"
+            )
+        slots[name] = expr
+    sections_raw = _shaped(
+        "briefing.sections",
+        raw.get("sections"),
+        dict,
+        "sections: {morning: [overnight]}",
+    )
+    sections = {
+        str(k): [
+            str(s) for s in _shaped(f"briefing.sections.{k}", v, list, "[overnight]")
+        ]
+        for k, v in sections_raw.items()
+    }
+    sources = [
+        str(s) for s in _shaped("briefing.sources", raw.get("sources"), list, "[gmail]")
+    ]
+    return BriefingConfig(slots=slots, sections=sections, sources=sources)
 
 
 def _merge_observability(
@@ -954,6 +1031,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         claudosseum_tenant_id=raw.get("claudosseum_tenant_id")
         or defaults.get("claudosseum_tenant_id"),
         autonomous_runner=_coerce_autonomous_runner(raw.get("autonomous_runner"), name),
+        briefing=_coerce_briefing(raw.get("briefing")),
     )
 
 
