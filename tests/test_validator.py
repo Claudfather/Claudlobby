@@ -692,3 +692,83 @@ class TestAutonomousRunnerValidation:
         report = validate(fleet, paths)
         assert not any("autonomous_runner" in w for w in report.warnings)
         assert not any("autonomous_runner" in e for e in report.errors)
+
+
+class TestToolGrantsValidation:
+    """validator warns on mcp-grants-without-integration-tool_grants and malformed tool_grants."""
+
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "1:a")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "2:b")
+
+    def _give_lead_github_mcp(self, fleet_dir: Path) -> None:
+        y = (
+            (fleet_dir / "fleet.yaml")
+            .read_text()
+            .replace(
+                "expertise: [orchestration]",
+                "expertise: [orchestration]\n      mcp: [github]",
+            )
+        )
+        (fleet_dir / "fleet.yaml").write_text(y)
+
+    def _set_github_contract(self, fleet_dir: Path, tools: list[str]) -> None:
+        import json
+
+        p = fleet_dir / "library" / "mcp" / "github.json"
+        frag = json.loads(p.read_text())
+        frag["_permissions_contract"] = {"tools": tools}
+        p.write_text(json.dumps(frag))
+
+    def _write_github_integration(self, fleet_dir: Path, tool_grants_yaml: str) -> None:
+        (fleet_dir / "library" / "integrations" / "github.md").write_text(
+            "---\ntitle: GitHub\n" + tool_grants_yaml + "---\n\n# GitHub\n"
+        )
+
+    def test_mcp_with_contract_but_no_tool_grants_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._set_github_contract(fleet_dir, ["search_code"])  # fragment grants tools
+        # github.md (fixture) has env_contract but no tool_grants → migration gap
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("tool_grants" in w and "github" in w for w in report.warnings)
+
+    def test_empty_contract_no_missing_grant_warning(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._set_github_contract(fleet_dir, [])  # empty contract → nothing to migrate
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any("tool_grants" in w for w in report.warnings)
+
+    def test_malformed_mid_string_wildcard_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._write_github_integration(
+            fleet_dir, 'tool_grants:\n  - "mcp__git*hub__*"\n'
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "mcp__git*hub__*" in w for w in report.warnings)
+
+    def test_non_mcp_prefixed_grant_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._write_github_integration(fleet_dir, 'tool_grants:\n  - "Bash(rm *)"\n')
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "Bash(rm *)" in w for w in report.warnings)
+
+    def test_valid_tool_grants_no_warning(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._set_github_contract(fleet_dir, ["search_code"])
+        self._write_github_integration(
+            fleet_dir, 'tool_grants:\n  - "mcp__github__*"\n'
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any("tool_grants" in w for w in report.warnings)
+        assert not any("malformed" in w for w in report.warnings)

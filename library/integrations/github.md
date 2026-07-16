@@ -1,5 +1,7 @@
 ---
 title: GitHub MCP
+tool_grants:
+  - "mcp__github__*"
 ---
 
 # GitHub MCP

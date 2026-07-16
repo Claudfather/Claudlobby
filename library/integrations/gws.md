@@ -1,6 +1,8 @@
 ---
 title: Google Workspace (Gmail + Calendar)
 type: mcp
+tool_grants:
+  - "mcp__gws__*"
 ---
 
 # Google Workspace (Gmail + Calendar)
@@ -10,6 +12,8 @@ Wire config: `library/mcp/gws.json` (uses `${GOOGLE_OAUTH_CLIENT_ID}`, `${GOOGLE
 Multi-instance capable: configure separate instances for different Google accounts (e.g., personal and work).
 
 Supersedes the deprecated `gmail.json` fragment.
+
+> **Backend cross-ref — self-hosted vs native.** `gws` is the **self-hosted OAuth MCP** for Google (multi-instance, `${GOOGLE_OAUTH_CLIENT_ID}`/`${GOOGLE_OAUTH_CLIENT_SECRET}`, grants under `mcp__gws__*`). Claude also ships **native connectors** for the same capabilities — `library/integrations/gmail.md` and `library/integrations/google-calendar.md` (`mcp__claude_ai_Gmail__*` / `mcp__claude_ai_Google_Calendar__*`, no fleet secrets). Equip **one path per capability per bot**, not both.
 
 ### Common ops
 

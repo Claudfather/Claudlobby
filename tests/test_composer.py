@@ -1217,6 +1217,12 @@ class TestMcpPermissionsInSettingsLocal:
         (root / "runtime" / "bots").mkdir(parents=True)
         for name, content in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(content))
+            # Pair every fragment with an integration file carrying covering
+            # tool_grants — the invariant the grant-superset gate enforces.
+            tools = content.get("_permissions_contract", {}).get("tools", [])
+            _write_integration(
+                root, name, tool_grants=[f"mcp__{name}__*"] if tools else []
+            )
         return Paths(root=root, fleet_dir=root)
 
     def test_mcp_trust_allowlist_sorted_no_blanket(self, tmp_path):
@@ -1677,6 +1683,7 @@ class TestExpertisePermissionsInSettingsLocal:
                 }
             )
         )
+        _write_integration(root, "github", tool_grants=["mcp__github__*"])
 
         paths = Paths(root=root, fleet_dir=root)
         bot = BotConfig(
@@ -2404,7 +2411,7 @@ class TestComposeAutonomousRunner:
 
 
 class TestResolveEffectiveIntegrations:
-    """resolve_effective_integrations: explicit list used verbatim; auto-derived from MCP when empty."""
+    """resolve_effective_integrations: explicit list unioned with auto-paired mcp names; auto-derived from MCP when empty."""
 
     def _paths_with_integrations(self, tmp_path: Path, names: list[str]) -> Paths:
         root = tmp_path / "claudlobby"
@@ -2415,7 +2422,11 @@ class TestResolveEffectiveIntegrations:
             (int_dir / f"{name}.md").write_text(f"# {name}\n")
         return Paths(root=root, fleet_dir=root)
 
-    def test_explicit_integrations_used_verbatim(self, tmp_path):
+    def test_explicit_integrations_union_mcp_paired(self, tmp_path):
+        """Explicit integrations are unioned with auto-paired mcp names, not replaced.
+
+        The old verbatim return would drop ``github`` here, stripping its grants.
+        """
         from claudlobby.composer import resolve_effective_integrations
         from claudlobby.config import McpEntry
 
@@ -2424,10 +2435,11 @@ class TestResolveEffectiveIntegrations:
             bot_id="w",
             name="w",
             expertise=["eng"],
-            integrations=["neon"],  # explicit; github not listed
+            integrations=["neon"],  # explicit; github implied by mcp
             mcp=[McpEntry(name="github"), McpEntry(name="neon")],
         )
-        assert resolve_effective_integrations(bot, paths) == ["neon"]
+        # neon (explicit) first; github auto-paired and appended; neon not duplicated
+        assert resolve_effective_integrations(bot, paths) == ["neon", "github"]
 
     def test_auto_derived_from_mcp_when_empty(self, tmp_path):
         from claudlobby.composer import resolve_effective_integrations
@@ -2568,3 +2580,329 @@ def test_compose_hooks_type_hints_resolve():
 
     hints = typing.get_type_hints(_compose_hooks)
     assert "hooks" in hints
+
+
+def _write_integration(
+    root: Path,
+    name: str,
+    *,
+    tool_grants: list[str] | None = None,
+    type_: str | None = None,
+    body: str = "doc",
+) -> None:
+    """Write a minimal library/integrations/<name>.md with optional tool_grants."""
+    d = root / "library" / "integrations"
+    d.mkdir(parents=True, exist_ok=True)
+    fm = ["---", f"title: {name}"]
+    if type_:
+        fm.append(f"type: {type_}")
+    if tool_grants is not None:
+        fm.append("tool_grants:")
+        fm.extend(f'  - "{g}"' for g in tool_grants)
+    fm.append("---")
+    (d / f"{name}.md").write_text("\n".join(fm) + f"\n# {name}\n\n{body}\n")
+
+
+class TestResolveEffectiveIntegrationsUnion:
+    """resolve_effective_integrations unions explicit integrations with auto-paired mcp names.
+
+    The pre-fix behavior returned bot.integrations verbatim, which stripped mcp-derived
+    grants the moment a bot set integrations: explicitly (the cycle-1 F2 blocker).
+    """
+
+    def _setup(self, tmp_path: Path, integration_names: list[str]) -> Paths:
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for n in integration_names:
+            _write_integration(root, n)
+        return Paths(root=root, fleet_dir=root)
+
+    def test_explicit_integrations_union_auto_paired_mcp(self, tmp_path):
+        """A bot with explicit integrations AND an auto-pairable mcp gets BOTH."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["neon", "github"])
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            integrations=["neon"],
+            mcp=[McpEntry(name="github")],
+        )
+        eff = resolve_effective_integrations(bot, paths)
+        assert "neon" in eff  # explicit integration kept
+        assert "github" in eff  # auto-paired mcp unioned in (the fix)
+
+    def test_only_mcp_auto_pairs(self, tmp_path):
+        """No explicit integrations → auto-pair from mcp (unchanged behavior)."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["github", "notion"])
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github"), McpEntry(name="notion")],
+        )
+        assert sorted(resolve_effective_integrations(bot, paths)) == [
+            "github",
+            "notion",
+        ]
+
+    def test_dedup_when_explicit_and_mcp_paired(self, tmp_path):
+        """An integration both listed explicitly and mcp-paired appears once."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["github"])
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            integrations=["github"],
+            mcp=[McpEntry(name="github")],
+        )
+        assert resolve_effective_integrations(bot, paths) == ["github"]
+
+    def test_explicit_order_preserved_mcp_appended(self, tmp_path):
+        """Explicit integrations come first in order; mcp-paired names append after."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["neon", "vercel", "github"])
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            integrations=["neon", "vercel"],
+            mcp=[McpEntry(name="github")],
+        )
+        assert resolve_effective_integrations(bot, paths) == [
+            "neon",
+            "vercel",
+            "github",
+        ]
+
+    def test_mcp_without_integration_file_not_paired(self, tmp_path):
+        """An mcp entry with no integrations/<name>.md is not auto-paired."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["neon"])  # no github integration file
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            integrations=["neon"],
+            mcp=[McpEntry(name="github")],
+        )
+        assert resolve_effective_integrations(bot, paths) == ["neon"]
+
+
+class TestResolveIntegrationGrants:
+    """_resolve_integration_grants resolves tool_grants across effective integrations.
+
+    Three emergent shapes from one rule (a fragment-backed integration shares its
+    name with its mcp server):
+      - fragment-backed with a matching bot.mcp entry → the ``mcp__<name>__``
+        prefix is instance-expanded, reproducing _resolve_mcp_permissions output;
+      - fragment-backed equipped WITHOUT a matching mcp entry → grant emitted
+        literally (the default ``mcp__<name>__*``; validator warns);
+      - connector-backed (no matching mcp entry) → literal ``mcp__claude_ai_*``;
+      - CLI-backed (no tool_grants) → nothing.
+    """
+
+    def _setup(self, tmp_path: Path, integrations: dict[str, dict]) -> Paths:
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for name, spec in integrations.items():
+            _write_integration(
+                root,
+                name,
+                tool_grants=spec.get("tool_grants"),
+                type_=spec.get("type_"),
+            )
+        return Paths(root=root, fleet_dir=root)
+
+    def test_fragment_backed_default_instance(self, tmp_path):
+        from claudlobby.composer import _resolve_integration_grants
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(tmp_path, {"github": {"tool_grants": ["mcp__github__*"]}})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
+        )
+        assert _resolve_integration_grants(bot, paths) == ["mcp__github__*"]
+
+    def test_fragment_backed_multi_instance_expands(self, tmp_path):
+        """Instance-scoped fragment servers rewrite the prefix per instance."""
+        from claudlobby.composer import _resolve_integration_grants
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(tmp_path, {"gws": {"tool_grants": ["mcp__gws__*"]}})
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            mcp=[McpEntry(name="gws", instances=["personal", "work"])],
+        )
+        assert _resolve_integration_grants(bot, paths) == [
+            "mcp__gws-personal__*",
+            "mcp__gws-work__*",
+        ]
+
+    def test_connector_grant_literal(self, tmp_path):
+        """A connector equipped via integrations: (no mcp entry) emits its grant literally."""
+        from claudlobby.composer import _resolve_integration_grants
+
+        paths = self._setup(
+            tmp_path,
+            {
+                "gmail": {
+                    "tool_grants": ["mcp__claude_ai_Gmail__*"],
+                    "type_": "connector",
+                }
+            },
+        )
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], integrations=["gmail"], mcp=[]
+        )
+        assert _resolve_integration_grants(bot, paths) == ["mcp__claude_ai_Gmail__*"]
+
+    def test_cli_backed_no_grants(self, tmp_path):
+        """A CLI integration carries no tool_grants → no grants."""
+        from claudlobby.composer import _resolve_integration_grants
+
+        paths = self._setup(tmp_path, {"neon": {"type_": "cli"}})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], integrations=["neon"], mcp=[]
+        )
+        assert _resolve_integration_grants(bot, paths) == []
+
+    def test_fragment_backed_without_mcp_entry_emits_default(self, tmp_path):
+        """Fragment-backed integration equipped without a matching mcp entry → literal default."""
+        from claudlobby.composer import _resolve_integration_grants
+
+        paths = self._setup(tmp_path, {"github": {"tool_grants": ["mcp__github__*"]}})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], integrations=["github"], mcp=[]
+        )
+        assert _resolve_integration_grants(bot, paths) == ["mcp__github__*"]
+
+
+class TestGrantSupersetGate:
+    """_assert_grant_superset hard-fails when new tool_grants would drop a legacy grant."""
+
+    def test_gate_raises_when_new_drops_legacy(self):
+        import pytest
+
+        from claudlobby.composer import _assert_grant_superset
+
+        with pytest.raises(ValueError, match="mcp__github__"):
+            _assert_grant_superset("worker", ["mcp__github__*"], [])
+
+    def test_gate_passes_when_new_is_superset(self):
+        from claudlobby.composer import _assert_grant_superset
+
+        # new adds a connector grant on top of legacy — superset, no raise
+        _assert_grant_superset(
+            "worker",
+            ["mcp__github__*"],
+            ["mcp__github__*", "mcp__claude_ai_Gmail__*"],
+        )
+
+    def test_gate_is_set_comparison_not_textual_order(self):
+        from claudlobby.composer import _assert_grant_superset
+
+        _assert_grant_superset(
+            "worker",
+            ["mcp__github__*", "mcp__notion__*"],
+            ["mcp__notion__*", "mcp__github__*"],
+        )
+
+
+class TestGrantUnionInSettingsLocal:
+    """compose_settings_local emits the union of legacy + integration grants, gated."""
+
+    def _setup(
+        self, tmp_path: Path, fragments: dict[str, dict], integrations: dict[str, dict]
+    ) -> Paths:
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots").mkdir(parents=True)
+        mcp_dir = root / "library" / "mcp"
+        mcp_dir.mkdir(parents=True)
+        for name, content in fragments.items():
+            (mcp_dir / f"{name}.json").write_text(json.dumps(content))
+        for name, spec in integrations.items():
+            _write_integration(
+                root,
+                name,
+                tool_grants=spec.get("tool_grants"),
+                type_=spec.get("type_"),
+            )
+        return Paths(root=root, fleet_dir=root)
+
+    _GH_FRAGMENT = {
+        "github": {
+            "_permissions_contract": {"tools": ["search_code"]},
+            "github": {"command": "npx", "args": []},
+        }
+    }
+
+    def test_fragment_backed_grant_not_duplicated(self, tmp_path):
+        """Legacy and new both emit mcp__github__* → union dedups to one entry."""
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(
+            tmp_path, self._GH_FRAGMENT, {"github": {"tool_grants": ["mcp__github__*"]}}
+        )
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        allow = compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
+        assert allow.count("mcp__github__*") == 1
+
+    def test_connector_grant_added_alongside_legacy(self, tmp_path):
+        """Equipping a connector integration adds its literal grant; legacy grant retained."""
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(
+            tmp_path,
+            self._GH_FRAGMENT,
+            {
+                "github": {"tool_grants": ["mcp__github__*"]},
+                "gmail": {
+                    "tool_grants": ["mcp__claude_ai_Gmail__*"],
+                    "type_": "connector",
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            integrations=["gmail"],
+            mcp=[McpEntry(name="github")],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        allow = compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
+        assert "mcp__github__*" in allow  # legacy grant retained (union)
+        assert "mcp__claude_ai_Gmail__*" in allow  # connector addition
+
+    def test_compose_hard_fails_when_fragment_grant_uncovered(self, tmp_path):
+        """A contract fragment with no paired integration tool_grants trips the gate end-to-end."""
+        import pytest
+
+        from claudlobby.config import McpEntry
+
+        # fragment has a live grant, but NO integration file carries covering tool_grants
+        paths = self._setup(tmp_path, self._GH_FRAGMENT, {})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        with pytest.raises(ValueError, match="mcp__github__"):
+            compose_settings_local(bot, fleet, paths)

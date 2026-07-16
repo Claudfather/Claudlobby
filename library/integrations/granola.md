@@ -1,6 +1,8 @@
 ---
 title: Granola
 type: mcp
+tool_grants:
+  - "mcp__granola__*"
 ---
 
 # Granola

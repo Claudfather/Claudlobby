@@ -60,6 +60,39 @@ def _available_names(paths: Paths, kind: str, ext: str = ".md") -> set[str]:
     return names
 
 
+# A well-formed tool_grant is an exact-prefix ``mcp__`` glob whose only wildcard,
+# if any, is a trailing ``*`` (F5: no mid-string wildcards).
+_TOOL_GRANT_RE = re.compile(r"^mcp__[^*]*\*?$")
+
+
+def _integration_tool_grants(paths: Paths, name: str) -> list[str]:
+    """Read the ``tool_grants`` list from an integration file's frontmatter (empty if none)."""
+    from .loader import parse_frontmatter
+
+    int_path = paths.find_library_file("integrations", name, ".md")
+    if int_path is None:
+        return []
+    try:
+        fm, _ = parse_frontmatter(int_path.read_text())
+    except OSError:
+        return []
+    grants = fm.get("tool_grants")
+    return grants if isinstance(grants, list) else []
+
+
+def _mcp_contract_has_tools(frag_path: Path) -> bool:
+    """True when an MCP fragment carries a non-empty ``_permissions_contract.tools``.
+
+    Remove with the P8 ``_permissions_contract`` cut — it only exists to power the
+    migration-gap warning below, which is dead once the legacy contract is gone.
+    """
+    try:
+        frag = json.loads(frag_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(frag.get("_permissions_contract", {}).get("tools"))
+
+
 def _validate_bots(
     fleet: FleetConfig,
     paths: Paths,
@@ -114,11 +147,23 @@ def _validate_bots(
         # on disk is named after .name regardless of how many instances the
         # entry composes into .mcp.json.
         for mcp in bot.mcp:
-            if paths.find_library_file("mcp", mcp.name, ".json") is None:
+            frag_path = paths.find_library_file("mcp", mcp.name, ".json")
+            if frag_path is None:
                 suggestion = closest_match(mcp.name, avail_mcp)
                 hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(
                     f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{hint}"
+                )
+            # Migration-gap warning (remove with the P8 _permissions_contract cut):
+            # a fragment that still grants tools whose paired integration hasn't been
+            # given covering tool_grants would be dropped by the eventual cut.
+            elif _mcp_contract_has_tools(frag_path) and not _integration_tool_grants(
+                paths, mcp.name
+            ):
+                report.warnings.append(
+                    f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
+                    f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
+                    f'won\'t migrate (add tool_grants: ["mcp__{mcp.name}__*"])'
                 )
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
@@ -147,6 +192,18 @@ def _validate_bots(
                 report.warnings.append(
                     f"bot '{bot_name}': integration '{integ}' not in any library/integrations/ — skipped"
                 )
+
+        # tool_grants shape (warn) — every grant on an equipped integration must be
+        # an exact-prefix mcp__ glob (F5: no mid-string wildcards).
+        from .composer import resolve_effective_integrations
+
+        for integ in resolve_effective_integrations(bot, paths):
+            for grant in _integration_tool_grants(paths, integ):
+                if not (isinstance(grant, str) and _TOOL_GRANT_RE.match(grant)):
+                    report.warnings.append(
+                        f"bot '{bot_name}': integration '{integ}' tool_grant '{grant}' is "
+                        "malformed — must be an exact-prefix mcp__ glob with no mid-string wildcard"
+                    )
 
         # Briefing source coverage (warn). A briefing-equipped bot with no
         # integrations and no mcp servers has nothing to summarize — the skill

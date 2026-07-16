@@ -1,6 +1,8 @@
 ---
 title: Docker
 type: mcp
+tool_grants:
+  - "mcp__docker__*"
 ---
 
 # Docker
