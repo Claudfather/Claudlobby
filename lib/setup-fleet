@@ -151,6 +151,94 @@ migrate_legacy_keepalive() {
     fi
 }
 
+# --- 1c. briefing timer reconcile (F3 / #627) ---------------------------------
+# The briefing family is the first DYNAMIC per-(bot,slot) timer set: a renamed
+# or removed slot leaves an enrolled orphan that fires forever. enroll_jobs is
+# additive glob-enroll and never disables, so this is the disable half — the
+# enroll-side twin of the composer generate-time prune (_reconcile_briefing_units).
+# Models migrate_legacy_keepalive gate discipline + spin-down-bot.sh teardown;
+# reconcile-fleet.sh (step 4) already AUDITS such job drift, this acts on the
+# briefing subset. Cross-platform, dry-run-logged, glob-bounded to
+# <prefix>.briefing-*, with an abort-on-degenerate guard so a bad (or not-yet-run)
+# generate can never disable every live briefing timer. Enumerates the LIVE
+# ENROLLED set, not the composed dir.
+reconcile_briefing_timers() {
+    [ -n "$FLEET" ] || return 0      # root mode has no fleet timers
+    [ -d "$TIMERS_DIR" ] || return 0 # nothing composed -> nothing to reconcile
+    local ext c base
+    if [ "$_OS" = "Linux" ]; then ext="timer"; else ext="plist"; fi
+
+    # Composed set: <prefix>.briefing-* basenames just written by generate.
+    local composed=()
+    for c in "$TIMERS_DIR/$SERVICE_PREFIX".briefing-*."$ext"; do
+        [ -e "$c" ] || continue
+        composed+=("$(basename "$c" ".$ext")")
+    done
+
+    # Live ENROLLED set (the real firing units), not the composed dir.
+    local enrolled=() unit label uid
+    if [ "$_OS" = "Linux" ]; then
+        while IFS= read -r unit; do
+            [ -n "$unit" ] && enrolled+=("${unit%.timer}")
+        done < <(systemctl --user list-unit-files --no-legend \
+            "$SERVICE_PREFIX.briefing-*.timer" 2>/dev/null | awk '{print $1}')
+    else
+        uid="$(id -u)"
+        for c in "$HOME/Library/LaunchAgents/$SERVICE_PREFIX".briefing-*.plist; do
+            [ -e "$c" ] || continue
+            label="$(basename "$c" .plist)"
+            launchctl print "gui/$uid/$label" >/dev/null 2>&1 && enrolled+=("$label")
+        done
+    fi
+    [ "${#enrolled[@]}" -gt 0 ] || return 0 # no live briefing units to reconcile
+
+    # Orphans = enrolled - composed.
+    local orphans=() e is_composed
+    for e in "${enrolled[@]}"; do
+        is_composed=0
+        for base in "${composed[@]:-}"; do
+            [ "$e" = "$base" ] && { is_composed=1; break; }
+        done
+        [ "$is_composed" = 0 ] && orphans+=("$e")
+    done
+    [ "${#orphans[@]}" -gt 0 ] || return 0
+
+    # Abort-on-degenerate (verify-before-disable): nothing composed yet live units
+    # exist means a bad or not-yet-run generate — refuse the wholesale disable,
+    # dry-run-log, leave them running. A real full removal is done by hand from
+    # this log (rare; the generate side already pruned the unit files).
+    if [ "${#composed[@]}" -eq 0 ]; then
+        log "○ briefing reconcile ABORTED (degenerate): composed set empty while ${#enrolled[@]} briefing timer(s) live — NOT disabling; re-run 'claudlobby generate' or remove by hand"
+        for e in "${orphans[@]}"; do log "  would-disable (skipped): $e"; done
+        return 0
+    fi
+
+    # Dry-run-log every orphan first (forensic), then disable — glob-guarded so
+    # only <prefix>.briefing-* units can ever be touched.
+    local o
+    for o in "${orphans[@]}"; do log "· briefing orphan (will disable): $o"; done
+    for o in "${orphans[@]}"; do
+        case "$o" in
+        "$SERVICE_PREFIX".briefing-*) : ;;
+        *)
+            log "○ glob-guard refused non-briefing unit: $o"
+            continue
+            ;;
+        esac
+        if [ "$_OS" = "Linux" ]; then
+            systemctl --user disable --now "$o.timer" 2>/dev/null || true
+            rm -f "$HOME/.config/systemd/user/$o.timer" \
+                "$HOME/.config/systemd/user/$o.service"
+            systemctl --user daemon-reload 2>/dev/null || true
+            systemctl --user reset-failed "$o.timer" 2>/dev/null || true
+        else
+            /bin/launchctl bootout "gui/$(id -u)/$o" 2>/dev/null || true
+            rm -f "$HOME/Library/LaunchAgents/$o.plist"
+        fi
+        log "✓ briefing orphan disabled + removed: $o"
+    done
+}
+
 # --- 2. warm npx cache (before spin-up) ---------------------------------------
 warm_npx_cache() {
     # Skip when every declared bot is already healthy — those running bots are
@@ -235,6 +323,7 @@ reconcile() {
     "$LIB_DIR/reconcile-fleet.sh" "$FLEET" || FAILURES=$((FAILURES + 1))
 }
 
+reconcile_briefing_timers
 enroll_jobs
 migrate_legacy_keepalive
 warm_npx_cache

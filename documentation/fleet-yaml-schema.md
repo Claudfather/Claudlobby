@@ -234,6 +234,29 @@ fleet:
 
 After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land in the owner's `data/events/` — see the `fleet-observability` protocol.
 
+### `bots.<bot>.briefing`
+
+Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` alone: each **slot** becomes a composed per-(bot,slot) `OnCalendar` timer (`<service_prefix>.briefing-<bot>-<slot>`) whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>` — a committed, never-swept trigger that delivers `/briefing <slot>` into the bot's own session through the slash-aware `lib/dispatch.sh`, so the skill actually fires (never hand-install a briefing cron). Presence of the block opts in; omit it and nothing is emitted for that bot.
+
+```yaml
+fleet:
+  bots:
+    kev:
+      briefing:
+        slots:                              # slot name -> systemd OnCalendar (NOT 5-field cron)
+          morning: "*-*-* 08:30:00"         # daily 08:30
+          analytics: "Sun *-*-* 17:00:00"   # weekly, Sundays 17:00 (custom slot)
+        sections:                           # optional per-slot section list
+          morning: [overnight, calendar, overdue]
+        sources: [github, gmail]            # optional data sources the /briefing skill reads
+```
+
+- **Slot names must be shell identifiers** (`[A-Za-z_][A-Za-z0-9_]*`) — they become the `BRIEFING_SECTIONS_<SLOT>` env-var suffix. A non-identifier name (`week-end`, `9am`) is a **hard parse error**.
+- **Slot values are systemd `OnCalendar`**, the same dialect as `fleet.sweep.schedule` — not 5-field cron. A 5-field cron value (`30 8 * * *`) is a **hard parse error** (the chain has no cron-translation layer).
+- Composed into the equipped bot's `bot.conf`: `BRIEFING_SLOTS` (space-separated slot names), `BRIEFING_SOURCES`, and one `BRIEFING_SECTIONS_<SLOT>` per slot that declares sections — **`<SLOT>` is upper-cased** (shell-var convention; the skill upper-cases the dispatched slot to read it). The `/briefing` skill falls back to sensible per-slot defaults when a var is unset, so equipping with zero personalization works.
+- **Enrollment** is automatic: `setup-fleet`'s generic `install_fleet_timer[_launchd].sh` glob picks up the composed `<prefix>.briefing-*` units — no per-timer installer. `setup-fleet` also **reconciles** the dynamic family: `reconcile_briefing_timers` disables live enrolled briefing timers with no composed counterpart (a renamed/removed slot), glob-bounded to `<prefix>.briefing-*` and dry-run-logged first; `generate` prunes the corresponding unit files. Both sides carry an **abort-on-degenerate guard** — a composition that yields an empty briefing set while units exist is refused rather than allowed to wholesale-delete live timers.
+- The validator **warns** when a briefing-equipped bot has no `integrations`/`mcp` source coverage (sections that read external data would be empty).
+
 ### `fleet.workstreams`
 
 Bounds for the per-fleet workstream registry (`workstreams.json`) — the fleet's bounded portfolio of concurrent work across unrelated repos. Optional; the defaults apply when the block is omitted.

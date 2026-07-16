@@ -23,7 +23,7 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from . import dotenv
 from .config import BotConfig, FleetConfig, load_host_jobs
-from .known_values import HEADLESS_TRIM_VARS
+from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
     LibraryItem,
     _demote_headings,
@@ -257,7 +257,7 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
 # ----------------------------------------------------------------------
 
 _SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
-_SHELL_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_SHELL_IDENT_RE = SHELL_IDENT_RE  # canonical in known_values (shared with config)
 # Telegram handle: must start alnum/underscore, then alnum/underscore/dash.
 # One canonical rule used by both compose_bot_conf and compose_bot.
 _TELEGRAM_HANDLE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
@@ -518,6 +518,27 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         lines.append(
             f"export SWEEP_AUDIT_TYPES={_shq(' '.join(fleet.sweep.audit_types))}"
         )
+
+    # Equippable briefing (bots.<bot>.briefing) — emitted into the equipped bot's
+    # own conf, mirroring SWEEP_*. The composed timer passes the slot to the
+    # trigger as an ExecStart arg; these vars let the in-session /briefing skill
+    # read the bot's personalization. Per-slot sections use an UPPER-CASED slot
+    # suffix (BRIEFING_SECTIONS_<SLOT>) per shell-var convention — the skill
+    # upper-cases the dispatched slot name to read the matching var.
+    if bot.briefing:
+        lines.append("")
+        lines.append("# Briefing (equipped via bots.<bot>.briefing)")
+        lines.append(f"export BRIEFING_SLOTS={_shq(' '.join(bot.briefing.slots))}")
+        if bot.briefing.sources:
+            lines.append(
+                f"export BRIEFING_SOURCES={_shq(' '.join(bot.briefing.sources))}"
+            )
+        for slot, sections in bot.briefing.sections.items():
+            if sections:
+                lines.append(
+                    f"export BRIEFING_SECTIONS_{slot.upper()}="
+                    f"{_shq(' '.join(sections))}"
+                )
 
     # Ecosystem — clauDNA version pin, Claudron vault, Claudosseum tenant
     if bot.claudna_version or bot.claudron_vault_path or bot.claudosseum_tenant_id:
@@ -1588,6 +1609,7 @@ def _write_timer_units(
     *,
     persistent: bool = False,
     randomized_delay: int = 0,
+    exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
@@ -1601,11 +1623,15 @@ def _write_timer_units(
     CLAUDLOBBY_FLEET env and no fleet argument on ExecStart. ``persistent`` /
     ``randomized_delay`` map to the systemd ``Persistent=`` /
     ``RandomizedDelaySec=`` timer knobs; launchd has no equivalent, so the
-    plist ignores them.
+    plist ignores them. ``exec_args`` appends extra positional arguments after
+    the fleet name on both the systemd ``ExecStart`` and the launchd
+    ``ProgramArguments`` (the per-(bot,slot) briefing timers pass ``<bot> <slot>``).
     """
     scope = fleet_name if fleet_name is not None else "host"
     script_expanded = script.replace("$CLAUDLOBBY_ROOT", str(paths.root))
     exec_start = f"{script_expanded} {fleet_name}" if fleet_name else script_expanded
+    if exec_args:
+        exec_start = f"{exec_start} {' '.join(exec_args)}"
 
     # --- systemd service unit ---
     service_lines = [
@@ -1692,6 +1718,8 @@ def _write_timer_units(
     ]
     if fleet_name:
         plist_lines.append(f"    <string>{fleet_name}</string>")
+    for arg in exec_args or []:
+        plist_lines.append(f"    <string>{arg}</string>")
     plist_lines.extend(
         [
             "  </array>",
@@ -1772,6 +1800,58 @@ def _write_timer_units(
     (timers_dir / f"{service_name}.plist").write_text("\n".join(plist_lines) + "\n")
 
 
+def _reconcile_briefing_units(
+    timers_dir: Path, prefix: str, composed: set[str], n_declared: int
+) -> list[str]:
+    """Prune stale ``<prefix>.briefing-*`` unit files — glob-bounded, with a
+    verify-before-disable degenerate guard (F3).
+
+    The briefing family is the first dynamic per-(bot,slot) timer set, so a
+    renamed/removed slot leaves an enrolled orphan that fires forever unless
+    pruned. This is the generate-side half: after the current units are written,
+    delete any existing ``<prefix>.briefing-*`` {service,timer,plist} absent from
+    ``composed``.
+
+    ``composed`` is the set of unit basenames just written this generate.
+    ``n_declared`` is how many bots actually declare a briefing stanza — the
+    config truth a composition bug can't fake.
+
+    Abort-on-degenerate (modeled on ``migrate_legacy_keepalive``'s
+    verify-before-disable): if config declares briefing bots yet nothing was
+    composed, a bug dropped the set — SKIP the prune, leave every unit untouched,
+    and warn loudly, so a generate bug can never wholesale-delete live briefing
+    timers. A legitimate full removal (``n_declared == 0``) prunes everything.
+    The glob bound means it can never touch a non-briefing unit. Returns the
+    pruned unit basenames.
+    """
+    if not timers_dir.is_dir():
+        return []
+    existing = {p.stem for p in timers_dir.glob(f"{prefix}.briefing-*")}
+    stale = existing - composed
+    if not stale:
+        return []
+    # Degenerate: config HAS briefing bots but the composed set is empty — a
+    # composition bug, not an intended teardown. Refuse the wholesale prune.
+    if not composed and n_declared > 0:
+        _log.warning(
+            "briefing reconcile: DEGENERATE composed set (empty) while %d bot(s) "
+            "declare briefing — SKIPPING prune of %d existing unit(s) to avoid a "
+            "generate-bug wholesale delete; units left untouched (re-run once the "
+            "composition is fixed)",
+            n_declared,
+            len(stale),
+        )
+        return []
+    pruned: list[str] = []
+    for base in sorted(stale):
+        for ext in ("service", "timer", "plist"):
+            f = timers_dir / f"{base}.{ext}"
+            if f.exists():
+                f.unlink()
+        pruned.append(base)
+    return pruned
+
+
 def compose_fleet_timers(
     fleet: FleetConfig,
     paths: Paths,
@@ -1801,10 +1881,19 @@ def compose_fleet_timers(
     sd = fleet.system_defaults
     emit_defaults = bool(sd.enabled and sd.timers and timers)
     sweep_on = fleet.sweep_enabled()
+    briefing_bots = [
+        (bot_id, bot)
+        for bot_id, bot in fleet.bots.items()
+        if bot.briefing and bot.briefing.slots
+    ]
+    briefing_on = bool(briefing_bots)
 
     base_dir = output_dir if output_dir is not None else paths.runtime_fleet
     timers_dir = base_dir / "timers"
-    if not emit_defaults and not sweep_on:
+    if not emit_defaults and not sweep_on and not briefing_on:
+        # Nothing to emit — but a prior generate may have left briefing units a
+        # now-removed stanza should prune. Reconcile only if the dir exists.
+        _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0)
         return timers_dir
 
     timers_dir.mkdir(parents=True, exist_ok=True)
@@ -1851,6 +1940,32 @@ def compose_fleet_timers(
             paths,
             telegram_group_chat_id=fleet.telegram_group_chat_id,
         )
+
+    # Equippable briefing (bots.<bot>.briefing) — the first dynamic
+    # per-(bot,slot) timer family. Each equipped (bot,slot) becomes a
+    # <prefix>.briefing-<bot>-<slot> OnCalendar unit whose ExecStart hands the
+    # slash-aware trigger `<fleet> <bot> <slot>`. Reconcile runs unconditionally
+    # (even with zero briefing bots) so a removed stanza's stale units are pruned;
+    # the degenerate guard blocks a wholesale delete when config declares bots
+    # but none composed.
+    composed_briefing: set[str] = set()
+    for bot_id, bot in briefing_bots:
+        for slot, expr in bot.briefing.slots.items():
+            unit = f"{prefix}.briefing-{bot_id}-{slot}"
+            _write_timer_units(
+                timers_dir,
+                unit,
+                f"briefing-{bot_id}-{slot}",
+                {"type": "calendar", "expression": expr},
+                "$CLAUDLOBBY_ROOT/lib/briefing-trigger.sh",
+                "oneshot",
+                fleet.name,
+                paths,
+                exec_args=[bot_id, slot],
+                telegram_group_chat_id=fleet.telegram_group_chat_id,
+            )
+            composed_briefing.add(unit)
+    _reconcile_briefing_units(timers_dir, prefix, composed_briefing, len(briefing_bots))
 
     return timers_dir
 

@@ -8,6 +8,12 @@ for what values the compositor recognizes.
 from __future__ import annotations
 
 import difflib
+import re
+
+# Shell-identifier pattern — the SSOT for anything that becomes a shell variable
+# name (bot.env keys, model-strategy tiers, briefing slot -> BRIEFING_SECTIONS_<SLOT>).
+# Shared by config.py and composer.py so the rule can't drift between them.
+SHELL_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 # ── Models ───────────────────────────────────────────────────────
 # Short aliases that Claude Code accepts, plus full model IDs for
