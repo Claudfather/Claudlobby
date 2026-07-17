@@ -12,9 +12,10 @@
   "_permissions_contract": {
     "tools": []
   },
+  "_note": "DRAFT — do NOT merge until the fixed fork is published to npm. The previous default ran the UPSTREAM 'printify-mcp' package, which fabricates 'Mock Shop 1' on a transient init failure and still reports Connected: Yes (fixed in chrisrogers37/printify-mcp PR #1 + #2). This points at the fixed fork instead. BLOCKER: @chrisrogers37/printify-mcp is not yet on npm; until it is, fleets should override this fragment locally to point command:'node' at a built fork (dist/index.js).",
   "printify": {
     "command": "npx",
-    "args": ["-y", "printify-mcp"],
+    "args": ["-y", "@chrisrogers37/printify-mcp@latest"],
     "env": {
       "PRINTIFY_API_KEY": "${PRINTIFY_API_KEY}",
       "PRINTIFY_SHOP_ID": "${PRINTIFY_SHOP_ID}"
