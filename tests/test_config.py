@@ -31,17 +31,31 @@ class TestCoercePlugins:
         assert result.required == DEFAULT_PLUGINS
         assert result.marketplaces == DEFAULT_MARKETPLACES
 
+    def test_superpowers_and_official_marketplace_are_defaults(self):
+        # Fresh-box hardening (G5): superpowers + its marketplace ship as
+        # built-in defaults so cold start restores the process skills, not
+        # only claudna.
+        result = _coerce_plugins(None)
+        assert "superpowers@claude-plugins-official" in result.required
+        assert result.marketplaces["claude-plugins-official"] == {
+            "source": {"source": "github", "repo": "anthropics/claude-plugins-official"}
+        }
+
     def test_additional_merges_with_defaults(self):
         result = _coerce_plugins({"additional": ["telegram@claude-plugins-official"]})
         assert result.required == [
             "claudna@Claudfather",
+            "superpowers@claude-plugins-official",
             "telegram@claude-plugins-official",
         ]
         assert "Claudfather" in result.marketplaces
 
     def test_additional_dedup_with_defaults(self):
         result = _coerce_plugins({"additional": ["claudna@Claudfather"]})
-        assert result.required == ["claudna@Claudfather"]
+        assert result.required == [
+            "claudna@Claudfather",
+            "superpowers@claude-plugins-official",
+        ]
         assert result.required.count("claudna@Claudfather") == 1
 
     def test_include_defaults_false(self):

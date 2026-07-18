@@ -318,6 +318,25 @@ def _shq(v: object) -> str:
     return shlex.quote(str(v))
 
 
+def _channel_plugins(channels: list[str]) -> list[str]:
+    """Plugin install-IDs a bot's ``--channels`` flag depends on.
+
+    A channel entry ``plugin:<name>@<marketplace>`` means the session launches
+    with that plugin, so it must be installed for the channel to work on a cold
+    box. Returns the ``<name>@<marketplace>`` install-IDs in order, skipping any
+    channel that is not a marketplace-pinned plugin ref. The marketplace itself
+    must still be declared in ``plugins.marketplaces`` (its source repo cannot
+    be inferred from the ref) for start-bot to register it.
+    """
+    plugins: list[str] = []
+    for chan in channels:
+        if chan.startswith("plugin:"):
+            ref = chan.removeprefix("plugin:")
+            if "@" in ref and ref not in plugins:
+                plugins.append(ref)
+    return plugins
+
+
 def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # Defense-in-depth: validate identifiers embedded in double-quoted lines
     # that require shell variable expansion ($HOME, $CLAUDLOBBY_ROOT).
@@ -593,11 +612,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
             )
 
-    # Plugin sync — if fleet declares plugins, enable auto-install on session start
-    if fleet.plugins.required:
+    # Plugin sync — restore third-party plugins on session start. Union the
+    # plugins this bot's channels pin (see _channel_plugins) so a cold box
+    # installs them alongside the fleet's declared plugins.
+    plugins_required = list(fleet.plugins.required)
+    for _chan_plugin in _channel_plugins(bot.channels):
+        if _chan_plugin not in plugins_required:
+            plugins_required.append(_chan_plugin)
+    if plugins_required:
         lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
         lines.append(
-            f"export FLEET_PLUGINS_REQUIRED={_shq(' '.join(fleet.plugins.required))}"
+            f"export FLEET_PLUGINS_REQUIRED={_shq(' '.join(plugins_required))}"
         )
     if fleet.plugins.marketplaces:
         # Encode as "Name=github:Owner/Repo Name2=github:Owner2/Repo2"

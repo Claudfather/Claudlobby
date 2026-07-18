@@ -1784,7 +1784,7 @@ class TestComposeSystemdUnit:
 class TestPluginsBotConf:
     """compose_bot_conf emits CLAUDE_CODE_SYNC_PLUGIN_INSTALL when fleet has plugins."""
 
-    def _compose(self, tmp_path, plugins=None):
+    def _compose(self, tmp_path, plugins=None, channels=None):
         from claudlobby.config import PluginsConfig
         from claudlobby.composer import compose_bot_conf
 
@@ -1793,6 +1793,7 @@ class TestPluginsBotConf:
             name="worker",
             expertise=["eng"],
             telegram=TelegramConfig(handle="w_bot"),
+            channels=channels or [],
         )
         fleet = FleetConfig(
             name="test-fleet",
@@ -1857,6 +1858,44 @@ class TestPluginsBotConf:
         plugins = PluginsConfig(required=["claudna@Claudfather"])
         conf = self._compose(tmp_path, plugins=plugins)
         assert "FLEET_PLUGINS_MARKETPLACES" not in conf
+
+    def test_bot_conf_derives_channel_plugin_into_required(self, tmp_path):
+        # G3: the plugin a bot's --channels flag pins must be restored on a cold
+        # box even when the fleet did not list it in plugins.required.
+        from claudlobby.config import PluginsConfig
+
+        plugins = PluginsConfig(required=["claudna@Claudfather"])
+        conf = self._compose(
+            tmp_path, plugins=plugins, channels=["plugin:telegram@claudfather-plugins"]
+        )
+        assert (
+            "export FLEET_PLUGINS_REQUIRED="
+            "'claudna@Claudfather telegram@claudfather-plugins'" in conf
+        )
+
+    def test_bot_conf_channel_plugin_deduped(self, tmp_path):
+        # A channel plugin already in plugins.required is not double-listed.
+        from claudlobby.config import PluginsConfig
+
+        plugins = PluginsConfig(
+            required=["claudna@Claudfather", "telegram@claudfather-plugins"]
+        )
+        conf = self._compose(
+            tmp_path, plugins=plugins, channels=["plugin:telegram@claudfather-plugins"]
+        )
+        line = next(ln for ln in conf.splitlines() if "FLEET_PLUGINS_REQUIRED" in ln)
+        assert line.count("telegram@claudfather-plugins") == 1
+
+    def test_channel_plugins_parses_marketplace_pinned_refs(self):
+        from claudlobby.composer import _channel_plugins
+
+        assert _channel_plugins(["plugin:telegram@claudfather-plugins"]) == [
+            "telegram@claudfather-plugins"
+        ]
+        # non-plugin / unpinned channels skipped; order + dedup preserved
+        assert _channel_plugins(
+            ["plugin:telegram@mp", "slack", "plugin:telegram@mp", "plugin:nomarket"]
+        ) == ["telegram@mp"]
 
 
 class TestPluginsSettingsLocal:

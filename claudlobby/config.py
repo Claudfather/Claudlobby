@@ -412,13 +412,23 @@ class PluginsConfig:
     include_defaults: bool = True
 
 
-# Built-in defaults — claudna is always installed unless explicitly disabled.
+# Built-in defaults — installed + enabled on every bot unless
+# plugins.include_defaults is false. claudna carries the fleet skill set;
+# superpowers carries the process skills every bot relies on (brainstorming,
+# TDD, systematic-debugging), so a fresh box must restore it too — not only
+# claudna. The telegram channel plugin is NOT listed here: it is derived
+# per-bot from `channels` (composer._channel_plugins) so each fleet restores
+# whichever telegram marketplace its `--channels` flag actually pins.
 DEFAULT_MARKETPLACES: dict[str, dict] = {
     "Claudfather": {"source": {"source": "github", "repo": "Claudfather/clauDNA"}},
+    "claude-plugins-official": {
+        "source": {"source": "github", "repo": "anthropics/claude-plugins-official"}
+    },
 }
 
 DEFAULT_PLUGINS: list[str] = [
     "claudna@Claudfather",
+    "superpowers@claude-plugins-official",
 ]
 
 
