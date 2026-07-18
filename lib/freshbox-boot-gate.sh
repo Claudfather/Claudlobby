@@ -45,8 +45,8 @@ CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 HOST_CREDS="${HOME}/.claude/.credentials.json"
 BOOT_TIMEOUT="${FRESHBOX_BOOT_TIMEOUT:-180}"
 # A token in a NON-auto-loaded file (CLAUDE.md is auto-loaded into context, so a
-# question about it needs no tool). Reading probe.txt forces a real Read tool
-# call; echoing the token back proves the tool fired AND was permitted.
+# question about it needs no tool). The bot must retrieve it via a GATED tool —
+# Bash(cat ...) — so a clean return proves a non-base composed grant was honored.
 SENTINEL="FRESHBOX_OK_7F3A2B"
 
 # --- preconditions (skip, do not fail, when a heavy dep is absent) ------------
@@ -80,8 +80,26 @@ check() {  # check "<desc>" "<yes|no>"
 check_no_match() {  # check_no_match "<desc>" <file> <grep-ERE> ; passes iff the pattern is ABSENT
   if grep -qiE "$3" "$2" 2>/dev/null; then check "$1" "no"; else check "$1" "yes"; fi
 }
-reached_clean_result() {  # reached_clean_result <transcript> ; rc 0 iff a non-error result exists
-  jq -e 'select(.type=="result") | .is_error == false' "$1" >/dev/null 2>&1
+json_lines() {  # keep only JSONL objects; drop the non-JSON advisory/banner prose
+  # claude -p prints e.g. "Ignoring N permissions.allow entries ... not trusted" as
+  # a bare text line — feeding that to jq is a hard parse error (rc 4), which would
+  # false-read as "no result". Every stream-json record is an object starting with {.
+  grep '^{' "$1" 2>/dev/null
+}
+# These capture jq OUTPUT and test it, rather than relying on `jq -e`'s exit code:
+# over a JSONL stream `-e` reflects only the last input, so a match on a non-final
+# record (e.g. a mid-stream tool_use, with the result line last) mis-reads as absent.
+reached_clean_result() {  # rc 0 iff the result record is non-error
+  [ "$(json_lines "$1" | jq -rc 'select(.type=="result") | .is_error' 2>/dev/null | tail -1)" = "false" ]
+}
+result_has_sentinel() {  # rc 0 iff the final result text carries the probe token
+  json_lines "$1" | jq -rc 'select(.type=="result") | .result // ""' 2>/dev/null |
+    grep -qF "$SENTINEL"
+}
+bash_tool_used() {  # rc 0 iff the transcript contains a Bash tool_use (a gated, non-base tool)
+  [ -n "$(json_lines "$1" |
+    jq -rc 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | .name' \
+      2>/dev/null)" ]
 }
 
 # --- compose a scoped freshbox bot into the isolated root ---------------------
@@ -157,11 +175,13 @@ check "no user-tier settings.json skip-flags seeded (isolates the project-tier f
   "$([ ! -f "$CONFIG_DIR/settings.json" ] && echo yes || echo no)"
 
 # --- boot: claude -p on the fresh, seeded, composed config --------------------
-# The prompt exercises only allow-listed tools (Read is a base tool). A bare
-# no-prompt run proves absence only for the tools that fire, so the transcript is
-# checked against the allow-list below; OAuth / unfired grants are asserted
-# statically by `claudlobby freshbox`.
-BOOT_PROMPT="Read the file probe.txt in the current directory and reply with only the exact token it contains. Do not run any shell commands."
+# The prompt has the bot retrieve a token from a non-auto-loaded file via a
+# tool call, proving the boot operates end-to-end (not a no-op). NOTE: headless
+# `claude -p` auto-runs tools — the allow-list does not gate execution here (a
+# tool fires whether or not settings.local.json is honored), so tool success is
+# a functional-boot signal, NOT proof the allow was honored. The real "settings
+# honored?" signal is the untrusted-workspace advisory below.
+BOOT_PROMPT="Use the Bash tool to run exactly this command: cat probe.txt — then reply with only the token it prints. Do not use the Read tool."
 boot() {  # boot <config_dir> <out_file>
   ( cd "$BOT_DIR" && CLAUDE_CONFIG_DIR="$1" timeout "$BOOT_TIMEOUT" "$CLAUDE_BIN" -p \
       "$BOOT_PROMPT" \
@@ -169,34 +189,42 @@ boot() {  # boot <config_dir> <out_file>
       > "$2" 2>&1 ) || return $?
 }
 
+# Claude Code logs this on an UNTRUSTED workspace and drops every composed
+# settings.local.json allow — the deterministic signal that the trust seed is
+# load-bearing (documentation/decisions/permissions-model.md).
+ADVISORY_RE='has not been trusted|Ignoring [0-9]+ permissions'
+
 printf 'booting on the fresh CONFIG_DIR ...\n'
 boot_rc=0
 boot "$CONFIG_DIR" "$TRANSCRIPT" || boot_rc=$?
 
-# Clean completion is the authoritative signal — a headless boot blocked on the
-# auth wall, the onboarding wizard, or a permission prompt cannot reach a
-# non-error result. is_error is a structured field, immune to the ambient
-# CLAUDE.md text the verbose transcript echoes.
 clean_result="no"; reached_clean_result "$TRANSCRIPT" && clean_result="yes"
 check "reaches a clean (non-error) result on the fresh CONFIG_DIR (rc=$boot_rc, no hang within ${BOOT_TIMEOUT}s)" "$clean_result"
 
-# The forced Read fired AND returned content → the tool was permitted and worked
-# (not merely absent). The token only exists in probe.txt, never auto-loaded.
-read_worked="no"
-jq -e --arg s "$SENTINEL" 'select(.type=="result") | (.result // "") | contains($s)' "$TRANSCRIPT" >/dev/null 2>&1 && read_worked="yes"
-check "forced Read tool fired and returned the probe token (allow-list permitted it)" "$read_worked"
+# The whole composed settings.local.json (allows AND skip-flags) is HONORED — no
+# untrusted-workspace advisory. This is what proves the trust seed took: an
+# untrusted workspace drops the entire file, so no-advisory == composed config
+# active. (Directly answers #648/rajan: the settings.local.json skip-flags take
+# effect only on a trusted workspace, which the seed provides.)
+check_no_match "composed settings.local.json honored — no untrusted-workspace advisory (allows + skip-flags active)" \
+  "$TRANSCRIPT" "$ADVISORY_RE"
 
-# auth wall / onboarding wizard would appear if a seed were missing (structural
-# markers, not ambient prose).
+# The bot fired a tool and returned the token from a non-auto-loaded file → it
+# operates end-to-end on the fresh CONFIG_DIR (not a no-op boot).
+tool_worked="no"
+if bash_tool_used "$TRANSCRIPT" && result_has_sentinel "$TRANSCRIPT"; then tool_worked="yes"; fi
+check "the bot ran a tool and returned the probe token (operates end-to-end on the fresh config)" "$tool_worked"
+
+# auth wall / onboarding wizard would appear if a seed were missing.
 check_no_match "no auth wall (credential drop authenticated the fresh dir)" \
   "$TRANSCRIPT" 'not logged in|please run /login|invalid api key'
 check_no_match "no onboarding/trust wizard (trust seed cleared it)" \
   "$TRANSCRIPT" 'choose the text style|hasTrustDialog|do you trust this folder'
 
 # no permission prompt / missing-perm — the skip-flag no-hang claim, empirically.
-# Anchored to structured tool_result denials, not ambient CLAUDE.md text.
+# Anchored to structured tool_result denials (json_lines drops the advisory prose).
 perm_blocked="no"
-if jq -e 'select(.type=="user") | .message.content[]? | select(.type=="tool_result") | ((.is_error == true) and ((.content | tostring) | test("permission|not allowed|requires approval|denied"; "i")))' "$TRANSCRIPT" >/dev/null 2>&1; then
+if json_lines "$TRANSCRIPT" | jq -rc 'select(.type=="user") | .message.content[]? | select(.type=="tool_result" and .is_error==true) | (.content | tostring)' 2>/dev/null | grep -qiE 'permission|not allowed|requires approval|denied'; then
   perm_blocked="yes"
 fi
 check "zero permission prompts / missing-perm failures (skip-flags + allow-list held)" \
@@ -206,7 +234,7 @@ check "zero permission prompts / missing-perm failures (skip-flags + allow-list 
 used_tools=()
 while IFS= read -r t; do
   [ -n "$t" ] && used_tools+=("$t")
-done < <(jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' "$TRANSCRIPT" 2>/dev/null | sort -u)
+done < <(json_lines "$TRANSCRIPT" | jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' 2>/dev/null | sort -u)
 allow_json="$(jq -c '.permissions.allow // []' "$SETTINGS")"
 covered="yes"; uncovered=""
 for t in "${used_tools[@]:-}"; do
@@ -218,24 +246,28 @@ for t in "${used_tools[@]:-}"; do
 done
 check "transcript tool-set ⊆ composed allow-list (used:${used_tools[*]:-none}${uncovered:+ uncovered:$uncovered})" "$covered"
 
-# --- teeth: strip the trust seed → the run must NOT cleanly complete ----------
-# Proves the pre-seed-before-first-contact requirement is real (not vacuous): a
-# fresh CONFIG_DIR without the trust key does not reach a clean result the same
-# way, so the passing run above is attributable to the seed.
+# --- teeth: strip the trust seed → the whole composed settings.local.json inert -
+# The REAL functional divergence (not a jq artifact): with the trust key stripped,
+# Claude Code refuses to honor settings.local.json and logs the untrusted-workspace
+# advisory, dropping every composed allow AND skip-flag. (A no-trust boot still
+# completes — base tools work and headless -p auto-runs tools — so the load-bearing
+# proof is the advisory appearing ONLY without the seed, NOT "no clean result";
+# that earlier claim was a jq parse failure on the advisory line.) The advisory
+# text itself ("Ignoring N permissions.allow entries ... not trusted") is the
+# functional signal that the composed config is provably being dropped.
 MUT_DIR="$ROOT/fbconfig-notrust"
 MUT_OUT="$ROOT/boot-notrust.jsonl"
 mkdir -p "$MUT_DIR"
 seed_auth "$MUT_DIR"  # auth seeded, trust NOT seeded (no .claude.json).
 boot "$MUT_DIR" "$MUT_OUT" || true
-mut_result="no"; reached_clean_result "$MUT_OUT" && mut_result="yes"
-mut_wizard="no"; grep -qiE 'do you trust|welcome to claude code|hasTrustDialog' "$MUT_OUT" 2>/dev/null && mut_wizard="yes"
-# teeth pass = the stripped run diverged: it either hit the wizard or did NOT
-# reach a clean result. If a no-trust boot completes identically to the seeded
-# one, the seed is not what makes the gate pass and the assertions above prove
-# nothing — that is the regression this teeth-check exists to catch.
+notrust_advisory="no"; grep -qiE "$ADVISORY_RE" "$MUT_OUT" 2>/dev/null && notrust_advisory="yes"
+seeded_advisory="no"; grep -qiE "$ADVISORY_RE" "$TRANSCRIPT" 2>/dev/null && seeded_advisory="yes"
+# teeth pass = the composed config is honored ONLY with the seed: the no-trust boot
+# logs the untrusted advisory (composed settings dropped) that the seeded one does
+# not. Mutation-tested (seed both → no divergence → this goes RED).
 teeth="no"
-if [ "$mut_wizard" = yes ] || [ "$mut_result" = no ]; then teeth="yes"; fi
-check "trust-seed teeth: a no-trust boot diverges (wizard or no clean result)" "$teeth"
+if [ "$notrust_advisory" = yes ] && [ "$seeded_advisory" = no ]; then teeth="yes"; fi
+check "trust-seed teeth: no-trust boot drops the whole composed settings.local.json (untrusted advisory present only without the seed)" "$teeth"
 
 # --- verdict ------------------------------------------------------------------
 printf '\nfreshbox-boot-gate: %d passed, %d failed\n' "$pass" "$fail"

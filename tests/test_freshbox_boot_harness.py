@@ -58,7 +58,8 @@ def test_freshbox_boot_gate():
     # Every scenario name must appear — a silent skip must not read as a pass.
     for marker in (
         "reaches a clean (non-error) result",
-        "forced Read tool fired and returned the probe token",
+        "composed settings.local.json honored",
+        "the bot ran a tool and returned the probe token",
         "no auth wall",
         "no onboarding/trust wizard",
         "zero permission prompts",
