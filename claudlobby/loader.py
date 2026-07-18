@@ -278,16 +278,8 @@ def parse_expertise_file(path: Path) -> ExpertiseItem | None:
     )
 
 
-def skill_tool_grants(paths, name: str) -> list[str]:
-    """Read a skill's additive ``tool_grants`` list (F2) from ``<skill>/SKILL.md``.
-
-    Skills are folders (folder-expansion): the contract lives on the ``SKILL.md``
-    marker file, never on sibling files in the folder. Returns ``[]`` when the
-    skill, its ``SKILL.md``, or the ``tool_grants`` field is absent or malformed.
-    """
-    skill_dir = paths.find_skill_dir(name)
-    if skill_dir is None:
-        return []
+def _read_skill_grants(skill_dir: Path) -> list[str]:
+    """Read the additive ``tool_grants`` list from a skill dir's ``SKILL.md`` marker."""
     md = skill_dir / "SKILL.md"
     if not md.is_file():
         return []
@@ -297,6 +289,16 @@ def skill_tool_grants(paths, name: str) -> list[str]:
         return []
     grants = fm.get("tool_grants")
     return list(grants) if isinstance(grants, list) else []
+
+
+def skill_tool_grants(paths, name: str) -> list[str]:
+    """Read a single skill's additive ``tool_grants`` list (F2) from ``<skill>/SKILL.md``.
+
+    The contract lives on the ``SKILL.md`` marker file, never on sibling files in the
+    folder. Returns ``[]`` when the skill, its ``SKILL.md``, or the field is absent.
+    """
+    skill_dir = paths.find_skill_dir(name)
+    return _read_skill_grants(skill_dir) if skill_dir is not None else []
 
 
 def parse_guardrail_permissions(path: Path) -> ExpertisePermissions | None:
@@ -313,6 +315,51 @@ def parse_guardrail_permissions(path: Path) -> ExpertisePermissions | None:
     except OSError:
         return None
     return _parse_expertise_permissions(fm)
+
+
+def iter_skill_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]:
+    """Resolve equipped skill entries to ``(display_name, tool_grants)`` pairs.
+
+    Entry forms mirror the skill loader: ``name`` / ``dir/name`` (a single skill) and
+    ``dir/`` (folder-expansion — every skill dir beneath it). Folder-expanded members
+    are each resolved so their grant contracts are not silently skipped.
+    """
+    out: list[tuple[str, list[str]]] = []
+    for entry in equipped:
+        if entry.endswith("/"):
+            base = entry.rstrip("/")
+            for leaf, skill_dir in paths.expand_skill_folder(base).items():
+                name = f"{base}/{leaf}" if base else leaf
+                out.append((name, _read_skill_grants(skill_dir)))
+        else:
+            skill_dir = paths.find_skill_dir(entry)
+            grants = _read_skill_grants(skill_dir) if skill_dir is not None else []
+            out.append((entry, grants))
+    return out
+
+
+def iter_guardrail_permissions(
+    paths, equipped: list[str]
+) -> list[tuple[str, ExpertisePermissions | None]]:
+    """Resolve equipped guardrail entries to ``(display_name, permissions)`` pairs.
+
+    Handles ``name`` / ``dir/name`` (a single guardrail) and ``dir/`` (folder-expansion
+    — every ``.md`` beneath it), so grant contracts in expanded folders are validated too.
+    """
+    out: list[tuple[str, ExpertisePermissions | None]] = []
+    for entry in equipped:
+        if entry.endswith("/"):
+            base = entry.rstrip("/")
+            for rel_key, gpath in paths.expand_library_folder(
+                "guardrails", base
+            ).items():
+                name = f"{base}/{rel_key}" if base else rel_key
+                out.append((name, parse_guardrail_permissions(gpath)))
+        else:
+            gpath = paths.find_library_file("guardrails", entry, ".md")
+            perms = parse_guardrail_permissions(gpath) if gpath is not None else None
+            out.append((entry, perms))
+    return out
 
 
 def load_voice(path: Path) -> LibraryItem | None:

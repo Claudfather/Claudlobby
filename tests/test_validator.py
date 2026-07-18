@@ -952,3 +952,41 @@ class TestSkillGuardrailGrantValidation:
             "snowflake-read-only" in w and ("malformed" in w or "scope" in w.lower())
             for w in report.warnings
         )
+
+    # --- folder-expansion (dir/) equips must not bypass grant validation ---
+
+    def _write_nested_skill(self, fleet_dir, folder, name, tool_grants_yaml):
+        d = fleet_dir / "library" / "skills" / folder / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\n{tool_grants_yaml}---\n\n# {name}\n"
+        )
+
+    def _write_nested_guardrail(self, fleet_dir, folder, name, perms_yaml):
+        d = fleet_dir / "library" / "guardrails" / folder
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(
+            f"---\ntitle: {name}\n{perms_yaml}---\n\n# {name}\n"
+        )
+
+    def test_skill_folder_expansion_grant_validated(self, fleet_dir, monkeypatch):
+        # A malformed grant nested in a dir/ folder-expansion skill must still warn.
+        self._env(monkeypatch)
+        self._write_nested_skill(
+            fleet_dir, "expandme", "nested", 'tool_grants:\n  - "rm -rf /"\n'
+        )
+        self._equip_worker_skill(fleet_dir, "expandme/")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "rm -rf /" in w for w in report.warnings)
+
+    def test_guardrail_folder_expansion_grant_validated(self, fleet_dir, monkeypatch):
+        # A malformed permission nested in a dir/ folder-expansion guardrail must still warn.
+        self._env(monkeypatch)
+        self._write_nested_guardrail(
+            fleet_dir, "gexpand", "nested", 'permissions:\n  deny: ["bad grant!"]\n'
+        )
+        self._equip_worker_guardrail(fleet_dir, "gexpand/")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "bad grant!" in w for w in report.warnings)

@@ -241,7 +241,7 @@ def _validate_bots(
         # skills (additive tool_grants), guardrails (deny-capable permissions:) — all
         # validated against the single F3(a) grammar via _grant_shape_warnings.
         from .composer import resolve_effective_integrations
-        from .loader import parse_guardrail_permissions, skill_tool_grants
+        from .loader import iter_guardrail_permissions, iter_skill_grants
 
         for integ in resolve_effective_integrations(bot, paths):
             report.warnings.extend(
@@ -253,31 +253,21 @@ def _validate_bots(
                     allow_side=True,
                 )
             )
-        for skill in bot.skills:
+        for name, grants in iter_skill_grants(paths, bot.skills):
             report.warnings.extend(
-                _grant_shape_warnings(
-                    bot_name,
-                    "skill",
-                    skill,
-                    skill_tool_grants(paths, skill),
-                    allow_side=True,
-                )
+                _grant_shape_warnings(bot_name, "skill", name, grants, allow_side=True)
             )
-        for gr in bot.guardrails:
-            gpath = paths.find_library_file("guardrails", gr, ".md")
-            if gpath is None:
-                continue
-            gperms = parse_guardrail_permissions(gpath)
+        for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
             if gperms is None:
                 continue
             report.warnings.extend(
                 _grant_shape_warnings(
-                    bot_name, "guardrail", gr, gperms.allow, allow_side=True
+                    bot_name, "guardrail", name, gperms.allow, allow_side=True
                 )
             )
             report.warnings.extend(
                 _grant_shape_warnings(
-                    bot_name, "guardrail", gr, gperms.deny, allow_side=False
+                    bot_name, "guardrail", name, gperms.deny, allow_side=False
                 )
             )
 
