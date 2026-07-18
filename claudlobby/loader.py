@@ -278,6 +278,43 @@ def parse_expertise_file(path: Path) -> ExpertiseItem | None:
     )
 
 
+def skill_tool_grants(paths, name: str) -> list[str]:
+    """Read a skill's additive ``tool_grants`` list (F2) from ``<skill>/SKILL.md``.
+
+    Skills are folders (folder-expansion): the contract lives on the ``SKILL.md``
+    marker file, never on sibling files in the folder. Returns ``[]`` when the
+    skill, its ``SKILL.md``, or the ``tool_grants`` field is absent or malformed.
+    """
+    skill_dir = paths.find_skill_dir(name)
+    if skill_dir is None:
+        return []
+    md = skill_dir / "SKILL.md"
+    if not md.is_file():
+        return []
+    try:
+        fm, _ = parse_frontmatter(md.read_text())
+    except OSError:
+        return []
+    grants = fm.get("tool_grants")
+    return list(grants) if isinstance(grants, list) else []
+
+
+def parse_guardrail_permissions(path: Path) -> ExpertisePermissions | None:
+    """Read a guardrail's deny-capable ``permissions:`` block (F2), if declared.
+
+    Guardrails share the expertise ``permissions:`` schema (``allow`` / ``deny`` /
+    ``allow_all`` / ``bash_allow``); a guardrail typically sets only ``deny``.
+    Returns ``None`` when no block is present — prose-only guardrails stay prose.
+    """
+    if not path.is_file():
+        return None
+    try:
+        fm, _ = parse_frontmatter(path.read_text())
+    except OSError:
+        return None
+    return _parse_expertise_permissions(fm)
+
+
 def load_voice(path: Path) -> LibraryItem | None:
     """Voice files are LibraryItems but also accept the legacy `## Voice: <Name>` H2 line."""
     if not path.is_file():
