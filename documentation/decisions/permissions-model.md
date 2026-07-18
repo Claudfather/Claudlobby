@@ -310,12 +310,12 @@ And for full OS-level isolation, use sandbox `filesystem.denyRead`/`denyWrite` p
 5. `~/.claude/settings.json` (user-global)
 
 **Array merging rules:**
-- **Permission arrays (`allow`, `deny`):** replaced by lower-precedence scope, NOT merged. If settings.local.json defines `deny: [...]`, it completely overrides any parent deny list.
+- **Permission arrays (`allow`, `deny`):** **merged (unioned) across all scopes**, NOT replaced. A tool is allowed if *any* scope allows it; a tool is denied if *any* scope denies it, and **deny wins** over any allow in any scope. Verified empirically — P0-S2 spike ([#644](https://github.com/Claudfather/Claudlobby/issues/644), 2026-07-18): with one marker allowed only in `~/.claude/settings.json` and a *different* marker allowed only in `.claude/settings.local.json`, **both** executed; and a marker denied in `~/.claude/settings.json` stayed blocked even when `.claude/settings.local.json` defined its own (different, non-empty) deny block. Consistent with Claude Code's official permission docs (`code.claude.com/docs/en/permissions.md`): rules from all settings scopes are combined, and deny is evaluated before allow across the merged set.
 - **Sandbox path arrays** (`filesystem.allowWrite`, `denyWrite`, `denyRead`): **merged** across all scopes.
 
-**Implication for the compositor:** The `settings.local.json` permissions block must be self-contained. It cannot rely on patterns from `~/.claude/settings.json` because the local file's `allow` list replaces (not extends) the global one.
+> **Workspace-trust caveat (the real gotcha).** The union above only holds on a **trusted** workspace. Project-scoped permission entries in `.claude/settings.local.json` (and `.claude/settings.json`) are **ignored entirely until the workspace is trusted** — Claude Code logs `Ignoring N permissions.allow entry from .claude/settings.local.json: this workspace has not been trusted` and drops them. Trust is recorded as `projects["<abs-path>"].hasTrustDialogAccepted: true` in `<CLAUDE_CONFIG_DIR>/.claude.json`. On an **untrusted** workspace the local allow list vanishes and only the global (`~/.claude`) allows apply — which can *masquerade* as "local replaces global" but is actually "local ignored." Any per-bot `CLAUDE_CONFIG_DIR` migration must seed this trust key, or the composed `settings.local.json` silently no-ops (cf. [#638](https://github.com/Claudfather/Claudlobby/issues/638), which seeds `enabledMcpjsonServers` trust into checkouts for the same reason).
 
-This is the single most important design constraint. The compositor must emit a **complete** allow list in `settings.local.json`, including base tools, MCP tools, skills, and channel tools. It cannot assume anything from the global settings will carry through.
+**Implication for the compositor.** Because permission arrays union, a composed `settings.local.json` allow list does **not** have to duplicate the global `~/.claude/settings.json` allows for correctness — global allows carry through. (This is why the fleet works today: the composed per-bot list unions with the shared global.) Self-containment is therefore a **goal of the [#644](https://github.com/Claudfather/Claudlobby/issues/644) epic — retire the hand-accumulated shared global by moving every setting into each bot's own `CLAUDE_CONFIG_DIR`, where that dir's `settings.json` becomes the bot's "global" scope** — not a correctness constraint imposed by a replace semantic. The union also makes the epic's **gradual per-bot retirement safe**: removing an allow from the shared global does not strip a bot whose own composed settings still list it, and vice versa — there is no all-or-nothing cutover cliff.
 
 ### Current compositor output
 
@@ -484,7 +484,7 @@ Same 22 tools, namespaced under `mcp__gws-work__`.
 
 ## Implementation Status
 
-1. **Shipped.** `settings.local.json` is emitted as a complete, self-contained allow list — the compositor never relies on global-settings patterns carrying through.
+1. **Shipped (rationale corrected).** `settings.local.json` is emitted with the bot's full resolved allow list. The original rationale — that the list *had* to be self-contained because local `allow` **replaces** global — was wrong: permission arrays **union** across scopes (see [Settings file merging](#settings-file-merging)), so global allows do carry through on a trusted workspace. A complete per-bot list remains the right target, but as the #644 self-containment goal (retire the shared global into each bot's own `CLAUDE_CONFIG_DIR`), not because of a replace semantic.
 
 2. **Partially shipped.** The `f"{tool}(**)"` bug this doc flagged is fixed on the **allow** side (plain tool names now emit as-is). The same defect still exists on the **deny** side as of this writing — worth a follow-up fix.
 
