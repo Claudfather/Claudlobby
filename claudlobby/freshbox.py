@@ -61,20 +61,24 @@ def _sourced_grants(bot: BotConfig, paths: Paths) -> set[str]:
     return sourced
 
 
-def _grant_detail(kind: str, grant: str) -> str:
-    if kind == "unsourced_grant":
-        return (
-            f"{grant} granted via fleet tools.allow but no equipped source declares it"
-        )
-    if kind == "orphan_grant":
-        return (
-            f"{grant} in composed allow but traces to no source, base floor, or "
-            "fleet override"
-        )
-    return (
-        f"{grant} declared by an equipped source but missing from the composed "
-        "allow (not denied) — the bot would fall back to the global"
-    )
+# Grant finding vocabulary — kind → (severity, allow-list detail suffix). One
+# home for both, so severity and detail can't drift apart. (missing_tier_a has a
+# dynamic per-key detail and lives in _tier_a_findings.)
+_GRANT_KINDS: dict[str, tuple[str, str]] = {
+    "orphan_grant": (
+        FAIL,
+        "in composed allow but traces to no source, base floor, or fleet override",
+    ),
+    "unsourced_grant": (
+        WARN,
+        "granted via fleet tools.allow but no equipped source declares it",
+    ),
+    "under_grant": (
+        FAIL,
+        "declared by an equipped source but missing from the composed allow "
+        "(not denied) — the bot would fall back to the global",
+    ),
+}
 
 
 def classify_grants(
@@ -102,12 +106,11 @@ def classify_grants(
         if grant in sourced or grant in base:
             continue
         kind = "unsourced_grant" if grant in override else "orphan_grant"
-        sev = WARN if kind == "unsourced_grant" else FAIL
-        results.append((kind, sev, grant))
+        results.append((kind, _GRANT_KINDS[kind][0], grant))
 
     for grant in sorted(sourced):
         if grant not in allow_set and grant not in deny_set:
-            results.append(("under_grant", FAIL, grant))
+            results.append(("under_grant", _GRANT_KINDS["under_grant"][0], grant))
 
     return results
 
@@ -153,7 +156,7 @@ def audit_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]
         override=set(bot.tools.allow),
     )
     findings = [
-        Finding(bot.bot_id, kind, sev, _grant_detail(kind, grant))
+        Finding(bot.bot_id, kind, sev, f"{grant} {_GRANT_KINDS[kind][1]}")
         for kind, sev, grant in triples
     ]
     findings.extend(_tier_a_findings(bot.bot_id, settings))

@@ -62,6 +62,7 @@ BOT_DIR="$ROOT/runtime/bots/$BOT"
 TRANSCRIPT="$ROOT/boot.jsonl"
 
 cleanup() {
+  _lc_cleanup  # lib-common sets its own EXIT trap + tmpdir; ours overrides it.
   if [ -n "${FRESHBOX_KEEP:-}" ]; then printf 'kept artifacts: %s\n' "$ROOT"; return; fi
   rm -rf "$ROOT" 2>/dev/null || true
 }
@@ -75,6 +76,12 @@ check() {  # check "<desc>" "<yes|no>"
   else
     printf 'FAIL: %s\n' "$1"; fail=$((fail + 1))
   fi
+}
+check_no_match() {  # check_no_match "<desc>" <file> <grep-ERE> ; passes iff the pattern is ABSENT
+  if grep -qiE "$3" "$2" 2>/dev/null; then check "$1" "no"; else check "$1" "yes"; fi
+}
+reached_clean_result() {  # reached_clean_result <transcript> ; rc 0 iff a non-error result exists
+  jq -e 'select(.type=="result") | .is_error == false' "$1" >/dev/null 2>&1
 }
 
 # --- compose a scoped freshbox bot into the isolated root ---------------------
@@ -113,19 +120,22 @@ SETTINGS="$BOT_DIR/.claude/settings.local.json"
 [ -f "$SETTINGS" ] || { printf 'ERROR: compose produced no %s\n' "$SETTINGS"; exit 1; }
 
 # The composer must have pointed the bot at the fresh CONFIG_DIR (freshbox account).
-composed_cfg="$(grep -E '^CLAUDE_CONFIG_DIR=' "$BOT_DIR/bot.conf" | head -1 | cut -d= -f2- | tr -d "'\"")"
+composed_cfg="$(bot_conf_get "$BOT_DIR" CLAUDE_CONFIG_DIR "")"
 check "composer emits an active CLAUDE_CONFIG_DIR at the fresh dir" \
   "$([ "$composed_cfg" = "$CONFIG_DIR" ] && echo yes || echo no)"
 
 printf '%s\n' "$SENTINEL" > "$BOT_DIR/probe.txt"
 
 # --- the #645 Tier-B seam: seed auth + trust BEFORE first contact -------------
+seed_auth() {  # seed_auth <config_dir>
+  # The credential-file drop (#645 Fork F1) — self-refreshing, and it preserves
+  # native mcp__claude_ai_* connectors a strict scope would drop.
+  cp "$HOST_CREDS" "$1/.credentials.json"
+  chmod 600 "$1/.credentials.json"
+}
 seed_auth_and_trust() {  # seed_auth_and_trust <config_dir> <project_cwd>
   local cfg="$1" cwd="$2" ver
-  # (1) auth: the credential-file drop (#645 Fork F1) — self-refreshing, and it
-  #     preserves native mcp__claude_ai_* connectors a strict scope would drop.
-  cp "$HOST_CREDS" "$cfg/.credentials.json"
-  chmod 600 "$cfg/.credentials.json"
+  seed_auth "$cfg"
   # (2) trust + onboarding: without projects[cwd].hasTrustDialogAccepted the
   #     composed settings.local.json allows are silently ignored, and a fresh
   #     dir otherwise drops a headless boot into the interactive wizard.
@@ -167,10 +177,7 @@ boot "$CONFIG_DIR" "$TRANSCRIPT" || boot_rc=$?
 # auth wall, the onboarding wizard, or a permission prompt cannot reach a
 # non-error result. is_error is a structured field, immune to the ambient
 # CLAUDE.md text the verbose transcript echoes.
-clean_result="no"
-if jq -e 'select(.type=="result") | .is_error == false' "$TRANSCRIPT" >/dev/null 2>&1; then
-  clean_result="yes"
-fi
+clean_result="no"; reached_clean_result "$TRANSCRIPT" && clean_result="yes"
 check "reaches a clean (non-error) result on the fresh CONFIG_DIR (rc=$boot_rc, no hang within ${BOOT_TIMEOUT}s)" "$clean_result"
 
 # The forced Read fired AND returned content → the tool was permitted and worked
@@ -181,12 +188,10 @@ check "forced Read tool fired and returned the probe token (allow-list permitted
 
 # auth wall / onboarding wizard would appear if a seed were missing (structural
 # markers, not ambient prose).
-hit_login="no"; grep -qiE 'not logged in|please run /login|invalid api key' "$TRANSCRIPT" 2>/dev/null && hit_login="yes"
-check "no auth wall (credential drop authenticated the fresh dir)" \
-  "$([ "$hit_login" = no ] && echo yes || echo no)"
-hit_wizard="no"; grep -qiE 'choose the text style|hasTrustDialog|do you trust this folder' "$TRANSCRIPT" 2>/dev/null && hit_wizard="yes"
-check "no onboarding/trust wizard (trust seed cleared it)" \
-  "$([ "$hit_wizard" = no ] && echo yes || echo no)"
+check_no_match "no auth wall (credential drop authenticated the fresh dir)" \
+  "$TRANSCRIPT" 'not logged in|please run /login|invalid api key'
+check_no_match "no onboarding/trust wizard (trust seed cleared it)" \
+  "$TRANSCRIPT" 'choose the text style|hasTrustDialog|do you trust this folder'
 
 # no permission prompt / missing-perm — the skip-flag no-hang claim, empirically.
 # Anchored to structured tool_result denials, not ambient CLAUDE.md text.
@@ -220,17 +225,9 @@ check "transcript tool-set ⊆ composed allow-list (used:${used_tools[*]:-none}$
 MUT_DIR="$ROOT/fbconfig-notrust"
 MUT_OUT="$ROOT/boot-notrust.jsonl"
 mkdir -p "$MUT_DIR"
-cp "$HOST_CREDS" "$MUT_DIR/.credentials.json"; chmod 600 "$MUT_DIR/.credentials.json"
-# auth seeded, trust NOT seeded (no .claude.json).
-( cd "$BOT_DIR" && CLAUDE_CONFIG_DIR="$MUT_DIR" timeout "$BOOT_TIMEOUT" "$CLAUDE_BIN" -p \
-    "$BOOT_PROMPT" \
-    --output-format stream-json --verbose --model claude-haiku-4-5-20251001 \
-    > "$MUT_OUT" 2>&1 ) || true
-mut_result="no"
-if grep -q '"type":"result"' "$MUT_OUT" 2>/dev/null &&
-   jq -e 'select(.type=="result") | .is_error == false' "$MUT_OUT" >/dev/null 2>&1; then
-  mut_result="yes"
-fi
+seed_auth "$MUT_DIR"  # auth seeded, trust NOT seeded (no .claude.json).
+boot "$MUT_DIR" "$MUT_OUT" || true
+mut_result="no"; reached_clean_result "$MUT_OUT" && mut_result="yes"
 mut_wizard="no"; grep -qiE 'do you trust|welcome to claude code|hasTrustDialog' "$MUT_OUT" 2>/dev/null && mut_wizard="yes"
 # teeth pass = the stripped run diverged: it either hit the wizard or did NOT
 # reach a clean result. If a no-trust boot completes identically to the seeded

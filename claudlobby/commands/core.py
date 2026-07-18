@@ -40,7 +40,7 @@ def cmd_freshbox(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet, _md = _load_fleet_or_exit(paths)
-    if getattr(args, "bot", None):
+    if args.bot:
         bot = fleet.bots.get(args.bot)
         if bot is None:
             log.error("no such bot: %s", args.bot)
@@ -49,11 +49,7 @@ def cmd_freshbox(args) -> int:
     else:
         findings = audit_fleet(fleet, paths)
     print(format_report(fleet, findings))
-    if has_failures(findings):
-        return 1
-    if getattr(args, "strict", False) and findings:
-        return 1
-    return 0
+    return 1 if has_failures(findings) or (args.strict and findings) else 0
 
 
 def cmd_validate(args) -> int:

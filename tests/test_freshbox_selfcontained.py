@@ -239,3 +239,26 @@ def test_rich_multisource_bot_audits_clean(tmp_path):
     assert fails == [], f"rich well-formed bot should audit clean; got {fails}"
     # the integration grant is recognized as sourced, not flagged as drift.
     assert not any("mcp__github__*" in f.detail for f in findings)
+
+
+def test_sourced_grants_mirrors_every_composer_grant_resolver():
+    """Drift guard: every allow-contributing composer resolver must be referenced
+    by `_sourced_grants`. Adding a new grant/permission resolver to the composer
+    without mirroring it here would misclassify its grants as orphans (false
+    fail); this converts that latent drift into a CI failure at add-time."""
+    import inspect
+
+    from claudlobby import composer, freshbox
+
+    src = inspect.getsource(freshbox._sourced_grants)
+    resolvers = [
+        name
+        for name in dir(composer)
+        if name.startswith("_resolve_") and ("grant" in name or "permission" in name)
+    ]
+    assert resolvers, "expected composer to expose grant/permission resolvers"
+    missing = [r for r in resolvers if r not in src]
+    assert not missing, (
+        "_sourced_grants must reference every composer grant/permission resolver; "
+        f"missing: {missing} (mirror them or the audit false-flags their grants)"
+    )
