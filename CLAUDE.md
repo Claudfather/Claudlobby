@@ -94,6 +94,7 @@ Key lifecycle scripts in `lib/`:
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
+| `freshbox-boot-gate.sh` | #644 P4 real-boot gate — boots a scoped bot on a fresh empty `CLAUDE_CONFIG_DIR` (auth+trust seeded before first contact) and asserts the composed perms hold: clean boot, zero prompts, transcript ⊆ allow. Gated job (deps absent → skip); wrapped by `tests/test_freshbox_boot_harness.py` (opt-in `FRESHBOX_REALBOOT=1`) |
 | `rehearse-keepalive-swap.sh` | Phase 6 gate 1 — rehearse the atomic legacy-keepalive swap on a throwaway fleet with real 60s timers; journal-derived no-gap assertion |
 | `update-claude-code.sh` | Daily Claude Code binary download (download-only; no fleet bounce) — runs as the `claude-update` host job (system.yaml `host.jobs`, enrolled by `setup-system`) |
 | `notify-behind.sh` | Daily source-currency nudge — FLEET NOTICE when the install is N commits behind origin/main (notify-only, never pulls) — runs as the `notify-behind` host job |
@@ -227,6 +228,7 @@ claudlobby new-bot                     # interactive bot scaffolding
 claudlobby status                      # fleet health dashboard
 claudlobby status --bot <name>         # detailed status for one bot
 claudlobby doctor                      # pre-flight fleet health diagnostic
+claudlobby freshbox                    # fresh-box self-containment audit (over-grant/orphan report; --strict, --bot)
 claudlobby report-back                 # query bot work event ledger
 claudlobby report-back --since 24h     # filter by time window
 claudlobby uptime                      # per-bot uptime, MTBR, restart-rate
@@ -289,6 +291,7 @@ claudlobby/
   dotenv.py           — .env file handling
   paths.py            — Path resolution helpers
   doctor.py           — Pre-flight fleet health diagnostic
+  freshbox.py         — Fresh-box self-containment audit (#644 P4): over-grant/orphan + under-grant + Tier-A composed-not-inherited (backs `claudlobby freshbox`)
   status.py           — Fleet health dashboard (tmux/systemd/fleet-state)
   uptime.py           — Per-bot uptime, MTBR, restart-rate metrics
   utilization.py      — Fleet utilization rollup — per-bot busy/idle % over rolling windows
