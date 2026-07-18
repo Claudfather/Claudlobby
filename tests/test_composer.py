@@ -363,6 +363,87 @@ class TestComposeSettingsLocal:
         assert result["preferredNotifChannel"] == "iterm2"
         assert result["prefersReducedMotion"] is False
 
+    def test_sandbox_disabled_by_default(self, tmp_path):
+        """G7: a bot with no sandbox config still composes sandbox.enabled = False.
+
+        The sandbox is off by default as a low-friction system default applied at
+        the compose boundary — without this a fleet that omits sandbox config emits
+        no sandbox key and a fresh box runs unsandboxed.
+        """
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["sandbox"]["enabled"] is False
+
+    def test_sandbox_enabled_opt_in(self, tmp_path):
+        """An explicit sandbox.enabled=True opt-in still composes enabled = True."""
+        from claudlobby.config import SandboxConfig
+
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="solo",
+            name="solo",
+            expertise=["eng"],
+            sandbox=SandboxConfig(enabled=True),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["sandbox"]["enabled"] is True
+
+    def test_skip_permission_prompts_emitted(self, tmp_path):
+        """G6: both first-run consent skip-flags compose into settings.local at
+        their default (True) so a headless bot never hangs on the first-run
+        permission prompt."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["skipAutoPermissionPrompt"] is True
+        assert result["skipDangerousModePermissionPrompt"] is True
+
+    def test_skip_permission_prompts_overridable(self, tmp_path):
+        """Per-bot overrides to False flow through to settings.local."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="solo",
+            name="solo",
+            expertise=["eng"],
+            skip_auto_permission_prompt=False,
+            skip_dangerous_mode_permission_prompt=False,
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["skipAutoPermissionPrompt"] is False
+        assert result["skipDangerousModePermissionPrompt"] is False
+
+    def test_skip_prompts_independent_of_cli_flag(self, tmp_path):
+        """The settings.local skip-flags are a distinct knob from the
+        --dangerously-skip-permissions CLI flag: the flag still composes into
+        CLAUDE_FLAGS while the settings booleans follow their own values."""
+        from claudlobby.composer import compose_bot_conf
+
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / "solo").mkdir(parents=True)
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        bot = BotConfig(
+            bot_id="solo",
+            name="solo",
+            expertise=["eng"],
+            dangerously_skip_permissions=True,
+            skip_auto_permission_prompt=False,
+            skip_dangerous_mode_permission_prompt=False,
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        settings = compose_settings_local(bot, fleet, paths)
+        conf = compose_bot_conf(bot, fleet, paths)
+        # settings.local booleans follow their own (False) values...
+        assert settings["skipAutoPermissionPrompt"] is False
+        assert settings["skipDangerousModePermissionPrompt"] is False
+        # ...while the CLI flag still lands in CLAUDE_FLAGS, unaffected.
+        assert "--dangerously-skip-permissions" in conf
+
     def test_sibling_isolation_only(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
         fleet = self._make_fleet_with_bots("bot-a", "bot-b")
@@ -1961,6 +2042,70 @@ class TestPluginsSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         assert "enabledPlugins" in result
         assert "extraKnownMarketplaces" not in result
+
+
+class TestChannelPluginInstallEnableCarveout:
+    """G3/G5 contract: a channel plugin is INSTALLED but not ambiently ENABLED.
+
+    enabledPlugins is the equipped NON-channel set (fleet.plugins.required =
+    claudna + superpowers + additional). A channel plugin (derived from
+    ``channels``) is unioned into FLEET_PLUGINS_REQUIRED so a cold box installs
+    it, then activated by the ``--channels`` flag — NOT by ambient settings.local
+    enablement. This locks PR #646's ratified carve-out against future drift.
+    """
+
+    def test_channel_plugin_installed_but_not_enabled(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+        from claudlobby.composer import compose_bot_conf
+
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot"),
+            channels=["plugin:telegram@claudfather-plugins"],
+        )
+        plugins = PluginsConfig(
+            required=[
+                "claudna@Claudfather",
+                "superpowers@claude-plugins-official",
+            ]
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+            bots={"worker": bot},
+            plugins=plugins,
+        )
+
+        conf = compose_bot_conf(bot, fleet, paths)
+        settings = compose_settings_local(bot, fleet, paths)
+
+        # Install side: the channel plugin the --channels flag pins is unioned into
+        # FLEET_PLUGINS_REQUIRED alongside the equipped plugins so a cold box
+        # installs it.
+        required_line = next(
+            ln for ln in conf.splitlines() if "FLEET_PLUGINS_REQUIRED" in ln
+        )
+        assert "telegram@claudfather-plugins" in required_line
+        assert "claudna@Claudfather" in required_line
+        assert "superpowers@claude-plugins-official" in required_line
+
+        # Enable side: enabledPlugins is the equipped NON-channel set only. The
+        # channel plugin must NOT be ambiently enabled (it is activated by
+        # --channels, not settings.local).
+        enabled = settings["enabledPlugins"]
+        assert "telegram@claudfather-plugins" not in enabled
+        assert enabled == {
+            "claudna@Claudfather": True,
+            "superpowers@claude-plugins-official": True,
+        }
 
 
 class TestComposeBotEventsDir:

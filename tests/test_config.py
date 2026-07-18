@@ -157,6 +157,39 @@ class TestCoerceBot:
         assert bot.preferred_notif_channel == "terminal_bell"
         assert bot.disable_nonessential_traffic is True  # unset → headless default
 
+    def test_skip_permission_prompts_default_true(self):
+        """G6: both first-run consent skip-flags default True (skip the prompt) so a
+        headless bot never hangs on the first-run permission prompt."""
+        bot = _coerce_bot("t", {"expertise": ["eng"]}, {})
+        assert bot.skip_auto_permission_prompt is True
+        assert bot.skip_dangerous_mode_permission_prompt is True
+
+    def test_skip_permission_prompts_overridable(self):
+        """Both skip-flags are fleet-default-able and per-bot-overridable to False."""
+        # Per-bot value wins.
+        bot = _coerce_bot(
+            "t",
+            {
+                "expertise": ["eng"],
+                "skip_auto_permission_prompt": False,
+                "skip_dangerous_mode_permission_prompt": False,
+            },
+            {},
+        )
+        assert bot.skip_auto_permission_prompt is False
+        assert bot.skip_dangerous_mode_permission_prompt is False
+        # Fleet default applies when the bot is silent.
+        bot2 = _coerce_bot(
+            "t",
+            {"expertise": ["eng"]},
+            {
+                "skip_auto_permission_prompt": False,
+                "skip_dangerous_mode_permission_prompt": False,
+            },
+        )
+        assert bot2.skip_auto_permission_prompt is False
+        assert bot2.skip_dangerous_mode_permission_prompt is False
+
     def test_bench_from_bot(self):
         bot = _coerce_bot("test", {"expertise": ["eng"], "bench": True}, {})
         assert bot.bench is True

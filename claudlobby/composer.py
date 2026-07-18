@@ -1348,8 +1348,11 @@ def compose_settings_local(
     # Sandbox: enabled toggle + network + filesystem allowlists + bash auto-allow
     sandbox_cfg: dict = {}
     sandbox = bot.sandbox
-    if sandbox.enabled is not None:
-        sandbox_cfg["enabled"] = sandbox.enabled
+    # Sandbox is disabled by default as a low-friction system default; a fleet or
+    # bot opts in with `sandbox.enabled: true`. None is the internal unset/inherit
+    # sentinel, resolved to the system default (False) here at the compose boundary
+    # so `enabled` is always emitted (a fresh box never runs unsandboxed by omission).
+    sandbox_cfg["enabled"] = sandbox.enabled if sandbox.enabled is not None else False
     if sandbox.network_allowed_domains:
         sandbox_cfg["network"] = {"allowedDomains": sandbox.network_allowed_domains}
     if sandbox.filesystem_allow_write:
@@ -1389,6 +1392,15 @@ def compose_settings_local(
     settings["spinnerTipsEnabled"] = bot.spinner_tips_enabled
     settings["preferredNotifChannel"] = bot.preferred_notif_channel
     settings["prefersReducedMotion"] = bot.prefers_reduced_motion
+
+    # First-run consent skip-flags (fleet.yaml-overridable per bot): suppress the
+    # interactive first-run permission prompts so a headless bot boots without
+    # hanging. Distinct from the --dangerously-skip-permissions CLI flag, which
+    # composes into CLAUDE_FLAGS.
+    settings["skipAutoPermissionPrompt"] = bot.skip_auto_permission_prompt
+    settings["skipDangerousModePermissionPrompt"] = (
+        bot.skip_dangerous_mode_permission_prompt
+    )
 
     return settings
 

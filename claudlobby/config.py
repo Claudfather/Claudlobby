@@ -356,6 +356,14 @@ class BotConfig:
     # an explicit opt-in.
     dangerously_skip_permissions: bool = False  # --dangerously-skip-permissions
     permission_mode: str | None = None  # --permission-mode (wins over the skip flag)
+    # First-run consent skip-flags → settings.local.json. Distinct from the
+    # --dangerously-skip-permissions CLI flag above: these suppress the interactive
+    # first-run permission prompts a headless bot would otherwise hang on. Default
+    # True = skip the prompts.
+    # settings.local.json skipAutoPermissionPrompt
+    skip_auto_permission_prompt: bool = True
+    # settings.local.json skipDangerousModePermissionPrompt
+    skip_dangerous_mode_permission_prompt: bool = True
     channels: list[str] = field(
         default_factory=lambda: ["plugin:telegram@claude-plugins-official"]
     )  # --channels <name>
@@ -978,6 +986,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             "permission_mode",
             raw.get("permission_mode") or defaults.get("permission_mode"),
             VALID_PERMISSION_MODES,
+        ),
+        skip_auto_permission_prompt=_bool("skip_auto_permission_prompt", True),
+        skip_dangerous_mode_permission_prompt=_bool(
+            "skip_dangerous_mode_permission_prompt", True
         ),
         prompt_suggestions=_bool("prompt_suggestions", False),
         disable_nonessential_traffic=_bool("disable_nonessential_traffic", True),
