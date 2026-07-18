@@ -450,8 +450,10 @@ class TestComposeSettingsLocal:
         result = compose_settings_local(fleet.bots["bot-a"], fleet, paths)
         assert "permissions" in result
         deny = result["permissions"]["deny"]
-        assert len(deny) == 1
-        assert "Read(" in deny[0] and "bot-b" in deny[0]
+        # R9: one sibling → Read/Write/Edit denies over that sibling's runtime dir.
+        assert len(deny) == 3
+        assert {d.split("(")[0] for d in deny} == {"Read", "Write", "Edit"}
+        assert all("bot-b" in d for d in deny)
 
     def test_tool_deny_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)

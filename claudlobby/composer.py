@@ -25,8 +25,11 @@ from . import dotenv
 from .config import BotConfig, FleetConfig, load_host_jobs
 from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
+    ExpertisePermissions,
     LibraryItem,
     _demote_headings,
+    iter_guardrail_permissions,
+    iter_skill_grants,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -1157,73 +1160,125 @@ def _resolve_skill_permissions(bot: BotConfig) -> list[str]:
     return patterns
 
 
+def _resolve_skill_grants(bot: BotConfig, paths: Paths) -> list[str]:
+    """Additive ``tool_grants`` declared by the bot's equipped skills (F2/F6).
+
+    :func:`_resolve_skill_permissions` grants only ``Skill(<name>)`` invocation;
+    a skill's ``SKILL.md`` separately declares the ``Bash(...)`` / ``mcp__...`` /
+    bare tools its body actually runs. This resolves those additive grants —
+    folder entries (``dir/``) expanded to every member — so a skill ships
+    self-contained with the tools it needs. Joins integrations on the additive
+    ``tool_grants`` path; de-duplication against the allow list happens in
+    :func:`compose_settings_local`.
+    """
+    return [
+        grant
+        for _name, grants in iter_skill_grants(paths, bot.skills)
+        for grant in grants
+    ]
+
+
+# Full tool set an ``allow_all`` permission profile expands to.
+ALL_TOOLS = [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Agent",
+    "Grep",
+    "Glob",
+    "WebFetch",
+    "WebSearch",
+    "NotebookEdit",
+]
+
+
+def _append_unique(target: list[str], items: Iterable[str]) -> None:
+    """Append each item to ``target`` in order, skipping ones already present.
+
+    The composed allow/deny lists are order-preserving de-duplicated unions;
+    this is the single expression of that idiom across the permission layers.
+    """
+    for item in items:
+        if item not in target:
+            target.append(item)
+
+
+def _merge_permission_profiles(
+    profiles: Iterable[ExpertisePermissions | None],
+) -> tuple[list[str], list[str]]:
+    """Fold deny-capable permission profiles into (allow, deny) pattern lists.
+
+    Shared by expertise and guardrail resolution — both declare the same
+    deny-capable ``permissions:{}`` schema (F2). ``allow`` and ``deny`` are
+    unioned across profiles, ``allow_all`` expands to :data:`ALL_TOOLS`,
+    ``bash_allow`` entries become ``Bash(<cmd> *)`` allows, and deny wins over
+    allow within the merged set (CC also enforces deny-wins at runtime across
+    layers). ``None`` profiles (prose-only sources) are skipped.
+    """
+    merged_allow: list[str] = []
+    merged_deny: list[str] = []
+    merged_bash: list[str] = []
+    has_allow_all = False
+
+    for p in profiles:
+        if p is None:
+            continue
+        if p.allow_all:
+            has_allow_all = True
+        _append_unique(merged_allow, p.allow)
+        _append_unique(merged_deny, p.deny)
+        _append_unique(merged_bash, p.bash_allow)
+
+    if has_allow_all:
+        _append_unique(merged_allow, ALL_TOOLS)
+
+    # Deny wins within the merged set.
+    merged_allow = [t for t in merged_allow if t not in merged_deny]
+
+    allow_patterns = list(merged_allow)
+    for cmd in merged_bash:
+        allow_patterns.append(f"Bash({cmd} *)")
+    return allow_patterns, list(merged_deny)
+
+
 def _resolve_expertise_permissions(
     bot: BotConfig,
     paths: Paths,
 ) -> tuple[list[str], list[str]]:
     """Merge permission profiles from all expertise files for a bot.
 
-    Returns (allow_patterns, deny_patterns). For each expertise:
-    - allow_all expands to a broad tool set
-    - allow lists are unioned
-    - deny lists are unioned
-    - bash_allow entries become Bash(<cmd> *) patterns in the allow list
-
-    Deny wins over allow at the same layer — if a tool appears in both,
-    it stays in deny and is removed from allow.
+    Returns (allow_patterns, deny_patterns) — see :func:`_merge_permission_profiles`
+    for the fold semantics (allow/deny union, allow_all expansion, bash_allow,
+    deny-wins).
     """
-    ALL_TOOLS = [
-        "Read",
-        "Write",
-        "Edit",
-        "Bash",
-        "Agent",
-        "Grep",
-        "Glob",
-        "WebFetch",
-        "WebSearch",
-        "NotebookEdit",
-    ]
-
-    merged_allow: list[str] = []
-    merged_deny: list[str] = []
-    merged_bash: list[str] = []
-    has_allow_all = False
-
+    profiles: list[ExpertisePermissions | None] = []
     for area in bot.expertise:
         path = paths.find_library_file("expertise", area, ".md")
         if path is None:
             continue
         item = parse_expertise_file(path)
-        if item is None or item.permissions is None:
+        if item is None:
             continue
-        p = item.permissions
-        if p.allow_all:
-            has_allow_all = True
-        for t in p.allow:
-            if t not in merged_allow:
-                merged_allow.append(t)
-        for t in p.deny:
-            if t not in merged_deny:
-                merged_deny.append(t)
-        for cmd in p.bash_allow:
-            if cmd not in merged_bash:
-                merged_bash.append(cmd)
+        profiles.append(item.permissions)
+    return _merge_permission_profiles(profiles)
 
-    if has_allow_all:
-        for t in ALL_TOOLS:
-            if t not in merged_allow:
-                merged_allow.append(t)
 
-    # Deny wins at this layer
-    merged_allow = [t for t in merged_allow if t not in merged_deny]
+def _resolve_guardrail_permissions(
+    bot: BotConfig,
+    paths: Paths,
+) -> tuple[list[str], list[str]]:
+    """Merge deny-capable ``permissions:{}`` blocks from the bot's guardrails (F2).
 
-    allow_patterns = list(merged_allow)
-    for cmd in merged_bash:
-        allow_patterns.append(f"Bash({cmd} *)")
-
-    deny_patterns = list(merged_deny)
-    return allow_patterns, deny_patterns
+    Guardrails share the expertise permission schema; a guardrail typically
+    declares only ``deny`` (a safety rule). Prose-only guardrails contribute
+    nothing. Folder entries (``dir/``) are expanded so nested guardrails are not
+    silently skipped. Joins expertise on the deny-capable ``permissions:{}`` path.
+    """
+    profiles = [
+        perms for _name, perms in iter_guardrail_permissions(paths, bot.guardrails)
+    ]
+    return _merge_permission_profiles(profiles)
 
 
 # Minimal base tools every bot needs for read-only operation.
@@ -1281,11 +1336,20 @@ def compose_settings_local(
     # Build permissions block — layered composition
     deny_patterns: list[str] = []
 
-    # Layer 0: Sibling isolation — deny reading other bots' files
+    # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime
+    # dir. Read alone left a cross-bot Write/Edit gap (R9); all three are denied so
+    # a bot cannot touch a sibling's files.
     siblings = [bid for bid in fleet.bots if bid != bot.bot_id]
     for sibling in siblings:
         sibling_dir = str(paths.bot_runtime(sibling))
         deny_patterns.append(f"Read({sibling_dir}/**)")
+        deny_patterns.append(f"Write({sibling_dir}/**)")
+        deny_patterns.append(f"Edit({sibling_dir}/**)")
+
+    # Layer 1: Guardrail permissions (deny-capable safety rules; shared expertise
+    # schema). Guardrails are usually deny-only; their rare allows join Layer 2.
+    guardrail_allow, guardrail_deny = _resolve_guardrail_permissions(bot, paths)
+    deny_patterns.extend(guardrail_deny)
 
     # Layer 2: Expertise permissions (from library/expertise/ frontmatter)
     expertise_allow, expertise_deny = _resolve_expertise_permissions(bot, paths)
@@ -1301,6 +1365,9 @@ def compose_settings_local(
     # Layer 2: Expertise allow (plain tool names + bash command patterns)
     allow_patterns.extend(expertise_allow)
 
+    # Layer 1: Guardrail allow (rare — guardrails are usually deny-only)
+    _append_unique(allow_patterns, guardrail_allow)
+
     # Layer 3: MCP tool grants — union of the legacy fragment _permissions_contract
     # resolver and the new integration tool_grants resolver. Both stay live through
     # the migration window (belt-and-suspenders — no live grant can vanish even if the
@@ -1309,9 +1376,7 @@ def compose_settings_local(
     legacy_grants = _resolve_mcp_permissions(bot, paths)
     integration_grants = _resolve_integration_grants(bot, paths)
     _assert_grant_superset(bot.bot_id, legacy_grants, integration_grants)
-    for grant in (*legacy_grants, *integration_grants):
-        if grant not in allow_patterns:
-            allow_patterns.append(grant)
+    _append_unique(allow_patterns, (*legacy_grants, *integration_grants))
 
     # Layer 4: Channel/plugin tools (auto-derived from config)
     allow_patterns.extend(_resolve_channel_permissions(bot))
@@ -1319,10 +1384,13 @@ def compose_settings_local(
     # Layer 5: Skill patterns (auto-derived from bot.skills)
     allow_patterns.extend(_resolve_skill_permissions(bot))
 
+    # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
+    # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
+    # additive path; Skill(<name>) above only grants invocation.
+    _append_unique(allow_patterns, _resolve_skill_grants(bot, paths))
+
     # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
-    for tool in bot.tools.allow:
-        if tool not in allow_patterns:
-            allow_patterns.append(tool)
+    _append_unique(allow_patterns, bot.tools.allow)
 
     # Bot-level deny wins over all allow layers
     bot_deny_plain = set(bot.tools.deny)
