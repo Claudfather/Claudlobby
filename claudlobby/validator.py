@@ -109,21 +109,6 @@ def _grant_shape_warnings(
     return out
 
 
-def _integration_tool_grants(paths: Paths, name: str) -> list[str]:
-    """Read the ``tool_grants`` list from an integration file's frontmatter (empty if none)."""
-    from .loader import parse_frontmatter
-
-    int_path = paths.find_library_file("integrations", name, ".md")
-    if int_path is None:
-        return []
-    try:
-        fm, _ = parse_frontmatter(int_path.read_text())
-    except OSError:
-        return []
-    grants = fm.get("tool_grants")
-    return grants if isinstance(grants, list) else []
-
-
 def _mcp_contract_has_tools(frag_path: Path) -> bool:
     """True when an MCP fragment carries a non-empty ``_permissions_contract.tools``.
 
@@ -147,6 +132,14 @@ def _validate_bots(
     # Pre-compute available names for suggestion hints (avoids per-bot re-scan)
     avail_expertise = _available_names(paths, "expertise")
     avail_mcp = _available_names(paths, "mcp", ext=".json")
+
+    # Grant-contract readers (folder-aware; shared with the P2 composer resolvers).
+    from .loader import (
+        integration_tool_grants,
+        iter_guardrail_permissions,
+        iter_integration_grants,
+        iter_skill_grants,
+    )
 
     for bot_name, bot in fleet.bots.items():
         bot_env = dotenv.read(paths.bot_runtime(bot_name) / ".env")
@@ -201,7 +194,7 @@ def _validate_bots(
             # Migration-gap warning (remove with the P8 _permissions_contract cut):
             # a fragment that still grants tools whose paired integration hasn't been
             # given covering tool_grants would be dropped by the eventual cut.
-            elif _mcp_contract_has_tools(frag_path) and not _integration_tool_grants(
+            elif _mcp_contract_has_tools(frag_path) and not integration_tool_grants(
                 paths, mcp.name
             ):
                 report.warnings.append(
@@ -240,17 +233,16 @@ def _validate_bots(
         # Grant contracts on equipped sources — integrations (additive tool_grants),
         # skills (additive tool_grants), guardrails (deny-capable permissions:) — all
         # validated against the single F3(a) grammar via _grant_shape_warnings.
+        # iter_integration_grants folder-expands dir/ equips so a contract nested in
+        # an expanded folder is not silently skipped (same guarantee as skills).
         from .composer import resolve_effective_integrations
-        from .loader import iter_guardrail_permissions, iter_skill_grants
 
-        for integ in resolve_effective_integrations(bot, paths):
+        for name, grants in iter_integration_grants(
+            paths, resolve_effective_integrations(bot, paths)
+        ):
             report.warnings.extend(
                 _grant_shape_warnings(
-                    bot_name,
-                    "integration",
-                    integ,
-                    _integration_tool_grants(paths, integ),
-                    allow_side=True,
+                    bot_name, "integration", name, grants, allow_side=True
                 )
             )
         for name, grants in iter_skill_grants(paths, bot.skills):

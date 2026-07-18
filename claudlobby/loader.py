@@ -278,17 +278,25 @@ def parse_expertise_file(path: Path) -> ExpertiseItem | None:
     )
 
 
-def _read_skill_grants(skill_dir: Path) -> list[str]:
-    """Read the additive ``tool_grants`` list from a skill dir's ``SKILL.md`` marker."""
-    md = skill_dir / "SKILL.md"
-    if not md.is_file():
+def _read_tool_grants(md_path: Path) -> list[str]:
+    """Read the additive ``tool_grants`` list from a markdown file's frontmatter.
+
+    Shared by skills (``<skill>/SKILL.md``) and integrations (``<name>.md``). Returns
+    ``[]`` when the file, its frontmatter, or the ``tool_grants`` list is absent.
+    """
+    if not md_path.is_file():
         return []
     try:
-        fm, _ = parse_frontmatter(md.read_text())
+        fm, _ = parse_frontmatter(md_path.read_text())
     except OSError:
         return []
     grants = fm.get("tool_grants")
     return list(grants) if isinstance(grants, list) else []
+
+
+def _read_skill_grants(skill_dir: Path) -> list[str]:
+    """Read a skill's ``tool_grants`` from its ``SKILL.md`` marker (never sibling files)."""
+    return _read_tool_grants(skill_dir / "SKILL.md")
 
 
 def skill_tool_grants(paths, name: str) -> list[str]:
@@ -299,6 +307,15 @@ def skill_tool_grants(paths, name: str) -> list[str]:
     """
     skill_dir = paths.find_skill_dir(name)
     return _read_skill_grants(skill_dir) if skill_dir is not None else []
+
+
+def integration_tool_grants(paths, name: str) -> list[str]:
+    """Read a single integration's additive ``tool_grants`` list (F2) from ``<name>.md``.
+
+    Returns ``[]`` when the integration file, or the field, is absent.
+    """
+    int_path = paths.find_library_file("integrations", name, ".md")
+    return _read_tool_grants(int_path) if int_path is not None else []
 
 
 def parse_guardrail_permissions(path: Path) -> ExpertisePermissions | None:
@@ -359,6 +376,28 @@ def iter_guardrail_permissions(
             gpath = paths.find_library_file("guardrails", entry, ".md")
             perms = parse_guardrail_permissions(gpath) if gpath is not None else None
             out.append((entry, perms))
+    return out
+
+
+def iter_integration_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]:
+    """Resolve equipped integration entries to ``(display_name, tool_grants)`` pairs.
+
+    Handles ``name`` / ``dir/name`` (a single integration) and ``dir/`` (folder-expansion
+    — every ``.md`` beneath it), so grant contracts in expanded folders are validated too.
+    """
+    out: list[tuple[str, list[str]]] = []
+    for entry in equipped:
+        if entry.endswith("/"):
+            base = entry.rstrip("/")
+            for rel_key, ipath in paths.expand_library_folder(
+                "integrations", base
+            ).items():
+                name = f"{base}/{rel_key}" if base else rel_key
+                out.append((name, _read_tool_grants(ipath)))
+        else:
+            ipath = paths.find_library_file("integrations", entry, ".md")
+            grants = _read_tool_grants(ipath) if ipath is not None else []
+            out.append((entry, grants))
     return out
 
 

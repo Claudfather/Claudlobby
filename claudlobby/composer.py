@@ -269,16 +269,15 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
       emitted literally;
     - **CLI-backed** (no ``tool_grants``) — nothing.
     """
-    from .loader import parse_frontmatter
+    from .loader import iter_integration_grants
 
     grants: list[str] = []
-    for name in resolve_effective_integrations(bot, paths):
-        int_path = paths.find_library_file("integrations", name, ".md")
-        if int_path is None:
-            continue
-        fm, _ = parse_frontmatter(int_path.read_text())
-        tool_grants = fm.get("tool_grants")
-        if not isinstance(tool_grants, list) or not tool_grants:
+    # Folder-aware (dir/ expansion) so generate resolves the same grant set the
+    # validator shape-checks — the reader is shared with validator.py.
+    for name, tool_grants in iter_integration_grants(
+        paths, resolve_effective_integrations(bot, paths)
+    ):
+        if not tool_grants:
             continue
         entry = next((e for e in bot.mcp if e.name == name), None)
         if entry is None:
