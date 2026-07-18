@@ -783,6 +783,37 @@ class TestToolGrantsValidation:
         assert not any("tool_grants" in w for w in report.warnings)
         assert not any("malformed" in w for w in report.warnings)
 
+    def _write_nested_integration(self, fleet_dir, folder, name, tool_grants_yaml):
+        d = fleet_dir / "library" / "integrations" / folder
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(
+            f"---\ntitle: {name}\n{tool_grants_yaml}---\n\n# {name}\n"
+        )
+
+    def _equip_lead_integration(self, fleet_dir, integ):
+        y = (
+            (fleet_dir / "fleet.yaml")
+            .read_text()
+            .replace(
+                "expertise: [orchestration]",
+                f"expertise: [orchestration]\n      integrations: [{integ}]",
+            )
+        )
+        (fleet_dir / "fleet.yaml").write_text(y)
+
+    def test_integration_folder_expansion_grant_validated(self, fleet_dir, monkeypatch):
+        # A malformed grant nested in a dir/ folder-expansion integration must
+        # still warn — the same bypass alex closed for skills/guardrails, which
+        # the integration grant loop still had (rajan's follow-up).
+        self._env(monkeypatch)
+        self._write_nested_integration(
+            fleet_dir, "iexpand", "nested", 'tool_grants:\n  - "rm -rf /"\n'
+        )
+        self._equip_lead_integration(fleet_dir, "iexpand/")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "rm -rf /" in w for w in report.warnings)
+
 
 class TestGrantGrammar:
     """F3(a): a well-formed grant is an mcp__ glob, a Bash(...) pattern, or a bare tool name."""

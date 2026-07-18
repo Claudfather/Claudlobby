@@ -167,6 +167,29 @@ class TestGrantSupersetSweep:
         assert new == {"mcp__gws-personal__*", "mcp__gws-work__*"}
         assert set(_resolve_mcp_permissions(bot, paths)) <= new
 
+    def test_dir_folder_integration_grants_resolved(self, tmp_path):
+        # generate must resolve grants from a dir/ folder-expanded integration —
+        # the same bypass the validator closes, kept consistent on the composer
+        # side so validate and generate agree. Pre-fix the resolver was
+        # folder-blind (find_library_file("integrations", "connectors/") -> None)
+        # and silently dropped these grants.
+        root = tmp_path / "claudlobby"
+        _build_library(root)
+        conn = root / "library" / "integrations" / "connectors"
+        conn.mkdir()
+        conn.joinpath("native.md").write_text(
+            "---\ntitle: native\ntype: connector\n"
+            'tool_grants:\n  - "mcp__claude_ai_Gmail__*"\n---\n\n# native\n'
+        )
+        paths = Paths(root=root, fleet_dir=root)
+        bot = BotConfig(
+            bot_id="folder-bot",
+            name="folder-bot",
+            expertise=["eng"],
+            integrations=["connectors/"],
+        )
+        assert "mcp__claude_ai_Gmail__*" in set(_resolve_integration_grants(bot, paths))
+
 
 class TestGrantSupersetGateHasTeeth:
     """A genuine coverage gap hard-fails the gate — the property is enforced, not assumed."""

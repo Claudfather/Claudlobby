@@ -11,6 +11,8 @@ from claudlobby.loader import (
     _derive_title,
     _parse_expertise_permissions,
     _strip_leading_title_heading,
+    integration_tool_grants,
+    iter_integration_grants,
     load_library_item,
     load_library_items_overlay,
     load_voice,
@@ -560,6 +562,70 @@ class TestSkillToolGrants:
     def test_non_list_tool_grants_returns_empty(self, tmp_path):
         self._write_skill(tmp_path, "bad", 'tool_grants: "not-a-list"\n')
         assert skill_tool_grants(self._paths(tmp_path), "bad") == []
+
+
+# ── integration tool_grants (F2: additive list, folder-aware) ────────
+
+
+class TestIntegrationToolGrants:
+    def _paths(self, root):
+        return Paths(root=root, fleet_dir=None)
+
+    def _write_integration(self, root, rel, body_fm=""):
+        p = root / "library" / "integrations" / f"{rel}.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"---\ntitle: {rel}\n{body_fm}---\n\n# {rel}\n")
+        return p
+
+    def test_reads_tool_grants_from_integration_md(self, tmp_path):
+        self._write_integration(
+            tmp_path, "github", 'tool_grants:\n  - "mcp__github__*"\n'
+        )
+        grants = integration_tool_grants(self._paths(tmp_path), "github")
+        assert grants == ["mcp__github__*"]
+
+    def test_missing_tool_grants_returns_empty(self, tmp_path):
+        self._write_integration(tmp_path, "plain")
+        assert integration_tool_grants(self._paths(tmp_path), "plain") == []
+
+    def test_unknown_integration_returns_empty(self, tmp_path):
+        assert integration_tool_grants(self._paths(tmp_path), "ghost") == []
+
+    def test_non_list_tool_grants_returns_empty(self, tmp_path):
+        self._write_integration(tmp_path, "bad", 'tool_grants: "not-a-list"\n')
+        assert integration_tool_grants(self._paths(tmp_path), "bad") == []
+
+    def test_iter_resolves_single_and_dir_name(self, tmp_path):
+        self._write_integration(
+            tmp_path, "slack", 'tool_grants:\n  - "mcp__slack__*"\n'
+        )
+        self._write_integration(
+            tmp_path, "conn/gmail", 'tool_grants:\n  - "mcp__claude_ai_Gmail__*"\n'
+        )
+        pairs = iter_integration_grants(self._paths(tmp_path), ["slack", "conn/gmail"])
+        assert pairs == [
+            ("slack", ["mcp__slack__*"]),
+            ("conn/gmail", ["mcp__claude_ai_Gmail__*"]),
+        ]
+
+    def test_iter_expands_dir_folder(self, tmp_path):
+        # A dir/ folder-expansion entry resolves every member's grants — the
+        # bypass rajan flagged: a malformed grant nested in an expanded folder
+        # must not be silently skipped.
+        self._write_integration(
+            tmp_path, "conn/native", 'tool_grants:\n  - "mcp__claude_ai_Gmail__*"\n'
+        )
+        self._write_integration(tmp_path, "conn/bad", 'tool_grants:\n  - "rm -rf /"\n')
+        pairs = dict(iter_integration_grants(self._paths(tmp_path), ["conn/"]))
+        assert pairs == {
+            "conn/native": ["mcp__claude_ai_Gmail__*"],
+            "conn/bad": ["rm -rf /"],
+        }
+
+    def test_iter_unknown_entry_yields_empty_grants(self, tmp_path):
+        assert iter_integration_grants(self._paths(tmp_path), ["ghost"]) == [
+            ("ghost", [])
+        ]
 
 
 # ── guardrail permissions (F2: deny-capable block, shared schema) ────
