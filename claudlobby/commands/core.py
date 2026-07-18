@@ -29,6 +29,33 @@ def cmd_doctor(args) -> int:
     return 1 if report.has_failures else 0
 
 
+def cmd_freshbox(args) -> int:
+    """Fresh-box self-containment audit (#644 P4): every grant traces to an
+    equipped source's contract (no over-grant/orphan), the composed allow covers
+    every declared grant (no under-grant), and the Tier-A settings surface
+    (enabledPlugins/skip-flags/sandbox) is composed per-bot, not global-inherited.
+    """
+    from ..freshbox import audit_bot, audit_fleet, format_report, has_failures
+
+    paths = _resolve_paths(args)
+    _load_env(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
+    if getattr(args, "bot", None):
+        bot = fleet.bots.get(args.bot)
+        if bot is None:
+            log.error("no such bot: %s", args.bot)
+            return 1
+        findings = audit_bot(bot, fleet, paths)
+    else:
+        findings = audit_fleet(fleet, paths)
+    print(format_report(fleet, findings))
+    if has_failures(findings):
+        return 1
+    if getattr(args, "strict", False) and findings:
+        return 1
+    return 0
+
+
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
