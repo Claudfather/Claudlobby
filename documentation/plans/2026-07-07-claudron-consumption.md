@@ -5,9 +5,9 @@ status: draft
 owner: chris
 tags: [ecosystem, claudron, mcp, protocols, knowledge, play:ecosystem]
 created: 2026-07-07
-updated: 2026-07-10
-links: ["#251", "#266", "#508", "#509", "#528", "#532", "Claudfather/Claudron#14", "Claudfather/Claudron#17", "Claudfather/Claudron#33"]
-ironclad: "cycle-1 complete (9 lenses: 1 Blocker + 8 majors + ~20 minors — ALL folded or dispositioned below); forks F1–F5 + F7 ALL LOCKED by the fleet owner 2026-07-07 (ratified in-session post-merge of #508; recorded in the fork-locks PR); F6 demoted to a plan decision: CONVERGED — phases implement on their capability gates"
+updated: 2026-07-18
+links: ["#251", "#266", "#508", "#509", "#528", "#532", "#561", "Claudfather/Claudron#14", "Claudfather/Claudron#17", "Claudfather/Claudron#33", "Claudfather/Claudron#60"]
+ironclad: "cycle-1 complete (9 lenses); forks F1–F5 + F7 locked 2026-07-07, F8 locked 2026-07-18 (Decision C — clauDNA CLI-skill door; MCP fragment parked). CONVERGED. v5 (2026-07-18) re-scoped P2/P3/P4 per Decision C + full anchor re-validation (all behavioral claims hold; line drift tabled in the revision log)."
 ---
 
 # Claudlobby Consumes Claudron — the Receiving-Side Epic
@@ -17,6 +17,32 @@ Companion to Claudron's six-epic roadmap (Claudfather/Claudron PR #13 → EPIC #
 > **For agentic workers / reviewers:** This is a `/forge`-style plan. **Decision Forks are ALL LOCKED** — the plan PR (#508) merged before the lock ceremony, so the fleet owner ratified F1–F5 + F7 in-session (2026-07-07); each fork's Status line below is the lock record, committed via the follow-up fork-locks PR (which stands as the `[FORK-LOCK]` artifact). Sizing is **S/M/L per phase — no calendar estimates** (fleet convention). This is **plan-only**; no implementation in this PR. Format note (plan-health disposition): this doc keeps the repo's committed single-doc plan shape (the goal-aware and fleet-update exemplars) rather than the plugin's one-doc-per-phase skeleton; section names map 1:1 (Goal≈Summary, Verified Current State≈Evidence, Phases≈Implementation Plan, Validation≈Verification Checklist) and the issue mapping below is the one-phase-one-issue ledger.
 
 ## Revision Log
+
+### v5 (2026-07-18, Decision C re-scope + full re-validation)
+
+**Two things after a week+ of heavy Claudlobby shipping (38 commits past v4):**
+
+**1. Decision C ratified — the consumption door is clauDNA's CLI-skill, not a Claudlobby MCP fragment.** A `/weigh-development-paths` pass (7 dimensions, 3 options) picked **C: adopt clauDNA's `/claudron`/`/recall`/`/capture` CLI-skill door as the fleet-consumption path now; park the `library/mcp/claudron.json` fragment as a demand-gated option** (adopt only when Claudron E3 ships *and* per-tool permission scoping is wanted — the #644 tie-in). Full record + matrix: `documentation/decisions/2026-07-18-claudron-consumption-door.md`. Ratified by the fleet owner 2026-07-18 and **executed cross-repo the same day** — Claudfather/Claudron#60 marks their `03-mcp-server.md` `status: deferred` (E3 off the critical path). Rationale in brief: Claudron E3 has no active work (only `v0.2.0` tagged), clauDNA already ships the door CLI-based on every bot ("clauDNA ships no MCP servers — this engine IS the CLI… if MCP is configured, the same engine"), and the epic's own #561 already reframed bot↔hub as navigate-vs-query over `recall`/`lookup`. **Scope impact:** P2 sheds the fragment-mount work (2b/2e/MCP-half-of-2d → parked); P3 collapses to "point bots at `/recall`+`/capture` + #561"; **P4's F5 mission-approval gate is largely moot** (no new MCP server in the default template); the wiring children #560–564 and the #561 protocol are what C depends on and they stand. New **Fork F8** records the parked fragment. Forks F1–F5/F7 unchanged.
+
+**2. Full anchor re-validation vs `main` @ f2863a8 — every behavioral claim HOLDS; nothing removed or reversed.** Line numbers drifted heavily (composer/config/validator ~+100–130 lines each); the corrected anchors are tabled here rather than hand-patched inline (they re-drift every week — treat the Python-file anchors as symbol-cited, re-verified at gate-fire per the anchor re-validation rule):
+
+| Claim (v4 anchor) | Corrected @ f2863a8 |
+|---|---|
+| CLAUDRON_VAULT_PATH emission `composer.py:501-512` | `# Ecosystem` block `composer.py:604-615` (CLAUDRON_VAULT_PATH `:611`) |
+| shared-docs mkdir scaffold `composer.py:1874-1883` | `composer.py:2258-2266` (same five dirs, unconditional) |
+| protocol auto-include `composer.py:885-888` | `composer.py:1005-1008` |
+| `collect_env_contracts` provided_by skip | **retargeted (#568): shared kernel `iter_operator_contract_vars` (`composer.py:1602`, called `:1620`) — P2a tests target this SSOT** |
+| `claudron_vault_path` field `config.py:364`; defaults `:935-936` | field `config.py:403`; defaults `:1057-1058` |
+| `_merge_mcp_lists` `config.py:509-518`; merge in `_coerce_bot` `:893-895` | def `config.py:563-572`; merge call `:1015-1017` |
+| validator cross-check `validator.py:271-282` (key `:272`) | `validator.py:403-413` (keys on "claudron" `:404`) |
+| warm-cache npx-only `commands/core.py:392-456` | `cmd_warm_cache` `commands/core.py:415` (npx filter `:440`) |
+| start-bot bot.conf-last `:137-152` | `start-bot.sh:155-162` (now `set -a`-wrapped) |
+| `fleet-yaml-schema.md` claudron_vault_path `:441-451`; 2c example `:448` | **badly stale → field `:124`, doc `:493-503`, example `:500`, warn-note `:597` (2c's correction target is now `:500`)** |
+| shared-documentation.md pre-work INDEX + 5-cap `:14-16` | `:14-17` (5-doc cap line `:17`) |
+| dispatch.md INDEX preflight `:119-136` | `:128-145` (scan `:132-133`, monitor `:139-145`) |
+| doctor.py non-npx warn `:124-131` | `doctor.py:128` |
+
+Confirmed still-true (Option-A-parked-relevant): `library/mcp/claudron.json` **does not exist** ✅; `apply_ecosystem_defaults` **not yet built** ✅; doctor has **no `check_claudron`/`--json`** ✅; `provided_by:"composer"` shipped (`library/mcp/README.md:31`) ✅; `[vault]` pinned `@v0.2.0` (`pyproject.toml:21`) ✅; INDEX.md text still present (1d not run) ✅. New neighbor to note: #644 added `permission_mode`/`dangerously_skip_permissions` emission at `composer.py:405-406` (separate region); the ecosystem block (`:604-615`) now sits between briefing (`:600`) and plugin-sync (`:618`) — 2c's `apply_ecosystem_defaults` must run before this emission point.
 
 ### v4 (2026-07-10, accuracy + companion-consistency pass)
 
@@ -51,9 +77,9 @@ Make "query Claudron before tasks, write findings after" (PROJECT_MISSION.md:11,
 | Claudlobby phase | Gate (capability-phrased) | Claudron epic |
 |---|---|---|
 | P1 — SSOT reception, ladder fix, pin, dead-text cleanup, interim query wedge | none (SSOT-pointer PR rides the first tag shipping E1 — 0.2.0 in default order; everything else is unconditional) | E1 (#15) |
-| P2 — Fragment reception + compositor/doctor readiness | first tagged release shipping the MCP server (E3; 0.3.0 in default order, post-G1) | E3 (#17) |
-| P3 — Protocol cutover (MCP overlay) | P2 landed + the dogfood fleet vault-wired | E3 (#17) |
-| P4 — Graduation to fleet default | P3 soak evidence + **mission approval** (PROJECT_MISSION.md:63/:67/:68 — see F5) | — |
+| P2 — ~~Fragment reception~~ → **re-scoped (Decision C):** vault-wiring readiness (compat/doctor); the MCP-fragment half is **parked (Fork F8)** | fragment-mount half → demand-gated (F8); wiring → now, folds into #560–564 | ~~E3~~ (parked) |
+| P3 — ~~Protocol cutover (MCP overlay)~~ → **re-scoped (Decision C):** point bots at clauDNA `/recall`+`/capture` + the #561 navigate-vs-query protocol | none MCP-gated — clauDNA door ships today; folds into #561 | — |
+| P4 — Graduation to fleet default | **F5 gate largely moot (Decision C — no new MCP server in the template);** graduation = vault wiring on when a vault resolves | — |
 | P5 — Librarian standing job | first tagged release shipping `claudron review --json` (E5; 0.5.0 in default order) | E5 (#19) |
 | Deferred — events.jsonl fleet observability | first fleet with ≥2 actively-writing bots (Claudron's own F8 milestone) | — |
 
@@ -140,7 +166,9 @@ Boundary invariants (both missions): Claudlobby never stores the corpus — the 
 
 ### Phase 2 (M): Fragment reception + compositor/validator/doctor readiness — gate: first Claudron release shipping the MCP server
 
-**Dependencies:** P1c; the gate capability (E3 shipped in a tagged release — 0.3.0 in default order, post-G1). ~~Coordination: PR #490~~ (merged 2026-07-07 — resolved). On gate-fire, run the anchor re-validation rule. **Blocks:** P3, P4.
+> **⛔ RE-SCOPED by Decision C (2026-07-18) — `documentation/decisions/2026-07-18-claudron-consumption-door.md`.** The **MCP-fragment half is parked (Fork F8):** 2b (review/land `library/mcp/claudron.json`), 2e (`claudron[mcp]` pipx install), and the MCP-specific half of 2d (`check_claudron` for a mounted server) do **not** happen unless F8's demand gate fires. **What survives now:** 2a (shipped, #532), and the **option-agnostic wiring** — vault-reachability doctor coverage, the `claudron_compat.py` floor, and the `apply_ecosystem_defaults` vault auto-default (2c) — which **fold into the conformance children #560–564**. 2a's test target is retargeted to `iter_operator_contract_vars` (the #568 shared kernel). The steps below are retained as the *parked-fragment* reference for if/when F8 is un-parked.
+
+**Dependencies:** P1c; ~~the gate capability (E3 shipped)~~ **(parked — Decision C).** ~~Coordination: PR #490~~ (merged 2026-07-07 — resolved). On any un-park, run the anchor re-validation rule. **Blocks:** ~~P3, P4~~ (P3/P4 no longer depend on the fragment).
 
 > **Re-sequencing (ratifier-approved, 2026-07-08):** step **2a's claudlobby-internal half is pulled ahead of the gate** — the `provided_by: "composer"` contract extension needs nothing from Claudron's code, F2 is locked, and building it first means Claudron's fragment PR validates against machinery that already exists with tests. The Claudron#17 feedback comment (also 2a) was posted at epic filing. The reception steps (2b) and the doctor/composer/install work (2c–2f) remain gated as written.
 
@@ -158,7 +186,9 @@ Boundary invariants (both missions): Claudlobby never stores the corpus — the 
 
 ### Phase 3 (M): Protocol cutover — the MCP overlay — gate: P2 landed + dogfood fleet vault-wired
 
-**Dependencies:** P2 (and 1d's fallback text as the base). On gate-fire, diff the shipped tag's tool names/response contracts against this plan's assumptions; re-open affected forks on drift. **Blocks:** P4 (soak needs bots instructed — or mechanically wired — to query/write).
+> **⛔ RE-SCOPED by Decision C (2026-07-18).** No `mcp__claudron__*` protocol cutover — bots consume the vault through **clauDNA's `/recall` (query-before) + `/capture` (write-after)** over the `claudron` CLI, already installed fleet-wide. Claudlobby's protocol work collapses to the **#561 navigate-vs-query protocol** (navigate the filesystem for config; query `recall`/`lookup` for knowledge; never hardcode the hub path) + the read-side trust note (draft = unverified) + the vault-hygiene guardrail (3e still stands). 3a/3b's `claudron_lookup`/`claudron_write` *tool* text is superseded by the clauDNA verbs; the routing-contract nuances (`suggest_*`, `retry_later`, draft-trust) migrate into clauDNA's `/capture` guidance, not a Claudlobby overlay. **This work is not MCP-gated and can proceed once the dogfood vault is wired.**
+
+**Dependencies:** ~~P2 fragment~~ → the clauDNA door (ships today) + #561; 1d's fallback text as the base. **Blocks:** P4 soak (needs bots actually querying/writing — via clauDNA verbs + the 1e wedge).
 
 **Steps:**
 - [ ] 3a. **`dispatch.md` preflight overlay**: vault-wired fleets — `claudron_lookup` scoped to the target repo/fleet before dispatch, include hits in the dispatch prompt (door-consistent with 1e's mechanical injection if F7 locked: the protocol documents what the helper does mechanically, and covers the manager-judgment cases the helper can't). Claudron-less fallback text (from 1d) stays. Manager monitoring: `claudron review` forward-ref stays conditional.
@@ -173,6 +203,8 @@ Boundary invariants (both missions): Claudlobby never stores the corpus — the 
 **Standalone value:** the fleet's knowledge conventions describe machinery that exists, for both fleet classes; bots get typed, permission-gated tools with honest failure-mode guidance.
 
 ### Phase 4 (M): Graduation to fleet default — gates: soak evidence + mission approval
+
+> **⛔ RE-SCOPED by Decision C (2026-07-18).** Graduation was "default-mount the MCP fragment," which tripped the **F5 mission-approval gate** (PROJECT_MISSION.md :63/:67/:68 — "new MCP server in the default template"). **Under Decision C there is no new MCP server in the template → the F5 approval artifact is largely moot.** What "graduation" means now: the **vault wiring is on by default when a vault resolves** (the `.claudron` bridge → `CLAUDRON_VAULT_PATH` → clauDNA door + the 1e wedge), an operator-config default, not a mounted server. The soak (below) still validates the *behavior* (bots query/write against the vault); it's just no longer gating an MCP-server-in-template approval. F5's generic `mcp_exclude` mechanism survives only if F8 is ever un-parked.
 
 **Dependencies:** P3 landed. **Soak precondition:** the dogfood vault holds a minimum corpus (≥25 notes spanning ≥2 repos — lookups against an empty vault prove nothing). **Soak evidence** (≥2 weeks, dogfood fleet; instruments named): (i) *compliance floor* — `claudron_lookup` calls on ≥50% of dispatched tasks (from `claudron status` counters / events vs dispatch-log count); (ii) *impact* — ≥3 observed instances where a preflight hit was included in a dispatch and visibly used in the worker's output (transcript/events — the saved-me-tally analog; impact, not just activity); (iii) *latency* — dispatch→first-activity P95 from `data/events/*.jsonl` within 10% of the pre-mount baseline window; (iv) *resources* — cold-start and fleet RSS deltas within the 2f budgets (fleet-memory-check); (v) *hygiene* — a weekly sweep of vault commits (secret patterns, `runtime/` paths, PII) returns zero hits — named checker, run by the fleet owner or a dispatched bot task; (vi) *liveness caveat* — flat counters trigger a doctor run before being read as non-adoption (MCP server crashes fire `PostToolUseFailure`, which bot-vitals does not capture — a dead server and an unpersuaded bot look identical in counters alone). **Soak-fail branch:** stay opt-in; if the floor failed for mechanism reasons, mechanical injection (F7's door) becomes the default query path and prose demotes to guidance; re-run the soak. No silent indefinite soak.
 **Approval:** this phase is the PROJECT_MISSION.md approval artifact for **:68** (new MCP server in the default template), and the F5 lock also explicitly discharges **:63** (the host-level `claudron[mcp]` install becomes a de-facto conditional prereq for vault-resolving fleets) and **:67** (MCP-config provisioning changes) — **granted: F5 locked (a) by the fleet owner 2026-07-07, presented with the n=1 honesty line** (soak evidence is the author's own fleet; graduating serves future vault-wired operators). The lock ratifies the mechanism; the soak bundle above still gates the rollout — a failed soak lands in the fail branch, not in graduation.
@@ -247,6 +279,12 @@ Boundary invariants (both missions): Claudlobby never stores the corpus — the 
 - **Options:** **(a)** adopt the mechanical wedge now (P1e): env-knobbed CLI `lookup` injection in `dispatch-task.sh`, off by default, dogfood fleet on — deterministic query-before from the P1 pin onward; MCP tools (P3) layer on for in-session use; write-after stays MCP/write-lock-gated (no pre-lock concurrency exposure); generates the fleet query-volume evidence Claudron's G1 wants; (b) decline — protocol prose + MCP only; mechanical injection reserved as the named soak-fail remediation (P4's fail branch); (c) mechanical injection only, never protocol text (rejected: managers also need judgment-call queries the helper can't anticipate, and in-session tools need discovery text).
 - **Lean:** **(a)** at S effort (a spike + one script knob) — it converts the plan's biggest external risk (fleet evidence waiting on an evidence-gated option) into early evidence either way, and gives P4's soak a deterministic floor. Costs stated honestly: a third query door to document, Bash-level permissions instead of `mcp__claudron__*` gating for the helper path, and a v0.1-lookup-vs-fleet-vault spike that may find gaps (filed on #17 as feedback, per the boundary).
 - **Ratifier:** fleet owner. **Status:** **locked (a)** — fleet owner, 2026-07-07 (ratified in-session; recorded in the fork-locks PR). P1e is go.
+
+### Fork F8: Consumption door — clauDNA CLI-skill vs Claudlobby MCP fragment *(this plan's F8; distinct from Claudron's F8 field-research milestone in the Deferred row)*
+- **Context:** The epic's P2/P3 assumed bots consume the vault via a Claudlobby-authored MCP fragment mounting Claudron's E3 server. But E3 has no active work (only `v0.2.0` tagged), and clauDNA ships the query/write door **CLI-based on every bot today** (`/claudna:claudron` lookup/status, `/recall`, `/capture` — "clauDNA ships no MCP servers; this engine IS the CLI; if MCP is configured, the same engine"). A `/weigh-development-paths` pass evaluated three options across 7 dimensions.
+- **Options:** **(A)** Claudlobby MCP fragment (`library/mcp/claudron.json` + E3 mount + protocol cutover); **(B)** clauDNA CLI-skill door + Claudlobby wiring only; **(C)** hybrid — B now, A parked as demand-gated.
+- **Lean:** **(C).** B wins on elegance/DRY/separation/existing-patterns (one engine, one door, matches the ecosystem boundary "Claudlobby does not define skills"); A's only unique value (in-session tool discovery + `mcp__claudron__*` per-tool permission gating) is gated on an unshipped server, so C parks A rather than deletes it — pull it forward only when **E3 ships AND the fleet wants per-tool vault-access permission scoping** (the #644 tie-in) or a non-clauDNA MCP consumer appears.
+- **Ratifier:** fleet owner. **Status:** **locked (C)** — fleet owner, 2026-07-18. Full matrix: `documentation/decisions/2026-07-18-claudron-consumption-door.md`. Executed cross-repo — Claudfather/Claudron#60 marks their `03-mcp-server.md` `status: deferred`. Consequence: P2's fragment half + P3's MCP overlay are parked; the wiring (#560–564) and #561 protocol are the active path.
 
 ## Risks
 
