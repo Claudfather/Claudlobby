@@ -60,9 +60,53 @@ def _available_names(paths: Paths, kind: str, ext: str = ".md") -> set[str]:
     return names
 
 
-# A well-formed tool_grant is an exact-prefix ``mcp__`` glob whose only wildcard,
-# if any, is a trailing ``*`` (F5: no mid-string wildcards).
-_TOOL_GRANT_RE = re.compile(r"^mcp__[^*]*\*?$")
+# Grant grammar (F3(a)): a well-formed grant is exactly one of three kinds —
+#   1. an exact-prefix ``mcp__`` glob whose only wildcard, if any, is a trailing
+#      ``*`` (F5: no mid-string wildcards);
+#   2. a scoped ``Bash(<command pattern>)`` grant;
+#   3. a bare CamelCase tool name (e.g. ``Read``, ``WebFetch``, ``Bash``).
+# One regex per kind keeps each shape independently checkable.
+_GRANT_MCP_RE = re.compile(r"^mcp__[^*]*\*?$")
+_GRANT_BASH_RE = re.compile(r"^Bash\(.+\)$")
+_GRANT_BARE_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
+
+
+def _grant_wellformed(grant: object) -> bool:
+    """True when ``grant`` matches the F3(a) grant grammar (mcp glob | Bash(..) | bare tool)."""
+    return isinstance(grant, str) and bool(
+        _GRANT_MCP_RE.match(grant)
+        or _GRANT_BASH_RE.match(grant)
+        or _GRANT_BARE_RE.match(grant)
+    )
+
+
+def _grant_shape_warnings(
+    bot_name: str,
+    source_kind: str,
+    source_name: str,
+    grants: list[str],
+    *,
+    allow_side: bool,
+) -> list[str]:
+    """Grammar (F3(a)) + missing-scoped-Bash warnings for a list of declared grants.
+
+    ``allow_side`` gates the bare-``Bash`` warning: *granting* bare ``Bash`` is
+    over-broad (a specific ``Bash(<cmd> *)`` is missing), but *denying* bare
+    ``Bash`` (deny-all shell) is legitimate, so it is not flagged.
+    """
+    out: list[str] = []
+    for grant in grants:
+        if not _grant_wellformed(grant):
+            out.append(
+                f"bot '{bot_name}': {source_kind} '{source_name}' grant '{grant}' is "
+                "malformed — must be an mcp__ glob, a Bash(...) grant, or a bare tool name"
+            )
+        elif allow_side and grant == "Bash":
+            out.append(
+                f"bot '{bot_name}': {source_kind} '{source_name}' grants bare 'Bash' — "
+                "scope it to Bash(<cmd> *) so the contract is specific (missing scoped Bash(...))"
+            )
+    return out
 
 
 def _integration_tool_grants(paths: Paths, name: str) -> list[str]:
@@ -193,17 +237,39 @@ def _validate_bots(
                     f"bot '{bot_name}': integration '{integ}' not in any library/integrations/ — skipped"
                 )
 
-        # tool_grants shape (warn) — every grant on an equipped integration must be
-        # an exact-prefix mcp__ glob (F5: no mid-string wildcards).
+        # Grant contracts on equipped sources — integrations (additive tool_grants),
+        # skills (additive tool_grants), guardrails (deny-capable permissions:) — all
+        # validated against the single F3(a) grammar via _grant_shape_warnings.
         from .composer import resolve_effective_integrations
+        from .loader import iter_guardrail_permissions, iter_skill_grants
 
         for integ in resolve_effective_integrations(bot, paths):
-            for grant in _integration_tool_grants(paths, integ):
-                if not (isinstance(grant, str) and _TOOL_GRANT_RE.match(grant)):
-                    report.warnings.append(
-                        f"bot '{bot_name}': integration '{integ}' tool_grant '{grant}' is "
-                        "malformed — must be an exact-prefix mcp__ glob with no mid-string wildcard"
-                    )
+            report.warnings.extend(
+                _grant_shape_warnings(
+                    bot_name,
+                    "integration",
+                    integ,
+                    _integration_tool_grants(paths, integ),
+                    allow_side=True,
+                )
+            )
+        for name, grants in iter_skill_grants(paths, bot.skills):
+            report.warnings.extend(
+                _grant_shape_warnings(bot_name, "skill", name, grants, allow_side=True)
+            )
+        for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
+            if gperms is None:
+                continue
+            report.warnings.extend(
+                _grant_shape_warnings(
+                    bot_name, "guardrail", name, gperms.allow, allow_side=True
+                )
+            )
+            report.warnings.extend(
+                _grant_shape_warnings(
+                    bot_name, "guardrail", name, gperms.deny, allow_side=False
+                )
+            )
 
         # Briefing source coverage (warn). A briefing-equipped bot with no
         # integrations and no mcp servers has nothing to summarize — the skill

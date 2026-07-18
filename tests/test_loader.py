@@ -16,7 +16,10 @@ from claudlobby.loader import (
     load_voice,
     parse_expertise_file,
     parse_frontmatter,
+    parse_guardrail_permissions,
+    skill_tool_grants,
 )
+from claudlobby.paths import Paths
 
 
 # ── parse_frontmatter ────────────────────────────────────────────────
@@ -510,3 +513,78 @@ class TestLoadVoice:
         item = load_voice(p)
         # Frontmatter wins
         assert item.title == "Frontmatter Name"
+
+
+# ── skill tool_grants (F2: additive contract on SKILL.md) ────────────
+
+
+class TestSkillToolGrants:
+    def _paths(self, root):
+        return Paths(root=root, fleet_dir=None)
+
+    def _write_skill(self, root, name, body_fm=""):
+        d = root / "library" / "skills" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\n{body_fm}---\n\n# {name}\n\nbody\n"
+        )
+        return d
+
+    def test_reads_tool_grants_from_skill_md(self, tmp_path):
+        self._write_skill(
+            tmp_path,
+            "dispatch",
+            'tool_grants:\n  - "Bash(tmux *)"\n  - "mcp__github__*"\n  - "Read"\n',
+        )
+        grants = skill_tool_grants(self._paths(tmp_path), "dispatch")
+        assert grants == ["Bash(tmux *)", "mcp__github__*", "Read"]
+
+    def test_missing_tool_grants_returns_empty(self, tmp_path):
+        self._write_skill(tmp_path, "plain")
+        assert skill_tool_grants(self._paths(tmp_path), "plain") == []
+
+    def test_folder_expansion_reads_only_skill_md(self, tmp_path):
+        # A multi-file skill folder: only SKILL.md carries the contract; sub-files
+        # (even one with its own tool_grants) are ignored.
+        d = self._write_skill(tmp_path, "runner", 'tool_grants:\n  - "Bash(git *)"\n')
+        (d / "archetype.md").write_text("# Archetype\n\nno frontmatter here\n")
+        (d / "helper.md").write_text(
+            '---\ntool_grants:\n  - "Bash(rm *)"\n---\n# nope\n'
+        )
+        grants = skill_tool_grants(self._paths(tmp_path), "runner")
+        assert grants == ["Bash(git *)"]
+
+    def test_unknown_skill_returns_empty(self, tmp_path):
+        assert skill_tool_grants(self._paths(tmp_path), "ghost") == []
+
+    def test_non_list_tool_grants_returns_empty(self, tmp_path):
+        self._write_skill(tmp_path, "bad", 'tool_grants: "not-a-list"\n')
+        assert skill_tool_grants(self._paths(tmp_path), "bad") == []
+
+
+# ── guardrail permissions (F2: deny-capable block, shared schema) ────
+
+
+class TestGuardrailPermissions:
+    def test_reads_permissions_block(self, tmp_path):
+        p = tmp_path / "guard.md"
+        p.write_text(
+            "---\ntitle: Guard\npermissions:\n  deny: [Write, Edit]\n"
+            "  allow: [Read]\n---\n\n# Guard\n"
+        )
+        perms = parse_guardrail_permissions(p)
+        assert perms is not None
+        assert perms.deny == ["Write", "Edit"]
+        assert perms.allow == ["Read"]
+
+    def test_prose_only_guardrail_returns_none(self, tmp_path):
+        # Snowflake SELECT-only stays prose (grammar can't express it) — no permissions block.
+        p = tmp_path / "snowflake-read-only.md"
+        p.write_text(
+            "---\ntitle: Snowflake — read-only\n---\n\n"
+            "# Snowflake — read-only\n\nWithout confirmation, only SELECT.\n"
+        )
+        assert parse_guardrail_permissions(p) is None
+
+    def test_missing_file_returns_none(self, tmp_path):
+        assert parse_guardrail_permissions(tmp_path / "nope.md") is None
