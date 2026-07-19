@@ -47,6 +47,22 @@ tmux attach -t <bot>                   # watch the pane
 
 Write down what you saw: *"composed `<fleet>`, restarted `<bot>`, invoked `/<skill>`, observed `<result>`."*
 
+### Reaping a throwaway (guaranteed teardown)
+
+When the live bot is a **throwaway canary** (a scratch fleet spun up only to observe), reap it with `lib/spin-down-bot.sh` — the inverse of `spin-up-bot.sh`. It stops + removes the systemd user unit / launchd agent, kills the per-bot tmux server, surgically drops the bot's `fleet-state.json` key (a locked single-key delete, never a prune), and with `--purge` also removes the bot dir. Cross-platform and idempotent.
+
+Wire it under a `trap` so the throwaway is reaped even if the driver crashes or the session dies mid-run:
+
+```bash
+BOT_DIR=<bot-dir>
+trap 'lib/spin-down-bot.sh --purge "$BOT_DIR"' EXIT INT TERM HUP
+lib/spin-up-bot.sh "$BOT_DIR"
+# ... drive + observe the canary ...
+sleep <n> & wait          # interruptible wait — a mid-run SIGTERM then fires the trap promptly
+```
+
+The trap always fires on normal or `set -e` exit; `INT TERM HUP` add Ctrl-C, kill, and terminal-close. Use an **interruptible** wait (`sleep & wait`, not a bare foreground `sleep`) — bash defers a trap until the current foreground command returns, so a bare `sleep` delays the reap. (SIGKILL is uncatchable by design; for that case `lib/spin-down-bot.sh <bot-dir>` reaps the orphan when run manually — it is idempotent.)
+
 ## In review
 
 Cite the observation in the PR body — claimed evidence is not evidence. See `library/lessons/review/empirical-verification.md`; reviewers gate bot-behavior PRs on a cited Observe step, not on "the composer test passes."

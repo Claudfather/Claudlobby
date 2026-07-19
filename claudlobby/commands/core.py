@@ -29,6 +29,29 @@ def cmd_doctor(args) -> int:
     return 1 if report.has_failures else 0
 
 
+def cmd_freshbox(args) -> int:
+    """Fresh-box self-containment audit (#644 P4): every grant traces to an
+    equipped source's contract (no over-grant/orphan), the composed allow covers
+    every declared grant (no under-grant), and the Tier-A settings surface
+    (enabledPlugins/skip-flags/sandbox) is composed per-bot, not global-inherited.
+    """
+    from ..freshbox import audit_bot, audit_fleet, format_report, has_failures
+
+    paths = _resolve_paths(args)
+    _load_env(paths)
+    fleet, _md = _load_fleet_or_exit(paths)
+    if args.bot:
+        bot = fleet.bots.get(args.bot)
+        if bot is None:
+            log.error("no such bot: %s", args.bot)
+            return 1
+        findings = audit_bot(bot, fleet, paths)
+    else:
+        findings = audit_fleet(fleet, paths)
+    print(format_report(fleet, findings))
+    return 1 if has_failures(findings) or (args.strict and findings) else 0
+
+
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
@@ -82,12 +105,12 @@ def cmd_generate(args) -> int:
         out = compose_fleet(fleet, paths)
         log.info("composed %d bots → %s", len(out), paths.runtime_bots)
 
-    # Fleet-level timer generation (after per-bot loop). compose_fleet_timers
-    # emits the system_defaults timers and/or the opt-in sweep timer, so call
-    # it when either is in play.
-    sd = fleet.system_defaults
-    if (sd.enabled and sd.timers) or fleet.sweep_enabled():
-        timers_dir = compose_fleet_timers(fleet, paths, merged_defaults)
+    # Fleet-level timer generation (after per-bot loop). Called unconditionally:
+    # compose_fleet_timers early-returns cheaply (no mkdir) when nothing is
+    # configured, and owns the "prune a removed stanza's stale units" reconcile
+    # on that path — a caller-side guard would skip that cleanup.
+    timers_dir = compose_fleet_timers(fleet, paths, merged_defaults)
+    if timers_dir.is_dir():
         log.info("composed fleet timers → %s", timers_dir)
 
     # Host-global jobs (system.yaml host:) are platform equipment, not fleet

@@ -23,10 +23,13 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from . import dotenv
 from .config import BotConfig, FleetConfig, load_host_jobs
-from .known_values import HEADLESS_TRIM_VARS
+from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
+    ExpertisePermissions,
     LibraryItem,
     _demote_headings,
+    iter_guardrail_permissions,
+    iter_skill_grants,
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
@@ -173,10 +176,7 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
 
         # Generate one server entry per instance
         for instance in entry.instances:
-            if instance == "default":
-                output_name = entry.name
-            else:
-                output_name = f"{entry.name}-{instance}"
+            output_name = entry.output_name(instance)
 
             instance_config = copy.deepcopy(server_config)
 
@@ -241,10 +241,7 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
         if not tools:
             continue
         for instance in entry.instances:
-            if instance == "default":
-                output_name = entry.name
-            else:
-                output_name = f"{entry.name}-{instance}"
+            output_name = entry.output_name(instance)
             # Emit a server-level wildcard when ALL contract tools are allowed.
             # This is always the case currently (no partial allow mechanism),
             # so the wildcard is emitted for every server with a non-empty tools list.
@@ -252,12 +249,57 @@ def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
     return patterns
 
 
+def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
+    """Resolve MCP tool-permission grants from equipped integrations' ``tool_grants``.
+
+    Reads ``tool_grants`` frontmatter from each of the bot's effective
+    integrations (see :func:`resolve_effective_integrations`) and expands it
+    into settings.local.json allow entries. One rule produces three shapes,
+    keyed on whether a ``bot.mcp`` entry shares the integration's name (a
+    fragment-backed integration is named after its mcp server):
+
+    - **fragment-backed** with a matching ``bot.mcp`` entry — the
+      ``mcp__<name>__`` prefix is rewritten per instance (``default`` →
+      ``mcp__<name>__``; named → ``mcp__<name>-<instance>__``), reproducing
+      :func:`_resolve_mcp_permissions` output byte-for-byte;
+    - **fragment-backed equipped without a matching mcp entry** — the grant is
+      emitted literally (the default ``mcp__<name>__*``); the validator warns
+      that the paired server is not configured;
+    - **connector-backed** (no matching mcp entry, e.g. ``mcp__claude_ai_*``) —
+      emitted literally;
+    - **CLI-backed** (no ``tool_grants``) — nothing.
+    """
+    from .loader import iter_integration_grants
+
+    grants: list[str] = []
+    # Folder-aware (dir/ expansion) so generate resolves the same grant set the
+    # validator shape-checks — the reader is shared with validator.py.
+    for name, tool_grants in iter_integration_grants(
+        paths, resolve_effective_integrations(bot, paths)
+    ):
+        if not tool_grants:
+            continue
+        entry = next((e for e in bot.mcp if e.name == name), None)
+        if entry is None:
+            grants.extend(tool_grants)
+            continue
+        prefix = f"mcp__{name}__"
+        for grant in tool_grants:
+            if grant.startswith(prefix):
+                rest = grant[len(prefix) :]
+                for instance in entry.instances:
+                    grants.append(f"mcp__{entry.output_name(instance)}__{rest}")
+            else:
+                grants.append(grant)
+    return grants
+
+
 # ----------------------------------------------------------------------
 # bot.conf
 # ----------------------------------------------------------------------
 
 _SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_-]+\Z")
-_SHELL_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_SHELL_IDENT_RE = SHELL_IDENT_RE  # canonical in known_values (shared with config)
 # Telegram handle: must start alnum/underscore, then alnum/underscore/dash.
 # One canonical rule used by both compose_bot_conf and compose_bot.
 _TELEGRAM_HANDLE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
@@ -276,6 +318,25 @@ def _shq(v: object) -> str:
     Uses shlex.quote (single-quoting) so $, `, \\, and " are literal.
     """
     return shlex.quote(str(v))
+
+
+def _channel_plugins(channels: list[str]) -> list[str]:
+    """Plugin install-IDs a bot's ``--channels`` flag depends on.
+
+    A channel entry ``plugin:<name>@<marketplace>`` means the session launches
+    with that plugin, so it must be installed for the channel to work on a cold
+    box. Returns the ``<name>@<marketplace>`` install-IDs in order, skipping any
+    channel that is not a marketplace-pinned plugin ref. The marketplace itself
+    must still be declared in ``plugins.marketplaces`` (its source repo cannot
+    be inferred from the ref) for start-bot to register it.
+    """
+    plugins: list[str] = []
+    for chan in channels:
+        if chan.startswith("plugin:"):
+            ref = chan.removeprefix("plugin:")
+            if "@" in ref and ref not in plugins:
+                plugins.append(ref)
+    return plugins
 
 
 def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
@@ -340,10 +401,18 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         flags.append(f"--channels {ch}")
     if bot.remote_control:
         flags.append("--remote-control")
+    # Permission model, in precedence order:
+    #   1. explicit permission_mode always wins;
+    #   2. else an explicit dangerously_skip_permissions opt-in bypasses prompts;
+    #   3. else the conservative default — acceptEdits auto-accepts edits while
+    #      still honoring the composed allow/deny lists (headless-safe, and unlike
+    #      dangerously-skip it does not bypass the cross-bot read isolation).
     if bot.permission_mode:
         flags.append(f"--permission-mode {bot.permission_mode}")
     elif bot.dangerously_skip_permissions:
         flags.append("--dangerously-skip-permissions")
+    else:
+        flags.append("--permission-mode acceptEdits")
     if bot.model:
         flags.append(f"--model {bot.model}")
     if bot.effort:
@@ -511,6 +580,27 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             f"export SWEEP_AUDIT_TYPES={_shq(' '.join(fleet.sweep.audit_types))}"
         )
 
+    # Equippable briefing (bots.<bot>.briefing) — emitted into the equipped bot's
+    # own conf, mirroring SWEEP_*. The composed timer passes the slot to the
+    # trigger as an ExecStart arg; these vars let the in-session /briefing skill
+    # read the bot's personalization. Per-slot sections use an UPPER-CASED slot
+    # suffix (BRIEFING_SECTIONS_<SLOT>) per shell-var convention — the skill
+    # upper-cases the dispatched slot name to read the matching var.
+    if bot.briefing:
+        lines.append("")
+        lines.append("# Briefing (equipped via bots.<bot>.briefing)")
+        lines.append(f"export BRIEFING_SLOTS={_shq(' '.join(bot.briefing.slots))}")
+        if bot.briefing.sources:
+            lines.append(
+                f"export BRIEFING_SOURCES={_shq(' '.join(bot.briefing.sources))}"
+            )
+        for slot, sections in bot.briefing.sections.items():
+            if sections:
+                lines.append(
+                    f"export BRIEFING_SECTIONS_{slot.upper()}="
+                    f"{_shq(' '.join(sections))}"
+                )
+
     # Ecosystem — clauDNA version pin, Claudron vault, Claudosseum tenant
     if bot.claudna_version or bot.claudron_vault_path or bot.claudosseum_tenant_id:
         lines.append("")
@@ -524,11 +614,17 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
                 f"export CLAUDOSSEUM_TENANT_ID={_shq(bot.claudosseum_tenant_id)}"
             )
 
-    # Plugin sync — if fleet declares plugins, enable auto-install on session start
-    if fleet.plugins.required:
+    # Plugin sync — restore third-party plugins on session start. Union the
+    # plugins this bot's channels pin (see _channel_plugins) so a cold box
+    # installs them alongside the fleet's declared plugins.
+    plugins_required = list(fleet.plugins.required)
+    for _chan_plugin in _channel_plugins(bot.channels):
+        if _chan_plugin not in plugins_required:
+            plugins_required.append(_chan_plugin)
+    if plugins_required:
         lines.append('export CLAUDE_CODE_SYNC_PLUGIN_INSTALL="1"')
         lines.append(
-            f"export FLEET_PLUGINS_REQUIRED={_shq(' '.join(fleet.plugins.required))}"
+            f"export FLEET_PLUGINS_REQUIRED={_shq(' '.join(plugins_required))}"
         )
     if fleet.plugins.marketplaces:
         # Encode as "Name=github:Owner/Repo Name2=github:Owner2/Repo2"
@@ -854,19 +950,30 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
     """Return the list of integration names to use for a bot.
 
-    If bot.integrations is explicitly set, use it verbatim. Otherwise,
-    derive from bot.mcp: any MCP entry whose name has a matching
-    integrations/<name>.md file (in the overlay or base library) is
-    auto-paired. This avoids requiring authors to repeat integration names
-    that are already implied by the MCP config.
+    Returns the UNION of explicit ``bot.integrations`` and the auto-paired
+    mcp names (any MCP entry whose name has a matching integrations/<name>.md
+    file in the overlay or base library), with explicit integrations first and
+    order preserved. When ``bot.integrations`` is unset this is exactly the
+    auto-paired set.
+
+    The union is load-bearing: returning ``bot.integrations`` verbatim would
+    strip the mcp-derived permission grants the moment a bot sets integrations:
+    explicitly, because grant resolution keys off the effective-integration set.
+    Explicit connector integrations must be *additive* to the mcp-paired set,
+    never a replacement.
     """
-    if bot.integrations:
-        return bot.integrations
-    return [
+    auto_paired = [
         e.name
         for e in bot.mcp
         if paths.find_library_file("integrations", e.name, ".md") is not None
     ]
+    if not bot.integrations:
+        return auto_paired
+    result = list(bot.integrations)
+    for name in auto_paired:
+        if name not in result:
+            result.append(name)
+    return result
 
 
 # ----------------------------------------------------------------------
@@ -1052,78 +1159,149 @@ def _resolve_skill_permissions(bot: BotConfig) -> list[str]:
     return patterns
 
 
+def _resolve_skill_grants(bot: BotConfig, paths: Paths) -> list[str]:
+    """Additive ``tool_grants`` declared by the bot's equipped skills (F2/F6).
+
+    :func:`_resolve_skill_permissions` grants only ``Skill(<name>)`` invocation;
+    a skill's ``SKILL.md`` separately declares the ``Bash(...)`` / ``mcp__...`` /
+    bare tools its body actually runs. This resolves those additive grants —
+    folder entries (``dir/``) expanded to every member — so a skill ships
+    self-contained with the tools it needs. Joins integrations on the additive
+    ``tool_grants`` path; de-duplication against the allow list happens in
+    :func:`compose_settings_local`.
+    """
+    return [
+        grant
+        for _name, grants in iter_skill_grants(paths, bot.skills)
+        for grant in grants
+    ]
+
+
+# Full tool set an ``allow_all`` permission profile expands to.
+ALL_TOOLS = [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Agent",
+    "Grep",
+    "Glob",
+    "WebFetch",
+    "WebSearch",
+    "NotebookEdit",
+]
+
+
+def _append_unique(target: list[str], items: Iterable[str]) -> None:
+    """Append each item to ``target`` in order, skipping ones already present.
+
+    The composed allow/deny lists are order-preserving de-duplicated unions;
+    this is the single expression of that idiom across the permission layers.
+    """
+    for item in items:
+        if item not in target:
+            target.append(item)
+
+
+def _merge_permission_profiles(
+    profiles: Iterable[ExpertisePermissions | None],
+) -> tuple[list[str], list[str]]:
+    """Fold deny-capable permission profiles into (allow, deny) pattern lists.
+
+    Shared by expertise and guardrail resolution — both declare the same
+    deny-capable ``permissions:{}`` schema (F2). ``allow`` and ``deny`` are
+    unioned across profiles, ``allow_all`` expands to :data:`ALL_TOOLS`,
+    ``bash_allow`` entries become ``Bash(<cmd> *)`` allows, and deny wins over
+    allow within the merged set (CC also enforces deny-wins at runtime across
+    layers). ``None`` profiles (prose-only sources) are skipped.
+    """
+    merged_allow: list[str] = []
+    merged_deny: list[str] = []
+    merged_bash: list[str] = []
+    has_allow_all = False
+
+    for p in profiles:
+        if p is None:
+            continue
+        if p.allow_all:
+            has_allow_all = True
+        _append_unique(merged_allow, p.allow)
+        _append_unique(merged_deny, p.deny)
+        _append_unique(merged_bash, p.bash_allow)
+
+    if has_allow_all:
+        _append_unique(merged_allow, ALL_TOOLS)
+
+    # Deny wins within the merged set.
+    merged_allow = [t for t in merged_allow if t not in merged_deny]
+
+    allow_patterns = list(merged_allow)
+    for cmd in merged_bash:
+        allow_patterns.append(f"Bash({cmd} *)")
+    return allow_patterns, list(merged_deny)
+
+
 def _resolve_expertise_permissions(
     bot: BotConfig,
     paths: Paths,
 ) -> tuple[list[str], list[str]]:
     """Merge permission profiles from all expertise files for a bot.
 
-    Returns (allow_patterns, deny_patterns). For each expertise:
-    - allow_all expands to a broad tool set
-    - allow lists are unioned
-    - deny lists are unioned
-    - bash_allow entries become Bash(<cmd> *) patterns in the allow list
-
-    Deny wins over allow at the same layer — if a tool appears in both,
-    it stays in deny and is removed from allow.
+    Returns (allow_patterns, deny_patterns) — see :func:`_merge_permission_profiles`
+    for the fold semantics (allow/deny union, allow_all expansion, bash_allow,
+    deny-wins).
     """
-    ALL_TOOLS = [
-        "Read",
-        "Write",
-        "Edit",
-        "Bash",
-        "Agent",
-        "Grep",
-        "Glob",
-        "WebFetch",
-        "WebSearch",
-        "NotebookEdit",
-    ]
-
-    merged_allow: list[str] = []
-    merged_deny: list[str] = []
-    merged_bash: list[str] = []
-    has_allow_all = False
-
+    profiles: list[ExpertisePermissions | None] = []
     for area in bot.expertise:
         path = paths.find_library_file("expertise", area, ".md")
         if path is None:
             continue
         item = parse_expertise_file(path)
-        if item is None or item.permissions is None:
+        if item is None:
             continue
-        p = item.permissions
-        if p.allow_all:
-            has_allow_all = True
-        for t in p.allow:
-            if t not in merged_allow:
-                merged_allow.append(t)
-        for t in p.deny:
-            if t not in merged_deny:
-                merged_deny.append(t)
-        for cmd in p.bash_allow:
-            if cmd not in merged_bash:
-                merged_bash.append(cmd)
+        profiles.append(item.permissions)
+    return _merge_permission_profiles(profiles)
 
-    if has_allow_all:
-        for t in ALL_TOOLS:
-            if t not in merged_allow:
-                merged_allow.append(t)
 
-    # Deny wins at this layer
-    merged_allow = [t for t in merged_allow if t not in merged_deny]
+def _resolve_guardrail_permissions(
+    bot: BotConfig,
+    paths: Paths,
+) -> tuple[list[str], list[str]]:
+    """Merge deny-capable ``permissions:{}`` blocks from the bot's guardrails (F2).
 
-    allow_patterns = list(merged_allow)
-    for cmd in merged_bash:
-        allow_patterns.append(f"Bash({cmd} *)")
-
-    deny_patterns = list(merged_deny)
-    return allow_patterns, deny_patterns
+    Guardrails share the expertise permission schema; a guardrail typically
+    declares only ``deny`` (a safety rule). Prose-only guardrails contribute
+    nothing. Folder entries (``dir/``) are expanded so nested guardrails are not
+    silently skipped. Joins expertise on the deny-capable ``permissions:{}`` path.
+    """
+    profiles = [
+        perms for _name, perms in iter_guardrail_permissions(paths, bot.guardrails)
+    ]
+    return _merge_permission_profiles(profiles)
 
 
 # Minimal base tools every bot needs for read-only operation.
 # Expertise profiles add Write, Edit, Bash, etc. in Phase 2.
 BASE_TOOLS = ["Read", "Grep", "Glob"]
+
+
+def _assert_grant_superset(bot_id: str, legacy: list[str], new: list[str]) -> None:
+    """Fail generation unless the new integration ``tool_grants`` cover every legacy grant.
+
+    The migration keeps both grant sources live (see :func:`compose_settings_local`),
+    so no live grant can vanish mid-window even if the new resolver has an edge bug.
+    This gate proves the *stronger* property the ``_permissions_contract`` cut depends
+    on: the new :func:`_resolve_integration_grants` output alone is already a superset
+    of :func:`_resolve_mcp_permissions`. Compared as normalized sets (order-independent)
+    and raised before any settings.local.json is written.
+    """
+    missing = sorted(set(legacy) - set(new))
+    if missing:
+        raise ValueError(
+            f"bot {bot_id!r}: integration tool_grants would drop legacy MCP grants "
+            f"{missing} — every fragment-backed mcp entry needs a paired integration "
+            "file whose tool_grants cover it before the _permissions_contract cut."
+        )
 
 
 def compose_settings_local(
@@ -1157,11 +1335,20 @@ def compose_settings_local(
     # Build permissions block — layered composition
     deny_patterns: list[str] = []
 
-    # Layer 0: Sibling isolation — deny reading other bots' files
+    # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime
+    # dir. Read alone left a cross-bot Write/Edit gap (R9); all three are denied so
+    # a bot cannot touch a sibling's files.
     siblings = [bid for bid in fleet.bots if bid != bot.bot_id]
     for sibling in siblings:
         sibling_dir = str(paths.bot_runtime(sibling))
         deny_patterns.append(f"Read({sibling_dir}/**)")
+        deny_patterns.append(f"Write({sibling_dir}/**)")
+        deny_patterns.append(f"Edit({sibling_dir}/**)")
+
+    # Layer 1: Guardrail permissions (deny-capable safety rules; shared expertise
+    # schema). Guardrails are usually deny-only; their rare allows join Layer 2.
+    guardrail_allow, guardrail_deny = _resolve_guardrail_permissions(bot, paths)
+    deny_patterns.extend(guardrail_deny)
 
     # Layer 2: Expertise permissions (from library/expertise/ frontmatter)
     expertise_allow, expertise_deny = _resolve_expertise_permissions(bot, paths)
@@ -1177,8 +1364,18 @@ def compose_settings_local(
     # Layer 2: Expertise allow (plain tool names + bash command patterns)
     allow_patterns.extend(expertise_allow)
 
-    # Layer 3: MCP tool contracts (auto-derived from fragment _permissions_contract)
-    allow_patterns.extend(_resolve_mcp_permissions(bot, paths))
+    # Layer 1: Guardrail allow (rare — guardrails are usually deny-only)
+    _append_unique(allow_patterns, guardrail_allow)
+
+    # Layer 3: MCP tool grants — union of the legacy fragment _permissions_contract
+    # resolver and the new integration tool_grants resolver. Both stay live through
+    # the migration window (belt-and-suspenders — no live grant can vanish even if the
+    # new resolver has an edge bug). _assert_grant_superset proves the new resolver
+    # alone already covers legacy, the precondition for cutting _permissions_contract.
+    legacy_grants = _resolve_mcp_permissions(bot, paths)
+    integration_grants = _resolve_integration_grants(bot, paths)
+    _assert_grant_superset(bot.bot_id, legacy_grants, integration_grants)
+    _append_unique(allow_patterns, (*legacy_grants, *integration_grants))
 
     # Layer 4: Channel/plugin tools (auto-derived from config)
     allow_patterns.extend(_resolve_channel_permissions(bot))
@@ -1186,10 +1383,13 @@ def compose_settings_local(
     # Layer 5: Skill patterns (auto-derived from bot.skills)
     allow_patterns.extend(_resolve_skill_permissions(bot))
 
+    # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
+    # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
+    # additive path; Skill(<name>) above only grants invocation.
+    _append_unique(allow_patterns, _resolve_skill_grants(bot, paths))
+
     # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
-    for tool in bot.tools.allow:
-        if tool not in allow_patterns:
-            allow_patterns.append(tool)
+    _append_unique(allow_patterns, bot.tools.allow)
 
     # Bot-level deny wins over all allow layers
     bot_deny_plain = set(bot.tools.deny)
@@ -1215,8 +1415,11 @@ def compose_settings_local(
     # Sandbox: enabled toggle + network + filesystem allowlists + bash auto-allow
     sandbox_cfg: dict = {}
     sandbox = bot.sandbox
-    if sandbox.enabled is not None:
-        sandbox_cfg["enabled"] = sandbox.enabled
+    # Sandbox is disabled by default as a low-friction system default; a fleet or
+    # bot opts in with `sandbox.enabled: true`. None is the internal unset/inherit
+    # sentinel, resolved to the system default (False) here at the compose boundary
+    # so `enabled` is always emitted (a fresh box never runs unsandboxed by omission).
+    sandbox_cfg["enabled"] = sandbox.enabled if sandbox.enabled is not None else False
     if sandbox.network_allowed_domains:
         sandbox_cfg["network"] = {"allowedDomains": sandbox.network_allowed_domains}
     if sandbox.filesystem_allow_write:
@@ -1256,6 +1459,15 @@ def compose_settings_local(
     settings["spinnerTipsEnabled"] = bot.spinner_tips_enabled
     settings["preferredNotifChannel"] = bot.preferred_notif_channel
     settings["prefersReducedMotion"] = bot.prefers_reduced_motion
+
+    # First-run consent skip-flags (fleet.yaml-overridable per bot): suppress the
+    # interactive first-run permission prompts so a headless bot boots without
+    # hanging. Distinct from the --dangerously-skip-permissions CLI flag, which
+    # composes into CLAUDE_FLAGS.
+    settings["skipAutoPermissionPrompt"] = bot.skip_auto_permission_prompt
+    settings["skipDangerousModePermissionPrompt"] = (
+        bot.skip_dangerous_mode_permission_prompt
+    )
 
     return settings
 
@@ -1580,6 +1792,7 @@ def _write_timer_units(
     *,
     persistent: bool = False,
     randomized_delay: int = 0,
+    exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
@@ -1593,11 +1806,15 @@ def _write_timer_units(
     CLAUDLOBBY_FLEET env and no fleet argument on ExecStart. ``persistent`` /
     ``randomized_delay`` map to the systemd ``Persistent=`` /
     ``RandomizedDelaySec=`` timer knobs; launchd has no equivalent, so the
-    plist ignores them.
+    plist ignores them. ``exec_args`` appends extra positional arguments after
+    the fleet name on both the systemd ``ExecStart`` and the launchd
+    ``ProgramArguments`` (the per-(bot,slot) briefing timers pass ``<bot> <slot>``).
     """
     scope = fleet_name if fleet_name is not None else "host"
     script_expanded = script.replace("$CLAUDLOBBY_ROOT", str(paths.root))
     exec_start = f"{script_expanded} {fleet_name}" if fleet_name else script_expanded
+    if exec_args:
+        exec_start = f"{exec_start} {' '.join(exec_args)}"
 
     # --- systemd service unit ---
     service_lines = [
@@ -1684,6 +1901,8 @@ def _write_timer_units(
     ]
     if fleet_name:
         plist_lines.append(f"    <string>{fleet_name}</string>")
+    for arg in exec_args or []:
+        plist_lines.append(f"    <string>{arg}</string>")
     plist_lines.extend(
         [
             "  </array>",
@@ -1764,6 +1983,101 @@ def _write_timer_units(
     (timers_dir / f"{service_name}.plist").write_text("\n".join(plist_lines) + "\n")
 
 
+def _reconcile_briefing_units(
+    timers_dir: Path, prefix: str, composed: set[str], n_expected: int
+) -> list[str]:
+    """Prune stale ``<prefix>.briefing-*`` unit files — glob-bounded, with a
+    verify-before-disable partial/degenerate guard (F3).
+
+    The briefing family is the first dynamic per-(bot,slot) timer set, so a
+    renamed/removed slot leaves an enrolled orphan that fires forever unless
+    pruned. This is the generate-side half: after the current units are written,
+    delete any existing ``<prefix>.briefing-*`` {service,timer,plist} absent from
+    ``composed``.
+
+    ``composed`` is the set of unit basenames just written this generate.
+    ``n_expected`` is how many (bot,slot) briefing units the fleet config
+    declares — the config truth a composition bug can't fake.
+
+    Abort-on-partial (modeled on ``migrate_legacy_keepalive``'s
+    verify-before-disable): if fewer units composed than config declares
+    (``len(composed) < n_expected``, of which a fully-empty set is the limit
+    case), a bug or an interrupted generate dropped part of the set — SKIP the
+    prune, leave every unit untouched, and warn loudly, so a compose shortfall
+    can never wholesale-delete live briefing timers. A legitimate full removal
+    passes ``n_expected == 0`` and prunes everything. The glob bound means it can
+    never touch a non-briefing unit. Returns the pruned unit basenames.
+    """
+    if not timers_dir.is_dir():
+        return []
+    existing = {p.stem for p in timers_dir.glob(f"{prefix}.briefing-*")}
+    stale = existing - composed
+    if not stale:
+        return []
+    # Partial/degenerate: config declares n_expected (bot,slot) units but fewer
+    # composed — a torn or interrupted compose, not an intended teardown. Refuse
+    # the prune so a shortfall can never wholesale-delete live timers. Empty is
+    # the limit case (0 < n_expected); a real full removal passes n_expected == 0.
+    if len(composed) < n_expected:
+        _log.warning(
+            "briefing reconcile: PARTIAL composed set (%d of %d declared unit(s)) "
+            "— SKIPPING prune of %d existing unit(s) to avoid a compose-shortfall "
+            "wholesale delete; units left untouched (re-run once composition is "
+            "fixed)",
+            len(composed),
+            n_expected,
+            len(stale),
+        )
+        return []
+    pruned: list[str] = []
+    for base in sorted(stale):
+        for ext in ("service", "timer", "plist"):
+            f = timers_dir / f"{base}.{ext}"
+            if f.exists():
+                f.unlink()
+        pruned.append(base)
+    return pruned
+
+
+def _write_timers_manifest(
+    timers_dir: Path, name: str, header: list[str], units: set[str] | list[str]
+) -> None:
+    """Atomically write a timers-dir sidecar manifest (``DORMANT``,
+    ``BRIEFING_EXPECTED``): comment ``header`` lines followed by one unit
+    basename per line, sorted.
+
+    The setup backbone reads these mid-run (``unit_is_dormant``,
+    ``reconcile_briefing_timers``), so the write is atomic (temp + ``replace``) —
+    a torn file would under-list and either wrongly enroll a dormant unit or
+    under-count the reconcile guard. A no-op when the timers dir does not exist
+    (nothing composed, so nothing to annotate).
+    """
+    if not timers_dir.is_dir():
+        return
+    body = "\n".join([*header, *sorted(units)]) + "\n"
+    tmp = timers_dir / f"{name}.tmp"
+    tmp.write_text(body)
+    tmp.replace(timers_dir / name)
+
+
+def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
+    """Write the config-truth ``BRIEFING_EXPECTED`` manifest — the declared
+    ``<prefix>.briefing-<bot>-<slot>`` basenames setup-fleet's reconcile reads as
+    the independent expected count (a composed dir shorter than this is a
+    partial/torn generate, and the live-timer disable is refused). Thin
+    briefing-header wrapper over the shared atomic manifest writer.
+    """
+    _write_timers_manifest(
+        timers_dir,
+        "BRIEFING_EXPECTED",
+        [
+            "# Config-declared briefing (bot,slot) units. setup-fleet reconcile",
+            "# refuses to disable live briefing timers when fewer than these compose.",
+        ],
+        expected,
+    )
+
+
 def compose_fleet_timers(
     fleet: FleetConfig,
     paths: Paths,
@@ -1793,10 +2107,22 @@ def compose_fleet_timers(
     sd = fleet.system_defaults
     emit_defaults = bool(sd.enabled and sd.timers and timers)
     sweep_on = fleet.sweep_enabled()
+    briefing_bots = [
+        (bot_id, bot)
+        for bot_id, bot in fleet.bots.items()
+        if bot.briefing and bot.briefing.slots
+    ]
+    briefing_on = bool(briefing_bots)
 
     base_dir = output_dir if output_dir is not None else paths.runtime_fleet
     timers_dir = base_dir / "timers"
-    if not emit_defaults and not sweep_on:
+    if not emit_defaults and not sweep_on and not briefing_on:
+        # Nothing to emit — but a prior generate may have left briefing units a
+        # now-removed stanza should prune. Reconcile only if the dir exists, and
+        # record zero declared units so setup-fleet confirms the teardown is
+        # intended (config truth) rather than a torn compose.
+        _reconcile_briefing_units(timers_dir, fleet.service_prefix, set(), 0)
+        _write_briefing_manifest(timers_dir, set())
         return timers_dir
 
     timers_dir.mkdir(parents=True, exist_ok=True)
@@ -1820,15 +2146,18 @@ def compose_fleet_timers(
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
             )
-        dormant = sorted(
+        dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
-        )
-        manifest_lines = [
-            "# Composed-but-dormant units — the setup backbone does not enroll",
-            "# these. Opt in via fleet.yaml defaults.jobs.<name>.enroll: true.",
-            *dormant,
         ]
-        (timers_dir / "DORMANT").write_text("\n".join(manifest_lines) + "\n")
+        _write_timers_manifest(
+            timers_dir,
+            "DORMANT",
+            [
+                "# Composed-but-dormant units — the setup backbone does not enroll",
+                "# these. Opt in via fleet.yaml defaults.jobs.<name>.enroll: true.",
+            ],
+            dormant,
+        )
 
     if sweep_on:
         # Opt-in sweep timer: synthesized from fleet.sweep, not system_defaults.
@@ -1843,6 +2172,44 @@ def compose_fleet_timers(
             paths,
             telegram_group_chat_id=fleet.telegram_group_chat_id,
         )
+
+    # Equippable briefing (bots.<bot>.briefing) — the first dynamic
+    # per-(bot,slot) timer family. Each equipped (bot,slot) becomes a
+    # <prefix>.briefing-<bot>-<slot> OnCalendar unit whose ExecStart hands the
+    # slash-aware trigger `<fleet> <bot> <slot>`. Reconcile runs unconditionally
+    # (even with zero briefing bots) so a removed stanza's stale units are pruned;
+    # the count-check guard blocks a wholesale delete when fewer units compose
+    # than config declares (a torn/partial generate), of which "none composed" is
+    # only the limit case. The BRIEFING_EXPECTED manifest — the config truth a
+    # partial compose can't fake — is emitted BEFORE the per-unit write loop so an
+    # interrupted generate still leaves the full declared count for setup-fleet's
+    # reconcile to compare a short timers dir against.
+    expected_briefing = {
+        f"{prefix}.briefing-{bot_id}-{slot}"
+        for bot_id, bot in briefing_bots
+        for slot in bot.briefing.slots
+    }
+    _write_briefing_manifest(timers_dir, expected_briefing)
+    composed_briefing: set[str] = set()
+    for bot_id, bot in briefing_bots:
+        for slot, expr in bot.briefing.slots.items():
+            unit = f"{prefix}.briefing-{bot_id}-{slot}"
+            _write_timer_units(
+                timers_dir,
+                unit,
+                f"briefing-{bot_id}-{slot}",
+                {"type": "calendar", "expression": expr},
+                "$CLAUDLOBBY_ROOT/lib/briefing-trigger.sh",
+                "oneshot",
+                fleet.name,
+                paths,
+                exec_args=[bot_id, slot],
+                telegram_group_chat_id=fleet.telegram_group_chat_id,
+            )
+            composed_briefing.add(unit)
+    _reconcile_briefing_units(
+        timers_dir, prefix, composed_briefing, len(expected_briefing)
+    )
 
     return timers_dir
 

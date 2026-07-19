@@ -48,11 +48,13 @@ Key lifecycle scripts in `lib/`:
 |--------|---------|
 | `start-bot.sh` | Launches a bot's tmux session with env vars from bot.conf |
 | `spin-up-bot.sh` | Idempotent: enrolls bot as supervised service, then starts |
+| `spin-down-bot.sh` | Inverse of spin-up: guaranteed teardown/reaper for canary/throwaway bots — removes supervision, kills the tmux server, drops the bot's fleet-state key; `--purge` also removes the bot dir |
 | `keepalive.sh` | Per-bot watchdog — restarts if tmux session dies |
 | `keepalive-all.sh` | Fleet-level watchdog — runs keepalive for all bots |
 | `reconcile-fleet.sh` | Audits supervision state: healthy, orphan, missing, unbound |
 | `report-back.sh` | Worker → manager structured reporting via tmux |
 | `fleet-state-update.sh` | Atomic state/fleet-state.json updates with flock locking |
+| `workstream-update.sh` | Single-writer mutator for the per-fleet `workstreams.json` registry (open/progress/renew/block/close/prune); reads go through `claudlobby workstreams` |
 | `pre-stop-handoff.sh` | Graceful context handoff before service stop |
 | `lib-common.sh` | Shared helpers: OS detection, bot.conf loading, safe mktemp |
 | `log-rotate-fleet.sh` | Fleet-wide log rotation |
@@ -92,6 +94,7 @@ Key lifecycle scripts in `lib/`:
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
+| `freshbox-boot-gate.sh` | #644 P4 real-boot gate — boots a scoped bot on a fresh empty `CLAUDE_CONFIG_DIR` (auth+trust seeded before first contact) and asserts the composed perms hold: clean boot, zero prompts, transcript ⊆ allow. Gated job (deps absent → skip); wrapped by `tests/test_freshbox_boot_harness.py` (opt-in `FRESHBOX_REALBOOT=1`) |
 | `rehearse-keepalive-swap.sh` | Phase 6 gate 1 — rehearse the atomic legacy-keepalive swap on a throwaway fleet with real 60s timers; journal-derived no-gap assertion |
 | `update-claude-code.sh` | Daily Claude Code binary download (download-only; no fleet bounce) — runs as the `claude-update` host job (system.yaml `host.jobs`, enrolled by `setup-system`) |
 | `notify-behind.sh` | Daily source-currency nudge — FLEET NOTICE when the install is N commits behind origin/main (notify-only, never pulls) — runs as the `notify-behind` host job |
@@ -225,10 +228,12 @@ claudlobby new-bot                     # interactive bot scaffolding
 claudlobby status                      # fleet health dashboard
 claudlobby status --bot <name>         # detailed status for one bot
 claudlobby doctor                      # pre-flight fleet health diagnostic
+claudlobby freshbox                    # fresh-box self-containment audit (over-grant/orphan report; --strict, --bot)
 claudlobby report-back                 # query bot work event ledger
 claudlobby report-back --since 24h     # filter by time window
 claudlobby uptime                      # per-bot uptime, MTBR, restart-rate
 claudlobby events                      # tail/filter JSONL events across all bots
+claudlobby workstreams [list|show <id>] # read-only fleet workstream registry
 claudlobby warm-cache                  # pre-download npx packages for MCP servers
 claudlobby move-bot <bot> --to <fleet> # move a bot between fleets
 
@@ -270,19 +275,26 @@ lib/check-npx-cache.sh                # verify npx cache state
 
 ```
 claudlobby/
-  __main__.py      — Thin CLI entry point (~55 lines); argparse setup + subcommands live in commands/
-  commands/        — CLI command implementations: argparse registration, core ops, migrations, scaffolding, move-bot, events (11 files)
-  config.py        — fleet.yaml parsing, BotConfig/FleetConfig dataclasses
-  composer.py      — CLAUDE.md/bot.conf/.mcp.json/systemd unit generation
-  loader.py        — Library file loading, frontmatter parsing, heading demotion
-  validator.py     — Fleet validation (env vars, MCP refs, scope checks)
-  newbot.py        — Interactive bot scaffolding wizard
-  newskill.py      — Skill directory scaffolding
-  newguardrail.py  — Guardrail file scaffolding
-  diff.py          — Drift detection and promotion
-  dotenv.py        — .env file handling
-  paths.py         — Path resolution helpers
-  doctor.py        — Pre-flight fleet health diagnostic
-  status.py        — Fleet health dashboard (tmux/systemd/fleet-state)
-  uptime.py        — Per-bot uptime, MTBR, restart-rate metrics
+  __main__.py         — Thin CLI entry point (~55 lines); argparse setup + subcommands live in commands/
+  commands/           — CLI command implementations: argparse registration, core ops, migrations, scaffolding, move-bot, events (11 files)
+  config.py           — fleet.yaml parsing, BotConfig/FleetConfig dataclasses
+  known_values.py     — Known-good value sets for fleet.yaml fields (SSOT for config + validator)
+  composer.py         — CLAUDE.md/bot.conf/.mcp.json/systemd unit generation
+  mcp_resolve.py      — MCP fragment ${VAR} env-var / instance resolution (shared by composer + validator)
+  loader.py           — Library file loading, frontmatter parsing, heading demotion
+  validator.py        — Fleet validation (env vars, MCP refs, scope checks)
+  newbot.py           — Interactive bot scaffolding wizard
+  newskill.py         — Skill directory scaffolding
+  newguardrail.py     — Guardrail file scaffolding
+  prompts.py          — Shared interactive prompt helpers for the scaffolding wizards
+  diff.py             — Drift detection and promotion
+  dotenv.py           — .env file handling
+  paths.py            — Path resolution helpers
+  doctor.py           — Pre-flight fleet health diagnostic
+  freshbox.py         — Fresh-box self-containment audit (#644 P4): over-grant/orphan + under-grant + Tier-A composed-not-inherited (backs `claudlobby freshbox`)
+  status.py           — Fleet health dashboard (tmux/systemd/fleet-state)
+  uptime.py           — Per-bot uptime, MTBR, restart-rate metrics
+  utilization.py      — Fleet utilization rollup — per-bot busy/idle % over rolling windows
+  workstreams.py      — Read-only view of the per-fleet workstream registry (workstreams.json)
+  claudron_compat.py  — Claudron compatibility floor — min capability per integration surface
 ```

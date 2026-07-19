@@ -7,7 +7,7 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `BOT_ID` | `bots.<name>` key | Bot identifier (same as fleet.yaml key) |
-| `BOT_NAME` | `bots.<name>` key | Bot name (same as BOT_ID) |
+| `BOT_NAME` | `bots.<name>.name` (defaults to key) | Bot display name (defaults to BOT_ID) |
 | `BOT_SERVICE` | Derived | systemd/launchd service name (e.g., `com.example.fleet.botname`) |
 | `TMUX_SOCKET` | Derived | Per-bot tmux server socket name (`-L` argument) — equals `BOT_SERVICE`. One tmux server per bot, so one server's death drops only that bot. Peer scripts resolve it via `tmux_socket_for_bot()` (`lib/lib-common.sh`) |
 | `BOT_LABEL` | Derived | Human-readable label for the service |
@@ -24,12 +24,15 @@ The compositor writes environment variables to each bot's `bot.conf`. These are 
 | `MANAGER_TMUX` | `teams` config | tmux session name of this bot's manager (if in a team) |
 | `MANAGER_TMUX_SOCKET` | Derived | tmux socket (`BOT_SERVICE`) of this bot's manager, or its own socket when this bot is itself a manager. Used for cross-socket sends via `bot_tmux_send()` |
 | `TMUX_TMPDIR` | Pinned constant | tmux's tmpdir (`/tmp`), pinned so every script's `tmux -L <socket>` resolves to the same server — drift here would silently spawn a duplicate server for the same socket name |
+| `FLEET_MISSION_FILE` | `fleet.mission_file` | Absolute path to the fuller fleet charter file — emitted only when both `mission_file` and `mission` are set |
+| `WORKSTREAM_MAX_ACTIVE` | `fleet.workstreams.max_active` | Cap on concurrently active workstreams in the fleet registry (default: 12) |
+| `WORKSTREAM_LEASE_DAYS` | `fleet.workstreams.lease_days` | Workstream lease length in days before renewal is needed (default: 14) |
 
 ## Telegram
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| `TELEGRAM_GROUP_CHAT_ID` | `bots.<name>.telegram.group_chat_id` | Telegram group chat ID for posting |
+| `TELEGRAM_GROUP_CHAT_ID` | `bots.<name>.telegram.chat_id` (falls back to `fleet.telegram_group_chat_id`) | Telegram group chat ID for posting |
 | `TELEGRAM_TOKEN_ENV_NAME` | `bots.<name>.telegram.token_env` | Name of the env var holding the bot's Telegram token |
 | `TELEGRAM_REQUIRE_MENTION` | `bots.<name>.telegram.require_mention` | Whether the bot requires @-mention to respond in groups |
 | `TELEGRAM_BOT_HANDLE` | `bots.<name>.telegram.handle` | Bot's Telegram username (without @) |
@@ -77,6 +80,15 @@ Emitted only into the `fleet.sweep.owner_bot`'s `bot.conf` (see `fleet.sweep` in
 | `SWEEP_REPOS` | `fleet.sweep.repos` | Space-separated repo list to audit — falls back to the owner's `scope.repos` when `sweep.repos` is unset |
 | `SWEEP_LABEL` | `fleet.sweep.label` | GitHub label used to track audit staleness (default: `auto-audit`) |
 | `SWEEP_AUDIT_TYPES` | `fleet.sweep.audit_types` | Space-separated audit types rotated per run (default: `tech-debt`) |
+
+## Projects
+
+Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per project — so any sprint/runner bot can resolve a working repo's closure bar locally (there is no "sprint owner" concept). `<SLUG>` is the uppercased project key.
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `PROJECT_TIER_<SLUG>` | `projects.<key>.validation.tier` | Validation/closure tier for the project (`auto` / `review` / `preview` / `human`) |
+| `PROJECT_REPOS_<SLUG>` | `projects.<key>.repos` | Space-separated list of repos belonging to the project |
 
 ## Ecosystem
 

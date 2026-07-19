@@ -169,6 +169,21 @@ fleet:
 #     # Setting this explicitly overrides auto-pairing. Omit to let mcp drive it.
 #     integrations: [neon, railway, vercel]
 #
+#     # briefing — equippable scheduled briefing (#627). Each slot becomes a
+#     # composed per-(bot,slot) OnCalendar timer that dispatches /briefing <slot>
+#     # into THIS bot's session via lib/briefing-trigger.sh — never hand-install
+#     # cron. Slot names must be shell identifiers (they become the
+#     # BRIEFING_SECTIONS_<SLOT> env suffix); values are systemd OnCalendar, NOT
+#     # 5-field cron. BRIEFING_* lands in bot.conf for the /briefing skill; the
+#     # timers enroll on `setup-fleet` and prune when a slot is removed.
+#     briefing:
+#       slots:
+#         morning: "*-*-* 08:30:00"          # daily 08:30
+#         analytics: "Sun *-*-* 17:00:00"    # weekly, Sundays 17:00 (custom slot)
+#       sections:                            # optional per-slot section list
+#         morning: [overnight, calendar, overdue]
+#       sources: [github, gmail]             # optional data sources the skill reads
+#
 #     # scope — operational boundaries (org, repos the bot is allowed to touch)
 #     scope:
 #       org: my-github-org
@@ -211,14 +226,19 @@ fleet:
 #     # Multi-bot fleets should set bench: true on exactly one bot.
 #     bench: true
 #
-#     # permission_mode — Claude Code --permission-mode flag (default: unset)
+#     # Permission model — set AT MOST ONE of the two fields below; they do NOT
+#     # combine. permission_mode wins whenever it is set. With neither set, the
+#     # compositor default is --permission-mode acceptEdits.
+#     #
+#     # Option A (preferred) — permission_mode: Claude Code --permission-mode flag.
 #     # Values: default, acceptEdits, bypassPermissions, plan, dontAsk, auto
-#     # When set, overrides dangerously_skip_permissions. Preferred for fleet use.
 #     permission_mode: auto
 #
-#     # dangerously_skip_permissions — legacy flag (default: true)
-#     # Ignored when permission_mode is set. Use permission_mode instead.
-#     dangerously_skip_permissions: false
+#     # Option B — dangerously_skip_permissions: explicit opt-in to
+#     # --dangerously-skip-permissions (default: false). Bypasses ALL permission
+#     # prompts AND the allow/deny lists. Takes effect ONLY when permission_mode is
+#     # unset (omit Option A above to use this).
+#     dangerously_skip_permissions: true
 #
 #     # remote_control — enable --remote-control flag (default: true)
 #     # Allows dispatch via tmux send-keys. Disable for standalone bots.

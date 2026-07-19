@@ -80,4 +80,4 @@ PR #399 added `lib/update-claude-code.sh` with a daily **fleet-wide bounce** —
 | `lib/start-bot.sh` | Injects age-gated `/claudna:session resume --auto` before `STARTUP_PROMPT` on every start |
 | `lib/pre-stop-handoff.sh` | Best-effort, non-blocking handoff before an intentional restart |
 
-Full design history, decision forks, and rationale: `documentation/plans/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.
+Full design history, decision forks, and rationale: `documentation/plans/archive/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.

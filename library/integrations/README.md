@@ -48,6 +48,20 @@ Every real integration file has YAML frontmatter with a `title:` matching its H1
 
   `composer.py::collect_env_contracts` and `mcp_resolve.py` both read `env_contract:` (same `{description, tier: fleet|bot}` shape as MCP fragments' `_env_contract` — see `library/mcp/README.md`) to fold these vars into the fleet's environment-variable contract, which `claudlobby doctor` checks against `.env`. 5 of 16 files use it today (`neon.md`, `printify.md`, `railway.md`, `shopify.md`, `snowflake.md`) — add it whenever an integration depends on env vars not already declared by a paired MCP fragment.
 
+## Grant contract (`tool_grants:`)
+
+An integration declares the tools it authorizes as an additive grant contract in frontmatter. `composer.py::_resolve_integration_grants` reads it and emits the corresponding `allow` entries into each equipping bot's `settings.local.json` — so a bot's permissions travel with the source that requires them instead of a hand-maintained global allow-list:
+
+```yaml
+---
+title: GitHub MCP
+tool_grants:
+  - "mcp__github__*"   # an mcp__ glob (trailing * only)
+---
+```
+
+Each entry is one of three shapes (the grant grammar): an `mcp__<server>__*` glob, a `Bash(<cmd> *)` pattern, or a bare CamelCase tool name. For an MCP-paired integration the prefix is rewritten per instance (`gws` + instance `personal` → `mcp__gws-personal__*`); a connector-backed grant (`mcp__claude_ai_*`, no wire fragment) is emitted literally. The compositor validates each entry's shape and warns on a malformed grant or an over-broad bare `Bash`. Validation is folder-aware: a `dir/` folder-expansion equip resolves every member integration's contract, so a malformed grant nested in an expanded folder is not silently skipped.
+
 ## Example
 
 `library/integrations/github.md` (MCP-paired, but omits `type:`/`env_contract:` despite fitting the MCP flavor clearly — real content, abbreviated):

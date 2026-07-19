@@ -6,6 +6,7 @@ from ._helpers import _add_migration_args
 from .core import (
     cmd_diff,
     cmd_doctor,
+    cmd_freshbox,
     cmd_generate,
     cmd_host_timers,
     cmd_list_library,
@@ -37,6 +38,17 @@ def register_subparsers(sub) -> None:
         help="Pre-flight fleet health diagnostic (env, MCP, services, creds)",
     )
     pdr.set_defaults(func=cmd_doctor)
+
+    pfb = sub.add_parser(
+        "freshbox",
+        help="Fresh-box self-containment audit — grants trace to sources, "
+        "Tier-A composed (#644 P4)",
+    )
+    pfb.add_argument("--bot", help="Audit only one bot")
+    pfb.add_argument(
+        "--strict", action="store_true", help="Fail on advisory warnings too"
+    )
+    pfb.set_defaults(func=cmd_freshbox)
 
     pg = sub.add_parser(
         "generate", help="Compose runtime/bots/ from fleet.yaml + library/"
@@ -190,9 +202,9 @@ def register_subparsers(sub) -> None:
         "--no-remote-control", action="store_true", help="Disable --remote-control flag"
     )
     pn.add_argument(
-        "--no-dangerously-skip-permissions",
+        "--dangerously-skip-permissions",
         action="store_true",
-        help="Disable --dangerously-skip-permissions",
+        help="Opt in to --dangerously-skip-permissions (default: conservative acceptEdits)",
     )
     pn.add_argument("--extra-flags", help="Comma-separated extra claude CLI flags")
     pn.add_argument("--scope-org", help="GitHub org for scope")

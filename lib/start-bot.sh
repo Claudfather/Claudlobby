@@ -88,6 +88,14 @@ if command -v jq >/dev/null 2>&1; then
 fi
 # --- end headless consent ----------------------------------------------------
 
+# --- Pre-trust MCP servers in this bot dev checkouts -------------------------
+# Seed each projects/ checkout with this bot composed MCP allowlist so a `claude`
+# session rooted there boots clean instead of stalling on the MCP-server-trust
+# prompt (see seed_all_checkouts). Re-seeds each start to track allowlist
+# changes. Idempotent, fail-closed; never blocks boot.
+seed_all_checkouts "$BOT_DIR" || true
+# --- end MCP checkout pre-trust ----------------------------------------------
+
 # Tmux session name: use the bot directory slug (always lowercase) rather
 # than BOT_NAME (display name, potentially mixed-case from fleet.yaml).
 # Dispatch and monitoring scripts target sessions by this slug.
@@ -344,6 +352,7 @@ fi
 _bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" "${BRIDGE_READY_TIMEOUT_S:-}")"
 case "$_bridge_verdict" in
     ready)     echo "$(ts_iso) BRIDGE_READY — Telegram poller up" >> "$LOG" ;;
+    expected:no_token) echo "$(ts_iso) BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert" >> "$LOG" ;;
     missing:*) echo "$(ts_iso) BRIDGE_MISSING ${_bridge_verdict#missing:} — escalated tmux-first; keepalive owns heal" >> "$LOG" ;;
     unknown)   echo "$(ts_iso) BRIDGE_UNKNOWN — ownership unprovable; not actionable" >> "$LOG" ;;
     no_handle) : ;; # not a channel bot — nothing to verify

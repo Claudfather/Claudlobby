@@ -1,7 +1,7 @@
 """Tests for claudlobby/newbot.py — stanza rendering, fleet editing, voice/env helpers."""
+
 from __future__ import annotations
 
-from pathlib import Path
 from textwrap import dedent
 
 from claudlobby.newbot import (
@@ -110,6 +110,22 @@ class TestRenderStanza:
     def test_remote_control_none_omitted(self):
         inp = NewBotInputs(name="x", expertise=["a"], remote_control=None)
         assert "remote_control" not in render_stanza(inp)
+
+    def test_dangerously_skip_permissions_true_rendered(self):
+        inp = NewBotInputs(name="x", expertise=["a"], dangerously_skip_permissions=True)
+        assert "dangerously_skip_permissions: true" in render_stanza(inp)
+
+    def test_dangerously_skip_permissions_none_omitted(self):
+        inp = NewBotInputs(name="x", expertise=["a"], dangerously_skip_permissions=None)
+        assert "dangerously_skip_permissions" not in render_stanza(inp)
+
+    def test_dangerously_skip_permissions_false_also_omitted(self):
+        """False composes to the same safe default as an omitted field, so it
+        emits no explicit line — only an explicit opt-in (True) renders."""
+        inp = NewBotInputs(
+            name="x", expertise=["a"], dangerously_skip_permissions=False
+        )
+        assert "dangerously_skip_permissions" not in render_stanza(inp)
 
     def test_list_fields(self):
         inp = NewBotInputs(
@@ -237,6 +253,7 @@ class TestAddToTeam:
         assert result.count("workers:") == 1
         # 'a' should appear only once in the workers list
         import re
+
         m = re.search(r"workers: \[([^\]]+)\]", result)
         workers = [w.strip() for w in m.group(1).split(",")]
         assert workers.count("a") == 1
@@ -271,40 +288,20 @@ class TestMaybeCreateVoice:
         assert maybe_create_voice(paths, "bot", None, None) is None
 
 
-def test_interactive_collect_lists_public_base_expertise_only(tmp_path, monkeypatch, capsys):
+def test_interactive_collect_lists_public_base_expertise_only(
+    tmp_path, monkeypatch, capsys
+):
     root = tmp_path / "repo"
     (root / "library" / "expertise").mkdir(parents=True)
     (root / "library" / "expertise" / "base-engineering.md").write_text("base")
     (root / "local" / "fleet-a" / "library" / "expertise").mkdir(parents=True)
-    (root / "local" / "fleet-a" / "library" / "expertise" / "overlay-only.md").write_text("overlay")
+    (
+        root / "local" / "fleet-a" / "library" / "expertise" / "overlay-only.md"
+    ).write_text("overlay")
     paths = Paths(root=root, fleet_dir=root / "local" / "fleet-a")
-    answers = iter(
-        [
-            "bot-a",
-            "1",
-            "3",
-            "",
-            "",
-            "",
-            "",
-            "none",
-            "none",
-            "none",
-            "none",
-            "none",
-            "none",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "n",
-            "",
-        ]
-    )
+    # Same wizard answer sequence as the opt-in test — one source of truth for the
+    # positional prompt order (blank at idx 14 = default the dangerous prompt).
+    answers = iter(_wizard_answers(""))
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     result = interactive_collect(paths)
@@ -313,6 +310,85 @@ def test_interactive_collect_lists_public_base_expertise_only(tmp_path, monkeypa
     assert "base-engineering" in output
     assert "overlay-only" not in output
     assert result.expertise == ["base-engineering"]
+    # Opt-in: a blank answer to the --dangerously-skip-permissions prompt stays
+    # SAFE — the field is omitted, composing to the acceptEdits default.
+    assert result.dangerously_skip_permissions is None
+
+
+def _wizard_answers(dangerous: str) -> list[str]:
+    """interactive_collect's answer sequence; index 14 is the
+    --dangerously-skip-permissions prompt (parameterized here)."""
+    return [
+        "bot-a",
+        "1",
+        "3",
+        "",
+        "",
+        "",
+        "",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "",  # remote_control (blank = default)
+        dangerous,  # --dangerously-skip-permissions?
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "n",
+        "",
+    ]
+
+
+def test_interactive_collect_dangerous_is_explicit_opt_in(tmp_path, monkeypatch):
+    """The wizard defaults to SAFE: only an explicit 'y' sets the flag, which then
+    renders into the stanza. Previously a 'yes' emitted nothing and the bot
+    silently got acceptEdits — the UX lied."""
+    root = tmp_path / "repo"
+    (root / "library" / "expertise").mkdir(parents=True)
+    (root / "library" / "expertise" / "base-engineering.md").write_text("base")
+    paths = Paths(root=root)
+
+    answers = iter(_wizard_answers("y"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    result = interactive_collect(paths)
+    assert result.dangerously_skip_permissions is True
+    assert "dangerously_skip_permissions: true" in render_stanza(result)
+
+
+def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys):
+    """End-to-end non-interactive CLI: --dangerously-skip-permissions is a positive
+    opt-in that renders the flag; omitted, the stanza omits it (safe acceptEdits).
+    The old --no- opt-out of the removed dangerous default no longer parses."""
+    import pytest
+
+    from claudlobby.__main__ import main
+
+    base = [
+        "--root",
+        str(tmp_path),
+        "new-bot",
+        "--name",
+        "x",
+        "--expertise",
+        "software-engineering",
+        "--dry-run",
+        "--yes",
+    ]
+
+    assert main(base + ["--dangerously-skip-permissions"]) == 0
+    assert "dangerously_skip_permissions: true" in capsys.readouterr().out
+
+    assert main(base) == 0
+    assert "dangerously_skip_permissions" not in capsys.readouterr().out
+
+    with pytest.raises(SystemExit):  # cut clean: the old opt-out is gone
+        main(base + ["--no-dangerously-skip-permissions"])
 
 
 # ---------------------------------------------------------------------------

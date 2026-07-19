@@ -363,14 +363,97 @@ class TestComposeSettingsLocal:
         assert result["preferredNotifChannel"] == "iterm2"
         assert result["prefersReducedMotion"] is False
 
+    def test_sandbox_disabled_by_default(self, tmp_path):
+        """G7: a bot with no sandbox config still composes sandbox.enabled = False.
+
+        The sandbox is off by default as a low-friction system default applied at
+        the compose boundary — without this a fleet that omits sandbox config emits
+        no sandbox key and a fresh box runs unsandboxed.
+        """
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["sandbox"]["enabled"] is False
+
+    def test_sandbox_enabled_opt_in(self, tmp_path):
+        """An explicit sandbox.enabled=True opt-in still composes enabled = True."""
+        from claudlobby.config import SandboxConfig
+
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="solo",
+            name="solo",
+            expertise=["eng"],
+            sandbox=SandboxConfig(enabled=True),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["sandbox"]["enabled"] is True
+
+    def test_skip_permission_prompts_emitted(self, tmp_path):
+        """G6: both first-run consent skip-flags compose into settings.local at
+        their default (True) so a headless bot never hangs on the first-run
+        permission prompt."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["skipAutoPermissionPrompt"] is True
+        assert result["skipDangerousModePermissionPrompt"] is True
+
+    def test_skip_permission_prompts_overridable(self, tmp_path):
+        """Per-bot overrides to False flow through to settings.local."""
+        paths = self._make_paths_with_runtime(tmp_path)
+        bot = BotConfig(
+            bot_id="solo",
+            name="solo",
+            expertise=["eng"],
+            skip_auto_permission_prompt=False,
+            skip_dangerous_mode_permission_prompt=False,
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        result = compose_settings_local(bot, fleet, paths)
+        assert result["skipAutoPermissionPrompt"] is False
+        assert result["skipDangerousModePermissionPrompt"] is False
+
+    def test_skip_prompts_independent_of_cli_flag(self, tmp_path):
+        """The settings.local skip-flags are a distinct knob from the
+        --dangerously-skip-permissions CLI flag: the flag still composes into
+        CLAUDE_FLAGS while the settings booleans follow their own values."""
+        from claudlobby.composer import compose_bot_conf
+
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / "solo").mkdir(parents=True)
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        bot = BotConfig(
+            bot_id="solo",
+            name="solo",
+            expertise=["eng"],
+            dangerously_skip_permissions=True,
+            skip_auto_permission_prompt=False,
+            skip_dangerous_mode_permission_prompt=False,
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
+        settings = compose_settings_local(bot, fleet, paths)
+        conf = compose_bot_conf(bot, fleet, paths)
+        # settings.local booleans follow their own (False) values...
+        assert settings["skipAutoPermissionPrompt"] is False
+        assert settings["skipDangerousModePermissionPrompt"] is False
+        # ...while the CLI flag still lands in CLAUDE_FLAGS, unaffected.
+        assert "--dangerously-skip-permissions" in conf
+
     def test_sibling_isolation_only(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
         fleet = self._make_fleet_with_bots("bot-a", "bot-b")
         result = compose_settings_local(fleet.bots["bot-a"], fleet, paths)
         assert "permissions" in result
         deny = result["permissions"]["deny"]
-        assert len(deny) == 1
-        assert "Read(" in deny[0] and "bot-b" in deny[0]
+        # R9: one sibling → Read/Write/Edit denies over that sibling's runtime dir.
+        assert len(deny) == 3
+        assert {d.split("(")[0] for d in deny} == {"Read", "Write", "Edit"}
+        assert all("bot-b" in d for d in deny)
 
     def test_tool_deny_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -1217,6 +1300,12 @@ class TestMcpPermissionsInSettingsLocal:
         (root / "runtime" / "bots").mkdir(parents=True)
         for name, content in fragments.items():
             (mcp_dir / f"{name}.json").write_text(json.dumps(content))
+            # Pair every fragment with an integration file carrying covering
+            # tool_grants — the invariant the grant-superset gate enforces.
+            tools = content.get("_permissions_contract", {}).get("tools", [])
+            _write_integration(
+                root, name, tool_grants=[f"mcp__{name}__*"] if tools else []
+            )
         return Paths(root=root, fleet_dir=root)
 
     def test_mcp_trust_allowlist_sorted_no_blanket(self, tmp_path):
@@ -1677,6 +1766,7 @@ class TestExpertisePermissionsInSettingsLocal:
                 }
             )
         )
+        _write_integration(root, "github", tool_grants=["mcp__github__*"])
 
         paths = Paths(root=root, fleet_dir=root)
         bot = BotConfig(
@@ -1777,7 +1867,7 @@ class TestComposeSystemdUnit:
 class TestPluginsBotConf:
     """compose_bot_conf emits CLAUDE_CODE_SYNC_PLUGIN_INSTALL when fleet has plugins."""
 
-    def _compose(self, tmp_path, plugins=None):
+    def _compose(self, tmp_path, plugins=None, channels=None):
         from claudlobby.config import PluginsConfig
         from claudlobby.composer import compose_bot_conf
 
@@ -1786,6 +1876,7 @@ class TestPluginsBotConf:
             name="worker",
             expertise=["eng"],
             telegram=TelegramConfig(handle="w_bot"),
+            channels=channels or [],
         )
         fleet = FleetConfig(
             name="test-fleet",
@@ -1851,6 +1942,44 @@ class TestPluginsBotConf:
         conf = self._compose(tmp_path, plugins=plugins)
         assert "FLEET_PLUGINS_MARKETPLACES" not in conf
 
+    def test_bot_conf_derives_channel_plugin_into_required(self, tmp_path):
+        # G3: the plugin a bot's --channels flag pins must be restored on a cold
+        # box even when the fleet did not list it in plugins.required.
+        from claudlobby.config import PluginsConfig
+
+        plugins = PluginsConfig(required=["claudna@Claudfather"])
+        conf = self._compose(
+            tmp_path, plugins=plugins, channels=["plugin:telegram@claudfather-plugins"]
+        )
+        assert (
+            "export FLEET_PLUGINS_REQUIRED="
+            "'claudna@Claudfather telegram@claudfather-plugins'" in conf
+        )
+
+    def test_bot_conf_channel_plugin_deduped(self, tmp_path):
+        # A channel plugin already in plugins.required is not double-listed.
+        from claudlobby.config import PluginsConfig
+
+        plugins = PluginsConfig(
+            required=["claudna@Claudfather", "telegram@claudfather-plugins"]
+        )
+        conf = self._compose(
+            tmp_path, plugins=plugins, channels=["plugin:telegram@claudfather-plugins"]
+        )
+        line = next(ln for ln in conf.splitlines() if "FLEET_PLUGINS_REQUIRED" in ln)
+        assert line.count("telegram@claudfather-plugins") == 1
+
+    def test_channel_plugins_parses_marketplace_pinned_refs(self):
+        from claudlobby.composer import _channel_plugins
+
+        assert _channel_plugins(["plugin:telegram@claudfather-plugins"]) == [
+            "telegram@claudfather-plugins"
+        ]
+        # non-plugin / unpinned channels skipped; order + dedup preserved
+        assert _channel_plugins(
+            ["plugin:telegram@mp", "slack", "plugin:telegram@mp", "plugin:nomarket"]
+        ) == ["telegram@mp"]
+
 
 class TestPluginsSettingsLocal:
     """compose_settings_local emits enabledPlugins + extraKnownMarketplaces."""
@@ -1915,6 +2044,70 @@ class TestPluginsSettingsLocal:
         result = compose_settings_local(bot, fleet, paths)
         assert "enabledPlugins" in result
         assert "extraKnownMarketplaces" not in result
+
+
+class TestChannelPluginInstallEnableCarveout:
+    """G3/G5 contract: a channel plugin is INSTALLED but not ambiently ENABLED.
+
+    enabledPlugins is the equipped NON-channel set (fleet.plugins.required =
+    claudna + superpowers + additional). A channel plugin (derived from
+    ``channels``) is unioned into FLEET_PLUGINS_REQUIRED so a cold box installs
+    it, then activated by the ``--channels`` flag — NOT by ambient settings.local
+    enablement. This locks PR #646's ratified carve-out against future drift.
+    """
+
+    def test_channel_plugin_installed_but_not_enabled(self, tmp_path):
+        from claudlobby.config import PluginsConfig
+        from claudlobby.composer import compose_bot_conf
+
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True)
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="w_bot"),
+            channels=["plugin:telegram@claudfather-plugins"],
+        )
+        plugins = PluginsConfig(
+            required=[
+                "claudna@Claudfather",
+                "superpowers@claude-plugins-official",
+            ]
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+            bots={"worker": bot},
+            plugins=plugins,
+        )
+
+        conf = compose_bot_conf(bot, fleet, paths)
+        settings = compose_settings_local(bot, fleet, paths)
+
+        # Install side: the channel plugin the --channels flag pins is unioned into
+        # FLEET_PLUGINS_REQUIRED alongside the equipped plugins so a cold box
+        # installs it.
+        required_line = next(
+            ln for ln in conf.splitlines() if "FLEET_PLUGINS_REQUIRED" in ln
+        )
+        assert "telegram@claudfather-plugins" in required_line
+        assert "claudna@Claudfather" in required_line
+        assert "superpowers@claude-plugins-official" in required_line
+
+        # Enable side: enabledPlugins is the equipped NON-channel set only. The
+        # channel plugin must NOT be ambiently enabled (it is activated by
+        # --channels, not settings.local).
+        enabled = settings["enabledPlugins"]
+        assert "telegram@claudfather-plugins" not in enabled
+        assert enabled == {
+            "claudna@Claudfather": True,
+            "superpowers@claude-plugins-official": True,
+        }
 
 
 class TestComposeBotEventsDir:
@@ -2404,7 +2597,7 @@ class TestComposeAutonomousRunner:
 
 
 class TestResolveEffectiveIntegrations:
-    """resolve_effective_integrations: explicit list used verbatim; auto-derived from MCP when empty."""
+    """resolve_effective_integrations: explicit list unioned with auto-paired mcp names; auto-derived from MCP when empty."""
 
     def _paths_with_integrations(self, tmp_path: Path, names: list[str]) -> Paths:
         root = tmp_path / "claudlobby"
@@ -2415,7 +2608,11 @@ class TestResolveEffectiveIntegrations:
             (int_dir / f"{name}.md").write_text(f"# {name}\n")
         return Paths(root=root, fleet_dir=root)
 
-    def test_explicit_integrations_used_verbatim(self, tmp_path):
+    def test_explicit_integrations_union_mcp_paired(self, tmp_path):
+        """Explicit integrations are unioned with auto-paired mcp names, not replaced.
+
+        The old verbatim return would drop ``github`` here, stripping its grants.
+        """
         from claudlobby.composer import resolve_effective_integrations
         from claudlobby.config import McpEntry
 
@@ -2424,10 +2621,11 @@ class TestResolveEffectiveIntegrations:
             bot_id="w",
             name="w",
             expertise=["eng"],
-            integrations=["neon"],  # explicit; github not listed
+            integrations=["neon"],  # explicit; github implied by mcp
             mcp=[McpEntry(name="github"), McpEntry(name="neon")],
         )
-        assert resolve_effective_integrations(bot, paths) == ["neon"]
+        # neon (explicit) first; github auto-paired and appended; neon not duplicated
+        assert resolve_effective_integrations(bot, paths) == ["neon", "github"]
 
     def test_auto_derived_from_mcp_when_empty(self, tmp_path):
         from claudlobby.composer import resolve_effective_integrations
@@ -2464,7 +2662,7 @@ class TestPermissionMode:
     """compose_bot_conf handles permission_mode vs dangerously_skip_permissions."""
 
     def _compose(
-        self, tmp_path, permission_mode=None, dangerously_skip_permissions=True
+        self, tmp_path, permission_mode=None, dangerously_skip_permissions=False
     ):
         from claudlobby.composer import compose_bot_conf
 
@@ -2498,19 +2696,33 @@ class TestPermissionMode:
         assert "--permission-mode bypassPermissions" in conf
         assert "--dangerously-skip-permissions" not in conf
 
-    def test_no_permission_mode_falls_back_to_skip(self, tmp_path):
+    def test_explicit_dangerously_skip_opt_in(self, tmp_path):
+        # dangerously-skip stays available as an EXPLICIT opt-in: set it true
+        # (with no permission_mode) and the dangerous flag is still emitted.
         conf = self._compose(
             tmp_path, permission_mode=None, dangerously_skip_permissions=True
         )
         assert "--dangerously-skip-permissions" in conf
         assert "--permission-mode" not in conf
 
-    def test_neither_set(self, tmp_path):
-        conf = self._compose(
-            tmp_path, permission_mode=None, dangerously_skip_permissions=False
-        )
+    def test_default_is_acceptedits(self, tmp_path):
+        # A bot that configures neither field gets the conservative default:
+        # --permission-mode acceptEdits (headless-safe, respects allow/deny lists),
+        # NOT --dangerously-skip-permissions.
+        conf = self._compose(tmp_path)
+        assert "--permission-mode acceptEdits" in conf
         assert "--dangerously-skip-permissions" not in conf
-        assert "--permission-mode" not in conf
+
+    def test_permission_mode_wins_when_both_set(self, tmp_path):
+        # Behavior 2: an explicit permission_mode takes precedence over an explicit
+        # dangerously_skip_permissions when BOTH are set. Kills the if/elif
+        # order-swap mutation — every other permission_mode test leaves
+        # dangerously_skip at the default False, so only this one sets both.
+        conf = self._compose(
+            tmp_path, permission_mode="plan", dangerously_skip_permissions=True
+        )
+        assert "--permission-mode plan" in conf
+        assert "--dangerously-skip-permissions" not in conf
 
     def test_invalid_permission_mode_raises(self):
         from claudlobby.config import _parse_enum
@@ -2554,3 +2766,329 @@ def test_compose_hooks_type_hints_resolve():
 
     hints = typing.get_type_hints(_compose_hooks)
     assert "hooks" in hints
+
+
+def _write_integration(
+    root: Path,
+    name: str,
+    *,
+    tool_grants: list[str] | None = None,
+    type_: str | None = None,
+    body: str = "doc",
+) -> None:
+    """Write a minimal library/integrations/<name>.md with optional tool_grants."""
+    d = root / "library" / "integrations"
+    d.mkdir(parents=True, exist_ok=True)
+    fm = ["---", f"title: {name}"]
+    if type_:
+        fm.append(f"type: {type_}")
+    if tool_grants is not None:
+        fm.append("tool_grants:")
+        fm.extend(f'  - "{g}"' for g in tool_grants)
+    fm.append("---")
+    (d / f"{name}.md").write_text("\n".join(fm) + f"\n# {name}\n\n{body}\n")
+
+
+class TestResolveEffectiveIntegrationsUnion:
+    """resolve_effective_integrations unions explicit integrations with auto-paired mcp names.
+
+    The pre-fix behavior returned bot.integrations verbatim, which stripped mcp-derived
+    grants the moment a bot set integrations: explicitly (the cycle-1 F2 blocker).
+    """
+
+    def _setup(self, tmp_path: Path, integration_names: list[str]) -> Paths:
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for n in integration_names:
+            _write_integration(root, n)
+        return Paths(root=root, fleet_dir=root)
+
+    def test_explicit_integrations_union_auto_paired_mcp(self, tmp_path):
+        """A bot with explicit integrations AND an auto-pairable mcp gets BOTH."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["neon", "github"])
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            integrations=["neon"],
+            mcp=[McpEntry(name="github")],
+        )
+        eff = resolve_effective_integrations(bot, paths)
+        assert "neon" in eff  # explicit integration kept
+        assert "github" in eff  # auto-paired mcp unioned in (the fix)
+
+    def test_only_mcp_auto_pairs(self, tmp_path):
+        """No explicit integrations → auto-pair from mcp (unchanged behavior)."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["github", "notion"])
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            mcp=[McpEntry(name="github"), McpEntry(name="notion")],
+        )
+        assert sorted(resolve_effective_integrations(bot, paths)) == [
+            "github",
+            "notion",
+        ]
+
+    def test_dedup_when_explicit_and_mcp_paired(self, tmp_path):
+        """An integration both listed explicitly and mcp-paired appears once."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["github"])
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            integrations=["github"],
+            mcp=[McpEntry(name="github")],
+        )
+        assert resolve_effective_integrations(bot, paths) == ["github"]
+
+    def test_explicit_order_preserved_mcp_appended(self, tmp_path):
+        """Explicit integrations come first in order; mcp-paired names append after."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["neon", "vercel", "github"])
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            integrations=["neon", "vercel"],
+            mcp=[McpEntry(name="github")],
+        )
+        assert resolve_effective_integrations(bot, paths) == [
+            "neon",
+            "vercel",
+            "github",
+        ]
+
+    def test_mcp_without_integration_file_not_paired(self, tmp_path):
+        """An mcp entry with no integrations/<name>.md is not auto-paired."""
+        from claudlobby.config import McpEntry
+        from claudlobby.composer import resolve_effective_integrations
+
+        paths = self._setup(tmp_path, ["neon"])  # no github integration file
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            integrations=["neon"],
+            mcp=[McpEntry(name="github")],
+        )
+        assert resolve_effective_integrations(bot, paths) == ["neon"]
+
+
+class TestResolveIntegrationGrants:
+    """_resolve_integration_grants resolves tool_grants across effective integrations.
+
+    Three emergent shapes from one rule (a fragment-backed integration shares its
+    name with its mcp server):
+      - fragment-backed with a matching bot.mcp entry → the ``mcp__<name>__``
+        prefix is instance-expanded, reproducing _resolve_mcp_permissions output;
+      - fragment-backed equipped WITHOUT a matching mcp entry → grant emitted
+        literally (the default ``mcp__<name>__*``; validator warns);
+      - connector-backed (no matching mcp entry) → literal ``mcp__claude_ai_*``;
+      - CLI-backed (no tool_grants) → nothing.
+    """
+
+    def _setup(self, tmp_path: Path, integrations: dict[str, dict]) -> Paths:
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots").mkdir(parents=True)
+        for name, spec in integrations.items():
+            _write_integration(
+                root,
+                name,
+                tool_grants=spec.get("tool_grants"),
+                type_=spec.get("type_"),
+            )
+        return Paths(root=root, fleet_dir=root)
+
+    def test_fragment_backed_default_instance(self, tmp_path):
+        from claudlobby.composer import _resolve_integration_grants
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(tmp_path, {"github": {"tool_grants": ["mcp__github__*"]}})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
+        )
+        assert _resolve_integration_grants(bot, paths) == ["mcp__github__*"]
+
+    def test_fragment_backed_multi_instance_expands(self, tmp_path):
+        """Instance-scoped fragment servers rewrite the prefix per instance."""
+        from claudlobby.composer import _resolve_integration_grants
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(tmp_path, {"gws": {"tool_grants": ["mcp__gws__*"]}})
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            mcp=[McpEntry(name="gws", instances=["personal", "work"])],
+        )
+        assert _resolve_integration_grants(bot, paths) == [
+            "mcp__gws-personal__*",
+            "mcp__gws-work__*",
+        ]
+
+    def test_connector_grant_literal(self, tmp_path):
+        """A connector equipped via integrations: (no mcp entry) emits its grant literally."""
+        from claudlobby.composer import _resolve_integration_grants
+
+        paths = self._setup(
+            tmp_path,
+            {
+                "gmail": {
+                    "tool_grants": ["mcp__claude_ai_Gmail__*"],
+                    "type_": "connector",
+                }
+            },
+        )
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], integrations=["gmail"], mcp=[]
+        )
+        assert _resolve_integration_grants(bot, paths) == ["mcp__claude_ai_Gmail__*"]
+
+    def test_cli_backed_no_grants(self, tmp_path):
+        """A CLI integration carries no tool_grants → no grants."""
+        from claudlobby.composer import _resolve_integration_grants
+
+        paths = self._setup(tmp_path, {"neon": {"type_": "cli"}})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], integrations=["neon"], mcp=[]
+        )
+        assert _resolve_integration_grants(bot, paths) == []
+
+    def test_fragment_backed_without_mcp_entry_emits_default(self, tmp_path):
+        """Fragment-backed integration equipped without a matching mcp entry → literal default."""
+        from claudlobby.composer import _resolve_integration_grants
+
+        paths = self._setup(tmp_path, {"github": {"tool_grants": ["mcp__github__*"]}})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], integrations=["github"], mcp=[]
+        )
+        assert _resolve_integration_grants(bot, paths) == ["mcp__github__*"]
+
+
+class TestGrantSupersetGate:
+    """_assert_grant_superset hard-fails when new tool_grants would drop a legacy grant."""
+
+    def test_gate_raises_when_new_drops_legacy(self):
+        import pytest
+
+        from claudlobby.composer import _assert_grant_superset
+
+        with pytest.raises(ValueError, match="mcp__github__"):
+            _assert_grant_superset("worker", ["mcp__github__*"], [])
+
+    def test_gate_passes_when_new_is_superset(self):
+        from claudlobby.composer import _assert_grant_superset
+
+        # new adds a connector grant on top of legacy — superset, no raise
+        _assert_grant_superset(
+            "worker",
+            ["mcp__github__*"],
+            ["mcp__github__*", "mcp__claude_ai_Gmail__*"],
+        )
+
+    def test_gate_is_set_comparison_not_textual_order(self):
+        from claudlobby.composer import _assert_grant_superset
+
+        _assert_grant_superset(
+            "worker",
+            ["mcp__github__*", "mcp__notion__*"],
+            ["mcp__notion__*", "mcp__github__*"],
+        )
+
+
+class TestGrantUnionInSettingsLocal:
+    """compose_settings_local emits the union of legacy + integration grants, gated."""
+
+    def _setup(
+        self, tmp_path: Path, fragments: dict[str, dict], integrations: dict[str, dict]
+    ) -> Paths:
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots").mkdir(parents=True)
+        mcp_dir = root / "library" / "mcp"
+        mcp_dir.mkdir(parents=True)
+        for name, content in fragments.items():
+            (mcp_dir / f"{name}.json").write_text(json.dumps(content))
+        for name, spec in integrations.items():
+            _write_integration(
+                root,
+                name,
+                tool_grants=spec.get("tool_grants"),
+                type_=spec.get("type_"),
+            )
+        return Paths(root=root, fleet_dir=root)
+
+    _GH_FRAGMENT = {
+        "github": {
+            "_permissions_contract": {"tools": ["search_code"]},
+            "github": {"command": "npx", "args": []},
+        }
+    }
+
+    def test_fragment_backed_grant_not_duplicated(self, tmp_path):
+        """Legacy and new both emit mcp__github__* → union dedups to one entry."""
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(
+            tmp_path, self._GH_FRAGMENT, {"github": {"tool_grants": ["mcp__github__*"]}}
+        )
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        allow = compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
+        assert allow.count("mcp__github__*") == 1
+
+    def test_connector_grant_added_alongside_legacy(self, tmp_path):
+        """Equipping a connector integration adds its literal grant; legacy grant retained."""
+        from claudlobby.config import McpEntry
+
+        paths = self._setup(
+            tmp_path,
+            self._GH_FRAGMENT,
+            {
+                "github": {"tool_grants": ["mcp__github__*"]},
+                "gmail": {
+                    "tool_grants": ["mcp__claude_ai_Gmail__*"],
+                    "type_": "connector",
+                },
+            },
+        )
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            integrations=["gmail"],
+            mcp=[McpEntry(name="github")],
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        allow = compose_settings_local(bot, fleet, paths)["permissions"]["allow"]
+        assert "mcp__github__*" in allow  # legacy grant retained (union)
+        assert "mcp__claude_ai_Gmail__*" in allow  # connector addition
+
+    def test_compose_hard_fails_when_fragment_grant_uncovered(self, tmp_path):
+        """A contract fragment with no paired integration tool_grants trips the gate end-to-end."""
+        import pytest
+
+        from claudlobby.config import McpEntry
+
+        # fragment has a live grant, but NO integration file carries covering tool_grants
+        paths = self._setup(tmp_path, self._GH_FRAGMENT, {})
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="github")]
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        with pytest.raises(ValueError, match="mcp__github__"):
+            compose_settings_local(bot, fleet, paths)

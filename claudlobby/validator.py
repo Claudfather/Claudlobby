@@ -60,6 +60,68 @@ def _available_names(paths: Paths, kind: str, ext: str = ".md") -> set[str]:
     return names
 
 
+# Grant grammar (F3(a)): a well-formed grant is exactly one of three kinds —
+#   1. an exact-prefix ``mcp__`` glob whose only wildcard, if any, is a trailing
+#      ``*`` (F5: no mid-string wildcards);
+#   2. a scoped ``Bash(<command pattern>)`` grant;
+#   3. a bare CamelCase tool name (e.g. ``Read``, ``WebFetch``, ``Bash``).
+# One regex per kind keeps each shape independently checkable.
+_GRANT_MCP_RE = re.compile(r"^mcp__[^*]*\*?$")
+_GRANT_BASH_RE = re.compile(r"^Bash\(.+\)$")
+_GRANT_BARE_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
+
+
+def _grant_wellformed(grant: object) -> bool:
+    """True when ``grant`` matches the F3(a) grant grammar (mcp glob | Bash(..) | bare tool)."""
+    return isinstance(grant, str) and bool(
+        _GRANT_MCP_RE.match(grant)
+        or _GRANT_BASH_RE.match(grant)
+        or _GRANT_BARE_RE.match(grant)
+    )
+
+
+def _grant_shape_warnings(
+    bot_name: str,
+    source_kind: str,
+    source_name: str,
+    grants: list[str],
+    *,
+    allow_side: bool,
+) -> list[str]:
+    """Grammar (F3(a)) + missing-scoped-Bash warnings for a list of declared grants.
+
+    ``allow_side`` gates the bare-``Bash`` warning: *granting* bare ``Bash`` is
+    over-broad (a specific ``Bash(<cmd> *)`` is missing), but *denying* bare
+    ``Bash`` (deny-all shell) is legitimate, so it is not flagged.
+    """
+    out: list[str] = []
+    for grant in grants:
+        if not _grant_wellformed(grant):
+            out.append(
+                f"bot '{bot_name}': {source_kind} '{source_name}' grant '{grant}' is "
+                "malformed — must be an mcp__ glob, a Bash(...) grant, or a bare tool name"
+            )
+        elif allow_side and grant == "Bash":
+            out.append(
+                f"bot '{bot_name}': {source_kind} '{source_name}' grants bare 'Bash' — "
+                "scope it to Bash(<cmd> *) so the contract is specific (missing scoped Bash(...))"
+            )
+    return out
+
+
+def _mcp_contract_has_tools(frag_path: Path) -> bool:
+    """True when an MCP fragment carries a non-empty ``_permissions_contract.tools``.
+
+    Remove with the P8 ``_permissions_contract`` cut — it only exists to power the
+    migration-gap warning below, which is dead once the legacy contract is gone.
+    """
+    try:
+        frag = json.loads(frag_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(frag.get("_permissions_contract", {}).get("tools"))
+
+
 def _validate_bots(
     fleet: FleetConfig,
     paths: Paths,
@@ -70,6 +132,14 @@ def _validate_bots(
     # Pre-compute available names for suggestion hints (avoids per-bot re-scan)
     avail_expertise = _available_names(paths, "expertise")
     avail_mcp = _available_names(paths, "mcp", ext=".json")
+
+    # Grant-contract readers (folder-aware; shared with the P2 composer resolvers).
+    from .loader import (
+        integration_tool_grants,
+        iter_guardrail_permissions,
+        iter_integration_grants,
+        iter_skill_grants,
+    )
 
     for bot_name, bot in fleet.bots.items():
         bot_env = dotenv.read(paths.bot_runtime(bot_name) / ".env")
@@ -114,11 +184,23 @@ def _validate_bots(
         # on disk is named after .name regardless of how many instances the
         # entry composes into .mcp.json.
         for mcp in bot.mcp:
-            if paths.find_library_file("mcp", mcp.name, ".json") is None:
+            frag_path = paths.find_library_file("mcp", mcp.name, ".json")
+            if frag_path is None:
                 suggestion = closest_match(mcp.name, avail_mcp)
                 hint = f" — did you mean '{suggestion}'?" if suggestion else ""
                 report.warnings.append(
                     f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{hint}"
+                )
+            # Migration-gap warning (remove with the P8 _permissions_contract cut):
+            # a fragment that still grants tools whose paired integration hasn't been
+            # given covering tool_grants would be dropped by the eventual cut.
+            elif _mcp_contract_has_tools(frag_path) and not integration_tool_grants(
+                paths, mcp.name
+            ):
+                report.warnings.append(
+                    f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
+                    f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
+                    f'won\'t migrate (add tool_grants: ["mcp__{mcp.name}__*"])'
                 )
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
@@ -147,6 +229,49 @@ def _validate_bots(
                 report.warnings.append(
                     f"bot '{bot_name}': integration '{integ}' not in any library/integrations/ — skipped"
                 )
+
+        # Grant contracts on equipped sources — integrations (additive tool_grants),
+        # skills (additive tool_grants), guardrails (deny-capable permissions:) — all
+        # validated against the single F3(a) grammar via _grant_shape_warnings.
+        # iter_integration_grants folder-expands dir/ equips so a contract nested in
+        # an expanded folder is not silently skipped (same guarantee as skills).
+        from .composer import resolve_effective_integrations
+
+        for name, grants in iter_integration_grants(
+            paths, resolve_effective_integrations(bot, paths)
+        ):
+            report.warnings.extend(
+                _grant_shape_warnings(
+                    bot_name, "integration", name, grants, allow_side=True
+                )
+            )
+        for name, grants in iter_skill_grants(paths, bot.skills):
+            report.warnings.extend(
+                _grant_shape_warnings(bot_name, "skill", name, grants, allow_side=True)
+            )
+        for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
+            if gperms is None:
+                continue
+            report.warnings.extend(
+                _grant_shape_warnings(
+                    bot_name, "guardrail", name, gperms.allow, allow_side=True
+                )
+            )
+            report.warnings.extend(
+                _grant_shape_warnings(
+                    bot_name, "guardrail", name, gperms.deny, allow_side=False
+                )
+            )
+
+        # Briefing source coverage (warn). A briefing-equipped bot with no
+        # integrations and no mcp servers has nothing to summarize — the skill
+        # would render only self-derivable sections. Parse-time already
+        # hard-rejects malformed slot names / cron (config._coerce_briefing).
+        if bot.briefing and not bot.integrations and not bot.mcp:
+            report.warnings.append(
+                f"bot '{bot_name}': briefing equipped but no integrations/mcp "
+                "source coverage — sections that read external data will be empty"
+            )
 
         # Guardrails / protocols / resources / lessons / post_actions (warn).
         # Each entry can be `name`, `dir/name`, or `dir/` (folder expansion).

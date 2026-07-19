@@ -9,7 +9,7 @@ import pytest
 from claudlobby.config import load_fleet
 from claudlobby.known_values import _AUTO_ELIGIBLE_RENAMES
 from claudlobby.paths import Paths
-from claudlobby.validator import validate
+from claudlobby.validator import _grant_wellformed, validate
 
 
 def _make_paths(root: Path) -> Paths:
@@ -692,3 +692,332 @@ class TestAutonomousRunnerValidation:
         report = validate(fleet, paths)
         assert not any("autonomous_runner" in w for w in report.warnings)
         assert not any("autonomous_runner" in e for e in report.errors)
+
+
+class TestToolGrantsValidation:
+    """validator warns on mcp-grants-without-integration-tool_grants and malformed tool_grants."""
+
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "1:a")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "2:b")
+
+    def _give_lead_github_mcp(self, fleet_dir: Path) -> None:
+        y = (
+            (fleet_dir / "fleet.yaml")
+            .read_text()
+            .replace(
+                "expertise: [orchestration]",
+                "expertise: [orchestration]\n      mcp: [github]",
+            )
+        )
+        (fleet_dir / "fleet.yaml").write_text(y)
+
+    def _set_github_contract(self, fleet_dir: Path, tools: list[str]) -> None:
+        import json
+
+        p = fleet_dir / "library" / "mcp" / "github.json"
+        frag = json.loads(p.read_text())
+        frag["_permissions_contract"] = {"tools": tools}
+        p.write_text(json.dumps(frag))
+
+    def _write_github_integration(self, fleet_dir: Path, tool_grants_yaml: str) -> None:
+        (fleet_dir / "library" / "integrations" / "github.md").write_text(
+            "---\ntitle: GitHub\n" + tool_grants_yaml + "---\n\n# GitHub\n"
+        )
+
+    def test_mcp_with_contract_but_no_tool_grants_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._set_github_contract(fleet_dir, ["search_code"])  # fragment grants tools
+        # github.md (fixture) has env_contract but no tool_grants → migration gap
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("tool_grants" in w and "github" in w for w in report.warnings)
+
+    def test_empty_contract_no_missing_grant_warning(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._set_github_contract(fleet_dir, [])  # empty contract → nothing to migrate
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any("tool_grants" in w for w in report.warnings)
+
+    def test_malformed_mid_string_wildcard_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._write_github_integration(
+            fleet_dir, 'tool_grants:\n  - "mcp__git*hub__*"\n'
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "mcp__git*hub__*" in w for w in report.warnings)
+
+    def test_bash_grant_on_integration_not_malformed(self, fleet_dir, monkeypatch):
+        # F3(a): the grammar accepts Bash(...) grants — no longer "malformed".
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._write_github_integration(fleet_dir, 'tool_grants:\n  - "Bash(git *)"\n')
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any("malformed" in w for w in report.warnings)
+
+    def test_unparseable_grant_still_warns(self, fleet_dir, monkeypatch):
+        # Not an mcp glob, not Bash(...), not a bare tool name → still malformed.
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._write_github_integration(fleet_dir, 'tool_grants:\n  - "rm -rf /"\n')
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "rm -rf /" in w for w in report.warnings)
+
+    def test_valid_tool_grants_no_warning(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._give_lead_github_mcp(fleet_dir)
+        self._set_github_contract(fleet_dir, ["search_code"])
+        self._write_github_integration(
+            fleet_dir, 'tool_grants:\n  - "mcp__github__*"\n'
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any("tool_grants" in w for w in report.warnings)
+        assert not any("malformed" in w for w in report.warnings)
+
+    def _write_nested_integration(self, fleet_dir, folder, name, tool_grants_yaml):
+        d = fleet_dir / "library" / "integrations" / folder
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(
+            f"---\ntitle: {name}\n{tool_grants_yaml}---\n\n# {name}\n"
+        )
+
+    def _equip_lead_integration(self, fleet_dir, integ):
+        y = (
+            (fleet_dir / "fleet.yaml")
+            .read_text()
+            .replace(
+                "expertise: [orchestration]",
+                f"expertise: [orchestration]\n      integrations: [{integ}]",
+            )
+        )
+        (fleet_dir / "fleet.yaml").write_text(y)
+
+    def test_integration_folder_expansion_grant_validated(self, fleet_dir, monkeypatch):
+        # A malformed grant nested in a dir/ folder-expansion integration must
+        # still warn — the same bypass alex closed for skills/guardrails, which
+        # the integration grant loop still had (rajan's follow-up).
+        self._env(monkeypatch)
+        self._write_nested_integration(
+            fleet_dir, "iexpand", "nested", 'tool_grants:\n  - "rm -rf /"\n'
+        )
+        self._equip_lead_integration(fleet_dir, "iexpand/")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "rm -rf /" in w for w in report.warnings)
+
+
+class TestGrantGrammar:
+    """F3(a): a well-formed grant is an mcp__ glob, a Bash(...) pattern, or a bare tool name."""
+
+    @pytest.mark.parametrize(
+        "grant",
+        [
+            "mcp__github__*",
+            "mcp__github__create_issue",
+            "mcp__claude_ai_Gmail__*",
+            "Bash(git *)",
+            "Bash(npm test)",
+            "Bash(git * main)",
+            "Bash",  # bare Bash is shape-valid; scoping is a separate warning
+            "Read",
+            "Write",
+            "WebFetch",
+            "NotebookEdit",
+            "Agent",
+        ],
+    )
+    def test_wellformed_grants(self, grant):
+        assert _grant_wellformed(grant) is True
+
+    @pytest.mark.parametrize(
+        "grant",
+        [
+            "mcp__git*hub__*",  # mid-string wildcard (F5)
+            "mcp__github__create_*_issue",  # mid-string wildcard
+            "rm -rf /",  # not a tool at all
+            "git commit",  # unscoped shell, not wrapped in Bash(...)
+            "read",  # bare tool must be Capitalized
+            "webFetch",  # lowercase leader
+            "Bash()",  # empty Bash pattern
+            "",  # empty
+            "  ",  # whitespace only
+        ],
+    )
+    def test_malformed_grants(self, grant):
+        assert _grant_wellformed(grant) is False
+
+    def test_non_string_is_malformed(self):
+        assert _grant_wellformed(123) is False
+        assert _grant_wellformed(None) is False
+        assert _grant_wellformed(["mcp__x__*"]) is False
+
+
+class TestSkillGuardrailGrantValidation:
+    """Skills declare additive tool_grants; guardrails declare deny-capable permissions.
+    The validator checks both against the F3(a) grammar and flags bare 'Bash' allows."""
+
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "1:a")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "2:b")
+
+    def _equip_worker_skill(self, fleet_dir, skill):
+        y = (
+            (fleet_dir / "fleet.yaml")
+            .read_text()
+            .replace(
+                "expertise: [software-engineering]",
+                f"expertise: [software-engineering]\n      skills: [{skill}]",
+            )
+        )
+        (fleet_dir / "fleet.yaml").write_text(y)
+
+    def _write_skill(self, fleet_dir, name, tool_grants_yaml):
+        d = fleet_dir / "library" / "skills" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\n{tool_grants_yaml}---\n\n# {name}\n"
+        )
+
+    def _equip_worker_guardrail(self, fleet_dir, gr):
+        y = (
+            (fleet_dir / "fleet.yaml")
+            .read_text()
+            .replace(
+                "expertise: [software-engineering]",
+                f"expertise: [software-engineering]\n      guardrails: [{gr}]",
+            )
+        )
+        (fleet_dir / "fleet.yaml").write_text(y)
+
+    def _write_guardrail(self, fleet_dir, name, perms_yaml):
+        (fleet_dir / "library" / "guardrails" / f"{name}.md").write_text(
+            f"---\ntitle: {name}\n{perms_yaml}---\n\n# {name}\n"
+        )
+
+    def test_skill_malformed_grant_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._write_skill(fleet_dir, "badskill", 'tool_grants:\n  - "rm -rf /"\n')
+        self._equip_worker_skill(fleet_dir, "badskill")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any(
+            "malformed" in w and "badskill" in w and "rm -rf /" in w
+            for w in report.warnings
+        )
+
+    def test_skill_valid_grants_no_warning(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._write_skill(
+            fleet_dir, "goodskill", 'tool_grants:\n  - "Bash(git *)"\n  - "Read"\n'
+        )
+        self._equip_worker_skill(fleet_dir, "goodskill")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any(
+            "goodskill" in w and ("malformed" in w or "scope" in w.lower())
+            for w in report.warnings
+        )
+
+    def test_skill_bare_bash_warns_scope(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._write_skill(fleet_dir, "bashy", 'tool_grants:\n  - "Bash"\n')
+        self._equip_worker_skill(fleet_dir, "bashy")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("bashy" in w and "scope" in w.lower() for w in report.warnings)
+
+    def test_guardrail_malformed_deny_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._write_guardrail(
+            fleet_dir, "badguard", 'permissions:\n  deny: ["rm -rf /"]\n'
+        )
+        self._equip_worker_guardrail(fleet_dir, "badguard")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "badguard" in w for w in report.warnings)
+
+    def test_guardrail_valid_permissions_no_warning(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._write_guardrail(
+            fleet_dir,
+            "okguard",
+            "permissions:\n  deny: [Write, Edit]\n  allow: [Read]\n",
+        )
+        self._equip_worker_guardrail(fleet_dir, "okguard")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any(
+            "okguard" in w and ("malformed" in w or "scope" in w.lower())
+            for w in report.warnings
+        )
+
+    def test_guardrail_deny_bare_bash_no_scope_warning(self, fleet_dir, monkeypatch):
+        # Denying bare Bash is legitimate (deny-all) — must NOT trigger the scope-it warning.
+        self._env(monkeypatch)
+        self._write_guardrail(fleet_dir, "denybash", "permissions:\n  deny: [Bash]\n")
+        self._equip_worker_guardrail(fleet_dir, "denybash")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any(
+            "denybash" in w and "scope" in w.lower() for w in report.warnings
+        )
+
+    def test_prose_only_guardrail_no_grant_warning(self, fleet_dir, monkeypatch):
+        # Snowflake SELECT-only stays prose — a permissions-less guardrail warns nothing.
+        self._env(monkeypatch)
+        self._write_guardrail(fleet_dir, "snowflake-read-only", "")
+        self._equip_worker_guardrail(fleet_dir, "snowflake-read-only")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any(
+            "snowflake-read-only" in w and ("malformed" in w or "scope" in w.lower())
+            for w in report.warnings
+        )
+
+    # --- folder-expansion (dir/) equips must not bypass grant validation ---
+
+    def _write_nested_skill(self, fleet_dir, folder, name, tool_grants_yaml):
+        d = fleet_dir / "library" / "skills" / folder / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\n{tool_grants_yaml}---\n\n# {name}\n"
+        )
+
+    def _write_nested_guardrail(self, fleet_dir, folder, name, perms_yaml):
+        d = fleet_dir / "library" / "guardrails" / folder
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.md").write_text(
+            f"---\ntitle: {name}\n{perms_yaml}---\n\n# {name}\n"
+        )
+
+    def test_skill_folder_expansion_grant_validated(self, fleet_dir, monkeypatch):
+        # A malformed grant nested in a dir/ folder-expansion skill must still warn.
+        self._env(monkeypatch)
+        self._write_nested_skill(
+            fleet_dir, "expandme", "nested", 'tool_grants:\n  - "rm -rf /"\n'
+        )
+        self._equip_worker_skill(fleet_dir, "expandme/")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "rm -rf /" in w for w in report.warnings)
+
+    def test_guardrail_folder_expansion_grant_validated(self, fleet_dir, monkeypatch):
+        # A malformed permission nested in a dir/ folder-expansion guardrail must still warn.
+        self._env(monkeypatch)
+        self._write_nested_guardrail(
+            fleet_dir, "gexpand", "nested", 'permissions:\n  deny: ["bad grant!"]\n'
+        )
+        self._equip_worker_guardrail(fleet_dir, "gexpand/")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("malformed" in w and "bad grant!" in w for w in report.warnings)

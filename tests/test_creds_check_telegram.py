@@ -83,13 +83,21 @@ def _fleet(
     _curl_stub(bindir)
     (root / ".env").write_text("")  # no PAT/Railway -> those checks skip
 
-    def bot(name: str, handle: str | None, token_var: str, token: str | None):
+    def bot(
+        name: str,
+        handle: str | None,
+        token_var: str,
+        token: str | None,
+        expect_no_token: bool = False,
+    ):
         d = root / "local" / "f" / "runtime" / "bots" / name
         (d / "data").mkdir(parents=True)
         conf = [f'export BOT_ID="{name}"', f'export BOT_SERVICE="com.t.f.{name}"']
         if handle:
             conf.append(f'export TELEGRAM_BOT_HANDLE="{handle}"')
             conf.append(f'export TELEGRAM_TOKEN_ENV_NAME="{token_var}"')
+        if expect_no_token:
+            conf.append("export EXPECT_NO_TOKEN=1")
         (d / "bot.conf").write_text("\n".join(conf) + "\n")
         if token is not None:
             # Quoted on purpose — the false-404 pitfall this check must dodge.
@@ -102,11 +110,14 @@ def _fleet(
         bot("bot3", "bot_three_bot", "T_BOT3_TOKEN", None)  # configured, no value
         bot("bot4", None, "UNUSED", None)  # not a channel bot
         bot("bot5", "bot_five_bot", "T_BOT5_TOKEN", WRONGBOT_TOKEN)
+        # Canary/throwaway: same empty-token state as bot3, but EXPECT_NO_TOKEN=1
+        # declares it intentional — an expected skip, not a fault (#608).
+        bot("bot6", "bot_six_bot", "T_BOT6_TOKEN", None, expect_no_token=True)
         # Residue dir: a departed bot whose runtime dir (with bot.conf + handle)
         # survives on disk but is NOT declared in fleet.yaml — the stale-dir class
         # the declared-bots filter exists to skip (no getMe, no false alert).
         bot("ghost", "ghost_bot", "T_GHOST_TOKEN", VALID_TOKEN)
-        declared = ("bot1", "bot2", "bot3", "bot4", "bot5")
+        declared = ("bot1", "bot2", "bot3", "bot4", "bot5", "bot6")
     else:
         # Delivery-selection tests need roster control: resolve_delivery_token
         # walks the bots dir in GLOB order (not fleet.yaml order), so bot
@@ -180,6 +191,18 @@ def test_empty_token_fails_not_skips(tmp_path):
     state = _run(_fleet(tmp_path))
     assert state["telegram_f_bot3"]["status"] == "fail"
     assert "empty" in state["telegram_f_bot3"]["detail"].lower()
+
+
+def test_canary_marker_skips_not_fails(tmp_path):
+    """#608, the sibling of test_empty_token_fails_not_skips: bot6 has the SAME
+    empty-token state as bot3 but declares EXPECT_NO_TOKEN=1, so it is an expected
+    skip, not an outage — and a skip is silent (no page). The marker is the only
+    difference between the two bots, so the divergence IS the exemption."""
+    f = _fleet(tmp_path)
+    state = _run(f)
+    assert state["telegram_f_bot6"]["status"] == "skip"
+    posts = f["tg_log"].read_text() if f["tg_log"].exists() else ""
+    assert "bot6" not in posts  # an intentional throwaway must never page
 
 
 def test_handle_mismatch_fails(tmp_path):

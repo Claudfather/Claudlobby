@@ -1,6 +1,8 @@
 ---
 title: Spotify
 type: mcp
+tool_grants:
+  - "mcp__spotify__*"
 ---
 
 # Spotify

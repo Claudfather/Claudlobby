@@ -179,11 +179,22 @@ for bot_dir in "$BOTS_DIR"/*/; do
                     prev_ts=$(cat "$ts_file")
                     now_epoch=$(date +%s)
                     elapsed=$(( now_epoch - prev_ts ))
-                    # Idle-guard (mirrors Check 5 activity_stuck): a bot parked
-                    # at an idle prompt has a stable pane by definition — that is
-                    # idle, not stuck. keepalive.sh touches data/.idle when idle;
-                    # bot-vitals.sh touches data/.last-tool-call on each tool call.
-                    if [ "$elapsed" -ge 300 ] && ! marker_is_newer "$bot_dir/data/.idle" "$bot_dir/data/.last-tool-call"; then
+                    pane_stuck_threshold=$(bot_conf_get "$bot_dir" OBSERVABILITY_PANE_STUCK_THRESHOLD 300)
+                    # Fire only when the pane has been static past the threshold AND
+                    # the bot shows NO sign of life by any liveness signal (mirrors
+                    # Check 5 activity_stuck + bot_is_busy, on the already-captured
+                    # pane). A working-but-static or idle-waiting bot trips one of:
+                    #   - idle: data/.idle not older than .last-tool-call (keepalive
+                    #     touches .idle when idle; bot-vitals touches .last-tool-call
+                    #     on each tool call);
+                    #   - recently active: a tool call within the active window; or
+                    #   - active turn: an "esc to interrupt" affordance in the pane
+                    #     (e.g. a long tool call or waiting on a subagent).
+                    # Any of these means busy/idle, NOT stuck.
+                    if [ "$elapsed" -ge "$pane_stuck_threshold" ] \
+                        && ! marker_is_newer "$bot_dir/data/.idle" "$bot_dir/data/.last-tool-call" \
+                        && ! marker_age_within "$bot_dir/data/.last-tool-call" "${KEEPALIVE_ACTIVE_WINDOW_S:-$_ACTIVE_WINDOW_DEFAULT}" \
+                        && ! pane_is_busy "$_pane_buf"; then
                         emit_fleet_event "pane_stuck" "pulse" '{"unchanged_since_epoch":'"$prev_ts"',"elapsed_seconds":'"$elapsed"'}' "$bot_dir" "$bot_id"
                     fi
                 else
@@ -279,13 +290,18 @@ done
 # (miss), never over-escalate.
 _rb_today=$(date +%Y-%m-%d)
 # Echo a bot's existing ledger file(s) across that span, oldest first so a
-# downstream `tail -1` still yields the chronologically latest event.
+# downstream `tail -1` still yields the chronologically latest event. An empty
+# result (bot emitted nothing in the span) is a normal state, not an error:
+# without the explicit return, a missing file on the span's last date makes the
+# failed `[ -f ]` the pipeline's exit status under pipefail, and the `$(...)`
+# assignment call sites abort the whole pulse via set -e (#610).
 _readback_efiles() {
     local _bd="$1" _d _f
     for _d in "$today" "$_rb_today"; do
         _f="$_bd/data/events/fleet-${_d}.jsonl"
         [ -f "$_f" ] && printf '%s\n' "$_f"
     done | sort -u
+    return 0
 }
 
 # --- Fleet-wide escalation: persistent critical events → Telegram -----------
@@ -384,8 +400,14 @@ _summary_tmp=$(safe_mktemp)
 
         _s_session_status="up"
         _s_session_name=$(tmux_session_name "$_s_bot_dir")
-        _s_svc=$(bot_conf_get "$_s_bot_dir" BOT_SERVICE "$_s_bid")
-        check_tmux_session "$_s_session_name" "$_s_svc" 2>/dev/null || _s_session_status="DOWN"
+        # Resolve the socket the SAME way the main loop does (single source of
+        # truth) — a bot whose TMUX_SOCKET differs from BOT_SERVICE must not show a
+        # false SESSION DOWN in the summary while the main loop sees it alive.
+        _s_socket=$(tmux_socket_for_bot "$_s_bot_dir" 2>/dev/null || true)
+        check_tmux_session "$_s_session_name" "$_s_socket" 2>/dev/null || _s_session_status="DOWN"
+        # BOT_SERVICE (empty default + [ -n ] guard, mirroring the main loop) drives
+        # only the systemd column — a BOT_SERVICE-less bot must not be probed as a unit.
+        _s_svc=$(bot_conf_get "$_s_bot_dir" BOT_SERVICE "")
         _s_svc_status="ok"
         if [ "$_OS" = "Linux" ] && [ -n "$_s_svc" ]; then
             systemctl --user is-active "$_s_svc" >/dev/null 2>&1 || _s_svc_status="DOWN"

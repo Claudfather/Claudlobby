@@ -48,6 +48,7 @@ fleet:
       token_env: <env-var-name>
       require_mention: true | false
     sandbox:                            # sandbox network/filesystem allowlists
+      enabled: true | false             # omit/None = inherit global settings.json
       auto_allow_bash: true | false
       network_allowed_domains: [<list>]
       filesystem_allow_write: [<list>]
@@ -114,7 +115,7 @@ fleet:
         chat_id: "<override>"
       startup_prompt: <string>
       bench: true | false                 # OPTIONAL — benchmarking target (default: false)
-      dangerously_skip_permissions: true | false  # OPTIONAL — skip permission prompts (default: true)
+      dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
       remote_control: true | false        # OPTIONAL — enable --remote-control (default: true)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
@@ -233,6 +234,42 @@ fleet:
 
 After `claudlobby generate`, enroll the timer once per host: `lib/install-code-audit-sweep-systemd.sh <fleet>` (Linux) or `lib/install-code-audit-sweep.sh <fleet>` (macOS). The owner bot needs the `code-audit-sweep` skill (add `code-audit-sweep` to its `skills:`). Audit events (`audit_selected`, `audit_dispatched`, `audit_completed`, …) land in the owner's `data/events/` — see the `fleet-observability` protocol.
 
+### `bots.<bot>.briefing`
+
+Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` alone: each **slot** becomes a composed per-(bot,slot) `OnCalendar` timer (`<service_prefix>.briefing-<bot>-<slot>`) whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>` — a committed, never-swept trigger that delivers `/briefing <slot>` into the bot's own session through the slash-aware `lib/dispatch.sh`, so the skill actually fires (never hand-install a briefing cron). Presence of the block opts in; omit it and nothing is emitted for that bot.
+
+```yaml
+fleet:
+  bots:
+    kev:
+      briefing:
+        slots:                              # slot name -> systemd OnCalendar (NOT 5-field cron)
+          morning: "*-*-* 08:30:00"         # daily 08:30
+          analytics: "Sun *-*-* 17:00:00"   # weekly, Sundays 17:00 (custom slot)
+        sections:                           # optional per-slot section list
+          morning: [overnight, calendar, overdue]
+        sources: [github, gmail]            # optional data sources the /briefing skill reads
+```
+
+- **Slot names must be shell identifiers** (`[A-Za-z_][A-Za-z0-9_]*`) — they become the `BRIEFING_SECTIONS_<SLOT>` env-var suffix. A non-identifier name (`week-end`, `9am`) is a **hard parse error**.
+- **Slot values are systemd `OnCalendar`**, the same dialect as `fleet.sweep.schedule` — not 5-field cron. A 5-field cron value (`30 8 * * *`) is a **hard parse error** (the chain has no cron-translation layer).
+- Composed into the equipped bot's `bot.conf`: `BRIEFING_SLOTS` (space-separated slot names), `BRIEFING_SOURCES`, and one `BRIEFING_SECTIONS_<SLOT>` per slot that declares sections — **`<SLOT>` is upper-cased** (shell-var convention; the skill upper-cases the dispatched slot to read it). The `/briefing` skill falls back to sensible per-slot defaults when a var is unset, so equipping with zero personalization works.
+- **Enrollment** is automatic: `setup-fleet`'s generic `install_fleet_timer[_launchd].sh` glob picks up the composed `<prefix>.briefing-*` units — no per-timer installer. `setup-fleet` also **reconciles** the dynamic family: `reconcile_briefing_timers` disables live enrolled briefing timers with no composed counterpart (a renamed/removed slot), glob-bounded to `<prefix>.briefing-*` and dry-run-logged first; `generate` prunes the corresponding unit files. Both sides carry an **abort-on-degenerate guard** — a composition that yields an empty briefing set while units exist is refused rather than allowed to wholesale-delete live timers.
+- The validator **warns** when a briefing-equipped bot has no `integrations`/`mcp` source coverage (sections that read external data would be empty).
+
+### `fleet.workstreams`
+
+Bounds for the per-fleet workstream registry (`workstreams.json`) — the fleet's bounded portfolio of concurrent work across unrelated repos. Optional; the defaults apply when the block is omitted.
+
+```yaml
+fleet:
+  workstreams:
+    max_active: 12    # cap on concurrently active workstreams — `open` refuses past it (default: 12)
+    lease_days: 14    # lease length in days before a workstream needs renewal (default: 14)
+```
+
+Both values emit into every bot's `bot.conf` (`WORKSTREAM_MAX_ACTIVE`, `WORKSTREAM_LEASE_DAYS`) and are read by the single-writer helper `lib/workstream-update.sh` at open/renew time. Parsed by `config.py` (`_coerce_workstreams`); the validator warns on non-positive values or unknown keys. Reads go through the read-only `claudlobby workstreams` CLI; see `advanced-patterns.md` for the workstream lifecycle.
+
 ### `bots.<name>.expertise`
 
 **Required.** A list of area-of-expertise filenames from `library/expertise/`. The first file's H1 titles the bot; subsequent files' H1s are stripped and their bodies append below.
@@ -282,6 +319,16 @@ List of skill basenames from `library/skills/`. Generator symlinks each into `ru
 ### `bots.<name>.mcp` and `bots.<name>.integrations`
 
 `mcp:` lists MCP fragments from `library/mcp/`. The generator merges them into `.mcp.json`.
+
+For a bot that needs **multiple instances** of the same server (e.g. two Notion workspaces), use the mapping form with an `instances:` list instead of a bare string:
+
+```yaml
+mcp:
+  - notion:
+      instances: [default, work]
+```
+
+This emits one `.mcp.json` server per instance — `notion` (the `default`) and `notion-work` — and namespaces each instance's env-var placeholders by an uppercased prefix: the `default` instance keeps `NOTION_` (so it reads `NOTION_TOKEN`), while `work` becomes `NOTION_WORK_` (so it reads `NOTION_WORK_TOKEN`). Set one env var per instance in `.env`. Parsed by `config.py` (`_parse_mcp_list` → `McpEntry`); placeholder resolution lives in `claudlobby/mcp_resolve.py`. See the Notion integration guide for a worked example.
 
 `integrations:` lists usage docs from `library/integrations/`. By default, integrations are **auto-paired with mcp** — listing `mcp: [github]` automatically pulls in `library/integrations/github.md` (when it exists). Override by setting `integrations:` explicitly.
 
@@ -370,6 +417,7 @@ The compositor transforms the flat fleet.yaml format into Claude Code's nested m
 
 Sandbox network and filesystem allowlists, written to `settings.local.json`. Merged with defaults (lists unioned, bools overridden).
 
+- `enabled` — turn the sandbox layer on or off for this bot. Omitting it (or `None`) inherits the global `settings.json` sandbox setting; `true`/`false` overrides it per-bot.
 - `network_allowed_domains` — hostnames the bot may access (e.g., `api.github.com`, `"*.anthropic.com"`)
 - `filesystem_allow_write` — additional writable paths beyond the bot directory
 - `auto_allow_bash` — skip Bash tool permission prompts when running in sandbox mode
@@ -391,7 +439,7 @@ Boolean (default `false`). Marks this bot as the fleet's benchmarking target for
 
 ### `bots.<name>.permission_mode`
 
-String (default `null`). Sets the `--permission-mode` flag on the Claude Code CLI, providing more granular control than `dangerously_skip_permissions`. When set, this field takes precedence over `dangerously_skip_permissions`.
+String (default `null`). Sets the `--permission-mode` flag on the Claude Code CLI, providing more granular control than `dangerously_skip_permissions`. When set, this field takes precedence over `dangerously_skip_permissions`. When **neither** this nor `dangerously_skip_permissions` is set, the compositor emits a conservative default of `--permission-mode acceptEdits` — edits are auto-accepted while the composed allow/deny lists are still enforced.
 
 Valid values:
 
@@ -408,7 +456,7 @@ Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
 
 ### `bots.<name>.dangerously_skip_permissions`
 
-Boolean (default `true`). Controls whether the bot runs with `--dangerously-skip-permissions`, which skips tool-call permission prompts. Set to `false` for bots that should require human approval before executing tools. Superseded by `permission_mode` when both are set. Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
+Boolean (default `false`). Set to `true` to run the bot with `--dangerously-skip-permissions`, which bypasses all tool-call permission prompts **and** the composed allow/deny lists. This is an explicit opt-in: when neither this nor `permission_mode` is set, the compositor's conservative default is `--permission-mode acceptEdits`, which is headless-safe without bypassing the permission lists. Superseded by `permission_mode` when both are set. Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
 
 ### `bots.<name>.remote_control`
 

@@ -108,8 +108,10 @@ def render_stanza(inp: NewBotInputs) -> str:
         lines.append(f"      effort: {inp.effort}")
     if inp.remote_control is False:
         lines.append("      remote_control: false")
-    if inp.dangerously_skip_permissions is False:
-        lines.append("      dangerously_skip_permissions: false")
+    # dangerously_skip_permissions is opt-IN: an omitted field composes to the
+    # safe acceptEdits default, so emit a line only to positively enable it.
+    if inp.dangerously_skip_permissions is True:
+        lines.append("      dangerously_skip_permissions: true")
     if inp.extra_flags:
         lines.append(f"      extra_flags: {_yaml_list(inp.extra_flags)}")
     for label, vals in [
@@ -393,7 +395,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
 
     print()
     remote_control = _ask_yn("--remote-control?", default=True)
-    dangerously = _ask_yn("--dangerously-skip-permissions?", default=True)
+    dangerously = _ask_yn("--dangerously-skip-permissions?", default=False)
 
     print("\nScope (optional — leave blank to skip):")
     scope_org = _ask("  Org (e.g. 'your-github-org')") or None
@@ -457,7 +459,7 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
         resources=resources or None,
         lessons=lessons or None,
         remote_control=False if not remote_control else None,
-        dangerously_skip_permissions=False if not dangerously else None,
+        dangerously_skip_permissions=True if dangerously else None,
         scope_org=scope_org,
         scope_repos=scope_repos,
         team=team_picked,

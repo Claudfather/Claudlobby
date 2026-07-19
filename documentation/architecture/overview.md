@@ -109,21 +109,23 @@ runtime/bots/<name>/
 ```
  1. Expertise                  library/expertise/<name>.md (concatenated)
  2. Voice overlay              inserted after H1 (if voice: set)
- 3. Mission                    from fleet.yaml mission: field
- 4. Autonomous Runner          "Your Continuous Job" section (if bot.autonomous_runner: set)
- 5. Scope                      from fleet.yaml scope: field
- 6. Shared Documentation       fleet-shared docs index (if shared_docs_path: set)
- 7. Model strategy             from fleet.yaml model_strategy: field
- 8. Org structure              auto-generated from reports_to/manages
- 9. Fleet roster               auto-generated for managers (from teams)
-10. Resources                  library/resources/<each>.md
-11. Integrations               library/integrations/<each>.md (auto-paired with mcp)
-12. Principles                 library/principles/<each>.md
-13. Permissions                library/permissions/<each>.md
-14. Protocols                  library/protocols/<each>.md
-15. Guardrails                 library/guardrails/<each>.md
-16. Lessons                    library/lessons/<each>.md
-17. Post-actions               library/post_actions/<each>.md
+ 3. Fleet Mission              from fleet.yaml fleet.mission: field
+ 4. Mission                    from fleet.yaml bots.<name>.mission: field
+ 5. Autonomous Runner          "Your Continuous Job" section (if bot.autonomous_runner: set)
+ 6. Scope                      from fleet.yaml scope: field
+ 7. Shared Documentation       fleet-shared docs index (if shared_docs_path: set)
+ 8. Model strategy             from fleet.yaml model_strategy: field
+ 9. Org structure              auto-generated from reports_to/manages
+10. Fleet roster               auto-generated for managers (from teams)
+11. Projects                   auto-generated for managers (from projects.yaml)
+12. Resources                  library/resources/<each>.md
+13. Integrations               library/integrations/<each>.md (auto-paired with mcp)
+14. Principles                 library/principles/<each>.md
+15. Permissions                library/permissions/<each>.md
+16. Protocols                  library/protocols/<each>.md
+17. Guardrails                 library/guardrails/<each>.md
+18. Lessons                    library/lessons/<each>.md
+19. Post-actions               library/post_actions/<each>.md
 ```
 
 Reading the generated file top-to-bottom, you can see exactly which library file each section came from. This matters for trust: bots are configured with composable text, not opaque code.
@@ -172,7 +174,7 @@ Bots can edit themselves in `runtime/bots/<name>/` during a session. `runtime/bo
 
   1. Bot edits its CLAUDE.md mid-session (e.g., learns a new pattern, codifies a rule)
   2. `claudlobby diff <bot>` shows the drift vs what `generate` would produce
-  3. `claudlobby promote <bot>` (interactive — v1 is manual; v2 will have a picker) moves drifted content back to `library/expertise/<role>.md`, `library/voices/<voice>.md`, or a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`
+  3. `claudlobby promote <bot>` (interactive — v1 is manual; v2 will have a picker) moves drifted content back to `library/expertise/<role>.md`, `voices/<voice>.md`, or a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`
   4. After promotion, `library/` reflects the learned change. Re-running `generate` produces a CLAUDE.md consistent with the new library state.
 
 This is the foundation for the future ML / self-learning layer: drift becomes training data. When the same drift shows up across multiple bots, that's a signal a guardrail or protocol should exist.
@@ -192,7 +194,7 @@ Pass `--strict` to make warnings into errors (CI use).
 
 ## Why Python (not Bash, not Node, not Bun)
 
-The compositor logic has grown to ~9,000 lines of Python — but the *future* of the system is larger still:
+The compositor logic has grown to ~10,000 lines of Python — but the *future* of the system is larger still:
 
 - A self-learning layer behind `library/` (embeddings, similarity search for "I need a bot that…", suggested skills based on observed drift)
 - A knowledge graph linking guardrails ↔ incidents that motivated them

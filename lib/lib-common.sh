@@ -251,6 +251,75 @@ json_escape() {
     esac
 }
 
+# --- MCP trust seeding (dev checkouts) ---------------------------------------
+
+# _home_mcp_allowlist <bot_home>
+# Echo the bot composed enabledMcpjsonServers allowlist (a JSON array) from its
+# home settings.local.json, or return non-zero when there is nothing to trust
+# (no home settings, or an empty/absent allowlist). The composer is the SOLE
+# deriver of this set (fleet-config-driven, fail-closed); callers only PROPAGATE
+# the value it wrote, so they can never drift from the composer rules.
+_home_mcp_allowlist() {
+    local home_settings="$1/.claude/settings.local.json" allowlist
+    [ -f "$home_settings" ] || return 1
+    allowlist="$(jq -c '.enabledMcpjsonServers // empty' "$home_settings" 2>/dev/null || true)"
+    case "$allowlist" in
+        ""|"null"|"[]") return 1 ;;
+    esac
+    printf '%s' "$allowlist"
+}
+
+# seed_checkout_mcp_trust <checkout_dir> <allowlist_json>
+# Write the given MCP-trust allowlist into a projects/ checkout so an interactive
+# `claude` session rooted there pre-trusts the same fleet-configured MCP servers
+# and never stalls on the MCP-server-trust prompt (which no --permission-mode
+# answers). Idempotent and non-destructive (merges into any existing
+# settings.local.json). Callers derive <allowlist_json> once via
+# _home_mcp_allowlist and pass it in. Plain projects/ checkouts only.
+seed_checkout_mcp_trust() {
+    local checkout_dir="$1" allowlist="$2"
+    [ -d "$checkout_dir" ] || return 0
+    case "$allowlist" in
+        ""|"null"|"[]") return 0 ;;
+    esac
+
+    local checkout_settings="$checkout_dir/.claude/settings.local.json" tmp created=0
+    mkdir -p "$checkout_dir/.claude"
+    tmp="$(safe_mktemp)"
+    # Merge into an existing valid file to preserve any developer keys; a missing
+    # or unparseable file is (re)written fresh.
+    if [ ! -f "$checkout_settings" ] \
+       || ! jq --argjson al "$allowlist" '.enabledMcpjsonServers = $al' "$checkout_settings" > "$tmp" 2>/dev/null; then
+        printf '{"enabledMcpjsonServers":%s}\n' "$allowlist" > "$tmp"
+        created=1
+    fi
+    mv "$tmp" "$checkout_settings"
+
+    # A file we created is invisible to git only if excluded; an existing file
+    # was already visible to whoever wrote it. The per-clone info/exclude never
+    # touches tracked files and stops an accidental `git add -A` from staging the
+    # dev-context seed. (The callers gate on a real .git directory.)
+    if [ "$created" = 1 ]; then
+        local exclude="$checkout_dir/.git/info/exclude"
+        grep -qxF ".claude/settings.local.json" "$exclude" 2>/dev/null \
+            || printf '%s\n' ".claude/settings.local.json" >> "$exclude"
+    fi
+}
+
+# seed_all_checkouts <bot_dir>
+# Seed every projects/ checkout under a bot home with the bot composed MCP-trust
+# allowlist (see seed_checkout_mcp_trust). Reads the allowlist once. No-ops
+# cleanly when the bot has no projects/ dir, no checkouts, or nothing to trust.
+seed_all_checkouts() {
+    local bot_dir="$1" repo allowlist
+    [ -d "$bot_dir/projects" ] || return 0
+    allowlist="$(_home_mcp_allowlist "$bot_dir")" || return 0
+    for repo in "$bot_dir"/projects/*/; do
+        [ -d "$repo/.git" ] || continue
+        seed_checkout_mcp_trust "$repo" "$allowlist" || true
+    done
+}
+
 # --- Task identity -------------------------------------------------------------
 
 # mint_task_id
@@ -365,6 +434,19 @@ resolve_bot_telegram_token() {
     ) || true
 }
 
+# bot_expects_no_token <bot_dir>
+# True when a bot intentionally runs WITHOUT a Telegram token — a canary or
+# throwaway spun to exercise a boot/reaper path, not a real channel bot. Marked
+# by EXPECT_NO_TOKEN=1 in its bot.conf. A missing token is a genuine fault for a
+# real bot (unmarked — the no_token alert still fires) but the declared, expected
+# state for a throwaway, where that same alert is pure bring-up noise. Read from
+# bot.conf via bot_conf_get (not the process env) so the verdict is identical in
+# fleet-pulse, which classifies bots without sourcing any bot.conf.
+bot_expects_no_token() {
+    local bot_dir="${1:?Usage: bot_expects_no_token /path/to/bot/dir}"
+    [ "$(bot_conf_get "$bot_dir" EXPECT_NO_TOKEN "")" = "1" ]
+}
+
 bridge_state() {
     local bot_dir="${1:?Usage: bridge_state /path/to/bot/dir}"
     local handle state_dir token pidfile pid comm ppid pcomm environ args psline _anc _hop
@@ -459,6 +541,8 @@ bridge_state() {
 #   up | no_handle | unknown  -> print nothing, return 1    (no alert)
 # `unknown` is never actionable: bridge_state emits it when ownership is
 # unprovable (unreadable /proc, non-Linux) and must not be healed OR alerted.
+# no_token is likewise not actionable for a bot that declares EXPECT_NO_TOKEN=1
+# (a canary/throwaway with no token by design) — it collapses to no-alert.
 #
 # Grace is measured from the data/.spawn marker (touched on every start-bot.sh
 # (re)start). A missing marker means no grace — a long-lived bot with a genuinely
@@ -476,7 +560,12 @@ bridge_down_state() {
 
     state="$(bridge_state "$bot_dir" 2>/dev/null || true)"
     case "$state" in
-        no_bridge | no_token) printf '%s' "$state"; return 0 ;;
+        no_token)
+            # Exempt a declared throwaway (EXPECT_NO_TOKEN=1, per the header note);
+            # real bots (no marker) still surface as no_token for the caller to alert.
+            bot_expects_no_token "$bot_dir" && return 1
+            printf '%s' "$state"; return 0 ;;
+        no_bridge) printf '%s' "$state"; return 0 ;;
         *) return 1 ;; # up / no_handle / unknown -> not an actionable bridge_down
     esac
 }
@@ -530,9 +619,16 @@ bridge_bringup_verify() {
         no_handle)
             printf '%s' "no_handle" ;;
         no_token)
-            emit_failure_alert "$bots_dir" "bridge_down" \
-                "$bot_id Telegram bridge no_token at bring-up — token unset; escalate, cannot heal" || true
-            printf '%s' "missing:no_token" ;;
+            if bot_expects_no_token "$bot_dir"; then
+                # Declared throwaway/canary (EXPECT_NO_TOKEN=1): a missing token is
+                # its intended state, so this alert would be pure bring-up noise.
+                # A real bot never carries the marker and still escalates below.
+                printf '%s' "expected:no_token"
+            else
+                emit_failure_alert "$bots_dir" "bridge_down" \
+                    "$bot_id Telegram bridge no_token at bring-up — token unset; escalate, cannot heal" || true
+                printf '%s' "missing:no_token"
+            fi ;;
         unknown)
             printf '%s' "unknown" ;;
         *) # no_bridge (or an empty read) — a verified-dark bridge
@@ -1262,9 +1358,13 @@ resolve_timer_unit() {
 # extract_bot_conf_var FILE VAR_NAME
 # Extract a variable's value from a bot.conf file (strips 'export' prefix and quotes).
 # Usage: SERVICE_PREFIX="$(extract_bot_conf_var "$conf_file" SERVICE_PREFIX)"
+# An absent var is a normal state (empty output, exit 0): without the explicit
+# return, grep's no-match status becomes the pipeline's under pipefail and the
+# $(...) assignment call sites abort strict callers — same class as #610.
 extract_bot_conf_var() {
     local conf_file="$1" var_name="$2"
     grep -m1 "^export ${var_name}=" "$conf_file" | cut -d= -f2- | tr -d "'"
+    return 0
 }
 
 # --- Script error events ------------------------------------------------------

@@ -6,6 +6,21 @@ Composable safety rules that constrain bot behavior. Each guardrail is a self-co
 
 One `.md` file per rule. Use YAML frontmatter with `title:` (and optionally `description:`), followed by an H1 heading and the rule body. Keep each file focused on a single concern.
 
+## Permission contract (`permissions:`)
+
+Beyond prose, a guardrail may declare a deny-capable permission contract in frontmatter — the same `permissions:` schema expertise files use (`allow` / `deny`):
+
+```yaml
+---
+title: Reviewer — read-only
+permissions:
+  deny: [Write, Edit, NotebookEdit]
+  allow: [Read, Grep, Glob]
+---
+```
+
+Each `allow`/`deny` entry follows the grant grammar (an `mcp__<server>__*` glob, a `Bash(<cmd> *)` pattern, or a bare tool name); the compositor validates the shape. Restrictions the grammar cannot express (e.g. Snowflake `SELECT`-only) stay as prose in the body.
+
 ## Composition
 
 Guardrails accumulate: fleet-level defaults plus bot-level additions. In fleet.yaml:

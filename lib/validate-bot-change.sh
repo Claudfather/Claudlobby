@@ -79,7 +79,7 @@ EVENTS="$BOT_DIR/data/events"
 
 cleanup() {
     # Per-bot servers must be torn down with kill-server, or empty servers leak.
-    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}"; do
+    for _s in "$BOT" "$MGR" "$IBOT" "$BUSY" "$SBOT" "$MBOT" "${HBOT:-}" "${RB_SESSION:-}" "${MP_SESSION:-}" "${IDLEK:-}" "${SOCKB:-}" "${BUSYM:-}" "${BUSYP:-}" "${BRIEF:-}" "${BRIEFBUSY:-}" "${SINK:-}"; do
         [ -n "$_s" ] && command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
     # Bridge-hijack pollers are plain bun processes, not tmux panes — TERM any
@@ -378,6 +378,59 @@ _heal_reset
 run_heal
 [ "$(cat "$HREC" 2>/dev/null || echo 0)" = "0" ] && r=yes || r=no
 check "heal never bounces on no_token (a bounce cannot conjure a missing token)" "$r"
+
+# ===========================================================================
+# #608 — a tokenless canary/throwaway (EXPECT_NO_TOKEN=1) must NOT fire the
+# no_token alert at BRING-UP or via FLEET-PULSE; a REAL bot with no token still
+# MUST. Both hit the SAME classification (handle set, token unresolvable →
+# no_token); the ONLY difference is the marker, so any divergence below IS the
+# exemption. Drive the REAL bringup + down-state deciders (the exact functions
+# that choose to alert), so the fix is OBSERVED end-to-end — not just composed.
+echo ""
+echo "=== validate no_token canary exemption (#608: EXPECT_NO_TOKEN gates the alert) ==="
+NTBOTS="$ROOT/local/$FLEET/runtime/bots"
+NTC="$NTBOTS/valcanary"   # EXPECT_NO_TOKEN=1 → exempt throwaway
+NTR="$NTBOTS/valreal"     # no marker → real bot, a missing token is a fault
+NTEV="$ROOT/state/events"
+_nt_conf() {   # $1 = bot dir   $2 = y|n (carry the canary marker?). Handle set, token absent.
+    local d="$1" b; b="$(basename "$1")"
+    mkdir -p "$d/data"
+    cat > "$d/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_ID="$b"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+TELEGRAM_BOT_HANDLE="$b"
+TELEGRAM_TOKEN_ENV_NAME=NT_ABSENT_TOKEN
+CONF
+    [ "$2" = y ] && printf 'EXPECT_NO_TOKEN=1\n' >> "$d/bot.conf" || true
+}
+_nt_conf "$NTC" y
+_nt_conf "$NTR" n
+
+# Sanity: identical token-absent input — both classify as no_token.
+{ [ "$(bridge_state "$NTC" 2>/dev/null || true)" = "no_token" ] \
+  && [ "$(bridge_state "$NTR" 2>/dev/null || true)" = "no_token" ]; } && r=yes || r=no
+check "#608 canary + real both classify no_token (same token-absent input)" "$r"
+
+# --- Bring-up path (bridge_bringup_verify): canary silent, real escalates ---
+ntv="$(CLAUDLOBBY_ROOT="$ROOT" bridge_bringup_verify "$NTC" "$(dirname "$NTC")" 0 2>/dev/null || true)"
+[ "$ntv" = "expected:no_token" ] && r=yes || r=no
+check "#608 canary bring-up verdict is expected:no_token (marker exempts)" "$r"
+grep -q 'valcanary Telegram bridge no_token' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=no || r=yes
+check "#608 canary bring-up emits NO bridge_down alert (no fleet event)" "$r"
+
+ntv="$(CLAUDLOBBY_ROOT="$ROOT" bridge_bringup_verify "$NTR" "$(dirname "$NTR")" 0 2>/dev/null || true)"
+[ "$ntv" = "missing:no_token" ] && r=yes || r=no
+check "#608 real-bot bring-up verdict is missing:no_token (still a fault)" "$r"
+grep -q 'valreal Telegram bridge no_token at bring-up' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=yes || r=no
+check "#608 real-bot bring-up DOES emit the no_token bridge_down alert" "$r"
+
+# --- Fleet-pulse path (bridge_down_state, grace 0): canary not-down, real down ---
+CLAUDLOBBY_ROOT="$ROOT" bridge_down_state "$NTC" 0 >/dev/null 2>&1 && r=no || r=yes  # rc 0 = down
+check "#608 canary is NOT actionably down for fleet-pulse (no pulse alert)" "$r"
+[ "$(CLAUDLOBBY_ROOT="$ROOT" bridge_down_state "$NTR" 0 2>/dev/null || true)" = "no_token" ] && r=yes || r=no
+check "#608 real bot IS actionably down (no_token) for fleet-pulse" "$r"
 
 # ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
@@ -821,6 +874,91 @@ check "#415 undeclared orphan dir emits ZERO pulse events (filtered via fleet.ya
 check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard)" "$r"
 
 # ===========================================================================
+# #611 summary socket resolution + pane_stuck busy-guard (this PR).
+#   (a) #611: the SUMMARY must resolve the tmux socket the SAME way the main loop
+#       does (tmux_socket_for_bot), else a bot whose TMUX_SOCKET != BOT_SERVICE
+#       shows a false SESSION DOWN in the summary while the main loop sees it up.
+#   (b) pane_stuck must NOT fire on a WORKING bot: a fresh data/.last-tool-call
+#       (mid-tool-call) or an "esc to interrupt" pane (active turn / waiting on a
+#       subagent) is busy, not stuck.
+# ===========================================================================
+echo ""
+echo "=== validate #611 summary socket + pane_stuck busy-guard (this PR) ==="
+
+# (a) #611 repro: TMUX_SOCKET points at the live server, BOT_SERVICE is a
+#     DIFFERENT string. The shadow tmux() puts the session on tmux-valsock.
+SOCKB="valsock"
+mkdir -p "$F2_BOTS/$SOCKB/data"
+cat > "$F2_BOTS/$SOCKB/bot.conf" <<CONF
+BOT_NAME="$SOCKB"
+BOT_SERVICE="com.diverge.$SOCKB"
+TMUX_SOCKET="tmux-$SOCKB"
+MANAGER_TMUX="$MGR"
+CONF
+tmux new-session -d -s "$SOCKB" 'printf "\n> \n"; sleep 600'
+
+# (b) pane_stuck busy repros: BUSYM = fresh .last-tool-call (mid-tool-call),
+#     BUSYP = "esc to interrupt" pane (active turn). Both static + backdated.
+BUSYM="valbusym"; BUSYP="valbusyp"
+mkdir -p "$F2_BOTS/$BUSYM/data" "$F2_BOTS/$BUSYP/data"
+for b in "$BUSYM" "$BUSYP"; do
+    cat > "$F2_BOTS/$b/bot.conf" <<CONF
+BOT_NAME="$b"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+done
+tmux new-session -d -s "$BUSYM" 'printf "\n> \n"; sleep 600'
+tmux new-session -d -s "$BUSYP" 'printf "\nWorking (esc to interrupt)\n"; sleep 600'
+sleep 1
+
+# Declare the three new bots so fleet-pulse does not filter them as orphans (#415).
+cat > "$ROOT/local/$F2/fleet.yaml" <<YAML
+fleet:
+  name: $F2
+  bots:
+    $KEEP:
+      expertise: [software-engineering]
+    $IDLEK:
+      expertise: [software-engineering]
+    $SOCKB:
+      expertise: [software-engineering]
+    $BUSYM:
+      expertise: [software-engineering]
+    $BUSYP:
+      expertise: [software-engineering]
+YAML
+
+# Run 3: seed pane hashes/ts for the new bots.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+
+# Mark BUSYM "working" (fresh marker, no .idle) and backdate both busy bots past
+# the 300s pane threshold; BUSYP stays marker-less (its esc-to-interrupt pane is
+# the only busy signal).
+_n611=$(date +%s)
+touch "$F2_BOTS/$BUSYM/data/.last-tool-call"
+printf '%s' "$((_n611 - 400))" > "$ROOT/state/pulse/$BUSYM.pane_ts"
+printf '%s' "$((_n611 - 400))" > "$ROOT/state/pulse/$BUSYP.pane_ts"
+
+# Run 4: the sweep where pane_stuck would trip for the busy bots + the summary runs.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
+
+busym_ev=$(ls "$F2_BOTS/$BUSYM/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+busyp_ev=$(ls "$F2_BOTS/$BUSYP/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+{ [ -n "$busym_ev" ] && grep -q '"type":"pane_stuck"' "$busym_ev"; } && r=no || r=yes
+check "pane_stuck NOT fired for a working bot (fresh .last-tool-call, mid-tool-call)" "$r"
+{ [ -n "$busyp_ev" ] && grep -q '"type":"pane_stuck"' "$busyp_ev"; } && r=no || r=yes
+check "pane_stuck NOT fired for a working bot (esc-to-interrupt pane, active turn)" "$r"
+
+# #611: the summary must show the TMUX_SOCKET-only bot as up, not a false DOWN.
+_sumfile="$ROOT/state/pulse/pulse-summary.txt"
+printf '%s' "$(grep "^$SOCKB " "$_sumfile" 2>/dev/null || true)" | awk '{print $2}' | grep -qx up && r=yes || r=no
+check "#611 summary session=up for a bot whose TMUX_SOCKET != BOT_SERVICE" "$r"
+# related: a BOT_SERVICE-less bot must not show a false SERVICE DOWN in the summary.
+printf '%s' "$(grep "^$IDLEK " "$_sumfile" 2>/dev/null || true)" | awk '{print $3}' | grep -qx ok && r=yes || r=no
+check "#611 summary service=ok (not false DOWN) for a BOT_SERVICE-less bot" "$r"
+
+# ===========================================================================
 # Per-bot socket isolation (#414) — blast radius = 1 + observable misses.
 # valmgr + valbot are up on DISTINCT private servers (tmux-valmgr/tmux-valbot),
 # so a single server's death can no longer drop the whole fleet at once.
@@ -1046,6 +1184,123 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$NF" >/dev/null 2>&1 || true
 nbot_ev=$(ls "$NF_BOTS/$NBOT/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
 [ -n "$nbot_ev" ] && grep -q '"type":"session_missing"' "$nbot_ev" && r=yes || r=no
 check "#602 fleet-pulse health-checks a bot in a NESTED fleet (session_missing fired)" "$r"
+
+# ===========================================================================
+# Scenario: equippable briefing trigger (#627 P3/P4/P6). The timer-fired
+# /briefing dispatch must (a) fire a briefing_dispatched event, (b) land as a
+# REAL bare slash command — NOT set +H; prose (the F6 regression canary) — and
+# (c) defer on a busy bot; the shared dispatch.sh classifier must keep the
+# set +H; guard on (d) prose, (e) file-path prose + a leading-whitespace slash;
+# and (f) the /briefing skill's documented env-read must resolve the CONFIGURED
+# sections, not the canonical default. This is BEHAVIOR a unit test cannot
+# prove. The composed-timer plumbing (compose -> enroll -> journal fire ->
+# reconcile prune, incl. the launchd .plist prune) is the sibling
+# lib/rehearse-briefing-timer.sh (real systemd timer, ~2 min, run separately).
+# ===========================================================================
+echo ""
+echo "=== validate-bot-change: equippable briefing trigger (#627 P6) ==="
+
+BRIEF="valbrief"; BRIEFBUSY="valbriefbusy"; SINK="valsink"
+BRIEF_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEF"
+BRIEFBUSY_DIR="$ROOT/local/$FLEET/runtime/bots/$BRIEFBUSY"
+# data/ holds the busy bot's .last-tool-call marker and is where the trigger
+# emits events; briefing-trigger.sh + emit_fleet_event create logs/ + data/events
+# on demand. SINK is a pure classifier sink (pane-only) — no dir needed; its
+# socket resolves by the basename fallback.
+mkdir -p "$BRIEF_DIR/data" "$BRIEFBUSY_DIR/data"
+
+# Composed-SHAPE bot.conf: BOT_SERVICE empty so tmux_socket_for_bot resolves the
+# harness fallback tmux-<name> (the socket the tmux() shim targets). BRIEFING_*
+# mirror the composer emission (compose_bot_conf); BRIEFING_SECTIONS_MORNING is
+# UPPER-CASED exactly as composer.py emits it — the var the /briefing skill reads
+# by upper-casing the dispatched slot — with a NON-default section list so (f)
+# can tell config-tracking from the canonical morning default. (Emission case is
+# unit-tested in tests/test_briefing.py; this scenario proves the read-side.)
+for _d in "$BRIEF_DIR" "$BRIEFBUSY_DIR"; do
+    _n="$(basename "$_d")"
+    cat > "$_d/bot.conf" <<CONF
+BOT_NAME="$_n"
+BOT_ID="$_n"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+BRIEFING_SLOTS="morning"
+BRIEFING_SOURCES="github"
+BRIEFING_SECTIONS_MORNING="wrap tomorrow overnight"
+CONF
+done
+
+# Idle briefing bot: plain pane, no esc-to-interrupt, no fresh .last-tool-call
+# -> bot_is_busy reads not-busy -> the trigger dispatches.
+tmux new-session -d -s "$BRIEF" "sleep 600"
+# Busy briefing bot: a fresh data/.last-tool-call -> bot_is_busy reads BUSY via
+# the rendering-immune marker branch (no pane-render race) -> the trigger defers.
+tmux new-session -d -s "$BRIEFBUSY" "sleep 600"
+touch "$BRIEFBUSY_DIR/data/.last-tool-call"
+# Classifier sink: an idle pane that receives direct dispatch.sh sends, so the
+# computed PAYLOAD (bare vs set +H;) is observable verbatim in the captured pane.
+tmux new-session -d -s "$SINK" "sleep 600"
+sleep 1  # let panes render
+
+# --- Observe: the real trigger against the idle + busy briefing bots ----------
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEF" morning >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEFBUSY" morning >/dev/null 2>&1 || true
+# Prose + classifier-edge payloads straight through dispatch.sh: prose with a
+# bang, file-path prose, and a leading-whitespace slash must ALL keep set +H;.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" "deploy failed alert !!" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" "/home/crog/x is broken" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" " /leading-space-prose" >/dev/null 2>&1 || true
+sleep 1  # let the sends render into the panes
+
+# --- Assert ---
+brief_events=$(ls "$BRIEF_DIR"/data/events/fleet-*.jsonl 2>/dev/null | head -1 || true)
+briefbusy_events=$(ls "$BRIEFBUSY_DIR"/data/events/fleet-*.jsonl 2>/dev/null | head -1 || true)
+brief_pane=$(tmux capture-pane -t "$BRIEF" -p 2>/dev/null || true)
+busy_pane=$(tmux capture-pane -t "$BRIEFBUSY" -p 2>/dev/null || true)
+sink_pane=$(tmux capture-pane -t "$SINK" -p 2>/dev/null || true)
+
+# (a) the trigger fires — briefing_dispatched on the idle bot's ledger
+{ [ -n "$brief_events" ] && grep -q '"type":"briefing_dispatched"' "$brief_events"; } && r=yes || r=no
+check "briefing trigger fires: briefing_dispatched event emitted (idle bot)" "$r"
+
+# (b) bare-slash lands — /briefing morning present, NO set +H; prefix (F6 canary)
+{ printf '%s' "$brief_pane" | grep -q '/briefing morning' \
+    && ! printf '%s' "$brief_pane" | grep -q 'set +H'; } && r=yes || r=no
+check "briefing dispatch lands as a BARE slash command (no set +H; — F6 regression canary)" "$r"
+
+# (c) busy-defer — briefing_deferred/bot_busy, and NOTHING sent to the busy pane
+printf '%s' "$busy_pane" | grep -q '/briefing' && _sent=yes || _sent=no
+{ [ -n "$briefbusy_events" ] \
+    && grep -q '"type":"briefing_deferred".*"reason":"bot_busy"' "$briefbusy_events" \
+    && [ "$_sent" = no ]; } && r=yes || r=no
+check "briefing defers on a busy bot: briefing_deferred/bot_busy, no dispatch" "$r"
+
+# (d) prose control — a non-slash payload keeps the set +H; guard
+printf '%s' "$sink_pane" | grep -qE 'set \+H; deploy failed alert' && r=yes || r=no
+check "dispatch classifier keeps set +H; on prose (deploy failed !!)" "$r"
+
+# (e) classifier edges — file-path prose + leading-whitespace slash keep the guard
+printf '%s' "$sink_pane" | grep -qE 'set \+H; /home/crog/x is broken' && r=yes || r=no
+check "dispatch classifier keeps set +H; on file-path prose (/home/... not a slash cmd)" "$r"
+printf '%s' "$sink_pane" | grep -qE 'set \+H; +/leading-space-prose' && r=yes || r=no
+check "dispatch classifier keeps set +H; on a leading-whitespace slash (not anchored ^/)" "$r"
+
+# (f) skill env-consumption (F4). The /briefing skill must actually CONSUME the
+# configured sections — the F4 "silently-ignored section list" risk. SKILL.md is
+# model-facing prose with no runnable artifact in this model-free harness, so
+# prove the consumption CONTRACT lives in the REAL library skill file: its
+# actionable "## Instructions" must READ BRIEFING_SECTIONS_<SLOT> and RENDER the
+# configured sections (a mention in a reference table is not consumption). TEETH:
+# gutting SKILL.md's BRIEFING_SECTIONS handling makes this go RED (mutation-
+# verified). A live model honoring the instruction is the P7 human canary; this
+# is the deterministic file-contract gate. NOTE: the prior version re-read a
+# bot.conf var the test itself wrote and never touched SKILL.md, so a gutted
+# skill stayed green — hollow (#640, rajan request-changes).
+_skill="$LIB_DIR/../library/skills/briefing/SKILL.md"
+_instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null)
+{ [ -f "$_skill" ] \
+    && printf '%s\n' "$_instr" | grep -q 'BRIEFING_SECTIONS' \
+    && printf '%s\n' "$_instr" | grep -qi 'configured section'; } && r=yes || r=no
+check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (read the var + render the configured sections)" "$r"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
