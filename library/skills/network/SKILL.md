@@ -46,8 +46,9 @@ Then run the **targeted LinkedIn recruiter pass** (Operation 7) — recruiter an
 ```
 q: "(from:inmail-hit-reply@linkedin.com OR from:hit-reply@linkedin.com) newer_than:3d"
 ```
+**Route this pass's results through Operation 7** (extract-by-name) — not the sender-match steps below — because the relay `from:` won't match a contact, so sender-matching silently fails on these.
 
-For each relevant email:
+For each relevant email (the first two passes above):
 1. **Match sender** against Notion contacts (search by email or name)
 2. **Known contact** → Post a comment on their Notion page:
    ```
