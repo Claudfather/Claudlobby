@@ -6,6 +6,27 @@ Compositor for Claude Code agent fleets. Transforms `fleet.yaml` + `library/` in
 
 **New here?** See [`documentation/getting-started.md`](documentation/getting-started.md) for the clone-to-fleet walkthrough and [`documentation/fleet-yaml-schema.md`](documentation/fleet-yaml-schema.md) for every config field.
 
+## Ecosystem boundary
+
+Claudlobby is the stack's **composition system**: it turns `fleet.yaml` into wired bots —
+identities, plugins, env, permission grants, supervision — and owns fleet *policy* (what each bot
+may do, including vault writer topology). Engineering-workflow behavior is clauDNA's; the durable
+knowledge corpus is Claudron's. The local rules:
+
+- **Skills here are fleet operations.** `library/skills/` operate the fleet itself (dispatch,
+  restart, pulse) — runtime content that happens to use the skill format. Engineering-workflow
+  skills belong in clauDNA.
+- **Durable knowledge lives in the vault.** `library/` composes context into bots; it is not the
+  corpus. Learned-the-hard-way content accrues through the Claudron door (`/claudna:capture`),
+  not as new library files (see `library/CLAUDE.md`).
+- **Consume siblings by contract, never by assertion.** Wire what is shipped (the `claudron` CLI
+  door; the `claudron_compat.py` floor); never validate or warn about a sibling surface that does
+  not exist at the pinned version. The canonical vault env var is `CLAUDRON_VAULT_PATH` (Claudron
+  CLI contract).
+- **Placement test** (one line): does it *wire, grant, or supervise*? → here. Behavior → clauDNA;
+  knowledge → the vault. Full algorithm: Claudron repo,
+  `documentation/plans/2026-07-20-claudfather-boundary-separation.md` §10.3.
+
 ## Architecture
 
 ```
