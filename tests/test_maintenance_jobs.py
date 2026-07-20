@@ -15,6 +15,7 @@ from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_event
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
 
+
 def _signal_root(tmp_path, bots_at="runtime/bots"):
     """Throwaway CLAUDLOBBY_ROOT with a tg-post stub + a chat-declaring bot,
     so emit_failure_alert's Telegram leg is observable."""
@@ -146,7 +147,9 @@ class TestReloadFleetNpxPreflight:
     degraded cache warms best-effort (once per episode) and never aborts the
     reload."""
 
-    def _harness(self, tmp_path, npx_rc):
+    def _harness(self, tmp_path, npx_rc, plugins_line=None):
+        if plugins_line is None:
+            plugins_line = 'export FLEET_PLUGINS_REQUIRED="somepkg@Somewhere"'
         root = tmp_path / "root"
         libdir = root / "lib"
         libdir.mkdir(parents=True)
@@ -168,9 +171,7 @@ class TestReloadFleetNpxPreflight:
         # A bot declaring plugins so the plugin-update leg actually runs.
         bot = root / "runtime" / "bots" / "tbot"
         bot.mkdir(parents=True)
-        (bot / "bot.conf").write_text(
-            'export FLEET_PLUGINS_REQUIRED="somepkg@Somewhere"\n'
-        )
+        (bot / "bot.conf").write_text(plugins_line + "\n")
         env = _scrubbed_env(
             CLAUDLOBBY_ROOT=str(root),
             CALL_LOG=str(tmp_path / "calls.log"),
@@ -215,3 +216,20 @@ class TestReloadFleetNpxPreflight:
         self._run_reload(root, env)
         self._run_reload(root, env)
         assert self._calls(tmp_path).count("warm-cache") == 1
+
+    def test_multi_token_single_quoted_plugins_parse_clean(self, tmp_path):
+        """#658: the composer emits FLEET_PLUGINS_REQUIRED via shlex.quote,
+        which single-quotes any multi-token value. The reader must strip that
+        wrapper so each plugin reaches `claude plugin update` clean — not as
+        "'alpha@Src" with a stray leading quote (the daily plugin-update fail)."""
+        root, env = self._harness(
+            tmp_path,
+            npx_rc=0,
+            plugins_line="export FLEET_PLUGINS_REQUIRED='alpha@Src beta@Src'",
+        )
+        self._run_reload(root, env)
+        calls = self._calls(tmp_path)
+        assert "claude plugin update alpha@Src" in calls
+        assert "claude plugin update beta@Src" in calls
+        assert "'alpha@Src" not in calls  # no stray leading quote
+        assert "beta@Src'" not in calls  # no stray trailing quote

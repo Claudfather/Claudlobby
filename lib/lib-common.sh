@@ -1424,13 +1424,22 @@ install_error_trap() {
 # bot_conf_get <bot_dir> <key> <default>
 # Read a single variable from a bot's bot.conf without sourcing the file
 # (no side effects on the caller's environment). Handles both `export VAR=val`
-# and plain `VAR=val` forms. Strips surrounding double quotes from values.
+# and plain `VAR=val` forms. Strips one layer of surrounding single OR double
+# quotes (the composer emits values via shlex.quote, which single-quotes any
+# value containing a space, e.g. a multi-plugin FLEET_PLUGINS_REQUIRED).
 # Returns <default> if the file is missing or the key isn't found.
 bot_conf_get() {
     local bot_dir="$1" key="$2" default="$3" val=""
     if [ -f "$bot_dir/bot.conf" ]; then
         val=$(grep "^\(export \)\?$key=" "$bot_dir/bot.conf" | head -1 \
-            | sed -E "s/^(export )?$key=//" | tr -d '"' || true)
+            | sed -E "s/^(export )?$key=//" || true)
+        # Strip a surrounding quote pair (single or double) via parameter
+        # expansion, kept outside the command substitution above so no literal
+        # quote sits inside $( ) where bash 3.2 mis-scans it.
+        case "$val" in
+            \"*\") val=${val#\"}; val=${val%\"} ;;
+            \'*\') val=${val#\'}; val=${val%\'} ;;
+        esac
     fi
     printf '%s' "${val:-$default}"
 }
