@@ -42,6 +42,11 @@ Also scan tagged/important inbound:
 q: "is:important newer_than:3d -from:github.com -from:vercel.com -category:promotions"
 ```
 
+Then run the **targeted LinkedIn recruiter pass** (Operation 7) — recruiter and InMail threads that a plain `from:linkedin.com` search buries under job-alert noise, and whose `from:` is a LinkedIn relay rather than the actual person:
+```
+q: "(from:inmail-hit-reply@linkedin.com OR from:hit-reply@linkedin.com) newer_than:3d"
+```
+
 For each relevant email:
 1. **Match sender** against Notion contacts (search by email or name)
 2. **Known contact** → Post a comment on their Notion page:
@@ -172,6 +177,28 @@ For each job posting:
 2. Search Notion contacts for people at that company
 3. Present: "<Company> Data Scientist 5 posted — you know <Contact A> (recruiter), <Contact C> (recruiter), <Contact D> (recruiter), <Referrer> (referrer)"
 4. Suggest which contact to reach out to and draft talking points
+
+### 7. LinkedIn Recruiter Threads (targeted)
+
+Recruiter and hiring-manager conversations that happen **on LinkedIn** still land in Gmail as relay notifications — but they slip past a naive scan for two reasons: the automated job-alert blasts drown them out, and the `from:` header is a LinkedIn relay, not the actual person. Give them a dedicated pass:
+
+```
+mcp__claude_ai_Gmail__gmail_search_messages
+q: "(from:inmail-hit-reply@linkedin.com OR from:hit-reply@linkedin.com) newer_than:3d"
+maxResults: 25
+```
+
+Deliberately **excludes** `jobalerts-noreply@linkedin.com` and `jobs-noreply@linkedin.com` — those are automated job blasts handled by Operation 6, not person-to-person threads.
+
+For each thread:
+
+1. **Extract the person, not the sender.** The `from:` is a LinkedIn relay (`hit-reply@linkedin.com`), so sender-based contact matching fails. Parse the human's name and the role/company from the **subject** (e.g. "Senior Analytics role") and the snippet/body signature. `inmail-hit-reply` = an InMail from the recruiter/hiring side; `hit-reply` = an ongoing message thread.
+2. **Match by name** against Notion contacts — search the Contacts title. Only fall back to email matching if the person's real address appears in the body.
+3. **Known contact** → log a comment (`"<date>: LinkedIn re: [role] — [1-line]"`) and update Last Contact Date.
+4. **Unknown but worth tracking** (an active recruiter/hiring thread) → **suggest adding** as a new contact: Type **Professional**, Contact Method **LinkedIn**, with the role + company captured in the correspondence note. If their real email surfaces later (they move the thread to email, or send a calendar invite from `person@company.com`), fill Email Address then.
+5. **Reconcile crossover.** A LinkedIn thread often graduates to a direct email or a calendar invite from the person's real address — that is **one relationship, one contact**. Don't create a duplicate for the relay-name and the real-email; merge onto the existing record.
+
+This is where interview pipelines hide: the first touch is frequently a LinkedIn InMail, so a contact can be **mid-interview yet entirely absent from the CRM** if only Gmail sender-matching is used.
 
 ## Output Formatting
 
