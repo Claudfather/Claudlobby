@@ -299,3 +299,35 @@ class TestCollectFleetStatus:
         # bob does not
         bob = next(bs for bs in results if bs.name == "bob")
         assert bob.tmux_alive is False
+
+    def test_systemd_check_queries_bot_service_label(self, mock_fleet, mock_paths):
+        """#657: on Linux the SVC check must query the BOT_SERVICE unit
+        (com.<fleet>.<bot>.service) the installer names the unit after, not
+        the bare bot id — otherwise every healthy bot renders SVC=down."""
+        from types import SimpleNamespace
+
+        alice_dir = mock_paths.bot_runtime("alice")
+        alice_dir.mkdir(parents=True, exist_ok=True)
+        (alice_dir / "bot.conf").write_text("BOT_SERVICE=com.test.alice\n")
+
+        queried: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            queried.append(argv)
+            return SimpleNamespace(
+                returncode=0, stdout="ActiveState=active\nSubState=running\n"
+            )
+
+        with (
+            patch("claudlobby.status.platform.system", return_value="Linux"),
+            patch("claudlobby.status._check_tmux_sessions", return_value=set()),
+            patch("claudlobby.status.subprocess.run", side_effect=fake_run),
+            patch("claudlobby.utilization.load_fleet_state", return_value={"bots": {}}),
+        ):
+            results = collect_fleet_status(mock_fleet, mock_paths)
+
+        units = [a for argv in queried for a in argv if a.endswith(".service")]
+        assert "com.test.alice.service" in units
+        assert "alice.service" not in units
+        alice = next(bs for bs in results if bs.name == "alice")
+        assert alice.service_active is True

@@ -122,9 +122,15 @@ def _check_tmux_sessions(fleet, paths) -> set[str]:
     return alive
 
 
-def _check_systemd_service(bot_id: str) -> tuple[bool, str]:
-    """Check systemd user unit. Returns (active, sub_state)."""
-    unit = f"{bot_id}.service"
+def _check_systemd_service(bot_id: str, service_label: str = "") -> tuple[bool, str]:
+    """Check systemd user unit. Returns (active, sub_state).
+
+    Keys off the BOT_SERVICE label the installer names the unit after
+    (``com.<fleet>.<bot>.service``), mirroring the launchd path; falls back to
+    the bare bot id only for a pre-BOT_SERVICE bot.conf.
+    """
+    label = service_label or bot_id
+    unit = f"{label}.service"
     try:
         out = subprocess.run(
             [
@@ -245,15 +251,13 @@ def collect_fleet_status(
         # tmux
         bs.tmux_alive = bot_id in tmux_sessions
 
-        # service supervision
+        # service supervision — key off the BOT_SERVICE label the installer
+        # names the unit after (com.<fleet>.<bot>), not the bare bot id.
+        label = _read_service_label(bot_dir)
         if is_linux:
-            bs.service_active, bs.service_sub = _check_systemd_service(bot_id)
-        else:
-            label = _read_service_label(bot_dir)
-            if label:
-                bs.service_active, bs.service_sub = _check_launchd_service(
-                    bot_id, label
-                )
+            bs.service_active, bs.service_sub = _check_systemd_service(bot_id, label)
+        elif label:
+            bs.service_active, bs.service_sub = _check_launchd_service(bot_id, label)
 
         # keepalive heartbeat
         bs.last_heartbeat, bs.pane_state = _parse_keepalive_log(bot_dir)
