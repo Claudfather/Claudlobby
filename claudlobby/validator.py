@@ -138,6 +138,10 @@ def _validate_bots(
 
     # The claudron CLI door is host state, not per-bot state — probe once.
     claudron_on_path = shutil.which("claudron") is not None
+    # Vault resolution is a full walk-up + scan per call, and `claudron_vault_path`
+    # falls back to a fleet-wide default (config.py) — so every bot in a fleet
+    # typically resolves the *same* path. Memo per run, same reason as above.
+    vault_resolutions: dict[str, bool] = {}
 
     # Grant-contract readers (folder-aware; shared with the P2 composer resolvers).
     from .loader import (
@@ -433,7 +437,9 @@ def _validate_bots(
                     f"'{bot.claudron_vault_path}' is not a directory on this host — "
                     f"the bot will get no vault (see {CLAUDRON_INTEGRATION_URL})"
                 )
-            elif detect_vault(vault_path) is None:
+            elif not vault_resolutions.setdefault(
+                bot.claudron_vault_path, detect_vault(vault_path) is not None
+            ):
                 report.warnings.append(
                     f"bot '{bot_name}': claudron_vault_path "
                     f"'{bot.claudron_vault_path}' does not resolve to a vault — no "

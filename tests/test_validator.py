@@ -1129,13 +1129,19 @@ class TestClaudronDoor:
         self, fleet_dir, tmp_path, monkeypatch, mcp
     ):
         """Vault-wired with no `claudron` MCP entry is the §6 triggering
-        example. Neither it nor any other MCP wiring may produce a vault
-        warning that mentions MCP at all."""
+        example. Neither it nor any other MCP wiring may produce a *vault*
+        warning that mentions MCP at all.
+
+        Scoped to claudron warnings deliberately: the validator legitimately
+        emits unrelated MCP warnings elsewhere (e.g. a missing env var for a
+        real MCP server), and asserting over every warning made this boundary
+        test hostage to changes it does not govern."""
         self._env(monkeypatch)
         self._cli_on_path(tmp_path, monkeypatch)
         self._wire(fleet_dir, self._vault(tmp_path), mcp=mcp)
         for w in self._warnings(fleet_dir):
-            assert "MCP" not in w, w
+            if "claudron" in w.lower():
+                assert "MCP" not in w, w
 
     def test_unwired_bot_gets_no_claudron_warning(
         self, fleet_dir, tmp_path, monkeypatch

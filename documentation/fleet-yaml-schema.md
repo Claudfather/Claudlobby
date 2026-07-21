@@ -497,10 +497,10 @@ Ecosystem-aware fields connecting bots to clauDNA, Claudron, and Claudosseum. Al
 | Field | Env var | Purpose |
 |-------|---------|---------|
 | `claudna_version` | `CLAUDNA_VERSION` | Pin the clauDNA plugin version (e.g., `"0.2.0"`). Skills/hooks can read this to gate behavior by version. |
-| `claudron_vault_path` | `CLAUDRON_VAULT_PATH` | Path to the bot's Claudron vault (e.g., `"vaults/my-fleet/eng-1"`). The Claudron MCP server reads this to scope queries. |
+| `claudron_vault_path` | `CLAUDRON_VAULT_PATH` | Pointer to the Claudron **vault root** (e.g., `"vaults/my-fleet"`) — not a per-bot sub-path; one vault is one tenant. The bot's `claudron` CLI resolves the vault from this env var (Claudron `docs/CLI_CONTRACT.md` §Environment). |
 | `claudosseum_tenant_id` | `CLAUDOSSEUM_TENANT_ID` | Tenant identifier for Claudosseum telemetry (e.g., `"tenant_abc123"`). Bots emit structured signal to this tenant when configured. |
 
-Can be set in `defaults:` (fleet-wide) or per-bot (bot overrides default). The validator warns if `claudron_vault_path` is set but no `claudron` MCP server is configured.
+Can be set in `defaults:` (fleet-wide) or per-bot (bot overrides default). The validator warns if `claudron_vault_path` is set but the **`claudron` CLI is not reachable**, or the path does not resolve to a vault — the CLI is the fleet-consumption door (Claudron `docs/INTEGRATION.md`). It does *not* check for an MCP server: that door is demand-gated and unbuilt (decision C).
 
 ### `bots.<name>.autonomous_runner`
 
@@ -594,7 +594,7 @@ In addition to CLAUDE.md, the generator produces:
 - **Warn** — `telegram.token_env` env var not set
 - **Warn** — `teams.<X>.workers` references a bot not defined in `bots:`
 - **Warn** — fleet has multiple bots but none has `bench: true` — benchmarking won't know which bot to measure
-- **Warn** — `claudron_vault_path` is set but no `claudron` MCP server is configured
+- **Warn** — `claudron_vault_path` is set but the `claudron` CLI is not on PATH, or the path does not resolve to a vault
 
 Generate proceeds through warnings. Pass `--strict` to make warnings errors (CI use).
 

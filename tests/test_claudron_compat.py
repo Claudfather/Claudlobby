@@ -8,7 +8,7 @@ table it renders.
 import re
 from pathlib import Path
 
-from claudlobby.claudron_compat import COMPAT_FLOOR
+from claudlobby.claudron_compat import COMPAT_FLOOR, PROBE_API, PROBE_VERB_PREFIX
 
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
@@ -70,10 +70,33 @@ def test_live_rows_declare_a_probe():
 
 def test_integration_doc_renders_compat_floor():
     """The doc table is the human rendering of COMPAT_FLOOR — each capability
-    must appear as a full row (all three columns bound, so rows can't drift
-    independently), and the doc must name the module as SSOT."""
+    must appear as a full row (**every** column bound, so no cell can drift
+    independently), and the doc must name the module as SSOT.
+
+    The Doctor-state cell is derived, not asserted as prose: a parked row must
+    render its parked marker, a live row must name the probe it actually runs.
+    Without this the fourth column was a hand-maintained copy of `cap.parked` /
+    `cap.probe` with no gate — the exact rendered-copy drift the table's own
+    SSOT claim forbids."""
     doc = INTEGRATION_DOC.read_text()
     assert "claudlobby/claudron_compat.py" in doc
     for cap in COMPAT_FLOOR:
         row = f"| {cap.feature} | {cap.requires} | {cap.default_order_release} |"
         assert row in doc, f"doc table missing or stale row: {row}"
+
+        # Locate the rendered row and pin its Doctor-state cell to the data.
+        # Backticks are markdown, not content — strip them so the gate tracks
+        # what the cell *says*, not how it is formatted.
+        line = next(ln for ln in doc.splitlines() if ln.startswith(row))
+        state = line[len(row):].replace("`", "")
+        if cap.parked:
+            assert "parked" in state, f"parked row not rendered as parked: {cap.feature}"
+            assert "unmet" not in state.replace('never "unmet"', ""), (
+                f"parked row rendered as a deficiency: {cap.feature}"
+            )
+        else:
+            probe = cap.probe.removeprefix(PROBE_VERB_PREFIX) if cap.probe != PROBE_API else "[vault] extra"
+            assert probe in state, (
+                f"live row's Doctor-state cell does not name its probe "
+                f"({probe!r}): {cap.feature}"
+            )
