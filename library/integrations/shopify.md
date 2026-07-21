@@ -7,6 +7,42 @@ env_contract:
   SHOPIFY_STORE_DOMAIN:
     description: Shopify store domain (e.g. mystore.myshopify.com)
     tier: fleet
+tool_grants:
+  - "mcp__shopify__getAbandonmentReport"
+  - "mcp__shopify__getConversionReport"
+  - "mcp__shopify__getCustomReport"
+  - "mcp__shopify__getCustomer"
+  - "mcp__shopify__getCustomerAnalytics"
+  - "mcp__shopify__getFinancialSummary"
+  - "mcp__shopify__getInventoryLevels"
+  - "mcp__shopify__getInventoryReport"
+  - "mcp__shopify__getMarketingReport"
+  - "mcp__shopify__getOrder"
+  - "mcp__shopify__getProduct"
+  - "mcp__shopify__getProductAnalytics"
+  - "mcp__shopify__getSalesReport"
+  - "mcp__shopify__getShippingZones"
+  - "mcp__shopify__getShopInfo"
+  - "mcp__shopify__getTrafficReport"
+  - "mcp__shopify__listAbandonedCheckouts"
+  - "mcp__shopify__listBlogs"
+  - "mcp__shopify__listCollections"
+  - "mcp__shopify__listCompanies"
+  - "mcp__shopify__listCustomers"
+  - "mcp__shopify__listDiscounts"
+  - "mcp__shopify__listDraftOrders"
+  - "mcp__shopify__listFulfillmentOrders"
+  - "mcp__shopify__listGiftCards"
+  - "mcp__shopify__listLocations"
+  - "mcp__shopify__listMarkets"
+  - "mcp__shopify__listMetaobjects"
+  - "mcp__shopify__listOrders"
+  - "mcp__shopify__listPages"
+  - "mcp__shopify__listPriceRules"
+  - "mcp__shopify__listProducts"
+  - "mcp__shopify__listThemes"
+  - "mcp__shopify__listTransactions"
+  - "mcp__shopify__listWebhooks"
 ---
 
 # Shopify
@@ -17,10 +53,14 @@ Wire config: `library/mcp/shopify.json` (uses `${SHOPIFY_ACCESS_TOKEN}`, `${SHOP
 
 #### Common Ops
 
-- **Orders:** `mcp__shopify__*` — list, search, fulfill, refund
+- **Orders:** list, search (auto-allowed reads); fulfill, refund (prompted writes)
 - **Products:** create, update, manage variants, set pricing
 - **Customers:** lookup by email/name, order history
 - **Collections:** smart (rule-based) and manual collections
+
+#### Permissions
+
+Read-only tools (`get*`, `list*`) are auto-allowed for every bot that attaches this MCP, so headless bots never stall on a read prompt. Mutations (`createProduct`, `updateProduct`, `createRefund`, `adjustInventory`, etc.) always prompt; a bot that genuinely needs an unattended write gets it via fleet.yaml `tools.allow`. Split declared in `library/mcp/shopify.json` `_permissions_contract` (see `library/mcp/README.md`).
 
 #### Hidden / Unlisted Product Pattern
 
