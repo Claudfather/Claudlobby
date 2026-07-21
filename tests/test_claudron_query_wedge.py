@@ -231,8 +231,10 @@ def test_task_passed_as_single_quoted_query_arg(tmp_path):
     r, _, _ = _run_dispatch(tmp_path, env, task="use * wisely")
     assert r.returncode == 0, r.stderr
     argv = (tmp_path / "claudron-argv.txt").read_text().splitlines()
-    # --vault <path> lookup --json --limit 3 "<whole task>"
+    # lookup --json --limit 3 "<whole task>" — no --vault: the CLI reads
+    # CLAUDRON_VAULT_PATH itself (Claudron CLI_CONTRACT.md §Environment).
     assert argv[-1] == "use * wisely", argv
+    assert "--vault" not in argv, argv
 
 
 def test_control_chars_in_titles_sanitize_clean(tmp_path):

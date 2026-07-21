@@ -100,16 +100,17 @@ fi
 # built, so both enveloped and raw-text dispatches carry them and the ledger
 # records the enriched task. The wedge must never block a dispatch: any
 # missing prerequisite, lookup failure, or unparseable output degrades to a
-# plain send. The claudron CLI does not read CLAUDRON_VAULT_PATH itself, so
-# the vault is passed explicitly via --vault, and a missing vault does not
-# return clean JSON (0.1.x exits 0 with a non-JSON message; 0.2.0 exits 3) —
-# both are absorbed by the `2>/dev/null || return 0` net and the parser's
-# JSON validation, so stdout is parsed defensively either way.
-# Result shape: claudron 0.2.0 wraps the payload in the CLI-contract envelope
-# {ok, command, data:{query, results}, ...}; 0.1.x returned {results} flat.
-# The parser reads data.results then top-level results (line 138), so a
-# version skew between the repo pin and a fleet's installed claudron degrades
-# gracefully instead of silently injecting nothing.
+# plain send. CLAUDRON_VAULT_PATH is the canonical vault address and the CLI
+# reads it itself (Claudron CLI_CONTRACT.md §Environment, row 2) — this wedge
+# exports nothing and passes no --vault, so bot and CLI can never resolve two
+# different vaults. A vault that does not resolve exits 3 with nothing on
+# stdout; that and every other failure are absorbed by the
+# `2>/dev/null || return 0` net plus the parser's JSON validation.
+# Result shape: the CLI-contract envelope {ok, command, data:{query, results}}.
+# Version skew is real — the host CLI is installed out of band and can lag the
+# repo's [vault] pin — so the parser reads data.results then top-level results
+# (the pre-envelope 0.1.x shape) and degrades to injecting nothing rather than
+# erroring.
 CLAUDRON_HITS=""
 _claudron_query_before() {
     [ "${CLAUDRON_QUERY_BEFORE:-}" = "1" ] || return 0
@@ -121,7 +122,7 @@ _claudron_query_before() {
     local raw parsed pointers
     # The whole task is one quoted query argument (lookup tokenizes
     # internally; quoting avoids glob expansion of task text).
-    raw=$(claudron --vault "$CLAUDRON_VAULT_PATH" lookup --json \
+    raw=$(claudron lookup --json \
         --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$TASK" 2>/dev/null) || return 0
     # Emits "<count>\t<title (abs path); ...>". Claudron-supplied strings are
     # sanitized to printable-by-construction before use: pipes become "/"

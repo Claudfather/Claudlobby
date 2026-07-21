@@ -51,6 +51,23 @@ def test_compat_floor_well_formed():
         assert cap.feature and cap.requires and cap.default_order_release
 
 
+def test_parked_rows_are_never_probed():
+    """A parked row is demand-gated by decision, not missing capability —
+    probing one is how it would come back as "unmet" (boundary phase L1)."""
+    for cap in COMPAT_FLOOR:
+        if cap.parked:
+            assert cap.probe == "", f"parked row carries a probe: {cap.feature}"
+
+
+def test_live_rows_declare_a_probe():
+    """Doctor decides met/unmet by probing the capability, never by comparing
+    the release annotation — so an un-parked row without a probe is a row
+    doctor cannot honestly report on."""
+    for cap in COMPAT_FLOOR:
+        if not cap.parked:
+            assert cap.probe, f"live row has no probe: {cap.feature}"
+
+
 def test_integration_doc_renders_compat_floor():
     """The doc table is the human rendering of COMPAT_FLOOR — each capability
     must appear as a full row (all three columns bound, so rows can't drift

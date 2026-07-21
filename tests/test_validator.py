@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 import pytest
 
+from claudlobby import validator as validator_module
 from claudlobby.config import load_fleet
 from claudlobby.known_values import _AUTO_ELIGIBLE_RENAMES
 from claudlobby.paths import Paths
@@ -1021,3 +1024,137 @@ class TestSkillGuardrailGrantValidation:
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         report = validate(fleet, _make_paths(fleet_dir))
         assert any("malformed" in w and "bad grant!" in w for w in report.warnings)
+
+
+class TestClaudronDoor:
+    """The door a vault-wired bot actually walks through is the CLI (phase L1).
+
+    The deleted check warned that a vault-wired bot had no ``claudron`` MCP
+    server — a door the engine deliberately never shipped (decision C), and the
+    §6 triggering example of the boundary spec. These tests pin the inversion:
+    warn when the CLI door is broken, never about a missing MCP fragment.
+    """
+
+    @staticmethod
+    def _env(monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    @staticmethod
+    def _wire(fleet_dir: Path, vault: Path, *, mcp: str = "") -> None:
+        extra = f"\n      mcp: [{mcp}]" if mcp else ""
+        text = (fleet_dir / "fleet.yaml").read_text()
+        wired = text.replace(
+            "    lead:\n      expertise: [orchestration]",
+            "    lead:\n      expertise: [orchestration]\n"
+            f"      claudron_vault_path: {vault}{extra}",
+        )
+        assert wired != text, "fleet.yaml fixture shape changed — wiring no-oped"
+        (fleet_dir / "fleet.yaml").write_text(wired)
+
+    @staticmethod
+    def _vault(tmp_path: Path) -> Path:
+        vault = tmp_path / "vault"
+        (vault / "_shared").mkdir(parents=True)
+        return vault
+
+    @staticmethod
+    def _cli_on_path(tmp_path: Path, monkeypatch) -> None:
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        stub = bindir / "claudron"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+    @staticmethod
+    def _no_cli_on_path(tmp_path: Path, monkeypatch) -> None:
+        empty = tmp_path / "empty-bin"
+        empty.mkdir(exist_ok=True)
+        monkeypatch.setenv("PATH", str(empty))
+
+    def _warnings(self, fleet_dir: Path) -> list[str]:
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return validate(fleet, _make_paths(fleet_dir)).warnings
+
+    def test_cli_absent_warns(self, fleet_dir, tmp_path, monkeypatch):
+        self._env(monkeypatch)
+        self._no_cli_on_path(tmp_path, monkeypatch)
+        self._wire(fleet_dir, self._vault(tmp_path))
+        warnings = self._warnings(fleet_dir)
+        assert any(
+            "bot 'lead'" in w and "claudron CLI is not on PATH" in w for w in warnings
+        ), warnings
+        # The message names the door, and where the door is documented.
+        assert any("docs/INTEGRATION.md" in w for w in warnings), warnings
+
+    def test_cli_present_and_vault_valid_is_silent(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        self._env(monkeypatch)
+        self._cli_on_path(tmp_path, monkeypatch)
+        self._wire(fleet_dir, self._vault(tmp_path))
+        assert not [
+            w for w in self._warnings(fleet_dir) if "claudron" in w.lower()
+        ], self._warnings(fleet_dir)
+
+    def test_path_that_is_not_a_vault_warns(self, fleet_dir, tmp_path, monkeypatch):
+        self._env(monkeypatch)
+        self._cli_on_path(tmp_path, monkeypatch)
+        (tmp_path / "not-a-vault").mkdir()
+        self._wire(fleet_dir, tmp_path / "not-a-vault")
+        warnings = self._warnings(fleet_dir)
+        assert any("does not resolve to a vault" in w for w in warnings), warnings
+
+    def test_missing_path_warns_distinctly(self, fleet_dir, tmp_path, monkeypatch):
+        self._env(monkeypatch)
+        self._cli_on_path(tmp_path, monkeypatch)
+        self._wire(fleet_dir, tmp_path / "nowhere")
+        warnings = self._warnings(fleet_dir)
+        assert any("is not a directory on this host" in w for w in warnings), warnings
+
+    def test_cli_check_is_never_an_error(self, fleet_dir, tmp_path, monkeypatch):
+        """Bots can be composed before a host has the CLI — warn is the
+        contract-honest level, so a broken door must never block `generate`."""
+        self._env(monkeypatch)
+        self._no_cli_on_path(tmp_path, monkeypatch)
+        self._wire(fleet_dir, tmp_path / "nowhere")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not report.has_errors, report.errors
+
+    @pytest.mark.parametrize("mcp", ["", "github"])
+    def test_no_mcp_cross_check_in_any_combination(
+        self, fleet_dir, tmp_path, monkeypatch, mcp
+    ):
+        """Vault-wired with no `claudron` MCP entry is the §6 triggering
+        example. Neither it nor any other MCP wiring may produce a vault
+        warning that mentions MCP at all."""
+        self._env(monkeypatch)
+        self._cli_on_path(tmp_path, monkeypatch)
+        self._wire(fleet_dir, self._vault(tmp_path), mcp=mcp)
+        for w in self._warnings(fleet_dir):
+            assert "MCP" not in w, w
+
+    def test_unwired_bot_gets_no_claudron_warning(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        """No vault path ⇒ no door to check, even with no CLI on PATH."""
+        self._env(monkeypatch)
+        self._no_cli_on_path(tmp_path, monkeypatch)
+        assert not [
+            w for w in self._warnings(fleet_dir) if "claudron" in w.lower()
+        ], self._warnings(fleet_dir)
+
+
+def test_validator_never_imports_claudron():
+    """L4's boundary invariant, pinned at its first site: vault detection
+    reaches the validator through paths.py's seam, never a direct import."""
+    source = Path(validator_module.__file__).read_text()
+    offenders = [
+        line
+        for line in source.splitlines()
+        if re.match(r"\s*(from\s+claudron|import\s+claudron)\b", line)
+    ]
+    assert not offenders, offenders
