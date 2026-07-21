@@ -205,6 +205,25 @@ Output: mcp__gws-personal__search_gmail_messages, mcp__gws-personal__get_events,
         mcp__gws-work__search_gmail_messages, mcp__gws-work__get_events
 ```
 
+**Shipped emission shapes.** In `_resolve_mcp_permissions` the per-tool enumeration above is compressed to a single `mcp__<server>__*` wildcard per instance when the whole contract is grantable (compact, and new server tools don't go stale). When the contract declares `read_only_tools`, the wildcard is never emitted for that server: the compositor emits exact per-tool patterns for the read-only subset and nothing else.
+
+### Read-Only MCP Contracts
+
+Data-plane servers whose writes are real-world mutations (Shopify catalog, Printify orders) must not inherit the dev-tool wildcard posture. For these, the fragment declares a split:
+
+```json
+"_permissions_contract": {
+  "tools": ["listProducts", "getOrder", "createProduct", "updateProduct"],
+  "read_only_tools": ["listProducts", "getOrder"]
+}
+```
+
+- **Reads compose automatically.** Every bot that attaches the server gets exact `mcp__<server>__<tool>` allows for the read set (per instance), so headless workers never wedge on a safe-read permission prompt.
+- **Writes always prompt.** No library-derived path may cover them, enforced twice: the paired `library/integrations/<name>.md` `tool_grants` must mirror the read-only set exactly (a wildcard, write-tool, or missing-read entry fails `generate` with a directional error), and a union-layer assert re-checks the accumulated allow list — so a skill/expertise/guardrail grant covering a write of a split server also fails `generate`. A `read_only_tools` entry absent from `tools` fails too (typo/rename protection).
+- **Operator escape hatch.** A bot that genuinely needs an unattended write gets it explicitly in fleet.yaml: `tools: {allow: ["mcp__shopify__createProduct"]}` (per-bot, or fleet-wide via `defaults.tools.allow`). Operator-declared and auditable — never a library default; this layer is appended after the union-layer assert, deliberately exempt.
+
+Declaration paths, summarized: the read/write **facts** live in the fragment `_permissions_contract`; the composed **auto-grants** live in the integration file's `tool_grants` (kept mirror-equal by the compose-time gates); **exceptions** live in fleet.yaml `tools.allow`.
+
 ---
 
 ## Skill Pattern Format

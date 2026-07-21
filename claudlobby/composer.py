@@ -210,43 +210,152 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
     return merged
 
 
+def _load_mcp_contract(paths: Paths, name: str) -> dict | None:
+    """Load an MCP fragment's validated ``_permissions_contract``, or ``None`` when absent.
+
+    Missing fragment and malformed JSON (logged) both resolve to ``None`` so
+    callers treat the server as contract-less rather than failing compose.
+
+    A declared ``read_only_tools`` subset must sit inside the declared
+    ``tools`` universe: an entry outside it is a typo or an upstream tool
+    rename, and would silently grant a tool that does not exist — so every
+    reader gets the invariant checked here, at load, and compose fails loudly.
+    """
+    frag_path = paths.find_library_file("mcp", name, ".json")
+    if frag_path is None:
+        return None
+    try:
+        frag = json.loads(frag_path.read_text())
+    except json.JSONDecodeError as exc:
+        _log.warning(
+            "skipping MCP permissions for %s: malformed JSON: %s", frag_path, exc
+        )
+        return None
+    contract = frag.get("_permissions_contract")
+    if contract:
+        unknown = sorted(
+            set(contract.get("read_only_tools") or []) - set(contract.get("tools", []))
+        )
+        if unknown:
+            raise ValueError(
+                f"mcp fragment {name!r}: read_only_tools entries {unknown} are not in "
+                "the contract's tools list — declare the full tool universe in tools "
+                "and keep read_only_tools a subset of it."
+            )
+    return contract
+
+
 def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
     """Resolve MCP permission patterns from fragment _permissions_contract fields.
 
-    For each MCP entry the bot uses, reads the fragment, extracts
-    _permissions_contract.tools, and generates permission patterns per instance.
+    For each MCP entry the bot uses, reads the fragment contract and generates
+    permission patterns per instance:
 
-    Wildcard compression: when the bot is allowed all tools in the contract
-    (i.e., no partial restriction), emit a single ``mcp__<server>__*`` wildcard
-    instead of one entry per tool.  This keeps settings.local.json compact and
-    prevents staleness when MCP servers add new tools.
-
-    Individual patterns are still emitted when only a subset of the contract
-    tools should be allowed (not yet wired up, but the logic is ready).
+    - ``read_only_tools`` declared — one exact ``mcp__<server>__<tool>`` entry
+      per read-only tool. The server-level wildcard is never emitted for these
+      servers: it would auto-approve the contract's remaining (write) tools,
+      which must keep prompting (#661).
+    - otherwise, non-empty ``tools`` — a single ``mcp__<server>__*`` wildcard.
+      This keeps settings.local.json compact and prevents staleness when the
+      server adds new tools.
     """
     patterns: list[str] = []
     for entry in bot.mcp:
-        frag_path = paths.find_library_file("mcp", entry.name, ".json")
-        if frag_path is None:
+        contract = _load_mcp_contract(paths, entry.name)
+        if not contract:
             continue
-        try:
-            frag = json.loads(frag_path.read_text())
-        except json.JSONDecodeError as exc:
-            _log.warning(
-                "skipping MCP permissions for %s: malformed JSON: %s", frag_path, exc
-            )
-            continue
-        contract = frag.get("_permissions_contract", {})
-        tools = contract.get("tools", [])
-        if not tools:
-            continue
+        read_only = contract.get("read_only_tools")
         for instance in entry.instances:
             output_name = entry.output_name(instance)
-            # Emit a server-level wildcard when ALL contract tools are allowed.
-            # This is always the case currently (no partial allow mechanism),
-            # so the wildcard is emitted for every server with a non-empty tools list.
-            patterns.append(f"mcp__{output_name}__*")
+            if read_only is not None:
+                patterns.extend(f"mcp__{output_name}__{tool}" for tool in read_only)
+            elif contract.get("tools"):
+                patterns.append(f"mcp__{output_name}__*")
     return patterns
+
+
+def _assert_read_only_grants(name: str, tool_grants: list[str], paths: Paths) -> None:
+    """Fail compose unless an integration's grants mirror its read-only set exactly.
+
+    A fragment contract that declares ``read_only_tools`` splits its tool
+    universe into reads (auto-grantable) and writes (must keep prompting).
+    The paired integration's ``tool_grants`` is the composed grant surface, so
+    it must be the exact ``mcp__<name>__<tool>`` mirror of the read set:
+
+    - an entry beyond it (server wildcard, write tool) would silently
+      auto-approve mutations for every bot that equips the integration;
+    - a missing read entry would leave that safe read prompting forever —
+      the wedged-headless-worker symptom this contract exists to end (#661).
+
+    The equality check is what keeps the mirror maintained once the legacy
+    ``_resolve_mcp_permissions`` grant role (and its superset gate) is cut:
+    add a tool upstream and the directional error here names the fix. A bot
+    that genuinely needs a write tool gets it explicitly via fleet.yaml
+    ``tools.allow``; that operator path is untouched here.
+    """
+    contract = _load_mcp_contract(paths, name)
+    if not contract:
+        return
+    read_only = contract.get("read_only_tools")
+    if read_only is None:
+        return
+    mirror = {f"mcp__{name}__{tool}" for tool in read_only}
+    extra = sorted(set(tool_grants) - mirror)
+    if extra:
+        raise ValueError(
+            f"integration {name!r}: tool_grants {extra} not auto-grantable — the mcp "
+            f"fragment declares read_only_tools, so grants must be exact "
+            f"mcp__{name}__<tool> entries from that read-only set. Writes stay "
+            "prompt-gated; grant one per-bot via tools.allow if genuinely needed."
+        )
+    missing = sorted(mirror - set(tool_grants))
+    if missing:
+        raise ValueError(
+            f"integration {name!r}: tool_grants is missing read entries {missing} — "
+            f"add them so the fragment's read_only_tools compose (a missing read "
+            "prompts forever on headless bots)."
+        )
+
+
+def _assert_no_write_autoallows(
+    bot: BotConfig, paths: Paths, allow_patterns: list[str]
+) -> None:
+    """Fail compose when ANY library-derived allow covers a write of a read-only server.
+
+    :func:`_assert_read_only_grants` polices the integration grant surface, but
+    expertise ``permissions.allow``, guardrail allows, and skill ``tool_grants``
+    merge into the same allow list — a skill declaring ``mcp__shopify__*``
+    would otherwise compose every catalog write into each equipping bot. This
+    is the union-layer invariant: for every attached server whose contract
+    declares ``read_only_tools``, no accumulated pattern may reach beyond the
+    read set. Runs before fleet.yaml ``tools.allow`` is appended — that layer
+    is the operator's deliberate, auditable escape hatch and stays exempt.
+    """
+    for entry in bot.mcp:
+        contract = _load_mcp_contract(paths, entry.name)
+        if not contract:
+            continue
+        read_only = contract.get("read_only_tools")
+        if read_only is None:
+            continue
+        for instance in entry.instances:
+            server = entry.output_name(instance)
+            prefix = f"mcp__{server}__"
+            permitted = {f"{prefix}{tool}" for tool in read_only}
+            bad = sorted(
+                p
+                for p in allow_patterns
+                if (p == f"mcp__{server}" or p.startswith(prefix))
+                and p not in permitted
+            )
+            if bad:
+                raise ValueError(
+                    f"bot {bot.bot_id!r}: allow patterns {bad} cover non-read tools "
+                    f"of read-only server {server!r} — no library-derived layer "
+                    "(integration, skill, expertise, guardrail) may auto-allow a "
+                    "write. Grant it per-bot via fleet.yaml tools.allow if "
+                    "genuinely needed."
+                )
 
 
 def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
@@ -279,6 +388,7 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
     ):
         if not tool_grants:
             continue
+        _assert_read_only_grants(name, tool_grants, paths)
         entry = next((e for e in bot.mcp if e.name == name), None)
         if entry is None:
             grants.extend(tool_grants)
@@ -1387,6 +1497,11 @@ def compose_settings_local(
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the
     # additive path; Skill(<name>) above only grants invocation.
     _append_unique(allow_patterns, _resolve_skill_grants(bot, paths))
+
+    # Union-layer write guardrail: with every library-derived layer accumulated
+    # (and before the operator's tools.allow escape hatch below), nothing may
+    # cover a non-read tool of a read-only-contracted server (#661).
+    _assert_no_write_autoallows(bot, paths, allow_patterns)
 
     # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
     _append_unique(allow_patterns, bot.tools.allow)

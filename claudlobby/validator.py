@@ -109,17 +109,18 @@ def _grant_shape_warnings(
     return out
 
 
-def _mcp_contract_has_tools(frag_path: Path) -> bool:
-    """True when an MCP fragment carries a non-empty ``_permissions_contract.tools``.
+def _mcp_contract(frag_path: Path) -> dict:
+    """An MCP fragment's ``_permissions_contract`` (``{}`` on missing/malformed).
 
-    Remove with the P8 ``_permissions_contract`` cut — it only exists to power the
-    migration-gap warning below, which is dead once the legacy contract is gone.
+    Remove with the P8 ``_permissions_contract`` cut of the wildcard path — it
+    only exists to power the migration-gap warning below, which is dead once
+    the legacy contract's grant role is gone.
     """
     try:
         frag = json.loads(frag_path.read_text())
     except (OSError, json.JSONDecodeError):
-        return False
-    return bool(frag.get("_permissions_contract", {}).get("tools"))
+        return {}
+    return frag.get("_permissions_contract") or {}
 
 
 def _validate_bots(
@@ -191,17 +192,26 @@ def _validate_bots(
                 report.warnings.append(
                     f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{hint}"
                 )
-            # Migration-gap warning (remove with the P8 _permissions_contract cut):
-            # a fragment that still grants tools whose paired integration hasn't been
-            # given covering tool_grants would be dropped by the eventual cut.
-            elif _mcp_contract_has_tools(frag_path) and not integration_tool_grants(
-                paths, mcp.name
-            ):
-                report.warnings.append(
-                    f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
-                    f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
-                    f'won\'t migrate (add tool_grants: ["mcp__{mcp.name}__*"])'
-                )
+            else:
+                # Migration-gap warning (remove with the P8 _permissions_contract cut):
+                # a fragment that still grants tools whose paired integration hasn't
+                # been given covering tool_grants would be dropped by the eventual
+                # cut. A read-only-split fragment must NOT be covered by a wildcard —
+                # the hint mirrors what compose will actually accept.
+                contract = _mcp_contract(frag_path)
+                if contract.get("tools") and not integration_tool_grants(
+                    paths, mcp.name
+                ):
+                    hint = (
+                        f"mirror its read_only_tools as exact mcp__{mcp.name}__<tool> entries"
+                        if contract.get("read_only_tools") is not None
+                        else f'add tool_grants: ["mcp__{mcp.name}__*"]'
+                    )
+                    report.warnings.append(
+                        f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
+                        f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
+                        f"won't migrate ({hint})"
+                    )
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
         # var names (the same names composer puts into the rendered
