@@ -1,0 +1,38 @@
+{
+  "_env_contract": {
+    "GA4_SA_KEY_PATH": {
+      "description": "Absolute path to the GA4 service-account JSON key file (gitignored — NEVER commit the key; e.g. local/<fleet>/.secrets/ga4-service-account.json)",
+      "tier": "fleet"
+    },
+    "GA4_PROPERTY_ID": {
+      "description": "Numeric GA4 property ID of the STORE property (bare number, e.g. 123456789 — NOT the G-XXXXXXXXXX measurement ID). Confirm it is the property whose data stream carries the store's measurement ID, not a same-named junk property.",
+      "tier": "fleet"
+    }
+  },
+  "_permissions_contract": {
+    "tools": [
+      "get_ga4_data",
+      "search_schema",
+      "get_property_schema",
+      "list_metric_categories",
+      "list_dimension_categories",
+      "get_troubleshooting_guide"
+    ],
+    "read_only_tools": [
+      "get_ga4_data",
+      "search_schema",
+      "get_property_schema",
+      "list_metric_categories",
+      "list_dimension_categories",
+      "get_troubleshooting_guide"
+    ]
+  },
+  "google-analytics": {
+    "command": "uvx",
+    "args": ["--from", "google-analytics-mcp==2.8.1", "ga4-mcp-server"],
+    "env": {
+      "GOOGLE_APPLICATION_CREDENTIALS": "${GA4_SA_KEY_PATH}",
+      "GA4_PROPERTY_ID": "${GA4_PROPERTY_ID}"
+    }
+  }
+}
