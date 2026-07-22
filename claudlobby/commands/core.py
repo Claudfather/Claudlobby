@@ -201,6 +201,12 @@ def cmd_list_library(args) -> int:
         marker = " (override)" if tag == "[overlay]" else ""
         log.info("  %s%s", rel_key, marker)
 
+    log.info("Tools:")
+    for name, is_overlay in sorted(
+        paths.library_dir_names("tools", "tool.yaml").items()
+    ):
+        log.info("  %s%s", name, " (override)" if is_overlay else "")
+
     log.info("Voices:")
     seen_voices: dict[str, Path] = {}
     if paths.overlay_voices and paths.overlay_voices.is_dir():

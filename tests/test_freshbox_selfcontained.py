@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from claudlobby.config import BotConfig, FleetConfig, PluginsConfig, ToolsConfig
+from claudlobby.config import BotConfig, FleetConfig, PluginsConfig, ToolPermissionsConfig
 from claudlobby.freshbox import (
     Finding,
     audit_bot,
@@ -55,7 +55,7 @@ def test_fleet_override_grant_with_no_source_is_flagged_unsourced(tmp_path):
         bot_id="w",
         name="w",
         expertise=["eng"],
-        tools=ToolsConfig(allow=["mcp__mystery__*"]),
+        tool_permissions=ToolPermissionsConfig(allow=["mcp__mystery__*"]),
     )
     fleet = _fleet({"w": bot})
 
@@ -160,7 +160,7 @@ def test_audit_fleet_sweeps_every_bot(tmp_path):
             bot_id="drifty",
             name="drifty",
             expertise=["eng"],
-            tools=ToolsConfig(allow=["mcp__mystery__*"]),
+            tool_permissions=ToolPermissionsConfig(allow=["mcp__mystery__*"]),
         ),
     }
     fleet = _fleet(bots)
@@ -196,7 +196,7 @@ def test_format_report_renders_clean_summary_and_findings(tmp_path):
                 bot_id="d",
                 name="d",
                 expertise=["eng"],
-                tools=ToolsConfig(allow=["mcp__x__*"]),
+                tool_permissions=ToolPermissionsConfig(allow=["mcp__x__*"]),
             )
         }
     )

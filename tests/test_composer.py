@@ -11,7 +11,7 @@ from claudlobby.config import (
     BotConfig,
     FleetConfig,
     TelegramConfig,
-    ToolsConfig,
+    ToolPermissionsConfig,
     load_fleet,
 )
 from tests.conftest import install_real_template
@@ -461,7 +461,7 @@ class TestComposeSettingsLocal:
             bot_id="reviewer",
             name="reviewer",
             expertise=["code-review"],
-            tools=ToolsConfig(deny=["Write", "Edit", "NotebookEdit"]),
+            tool_permissions=ToolPermissionsConfig(deny=["Write", "Edit", "NotebookEdit"]),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"reviewer": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -476,7 +476,7 @@ class TestComposeSettingsLocal:
             bot_id="reader",
             name="reader",
             expertise=["eng"],
-            tools=ToolsConfig(allow=["Read", "Grep", "Glob"]),
+            tool_permissions=ToolPermissionsConfig(allow=["Read", "Grep", "Glob"]),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"reader": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -491,7 +491,7 @@ class TestComposeSettingsLocal:
             bot_id="lead",
             name="lead",
             expertise=["orchestration"],
-            tools=ToolsConfig(deny=["Write", "Edit"], allow=["Agent", "Bash"]),
+            tool_permissions=ToolPermissionsConfig(deny=["Write", "Edit"], allow=["Agent", "Bash"]),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"lead": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -504,7 +504,7 @@ class TestComposeSettingsLocal:
             bot_id="bot-a",
             name="bot-a",
             expertise=["code-review"],
-            tools=ToolsConfig(deny=["Write"]),
+            tool_permissions=ToolPermissionsConfig(deny=["Write"]),
             telegram=TelegramConfig(handle="a_bot"),
         )
         bot_b = BotConfig(
@@ -1103,7 +1103,7 @@ class TestChannelSkillInSettingsLocal:
             expertise=["eng"],
             skills=["commit"],
             telegram=TelegramConfig(handle="my_bot"),
-            tools=ToolsConfig(deny=["Write"]),
+            tool_permissions=ToolPermissionsConfig(deny=["Write"]),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -1127,7 +1127,7 @@ class TestChannelSkillInSettingsLocal:
             expertise=["eng"],
             skills=["commit"],
             telegram=TelegramConfig(handle="my_bot"),
-            tools=ToolsConfig(allow=["Bash", "Agent"]),
+            tool_permissions=ToolPermissionsConfig(allow=["Bash", "Agent"]),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -1385,7 +1385,7 @@ class TestMcpPermissionsInSettingsLocal:
         assert "mcp__github__create_pull_request" not in allow
 
     def test_mcp_emitted_even_without_explicit_tools_allow(self, tmp_path):
-        """MCP permissions should appear even if bot.tools.allow is empty."""
+        """MCP permissions should appear even if bot.tool_permissions.allow is empty."""
         from claudlobby.config import McpEntry
 
         paths = self._setup_mcp_library(
@@ -1402,7 +1402,7 @@ class TestMcpPermissionsInSettingsLocal:
             name="worker",
             expertise=["eng"],
             mcp=[McpEntry(name="notion")],
-            tools=ToolsConfig(allow=[], deny=[]),
+            tool_permissions=ToolPermissionsConfig(allow=[], deny=[]),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -1426,7 +1426,7 @@ class TestMcpPermissionsInSettingsLocal:
             name="worker",
             expertise=["eng"],
             mcp=[McpEntry(name="github")],
-            tools=ToolsConfig(deny=["Write", "Edit"]),
+            tool_permissions=ToolPermissionsConfig(deny=["Write", "Edit"]),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -1726,7 +1726,7 @@ class TestExpertisePermissionsInSettingsLocal:
             bot_id="w",
             name="w",
             expertise=["eng"],
-            tools=ToolsConfig(deny=["Write", "Edit"]),
+            tool_permissions=ToolPermissionsConfig(deny=["Write", "Edit"]),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
         result = compose_settings_local(bot, fleet, paths)

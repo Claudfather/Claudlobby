@@ -17,11 +17,12 @@ library/                                         ├── CLAUDE.md      (compo
   guardrails/                                    ├── *.service      (systemd unit, Linux)
   protocols/                                     ├── *.plist        (launchd unit, macOS)
   integrations/                                  ├── memory/        (bot-owned persistent state)
-  resources/                                     ├── data/          (bot-owned data + scripts)
-  lessons/                                       ├── logs/          (bot log files)
-  principles/                                    └── projects/      (git checkouts, gitignored)
-  permissions/
+  resources/                                     ├── data/          (bot-owned data — mutable, never regenerated)
+  lessons/                                       ├── tools/         (composited scripts — generated, never hand-edited)
+  principles/                                    ├── logs/          (bot log files)
+  permissions/                                   └── projects/      (git checkouts, gitignored)
   post_actions/
+  tools/
 voices/
 templates/claude.md.j2
 ```
@@ -35,6 +36,7 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 - **MCP fragments** — JSON wire configs in `library/mcp/` with `${ENV_VAR}` placeholders. Never real tokens.
 - **Guardrails** — Safety rules composed per-bot (e.g. `no-push-main`, `snowflake-read-only`).
 - **Protocols** — Reusable workflow patterns (dispatch, review-flow, context-management).
+- **Tools** — Composited bot scripts in `library/tools/<name>/` (`tool.yaml` + Jinja template), rendered per-bot into `<bot_dir>/tools/` (0755) with compose-time params; secrets stay runtime env reads. See `library/tools/README.md`.
 - **Plugins** — Claude Code plugins installed fleet-wide. `claudna@Claudfather` is a built-in default; extras via `fleet.plugins.additional`. Auto-installed on bot start.
 - **Voices** — Optional personality overlays from `voices/`.
 
@@ -281,6 +283,7 @@ claudlobby/
   known_values.py     — Known-good value sets for fleet.yaml fields (SSOT for config + validator)
   composer.py         — CLAUDE.md/bot.conf/.mcp.json/systemd unit generation
   mcp_resolve.py      — MCP fragment ${VAR} env-var / instance resolution (shared by composer + validator)
+  tool_resolve.py     — Library tools manifest/template/param resolution (shared by composer + validator)
   loader.py           — Library file loading, frontmatter parsing, heading demotion
   validator.py        — Fleet validation (env vars, MCP refs, scope checks)
   newbot.py           — Interactive bot scaffolding wizard

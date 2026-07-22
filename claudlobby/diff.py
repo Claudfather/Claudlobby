@@ -15,7 +15,12 @@ import difflib
 import json
 from pathlib import Path
 
-from .composer import compose_bot_conf, compose_claude_md, compose_mcp_json
+from .composer import (
+    compose_bot_conf,
+    compose_claude_md,
+    compose_mcp_json,
+    compose_tool_outputs,
+)
 from .config import FleetConfig
 from .paths import Paths
 
@@ -80,6 +85,31 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
                 actual_conf.splitlines(),
                 fromfile="library-composed (would be regenerated)",
                 tofile=f"runtime/bots/{bot_name}/bot.conf (current)",
+                lineterm="",
+            )
+        )
+
+    # tools/ — composited scripts. The whole dir is compositor-owned, so a
+    # hand-edited, deleted, or stray file is all drift.
+    expected_tools = compose_tool_outputs(bot, fleet, paths, bot_dir)
+    tools_dir = bot_dir / "tools"
+    actual_tools = (
+        {p.name: p.read_text() for p in sorted(tools_dir.iterdir()) if p.is_file()}
+        if tools_dir.is_dir()
+        else {}
+    )
+    for tool_name in sorted(set(expected_tools) | set(actual_tools)):
+        expected_text = expected_tools.get(tool_name, "")
+        actual_text = actual_tools.get(tool_name, "")
+        if expected_text == actual_text:
+            continue
+        parts.append(f"\n=== tools/{tool_name} drift in {bot_name} ===")
+        parts.extend(
+            difflib.unified_diff(
+                expected_text.splitlines(),
+                actual_text.splitlines(),
+                fromfile="library-composed (would be regenerated)",
+                tofile=f"runtime/bots/{bot_name}/tools/{tool_name} (current)",
                 lineterm="",
             )
         )

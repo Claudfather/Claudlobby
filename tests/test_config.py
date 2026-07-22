@@ -321,39 +321,49 @@ class TestCoerceBot:
         assert bot.reports_to is None
         assert bot.manages is None
 
-    def test_tools_default_empty(self):
+    def test_tool_permissions_default_empty(self):
         bot = _coerce_bot("test", {"expertise": ["eng"]}, {})
-        assert bot.tools.deny == []
-        assert bot.tools.allow == []
+        assert bot.tool_permissions.deny == []
+        assert bot.tool_permissions.allow == []
 
-    def test_tools_deny_list(self):
-        raw = {"expertise": ["eng"], "tools": {"deny": ["Write", "Edit"]}}
+    def test_tool_permissions_deny_list(self):
+        raw = {"expertise": ["eng"], "tool_permissions": {"deny": ["Write", "Edit"]}}
         bot = _coerce_bot("test", raw, {})
-        assert bot.tools.deny == ["Write", "Edit"]
-        assert bot.tools.allow == []
+        assert bot.tool_permissions.deny == ["Write", "Edit"]
+        assert bot.tool_permissions.allow == []
 
-    def test_tools_allow_list(self):
-        raw = {"expertise": ["eng"], "tools": {"allow": ["Read", "Grep"]}}
+    def test_tool_permissions_allow_list(self):
+        raw = {"expertise": ["eng"], "tool_permissions": {"allow": ["Read", "Grep"]}}
         bot = _coerce_bot("test", raw, {})
-        assert bot.tools.allow == ["Read", "Grep"]
+        assert bot.tool_permissions.allow == ["Read", "Grep"]
 
-    def test_tools_deny_and_allow(self):
-        raw = {"expertise": ["eng"], "tools": {"deny": ["Write"], "allow": ["Read"]}}
+    def test_tool_permissions_deny_and_allow(self):
+        raw = {"expertise": ["eng"], "tool_permissions": {"deny": ["Write"], "allow": ["Read"]}}
         bot = _coerce_bot("test", raw, {})
-        assert bot.tools.deny == ["Write"]
-        assert bot.tools.allow == ["Read"]
+        assert bot.tool_permissions.deny == ["Write"]
+        assert bot.tool_permissions.allow == ["Read"]
 
-    def test_tools_merge_with_defaults(self):
+    def test_tool_permissions_merge_with_defaults(self):
+        defaults = {"tool_permissions": {"deny": ["Write"]}}
+        raw = {"expertise": ["eng"], "tool_permissions": {"deny": ["Edit"]}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.tool_permissions.deny == ["Write", "Edit"]
+
+    def test_tool_permissions_merge_dedup(self):
+        defaults = {"tool_permissions": {"deny": ["Write", "Edit"]}}
+        raw = {"expertise": ["eng"], "tool_permissions": {"deny": ["Edit", "NotebookEdit"]}}
+        bot = _coerce_bot("test", raw, defaults)
+        assert bot.tool_permissions.deny == ["Write", "Edit", "NotebookEdit"]
+
+    def test_legacy_tools_key_raises(self):
+        raw = {"expertise": ["eng"], "tools": {"deny": ["Write"]}}
+        with pytest.raises(ValueError, match="tool_permissions"):
+            _coerce_bot("test", raw, {})
+
+    def test_legacy_tools_key_in_defaults_raises(self):
         defaults = {"tools": {"deny": ["Write"]}}
-        raw = {"expertise": ["eng"], "tools": {"deny": ["Edit"]}}
-        bot = _coerce_bot("test", raw, defaults)
-        assert bot.tools.deny == ["Write", "Edit"]
-
-    def test_tools_merge_dedup(self):
-        defaults = {"tools": {"deny": ["Write", "Edit"]}}
-        raw = {"expertise": ["eng"], "tools": {"deny": ["Edit", "NotebookEdit"]}}
-        bot = _coerce_bot("test", raw, defaults)
-        assert bot.tools.deny == ["Write", "Edit", "NotebookEdit"]
+        with pytest.raises(ValueError, match="tool_permissions"):
+            _coerce_bot("test", {"expertise": ["eng"]}, defaults)
 
     def test_model_strategy_full(self):
         raw = {
