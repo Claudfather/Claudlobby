@@ -321,6 +321,19 @@ class McpEntry:
 
 
 @dataclass
+class ToolEntry:
+    """Parsed tools entry from fleet.yaml (library tools category ref).
+
+    Supports two forms:
+      - `"audit-tracker"` → name="audit-tracker", params={}
+      - `{"portfolio-snapshot": {"params": {...}}}` → per-bot param overrides
+    """
+
+    name: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class AutonomousRunnerPicker:
     """Picker config for autonomous-runner. Selects work items per cadence tick."""
 
@@ -409,6 +422,7 @@ class BotConfig:
     lessons: list[str] = field(default_factory=list)
     post_actions: list[str] = field(default_factory=list)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    tools: list[ToolEntry] = field(default_factory=list)
     tool_permissions: ToolPermissionsConfig = field(
         default_factory=ToolPermissionsConfig
     )
@@ -591,6 +605,60 @@ def _merge_mcp_lists(*lists) -> list[McpEntry]:
                 seen.add(entry.name)
                 out.append(entry)
     return out
+
+
+def _parse_tools_list(raw_list, *, where: str) -> list[ToolEntry]:
+    """Parse the `tools:` list (library tool refs) into ToolEntry objects.
+
+    Accepts:
+      - "audit-tracker"                       → ToolEntry(name, params={})
+      - {"portfolio-snapshot": {"params": {...}}} → per-bot param overrides
+
+    A mapping (the pre-rename allow/deny permissions shape) is a hard error
+    with a migration message — no shim.
+    """
+    if not raw_list:
+        return []
+    if isinstance(raw_list, dict):
+        raise ValueError(
+            f"{where}: 'tools:' is now the tool-attachment list — move the "
+            "allow/deny block to 'tool_permissions:'"
+        )
+    entries: list[ToolEntry] = []
+    seen: set[str] = set()
+    for item in raw_list:
+        if isinstance(item, str):
+            name, params = item, {}
+        elif isinstance(item, dict) and len(item) == 1:
+            name, cfg = next(iter(item.items()))
+            cfg = cfg or {}
+            if not isinstance(cfg, dict):
+                raise ValueError(f"{where}: tool '{name}' config must be a mapping")
+            params = dict(cfg.get("params") or {})
+        else:
+            raise ValueError(f"{where}: unrecognized tools entry {item!r}")
+        if name in seen:
+            continue
+        seen.add(name)
+        entries.append(ToolEntry(name=name, params=params))
+    return entries
+
+
+def _merge_tool_lists(
+    default: list[ToolEntry], override: list[ToolEntry]
+) -> list[ToolEntry]:
+    """Merge tools lists by name (defaults-first order); when both declare a
+    tool, per-bot params override defaults per key."""
+    merged: dict[str, ToolEntry] = {}
+    for entry in [*default, *override]:
+        if entry.name in merged:
+            merged[entry.name] = ToolEntry(
+                name=entry.name,
+                params={**merged[entry.name].params, **entry.params},
+            )
+        else:
+            merged[entry.name] = ToolEntry(name=entry.name, params=dict(entry.params))
+    return list(merged.values())
 
 
 def _coerce_plugins(raw: dict | None) -> PluginsConfig:
@@ -970,14 +1038,6 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     if not expertise_raw:
         raise ValueError(f"bot '{name}': missing required field 'expertise'")
 
-    # `tools:` was renamed to `tool_permissions:` — hard cut, no compat shim.
-    for src, where in ((raw, f"bot '{name}'"), (defaults, "defaults")):
-        if "tools" in src:
-            raise ValueError(
-                f"{where}: 'tools:' has been renamed — move the allow/deny "
-                "block to 'tool_permissions:'"
-            )
-
     def _bool(key: str, fallback: bool) -> bool:
         if key in raw:
             return bool(raw[key])
@@ -1061,6 +1121,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         sandbox=_merge_sandbox(
             _coerce_sandbox(defaults.get("sandbox")),
             _coerce_sandbox(raw.get("sandbox")),
+        ),
+        tools=_merge_tool_lists(
+            _parse_tools_list(defaults.get("tools"), where="defaults"),
+            _parse_tools_list(raw.get("tools"), where=f"bot '{name}'"),
         ),
         tool_permissions=_merge_tool_permissions(
             _coerce_tool_permissions(defaults.get("tool_permissions")),

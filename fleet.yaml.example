@@ -210,6 +210,15 @@ fleet:
 #     # voice — personality overlay file (separate from expertise)
 #     voice: voices/erlich-bachman.md
 #
+#     # tools — library tools (composited scripts) rendered into <bot_dir>/tools/
+#     # Bare name uses manifest defaults; dict form overrides params per-bot.
+#     # See library/tools/README.md for authoring.
+#     tools:
+#       - audit-tracker
+#       - portfolio-snapshot:
+#           params:
+#             lookback_days: 30
+#
 #     # tool_permissions — control which Claude Code tools the bot may use
 #     # deny: tool names the bot cannot call (generates permission deny rules)
 #     # allow: tool names the bot is explicitly allowed (generates permission allow rules)

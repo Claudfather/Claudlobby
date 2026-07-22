@@ -21,7 +21,7 @@ _log = logging.getLogger(__name__)
 import jinja2
 from jinja2.sandbox import SandboxedEnvironment
 
-from . import dotenv
+from . import dotenv, tool_resolve
 from .config import BotConfig, FleetConfig, load_host_jobs
 from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
@@ -935,7 +935,7 @@ def link_skills(bot: BotConfig, paths: Paths, log) -> None:
             for leaf, src in collected.items():
                 _add(leaf, src)
         else:
-            src = paths.find_skill_dir(skill)
+            src = paths.find_library_dir("skills", skill)
             if src is None:
                 log(f"  skill '{skill}' missing — skipped")
                 continue
@@ -984,6 +984,82 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
                 f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink"
             )
         link.symlink_to(target_path)
+
+
+# ----------------------------------------------------------------------
+# Tools — composited scripts (library/tools/<name>/ → bot_dir/tools/)
+
+
+def compose_tool_outputs(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, bot_dir: Path
+) -> dict[str, str]:
+    """Render the bot's attached library tools → {target_filename: content}.
+
+    Pure (no writes) so generate and diff share one implementation. Tool
+    templates render with StrictUndefined — a missing/undeclared variable is
+    a hard error, never a silently-empty executable. Params are compose-time
+    structure; secrets never enter the context (rendered files are 0755 —
+    tools read secrets from os.environ at runtime, declared in tool.yaml
+    `env:`).
+    """
+    outputs: dict[str, str] = {}
+    env = SandboxedEnvironment(
+        undefined=jinja2.StrictUndefined, keep_trailing_newline=True
+    )
+    for entry in bot.tools:
+        tool_dir = paths.find_library_dir("tools", entry.name)
+        if tool_dir is None:
+            raise ValueError(
+                f"bot '{bot.bot_id}': tool '{entry.name}' not in any library/tools/"
+            )
+        manifest = tool_resolve.load_tool_manifest(tool_dir)
+        template_path = tool_resolve.tool_template_path(tool_dir, manifest)
+        target_name = tool_resolve.tool_target_name(template_path)
+        if target_name in outputs:
+            raise ValueError(
+                f"bot '{bot.bot_id}': tools render duplicate target '{target_name}'"
+            )
+        params = tool_resolve.resolve_tool_params(entry.name, manifest, entry.params)
+        context = tool_resolve.tool_context(
+            params,
+            bot_id=bot.bot_id,
+            bot_name=bot.name,
+            fleet_name=fleet.name,
+            bot_dir=str(bot_dir),
+            data_dir=str(bot_dir / "data"),
+        )
+        try:
+            content = env.from_string(template_path.read_text()).render(context)
+        except jinja2.exceptions.UndefinedError as e:
+            raise ValueError(
+                f"tool '{entry.name}': template references an "
+                f"undeclared/unset variable — {e}"
+            ) from None
+        outputs[target_name] = content
+    return outputs
+
+
+def compose_tools(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, bot_dir: Path
+) -> None:
+    """Write rendered tools into bot_dir/tools/ (0755) and reconcile.
+
+    tools/ is compositor-owned like CLAUDE.md — never hand-edited. Files for
+    detached tools are removed on every generate; a tool's runtime outputs
+    (snapshots, ledgers) belong in data/, which this never touches.
+    """
+    outputs = compose_tool_outputs(bot, fleet, paths, bot_dir)
+    tools_dir = bot_dir / "tools"
+    if outputs:
+        tools_dir.mkdir(exist_ok=True)
+    for target_name, content in outputs.items():
+        target = tools_dir / target_name
+        target.write_text(content)
+        target.chmod(0o755)
+    if tools_dir.is_dir():
+        for existing in sorted(tools_dir.iterdir()):
+            if existing.is_file() and existing.name not in outputs:
+                existing.unlink()
 
 
 # ----------------------------------------------------------------------
@@ -1668,6 +1744,7 @@ def compose_bot(
     _emit = log if log is not None else _log.info
     link_skills(bot, paths, _emit)
     link_mounts(bot, bot_dir, _emit)
+    compose_tools(bot, fleet, paths, bot_dir)
 
     # Telegram access.json — write to channel state dir so the plugin
     # picks up correct requireMention/dmPolicy on first boot.

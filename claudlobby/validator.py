@@ -14,7 +14,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-from . import dotenv
+from . import dotenv, tool_resolve
 from .config import _PROJECT_VALIDATION_KEYS, FleetConfig, is_pos_int
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
@@ -133,6 +133,7 @@ def _validate_bots(
     # Pre-compute available names for suggestion hints (avoids per-bot re-scan)
     avail_expertise = _available_names(paths, "expertise")
     avail_mcp = _available_names(paths, "mcp", ext=".json")
+    avail_tools = set(paths.library_dir_names("tools", "tool.yaml"))
 
     # Grant-contract readers (folder-aware; shared with the P2 composer resolvers).
     from .loader import (
@@ -176,7 +177,7 @@ def _validate_bots(
                     report.warnings.append(
                         f"bot '{bot_name}': skill folder '{skill}' empty or missing in any library/skills/ — no skills will be linked"
                     )
-            elif paths.find_skill_dir(skill) is None:
+            elif paths.find_library_dir("skills", skill) is None:
                 report.warnings.append(
                     f"bot '{bot_name}': skill '{skill}' not in any library/skills/ — symlink will be skipped"
                 )
@@ -302,6 +303,44 @@ def _validate_bots(
                 elif paths.find_library_file(kind, item, ".md") is None:
                     report.warnings.append(
                         f"bot '{bot_name}': {kind[:-1]} '{item}' not in any library/{kind}/ — section will be skipped"
+                    )
+
+        # Tools (library/tools/ refs). Ref/manifest/param defects are HARD
+        # errors — generate would raise on the same defect, and a bad param
+        # means a broken 0755 executable. The env contract mirrors the MCP
+        # check above: warn only, the script fails at runtime.
+        tool_targets: dict[str, str] = {}  # target filename → tool name
+        for tool_entry in bot.tools:
+            tool_dir = paths.find_library_dir("tools", tool_entry.name)
+            if tool_dir is None:
+                suggestion = closest_match(tool_entry.name, avail_tools)
+                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                report.errors.append(
+                    f"bot '{bot_name}': tool '{tool_entry.name}' not in any library/tools/{hint}"
+                )
+                continue
+            try:
+                manifest = tool_resolve.load_tool_manifest(tool_dir)
+                template_path = tool_resolve.tool_template_path(tool_dir, manifest)
+                tool_resolve.resolve_tool_params(
+                    tool_entry.name, manifest, tool_entry.params
+                )
+            except ValueError as e:
+                report.errors.append(f"bot '{bot_name}': {e}")
+                continue
+            target = tool_resolve.tool_target_name(template_path)
+            if target in tool_targets:
+                report.errors.append(
+                    f"bot '{bot_name}': tools '{tool_targets[target]}' and "
+                    f"'{tool_entry.name}' both render '{target}' — generate would fail"
+                )
+            else:
+                tool_targets[target] = tool_entry.name
+            for var in manifest.get("env") or []:
+                if var not in effective_env:
+                    report.warnings.append(
+                        f"bot '{bot_name}': tool '{tool_entry.name}' requires {var} but it's not set — "
+                        f"add to a .env tier (script will fail at runtime)"
                     )
 
         # Telegram token env (warn). Check effective_env so bot-tier .env
@@ -578,7 +617,9 @@ def _validate_mission(
         )
     if fleet.mission_file:
         _check_relative_file(
-            "fleet.mission_file", fleet.mission_file, paths.fleet_config_dir,
+            "fleet.mission_file",
+            fleet.mission_file,
+            paths.fleet_config_dir,
             report,
         )
 
@@ -731,8 +772,7 @@ def _validate_projects(
                 )
             elif not _ORG_REPO_RE.match(repo):
                 report.warnings.append(
-                    f"{label}: repos entry '{repo}' does not match "
-                    f"<org>/<repo> format"
+                    f"{label}: repos entry '{repo}' does not match <org>/<repo> format"
                 )
             elif repo in repo_owners and repo_owners[repo] != key:
                 report.warnings.append(
@@ -744,8 +784,10 @@ def _validate_projects(
 
         if project.mission_file:
             _check_relative_file(
-                f"{label}: mission_file", project.mission_file,
-                paths.fleet_config_dir, report,
+                f"{label}: mission_file",
+                project.mission_file,
+                paths.fleet_config_dir,
+                report,
             )
 
         for unknown in sorted(project.raw):

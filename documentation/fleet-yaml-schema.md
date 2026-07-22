@@ -99,6 +99,7 @@ fleet:
       permissions: [<list>]
       post_actions: [<list>]
       env: { <KEY>: <value>, ... }      # bot-specific env exports (merged into bot.conf)
+      tools: [<list>]                   # OPTIONAL — library/tools/ refs (composited scripts)
       tool_permissions:                 # OPTIONAL — tool allow/deny
         deny: [<tool>, ...]
         allow: [<tool>, ...]
@@ -347,6 +348,33 @@ Telegram config for this bot. Fields: `handle` (bot username), `token_env` (env 
 `token_env` names the **env var** that holds the Telegram token (e.g., `TELEGRAM_TOKEN_LEAD`). The actual token lives in `.env`. The generator writes the env-var *name* into `bot.conf` as `TELEGRAM_TOKEN_ENV_NAME`; `lib/start-bot.sh` reads through to the actual token. This indirection lets you commit `fleet.yaml` publicly while keeping tokens in a gitignored `.env`.
 
 Telegram fields support defaults merging — set common values (like `token_env`) in `defaults.telegram` and override per-bot as needed.
+
+### `bots.<name>.tools`
+
+Attach library tools — composited scripts rendered into `<bot_dir>/tools/`
+(0755) at generate time. Each entry is a `library/tools/<name>/` (or fleet
+overlay) directory ref; see `library/tools/README.md` for authoring.
+
+```yaml
+tools:
+  - audit-tracker                  # bare ref — manifest param defaults
+  - portfolio-snapshot:            # per-bot param overrides
+      params:
+        lookback_days: 30
+```
+
+- Params are compose-time structure (paths, cadence) baked into the rendered
+  script; per-bot values override manifest defaults per key. Unknown param
+  names and missing required params are validation **errors**.
+- Secrets never pass through params — a tool declares runtime env vars under
+  `env:` in its `tool.yaml` and reads them via `os.environ`; the validator
+  warns when one is unset (same contract as MCP fragments).
+- `tools/` in the bot dir is compositor-owned: hand-edits are overwritten and
+  files for detached tools are removed on every generate. Tool runtime
+  outputs belong in `data/`.
+- Note: this key previously held the tool allow/deny permissions block, which
+  is now `tool_permissions:` (below). The old dict shape fails with a
+  migration error.
 
 ### `bots.<name>.tool_permissions`
 
