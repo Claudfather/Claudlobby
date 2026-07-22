@@ -9,12 +9,14 @@ import json
 import logging
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 from . import dotenv, tool_resolve
+from .claudron_compat import CLAUDRON_INTEGRATION_URL
 from .config import _PROJECT_VALIDATION_KEYS, FleetConfig, is_pos_int
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
@@ -31,7 +33,7 @@ from .known_values import (
     hint,
 )
 from .mcp_resolve import required_vars as _mcp_required_vars
-from .paths import Paths
+from .paths import Paths, detect_vault
 
 _CADENCE_RE = re.compile(r"^\d+[mhd]$")
 _ORG_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
@@ -134,6 +136,13 @@ def _validate_bots(
     avail_expertise = _available_names(paths, "expertise")
     avail_mcp = _available_names(paths, "mcp", ext=".json")
     avail_tools = set(paths.library_dir_names("tools", "tool.yaml"))
+
+    # The claudron CLI door is host state, not per-bot state — probe once.
+    claudron_on_path = shutil.which("claudron") is not None
+    # Vault resolution is a full walk-up + scan per call, and `claudron_vault_path`
+    # falls back to a fleet-wide default (config.py) — so every bot in a fleet
+    # typically resolves the *same* path. Memo per run, same reason as above.
+    vault_resolutions: dict[str, bool] = {}
 
     # Grant-contract readers (folder-aware; shared with the P2 composer resolvers).
     from .loader import (
@@ -449,18 +458,39 @@ def _validate_bots(
                         f"genuinely needs it."
                     )
 
-        # Ecosystem: Claudron MCP ↔ vault path cross-check (warn)
-        has_claudron_mcp = any(entry.name == "claudron" for entry in bot.mcp)
-        if bot.claudron_vault_path and not has_claudron_mcp:
-            report.warnings.append(
-                f"bot '{bot_name}': claudron_vault_path is set but no 'claudron' MCP server is configured — "
-                "the vault path won't be used without the Claudron MCP server"
-            )
-        if has_claudron_mcp and not bot.claudron_vault_path:
-            report.warnings.append(
-                f"bot '{bot_name}': claudron MCP configured but claudron_vault_path not set — "
-                "queries will have no vault scope"
-            )
+        # Ecosystem: the Claudron door a vault-wired bot actually walks through
+        # is the CLI (Claudron's CLI_CONTRACT is the consumption ABI) — never an
+        # MCP server. Warn, never error: a fleet is legitimately composed on a
+        # host that has no claudron installed yet.
+        if bot.claudron_vault_path:
+            if not claudron_on_path:
+                report.warnings.append(
+                    f"bot '{bot_name}': claudron_vault_path is set but the claudron CLI "
+                    f"is not on PATH — bots reach the vault through the CLI "
+                    f"(see {CLAUDRON_INTEGRATION_URL})"
+                )
+            vault_path = Path(bot.claudron_vault_path).expanduser()
+            if not vault_path.is_dir():
+                report.warnings.append(
+                    f"bot '{bot_name}': claudron_vault_path "
+                    f"'{bot.claudron_vault_path}' is not a directory on this host — "
+                    f"the bot will get no vault (see {CLAUDRON_INTEGRATION_URL})"
+                )
+            else:
+                # Memo the scan, not just its result: guard the call so
+                # detect_vault (a full walk-up) runs once per distinct path, not
+                # once per bot. `setdefault(k, detect_vault(...))` evaluates the
+                # default eagerly every iteration and would not save the scan.
+                key = bot.claudron_vault_path
+                if key not in vault_resolutions:
+                    vault_resolutions[key] = detect_vault(vault_path) is not None
+                if not vault_resolutions[key]:
+                    report.warnings.append(
+                        f"bot '{bot_name}': claudron_vault_path "
+                        f"'{bot.claudron_vault_path}' does not resolve to a vault — no "
+                        f"'_shared/' (or 'shared/') marker found walking up "
+                        f"(see {CLAUDRON_INTEGRATION_URL})"
+                    )
 
         # Account (warn)
         if bot.account not in fleet.accounts:

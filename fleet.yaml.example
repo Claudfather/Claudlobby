@@ -265,8 +265,15 @@ fleet:
 #     # Ecosystem fields — connect bots to clauDNA, Claudron, and Claudosseum.
 #     # All optional. Can also be set in defaults: for fleet-wide values.
 #     claudna_version: "0.2.0"                    # pin clauDNA plugin version
-#     claudron_vault_path: "vaults/my-fleet/eng-1" # Claudron vault scope for this bot
+#     claudron_vault_path: "/srv/vaults/my-vault"  # points AT a vault, not into one
 #     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
+#
+#     # claudron_vault_path composes CLAUDRON_VAULT_PATH into bot.conf — the
+#     # canonical vault address (Claudron CLI_CONTRACT.md §Environment). The
+#     # value is a POINTER to a vault root (the directory holding `_shared/`),
+#     # not a per-bot scope: one vault per tenant, and detection walks up from
+#     # whatever path it is handed. Scoping happens inside the vault (fleet and
+#     # project tiers), never by addressing a subdirectory here.
 #
 #     # Vault-wired MANAGER bots can also opt into the Claudron query-before
 #     # preflight: dispatch-task.sh prepends fleet-memory pointers (titles +
