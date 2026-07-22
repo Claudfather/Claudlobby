@@ -323,6 +323,13 @@ class TestShippedLibraryContent:
             "delete_sitemap",
             "manage_sitemaps",
         ],
+        # meta-ads: pure-read as shipped. meta-ads-mcp-server is write-capable
+        # (19 create/update/delete/pause campaign+adset+ad, budget-schedule,
+        # creative, and image-upload tools), but the fragment sets
+        # META_ADS_ENABLE_WRITE_TOOLS=false, so the server never registers them —
+        # the same server-side write-drop as posthog's readonly=true. Empty
+        # list = a verified pure-read fragment.
+        "meta-ads": [],
     }
 
     # Verified read-only tools whose names don't match READ_NAME_RE's get_*/list_*
@@ -355,6 +362,47 @@ class TestShippedLibraryContent:
             "inspect_url_enhanced",
             "batch_url_inspection",
             "check_indexing_issues",
+        },
+        # meta-ads uses meta_ads_<verb>_<object> naming; none fit get_*/list_*.
+        # All 35 are confirmed side-effect-free reads in the pinned
+        # meta-ads-mcp-server@1.5.1 source (its 19 write tools are gated off —
+        # see KNOWN_WRITES above).
+        "meta-ads": {
+            "meta_ads_list_ad_accounts",
+            "meta_ads_get_ad_account_details",
+            "meta_ads_get_activities_by_adaccount",
+            "meta_ads_get_activities_by_adset",
+            "meta_ads_get_ad_by_id",
+            "meta_ads_get_ads_by_adaccount",
+            "meta_ads_get_ads_by_campaign",
+            "meta_ads_get_ads_by_adset",
+            "meta_ads_get_adset_by_id",
+            "meta_ads_get_adsets_by_ids",
+            "meta_ads_get_adsets_by_adaccount",
+            "meta_ads_get_adsets_by_campaign",
+            "meta_ads_get_campaign_by_id",
+            "meta_ads_get_campaigns_by_adaccount",
+            "meta_ads_get_adcreatives_by_adaccount",
+            "meta_ads_get_ad_creative_by_id",
+            "meta_ads_get_ad_creatives_by_ad_id",
+            "meta_ads_compute_image_crops",
+            "meta_ads_get_adaccount_insights",
+            "meta_ads_get_campaign_insights",
+            "meta_ads_get_adset_insights",
+            "meta_ads_get_ad_insights",
+            "meta_ads_get_ad_images",
+            "meta_ads_get_ad_previews",
+            "meta_ads_get_ad_video",
+            "meta_ads_get_image_by_hash",
+            "meta_ads_get_account_pages",
+            "meta_ads_search_pages_by_name",
+            "meta_ads_fetch_pagination_url",
+            "meta_ads_search_interests",
+            "meta_ads_get_interest_suggestions",
+            "meta_ads_search_behaviors",
+            "meta_ads_search_demographics",
+            "meta_ads_search_geo_locations",
+            "meta_ads_estimate_audience_size",
         },
     }
 

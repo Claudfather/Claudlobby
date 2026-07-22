@@ -1,0 +1,92 @@
+{
+  "_env_contract": {
+    "META_ACCESS_TOKEN": {
+      "description": "Long-lived Meta (Facebook) Marketing API access token with the ads_read scope — a System User token is strongly preferred (it does not expire). The fragment maps it to the server's own META_ADS_ACCESS_TOKEN env var. Gitignored — never commit; store only in the fleet .env. The ad-account id (act_XXXXXXXXX) is NOT an env var: it is passed per call as a tool argument, so one token serves every account it can see.",
+      "tier": "fleet"
+    }
+  },
+  "_permissions_contract": {
+    "tools": [
+      "meta_ads_list_ad_accounts",
+      "meta_ads_get_ad_account_details",
+      "meta_ads_get_activities_by_adaccount",
+      "meta_ads_get_activities_by_adset",
+      "meta_ads_get_ad_by_id",
+      "meta_ads_get_ads_by_adaccount",
+      "meta_ads_get_ads_by_campaign",
+      "meta_ads_get_ads_by_adset",
+      "meta_ads_get_adset_by_id",
+      "meta_ads_get_adsets_by_ids",
+      "meta_ads_get_adsets_by_adaccount",
+      "meta_ads_get_adsets_by_campaign",
+      "meta_ads_get_campaign_by_id",
+      "meta_ads_get_campaigns_by_adaccount",
+      "meta_ads_get_adcreatives_by_adaccount",
+      "meta_ads_get_ad_creative_by_id",
+      "meta_ads_get_ad_creatives_by_ad_id",
+      "meta_ads_compute_image_crops",
+      "meta_ads_get_adaccount_insights",
+      "meta_ads_get_campaign_insights",
+      "meta_ads_get_adset_insights",
+      "meta_ads_get_ad_insights",
+      "meta_ads_get_ad_images",
+      "meta_ads_get_ad_previews",
+      "meta_ads_get_ad_video",
+      "meta_ads_get_image_by_hash",
+      "meta_ads_get_account_pages",
+      "meta_ads_search_pages_by_name",
+      "meta_ads_fetch_pagination_url",
+      "meta_ads_search_interests",
+      "meta_ads_get_interest_suggestions",
+      "meta_ads_search_behaviors",
+      "meta_ads_search_demographics",
+      "meta_ads_search_geo_locations",
+      "meta_ads_estimate_audience_size"
+    ],
+    "read_only_tools": [
+      "meta_ads_list_ad_accounts",
+      "meta_ads_get_ad_account_details",
+      "meta_ads_get_activities_by_adaccount",
+      "meta_ads_get_activities_by_adset",
+      "meta_ads_get_ad_by_id",
+      "meta_ads_get_ads_by_adaccount",
+      "meta_ads_get_ads_by_campaign",
+      "meta_ads_get_ads_by_adset",
+      "meta_ads_get_adset_by_id",
+      "meta_ads_get_adsets_by_ids",
+      "meta_ads_get_adsets_by_adaccount",
+      "meta_ads_get_adsets_by_campaign",
+      "meta_ads_get_campaign_by_id",
+      "meta_ads_get_campaigns_by_adaccount",
+      "meta_ads_get_adcreatives_by_adaccount",
+      "meta_ads_get_ad_creative_by_id",
+      "meta_ads_get_ad_creatives_by_ad_id",
+      "meta_ads_compute_image_crops",
+      "meta_ads_get_adaccount_insights",
+      "meta_ads_get_campaign_insights",
+      "meta_ads_get_adset_insights",
+      "meta_ads_get_ad_insights",
+      "meta_ads_get_ad_images",
+      "meta_ads_get_ad_previews",
+      "meta_ads_get_ad_video",
+      "meta_ads_get_image_by_hash",
+      "meta_ads_get_account_pages",
+      "meta_ads_search_pages_by_name",
+      "meta_ads_fetch_pagination_url",
+      "meta_ads_search_interests",
+      "meta_ads_get_interest_suggestions",
+      "meta_ads_search_behaviors",
+      "meta_ads_search_demographics",
+      "meta_ads_search_geo_locations",
+      "meta_ads_estimate_audience_size"
+    ]
+  },
+  "meta-ads": {
+    "command": "npx",
+    "args": ["-y", "meta-ads-mcp-server@1.5.1"],
+    "env": {
+      "META_ADS_ACCESS_TOKEN": "${META_ACCESS_TOKEN}",
+      "META_ADS_ENABLE_WRITE_TOOLS": "false"
+    }
+  }
+}
