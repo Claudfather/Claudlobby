@@ -137,7 +137,7 @@ class TestValidate:
         yaml_text = (fleet_dir / "fleet.yaml").read_text()
         yaml_text = yaml_text.replace(
             "expertise: [software-engineering]",
-            "expertise: [software-engineering]\n      tools:\n        deny: [Write, Edit]",
+            "expertise: [software-engineering]\n      tool_permissions:\n        deny: [Write, Edit]",
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
@@ -158,7 +158,7 @@ class TestValidate:
         yaml_text = (fleet_dir / "fleet.yaml").read_text()
         yaml_text = yaml_text.replace(
             "expertise: [software-engineering]",
-            "expertise: [code-review]\n      tools:\n        deny: [Write, Edit]",
+            "expertise: [code-review]\n      tool_permissions:\n        deny: [Write, Edit]",
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
@@ -172,7 +172,7 @@ class TestValidate:
         yaml_text = (fleet_dir / "fleet.yaml").read_text()
         yaml_text = yaml_text.replace(
             "expertise: [software-engineering]",
-            "expertise: [software-engineering]\n      tools:\n        deny: [Write]\n        allow: [Write, Read]",
+            "expertise: [software-engineering]\n      tool_permissions:\n        deny: [Write]\n        allow: [Write, Read]",
         )
         (fleet_dir / "fleet.yaml").write_text(yaml_text)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")

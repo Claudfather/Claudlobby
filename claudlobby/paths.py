@@ -256,7 +256,8 @@ class Paths:
         """Search dirs for a given library kind, in precedence order.
 
         kind ∈ {expertise, skills, mcp, integrations, guardrails,
-                protocols, resources, lessons, post_actions, permissions}
+                protocols, resources, lessons, post_actions, permissions,
+                tools}
         """
         out: list[Path] = []
         if self.overlay_library:
@@ -276,13 +277,31 @@ class Paths:
                 return p
         return None
 
-    def find_skill_dir(self, name: str) -> Path | None:
-        """Skills are directories. Overlay wins."""
-        for d in self.library_search_dirs("skills"):
+    def find_library_dir(self, kind: str, name: str) -> Path | None:
+        """Find a dir-form library item (skills, tools). Overlay wins."""
+        if ".." in name:
+            raise ValueError(f"path traversal in library dir name: {name!r}")
+        for d in self.library_search_dirs(kind):
             p = d / name
             if p.is_dir():
                 return p
         return None
+
+    def library_dir_names(self, kind: str, sentinel: str) -> dict[str, bool]:
+        """Names of dir-form library items (flat scan), name → is-overlay.
+
+        Only dirs containing the category's sentinel file count (e.g.
+        tools/tool.yaml). Overlay wins on collisions.
+        """
+        out: dict[str, bool] = {}
+        for d in self.library_search_dirs(kind):
+            if not d.is_dir():
+                continue
+            is_overlay = bool(self.overlay_library and d == self.overlay_library / kind)
+            for sub in sorted(d.iterdir()):
+                if sub.is_dir() and (sub / sentinel).is_file() and sub.name not in out:
+                    out[sub.name] = is_overlay
+        return out
 
     def expand_library_folder(self, kind: str, dir_name: str) -> dict[str, Path]:
         """Expand a ``dir/`` entry into ``{rel_key: Path}`` for every ``.md`` file.

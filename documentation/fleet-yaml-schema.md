@@ -52,7 +52,7 @@ fleet:
       auto_allow_bash: true | false
       network_allowed_domains: [<list>]
       filesystem_allow_write: [<list>]
-    tools:                              # tool allow/deny defaults
+    tool_permissions:                   # tool allow/deny defaults
       deny: [<tool>, ...]
       allow: [<tool>, ...]
     hooks:                              # Claude Code hooks for fleet-wide observability
@@ -99,7 +99,8 @@ fleet:
       permissions: [<list>]
       post_actions: [<list>]
       env: { <KEY>: <value>, ... }      # bot-specific env exports (merged into bot.conf)
-      tools:                            # OPTIONAL — tool allow/deny
+      tools: [<list>]                   # OPTIONAL — library/tools/ refs (composited scripts)
+      tool_permissions:                 # OPTIONAL — tool allow/deny
         deny: [<tool>, ...]
         allow: [<tool>, ...]
       hooks:                            # OPTIONAL — per-bot hooks (appended to fleet defaults)
@@ -350,6 +351,33 @@ Telegram fields support defaults merging — set common values (like `token_env`
 
 ### `bots.<name>.tools`
 
+Attach library tools — composited scripts rendered into `<bot_dir>/tools/`
+(0755) at generate time. Each entry is a `library/tools/<name>/` (or fleet
+overlay) directory ref; see `library/tools/README.md` for authoring.
+
+```yaml
+tools:
+  - audit-tracker                  # bare ref — manifest param defaults
+  - portfolio-snapshot:            # per-bot param overrides
+      params:
+        lookback_days: 30
+```
+
+- Params are compose-time structure (paths, cadence) baked into the rendered
+  script; per-bot values override manifest defaults per key. Unknown param
+  names and missing required params are validation **errors**.
+- Secrets never pass through params — a tool declares runtime env vars under
+  `env:` in its `tool.yaml` and reads them via `os.environ`; the validator
+  warns when one is unset (same contract as MCP fragments).
+- `tools/` in the bot dir is compositor-owned: hand-edits are overwritten and
+  files for detached tools are removed on every generate. Tool runtime
+  outputs belong in `data/`.
+- Note: this key previously held the tool allow/deny permissions block, which
+  is now `tool_permissions:` (below). The old dict shape fails with a
+  migration error.
+
+### `bots.<name>.tool_permissions`
+
 Control which Claude Code tools a bot may use. Two sub-fields:
 
 - `deny: [Write, Edit, NotebookEdit]` — generates permission deny rules like `Write(**)` in `settings.local.json`. The bot cannot call these tools.
@@ -536,7 +564,7 @@ Jinja2-templated string sent to the bot on startup. Available placeholders: `{{ 
 
 ## Auto-derived permissions
 
-The compositor auto-derives permission entries in `settings.local.json` from several sources. These don't require explicit `tools:` config — they're generated automatically.
+The compositor auto-derives permission entries in `settings.local.json` from several sources. These don't require explicit `tool_permissions:` config — they're generated automatically.
 
 | Source | What it generates |
 |--------|-------------------|

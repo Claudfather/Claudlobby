@@ -53,12 +53,13 @@ class ModelStrategyConfig:
 
 
 @dataclass
-class ToolsConfig:
+class ToolPermissionsConfig:
     """Tool allow/deny lists → .claude/settings.local.json permissions.
 
-    Controls which Claude Code tools a bot may use. Deny rules generate
-    permission deny patterns like "Write(**)", enforcing bot roles at the
-    platform level rather than relying on CLAUDE.md prose alone.
+    fleet.yaml key: `tool_permissions:`. Controls which Claude Code tools a
+    bot may use. Deny rules generate permission deny patterns like
+    "Write(**)", enforcing bot roles at the platform level rather than
+    relying on CLAUDE.md prose alone.
     """
 
     deny: list[str] = field(default_factory=list)
@@ -169,9 +170,7 @@ class ProjectConfig:
     title: str
     repos: list[str] = field(default_factory=list)
     mission_file: str | None = None  # overlay-relative pointer to a PROJECT_MISSION.md
-    validation: ProjectValidationConfig = field(
-        default_factory=ProjectValidationConfig
-    )
+    validation: ProjectValidationConfig = field(default_factory=ProjectValidationConfig)
     # Unrecognized top-level keys, preserved verbatim so the validator can
     # warn on them (metrics: lives here — reserved for the metrics plan).
     raw: dict[str, Any] = field(default_factory=dict)
@@ -197,8 +196,7 @@ def _shaped(label: str, value: Any, want: type, example: str) -> Any:
         # exact-type: YAML scalars like 123/true are NOT silently stringified
         if not isinstance(value, str):
             raise ValueError(
-                f"{label} must be a string (e.g. {example}), "
-                f"got {type(value).__name__}"
+                f"{label} must be a string (e.g. {example}), got {type(value).__name__}"
             )
         return value
     if not isinstance(value, want):
@@ -212,31 +210,52 @@ def _shaped(label: str, value: Any, want: type, example: str) -> Any:
 def _coerce_project(key: Any, d: Any) -> ProjectConfig:
     key = _shaped("project key", key, str, "acme-shop")
     d = _shaped(f"project '{key}'", d, dict, "a mapping of fields")
-    v = _shaped(f"project '{key}': validation", d.get("validation"), dict,
-                "validation: {tier: review}")
-    repos_raw = _shaped(f"project '{key}': repos", d.get("repos"), list,
-                        "repos: [org/repo]")
+    v = _shaped(
+        f"project '{key}': validation",
+        d.get("validation"),
+        dict,
+        "validation: {tier: review}",
+    )
+    repos_raw = _shaped(
+        f"project '{key}': repos", d.get("repos"), list, "repos: [org/repo]"
+    )
     repos = [
-        _shaped(f"project '{key}': repos entry", r, str, "org/repo")
-        for r in repos_raw
+        _shaped(f"project '{key}': repos entry", r, str, "org/repo") for r in repos_raw
     ]
     validation = ProjectValidationConfig(
-        tier=_shaped(f"project '{key}': validation.tier",
-                     v.get("tier"), str, "tier: review") or "review",
-        preview=_shaped(f"project '{key}': validation.preview",
-                        v.get("preview"), dict, "preview: {source: vercel}"),
-        notes=_shaped(f"project '{key}': validation.notes",
-                      v.get("notes"), str, "notes: why this bar") or None,
+        tier=_shaped(
+            f"project '{key}': validation.tier", v.get("tier"), str, "tier: review"
+        )
+        or "review",
+        preview=_shaped(
+            f"project '{key}': validation.preview",
+            v.get("preview"),
+            dict,
+            "preview: {source: vercel}",
+        ),
+        notes=_shaped(
+            f"project '{key}': validation.notes",
+            v.get("notes"),
+            str,
+            "notes: why this bar",
+        )
+        or None,
         raw={k: val for k, val in v.items() if k not in _PROJECT_VALIDATION_KEYS},
     )
     return ProjectConfig(
         key=key,
-        title=_shaped(f"project '{key}': title", d.get("title"), str,
-                      "title: Acme Shop") or key,
+        title=_shaped(
+            f"project '{key}': title", d.get("title"), str, "title: Acme Shop"
+        )
+        or key,
         repos=repos,
-        mission_file=_shaped(f"project '{key}': mission_file",
-                             d.get("mission_file"), str,
-                             "missions/acme.md") or None,
+        mission_file=_shaped(
+            f"project '{key}': mission_file",
+            d.get("mission_file"),
+            str,
+            "missions/acme.md",
+        )
+        or None,
         validation=validation,
         raw={k: val for k, val in d.items() if k not in PROJECT_KEYS},
     )
@@ -299,6 +318,19 @@ class McpEntry:
         ``mcp__<name>__*`` grant prefix both derive from this one convention, so they
         stay in lockstep. E.g., gws/personal → ``gws-personal``; default → ``gws``."""
         return self.name if instance == "default" else f"{self.name}-{instance}"
+
+
+@dataclass
+class ToolEntry:
+    """Parsed tools entry from fleet.yaml (library tools category ref).
+
+    Supports two forms:
+      - `"audit-tracker"` → name="audit-tracker", params={}
+      - `{"portfolio-snapshot": {"params": {...}}}` → per-bot param overrides
+    """
+
+    name: str
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -390,7 +422,10 @@ class BotConfig:
     lessons: list[str] = field(default_factory=list)
     post_actions: list[str] = field(default_factory=list)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
-    tools: ToolsConfig = field(default_factory=ToolsConfig)
+    tools: list[ToolEntry] = field(default_factory=list)
+    tool_permissions: ToolPermissionsConfig = field(
+        default_factory=ToolPermissionsConfig
+    )
     hooks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     mounts: dict[str, str] = field(default_factory=dict)  # name → absolute host path
@@ -572,6 +607,60 @@ def _merge_mcp_lists(*lists) -> list[McpEntry]:
     return out
 
 
+def _parse_tools_list(raw_list, *, where: str) -> list[ToolEntry]:
+    """Parse the `tools:` list (library tool refs) into ToolEntry objects.
+
+    Accepts:
+      - "audit-tracker"                       → ToolEntry(name, params={})
+      - {"portfolio-snapshot": {"params": {...}}} → per-bot param overrides
+
+    A mapping (the pre-rename allow/deny permissions shape) is a hard error
+    with a migration message — no shim.
+    """
+    if not raw_list:
+        return []
+    if isinstance(raw_list, dict):
+        raise ValueError(
+            f"{where}: 'tools:' is now the tool-attachment list — move the "
+            "allow/deny block to 'tool_permissions:'"
+        )
+    entries: list[ToolEntry] = []
+    seen: set[str] = set()
+    for item in raw_list:
+        if isinstance(item, str):
+            name, params = item, {}
+        elif isinstance(item, dict) and len(item) == 1:
+            name, cfg = next(iter(item.items()))
+            cfg = cfg or {}
+            if not isinstance(cfg, dict):
+                raise ValueError(f"{where}: tool '{name}' config must be a mapping")
+            params = dict(cfg.get("params") or {})
+        else:
+            raise ValueError(f"{where}: unrecognized tools entry {item!r}")
+        if name in seen:
+            continue
+        seen.add(name)
+        entries.append(ToolEntry(name=name, params=params))
+    return entries
+
+
+def _merge_tool_lists(
+    default: list[ToolEntry], override: list[ToolEntry]
+) -> list[ToolEntry]:
+    """Merge tools lists by name (defaults-first order); when both declare a
+    tool, per-bot params override defaults per key."""
+    merged: dict[str, ToolEntry] = {}
+    for entry in [*default, *override]:
+        if entry.name in merged:
+            merged[entry.name] = ToolEntry(
+                name=entry.name,
+                params={**merged[entry.name].params, **entry.params},
+            )
+        else:
+            merged[entry.name] = ToolEntry(name=entry.name, params=dict(entry.params))
+    return list(merged.values())
+
+
 def _coerce_plugins(raw: dict | None) -> PluginsConfig:
     include_defaults = True
     additional: list[str] = []
@@ -689,18 +778,20 @@ def _merge_sandbox(default: SandboxConfig, override: SandboxConfig) -> SandboxCo
     )
 
 
-def _coerce_tools(raw: dict | None) -> ToolsConfig:
+def _coerce_tool_permissions(raw: dict | None) -> ToolPermissionsConfig:
     if not raw:
-        return ToolsConfig()
-    return ToolsConfig(
+        return ToolPermissionsConfig()
+    return ToolPermissionsConfig(
         deny=list(raw.get("deny") or []),
         allow=list(raw.get("allow") or []),
     )
 
 
-def _merge_tools(default: ToolsConfig, override: ToolsConfig) -> ToolsConfig:
-    """Merge tools configs — lists are unioned, deduplicated."""
-    return ToolsConfig(
+def _merge_tool_permissions(
+    default: ToolPermissionsConfig, override: ToolPermissionsConfig
+) -> ToolPermissionsConfig:
+    """Merge tool-permission configs — lists are unioned, deduplicated."""
+    return ToolPermissionsConfig(
         deny=_merge_lists(default.deny, override.deny),
         allow=_merge_lists(default.allow, override.allow),
     )
@@ -1031,9 +1122,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             _coerce_sandbox(defaults.get("sandbox")),
             _coerce_sandbox(raw.get("sandbox")),
         ),
-        tools=_merge_tools(
-            _coerce_tools(defaults.get("tools")),
-            _coerce_tools(raw.get("tools")),
+        tools=_merge_tool_lists(
+            _parse_tools_list(defaults.get("tools"), where="defaults"),
+            _parse_tools_list(raw.get("tools"), where=f"bot '{name}'"),
+        ),
+        tool_permissions=_merge_tool_permissions(
+            _coerce_tool_permissions(defaults.get("tool_permissions")),
+            _coerce_tool_permissions(raw.get("tool_permissions")),
         ),
         hooks=_merge_hooks_dedup(
             _coerce_hooks(defaults.get("hooks")),
@@ -1228,10 +1323,14 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
         projects=load_projects(fleet_yaml.parent / "projects.yaml"),
-        mission=_shaped("fleet.mission", fleet.get("mission"), str,
-                        "mission: one paragraph") or None,
-        mission_file=_shaped("fleet.mission_file", fleet.get("mission_file"),
-                             str, "missions/fleet.md") or None,
+        mission=_shaped(
+            "fleet.mission", fleet.get("mission"), str, "mission: one paragraph"
+        )
+        or None,
+        mission_file=_shaped(
+            "fleet.mission_file", fleet.get("mission_file"), str, "missions/fleet.md"
+        )
+        or None,
         workstreams=_coerce_workstreams(fleet.get("workstreams")),
     )
     return fleet_cfg, merged_defaults

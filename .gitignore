@@ -7,15 +7,13 @@
 
 # Generated MCP configs (composed from library/mcp/ fragments at generate time)
 .mcp.json
-runtime/bots/*/.mcp.json
 
 # OAuth credentials
 .google_workspace_mcp/
 
 # Compositor output — gitignored. Bots may edit themselves here freely;
 # promote useful changes back to library/ via `claudlobby promote`.
-runtime/bots/
-runtime/seed/
+runtime/
 
 # Local fleet overlays — user's fleet-specific library, voices, fleet.yaml,
 # runtime, .env, etc. Never committed to the public claudlobby repo.
