@@ -360,7 +360,7 @@ ln -s ~/.claude/skills ~/.claude-work/skills
 
 ## 11. Finance/Data Pre-Sync Pattern
 
-Pre-fetch slow or rate-limited data before a scheduled briefing so the briefing reads a snapshot instead of making live calls. Unlike most patterns here, this has no shipped equivalent — it's a genuine build-it-yourself template. (Note: `lib/data-sweep.sh` is unrelated — it's a retention job that *purges* old `data/` files, not a pre-fetch cache.)
+Pre-fetch slow or rate-limited data before a scheduled briefing so the briefing reads a snapshot instead of making live calls. Unlike most patterns here, this has no shipped equivalent — it's a genuine build-it-yourself template. (Note: `lib/data-sweep.sh` is unrelated — it's a retention job that *purges* old ephemeral `data/` files, not a pre-fetch cache.)
 
 ### Why
 

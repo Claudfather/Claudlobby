@@ -87,7 +87,7 @@ Key lifecycle scripts in `lib/`:
 | `fleet-pulse.sh` | Fleet-wide heartbeat / status monitoring |
 | `tail-fleet.sh` | Fleet-wide log tail + grep filter |
 | `ci-health-check.sh` | Pre-push CI health canary for target branch |
-| `data-sweep.sh` | Weekly per-bot data/ purge (30d default, fleet-overridable) — runs as the `data-sweep` fleet job |
+| `data-sweep.sh` | Weekly per-bot data/ ephemeral purge — only `events/*.jsonl`, vetted text-log names, and `*.bak` age out (30d default, fleet-overridable); durable files are never swept — runs as the `data-sweep` fleet job |
 | `dispatch.sh` | Dispatch helper for manager → worker |
 | `dispatch-task.sh` | Task dispatch helper |
 | `dispatch-overdue.py` | Finds overdue dispatches — the matcher behind the `fleet-pulse.sh` watchdog (age-capped via `DISPATCH_OVERDUE_MAX_AGE_S`) |
