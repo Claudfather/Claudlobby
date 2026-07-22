@@ -286,10 +286,20 @@ class TestShippedLibraryContent:
 
     # how_to_use is a static documentation reader — verified side-effect-free in
     # the packaged server source, granted alongside the get_*/list_* families.
-    # A future split fragment with an oddly-named read must extend this canary
-    # deliberately — that review friction is the point.
+    # The default heuristic: an auto-granted tool must LOOK like a read
+    # (get_*/list_*/how_to_use). A server whose naming convention doesn't fit the
+    # heuristic registers its verified reads in VERIFIED_NONSTANDARD_READS below —
+    # a deliberate, human-curated exception per fragment. That review friction is
+    # the point: a genuinely new read must be typed in by a human who confirmed it
+    # does not mutate.
     READ_NAME_RE = re.compile(r"^(get|list)[_A-Z]|^how_to_use$")
 
+    # Writes each split server exposes that must stay prompt-gated (never
+    # auto-granted). An empty list = a verified PURE-READ server: the fragment
+    # exposes no write tool, because the server is read-only (e.g. the GA4 Data
+    # API) or the fragment drops writes server-side (posthog's readonly=true).
+    # Every split fragment needs an entry — the curated ledger the write-guard
+    # enforces.
     KNOWN_WRITES = {
         "shopify": [
             "createProduct",
@@ -304,6 +314,48 @@ class TestShippedLibraryContent:
             "publish_product",
             "upload_image",
         ],
+        "google-analytics": [],
+        "posthog": [],
+        "google-search-console": [
+            "add_site",
+            "delete_site",
+            "submit_sitemap",
+            "delete_sitemap",
+            "manage_sitemaps",
+        ],
+    }
+
+    # Verified read-only tools whose names don't match READ_NAME_RE's get_*/list_*
+    # heuristic. Each is confirmed side-effect-free in the pinned server source;
+    # listing it here is the deliberate human sign-off. shopify/printify need no
+    # entry — their reads all fit the heuristic.
+    VERIFIED_NONSTANDARD_READS = {
+        # GA4: keyword schema search over dimension/metric names (read).
+        "google-analytics": {"search_schema"},
+        # posthog uses <resource>-<action> naming; none fit get_*/list_*.
+        "posthog": {
+            "organizations-get",
+            "organization-details-get",
+            "projects-get",
+            "insights-get-all",
+            "insight-get",
+            "insight-query",
+            "query-run",
+            "query-generate-hogql-from-question",
+            "dashboards-get-all",
+            "dashboard-get",
+            "event-definitions-list",
+            "property-definitions",
+            "properties-list",
+        },
+        # GSC: period comparison, URL index inspection, batched inspection, and
+        # indexing-issue checks — all read-only in the pinned server source.
+        "google-search-console": {
+            "compare_search_periods",
+            "inspect_url_enhanced",
+            "batch_url_inspection",
+            "check_indexing_issues",
+        },
     }
 
     def _contract(self, name: str) -> dict:
@@ -319,18 +371,29 @@ class TestShippedLibraryContent:
         assert {"shopify", "printify"} <= set(SPLIT_FRAGMENTS)
 
     @pytest.mark.parametrize("name", SPLIT_FRAGMENTS)
-    def test_read_only_is_strict_subset_of_tools(self, name):
+    def test_read_only_is_subset_of_tools(self, name):
         contract = self._contract(name)
         read_only = set(contract["read_only_tools"])
         tools = set(contract["tools"])
-        assert read_only < tools, "read set must exclude at least the write tools"
+        # <= not <: a PURE-READ server (KNOWN_WRITES[name] == []) legitimately has
+        # read_only == tools. A write-bearing server must keep its writes out of
+        # the read set, so for those the subset is strict.
+        assert read_only <= tools, "read set must be within the declared tool universe"
+        if self.KNOWN_WRITES[name]:
+            assert read_only < tools, "write-bearing server: reads must exclude writes"
 
     @pytest.mark.parametrize("name", SPLIT_FRAGMENTS)
     def test_read_only_names_match_read_patterns(self, name):
         """Every auto-granted tool must look like a read — a canary against a
-        mutation ever slipping into the curated list."""
+        mutation ever slipping into the curated list. Reads that don't fit the
+        get_*/list_* heuristic must be explicitly vetted in
+        VERIFIED_NONSTANDARD_READS[name]."""
+        allowed = self.VERIFIED_NONSTANDARD_READS.get(name, set())
         for tool in self._contract(name)["read_only_tools"]:
-            assert self.READ_NAME_RE.match(tool), f"{tool} does not look read-only"
+            assert self.READ_NAME_RE.match(tool) or tool in allowed, (
+                f"{tool} is not get_*/list_* and is not vetted in "
+                f"VERIFIED_NONSTANDARD_READS[{name!r}]"
+            )
 
     @pytest.mark.parametrize("name", SPLIT_FRAGMENTS)
     def test_integration_grants_mirror_read_only_exactly(self, name):
@@ -341,7 +404,10 @@ class TestShippedLibraryContent:
     @pytest.mark.parametrize("name", SPLIT_FRAGMENTS)
     def test_known_writes_stay_prompt_gated(self, name):
         writes = self.KNOWN_WRITES.get(name)
-        assert writes, f"add {name} to KNOWN_WRITES — every split fragment needs one"
+        assert writes is not None, (
+            f"add {name} to KNOWN_WRITES — every split fragment needs an entry "
+            "([] for a verified pure-read server with no write tools)"
+        )
         contract = self._contract(name)
         grants = self._tool_grants(name)
         for write in writes:
