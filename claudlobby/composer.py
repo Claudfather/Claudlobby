@@ -1465,7 +1465,7 @@ def compose_settings_local(
     deny_patterns.extend(expertise_deny)
 
     # Layer 7: Bot-level deny (from fleet.yaml tools.deny) — wins over everything
-    for tool in bot.tools.deny:
+    for tool in bot.tool_permissions.deny:
         deny_patterns.append(tool)
 
     # Build allow list: layers 2-7
@@ -1504,10 +1504,10 @@ def compose_settings_local(
     _assert_no_write_autoallows(bot, paths, allow_patterns)
 
     # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
-    _append_unique(allow_patterns, bot.tools.allow)
+    _append_unique(allow_patterns, bot.tool_permissions.allow)
 
     # Bot-level deny wins over all allow layers
-    bot_deny_plain = set(bot.tools.deny)
+    bot_deny_plain = set(bot.tool_permissions.deny)
     allow_patterns = [p for p in allow_patterns if p not in bot_deny_plain]
 
     # Ensure base tools are present whenever allow list is non-empty

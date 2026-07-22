@@ -52,7 +52,7 @@ fleet:
       auto_allow_bash: true | false
       network_allowed_domains: [<list>]
       filesystem_allow_write: [<list>]
-    tools:                              # tool allow/deny defaults
+    tool_permissions:                   # tool allow/deny defaults
       deny: [<tool>, ...]
       allow: [<tool>, ...]
     hooks:                              # Claude Code hooks for fleet-wide observability
@@ -99,7 +99,7 @@ fleet:
       permissions: [<list>]
       post_actions: [<list>]
       env: { <KEY>: <value>, ... }      # bot-specific env exports (merged into bot.conf)
-      tools:                            # OPTIONAL — tool allow/deny
+      tool_permissions:                 # OPTIONAL — tool allow/deny
         deny: [<tool>, ...]
         allow: [<tool>, ...]
       hooks:                            # OPTIONAL — per-bot hooks (appended to fleet defaults)
@@ -348,7 +348,7 @@ Telegram config for this bot. Fields: `handle` (bot username), `token_env` (env 
 
 Telegram fields support defaults merging — set common values (like `token_env`) in `defaults.telegram` and override per-bot as needed.
 
-### `bots.<name>.tools`
+### `bots.<name>.tool_permissions`
 
 Control which Claude Code tools a bot may use. Two sub-fields:
 
@@ -536,7 +536,7 @@ Jinja2-templated string sent to the bot on startup. Available placeholders: `{{ 
 
 ## Auto-derived permissions
 
-The compositor auto-derives permission entries in `settings.local.json` from several sources. These don't require explicit `tools:` config — they're generated automatically.
+The compositor auto-derives permission entries in `settings.local.json` from several sources. These don't require explicit `tool_permissions:` config — they're generated automatically.
 
 | Source | What it generates |
 |--------|-------------------|

@@ -128,7 +128,7 @@ fleet:
       mission: "Review PRs the manager dispatches. Mutation-test assertions. Verdict-first comments. No commits, no merges."
       model: sonnet                            # reviewers run hot — Sonnet is enough
       protocols: [review-flow]
-      tools:
+      tool_permissions:
         deny: [Write, Edit, NotebookEdit]      # reviewers read, not write
       telegram:
         handle: my_reviewer_bot
@@ -210,11 +210,11 @@ fleet:
 #     # voice — personality overlay file (separate from expertise)
 #     voice: voices/erlich-bachman.md
 #
-#     # tools — control which Claude Code tools the bot may use
+#     # tool_permissions — control which Claude Code tools the bot may use
 #     # deny: tool names the bot cannot call (generates permission deny rules)
 #     # allow: tool names the bot is explicitly allowed (generates permission allow rules)
 #     # Validator warns if denied tools conflict with the bot's expertise.
-#     tools:
+#     tool_permissions:
 #       deny: [Write, Edit, NotebookEdit]
 #       # allow: [Agent, Bash, Read, Grep, Glob]
 #

@@ -261,7 +261,7 @@ class TestUnionLayerWriteGuard:
             tmp_path / "r", integration_grants=[f"mcp__shopify__{t}" for t in READS]
         )
         bot = _bot()
-        bot.tools.allow.append("mcp__shopify__createProduct")
+        bot.tool_permissions.allow.append("mcp__shopify__createProduct")
         settings = compose_settings_local(bot, _single_bot_fleet(bot), paths)
         allow = settings["permissions"]["allow"]
         assert "mcp__shopify__createProduct" in allow

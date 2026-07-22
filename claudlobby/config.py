@@ -53,12 +53,13 @@ class ModelStrategyConfig:
 
 
 @dataclass
-class ToolsConfig:
+class ToolPermissionsConfig:
     """Tool allow/deny lists → .claude/settings.local.json permissions.
 
-    Controls which Claude Code tools a bot may use. Deny rules generate
-    permission deny patterns like "Write(**)", enforcing bot roles at the
-    platform level rather than relying on CLAUDE.md prose alone.
+    fleet.yaml key: `tool_permissions:`. Controls which Claude Code tools a
+    bot may use. Deny rules generate permission deny patterns like
+    "Write(**)", enforcing bot roles at the platform level rather than
+    relying on CLAUDE.md prose alone.
     """
 
     deny: list[str] = field(default_factory=list)
@@ -169,9 +170,7 @@ class ProjectConfig:
     title: str
     repos: list[str] = field(default_factory=list)
     mission_file: str | None = None  # overlay-relative pointer to a PROJECT_MISSION.md
-    validation: ProjectValidationConfig = field(
-        default_factory=ProjectValidationConfig
-    )
+    validation: ProjectValidationConfig = field(default_factory=ProjectValidationConfig)
     # Unrecognized top-level keys, preserved verbatim so the validator can
     # warn on them (metrics: lives here — reserved for the metrics plan).
     raw: dict[str, Any] = field(default_factory=dict)
@@ -197,8 +196,7 @@ def _shaped(label: str, value: Any, want: type, example: str) -> Any:
         # exact-type: YAML scalars like 123/true are NOT silently stringified
         if not isinstance(value, str):
             raise ValueError(
-                f"{label} must be a string (e.g. {example}), "
-                f"got {type(value).__name__}"
+                f"{label} must be a string (e.g. {example}), got {type(value).__name__}"
             )
         return value
     if not isinstance(value, want):
@@ -212,31 +210,52 @@ def _shaped(label: str, value: Any, want: type, example: str) -> Any:
 def _coerce_project(key: Any, d: Any) -> ProjectConfig:
     key = _shaped("project key", key, str, "acme-shop")
     d = _shaped(f"project '{key}'", d, dict, "a mapping of fields")
-    v = _shaped(f"project '{key}': validation", d.get("validation"), dict,
-                "validation: {tier: review}")
-    repos_raw = _shaped(f"project '{key}': repos", d.get("repos"), list,
-                        "repos: [org/repo]")
+    v = _shaped(
+        f"project '{key}': validation",
+        d.get("validation"),
+        dict,
+        "validation: {tier: review}",
+    )
+    repos_raw = _shaped(
+        f"project '{key}': repos", d.get("repos"), list, "repos: [org/repo]"
+    )
     repos = [
-        _shaped(f"project '{key}': repos entry", r, str, "org/repo")
-        for r in repos_raw
+        _shaped(f"project '{key}': repos entry", r, str, "org/repo") for r in repos_raw
     ]
     validation = ProjectValidationConfig(
-        tier=_shaped(f"project '{key}': validation.tier",
-                     v.get("tier"), str, "tier: review") or "review",
-        preview=_shaped(f"project '{key}': validation.preview",
-                        v.get("preview"), dict, "preview: {source: vercel}"),
-        notes=_shaped(f"project '{key}': validation.notes",
-                      v.get("notes"), str, "notes: why this bar") or None,
+        tier=_shaped(
+            f"project '{key}': validation.tier", v.get("tier"), str, "tier: review"
+        )
+        or "review",
+        preview=_shaped(
+            f"project '{key}': validation.preview",
+            v.get("preview"),
+            dict,
+            "preview: {source: vercel}",
+        ),
+        notes=_shaped(
+            f"project '{key}': validation.notes",
+            v.get("notes"),
+            str,
+            "notes: why this bar",
+        )
+        or None,
         raw={k: val for k, val in v.items() if k not in _PROJECT_VALIDATION_KEYS},
     )
     return ProjectConfig(
         key=key,
-        title=_shaped(f"project '{key}': title", d.get("title"), str,
-                      "title: Acme Shop") or key,
+        title=_shaped(
+            f"project '{key}': title", d.get("title"), str, "title: Acme Shop"
+        )
+        or key,
         repos=repos,
-        mission_file=_shaped(f"project '{key}': mission_file",
-                             d.get("mission_file"), str,
-                             "missions/acme.md") or None,
+        mission_file=_shaped(
+            f"project '{key}': mission_file",
+            d.get("mission_file"),
+            str,
+            "missions/acme.md",
+        )
+        or None,
         validation=validation,
         raw={k: val for k, val in d.items() if k not in PROJECT_KEYS},
     )
@@ -390,7 +409,9 @@ class BotConfig:
     lessons: list[str] = field(default_factory=list)
     post_actions: list[str] = field(default_factory=list)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
-    tools: ToolsConfig = field(default_factory=ToolsConfig)
+    tool_permissions: ToolPermissionsConfig = field(
+        default_factory=ToolPermissionsConfig
+    )
     hooks: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     mounts: dict[str, str] = field(default_factory=dict)  # name → absolute host path
@@ -689,18 +710,20 @@ def _merge_sandbox(default: SandboxConfig, override: SandboxConfig) -> SandboxCo
     )
 
 
-def _coerce_tools(raw: dict | None) -> ToolsConfig:
+def _coerce_tool_permissions(raw: dict | None) -> ToolPermissionsConfig:
     if not raw:
-        return ToolsConfig()
-    return ToolsConfig(
+        return ToolPermissionsConfig()
+    return ToolPermissionsConfig(
         deny=list(raw.get("deny") or []),
         allow=list(raw.get("allow") or []),
     )
 
 
-def _merge_tools(default: ToolsConfig, override: ToolsConfig) -> ToolsConfig:
-    """Merge tools configs — lists are unioned, deduplicated."""
-    return ToolsConfig(
+def _merge_tool_permissions(
+    default: ToolPermissionsConfig, override: ToolPermissionsConfig
+) -> ToolPermissionsConfig:
+    """Merge tool-permission configs — lists are unioned, deduplicated."""
+    return ToolPermissionsConfig(
         deny=_merge_lists(default.deny, override.deny),
         allow=_merge_lists(default.allow, override.allow),
     )
@@ -947,6 +970,14 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
     if not expertise_raw:
         raise ValueError(f"bot '{name}': missing required field 'expertise'")
 
+    # `tools:` was renamed to `tool_permissions:` — hard cut, no compat shim.
+    for src, where in ((raw, f"bot '{name}'"), (defaults, "defaults")):
+        if "tools" in src:
+            raise ValueError(
+                f"{where}: 'tools:' has been renamed — move the allow/deny "
+                "block to 'tool_permissions:'"
+            )
+
     def _bool(key: str, fallback: bool) -> bool:
         if key in raw:
             return bool(raw[key])
@@ -1031,9 +1062,9 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             _coerce_sandbox(defaults.get("sandbox")),
             _coerce_sandbox(raw.get("sandbox")),
         ),
-        tools=_merge_tools(
-            _coerce_tools(defaults.get("tools")),
-            _coerce_tools(raw.get("tools")),
+        tool_permissions=_merge_tool_permissions(
+            _coerce_tool_permissions(defaults.get("tool_permissions")),
+            _coerce_tool_permissions(raw.get("tool_permissions")),
         ),
         hooks=_merge_hooks_dedup(
             _coerce_hooks(defaults.get("hooks")),
@@ -1228,10 +1259,14 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
         projects=load_projects(fleet_yaml.parent / "projects.yaml"),
-        mission=_shaped("fleet.mission", fleet.get("mission"), str,
-                        "mission: one paragraph") or None,
-        mission_file=_shaped("fleet.mission_file", fleet.get("mission_file"),
-                             str, "missions/fleet.md") or None,
+        mission=_shaped(
+            "fleet.mission", fleet.get("mission"), str, "mission: one paragraph"
+        )
+        or None,
+        mission_file=_shaped(
+            "fleet.mission_file", fleet.get("mission_file"), str, "missions/fleet.md"
+        )
+        or None,
         workstreams=_coerce_workstreams(fleet.get("workstreams")),
     )
     return fleet_cfg, merged_defaults

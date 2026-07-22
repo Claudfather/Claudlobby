@@ -431,8 +431,8 @@ def _validate_bots(
 
         # Tool deny vs expertise conflict (warn). Flag when a denied tool is
         # core to the bot's expertise — the bot won't be able to do its job.
-        if bot.tools.deny:
-            denied = set(bot.tools.deny)
+        if bot.tool_permissions.deny:
+            denied = set(bot.tool_permissions.deny)
             for area in bot.expertise:
                 core = EXPERTISE_CORE_TOOLS.get(area, set())
                 conflict = denied & core
@@ -442,8 +442,8 @@ def _validate_bots(
                         f"but expertise '{area}' typically requires them"
                     )
             # Also warn if same tool appears in both allow and deny
-            if bot.tools.allow:
-                overlap = denied & set(bot.tools.allow)
+            if bot.tool_permissions.allow:
+                overlap = denied & set(bot.tool_permissions.allow)
                 if overlap:
                     report.warnings.append(
                         f"bot '{bot_name}': tools {sorted(overlap)} appear in both allow and deny lists"
