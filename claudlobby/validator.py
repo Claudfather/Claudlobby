@@ -437,15 +437,21 @@ def _validate_bots(
                     f"'{bot.claudron_vault_path}' is not a directory on this host — "
                     f"the bot will get no vault (see {CLAUDRON_INTEGRATION_URL})"
                 )
-            elif not vault_resolutions.setdefault(
-                bot.claudron_vault_path, detect_vault(vault_path) is not None
-            ):
-                report.warnings.append(
-                    f"bot '{bot_name}': claudron_vault_path "
-                    f"'{bot.claudron_vault_path}' does not resolve to a vault — no "
-                    f"'_shared/' (or 'shared/') marker found walking up "
-                    f"(see {CLAUDRON_INTEGRATION_URL})"
-                )
+            else:
+                # Memo the scan, not just its result: guard the call so
+                # detect_vault (a full walk-up) runs once per distinct path, not
+                # once per bot. `setdefault(k, detect_vault(...))` evaluates the
+                # default eagerly every iteration and would not save the scan.
+                key = bot.claudron_vault_path
+                if key not in vault_resolutions:
+                    vault_resolutions[key] = detect_vault(vault_path) is not None
+                if not vault_resolutions[key]:
+                    report.warnings.append(
+                        f"bot '{bot_name}': claudron_vault_path "
+                        f"'{bot.claudron_vault_path}' does not resolve to a vault — no "
+                        f"'_shared/' (or 'shared/') marker found walking up "
+                        f"(see {CLAUDRON_INTEGRATION_URL})"
+                    )
 
         # Account (warn)
         if bot.account not in fleet.accounts:
