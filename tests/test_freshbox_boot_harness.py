@@ -30,6 +30,9 @@ _missing = [
     for name, present in (
         ("claude", shutil.which("claude") is not None),
         ("jq", shutil.which("jq") is not None),
+        # L2: the gate now wires a vault-wired bot and asserts the injected recall
+        # brief, so the engine CLI must be on PATH for its SessionStart hook.
+        ("claudron", shutil.which("claudron") is not None),
         ("auth ~/.claude/.credentials.json", HOST_CREDS.is_file()),
     )
     if not present
@@ -65,5 +68,11 @@ def test_freshbox_boot_gate():
         "zero permission prompts",
         "transcript tool-set ⊆ composed allow-list",
         "trust-seed teeth",
+        # L2 additions
+        "composed settings carry the three claudron session-loop hooks",
+        "composed settings carry the four narrow claudron verb grants",
+        "no Bash(claudron *) wildcard in composed settings",
+        "vault-wired bot cannot run claudron promote",
+        "SessionStart injected the recall brief",
     ):
         assert marker in out, f"missing scenario marker {marker!r}:\n{out}"

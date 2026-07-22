@@ -436,6 +436,12 @@ class BotConfig:
     # Ecosystem-aware fields — optional integration with clauDNA, Claudron, Claudosseum
     claudna_version: str | None = None
     claudron_vault_path: str | None = None
+    # Wire the Claudron session loop (L2): the composer installs the engine's
+    # SessionStart/PreCompact/SessionEnd hooks + narrow verb grants. Tri-state:
+    # None = unset → defaults True when claudron_vault_path is set, False
+    # otherwise (resolved in composer._session_loop_enabled); an explicit bool
+    # overrides that default.
+    claudron_session_loop: bool | None = None
     claudosseum_tenant_id: str | None = None
     autonomous_runner: AutonomousRunnerConfig | None = None
     briefing: BriefingConfig | None = None  # equippable briefing feature (#627)
@@ -1052,6 +1058,16 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             return str(defaults[key])
         return fallback
 
+    def _tristate(key: str) -> bool | None:
+        """Presence-based tri-state: an explicit bot/fleet value wins, else
+        None — the unset sentinel the composer resolves to its vault-presence
+        default (unlike `_bool`, which collapses unset to a fixed fallback)."""
+        if key in raw:
+            return bool(raw[key])
+        if key in defaults:
+            return bool(defaults[key])
+        return None
+
     return BotConfig(
         bot_id=name,
         name=raw.get("name", name),
@@ -1151,6 +1167,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         claudna_version=raw.get("claudna_version") or defaults.get("claudna_version"),
         claudron_vault_path=raw.get("claudron_vault_path")
         or defaults.get("claudron_vault_path"),
+        claudron_session_loop=_tristate("claudron_session_loop"),
         claudosseum_tenant_id=raw.get("claudosseum_tenant_id")
         or defaults.get("claudosseum_tenant_id"),
         autonomous_runner=_coerce_autonomous_runner(raw.get("autonomous_runner"), name),

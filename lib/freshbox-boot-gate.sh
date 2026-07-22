@@ -50,7 +50,7 @@ BOOT_TIMEOUT="${FRESHBOX_BOOT_TIMEOUT:-180}"
 SENTINEL="FRESHBOX_OK_7F3A2B"
 
 # --- preconditions (skip, do not fail, when a heavy dep is absent) ------------
-for dep in "$CLAUDE_BIN" jq python3; do
+for dep in "$CLAUDE_BIN" jq python3 claudron; do
   command -v "$dep" >/dev/null 2>&1 || { printf 'SKIP: %s not found\n' "$dep"; exit 2; }
 done
 [ -f "$HOST_CREDS" ] || { printf 'SKIP: no host auth at ~/.claude/.credentials.json to seed\n'; exit 2; }
@@ -112,8 +112,28 @@ ln -s "$CLAUDLOBBY_SRC/lib" "$ROOT/lib"
 ln -s "$CLAUDLOBBY_SRC/templates" "$ROOT/templates"
 mkdir -p "$CONFIG_DIR"
 
+# A throwaway vault the fresh bot is wired to → its session loop (L2) defaults
+# on, so the composer installs the three engine hooks + the narrow verb grants.
+# The SessionStart hook pulls (no remote → offline fail-open) then recalls;
+# CONVENTIONS is the always-injected layer, so a sentinel there is the runtime
+# proof the recall brief reached the session (not merely that a hook is registered).
+VAULT="$ROOT/vault"
+RECALL_SENTINEL="RECALL_OK_5C1D9E"
+mkdir -p "$VAULT/_shared/knowledge"
+printf '# Conventions\n\n%s — fleet knowledge marker.\n' "$RECALL_SENTINEL" \
+  > "$VAULT/_shared/CONVENTIONS.md"
+cat > "$VAULT/_shared/knowledge/seed.md" <<NOTE
+---
+type: knowledge
+title: freshbox seed note
+tags: [freshbox]
+---
+A durable finding the recall brief can surface.
+NOTE
+
 # plugins omitted → the bot inherits DEFAULT_PLUGINS (claudna + superpowers),
 # exactly like a real bot; the scoped code-review expertise keeps it non-allow_all.
+# claudron_vault_path wires the L2 loop (default on → hooks + narrow grants).
 cat > "$ROOT/fleet.yaml" <<YAML
 fleet:
   name: freshbox-gate
@@ -125,6 +145,7 @@ fleet:
     $BOT:
       name: $BOT
       account: freshbox
+      claudron_vault_path: $VAULT
       expertise:
         - code-review
       telegram:
@@ -174,6 +195,36 @@ check "composed settings.local.json carries the skip-flags" \
 check "no user-tier settings.json skip-flags seeded (isolates the project-tier flags)" \
   "$([ ! -f "$CONFIG_DIR/settings.json" ] && echo yes || echo no)"
 
+# --- L2: the composed session-loop wiring (static — proves composition) -------
+# The vault-wired bot must carry the three engine hooks + the four narrow verb
+# grants, and — the ratified BLOCKER — NO Bash(claudron *) wildcard and no
+# promote grant, so it cannot self-promote (curation stays human-gated).
+loop_cmds="$(jq -r '[.hooks.SessionStart[]?.hooks[]?.command,
+                     .hooks.PreCompact[]?.hooks[]?.command,
+                     .hooks.SessionEnd[]?.hooks[]?.command] | join(" ")' "$SETTINGS")"
+has_all_hooks="yes"
+for suffix in 'hook session-start' 'hook pre-compact' 'hook session-end'; do
+  printf '%s' "$loop_cmds" | grep -qF "$suffix" || has_all_hooks="no"
+done
+check "composed settings carry the three claudron session-loop hooks" "$has_all_hooks"
+
+allow_json="$(jq -c '.permissions.allow // []' "$SETTINGS")"
+grants_ok="yes"
+for verb in lookup recall capture status; do
+  printf '%s' "$allow_json" | jq -e --arg g "Bash(claudron $verb *)" \
+    'any(.[]; . == $g)' >/dev/null 2>&1 || grants_ok="no"
+done
+check "composed settings carry the four narrow claudron verb grants" "$grants_ok"
+
+check_no_match "no Bash(claudron *) wildcard in composed settings" \
+  "$SETTINGS" 'Bash\(claudron \*\)'
+promote_denied="yes"
+printf '%s' "$allow_json" | jq -e \
+  'any(.[]; . == "Bash" or . == "Bash(claudron *)" or (tostring | test("claudron +promote")))' \
+  >/dev/null 2>&1 && promote_denied="no"
+check "vault-wired bot cannot run claudron promote (no promote grant, no wildcard)" \
+  "$promote_denied"
+
 # --- boot: claude -p on the fresh, seeded, composed config --------------------
 # The prompt has the bot retrieve a token from a non-auto-loaded file via a
 # tool call, proving the boot operates end-to-end (not a no-op). NOTE: headless
@@ -181,9 +232,15 @@ check "no user-tier settings.json skip-flags seeded (isolates the project-tier f
 # tool fires whether or not settings.local.json is honored), so tool success is
 # a functional-boot signal, NOT proof the allow was honored. The real "settings
 # honored?" signal is the untrusted-workspace advisory below.
-BOOT_PROMPT="Use the Bash tool to run exactly this command: cat probe.txt — then reply with only the token it prints. Do not use the Read tool."
+# Two asks in one boot: retrieve the probe token via a GATED Bash tool (proves a
+# non-base composed grant is honored end-to-end), and echo any RECALL_ token from
+# the injected SessionStart brief (proves the recall brief reached the session).
+BOOT_PROMPT="Use the Bash tool to run exactly this command: cat probe.txt. Then reply with the token it prints, and on a second line, any token starting with RECALL_ that appears anywhere in your session context (write NONE if there is none). Do not use the Read tool."
 boot() {  # boot <config_dir> <out_file>
-  ( cd "$BOT_DIR" && CLAUDE_CONFIG_DIR="$1" timeout "$BOOT_TIMEOUT" "$CLAUDE_BIN" -p \
+  # CLAUDRON_VAULT_PATH is exported into the boot so the SessionStart hook resolves
+  # the vault (start-bot.sh sources it from bot.conf in production; set directly here).
+  ( cd "$BOT_DIR" && CLAUDE_CONFIG_DIR="$1" CLAUDRON_VAULT_PATH="$VAULT" \
+      timeout "$BOOT_TIMEOUT" "$CLAUDE_BIN" -p \
       "$BOOT_PROMPT" \
       --output-format stream-json --verbose --model claude-haiku-4-5-20251001 \
       > "$2" 2>&1 ) || return $?
@@ -214,6 +271,15 @@ check_no_match "composed settings.local.json honored — no untrusted-workspace 
 tool_worked="no"
 if bash_tool_used "$TRANSCRIPT" && result_has_sentinel "$TRANSCRIPT"; then tool_worked="yes"; fi
 check "the bot ran a tool and returned the probe token (operates end-to-end on the fresh config)" "$tool_worked"
+
+# L2: the SessionStart hook injected the recall brief. CONVENTIONS is the
+# always-loaded layer, so its sentinel surfacing in the model's reply proves the
+# brief reached the session — not merely that the hook entry is registered.
+brief_injected="no"
+if json_lines "$TRANSCRIPT" | jq -rc 'select(.type=="result") | .result // ""' 2>/dev/null | grep -qF "$RECALL_SENTINEL"; then
+  brief_injected="yes"
+fi
+check "SessionStart injected the recall brief (CONVENTIONS sentinel observed in the reply)" "$brief_injected"
 
 # auth wall / onboarding wizard would appear if a seed were missing.
 check_no_match "no auth wall (credential drop authenticated the fresh dir)" \
