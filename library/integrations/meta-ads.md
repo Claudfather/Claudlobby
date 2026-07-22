@@ -139,10 +139,13 @@ campaigns is a deliberate, separate, reviewed change.
    Accounts**, select the account and **Assign** the System User with at least
    *view performance* access. A token minted **before** the account was assigned
    will not see it — assign first, or regenerate the token after assigning.
-4. **Find the ad-account id.** In **Ads Manager** or **Business Settings → Ad
-   Accounts** — it is the numeric id shown for the account. Callers pass it as
-   `act_<that-number>` (the `act_` prefix is required). This is a per-call tool
-   argument, not an env var.
+4. **Find the ad-account id — or just let the token reveal it.** You rarely need to
+   ask: `meta_ads_list_ad_accounts` (or REST
+   `GET /me/adaccounts?fields=id,name,account_status`) enumerates every account the
+   token can see, with names — so if the token sees several, pick the right one by
+   name. In the UI it's the numeric id in **Ads Manager** or **Business Settings → Ad
+   Accounts**. Callers pass it as `act_<that-number>` (the `act_` prefix is required);
+   it's a per-call tool argument, not an env var.
 5. **(Optional) note the pixel/dataset id** in **Events Manager** if you plan to
    reason about conversions — but see gotchas: this server has no pixel-stats tool;
    conversion outcomes surface only inside the insights tools.
@@ -213,6 +216,13 @@ campaigns → drill with `meta_ads_get_adset_insights` / `meta_ads_get_ad_insigh
   (re)generate. Symptom if skipped: `meta_ads_list_ad_accounts` is empty, or an
   `act_` id errors as not found.
 - **`act_` prefix is required.** Pass `act_<numeric-id>`; a bare number errors.
+- **Empty recent window ≠ no access.** `date_preset=last_90d` can return zero rows
+  simply because ads are paused, while `date_preset=maximum` shows real all-time
+  spend / impressions / clicks. Check an all-time window before concluding the token
+  can't see data.
+- **Status `ACTIVE` ≠ actually spending.** A campaign can report status `ACTIVE`
+  while running `$0` recent spend (active-on-paper, dark-in-reality). Cross-check the
+  `*_insights` spend, and flag the gap to whoever reads the numbers.
 - **Rate limits are per account and per app; insights are the heaviest calls.**
   Prefer `date_preset` or batched `time_ranges` over many single-day requests, and
   request Standard/Advanced access for real reporting volume — Development-tier apps
