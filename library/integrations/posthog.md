@@ -90,9 +90,13 @@ layer 2 into one all-tunnelling grant).
 2. **Create a read-only Personal API Key** (PostHog → Settings → Personal API keys →
    "MCP server" preset). Restrict its scopes to read and to the intended project.
    Copy the `phx_…` value.
-3. **Find the numeric project ID.** PostHog → Settings → Project → the URL and
-   settings show a bare number (e.g. `12345`). This is **not** the `phc_…` client
-   Web-analytics token — it is the internal project ID.
+3. **Find the numeric project ID.** You don't have to hunt for it or ask anyone —
+   the key can discover it. Once the MCP is wired, `projects-get` returns every
+   project the key can see with its numeric ID; out-of-band, `GET /api/projects/`
+   against the data host (see the host note in gotchas) does the same. In the UI it's
+   under PostHog → Settings → Project (the URL and settings show a bare number, e.g.
+   `12345`). This is **not** the `phc_…` client Web-analytics token, and **not** the
+   `phx_…` key — it is the internal project ID.
 4. **Set the three fleet `.env` vars** (gitignored — real values live only there):
 
    ```
@@ -104,10 +108,18 @@ layer 2 into one all-tunnelling grant).
 5. **Wire the MCP** — add `posthog` to a bot's `mcp:` list, `claudlobby generate`
    (see *Equipping a bot*). First `npx` run downloads `mcp-remote` into the cache —
    `claudlobby warm-cache` warms it so the first bot use isn't slow.
-6. **Verify the connection.** On first live use, list the exposed tools and run a
-   trivial read (e.g. `projects-get`) to confirm auth + project pinning. Because the
-   hosted server rolls forward, this is also where you confirm the pinned tool names
-   still match — see gotchas.
+6. **Verify it's connected *and* capturing.** These are two different questions —
+   check both:
+   - **Connected?** Run a trivial read (e.g. `projects-get`) to confirm auth + project
+     pinning, and that the pinned tool names still match (the hosted server rolls
+     forward — see gotchas).
+   - **Actually capturing?** A connected key proves nothing about whether events are
+     flowing. Pull the most recent events and look for fresh timestamps + the events
+     you expect (`$pageview`, `$autocapture`, your custom events): via the MCP,
+     `query-run` with HogQL `SELECT event, timestamp FROM events ORDER BY timestamp
+     DESC LIMIT 5`; out-of-band, `GET /api/projects/<id>/events/?limit=5`. Recent rows
+     = capturing. Empty or stale = not capturing yet (tag not firing, wrong
+     project/key, or consent-gated with no consented visits yet).
 
 ## Common operations
 
@@ -142,8 +154,13 @@ Typical flow: `event-definitions-list` / `property-definitions` to find field na
   `readonly=true`. If you ever remove it, writes would re-appear server-side — the
   compositor's exact-allow list still blocks them from auto-running, but don't rely on
   one layer. Keep `readonly=true` in the fragment.
-- **Region.** US Cloud → `mcp.posthog.com`; EU Cloud → `mcp-eu.posthog.com`. The
-  proxy auto-routes by account, but set the matching host for EU data residency.
+- **Region — and two different hosts.** The **MCP proxy host** is `mcp.posthog.com`
+  (US) / `mcp-eu.posthog.com` (EU); the proxy auto-routes by account, but set the
+  matching one for EU data residency. Distinct from it is the **data-API host** you
+  hit for an *out-of-band* REST check (e.g. the capture check in setup):
+  `us.posthog.com` (US) / `eu.posthog.com` (EU). If you logged in at app.posthog.com
+  you're on **US**, so try `us.posthog.com` first and fall back to `eu.posthog.com` —
+  the wrong data host returns a 401 or a redirect, not your data.
 - **Hosted server rolls forward → verify tool names on first connect.** The pinned
   tool list here matches the published schema, but because the server is
   PostHog-hosted it can add/rename tools. Tool names are documented as stable; still,

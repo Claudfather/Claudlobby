@@ -68,19 +68,62 @@ official server instead.
 5. **Add the service account as Viewer on the GA4 property** (GA4 Admin → Property
    Access Management → add `svc@your-project.iam.gserviceaccount.com` with the
    **Viewer** role). This is a *GA4 property* grant, separate from GCP IAM.
-6. **Get the numeric property ID** (NOT the measurement ID — see gotchas):
-   - GA4 Admin → **Property Settings → Property details** shows it, or
-   - list it via the Admin API once enabled:
+6. **Get the numeric property ID — and make sure it's the RIGHT property.** This is
+   the #1 GA4 wall: an account often holds several look-alike properties (a real
+   store property and a dead one auto-created by a link-in-bio tool), and the wrong
+   Measurement ID gets wired first. The property ID is **not** the `G-XXXXXXXXXX`
+   measurement ID (see gotchas). Find and confirm it:
+   - **Read the ID:** GA4 **Admin → Property Settings → Property details** shows the
+     numeric property ID, or list every property via the Admin API once enabled:
      `GET https://analyticsadmin.googleapis.com/v1beta/accountSummaries`
      (each `propertySummaries[].property` = `properties/<numericId>`).
-   - **Disambiguate same-named properties** by data stream: for each property, GET
-     `…/v1beta/{property}/dataStreams` and pick the one whose
-     `webStreamData.measurementId` equals your store's `G-XXXXXXXXXX`.
+   - **Confirm it's the store's, by data stream:** GA4 **Admin → Data Streams →** the
+     web stream **→** its **Measurement ID**. The right property is the one whose
+     stream Measurement ID equals the `G-XXXXXXXXXX` **actually installed on the live
+     store** (view the storefront's gtag, or check the theme / tag config). Via the
+     API: GET `…/v1beta/{property}/dataStreams` and match `webStreamData.measurementId`.
+   - **Still unsure?** Query the Data API with the `hostName` dimension — the real
+     property reports your storefront domain; the junk one reports the link-in-bio
+     domain.
 7. **Set the two `.env` vars** (fleet `.env`, gitignored): `GA4_SA_KEY_PATH`,
    `GA4_PROPERTY_ID`.
 8. **Wire the MCP** — add `google-analytics` to a bot's `mcp:` list, `claudlobby
    generate` (see *Equipping a bot*). The first `uvx` run downloads the package into
    the uv cache — warm it once so first bot use isn't slow.
+
+## Navigating the GCP Console (service-account setup)
+
+Steps 1–5 span the Google Cloud Console (<https://console.cloud.google.com>) and
+the GA4 Admin UI, both easy to get lost in — everything in the Cloud Console is
+**per-project**, so watch the project selector.
+
+**The service-account setup, as an ordered checklist.** Do these in order; skip or
+misplace any one and you get a `403` whose message usually names the missing step
+("API has not been used…", "permission denied on the property"):
+
+1. **Enable the API(s)** — GA4 needs **two**: the **Data API**
+   (`analyticsdata.googleapis.com`) for reporting *and* the **Admin API**
+   (`analyticsadmin.googleapis.com`) to discover/verify the property ID. Enabling one
+   and missing the other is the classic trap. (GSC needs the Search Console API;
+   PostHog and Meta Ads need none of this — just a token, no console at all.)
+2. **Create the service account**, and **download its JSON key**.
+3. **Grant the SA on the property** — GA4 **Admin → Property Access Management**, add
+   its `client_email` as **Viewer**. This is a GA4-property grant, *not* GCP IAM, and
+   it's the step people miss.
+
+**Where to click (Cloud Console):**
+
+- **Select the right project first** — the picker is the dropdown at the top-left,
+  next to "Google Cloud." APIs, service accounts, and keys all live inside the
+  selected project; doing a step in the wrong project is a common *silent* failure.
+- **Enable an API:** APIs & Services → Library → search the name → click it →
+  **Enable**.
+- **Create a service account:** APIs & Services → Credentials → Create credentials →
+  Service account.
+- **Download its key:** click the service account → Keys → Add key → **JSON** →
+  download. That JSON file *is* the secret — gitignore it, never commit it.
+- **Confirm what's enabled:** APIs & Services → **Enabled APIs & services** lists
+  everything currently on — the fastest way to check you didn't miss one.
 
 ## Common operations
 
@@ -116,7 +159,10 @@ Typical flow: `search_schema` or `get_property_schema` to find exact field names
   query the Data API but aren't sure, run `get_ga4_data` with the `hostName`
   dimension — the store property reports your storefront domain; the junk one reports
   the link-in-bio domain. Pinning the wrong property = a bot reporting on junk
-  traffic that looks plausible.
+  traffic that looks plausible. The mirror-image failure is wiring the wrong
+  `G-XXXXXXXXXX` into the *storefront itself* — analytics then looks configured but
+  the intended property never populates; confirm the installed measurement ID
+  against the stream you pinned.
 - **Both APIs must be enabled** (see setup). The Admin API is easy to forget because
   *reporting* only needs the Data API — but you need Admin to *find / verify* the
   property ID.
@@ -128,6 +174,14 @@ Typical flow: `search_schema` or `get_property_schema` to find exact field names
   fires only after cookie consent, and only once the stream is live — a fresh
   property returns small/empty reports. A successful authenticated `200` is the proof
   the integration works, not the row count.
+- **The gtag is client-injected — don't verify it from raw HTML, and expect a
+  backfill lag.** The `G-XXXXXXXXXX` tag loads client-side (and only post-consent),
+  so it is **not** in the page's raw HTML — "View Source" or a plain `curl` won't
+  find it, and that absence does *not* mean it's broken. To actually prove the tag
+  fires, watch a **Realtime** view during a consented visit (open the store, accept
+  cookies): GA4 UI **Reports → Realtime**, or Google's official realtime MCP — **this
+  batch server has no realtime tool** (it is Data-API only). Historical `get_ga4_data`
+  reports then lag ~24–48h while GA backfills, which is normal, not a failure.
 
 ## Failure modes
 

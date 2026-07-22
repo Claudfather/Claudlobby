@@ -93,14 +93,36 @@ Never set `GSC_ALLOW_DESTRUCTIVE=true`, and never add a write tool to a bot's
 
 ## Setup walkthrough (full, generalized)
 
-1. **Verify the property in Search Console.** At
-   <https://search.google.com/search-console>, add the site as a property and
-   complete ownership verification if it is not already verified:
-   - **Domain property** (`sc-domain:example.com` — covers all subdomains and
-     protocols): verify by adding the supplied `TXT` record to the domain's DNS.
-     Usually the better choice for whole-site SEO.
-   - **URL-prefix property** (`https://example.com/`): verify by DNS, an HTML file
-     upload, an HTML `<meta>` tag, or a linked Google Analytics / Tag Manager account.
+1. **Verify the property in Search Console.** Go to
+   <https://search.google.com/search-console> and click **Add property**. You pick a
+   **property type**, then a **verification method** — this pair is the single
+   biggest place first-timers get stuck, so choose deliberately:
+
+   **Property type:**
+   - **Domain property** (`sc-domain:example.com` — covers every subdomain and both
+     `http`/`https`): the most complete for whole-site SEO, but it can **only** be
+     verified by adding a `TXT` record to the domain's DNS. Choose it if you control
+     DNS and want everything under one property.
+   - **URL-prefix property** (`https://example.com/` — one exact origin): more
+     verification options, and the path of least resistance when DNS is awkward.
+
+   **Verification method — the wall.** For a URL-prefix property the offered methods
+   are **not** equally reliable on a modern, consent-gated storefront:
+   - **HTML `<meta>` tag (recommended here):** a `google-site-verification` meta in
+     the page `<head>`. It renders server-side, so Google's verifier finds it in the
+     raw HTML even when the rest of the page is client-rendered.
+   - **HTML-file upload:** serve the supplied `google*.html` file at the site root.
+     Fine for static hosts, but on a framework app you must actually route that exact
+     file, or verification fails with **"file not found."**
+   - **Google Analytics / Tag Manager:** **fails on a consent-gated site.** The
+     verifier reads raw HTML, and a GA tag that injects only *after* cookie consent
+     isn't there yet — so this reports failure even though GA is wired correctly. Use
+     the meta tag instead.
+
+   **Verify with the method you actually deployed.** The most common self-inflicted
+   failure is deploying the **meta tag** but then clicking **Verify** under the
+   **HTML-file** method (or the reverse): Google checks for the file, doesn't find it,
+   and reports "not found." Deploy one method, then verify *that same* method.
 2. **Enable the Search Console API** on the service account's GCP project
    (<https://console.cloud.google.com> → APIs & Services → Library → **Search Console
    API** → Enable, or `gcloud services enable searchconsole.googleapis.com`). This is
@@ -110,14 +132,19 @@ Never set `GSC_ALLOW_DESTRUCTIVE=true`, and never add a write tool to a bot's
    (recommended — one SA, one key), or create a new one (IAM & Admin → Service
    Accounts → Keys → Add key → JSON). Store the key gitignored
    (`local/<fleet>/.secrets/<name>.json`, `chmod 600`) — never commit it.
-4. **Add the service account as a user on the property.** Search Console → the
-   property → **Settings → Users and permissions → Add user** → paste the SA's
-   `client_email` (`svc@your-project.iam.gserviceaccount.com`, found in the JSON key).
-   Permission level:
+4. **Add the service account as a user on the property.** In Search Console, open
+   **Settings** — the **gear icon at the *bottom-left* of the left sidebar**, below
+   "Achievements" (it is easy to miss and is *not* in the top nav) — then **Users and
+   permissions → Add user**. Paste the SA's `client_email`
+   (`svc@your-project.iam.gserviceaccount.com`, found inside the JSON key) and set a
+   permission level:
    - **Restricted** is enough for search-analytics reads and sitemap listing.
    - **Full** is required for **URL Inspection** (`inspect_url_enhanced` /
      `batch_url_inspection`). Add the SA as **Full** if you want URL inspection;
      otherwise those calls 403 while every other read still works.
+
+   This grant is **per-property** and does **not** inherit GA4 access — the *same*
+   service account must still be added here explicitly (see gotchas).
 5. **Configure.** Set the one fleet `.env` var (gitignored — real path lives only
    there):
    ```
@@ -132,6 +159,37 @@ Never set `GSC_ALLOW_DESTRUCTIVE=true`, and never add a write tool to a bot's
    SA sees the property, then a small `get_search_analytics` for the last 7 days on
    its `site_url`. A successful authenticated response is the proof — see gotchas on
    why a fresh property returns few rows.
+
+## Navigating the GCP Console (service-account setup)
+
+Steps 2–3 happen in the Google Cloud Console
+(<https://console.cloud.google.com>), which is easy to get lost in — everything
+below is **per-project**, so watch the project selector.
+
+**The service-account setup, as an ordered checklist.** Do these in order; skip or
+misplace any one and you get a `403` whose message usually names the missing step
+("API has not been used…", "permission denied"):
+
+1. **Enable the API** — GSC needs the **Search Console API**
+   (`searchconsole.googleapis.com`). This is *separate* from GA4's Data + Admin APIs.
+   (PostHog and Meta Ads need none of this — just a token, no console at all.)
+2. **Create or locate the service account**, and **download its JSON key**.
+3. **Grant the SA on the property** — add its `client_email` under the property's
+   *Users and permissions* (step 4). This is the step people miss.
+
+**Where to click:**
+
+- **Select the right project first** — the picker is the dropdown at the top-left,
+  next to "Google Cloud." APIs, service accounts, and keys all live inside the
+  selected project; doing a step in the wrong project is a common *silent* failure.
+- **Enable an API:** APIs & Services → Library → search the name → click it →
+  **Enable**.
+- **Create a service account:** APIs & Services → Credentials → Create credentials →
+  Service account.
+- **Download its key:** click the service account → Keys → Add key → **JSON** →
+  download. That JSON file *is* the secret — gitignore it, never commit it.
+- **Confirm what's enabled:** APIs & Services → **Enabled APIs & services** lists
+  everything currently on — the fastest way to check you didn't miss one.
 
 ## Common operations
 
@@ -161,6 +219,19 @@ low-CTR queries → `get_advanced_search_analytics` to see which page ranks for 
 - **Install `mcp-search-console`, NOT `mcp-gsc`.** A separate, unmaintained PyPI
   package named `mcp-gsc` exists and is **not** this project. The fragment pins
   `mcp-search-console==0.3.2` — keep it that way.
+- **Verification: the "Google Analytics" method fails on a consent-gated site.**
+  Google's ownership verifier reads the **raw** server HTML. A GA tag that injects
+  only *after* cookie consent isn't in that HTML, so the GA verification method
+  reports failure even though GA is wired correctly. Use the **HTML `<meta>` tag** (it
+  renders in the SSR `<head>`) or the **HTML-file** method — and **verify with the
+  method you actually deployed** (deploying the meta tag but clicking Verify under
+  HTML-file, or the reverse, is the classic "file not found" self-own).
+- **Redirect + `curl` check: use `-L`.** If the site redirects root→www (or
+  www→root), the verification tag must live on the **redirect target**, and Google
+  follows the redirect to check it. When you sanity-check the deployed tag with
+  `curl`, pass **`-L`** so it follows the redirect — a `-L`-less `curl` on the
+  redirecting host returns a tiny "Redirecting…" stub with no tag, which *looks* like
+  a broken or empty deploy when the tag is actually fine on the target.
 - **The SA must be added to each property.** Search Console authorizes per-property
   and does **not** inherit Google Analytics access. Reusing the GA4 SA still requires
   adding its `client_email` as a user on every GSC property you want to read.
@@ -180,9 +251,10 @@ low-CTR queries → `get_advanced_search_analytics` to see which page ranks for 
   host needs `uv` on PATH. The `npx` cache-warmer (`check-npx-cache.sh`) does **not**
   cover uvx packages — pre-warm the uv cache separately so first bot start isn't a
   cold download.
-- **A fresh property returns little data — that's normal.** Search Console data lags
-  a couple of days and a newly-verified property has scant history. An authenticated
-  `200` with few rows is success, not failure.
+- **A freshly-verified property returns `200` but ~zero rows for 24–48h.** Search
+  Console backfills a new property over a day or two. An authenticated `200` proves
+  *access*; rows prove *data*, and the data lags. Access-proven ≠ data-yet — say so,
+  rather than reporting the integration broken.
 - **Verify tool names on a version bump.** The 15 grants match `0.3.2`. If you bump
   the pin, re-confirm the tool list — a rename must update both `read_only_tools`
   (fragment) and `tool_grants` (this doc) together, or generation fails with a
