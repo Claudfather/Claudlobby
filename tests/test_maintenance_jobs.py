@@ -50,33 +50,54 @@ _events = read_fleet_events
 
 
 class TestDataSweep:
+    # Purge is allowlist-scoped: only known-ephemeral classes may be removed.
+    # Everything else under data/ is durable by default, however old —
+    # including unvetted .log names (a LevelDB-style 000003.log is live
+    # database state, not a text log).
+    EPHEMERAL = ["events/old.jsonl", "cron.log", "ledger.json.bak"]
+    DURABLE = ["scripts/audit-tracker.py", "ledger.json", "notes.md", "000003.log"]
+
     def _fleet_data(self, root):
         data = root / "local" / "f7" / "runtime" / "bots" / "b1" / "data"
-        data.mkdir(parents=True)
-        old = data / "old.jsonl"
-        old.write_text("stale\n")
+        (data / "events").mkdir(parents=True)
+        (data / "scripts").mkdir()
         stale_mtime = time.time() - 40 * 86400
-        os.utime(old, (stale_mtime, stale_mtime))
-        fresh = data / "fresh.jsonl"
+        for rel in self.EPHEMERAL + self.DURABLE:
+            f = data / rel
+            f.write_text("stale\n")
+            os.utime(f, (stale_mtime, stale_mtime))
+        fresh = data / "events" / "fresh.jsonl"
         fresh.write_text("current\n")
         return data
 
-    def test_composed_invocation_purges_old_keeps_fresh(self, tmp_path):
+    def test_composed_invocation_purges_old_ephemeral_keeps_fresh(self, tmp_path):
         # The composed unit runs `data-sweep.sh --purge <fleet>` — flags
         # first, positional fleet name appended by the composer.
         root = tmp_path / "root"
         data = self._fleet_data(root)
         r = _run("data-sweep.sh", ["--purge", "f7"], root, tmp_path)
         assert r.returncode == 0, r.stderr
-        assert not (data / "old.jsonl").exists()
-        assert (data / "fresh.jsonl").exists()
+        for rel in self.EPHEMERAL:
+            assert not (data / rel).exists(), f"{rel} should be purged"
+        assert (data / "events" / "fresh.jsonl").exists()
+
+    def test_durable_files_survive_purge(self, tmp_path):
+        # The recurring incident: operational scripts/ledgers under data/
+        # aged out and vanished. Durable files must survive any purge.
+        root = tmp_path / "root"
+        data = self._fleet_data(root)
+        r = _run("data-sweep.sh", ["--purge", "f7"], root, tmp_path)
+        assert r.returncode == 0, r.stderr
+        for rel in self.DURABLE:
+            assert (data / rel).exists(), f"{rel} must never be swept"
 
     def test_report_only_deletes_nothing(self, tmp_path):
         root = tmp_path / "root"
         data = self._fleet_data(root)
         r = _run("data-sweep.sh", ["f7"], root, tmp_path)
         assert r.returncode == 0, r.stderr
-        assert (data / "old.jsonl").exists()
+        for rel in self.EPHEMERAL + self.DURABLE:
+            assert (data / rel).exists()
 
     def test_days_override_spares_younger_files(self, tmp_path):
         # Retention is fleet-overridable via the job's script line — prove
@@ -85,12 +106,12 @@ class TestDataSweep:
         data = self._fleet_data(root)
         r = _run("data-sweep.sh", ["--purge", "--days", "60", "f7"], root, tmp_path)
         assert r.returncode == 0, r.stderr
-        assert (data / "old.jsonl").exists()
+        for rel in self.EPHEMERAL:
+            assert (data / rel).exists()
 
     def test_unknown_flag_still_rejected(self, tmp_path):
-        root = tmp_path / "root"
-        self._fleet_data(root)
-        r = _run("data-sweep.sh", ["--bogus"], root, tmp_path)
+        # Rejected at arg parse — no fixture needed.
+        r = _run("data-sweep.sh", ["--bogus"], tmp_path / "root", tmp_path)
         assert r.returncode == 2
 
 
