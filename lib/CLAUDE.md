@@ -12,7 +12,8 @@ reporting, health checks, migrations, setup.
 - **Direct vault access.** Knowledge is consumed through the `claudron` CLI door only, in the
   `dispatch-task.sh` wedge shape: titles + pointers, never note bodies — the worker reads files
   itself. Resolution comes from the contract env (`CLAUDRON_VAULT_PATH`); no script opens files
-  under a vault's note tiers (`_shared/`, `projects/`, `<fleet>/shared/`).
+  under a vault's note tiers (the set Claudron owns in `VAULT-STRUCTURE.md §Directory contract` —
+  point at it, don't re-list it here).
 - **Agent-facing behavior.** A procedure a *bot session* should follow is a skill (engineering →
   clauDNA; fleet command → `library/skills/`), not a bash script that prompts it.
 - **Assertions about unshipped sibling surfaces.** Scripts guard on what the pinned floor ships
