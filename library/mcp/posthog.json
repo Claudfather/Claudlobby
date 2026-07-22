@@ -1,0 +1,59 @@
+{
+  "_env_contract": {
+    "POSTHOG_API_KEY": {
+      "description": "PostHog Personal API Key created with the 'MCP server' preset and READ-only scopes (format phx_XXXXXXXX). Sent to the server as 'Authorization: Bearer <key>'. Gitignored — never commit; store only in the fleet .env.",
+      "tier": "fleet"
+    },
+    "POSTHOG_HOST": {
+      "description": "PostHog MCP endpoint host — 'mcp.posthog.com' for US Cloud (default) or 'mcp-eu.posthog.com' for EU Cloud. This is the MCP proxy host, NOT the app host (us.posthog.com / eu.posthog.com). Self-hosted instances: see library/integrations/posthog.md.",
+      "tier": "fleet"
+    },
+    "POSTHOG_PROJECT_ID": {
+      "description": "Numeric PostHog project ID to pin queries to (bare number, e.g. 12345). Required for read-only use: pinning the project supplies query context so the session never needs the write-only switch-project tool.",
+      "tier": "fleet"
+    }
+  },
+  "_permissions_contract": {
+    "tools": [
+      "organizations-get",
+      "organization-details-get",
+      "projects-get",
+      "insights-get-all",
+      "insight-get",
+      "insight-query",
+      "query-run",
+      "query-generate-hogql-from-question",
+      "dashboards-get-all",
+      "dashboard-get",
+      "event-definitions-list",
+      "property-definitions",
+      "properties-list"
+    ],
+    "read_only_tools": [
+      "organizations-get",
+      "organization-details-get",
+      "projects-get",
+      "insights-get-all",
+      "insight-get",
+      "insight-query",
+      "query-run",
+      "query-generate-hogql-from-question",
+      "dashboards-get-all",
+      "dashboard-get",
+      "event-definitions-list",
+      "property-definitions",
+      "properties-list"
+    ]
+  },
+  "posthog": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "mcp-remote@0.1.38",
+      "https://${POSTHOG_HOST}/mcp?mode=tools&readonly=true&project_id=${POSTHOG_PROJECT_ID}",
+      "--header",
+      "Authorization:Bearer ${POSTHOG_API_KEY}"
+    ]
+  },
+  "_global_binary": "mcp-remote"
+}
