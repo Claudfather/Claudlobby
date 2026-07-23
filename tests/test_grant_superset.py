@@ -41,7 +41,7 @@ def _build_library(root: Path) -> None:
         "github": ["search_code", "create_pull_request"],
         "notion": ["API-post-page"],
         "gws": ["search_gmail_messages", "get_events"],
-        "shopify": [],  # empty contract → grants nothing (printify/shopify shape)
+        "shopify": [],  # empty contract → grants nothing
     }
     for name, tools in contracts.items():
         (mcp / f"{name}.json").write_text(

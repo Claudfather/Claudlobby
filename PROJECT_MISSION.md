@@ -33,7 +33,7 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and t
 **Produces:** real-world telemetry that Claudosseum uses to score skills; knowledge content written into Claudron vaults; the actual work — PRs, code reviews, deployments, customer responses, whatever the operator's domain demands.
 
 **Sibling boundaries:**
-- Claudlobby does not define skills. clauDNA does.
+- Claudlobby does not define engineering-workflow skills — clauDNA does; Claudlobby's `library/skills/` are fleet-operations commands, coupled to the runtime.
 - Claudlobby does not store the long-lived knowledge corpus. Claudron does.
 - Claudlobby does not evaluate skill quality. Claudosseum does.
 - Claudlobby is not a hosted service. It's a framework users run on their own hardware.
@@ -53,7 +53,7 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and t
 1. Migrate from shared GitHub PAT to per-bot GitHub Apps, with token-vending sidecar for installation token refresh
 2. Replace the manual "GitHub PAT in env vars" pattern in bot config with App-based auth
 3. Integrate clauDNA marketplace plugin install into the bootstrap workflow
-4. Add Claudron MCP server config to bot bootstrap and document the query-before / write-after pattern
+4. ~~Add Claudron MCP server config to bot bootstrap~~ and document the query-before / write-after pattern — **superseded by decision C** (2026-07-18, `documentation/plans/2026-07-18-decision-c-mcp-demand-gated.md`; boundary spec §10.5.6). There is no Claudron MCP server to add to the bootstrap — it is parked as a demand-gated option. Fleet consumption goes through the **CLI door** (clauDNA's `/claudron` · `/recall` · `/capture` skills wrapping the `claudron` CLI), wired per bot by the L2 session loop: set `claudron_vault_path`, and the compositor emits `CLAUDRON_VAULT_PATH` plus the session-loop hooks. The query-before / write-after pattern is documented in a vault-wired bot's door-stamped §Shared Documentation.
 5. Optional telemetry emitter: bots write structured signal to Claudosseum if configured
 6. Extend `bot.conf` with ecosystem-aware fields (clauDNA version pin, Claudron vault path, Claudosseum tenant ID)
 

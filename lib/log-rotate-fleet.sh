@@ -74,6 +74,7 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
         done
         # Bot data/ logs (only named cron.log, briefing*.log, git-pull.log, etc.)
         # Skip binary logs (LevelDB, browser profiles) by matching known text log names.
+        # data-sweep.sh purges the same name set once abandoned — keep in lockstep.
         if [ -d "${bot_dir}data" ]; then
             while IFS= read -r -d '' f; do
                 LOGS+=("$f")

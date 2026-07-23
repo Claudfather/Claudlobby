@@ -10,7 +10,39 @@
     }
   },
   "_permissions_contract": {
-    "tools": []
+    "tools": [
+      "create_product",
+      "delete_product",
+      "generate_and_upload_image",
+      "generate_image",
+      "get_blueprint",
+      "get_blueprints",
+      "get_defaults",
+      "get_print_providers",
+      "get_printify_status",
+      "get_product",
+      "get_variants",
+      "how_to_use",
+      "list_products",
+      "list_shops",
+      "publish_product",
+      "set_default",
+      "switch_shop",
+      "update_product",
+      "upload_image"
+    ],
+    "read_only_tools": [
+      "get_blueprint",
+      "get_blueprints",
+      "get_defaults",
+      "get_print_providers",
+      "get_printify_status",
+      "get_product",
+      "get_variants",
+      "how_to_use",
+      "list_products",
+      "list_shops"
+    ]
   },
   "printify": {
     "command": "npx",

@@ -1,14 +1,19 @@
 """Guards for the Claudron integration floor (plan 2026-07-07-claudron-consumption, 1c).
 
-Three invariants: the [vault] extra stays pinned (never a bare git URL), the
-compat table stays well-formed, and the integration doc stays in sync with the
-table it renders.
+Invariants: the [vault] extra stays pinned (never a bare git URL), the compat
+table stays well-formed, the integration doc stays in sync with the table it
+renders, and — added in boundary phase L4 (deliverable 4) — the module docstring
+names a *real* consumer (L1 wired ``doctor.check_claudron``; the docstring must
+not out-live it).
 """
 
+import inspect
 import re
 from pathlib import Path
 
-from claudlobby.claudron_compat import COMPAT_FLOOR
+import claudlobby.claudron_compat as claudron_compat
+import claudlobby.doctor as doctor
+from claudlobby.claudron_compat import COMPAT_FLOOR, PROBE_API, PROBE_VERB_PREFIX
 
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
@@ -51,12 +56,75 @@ def test_compat_floor_well_formed():
         assert cap.feature and cap.requires and cap.default_order_release
 
 
+def test_parked_rows_are_never_probed():
+    """A parked row is demand-gated by decision, not missing capability —
+    probing one is how it would come back as "unmet" (boundary phase L1)."""
+    for cap in COMPAT_FLOOR:
+        if cap.parked:
+            assert cap.probe == "", f"parked row carries a probe: {cap.feature}"
+
+
+def test_live_rows_declare_a_probe():
+    """Doctor decides met/unmet by probing the capability, never by comparing
+    the release annotation — so an un-parked row without a probe is a row
+    doctor cannot honestly report on."""
+    for cap in COMPAT_FLOOR:
+        if not cap.parked:
+            assert cap.probe, f"live row has no probe: {cap.feature}"
+
+
 def test_integration_doc_renders_compat_floor():
     """The doc table is the human rendering of COMPAT_FLOOR — each capability
-    must appear as a full row (all three columns bound, so rows can't drift
-    independently), and the doc must name the module as SSOT."""
+    must appear as a full row (**every** column bound, so no cell can drift
+    independently), and the doc must name the module as SSOT.
+
+    The Doctor-state cell is derived, not asserted as prose: a parked row must
+    render its parked marker, a live row must name the probe it actually runs.
+    Without this the fourth column was a hand-maintained copy of `cap.parked` /
+    `cap.probe` with no gate — the exact rendered-copy drift the table's own
+    SSOT claim forbids."""
     doc = INTEGRATION_DOC.read_text()
     assert "claudlobby/claudron_compat.py" in doc
     for cap in COMPAT_FLOOR:
         row = f"| {cap.feature} | {cap.requires} | {cap.default_order_release} |"
         assert row in doc, f"doc table missing or stale row: {row}"
+
+        # Locate the rendered row and pin its Doctor-state cell to the data.
+        # Backticks are markdown, not content — strip them so the gate tracks
+        # what the cell *says*, not how it is formatted.
+        line = next(ln for ln in doc.splitlines() if ln.startswith(row))
+        state = line[len(row):].replace("`", "")
+        if cap.parked:
+            assert "parked" in state, f"parked row not rendered as parked: {cap.feature}"
+            assert "unmet" not in state.replace('never "unmet"', ""), (
+                f"parked row rendered as a deficiency: {cap.feature}"
+            )
+        else:
+            probe = cap.probe.removeprefix(PROBE_VERB_PREFIX) if cap.probe != PROBE_API else "[vault] extra"
+            assert probe in state, (
+                f"live row's Doctor-state cell does not name its probe "
+                f"({probe!r}): {cap.feature}"
+            )
+
+
+def test_docstring_names_a_real_consumer():
+    """Docstring truth (L4, deliverable 4): the module docstring promises
+    ``doctor.check_claudron`` reads this table (the check L1 wired). Freeze that
+    the named consumer is real — exists, is callable, and actually reads
+    COMPAT_FLOOR — so the docstring cannot describe a consumer that drifted away
+    (rename or delete ``check_claudron`` and this fails, forcing both in sync)."""
+    docstring = claudron_compat.__doc__ or ""
+    assert "doctor.check_claudron" in docstring, (
+        "docstring names a consumer that is not doctor.check_claudron"
+    )
+    consumer = getattr(doctor, "check_claudron", None)
+    assert callable(consumer), "docstring names doctor.check_claudron but it is gone"
+
+    doctor_src = inspect.getsource(doctor)
+    assert "from .claudron_compat import" in doctor_src, (
+        "doctor no longer imports the compat table the docstring says it reads"
+    )
+    assert "COMPAT_FLOOR" in inspect.getsource(consumer), (
+        "doctor.check_claudron no longer reads COMPAT_FLOOR — the docstring's "
+        "'reads this table' claim is stale"
+    )

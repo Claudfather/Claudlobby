@@ -6,6 +6,27 @@ Compositor for Claude Code agent fleets. Transforms `fleet.yaml` + `library/` in
 
 **New here?** See [`documentation/getting-started.md`](documentation/getting-started.md) for the clone-to-fleet walkthrough and [`documentation/fleet-yaml-schema.md`](documentation/fleet-yaml-schema.md) for every config field.
 
+## Ecosystem boundary
+
+Claudlobby is the stack's **composition system**: it turns `fleet.yaml` into wired bots —
+identities, plugins, env, permission grants, supervision — and owns fleet *policy* (what each bot
+may do, including vault writer topology). Engineering-workflow behavior is clauDNA's; the durable
+knowledge corpus is Claudron's. The local rules:
+
+- **Skills here are fleet operations.** `library/skills/` operate the fleet itself (dispatch,
+  restart, pulse) — runtime content that happens to use the skill format. Engineering-workflow
+  skills belong in clauDNA.
+- **Durable knowledge lives in the vault.** `library/` composes context into bots; it is not the
+  corpus. Learned-the-hard-way content accrues through the Claudron door (`/claudna:capture`),
+  not as new library files (see `library/CLAUDE.md`).
+- **Consume siblings by contract, never by assertion.** Wire what is shipped (the `claudron` CLI
+  door; the `claudron_compat.py` floor); never validate or warn about a sibling surface that does
+  not exist at the pinned version. The canonical vault env var is `CLAUDRON_VAULT_PATH` (Claudron
+  CLI contract).
+- **Placement test** (one line): does it *wire, grant, or supervise*? → here. Behavior → clauDNA;
+  knowledge → the vault. Full algorithm: Claudron repo,
+  `documentation/plans/2026-07-20-claudfather-boundary-separation.md` §10.3.
+
 ## Architecture
 
 ```
@@ -17,11 +38,12 @@ library/                                         ├── CLAUDE.md      (compo
   guardrails/                                    ├── *.service      (systemd unit, Linux)
   protocols/                                     ├── *.plist        (launchd unit, macOS)
   integrations/                                  ├── memory/        (bot-owned persistent state)
-  resources/                                     ├── data/          (bot-owned data + scripts)
-  lessons/                                       ├── logs/          (bot log files)
-  principles/                                    └── projects/      (git checkouts, gitignored)
-  permissions/
+  resources/                                     ├── data/          (bot-owned data — mutable, never regenerated)
+  lessons/                                       ├── tools/         (composited scripts — generated, never hand-edited)
+  principles/                                    ├── logs/          (bot log files)
+  permissions/                                   └── projects/      (git checkouts, gitignored)
   post_actions/
+  tools/
 voices/
 templates/claude.md.j2
 ```
@@ -35,6 +57,7 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 - **MCP fragments** — JSON wire configs in `library/mcp/` with `${ENV_VAR}` placeholders. Never real tokens.
 - **Guardrails** — Safety rules composed per-bot (e.g. `no-push-main`, `snowflake-read-only`).
 - **Protocols** — Reusable workflow patterns (dispatch, review-flow, context-management).
+- **Tools** — Composited bot scripts in `library/tools/<name>/` (`tool.yaml` + Jinja template), rendered per-bot into `<bot_dir>/tools/` (0755) with compose-time params; secrets stay runtime env reads. See `library/tools/README.md`.
 - **Plugins** — Claude Code plugins installed fleet-wide. `claudna@Claudfather` is a built-in default; extras via `fleet.plugins.additional`. Auto-installed on bot start.
 - **Voices** — Optional personality overlays from `voices/`.
 
@@ -87,7 +110,7 @@ Key lifecycle scripts in `lib/`:
 | `fleet-pulse.sh` | Fleet-wide heartbeat / status monitoring |
 | `tail-fleet.sh` | Fleet-wide log tail + grep filter |
 | `ci-health-check.sh` | Pre-push CI health canary for target branch |
-| `data-sweep.sh` | Weekly per-bot data/ purge (30d default, fleet-overridable) — runs as the `data-sweep` fleet job |
+| `data-sweep.sh` | Weekly per-bot data/ ephemeral purge — only `events/*.jsonl`, vetted text-log names, and `*.bak` age out (30d default, fleet-overridable); durable files are never swept — runs as the `data-sweep` fleet job |
 | `dispatch.sh` | Dispatch helper for manager → worker |
 | `dispatch-task.sh` | Task dispatch helper |
 | `dispatch-overdue.py` | Finds overdue dispatches — the matcher behind the `fleet-pulse.sh` watchdog (age-capped via `DISPATCH_OVERDUE_MAX_AGE_S`) |
@@ -247,6 +270,7 @@ claudlobby env-migrate                 # migrate .env files into fleet structure
 claudlobby data-migrate                # migrate bot data directories
 claudlobby cron-migrate                # migrate crontab entries to new paths
 claudlobby memory-migrate              # copy memory files from ~/.claude/projects/ to per-bot dirs
+claudlobby lessons-migrate             # migrate referential library/lessons/ into the Claudron vault (dry-run by default)
 
 # Testing
 pip install -e '.[dev]' && pytest      # run test suite
@@ -276,11 +300,12 @@ lib/check-npx-cache.sh                # verify npx cache state
 ```
 claudlobby/
   __main__.py         — Thin CLI entry point (~55 lines); argparse setup + subcommands live in commands/
-  commands/           — CLI command implementations: argparse registration, core ops, migrations, scaffolding, move-bot, events (11 files)
+  commands/           — CLI command implementations: argparse registration, core ops, migrations, scaffolding, move-bot, events (12 files)
   config.py           — fleet.yaml parsing, BotConfig/FleetConfig dataclasses
   known_values.py     — Known-good value sets for fleet.yaml fields (SSOT for config + validator)
   composer.py         — CLAUDE.md/bot.conf/.mcp.json/systemd unit generation
   mcp_resolve.py      — MCP fragment ${VAR} env-var / instance resolution (shared by composer + validator)
+  tool_resolve.py     — Library tools manifest/template/param resolution (shared by composer + validator)
   loader.py           — Library file loading, frontmatter parsing, heading demotion
   validator.py        — Fleet validation (env vars, MCP refs, scope checks)
   newbot.py           — Interactive bot scaffolding wizard

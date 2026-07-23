@@ -1,15 +1,18 @@
 #!/bin/bash
 # data-sweep.sh — report per-bot data/ directory sizes and optionally
-# remove files older than N days.
+# remove known-ephemeral files older than N days.
 #
 # Usage:
 #   data-sweep.sh [--purge] [--days N] [<fleet-name>]
-#     (report only by default; --purge deletes files older than N days,
-#      default 30. Composed fleet units pass flags first and the fleet name
-#      last — the uniform fleet-job arg convention.)
+#     (report only by default; --purge deletes known-ephemeral files older
+#      than N days, default 30. Composed fleet units pass flags first and
+#      the fleet name last — the uniform fleet-job arg convention.)
+#
+# Purge scope is an allowlist of known-ephemeral classes (see
+# find_stale_ephemeral for the contract); directories are always left
+# intact.
 #
 # Reports sizes to stdout and to $CLAUDLOBBY_ROOT/lib/logs/data-sweep.log.
-# Purge mode only removes regular files — directories are left intact.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,6 +49,30 @@ LOG="$CLAUDLOBBY_ROOT/lib/logs/data-sweep.log"
 setup_log_dir "$LOG"
 TS=$(ts_iso)
 
+# The only file classes purge may remove — protect by default. A pattern
+# belongs here only when the class is regenerable or append-only history
+# nothing reads back after the retention window:
+#   events/*.jsonl    framework event stream. Primary ager: fleet-pulse
+#                     reap_events (fleet-*.jsonl) and keepalive.sh
+#                     (keepalive-*.jsonl) at OBSERVABILITY_REAP_DAYS
+#                     (default 7); this purge is the backstop for
+#                     pulse-off fleets and orphaned bot dirs.
+#   vetted log names  the known text logs, same name set log-rotate-fleet.sh
+#                     rotates under data/ (keep in lockstep). A bare *.log
+#                     glob would also match binary LevelDB / browser-profile
+#                     logs — live state, not logs.
+#   *.bak             backup copies
+# Durable assets (scripts, configs, ledgers, drafts) never match and are
+# never swept, wherever they sit under data/.
+find_stale_ephemeral() {
+    find "$1" -type f \
+        \( -path '*/events/*.jsonl' \
+           -o -name 'cron.log' -o -name 'git-pull.log' \
+           -o -name 'briefing*.log' -o -name 'home-assistant.log' \
+           -o -name '*.bak' \) \
+        -mtime +"$2" -print0 2>/dev/null
+}
+
 BOTS_DIR=$(resolve_bots_dir "$FLEET")
 
 if [ ! -d "$BOTS_DIR" ]; then
@@ -68,10 +95,10 @@ for bot_dir in "$BOTS_DIR"/*/; do
     echo "  $bot_name: $size ($file_count files)" | tee -a "$LOG"
 
     if [ "$PURGE" -eq 1 ]; then
-        old_count=$(find "$data_dir" -type f -mtime +"$DAYS" -print0 2>/dev/null | tr -dc '\0' | wc -c | tr -d ' ')
+        old_count=$(find_stale_ephemeral "$data_dir" "$DAYS" | tr -dc '\0' | wc -c | tr -d ' ')
         if [ "$old_count" -gt 0 ]; then
-            find "$data_dir" -type f -mtime +"$DAYS" -print0 2>/dev/null | xargs -0 rm -f
-            echo "    purged $old_count files older than $DAYS days" | tee -a "$LOG"
+            find_stale_ephemeral "$data_dir" "$DAYS" | xargs -0 rm -f
+            echo "    purged $old_count ephemeral files older than $DAYS days" | tee -a "$LOG"
         fi
     fi
 done
