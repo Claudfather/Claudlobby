@@ -201,13 +201,13 @@ def reap_orphan_units(
     short-form ``<bot>.plist`` left by an older layout is dead cruft, safe to reap.
     """
     removed: list[Path] = []
-    for bot in bots if bots is not None else list(fleet.bots.values()):
+    for bot in bots if bots is not None else fleet.bots.values():
         for f in _orphan_unit_files(bot, fleet, paths):
             try:
                 f.unlink()
                 removed.append(f)
             except OSError:
-                continue
+                pass
     return removed
 
 

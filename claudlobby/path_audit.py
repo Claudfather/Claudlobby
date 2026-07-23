@@ -68,9 +68,9 @@ def _anchor_values(bot: BotConfig, paths: Paths) -> dict[str, str]:
 def _resolve_anchor_tokens(text: str, anchor_values: dict[str, str]) -> str:
     """Expand ``${ANCHOR}`` / ``$ANCHOR`` to the anchor's absolute value, so a path
     written against a blessed anchor is checked at its real resolved location.
-    Longest names first so no anchor is a prefix of another mid-substitution."""
-    for name in sorted(anchor_values, key=len, reverse=True):
-        val = anchor_values[name]
+    Order-independent: ``${NAME}`` is brace-closed and ``$NAME`` is boundary-
+    delimited, so no anchor can partially match inside another."""
+    for name, val in anchor_values.items():
         text = text.replace("${" + name + "}", val)
         text = re.sub(r"\$" + re.escape(name) + r"(?![A-Za-z0-9_])", val, text)
     return text

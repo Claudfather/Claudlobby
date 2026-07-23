@@ -431,6 +431,21 @@ def _shq(v: object) -> str:
     return shlex.quote(str(v))
 
 
+def _root_anchored(path: Path, paths: Paths) -> str:
+    """Shell RHS for a fleet path: anchored on ``$CLAUDLOBBY_ROOT`` when it lives
+    under the install root, else an absolute ``_shq`` value (vault mode). The one
+    place the "anchor a fleet path for bot.conf" rule lives — BOT_DIR and
+    FLEET_ROOT both route through it, so the two anchors path_audit trusts to
+    resolve to the composer's real locations cannot silently drift apart."""
+    try:
+        rel = path.relative_to(paths.root)
+    except ValueError:
+        return _shq(str(path))
+    # rel == "." only for a root-mode fleet (fleet_config_dir == root); BOT_DIR,
+    # always runtime/bots/<id>, never hits it.
+    return '"$CLAUDLOBBY_ROOT"' if rel == Path(".") else f'"$CLAUDLOBBY_ROOT/{rel}"'
+
+
 def _channel_plugins(channels: list[str]) -> list[str]:
     """Plugin install-IDs a bot's ``--channels`` flag depends on.
 
@@ -469,13 +484,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         bot.account, fleet.accounts.get("default", "~/.claude")
     )
 
-    # When bot_dir is inside claudlobby root, use $CLAUDLOBBY_ROOT-relative path.
-    # When outside (vault mode), use absolute path.
-    try:
-        bot_dir_rel = bot_dir.relative_to(paths.root)
-        bot_dir_line = f'BOT_DIR="$CLAUDLOBBY_ROOT/{bot_dir_rel}"'
-    except ValueError:
-        bot_dir_line = f"BOT_DIR={_shq(str(bot_dir))}"
+    bot_dir_line = f"BOT_DIR={_root_anchored(bot_dir, paths)}"
     # BOT_SERVICE is the bot's host-wide-unique, fleet-prefixed identity. It
     # names the systemd/launchd unit AND the per-bot tmux server socket — one
     # value, two of the three identity axes (the third is the dir-slug session).
@@ -556,18 +565,8 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # FLEET_ROOT — the fleet-scoped sibling of CLAUDLOBBY_ROOT. It is the fleet
     # overlay root (the dir holding fleet.yaml, nested-aware), so every
     # fleet-relative path (secret-file paths, per-bot MCP build dirs) anchors on
-    # it and moves with the fleet instead of dangling after a re-nest. Emitted
-    # anchor-relative when the fleet lives under the install root, absolute in
-    # vault mode — the same branch BOT_DIR uses above.
-    fleet_root = paths.fleet_config_dir
-    try:
-        fleet_root_rel = fleet_root.relative_to(paths.root)
-        if fleet_root_rel == Path("."):
-            lines.append('export FLEET_ROOT="$CLAUDLOBBY_ROOT"')
-        else:
-            lines.append(f'export FLEET_ROOT="$CLAUDLOBBY_ROOT/{fleet_root_rel}"')
-    except ValueError:
-        lines.append(f"export FLEET_ROOT={_shq(str(fleet_root))}")
+    # it and moves with the fleet instead of dangling after a re-nest.
+    lines.append(f"export FLEET_ROOT={_root_anchored(paths.fleet_config_dir, paths)}")
     if fleet.mission_file and fleet.mission:
         # Gated on the PAIR, mirroring the CLAUDE.md section: in the
         # pairing-forbidden state (file without paragraph) no composed prose
