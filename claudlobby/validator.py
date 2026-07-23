@@ -33,7 +33,7 @@ from .known_values import (
     hint,
 )
 from .mcp_resolve import required_vars as _mcp_required_vars
-from .paths import Paths, detect_vault
+from .paths import Paths, _iter_fleet_dirs, detect_vault
 
 _CADENCE_RE = re.compile(r"^\d+[mhd]$")
 _ORG_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
@@ -900,6 +900,9 @@ def _validate_cross_fleet_collisions(
 
     tmux session names are derived from the bot directory basename, so two
     fleets with a bot named 'alex' would fight over the same tmux session.
+    Fleets are enumerated at both depths (flat ``local/<fleet>/`` and nested
+    ``local/<system>/<fleet>/``), so a nested sibling is not invisible to the
+    scan.
     """
     local_dir = paths.root / "local"
     if not local_dir.is_dir():
@@ -908,8 +911,8 @@ def _validate_cross_fleet_collisions(
     current_fleet = paths.fleet_dir.name if paths.fleet_dir else None
     bot_names = set(fleet.bots)
 
-    for fleet_dir in sorted(local_dir.iterdir()):
-        if not fleet_dir.is_dir() or fleet_dir.name == current_fleet:
+    for fleet_dir in _iter_fleet_dirs(local_dir):
+        if fleet_dir.name == current_fleet:
             continue
         other_bots_dir = fleet_dir / "runtime" / "bots"
         if not other_bots_dir.is_dir():

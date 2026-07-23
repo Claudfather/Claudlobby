@@ -18,7 +18,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
-FLEET_YAML="$CLAUDLOBBY_ROOT/local/$FLEET/fleet.yaml"
+# Flat local/<fleet> resolves byte-identically; nested local/<system>/<fleet>
+# resolves too. Flat fallback keeps the pre-generate error path (missing yaml).
+FLEET_DIR=$(resolve_fleet_dir "$FLEET") || FLEET_DIR="$CLAUDLOBBY_ROOT/local/$FLEET"
+FLEET_YAML="$FLEET_DIR/fleet.yaml"
 RUNTIME_DIR=$(resolve_bots_dir "$FLEET")
 
 if [ ! -f "$FLEET_YAML" ]; then
@@ -63,8 +66,13 @@ done <<< "$defined"
 # bot in ANY fleet.yaml. A rogue/leftover server is invisible to a default-socket
 # `tmux ls`, so walk the socket files under $TMUX_TMPDIR/tmux-$(id -u)/ directly
 # and list each server's sessions.
-all_defined=$(for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml; do
-    [ -f "$fy" ] && parse_bots "$fy"
+# `|| continue` (not `&& parse`): a non-matching glob stays literal and would be
+# the loop's LAST iteration — its failed [ -f ] test would make the loop exit
+# nonzero, and under pipefail that nonzero rides `| sort -u` into the $() and
+# trips set -e. continue keeps the last status 0. (Both flat globs + the nested one.)
+all_defined=$(for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml "$CLAUDLOBBY_ROOT"/local/*/*/fleet.yaml; do
+    [ -f "$fy" ] || continue
+    parse_bots "$fy"
 done | sort -u)
 _sock_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
 if [ -d "$_sock_dir" ]; then
@@ -89,7 +97,7 @@ echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before 
 # code-audit-sweep) should be enrolled on this host. A composed unit with no
 # live enrollment is drift — the default tier silently rotting.
 job_drift=""
-_timers_dir="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/fleet/timers"
+_timers_dir="$FLEET_DIR/runtime/fleet/timers"
 if [ -d "$_timers_dir" ]; then
     # Composed-but-dormant units (unit_is_dormant: enroll: false jobs) are
     # opt-in — not enrolled by design, so never drift.

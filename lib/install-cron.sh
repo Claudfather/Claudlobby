@@ -49,7 +49,8 @@ if [ -z "$FLEET" ]; then
 fi
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
-RUNTIME_BOTS="$CLAUDLOBBY_ROOT/local/$FLEET/runtime/bots"
+# resolve_bots_dir handles flat local/<fleet> byte-identically + nested vaults.
+RUNTIME_BOTS=$(resolve_bots_dir "$FLEET")
 LIB="$CLAUDLOBBY_ROOT/lib"
 
 if [ ! -d "$RUNTIME_BOTS" ]; then
