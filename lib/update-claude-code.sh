@@ -47,16 +47,40 @@ update_failed() {
     exit "$rc"
 }
 
-# --- Capture current version ---
+# --- Resolve the binary the FLEET launches (not this script's own PATH) ------
+# The update must target the SAME claude that start-bot.sh runs. This script's
+# PATH (above) prepends the user prefixes so npm/node resolve under a bare timer
+# env — but start-bot.sh:49 launches with the SYSTEM dirs FIRST, so the fleet
+# runs e.g. /usr/bin/claude even when ~/.npm-global holds a newer copy.
+# Detecting via this script's PATH updated that shadow user copy and left the
+# fleet's binary stale (#635). Mirror start-bot's ordering for detection +
+# version + the sudo choice; the PATH above still finds npm/node to RUN the
+# install. (Ordering mirrors start-bot.sh:49 — keep the two in sync.)
+# CLAUDE_BIN is the same override start-bot.sh:176 launches with — when the
+# fleet pins its binary explicitly, the updater targets THAT one (SSOT). Absent
+# it, mirror start-bot.sh:49's launch ordering. CLAUDE_UPDATE_FLEET_PATH lets a
+# test / an unusual host substitute the resolution order.
+_FLEET_PATH="${CLAUDE_UPDATE_FLEET_PATH:-/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.npm-global/bin${_HOMEBREW:+:$_HOMEBREW/bin}}"
+fleet_claude() {
+    if [ -n "${CLAUDE_BIN:-}" ]; then printf '%s' "$CLAUDE_BIN"; return; fi
+    PATH="$_FLEET_PATH" command -v claude 2>/dev/null || true
+}
+fleet_claude_version() {
+    local p; p="$(fleet_claude)"
+    [ -n "$p" ] || { echo "unknown"; return; }
+    "$p" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown"
+}
+
+# --- Capture current version (of the fleet's binary) ---
+_claude_path="$(fleet_claude)"
 old_version=""
-if command -v claude >/dev/null 2>&1; then
-    old_version=$(claude --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+if [ -n "$_claude_path" ]; then
+    old_version="$(fleet_claude_version)"
 fi
 
-echo "$ts UPDATE starting (current: ${old_version:-not installed}, fleet: ${FLEET:-none})" >> "$LOG"
+echo "$ts UPDATE starting (current: ${old_version:-not installed}, target: ${_claude_path:-none}, fleet: ${FLEET:-none})" >> "$LOG"
 
-# --- Detect install path and run update directly (no eval) ---
-_claude_path=$(command -v claude 2>/dev/null || true)
+# --- Elevate only when the fleet's binary is a root-owned system install ------
 _use_sudo=0
 if [ -n "$_claude_path" ] && [[ "$_claude_path" == /usr/* ]]; then
     _use_sudo=1
@@ -65,7 +89,7 @@ fi
 if [ "$_use_sudo" -eq 1 ]; then
     echo "$ts UPDATE running: sudo npm install -g @anthropic-ai/claude-code@latest" >> "$LOG"
     if sudo npm install -g @anthropic-ai/claude-code@latest >> "$LOG" 2>&1; then
-        new_version=$(claude --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+        new_version="$(fleet_claude_version)"
         echo "$ts UPDATE success: $old_version → $new_version" >> "$LOG"
     else
         update_failed 1 "npm install (sudo) returned non-zero — fleet stays on ${old_version:-unknown}"
@@ -73,7 +97,7 @@ if [ "$_use_sudo" -eq 1 ]; then
 else
     echo "$ts UPDATE running: npm install -g @anthropic-ai/claude-code@latest" >> "$LOG"
     if npm install -g @anthropic-ai/claude-code@latest >> "$LOG" 2>&1; then
-        new_version=$(claude --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+        new_version="$(fleet_claude_version)"
         echo "$ts UPDATE success: $old_version → $new_version" >> "$LOG"
     else
         update_failed 1 "npm install returned non-zero — fleet stays on ${old_version:-unknown}"
