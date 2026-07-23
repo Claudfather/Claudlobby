@@ -1950,6 +1950,13 @@ def compose_bot(
         compose_launchd_plist(bot, fleet, paths)
     )
 
+    # Path-ownership guarantee: fail loud if any composed wiring file carries a
+    # flat/dangling/improper absolute fleet path (a hand-typed path that would not
+    # survive a fleet move), rather than letting it dangle silently. See path_audit.
+    from .path_audit import assert_bot_paths
+
+    assert_bot_paths(bot, fleet, paths)
+
     return bot_dir
 
 

@@ -10,6 +10,15 @@ self-contained wiring rather than trusting hand-written absolute inputs.
 
 from __future__ import annotations
 
+import os
+import re
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import BotConfig, FleetConfig
+    from .paths import Paths
+
 # Path anchors the composer exports into bot.conf. A ${VAR} in an MCP fragment,
 # or a $VAR in bot.conf, that names one of these resolves — at runtime for
 # .mcp.json, at source time for bot.conf — to a composer-derived, migration-safe
@@ -24,3 +33,132 @@ COMPOSER_PROVIDED_PATH_ANCHORS: tuple[str, ...] = (
     "FLEET_ROOT",
     "BOT_DIR",
 )
+
+
+@dataclass(frozen=True)
+class PathFinding:
+    """One improper absolute fleet path in an emitted wiring file."""
+
+    bot_id: str
+    file: str  # bot-dir-relative filename
+    path: str  # the offending absolute path (anchors already resolved)
+    reason: str
+
+
+# A crude absolute-path token: a run starting with "/" up to whitespace or a
+# common delimiter. Good enough for the machine-generated wiring files scanned
+# here (bot.conf, .mcp.json, unit files).
+_ABS_TOKEN_RE = re.compile(r"/[^\s'\":;,]+")
+
+# Bot-dir-relative wiring files whose absolute paths must resolve for the bot to
+# run. Prose (CLAUDE.md) is intentionally excluded — a stale path there does not
+# break wiring and the text legitimately carries example paths.
+_WIRING_STATIC = ("bot.conf", ".mcp.json", ".claude/settings.local.json")
+
+
+def _anchor_values(bot: BotConfig, paths: Paths) -> dict[str, str]:
+    """Map each composer-provided path anchor to its resolved absolute value."""
+    return {
+        "CLAUDLOBBY_ROOT": str(paths.root),
+        "FLEET_ROOT": str(paths.fleet_config_dir),
+        "BOT_DIR": str(paths.bot_runtime(bot.bot_id)),
+    }
+
+
+def _resolve_anchor_tokens(text: str, anchor_values: dict[str, str]) -> str:
+    """Expand ``${ANCHOR}`` / ``$ANCHOR`` to the anchor's absolute value, so a path
+    written against a blessed anchor is checked at its real resolved location.
+    Longest names first so no anchor is a prefix of another mid-substitution."""
+    for name in sorted(anchor_values, key=len, reverse=True):
+        val = anchor_values[name]
+        text = text.replace("${" + name + "}", val)
+        text = re.sub(r"\$" + re.escape(name) + r"(?![A-Za-z0-9_])", val, text)
+    return text
+
+
+def _fleet_content_roots(paths: Paths) -> list[str]:
+    """Trees under which fleet-owned content lives — the ``local/`` overlay and,
+    in vault mode, the vault. An absolute path under one of these must resolve
+    inside the fleet's own overlay root."""
+    roots = [str(paths.root / "local")]
+    if paths.vault_root is not None:
+        roots.append(str(paths.vault_root))
+    return roots
+
+
+def improper_fleet_paths(
+    text: str, bot: BotConfig, paths: Paths
+) -> list[tuple[str, str]]:
+    """Return ``[(path, reason)]`` for improper absolute fleet paths in *text*.
+
+    After resolving composer path anchors, any absolute path under a fleet-content
+    root that does NOT resolve inside ``paths.fleet_config_dir`` is improper — a
+    flat/dangling husk from a pre-migration layout, or a cross-fleet leak. A
+    nested-correct absolute path (what the composer itself emits, e.g.
+    FLEET_MISSION_FILE) is fine; the rule is correctness, not "no absolutes".
+    """
+    resolved = _resolve_anchor_tokens(text, _anchor_values(bot, paths))
+    content_roots = _fleet_content_roots(paths)
+    fleet_root = str(paths.fleet_config_dir)
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for m in _ABS_TOKEN_RE.finditer(resolved):
+        p = m.group(0).rstrip("/.,:;\"')}")
+        if p in seen:
+            continue
+        if not any(p == r or p.startswith(r + os.sep) for r in content_roots):
+            continue  # not fleet-owned content (system path, $HOME, /tmp, …)
+        norm = os.path.normpath(p)
+        if norm == fleet_root or norm.startswith(fleet_root + os.sep):
+            continue  # resolves inside the fleet's real overlay root — correct
+        seen.add(p)
+        out.append(
+            (
+                p,
+                f"absolute fleet path outside the fleet overlay root {fleet_root} "
+                "— flat/dangling (pre-migration layout) or cross-fleet leak",
+            )
+        )
+    return out
+
+
+def _wiring_files(bot: BotConfig, fleet: FleetConfig) -> list[str]:
+    return [
+        *_WIRING_STATIC,
+        f"{fleet.service_prefix}.{bot.bot_id}.service",
+        f"{fleet.service_prefix}.{bot.bot_id}.plist",
+    ]
+
+
+def audit_bot_paths(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths
+) -> list[PathFinding]:
+    """Scan a bot's emitted wiring files for improper absolute fleet paths."""
+    bot_dir = paths.bot_runtime(bot.bot_id)
+    findings: list[PathFinding] = []
+    for rel in _wiring_files(bot, fleet):
+        try:
+            text = (bot_dir / rel).read_text()
+        except (OSError, UnicodeDecodeError):
+            continue  # file absent (e.g. no .mcp.json) or binary — nothing to scan
+        for path, reason in improper_fleet_paths(text, bot, paths):
+            findings.append(PathFinding(bot.bot_id, rel, path, reason))
+    return findings
+
+
+def assert_bot_paths(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> None:
+    """Fail loudly if any emitted wiring file carries an improper fleet path.
+
+    The generate-time half of the path-ownership guarantee: a hand-typed flat or
+    dangling absolute fleet path in any compose source surfaces here as a hard
+    error, never a silent dangle.
+    """
+    findings = audit_bot_paths(bot, fleet, paths)
+    if not findings:
+        return
+    detail = "\n".join(f"  {f.file}: {f.path}\n      {f.reason}" for f in findings)
+    raise ValueError(
+        f"bot {bot.bot_id!r}: improper absolute fleet path(s) in composed wiring — "
+        "derive the path from a composer anchor (FLEET_ROOT / BOT_DIR / "
+        "CLAUDLOBBY_ROOT), never hand-type it:\n" + detail
+    )
