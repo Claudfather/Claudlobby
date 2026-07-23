@@ -270,6 +270,7 @@ claudlobby env-migrate                 # migrate .env files into fleet structure
 claudlobby data-migrate                # migrate bot data directories
 claudlobby cron-migrate                # migrate crontab entries to new paths
 claudlobby memory-migrate              # copy memory files from ~/.claude/projects/ to per-bot dirs
+claudlobby lessons-migrate             # migrate referential library/lessons/ into the Claudron vault (dry-run by default)
 
 # Testing
 pip install -e '.[dev]' && pytest      # run test suite
@@ -299,7 +300,7 @@ lib/check-npx-cache.sh                # verify npx cache state
 ```
 claudlobby/
   __main__.py         — Thin CLI entry point (~55 lines); argparse setup + subcommands live in commands/
-  commands/           — CLI command implementations: argparse registration, core ops, migrations, scaffolding, move-bot, events (11 files)
+  commands/           — CLI command implementations: argparse registration, core ops, migrations, scaffolding, move-bot, events (12 files)
   config.py           — fleet.yaml parsing, BotConfig/FleetConfig dataclasses
   known_values.py     — Known-good value sets for fleet.yaml fields (SSOT for config + validator)
   composer.py         — CLAUDE.md/bot.conf/.mcp.json/systemd unit generation

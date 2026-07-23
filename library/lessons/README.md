@@ -1,5 +1,26 @@
 # library/lessons/
 
+> **FROZEN (L3, boundary re-architecture — 2026-07-23).** This directory is closed to new
+> content. Durable knowledge — the "we learned this the hard way" corpus — now lives in the
+> **Claudron vault**, reached at session time through the knowledge door, not composed from a
+> parallel tree here.
+>
+> **Where new content goes now:**
+> - **A referential finding** (an incident, an environment fact, a domain lesson) → capture it into
+>   the vault with `/claudna:capture` (or `claudron capture`). It surfaces later through
+>   relevance-ranked recall — see the door-stamped **§Shared Documentation** in a vault-wired bot's
+>   composed `CLAUDE.md`.
+> - **A bot-steering rule** (imperative "always/never do X" behavior — a pointer cannot steer
+>   behavior) → a `library/protocols/` pattern or a `library/guardrails/` rule, which keep rendering
+>   in-context.
+>
+> **Existing files are retained** as the composition fallback for **non-vault** fleets (a fleet with
+> no `claudron_vault_path` still renders the lessons it lists in `fleet.yaml`). They also carry the
+> provenance behind the protocols/guardrails they motivated. The referential subset has been
+> migrated to the vault via `claudlobby lessons-migrate`; the per-note verdicts are the triage
+> ledger at `documentation/plans/2026-07-23-l3-lessons-triage-ledger.md`. Removal of these files is a
+> later, scheduled release — not this one.
+
 "We learned this the hard way" notes. Specific incidents, retro findings, or empirically-discovered failure modes that bots should know about — distinct from rules (guardrails) or workflow patterns (protocols).
 
 ## What belongs here

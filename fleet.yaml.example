@@ -147,10 +147,13 @@ fleet:
 #     resources:
 #       - timezone
 #
-#     # lessons — learned patterns from library/lessons/ to include in CLAUDE.md
+#     # lessons — library/lessons/ is FROZEN (L3). Existing referential lessons still
+#     # compose for non-vault fleets; a vault-wired fleet reaches them via `claudron recall`
+#     # instead. New behavior rules → protocols/guardrails; new referential findings → the
+#     # vault (`claudlobby lessons-migrate`, /claudna:capture). See library/lessons/README.md.
 #     lessons:
-#       - tmux-dispatch-shell-expansion
-#       - messaging-channel-discipline
+#       - review/empirical-verification
+#       - telegram/mcp-drops
 #
 #     # principles — guiding principles from library/principles/
 #     principles:
