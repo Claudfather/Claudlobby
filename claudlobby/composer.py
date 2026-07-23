@@ -553,6 +553,21 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # drift would silently spawn a duplicate server for the same socket name.
     lines.append(f"export TMUX_TMPDIR={_shq(_TMUX_TMPDIR)}")
     lines.append('export FLEET_STATE_PATH="$CLAUDLOBBY_ROOT/state/fleet-state.json"')
+    # FLEET_ROOT — the fleet-scoped sibling of CLAUDLOBBY_ROOT. It is the fleet
+    # overlay root (the dir holding fleet.yaml, nested-aware), so every
+    # fleet-relative path (secret-file paths, per-bot MCP build dirs) anchors on
+    # it and moves with the fleet instead of dangling after a re-nest. Emitted
+    # anchor-relative when the fleet lives under the install root, absolute in
+    # vault mode — the same branch BOT_DIR uses above.
+    fleet_root = paths.fleet_config_dir
+    try:
+        fleet_root_rel = fleet_root.relative_to(paths.root)
+        if fleet_root_rel == Path("."):
+            lines.append('export FLEET_ROOT="$CLAUDLOBBY_ROOT"')
+        else:
+            lines.append(f'export FLEET_ROOT="$CLAUDLOBBY_ROOT/{fleet_root_rel}"')
+    except ValueError:
+        lines.append(f"export FLEET_ROOT={_shq(str(fleet_root))}")
     if fleet.mission_file and fleet.mission:
         # Gated on the PAIR, mirroring the CLAUDE.md section: in the
         # pairing-forbidden state (file without paragraph) no composed prose
@@ -751,6 +766,23 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if not _SHELL_IDENT_RE.match(k):
             raise ValueError(f"bot.env key {k!r} is not a valid shell identifier")
         lines.append(f"export {k}={_shq(v)}")
+
+    # Secret-file paths: fleet-relative by contract, anchored on FLEET_ROOT so the
+    # path is composer-derived and moves with the fleet. An absolute (or
+    # parent-escaping) value is the exact hand-typed dangling-path smell this
+    # closes → reject it loudly rather than bake it in.
+    for var, subpath in bot.secret_files.items():
+        if not _SHELL_IDENT_RE.match(var):
+            raise ValueError(
+                f"bot.secret_files key {var!r} is not a valid shell identifier"
+            )
+        if subpath.startswith(("/", "~")) or ".." in Path(subpath).parts:
+            raise ValueError(
+                f"bot.secret_files[{var!r}] must be fleet-relative, got {subpath!r} "
+                "— declare it relative to the fleet root so the composer anchors it "
+                "on FLEET_ROOT (never hand-type an absolute fleet path)"
+            )
+        lines.append(f'export {var}="$FLEET_ROOT/{subpath}"')
 
     lines.append("")
 
