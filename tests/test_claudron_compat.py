@@ -48,6 +48,72 @@ def test_vault_extra_is_pinned():
             ), f"[vault] extra has no version bound: {req}"
 
 
+def _pinned_vault_version() -> tuple[int, ...] | None:
+    """The version tuple the [vault] extra pins, or None for a SHA/rangeless pin.
+
+    Parses the trailing ``@v0.4.0`` (git tag) or a ``==0.4.0`` / ``>=0.4`` PyPI
+    bound from the single claudron requirement.
+    """
+    for req in _vault_requirements():
+        m = re.search(r"@v?(\d+(?:\.\d+){1,2})$", req) or re.search(
+            r"(?:==|>=|~=)\s*v?(\d+(?:\.\d+){0,2})", req
+        )
+        if m:
+            return tuple(int(p) for p in m.group(1).split("."))
+    return None
+
+
+def _release_tuple(release: str) -> tuple[int, ...] | None:
+    m = re.match(r"v?(\d+(?:\.\d+){1,2})", release)
+    return tuple(int(p) for p in m.group(1).split(".")) if m else None
+
+
+def test_vault_pin_satisfies_compat_floor():
+    """The pinned engine must actually PROVIDE every capability claudlobby
+    composes — i.e. the pin ≥ the highest ``default_order_release`` among live
+    (non-parked) floor rows.
+
+    This is the guard #692 added after #685 half-landed: the docs + COMPAT_FLOOR
+    were bumped to v0.4.0 (the fleet session loop's floor) while ``pyproject.toml``
+    still pinned v0.2.0 — an engine with no per-bot hook dispatch — so a
+    vault-wired bot composed a session loop against an engine that could not run
+    it (#680's false-green, re-shipped on every fresh install). ``default_order_release``
+    is an annotation Doctor never triggers on at *runtime* (it probes), but the
+    *install-time* pin is a static decision and this floor is exactly its binding
+    constraint. Parked rows are excluded — they are demand-gated, not shipped."""
+    pin = _pinned_vault_version()
+    if pin is None:  # SHA pin — version can't be compared; test_vault_extra_is_pinned covers form
+        return
+    live = [
+        rel
+        for cap in COMPAT_FLOOR
+        if not cap.parked and (rel := _release_tuple(cap.default_order_release)) is not None
+    ]
+    assert live, "no live floor rows carry a comparable release"
+    floor = max(live)
+    assert pin >= floor, (
+        f"[vault] pin v{'.'.join(map(str, pin))} is below the compat floor "
+        f"v{'.'.join(map(str, floor))} — a vault-wired bot would compose a "
+        f"capability the pinned engine cannot provide (see #680/#692)"
+    )
+
+
+def test_integration_doc_version_claim_matches_pin():
+    """The doc's "What works today (at vX.Y.Z)" headline must name the pinned
+    version — the exact doc/pin divergence #685 left behind."""
+    pin = _pinned_vault_version()
+    if pin is None:
+        return
+    doc = INTEGRATION_DOC.read_text()
+    m = re.search(r"What works today \(at v(\d+(?:\.\d+){1,2})\)", doc)
+    assert m, "integration doc is missing its 'What works today (at vX.Y.Z)' headline"
+    doc_ver = tuple(int(p) for p in m.group(1).split("."))
+    assert doc_ver == pin, (
+        f"integration doc claims v{m.group(1)} but [vault] pins "
+        f"v{'.'.join(map(str, pin))} — bump both together"
+    )
+
+
 def test_compat_floor_well_formed():
     assert COMPAT_FLOOR, "compat floor must not be empty"
     features = [c.feature for c in COMPAT_FLOOR]
