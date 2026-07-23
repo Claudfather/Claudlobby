@@ -492,6 +492,21 @@ def _validate_bots(
                         f"(see {CLAUDRON_INTEGRATION_URL})"
                     )
 
+        # Ecosystem: the session loop (L2) needs a vault to run against. An
+        # explicit `claudron_session_loop: true` with no `claudron_vault_path` is
+        # an error — its hooks (pull/recall/push) and narrow verb grants are
+        # meaningless without one. Left UNSET the loop defaults on only when a
+        # vault is wired (composer._session_loop_enabled), so this never fires on
+        # the default path — only on an opt-in that cannot work. (Loop enabled +
+        # vault set but claudron CLI absent is covered by the L1 PATH warning above.)
+        if bot.claudron_session_loop is True and not bot.claudron_vault_path:
+            report.errors.append(
+                f"bot '{bot_name}': claudron_session_loop is true but "
+                f"claudron_vault_path is unset — the session loop has no vault to "
+                f"pull, recall, or push against. Set claudron_vault_path, or remove "
+                f"claudron_session_loop (see {CLAUDRON_INTEGRATION_URL})"
+            )
+
         # Account (warn)
         if bot.account not in fleet.accounts:
             report.warnings.append(

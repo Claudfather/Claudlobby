@@ -7,6 +7,7 @@ template owns all top-level structure.
 
 from __future__ import annotations
 import copy
+import functools
 import json
 import logging
 import re
@@ -1314,6 +1315,125 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
     return out
 
 
+# ----------------------------------------------------------------------
+# Claudron session loop (L2) — engine hooks + narrow verb grants per vault-wired
+# bot. The hook entries are a RENDERED COPY of a Claudron-owned contract surface
+# (CLI_CONTRACT.md §Session-loop protocol, "The hook-settings snippet — normative
+# shape"); tests/test_claudron_loop.py carries the required drift gate against the
+# pinned engine's `claudron.hooks.settings_snippet()` (register rule R3).
+# ----------------------------------------------------------------------
+
+# Narrow, per-verb grants for the model-initiated CLI calls the loop enables (the
+# query-before wedge; /claudna:capture shelling `claudron capture`). NEVER a
+# Bash(claudron *) wildcard — that would grant the human-gated curation verbs
+# (promote/plug/unplug/config/migrate; boundary spec §8) and defeat curation. The
+# settings-installed hooks are harness-executed and pass through no permission
+# check, so they need no grant; these cover only calls the model itself makes.
+CLAUDRON_LOOP_GRANTS = [
+    "Bash(claudron lookup *)",
+    "Bash(claudron recall *)",
+    "Bash(claudron capture *)",
+    "Bash(claudron status *)",
+]
+
+# The three session-loop events → the engine's `hook <event>` dispatch verb.
+_CLAUDRON_HOOK_EVENTS = {
+    "SessionStart": "session-start",
+    "PreCompact": "pre-compact",
+    "SessionEnd": "session-end",
+}
+
+
+def _session_loop_enabled(bot: BotConfig) -> bool:
+    """Resolve the tri-state ``claudron_session_loop``: an explicit value wins;
+    unset defaults True exactly when the bot is vault-wired (has a
+    ``claudron_vault_path``), False otherwise."""
+    if bot.claudron_session_loop is not None:
+        return bot.claudron_session_loop
+    return bool(bot.claudron_vault_path)
+
+
+@functools.cache
+def _resolve_claudron_executable() -> tuple[str, str | None]:
+    """Absolute ``claudron`` path for the composed hook commands, resolved on the
+    compose host. Returns ``(executable, warning)``.
+
+    Hook context is not a login shell — PATH frequently omits a venv/pipx install
+    — so an absolute path is the contract (C2). A bare-``claudron`` fallback is
+    permitted only *with* a warning, because the loop would be wired-but-dead if
+    PATH does not carry it at runtime. Resolution is `shutil.which` at compose
+    time; we never shell out to ``claudron`` itself (composition must work on a
+    CLI-less host).
+
+    Cached: the executable's PATH location is host-invariant, so the per-bot
+    compose loop resolves it once per process instead of re-walking PATH for
+    every vault-wired bot. The caller emits the warning per bot, so operators
+    still see which bots are affected.
+    """
+    resolved = shutil.which("claudron")
+    if resolved:
+        return resolved, None
+    return (
+        "claudron",
+        "claudron is not on PATH at compose time — the session-loop hooks fall "
+        "back to a bare 'claudron' command that may not resolve in hook context "
+        "(hook PATH is not login-shell PATH). Install claudron on the compose/run "
+        "host so the hook command resolves to an absolute executable.",
+    )
+
+
+def _claudron_hook_entries(executable: str) -> dict[str, list]:
+    """The engine's session-loop hook entries in Claude Code settings shape.
+
+    Emitted INLINE (never by shelling ``claudron hooks install``) so composition
+    works on a CLI-less host. Byte-for-byte identical to the pinned engine's
+    ``claudron.hooks.settings_snippet(executable)["hooks"]`` — the parity gate
+    in tests/test_claudron_loop.py enforces that.
+    """
+    return {
+        event: [
+            {
+                "matcher": "",
+                "hooks": [
+                    {"type": "command", "command": f"{executable} hook {event_cmd}"}
+                ],
+            }
+        ]
+        for event, event_cmd in _CLAUDRON_HOOK_EVENTS.items()
+    }
+
+
+def _is_claudron_hook_entry(group: dict, event_cmd: str) -> bool:
+    """A claudron entry's identity is its ``hook <event>`` command SUFFIX, not the
+    full string (mirrors the engine's ``merge_settings`` key). Keying on the full
+    path would append a duplicate whenever the resolved executable moved."""
+    return any(
+        str(h.get("command", "")).endswith(f"hook {event_cmd}")
+        for h in (group.get("hooks") or [])
+    )
+
+
+def _merge_claudron_hooks(hooks: dict[str, list], executable: str) -> dict[str, list]:
+    """Merge the engine's session-loop entries into a composed hooks block.
+
+    Self-replacing per event (a stale claudron entry for the same event is
+    dropped, so a moved executable path never accumulates) while foreign entries
+    — a fleet's own SessionStart hook, say — are preserved. Mirrors the engine's
+    ``claudron.hooks.merge_settings`` so an engine-installed loop and a
+    composer-installed loop converge on the same file. Idempotent.
+    """
+    merged = dict(hooks)
+    for event, entries in _claudron_hook_entries(executable).items():
+        event_cmd = _CLAUDRON_HOOK_EVENTS[event]
+        kept = [
+            g
+            for g in (merged.get(event) or [])
+            if not _is_claudron_hook_entry(g, event_cmd)
+        ]
+        merged[event] = kept + entries
+    return merged
+
+
 _TELEGRAM_PLUGIN_TOOLS = [
     "mcp__plugin_telegram_telegram__reply",
     "mcp__plugin_telegram_telegram__edit_message",
@@ -1574,6 +1694,14 @@ def compose_settings_local(
     # additive path; Skill(<name>) above only grants invocation.
     _append_unique(allow_patterns, _resolve_skill_grants(bot, paths))
 
+    # Layer 5c: Claudron session-loop verb grants (L2) — the NARROW allowlist for
+    # the model-initiated CLI calls the loop enables (query wedge, /claudna:capture).
+    # Never a Bash(claudron *) wildcard (see CLAUDRON_LOOP_GRANTS). Gated on the
+    # same switch as the hooks below, so `claudron_session_loop: false` composes
+    # neither — a clean, single off-switch for a bot's Claudron loop wiring.
+    if _session_loop_enabled(bot):
+        _append_unique(allow_patterns, CLAUDRON_LOOP_GRANTS)
+
     # Union-layer write guardrail: with every library-derived layer accumulated
     # (and before the operator's tools.allow escape hatch below), nothing may
     # cover a non-read tool of a read-only-contracted server (#661).
@@ -1629,8 +1757,20 @@ def compose_settings_local(
     if sandbox_cfg:
         settings["sandbox"] = sandbox_cfg
 
-    # Hooks: PreToolUse, PostToolUse, etc.
+    # Hooks: fleet.yaml lifecycle hooks (PreToolUse/PostToolUse/…) plus, when the
+    # bot is wired to the Claudron session loop (L2), the engine's
+    # SessionStart/PreCompact/SessionEnd entries merged in per the C2 contract's
+    # normative snippet shape. The merge preserves a fleet's own entries for those
+    # events and replaces only a stale claudron entry (self-replacing by suffix).
+    # No claim env is composed: F1 is STRUCTURAL — the single capture prompt is
+    # claimed by clauDNA's hook detecting the engine's `hook pre-compact` entry,
+    # not by any composed CLAUDRON_CAPTURE_OWNER-style variable.
     hooks = _compose_hooks(bot.hooks)
+    if _session_loop_enabled(bot):
+        executable, warning = _resolve_claudron_executable()
+        if warning:
+            _log.warning("bot %s: %s", bot.bot_id, warning)
+        hooks = _merge_claudron_hooks(hooks, executable)
     if hooks:
         settings["hooks"] = hooks
 
