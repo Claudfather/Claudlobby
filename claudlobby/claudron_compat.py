@@ -55,13 +55,21 @@ COMPAT_FLOOR: tuple[ClaudronCapability, ...] = (
     ClaudronCapability(
         feature="CLI query wedge (dispatch-task.sh preflight)",
         requires="claudron lookup CLI",
-        default_order_release="0.2.0",
+        # 0.3.0, not 0.2.0: post-L1 the wedge relies on the CLI reading
+        # CLAUDRON_VAULT_PATH (dropped the explicit --vault), which landed in
+        # 0.3.0 (C1). On 0.2.0 the CLI reads only the removed CLAUDRON_VAULT, so
+        # the wedge would resolve no vault — a floor at 0.2.0 was a false green.
+        default_order_release="0.3.0",
         probe=PROBE_VERB_PREFIX + "lookup",
     ),
     ClaudronCapability(
         feature="fleet session loop — engine hooks installed per bot (plan L2)",
         requires="claudron hooks install + per-event hook dispatch",
-        default_order_release="0.2.0",
+        # 0.4.0, not 0.2.0: the composed hooks resolve the vault via
+        # CLAUDRON_VAULT_PATH (0.3.0+) and defer to the engine's front-end-neutral
+        # PreCompact prompt (C2, 0.4.0). On an older engine the loop is dead or
+        # double-prompts — a floor at 0.2.0 reported "met" on a broken loop (#680).
+        default_order_release="0.4.0",
         probe=PROBE_VERB_PREFIX + "hooks",
     ),
     ClaudronCapability(

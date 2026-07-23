@@ -4,7 +4,7 @@ How claudlobby connects to [Claudron](https://github.com/Claudfather/Claudron) �
 
 The full receiving-side plan is `documentation/plans/2026-07-07-claudron-consumption.md` (EPIC #509); Claudron's side is Claudfather/Claudron#14.
 
-## What works today (at v0.2.0)
+## What works today (at v0.4.0)
 
 - **Vault-based fleet overlays.** A `.claudron` file at the claudlobby root (shell-sourceable, gitignored) points at a vault; `claudlobby --fleet <name>` resolves the fleet overlay from `vault/<name>/` before falling back to `local/<name>/`. Uses claudron's `claudron.vault.detect` / `Vault.fleets` API when the `[vault]` extra is installed, with a manual bridge-file fallback otherwise.
 - **Per-bot vault env.** `claudron_vault_path` in fleet.yaml (per-bot or `defaults:`) composes `CLAUDRON_VAULT_PATH` into `bot.conf`.
@@ -32,11 +32,11 @@ Hooks **fail open**: any error (unresolvable vault, missing git, a stalled netwo
 
 **The composed hook block is a rendered copy of an owned surface** (register rule R3): its shape is fixed by the contract's normative snippet, and `tests/test_claudron_loop.py` carries the drift gate comparing the composer's output against the pinned engine's `claudron.hooks.settings_snippet()` (the L4 parity gate, runnable here).
 
-**Contention and push loss.** N bots on one host sharing one vault fire concurrent `SessionEnd` pushes. Engines that ship the vault write-lock (`locking.py`, post-0.2.0) serialize them on a `flock` — each holder's git ops are `10s`-bounded, but a waiter's lock acquisition is not, so the last of N contenders can wait roughly N × the per-op budget; the pinned **v0.2.0 has no write-lock**, so concurrent syncs serialize only on git's own `index.lock`. The guarantee that holds at **every** engine version is the load-bearing one: **the hook never exits nonzero (fail-open), and `sync` commits before it pushes — so a raced or timed-out push loses no work; the local commit travels on the next `SessionEnd`.** The N-bot contention test (`tests/test_claudron_loop.py::TestSessionEndContention`, ≥8 bots) asserts exactly this and records the completed-vs-deferred push accounting. Operationally, the fleet's **weekly-restart stagger** spreads SessionEnd bursts so contention stays low; if a soak shows real push loss, the escalation is the host-level sync-timer variant (F2(b), tracked as Claudron #43), not a change here.
+**Contention and push loss.** N bots on one host sharing one vault fire concurrent `SessionEnd` pushes. Engines that ship the vault write-lock (`locking.py`, post-0.2.0) serialize them on a `flock` — each holder's git ops are `10s`-bounded, but a waiter's lock acquisition is not, so the last of N contenders can wait roughly N × the per-op budget; the pinned **v0.4.0 ships the write-lock** (`claudron.locking.vault_write_lock`), so concurrent syncs serialize on that `flock`. The guarantee that holds at **every** engine version is the load-bearing one: **the hook never exits nonzero (fail-open), and `sync` commits before it pushes — so a raced or timed-out push loses no work; the local commit travels on the next `SessionEnd`.** The N-bot contention test (`tests/test_claudron_loop.py::TestSessionEndContention`, ≥8 bots) asserts exactly this and records the completed-vs-deferred push accounting. Operationally, the fleet's **weekly-restart stagger** spreads SessionEnd bursts so contention stays low; if a soak shows real push loss, the escalation is the host-level sync-timer variant (F2(b), tracked as Claudron #43), not a change here.
 
 ## Version pin and bump policy
 
-The `[vault]` extra in `pyproject.toml` is **pinned** to a released Claudron tag — `@v0.2.0` today (git tag; Claudron is not on PyPI yet, so the pin stays a `git+…@<tag>` URL rather than a `claudron>=0.2,<0.3` range until a PyPI publish lands). The extra tracks the **compositor's API consumption** (currently `claudron.vault.detect` / `Vault.fleets`); bump it per Claudron release *after* claudlobby's vault-mode tests (`tests/test_paths_integration.py`, run with claudron installed) pass against the new tag. Never revert to a bare git URL — `tests/test_claudron_compat.py` enforces the pin.
+The `[vault]` extra in `pyproject.toml` is **pinned** to a released Claudron tag — `@v0.4.0` today (git tag; Claudron is not on PyPI yet, so the pin stays a `git+…@<tag>` URL rather than a `claudron>=0.4,<0.5` range until a PyPI publish lands). The extra tracks the **compositor's API consumption** (currently `claudron.vault.detect` / `Vault.fleets`); bump it per Claudron release *after* claudlobby's vault-mode tests (`tests/test_paths_integration.py`, run with claudron installed) pass against the new tag. Never revert to a bare git URL — `tests/test_claudron_compat.py` enforces the pin.
 
 The MCP *server* install is deliberately **not** coupled to this extra: bots don't run in claudlobby's venv. The server is a host-level install (see Gated surfaces below).
 
@@ -47,8 +47,8 @@ SSOT: `claudlobby/claudron_compat.py` — `claudlobby doctor`'s `check_claudron`
 | Claudlobby surface | Requires (capability) | Slated release | Doctor state |
 |---|---|---|---|
 | vault-based fleet overlay resolution (paths.py .claudron bridge) | claudron.vault.detect / Vault.fleets API | 0.2.0 | probed (`[vault]` extra) |
-| CLI query wedge (dispatch-task.sh preflight) | claudron lookup CLI | 0.2.0 | probed (`claudron lookup`) |
-| fleet session loop — engine hooks installed per bot (plan L2) | claudron hooks install + per-event hook dispatch | 0.2.0 | probed (`claudron hooks`) |
+| CLI query wedge (dispatch-task.sh preflight) | claudron lookup CLI | 0.3.0 | probed (`claudron lookup`) |
+| fleet session loop — engine hooks installed per bot (plan L2) | claudron hooks install + per-event hook dispatch | 0.4.0 | probed (`claudron hooks`) |
 | MCP fragment library/mcp/claudron.json | claudron-mcp stdio server | unbuilt — demand-gated | **parked (decision C)** — never "unmet" |
 
 **Parked ≠ unmet.** A parked row is a surface deliberately *not built* under a recorded decision. Doctor never probes it and never renders it as a deficiency: warning about a door nobody shipped is the failure this check exists to stop making. The `librarian review sweep` row was **dropped** in this revision — `claudron review` does not exist at Claudron head, and its Claudlobby consumer (`lib/claudron-review-sweep.sh`) does not exist either, so the row gated nothing. It re-enters the floor when Claudron's E5 review queue ships and a consumer is built; it is tracked below until then.
