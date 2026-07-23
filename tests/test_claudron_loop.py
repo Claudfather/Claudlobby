@@ -371,6 +371,7 @@ class TestValidator:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.vault
 class TestSnippetParity:
     EXE = "/opt/claudron/bin/claudron"
 
@@ -450,32 +451,59 @@ def _engine_has_writelock() -> bool:
     return importlib.util.find_spec("claudron.locking") is not None
 
 
+@pytest.mark.vault
 @pytest.mark.skipif(
     not (_HAS_CLAUDRON and _HAS_GIT),
     reason="N-bot contention needs the [vault] extra (claudron) + git",
 )
 class TestSessionEndContention:
-    def _make_vault(self, tmp_path: Path) -> tuple[Path, Path]:
-        """A git-backed vault (clone of a bare remote) with N staged notes —
-        one per bot, simulating N sessions' captures awaiting a SessionEnd push."""
+    def _make_clones(self, tmp_path: Path) -> tuple[list[Path], Path]:
+        """N git-backed vault clones of one bare remote — one per bot, each with
+        ITS OWN unpushed note awaiting a SessionEnd push.
+
+        Separate clones (not one shared working copy) is what makes the pushes
+        actually race: each clone is its own vault with its own write-lock, so the
+        locks can't serialize the pushes into one — only the first to reach the
+        remote fast-forwards, the rest are rejected non-ff and must defer to a
+        later session. (#682: the old single-vault setup staged all N notes in one
+        working copy, so the first lock-holder's greedy ``git add -A`` committed +
+        pushed *everyone's* notes at once → no push ever deferred and the recovery
+        loop ran 0 cycles, never exercising the path its accounting narrates.)"""
         remote = tmp_path / "remote.git"
         _git(tmp_path, "init", "--bare", str(remote))
-        vault = tmp_path / "vault"
-        _git(tmp_path, "clone", str(remote), str(vault))
-        _git(vault, "config", "user.email", "fleet@test")
-        _git(vault, "config", "user.name", "fleet")
-        (vault / "_shared").mkdir()
-        (vault / "_shared" / "CONVENTIONS.md").write_text("# conv\n")
-        _git(vault, "add", "-A")
-        _git(vault, "commit", "-m", "init vault")
-        _git(vault, "push", "origin", "HEAD")
-        notes = vault / "_shared" / "knowledge"
-        notes.mkdir()
+
+        # Seed the shared base (CONVENTIONS) on the remote via a throwaway clone.
+        seed = tmp_path / "seed"
+        _git(tmp_path, "clone", str(remote), str(seed))
+        _git(seed, "config", "user.email", "fleet@test")
+        _git(seed, "config", "user.name", "fleet")
+        (seed / "_shared").mkdir()
+        (seed / "_shared" / "CONVENTIONS.md").write_text("# conv\n")
+        # Gitignore .claudron/ exactly like a real vault (claudron.vault
+        # _GITIGNORE_CONTENT) — otherwise the hooks' `git add -A` commits each
+        # clone's own .claudron/hooks.log, and those divergent per-clone logs
+        # collide when the losing clones rebase, stalling convergence. Machine-
+        # local runtime (index, logs, locks) is never committed.
+        (seed / ".gitignore").write_text("*/runtime/\n.env\n.claudron/\n")
+        _git(seed, "add", "-A")
+        _git(seed, "commit", "-m", "init vault")
+        _git(seed, "push", "origin", "HEAD")
+
+        clones: list[Path] = []
         for i in range(N_BOTS):
+            clone = tmp_path / f"vault-{i}"
+            _git(tmp_path, "clone", str(remote), str(clone))
+            _git(clone, "config", "user.email", f"bot{i}@test")
+            _git(clone, "config", "user.name", f"bot{i}")
+            notes = clone / "_shared" / "knowledge"
+            notes.mkdir(parents=True)
+            # Each bot captures ONLY its own note (unstaged — the SessionEnd hook's
+            # `git add -A` stages it; in this clone that -A sees only note-i).
             (notes / f"note-{i}.md").write_text(
                 f"---\ntype: knowledge\ntitle: note {i}\n---\nbody {i}\n"
             )
-        return vault, remote
+            clones.append(clone)
+        return clones, remote
 
     def _notes_on_remote(self, remote: Path) -> int:
         out = subprocess.run(
@@ -485,24 +513,25 @@ class TestSessionEndContention:
         return sum(1 for i in range(N_BOTS) if f"note-{i}.md" in out)
 
     def test_concurrent_session_end_fail_open_and_eventually_consistent(self, tmp_path):
-        vault, remote = self._make_vault(tmp_path)
+        clones, remote = self._make_clones(tmp_path)
         end_argv = _claudron_hook_argv("session-end")
         start_argv = _claudron_hook_argv("session-start")
-        # Resolve the vault via CWD walk-up (contract row 3), which every engine
+        # Resolve each vault via CWD walk-up (contract row 3), which every engine
         # version honors — deliberately NOT via CLAUDRON_VAULT_PATH: the pinned
         # v0.2.0 reads the old CLAUDRON_VAULT spelling, and this test validates
-        # concurrent-sync fail-open, not the env-address contract (which has its
-        # own tests). run() below sets cwd=vault for the same reason.
+        # concurrent-sync fail-open + recovery, not the env-address contract (which
+        # has its own tests). Each subprocess sets cwd=<clone-i>.
         env = dict(os.environ)
 
-        # Fire N SessionEnd hooks at once (started back-to-back for max overlap).
+        # Fire N SessionEnd hooks at once (started back-to-back for max overlap),
+        # each in its own clone → the pushes truly race for the remote ref.
         t0 = time.monotonic()
         procs = [
             subprocess.Popen(
-                end_argv, env=env, cwd=str(vault), stdin=subprocess.PIPE,
+                end_argv, env=env, cwd=str(clone), stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            for _ in range(N_BOTS)
+            for clone in clones
         ]
         rcs, durations = [], []
         for p in procs:
@@ -517,38 +546,47 @@ class TestSessionEndContention:
         burst_s = time.monotonic() - t0
 
         # (1) THE load-bearing invariant, holds at EVERY engine version: fail-open
-        #     under contention — no SessionEnd hook exits nonzero. A concurrent
-        #     push that loses the race degrades to a no-op, never a broken session.
+        #     under contention — no SessionEnd hook exits nonzero. A push that
+        #     loses the race degrades to a no-op, never a broken session.
         assert all(rc == 0 for rc in rcs), f"a hook exited nonzero: {rcs}"
 
-        # How much of the burst actually landed on the remote (0..N). On an engine
-        # with the vault write-lock this tends to N; on the lock-less pinned v0.2.0
-        # it varies with the race — the push-loss the risk table names.
+        # (2) The pushes ACTUALLY raced (the #682 honesty fix): some landed, some
+        #     deferred. Exactly one commit can fast-forward the shared base, so
+        #     `burst_landed < N` is deterministic here, not a timing artifact — and
+        #     `>= 1` means the race made real progress rather than deadlocking.
         burst_landed = self._notes_on_remote(remote)
+        assert burst_landed >= 1, "no SessionEnd push landed — the race made no progress"
+        assert burst_landed < N_BOTS, (
+            f"every push landed ({burst_landed}/{N_BOTS}) — the deferred-push path "
+            "is still un-exercised (the exact #682 dishonesty this fix removes)"
+        )
 
-        # (2) No work is ever DESTROYED — every note file survives on disk (a raced
-        #     push abandons the *push*, not the capture).
-        for i in range(N_BOTS):
-            assert (vault / "_shared" / "knowledge" / f"note-{i}.md").is_file()
+        # (3) No work is ever DESTROYED — every note survives on disk in its clone
+        #     (a raced push abandons the *push*, not the capture).
+        for i, clone in enumerate(clones):
+            assert (clone / "_shared" / "knowledge" / f"note-{i}.md").is_file()
 
-        # (3) Eventual consistency — "unpushed work travels the next session": a
-        #     bounded reconcile (SessionStart pull+rebase, then SessionEnd push)
-        #     converges the remote to all N notes. This is the recovery the loss
-        #     accounting is measured against; it is deterministic (adds never
-        #     conflict) and version-independent.
+        # (4) Eventual consistency — "unpushed work travels the next session": a
+        #     bounded reconcile (SessionStart pull+rebase, then SessionEnd push over
+        #     each clone) converges the remote to all N notes. Adds never conflict
+        #     (distinct files), so one pass suffices; the loop is bounded and
+        #     version-independent. THIS is the recovery #682 says must actually run
+        #     — and it now does (reconcile_cycles >= 1, asserted below).
         cycles = 0
-        landed = burst_landed
-        for _ in range(4):
-            if landed == N_BOTS:
+        for _ in range(N_BOTS):
+            if self._notes_on_remote(remote) == N_BOTS:
                 break
-            subprocess.run(start_argv, env=env, cwd=str(vault), input="{}", capture_output=True, text=True, timeout=60)
-            subprocess.run(end_argv, env=env, cwd=str(vault), input="{}", capture_output=True, text=True, timeout=60)
-            landed = self._notes_on_remote(remote)
+            for clone in clones:
+                subprocess.run(start_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
+                subprocess.run(end_argv, env=env, cwd=str(clone), input="{}", capture_output=True, text=True, timeout=60)
             cycles += 1
-        assert landed == N_BOTS, f"only {landed}/{N_BOTS} notes reached the remote after reconcile"
+        final = self._notes_on_remote(remote)
+        assert final == N_BOTS, f"only {final}/{N_BOTS} notes reached the remote after reconcile"
+        assert cycles >= 1, "reconcile ran 0 cycles — the deferred-push recovery was never exercised"
 
-        # (4) No object corruption from the concurrent writers.
-        _git(vault, "fsck")
+        # (5) No object corruption from the concurrent writers.
+        for clone in clones:
+            _git(clone, "fsck")
 
         within = sum(1 for d in durations if d <= 10.0)
         print(
@@ -557,5 +595,5 @@ class TestSessionEndContention:
             f"fail_open={sum(1 for r in rcs if r == 0)}/{N_BOTS} "
             f"within_10s_budget={within}/{N_BOTS} "
             f"burst_landed={burst_landed}/{N_BOTS} reconcile_cycles={cycles} "
-            f"final={landed}/{N_BOTS}"
+            f"final={final}/{N_BOTS}"
         )
