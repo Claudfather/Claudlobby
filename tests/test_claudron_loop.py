@@ -106,6 +106,15 @@ class TestSessionLoopConfig:
         )
         assert bot.claudron_session_loop is False
 
+    def test_explicit_null_is_unset_not_false(self):
+        """`claudron_session_loop:` with no value (YAML null) must read as unset
+        (→ vault-presence default), never a silent False that disables the loop
+        on a vault-wired bot."""
+        bot = _coerce_bot(
+            "b", {"expertise": ["eng"], "claudron_session_loop": None}, {}
+        )
+        assert bot.claudron_session_loop is None
+
     def test_from_fleet_defaults(self):
         bot = _coerce_bot("b", {"expertise": ["eng"]}, {"claudron_session_loop": True})
         assert bot.claudron_session_loop is True

@@ -1059,12 +1059,15 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         return fallback
 
     def _tristate(key: str) -> bool | None:
-        """Presence-based tri-state: an explicit bot/fleet value wins, else
-        None — the unset sentinel the composer resolves to its vault-presence
-        default (unlike `_bool`, which collapses unset to a fixed fallback)."""
-        if key in raw:
+        """Presence-based tri-state: an explicit *non-null* bot/fleet value wins,
+        else None — the unset sentinel the composer resolves to its vault-presence
+        default (unlike `_bool`, which collapses unset to a fixed fallback). A
+        YAML null (`key:` with no value) is treated as unset, not False, so a bare
+        key never silently disables a vault-wired loop (the sibling string fields
+        like `claudron_vault_path` fall through on null the same way)."""
+        if raw.get(key) is not None:
             return bool(raw[key])
-        if key in defaults:
+        if defaults.get(key) is not None:
             return bool(defaults[key])
         return None
 
