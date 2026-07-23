@@ -42,6 +42,16 @@ WILDCARD_GRANT = "Bash(claudron *)"
 CURATION_VERBS = ["promote", "plug", "unplug", "config", "migrate", "review", "init"]
 
 
+@pytest.fixture(autouse=True)
+def _clear_claudron_exe_cache():
+    """`_resolve_claudron_executable` is `@functools.cache`d (the PATH location
+    is host-invariant, so the per-bot compose loop resolves it once). Clear it
+    between tests so a prior test's cached result never shadows another test's
+    monkeypatched PATH."""
+    _resolve_claudron_executable.cache_clear()
+    yield
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -364,6 +374,32 @@ class TestSnippetParity:
         composed = _merge_claudron_hooks({}, self.EXE)
         engine = hooks.merge_settings({}, hooks.settings_snippet(self.EXE))["hooks"]
         assert composed == engine
+
+    def test_merge_self_replace_matches_engine(self):
+        """The self-replacing branch — a stale claudron entry for an event dropped
+        and re-installed while a foreign entry survives — is where the rendered
+        copy is most likely to drift from the engine, and is exactly what R3
+        guards. The empty-base case above cannot exercise it."""
+        hooks = pytest.importorskip("claudron.hooks")
+        old_exe, new_exe = "/old/venv/bin/claudron", "/new/venv/bin/claudron"
+        foreign = {"matcher": "", "hooks": [{"type": "command", "command": "fleet-own.sh"}]}
+
+        def base():  # a hooks block: stale claudron entries (old exe) + a foreign hook
+            b = _merge_claudron_hooks({}, old_exe)
+            event = next(iter(b))
+            b[event] = b[event] + [foreign]
+            return b, event
+
+        b_composer, event = base()
+        b_engine, _ = base()
+        composed = _merge_claudron_hooks(b_composer, new_exe)
+        engine = hooks.merge_settings(
+            {"hooks": b_engine}, hooks.settings_snippet(new_exe)
+        )["hooks"]
+        assert composed == engine
+        # sanity: foreign hook survived; the stale executable is fully gone
+        assert foreign in composed[event]
+        assert not any(old_exe in json.dumps(v) for v in composed.values())
 
 
 # ---------------------------------------------------------------------------

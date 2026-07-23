@@ -7,6 +7,7 @@ template owns all top-level structure.
 
 from __future__ import annotations
 import copy
+import functools
 import json
 import logging
 import re
@@ -1352,6 +1353,7 @@ def _session_loop_enabled(bot: BotConfig) -> bool:
     return bool(bot.claudron_vault_path)
 
 
+@functools.cache
 def _resolve_claudron_executable() -> tuple[str, str | None]:
     """Absolute ``claudron`` path for the composed hook commands, resolved on the
     compose host. Returns ``(executable, warning)``.
@@ -1362,6 +1364,11 @@ def _resolve_claudron_executable() -> tuple[str, str | None]:
     PATH does not carry it at runtime. Resolution is `shutil.which` at compose
     time; we never shell out to ``claudron`` itself (composition must work on a
     CLI-less host).
+
+    Cached: the executable's PATH location is host-invariant, so the per-bot
+    compose loop resolves it once per process instead of re-walking PATH for
+    every vault-wired bot. The caller emits the warning per bot, so operators
+    still see which bots are affected.
     """
     resolved = shutil.which("claudron")
     if resolved:
