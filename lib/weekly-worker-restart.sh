@@ -71,12 +71,26 @@ for bot_dir in "$BOTS_DIR"/*/; do
     fi
 
     echo "$ts RESTART worker: $bot_id" >> "$LOG"
+    # Fence the bridge log BEFORE the bounce so the gate below only sees THIS
+    # boot's BRIDGE_READY (a stale line from the prior boot cannot pass).
+    _wr_log="$bot_dir/logs/startup.log"
+    _wr_fence=0; [ -f "$_wr_log" ] && _wr_fence="$(wc -c < "$_wr_log" 2>/dev/null | tr -d ' ')"
     # Best-effort handoff first — pre-stop-handoff.sh self-bounds (≤30s, early
     # exits as soon as the handoff lands) and exits 0, so it never blocks the
     # restart. The restart proceeds regardless of the handoff outcome.
     "$LIB_DIR/pre-stop-handoff.sh" "$bot_dir" >> "$LOG" 2>&1 || true
 
     if "$LIB_DIR/spin-up-bot.sh" "$bot_dir" >> "$LOG" 2>&1; then
+        # Serialize on the Telegram bridge: wait for THIS worker's poller to come
+        # ready before bouncing the next, so an all-workers weekly bounce cannot
+        # mass-starve channel init (#688/#689). A gate timeout is logged + alerted
+        # but does NOT abort the maintenance run — the next worker still bounces.
+        if wait_bridge_ready "$bot_dir" "${WEEKLY_RESTART_CEILING:-180}" "${_wr_fence:-0}"; then
+            echo "$ts RESTART ready: $bot_id" >> "$LOG"
+        else
+            echo "$ts RESTART bridge-timeout: $bot_id (no BRIDGE_READY in ${WEEKLY_RESTART_CEILING:-180}s)" >> "$LOG"
+            emit_failure_alert "$BOTS_DIR" "bridge_down" "worker $bot_id restarted but its Telegram bridge did not come ready within ${WEEKLY_RESTART_CEILING:-180}s (weekly bounce)"
+        fi
         restarted=$((restarted + 1))
     else
         rc=$?

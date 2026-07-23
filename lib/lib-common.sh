@@ -640,6 +640,40 @@ bridge_bringup_verify() {
     esac
 }
 
+# wait_bridge_ready <bot_dir> <ceiling_s> <fence_bytes>
+# Block until a FRESH `BRIDGE_READY` is appended to the bot's startup.log — the
+# per-bot gate for a serial rolling restart (#689). <fence_bytes> is the log size
+# captured BEFORE the restart, so only lines this boot writes count and a stale
+# BRIDGE_READY from a prior boot can never pass the gate. Returns 0 the moment a
+# fresh BRIDGE_READY appears, 1 once <ceiling_s> elapses (the caller then serializes
+# / halts rather than proceed-anyway — a mass proceed-anyway is the #688/#689
+# fleet-wide outage). Poll-count, not clock, so a slow bridge spawns no date fork.
+# The log line is boot-scoped (start-bot writes exactly one per successful boot),
+# which is a cleaner freshness signal than a live bridge_state read that could
+# still match the not-yet-reaped OLD poller mid-restart.
+wait_bridge_ready() {
+    local bot_dir="${1:?Usage: wait_bridge_ready <bot_dir> <ceiling_s> <fence_bytes>}"
+    local ceiling="${2:-180}" fence="${3:-0}"
+    local log="$bot_dir/logs/startup.log" waited=0 step=3 cur fresh
+    while :; do
+        cur=0; [ -f "$log" ] && cur="$(wc -c < "$log" 2>/dev/null | tr -d ' ')"
+        cur="${cur:-0}"
+        if [ "$cur" -ge "$fence" ]; then
+            # Only bytes appended since the fence — inherently this-boot-fresh.
+            fresh="$(tail -c "+$((fence + 1))" "$log" 2>/dev/null || true)"
+        else
+            # Log rotated/truncated since the fence → fall back to the tail from
+            # the LAST POLL_START (start-bot writes one per boot), which still
+            # excludes any pre-restart BRIDGE_READY.
+            fresh="$(awk '/POLL_START/{buf=""} {buf = buf $0 ORS} END{printf "%s", buf}' "$log" 2>/dev/null || true)"
+        fi
+        case "$fresh" in *BRIDGE_READY*) return 0 ;; esac
+        [ "$waited" -ge "$ceiling" ] && return 1
+        sleep "$step"
+        waited=$((waited + step))
+    done
+}
+
 # --- Per-bot tmux socket isolation ------------------------------------------
 # Each bot runs its own tmux server, reached via a private socket name (the
 # `-L` argument), so one server's death can only drop one bot — not the whole
