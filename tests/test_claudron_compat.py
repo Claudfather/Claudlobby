@@ -1,13 +1,18 @@
 """Guards for the Claudron integration floor (plan 2026-07-07-claudron-consumption, 1c).
 
-Three invariants: the [vault] extra stays pinned (never a bare git URL), the
-compat table stays well-formed, and the integration doc stays in sync with the
-table it renders.
+Invariants: the [vault] extra stays pinned (never a bare git URL), the compat
+table stays well-formed, the integration doc stays in sync with the table it
+renders, and — added in boundary phase L4 (deliverable 4) — the module docstring
+names a *real* consumer (L1 wired ``doctor.check_claudron``; the docstring must
+not out-live it).
 """
 
+import inspect
 import re
 from pathlib import Path
 
+import claudlobby.claudron_compat as claudron_compat
+import claudlobby.doctor as doctor
 from claudlobby.claudron_compat import COMPAT_FLOOR, PROBE_API, PROBE_VERB_PREFIX
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -100,3 +105,26 @@ def test_integration_doc_renders_compat_floor():
                 f"live row's Doctor-state cell does not name its probe "
                 f"({probe!r}): {cap.feature}"
             )
+
+
+def test_docstring_names_a_real_consumer():
+    """Docstring truth (L4, deliverable 4): the module docstring promises
+    ``doctor.check_claudron`` reads this table (the check L1 wired). Freeze that
+    the named consumer is real — exists, is callable, and actually reads
+    COMPAT_FLOOR — so the docstring cannot describe a consumer that drifted away
+    (rename or delete ``check_claudron`` and this fails, forcing both in sync)."""
+    docstring = claudron_compat.__doc__ or ""
+    assert "doctor.check_claudron" in docstring, (
+        "docstring names a consumer that is not doctor.check_claudron"
+    )
+    consumer = getattr(doctor, "check_claudron", None)
+    assert callable(consumer), "docstring names doctor.check_claudron but it is gone"
+
+    doctor_src = inspect.getsource(doctor)
+    assert "from .claudron_compat import" in doctor_src, (
+        "doctor no longer imports the compat table the docstring says it reads"
+    )
+    assert "COMPAT_FLOOR" in inspect.getsource(consumer), (
+        "doctor.check_claudron no longer reads COMPAT_FLOOR — the docstring's "
+        "'reads this table' claim is stale"
+    )

@@ -25,3 +25,12 @@ claudlobby = "claudlobby.__main__:main"
 
 [tool.setuptools]
 packages = ["claudlobby", "claudlobby.commands"]
+
+[tool.pytest.ini_options]
+# Registered so `pytest -m vault` selects the vault-mode gate and unknown-marker
+# warnings stay quiet. These tests importorskip/skipif on the [vault] extra, so
+# they SKIP in the default `.[dev]` lane and RUN in the dedicated vault-tests CI
+# lane that installs pinned claudron (boundary phase L4 / issue #682).
+markers = [
+    "vault: requires the [vault] extra (pinned claudron); run in the vault-tests CI lane",
+]
