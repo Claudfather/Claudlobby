@@ -12,6 +12,7 @@ real-boot half of the gate lives in ``lib/freshbox-boot-gate.sh``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from .composer import (
     BASE_TOOLS,
@@ -144,6 +145,72 @@ def _tier_a_findings(bot_id: str, settings: dict) -> list[Finding]:
     return findings
 
 
+def _path_findings(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]:
+    """Improper-path findings — the generate-time guard folded into the audit so
+    the same 'no flat/dangling absolute fleet path' contract holds on the emitted
+    wiring. Reading the emitted files (not a re-compose) also catches post-generate
+    drift a re-compose would miss."""
+    from .path_audit import audit_bot_paths
+
+    return [
+        Finding(
+            bot.bot_id, "improper_path", FAIL, f"{pf.file}: {pf.path} — {pf.reason}"
+        )
+        for pf in audit_bot_paths(bot, fleet, paths)
+    ]
+
+
+def _orphan_unit_files(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Path]:
+    """Stale supervision units in the bot dir — any ``*.service`` / ``*.plist``
+    that is not the composed long-form ``<service_prefix>.<bot>`` name (e.g. a
+    pre-naming short-form ``<bot>.plist`` orphan). The composer emits only the
+    long-form, so anything else is dead cruft an older layout left behind."""
+    bot_dir = paths.bot_runtime(bot.bot_id)
+    valid = {
+        f"{fleet.service_prefix}.{bot.bot_id}.service",
+        f"{fleet.service_prefix}.{bot.bot_id}.plist",
+    }
+    orphans: list[Path] = []
+    for pattern in ("*.service", "*.plist"):
+        orphans.extend(f for f in sorted(bot_dir.glob(pattern)) if f.name not in valid)
+    return orphans
+
+
+def _orphan_unit_findings(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths
+) -> list[Finding]:
+    return [
+        Finding(
+            bot.bot_id,
+            "orphan_unit",
+            WARN,
+            f"{f.name} — stale supervision unit, not the composed "
+            f"{fleet.service_prefix}.{bot.bot_id} long-form; reap with "
+            "`claudlobby freshbox --reap`",
+        )
+        for f in _orphan_unit_files(bot, fleet, paths)
+    ]
+
+
+def reap_orphan_units(
+    fleet: FleetConfig, paths: Paths, bots: list[BotConfig] | None = None
+) -> list[Path]:
+    """Remove stale short-form supervision units; return the files removed.
+
+    Freshbox owns recurrence: the composer emits only the long-form unit, so any
+    short-form ``<bot>.plist`` left by an older layout is dead cruft, safe to reap.
+    """
+    removed: list[Path] = []
+    for bot in bots if bots is not None else list(fleet.bots.values()):
+        for f in _orphan_unit_files(bot, fleet, paths):
+            try:
+                f.unlink()
+                removed.append(f)
+            except OSError:
+                continue
+    return removed
+
+
 def audit_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]:
     """Fresh-box self-containment findings for one composed bot."""
     settings = compose_settings_local(bot, fleet, paths)
@@ -160,6 +227,8 @@ def audit_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]
         for kind, sev, grant in triples
     ]
     findings.extend(_tier_a_findings(bot.bot_id, settings))
+    findings.extend(_path_findings(bot, fleet, paths))
+    findings.extend(_orphan_unit_findings(bot, fleet, paths))
     return findings
 
 
