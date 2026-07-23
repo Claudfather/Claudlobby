@@ -46,9 +46,12 @@ class PathFinding:
 
 
 # A crude absolute-path token: a run starting with "/" up to whitespace or a
-# common delimiter. Good enough for the machine-generated wiring files scanned
+# common delimiter. `<` and `>` delimit too — they cannot occur in a real path,
+# so they mark the boundary between an XML tag and a path in a launchd plist
+# (``</key><string>/real/path</string>``), keeping the closing tag out of the
+# extracted token. Good enough for the machine-generated wiring files scanned
 # here (bot.conf, .mcp.json, unit files).
-_ABS_TOKEN_RE = re.compile(r"/[^\s'\":;,]+")
+_ABS_TOKEN_RE = re.compile(r"/[^\s'\":;,<>]+")
 
 # Bot-dir-relative wiring files whose absolute paths must resolve for the bot to
 # run. Prose (CLAUDE.md) is intentionally excluded — a stale path there does not
@@ -86,19 +89,58 @@ def _fleet_content_roots(paths: Paths) -> list[str]:
     return roots
 
 
+def _fleet_layout_needles(paths: Paths) -> list[str]:
+    """Slash-bounded fragments that mark a path as this fleet's own content by
+    *shape* — what a fleet-owned path keeps even when it is written against a
+    foreign install root, which a prefix test against this install's roots
+    (``_fleet_content_roots``) cannot recognize.
+
+    A path is fleet-owned by shape when it contains, at segment boundaries:
+
+    * this fleet's overlay dir at its real depth (``…/local/home/tl/…``),
+      derived from the fleet config dir so it tracks the layout rather than
+      restating it
+    * a flat ``local/<fleet>`` overlay — a flat-layout fleet, or a leftover husk
+      of one that lives deeper (kept as its own fragment so a flat path is
+      caught even when this fleet is nested)
+    * a bot runtime tree (``…/runtime/bots/…``)
+
+    Each fragment is gated on this fleet's own directory name or the runtime
+    marker, so a bare ``local`` segment (``/usr/local/bin``) or a package token
+    never matches; the leading/trailing ``/`` enforce the segment boundary.
+    """
+    fleet_cfg = paths.fleet_config_dir
+    needles = {f"/local/{fleet_cfg.name}/", "/runtime/bots/"}
+    if fleet_cfg.is_relative_to(paths.root):
+        rel = fleet_cfg.relative_to(paths.root).parts
+        if rel:
+            needles.add("/" + "/".join(rel) + "/")
+    return sorted(needles)
+
+
+def _traverses_fleet_layout(path: str, needles: list[str]) -> bool:
+    """True if *path* contains any fleet-layout fragment at a segment boundary."""
+    hay = path + "/"
+    return any(n in hay for n in needles)
+
+
 def improper_fleet_paths(
     text: str, bot: BotConfig, paths: Paths
 ) -> list[tuple[str, str]]:
     """Return ``[(path, reason)]`` for improper absolute fleet paths in *text*.
 
-    After resolving composer path anchors, any absolute path under a fleet-content
-    root that does NOT resolve inside ``paths.fleet_config_dir`` is improper — a
-    flat/dangling husk from a pre-migration layout, or a cross-fleet leak. A
-    nested-correct absolute path (what the composer itself emits, e.g.
-    FLEET_MISSION_FILE) is fine; the rule is correctness, not "no absolutes".
+    After resolving composer path anchors, an absolute path is improper when it
+    is fleet-owned — under a fleet-content root, or shaped like this fleet's own
+    overlay / bot-runtime layout at any root — yet does NOT resolve inside
+    ``paths.fleet_config_dir``. That covers a flat or dangling husk, a cross-fleet
+    leak, and a stale absolute hand-typed against a foreign install root that
+    dangles the moment the fleet runs elsewhere. A nested-correct absolute path
+    (what the composer itself emits, e.g. FLEET_MISSION_FILE) is fine; the rule
+    is correctness, not "no absolutes".
     """
     resolved = _resolve_anchor_tokens(text, _anchor_values(bot, paths))
     content_roots = _fleet_content_roots(paths)
+    layout_needles = _fleet_layout_needles(paths)
     fleet_root = str(paths.fleet_config_dir)
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
@@ -106,8 +148,11 @@ def improper_fleet_paths(
         p = m.group(0).rstrip("/.,:;\"')}")
         if p in seen:
             continue
-        if not any(p == r or p.startswith(r + os.sep) for r in content_roots):
-            continue  # not fleet-owned content (system path, $HOME, /tmp, …)
+        under_content_root = any(
+            p == r or p.startswith(r + os.sep) for r in content_roots
+        )
+        if not (under_content_root or _traverses_fleet_layout(p, layout_needles)):
+            continue  # not fleet-owned (system path, $HOME, /tmp, package token, …)
         norm = os.path.normpath(p)
         if norm == fleet_root or norm.startswith(fleet_root + os.sep):
             continue  # resolves inside the fleet's real overlay root — correct
@@ -115,8 +160,9 @@ def improper_fleet_paths(
         out.append(
             (
                 p,
-                f"absolute fleet path outside the fleet overlay root {fleet_root} "
-                "— flat/dangling (pre-migration layout) or cross-fleet leak",
+                f"absolute fleet path that does not resolve inside the fleet "
+                f"overlay root {fleet_root} — a flat, dangling, or foreign-rooted "
+                "layout, or a cross-fleet leak",
             )
         )
     return out

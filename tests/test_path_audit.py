@@ -88,6 +88,66 @@ class TestImproperFleetPaths:
         txt = 'export FLEET_STATE_PATH="$CLAUDLOBBY_ROOT/state/fleet-state.json"'
         assert improper_fleet_paths(txt, _bot(), paths) == []
 
+    def test_foreign_host_flat_absolute_is_flagged(self, tmp_path):
+        # A stale absolute copied from a prior host: under neither this install's
+        # local/ nor a resolving vault path, yet it traverses this fleet's own
+        # flat overlay layout (local/<fleet>/…) — a dangling fleet path, not a
+        # system path. This is the seam-1 gap (PR #690 review).
+        paths = _paths(tmp_path)
+        foreign = (
+            "/Users/olduser/old-mac-mini-install/claudlobby/local/tl/.secrets/ga4.json"
+        )
+        bad = improper_fleet_paths(f'"{foreign}"', _bot(), paths)
+        assert [p for p, _ in bad] == [foreign]
+
+    def test_foreign_host_nested_absolute_is_flagged(self, tmp_path):
+        # Same, but the stale path carries the nested overlay layout at a foreign root.
+        paths = _paths(tmp_path)
+        foreign = (
+            "/Users/olduser/old-install/claudlobby/local/home/tl/.secrets/ga4.json"
+        )
+        bad = improper_fleet_paths(foreign, _bot(), paths)
+        assert [p for p, _ in bad] == [foreign]
+
+    def test_foreign_bot_runtime_absolute_is_flagged(self, tmp_path):
+        # A bot-runtime tree (runtime/bots/…) anchored at a foreign root is a
+        # transplanted fleet path — recognized by the runtime-tree layout marker.
+        paths = _paths(tmp_path)
+        foreign = "/mnt/old/claudlobby/local/home/tl/runtime/bots/kev/data/x.js"
+        bad = improper_fleet_paths(foreign, _bot(), paths)
+        assert [p for p, _ in bad] == [foreign]
+
+    # --- false-positive locks: real absolutes that live in emitted wiring today ---
+    # (bot.conf / .mcp.json / unit files). The broadened recognizer must leave
+    # every one of these clean, or it breaks legit generates.
+
+    def test_usr_local_bin_is_not_flagged(self, tmp_path):
+        # /usr/local/... contains a `local` segment but is not a fleet overlay.
+        paths = _paths(tmp_path)
+        txt = "/usr/local/bin/node /usr/local/lib/thing"
+        assert improper_fleet_paths(txt, _bot(), paths) == []
+
+    def test_npm_scope_fragment_in_mcp_json_is_not_flagged(self, tmp_path):
+        # `@notionhq/notion-mcp-server@2.2.1` — the abs-token regex extracts
+        # `/notion-mcp-server@2.2.1`; it is not a filesystem path at all.
+        paths = _paths(tmp_path)
+        txt = '"args": ["-y", "@notionhq/notion-mcp-server@2.2.1", "@org/server-github@2025.4.8"]'
+        assert improper_fleet_paths(txt, _bot(), paths) == []
+
+    def test_cross_platform_homebrew_path_is_not_flagged(self, tmp_path):
+        # A launchd plist emitted on Linux carries a macOS PATH whose entries
+        # (/opt/homebrew/...) do not resolve on the generating host — legit, must pass.
+        paths = _paths(tmp_path)
+        txt = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin"
+        assert improper_fleet_paths(txt, _bot(), paths) == []
+
+    def test_plist_xml_fragments_are_not_flagged(self, tmp_path):
+        # plist is XML; the abs-token regex extracts `/array>`, `/dict>`,
+        # `/www.apple.com/DTDs/PropertyList-1.0.dtd` from closing tags / the DTD URL.
+        paths = _paths(tmp_path)
+        txt = "</array></dict> http://www.apple.com/DTDs/PropertyList-1.0.dtd </plist>"
+        assert improper_fleet_paths(txt, _bot(), paths) == []
+
 
 class TestAuditBotPaths:
     def _seed_bot_dir(self, paths):
@@ -208,3 +268,48 @@ class TestComposeBotFiresPathGuard:
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
         assert bot_dir.is_dir()
+
+    def test_foreign_host_env_path_makes_compose_bot_raise(self, fleet_dir):
+        # rajan's seam-1 repro at the compose seam: a fully-external hand-typed
+        # absolute (stale prior-host path, under neither this install's local/
+        # nor a resolving vault path) must fail generate loud, not bake in silent.
+        from claudlobby.composer import compose_bot
+        from claudlobby.config import load_fleet
+
+        root = fleet_dir
+        foreign = (
+            "/Users/olduser/old-mac-mini-install/claudlobby/local/tl/.secrets/ga4.json"
+        )
+        nested = _write_nested_fleet(root, foreign)
+        paths = Paths(root=root, fleet_dir=nested)
+        fleet, _ = load_fleet(nested / "fleet.yaml")
+        with pytest.raises(ValueError, match="improper absolute fleet path"):
+            compose_bot(fleet.bots["kev"], fleet, paths)
+
+
+class TestVaultModePathAudit:
+    """Vault-mode regression coverage (PR #690 review flagged this branch as
+    untested): in vault mode ``_fleet_content_roots`` includes ``vault_root``,
+    so a cross-fleet leak inside the vault is flagged while the fleet's own vault
+    path passes."""
+
+    def _vault_paths(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        vault = tmp_path / "vault"
+        fleet_dir = vault / "tl"  # fleet lives in the vault, not under local/
+        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (fleet_dir / "fleet.yaml").write_text("fleet:\n  name: tl\n")
+        (root / "library").mkdir(parents=True)
+        (root / "lib").mkdir(parents=True)
+        return Paths(root=root, fleet_dir=fleet_dir, vault_root=vault)
+
+    def test_own_vault_fleet_path_is_ok(self, tmp_path):
+        paths = self._vault_paths(tmp_path)
+        good = f"{paths.vault_root}/tl/.secrets/ga4.json"
+        assert improper_fleet_paths(good, _bot(), paths) == []
+
+    def test_cross_fleet_leak_in_vault_is_flagged(self, tmp_path):
+        paths = self._vault_paths(tmp_path)
+        leak = f"{paths.vault_root}/other-fleet/.secrets/ga4.json"
+        bad = improper_fleet_paths(leak, _bot(), paths)
+        assert [p for p, _ in bad] == [leak]
