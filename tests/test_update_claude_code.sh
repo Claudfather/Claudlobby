@@ -39,53 +39,66 @@ assert_eq "download-only (no bot restart)" "false" "$(grep -q 'spin-up-bot.sh' "
 echo ""
 echo "=== #635: targets the binary the FLEET launches, not this script's PATH ==="
 
-# Test 7: the fleet PATH orders SYSTEM dirs before the user prefixes — the bug
+# The fleet PATH default orders SYSTEM dirs before the user prefixes — the bug
 # was resolving via this script's npm-first PATH (~/.npm-global) while the fleet
 # runs /usr/bin/claude, so the update maintained a shadow the fleet never ran.
+# (Cheap structural guard; the behavioral ordering proof is (b) below.)
 _fleet_line="$(grep -m1 '_FLEET_PATH=' "$LIB_DIR/update-claude-code.sh")"
 _usr_pos="$(awk -v s="$_fleet_line" 'BEGIN{print index(s, "/usr/bin")}')"
 _npm_pos="$(awk -v s="$_fleet_line" 'BEGIN{print index(s, ".npm-global")}')"
-assert_eq "fleet PATH puts /usr/bin before ~/.npm-global" "true" \
+assert_eq "fleet PATH default orders /usr/bin before ~/.npm-global" "true" \
     "$([ "$_usr_pos" -gt 0 ] && [ "$_npm_pos" -gt 0 ] && [ "$_usr_pos" -lt "$_npm_pos" ] && echo true || echo false)"
 
-# Test 8: resolution honors CLAUDE_BIN (the same override start-bot.sh launches
-# with) so the updater and the launcher agree on the fleet's binary.
-assert_eq "resolver honors CLAUDE_BIN" "true" \
-    "$(grep -q 'CLAUDE_BIN' "$LIB_DIR/update-claude-code.sh" && echo true || echo false)"
-
-# Test 9 (behavioral): drive the real script against a fake binary + npm stub
-# and confirm it (a) targets THAT binary and (b) reads its version — proving the
-# update operates on the fleet's binary, not whatever its own PATH resolves.
-_T="$(mktemp -d)"
-trap 'rm -rf "$_T"' EXIT
-# The npm stub MUST live in $HOME/.local/bin: update-claude-code.sh rebuilds
-# PATH as "$HOME/.local/bin:$HOME/.npm-global/bin:$_HOMEBREW/bin:$PATH", so a
-# stub anywhere else loses the race to a real (homebrew) npm and the test would
-# fire a real global install. HOME points at the throwaway so this is hermetic.
-mkdir -p "$_T/root" "$_T/home/.local/bin"
-cat > "$_T/fakeclaude" <<'EOF'
-#!/bin/bash
-echo "9.9.9 (Claude Code)"
-EOF
-chmod +x "$_T/fakeclaude"
-# npm stub: record the invocation, no-op success (NO real download).
+# --- hermetic behavioral harness --------------------------------------------
+# TWO layers of containment (review finding 1 — the old test had exactly one, so
+# deleting the resolver's CLAUDE_BIN branch escalated into a REAL global install
+# on the reviewer's Pi):
+#   1. npm stub in $HOME/.local/bin — update-claude-code.sh rebuilds PATH as
+#      "$HOME/.local/bin:$HOME/.npm-global/bin:$_HOMEBREW/bin:$PATH", so a stub
+#      anywhere else loses the race to a real (homebrew) npm.
+#   2. CLAUDE_UPDATE_FLEET_PATH pinned at an EMPTY dir on the CLAUDE_BIN run — so
+#      if the CLAUDE_BIN branch ever regresses, fleet-PATH resolution finds
+#      nothing and the run fails CLOSED (no real claude → no sudo → no real npm),
+#      instead of falling through to whatever host runs the suite.
+# HOME is the throwaway, so both layers are self-contained.
+_T="$(mktemp -d)"; trap 'rm -rf "$_T"' EXIT
+mkdir -p "$_T/root" "$_T/root2" "$_T/home/.local/bin" "$_T/empty" "$_T/sysbin" "$_T/userbin"
 cat > "$_T/home/.local/bin/npm" <<EOF
 #!/bin/bash
 echo "npm-stub called: \$*" >> "$_T/npm.calls"
 exit 0
 EOF
 chmod +x "$_T/home/.local/bin/npm"
+_mkclaude() { printf '#!/bin/bash\necho "%s (Claude Code)"\n' "$2" > "$1"; chmod +x "$1"; }
+_mkclaude "$_T/fakeclaude" "9.9.9"
+_mkclaude "$_T/sysbin/claude" "1.1.1"
+_mkclaude "$_T/userbin/claude" "2.2.2"
 
+# (a) CLAUDE_BIN is honored — the same override start-bot.sh:176 launches with.
+#     Replaces the old bare `grep CLAUDE_BIN` decoy, which passed even with the
+#     real check deleted because the word also appears in a comment (finding 2).
+: > "$_T/npm.calls"
 CLAUDLOBBY_ROOT="$_T/root" HOME="$_T/home" CLAUDE_BIN="$_T/fakeclaude" \
+    CLAUDE_UPDATE_FLEET_PATH="$_T/empty" \
     bash "$LIB_DIR/update-claude-code.sh" testfleet >/dev/null 2>&1 || true
-
 _log="$_T/root/state/claude-update.log"
-assert_eq "logged the fleet binary as the target" "true" \
+assert_eq "CLAUDE_BIN is the resolved target" "true" \
     "$([ -f "$_log" ] && grep -q "target: $_T/fakeclaude" "$_log" && echo true || echo false)"
-assert_eq "read the version from the fleet binary (9.9.9)" "true" \
+assert_eq "version read from the CLAUDE_BIN binary (9.9.9)" "true" \
     "$([ -f "$_log" ] && grep -q "current: 9.9.9" "$_log" && echo true || echo false)"
-assert_eq "invoked npm to install (no-op stub)" "true" \
+assert_eq "npm install invoked via the stub (no real download)" "true" \
     "$([ -f "$_T/npm.calls" ] && grep -q 'install -g @anthropic-ai/claude-code@latest' "$_T/npm.calls" && echo true || echo false)"
+
+# (b) fleet-PATH ORDERING via a REAL command -v resolution (not a string-index
+#     check): CLAUDE_BIN unset, a fake claude in both a "system" and a "user"
+#     dir — the resolver must pick the system-first one. This is the behavioral
+#     coverage the ordering half of the fix previously lacked.
+CLAUDLOBBY_ROOT="$_T/root2" HOME="$_T/home" \
+    CLAUDE_UPDATE_FLEET_PATH="$_T/sysbin:$_T/userbin" \
+    bash "$LIB_DIR/update-claude-code.sh" testfleet >/dev/null 2>&1 || true
+_log2="$_T/root2/state/claude-update.log"
+assert_eq "fleet-PATH resolution prefers the system-first binary (1.1.1, not 2.2.2)" "true" \
+    "$([ -f "$_log2" ] && grep -q "current: 1.1.1" "$_log2" && grep -q "target: $_T/sysbin/claude" "$_log2" && echo true || echo false)"
 
 echo ""
 echo "=== composed host-job spine (system.yaml claude-update) ==="
