@@ -430,6 +430,12 @@ class BotConfig:
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     mounts: dict[str, str] = field(default_factory=dict)  # name → absolute host path
     env: dict[str, str] = field(default_factory=dict)
+    # ENV_VAR → fleet-relative path of a secret file (service-account keys,
+    # credentials living inside the fleet). The composer anchors the value on
+    # FLEET_ROOT so the path is derived, never hand-typed absolute; the secret
+    # VALUES stay in .env. Fleet-relative by contract — an absolute path is
+    # rejected at compose.
+    secret_files: dict[str, str] = field(default_factory=dict)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     startup_prompt: str | None = None
     bench: bool = False  # marks the bot as the fleet's benchmarking target
@@ -1159,6 +1165,10 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         ),
         mounts={**(defaults.get("mounts") or {}), **(raw.get("mounts") or {})},
         env=raw.get("env", {}) or {},
+        secret_files={
+            **(defaults.get("secret_files") or {}),
+            **(raw.get("secret_files") or {}),
+        },
         telegram=TelegramConfig(
             handle=tg_raw.get("handle"),
             token_env=tg_raw.get("token_env"),

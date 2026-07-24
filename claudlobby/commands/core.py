@@ -35,19 +35,34 @@ def cmd_freshbox(args) -> int:
     every declared grant (no under-grant), and the Tier-A settings surface
     (enabledPlugins/skip-flags/sandbox) is composed per-bot, not global-inherited.
     """
-    from ..freshbox import audit_bot, audit_fleet, format_report, has_failures
+    from ..freshbox import (
+        audit_bot,
+        audit_fleet,
+        format_report,
+        has_failures,
+        reap_orphan_units,
+    )
 
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet, _md = _load_fleet_or_exit(paths)
+
+    bot = None
     if args.bot:
         bot = fleet.bots.get(args.bot)
         if bot is None:
             log.error("no such bot: %s", args.bot)
             return 1
-        findings = audit_bot(bot, fleet, paths)
-    else:
-        findings = audit_fleet(fleet, paths)
+
+    # Reap before auditing so the report reflects the cleaned state.
+    if args.reap:
+        removed = reap_orphan_units(fleet, paths, [bot] if bot else None)
+        for p in removed:
+            print(f"reaped orphan unit: {p}")
+        if not removed:
+            print("no orphan units to reap")
+
+    findings = audit_bot(bot, fleet, paths) if bot else audit_fleet(fleet, paths)
     print(format_report(fleet, findings))
     return 1 if has_failures(findings) or (args.strict and findings) else 0
 

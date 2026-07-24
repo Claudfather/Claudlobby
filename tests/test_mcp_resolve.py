@@ -95,6 +95,25 @@ class TestResolvePlaceholders:
         assert resolve_placeholders(42, contract, entry, "default") == 42
         assert resolve_placeholders(True, contract, entry, "default") is True
 
+    def test_composer_provided_path_anchors_pass_through(self):
+        """FLEET_ROOT / BOT_DIR / CLAUDLOBBY_ROOT are runtime path anchors the
+        composer exports to bot.conf; a fragment references them and they survive
+        resolve_placeholders verbatim into .mcp.json for runtime expansion — never
+        baked to an absolute path here. Covers the printify combination: an anchor
+        with a long path suffix as a single args-array element."""
+        from claudlobby.path_audit import COMPOSER_PROVIDED_PATH_ANCHORS
+
+        entry = McpEntry(name="printify")
+        args = ["${FLEET_ROOT}/runtime/bots/kev/data/printify-mcp/dist/index.js"]
+        assert resolve_placeholders(args, {}, entry, "default") == args
+        for anchor in COMPOSER_PROVIDED_PATH_ANCHORS:
+            token = "${" + anchor + "}"
+            assert resolve_placeholders(token, {}, entry, "default") == token
+            # anchor + long suffix, both as a string leaf and an args-array element
+            suffixed = token + "/data/x/dist/index.js"
+            assert resolve_placeholders(suffixed, {}, entry, "default") == suffixed
+            assert resolve_placeholders([suffixed], {}, entry, "default") == [suffixed]
+
 
 class TestRoundTrip:
     """Composer's resolve_placeholders and validator's required_vars must

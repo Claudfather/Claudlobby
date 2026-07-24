@@ -14,7 +14,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from claudlobby.config import BotConfig, FleetConfig, PluginsConfig, ToolPermissionsConfig
+from claudlobby.config import (
+    BotConfig,
+    FleetConfig,
+    PluginsConfig,
+    ToolPermissionsConfig,
+)
 from claudlobby.freshbox import (
     Finding,
     audit_bot,
@@ -262,3 +267,72 @@ def test_sourced_grants_mirrors_every_composer_grant_resolver():
         "_sourced_grants must reference every composer grant/permission resolver; "
         f"missing: {missing} (mirror them or the audit false-flags their grants)"
     )
+
+
+# ── Scope 4: path + orphan-unit assertions folded into the audit ──────────────
+
+
+def _seed_bot_dir(paths: Paths, bot_id: str = "kev") -> Path:
+    bot_dir = paths.bot_runtime(bot_id)
+    bot_dir.mkdir(parents=True, exist_ok=True)
+    return bot_dir
+
+
+def test_orphan_short_form_plist_is_flagged_warn(tmp_path):
+    root = tmp_path / "cl"
+    _build_library(root)
+    bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
+    fleet = _fleet({"kev": bot})
+    paths = Paths(root=root, fleet_dir=root)
+    bot_dir = _seed_bot_dir(paths)
+    (bot_dir / "p.kev.plist").write_text("<plist/>")  # composed long-form — kept
+    (bot_dir / "p.kev.service").write_text("[Unit]\n")  # composed long-form — kept
+    (bot_dir / "kev.plist").write_text("<plist/>")  # pre-naming orphan — flagged
+
+    orphans = [f for f in audit_bot(bot, fleet, paths) if f.kind == "orphan_unit"]
+    assert [f.severity for f in orphans] == ["warn"]
+    assert "kev.plist" in orphans[0].detail
+
+
+def test_reap_removes_orphan_keeps_long_form(tmp_path):
+    from claudlobby.freshbox import reap_orphan_units
+
+    root = tmp_path / "cl"
+    _build_library(root)
+    bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
+    fleet = _fleet({"kev": bot})
+    paths = Paths(root=root, fleet_dir=root)
+    bot_dir = _seed_bot_dir(paths)
+    long_form = bot_dir / "p.kev.plist"
+    orphan = bot_dir / "kev.plist"
+    long_form.write_text("<plist/>")
+    orphan.write_text("<plist/>")
+
+    removed = reap_orphan_units(fleet, paths)
+    assert removed == [orphan]
+    assert not orphan.exists()
+    assert long_form.exists()
+    # Recurrence closed: a re-audit now finds no orphan.
+    assert [f for f in audit_bot(bot, fleet, paths) if f.kind == "orphan_unit"] == []
+
+
+def test_flat_path_in_emitted_mcp_json_is_improper_path_fail(tmp_path):
+    import json
+
+    root = tmp_path / "cl"
+    _build_library(root)  # root-level shared library
+    fleet_dir = root / "local" / "home" / "tl"  # nested overlay
+    (fleet_dir / "runtime" / "bots").mkdir(parents=True)
+    bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
+    fleet = _fleet({"kev": bot})
+    paths = Paths(root=root, fleet_dir=fleet_dir)
+    bot_dir = _seed_bot_dir(paths)
+    flat = f"{root}/local/tl/dist/index.js"  # flat husk: local/tl not local/home/tl
+    (bot_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"x": {"args": [flat]}}})
+    )
+
+    findings = audit_bot(bot, fleet, paths)
+    improper = [f for f in findings if f.kind == "improper_path"]
+    assert [f.severity for f in improper] == ["fail"]
+    assert ".mcp.json" in improper[0].detail and flat in improper[0].detail

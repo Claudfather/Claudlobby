@@ -461,7 +461,9 @@ class TestComposeSettingsLocal:
             bot_id="reviewer",
             name="reviewer",
             expertise=["code-review"],
-            tool_permissions=ToolPermissionsConfig(deny=["Write", "Edit", "NotebookEdit"]),
+            tool_permissions=ToolPermissionsConfig(
+                deny=["Write", "Edit", "NotebookEdit"]
+            ),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"reviewer": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -491,7 +493,9 @@ class TestComposeSettingsLocal:
             bot_id="lead",
             name="lead",
             expertise=["orchestration"],
-            tool_permissions=ToolPermissionsConfig(deny=["Write", "Edit"], allow=["Agent", "Bash"]),
+            tool_permissions=ToolPermissionsConfig(
+                deny=["Write", "Edit"], allow=["Agent", "Bash"]
+            ),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"lead": bot})
         result = compose_settings_local(bot, fleet, paths)
@@ -715,6 +719,189 @@ class TestComposeBotConfServicePrefix:
         assert "com.example" not in conf
         assert "com.claudlobby" not in conf
         assert "io.custom.fleet" in conf
+
+
+class TestComposeBotConfFleetRoot:
+    """FLEET_ROOT — the fleet-scoped sibling of CLAUDLOBBY_ROOT. Anchors every
+    fleet-relative path (secret files, MCP build dirs) so they resolve to the
+    fleet's real, nested location and survive a fleet move by construction."""
+
+    def _bot(self):
+        return BotConfig(
+            bot_id="kev",
+            name="kev",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="kev_bot"),
+        )
+
+    def _fleet(self):
+        return FleetConfig(
+            name="tl",
+            service_prefix="com.crog.tl",
+            telegram_group_chat_id="-100999",
+        )
+
+    def test_root_mode_fleet_root_equals_install_root(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        conf = compose_bot_conf(self._bot(), self._fleet(), paths)
+        # Root-mode fleet IS the install root — the anchor collapses cleanly.
+        assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT"' in conf
+
+    def test_nested_overlay_fleet_root_is_anchor_relative(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        root = tmp_path / "claudlobby"
+        fleet_dir = root / "local" / "home" / "tl"
+        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "lib").mkdir(parents=True)
+        paths = Paths(root=root, fleet_dir=fleet_dir)
+        conf = compose_bot_conf(self._bot(), self._fleet(), paths)
+        # Nested overlay — anchored under the install root, so a re-nest of the
+        # fleet only moves FLEET_ROOT; every derived path follows.
+        assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT/local/home/tl"' in conf
+
+    def test_vault_mode_fleet_root_is_absolute(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        root = tmp_path / "install"
+        vault_fleet = tmp_path / "vault" / "tl"
+        (vault_fleet / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "lib").mkdir(parents=True)
+        paths = Paths(root=root, fleet_dir=vault_fleet)
+        conf = compose_bot_conf(self._bot(), self._fleet(), paths)
+        # Fleet outside the install tree (vault) — absolute, no anchor to lean on.
+        assert f"export FLEET_ROOT={vault_fleet}" in conf
+
+    def test_fleet_root_always_emitted(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "lib").mkdir()
+        paths = Paths(root=root, fleet_dir=root)
+        conf = compose_bot_conf(self._bot(), self._fleet(), paths)
+        assert "FLEET_ROOT" in conf
+
+
+class TestComposeBotConfSecretFiles:
+    """secret_files declares fleet-relative paths to secret files (GA4/GSC keys,
+    credentials). The composer anchors them on FLEET_ROOT so the path is derived,
+    never hand-typed absolute — the migration-dangle class this closes. The secret
+    VALUES stay in .env; only the derivable PATHS are composed."""
+
+    def _fleet(self):
+        return FleetConfig(
+            name="tl", service_prefix="com.crog.tl", telegram_group_chat_id="-100999"
+        )
+
+    def _paths(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        fleet_dir = root / "local" / "home" / "tl"
+        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "lib").mkdir(parents=True)
+        return Paths(root=root, fleet_dir=fleet_dir)
+
+    def _bot(self, **kw):
+        return BotConfig(
+            bot_id="kev",
+            name="kev",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="kev_bot"),
+            **kw,
+        )
+
+    def test_secret_file_path_anchored_on_fleet_root(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = self._bot(
+            secret_files={"GA4_SA_KEY_PATH": ".secrets/ga4-service-account.json"}
+        )
+        conf = compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
+        assert (
+            'export GA4_SA_KEY_PATH="$FLEET_ROOT/.secrets/ga4-service-account.json"'
+            in conf
+        )
+
+    def test_multiple_secret_files_all_emitted(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        bot = self._bot(
+            secret_files={
+                "GA4_SA_KEY_PATH": ".secrets/ga4-service-account.json",
+                "GSC_SA_KEY_PATH": ".secrets/ga4-service-account.json",
+            }
+        )
+        conf = compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
+        assert (
+            'export GA4_SA_KEY_PATH="$FLEET_ROOT/.secrets/ga4-service-account.json"'
+            in conf
+        )
+        assert (
+            'export GSC_SA_KEY_PATH="$FLEET_ROOT/.secrets/ga4-service-account.json"'
+            in conf
+        )
+
+    def test_no_secret_files_emits_nothing(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+
+        conf = compose_bot_conf(self._bot(), self._fleet(), self._paths(tmp_path))
+        assert "SA_KEY_PATH" not in conf
+
+    def test_absolute_subpath_rejected(self, tmp_path):
+        """An absolute path defeats the whole purpose — it is exactly the
+        hand-typed path this feature removes. Fail loud at compose."""
+        import pytest
+
+        from claudlobby.composer import compose_bot_conf
+
+        bot = self._bot(
+            secret_files={"GA4_SA_KEY_PATH": "/home/crog/local/tl/.secrets/ga4.json"}
+        )
+        with pytest.raises(ValueError, match="fleet-relative"):
+            compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
+
+    def test_bad_var_name_rejected(self, tmp_path):
+        import pytest
+
+        from claudlobby.composer import compose_bot_conf
+
+        bot = self._bot(secret_files={"not a var": ".secrets/x.json"})
+        with pytest.raises(ValueError, match="shell identifier"):
+            compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
+
+
+class TestComposerProvidedPathAnchorsExported:
+    """Every blessed path anchor is actually assigned in bot.conf, so a
+    ${ANCHOR} token in .mcp.json has a value to expand at runtime. Ties the
+    anchor SSOT (path_audit.COMPOSER_PROVIDED_PATH_ANCHORS) to the emission —
+    drop an export and this fails."""
+
+    def test_all_anchors_assigned_in_bot_conf(self, tmp_path):
+        from claudlobby.composer import compose_bot_conf
+        from claudlobby.path_audit import COMPOSER_PROVIDED_PATH_ANCHORS
+
+        bot = BotConfig(
+            bot_id="kev",
+            name="kev",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="kev_bot"),
+        )
+        fleet = FleetConfig(
+            name="tl", service_prefix="com.crog.tl", telegram_group_chat_id="-100999"
+        )
+        root = tmp_path / "claudlobby"
+        fleet_dir = root / "local" / "home" / "tl"
+        (fleet_dir / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "lib").mkdir(parents=True)
+        paths = Paths(root=root, fleet_dir=fleet_dir)
+        conf = compose_bot_conf(bot, fleet, paths)
+        for anchor in COMPOSER_PROVIDED_PATH_ANCHORS:
+            assert f"{anchor}=" in conf, f"{anchor} not assigned in bot.conf"
 
 
 class TestComposeHooks:
