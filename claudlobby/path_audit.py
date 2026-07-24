@@ -792,3 +792,32 @@ def assert_bot_sources(
     findings = audit_bot_sources(bot, fleet, paths, fragments)
     if findings:
         raise source_findings_error(bot.bot_id, findings)
+
+
+def timer_script_findings(jobs: object) -> list[SourceFinding]:
+    """Denied absolute paths in fleet timer scripts (``jobs.<name>.script``) — the
+    census companion to the composer's per-unit timer guard (compose_fleet_timers),
+    so ``validate`` surfaces the same denied script ``generate`` rejects. A timer's
+    script is fleet/install code, never an external dependency, so it is classified
+    with no ``external_paths`` blessing (mirroring the composer choke's empty
+    decls): it must be ``$CLAUDLOBBY_ROOT``-anchored or it is denied."""
+    findings: list[SourceFinding] = []
+    if not isinstance(jobs, dict):
+        return findings
+    for name, cfg in jobs.items():
+        if not isinstance(cfg, dict):
+            continue
+        script = cfg.get("script", "")
+        if not isinstance(script, str):
+            continue
+        findings.extend(
+            SourceFinding(
+                bot_id=f"timer {name}",
+                source=f"jobs.{name}.script",
+                value=script,
+                path=denied,
+                reason="timer script path",
+            )
+            for denied in denied_source_paths(script, [])
+        )
+    return findings
