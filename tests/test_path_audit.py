@@ -323,3 +323,74 @@ class TestVaultModePathAudit:
         leak = f"{paths.vault_root}/other-fleet/.secrets/ga4.json"
         bad = improper_fleet_paths(leak, _bot(), paths)
         assert [p for p, _ in bad] == [leak]
+
+
+class TestClassifiedSourcePaths:
+    """classified_source_paths — the pre-bless companion to denied_source_paths (the
+    externals report's usage lens: which declaration blesses a live source value)."""
+
+    def test_returns_classified_absolutes_with_provenance(self):
+        from claudlobby.path_audit import classified_source_paths
+
+        bot = BotConfig(
+            bot_id="kev",
+            name="kev",
+            expertise=["eng"],
+            env={"A": "/opt/x", "OK": "${FLEET_ROOT}/y", "TOKEN": "${GH}"},
+        )
+        pairs = classified_source_paths(bot)
+        by_path = {p: prov for prov, p in pairs}
+        assert "/opt/x" in by_path  # raw absolute classified
+        assert "${FLEET_ROOT}/y" not in by_path  # anchored value is not a path
+        assert not any(p.startswith("${GH}") for p in by_path)  # plain ${VAR} passes
+        assert by_path["/opt/x"] == "bots.kev.env.A"
+
+    def test_includes_mcp_fragment_paths(self):
+        from claudlobby.path_audit import classified_source_paths
+
+        bot = BotConfig(bot_id="kev", name="kev", expertise=["eng"])
+        frags = {"printify": {"command": "node", "args": ["/opt/printify/index.js"]}}
+        pairs = classified_source_paths(bot, frags)
+        assert any(p == "/opt/printify/index.js" for _prov, p in pairs)
+
+    def test_exempt_fields_are_not_classified(self):
+        from claudlobby.path_audit import classified_source_paths
+
+        # mounts are EXEMPT (host targets, resolve/escape-gated elsewhere) — the walk
+        # skips them, so they never appear as classified source paths.
+        bot = BotConfig(
+            bot_id="kev",
+            name="kev",
+            expertise=["eng"],
+            mounts={"data": "/mnt/host/data"},
+        )
+        assert classified_source_paths(bot) == []
+
+
+class TestRenderedToolsPathScan:
+    """F6 — rendered tools/ scripts fold into the L2 emitted-path scan, so a
+    fleet-shaped absolute baked into one fails generate (via assert_bot_paths) and
+    surfaces in freshbox, by the SAME shape predicate the wiring files use."""
+
+    def _seed_bot_dir(self, paths):
+        bot_dir = paths.bot_runtime("kev")
+        (bot_dir / "tools").mkdir(parents=True, exist_ok=True)
+        return bot_dir
+
+    def test_flat_path_in_rendered_tool_is_flagged_and_raises(self, tmp_path):
+        paths = _paths(tmp_path)
+        bot_dir = self._seed_bot_dir(paths)
+        flat = f"{paths.root}/local/tl/dist/deploy.sh"  # flat husk
+        (bot_dir / "tools" / "deploy.sh").write_text(f"#!/bin/sh\nexec {flat}\n")
+
+        findings = audit_bot_paths(_bot(), _fleet(), paths)
+        assert [f.file for f in findings] == ["tools/deploy.sh"]
+        assert findings[0].path == flat
+        with pytest.raises(ValueError, match="improper absolute fleet path"):
+            assert_bot_paths(_bot(), _fleet(), paths)
+
+    def test_legit_tool_script_paths_pass(self, tmp_path):
+        paths = _paths(tmp_path)
+        bot_dir = self._seed_bot_dir(paths)
+        (bot_dir / "tools" / "ok.sh").write_text("#!/usr/bin/env bash\ncat /dev/null\n")
+        assert audit_bot_paths(_bot(), _fleet(), paths) == []
