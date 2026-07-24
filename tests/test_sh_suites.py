@@ -41,7 +41,10 @@ def test_hermetic_bash_suite(suite):
     path = TESTS_DIR / suite
     assert path.is_file(), f"missing bash suite: {suite}"
     bash = shutil.which("bash") or "/bin/bash"
-    proc = subprocess.run([bash, str(path)], capture_output=True, text=True)
+    # Bounded so a wedged suite fails CI instead of hanging the runner forever.
+    proc = subprocess.run(
+        [bash, str(path)], capture_output=True, text=True, timeout=120
+    )
     assert proc.returncode == 0, (
         f"{suite} failed (exit {proc.returncode}):\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
