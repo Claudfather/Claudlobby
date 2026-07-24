@@ -7,6 +7,12 @@ allow-list (no under-grant / silent reliance on the retired global ``~/.claude``
 and the Tier-A settings surface (``enabledPlugins`` / skip-flags / ``sandbox``) is
 composed per-bot rather than inherited from the hand-accumulated global. The
 real-boot half of the gate lives in ``lib/freshbox-boot-gate.sh``.
+
+#703 folds the deny-by-default path guard into the same audit: a source re-check
+(the L1 guard, ``_value_findings``), an externals visibility report
+(``_externals_report``), the fleet-tier ``.env`` rung generate cannot see
+(``_env_file_findings``, F5), and rendered ``tools/`` scripts in the L2 emitted-path
+scan (F6, in :mod:`path_audit`). All ride the existing severity/report machinery.
 """
 
 from __future__ import annotations
@@ -29,9 +35,11 @@ from .config import BotConfig, FleetConfig
 from .paths import Paths
 
 # Severities mirror doctor.Check: fail blocks the gate, warn is an advisory
-# report line (drift signal, not a fresh-box breakage).
+# report line (drift signal, not a fresh-box breakage). info is visibility only
+# (the externals report) — it never blocks, even under --strict.
 FAIL = "fail"
 WARN = "warn"
+INFO = "info"
 
 
 @dataclass
@@ -176,6 +184,154 @@ def _value_findings(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Fi
     ]
 
 
+def _mask(value: str) -> str:
+    """Mask a source value so a finding never echoes a secret (R4). A base64 secret
+    can legitimately lead with ``/`` and trip the path grammar, so the finding shows
+    only the head character and the length — never the body."""
+    if not value:
+        return "(empty)"
+    return f"{value[:1]}…({len(value)} chars)"
+
+
+def _env_tier_files(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, home: Path | None = None
+) -> list[tuple[Path, str]]:
+    """The ``.env`` files freshbox audits, each with its severity, in start-bot's
+    tier order. Fleet-owned tiers — a bot's own ``.env`` and the fleet overlay
+    ``.env`` — FAIL: the fleet controls them, and the founding #602 dangle lived
+    exactly there. The install-shared ``root/.env`` and the operator's personal
+    ``~/.env`` are host-tier WARN — fleet policy's writ ends at fleet-owned files
+    (F5). ``~/.env`` is scanned only when the caller injects ``home`` (the CLI opts
+    in; the library never reaches into a personal home by default, so a unit audit
+    never reads it). Deduped by path with FAIL winning, so a root-mode fleet
+    (``fleet_config_dir == root``) reports its one ``.env`` once, as fleet-tier."""
+    tiers: list[tuple[Path, str]] = [
+        (paths.bot_runtime(bot.bot_id) / ".env", FAIL),
+        (paths.fleet_config_dir / ".env", FAIL),
+        (paths.root / ".env", WARN),
+    ]
+    if home is not None:
+        tiers.append((home / ".env", WARN))
+    seen: set[str] = set()
+    out: list[tuple[Path, str]] = []
+    for path, severity in tiers:  # FAIL-first order → first-wins keeps the strictest
+        if str(path) not in seen:
+            seen.add(str(path))
+            out.append((path, severity))
+    return out
+
+
+def _env_file_findings(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, home: Path | None = None
+) -> list[Finding]:
+    """The F5 rung: a path-classified value in a ``.env`` file — the runtime-sourced
+    surface generate physically cannot see — is denied unless anchored or declared.
+    Fleet-owned tiers FAIL, host tiers WARN. The value is masked (R4): the finding
+    names the key and file but never prints the value, which may be a secret."""
+    from . import dotenv
+    from .path_audit import denied_source_paths
+
+    decls = list(bot.external_paths)
+    findings: list[Finding] = []
+    for path, severity in _env_tier_files(bot, fleet, paths, home=home):
+        for key, value in dotenv.read(path).items():
+            if denied_source_paths(value, decls):
+                findings.append(
+                    Finding(
+                        bot.bot_id,
+                        "env_denied_value",
+                        severity,
+                        f"{path}: {key}={_mask(value)} — undeclared, unanchored "
+                        "absolute path in a runtime-sourced .env (invisible at "
+                        "generate); anchor it on ${FLEET_ROOT} or declare it via "
+                        "external_paths / secret_files",
+                    )
+                )
+    return findings
+
+
+def _externals_report(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths
+) -> list[Finding]:
+    """Make the fleet's external coupling visible in one place (INFO), and flag a
+    declaration that blesses nothing (WARN — declaration rot). Surfaces every
+    ``external_paths`` entry with the source values it actually blesses (so an
+    over-broad ``/**`` silently covering a second use site is readable), plus the
+    declared-by-construction externals: mount targets, the claudron vault path, and
+    a non-default account dir. The default ``~/.claude`` account is the norm, not
+    coupling, so it is not surfaced — a clean bot stays silent here."""
+    from . import dotenv
+    from .composer import _load_bot_fragments
+    from .path_audit import (
+        classified_source_paths,
+        classify_source_value,
+        match_external,
+    )
+
+    findings: list[Finding] = []
+
+    # Which declaration blesses which live source value. Source paths come from the
+    # config walk + MCP fragments, plus the fleet-owned .env values a declaration may
+    # exist solely to bless (host-tier ~/.env is out of scope, so home is not
+    # injected here).
+    classified = classified_source_paths(bot, _load_bot_fragments(bot, paths))
+    for env_path, _severity in _env_tier_files(bot, fleet, paths):
+        for key, value in dotenv.read(env_path).items():
+            for path in classify_source_value(value):
+                classified.append((f"{env_path.name}:{key}", path))
+
+    for decl in bot.external_paths:
+        users = sorted(
+            {prov for prov, path in classified if match_external(path, [decl])}
+        )
+        if users:
+            findings.append(
+                Finding(
+                    bot.bot_id,
+                    "external_ref",
+                    INFO,
+                    f"external_paths[{decl.path}] — {decl.purpose}; blesses "
+                    f"{len(users)} source value(s): {', '.join(users)}",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    bot.bot_id,
+                    "unused_declaration",
+                    WARN,
+                    f"external_paths[{decl.path}] — {decl.purpose}; matches no source "
+                    "value (declaration rot — the dependency it guarded is gone, or "
+                    "the reference was anchored/removed; drop it)",
+                )
+            )
+
+    for name, target in sorted(bot.mounts.items()):
+        findings.append(
+            Finding(bot.bot_id, "external_ref", INFO, f"mount {name} → {target}")
+        )
+    if bot.claudron_vault_path:
+        findings.append(
+            Finding(
+                bot.bot_id,
+                "external_ref",
+                INFO,
+                f"claudron_vault_path → {bot.claudron_vault_path}",
+            )
+        )
+    account_dir = fleet.accounts.get(bot.account)
+    if account_dir and account_dir != "~/.claude":
+        findings.append(
+            Finding(
+                bot.bot_id,
+                "external_ref",
+                INFO,
+                f"account {bot.account} → {account_dir} (non-default config dir)",
+            )
+        )
+    return findings
+
+
 def _orphan_unit_files(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Path]:
     """Stale supervision units in the bot dir — any ``*.service`` / ``*.plist``
     that is not the composed long-form ``<service_prefix>.<bot>`` name (e.g. a
@@ -227,8 +383,12 @@ def reap_orphan_units(
     return removed
 
 
-def audit_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]:
-    """Fresh-box self-containment findings for one composed bot."""
+def audit_bot(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, home: Path | None = None
+) -> list[Finding]:
+    """Fresh-box self-containment findings for one composed bot. ``home`` (the CLI
+    injects ``Path.home()``) opts the host-tier ``~/.env`` into the F5 rung; the
+    default leaves a personal home untouched."""
     settings = compose_settings_local(bot, fleet, paths)
     perms = settings.get("permissions", {})
     triples = classify_grants(
@@ -245,21 +405,35 @@ def audit_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]
     findings.extend(_tier_a_findings(bot.bot_id, settings))
     findings.extend(_path_findings(bot, fleet, paths))
     findings.extend(_value_findings(bot, fleet, paths))
+    findings.extend(_env_file_findings(bot, fleet, paths, home=home))
+    findings.extend(_externals_report(bot, fleet, paths))
     findings.extend(_orphan_unit_findings(bot, fleet, paths))
     return findings
 
 
-def audit_fleet(fleet: FleetConfig, paths: Paths) -> list[Finding]:
+def audit_fleet(
+    fleet: FleetConfig, paths: Paths, *, home: Path | None = None
+) -> list[Finding]:
     """Fresh-box self-containment findings across every bot in the fleet."""
     findings: list[Finding] = []
     for bot in fleet.bots.values():
-        findings.extend(audit_bot(bot, fleet, paths))
+        findings.extend(audit_bot(bot, fleet, paths, home=home))
     return findings
 
 
 def has_failures(findings: list[Finding]) -> bool:
     """True if any finding is fail-severity — the gate blocks. Warns are advisory."""
     return any(f.severity == FAIL for f in findings)
+
+
+def exits_nonzero(findings: list[Finding], *, strict: bool) -> bool:
+    """Freshbox's exit contract: a FAIL always blocks; under ``--strict`` a WARN
+    blocks too; INFO (the externals visibility report) never blocks — so
+    ``freshbox --strict`` stays green on a clean fleet that merely lists its
+    external surface, instead of exiting non-zero on every INFO line."""
+    if has_failures(findings):
+        return True
+    return strict and any(f.severity == WARN for f in findings)
 
 
 def format_report(fleet: FleetConfig, findings: list[Finding]) -> str:
@@ -277,13 +451,16 @@ def format_report(fleet: FleetConfig, findings: list[Finding]) -> str:
     by_bot: dict[str, list[Finding]] = {}
     for f in findings:
         by_bot.setdefault(f.bot_id, []).append(f)
+    icons = {FAIL: "FAIL", WARN: "warn", INFO: "info"}
     for bot_id in sorted(by_bot):
         lines.append(f"  {bot_id}:")
         for f in by_bot[bot_id]:
-            icon = "FAIL" if f.severity == FAIL else "warn"
-            lines.append(f"    [{icon}] {f.kind}: {f.detail}")
+            lines.append(
+                f"    [{icons.get(f.severity, f.severity)}] {f.kind}: {f.detail}"
+            )
 
     fails = sum(1 for f in findings if f.severity == FAIL)
     warns = sum(1 for f in findings if f.severity == WARN)
-    lines.append(f"  {fails} fail, {warns} warn")
+    infos = sum(1 for f in findings if f.severity == INFO)
+    lines.append(f"  {fails} fail, {warns} warn, {infos} info")
     return "\n".join(lines)

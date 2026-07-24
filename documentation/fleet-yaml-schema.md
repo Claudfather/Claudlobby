@@ -492,6 +492,8 @@ Rules enforced at parse time: the path must be absolute (declare the expanded fo
 
 For a host path a bot should *read and write through the bot dir*, prefer `mounts:` (a managed symlink) over a raw `external_paths` grant.
 
+`claudlobby freshbox` reports the surface these declarations bless: an INFO line per declaration with the source values it actually covers (over-broad `/**` grants become visible this way), a `WARN` for a declaration that covers nothing (declaration rot), and a `FAIL` for a path-classified value that is **undeclared and unanchored in a fleet-tier `.env`** (`<bot_dir>/.env`, `local/<fleet>/.env`) — the runtime-sourced surface `generate` cannot see (`.env` values are masked in the report; a host-tier `root/.env` / `~/.env` value WARNs). Rendered `tools/` scripts are scanned for improper fleet paths on the same footing as the other emitted wiring.
+
 ### `bots.<name>.bench`
 
 Boolean (default `false`). Marks this bot as the fleet's benchmarking target for cold-start timing (`lib/bench-cold-start.sh`). Multi-bot fleets should set `bench: true` on exactly one bot so the benchmarking script knows which bot to measure. The validator warns if a fleet has multiple bots and none has `bench: true`.

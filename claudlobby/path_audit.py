@@ -189,13 +189,28 @@ def _wiring_files(bot: BotConfig, fleet: FleetConfig) -> list[str]:
     ]
 
 
+def _emitted_scan_files(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[str]:
+    """Bot-dir-relative files whose emitted absolute paths must resolve in-fleet —
+    the static wiring plus every rendered ``tools/`` script (F6). A rendered tool is
+    compositor-emitted wiring like any other: a fleet-shaped absolute baked into one
+    dangles on a fleet move, so it gets the same L2 shape scan (never L1 — a tool
+    legitimately runs system binaries like ``/usr/bin/env``)."""
+    rels = list(_wiring_files(bot, fleet))
+    tools_dir = paths.bot_runtime(bot.bot_id) / "tools"
+    if tools_dir.is_dir():
+        rels.extend(
+            f"tools/{p.name}" for p in sorted(tools_dir.iterdir()) if p.is_file()
+        )
+    return rels
+
+
 def audit_bot_paths(
     bot: BotConfig, fleet: FleetConfig, paths: Paths
 ) -> list[PathFinding]:
     """Scan a bot's emitted wiring files for improper absolute fleet paths."""
     bot_dir = paths.bot_runtime(bot.bot_id)
     findings: list[PathFinding] = []
-    for rel in _wiring_files(bot, fleet):
+    for rel in _emitted_scan_files(bot, fleet, paths):
         try:
             text = (bot_dir / rel).read_text()
         except (OSError, UnicodeDecodeError):
@@ -604,28 +619,46 @@ _EMISSION_METACHAR_REASON = (
 )
 
 
+def _checked_config_leaves(bot: BotConfig):
+    """Yield ``(provenance, value, word_split)`` for every CHECKED (non-EXEMPT)
+    string leaf of a ``BotConfig`` — the posture-walk SSOT shared by the deny guard
+    (:func:`audit_bot_sources`) and the pre-bless lens
+    (:func:`classified_source_paths`), so the posture / word-split decision lives in
+    one place and the two can never disagree on which leaves get classified."""
+    for segments, display, value in _walk_source_leaves(bot):
+        posture = _posture_for(segments)
+        if posture is Posture.EXEMPT:
+            continue
+        yield f"bots.{bot.bot_id}.{display}", value, posture is Posture.CHECK_WORDS
+
+
+def _checked_fragment_leaves(fragments: dict[str, object]):
+    """Yield ``(provenance, value)`` for every leaf of the loaded MCP fragments —
+    the fragment-walk SSOT shared by the same two callers. Fragment leaves carry no
+    posture (all CHECK, never word-split); a ``url`` leaf is a URL by grammar rule 1
+    (``file://`` still denies its path part)."""
+    for name, fragment in fragments.items():
+        for _segments, display, value in _walk_source_leaves(fragment):
+            yield f"library/mcp/{name}.json {display}", value
+
+
 def _mcp_fragment_findings(
     bot_id: str, fragments: dict[str, object], decls: list[ExternalDecl]
 ) -> list[SourceFinding]:
-    """Classify the leaves of loaded MCP fragments (choke-site 1). A fragment's
-    command / args / env / headers / url values are walked like any nested source
-    structure; a ``url`` leaf is a URL by rule 1 (``file://`` still denies its path
-    part). The composer loads the fragments and passes them in — path_audit never
-    reads the library layout itself."""
-    findings: list[SourceFinding] = []
-    for name, fragment in fragments.items():
-        for _segments, display, value in _walk_source_leaves(fragment):
-            for denied in denied_source_paths(value, decls):
-                findings.append(
-                    SourceFinding(
-                        bot_id=bot_id,
-                        source=f"library/mcp/{name}.json {display}",
-                        value=value,
-                        path=denied,
-                        reason=_SOURCE_DENY_REASON,
-                    )
-                )
-    return findings
+    """Classify the leaves of loaded MCP fragments (choke-site 1). The composer loads
+    the fragments and passes them in — path_audit never reads the library layout
+    itself."""
+    return [
+        SourceFinding(
+            bot_id=bot_id,
+            source=source,
+            value=value,
+            path=denied,
+            reason=_SOURCE_DENY_REASON,
+        )
+        for source, value in _checked_fragment_leaves(fragments)
+        for denied in denied_source_paths(value, decls)
+    ]
 
 
 def audit_bot_sources(
@@ -646,17 +679,12 @@ def audit_bot_sources(
     the guard-the-guard tripwire (``tests/test_source_guard_tripwire.py``) fails."""
     decls = list(bot.external_paths)
     findings: list[SourceFinding] = []
-    for segments, display, value in _walk_source_leaves(bot):
-        posture = _posture_for(segments)
-        if posture is Posture.EXEMPT:
-            continue
-        for denied in denied_source_paths(
-            value, decls, word_split=posture is Posture.CHECK_WORDS
-        ):
+    for source, value, word_split in _checked_config_leaves(bot):
+        for denied in denied_source_paths(value, decls, word_split=word_split):
             findings.append(
                 SourceFinding(
                     bot_id=bot.bot_id,
-                    source=f"bots.{bot.bot_id}.{display}",
+                    source=source,
                     value=value,
                     path=denied,
                     reason=_SOURCE_DENY_REASON,
@@ -697,6 +725,30 @@ def audit_bot_sources(
     if isinstance(fragments, dict):
         findings.extend(_mcp_fragment_findings(bot.bot_id, fragments, decls))
     return findings
+
+
+def classified_source_paths(
+    bot: BotConfig, fragments: object | None = None
+) -> list[tuple[str, str]]:
+    """Every ``(provenance, absolute_path)`` a bot's CHECKED source values classify
+    to, before ``external_paths`` blessing — the pre-bless companion to
+    :func:`denied_source_paths`. The freshbox externals report consumes it to tell
+    which declaration blesses a live source value (a declaration that blesses none
+    is rot). Shares the walk + posture + grammar primitives with
+    :func:`audit_bot_sources`; that guard filters this to the denied set and adds
+    the emission-safety checks."""
+    out: list[tuple[str, str]] = [
+        (source, path)
+        for source, value, word_split in _checked_config_leaves(bot)
+        for path in classify_source_value(value, word_split=word_split)
+    ]
+    if isinstance(fragments, dict):
+        out.extend(
+            (source, path)
+            for source, value in _checked_fragment_leaves(fragments)
+            for path in classify_source_value(value)
+        )
+    return out
 
 
 def source_findings_error(bot_id: str, findings: list[SourceFinding]) -> ValueError:

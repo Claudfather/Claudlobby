@@ -38,8 +38,8 @@ def cmd_freshbox(args) -> int:
     from ..freshbox import (
         audit_bot,
         audit_fleet,
+        exits_nonzero,
         format_report,
-        has_failures,
         reap_orphan_units,
     )
 
@@ -62,9 +62,16 @@ def cmd_freshbox(args) -> int:
         if not removed:
             print("no orphan units to reap")
 
-    findings = audit_bot(bot, fleet, paths) if bot else audit_fleet(fleet, paths)
+    # The CLI opts into scanning the operator's host-tier ~/.env (a WARN surface);
+    # the library default (home=None) never reaches into a personal home.
+    home = Path.home()
+    findings = (
+        audit_bot(bot, fleet, paths, home=home)
+        if bot
+        else audit_fleet(fleet, paths, home=home)
+    )
     print(format_report(fleet, findings))
-    return 1 if has_failures(findings) or (args.strict and findings) else 0
+    return 1 if exits_nonzero(findings, strict=args.strict) else 0
 
 
 def cmd_validate(args) -> int:

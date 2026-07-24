@@ -255,7 +255,7 @@ claudlobby new-bot                     # interactive bot scaffolding
 claudlobby status                      # fleet health dashboard
 claudlobby status --bot <name>         # detailed status for one bot
 claudlobby doctor                      # pre-flight fleet health diagnostic
-claudlobby freshbox                    # fresh-box self-containment audit (over-grant/orphan report; --strict, --bot)
+claudlobby freshbox                    # fresh-box self-containment audit (over-grant/orphan, denied source values, externals report, fleet-tier .env, rendered tools/; --strict, --bot, --reap)
 claudlobby report-back                 # query bot work event ledger
 claudlobby report-back --since 24h     # filter by time window
 claudlobby uptime                      # per-bot uptime, MTBR, restart-rate
@@ -320,7 +320,7 @@ claudlobby/
   dotenv.py           — .env file handling
   paths.py            — Path resolution helpers
   doctor.py           — Pre-flight fleet health diagnostic
-  freshbox.py         — Fresh-box self-containment audit (#644 P4): over-grant/orphan + under-grant + Tier-A composed-not-inherited (backs `claudlobby freshbox`)
+  freshbox.py         — Fresh-box self-containment audit (#644 P4): over-grant/orphan + under-grant + Tier-A composed-not-inherited; deny-by-default rungs (#703): denied source values, externals report + unused-declaration WARN, fleet-tier .env guard, rendered tools/ (backs `claudlobby freshbox`)
   status.py           — Fleet health dashboard (tmux/systemd/fleet-state)
   uptime.py           — Per-bot uptime, MTBR, restart-rate metrics
   utilization.py      — Fleet utilization rollup — per-bot busy/idle % over rolling windows
