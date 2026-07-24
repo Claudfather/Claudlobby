@@ -30,22 +30,49 @@ import pytest
 
 LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
 
-# The ownership/lineage checks read /proc/<pid>/environ — Linux only.
+# The Linux ownership read uses /proc/<pid>/environ; the macOS branch uses
+# `ps eww`. These live-bridge tests spawn a real process tree, so they gate on
+# Linux — where BOTH paths are exercisable: /proc natively, and the macOS
+# `ps eww` path by forcing _OS=Darwin (ps surfaces a process's env on Linux too).
 _LINUX = Path("/proc").is_dir()
 requires_proc = pytest.mark.skipif(
-    not _LINUX, reason="bridge_state ownership/lineage checks require Linux /proc"
+    not _LINUX,
+    reason="live-bridge ownership/lineage tests need Linux /proc + a spawnable tree",
+)
+
+# Every ownership/lineage assertion must hold IDENTICALLY on both OS branches.
+# force_os=None exercises the native /proc read; force_os="Darwin" forces the
+# macOS `ps eww` branch — run here on Linux against a real process, not a mock.
+both_os_branches = pytest.mark.parametrize(
+    "force_os", [None, "Darwin"], ids=["proc", "ps-eww"]
 )
 
 
-def _bridge_state(bot_dir: Path, home: Path) -> tuple[str, int]:
+def _os_prefix(force_os) -> str:
+    """Shell that overrides lib-common's _OS AFTER sourcing (detect_os has already
+    run), so a Linux host can drive the macOS ownership branch. Empty = native
+    detection. Only bridge_state's ownership read branches on _OS, so this does
+    not perturb token/state_dir resolution."""
+    return f"_OS={force_os}; " if force_os else ""
+
+
+def _bridge_state(bot_dir: Path, home: Path, force_os=None) -> tuple[str, int]:
     """Source lib-common.sh and run `bridge_state <bot_dir>`; return (stdout, rc).
 
     HOME is pinned to an isolated dir so source_env_tiered cannot read the real
-    ~/.env (hermetic; no real secrets, no cross-test bleed).
+    ~/.env (hermetic; no real secrets, no cross-test bleed). force_os forces the
+    OS branch of the ownership read (see _os_prefix).
     """
     env = {**os.environ, "HOME": str(home)}
     proc = subprocess.run(
-        ["bash", "-c", '. "$1"; bridge_state "$2"', "_", str(LIB_COMMON), str(bot_dir)],
+        [
+            "bash",
+            "-c",
+            f'. "$1"; {_os_prefix(force_os)}bridge_state "$2"',
+            "_",
+            str(LIB_COMMON),
+            str(bot_dir),
+        ],
         capture_output=True,
         text=True,
         env=env,
@@ -217,11 +244,13 @@ def test_no_bridge_when_pid_alive_but_not_bun(tmp_path):
 
 
 @requires_proc
-def test_up_when_claude_is_grandparent_via_bun_shim(tmp_path):
+@both_os_branches
+def test_up_when_claude_is_grandparent_via_bun_shim(tmp_path, force_os):
     """M4 lineage (production shape): the poller's DIRECT parent is the
     `bun … start` shim and `claude` is the GRANDPARENT (see _spawn_bridge). The
     lineage check must walk past bun shims to find the live `claude` ancestor —
-    a direct-parent-only check reads `no_bridge` for every healthy live bridge."""
+    a direct-parent-only check reads `no_bridge` for every healthy live bridge.
+    Both OS branches must resolve this owned+live bridge to `up`."""
     bindir = _fake_bins(tmp_path)
     sd = tmp_path / "state"
     bot = tmp_path / "bots" / "b1"
@@ -229,7 +258,7 @@ def test_up_when_claude_is_grandparent_via_bun_shim(tmp_path):
     (bot / ".env").write_text("B1_TG_TOKEN=x\n")
     proc = _spawn_bridge(bindir, sd)
     try:
-        out, rc = _bridge_state(bot, tmp_path)
+        out, rc = _bridge_state(bot, tmp_path, force_os=force_os)
         assert out == "up", f"got {out!r}"
         assert rc == 0
     finally:
@@ -237,13 +266,15 @@ def test_up_when_claude_is_grandparent_via_bun_shim(tmp_path):
 
 
 @requires_proc
-def test_orphan_bun_without_claude_parent_is_not_up(tmp_path):
+@both_os_branches
+def test_orphan_bun_without_claude_parent_is_not_up(tmp_path, force_os):
     """M4 lineage: a bun whose ancestry holds no live `claude` (orphaned →
     reparented to the session subreaper) holds the single-consumer slot but
     delivers nothing → must NOT read up. Doubles as the over-walk guard: the
     leaf's first non-shim ancestor is the test runner, so a walk that chased a
     distant unrelated `claude` (e.g. the pytest session's own) would wrongly
-    read `up` here — it must stop at the first non-shim ancestor."""
+    read `up` here — it must stop at the first non-shim ancestor. The lineage
+    walk is OS-agnostic, so both branches must reject the orphan."""
     bindir = _fake_bins(tmp_path)
     sd = tmp_path / "state"
     bot = tmp_path / "bots" / "b1"
@@ -251,17 +282,20 @@ def test_orphan_bun_without_claude_parent_is_not_up(tmp_path):
     (bot / ".env").write_text("B1_TG_TOKEN=x\n")
     proc = _spawn_bridge(bindir, sd, owned=False)
     try:
-        out, _ = _bridge_state(bot, tmp_path)
+        out, _ = _bridge_state(bot, tmp_path, force_os=force_os)
         assert out == "no_bridge", f"orphan must not be up; got {out!r}"
     finally:
         _kill_tree(proc)
 
 
 @requires_proc
-def test_sibling_prefix_env_does_not_match(tmp_path):
+@both_os_branches
+def test_sibling_prefix_env_does_not_match(tmp_path, force_os):
     """M4 ownership: a live owned-looking bun whose TELEGRAM_STATE_DIR is a
     PREFIX of ours (telegram-data vs telegram-data-eng) must NOT match — the env
-    comparison is exact/NUL-delimited, not a substring grep."""
+    comparison is exact (a whole-token match), not a substring grep. The macOS
+    branch tokenizes `ps eww` on whitespace, so it must preserve this exactness
+    just as the Linux NUL-delimited /proc read does."""
     bindir = _fake_bins(tmp_path)
     sd_ours = tmp_path / "ch" / "telegram-data"
     sd_sibling = tmp_path / "ch" / "telegram-data-eng"
@@ -272,7 +306,7 @@ def test_sibling_prefix_env_does_not_match(tmp_path):
     # bot.pid (under ours) points at a bun whose environ names the SIBLING dir.
     proc = _spawn_bridge(bindir, sd_ours, env_state_dir=str(sd_sibling))
     try:
-        out, _ = _bridge_state(bot, tmp_path)
+        out, _ = _bridge_state(bot, tmp_path, force_os=force_os)
         assert out == "no_bridge", f"sibling-prefix must not match; got {out!r}"
     finally:
         _kill_tree(proc)
@@ -282,12 +316,15 @@ def test_sibling_prefix_env_does_not_match(tmp_path):
 
 
 @requires_proc
-def test_killed_bridge_flips_to_no_bridge_and_actionable_down(tmp_path):
+@both_os_branches
+def test_killed_bridge_flips_to_no_bridge_and_actionable_down(tmp_path, force_os):
     """The #453 Phase 5 heal trigger. A live owned bridge reads `up`; once its
     poller is killed (a deterministic, Mode-A-shaped kill), bridge_state flips to
     `no_bridge` AND bridge_down_state (grace 0) returns the actionable `no_bridge`
     verdict that keepalive's _bridge_heal consumes to bounce the bot. This is the
-    unit-level companion to the end-to-end heal proof in validate-bot-change.sh."""
+    unit-level companion to the end-to-end heal proof in validate-bot-change.sh.
+    Running it on the macOS branch proves the deaf-orphan heal path #710 restores
+    is actionable on macOS, not stuck at the non-actionable `unknown`."""
     bindir = _fake_bins(tmp_path)
     sd = tmp_path / "state"
     bot = tmp_path / "bots" / "b1"
@@ -295,13 +332,13 @@ def test_killed_bridge_flips_to_no_bridge_and_actionable_down(tmp_path):
     (bot / ".env").write_text("B1_TG_TOKEN=x\n")
     proc = _spawn_bridge(bindir, sd)
     try:
-        out, _ = _bridge_state(bot, tmp_path)
+        out, _ = _bridge_state(bot, tmp_path, force_os=force_os)
         assert out == "up", f"live bridge should read up; got {out!r}"
     finally:
         _kill_tree(proc)
 
     # Poller dead (bot.pid now points at a dead pid) → classifier flips to down.
-    out2, rc2 = _bridge_state(bot, tmp_path)
+    out2, rc2 = _bridge_state(bot, tmp_path, force_os=force_os)
     assert out2 == "no_bridge", f"killed bridge must read no_bridge; got {out2!r}"
     assert rc2 != 0
 
@@ -311,7 +348,7 @@ def test_killed_bridge_flips_to_no_bridge_and_actionable_down(tmp_path):
         [
             "bash",
             "-c",
-            '. "$1"; bridge_down_state "$2" 0',
+            f'. "$1"; {_os_prefix(force_os)}bridge_down_state "$2" 0',
             "_",
             str(LIB_COMMON),
             str(bot),
