@@ -51,7 +51,7 @@ doctl apps list --format ID,Spec.Name,ActiveDeployment.Phase,UpdatedAt 2>&1
 
 ### Neon (Databases)
 ```bash
-neonctl projects list --org-id <NEON_ORG_ID> --output json 2>&1 \
+neon projects list --org-id <NEON_ORG_ID> --output json 2>&1 \
   | python3 -c "import sys,json; [print(f\"{p['name']}: {p['current_state']}\") for p in json.load(sys.stdin)]"
 ```
 

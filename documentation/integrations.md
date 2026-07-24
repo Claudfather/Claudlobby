@@ -245,7 +245,7 @@ Database branches, queries, project management.
 
 **Skills:** `/claudna:neon info` (schema overview), `/claudna:neon query` (run SQL), `/claudna:neon branch` (create/list/delete branches — copy-on-write, cents per branch).
 
-**Setup:** set `NEON_API_KEY` — fleet-tier env var, no `neonctl auth` needed. See [library/integrations/neon.md](../library/integrations/neon.md).
+**Setup:** set `NEON_API_KEY` — fleet-tier env var, no `neon auth` needed. See [library/integrations/neon.md](../library/integrations/neon.md).
 
 ### DigitalOcean
 
