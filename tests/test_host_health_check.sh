@@ -40,7 +40,7 @@ run_check() {
         THROTTLED="$1" JOURNAL="$2" HOST_HEALTH_BOOT_ID="$3" \
         bash "$LIB_DIR/host-health-check.sh" >/dev/null 2>&1 || true
 }
-last_verdict() { tail -1 "$LOG" | grep -oE 'ALERT|REPEAT|OK' | head -1; }
+last_verdict() { tail -1 "$LOG" 2>/dev/null | grep -oE 'ALERT|REPEAT|OK' | head -1; }
 reset() { rm -f "$ROOT/lib/host-health-check.state" "$LOG"; }
 
 echo "=== host-health-check detection + de-dup contract ==="
@@ -93,6 +93,34 @@ assert_eq "undefined throttle bit (0x100000) -> no empty-label alert (OK)" "OK" 
 reset
 run_check "0x00" "" "bootA"
 assert_eq "0x00 (numeric zero, non-canonical string) -> no alert (OK)" "OK" "$(last_verdict)"
+
+# --- #720 fast-follow: malformed hex must not CRASH the monitor (anchored guard) ---
+# A 0x-prefix-then-non-hex value matches the old unanchored glob, reaches $(( )),
+# and its arithmetic error is FATAL under set -e (aborts past `|| return 0`) — no
+# verdict logged. The anchored guard must reject it first so the monitor stays up.
+reset
+run_check "0x1zzz" "" "bootA"
+assert_eq "malformed hex 0x1zzz -> clean skip, monitor does not crash (OK)" "OK" "$(last_verdict)"
+
+reset
+run_check "0xAg" "" "bootA"
+assert_eq "malformed hex 0xAg -> clean skip (OK)" "OK" "$(last_verdict)"
+
+# --- #720 fast-follow: distinct mmc devices must not collapse to one fingerprint ---
+# Device identity (mmcblk0 vs mmcblk1) must survive the volatile digit-collapse so a
+# genuinely different device failing re-alerts instead of being deduped as a repeat.
+reset
+run_check "0x0" "Jul 24 10:00:00 host kernel: mmcblk0: error -110 sending status command" "bootA"
+assert_eq "mmcblk0 failure -> ALERT" "ALERT" "$(last_verdict)"
+run_check "0x0" "Jul 24 10:05:00 host kernel: mmcblk1: error -84 sending status command" "bootA"
+assert_eq "distinct device mmcblk1 failing -> ALERT (not deduped against mmcblk0)" "ALERT" "$(last_verdict)"
+
+# control: SAME device with a churning error code stays ONE incident (guard vs over-fix).
+reset
+run_check "0x0" "Jul 24 10:00:00 host kernel: mmcblk0: error -110 sending status command" "bootA"
+assert_eq "mmcblk0 first failure -> ALERT" "ALERT" "$(last_verdict)"
+run_check "0x0" "Jul 24 10:05:00 host kernel: mmcblk0: error -84 sending status command" "bootA"
+assert_eq "same device mmcblk0, volatile error code -> REPEAT (one ongoing incident)" "REPEAT" "$(last_verdict)"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
