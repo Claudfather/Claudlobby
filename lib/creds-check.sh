@@ -67,26 +67,33 @@ prev_status() {
     "$JQ" -r --arg k "$1" '.[$k].status // ""' "$STATE"
 }
 
+# Atomically write one provider's entry to the shared state file. This is the
+# critical section run under with_lock, so it must be a command (function), not
+# an inline block — with_lock invokes "$@".
+_write_state() {
+    local provider="$1" status="$2" detail="$3" now="$4"
+    if "$JQ" --arg k "$provider" --arg s "$status" --arg d "$detail" --arg t "$now" \
+        '.[$k] = {status: $s, detail: $d, ts: $t}' "$STATE" > "$STATE.tmp"; then
+        mv "$STATE.tmp" "$STATE"
+    else
+        # Silent state corruption is the worst failure mode here — the next tick
+        # would read a stale prev_status and miss the transition. Surface it loudly.
+        rm -f "$STATE.tmp"
+        log "STATE WRITE FAILED for $provider — $status will not transition"
+    fi
+}
+
 record_and_alert() {
     local provider="$1" status="$2" detail="$3"
     local prev now
     prev="$(prev_status "$provider")"
     now="$(ts)"
 
-    # Lock state file writes to prevent concurrent corruption
-    (
-    flock -x 200
-    if "$JQ" --arg k "$provider" --arg s "$status" --arg d "$detail" --arg t "$now" \
-        '.[$k] = {status: $s, detail: $d, ts: $t}' "$STATE" > "$STATE.tmp"; then
-        mv "$STATE.tmp" "$STATE"
-    else
-        # Silent state corruption is the worst failure mode here — the
-        # next tick would read a stale prev_status and miss the
-        # transition. Surface it loudly.
-        rm -f "$STATE.tmp"
-        log "STATE WRITE FAILED for $provider — $status will not transition"
-    fi
-    ) 200>"$STATE.lock"
+    # Serialize state-file writes so concurrent ticks can't corrupt the shared
+    # file. Portable mutex — flock where present, mkdir spinlock otherwise. A raw
+    # flock is not portable: it's a Linux util-linux binary, absent on stock
+    # macOS, where the bare call breaks the scheduled run (#709).
+    with_lock "$STATE.lock" _write_state "$provider" "$status" "$detail" "$now"
 
     log "$provider $status ($detail)"
 
