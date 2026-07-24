@@ -116,6 +116,7 @@ Key lifecycle scripts in `lib/`:
 | `dispatch-overdue.py` | Finds overdue dispatches — the matcher behind the `fleet-pulse.sh` watchdog (age-capped via `DISPATCH_OVERDUE_MAX_AGE_S`) |
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
+| `transcript-usage.py` | Per-session token accounting from Claude Code transcripts — sums the four `message.usage` components (flat, never `iterations[]`) over assistant turns, splits sidechains, emits `protocol_sensitive` + `cost_weighted_total` axes and an outbound-comms estimate (`--comms-share`). Prize-sizing instrument for the token-efficiency protocol (#716/#729); #717 extends it |
 | `validate-bot-change.sh` | Empirical validation harness for bot behavior changes |
 | `freshbox-boot-gate.sh` | #644 P4 real-boot gate — boots a scoped bot on a fresh empty `CLAUDE_CONFIG_DIR` (auth+trust seeded before first contact) and asserts the composed perms hold: clean boot, zero prompts, transcript ⊆ allow. Gated job (deps absent → skip); wrapped by `tests/test_freshbox_boot_harness.py` (opt-in `FRESHBOX_REALBOOT=1`) |
 | `rehearse-keepalive-swap.sh` | Phase 6 gate 1 — rehearse the atomic legacy-keepalive swap on a throwaway fleet with real 60s timers; journal-derived no-gap assertion |
