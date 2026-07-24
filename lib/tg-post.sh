@@ -51,7 +51,25 @@ printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" > "$URL_C
 # markup (underscores in identifiers, em-dashes) as "can't parse entities",
 # silently dropping the post. Callers that need rich formatting escape for
 # MarkdownV2 and pass it themselves (see telegram-formatting protocol).
-curl -s -X POST --config "$URL_CFG" \
+# Capture the response instead of piping straight to jq. A dead/cross-wired
+# token or a bad chat returns HTTP 200 with {"ok":false,...}, so `curl -s`
+# succeeds and the delivery failure lives ONLY in the body — piping to jq (whose
+# exit became the script's) reported exit 0 on a REJECTED send, so env-less
+# callers (creds-check, host timers) logged a false success and the operator was
+# never told (#552). Parse `.ok` and exit NON-ZERO on failure so the caller can
+# escalate a genuinely undelivered alert instead of trusting a silent drop.
+RESP="$(curl -s -X POST --config "$URL_CFG" \
   -d "chat_id=${CHAT_ID}" \
   --data-urlencode "text=${MSG}" \
-  -d "disable_web_page_preview=true" | jq -r '{ok, msg_id: .result.message_id, error: .description}'
+  -d "disable_web_page_preview=true")" || RESP=""
+
+OK="$(printf '%s' "$RESP" | jq -r '.ok // empty' 2>/dev/null || true)"
+if [ "$OK" = "true" ]; then
+  printf '%s' "$RESP" | jq -r '{ok, msg_id: .result.message_id}' 2>/dev/null || true
+  exit 0
+fi
+
+ERR="$(printf '%s' "$RESP" | jq -r '.description // empty' 2>/dev/null || true)"
+echo "tg-post: send REJECTED — message NOT delivered (ok=${OK:-<none>}${ERR:+; error: $ERR})" >&2
+printf '%s' "$RESP" | jq -r '{ok, error: .description}' 2>/dev/null || printf '%s\n' "${RESP:-<no response>}"
+exit 3
