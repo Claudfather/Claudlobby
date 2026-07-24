@@ -49,6 +49,11 @@ def register_subparsers(sub) -> None:
     pfb.add_argument(
         "--strict", action="store_true", help="Fail on advisory warnings too"
     )
+    pfb.add_argument(
+        "--reap",
+        action="store_true",
+        help="Remove stale orphan supervision units (short-form <bot>.plist)",
+    )
     pfb.set_defaults(func=cmd_freshbox)
 
     pg = sub.add_parser(

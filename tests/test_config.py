@@ -338,7 +338,10 @@ class TestCoerceBot:
         assert bot.tool_permissions.allow == ["Read", "Grep"]
 
     def test_tool_permissions_deny_and_allow(self):
-        raw = {"expertise": ["eng"], "tool_permissions": {"deny": ["Write"], "allow": ["Read"]}}
+        raw = {
+            "expertise": ["eng"],
+            "tool_permissions": {"deny": ["Write"], "allow": ["Read"]},
+        }
         bot = _coerce_bot("test", raw, {})
         assert bot.tool_permissions.deny == ["Write"]
         assert bot.tool_permissions.allow == ["Read"]
@@ -351,7 +354,10 @@ class TestCoerceBot:
 
     def test_tool_permissions_merge_dedup(self):
         defaults = {"tool_permissions": {"deny": ["Write", "Edit"]}}
-        raw = {"expertise": ["eng"], "tool_permissions": {"deny": ["Edit", "NotebookEdit"]}}
+        raw = {
+            "expertise": ["eng"],
+            "tool_permissions": {"deny": ["Edit", "NotebookEdit"]},
+        }
         bot = _coerce_bot("test", raw, defaults)
         assert bot.tool_permissions.deny == ["Write", "Edit", "NotebookEdit"]
 
@@ -398,6 +404,40 @@ class TestCoerceBot:
         assert bot.model_strategy is not None
         assert bot.model_strategy.base == "sonnet"
         assert bot.model_strategy.escalate_to == "opus"
+
+
+class TestCoerceBotSecretFiles:
+    """secret_files: ENV_VAR → fleet-relative secret-file path (composed onto
+    FLEET_ROOT). Parsed like mounts — bot raw over fleet defaults."""
+
+    def test_secret_files_parsed_from_raw(self):
+        bot = _coerce_bot(
+            "kev",
+            {
+                "expertise": ["eng"],
+                "secret_files": {"GA4_SA_KEY_PATH": ".secrets/ga4.json"},
+            },
+            {},
+        )
+        assert bot.secret_files == {"GA4_SA_KEY_PATH": ".secrets/ga4.json"}
+
+    def test_secret_files_default_empty(self):
+        bot = _coerce_bot("kev", {"expertise": ["eng"]}, {})
+        assert bot.secret_files == {}
+
+    def test_secret_files_merges_defaults(self):
+        bot = _coerce_bot(
+            "kev",
+            {
+                "expertise": ["eng"],
+                "secret_files": {"GSC_SA_KEY_PATH": ".secrets/gsc.json"},
+            },
+            {"secret_files": {"GA4_SA_KEY_PATH": ".secrets/ga4.json"}},
+        )
+        assert bot.secret_files == {
+            "GA4_SA_KEY_PATH": ".secrets/ga4.json",
+            "GSC_SA_KEY_PATH": ".secrets/gsc.json",
+        }
 
 
 class TestLoadFleet:
