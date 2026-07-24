@@ -154,9 +154,12 @@ def _validate_bots(
 
     # The L1 source guard runs at generate-time (composer.compose_bot); mirror it
     # here so `validate` ≡ `generate` for the deny-by-default path rule — an
-    # unanchored, undeclared absolute in a bot source (config leaves or loaded MCP
-    # fragments) is a hard error, surfaced before generate is ever attempted.
-    from .composer import _load_bot_fragments
+    # unanchored, undeclared absolute in a bot source is a hard error, surfaced
+    # before generate is ever attempted. Two source classes need two calls: the
+    # dataclass / MCP-fragment leaves via audit_bot_sources, and the grant paths
+    # (which live in the composed settings.local.json allow-list, not on BotConfig)
+    # via compose_settings_local — the same pure builder generate raises from (#704).
+    from .composer import _load_bot_fragments, compose_settings_local
     from .path_audit import audit_bot_sources
 
     for bot_name, bot in fleet.bots.items():
@@ -169,6 +172,17 @@ def _validate_bots(
                 f"{sf.path} (anchor on FLEET_ROOT/BOT_DIR/CLAUDLOBBY_ROOT, declare "
                 "in external_paths, or drop any shell metacharacter)"
             )
+
+        # Grant-path parity: the allow-list L1 deny (a foreign absolute in
+        # tool_permissions.allow or an expertise/guardrail/skill/integration grant)
+        # fires inside the composer's settings assembly, never in audit_bot_sources
+        # — grant strings are EXEMPT on the walk, classified at the settings choke.
+        # Run that pure, zero-write builder so the census catches what generate
+        # would; collect-all — convert its raise to a report error, never abort.
+        try:
+            compose_settings_local(bot, fleet, paths)
+        except ValueError as exc:
+            report.errors.append(f"bot '{bot_name}': {exc}")
 
         # Expertise — at least one must exist (HARD)
         if not bot.expertise:
@@ -935,7 +949,31 @@ def _validate_cross_fleet_collisions(
                 )
 
 
-def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
+def _validate_timers(
+    fleet: FleetConfig, merged_defaults: dict | None, report: ValidationReport
+) -> None:
+    """Grant `validate` ≡ `generate` for timer scripts: a raw absolute in a fleet
+    job's ``script`` fails generate (compose_fleet_timers), so the census must catch
+    it too. Gated on the composer's own emit condition (system defaults enabled +
+    timers on) so validate never flags a job generate would not emit — a false
+    positive there would itself break the zero-FP bar (#704)."""
+    if merged_defaults is None:
+        return
+    sd = fleet.system_defaults
+    if not (sd.enabled and sd.timers):
+        return
+    from .path_audit import timer_script_findings
+
+    for sf in timer_script_findings(merged_defaults.get("jobs", {})):
+        report.errors.append(
+            f"{sf.source} = {sf.value!r} — {sf.reason}: {sf.path} "
+            "(anchor the script on $CLAUDLOBBY_ROOT)"
+        )
+
+
+def validate(
+    fleet: FleetConfig, paths: Paths, merged_defaults: dict | None = None
+) -> ValidationReport:
     report = ValidationReport()
 
     if not fleet.bots:
@@ -945,6 +983,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
+    _validate_timers(fleet, merged_defaults, report)
     _validate_mission(fleet, paths, report)
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)
