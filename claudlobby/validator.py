@@ -9,12 +9,14 @@ import json
 import logging
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-from . import dotenv
+from . import dotenv, tool_resolve
+from .claudron_compat import CLAUDRON_INTEGRATION_URL
 from .config import _PROJECT_VALIDATION_KEYS, FleetConfig, is_pos_int
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
@@ -31,7 +33,7 @@ from .known_values import (
     hint,
 )
 from .mcp_resolve import required_vars as _mcp_required_vars
-from .paths import Paths
+from .paths import Paths, _iter_fleet_dirs, detect_vault
 
 _CADENCE_RE = re.compile(r"^\d+[mhd]$")
 _ORG_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
@@ -109,17 +111,18 @@ def _grant_shape_warnings(
     return out
 
 
-def _mcp_contract_has_tools(frag_path: Path) -> bool:
-    """True when an MCP fragment carries a non-empty ``_permissions_contract.tools``.
+def _mcp_contract(frag_path: Path) -> dict:
+    """An MCP fragment's ``_permissions_contract`` (``{}`` on missing/malformed).
 
-    Remove with the P8 ``_permissions_contract`` cut — it only exists to power the
-    migration-gap warning below, which is dead once the legacy contract is gone.
+    Remove with the P8 ``_permissions_contract`` cut of the wildcard path — it
+    only exists to power the migration-gap warning below, which is dead once
+    the legacy contract's grant role is gone.
     """
     try:
         frag = json.loads(frag_path.read_text())
     except (OSError, json.JSONDecodeError):
-        return False
-    return bool(frag.get("_permissions_contract", {}).get("tools"))
+        return {}
+    return frag.get("_permissions_contract") or {}
 
 
 def _validate_bots(
@@ -132,6 +135,14 @@ def _validate_bots(
     # Pre-compute available names for suggestion hints (avoids per-bot re-scan)
     avail_expertise = _available_names(paths, "expertise")
     avail_mcp = _available_names(paths, "mcp", ext=".json")
+    avail_tools = set(paths.library_dir_names("tools", "tool.yaml"))
+
+    # The claudron CLI door is host state, not per-bot state — probe once.
+    claudron_on_path = shutil.which("claudron") is not None
+    # Vault resolution is a full walk-up + scan per call, and `claudron_vault_path`
+    # falls back to a fleet-wide default (config.py) — so every bot in a fleet
+    # typically resolves the *same* path. Memo per run, same reason as above.
+    vault_resolutions: dict[str, bool] = {}
 
     # Grant-contract readers (folder-aware; shared with the P2 composer resolvers).
     from .loader import (
@@ -175,7 +186,7 @@ def _validate_bots(
                     report.warnings.append(
                         f"bot '{bot_name}': skill folder '{skill}' empty or missing in any library/skills/ — no skills will be linked"
                     )
-            elif paths.find_skill_dir(skill) is None:
+            elif paths.find_library_dir("skills", skill) is None:
                 report.warnings.append(
                     f"bot '{bot_name}': skill '{skill}' not in any library/skills/ — symlink will be skipped"
                 )
@@ -191,17 +202,26 @@ def _validate_bots(
                 report.warnings.append(
                     f"bot '{bot_name}': mcp fragment '{mcp.name}.json' not found — server will not be configured{hint}"
                 )
-            # Migration-gap warning (remove with the P8 _permissions_contract cut):
-            # a fragment that still grants tools whose paired integration hasn't been
-            # given covering tool_grants would be dropped by the eventual cut.
-            elif _mcp_contract_has_tools(frag_path) and not integration_tool_grants(
-                paths, mcp.name
-            ):
-                report.warnings.append(
-                    f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
-                    f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
-                    f'won\'t migrate (add tool_grants: ["mcp__{mcp.name}__*"])'
-                )
+            else:
+                # Migration-gap warning (remove with the P8 _permissions_contract cut):
+                # a fragment that still grants tools whose paired integration hasn't
+                # been given covering tool_grants would be dropped by the eventual
+                # cut. A read-only-split fragment must NOT be covered by a wildcard —
+                # the hint mirrors what compose will actually accept.
+                contract = _mcp_contract(frag_path)
+                if contract.get("tools") and not integration_tool_grants(
+                    paths, mcp.name
+                ):
+                    hint = (
+                        f"mirror its read_only_tools as exact mcp__{mcp.name}__<tool> entries"
+                        if contract.get("read_only_tools") is not None
+                        else f'add tool_grants: ["mcp__{mcp.name}__*"]'
+                    )
+                    report.warnings.append(
+                        f"bot '{bot_name}': mcp '{mcp.name}' grants tools via _permissions_contract "
+                        f"but the paired integration '{mcp.name}.md' has no tool_grants — the grant "
+                        f"won't migrate ({hint})"
+                    )
 
         # MCP env-contract check (warn) — uses the canonical instance-renamed
         # var names (the same names composer puts into the rendered
@@ -292,6 +312,44 @@ def _validate_bots(
                 elif paths.find_library_file(kind, item, ".md") is None:
                     report.warnings.append(
                         f"bot '{bot_name}': {kind[:-1]} '{item}' not in any library/{kind}/ — section will be skipped"
+                    )
+
+        # Tools (library/tools/ refs). Ref/manifest/param defects are HARD
+        # errors — generate would raise on the same defect, and a bad param
+        # means a broken 0755 executable. The env contract mirrors the MCP
+        # check above: warn only, the script fails at runtime.
+        tool_targets: dict[str, str] = {}  # target filename → tool name
+        for tool_entry in bot.tools:
+            tool_dir = paths.find_library_dir("tools", tool_entry.name)
+            if tool_dir is None:
+                suggestion = closest_match(tool_entry.name, avail_tools)
+                hint = f" — did you mean '{suggestion}'?" if suggestion else ""
+                report.errors.append(
+                    f"bot '{bot_name}': tool '{tool_entry.name}' not in any library/tools/{hint}"
+                )
+                continue
+            try:
+                manifest = tool_resolve.load_tool_manifest(tool_dir)
+                template_path = tool_resolve.tool_template_path(tool_dir, manifest)
+                tool_resolve.resolve_tool_params(
+                    tool_entry.name, manifest, tool_entry.params
+                )
+            except ValueError as e:
+                report.errors.append(f"bot '{bot_name}': {e}")
+                continue
+            target = tool_resolve.tool_target_name(template_path)
+            if target in tool_targets:
+                report.errors.append(
+                    f"bot '{bot_name}': tools '{tool_targets[target]}' and "
+                    f"'{tool_entry.name}' both render '{target}' — generate would fail"
+                )
+            else:
+                tool_targets[target] = tool_entry.name
+            for var in manifest.get("env") or []:
+                if var not in effective_env:
+                    report.warnings.append(
+                        f"bot '{bot_name}': tool '{tool_entry.name}' requires {var} but it's not set — "
+                        f"add to a .env tier (script will fail at runtime)"
                     )
 
         # Telegram token env (warn). Check effective_env so bot-tier .env
@@ -400,17 +458,53 @@ def _validate_bots(
                         f"genuinely needs it."
                     )
 
-        # Ecosystem: Claudron MCP ↔ vault path cross-check (warn)
-        has_claudron_mcp = any(entry.name == "claudron" for entry in bot.mcp)
-        if bot.claudron_vault_path and not has_claudron_mcp:
-            report.warnings.append(
-                f"bot '{bot_name}': claudron_vault_path is set but no 'claudron' MCP server is configured — "
-                "the vault path won't be used without the Claudron MCP server"
-            )
-        if has_claudron_mcp and not bot.claudron_vault_path:
-            report.warnings.append(
-                f"bot '{bot_name}': claudron MCP configured but claudron_vault_path not set — "
-                "queries will have no vault scope"
+        # Ecosystem: the Claudron door a vault-wired bot actually walks through
+        # is the CLI (Claudron's CLI_CONTRACT is the consumption ABI) — never an
+        # MCP server. Warn, never error: a fleet is legitimately composed on a
+        # host that has no claudron installed yet.
+        if bot.claudron_vault_path:
+            if not claudron_on_path:
+                report.warnings.append(
+                    f"bot '{bot_name}': claudron_vault_path is set but the claudron CLI "
+                    f"is not on PATH — bots reach the vault through the CLI "
+                    f"(see {CLAUDRON_INTEGRATION_URL})"
+                )
+            vault_path = Path(bot.claudron_vault_path).expanduser()
+            if not vault_path.is_dir():
+                report.warnings.append(
+                    f"bot '{bot_name}': claudron_vault_path "
+                    f"'{bot.claudron_vault_path}' is not a directory on this host — "
+                    f"the bot will get no vault (see {CLAUDRON_INTEGRATION_URL})"
+                )
+            else:
+                # Memo the scan, not just its result: guard the call so
+                # detect_vault (a full walk-up) runs once per distinct path, not
+                # once per bot. `setdefault(k, detect_vault(...))` evaluates the
+                # default eagerly every iteration and would not save the scan.
+                key = bot.claudron_vault_path
+                if key not in vault_resolutions:
+                    vault_resolutions[key] = detect_vault(vault_path) is not None
+                if not vault_resolutions[key]:
+                    report.warnings.append(
+                        f"bot '{bot_name}': claudron_vault_path "
+                        f"'{bot.claudron_vault_path}' does not resolve to a vault — no "
+                        f"'_shared/' (or 'shared/') marker found walking up "
+                        f"(see {CLAUDRON_INTEGRATION_URL})"
+                    )
+
+        # Ecosystem: the session loop (L2) needs a vault to run against. An
+        # explicit `claudron_session_loop: true` with no `claudron_vault_path` is
+        # an error — its hooks (pull/recall/push) and narrow verb grants are
+        # meaningless without one. Left UNSET the loop defaults on only when a
+        # vault is wired (composer._session_loop_enabled), so this never fires on
+        # the default path — only on an opt-in that cannot work. (Loop enabled +
+        # vault set but claudron CLI absent is covered by the L1 PATH warning above.)
+        if bot.claudron_session_loop is True and not bot.claudron_vault_path:
+            report.errors.append(
+                f"bot '{bot_name}': claudron_session_loop is true but "
+                f"claudron_vault_path is unset — the session loop has no vault to "
+                f"pull, recall, or push against. Set claudron_vault_path, or remove "
+                f"claudron_session_loop (see {CLAUDRON_INTEGRATION_URL})"
             )
 
         # Account (warn)
@@ -421,8 +515,8 @@ def _validate_bots(
 
         # Tool deny vs expertise conflict (warn). Flag when a denied tool is
         # core to the bot's expertise — the bot won't be able to do its job.
-        if bot.tools.deny:
-            denied = set(bot.tools.deny)
+        if bot.tool_permissions.deny:
+            denied = set(bot.tool_permissions.deny)
             for area in bot.expertise:
                 core = EXPERTISE_CORE_TOOLS.get(area, set())
                 conflict = denied & core
@@ -432,8 +526,8 @@ def _validate_bots(
                         f"but expertise '{area}' typically requires them"
                     )
             # Also warn if same tool appears in both allow and deny
-            if bot.tools.allow:
-                overlap = denied & set(bot.tools.allow)
+            if bot.tool_permissions.allow:
+                overlap = denied & set(bot.tool_permissions.allow)
                 if overlap:
                     report.warnings.append(
                         f"bot '{bot_name}': tools {sorted(overlap)} appear in both allow and deny lists"
@@ -568,7 +662,9 @@ def _validate_mission(
         )
     if fleet.mission_file:
         _check_relative_file(
-            "fleet.mission_file", fleet.mission_file, paths.fleet_config_dir,
+            "fleet.mission_file",
+            fleet.mission_file,
+            paths.fleet_config_dir,
             report,
         )
 
@@ -721,8 +817,7 @@ def _validate_projects(
                 )
             elif not _ORG_REPO_RE.match(repo):
                 report.warnings.append(
-                    f"{label}: repos entry '{repo}' does not match "
-                    f"<org>/<repo> format"
+                    f"{label}: repos entry '{repo}' does not match <org>/<repo> format"
                 )
             elif repo in repo_owners and repo_owners[repo] != key:
                 report.warnings.append(
@@ -734,8 +829,10 @@ def _validate_projects(
 
         if project.mission_file:
             _check_relative_file(
-                f"{label}: mission_file", project.mission_file,
-                paths.fleet_config_dir, report,
+                f"{label}: mission_file",
+                project.mission_file,
+                paths.fleet_config_dir,
+                report,
             )
 
         for unknown in sorted(project.raw):
@@ -803,6 +900,9 @@ def _validate_cross_fleet_collisions(
 
     tmux session names are derived from the bot directory basename, so two
     fleets with a bot named 'alex' would fight over the same tmux session.
+    Fleets are enumerated at both depths (flat ``local/<fleet>/`` and nested
+    ``local/<system>/<fleet>/``), so a nested sibling is not invisible to the
+    scan.
     """
     local_dir = paths.root / "local"
     if not local_dir.is_dir():
@@ -811,8 +911,8 @@ def _validate_cross_fleet_collisions(
     current_fleet = paths.fleet_dir.name if paths.fleet_dir else None
     bot_names = set(fleet.bots)
 
-    for fleet_dir in sorted(local_dir.iterdir()):
-        if not fleet_dir.is_dir() or fleet_dir.name == current_fleet:
+    for fleet_dir in _iter_fleet_dirs(local_dir):
+        if fleet_dir.name == current_fleet:
             continue
         other_bots_dir = fleet_dir / "runtime" / "bots"
         if not other_bots_dir.is_dir():

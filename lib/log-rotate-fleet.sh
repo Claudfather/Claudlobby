@@ -52,9 +52,12 @@ done
 
 # Per-fleet bot logs
 if [ -n "$FLEET" ]; then
-    FLEET_DIRS=("$CLAUDLOBBY_ROOT/local/$FLEET")
+    _fleet_dir=$(resolve_fleet_dir "$FLEET") || _fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET"
+    FLEET_DIRS=("$_fleet_dir")
 else
-    FLEET_DIRS=("$CLAUDLOBBY_ROOT"/local/*)
+    # Both depths: flat local/<fleet> AND nested local/<system>/<fleet>. The
+    # per-dir runtime/bots guard below drops containers + flat-fleet subdirs.
+    FLEET_DIRS=("$CLAUDLOBBY_ROOT"/local/* "$CLAUDLOBBY_ROOT"/local/*/*)
 fi
 
 for fleet_dir in "${FLEET_DIRS[@]}"; do
@@ -71,6 +74,7 @@ for fleet_dir in "${FLEET_DIRS[@]}"; do
         done
         # Bot data/ logs (only named cron.log, briefing*.log, git-pull.log, etc.)
         # Skip binary logs (LevelDB, browser profiles) by matching known text log names.
+        # data-sweep.sh purges the same name set once abandoned — keep in lockstep.
         if [ -d "${bot_dir}data" ]; then
             while IFS= read -r -d '' f; do
                 LOGS+=("$f")

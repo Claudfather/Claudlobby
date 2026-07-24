@@ -55,7 +55,9 @@ install_error_trap ""
 # unreadable fleet.yaml) → scan every dir, preserving prior behavior.
 _kf_fleet="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"
 if [ -n "$_kf_fleet" ]; then
-    _kf_yaml="$CLAUDLOBBY_ROOT/local/$_kf_fleet/fleet.yaml"
+    # Flat local/<fleet> byte-identically, or nested local/<system>/<fleet>.
+    _kf_dir=$(resolve_fleet_dir "$_kf_fleet") || _kf_dir="$CLAUDLOBBY_ROOT/local/$_kf_fleet"
+    _kf_yaml="$_kf_dir/fleet.yaml"
 else
     _kf_yaml="$(dirname "$(dirname "$BOTS_DIR")")/fleet.yaml"
 fi

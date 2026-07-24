@@ -187,9 +187,11 @@ source_env_tiered() {
         echo "DEPRECATED: $CLAUDLOBBY_ROOT/.env detected — move secrets to ~/.env or local/<fleet>/.env" >&2
         parse_env_file "$CLAUDLOBBY_ROOT/.env"
     fi
-    # Fleet
+    # Fleet — flat local/<fleet>/.env byte-identically, or the nested fleet dir.
     if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
-        local fleet_env="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/.env"
+        local fleet_dir fleet_env
+        fleet_dir=$(resolve_fleet_dir "$FLEET_NAME") || fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_NAME"
+        fleet_env="$fleet_dir/.env"
         [ -f "$fleet_env" ] && parse_env_file "$fleet_env"
     fi
     # Bot
@@ -638,6 +640,59 @@ bridge_bringup_verify() {
     esac
 }
 
+# bridge_fence_write <bot_dir>
+# Append a UNIQUE restart-fence marker to the bot's startup.log and echo the
+# token. Call this immediately BEFORE the restart, then pass the token to
+# wait_bridge_ready — only a BRIDGE_READY written after the marker counts as
+# fresh. The token embeds this run's pid + the bot + a per-run sequence, so it
+# is unique per (run, bot) and never collides with a prior run's leftover marker.
+bridge_fence_write() {
+    local bot_dir="${1:?Usage: bridge_fence_write <bot_dir>}"
+    local log="$bot_dir/logs/startup.log" token
+    : "${_RR_FENCE_SEQ:=0}"
+    token="RR_FENCE_$$_$(basename "$bot_dir")_${_RR_FENCE_SEQ}"
+    _RR_FENCE_SEQ=$((_RR_FENCE_SEQ + 1))
+    mkdir -p "$bot_dir/logs" 2>/dev/null || true
+    printf '%s %s\n' "$(ts_iso)" "$token" >> "$log" 2>/dev/null || true
+    printf '%s' "$token"
+}
+
+# wait_bridge_ready <bot_dir> <ceiling_s> <fence_token>
+# Block until a BRIDGE_READY is appended to the bot's startup.log AFTER
+# <fence_token> — the unique marker bridge_fence_write wrote just before the
+# restart. Only a BRIDGE_READY that follows the marker counts, so a stale one
+# from a prior boot can never pass the gate. This is the per-bot gate for a
+# serial rolling restart (#689); the caller serializes / halts rather than
+# proceed-anyway across the fleet (the #688/#689 mass-restart outage).
+#
+# Why a marker, not a byte offset (#696 review, finding 1): log-rotate.sh keeps
+# only a line-count tail, so a rotation mid-restart-window invalidates a byte
+# offset AND can leave a prior boot's POLL_START…BRIDGE_READY as the "newest"
+# pair — a stale line the old byte/last-POLL_START fallback would accept. The
+# marker rides the rotated tail with the new lines; if it is ever rotated away
+# entirely, nothing matches and the gate fails CLOSED (a timeout, never a
+# false-ready). Poll-count, not clock, so a slow bridge spawns no date fork.
+#
+# Limitation (#696 finding 2, narrow): the marker is written just before the
+# restart, so a bot that is ITSELF still mid-boot when rolled (has not reached
+# its own BRIDGE_READY) can have its old process append a real BRIDGE_READY after
+# the marker before `systemctl restart` reaps it. This is marker-fresh, not
+# process-generation-fresh — tracked as a #696 follow-up.
+wait_bridge_ready() {
+    local bot_dir="${1:?Usage: wait_bridge_ready <bot_dir> <ceiling_s> <fence_token>}"
+    local ceiling="${2:-180}" token="${3:?wait_bridge_ready needs a fence token}"
+    local log="$bot_dir/logs/startup.log" waited=0 step=3 after
+    while :; do
+        # Everything after the LAST occurrence of the fence token. A prior boot's
+        # lines precede the marker; only what follows it is this restart's.
+        after="$(awk -v tok="$token" 'index($0, tok){after=""; seen=1; next} seen{after = after $0 ORS} END{printf "%s", after}' "$log" 2>/dev/null || true)"
+        case "$after" in *BRIDGE_READY*) return 0 ;; esac
+        [ "$waited" -ge "$ceiling" ] && return 1
+        sleep "$step"
+        waited=$((waited + step))
+    done
+}
+
 # --- Per-bot tmux socket isolation ------------------------------------------
 # Each bot runs its own tmux server, reached via a private socket name (the
 # `-L` argument), so one server's death can only drop one bot — not the whole
@@ -688,6 +743,11 @@ tmux_socket_for_bot() {
 _resolve_cross_fleet_bot_dir() {
     local session="$1" d matches=()
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots/"$session"; do
+        [ -d "$d" ] && matches+=("$d")
+    done
+    # Nested vault: a fleet under a system container is one level deeper. The
+    # [ -d ] guard drops the literal glob when nothing matches (flat = additive).
+    for d in "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots/"$session"; do
         [ -d "$d" ] && matches+=("$d")
     done
     case ${#matches[@]} in
@@ -1150,6 +1210,27 @@ df_pcent() {
 
 # --- Fleet path resolution ---------------------------------------------------
 
+# resolve_fleet_dir <fleet> — echo the fleet overlay dir, flat OR nested.
+# Flat local/<fleet>/ wins (byte-identical to pre-nesting). Else the unique
+# local/<system>/<fleet>/ carrying a fleet.yaml (one level under a container).
+# Marker-agnostic: a fleet is a dir with fleet.yaml. Empty output + nonzero if
+# none. The bash twin of Python paths._find_fleet_dir — the ONE home for the
+# flat-vs-nested rule every supervision path routes through.
+resolve_fleet_dir() {
+    local fleet="$1" root="${CLAUDLOBBY_ROOT:?}" flat d
+    flat="$root/local/$fleet"
+    # Flat wins first — byte-identical: a bare dir resolves (scaffolding relies on it).
+    if [ -d "$flat" ]; then printf '%s\n' "$flat"; return 0; fi
+    # Nested: the unique local/<system>/<fleet>/ that carries a fleet.yaml.
+    local match="" n=0
+    for d in "$root"/local/*/"$fleet"; do
+        [ -f "$d/fleet.yaml" ] || continue
+        match="$d"; n=$((n+1))
+    done
+    if [ "$n" -eq 1 ]; then printf '%s\n' "$match"; return 0; fi
+    return 1   # none, or ambiguous (F5 — caller decides; keep flat-first semantics)
+}
+
 # shellcheck disable=SC2120  # fleet arg is optional by design (env fallback);
 # tmux_socket_for_session calls it argless, other-file callers pass a fleet.
 resolve_bots_dir() {
@@ -1157,8 +1238,12 @@ resolve_bots_dir() {
     # Usage: BOTS_DIR=$(resolve_bots_dir [fleet-name])
     # Falls back to CLAUDLOBBY_FLEET / FLEET_NAME env vars, then root-mode runtime/bots.
     local fleet="${1:-${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}}"
+    local fleet_dir
     if [ -n "$fleet" ]; then
-        printf '%s' "$CLAUDLOBBY_ROOT/local/$fleet/runtime/bots"
+        # resolve_fleet_dir returns local/<fleet> for flat (byte-identical) or the
+        # nested local/<system>/<fleet>; flat fallback keeps the pre-create path.
+        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+        printf '%s' "$fleet_dir/runtime/bots"
     else
         printf '%s' "$CLAUDLOBBY_ROOT/runtime/bots"
     fi
@@ -1171,8 +1256,10 @@ resolve_bots_dir() {
 # Usage: DIR=$(fleet_runtime_dir [fleet-name])
 fleet_runtime_dir() {
     local fleet="${1:-${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}}"
+    local fleet_dir
     if [ -n "$fleet" ]; then
-        printf '%s' "$CLAUDLOBBY_ROOT/local/$fleet/runtime"
+        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+        printf '%s' "$fleet_dir/runtime"
     else
         printf '%s' "$CLAUDLOBBY_ROOT/runtime/fleet"
     fi
@@ -1189,6 +1276,11 @@ host_bots_dirs() {
     local d
     [ -d "$CLAUDLOBBY_ROOT/runtime/bots" ] && printf '%s\n' "$CLAUDLOBBY_ROOT/runtime/bots"
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
+        [ -d "$d" ] && printf '%s\n' "$d"
+    done
+    # Nested vault: a fleet under a system container is one level deeper. The
+    # [ -d ] guard drops the literal glob when nothing matches (flat = additive).
+    for d in "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots; do
         [ -d "$d" ] && printf '%s\n' "$d"
     done
     return 0
@@ -1288,7 +1380,7 @@ resolve_timer_unit() {
             echo "$caller: pass a fleet name, set CLAUDLOBBY_FLEET, or set TIMER_DIR" >&2
             return 2
         fi
-        fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
         TIMER_DIR="$fleet_dir/runtime/fleet/timers"
     fi
     if [ ! -d "$TIMER_DIR" ]; then
@@ -1424,13 +1516,22 @@ install_error_trap() {
 # bot_conf_get <bot_dir> <key> <default>
 # Read a single variable from a bot's bot.conf without sourcing the file
 # (no side effects on the caller's environment). Handles both `export VAR=val`
-# and plain `VAR=val` forms. Strips surrounding double quotes from values.
+# and plain `VAR=val` forms. Strips one layer of surrounding single OR double
+# quotes (the composer emits values via shlex.quote, which single-quotes any
+# value containing a space, e.g. a multi-plugin FLEET_PLUGINS_REQUIRED).
 # Returns <default> if the file is missing or the key isn't found.
 bot_conf_get() {
     local bot_dir="$1" key="$2" default="$3" val=""
     if [ -f "$bot_dir/bot.conf" ]; then
         val=$(grep "^\(export \)\?$key=" "$bot_dir/bot.conf" | head -1 \
-            | sed -E "s/^(export )?$key=//" | tr -d '"' || true)
+            | sed -E "s/^(export )?$key=//" || true)
+        # Strip a surrounding quote pair (single or double) via parameter
+        # expansion, kept outside the command substitution above so no literal
+        # quote sits inside $( ) where bash 3.2 mis-scans it.
+        case "$val" in
+            \"*\") val=${val#\"}; val=${val%\"} ;;
+            \'*\') val=${val#\'}; val=${val%\'} ;;
+        esac
     fi
     printf '%s' "${val:-$default}"
 }
@@ -1484,6 +1585,14 @@ first_bot_with_conf_any_fleet() {
         return 0
     fi
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots; do
+        [ "$d" = "$bots_dir" ] && continue
+        if first_bot_with_conf "$d" "$key"; then
+            return 0
+        fi
+    done
+    # Nested vault: a fleet under a system container is one level deeper.
+    # first_bot_with_conf guards a nonexistent dir, so the literal glob is inert.
+    for d in "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots; do
         [ "$d" = "$bots_dir" ] && continue
         if first_bot_with_conf "$d" "$key"; then
             return 0

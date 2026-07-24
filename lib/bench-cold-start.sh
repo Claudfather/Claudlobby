@@ -92,7 +92,8 @@ if [ -z "$BOT_ARG" ]; then
         echo "  Pass a bot name or set FLEET_NAME (or use --fleet <name>)." >&2
         exit 1
     fi
-    FLEET_YAML="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/fleet.yaml"
+    _bcs_fleet_dir=$(resolve_fleet_dir "$FLEET_NAME") || _bcs_fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_NAME"
+    FLEET_YAML="$_bcs_fleet_dir/fleet.yaml"
     if [ ! -f "$FLEET_YAML" ]; then
         echo "bench-cold-start: fleet.yaml not found: $FLEET_YAML" >&2
         exit 1
@@ -116,7 +117,7 @@ _find_bot_dir() {
     local bot="$1"
     # 1. Fleet-namespaced runtime (preferred when FLEET_NAME is set)
     if [ -n "$FLEET_NAME" ]; then
-        local d="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/runtime/bots/$bot"
+        local d="$(resolve_bots_dir "$FLEET_NAME")/$bot"
         [ -d "$d" ] && { echo "$d"; return 0; }
     fi
     # 2. Root runtime (legacy / fleet-less layout)
@@ -124,6 +125,10 @@ _find_bot_dir() {
     [ -d "$d" ] && { echo "$d"; return 0; }
     # 3. Search all local/<fleet>/runtime/bots/<bot>
     for d in "$CLAUDLOBBY_ROOT"/local/*/runtime/bots/"$bot"; do
+        [ -d "$d" ] && { echo "$d"; return 0; }
+    done
+    # 4. Nested vault: a fleet under a system container is one level deeper.
+    for d in "$CLAUDLOBBY_ROOT"/local/*/*/runtime/bots/"$bot"; do
         [ -d "$d" ] && { echo "$d"; return 0; }
     done
     return 1

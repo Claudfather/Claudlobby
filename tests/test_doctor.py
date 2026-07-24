@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
+from claudlobby.claudron_compat import COMPAT_FLOOR
 from claudlobby.config import load_fleet
 from claudlobby.doctor import (
     DoctorReport,
+    check_claudron,
     check_env_vars,
     check_mcp_configs,
     check_services,
@@ -201,3 +206,171 @@ class TestRunDoctor:
         assert "mcp-configs" in check_names
         assert "services" in check_names
         assert "credentials" in check_names
+
+
+class TestCheckClaudron:
+    """The claudron door check `claudron_compat`'s docstring has promised since
+    it was written (boundary phase L1)."""
+
+    @staticmethod
+    def _vault(tmp_path: Path, *, git: bool = False, hooks_log: str = "") -> Path:
+        vault = tmp_path / "vault"
+        (vault / "_shared").mkdir(parents=True, exist_ok=True)
+        if hooks_log:
+            (vault / ".claudron").mkdir(exist_ok=True)
+            (vault / ".claudron" / "hooks.log").write_text(hooks_log)
+        if git:
+            subprocess.run(["git", "init", "-q", str(vault)], check=True)
+            subprocess.run(
+                ["git", "-C", str(vault), "commit", "-q", "--allow-empty",
+                 "-m", "seed", "--no-gpg-sign"],
+                check=True,
+                env={
+                    **os.environ,
+                    "GIT_AUTHOR_NAME": "t",
+                    "GIT_AUTHOR_EMAIL": "t@e",
+                    "GIT_COMMITTER_NAME": "t",
+                    "GIT_COMMITTER_EMAIL": "t@e",
+                },
+            )
+        return vault
+
+    @staticmethod
+    def _wire(root: Path, vault: Path) -> "FleetConfig":
+        raw = (root / "fleet.yaml").read_text()
+        text = raw.replace(
+            "      expertise: [eng]",
+            f"      expertise: [eng]\n      claudron_vault_path: {vault}",
+        )
+        assert text != raw, "fleet.yaml fixture shape changed — wiring no-oped"
+        (root / "fleet.yaml").write_text(text)
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        return fleet
+
+    @staticmethod
+    def _stub_cli(tmp_path: Path, monkeypatch, *, body: str) -> None:
+        bindir = tmp_path / "bin"
+        bindir.mkdir(exist_ok=True)
+        stub = bindir / "claudron"
+        stub.write_text(body)
+        stub.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+
+    def test_silent_for_a_fleet_with_no_vault_wired_bot(self, doctor_fleet):
+        _, fleet, paths = doctor_fleet
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        assert report.checks == []
+
+    def test_cli_absent_warns_and_names_the_door(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _fleet, paths = doctor_fleet
+        fleet = self._wire(root, self._vault(tmp_path))
+        empty = tmp_path / "empty-bin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        cli = [c for c in report.checks if c.name == "claudron-cli"][0]
+        assert cli.status == "warn"
+        assert "INTEGRATION.md" in cli.detail
+
+    def test_floor_rows_render_parked_never_unmet(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _fleet, paths = doctor_fleet
+        fleet = self._wire(root, self._vault(tmp_path))
+        # A stub CLI that answers the capability probe and every `--help`.
+        self._stub_cli(
+            tmp_path,
+            monkeypatch,
+            body=(
+                "#!/bin/sh\n"
+                'if [ "$1" = "status" ]; then\n'
+                '  echo \'{"ok":true,"command":"status","data":'
+                '{"engine_version":"0.3.0","root":"/v","total_docs":7}}\'\n'
+                "fi\n"
+                "exit 0\n"
+            ),
+        )
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+
+        floor = [c for c in report.checks if c.name.startswith("claudron-floor:")]
+        assert len(floor) == len(COMPAT_FLOOR)
+
+        parked = [c for c in floor if "parked" in c.detail]
+        assert parked, [c.detail for c in floor]
+        for check in parked:
+            assert "decision C" in check.detail
+            assert "unmet" not in check.detail
+            assert check.status == "pass"
+        # No row for a deliberately-unshipped surface may read "unmet".
+        for check in floor:
+            if "unmet" in check.detail:
+                assert "parked" not in check.detail
+
+        engine = [c for c in report.checks if c.name == "claudron-engine"][0]
+        assert engine.status == "pass"
+        assert "engine 0.3.0" in engine.detail
+
+    def test_probe_reports_exit_3_as_no_vault(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _fleet, paths = doctor_fleet
+        fleet = self._wire(root, self._vault(tmp_path))
+        self._stub_cli(
+            tmp_path,
+            monkeypatch,
+            body='#!/bin/sh\n[ "$1" = "status" ] && exit 3\nexit 0\n',
+        )
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        engine = [c for c in report.checks if c.name == "claudron-engine"][0]
+        assert engine.status == "warn"
+        assert "no vault resolved" in engine.detail
+
+    def test_loop_evidence_surfaces_recent_hook_degradation(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _fleet, paths = doctor_fleet
+        stamp = datetime.now().isoformat(timespec="seconds")
+        vault = self._vault(
+            tmp_path,
+            git=True,
+            hooks_log=f"{stamp} [session-end] sync --push degraded: offline\n",
+        )
+        fleet = self._wire(root, vault)
+        self._stub_cli(tmp_path, monkeypatch, body="#!/bin/sh\nexit 0\n")
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        loop = [c for c in report.checks if c.name == "claudron-loop"]
+        assert len(loop) == 1
+        assert loop[0].status == "warn"
+        assert "sync --push degraded" in loop[0].detail
+        assert "last commit" in loop[0].detail
+
+    def test_loop_evidence_passes_on_a_quiet_healthy_vault(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _fleet, paths = doctor_fleet
+        fleet = self._wire(root, self._vault(tmp_path, git=True))
+        self._stub_cli(tmp_path, monkeypatch, body="#!/bin/sh\nexit 0\n")
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        loop = [c for c in report.checks if c.name == "claudron-loop"][0]
+        assert loop.status == "pass"
+        assert "no hook degradation logged" in loop.detail
+
+    def test_loop_evidence_warns_when_the_vault_is_absent(
+        self, doctor_fleet, tmp_path, monkeypatch
+    ):
+        root, _fleet, paths = doctor_fleet
+        fleet = self._wire(root, tmp_path / "nowhere")
+        self._stub_cli(tmp_path, monkeypatch, body="#!/bin/sh\nexit 0\n")
+        report = DoctorReport()
+        check_claudron(fleet, paths, report)
+        loop = [c for c in report.checks if c.name == "claudron-loop"][0]
+        assert loop.status == "warn"
+        assert "not present on this host" in loop.detail

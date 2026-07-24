@@ -53,7 +53,8 @@ fi
 # spin-up-bot.sh would otherwise re-enroll + restart a bot the fleet no longer
 # declares, resurrecting cross-fleet orphan residue. Empty list (no/unreadable
 # fleet.yaml) → bot_in_fleet treats every dir as declared, preserving prior behavior.
-declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET/fleet.yaml")
+_wr_fleet_dir=$(resolve_fleet_dir "$FLEET") || _wr_fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET"
+declared_bots=$(parse_fleet_bots "$_wr_fleet_dir/fleet.yaml")
 
 echo "$ts RESTART starting weekly worker-only bounce: $FLEET" >> "$LOG"
 restarted=0; skipped=0; failed=0
@@ -70,12 +71,25 @@ for bot_dir in "$BOTS_DIR"/*/; do
     fi
 
     echo "$ts RESTART worker: $bot_id" >> "$LOG"
+    # Write a unique fence marker BEFORE the bounce so the gate below only sees a
+    # BRIDGE_READY after it (rotation-proof + fail-closed; see wait_bridge_ready).
+    _wr_fence="$(bridge_fence_write "$bot_dir")"
     # Best-effort handoff first — pre-stop-handoff.sh self-bounds (≤30s, early
     # exits as soon as the handoff lands) and exits 0, so it never blocks the
     # restart. The restart proceeds regardless of the handoff outcome.
     "$LIB_DIR/pre-stop-handoff.sh" "$bot_dir" >> "$LOG" 2>&1 || true
 
     if "$LIB_DIR/spin-up-bot.sh" "$bot_dir" >> "$LOG" 2>&1; then
+        # Serialize on the Telegram bridge: wait for THIS worker's poller to come
+        # ready before bouncing the next, so an all-workers weekly bounce cannot
+        # mass-starve channel init (#688/#689). A gate timeout is logged + alerted
+        # but does NOT abort the maintenance run — the next worker still bounces.
+        if wait_bridge_ready "$bot_dir" "${WEEKLY_RESTART_CEILING:-180}" "$_wr_fence"; then
+            echo "$ts RESTART ready: $bot_id" >> "$LOG"
+        else
+            echo "$ts RESTART bridge-timeout: $bot_id (no BRIDGE_READY in ${WEEKLY_RESTART_CEILING:-180}s)" >> "$LOG"
+            emit_failure_alert "$BOTS_DIR" "bridge_down" "worker $bot_id restarted but its Telegram bridge did not come ready within ${WEEKLY_RESTART_CEILING:-180}s (weekly bounce)"
+        fi
         restarted=$((restarted + 1))
     else
         rc=$?

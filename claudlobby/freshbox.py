@@ -153,7 +153,7 @@ def audit_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]
         deny=perms.get("deny", []),
         sourced=_sourced_grants(bot, paths),
         base=set(BASE_TOOLS),
-        override=set(bot.tools.allow),
+        override=set(bot.tool_permissions.allow),
     )
     findings = [
         Finding(bot.bot_id, kind, sev, f"{grant} {_GRANT_KINDS[kind][1]}")

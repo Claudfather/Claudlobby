@@ -28,6 +28,7 @@ Vault integration:
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -101,6 +102,48 @@ def tmux_socket_for_bot(bot_dir: Path) -> str:
     return ""
 
 
+def vault_api_available() -> bool:
+    """True when the ``[vault]`` extra's claudron import seam resolves.
+
+    The one place other modules ask "is the imported Claudron API here?" —
+    they must not test the import themselves (the ``[vault]`` extra is the
+    single sanctioned import seam and it lives behind this module).
+    """
+    return _HAS_CLAUDRON
+
+
+def detect_vault(path: Path) -> Path | None:
+    """Resolve *path* to a vault root, or ``None`` when no vault is addressed.
+
+    The sanctioned detection seam for callers outside this module (twin of
+    :func:`_resolve_vault_fleet`): nothing else in claudlobby imports
+    ``claudron.*``. Uses claudron's own ``vault.detect`` when the ``[vault]``
+    extra is installed — that is authoritative. Without it, falls back to the
+    documented marker walk-up (a ``_shared/`` or ``shared/`` directory, the way
+    git ascends for ``.git/``; Claudron ``VAULT-STRUCTURE.md``).
+
+    The fallback is deliberately *coarser* than the engine's: it does not
+    re-implement the overlay/system-container guards, so it can bind a fleet
+    overlay where the engine would keep walking to the true root. Every caller
+    is a warn-level diagnostic, and the coarse direction under-warns rather
+    than crying wolf on a vault that is fine.
+    """
+    try:
+        start = path.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    if _HAS_CLAUDRON:
+        vault = _claudron_detect(start)
+        return vault.root if vault else None
+
+    for candidate in [start, *start.parents]:
+        for marker in ("_shared", "shared"):
+            if (candidate / marker).is_dir():
+                return candidate
+    return None
+
+
 def _resolve_vault_fleet(root: Path, fleet: str) -> tuple[Path | None, Path | None]:
     """Resolve a fleet overlay through a vault.
 
@@ -128,6 +171,101 @@ def _resolve_vault_fleet(root: Path, fleet: str) -> tuple[Path | None, Path | No
     if (vault_fleet / "fleet.yaml").is_file():
         return vault_fleet, vault_path
     return None, None
+
+
+# --- nested-containment fleet enumeration (Claudlobby#602 P2) -----------------
+#
+# A vault may nest fleets one level under a ``<system>/`` container: flat
+# ``local/<fleet>/`` OR nested ``local/<system>/<fleet>/``. The rule is
+# marker-agnostic — Claudlobby needs no knowledge of the system marker: a
+# *fleet* is a directory holding ``fleet.yaml``; a *container* is a depth-1 dir
+# with no ``fleet.yaml`` of its own. Both helpers below are the single place
+# that nested-awareness lives, so the four resolution sites (Paths.detect, the
+# --root CLI twin, the validator collision scan, move-bot) stay DRY.
+
+
+def _iter_fleet_dirs(local_dir: Path) -> Iterator[Path]:
+    """Yield candidate fleet overlay dirs under *local_dir*, flat AND nested.
+
+    Enumerates depth 1 (``local/<fleet>/``) and depth 2
+    (``local/<system>/<fleet>/`` — one level under a system container). Only
+    *containers* (depth-1 dirs with no ``fleet.yaml`` of their own) are
+    descended into; never past two levels.
+
+    Depth-1 dirs are always yielded, with no ``fleet.yaml`` gate — the
+    pre-nesting enumeration did not require one, and callers (the collision
+    scan, move-bot autodetect) already filter to real fleets via their own
+    ``runtime/bots`` / ``fleet.yaml`` checks. This keeps the flat case
+    byte-identical while making nested siblings visible.
+    """
+    if not local_dir.is_dir():
+        return
+    for entry in sorted(local_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        yield entry
+        if not (entry / "fleet.yaml").is_file():
+            for child in sorted(entry.iterdir()):
+                if child.is_dir():
+                    yield child
+
+
+def _find_fleet_dir(local_dir: Path, fleet: str) -> Path | None:
+    """Resolve a fleet *name* to its overlay dir, flat OR nested.
+
+    Flat (``local/<fleet>/``) is tried first and wins — byte-identical to the
+    pre-nesting behavior: a bare dir resolves even without a ``fleet.yaml``
+    (scaffolding and the existing suite rely on this). Otherwise the unique
+    ``local/<system>/<fleet>/`` that carries a ``fleet.yaml`` (one level under
+    a container) resolves. Returns None when the name is present at neither
+    depth.
+
+    Raises ``ValueError`` on an F5 global-unique-name violation: the same name
+    present as both a flat *fleet* (a dir carrying ``fleet.yaml``) and a nested
+    fleet, or under two systems — never silently pick one. A bare flat *husk*
+    (a dir with no ``fleet.yaml`` — e.g. the gitignored ``local/<fleet>/runtime/``
+    a flat→nested ``git mv`` leaves behind) is NOT a real fleet: it yields to
+    the nested fleet rather than falsely colliding.
+    """
+    flat = local_dir / fleet
+    flat_is_fleet = (flat / "fleet.yaml").is_file()
+    flat_match = flat if flat.is_dir() else None
+
+    nested_matches: list[Path] = []
+    if local_dir.is_dir():
+        for entry in sorted(local_dir.iterdir()):
+            # Containers only: a dir with a fleet.yaml is itself a flat fleet
+            # (handled by flat_match), not a system container to descend.
+            if not entry.is_dir() or (entry / "fleet.yaml").is_file():
+                continue
+            candidate = entry / fleet
+            if (candidate / "fleet.yaml").is_file():
+                nested_matches.append(candidate)
+
+    # A genuine F5 both-depths collision requires the flat arm to be a REAL
+    # fleet. A bare husk (flat dir without fleet.yaml) must NOT trigger it —
+    # otherwise a leftover gitignored runtime/ husk bricks nested resolution.
+    if flat_is_fleet and nested_matches:
+        raise ValueError(
+            f"fleet '{fleet}' resolves at two depths — flat ({flat_match}) and "
+            f"nested ({nested_matches[0]}); fleet names must be globally unique "
+            f"across the vault"
+        )
+    if len(nested_matches) > 1:
+        joined = ", ".join(str(m) for m in nested_matches)
+        raise ValueError(
+            f"fleet '{fleet}' resolves under multiple systems ({joined}); "
+            f"fleet names must be globally unique across the vault"
+        )
+    if nested_matches and not flat_is_fleet:
+        # Flat is a husk (or absent) → the real nested fleet wins.
+        return nested_matches[0]
+    if flat_match:
+        # A real flat fleet with no nested sibling, OR a bare flat dir ALONE
+        # (the byte-identical scaffolding corner: a marker-less overlay still
+        # resolves when nothing collides).
+        return flat_match
+    return None
 
 
 @dataclass(frozen=True)
@@ -214,7 +352,8 @@ class Paths:
         """Search dirs for a given library kind, in precedence order.
 
         kind ∈ {expertise, skills, mcp, integrations, guardrails,
-                protocols, resources, lessons, post_actions, permissions}
+                protocols, resources, lessons, post_actions, permissions,
+                tools}
         """
         out: list[Path] = []
         if self.overlay_library:
@@ -234,13 +373,31 @@ class Paths:
                 return p
         return None
 
-    def find_skill_dir(self, name: str) -> Path | None:
-        """Skills are directories. Overlay wins."""
-        for d in self.library_search_dirs("skills"):
+    def find_library_dir(self, kind: str, name: str) -> Path | None:
+        """Find a dir-form library item (skills, tools). Overlay wins."""
+        if ".." in name:
+            raise ValueError(f"path traversal in library dir name: {name!r}")
+        for d in self.library_search_dirs(kind):
             p = d / name
             if p.is_dir():
                 return p
         return None
+
+    def library_dir_names(self, kind: str, sentinel: str) -> dict[str, bool]:
+        """Names of dir-form library items (flat scan), name → is-overlay.
+
+        Only dirs containing the category's sentinel file count (e.g.
+        tools/tool.yaml). Overlay wins on collisions.
+        """
+        out: dict[str, bool] = {}
+        for d in self.library_search_dirs(kind):
+            if not d.is_dir():
+                continue
+            is_overlay = bool(self.overlay_library and d == self.overlay_library / kind)
+            for sub in sorted(d.iterdir()):
+                if sub.is_dir() and (sub / sentinel).is_file() and sub.name not in out:
+                    out[sub.name] = is_overlay
+        return out
 
     def expand_library_folder(self, kind: str, dir_name: str) -> dict[str, Path]:
         """Expand a ``dir/`` entry into ``{rel_key: Path}`` for every ``.md`` file.
@@ -389,7 +546,9 @@ class Paths:
 
         If `fleet` is given, first check ``.claudron`` config at claudlobby root
         for a vault path. If the vault contains a fleet overlay for *fleet*,
-        use that. Otherwise fall back to ``<root>/local/<fleet>/``.
+        use that. Otherwise fall back to ``local/`` — resolving the fleet at
+        flat (``<root>/local/<fleet>/``) OR nested
+        (``<root>/local/<system>/<fleet>/``) depth.
         """
         start = Path(hint or os.environ.get("CLAUDLOBBY_ROOT") or Path.cwd()).resolve()
         root = None
@@ -417,12 +576,13 @@ class Paths:
             # Try vault-based fleet resolution (.claudron bridge → claudron API)
             fleet_dir, vault_root = _resolve_vault_fleet(root, fleet)
 
-            # Fall back to local/<fleet>/
+            # Fall back to local/ — flat OR nested (one level under a container).
             if fleet_dir is None:
-                fleet_dir = root / "local" / fleet
-                if not fleet_dir.is_dir():
+                fleet_dir = _find_fleet_dir(root / "local", fleet)
+                if fleet_dir is None:
+                    flat = root / "local" / fleet
                     raise FileNotFoundError(
-                        f"Fleet overlay not found: {fleet_dir} (run `claudlobby new-fleet {fleet}` to scaffold)"
+                        f"Fleet overlay not found: {flat} (run `claudlobby new-fleet {fleet}` to scaffold)"
                     )
 
         return cls(root=root, fleet_dir=fleet_dir, vault_root=vault_root)

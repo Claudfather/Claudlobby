@@ -12,11 +12,18 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import dotenv
+from .claudron_compat import (
+    CLAUDRON_INTEGRATION_URL,
+    COMPAT_FLOOR,
+    PROBE_API,
+    PROBE_VERB_PREFIX,
+)
 from .config import FleetConfig
-from .paths import Paths, tmux_socket_for_bot
+from .paths import Paths, tmux_socket_for_bot, vault_api_available
 from .validator import validate
 
 log = logging.getLogger(__name__)
@@ -378,6 +385,186 @@ def check_credentials(paths: Paths, report: DoctorReport) -> None:
 
 
 # ----------------------------------------------------------------------
+# Check: the Claudron door (CLI presence, capability probe, compat floor,
+# session-loop evidence)
+# ----------------------------------------------------------------------
+
+#: A hook degradation older than this is history, not a live symptom.
+_LOOP_DEGRADATION_WINDOW_DAYS = 7
+
+
+def _run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
+    """Run *argv*, returning (returncode, stdout). Absent binary ⇒ (127, "")."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except FileNotFoundError:
+        return 127, ""
+    except (subprocess.TimeoutExpired, OSError):
+        return 1, ""
+
+
+def _claudron_probe(vault: str) -> tuple[str, str]:
+    """Claudron's sanctioned capability probe (CLI_CONTRACT §Capability probe).
+
+    Returns (status, detail) for a doctor row. Branches on the exit code, never
+    on message text: 0 ⇒ envelope on stdout, 3 ⇒ engine present but no vault.
+    """
+    rc, out = _run(["claudron", "status", "--json", "--vault", vault])
+    if rc == 3:
+        return "warn", f"claudron installed but no vault resolved at {vault}"
+    if rc != 0:
+        return "warn", f"`claudron status --json` exited {rc} for {vault}"
+    try:
+        data = json.loads(out)["data"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return "warn", "`claudron status --json` did not return the CLI envelope"
+    # engine_version does not exist before 0.3.0 — index it defensively.
+    version = data.get("engine_version", "unknown (pre-0.3.0)")
+    return "pass", (
+        f"engine {version}, vault {data.get('root', vault)} "
+        f"({data.get('total_docs', '?')} notes)"
+    )
+
+
+def _floor_row_state(cap, cli_present: bool) -> tuple[str, str]:
+    """Resolve one COMPAT_FLOOR row to (status, detail).
+
+    Parked rows never probe and never read "unmet" — they are demand-gated by a
+    recorded decision, not missing capability.
+    """
+    if cap.parked:
+        return "pass", f"parked ({cap.parked}) — demand-gated, not built, not required"
+    if cap.probe == PROBE_API:
+        if vault_api_available():
+            return "pass", f"met — {cap.requires}"
+        return "warn", (
+            f"unmet — {cap.requires}: install `claudlobby[vault]` "
+            f"(the .claudron bridge parser is the degraded fallback)"
+        )
+    if cap.probe.startswith(PROBE_VERB_PREFIX):
+        verb = cap.probe[len(PROBE_VERB_PREFIX) :]
+        if not cli_present:
+            return "warn", f"unmet — no claudron CLI on PATH (needs `{verb}`)"
+        rc, _ = _run(["claudron", verb, "--help"], timeout=10.0)
+        return (
+            ("pass", f"met — `claudron {verb}` resolves")
+            if rc == 0
+            else ("warn", f"unmet — `claudron {verb}` not available (exit {rc})")
+        )
+    return "pass", (
+        f"not probeable — {cap.requires} "
+        f"(annotation: {cap.default_order_release})"
+    )
+
+
+def _loop_evidence(vault: str) -> tuple[str, str]:
+    """Loop-execution evidence for one vault: is a wired loop actually running?
+
+    Two independent signals, neither of which needs the network:
+
+    * **git** — SessionEnd pushes. Commits piling up unpushed is the silent
+      push-loss symptom the program's risk table names; a stale HEAD is a loop
+      that stopped capturing.
+    * **hooks.log** — the engine only writes there when a hook *degrades*
+      (fail-open by contract), so its absence proves nothing but its recent
+      contents prove a lot.
+    """
+    root = Path(vault).expanduser()
+    if not root.is_dir():
+        return "warn", f"{vault}: not present on this host"
+
+    bits: list[str] = []
+    degraded = False
+
+    rc, out = _run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"], 5.0)
+    if rc != 0:
+        bits.append("not a git repo — no sync evidence")
+    else:
+        rc, out = _run(["git", "-C", str(root), "log", "-1", "--format=%cI"], 5.0)
+        bits.append(
+            f"last commit {out.strip()}"
+            if rc == 0 and out.strip()
+            else "no commits yet"
+        )
+        rc, out = _run(
+            ["git", "-C", str(root), "rev-list", "--count", "@{upstream}..HEAD"], 5.0
+        )
+        if rc != 0:
+            bits.append("no upstream — pushes are not configured")
+        elif out.strip() not in ("0", ""):
+            bits.append(f"{out.strip()} commit(s) unpushed")
+            degraded = True
+        else:
+            bits.append("in sync with upstream")
+
+    log_path = root / ".claudron" / "hooks.log"
+    if not log_path.is_file():
+        bits.append("no hook degradation logged")
+    else:
+        try:
+            last = [ln for ln in log_path.read_text().splitlines() if ln.strip()][-1]
+        except (OSError, IndexError):
+            last = ""
+        if not last:
+            bits.append("no hook degradation logged")
+        else:
+            bits.append(f"last hook degradation: {last[:160]}")
+            stamp = last.split(" ", 1)[0]
+            try:
+                age = datetime.now() - datetime.fromisoformat(stamp)
+                if age <= timedelta(days=_LOOP_DEGRADATION_WINDOW_DAYS):
+                    degraded = True
+            except ValueError:
+                degraded = True  # unparseable stamp — surface it rather than hide it
+
+    return ("warn" if degraded else "pass"), f"{vault}: " + "; ".join(bits)
+
+
+def check_claudron(fleet: FleetConfig, paths: Paths, report: DoctorReport) -> None:
+    """The claudron door check ``claudron_compat``'s docstring promises.
+
+    Silent for a fleet with no vault-wired bot — nothing to diagnose. For a
+    vault-wired fleet it reports, in order: CLI presence, the engine capability
+    probe, every COMPAT_FLOOR row as met/unmet/parked, and per-vault
+    loop-execution evidence so a wired-but-dead session loop is visible in
+    steady state.
+
+    Warn-level throughout, deliberately: a host can be composing for a fleet it
+    does not itself run, and a diagnostic that fails the whole doctor run on
+    that basis would be asserting more than the contract does.
+    """
+    wired = {
+        bot_id: bot.claudron_vault_path
+        for bot_id, bot in fleet.bots.items()
+        if bot.claudron_vault_path
+    }
+    if not wired:
+        return
+
+    cli_present = shutil.which("claudron") is not None
+    if cli_present:
+        report.add("claudron-cli", "pass", f"{len(wired)} vault-wired bot(s)")
+        status, detail = _claudron_probe(sorted(set(wired.values()))[0])
+        report.add("claudron-engine", status, detail)
+    else:
+        report.add(
+            "claudron-cli",
+            "warn",
+            f"{len(wired)} vault-wired bot(s) but no claudron on PATH — bots reach "
+            f"the vault through the CLI (see {CLAUDRON_INTEGRATION_URL})",
+        )
+
+    for cap in COMPAT_FLOOR:
+        status, detail = _floor_row_state(cap, cli_present)
+        report.add(f"claudron-floor: {cap.feature}", status, detail)
+
+    for vault in sorted(set(wired.values())):
+        status, detail = _loop_evidence(vault)
+        report.add("claudron-loop", status, detail)
+
+
+# ----------------------------------------------------------------------
 # Check: fleet.yaml validates
 # ----------------------------------------------------------------------
 
@@ -417,6 +604,7 @@ def run_doctor(fleet: FleetConfig, paths: Paths) -> DoctorReport:
     check_npx_cache(paths, report)
     check_services(fleet, paths, report)
     check_credentials(paths, report)
+    check_claudron(fleet, paths, report)
     return report
 
 

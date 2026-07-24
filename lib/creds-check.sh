@@ -228,14 +228,15 @@ check_telegram_tokens() {
     # check validates exactly the token the bot runs with. One getMe per
     # channel bot per daily tick; the token rides a curl config file,
     # never argv; only ok/error_code is ever recorded.
-    local bots_dir
+    local bots_dir fleet_dir
     bots_dir="$(resolve_bots_dir "$FLEET_ARG")"
     [ -d "$bots_dir" ] || return 0
 
     # Filter through the declared-bots SSOT (same as fleet-pulse/keepalive-all)
     # so stale/cross-fleet residue dirs never fire false token alerts.
     local declared_bots
-    declared_bots=$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET_ARG/fleet.yaml")
+    fleet_dir="$(resolve_fleet_dir "$FLEET_ARG")" || fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
+    declared_bots=$(parse_fleet_bots "$fleet_dir/fleet.yaml")
 
     local d bot key handle token resp okflag username errcode
     for d in "$bots_dir"/*/; do
@@ -327,10 +328,11 @@ _telegram_getme() {
 # fragile channel-dir token. Promoting this pair to lib-common and pointing all
 # three at it would give them one validated delivery path (follow-up: #552).
 resolve_delivery_token() {
-    local _dir _declared _d _tok
+    local _dir _declared _d _tok _fdir
     _dir="$(resolve_bots_dir "$FLEET_ARG")"
     [ -d "$_dir" ] || return 0
-    _declared="$(parse_fleet_bots "$CLAUDLOBBY_ROOT/local/$FLEET_ARG/fleet.yaml")"
+    _fdir="$(resolve_fleet_dir "$FLEET_ARG")" || _fdir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
+    _declared="$(parse_fleet_bots "$_fdir/fleet.yaml")"
     for _d in "$_dir"/*/; do
         [ -f "$_d/bot.conf" ] || continue
         bot_in_fleet "$(basename "$_d")" "$_declared" || continue

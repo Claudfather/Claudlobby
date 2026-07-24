@@ -7,6 +7,7 @@ template owns all top-level structure.
 
 from __future__ import annotations
 import copy
+import functools
 import json
 import logging
 import re
@@ -21,7 +22,7 @@ _log = logging.getLogger(__name__)
 import jinja2
 from jinja2.sandbox import SandboxedEnvironment
 
-from . import dotenv
+from . import dotenv, tool_resolve
 from .config import BotConfig, FleetConfig, load_host_jobs
 from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
@@ -210,43 +211,152 @@ def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
     return merged
 
 
+def _load_mcp_contract(paths: Paths, name: str) -> dict | None:
+    """Load an MCP fragment's validated ``_permissions_contract``, or ``None`` when absent.
+
+    Missing fragment and malformed JSON (logged) both resolve to ``None`` so
+    callers treat the server as contract-less rather than failing compose.
+
+    A declared ``read_only_tools`` subset must sit inside the declared
+    ``tools`` universe: an entry outside it is a typo or an upstream tool
+    rename, and would silently grant a tool that does not exist — so every
+    reader gets the invariant checked here, at load, and compose fails loudly.
+    """
+    frag_path = paths.find_library_file("mcp", name, ".json")
+    if frag_path is None:
+        return None
+    try:
+        frag = json.loads(frag_path.read_text())
+    except json.JSONDecodeError as exc:
+        _log.warning(
+            "skipping MCP permissions for %s: malformed JSON: %s", frag_path, exc
+        )
+        return None
+    contract = frag.get("_permissions_contract")
+    if contract:
+        unknown = sorted(
+            set(contract.get("read_only_tools") or []) - set(contract.get("tools", []))
+        )
+        if unknown:
+            raise ValueError(
+                f"mcp fragment {name!r}: read_only_tools entries {unknown} are not in "
+                "the contract's tools list — declare the full tool universe in tools "
+                "and keep read_only_tools a subset of it."
+            )
+    return contract
+
+
 def _resolve_mcp_permissions(bot: BotConfig, paths: Paths) -> list[str]:
     """Resolve MCP permission patterns from fragment _permissions_contract fields.
 
-    For each MCP entry the bot uses, reads the fragment, extracts
-    _permissions_contract.tools, and generates permission patterns per instance.
+    For each MCP entry the bot uses, reads the fragment contract and generates
+    permission patterns per instance:
 
-    Wildcard compression: when the bot is allowed all tools in the contract
-    (i.e., no partial restriction), emit a single ``mcp__<server>__*`` wildcard
-    instead of one entry per tool.  This keeps settings.local.json compact and
-    prevents staleness when MCP servers add new tools.
-
-    Individual patterns are still emitted when only a subset of the contract
-    tools should be allowed (not yet wired up, but the logic is ready).
+    - ``read_only_tools`` declared — one exact ``mcp__<server>__<tool>`` entry
+      per read-only tool. The server-level wildcard is never emitted for these
+      servers: it would auto-approve the contract's remaining (write) tools,
+      which must keep prompting (#661).
+    - otherwise, non-empty ``tools`` — a single ``mcp__<server>__*`` wildcard.
+      This keeps settings.local.json compact and prevents staleness when the
+      server adds new tools.
     """
     patterns: list[str] = []
     for entry in bot.mcp:
-        frag_path = paths.find_library_file("mcp", entry.name, ".json")
-        if frag_path is None:
+        contract = _load_mcp_contract(paths, entry.name)
+        if not contract:
             continue
-        try:
-            frag = json.loads(frag_path.read_text())
-        except json.JSONDecodeError as exc:
-            _log.warning(
-                "skipping MCP permissions for %s: malformed JSON: %s", frag_path, exc
-            )
-            continue
-        contract = frag.get("_permissions_contract", {})
-        tools = contract.get("tools", [])
-        if not tools:
-            continue
+        read_only = contract.get("read_only_tools")
         for instance in entry.instances:
             output_name = entry.output_name(instance)
-            # Emit a server-level wildcard when ALL contract tools are allowed.
-            # This is always the case currently (no partial allow mechanism),
-            # so the wildcard is emitted for every server with a non-empty tools list.
-            patterns.append(f"mcp__{output_name}__*")
+            if read_only is not None:
+                patterns.extend(f"mcp__{output_name}__{tool}" for tool in read_only)
+            elif contract.get("tools"):
+                patterns.append(f"mcp__{output_name}__*")
     return patterns
+
+
+def _assert_read_only_grants(name: str, tool_grants: list[str], paths: Paths) -> None:
+    """Fail compose unless an integration's grants mirror its read-only set exactly.
+
+    A fragment contract that declares ``read_only_tools`` splits its tool
+    universe into reads (auto-grantable) and writes (must keep prompting).
+    The paired integration's ``tool_grants`` is the composed grant surface, so
+    it must be the exact ``mcp__<name>__<tool>`` mirror of the read set:
+
+    - an entry beyond it (server wildcard, write tool) would silently
+      auto-approve mutations for every bot that equips the integration;
+    - a missing read entry would leave that safe read prompting forever —
+      the wedged-headless-worker symptom this contract exists to end (#661).
+
+    The equality check is what keeps the mirror maintained once the legacy
+    ``_resolve_mcp_permissions`` grant role (and its superset gate) is cut:
+    add a tool upstream and the directional error here names the fix. A bot
+    that genuinely needs a write tool gets it explicitly via fleet.yaml
+    ``tools.allow``; that operator path is untouched here.
+    """
+    contract = _load_mcp_contract(paths, name)
+    if not contract:
+        return
+    read_only = contract.get("read_only_tools")
+    if read_only is None:
+        return
+    mirror = {f"mcp__{name}__{tool}" for tool in read_only}
+    extra = sorted(set(tool_grants) - mirror)
+    if extra:
+        raise ValueError(
+            f"integration {name!r}: tool_grants {extra} not auto-grantable — the mcp "
+            f"fragment declares read_only_tools, so grants must be exact "
+            f"mcp__{name}__<tool> entries from that read-only set. Writes stay "
+            "prompt-gated; grant one per-bot via tools.allow if genuinely needed."
+        )
+    missing = sorted(mirror - set(tool_grants))
+    if missing:
+        raise ValueError(
+            f"integration {name!r}: tool_grants is missing read entries {missing} — "
+            f"add them so the fragment's read_only_tools compose (a missing read "
+            "prompts forever on headless bots)."
+        )
+
+
+def _assert_no_write_autoallows(
+    bot: BotConfig, paths: Paths, allow_patterns: list[str]
+) -> None:
+    """Fail compose when ANY library-derived allow covers a write of a read-only server.
+
+    :func:`_assert_read_only_grants` polices the integration grant surface, but
+    expertise ``permissions.allow``, guardrail allows, and skill ``tool_grants``
+    merge into the same allow list — a skill declaring ``mcp__shopify__*``
+    would otherwise compose every catalog write into each equipping bot. This
+    is the union-layer invariant: for every attached server whose contract
+    declares ``read_only_tools``, no accumulated pattern may reach beyond the
+    read set. Runs before fleet.yaml ``tools.allow`` is appended — that layer
+    is the operator's deliberate, auditable escape hatch and stays exempt.
+    """
+    for entry in bot.mcp:
+        contract = _load_mcp_contract(paths, entry.name)
+        if not contract:
+            continue
+        read_only = contract.get("read_only_tools")
+        if read_only is None:
+            continue
+        for instance in entry.instances:
+            server = entry.output_name(instance)
+            prefix = f"mcp__{server}__"
+            permitted = {f"{prefix}{tool}" for tool in read_only}
+            bad = sorted(
+                p
+                for p in allow_patterns
+                if (p == f"mcp__{server}" or p.startswith(prefix))
+                and p not in permitted
+            )
+            if bad:
+                raise ValueError(
+                    f"bot {bot.bot_id!r}: allow patterns {bad} cover non-read tools "
+                    f"of read-only server {server!r} — no library-derived layer "
+                    "(integration, skill, expertise, guardrail) may auto-allow a "
+                    "write. Grant it per-bot via fleet.yaml tools.allow if "
+                    "genuinely needed."
+                )
 
 
 def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
@@ -279,6 +389,7 @@ def _resolve_integration_grants(bot: BotConfig, paths: Paths) -> list[str]:
     ):
         if not tool_grants:
             continue
+        _assert_read_only_grants(name, tool_grants, paths)
         entry = next((e for e in bot.mcp if e.name == name), None)
         if entry is None:
             grants.extend(tool_grants)
@@ -825,7 +936,7 @@ def link_skills(bot: BotConfig, paths: Paths, log) -> None:
             for leaf, src in collected.items():
                 _add(leaf, src)
         else:
-            src = paths.find_skill_dir(skill)
+            src = paths.find_library_dir("skills", skill)
             if src is None:
                 log(f"  skill '{skill}' missing — skipped")
                 continue
@@ -874,6 +985,82 @@ def link_mounts(bot: BotConfig, bot_dir: Path, log) -> None:
                 f"  mount '{name}' target does not exist: {target_path} — creating dangling symlink"
             )
         link.symlink_to(target_path)
+
+
+# ----------------------------------------------------------------------
+# Tools — composited scripts (library/tools/<name>/ → bot_dir/tools/)
+
+
+def compose_tool_outputs(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, bot_dir: Path
+) -> dict[str, str]:
+    """Render the bot's attached library tools → {target_filename: content}.
+
+    Pure (no writes) so generate and diff share one implementation. Tool
+    templates render with StrictUndefined — a missing/undeclared variable is
+    a hard error, never a silently-empty executable. Params are compose-time
+    structure; secrets never enter the context (rendered files are 0755 —
+    tools read secrets from os.environ at runtime, declared in tool.yaml
+    `env:`).
+    """
+    outputs: dict[str, str] = {}
+    env = SandboxedEnvironment(
+        undefined=jinja2.StrictUndefined, keep_trailing_newline=True
+    )
+    for entry in bot.tools:
+        tool_dir = paths.find_library_dir("tools", entry.name)
+        if tool_dir is None:
+            raise ValueError(
+                f"bot '{bot.bot_id}': tool '{entry.name}' not in any library/tools/"
+            )
+        manifest = tool_resolve.load_tool_manifest(tool_dir)
+        template_path = tool_resolve.tool_template_path(tool_dir, manifest)
+        target_name = tool_resolve.tool_target_name(template_path)
+        if target_name in outputs:
+            raise ValueError(
+                f"bot '{bot.bot_id}': tools render duplicate target '{target_name}'"
+            )
+        params = tool_resolve.resolve_tool_params(entry.name, manifest, entry.params)
+        context = tool_resolve.tool_context(
+            params,
+            bot_id=bot.bot_id,
+            bot_name=bot.name,
+            fleet_name=fleet.name,
+            bot_dir=str(bot_dir),
+            data_dir=str(bot_dir / "data"),
+        )
+        try:
+            content = env.from_string(template_path.read_text()).render(context)
+        except jinja2.exceptions.UndefinedError as e:
+            raise ValueError(
+                f"tool '{entry.name}': template references an "
+                f"undeclared/unset variable — {e}"
+            ) from None
+        outputs[target_name] = content
+    return outputs
+
+
+def compose_tools(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, bot_dir: Path
+) -> None:
+    """Write rendered tools into bot_dir/tools/ (0755) and reconcile.
+
+    tools/ is compositor-owned like CLAUDE.md — never hand-edited. Files for
+    detached tools are removed on every generate; a tool's runtime outputs
+    (snapshots, ledgers) belong in data/, which this never touches.
+    """
+    outputs = compose_tool_outputs(bot, fleet, paths, bot_dir)
+    tools_dir = bot_dir / "tools"
+    if outputs:
+        tools_dir.mkdir(exist_ok=True)
+    for target_name, content in outputs.items():
+        target = tools_dir / target_name
+        target.write_text(content)
+        target.chmod(0o755)
+    if tools_dir.is_dir():
+        for existing in sorted(tools_dir.iterdir()):
+            if existing.is_file() and existing.name not in outputs:
+                existing.unlink()
 
 
 # ----------------------------------------------------------------------
@@ -1128,6 +1315,125 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
     return out
 
 
+# ----------------------------------------------------------------------
+# Claudron session loop (L2) — engine hooks + narrow verb grants per vault-wired
+# bot. The hook entries are a RENDERED COPY of a Claudron-owned contract surface
+# (CLI_CONTRACT.md §Session-loop protocol, "The hook-settings snippet — normative
+# shape"); tests/test_claudron_loop.py carries the required drift gate against the
+# pinned engine's `claudron.hooks.settings_snippet()` (register rule R3).
+# ----------------------------------------------------------------------
+
+# Narrow, per-verb grants for the model-initiated CLI calls the loop enables (the
+# query-before wedge; /claudna:capture shelling `claudron capture`). NEVER a
+# Bash(claudron *) wildcard — that would grant the human-gated curation verbs
+# (promote/plug/unplug/config/migrate; boundary spec §8) and defeat curation. The
+# settings-installed hooks are harness-executed and pass through no permission
+# check, so they need no grant; these cover only calls the model itself makes.
+CLAUDRON_LOOP_GRANTS = [
+    "Bash(claudron lookup *)",
+    "Bash(claudron recall *)",
+    "Bash(claudron capture *)",
+    "Bash(claudron status *)",
+]
+
+# The three session-loop events → the engine's `hook <event>` dispatch verb.
+_CLAUDRON_HOOK_EVENTS = {
+    "SessionStart": "session-start",
+    "PreCompact": "pre-compact",
+    "SessionEnd": "session-end",
+}
+
+
+def _session_loop_enabled(bot: BotConfig) -> bool:
+    """Resolve the tri-state ``claudron_session_loop``: an explicit value wins;
+    unset defaults True exactly when the bot is vault-wired (has a
+    ``claudron_vault_path``), False otherwise."""
+    if bot.claudron_session_loop is not None:
+        return bot.claudron_session_loop
+    return bool(bot.claudron_vault_path)
+
+
+@functools.cache
+def _resolve_claudron_executable() -> tuple[str, str | None]:
+    """Absolute ``claudron`` path for the composed hook commands, resolved on the
+    compose host. Returns ``(executable, warning)``.
+
+    Hook context is not a login shell — PATH frequently omits a venv/pipx install
+    — so an absolute path is the contract (C2). A bare-``claudron`` fallback is
+    permitted only *with* a warning, because the loop would be wired-but-dead if
+    PATH does not carry it at runtime. Resolution is `shutil.which` at compose
+    time; we never shell out to ``claudron`` itself (composition must work on a
+    CLI-less host).
+
+    Cached: the executable's PATH location is host-invariant, so the per-bot
+    compose loop resolves it once per process instead of re-walking PATH for
+    every vault-wired bot. The caller emits the warning per bot, so operators
+    still see which bots are affected.
+    """
+    resolved = shutil.which("claudron")
+    if resolved:
+        return resolved, None
+    return (
+        "claudron",
+        "claudron is not on PATH at compose time — the session-loop hooks fall "
+        "back to a bare 'claudron' command that may not resolve in hook context "
+        "(hook PATH is not login-shell PATH). Install claudron on the compose/run "
+        "host so the hook command resolves to an absolute executable.",
+    )
+
+
+def _claudron_hook_entries(executable: str) -> dict[str, list]:
+    """The engine's session-loop hook entries in Claude Code settings shape.
+
+    Emitted INLINE (never by shelling ``claudron hooks install``) so composition
+    works on a CLI-less host. Byte-for-byte identical to the pinned engine's
+    ``claudron.hooks.settings_snippet(executable)["hooks"]`` — the parity gate
+    in tests/test_claudron_loop.py enforces that.
+    """
+    return {
+        event: [
+            {
+                "matcher": "",
+                "hooks": [
+                    {"type": "command", "command": f"{executable} hook {event_cmd}"}
+                ],
+            }
+        ]
+        for event, event_cmd in _CLAUDRON_HOOK_EVENTS.items()
+    }
+
+
+def _is_claudron_hook_entry(group: dict, event_cmd: str) -> bool:
+    """A claudron entry's identity is its ``hook <event>`` command SUFFIX, not the
+    full string (mirrors the engine's ``merge_settings`` key). Keying on the full
+    path would append a duplicate whenever the resolved executable moved."""
+    return any(
+        str(h.get("command", "")).endswith(f"hook {event_cmd}")
+        for h in (group.get("hooks") or [])
+    )
+
+
+def _merge_claudron_hooks(hooks: dict[str, list], executable: str) -> dict[str, list]:
+    """Merge the engine's session-loop entries into a composed hooks block.
+
+    Self-replacing per event (a stale claudron entry for the same event is
+    dropped, so a moved executable path never accumulates) while foreign entries
+    — a fleet's own SessionStart hook, say — are preserved. Mirrors the engine's
+    ``claudron.hooks.merge_settings`` so an engine-installed loop and a
+    composer-installed loop converge on the same file. Idempotent.
+    """
+    merged = dict(hooks)
+    for event, entries in _claudron_hook_entries(executable).items():
+        event_cmd = _CLAUDRON_HOOK_EVENTS[event]
+        kept = [
+            g
+            for g in (merged.get(event) or [])
+            if not _is_claudron_hook_entry(g, event_cmd)
+        ]
+        merged[event] = kept + entries
+    return merged
+
+
 _TELEGRAM_PLUGIN_TOOLS = [
     "mcp__plugin_telegram_telegram__reply",
     "mcp__plugin_telegram_telegram__edit_message",
@@ -1355,7 +1661,7 @@ def compose_settings_local(
     deny_patterns.extend(expertise_deny)
 
     # Layer 7: Bot-level deny (from fleet.yaml tools.deny) — wins over everything
-    for tool in bot.tools.deny:
+    for tool in bot.tool_permissions.deny:
         deny_patterns.append(tool)
 
     # Build allow list: layers 2-7
@@ -1388,11 +1694,24 @@ def compose_settings_local(
     # additive path; Skill(<name>) above only grants invocation.
     _append_unique(allow_patterns, _resolve_skill_grants(bot, paths))
 
+    # Layer 5c: Claudron session-loop verb grants (L2) — the NARROW allowlist for
+    # the model-initiated CLI calls the loop enables (query wedge, /claudna:capture).
+    # Never a Bash(claudron *) wildcard (see CLAUDRON_LOOP_GRANTS). Gated on the
+    # same switch as the hooks below, so `claudron_session_loop: false` composes
+    # neither — a clean, single off-switch for a bot's Claudron loop wiring.
+    if _session_loop_enabled(bot):
+        _append_unique(allow_patterns, CLAUDRON_LOOP_GRANTS)
+
+    # Union-layer write guardrail: with every library-derived layer accumulated
+    # (and before the operator's tools.allow escape hatch below), nothing may
+    # cover a non-read tool of a read-only-contracted server (#661).
+    _assert_no_write_autoallows(bot, paths, allow_patterns)
+
     # Layer 6/7: Explicit tools.allow from fleet defaults + bot config
-    _append_unique(allow_patterns, bot.tools.allow)
+    _append_unique(allow_patterns, bot.tool_permissions.allow)
 
     # Bot-level deny wins over all allow layers
-    bot_deny_plain = set(bot.tools.deny)
+    bot_deny_plain = set(bot.tool_permissions.deny)
     allow_patterns = [p for p in allow_patterns if p not in bot_deny_plain]
 
     # Ensure base tools are present whenever allow list is non-empty
@@ -1438,8 +1757,20 @@ def compose_settings_local(
     if sandbox_cfg:
         settings["sandbox"] = sandbox_cfg
 
-    # Hooks: PreToolUse, PostToolUse, etc.
+    # Hooks: fleet.yaml lifecycle hooks (PreToolUse/PostToolUse/…) plus, when the
+    # bot is wired to the Claudron session loop (L2), the engine's
+    # SessionStart/PreCompact/SessionEnd entries merged in per the C2 contract's
+    # normative snippet shape. The merge preserves a fleet's own entries for those
+    # events and replaces only a stale claudron entry (self-replacing by suffix).
+    # No claim env is composed: F1 is STRUCTURAL — the single capture prompt is
+    # claimed by clauDNA's hook detecting the engine's `hook pre-compact` entry,
+    # not by any composed CLAUDRON_CAPTURE_OWNER-style variable.
     hooks = _compose_hooks(bot.hooks)
+    if _session_loop_enabled(bot):
+        executable, warning = _resolve_claudron_executable()
+        if warning:
+            _log.warning("bot %s: %s", bot.bot_id, warning)
+        hooks = _merge_claudron_hooks(hooks, executable)
     if hooks:
         settings["hooks"] = hooks
 
@@ -1553,6 +1884,7 @@ def compose_bot(
     _emit = log if log is not None else _log.info
     link_skills(bot, paths, _emit)
     link_mounts(bot, bot_dir, _emit)
+    compose_tools(bot, fleet, paths, bot_dir)
 
     # Telegram access.json — write to channel state dir so the plugin
     # picks up correct requireMention/dmPolicy on first boot.

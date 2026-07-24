@@ -305,7 +305,7 @@ def skill_tool_grants(paths, name: str) -> list[str]:
     The contract lives on the ``SKILL.md`` marker file, never on sibling files in the
     folder. Returns ``[]`` when the skill, its ``SKILL.md``, or the field is absent.
     """
-    skill_dir = paths.find_skill_dir(name)
+    skill_dir = paths.find_library_dir("skills", name)
     return _read_skill_grants(skill_dir) if skill_dir is not None else []
 
 
@@ -349,7 +349,7 @@ def iter_skill_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]
                 name = f"{base}/{leaf}" if base else leaf
                 out.append((name, _read_skill_grants(skill_dir)))
         else:
-            skill_dir = paths.find_skill_dir(entry)
+            skill_dir = paths.find_library_dir("skills", entry)
             grants = _read_skill_grants(skill_dir) if skill_dir is not None else []
             out.append((entry, grants))
     return out

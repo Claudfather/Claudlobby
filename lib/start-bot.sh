@@ -147,7 +147,9 @@ if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
     printf '. %q\n' "$CLAUDLOBBY_ROOT/.env" >> "$BOT_ENV_FILE"
 fi
 if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
-    local_fleet_env="$CLAUDLOBBY_ROOT/local/$FLEET_NAME/.env"
+    # Flat local/<fleet> byte-identically, or nested local/<system>/<fleet>.
+    _sb_fleet_dir=$(resolve_fleet_dir "$FLEET_NAME") || _sb_fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_NAME"
+    local_fleet_env="$_sb_fleet_dir/.env"
     [ -f "$local_fleet_env" ] && printf '. %q\n' "$local_fleet_env" >> "$BOT_ENV_FILE"
 fi
 [ -f "$BOT_DIR/.env" ]                             && printf '. %q\n' "$BOT_DIR/.env" >> "$BOT_ENV_FILE"

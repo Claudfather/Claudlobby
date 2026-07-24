@@ -128,7 +128,7 @@ fleet:
       mission: "Review PRs the manager dispatches. Mutation-test assertions. Verdict-first comments. No commits, no merges."
       model: sonnet                            # reviewers run hot — Sonnet is enough
       protocols: [review-flow]
-      tools:
+      tool_permissions:
         deny: [Write, Edit, NotebookEdit]      # reviewers read, not write
       telegram:
         handle: my_reviewer_bot
@@ -147,10 +147,13 @@ fleet:
 #     resources:
 #       - timezone
 #
-#     # lessons — learned patterns from library/lessons/ to include in CLAUDE.md
+#     # lessons — library/lessons/ is FROZEN (L3). Existing referential lessons still
+#     # compose for non-vault fleets; a vault-wired fleet reaches them via `claudron recall`
+#     # instead. New behavior rules → protocols/guardrails; new referential findings → the
+#     # vault (`claudlobby lessons-migrate`, /claudna:capture). See library/lessons/README.md.
 #     lessons:
-#       - tmux-dispatch-shell-expansion
-#       - messaging-channel-discipline
+#       - review/empirical-verification
+#       - telegram/mcp-drops
 #
 #     # principles — guiding principles from library/principles/
 #     principles:
@@ -210,11 +213,20 @@ fleet:
 #     # voice — personality overlay file (separate from expertise)
 #     voice: voices/erlich-bachman.md
 #
-#     # tools — control which Claude Code tools the bot may use
+#     # tools — library tools (composited scripts) rendered into <bot_dir>/tools/
+#     # Bare name uses manifest defaults; dict form overrides params per-bot.
+#     # See library/tools/README.md for authoring.
+#     tools:
+#       - audit-tracker
+#       - portfolio-snapshot:
+#           params:
+#             lookback_days: 30
+#
+#     # tool_permissions — control which Claude Code tools the bot may use
 #     # deny: tool names the bot cannot call (generates permission deny rules)
 #     # allow: tool names the bot is explicitly allowed (generates permission allow rules)
 #     # Validator warns if denied tools conflict with the bot's expertise.
-#     tools:
+#     tool_permissions:
 #       deny: [Write, Edit, NotebookEdit]
 #       # allow: [Agent, Bash, Read, Grep, Glob]
 #
@@ -256,8 +268,29 @@ fleet:
 #     # Ecosystem fields — connect bots to clauDNA, Claudron, and Claudosseum.
 #     # All optional. Can also be set in defaults: for fleet-wide values.
 #     claudna_version: "0.2.0"                    # pin clauDNA plugin version
-#     claudron_vault_path: "vaults/my-fleet/eng-1" # Claudron vault scope for this bot
+#     claudron_vault_path: "/srv/vaults/my-vault"  # points AT a vault, not into one
 #     claudosseum_tenant_id: "tenant_abc123"       # Claudosseum telemetry tenant
+#
+#     # claudron_vault_path composes CLAUDRON_VAULT_PATH into bot.conf — the
+#     # canonical vault address (Claudron CLI_CONTRACT.md §Environment). The
+#     # value is a POINTER to a vault root (the directory holding `_shared/`),
+#     # not a per-bot scope: one vault per tenant, and detection walks up from
+#     # whatever path it is handed. Scoping happens inside the vault (fleet and
+#     # project tiers), never by addressing a subdirectory here.
+#
+#     # claudron_session_loop — wire the bot to Claudron's session loop (L2).
+#     # When on, the composer installs the engine's three lifecycle hooks into
+#     # settings.local.json (SessionStart → pull + recall brief; PreCompact →
+#     # the single capture prompt; SessionEnd → push) and grants the narrow verb
+#     # set the model may call itself (Bash(claudron lookup|recall|capture|status *)
+#     # — never a Bash(claudron *) wildcard: curation verbs like promote stay
+#     # human-gated). What fires when is Claudron's CLI_CONTRACT.md §Session-loop
+#     # protocol (the owner); see documentation/integrations/claudron-integration.md.
+#     # Tri-state: DEFAULT is on whenever claudron_vault_path is set, off
+#     # otherwise. Set it explicitly only to override that default — e.g. off on a
+#     # vault-wired bot that should reach the vault by hand-run CLI alone.
+#     # `claudron_session_loop: true` with no claudron_vault_path is a validate error.
+#     claudron_session_loop: true
 #
 #     # Vault-wired MANAGER bots can also opt into the Claudron query-before
 #     # preflight: dispatch-task.sh prepends fleet-memory pointers (titles +

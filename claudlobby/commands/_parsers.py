@@ -21,6 +21,7 @@ from .core import (
 from .cron_migrate import cmd_cron_migrate
 from .data_migrate import cmd_data_migrate
 from .env_migrate import cmd_env_migrate
+from .lessons_migrate import cmd_lessons_migrate
 from .memory_migrate import cmd_memory_migrate
 from .move_bot import cmd_move_bot
 from .scaffolding import cmd_new_bot, cmd_new_guardrail, cmd_new_skill
@@ -171,6 +172,32 @@ def register_subparsers(sub) -> None:
         "--force", action="store_true", help="Overwrite existing memory files"
     )
     pm.set_defaults(func=cmd_memory_migrate)
+
+    plm = sub.add_parser(
+        "lessons-migrate",
+        help="Migrate referential library/lessons/ into the Claudron vault via "
+        "`claudron capture` (dry-run by default; behavior-class lessons stay put)",
+    )
+    plm.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write to the vault via `claudron capture` (default: dry-run plan)",
+    )
+    plm.add_argument(
+        "--vault",
+        help="Target vault path for --apply (falls back to CLAUDRON_VAULT_PATH)",
+    )
+    plm.add_argument(
+        "--vault-fleet",
+        dest="fleet_scope",
+        help="Capture into a fleet tier instead of the default _shared/ hub",
+    )
+    plm.add_argument(
+        "--claudron-bin",
+        dest="claudron_bin",
+        help="Path to the claudron executable (default: `claudron` on PATH)",
+    )
+    plm.set_defaults(func=cmd_lessons_migrate)
 
     pn = sub.add_parser(
         "new-bot",

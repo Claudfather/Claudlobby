@@ -43,6 +43,11 @@ KNOWN_HOOK_EVENTS: frozenset[str] = frozenset(
     {"PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop"}
 )
 
+# ── Tool types ───────────────────────────────────────────────────
+# library/tools/<name>/tool.yaml `type:` values the compositor can render.
+# `script`: render the tool's Jinja template into bot_dir/tools/ and chmod +x.
+KNOWN_TOOL_TYPES: frozenset[str] = frozenset({"script"})
+
 # ── Permission modes ─────────────────────────────────────────────
 # Valid values for BotConfig.permission_mode.
 VALID_PERMISSION_MODES: frozenset[str] = frozenset(
