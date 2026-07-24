@@ -449,7 +449,7 @@ bot_expects_no_token() {
 
 bridge_state() {
     local bot_dir="${1:?Usage: bridge_state /path/to/bot/dir}"
-    local handle state_dir token pidfile pid comm ppid pcomm environ args psline _anc _hop
+    local handle state_dir token pidfile pid comm ppid pcomm environ environ_lines args psline _anc _hop
 
     handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "")" || true
     if [ -z "$handle" ]; then printf '%s' "no_handle"; return 1; fi
@@ -485,13 +485,28 @@ bridge_state() {
         *) printf '%s' "no_bridge"; return 1 ;;
     esac
 
-    # Ownership: the poller's environ must hold EXACTLY this bot's
-    # TELEGRAM_STATE_DIR as a NUL-delimited KEY=VALUE entry — not a substring
-    # (telegram-data must not match telegram-data-eng). Unreadable environ
-    # (EACCES / non-Linux) → unknown; never treat unprovable ownership as ours.
-    environ="/proc/$pid/environ"
-    if [ ! -r "$environ" ]; then printf '%s' "unknown"; return 1; fi
-    if ! tr '\0' '\n' < "$environ" 2>/dev/null | grep -qxF "TELEGRAM_STATE_DIR=$state_dir"; then
+    # Ownership: the poller's environment must hold EXACTLY this bot's
+    # TELEGRAM_STATE_DIR as a KEY=VALUE entry — never a substring (telegram-data
+    # must not match telegram-data-eng). Only the SOURCE of the environment is
+    # per-OS; the exact match below is shared. Linux reads the NUL-delimited
+    # /proc environ. macOS/BSD has no /proc, so `ps eww` surfaces the environment
+    # appended to the command — the portable read that keeps deaf-orphan
+    # detection alive for channel bots there (#710), the exact case the lineage
+    # walk below exists to catch. Either source unreadable (EACCES, no /proc, a
+    # ps with no env support) → unknown; never treat unprovable ownership as ours.
+    if [ "$_OS" = "Linux" ]; then
+        environ="/proc/$pid/environ"
+        if [ ! -r "$environ" ]; then printf '%s' "unknown"; return 1; fi
+        environ_lines="$(tr '\0' '\n' < "$environ" 2>/dev/null)"
+    else
+        # `e` shows the environment, `ww` prevents truncation; split on whitespace
+        # so each KEY=VALUE is its own line for the exact match (mirrors the Linux
+        # NUL split). A space-bearing value would split — macOS home dirs carry
+        # none. Empty (a ps with no env support, or the pid gone) → unknown.
+        environ_lines="$(ps eww -p "$pid" 2>/dev/null | tr '[:space:]' '\n')"
+        if [ -z "$environ_lines" ]; then printf '%s' "unknown"; return 1; fi
+    fi
+    if ! grep -qxF "TELEGRAM_STATE_DIR=$state_dir" <<<"$environ_lines"; then
         printf '%s' "no_bridge"; return 1
     fi
 
@@ -540,7 +555,9 @@ bridge_state() {
 #   no_bridge | no_token      -> print the state, return 0  (caller alerts)
 #   up | no_handle | unknown  -> print nothing, return 1    (no alert)
 # `unknown` is never actionable: bridge_state emits it when ownership is
-# unprovable (unreadable /proc, non-Linux) and must not be healed OR alerted.
+# unprovable (an unreadable environment source — EACCES on /proc, or a ps with
+# no env support) and must not be healed OR alerted. macOS is no longer unknown
+# by default: its `ps eww` ownership read resolves up/no_bridge like Linux.
 # no_token is likewise not actionable for a bot that declares EXPECT_NO_TOKEN=1
 # (a canary/throwaway with no token by design) — it collapses to no-alert.
 #
