@@ -6,6 +6,8 @@ MCP server wire-config fragments — small JSON files containing one MCP server 
 
 One `.json` file per MCP server. Use `${ENV_VAR}` placeholders for secrets — never hardcode tokens. Fragments are flat, not wrapped in `mcpServers`: the compositor takes whichever top-level key doesn't start with `_` as the server config.
 
+For an in-fleet absolute **path** in a fragment (a local server's `dist/index.js`, a socket), write it against a composer anchor — `${FLEET_ROOT}/…`, `${BOT_DIR}/…`, or `${CLAUDLOBBY_ROOT}/…` — never a raw absolute. The deny-by-default source guard fails `generate` on any un-anchored, un-declared absolute path in a fragment; the anchor resolves at runtime to the fleet's real (migration-safe) location. A genuine path *outside* the fleet must be declared in the referencing bot's `external_paths`.
+
 ```json
 {
   "_env_contract": {

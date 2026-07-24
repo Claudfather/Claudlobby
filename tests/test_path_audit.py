@@ -242,8 +242,15 @@ def _write_nested_fleet(root, env_path_value):
 
 
 class TestComposeBotFiresPathGuard:
-    """End-to-end: compose_bot invokes the guard, so a hand-typed flat fleet path
-    anywhere in the composed wiring fails the generate loudly."""
+    """End-to-end: compose_bot invokes a path guard, so a hand-typed fleet path in
+    the composed wiring fails generate loudly.
+
+    Since #702, the L1 source guard fronts compose_bot (before any write), so a
+    raw absolute in a *source* value (here bot.env) is denied at the source —
+    stricter than L2, which alone accepted a nested-correct raw absolute. L2's own
+    emitted-path coverage (a nested-correct absolute is fine, a flat/foreign husk
+    is flagged) lives untouched in TestImproperFleetPaths / TestAuditBotPaths;
+    here the in-fleet path must be *anchored* to compose clean."""
 
     def test_flat_env_path_makes_compose_bot_raise(self, fleet_dir):
         from claudlobby.composer import compose_bot
@@ -254,15 +261,18 @@ class TestComposeBotFiresPathGuard:
         nested = _write_nested_fleet(root, flat)
         paths = Paths(root=root, fleet_dir=nested)
         fleet, _ = load_fleet(nested / "fleet.yaml")
-        with pytest.raises(ValueError, match="improper absolute fleet path"):
+        # L1 denies the unanchored absolute at the source, before emission.
+        with pytest.raises(ValueError, match="absolute path"):
             compose_bot(fleet.bots["kev"], fleet, paths)
 
-    def test_nested_correct_env_path_composes_clean(self, fleet_dir):
+    def test_anchored_env_path_composes_clean(self, fleet_dir):
         from claudlobby.composer import compose_bot
         from claudlobby.config import load_fleet
 
         root = fleet_dir
-        good = f"{root}/local/home/tl/data/x"  # nested-correct → allowed
+        # An in-fleet path expressed against the FLEET_ROOT anchor: L1 passes it,
+        # and the emitted (resolved) path resolves in-fleet so L2 passes too.
+        good = "${FLEET_ROOT}/data/x"
         nested = _write_nested_fleet(root, good)
         paths = Paths(root=root, fleet_dir=nested)
         fleet, _ = load_fleet(nested / "fleet.yaml")
@@ -283,7 +293,7 @@ class TestComposeBotFiresPathGuard:
         nested = _write_nested_fleet(root, foreign)
         paths = Paths(root=root, fleet_dir=nested)
         fleet, _ = load_fleet(nested / "fleet.yaml")
-        with pytest.raises(ValueError, match="improper absolute fleet path"):
+        with pytest.raises(ValueError, match="absolute path"):
             compose_bot(fleet.bots["kev"], fleet, paths)
 
 

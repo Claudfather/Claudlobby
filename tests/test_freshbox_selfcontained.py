@@ -336,3 +336,37 @@ def test_flat_path_in_emitted_mcp_json_is_improper_path_fail(tmp_path):
     improper = [f for f in findings if f.kind == "improper_path"]
     assert [f.severity for f in improper] == ["fail"]
     assert ".mcp.json" in improper[0].detail and flat in improper[0].detail
+
+
+# ── #702 L1 source guard folded into the audit (denied_value) ─────────
+
+
+def test_denied_source_value_is_a_fail_finding(tmp_path):
+    """A foreign absolute in a bot SOURCE (not just emitted wiring) surfaces as a
+    denied_value FAIL — the L1 complement to the improper_path (L2) check."""
+    root = tmp_path / "claudlobby"
+    _build_library(root)
+    paths = Paths(root=root, fleet_dir=root)
+    bot = BotConfig(
+        bot_id="w", name="w", expertise=["eng"], env={"GA4_KEY": "/Users/x/ga4.json"}
+    )
+    fleet = _fleet({"w": bot})
+
+    findings = audit_bot(bot, fleet, paths)
+
+    denied = [f for f in findings if f.kind == "denied_value"]
+    assert [f.severity for f in denied] == ["fail"]
+    assert "/Users/x/ga4.json" in denied[0].detail
+
+
+def test_anchored_source_value_has_no_denied_finding(tmp_path):
+    root = tmp_path / "claudlobby"
+    _build_library(root)
+    paths = Paths(root=root, fleet_dir=root)
+    bot = BotConfig(
+        bot_id="w", name="w", expertise=["eng"], env={"P": "${FLEET_ROOT}/mcp/x.py"}
+    )
+    fleet = _fleet({"w": bot})
+
+    denied = [f for f in audit_bot(bot, fleet, paths) if f.kind == "denied_value"]
+    assert denied == []

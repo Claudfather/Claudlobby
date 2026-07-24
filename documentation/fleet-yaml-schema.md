@@ -461,6 +461,37 @@ mounts:
 
 Edits write to the real location via the symlink. Stale symlinks (removed from config) are cleaned up on re-generate.
 
+### `bots.<name>.external_paths`
+
+Declarations that bless absolute paths **outside** the fleet overlay so a compose source may reference them. The compositor runs a **deny-by-default source guard**: any absolute path written into a compose source (a bot's `env`, an MCP fragment's `args`, a permission grant, a timer script, …) fails `generate` unless it is either **anchored** on a composer path or **declared** here.
+
+Prefer anchoring. A path *inside* the fleet is written against one of the three composer anchors, and the compositor derives its real, migration-safe location:
+
+| Anchor | Resolves to |
+|--------|-------------|
+| `${FLEET_ROOT}` | the fleet overlay root |
+| `${BOT_DIR}` | this bot's runtime dir |
+| `${CLAUDLOBBY_ROOT}` | the install root |
+
+```yaml
+env:
+  PRINTIFY_MCP_ENTRY: "${FLEET_ROOT}/runtime/bots/kev/data/printify-mcp/dist/index.js"
+```
+
+`external_paths` is only for a genuine dependency that truly lives outside the fleet — a host mount source, a system tool tree. Each entry is a `{path, purpose}` mapping; `purpose` is required (it is the verifiable justification — a YAML comment is invisible to the guard):
+
+```yaml
+external_paths:
+  - path: /var/lib/printify/data       # exact path
+    purpose: printify persistent data volume
+  - path: /opt/vendor-tool/**          # or a subtree, trailing /** only
+    purpose: vendored CLI the bot shells out to
+```
+
+Rules enforced at parse time: the path must be absolute (declare the expanded form — `~` and relative paths are rejected); no `..`; a trailing `/**` blesses a whole subtree but only on a segment boundary and only below a breadth floor of two leading path segments (never `/**`, `/opt/**`, or another root-adjacent width). A `/**` declaration matches the prefix and anything below it (`/var/lib/printify/**` blesses `/var/lib/printify/data/x` but never the sibling `/var/lib/printify-secret`). Set in `defaults:` to apply fleet-wide; bot-level entries union with the defaults.
+
+For a host path a bot should *read and write through the bot dir*, prefer `mounts:` (a managed symlink) over a raw `external_paths` grant.
+
 ### `bots.<name>.bench`
 
 Boolean (default `false`). Marks this bot as the fleet's benchmarking target for cold-start timing (`lib/bench-cold-start.sh`). Multi-bot fleets should set `bench: true` on exactly one bot so the benchmarking script knows which bot to measure. The validator warns if a fleet has multiple bots and none has `bench: true`.

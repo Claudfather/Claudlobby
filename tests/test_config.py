@@ -17,6 +17,7 @@ from claudlobby.config import (
     _coerce_plugins,
     load_fleet,
 )
+from claudlobby.path_audit import ExternalDecl
 
 
 class TestCoercePlugins:
@@ -438,6 +439,73 @@ class TestCoerceBotSecretFiles:
             "GA4_SA_KEY_PATH": ".secrets/ga4.json",
             "GSC_SA_KEY_PATH": ".secrets/gsc.json",
         }
+
+
+class TestCoerceBotExternalPaths:
+    """external_paths: {path, purpose} declarations blessing absolute paths
+    outside the fleet overlay. Merged fleet defaults ∪ bot, then validated and
+    hardened at coerce (the L1 source guard, #702) — a bad shape fails loudly
+    at parse, never silently over-grants."""
+
+    def test_external_paths_parsed_from_raw(self):
+        bot = _coerce_bot(
+            "kev",
+            {
+                "expertise": ["eng"],
+                "external_paths": [
+                    {"path": "/var/lib/printify/data", "purpose": "printify mount"}
+                ],
+            },
+            {},
+        )
+        assert bot.external_paths == [
+            ExternalDecl(path="/var/lib/printify/data", purpose="printify mount")
+        ]
+
+    def test_external_paths_default_empty(self):
+        bot = _coerce_bot("kev", {"expertise": ["eng"]}, {})
+        assert bot.external_paths == []
+
+    def test_external_paths_merges_defaults(self):
+        bot = _coerce_bot(
+            "kev",
+            {
+                "expertise": ["eng"],
+                "external_paths": [{"path": "/opt/tool/bin", "purpose": "bot tool"}],
+            },
+            {
+                "external_paths": [
+                    {"path": "/var/lib/printify/**", "purpose": "fleet mount"}
+                ]
+            },
+        )
+        # fleet defaults first, then bot — union, deduped
+        assert bot.external_paths == [
+            ExternalDecl(path="/var/lib/printify/**", purpose="fleet mount"),
+            ExternalDecl(path="/opt/tool/bin", purpose="bot tool"),
+        ]
+
+    def test_external_paths_relative_rejected_at_coerce(self):
+        with pytest.raises(ValueError, match="absolute"):
+            _coerce_bot(
+                "kev",
+                {
+                    "expertise": ["eng"],
+                    "external_paths": [{"path": "relative/x", "purpose": "p"}],
+                },
+                {},
+            )
+
+    def test_external_paths_missing_purpose_rejected_at_coerce(self):
+        with pytest.raises(ValueError, match="purpose"):
+            _coerce_bot(
+                "kev",
+                {
+                    "expertise": ["eng"],
+                    "external_paths": [{"path": "/var/lib/printify/data"}],
+                },
+                {},
+            )
 
 
 class TestLoadFleet:

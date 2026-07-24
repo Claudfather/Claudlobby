@@ -160,6 +160,22 @@ def _path_findings(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Fin
     ]
 
 
+def _value_findings(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]:
+    """Denied-source-value findings — the L1 deny-by-default guard (#702) folded
+    into the audit so a fresh box reports an unanchored, undeclared absolute in a
+    bot source (config leaves + loaded MCP fragments), the source-side complement
+    to the emitted-path check above."""
+    from .composer import _load_bot_fragments
+    from .path_audit import audit_bot_sources
+
+    return [
+        Finding(
+            bot.bot_id, "denied_value", FAIL, f"{sf.source}: {sf.path} — {sf.reason}"
+        )
+        for sf in audit_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths))
+    ]
+
+
 def _orphan_unit_files(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Path]:
     """Stale supervision units in the bot dir — any ``*.service`` / ``*.plist``
     that is not the composed long-form ``<service_prefix>.<bot>`` name (e.g. a
@@ -228,6 +244,7 @@ def audit_bot(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> list[Finding]
     ]
     findings.extend(_tier_a_findings(bot.bot_id, settings))
     findings.extend(_path_findings(bot, fleet, paths))
+    findings.extend(_value_findings(bot, fleet, paths))
     findings.extend(_orphan_unit_findings(bot, fleet, paths))
     return findings
 

@@ -111,7 +111,10 @@ def tool_target_name(template_path: Path) -> str:
 
 
 def resolve_tool_params(
-    tool_name: str, manifest: dict[str, Any], overrides: dict[str, Any]
+    tool_name: str,
+    manifest: dict[str, Any],
+    overrides: dict[str, Any],
+    decls: list | None = None,
 ) -> dict[str, Any]:
     """Merge manifest defaults with per-bot overrides.
 
@@ -120,6 +123,13 @@ def resolve_tool_params(
     Missing required params are a hard error; params that are neither set,
     defaulted, nor required are simply absent (StrictUndefined catches any
     template use).
+
+    ``decls`` is the equipping bot's ``external_paths`` (the composer threads it
+    in; ``None`` → no path guard). With it, the L1 source guard (#702) denies any
+    resolved string param — a manifest ``default:`` or a fleet.yaml override —
+    that carries an absolute path neither anchored on a composer path nor
+    declared, so a tool default cannot smuggle a foreign absolute into a rendered
+    script.
     """
     declared = manifest.get("params") or {}
     unknown = set(overrides) - set(declared)
@@ -141,4 +151,22 @@ def resolve_tool_params(
             resolved[pname] = spec["default"]
         elif spec.get("required"):
             raise ValueError(f"tool '{tool_name}': missing required param '{pname}'")
+
+    from .path_audit import SourceFinding, denied_source_paths, source_findings_error
+
+    tool_id = f"tool {tool_name}"
+    findings = [
+        SourceFinding(
+            bot_id=tool_id,
+            source=f"tools.{tool_name}.params.{pname}",
+            value=value,
+            path=denied,
+            reason="tool param path",
+        )
+        for pname, value in resolved.items()
+        if isinstance(value, str)
+        for denied in denied_source_paths(value, decls or [])
+    ]
+    if findings:
+        raise source_findings_error(tool_id, findings)
     return resolved
