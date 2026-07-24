@@ -150,8 +150,8 @@ railway login
 ### Neon CLI
 
 ```bash
-npm install -g neonctl
-neonctl auth
+npm install -g neon
+neon auth
 # Complete browser auth via SSH tunnel
 ```
 

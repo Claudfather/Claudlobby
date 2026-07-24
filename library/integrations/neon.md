@@ -3,7 +3,7 @@ title: Neon (Postgres)
 type: cli
 env_contract:
   NEON_API_KEY:
-    description: Neon API key for neonctl CLI
+    description: Neon API key for neon CLI
     tier: fleet
 ---
 
@@ -19,5 +19,5 @@ env_contract:
 
 **Gotchas:**
 - Always branch before destructive migrations — test on the branch, then apply to prod
-- `neonctl` requires `--org-id` for org-scoped projects (configured per fleet in env)
+- `neon` requires `--org-id` for org-scoped projects (configured per fleet in env)
 - Connection strings use `?sslmode=require` — don't strip it
