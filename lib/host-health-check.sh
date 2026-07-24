@@ -55,10 +55,12 @@ undervoltage_report() {
     raw=$(vcgencmd get_throttled 2>/dev/null) || return 0
     hex=${raw#*=}
     if [ -z "$hex" ]; then return 0; fi
-    # Only decode a well-formed hex value; malformed firmware output is not an
-    # actionable finding.
-    case "$hex" in 0x[0-9a-fA-F]*) : ;; *) return 0 ;; esac
-    n=$(( hex )) || return 0
+    # Only decode a well-formed hex value, ANCHORED end-to-end. An unanchored
+    # match on a 0x-prefix-then-garbage value (0x1zzz) would reach $(( )), whose
+    # arithmetic error is FATAL under set -e (it aborts past a `|| return 0`) and
+    # crashes the whole monitor with no verdict logged. Reject it before decode.
+    [[ "$hex" =~ ^0x[0-9a-fA-F]+$ ]] || return 0
+    n=$(( hex ))
     parts=""
     for c in "0x1:under-voltage-NOW" "0x2:arm-cap-NOW" "0x4:throttled-NOW" \
              "0x8:soft-temp-NOW" "0x10000:under-voltage-occurred" \
@@ -102,6 +104,19 @@ join_finding() {  # $1=power  $2=storage
     printf '%s' "$out"
 }
 
+# Stable signature for a storage finding: preserve mmc device identity (mmc0,
+# mmcblk1, ...) so two DISTINCT devices never collide to one fingerprint, THEN
+# collapse the remaining volatile digit runs (kworker thread, PID, sector, error
+# code, elapsed seconds, hit count) so one device's ongoing incident still
+# de-dups to a single alert. Identity preservation is mmc-scoped by design -- the
+# dominant device class on this SD/MMC fleet; if storage_report widens its device
+# vocabulary (sd*, nvme*), widen this token pattern too or those classes collapse.
+storage_signature() {  # $1=storage finding text
+    local devs
+    devs=$(printf '%s' "$1" | grep -oE 'mmc(blk)?[0-9]+' | sort -u | tr '\n' ',' || true)
+    printf '%s%s' "$devs" "$(printf '%s' "$1" | sed -E 's/[0-9]+/#/g')"
+}
+
 POWER=$(undervoltage_report || true)
 STORAGE=$(storage_report || true)
 
@@ -120,13 +135,13 @@ fi
 # changes when the condition genuinely worsens OR the host reboots.
 #   - power: the decoded hex+labels are already stable and meaningful -- kept
 #     exact, so a worsened throttle state has a different fingerprint and re-alerts.
-#   - storage: raw kernel lines embed volatile identifiers (kworker thread name,
-#     PID, sector, elapsed seconds, hit count) that churn every run of the SAME
-#     incident -- collapse digit runs so one ongoing stall fingerprints identically.
+#   - storage: preserve mmc device identity, then collapse the volatile digit runs
+#     (see storage_signature) so one device's ongoing stall fingerprints identically
+#     while a DIFFERENT device failing still produces a fresh fingerprint and re-alerts.
 #   - boot id: folded in so a recurrence after a reboot always re-alerts even when
 #     the finding text is byte-identical (the state file is boot-unaware while the
 #     -b0 log scan is boot-scoped). Overridable for hosts without a /proc boot_id.
-SIGTEXT=$(join_finding "$POWER" "$(printf '%s' "$STORAGE" | sed -E 's/[0-9]+/#/g')")
+SIGTEXT=$(join_finding "$POWER" "$(storage_signature "$STORAGE")")
 BOOT_ID="${HOST_HEALTH_BOOT_ID:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s 2>/dev/null || echo "")}"
 SIG=$(printf '%s|%s' "$BOOT_ID" "$SIGTEXT" | cksum | awk '{print $1}')
 LAST=$(cat "$STATE" 2>/dev/null || echo "")
