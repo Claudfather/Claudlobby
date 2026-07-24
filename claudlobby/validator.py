@@ -949,31 +949,28 @@ def _validate_cross_fleet_collisions(
                 )
 
 
-def _validate_timers(
-    fleet: FleetConfig, merged_defaults: dict | None, report: ValidationReport
-) -> None:
+def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
     """Grant `validate` ≡ `generate` for timer scripts: a raw absolute in a fleet
     job's ``script`` fails generate (compose_fleet_timers), so the census must catch
-    it too. Gated on the composer's own emit condition (system defaults enabled +
-    timers on) so validate never flags a job generate would not emit — a false
-    positive there would itself break the zero-FP bar (#704)."""
-    if merged_defaults is None:
-        return
+    it too. Reads the fleet's own merged defaults (``fleet.defaults`` — the dict
+    ``load_fleet`` builds and stores on the fleet), so the check runs on every
+    surface that calls ``validate`` and cannot be silently skipped by a caller that
+    forgets to thread it in. Gated on the composer's own emit condition (system
+    defaults enabled + timers on) so validate never flags a job generate would not
+    emit — a false positive there would itself break the zero-FP bar (#704)."""
     sd = fleet.system_defaults
     if not (sd.enabled and sd.timers):
         return
     from .path_audit import timer_script_findings
 
-    for sf in timer_script_findings(merged_defaults.get("jobs", {})):
+    for sf in timer_script_findings(fleet.defaults.get("jobs", {})):
         report.errors.append(
             f"{sf.source} = {sf.value!r} — {sf.reason}: {sf.path} "
             "(anchor the script on $CLAUDLOBBY_ROOT)"
         )
 
 
-def validate(
-    fleet: FleetConfig, paths: Paths, merged_defaults: dict | None = None
-) -> ValidationReport:
+def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     report = ValidationReport()
 
     if not fleet.bots:
@@ -983,7 +980,7 @@ def validate(
     _validate_bots(fleet, paths, fleet_env, report)
     _validate_teams(fleet, report)
     _validate_fleet(fleet, report)
-    _validate_timers(fleet, merged_defaults, report)
+    _validate_timers(fleet, report)
     _validate_mission(fleet, paths, report)
     _validate_workstreams(fleet, report)
     _validate_sweep(fleet, report)

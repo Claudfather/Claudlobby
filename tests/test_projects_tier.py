@@ -451,3 +451,31 @@ def test_projects_yaml_example_parses_and_exercises_v1_schema(fleet_dir):
 
 def test_fleet_yaml_example_cross_references_projects_yaml():
     assert "projects.yaml" in (REPO_DIR / "fleet.yaml.example").read_text()
+
+
+# --- timer-script parity on the shared compose gate (#735 follow-up) ------------
+# validate reads timer jobs off fleet.defaults, so the shared compose-outside-
+# generate gate (new-bot, move-bot) catches a denied timer script with no extra
+# threading — the same L1 rule generate enforces via compose_fleet_timers.
+
+
+def test_validation_gate_fails_on_foreign_absolute_timer_script(fleet_dir):
+    from claudlobby.commands._helpers import _validation_gate
+
+    fleet = _load(fleet_dir)
+    fleet.defaults["jobs"] = {
+        "rogue": {"script": "/opt/rogue/job.sh", "schedule": "daily"}
+    }
+    ok = _validation_gate(fleet, _paths(fleet_dir), context="retry")
+    assert not ok, "a denied timer script must block the compose gate"
+
+
+def test_validation_gate_passes_on_anchored_timer_script(fleet_dir):
+    from claudlobby.commands._helpers import _validation_gate
+
+    fleet = _load(fleet_dir)
+    fleet.defaults["jobs"] = {
+        "vitals": {"script": "$CLAUDLOBBY_ROOT/lib/x.sh", "schedule": "daily"}
+    }
+    ok = _validation_gate(fleet, _paths(fleet_dir), context="retry")
+    assert ok, "an anchored timer script must not block the gate"
