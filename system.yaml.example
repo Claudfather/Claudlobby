@@ -89,6 +89,17 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 600
+    # Early-warning for the host-hardware failure modes that silently freeze a
+    # whole cheap-hardware fleet: under-voltage / thermal throttling (vcgencmd)
+    # and storage stalls -- SD/MMC bus hangs, kernel hung-task, FS I/O errors.
+    # HOURLY, not daily (a storage stall can wedge the host within the hour, so
+    # the daily monitors miss it); de-duped so a standing condition alerts once.
+    host-health-check:
+      script: "$CLAUDLOBBY_ROOT/lib/host-health-check.sh"
+      schedule: "*-*-* *:00:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 300
 
 defaults:
   hooks:
