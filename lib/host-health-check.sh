@@ -55,8 +55,10 @@ undervoltage_report() {
     raw=$(vcgencmd get_throttled 2>/dev/null) || return 0
     hex=${raw#*=}
     if [ -z "$hex" ]; then return 0; fi
-    if [ "$hex" = "0x0" ]; then return 0; fi
-    n=$(( hex ))
+    # Only decode a well-formed hex value; malformed firmware output is not an
+    # actionable finding.
+    case "$hex" in 0x[0-9a-fA-F]*) : ;; *) return 0 ;; esac
+    n=$(( hex )) || return 0
     parts=""
     for c in "0x1:under-voltage-NOW" "0x2:arm-cap-NOW" "0x4:throttled-NOW" \
              "0x8:soft-temp-NOW" "0x10000:under-voltage-occurred" \
@@ -65,6 +67,10 @@ undervoltage_report() {
         mask=${c%%:*}; label=${c#*:}
         if (( n & mask )); then parts="$parts $label"; fi
     done
+    # A value that decodes to no documented bit (0x0, the non-canonical 0x00, or
+    # an undefined bit >= 20) is not a throttling event -- emit nothing rather
+    # than an empty-label alert.
+    if [ -z "$parts" ]; then return 0; fi
     printf 'power(%s):%s' "$hex" "$parts"
 }
 
@@ -78,7 +84,7 @@ storage_report() {
     since_args=(-k --no-pager)
     if [ -n "$SINCE" ]; then since_args+=(--since "$SINCE"); else since_args+=(-b 0); fi
     hits=$(journalctl "${since_args[@]}" 2>/dev/null \
-        | grep -iE 'blocked for more than [0-9]+ seconds|__mmc_claim_host|mmc_rescan|mmc[0-9].*(error|timeout|reset)|EXT4-fs error|I/O error' \
+        | grep -iE 'blocked for more than [0-9]+ seconds|__mmc_claim_host|mmc_rescan|mmc(blk)?[0-9].*(error|timeout|reset)|stuck in programming state|EXT4-fs error|I/O error' \
         | tail -8) || true
     if [ -z "$hits" ]; then return 0; fi
     cnt=$(printf '%s\n' "$hits" | grep -c . || true)
@@ -86,12 +92,20 @@ storage_report() {
     printf 'storage(%s hits): %s' "$cnt" "$rep"
 }
 
+# Join the power and storage findings into one " | "-separated line, omitting
+# whichever probe was clean. Shared by the human-readable message and (with
+# storage digit-collapsed) the de-dup fingerprint, so the two never drift apart.
+join_finding() {  # $1=power  $2=storage
+    local out=""
+    if [ -n "$1" ]; then out="$1"; fi
+    if [ -n "$2" ]; then out="${out:+$out | }$2"; fi
+    printf '%s' "$out"
+}
+
 POWER=$(undervoltage_report || true)
 STORAGE=$(storage_report || true)
 
-FINDING=""
-if [ -n "$POWER" ]; then FINDING="$POWER"; fi
-if [ -n "$STORAGE" ]; then FINDING="${FINDING:+$FINDING | }$STORAGE"; fi
+FINDING=$(join_finding "$POWER" "$STORAGE")
 
 # --- Clean path ---------------------------------------------------------------
 if [ -z "$FINDING" ]; then
@@ -100,11 +114,21 @@ if [ -z "$FINDING" ]; then
     exit 0
 fi
 
-# --- Alert path (de-duped by fingerprint) -------------------------------------
-# A persistent condition (e.g. an under-voltage-occurred latch that stays set
-# for the whole boot) alerts ONCE; a new/worsened condition changes the
-# fingerprint and re-alerts.
-SIG=$(printf '%s' "$FINDING" | cksum | awk '{print $1}')
+# --- Alert path (de-duped by a STABLE fingerprint) ----------------------------
+# The fingerprint identifies a CONDITION, not a log line: it stays constant while
+# a condition persists across runs (so a standing condition alerts ONCE), yet
+# changes when the condition genuinely worsens OR the host reboots.
+#   - power: the decoded hex+labels are already stable and meaningful -- kept
+#     exact, so a worsened throttle state has a different fingerprint and re-alerts.
+#   - storage: raw kernel lines embed volatile identifiers (kworker thread name,
+#     PID, sector, elapsed seconds, hit count) that churn every run of the SAME
+#     incident -- collapse digit runs so one ongoing stall fingerprints identically.
+#   - boot id: folded in so a recurrence after a reboot always re-alerts even when
+#     the finding text is byte-identical (the state file is boot-unaware while the
+#     -b0 log scan is boot-scoped). Overridable for hosts without a /proc boot_id.
+SIGTEXT=$(join_finding "$POWER" "$(printf '%s' "$STORAGE" | sed -E 's/[0-9]+/#/g')")
+BOOT_ID="${HOST_HEALTH_BOOT_ID:-$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uptime -s 2>/dev/null || echo "")}"
+SIG=$(printf '%s|%s' "$BOOT_ID" "$SIGTEXT" | cksum | awk '{print $1}')
 LAST=$(cat "$STATE" 2>/dev/null || echo "")
 MSG="host hardware health warning on $(hostname): $FINDING"
 

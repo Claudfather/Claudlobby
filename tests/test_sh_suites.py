@@ -20,6 +20,7 @@ TESTS_DIR = Path(__file__).resolve().parent
 
 HERMETIC_SH_SUITES = [
     "test_rolling_restart.sh",
+    "test_host_health_check.sh",
 ]
 
 
@@ -28,9 +29,7 @@ def test_hermetic_bash_suite(suite):
     path = TESTS_DIR / suite
     assert path.is_file(), f"missing bash suite: {suite}"
     bash = shutil.which("bash") or "/bin/bash"
-    proc = subprocess.run(
-        [bash, str(path)], capture_output=True, text=True
-    )
+    proc = subprocess.run([bash, str(path)], capture_output=True, text=True)
     assert proc.returncode == 0, (
         f"{suite} failed (exit {proc.returncode}):\n"
         f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
