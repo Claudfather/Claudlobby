@@ -785,33 +785,47 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             pairs.append(f"{name}={src_type}:{src_repo}")
         lines.append(f"export FLEET_PLUGINS_MARKETPLACES={_shq(' '.join(pairs))}")
 
-    # An anchor-headed value (${FLEET_ROOT}/x, $BOT_DIR/y) must emit DOUBLE-quoted
-    # so the shell expands the composer anchor at source time — mirrors the
-    # secret_files precedent below. The default single-quoted _shq sink would
-    # freeze the anchor as a literal, leaving the 'anchor it' remediation inert.
+    # A well-formed anchored path (${FLEET_ROOT}/x, $BOT_DIR/y — anchor head, then
+    # only path-safe segments) emits DOUBLE-quoted so the shell expands the
+    # composer anchor at source time — mirrors the secret_files precedent below.
+    # The default single-quoted _shq sink would freeze the anchor as a literal,
+    # leaving the 'anchor it' remediation inert. Gating on is_safe_anchored_path
+    # (not the looser is_anchor_headed) is the emission-side of #731: an
+    # anchor-headed value with a shell metacharacter after the anchor is denied at
+    # the source guard, but if one ever reaches here it falls back to the frozen
+    # _shq sink rather than a double-quoted line that would execute on source.
     # Every non-anchor value stays _shq (byte-identical to before).
-    from .path_audit import is_anchor_headed
+    from .path_audit import is_safe_anchored_path
 
     for k, v in bot.env.items():
         if not _SHELL_IDENT_RE.match(k):
             raise ValueError(f"bot.env key {k!r} is not a valid shell identifier")
-        rhs = f'"{v}"' if is_anchor_headed(v) else _shq(v)
+        rhs = f'"{v}"' if is_safe_anchored_path(v) else _shq(v)
         lines.append(f"export {k}={rhs}")
 
     # Secret-file paths: fleet-relative by contract, anchored on FLEET_ROOT so the
     # path is composer-derived and moves with the fleet. An absolute (or
     # parent-escaping) value is the exact hand-typed dangling-path smell this
-    # closes → reject it loudly rather than bake it in.
+    # closes → reject it loudly rather than bake it in. The path is emitted
+    # double-quoted, so a shell metacharacter in the subpath would execute when
+    # bot.conf is sourced — is_safe_relative_subpath closes that too (#731).
+    from .path_audit import is_safe_relative_subpath
+
     for var, subpath in bot.secret_files.items():
         if not _SHELL_IDENT_RE.match(var):
             raise ValueError(
                 f"bot.secret_files key {var!r} is not a valid shell identifier"
             )
-        if subpath.startswith(("/", "~")) or ".." in Path(subpath).parts:
+        if (
+            subpath.startswith(("/", "~"))
+            or ".." in Path(subpath).parts
+            or not is_safe_relative_subpath(subpath)
+        ):
             raise ValueError(
-                f"bot.secret_files[{var!r}] must be fleet-relative, got {subpath!r} "
-                "— declare it relative to the fleet root so the composer anchors it "
-                "on FLEET_ROOT (never hand-type an absolute fleet path)"
+                f"bot.secret_files[{var!r}] must be a fleet-relative path of plain "
+                f"path segments, got {subpath!r} — no absolute/~ head, no '..', and "
+                "no shell metacharacter (the composer anchors it on FLEET_ROOT and "
+                "emits it double-quoted; a $() or backtick would execute on source)"
             )
         lines.append(f'export {var}="$FLEET_ROOT/{subpath}"')
 

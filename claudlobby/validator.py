@@ -165,9 +165,9 @@ def _validate_bots(
 
         for sf in audit_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths)):
             report.errors.append(
-                f"bot '{bot_name}': {sf.source} = {sf.value!r} — denied absolute "
-                f"path {sf.path} (anchor on FLEET_ROOT/BOT_DIR/CLAUDLOBBY_ROOT or "
-                "declare it in external_paths)"
+                f"bot '{bot_name}': {sf.source} = {sf.value!r} — {sf.reason}: "
+                f"{sf.path} (anchor on FLEET_ROOT/BOT_DIR/CLAUDLOBBY_ROOT, declare "
+                "in external_paths, or drop any shell metacharacter)"
             )
 
         # Expertise — at least one must exist (HARD)
@@ -347,7 +347,7 @@ def _validate_bots(
                 manifest = tool_resolve.load_tool_manifest(tool_dir)
                 template_path = tool_resolve.tool_template_path(tool_dir, manifest)
                 tool_resolve.resolve_tool_params(
-                    tool_entry.name, manifest, tool_entry.params
+                    tool_entry.name, manifest, tool_entry.params, bot.external_paths
                 )
             except ValueError as e:
                 report.errors.append(f"bot '{bot_name}': {e}")

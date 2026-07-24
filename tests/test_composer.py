@@ -866,6 +866,24 @@ class TestComposeBotConfSecretFiles:
         with pytest.raises(ValueError, match="shell identifier"):
             compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
 
+    def test_subpath_command_subst_rejected(self, tmp_path):
+        """The secret-file path is anchored on FLEET_ROOT and emitted
+        double-quoted, so a command substitution in the subpath would execute
+        when bot.conf is sourced — reject it loud (#731)."""
+        bot = self._bot(secret_files={"K": ".secrets/$(touch pwned).json"})
+        with pytest.raises(ValueError, match="fleet-relative"):
+            compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
+
+    def test_subpath_backtick_rejected(self, tmp_path):
+        bot = self._bot(secret_files={"K": ".secrets/`id`.json"})
+        with pytest.raises(ValueError, match="fleet-relative"):
+            compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
+
+    def test_subpath_double_quote_rejected(self, tmp_path):
+        bot = self._bot(secret_files={"K": '.secrets/a".json'})
+        with pytest.raises(ValueError, match="fleet-relative"):
+            compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
+
 
 class TestComposerProvidedPathAnchorsExported:
     """Every blessed path anchor is actually assigned in bot.conf, so a
@@ -3291,6 +3309,29 @@ class TestSourceGuardWiring:
         conf = compose_bot_conf(bot, fleet, paths)
         assert 'export ANCHORED="${FLEET_ROOT}/mcp/x.py"' in conf
         assert "export PLAINVAR='${GITHUB_PAT}'" in conf
+
+    def test_r1_anchor_headed_env_injection_neutralized_at_emission(self, tmp_path):
+        # Defense-in-depth (#731): even bypassing the source guard (a direct
+        # compose_bot_conf, which the guard-fronted compose_bot never reaches for
+        # a denied value), an anchor-headed value whose tail carries a shell
+        # metacharacter must NOT emit double-quoted-raw where sourcing bot.conf
+        # would execute it — it falls back to the frozen _shq sink.
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        paths = _make_paths(root)
+        bot = BotConfig(
+            bot_id="b",
+            name="b",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="b_bot"),
+            env={"ANCHORED": "${FLEET_ROOT}/$(touch pwned)/x"},
+        )
+        fleet = FleetConfig(name="t", service_prefix="com.t")
+        conf = compose_bot_conf(bot, fleet, paths)
+        # never the injectable double-quoted emission
+        assert 'export ANCHORED="${FLEET_ROOT}/$(touch pwned)/x"' not in conf
+        # frozen literal instead — the $(...) cannot execute when sourced
+        assert "export ANCHORED='${FLEET_ROOT}/$(touch pwned)/x'" in conf
 
     def test_grant_choke_denies_foreign_absolute_grant(self, fleet_dir):
         paths = _make_paths(fleet_dir)

@@ -1233,6 +1233,52 @@ class TestSourceGuardParity:
         report = validate(fleet, _make_paths(fleet_dir))
         assert any("/opt/evil/index.js" in e for e in report.errors)
 
+    def test_anchor_headed_env_injection_is_a_validate_error(
+        self, fleet_dir, monkeypatch
+    ):
+        # #731 parity: the R1 anchor-headed emission would double-quote this and a
+        # sourced bot.conf would execute the command substitution, so validate must
+        # flag it exactly like generate (both run audit_bot_sources).
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].env = {"P": "${FLEET_ROOT}/$(touch pwned)/x"}
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("$(touch pwned)" in e and "lead" in e for e in report.errors)
+
+    def test_tool_param_declared_external_is_clean(self, fleet_dir, monkeypatch):
+        # #731 Fix 3: the validator must thread bot.external_paths into
+        # resolve_tool_params (as composer does) — otherwise a legitimately
+        # declared external path in a tool param generates cleanly but fails
+        # `validate` with a false "denied absolute path". Locks that parity.
+        from textwrap import dedent
+
+        from claudlobby.config import ToolEntry
+        from claudlobby.path_audit import ExternalDecl
+
+        self._env_patch(monkeypatch)
+        tool_dir = fleet_dir / "library" / "tools" / "pathtool"
+        tool_dir.mkdir(parents=True)
+        (tool_dir / "tool.yaml").write_text(
+            dedent(
+                """\
+                type: script
+                params:
+                  path:
+                    required: true
+                """
+            )
+        )
+        (tool_dir / "pathtool.py.j2").write_text("BIN = {{ path }}\n")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].tools = [
+            ToolEntry(name="pathtool", params={"path": "/opt/tool/bin/run"})
+        ]
+        fleet.bots["lead"].external_paths = [
+            ExternalDecl(path="/opt/tool/**", purpose="tool tree")
+        ]
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any("/opt/tool/bin/run" in e for e in report.errors)
+
 
 class TestMissionFileAbsolute:
     """fleet.mission_file is composed into every bot's CLAUDE.md, so an absolute

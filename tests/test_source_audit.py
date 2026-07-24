@@ -108,6 +108,15 @@ class TestClassifyAnchorsAndVars:
     def test_flag_rhs_anchor_passes(self):
         assert classify_source_value("--config=${FLEET_ROOT}/x.json") == []
 
+    def test_flag_rhs_colon_list_denies_absolute(self):
+        # #731: rule 4 recurses rule 5 — a colon list inside a flag rhs
+        # (--flag=name:/abs) is no longer a blind spot
+        assert classify_source_value("--config=name:/abs/path") == ["/abs/path"]
+
+    def test_flag_rhs_colon_list_on_word_split_field(self):
+        bot = _bot(extra_flags=["--config=name:/abs/path"])
+        assert [f.path for f in audit_bot_sources(bot, _fleet())] == ["/abs/path"]
+
 
 class TestClassifyWordSplitRule6:
     """Adversarial rows — only the three word-split fields split first (rule 6).
@@ -329,6 +338,16 @@ class TestAuditBotSourcesWalk:
             == []
         )
 
+    def test_secret_files_shell_unsafe_subpath_is_a_finding(self):
+        # #731: a relative secret-file subpath emits double-quoted into bot.conf, so
+        # a shell metacharacter would execute on source — the shared audit denies it
+        # (validate ≡ generate; the composer raise is defense-in-depth)
+        findings = audit_bot_sources(
+            _bot(secret_files={"K": ".secrets/$(touch pwned).json"}), _fleet()
+        )
+        assert [f.path for f in findings] == [".secrets/$(touch pwned).json"]
+        assert findings[0].source.endswith(".secret_files.K")
+
     def test_hook_command_embedded_absolute_is_a_finding(self):
         bot = _bot(
             hooks={
@@ -347,6 +366,15 @@ class TestAuditBotSourcesWalk:
             }
         )
         assert audit_bot_sources(bot, _fleet()) == []
+
+    def test_hook_unknown_key_absolute_is_a_finding(self):
+        # #731: hooks default to CHECK, so a NEW hook sub-field beyond the recorded
+        # exemptions (command/type/matcher) is deny-by-default covered — it no
+        # longer silently bypasses the guard
+        bot = _bot(
+            hooks={"PreToolUse": [{"command": "true", "config_path": "/Users/x/h"}]}
+        )
+        assert [f.path for f in audit_bot_sources(bot, _fleet())] == ["/Users/x/h"]
 
     def test_extra_flags_word_split_finding(self):
         bot = _bot(extra_flags=["--mcp-config", "/Users/x/f.json"])
@@ -509,3 +537,68 @@ class TestIsAnchorHeaded:
 
     def test_absolute_is_not_anchor(self):
         assert is_anchor_headed("/Users/x") is False
+
+
+class TestEnvAnchorEmissionSafety:
+    """#731 — a bot.env value that leads with a composer anchor is emitted
+    DOUBLE-quoted (R1) so the shell expands the anchor at bot.conf source time. A
+    shell metacharacter after the anchor would execute on every bot start, so the
+    shared source audit denies any anchor-headed env value that is not a
+    well-formed path — caught identically by validate and generate.
+
+    Scoped to env (the one source that gets the anchor-expanding double-quoted
+    emission); the general grammar still treats every ${VAR}-headed value as
+    clean, so an MCP fragment / tool value that CC (not the shell) expands is
+    never swept up here.
+    """
+
+    def _bot(self, env):
+        return BotConfig(
+            bot_id="b",
+            name="b",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="b_bot"),
+            env=env,
+        )
+
+    def _audit(self, env):
+        fleet = FleetConfig(name="t", service_prefix="com.t")
+        return audit_bot_sources(self._bot(env), fleet)
+
+    def test_command_subst_after_anchor_denied(self):
+        f = self._audit({"X": "${FLEET_ROOT}/$(echo INJECTED > pwned.txt)/x"})
+        assert [sf.source for sf in f] == ["bots.b.env.X"]
+
+    def test_backtick_after_anchor_denied(self):
+        assert self._audit({"X": "${FLEET_ROOT}/`id`/x"})
+
+    def test_double_quote_after_anchor_denied(self):
+        assert self._audit({"X": '${FLEET_ROOT}/a"; touch pwned; :"b'})
+
+    def test_bare_dollar_anchor_command_subst_denied(self):
+        # the no-brace anchor form ($BOT_DIR) must be covered too
+        assert self._audit({"X": "$BOT_DIR/$(id)"})
+
+    def test_second_dollar_after_anchor_denied(self):
+        # a lone '$' interpolation (a non-composer var) in the tail is not a
+        # well-formed fleet path — denied (deny-by-default; multi-anchor is a
+        # deliberate residual, not silently expanded)
+        assert self._audit({"X": "${FLEET_ROOT}/$OTHER/x"})
+
+    def test_safe_anchored_path_clean(self):
+        assert self._audit({"X": "${FLEET_ROOT}/runtime/bots/b/data/x.json"}) == []
+
+    def test_bare_dollar_safe_anchor_clean(self):
+        assert self._audit({"X": "$BOT_DIR/data/index.js"}) == []
+
+    def test_plain_env_ref_clean(self):
+        # a non-composer ${VAR} is frozen (single-quoted) at emission, never
+        # expanded — no injection surface, so no deny even with a metachar tail
+        assert self._audit({"X": "${GITHUB_PAT}"}) == []
+        assert self._audit({"X": "${SOME_TOKEN}/$(x)"}) == []
+
+    def test_grammar_untouched_for_non_env_surfaces(self):
+        # the deny is scoped to bot.conf emission; the general grammar still
+        # treats any ${VAR}-headed value as clean (MCP/tool leaves CC expands,
+        # not the shell) so it is not swept up by this fix
+        assert classify_source_value("${FLEET_ROOT}/$(echo x)/y") == []

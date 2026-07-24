@@ -272,8 +272,9 @@ def _classify_atom(token: str) -> list[str]:
 
 def _classify_1_3(word: str) -> list[str]:
     """Rules 1-3 — the URL-scheme carve-out over :func:`_classify_atom`, and the
-    one home of the ``file://`` decision. Used for a URL-headed word, a bare
-    word, and a ``KEY=``/``--flag=`` right-hand side (rule 4)."""
+    one home of the ``file://`` decision. Used for a URL-headed word and a bare
+    word (a ``KEY=``/``--flag=`` rhs recurses the full grammar via
+    :func:`_classify_word`)."""
     m = _URL_SCHEME_RE.match(word)
     if m:
         scheme = m.group(0)
@@ -285,8 +286,9 @@ def _classify_1_3(word: str) -> list[str]:
 
 def _classify_word(word: str) -> list[str]:
     """Rules 1-5 on a single whitespace-free word: a URL carve-out (1), then a
-    ``KEY=``/``--flag=`` assignment classifies its rhs by 1-3 (4), then a colon
-    list classifies each segment by 2-3 (5), else the word itself by 1-3.
+    ``KEY=``/``--flag=`` assignment re-classifies its rhs by the full grammar (4 →
+    1-5, so a ``--flag=name:/abs`` colon list is caught), then a colon list
+    classifies each segment by 2-3 (5), else the word itself by 1-3.
 
     The URL check comes first so a connection string's ``:`` (``postgres://…:port``)
     is never mistaken for a PATH-style colon list."""
@@ -294,7 +296,11 @@ def _classify_word(word: str) -> list[str]:
         return _classify_1_3(word)  # rule 1, incl. the file:// carve-out
     assign = _FLAG_ASSIGN_RE.match(word)
     if assign:
-        return _classify_1_3(assign.group(1))
+        # rule 4: the rhs is itself a value — recurse through the full grammar so a
+        # colon list (rule 5) inside a flag rhs (``--flag=name:/abs/path``) is not
+        # a blind spot. The URL check inside keeps ``DATABASE_URL=postgres://…``
+        # from colon-splitting.
+        return _classify_word(assign.group(1))
     if ":" in word:
         denied: list[str] = []
         for segment in word.split(":"):
@@ -444,13 +450,58 @@ def classify_grant_paths(grant: str, decls: list[ExternalDecl]) -> list[str]:
 
 def is_anchor_headed(value: str) -> bool:
     """True if *value* leads with a composer path anchor (``${FLEET_ROOT}``,
-    ``$BOT_DIR``, …). bot.conf must emit such a value DOUBLE-quoted so the shell
-    expands the anchor at source time (R1); the default single-quoted ``_shq``
-    sink would freeze it as a literal, leaving the anchor un-expanded and the
-    'anchor it' remediation inert. A plain env reference (``${GITHUB_PAT}``) is
-    not an anchor and keeps its existing frozen emission."""
+    ``$BOT_DIR``, …) — a *candidate* for the double-quoted bot.conf emission that
+    expands the anchor at source time (R1). This is the loose probe: it scopes the
+    emission-safety deny to values that intend an anchor, while the strict
+    ``is_safe_anchored_path`` decides whether one is actually safe to emit
+    unescaped. A plain env reference (``${GITHUB_PAT}``) is not an anchor."""
     m = re.match(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)", value)
     return bool(m and m.group(1) in COMPOSER_PROVIDED_PATH_ANCHORS)
+
+
+# The characters a path segment may hold to be emitted, UNESCAPED, inside a
+# double-quoted bot.conf value: alphanumerics and the handful of punctuation a
+# real fleet path uses — never a shell-active character ($ ` " \), whitespace, or
+# a glob/redirection metacharacter. An anchored fleet path is built only from
+# these; anything else after the anchor is not a well-formed path and is denied
+# rather than expanded at source time (#731).
+_PATH_SEG = r"[A-Za-z0-9_.@:+=,%-]+"
+_SAFE_PATH_TAIL_RE = re.compile(rf"^(?:/{_PATH_SEG})*/?$")
+_SAFE_REL_PATH_RE = re.compile(rf"^{_PATH_SEG}(?:/{_PATH_SEG})*$")
+# A single composer-anchor head — braced (``${FLEET_ROOT}``) or bare
+# (``$BOT_DIR``). Unlike the loose ``is_anchor_headed`` probe, the braced form
+# must close, so a truncated ``${FLEET_ROOT`` never reads as a safe anchor.
+_ANCHOR_HEAD_RE = re.compile(
+    r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
+def is_safe_anchored_path(value: str) -> bool:
+    """True if *value* is a well-formed anchored fleet path: a single composer
+    anchor (``${FLEET_ROOT}`` / ``$BOT_DIR`` / ``${CLAUDLOBBY_ROOT}``) at the head
+    followed only by path-safe segments. Such a value — and only such a value — is
+    safe to emit DOUBLE-quoted in bot.conf: the anchor expands and nothing after
+    it is shell-active. An anchor head trailed by a command substitution, a quote,
+    a backslash, or a second ``$`` (a non-composer var or a further anchor) is NOT
+    well-formed; it is denied at the source guard and never reaches the
+    double-quoted sink (#731). Multi-anchor values are a deliberate residual —
+    fail loud, extend the grammar if a real need appears."""
+    m = _ANCHOR_HEAD_RE.match(value)
+    if not m:
+        return False
+    name = m.group(1) or m.group(2)
+    if name not in COMPOSER_PROVIDED_PATH_ANCHORS:
+        return False
+    return bool(_SAFE_PATH_TAIL_RE.match(value[m.end() :]))
+
+
+def is_safe_relative_subpath(subpath: str) -> bool:
+    """True if *subpath* is a fleet-relative path of path-safe segments only — the
+    shape a secret-file path must have to be anchored on ``$FLEET_ROOT`` and
+    emitted double-quoted without opening a shell-injection surface. Rejects a
+    shell metacharacter; the caller still rejects an absolute/``~`` head and
+    ``..`` traversal separately (#731)."""
+    return bool(_SAFE_REL_PATH_RE.match(subpath))
 
 
 # ── The posture registry + the dataclass walk ───────────────────────────────
@@ -480,6 +531,8 @@ _FIELD_POSTURES: dict[str, Posture] = {
     "permissions": Posture.EXEMPT,  # Tool(spec) grants — classified at the grant choke
     "tool_permissions": Posture.EXEMPT,  # Tool(spec) grants — classified at the grant choke
     "autonomous_runner.skill": Posture.EXEMPT,  # a slash-command ref, not a path
+    "hooks.type": Posture.EXEMPT,  # hook event kind (e.g. "command"), not a path
+    "hooks.matcher": Posture.EXEMPT,  # tool-name matcher, not a path
     # word-split (rule 6, F3=b) — the only fields whose value is scanned token by
     # token; everywhere else the grammar stays head-anchored:
     "extra_flags": Posture.CHECK_WORDS,
@@ -496,9 +549,11 @@ def _posture_for(segments: tuple[str, ...]) -> Posture:
         return Posture.CHECK
     top = segments[0]
     if top in ("hooks", "autonomous_runner"):
-        # a hook entry's non-command keys (type, matcher) are not shell commands
-        default = Posture.EXEMPT if top == "hooks" else Posture.CHECK
-        return _FIELD_POSTURES.get(f"{top}.{segments[-1]}", default)
+        # Both structured fields refine by terminal key and default to CHECK, so a
+        # NEW hook/runner sub-field is deny-by-default covered (not silently
+        # exempt). The known non-path keys (hooks.type/matcher,
+        # autonomous_runner.skill) are the recorded exemptions.
+        return _FIELD_POSTURES.get(f"{top}.{segments[-1]}", Posture.CHECK)
     return _FIELD_POSTURES.get(top, Posture.CHECK)
 
 
@@ -536,9 +591,16 @@ class SourceFinding:
     reason: str
 
 
-_SOURCE_DENY_REASON = (
-    "absolute path in a compose source that is neither anchored on a composer "
-    "path nor blessed by an external_paths declaration"
+_SOURCE_DENY_REASON = "denied absolute path"
+
+# A value emitted DOUBLE-quoted into bot.conf (an anchored bot.env value's tail, a
+# secret-file path anchored on $FLEET_ROOT) expands at source time — so a shell
+# metacharacter in it would execute on every bot start. Findings tagged with this
+# reason are that emission-safety class (#731), distinct from a foreign absolute
+# (a path-ownership finding).
+_EMISSION_METACHAR_REASON = (
+    "shell metacharacter in a value emitted double-quoted into bot.conf "
+    "(sourcing it would execute the metacharacter)"
 )
 
 
@@ -600,6 +662,38 @@ def audit_bot_sources(
                     reason=_SOURCE_DENY_REASON,
                 )
             )
+    # bot.conf emission safety (#731): the two source values that emit DOUBLE-quoted
+    # into bot.conf — a bot.env value led by a composer anchor, and a secret-file
+    # path anchored on $FLEET_ROOT — expand at source time, so a shell metacharacter
+    # in either would execute on every bot start. Deny both here, in the shared
+    # audit, so validate ≡ generate catch them (the composer sink is
+    # defense-in-depth). Env is scoped to anchor-headed values: the general grammar
+    # (above) still passes every ${VAR}-headed value, so an MCP/tool leaf that CC,
+    # not the shell, expands is never swept up.
+    for key, value in bot.env.items():
+        if is_anchor_headed(value) and not is_safe_anchored_path(value):
+            findings.append(
+                SourceFinding(
+                    bot_id=bot.bot_id,
+                    source=f"bots.{bot.bot_id}.env.{key}",
+                    value=value,
+                    path=value,
+                    reason=_EMISSION_METACHAR_REASON,
+                )
+            )
+    for key, subpath in bot.secret_files.items():
+        # a relative subpath with a shell metacharacter — the walk above already
+        # denies an absolute/~ subpath; '..' traversal stays the emission guard's job
+        if not subpath.startswith(("/", "~")) and not is_safe_relative_subpath(subpath):
+            findings.append(
+                SourceFinding(
+                    bot_id=bot.bot_id,
+                    source=f"bots.{bot.bot_id}.secret_files.{key}",
+                    value=subpath,
+                    path=subpath,
+                    reason=_EMISSION_METACHAR_REASON,
+                )
+            )
     if isinstance(fragments, dict):
         findings.extend(_mcp_fragment_findings(bot.bot_id, fragments, decls))
     return findings
@@ -611,17 +705,24 @@ def source_findings_error(bot_id: str, findings: list[SourceFinding]) -> ValueEr
     fragment / grant / tool / timer sites), so the remediation reads the same
     wherever a denied path is found."""
     detail = "\n".join(
-        f"  fleet.yaml {f.source} = {f.value!r}\n      denied absolute path: {f.path}"
+        f"  fleet.yaml {f.source} = {f.value!r}\n      {f.reason}: {f.path}"
         for f in findings
     )
-    return ValueError(
-        f"bot {bot_id!r}: source value(s) carry an absolute path that is "
-        f"neither anchored on a composer path nor declared:\n{detail}\n\n"
-        "Fix — pick one:\n"
+    tips = [
         "  - anchor it: rewrite against FLEET_ROOT / BOT_DIR / CLAUDLOBBY_ROOT "
-        "(e.g. ${FLEET_ROOT}/sub/path) so the composer derives the real location;\n"
+        "(e.g. ${FLEET_ROOT}/sub/path) so the composer derives the real location;",
         "  - declare it: add an external_paths entry {path, purpose} blessing the "
-        "absolute path, for a genuine dependency outside the fleet overlay.\n"
+        "absolute path, for a genuine dependency outside the fleet overlay.",
+    ]
+    if any(f.reason == _EMISSION_METACHAR_REASON for f in findings):
+        tips.append(
+            "  - de-fang it: a value emitted into bot.conf (an anchored env value's "
+            "tail, a secret-file path) must be only path segments — drop the shell "
+            "metacharacter (a fleet path has no $(...), backtick, or quote)."
+        )
+    return ValueError(
+        f"bot {bot_id!r}: denied source value(s):\n{detail}\n\n"
+        "Fix — pick one:\n" + "\n".join(tips) + "\n"
         "Triage: anchor first (in-fleet paths), declare last (true externals); "
         "for a host mount use the bot's mounts: map, not a raw path."
     )
