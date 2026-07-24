@@ -431,6 +431,21 @@ def _shq(v: object) -> str:
     return shlex.quote(str(v))
 
 
+def _root_anchored(path: Path, paths: Paths) -> str:
+    """Shell RHS for a fleet path: anchored on ``$CLAUDLOBBY_ROOT`` when it lives
+    under the install root, else an absolute ``_shq`` value (vault mode). The one
+    place the "anchor a fleet path for bot.conf" rule lives — BOT_DIR and
+    FLEET_ROOT both route through it, so the two anchors path_audit trusts to
+    resolve to the composer's real locations cannot silently drift apart."""
+    try:
+        rel = path.relative_to(paths.root)
+    except ValueError:
+        return _shq(str(path))
+    # rel == "." only for a root-mode fleet (fleet_config_dir == root); BOT_DIR,
+    # always runtime/bots/<id>, never hits it.
+    return '"$CLAUDLOBBY_ROOT"' if rel == Path(".") else f'"$CLAUDLOBBY_ROOT/{rel}"'
+
+
 def _channel_plugins(channels: list[str]) -> list[str]:
     """Plugin install-IDs a bot's ``--channels`` flag depends on.
 
@@ -469,13 +484,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         bot.account, fleet.accounts.get("default", "~/.claude")
     )
 
-    # When bot_dir is inside claudlobby root, use $CLAUDLOBBY_ROOT-relative path.
-    # When outside (vault mode), use absolute path.
-    try:
-        bot_dir_rel = bot_dir.relative_to(paths.root)
-        bot_dir_line = f'BOT_DIR="$CLAUDLOBBY_ROOT/{bot_dir_rel}"'
-    except ValueError:
-        bot_dir_line = f"BOT_DIR={_shq(str(bot_dir))}"
+    bot_dir_line = f"BOT_DIR={_root_anchored(bot_dir, paths)}"
     # BOT_SERVICE is the bot's host-wide-unique, fleet-prefixed identity. It
     # names the systemd/launchd unit AND the per-bot tmux server socket — one
     # value, two of the three identity axes (the third is the dir-slug session).
@@ -553,6 +562,11 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # drift would silently spawn a duplicate server for the same socket name.
     lines.append(f"export TMUX_TMPDIR={_shq(_TMUX_TMPDIR)}")
     lines.append('export FLEET_STATE_PATH="$CLAUDLOBBY_ROOT/state/fleet-state.json"')
+    # FLEET_ROOT — the fleet-scoped sibling of CLAUDLOBBY_ROOT. It is the fleet
+    # overlay root (the dir holding fleet.yaml, nested-aware), so every
+    # fleet-relative path (secret-file paths, per-bot MCP build dirs) anchors on
+    # it and moves with the fleet instead of dangling after a re-nest.
+    lines.append(f"export FLEET_ROOT={_root_anchored(paths.fleet_config_dir, paths)}")
     if fleet.mission_file and fleet.mission:
         # Gated on the PAIR, mirroring the CLAUDE.md section: in the
         # pairing-forbidden state (file without paragraph) no composed prose
@@ -751,6 +765,23 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if not _SHELL_IDENT_RE.match(k):
             raise ValueError(f"bot.env key {k!r} is not a valid shell identifier")
         lines.append(f"export {k}={_shq(v)}")
+
+    # Secret-file paths: fleet-relative by contract, anchored on FLEET_ROOT so the
+    # path is composer-derived and moves with the fleet. An absolute (or
+    # parent-escaping) value is the exact hand-typed dangling-path smell this
+    # closes → reject it loudly rather than bake it in.
+    for var, subpath in bot.secret_files.items():
+        if not _SHELL_IDENT_RE.match(var):
+            raise ValueError(
+                f"bot.secret_files key {var!r} is not a valid shell identifier"
+            )
+        if subpath.startswith(("/", "~")) or ".." in Path(subpath).parts:
+            raise ValueError(
+                f"bot.secret_files[{var!r}] must be fleet-relative, got {subpath!r} "
+                "— declare it relative to the fleet root so the composer anchors it "
+                "on FLEET_ROOT (never hand-type an absolute fleet path)"
+            )
+        lines.append(f'export {var}="$FLEET_ROOT/{subpath}"')
 
     lines.append("")
 
@@ -1917,6 +1948,13 @@ def compose_bot(
     (bot_dir / f"{fleet.service_prefix}.{bot.bot_id}.plist").write_text(
         compose_launchd_plist(bot, fleet, paths)
     )
+
+    # Path-ownership guarantee: fail loud if any composed wiring file carries a
+    # flat/dangling/improper absolute fleet path (a hand-typed path that would not
+    # survive a fleet move), rather than letting it dangle silently. See path_audit.
+    from .path_audit import assert_bot_paths
+
+    assert_bot_paths(bot, fleet, paths)
 
     return bot_dir
 
