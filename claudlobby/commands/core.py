@@ -77,8 +77,8 @@ def cmd_freshbox(args) -> int:
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
-    fleet, merged_defaults = _load_fleet_or_exit(paths)
-    report = validate(fleet, paths, merged_defaults)
+    fleet, _ = _load_fleet_or_exit(paths)
+    report = validate(fleet, paths)
 
     for e in report.errors:
         log.error("%s", e)
@@ -101,7 +101,7 @@ def cmd_generate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet, merged_defaults = _load_fleet_or_exit(paths)
-    report = validate(fleet, paths, merged_defaults)
+    report = validate(fleet, paths)
 
     if report.has_errors:
         log.error("validation errors — refusing to generate")

@@ -374,3 +374,37 @@ class TestCheckClaudron:
         loop = [c for c in report.checks if c.name == "claudron-loop"][0]
         assert loop.status == "warn"
         assert "not present on this host" in loop.detail
+
+
+class TestDoctorTimerScriptParity:
+    """`claudlobby doctor` mirrors `generate` for the L1 deny-by-default timer
+    rule: a fleet job whose ``script`` is a foreign absolute fails the rollout
+    `generate` (compose_fleet_timers), so doctor's fleet-yaml check must fail too.
+    validate reads the jobs off ``fleet.defaults``, so every surface that runs it —
+    doctor included — catches the denial without any per-call-site threading."""
+
+    def _fleet(self, doctor_fleet, monkeypatch):
+        _, fleet, paths = doctor_fleet
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.delenv("FLEET_NAME", raising=False)
+        return fleet, paths
+
+    def test_doctor_fails_on_foreign_absolute_timer_script(
+        self, doctor_fleet, monkeypatch
+    ):
+        fleet, paths = self._fleet(doctor_fleet, monkeypatch)
+        fleet.defaults["jobs"] = {
+            "rogue": {"script": "/opt/rogue/job.sh", "schedule": "daily"}
+        }
+        report = run_doctor(fleet, paths)
+        fleet_yaml = next(c for c in report.checks if c.name == "fleet-yaml")
+        assert fleet_yaml.status == "fail"
+
+    def test_doctor_passes_on_anchored_timer_script(self, doctor_fleet, monkeypatch):
+        fleet, paths = self._fleet(doctor_fleet, monkeypatch)
+        fleet.defaults["jobs"] = {
+            "vitals": {"script": "$CLAUDLOBBY_ROOT/lib/x.sh", "schedule": "daily"}
+        }
+        report = run_doctor(fleet, paths)
+        fleet_yaml = next(c for c in report.checks if c.name == "fleet-yaml")
+        assert fleet_yaml.status != "fail"

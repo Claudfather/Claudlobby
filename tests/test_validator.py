@@ -1331,14 +1331,14 @@ class TestValidateGenerateParity:
             ("TELEGRAM_TOKEN_WORKER1", "456:def"),
         ):
             monkeypatch.setenv(k, v)
-        fleet, merged_defaults = load_fleet(fleet_dir / "fleet.yaml")
-        return fleet, merged_defaults, _make_paths(fleet_dir)
+        fleet, _ = load_fleet(fleet_dir / "fleet.yaml")
+        return fleet, _make_paths(fleet_dir)
 
     def test_validate_catches_foreign_absolute_grant(self, fleet_dir, monkeypatch):
         from claudlobby.composer import compose_settings_local
         from claudlobby.config import ToolPermissionsConfig
 
-        fleet, merged_defaults, paths = self._load(fleet_dir, monkeypatch)
+        fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.bots["lead"].tool_permissions = ToolPermissionsConfig(
             allow=["Read(/Users/x/secret)"]
         )
@@ -1346,7 +1346,7 @@ class TestValidateGenerateParity:
         with pytest.raises(ValueError, match="/Users/x/secret"):
             compose_settings_local(fleet.bots["lead"], fleet, paths)
         # ...and validate now surfaces the same finding instead of passing clean.
-        report = validate(fleet, paths, merged_defaults)
+        report = validate(fleet, paths)
         assert report.has_errors
         assert any("/Users/x/secret" in e for e in report.errors)
 
@@ -1354,27 +1354,27 @@ class TestValidateGenerateParity:
         from claudlobby.config import ToolPermissionsConfig
         from claudlobby.path_audit import ExternalDecl
 
-        fleet, merged_defaults, paths = self._load(fleet_dir, monkeypatch)
+        fleet, paths = self._load(fleet_dir, monkeypatch)
         lead = fleet.bots["lead"]
         lead.tool_permissions = ToolPermissionsConfig(allow=["Bash(/opt/tool/bin *)"])
         lead.external_paths = [ExternalDecl(path="/opt/tool/**", purpose="tool tree")]
-        report = validate(fleet, paths, merged_defaults)
+        report = validate(fleet, paths)
         assert not any("/opt/tool" in e for e in report.errors)
 
     def test_validate_catches_foreign_absolute_timer_script(self, fleet_dir, monkeypatch):
-        fleet, merged_defaults, paths = self._load(fleet_dir, monkeypatch)
-        merged_defaults["jobs"] = {
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        fleet.defaults["jobs"] = {
             "rogue": {"script": "/opt/rogue/job.sh", "schedule": "daily"}
         }
-        report = validate(fleet, paths, merged_defaults)
+        report = validate(fleet, paths)
         assert any("/opt/rogue/job.sh" in e for e in report.errors)
 
     def test_validate_passes_anchored_timer_script(self, fleet_dir, monkeypatch):
-        fleet, merged_defaults, paths = self._load(fleet_dir, monkeypatch)
-        merged_defaults["jobs"] = {
+        fleet, paths = self._load(fleet_dir, monkeypatch)
+        fleet.defaults["jobs"] = {
             "vitals": {"script": "$CLAUDLOBBY_ROOT/lib/x.sh", "schedule": "daily"}
         }
-        report = validate(fleet, paths, merged_defaults)
+        report = validate(fleet, paths)
         assert not any("timer script" in e for e in report.errors)
 
     def test_timer_check_gated_on_emit_condition_no_false_positive(
@@ -1384,10 +1384,10 @@ class TestValidateGenerateParity:
         # validate must NOT flag a job generate would never check (the zero-FP bar).
         from claudlobby.config import SystemDefaultsConfig
 
-        fleet, merged_defaults, paths = self._load(fleet_dir, monkeypatch)
+        fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.system_defaults = SystemDefaultsConfig(timers=False)
-        merged_defaults["jobs"] = {
+        fleet.defaults["jobs"] = {
             "rogue": {"script": "/opt/rogue/job.sh", "schedule": "daily"}
         }
-        report = validate(fleet, paths, merged_defaults)
+        report = validate(fleet, paths)
         assert not any("/opt/rogue/job.sh" in e for e in report.errors)
