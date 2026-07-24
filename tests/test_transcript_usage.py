@@ -253,3 +253,92 @@ class TestCli:
             == COMBINED["cr"]
         )
         assert agg["comms_blocks"] == 2
+
+
+# second sidechain turn (distinct usage) for the deeper workflow-subagent file
+_SIDE2 = _turn(
+    {
+        "input_tokens": 3,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 200,
+        "output_tokens": 7,
+    },
+    [{"type": "text", "text": "wf-subagent"}],
+    sidechain=True,
+)
+
+
+class TestDirectoryWalk:
+    """Subagent transcripts nest under <sess>/subagents/[workflows/wf_*/]agent-*.jsonl
+    and carry isSidechain:true — the dir walk must recurse to find them, or ~13% of
+    real spend is invisible."""
+
+    def _nested_corpus(self, tmp_path):
+        write_jsonl(tmp_path / "sess.jsonl", [_ROW1, _ROW2])  # main session (2 turns)
+        sub = tmp_path / "sess" / "subagents"
+        sub.mkdir(parents=True)
+        write_jsonl(sub / "agent-1.jsonl", [_ROW3_SIDE])  # depth-1 subagent
+        wf = sub / "workflows" / "wf_x"
+        wf.mkdir(parents=True)
+        write_jsonl(wf / "agent-2.jsonl", [_SIDE2])  # deeper workflow subagent
+        return tmp_path
+
+    def test_iter_transcripts_recurses_into_nested_subagents(self, tmp_path):
+        self._nested_corpus(tmp_path)
+        found = {Path(f).name for f in tu._iter_transcripts([str(tmp_path)])}
+        assert found == {"sess.jsonl", "agent-1.jsonl", "agent-2.jsonl"}
+
+    def test_cli_buckets_nested_subagents_as_sidechain(self, tmp_path):
+        self._nested_corpus(tmp_path)
+        out = subprocess.run(
+            [sys.executable, str(Path(tu.__file__)), "--json", str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        agg = json.loads(out.stdout)["aggregate"]
+        # main = sess.jsonl only (ROW1+ROW2): 2 turns, output 10+20=30
+        assert agg["main"]["turns"] == 2
+        assert agg["main"]["output_tokens"] == 30
+        # with_sidechains folds in BOTH nested subagents: 2+1+1=4 turns, output 30+5+7=42
+        assert agg["with_sidechains"]["turns"] == 4
+        assert agg["with_sidechains"]["output_tokens"] == 42
+
+
+class TestCommsShareCostWeighted:
+    """Outbound-comms share is reported against cost_weighted_total ('% of spend'),
+    matching the #729 read-out — and exercised in BOTH the JSON and printed paths."""
+
+    def test_json_emits_cost_weighted_comms_share(self, tmp_path):
+        fixture = _write(tmp_path, PRIMARY)
+        out = subprocess.run(
+            [
+                sys.executable,
+                str(Path(tu.__file__)),
+                "--json",
+                "--comms-share",
+                str(fixture),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        agg = json.loads(out.stdout)["aggregate"]["main"]
+        comms_est = (len(TG_TEXT) + len(BASH_COMMS_CMD)) // 4
+        exp_cw = comms_est * 5.0  # comms text is generated output → output weight
+        exp_share = 100.0 * exp_cw / MAIN["cw"]
+        assert agg["comms_est_tokens"] == comms_est
+        assert abs(agg["comms_cost_weighted"] - exp_cw) < 1e-6
+        assert abs(agg["comms_share_of_cost_pct"] - exp_share) < 1e-6
+
+    def test_printed_share_is_cost_weighted(self, tmp_path):
+        fixture = _write(tmp_path, PRIMARY)
+        out = subprocess.run(
+            [sys.executable, str(Path(tu.__file__)), "--comms-share", str(fixture)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        comms_est = (len(TG_TEXT) + len(BASH_COMMS_CMD)) // 4
+        exp_share = 100.0 * comms_est * 5.0 / MAIN["cw"]
+        assert f"{exp_share:.2f}% of spend" in out.stdout

@@ -17,16 +17,22 @@ Ground truth (verified against real transcripts):
   - `cache_read_input_tokens` is summed per turn: each turn is a separate paid
     API call that re-reads the whole cached prefix, so the running total is the
     standing-context cost — not a quantity to dedupe or max.
-  - Sidechain (subagent) turns carry top-level `isSidechain: true`; they are
-    split out and excluded unless --include-sidechains.
+  - Sidechain (subagent) turns carry top-level `isSidechain: true`, but they do
+    NOT sit inline in the parent `.jsonl`: they live in separate nested files at
+    `<slug>/<sessionId>/subagents/[workflows/wf_*/]agent-*.jsonl`. A directory
+    argument is therefore walked RECURSIVELY — a flat glob misses ~13% of real
+    fleet spend. Subagent turns are bucketed as sidechain and excluded from the
+    primary total unless --include-sidechains.
 
 Usage:
   transcript-usage.py <transcript.jsonl | dir>... [--include-sidechains]
                       [--json] [--comms-share]
 
-  A directory argument is walked for *.jsonl. Default output is human-readable;
-  --json emits a machine-readable object with both `main` and `with_sidechains`
-  aggregates. --comms-share adds the outbound-comms token estimate.
+  A directory argument is walked recursively for *.jsonl (to reach the nested
+  subagent transcripts above). Default output is human-readable; --json emits a
+  machine-readable object with both `main` and `with_sidechains` aggregates.
+  --comms-share adds the outbound-comms estimate + its cost-weighted share of
+  spend.
 """
 
 import argparse
@@ -82,6 +88,21 @@ class Usage:
     def comms_est_tokens(self) -> int:
         return self.comms_chars // CHARS_PER_TOKEN
 
+    @property
+    def comms_cost_weighted(self) -> float:
+        """Cost-weighted cost of outbound comms — the text is generated output."""
+        return self.comms_est_tokens * WEIGHTS["output"]
+
+    @property
+    def comms_share_of_cost_pct(self) -> float:
+        """Outbound comms as a share of total spend (cost-weighted) — the read-out axis.
+
+        Uses cost_weighted_total (not output_tokens) so the number matches "% of
+        spend" as the prize-sizing read-out characterizes it.
+        """
+        cw = self.cost_weighted_total
+        return 100.0 * self.comms_cost_weighted / cw if cw else 0.0
+
     def __add__(self, other: "Usage") -> "Usage":
         return Usage(
             input_tokens=self.input_tokens + other.input_tokens,
@@ -111,6 +132,8 @@ class Usage:
             d["comms_blocks"] = self.comms_blocks
             d["comms_chars"] = self.comms_chars
             d["comms_est_tokens"] = self.comms_est_tokens
+            d["comms_cost_weighted"] = round(self.comms_cost_weighted, 3)
+            d["comms_share_of_cost_pct"] = round(self.comms_share_of_cost_pct, 6)
         return d
 
 
@@ -191,7 +214,14 @@ def _iter_transcripts(paths) -> list:
     files = []
     for p in paths:
         if os.path.isdir(p):
-            files.extend(sorted(glob.glob(os.path.join(p, "*.jsonl"))))
+            # Recurse: subagent transcripts nest under
+            # <sessionId>/subagents/[workflows/wf_*/]agent-*.jsonl at varying depth,
+            # never inline in the parent .jsonl. A flat glob misses ~13% of real
+            # spend. Non-transcript nested .jsonl contributes nothing (filtered on
+            # type == "assistant").
+            files.extend(
+                sorted(glob.glob(os.path.join(p, "**", "*.jsonl"), recursive=True))
+            )
         else:
             files.append(p)
     return files
@@ -279,10 +309,10 @@ def main(argv=None) -> int:
         print(
             f"  (sidechain turns excluded: {agg_side.turns}; --include-sidechains to fold in)"
         )
-    if args.comms_share and primary.output_tokens:
-        share = 100.0 * primary.comms_est_tokens / primary.output_tokens
+    if args.comms_share and primary.cost_weighted_total:
         print(
-            f"  comms est ~{primary.comms_est_tokens} tok = {share:.1f}% of output tokens (estimate)"
+            f"  comms est ~{primary.comms_est_tokens} tok = "
+            f"{primary.comms_share_of_cost_pct:.2f}% of spend (cost-weighted estimate)"
         )
     return 0
 
