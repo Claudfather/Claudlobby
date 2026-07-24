@@ -11,7 +11,7 @@
 # healed it.
 #
 # Per bot: [skip if already healthy] → pre-stop-handoff → spin-up-bot → WAIT for
-# a fresh BRIDGE_READY in logs/startup.log (byte-fenced so a stale line cannot
+# a fresh BRIDGE_READY in logs/startup.log (marker-fenced so a stale line cannot
 # pass) up to --ceiling seconds → only THEN the next bot. Hard-stop on the first
 # bot that never comes ready (proceed-anyway across the fleet is the bug itself).
 #
@@ -71,7 +71,7 @@ rr_list_fleets() {
 # Roll a single fleet. Sets global counters; returns 1 to signal a hard-stop.
 rr_process_fleet() {
     local fleet="$1"
-    local bots_dir fleet_dir declared bot_dir bot_id log fence state
+    local bots_dir fleet_dir declared bot_dir bot_id fence state
     bots_dir="$(resolve_bots_dir "$fleet")"
     if [ ! -d "$bots_dir" ]; then
         echo "$(ts_iso) SKIP fleet: no bots dir for '$fleet' ($bots_dir)" >> "$LOG"
@@ -96,9 +96,9 @@ rr_process_fleet() {
             fi
         fi
 
-        # Fence the log BEFORE the restart so only this boot's BRIDGE_READY counts.
-        log="$bot_dir/logs/startup.log"
-        fence=0; [ -f "$log" ] && fence="$(wc -c < "$log" 2>/dev/null | tr -d ' ')"
+        # Write a unique fence marker BEFORE the restart so only a BRIDGE_READY
+        # after it counts (rotation-proof + fail-closed; see wait_bridge_ready).
+        fence="$(bridge_fence_write "$bot_dir")"
 
         echo "$(ts_iso) RESTART: $bot_id" >> "$LOG"
         "$LIB_DIR/pre-stop-handoff.sh" "$bot_dir" >> "$LOG" 2>&1 || true
@@ -106,7 +106,7 @@ rr_process_fleet() {
             rr_fail "$fleet" "$bot_id" "$bots_dir" "spin-up-bot failed" || return 1
             continue
         fi
-        if wait_bridge_ready "$bot_dir" "$CEILING" "${fence:-0}"; then
+        if wait_bridge_ready "$bot_dir" "$CEILING" "$fence"; then
             echo "$(ts_iso) READY: $bot_id" >> "$LOG"; RESTARTED=$((RESTARTED + 1))
         else
             rr_fail "$fleet" "$bot_id" "$bots_dir" "no BRIDGE_READY within ${CEILING}s" || return 1

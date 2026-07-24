@@ -14,43 +14,51 @@ assert_eq() {
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export CLAUDLOBBY_ROOT="$T"
 
-echo "=== wait_bridge_ready — the fresh-fenced BRIDGE_READY gate ==="
+echo "=== bridge_fence_write + wait_bridge_ready — the marker-fenced gate ==="
 # shellcheck source=../lib/lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
 BOT="$T/bot"; mkdir -p "$BOT/logs"
 LOG="$BOT/logs/startup.log"
 
-# (1) A STALE BRIDGE_READY (before the fence) must NOT pass — the exact
-#     "looks healthy but this boot never came up" trap the gate exists to stop.
+# Prior-boot content that already contains a (stale) BRIDGE_READY — the exact
+# "looks healthy but THIS boot never came up" trap the gate exists to stop.
 printf '%s\n' "2026-01-01 POLL_START — old boot" "2026-01-01 BRIDGE_READY — Telegram poller up" > "$LOG"
-fence="$(wc -c < "$LOG" | tr -d ' ')"
-wait_bridge_ready "$BOT" 0 "$fence" && r=pass || r=timeout
-assert_eq "(1) stale BRIDGE_READY below the fence is NOT accepted" "timeout" "$r"
 
-# (2) A FRESH BRIDGE_READY (appended after the fence) passes.
+# (1) bridge_fence_write appends a unique marker and echoes the token.
+tok="$(bridge_fence_write "$BOT")"
+assert_eq "(1) fence marker written to the log" "true" "$(grep -q "$tok" "$LOG" && echo true || echo false)"
+
+# (2) The stale BRIDGE_READY (BEFORE the marker) must NOT pass.
+wait_bridge_ready "$BOT" 0 "$tok" && r=ready || r=timeout
+assert_eq "(2) stale BRIDGE_READY before the marker is NOT accepted" "timeout" "$r"
+
+# (3) A fresh BRIDGE_READY AFTER the marker passes.
 printf '%s\n' "2026-07-23 POLL_START — this boot" "2026-07-23 BRIDGE_READY — Telegram poller up" >> "$LOG"
-wait_bridge_ready "$BOT" 0 "$fence" && r=ready || r=timeout
-assert_eq "(2) fresh BRIDGE_READY above the fence passes" "ready" "$r"
+wait_bridge_ready "$BOT" 0 "$tok" && r=ready || r=timeout
+assert_eq "(3) fresh BRIDGE_READY after the marker passes" "ready" "$r"
 
-# (3) Fence with no fresh line yet → timeout (drives the serial wait).
-fence2="$(wc -c < "$LOG" | tr -d ' ')"
+# (4) A NEW marker with no ready-yet after it → timeout (drives the serial wait).
+tok2="$(bridge_fence_write "$BOT")"
 printf '%s\n' "2026-07-23 POLL_START — restarted, bridge still coming up" >> "$LOG"
-wait_bridge_ready "$BOT" 0 "$fence2" && r=ready || r=timeout
-assert_eq "(3) fresh POLL_START but no BRIDGE_READY yet → timeout" "timeout" "$r"
+wait_bridge_ready "$BOT" 0 "$tok2" && r=ready || r=timeout
+assert_eq "(4) new marker, BRIDGE_READY not yet written → timeout" "timeout" "$r"
 
-# (4) Rotation fallback: log truncated below the fence → scan from the last
-#     POLL_START. A fresh BRIDGE_READY there still passes.
+# (5) Rotation that KEEPS the marker (log-rotate's line-tail): still passes.
 : > "$LOG"
-printf '%s\n' "POLL_START — post-rotation boot" "BRIDGE_READY — Telegram poller up" >> "$LOG"
-wait_bridge_ready "$BOT" 0 999999 && r=ready || r=timeout
-assert_eq "(4) rotation fallback accepts a fresh BRIDGE_READY after POLL_START" "ready" "$r"
+tok3="$(bridge_fence_write "$BOT")"
+printf '%s\n' "2026-07-23 POLL_START — booting" "2026-07-23 BRIDGE_READY — Telegram poller up" >> "$LOG"
+tail -n 3 "$LOG" > "$LOG.rot" && mv "$LOG.rot" "$LOG"   # rotation keeps the recent tail
+wait_bridge_ready "$BOT" 0 "$tok3" && r=ready || r=timeout
+assert_eq "(5) rotation keeping the marker still accepts a fresh BRIDGE_READY" "ready" "$r"
 
-# (5) Rotation fallback with POLL_START but NO BRIDGE_READY → timeout.
+# (6) Rotation that DROPS the marker → fail CLOSED (timeout), NEVER false-ready.
+#     This is the #696 finding: the old byte-offset fallback accepted a stale
+#     pre-restart BRIDGE_READY here; the marker approach rejects it.
 : > "$LOG"
-printf '%s\n' "POLL_START — post-rotation boot, bridge down" >> "$LOG"
-wait_bridge_ready "$BOT" 0 999999 && r=ready || r=timeout
-assert_eq "(5) rotation fallback with no BRIDGE_READY → timeout" "timeout" "$r"
+printf '%s\n' "OLD POLL_START — prior boot" "OLD BRIDGE_READY — Telegram poller up" > "$LOG"  # marker rotated away
+wait_bridge_ready "$BOT" 0 "RR_FENCE_that_was_rotated_away" && r=ready || r=timeout
+assert_eq "(6) marker rotated away → fail CLOSED (stale BRIDGE_READY rejected)" "timeout" "$r"
 
 echo ""
 echo "=== rolling-restart.sh — fleet enumeration + CLI guards ==="

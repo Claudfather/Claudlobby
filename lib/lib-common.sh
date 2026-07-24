@@ -640,34 +640,53 @@ bridge_bringup_verify() {
     esac
 }
 
-# wait_bridge_ready <bot_dir> <ceiling_s> <fence_bytes>
-# Block until a FRESH `BRIDGE_READY` is appended to the bot's startup.log — the
-# per-bot gate for a serial rolling restart (#689). <fence_bytes> is the log size
-# captured BEFORE the restart, so only lines this boot writes count and a stale
-# BRIDGE_READY from a prior boot can never pass the gate. Returns 0 the moment a
-# fresh BRIDGE_READY appears, 1 once <ceiling_s> elapses (the caller then serializes
-# / halts rather than proceed-anyway — a mass proceed-anyway is the #688/#689
-# fleet-wide outage). Poll-count, not clock, so a slow bridge spawns no date fork.
-# The log line is boot-scoped (start-bot writes exactly one per successful boot),
-# which is a cleaner freshness signal than a live bridge_state read that could
-# still match the not-yet-reaped OLD poller mid-restart.
+# bridge_fence_write <bot_dir>
+# Append a UNIQUE restart-fence marker to the bot's startup.log and echo the
+# token. Call this immediately BEFORE the restart, then pass the token to
+# wait_bridge_ready — only a BRIDGE_READY written after the marker counts as
+# fresh. The token embeds this run's pid + the bot + a per-run sequence, so it
+# is unique per (run, bot) and never collides with a prior run's leftover marker.
+bridge_fence_write() {
+    local bot_dir="${1:?Usage: bridge_fence_write <bot_dir>}"
+    local log="$bot_dir/logs/startup.log" token
+    : "${_RR_FENCE_SEQ:=0}"
+    token="RR_FENCE_$$_$(basename "$bot_dir")_${_RR_FENCE_SEQ}"
+    _RR_FENCE_SEQ=$((_RR_FENCE_SEQ + 1))
+    mkdir -p "$bot_dir/logs" 2>/dev/null || true
+    printf '%s %s\n' "$(ts_iso)" "$token" >> "$log" 2>/dev/null || true
+    printf '%s' "$token"
+}
+
+# wait_bridge_ready <bot_dir> <ceiling_s> <fence_token>
+# Block until a BRIDGE_READY is appended to the bot's startup.log AFTER
+# <fence_token> — the unique marker bridge_fence_write wrote just before the
+# restart. Only a BRIDGE_READY that follows the marker counts, so a stale one
+# from a prior boot can never pass the gate. This is the per-bot gate for a
+# serial rolling restart (#689); the caller serializes / halts rather than
+# proceed-anyway across the fleet (the #688/#689 mass-restart outage).
+#
+# Why a marker, not a byte offset (#696 review, finding 1): log-rotate.sh keeps
+# only a line-count tail, so a rotation mid-restart-window invalidates a byte
+# offset AND can leave a prior boot's POLL_START…BRIDGE_READY as the "newest"
+# pair — a stale line the old byte/last-POLL_START fallback would accept. The
+# marker rides the rotated tail with the new lines; if it is ever rotated away
+# entirely, nothing matches and the gate fails CLOSED (a timeout, never a
+# false-ready). Poll-count, not clock, so a slow bridge spawns no date fork.
+#
+# Limitation (#696 finding 2, narrow): the marker is written just before the
+# restart, so a bot that is ITSELF still mid-boot when rolled (has not reached
+# its own BRIDGE_READY) can have its old process append a real BRIDGE_READY after
+# the marker before `systemctl restart` reaps it. This is marker-fresh, not
+# process-generation-fresh — tracked as a #696 follow-up.
 wait_bridge_ready() {
-    local bot_dir="${1:?Usage: wait_bridge_ready <bot_dir> <ceiling_s> <fence_bytes>}"
-    local ceiling="${2:-180}" fence="${3:-0}"
-    local log="$bot_dir/logs/startup.log" waited=0 step=3 cur fresh
+    local bot_dir="${1:?Usage: wait_bridge_ready <bot_dir> <ceiling_s> <fence_token>}"
+    local ceiling="${2:-180}" token="${3:?wait_bridge_ready needs a fence token}"
+    local log="$bot_dir/logs/startup.log" waited=0 step=3 after
     while :; do
-        cur=0; [ -f "$log" ] && cur="$(wc -c < "$log" 2>/dev/null | tr -d ' ')"
-        cur="${cur:-0}"
-        if [ "$cur" -ge "$fence" ]; then
-            # Only bytes appended since the fence — inherently this-boot-fresh.
-            fresh="$(tail -c "+$((fence + 1))" "$log" 2>/dev/null || true)"
-        else
-            # Log rotated/truncated since the fence → fall back to the tail from
-            # the LAST POLL_START (start-bot writes one per boot), which still
-            # excludes any pre-restart BRIDGE_READY.
-            fresh="$(awk '/POLL_START/{buf=""} {buf = buf $0 ORS} END{printf "%s", buf}' "$log" 2>/dev/null || true)"
-        fi
-        case "$fresh" in *BRIDGE_READY*) return 0 ;; esac
+        # Everything after the LAST occurrence of the fence token. A prior boot's
+        # lines precede the marker; only what follows it is this restart's.
+        after="$(awk -v tok="$token" 'index($0, tok){after=""; seen=1; next} seen{after = after $0 ORS} END{printf "%s", after}' "$log" 2>/dev/null || true)"
+        case "$after" in *BRIDGE_READY*) return 0 ;; esac
         [ "$waited" -ge "$ceiling" ] && return 1
         sleep "$step"
         waited=$((waited + step))
