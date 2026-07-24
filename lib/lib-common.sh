@@ -644,14 +644,15 @@ bridge_bringup_verify() {
 # Append a UNIQUE restart-fence marker to the bot's startup.log and echo the
 # token. Call this immediately BEFORE the restart, then pass the token to
 # wait_bridge_ready — only a BRIDGE_READY written after the marker counts as
-# fresh. The token embeds this run's pid + the bot + a per-run sequence, so it
-# is unique per (run, bot) and never collides with a prior run's leftover marker.
+# fresh. The token embeds this run's pid + the bot, so it is unique per
+# (run, bot) and never collides with a prior run's leftover marker (a new run
+# carries a fresh pid). One fence write per bot per run — if a same-run retry is
+# ever added, the token needs a per-write discriminator (pid+bot alone cannot
+# tell two same-run writes apart).
 bridge_fence_write() {
     local bot_dir="${1:?Usage: bridge_fence_write <bot_dir>}"
     local log="$bot_dir/logs/startup.log" token
-    : "${_RR_FENCE_SEQ:=0}"
-    token="RR_FENCE_$$_$(basename "$bot_dir")_${_RR_FENCE_SEQ}"
-    _RR_FENCE_SEQ=$((_RR_FENCE_SEQ + 1))
+    token="RR_FENCE_$$_$(basename "$bot_dir")"
     mkdir -p "$bot_dir/logs" 2>/dev/null || true
     printf '%s %s\n' "$(ts_iso)" "$token" >> "$log" 2>/dev/null || true
     printf '%s' "$token"
@@ -685,6 +686,7 @@ wait_bridge_ready() {
     while :; do
         # Everything after the LAST occurrence of the fence token. A prior boot's
         # lines precede the marker; only what follows it is this restart's.
+        # POSIX awk only (index/ORS/printf) — runs on mawk, no GNU extensions.
         after="$(awk -v tok="$token" 'index($0, tok){after=""; seen=1; next} seen{after = after $0 ORS} END{printf "%s", after}' "$log" 2>/dev/null || true)"
         case "$after" in *BRIDGE_READY*) return 0 ;; esac
         [ "$waited" -ge "$ceiling" ] && return 1
