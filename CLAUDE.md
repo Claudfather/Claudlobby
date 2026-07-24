@@ -125,6 +125,10 @@ Key lifecycle scripts in `lib/`:
 | `install-reload-fleet-systemd.sh` | Reload-fleet daily timer enrollment (systemd) |
 | `weekly-worker-restart.sh` | Weekly lossless restart of worker bots (managers excluded) to apply a staged binary |
 | `install-weekly-worker-restart-systemd.sh` | Weekly-worker-restart timer enrollment (systemd) |
+| `rolling-restart.sh` | Serial fleet restart — bots one at a time, each gated on a fresh Telegram `BRIDGE_READY` before the next, so a mass restart cannot land the fleet inbound-dead (#689) |
+| `host-health-check.sh` | Host-hardware early-warning — FLEET ALERT on under-voltage/thermal throttling (Pi `vcgencmd`) and SD/MMC storage stalls (kernel log), de-duped via a state file — runs as the `host-health-check` host job |
+| `migrate-fleet-to-system.sh` | Staged, reversible migration of a flat `local/<fleet>/` into a nested vault system container (`local/<system>/<fleet>/`), re-pointing every bot supervision unit at the new path |
+| `rehearse-briefing-timer.sh` | Rehearse the composed briefing-timer chain on a throwaway fleet — asserts the equippable `<prefix>.briefing-<bot>-<slot>` unit fires and that removing a slot prunes its units on both platforms; sibling of `rehearse-keepalive-swap.sh` |
 
 ## Repository Hygiene — MANDATORY
 
