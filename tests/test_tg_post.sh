@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/test_tg_post.sh — tg-post delivery-outcome contract (#552).
+# tests/test_tg_post.sh — tg-post delivery-outcome contract.
 # Real jq + a stub curl (emits a canned API body): asserts tg-post exits 0 on
 # ok:true and NON-ZERO on a rejected / empty / non-JSON send, so env-less callers
 # (creds-check, host timers) stop logging a false success on a dead token.
@@ -32,15 +32,16 @@ run_tg() {  # $1=api-json  $2=curl-exit(default 0) → echoes tg-post's exit cod
     echo "$rc"
 }
 
-echo "=== tg-post delivery-outcome contract (#552) ==="
+echo "=== tg-post delivery-outcome contract ==="
 
 # 1) ok:true → exit 0, message_id surfaced
 rc="$(run_tg '{"ok":true,"result":{"message_id":42}}')"
 assert_eq "ok:true → exit 0" "0" "$rc"
 assert_eq "ok:true surfaces the message_id" "true" "$(grep -q 42 "$T/out" && echo true || echo false)"
 
-# 2) ok:false (dead/cross-wired token) → exit 3, LOUD on stderr — the #552 fix
-#    (was: curl 200 + jq exit 0 → silent success on a dropped alert).
+# 2) ok:false (dead/cross-wired token) → exit 3, LOUD on stderr. An HTTP 200 with
+#    ok:false is a REJECTED send, not delivery — without the .ok check it read as
+#    a silent success (curl 200 + jq exit 0) on a dropped alert.
 rc="$(run_tg '{"ok":false,"error_code":401,"description":"Unauthorized"}')"
 assert_eq "ok:false → exit 3 (not a silent 0)" "3" "$rc"
 assert_eq "ok:false is loud (REJECTED on stderr)" "true" "$(grep -q 'REJECTED' "$T/err" && echo true || echo false)"

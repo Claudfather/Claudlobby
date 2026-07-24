@@ -53,11 +53,12 @@ printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" > "$URL_C
 # MarkdownV2 and pass it themselves (see telegram-formatting protocol).
 # Capture the response instead of piping straight to jq. A dead/cross-wired
 # token or a bad chat returns HTTP 200 with {"ok":false,...}, so `curl -s`
-# succeeds and the delivery failure lives ONLY in the body — piping to jq (whose
-# exit became the script's) reported exit 0 on a REJECTED send, so env-less
-# callers (creds-check, host timers) logged a false success and the operator was
-# never told (#552). Parse `.ok` and exit NON-ZERO on failure so the caller can
-# escalate a genuinely undelivered alert instead of trusting a silent drop.
+# succeeds and the delivery failure lives ONLY in the body — an HTTP 200 does
+# NOT imply delivery. Piping to jq (its exit becoming the script exit) surfaces
+# exit 0 on a REJECTED send, so env-less callers (creds-check, host timers) log
+# a false success on an alert that never went out. Parse `.ok` and exit NON-ZERO
+# on failure so the caller can escalate a genuinely undelivered alert instead of
+# trusting a silent drop.
 RESP="$(curl -s -X POST --config "$URL_CFG" \
   -d "chat_id=${CHAT_ID}" \
   --data-urlencode "text=${MSG}" \
