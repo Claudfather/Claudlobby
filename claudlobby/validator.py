@@ -152,9 +152,24 @@ def _validate_bots(
         iter_skill_grants,
     )
 
+    # The L1 source guard runs at generate-time (composer.compose_bot); mirror it
+    # here so `validate` ≡ `generate` for the deny-by-default path rule — an
+    # unanchored, undeclared absolute in a bot source (config leaves or loaded MCP
+    # fragments) is a hard error, surfaced before generate is ever attempted.
+    from .composer import _load_bot_fragments
+    from .path_audit import audit_bot_sources
+
     for bot_name, bot in fleet.bots.items():
         bot_env = dotenv.read(paths.bot_runtime(bot_name) / ".env")
         effective_env: dict[str, str] = {**os.environ, **fleet_env, **bot_env}
+
+        for sf in audit_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths)):
+            report.errors.append(
+                f"bot '{bot_name}': {sf.source} = {sf.value!r} — denied absolute "
+                f"path {sf.path} (anchor on FLEET_ROOT/BOT_DIR/CLAUDLOBBY_ROOT or "
+                "declare it in external_paths)"
+            )
+
         # Expertise — at least one must exist (HARD)
         if not bot.expertise:
             report.errors.append(
@@ -423,18 +438,6 @@ def _validate_bots(
                     f"This hook will be silently ignored by Claude Code."
                 )
 
-        # Hook command existence (warn)
-        for event, entries in bot.hooks.items():
-            for entry in entries:
-                cmd = entry.get("command")
-                if not cmd or entry.get("type") == "prompt":
-                    continue
-                cmd_path = Path(cmd)
-                if cmd_path.is_absolute() and not cmd_path.exists():
-                    report.warnings.append(
-                        f"bot '{bot_name}': hook {event} command '{cmd}' not found on disk"
-                    )
-
         # RC-killing env vs remote-control/channels (error, #533). extra_flags
         # is checked too so a raw "--remote-control" there gets the same guard.
         # See RC_KILLING_ENV_VARS for why these vars break channel replies.
@@ -623,17 +626,21 @@ def _validate_teams(fleet: FleetConfig, report: ValidationReport) -> None:
 
 
 def _check_relative_file(
-    label: str, value: str, base: Path, report: ValidationReport
+    label: str, value: str, base: Path, report: ValidationReport, *, hard: bool = False
 ) -> None:
     """Shared check for config paths defined as relative-to-their-config-file
     (fleet.mission_file, project mission_file): warn on absolute (pathlib's
     / operator would silently discard base), on `..` components (escapes the
-    overlay the same way), and on a missing target."""
+    overlay the same way), and on a missing target.
+
+    ``hard=True`` routes the absolute-path case to ``report.errors`` instead of
+    ``warnings`` — the L1 deny-by-default posture for fleet.mission_file, whose
+    absolute the composer emits into every bot's CLAUDE.md. The `..`/missing
+    branches stay warnings (both hard and soft callers share them)."""
     p = Path(value)
     if p.is_absolute():
-        report.warnings.append(
-            f"{label} '{value}' is absolute — must be relative to {base}"
-        )
+        sink = report.errors if hard else report.warnings
+        sink.append(f"{label} '{value}' is absolute — must be relative to {base}")
     elif ".." in p.parts:
         report.warnings.append(
             f"{label} '{value}' contains '..' — must stay under {base}"
@@ -666,6 +673,7 @@ def _validate_mission(
             fleet.mission_file,
             paths.fleet_config_dir,
             report,
+            hard=True,
         )
 
 

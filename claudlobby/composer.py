@@ -149,18 +149,42 @@ def _build_jinja_env(paths: Paths) -> jinja2.Environment:
 # ----------------------------------------------------------------------
 
 
+def _load_mcp_fragment(name: str, paths: Paths) -> dict | None:
+    """Load + JSON-parse an MCP fragment by name, or ``None`` if it is absent.
+
+    The single loader for a raw fragment dict — shared by :func:`compose_mcp_json`
+    (which wires the servers) and the L1 source guard (which classifies the
+    fragment's leaves before any output is written). Malformed JSON is a hard
+    error: a fragment that will not parse cannot compose."""
+    frag_path = paths.find_library_file("mcp", name, ".json")
+    if frag_path is None:
+        return None
+    try:
+        return json.loads(frag_path.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"invalid JSON in MCP fragment {frag_path}: {e}") from e
+
+
+def _load_bot_fragments(bot: BotConfig, paths: Paths) -> dict[str, dict]:
+    """Every present MCP fragment for a bot, keyed by name — the ``{name: frag}``
+    dict the L1 source guard classifies. The one assembly point shared by
+    compose_bot, the validator, and freshbox (they import it from here, so the
+    fragment library layout stays a composer concern)."""
+    return {
+        entry.name: frag
+        for entry in bot.mcp
+        if (frag := _load_mcp_fragment(entry.name, paths)) is not None
+    }
+
+
 def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
     import shutil
 
     merged: dict = {"mcpServers": {}}
     for entry in bot.mcp:
-        frag_path = paths.find_library_file("mcp", entry.name, ".json")
-        if frag_path is None:
+        frag = _load_mcp_fragment(entry.name, paths)
+        if frag is None:
             continue
-        try:
-            frag = json.loads(frag_path.read_text())
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-            raise ValueError(f"invalid JSON in MCP fragment {frag_path}: {e}") from e
         contract = frag.pop("_env_contract", {})
         global_binary = frag.pop("_global_binary", None)
 
@@ -761,10 +785,18 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             pairs.append(f"{name}={src_type}:{src_repo}")
         lines.append(f"export FLEET_PLUGINS_MARKETPLACES={_shq(' '.join(pairs))}")
 
+    # An anchor-headed value (${FLEET_ROOT}/x, $BOT_DIR/y) must emit DOUBLE-quoted
+    # so the shell expands the composer anchor at source time — mirrors the
+    # secret_files precedent below. The default single-quoted _shq sink would
+    # freeze the anchor as a literal, leaving the 'anchor it' remediation inert.
+    # Every non-anchor value stays _shq (byte-identical to before).
+    from .path_audit import is_anchor_headed
+
     for k, v in bot.env.items():
         if not _SHELL_IDENT_RE.match(k):
             raise ValueError(f"bot.env key {k!r} is not a valid shell identifier")
-        lines.append(f"export {k}={_shq(v)}")
+        rhs = f'"{v}"' if is_anchor_headed(v) else _shq(v)
+        lines.append(f"export {k}={rhs}")
 
     # Secret-file paths: fleet-relative by contract, anchored on FLEET_ROOT so the
     # path is composer-derived and moves with the fleet. An absolute (or
@@ -1051,7 +1083,9 @@ def compose_tool_outputs(
             raise ValueError(
                 f"bot '{bot.bot_id}': tools render duplicate target '{target_name}'"
             )
-        params = tool_resolve.resolve_tool_params(entry.name, manifest, entry.params)
+        params = tool_resolve.resolve_tool_params(
+            entry.name, manifest, entry.params, bot.external_paths
+        )
         context = tool_resolve.tool_context(
             params,
             bot_id=bot.bot_id,
@@ -1678,9 +1712,13 @@ def compose_settings_local(
     siblings = [bid for bid in fleet.bots if bid != bot.bot_id]
     for sibling in siblings:
         sibling_dir = str(paths.bot_runtime(sibling))
-        deny_patterns.append(f"Read({sibling_dir}/**)")
-        deny_patterns.append(f"Write({sibling_dir}/**)")
-        deny_patterns.append(f"Edit({sibling_dir}/**)")
+        deny_patterns.extend(
+            (
+                f"Read({sibling_dir}/**)",
+                f"Write({sibling_dir}/**)",
+                f"Edit({sibling_dir}/**)",
+            )
+        )
 
     # Layer 1: Guardrail permissions (deny-capable safety rules; shared expertise
     # schema). Guardrails are usually deny-only; their rare allows join Layer 2.
@@ -1751,6 +1789,39 @@ def compose_settings_local(
         for t in BASE_TOOLS:
             if t not in allow_patterns and t not in bot_deny_plain:
                 allow_patterns.insert(0, t)
+
+    # L1 source guard (#702) — an ALLOW grant carrying an absolute path must
+    # anchor it (${FLEET_ROOT}/…) or declare it (external_paths), same as any
+    # other source value: granting access to a raw absolute is the self-containment
+    # violation (it dangles the moment the fleet runs elsewhere). Deny grants are
+    # restrictions, not wiring-to-a-path, so they are not classified — which also
+    # sidesteps the composer-derived sibling-isolation denies above (a resolved
+    # absolute the composer emits, never a source). No composer-derived allow layer
+    # emits an absolute, so every flagged allow traces to a real source. Fires
+    # before the settings file is written; the whole-bot no-partial-output
+    # guarantee is the dataclass+fragment gate before mkdir, and generate is
+    # idempotent (mkdir exist_ok, writes overwrite) with compose_fleet surfacing
+    # every offending bot, so a late-caught grant re-generates cleanly once fixed.
+    from .path_audit import (
+        SourceFinding,
+        classify_grant_paths,
+        source_findings_error,
+    )
+
+    grant_findings: list[SourceFinding] = []
+    for grant in allow_patterns:
+        for denied in classify_grant_paths(grant, bot.external_paths):
+            grant_findings.append(
+                SourceFinding(
+                    bot_id=bot.bot_id,
+                    source=f"bots.{bot.bot_id} grant {grant}",
+                    value=grant,
+                    path=denied,
+                    reason="grant path",
+                )
+            )
+    if grant_findings:
+        raise source_findings_error(bot.bot_id, grant_findings)
 
     if deny_patterns:
         permissions: dict = {"deny": deny_patterns}
@@ -1890,6 +1961,13 @@ def compose_bot(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, log=None, *, boot_delay_s: int = 0
 ) -> Path:
     bot_dir = paths.bot_runtime(bot.bot_id)
+    # L1 source guard (#702) — deny an unanchored, undeclared absolute path in any
+    # compose source (bot config leaves + loaded MCP fragments) BEFORE the first
+    # disk write, so a failing bot leaves no partial wiring behind.
+    from .path_audit import assert_bot_sources
+
+    assert_bot_sources(bot, fleet, paths, _load_bot_fragments(bot, paths))
+
     bot_dir.mkdir(parents=True, exist_ok=True)
     (bot_dir / ".claude").mkdir(exist_ok=True)
     (bot_dir / "memory").mkdir(exist_ok=True)
@@ -2180,6 +2258,25 @@ def _write_timer_units(
     the fleet name on both the systemd ``ExecStart`` and the launchd
     ``ProgramArguments`` (the per-(bot,slot) briefing timers pass ``<bot> <slot>``).
     """
+    # L1 source guard (#702) — a timer's script is a compose source. A
+    # $CLAUDLOBBY_ROOT-anchored script (the shape system.yaml / fleet jobs use)
+    # passes; a raw absolute hand-typed into a fleet timer's script is denied.
+    from .path_audit import SourceFinding, denied_source_paths, source_findings_error
+
+    _timer_id = f"{fleet_name or 'host'} timer {name}"
+    _timer_findings = [
+        SourceFinding(
+            bot_id=_timer_id,
+            source=f"jobs.{name}.script",
+            value=script,
+            path=denied,
+            reason="timer script path",
+        )
+        for denied in denied_source_paths(script, [])
+    ]
+    if _timer_findings:
+        raise source_findings_error(_timer_id, _timer_findings)
+
     scope = fleet_name if fleet_name is not None else "host"
     script_expanded = script.replace("$CLAUDLOBBY_ROOT", str(paths.root))
     exec_start = f"{script_expanded} {fleet_name}" if fleet_name else script_expanded
@@ -2636,13 +2733,23 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
             (paths.shared_docs / subdir).mkdir(parents=True, exist_ok=True)
 
     out: dict[str, Path] = {}
+    # Collect every bot's compose failure rather than aborting on the first (G1):
+    # one generate should surface all offenders, so an operator fixes the fleet in
+    # a single pass instead of whack-a-mole.
+    failures: list[tuple[str, str]] = []
     for i, (bot_name, bot) in enumerate(fleet.bots.items()):
         _log.info("composing %s...", bot_name)
         if log is not None:
             log(f"composing {bot_name}...")
-        out[bot_name] = compose_bot(
-            bot, fleet, paths, log=log, boot_delay_s=i * _BOOT_STAGGER_SECONDS
-        )
+        try:
+            out[bot_name] = compose_bot(
+                bot, fleet, paths, log=log, boot_delay_s=i * _BOOT_STAGGER_SECONDS
+            )
+        except ValueError as e:
+            failures.append((bot_name, str(e)))
+    if failures:
+        detail = "\n\n".join(f"[{name}] {err}" for name, err in failures)
+        raise ValueError(f"{len(failures)} bot(s) failed to compose:\n\n{detail}")
 
     scaffold_env_files(fleet, paths, log=log)
 

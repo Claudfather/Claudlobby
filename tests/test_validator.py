@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -437,15 +438,24 @@ class TestObservabilityValidation:
         assert not any("bridge_heal" in w for w in report.warnings)
 
 
-class TestHookCommandValidation:
-    """Hook command path existence validation."""
+class TestHookCommandSourceGuard:
+    """Absolute hook commands under the #702 L1 source guard.
+
+    The old soft existence check (warn when an absolute command file is missing)
+    is dropped — provenance replaces existence (G14). An absolute hook command is
+    now a hard error whether or not the file exists; it must anchor on a composer
+    path or be declared. hooks[].command is a word-split field, so an embedded
+    absolute is caught too.
+    """
 
     def _env_patch(self, monkeypatch):
         monkeypatch.setenv("GITHUB_PAT", "ghp_test")
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
 
-    def test_absolute_missing_command_warns(self, fleet_dir, monkeypatch):
+    def test_absolute_command_errors_and_existence_check_is_gone(
+        self, fleet_dir, monkeypatch
+    ):
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].hooks = {
@@ -453,12 +463,22 @@ class TestHookCommandValidation:
         }
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any(
-            "hook" in w and "/nonexistent/path/hook.sh" in w for w in report.warnings
-        )
+        # Now a hard ERROR (source guard), not a warning.
+        assert any("/nonexistent/path/hook.sh" in e for e in report.errors)
+        # The dropped existence check no longer emits its 'not found on disk' warn.
+        assert not any("not found on disk" in w for w in report.warnings)
 
-    def test_relative_command_not_checked(self, fleet_dir, monkeypatch):
-        """Relative commands (like 'log.sh') are not validated — may be on PATH."""
+    def test_existing_absolute_command_still_errors(self, fleet_dir, monkeypatch):
+        # /bin/true exists — but existence no longer excuses an absolute (G14).
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].hooks = {"PreToolUse": [{"command": "/bin/true"}]}
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("/bin/true" in e for e in report.errors)
+
+    def test_relative_command_is_clean(self, fleet_dir, monkeypatch):
+        """Relative commands (like 'log.sh') are not paths — neither warned nor errored."""
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].hooks = {
@@ -466,21 +486,21 @@ class TestHookCommandValidation:
         }
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any("hook" in w and "log.sh" in w for w in report.warnings)
+        assert not any("log.sh" in e for e in report.errors)
+        assert not any("log.sh" in w for w in report.warnings)
 
-    def test_existing_absolute_command_no_warn(self, fleet_dir, monkeypatch):
+    def test_anchored_command_is_clean(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        # /bin/true exists on all Unix systems
         fleet.bots["lead"].hooks = {
-            "PreToolUse": [{"command": "/bin/true"}],
+            "PreToolUse": [{"command": "${CLAUDLOBBY_ROOT}/lib/hook.sh"}],
         }
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any("hook" in w and "/bin/true" in w for w in report.warnings)
+        assert not any("hook.sh" in e for e in report.errors)
 
-    def test_prompt_type_hooks_skip_command_check(self, fleet_dir, monkeypatch):
-        """Hooks with type: prompt don't have file-based commands."""
+    def test_prompt_type_hook_has_no_command_to_check(self, fleet_dir, monkeypatch):
+        """Hooks with type: prompt carry no command — their keys are exempt."""
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].hooks = {
@@ -488,7 +508,7 @@ class TestHookCommandValidation:
         }
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any("hook" in w and "not found" in w for w in report.warnings)
+        assert not any("Is this safe" in e for e in report.errors)
 
 
 class TestCrossFleetCollisions:
@@ -1095,9 +1115,9 @@ class TestClaudronDoor:
         self._env(monkeypatch)
         self._cli_on_path(tmp_path, monkeypatch)
         self._wire(fleet_dir, self._vault(tmp_path))
-        assert not [
-            w for w in self._warnings(fleet_dir) if "claudron" in w.lower()
-        ], self._warnings(fleet_dir)
+        assert not [w for w in self._warnings(fleet_dir) if "claudron" in w.lower()], (
+            self._warnings(fleet_dir)
+        )
 
     def test_path_that_is_not_a_vault_warns(self, fleet_dir, tmp_path, monkeypatch):
         self._env(monkeypatch)
@@ -1149,9 +1169,9 @@ class TestClaudronDoor:
         """No vault path ⇒ no door to check, even with no CLI on PATH."""
         self._env(monkeypatch)
         self._no_cli_on_path(tmp_path, monkeypatch)
-        assert not [
-            w for w in self._warnings(fleet_dir) if "claudron" in w.lower()
-        ], self._warnings(fleet_dir)
+        assert not [w for w in self._warnings(fleet_dir) if "claudron" in w.lower()], (
+            self._warnings(fleet_dir)
+        )
 
 
 def test_validator_never_imports_claudron():
@@ -1164,3 +1184,84 @@ def test_validator_never_imports_claudron():
         if re.match(r"\s*(from\s+claudron|import\s+claudron)\b", line)
     ]
     assert not offenders, offenders
+
+
+class TestSourceGuardParity:
+    """validate ≡ generate for the #702 L1 deny-by-default source guard — an
+    unanchored, undeclared absolute in a bot source is a validate-time hard
+    error, mirroring compose_bot's assert_bot_sources."""
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def test_foreign_env_absolute_is_a_validate_error(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].env = {"GA4_KEY": "/Users/x/ga4.json"}
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("/Users/x/ga4.json" in e and "lead" in e for e in report.errors)
+
+    def test_anchored_env_is_clean(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].env = {"P": "${FLEET_ROOT}/mcp/x.py"}
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any("mcp/x.py" in e for e in report.errors)
+
+    def test_declared_external_absolute_is_clean(self, fleet_dir, monkeypatch):
+        from claudlobby.path_audit import ExternalDecl
+
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].env = {"P": "/var/lib/printify/dist/index.js"}
+        fleet.bots["lead"].external_paths = [
+            ExternalDecl(path="/var/lib/printify/**", purpose="mount")
+        ]
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert not any("printify" in e for e in report.errors)
+
+    def test_foreign_mcp_fragment_arg_is_a_validate_error(self, fleet_dir, monkeypatch):
+        from claudlobby.config import McpEntry
+
+        self._env_patch(monkeypatch)
+        frag = {"srv": {"command": "node", "args": ["/opt/evil/index.js"]}}
+        (fleet_dir / "library" / "mcp" / "evil.json").write_text(json.dumps(frag))
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].mcp = [McpEntry(name="evil")]
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("/opt/evil/index.js" in e for e in report.errors)
+
+
+class TestMissionFileAbsolute:
+    """fleet.mission_file is composed into every bot's CLAUDE.md, so an absolute
+    is a hard error (the L1 posture); project mission_file keeps the soft warn."""
+
+    def _env_patch(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+
+    def test_fleet_mission_file_absolute_is_error(self, fleet_dir, monkeypatch):
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.mission = "Ship product that earns its keep."
+        fleet.mission_file = "/abs/charter.md"
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any(
+            "mission_file" in e and "/abs/charter.md" in e for e in report.errors
+        )
+        assert not any("/abs/charter.md" in w for w in report.warnings)
+
+    def test_fleet_mission_file_relative_missing_stays_warn(
+        self, fleet_dir, monkeypatch
+    ):
+        # The `..`/missing branches stay warnings (only the absolute case is hard).
+        self._env_patch(monkeypatch)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.mission = "Ship product that earns its keep."
+        fleet.mission_file = "docs/charter.md"  # relative, does not exist
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("mission_file" in w and "not found" in w for w in report.warnings)
+        assert not any("mission_file" in e for e in report.errors)

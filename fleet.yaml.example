@@ -168,6 +168,17 @@ fleet:
 #     mounts:
 #       ha-config: /path/to/homeassistant/config  # edits write to the real location
 #
+#     # external_paths — bless absolute paths OUTSIDE the fleet overlay so the
+#     # deny-by-default source guard lets them through. An absolute path in any
+#     # compose source (env, an MCP fragment, a grant, a timer script) fails
+#     # generate unless it is anchored (${FLEET_ROOT}/…, ${BOT_DIR}/…,
+#     # ${CLAUDLOBBY_ROOT}/…) or declared here. Prefer anchoring for in-fleet
+#     # paths; declare only genuine outside-the-fleet dependencies. `purpose` is
+#     # required. A trailing /** blesses a subtree (>=2 leading segments).
+#     external_paths:
+#       - path: /var/lib/vendor-tool/**
+#         purpose: vendored CLI tree the bot shells out to
+#
 #     # integrations — usage docs from library/integrations/ (auto-paired with mcp by default)
 #     # Setting this explicitly overrides auto-pairing. Omit to let mcp drive it.
 #     integrations: [neon, railway, vercel]

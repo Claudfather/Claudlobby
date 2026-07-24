@@ -19,6 +19,7 @@ from .known_values import (
     VALID_PERMISSION_MODES,
     closest_match,
 )
+from .path_audit import ExternalDecl, parse_external_decls
 
 log = logging.getLogger(__name__)
 
@@ -436,6 +437,12 @@ class BotConfig:
     # VALUES stay in .env. Fleet-relative by contract — an absolute path is
     # rejected at compose.
     secret_files: dict[str, str] = field(default_factory=dict)
+    # Absolute paths OUTSIDE the fleet overlay that a compose source may
+    # legitimately reference — a genuine external dependency (a mount source, a
+    # system tool tree). Each is a {path, purpose} declaration; the L1 source
+    # guard denies any absolute that is neither anchored on a composer path
+    # (FLEET_ROOT / BOT_DIR / CLAUDLOBBY_ROOT) nor blessed here.
+    external_paths: list[ExternalDecl] = field(default_factory=list)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     startup_prompt: str | None = None
     bench: bool = False  # marks the bot as the fleet's benchmarking target
@@ -1169,6 +1176,15 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             **(defaults.get("secret_files") or {}),
             **(raw.get("secret_files") or {}),
         },
+        # Union defaults ∪ bot, then validate the merged set once. A list of
+        # {path, purpose} mappings — not a dict — so it concatenates rather than
+        # dict-spreads; parse_external_decls dedupes and hardens.
+        external_paths=parse_external_decls(
+            [
+                *(defaults.get("external_paths") or []),
+                *(raw.get("external_paths") or []),
+            ]
+        ),
         telegram=TelegramConfig(
             handle=tg_raw.get("handle"),
             token_env=tg_raw.get("token_env"),

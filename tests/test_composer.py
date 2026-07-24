@@ -6,19 +6,26 @@ import json
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
 
 from claudlobby.config import (
     BotConfig,
     FleetConfig,
+    McpEntry,
     TelegramConfig,
     ToolPermissionsConfig,
     load_fleet,
 )
+from claudlobby.path_audit import ExternalDecl
 from tests.conftest import install_real_template
 from claudlobby.composer import (
     _compose_hooks,
     _reconcile_access_json,
+    _write_timer_units,
     compose_access_json,
+    compose_bot,
+    compose_bot_conf,
+    compose_fleet,
     compose_mcp_json,
     compose_settings_local,
     compose_systemd_unit,
@@ -421,7 +428,6 @@ class TestComposeSettingsLocal:
         """The settings.local skip-flags are a distinct knob from the
         --dangerously-skip-permissions CLI flag: the flag still composes into
         CLAUDE_FLAGS while the settings booleans follow their own values."""
-        from claudlobby.composer import compose_bot_conf
 
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "solo").mkdir(parents=True)
@@ -533,7 +539,6 @@ class TestComposeBotConfModelStrategy:
     """compose_bot_conf emits MODEL_STRATEGY_* env vars when model_strategy is set."""
 
     def _compose(self, tmp_path, model_strategy=None, model=None):
-        from claudlobby.composer import compose_bot_conf
 
         bot = BotConfig(
             bot_id="worker",
@@ -618,7 +623,6 @@ class TestComposeBotConfExportedVars:
     """bot.conf must export BOT_ID so hook subprocesses (bot-vitals.sh) can read it."""
 
     def test_bot_id_is_exported(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         bot = BotConfig(
             bot_id="astrid",
@@ -640,7 +644,6 @@ class TestComposeBotConfExportedVars:
         assert "export BOT_ID=astrid" in conf
 
     def test_disable_nonessential_traffic_default_and_override(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         def _conf(**kw):
             bot = BotConfig(
@@ -674,7 +677,6 @@ class TestComposeBotConfServicePrefix:
     """compose_bot_conf derives BOT_SERVICE and SERVICE_PREFIX from fleet config."""
 
     def test_service_prefix_from_fleet_config(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         bot = BotConfig(
             bot_id="eng-1",
@@ -697,7 +699,6 @@ class TestComposeBotConfServicePrefix:
         assert "export SERVICE_PREFIX=com.myorg.prod" in conf
 
     def test_no_hardcoded_example_prefix(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         bot = BotConfig(
             bot_id="worker",
@@ -742,7 +743,6 @@ class TestComposeBotConfFleetRoot:
         )
 
     def test_root_mode_fleet_root_equals_install_root(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "kev").mkdir(parents=True)
@@ -753,7 +753,6 @@ class TestComposeBotConfFleetRoot:
         assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT"' in conf
 
     def test_nested_overlay_fleet_root_is_anchor_relative(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         root = tmp_path / "claudlobby"
         fleet_dir = root / "local" / "home" / "tl"
@@ -766,7 +765,6 @@ class TestComposeBotConfFleetRoot:
         assert 'export FLEET_ROOT="$CLAUDLOBBY_ROOT/local/home/tl"' in conf
 
     def test_vault_mode_fleet_root_is_absolute(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         root = tmp_path / "install"
         vault_fleet = tmp_path / "vault" / "tl"
@@ -778,7 +776,6 @@ class TestComposeBotConfFleetRoot:
         assert f"export FLEET_ROOT={vault_fleet}" in conf
 
     def test_fleet_root_always_emitted(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "kev").mkdir(parents=True)
@@ -816,7 +813,6 @@ class TestComposeBotConfSecretFiles:
         )
 
     def test_secret_file_path_anchored_on_fleet_root(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         bot = self._bot(
             secret_files={"GA4_SA_KEY_PATH": ".secrets/ga4-service-account.json"}
@@ -828,7 +824,6 @@ class TestComposeBotConfSecretFiles:
         )
 
     def test_multiple_secret_files_all_emitted(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         bot = self._bot(
             secret_files={
@@ -847,7 +842,6 @@ class TestComposeBotConfSecretFiles:
         )
 
     def test_no_secret_files_emits_nothing(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
 
         conf = compose_bot_conf(self._bot(), self._fleet(), self._paths(tmp_path))
         assert "SA_KEY_PATH" not in conf
@@ -855,7 +849,6 @@ class TestComposeBotConfSecretFiles:
     def test_absolute_subpath_rejected(self, tmp_path):
         """An absolute path defeats the whole purpose — it is exactly the
         hand-typed path this feature removes. Fail loud at compose."""
-        import pytest
 
         from claudlobby.composer import compose_bot_conf
 
@@ -866,7 +859,6 @@ class TestComposeBotConfSecretFiles:
             compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
 
     def test_bad_var_name_rejected(self, tmp_path):
-        import pytest
 
         from claudlobby.composer import compose_bot_conf
 
@@ -882,7 +874,6 @@ class TestComposerProvidedPathAnchorsExported:
     drop an export and this fails."""
 
     def test_all_anchors_assigned_in_bot_conf(self, tmp_path):
-        from claudlobby.composer import compose_bot_conf
         from claudlobby.path_audit import COMPOSER_PROVIDED_PATH_ANCHORS
 
         bot = BotConfig(
@@ -1347,7 +1338,6 @@ class TestResolveMcpPermissions:
 
     def test_github_and_notion_emit_wildcards(self, tmp_path):
         """When all tools are allowed, emit mcp__<server>__* wildcards instead of per-tool entries."""
-        from claudlobby.config import McpEntry
         from claudlobby.composer import _resolve_mcp_permissions
 
         paths = self._setup_mcp_library(
@@ -1390,7 +1380,6 @@ class TestResolveMcpPermissions:
 
     def test_multi_instance_gws_wildcards(self, tmp_path):
         """Multi-instance servers each get their own wildcard entry."""
-        from claudlobby.config import McpEntry
         from claudlobby.composer import _resolve_mcp_permissions
 
         paths = self._setup_mcp_library(
@@ -1419,7 +1408,6 @@ class TestResolveMcpPermissions:
         assert len(result) == 2
 
     def test_fragment_without_contract_skipped(self, tmp_path):
-        from claudlobby.config import McpEntry
         from claudlobby.composer import _resolve_mcp_permissions
 
         paths = self._setup_mcp_library(
@@ -1440,7 +1428,6 @@ class TestResolveMcpPermissions:
         assert result == []
 
     def test_empty_tools_list_skipped(self, tmp_path):
-        from claudlobby.config import McpEntry
         from claudlobby.composer import _resolve_mcp_permissions
 
         paths = self._setup_mcp_library(
@@ -1462,7 +1449,6 @@ class TestResolveMcpPermissions:
         assert result == []
 
     def test_missing_fragment_skipped(self, tmp_path):
-        from claudlobby.config import McpEntry
         from claudlobby.composer import _resolve_mcp_permissions
 
         paths = self._setup_mcp_library(tmp_path, {})
@@ -1516,7 +1502,6 @@ class TestMcpPermissionsInSettingsLocal:
 
     def test_mcp_trust_allowlist_matches_composed_mcp_json(self, tmp_path):
         """The allowlist equals the composed .mcp.json server keys exactly — no drift."""
-        from claudlobby.config import McpEntry
 
         paths = self._setup_mcp_library(
             tmp_path,
@@ -1543,7 +1528,6 @@ class TestMcpPermissionsInSettingsLocal:
 
     def test_mcp_permissions_in_allow_list(self, tmp_path):
         """Wildcard is emitted for github MCP in settings.local allow list."""
-        from claudlobby.config import McpEntry
 
         paths = self._setup_mcp_library(
             tmp_path,
@@ -1573,7 +1557,6 @@ class TestMcpPermissionsInSettingsLocal:
 
     def test_mcp_emitted_even_without_explicit_tools_allow(self, tmp_path):
         """MCP permissions should appear even if bot.tool_permissions.allow is empty."""
-        from claudlobby.config import McpEntry
 
         paths = self._setup_mcp_library(
             tmp_path,
@@ -1597,7 +1580,6 @@ class TestMcpPermissionsInSettingsLocal:
         assert "mcp__notion__*" in result["permissions"]["allow"]
 
     def test_explicit_deny_alongside_mcp_permissions(self, tmp_path):
-        from claudlobby.config import McpEntry
 
         paths = self._setup_mcp_library(
             tmp_path,
@@ -1624,7 +1606,6 @@ class TestMcpPermissionsInSettingsLocal:
         assert "mcp__github__*" in allow
 
     def test_multi_instance_in_settings_local(self, tmp_path):
-        from claudlobby.config import McpEntry
 
         paths = self._setup_mcp_library(
             tmp_path,
@@ -1930,7 +1911,6 @@ class TestExpertisePermissionsInSettingsLocal:
 
     def test_expertise_plus_mcp_plus_skills_combined(self, tmp_path):
         """Full integration: expertise + MCP contracts + skills + telegram all compose."""
-        from claudlobby.config import McpEntry
 
         root = tmp_path / "claudlobby"
         root.mkdir()
@@ -2056,7 +2036,6 @@ class TestPluginsBotConf:
 
     def _compose(self, tmp_path, plugins=None, channels=None):
         from claudlobby.config import PluginsConfig
-        from claudlobby.composer import compose_bot_conf
 
         bot = BotConfig(
             bot_id="worker",
@@ -2245,7 +2224,6 @@ class TestChannelPluginInstallEnableCarveout:
 
     def test_channel_plugin_installed_but_not_enabled(self, tmp_path):
         from claudlobby.config import PluginsConfig
-        from claudlobby.composer import compose_bot_conf
 
         root = tmp_path / "claudlobby"
         (root / "runtime" / "bots" / "worker").mkdir(parents=True)
@@ -2301,7 +2279,6 @@ class TestComposeBotEventsDir:
     """compose_bot creates data/events/ directory."""
 
     def test_events_dir_created(self, tmp_path):
-        from claudlobby.composer import compose_bot
 
         root = tmp_path / "claudlobby"
         root.mkdir()
@@ -2329,7 +2306,6 @@ class TestComposeBotConfObservability:
     """compose_bot_conf emits OBSERVABILITY_* env vars."""
 
     def _compose(self, tmp_path, observability=None):
-        from claudlobby.composer import compose_bot_conf
         from claudlobby.config import ObservabilityConfig
 
         obs = observability or ObservabilityConfig()
@@ -2521,7 +2497,6 @@ class TestJinja2Sandbox:
         assert result == "Hello Worker on test-fleet, id=worker"
 
     def test_render_startup_prompt_blocks_class_traversal(self):
-        import pytest
         from jinja2.sandbox import SecurityError
         from claudlobby.composer import _render_startup_prompt
 
@@ -2532,7 +2507,6 @@ class TestJinja2Sandbox:
             _render_startup_prompt(prompt, bot, fleet)
 
     def test_render_startup_prompt_blocks_subclass_walk(self):
-        import pytest
         from jinja2.sandbox import SecurityError
         from claudlobby.composer import _render_startup_prompt
 
@@ -2556,7 +2530,6 @@ class TestJinja2Sandbox:
         assert isinstance(env, SandboxedEnvironment)
 
     def test_build_jinja_env_blocks_ssti_in_template(self, tmp_path):
-        import pytest
         from jinja2.sandbox import SecurityError
         from claudlobby.composer import _build_jinja_env
 
@@ -2584,7 +2557,6 @@ class TestComposeBotConfShellEscaping:
         name="worker",
         telegram_handle="w_bot",
     ):
-        from claudlobby.composer import compose_bot_conf
 
         bot = BotConfig(
             bot_id=bot_id,
@@ -2628,19 +2600,16 @@ class TestComposeBotConfShellEscaping:
         assert "export NL=" in conf
 
     def test_invalid_env_key_raises(self, tmp_path):
-        import pytest
 
         with pytest.raises(ValueError, match="not a valid shell identifier"):
             self._compose(tmp_path, env={"FOO;ls": "x"})
 
     def test_invalid_env_key_with_space_raises(self, tmp_path):
-        import pytest
 
         with pytest.raises(ValueError, match="not a valid shell identifier"):
             self._compose(tmp_path, env={"FOO BAR": "x"})
 
     def test_unsafe_bot_id_raises(self, tmp_path):
-        import pytest
 
         with pytest.raises(ValueError, match="shell-unsafe"):
             self._compose(tmp_path, bot_id="evil$(whoami)")
@@ -2801,7 +2770,6 @@ class TestResolveEffectiveIntegrations:
         The old verbatim return would drop ``github`` here, stripping its grants.
         """
         from claudlobby.composer import resolve_effective_integrations
-        from claudlobby.config import McpEntry
 
         paths = self._paths_with_integrations(tmp_path, ["github", "neon"])
         bot = BotConfig(
@@ -2816,7 +2784,6 @@ class TestResolveEffectiveIntegrations:
 
     def test_auto_derived_from_mcp_when_empty(self, tmp_path):
         from claudlobby.composer import resolve_effective_integrations
-        from claudlobby.config import McpEntry
 
         # github has an integration doc; slack does not
         paths = self._paths_with_integrations(tmp_path, ["github"])
@@ -2832,7 +2799,6 @@ class TestResolveEffectiveIntegrations:
 
     def test_empty_when_no_mcp_has_integration_doc(self, tmp_path):
         from claudlobby.composer import resolve_effective_integrations
-        from claudlobby.config import McpEntry
 
         # No integration docs exist at all
         paths = self._paths_with_integrations(tmp_path, [])
@@ -2851,7 +2817,6 @@ class TestPermissionMode:
     def _compose(
         self, tmp_path, permission_mode=None, dangerously_skip_permissions=False
     ):
-        from claudlobby.composer import compose_bot_conf
 
         bot = BotConfig(
             bot_id="worker",
@@ -2915,8 +2880,6 @@ class TestPermissionMode:
         from claudlobby.config import _parse_enum
         from claudlobby.known_values import VALID_PERMISSION_MODES
 
-        import pytest
-
         with pytest.raises(ValueError, match="Invalid permission_mode"):
             _parse_enum("permission_mode", "yolo", VALID_PERMISSION_MODES)
 
@@ -2925,7 +2888,6 @@ class TestComposeBotConfHandleValidation:
     """compose_bot_conf validates telegram.handle against _TELEGRAM_HANDLE_RE."""
 
     def _compose(self, tmp_path, handle):
-        from claudlobby.composer import compose_bot_conf
 
         bot = _make_bot(handle=handle)
         root = tmp_path / "claudlobby"
@@ -2940,7 +2902,6 @@ class TestComposeBotConfHandleValidation:
             assert f"export TELEGRAM_BOT_HANDLE={handle}" in conf
 
     def test_invalid_handles_raise(self, tmp_path):
-        import pytest
 
         for handle in ("-x", "a b", "a.b"):
             with pytest.raises(ValueError, match="telegram handle"):
@@ -2992,7 +2953,6 @@ class TestResolveEffectiveIntegrationsUnion:
 
     def test_explicit_integrations_union_auto_paired_mcp(self, tmp_path):
         """A bot with explicit integrations AND an auto-pairable mcp gets BOTH."""
-        from claudlobby.config import McpEntry
         from claudlobby.composer import resolve_effective_integrations
 
         paths = self._setup(tmp_path, ["neon", "github"])
@@ -3009,7 +2969,6 @@ class TestResolveEffectiveIntegrationsUnion:
 
     def test_only_mcp_auto_pairs(self, tmp_path):
         """No explicit integrations → auto-pair from mcp (unchanged behavior)."""
-        from claudlobby.config import McpEntry
         from claudlobby.composer import resolve_effective_integrations
 
         paths = self._setup(tmp_path, ["github", "notion"])
@@ -3026,7 +2985,6 @@ class TestResolveEffectiveIntegrationsUnion:
 
     def test_dedup_when_explicit_and_mcp_paired(self, tmp_path):
         """An integration both listed explicitly and mcp-paired appears once."""
-        from claudlobby.config import McpEntry
         from claudlobby.composer import resolve_effective_integrations
 
         paths = self._setup(tmp_path, ["github"])
@@ -3041,7 +2999,6 @@ class TestResolveEffectiveIntegrationsUnion:
 
     def test_explicit_order_preserved_mcp_appended(self, tmp_path):
         """Explicit integrations come first in order; mcp-paired names append after."""
-        from claudlobby.config import McpEntry
         from claudlobby.composer import resolve_effective_integrations
 
         paths = self._setup(tmp_path, ["neon", "vercel", "github"])
@@ -3060,7 +3017,6 @@ class TestResolveEffectiveIntegrationsUnion:
 
     def test_mcp_without_integration_file_not_paired(self, tmp_path):
         """An mcp entry with no integrations/<name>.md is not auto-paired."""
-        from claudlobby.config import McpEntry
         from claudlobby.composer import resolve_effective_integrations
 
         paths = self._setup(tmp_path, ["neon"])  # no github integration file
@@ -3101,7 +3057,6 @@ class TestResolveIntegrationGrants:
 
     def test_fragment_backed_default_instance(self, tmp_path):
         from claudlobby.composer import _resolve_integration_grants
-        from claudlobby.config import McpEntry
 
         paths = self._setup(tmp_path, {"github": {"tool_grants": ["mcp__github__*"]}})
         bot = BotConfig(
@@ -3112,7 +3067,6 @@ class TestResolveIntegrationGrants:
     def test_fragment_backed_multi_instance_expands(self, tmp_path):
         """Instance-scoped fragment servers rewrite the prefix per instance."""
         from claudlobby.composer import _resolve_integration_grants
-        from claudlobby.config import McpEntry
 
         paths = self._setup(tmp_path, {"gws": {"tool_grants": ["mcp__gws__*"]}})
         bot = BotConfig(
@@ -3169,7 +3123,6 @@ class TestGrantSupersetGate:
     """_assert_grant_superset hard-fails when new tool_grants would drop a legacy grant."""
 
     def test_gate_raises_when_new_drops_legacy(self):
-        import pytest
 
         from claudlobby.composer import _assert_grant_superset
 
@@ -3226,7 +3179,6 @@ class TestGrantUnionInSettingsLocal:
 
     def test_fragment_backed_grant_not_duplicated(self, tmp_path):
         """Legacy and new both emit mcp__github__* → union dedups to one entry."""
-        from claudlobby.config import McpEntry
 
         paths = self._setup(
             tmp_path, self._GH_FRAGMENT, {"github": {"tool_grants": ["mcp__github__*"]}}
@@ -3240,7 +3192,6 @@ class TestGrantUnionInSettingsLocal:
 
     def test_connector_grant_added_alongside_legacy(self, tmp_path):
         """Equipping a connector integration adds its literal grant; legacy grant retained."""
-        from claudlobby.config import McpEntry
 
         paths = self._setup(
             tmp_path,
@@ -3267,7 +3218,6 @@ class TestGrantUnionInSettingsLocal:
 
     def test_compose_hard_fails_when_fragment_grant_uncovered(self, tmp_path):
         """A contract fragment with no paired integration tool_grants trips the gate end-to-end."""
-        import pytest
 
         from claudlobby.config import McpEntry
 
@@ -3279,3 +3229,151 @@ class TestGrantUnionInSettingsLocal:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
         with pytest.raises(ValueError, match="mcp__github__"):
             compose_settings_local(bot, fleet, paths)
+
+
+# ── #702 L1 source-guard wiring (composer choke-sites) ────────────────
+
+
+class TestSourceGuardWiring:
+    """The L1 deny-by-default guard wired into every composer choke-site.
+
+    The grammar itself is proven in test_source_audit.py; these prove the
+    composer actually calls it at generate time — compose_bot before any write,
+    the grant / timer / bot.conf-emission sites, and compose_fleet's aggregation.
+    """
+
+    def test_compose_bot_denies_foreign_env_before_any_write(self, fleet_dir):
+        # A foreign absolute in bot.env raises — and, because the guard fires
+        # before the first mkdir, leaves no partial wiring behind.
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot.env = {"GA4_KEY": "/Users/x/ga4.json"}
+        with pytest.raises(ValueError, match="/Users/x/ga4.json"):
+            compose_bot(bot, fleet, paths)
+        assert not (paths.bot_runtime("lead") / "bot.conf").exists()
+
+    def test_compose_bot_denies_foreign_mcp_fragment_arg(self, fleet_dir):
+        # A planted MCP fragment carrying an absolute arg is denied via the
+        # fragment choke — the composer loads it and hands it to the guard.
+        frag = {"srv": {"command": "node", "args": ["/opt/evil/index.js"]}}
+        (fleet_dir / "library" / "mcp" / "evil.json").write_text(json.dumps(frag))
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot.mcp = [McpEntry(name="evil")]
+        with pytest.raises(ValueError, match="/opt/evil/index.js"):
+            compose_bot(bot, fleet, paths)
+
+    def test_compose_bot_clean_when_anchored(self, fleet_dir):
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot.env = {"P": "${FLEET_ROOT}/mcp/x.py"}
+        compose_bot(bot, fleet, paths)  # no raise
+        assert (paths.bot_runtime("lead") / "bot.conf").is_file()
+
+    def test_r1_anchor_headed_env_emits_double_quoted(self, tmp_path):
+        # R1: an anchor-headed value emits DOUBLE-quoted so the shell expands the
+        # composer anchor at source time; a plain ${VAR} stays single-quoted
+        # (frozen) via _shq.
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        paths = _make_paths(root)
+        bot = BotConfig(
+            bot_id="b",
+            name="b",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="b_bot"),
+            env={"ANCHORED": "${FLEET_ROOT}/mcp/x.py", "PLAINVAR": "${GITHUB_PAT}"},
+        )
+        fleet = FleetConfig(name="t", service_prefix="com.t")
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert 'export ANCHORED="${FLEET_ROOT}/mcp/x.py"' in conf
+        assert "export PLAINVAR='${GITHUB_PAT}'" in conf
+
+    def test_grant_choke_denies_foreign_absolute_grant(self, fleet_dir):
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot.tool_permissions = ToolPermissionsConfig(allow=["Read(/Users/x/secret)"])
+        with pytest.raises(ValueError, match="/Users/x/secret"):
+            compose_settings_local(bot, fleet, paths)
+
+    def test_grant_choke_passes_declared_absolute_grant(self, fleet_dir):
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot.tool_permissions = ToolPermissionsConfig(allow=["Bash(/opt/tool/bin *)"])
+        bot.external_paths = [ExternalDecl(path="/opt/tool/**", purpose="tool tree")]
+        compose_settings_local(bot, fleet, paths)  # declared → no raise
+
+    def test_grant_choke_excludes_composer_sibling_isolation(self, fleet_dir):
+        # Deny grants aren't classified (they restrict, not wire-to-a-path), so the
+        # Layer-0 sibling-isolation denies — which embed a composer-DERIVED absolute
+        # (the sibling's runtime dir) — never trip the allow-only guard, on any
+        # multi-bot fleet. The deny is still emitted.
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]  # sibling worker-1 → Read(/abs/.../worker-1/**)
+        settings = compose_settings_local(bot, fleet, paths)  # must not raise
+        deny = settings["permissions"]["deny"]
+        assert any("worker-1" in d for d in deny)
+
+    def test_grant_choke_ignores_foreign_deny_grant(self, fleet_dir):
+        # A foreign absolute in a DENY grant is a restriction, not a self-containment
+        # violation — allow-only, so it is deliberately not flagged.
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot.tool_permissions = ToolPermissionsConfig(deny=["Read(/Users/x/secret)"])
+        compose_settings_local(bot, fleet, paths)  # deny not classified → no raise
+
+    def test_timer_choke_denies_raw_absolute_script(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        paths = _make_paths(root)
+        timers_dir = tmp_path / "timers"
+        timers_dir.mkdir()
+        with pytest.raises(ValueError, match="/opt/rogue/job.sh"):
+            _write_timer_units(
+                timers_dir,
+                "com.t.job",
+                "job",
+                {"type": "calendar", "expression": "daily"},
+                "/opt/rogue/job.sh",
+                "oneshot",
+                "t",
+                paths,
+            )
+
+    def test_timer_choke_passes_anchored_script(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        paths = _make_paths(root)
+        timers_dir = tmp_path / "timers"
+        timers_dir.mkdir()
+        _write_timer_units(
+            timers_dir,
+            "com.t.job",
+            "job",
+            {"type": "calendar", "expression": "daily"},
+            "$CLAUDLOBBY_ROOT/lib/job.sh",
+            "oneshot",
+            "t",
+            paths,
+        )  # anchor-headed → no raise
+        assert (timers_dir / "com.t.job.service").is_file()
+
+    def test_compose_fleet_aggregates_multiple_bot_failures(self, fleet_dir):
+        # G1: one generate surfaces EVERY offender, not just the first bot.
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].env = {"A": "/Users/x/a.json"}
+        fleet.bots["worker-1"].env = {"B": "/opt/y/b.json"}
+        with pytest.raises(ValueError) as ei:
+            compose_fleet(fleet, paths)
+        msg = str(ei.value)
+        assert "2 bot(s) failed" in msg
+        assert "lead" in msg and "worker-1" in msg
+        assert "/Users/x/a.json" in msg and "/opt/y/b.json" in msg
