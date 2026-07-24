@@ -1,8 +1,9 @@
 # #729 Stage-C — A/B comms-eval harness: design checkpoint (WIP)
 
-**Status:** PAUSED (design locked, no code written yet). Chris de-prioritized the #716 build
-2026-07-24; may defer to a future AI Platform team. This doc checkpoints the design so a resume
-does not redo the recon.
+**Status:** BUILT in this PR (was briefly PAUSED 2026-07-24, then resumed at Chris's direction).
+This doc is the design rationale; the locked decisions and the real-run blocker below remain the
+reference for F2. Shipped: `lib/ab-comms-eval.sh`, `lib/ab-comms-verdict.py`,
+`tests/test_ab_comms_eval.py`.
 
 **Branch:** `feat/729-stage-c-ab-comms-eval-scaffold` (off fresh `main` @ `c8aa31f`).
 **Issue:** [#729](https://github.com/Claudfather/Claudlobby/issues/729) — P2 A/B comms-eval harness + transcript-usage parser (#727 epic; source spec #716).
