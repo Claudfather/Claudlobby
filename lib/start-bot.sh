@@ -291,6 +291,12 @@ _rc_iters=$(( _rc_timeout_s * 2 ))
 _poll_start=$(date +%s)
 echo "$(ts_iso) POLL_START — waiting for Telegram poller readiness (bridge_state, ceiling ${_rc_timeout_s}s)" >> "$LOG"
 _ready=0
+# Resolve the token ONCE here, not inside every bridge_state poll below: the token
+# is static .env config, so re-sourcing the .env chain each 0.5s iteration (up to
+# ~180x on a cold start) is wasted I/O — costly when bots start in parallel on a
+# few cores. Threaded into bridge_state so the loop only re-checks the changing
+# part (the live poller pid) (#756).
+_pretoken="$(resolve_bot_telegram_token "$BOT_DIR" 2>/dev/null || true)"
 for _i in $(seq 1 "$_rc_iters"); do
     if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         echo "$(ts_iso) CRASH — tmux session died during startup (after ${_i}s)" >> "$LOG"
@@ -303,7 +309,7 @@ for _i in $(seq 1 "$_rc_iters"); do
     # Code initialized far enough to spawn its MCP plugin, and is immune to string
     # drift (the #710/#741 bridge-truth family). Bots with no channel (no_handle) or
     # a declared tokenless canary have no poller to await: ready at once, no alert.
-    case "$(bridge_state "$BOT_DIR" 2>/dev/null || true)" in
+    case "$(bridge_state "$BOT_DIR" "$_pretoken" 2>/dev/null || true)" in
         up)
             _elapsed=$(( $(date +%s) - _poll_start ))
             echo "$(ts_iso) READY — Telegram poller up after ${_elapsed}s" >> "$LOG"
@@ -387,15 +393,20 @@ fi
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails
 [ -x "$LIB_DIR/fleet-state-update.sh" ] && "$LIB_DIR/fleet-state-update.sh" "$BOT_NAME" "idle" || true
 
-# Verify the Telegram inbound bridge actually spawned (Phase 3b/3c). "remote-
-# control is active" (above) is a SEPARATE subsystem from the channel poller, so a
-# bot can be marked ready/idle with a dark bridge. Done AFTER the bot is dispatch-
-# ready (resumed + prompted + marked idle) so a slow or absent bridge never delays
-# the bridge-INDEPENDENT tmux-dispatch path. start-bot does NOT bounce — it
-# verifies, drops/clears the durable .bridge-down marker, and escalates tmux-first;
-# keepalive owns the heal ladder (Fork F1=b). BRIDGE_READY_TIMEOUT_S (default 45)
-# is env-overridable for slow hosts.
-_bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" "${BRIDGE_READY_TIMEOUT_S:-}")"
+# Verify the Telegram inbound bridge actually spawned (Phase 3b/3c). The readiness
+# wait above (poll 1) already blocked up to RC_READY_TIMEOUT_S on the SAME
+# bridge_state==up predicate, so this verify does NOT re-wait — it runs a single
+# check (timeout 0) to produce the verdict, drop/clear the durable .bridge-down
+# marker, and escalate tmux-first. Its bridge_down alert is DISTINCT from poll 1's
+# rc_timeout, not redundant (#756): different detection paths driving different
+# responses — rc_timeout burst-pages via fleet-pulse (#533), bridge_down feeds
+# keepalive's heal ladder. Both are intentional. Done AFTER the bot is dispatch-
+# ready (resumed + prompted + marked idle) so it never delays the bridge-
+# INDEPENDENT tmux-dispatch path. start-bot does NOT bounce — keepalive owns the
+# heal ladder (Fork F1=b). No second wait-knob here: a slow host raises poll 1's
+# RC_READY_TIMEOUT_S (which owns the wait); this verify is a single check (0) by
+# construction, never a redundant re-wait past an already-declared timeout.
+_bridge_verdict="$(bridge_bringup_verify "$BOT_DIR" "$(dirname "$BOT_DIR")" 0)"
 case "$_bridge_verdict" in
     ready)     echo "$(ts_iso) BRIDGE_READY — Telegram poller up" >> "$LOG" ;;
     expected:no_token) echo "$(ts_iso) BRIDGE_SKIP — no token by design (EXPECT_NO_TOKEN); canary/throwaway, no alert" >> "$LOG" ;;

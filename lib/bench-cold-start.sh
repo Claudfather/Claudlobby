@@ -9,8 +9,9 @@
 #   --notes    Optional free-text note appended to the log row.
 #
 # Records three timings per run:
-#   start_to_rc_seconds      — start-bot.sh invocation → "remote-control is active"
-#                              seen in the tmux pane
+#   start_to_rc_seconds      — start-bot.sh invocation → bridge_state readiness
+#                              (bridge up, or a non-channel bot): the ground truth
+#                              start-bot gates on, replacing the drifted pane string
 #   start_to_complete_seconds — start-bot.sh invocation → start-bot.sh exits (0)
 #   total_seconds            — wall-clock from first stop to script exit
 #
@@ -215,26 +216,36 @@ echo "bench-cold-start: starting '$BOT_NAME' via start-bot.sh..."
 START_PID=$!
 
 # ---------------------------------------------------------------------------
-# Step 4: Poll for "remote-control is active" in the tmux pane
+# Step 4: Poll bridge_state for readiness (the ground truth start-bot gates on)
 # ---------------------------------------------------------------------------
 
 RC_ACTIVE_TIME=""
-RC_TIMEOUT=120   # seconds to wait for remote-control readiness
+RC_TIMEOUT=120   # seconds to wait for bridge readiness
 
-echo "bench-cold-start: waiting for remote-control (timeout ${RC_TIMEOUT}s)..."
+echo "bench-cold-start: waiting for bridge readiness (timeout ${RC_TIMEOUT}s)..."
 
+# Resolve the token once, not per-poll — the same hot-loop shape #756 fixed in
+# start-bot; thread it into bridge_state so the loop skips re-sourcing the .env
+# chain every second.
+_pretoken="$(resolve_bot_telegram_token "$BOT_DIR" 2>/dev/null || true)"
 for _i in $(seq 1 "$RC_TIMEOUT"); do
-    if bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null \
-            | grep -q "remote-control is active"; then
-        RC_ACTIVE_TIME="$(_now_ns)"
-        echo "bench-cold-start: remote-control active at ${_i}s"
-        break
-    fi
+    # Ground truth, not a bring-up pane string: the "remote-control is active"
+    # line current claude builds no longer print, so the old grep always timed
+    # out and recorded a bogus mark (the #751/#754 string-drift that start-bot.sh
+    # switched off). bridge_state == up (or no_handle for a non-channel bot) is
+    # the readiness signal start-bot now gates on — measure the same thing.
+    case "$(bridge_state "$BOT_DIR" "$_pretoken" 2>/dev/null || true)" in
+        up | no_handle)
+            RC_ACTIVE_TIME="$(_now_ns)"
+            echo "bench-cold-start: bridge ready (bridge_state) at ${_i}s"
+            break
+            ;;
+    esac
     sleep 1
 done
 
 if [ -z "$RC_ACTIVE_TIME" ]; then
-    echo "bench-cold-start: WARNING — remote-control not detected within ${RC_TIMEOUT}s" >&2
+    echo "bench-cold-start: WARNING — bridge readiness not detected within ${RC_TIMEOUT}s" >&2
     RC_ACTIVE_TIME="$(_now_ns)"   # record the timeout mark so we still get a number
 fi
 
@@ -271,7 +282,7 @@ echo ""
 echo "=== Cold-Start Benchmark Results ==="
 printf '  %-30s %s\n' "Timestamp:"              "$TS"
 printf '  %-30s %s\n' "Bot:"                    "$BOT_NAME"
-printf '  %-30s %s s\n' "Start → RC active:"    "$START_TO_RC"
+printf '  %-30s %s s\n' "Start → bridge ready:"  "$START_TO_RC"
 printf '  %-30s %s s\n' "Start → start-bot done:" "$START_TO_COMPLETE"
 printf '  %-30s %s s\n' "Total wall clock:"      "$TOTAL"
 [ -n "$NOTES_ARG" ] && printf '  %-30s %s\n' "Notes:" "$NOTES_ARG"

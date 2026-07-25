@@ -61,8 +61,73 @@ class TestValidate:
         report = validate(fleet, paths)
         assert any("GITHUB_PAT" in w for w in report.warnings)
 
+    def test_empty_mcp_env_var_is_warning(self, fleet_dir, monkeypatch):
+        # Value-based (#755): an MCP contract var scaffolded as an empty stub
+        # (present but "") must still warn — MCP vars ARE auto-scaffolded, so a
+        # presence check goes permanently silent after the first cold generate.
+        monkeypatch.setenv("GITHUB_PAT", "")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        yaml_text = (fleet_dir / "fleet.yaml").read_text()
+        yaml_text = yaml_text.replace(
+            "expertise: [orchestration]",
+            "expertise: [orchestration]\n      mcp: [github]",
+        )
+        (fleet_dir / "fleet.yaml").write_text(yaml_text)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("GITHUB_PAT" in w for w in report.warnings)
+
+    def test_env_has_value_is_value_based(self):
+        # The shared predicate behind all three "requires VAR but it's not set"
+        # warnings (MCP / tool / token_env): absent AND empty both count as
+        # unset; a real value (even "0") counts as set (#755).
+        ev = validator_module._env_has_value
+        assert ev({}, "X") is False
+        assert ev({"X": ""}, "X") is False
+        assert ev({"X": "v"}, "X") is True
+        assert ev({"X": "0"}, "X") is True
+
+    def test_empty_tool_env_var_is_warning(self, fleet_dir, monkeypatch):
+        # #755 helper backs the tool env-contract warning too (validator.py:378).
+        # A tool declaring `env: [TOOLTOKEN]` with the var present-but-empty warns.
+        from textwrap import dedent
+
+        from claudlobby.config import ToolEntry
+
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        monkeypatch.setenv("TOOLTOKEN", "")
+        tool_dir = fleet_dir / "library" / "tools" / "envtool"
+        tool_dir.mkdir(parents=True)
+        (tool_dir / "tool.yaml").write_text(
+            dedent(
+                """\
+                type: script
+                env: [TOOLTOKEN]
+                """
+            )
+        )
+        (tool_dir / "envtool.py.j2").write_text("X = 1\n")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].tools = [ToolEntry(name="envtool")]
+        report = validate(fleet, _make_paths(fleet_dir))
+        assert any("TOOLTOKEN" in w for w in report.warnings)
+
     def test_missing_telegram_token_is_warning(self, fleet_dir, monkeypatch):
         monkeypatch.delenv("TELEGRAM_TOKEN_LEAD", raising=False)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert any("TELEGRAM_TOKEN_LEAD" in w for w in report.warnings)
+
+    def test_empty_telegram_token_is_warning(self, fleet_dir, monkeypatch):
+        # Value-based, not presence-based (#755): a scaffolded-but-empty token_env
+        # (key present, value "") must still warn — else the nudge fires once then
+        # goes permanently silent even though the operator never filled it in.
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "")
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
@@ -1361,7 +1426,9 @@ class TestValidateGenerateParity:
         report = validate(fleet, paths)
         assert not any("/opt/tool" in e for e in report.errors)
 
-    def test_validate_catches_foreign_absolute_timer_script(self, fleet_dir, monkeypatch):
+    def test_validate_catches_foreign_absolute_timer_script(
+        self, fleet_dir, monkeypatch
+    ):
         fleet, paths = self._load(fleet_dir, monkeypatch)
         fleet.defaults["jobs"] = {
             "rogue": {"script": "/opt/rogue/job.sh", "schedule": "daily"}

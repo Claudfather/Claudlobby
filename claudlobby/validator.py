@@ -39,6 +39,21 @@ _CADENCE_RE = re.compile(r"^\d+[mhd]$")
 _ORG_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
 
 
+def _env_has_value(effective_env: dict[str, str], var: str) -> bool:
+    """True iff ``var`` resolves to a non-empty value in ``effective_env``.
+
+    Value-based, not presence-based: the compositor scaffolds required env vars
+    as empty ``export VAR=`` stubs and dotenv parses those to ``""``, so a bare
+    ``var in effective_env`` is True-but-empty. A warning that keyed off mere
+    presence fired once (the first cold generate, before the stub existed) then
+    went permanently silent even if the operator never filled in a real value
+    (#755). The single predicate behind all three "requires VAR but it's not
+    set" validator warnings — MCP contract vars, tool env vars, telegram
+    token_env — so a fourth site can't reintroduce the presence-check fork.
+    """
+    return bool(effective_env.get(var))
+
+
 @dataclass
 class ValidationReport:
     errors: list[str] = field(default_factory=list)
@@ -258,7 +273,7 @@ def _validate_bots(
         # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
         # didn't know about instance scoping or bot-tier .env files.
         for var, tier, source, instance in _mcp_required_vars(bot, paths):
-            if var in effective_env:
+            if _env_has_value(effective_env, var):
                 continue
             inst_note = f" (instance: {instance})" if instance else ""
             report.warnings.append(
@@ -375,14 +390,18 @@ def _validate_bots(
             else:
                 tool_targets[target] = tool_entry.name
             for var in manifest.get("env") or []:
-                if var not in effective_env:
+                if not _env_has_value(effective_env, var):
                     report.warnings.append(
                         f"bot '{bot_name}': tool '{tool_entry.name}' requires {var} but it's not set — "
                         f"add to a .env tier (script will fail at runtime)"
                     )
 
-        # Telegram token env (warn). Check effective_env so bot-tier .env
-        # values count (the common case — per-bot Telegram tokens live in
+        # Telegram token env (warn). Value-based, not mere presence: warn when the
+        # token_env resolves EMPTY or absent, so a scaffolded-but-unfilled stub
+        # still nudges. A presence check fires once (the first cold generate,
+        # before the stub exists) then goes permanently silent even if the operator
+        # never fills in a real value (#755). Reading effective_env lets bot-tier
+        # .env values count (the common case — per-bot Telegram tokens live in
         # runtime/bots/<bot>/.env so multi-bot fleets don't cross-wire). Skip the
         # self-referential case (token_env == TELEGRAM_BOT_TOKEN): the compositor
         # deliberately does not scaffold it and its home is the plugin's channel-dir
@@ -391,7 +410,7 @@ def _validate_bots(
         if (
             bot.telegram.token_env
             and not bot.telegram.token_env_is_self_referential
-            and bot.telegram.token_env not in effective_env
+            and not _env_has_value(effective_env, bot.telegram.token_env)
         ):
             report.warnings.append(
                 f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in any tier of .env — bot won't connect to Telegram"

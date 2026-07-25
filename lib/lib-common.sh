@@ -398,7 +398,7 @@ check_tmux_session() {
 
 # --- Telegram channel bridge state ------------------------------------------
 
-# bridge_state <bot_dir>
+# bridge_state <bot_dir> [pretoken]
 # Classify a bot's Telegram inbound bridge — the `bun server.ts` MCP child its
 # `claude` spawns from the `--channels` flag. Prints exactly one state; returns
 # 0 only for `up`:
@@ -455,7 +455,11 @@ bridge_state() {
     handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "")" || true
     if [ -z "$handle" ]; then printf '%s' "no_handle"; return 1; fi
 
-    token="$(resolve_bot_telegram_token "$bot_dir")" || true
+    # A hot-loop caller (start-bot readiness) may pass a pre-resolved token as $2
+    # to skip re-sourcing the .env chain on every poll (#756); every other caller
+    # omits it and resolves here. The token is static .env config, so resolving it
+    # once in the caller and threading it in is safe.
+    if [ "$#" -ge 2 ]; then token="$2"; else token="$(resolve_bot_telegram_token "$bot_dir")" || true; fi
     if [ -z "$token" ]; then printf '%s' "no_token"; return 1; fi
 
     state_dir="$(bot_conf_get "$bot_dir" TELEGRAM_STATE_DIR "")" || true
