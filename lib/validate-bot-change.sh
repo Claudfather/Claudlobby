@@ -127,21 +127,15 @@ pass=0; fail=0
 events_file=$(ls "$EVENTS"/fleet-*.jsonl 2>/dev/null | head -1 || true)
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
 
-check() {
-    local desc="$1" cond="$2"
-    if [ "$cond" = "yes" ]; then pass=$((pass+1)); printf "  PASS  %s\n" "$desc"
-    else fail=$((fail+1)); printf "  FAIL  %s\n" "$desc"; fi
-}
-
 echo "=== validate-bot-change: observe the trust-loop behaviors ==="
 [ -n "$events_file" ] && grep -q '"type":"activity_stuck"' "$events_file" && r=yes || r=no
-check "activity_stuck event emitted (animated-but-hung worker)" "$r"
+harness_check "activity_stuck event emitted (animated-but-hung worker)" "$r"
 [ -n "$events_file" ] && grep -q '"type":"overdue_dispatch"' "$events_file" && r=yes || r=no
-check "overdue_dispatch event emitted (deadline passed, no report)" "$r"
+harness_check "overdue_dispatch event emitted (deadline passed, no report)" "$r"
 printf '%s' "$mgr_pane" | grep -q '\[FLEET-PULSE\]' && r=yes || r=no
-check "manager notified via [FLEET-PULSE] push" "$r"
+harness_check "manager notified via [FLEET-PULSE] push" "$r"
 [ -n "$events_file" ] && grep -q '"type":"bridge_down"' "$events_file" && r=yes || r=no
-check "bridge_down event emitted (live session, Telegram poller not delivering)" "$r"
+harness_check "bridge_down event emitted (live session, Telegram poller not delivering)" "$r"
 
 # #460: a never-closing dispatch must age out of the overdue set so fleet-pulse
 # stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI
@@ -151,7 +145,7 @@ printf '{"ts":"t","manager":"%s","bot":"%s","task":"x","dispatched_at":%s,"expec
     "$MGR" "$BOT" "$((now - 90000))" "$((now - 89400))" > "$aged_log"
 aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$aged_log" "$ROOT/state/report-back.jsonl" "$now" 2>/dev/null || true)
 [ -z "$aged_out" ] && r=yes || r=no
-check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
+harness_check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
 
 # ===========================================================================
 # Task-id end-to-end (goal-aware plan P4) — the dispatch row seeded above
@@ -163,9 +157,9 @@ echo ""
 echo "=== validate task-id end-to-end (P4: event + nudge carry the id) ==="
 [ -n "$events_file" ] && grep -q '"type":"overdue_dispatch"' "$events_file" \
     && grep '"type":"overdue_dispatch"' "$events_file" | grep -q '"task_id":"t-1-aaaa"' && r=yes || r=no
-check "overdue_dispatch event carries the dispatch task_id" "$r"
+harness_check "overdue_dispatch event carries the dispatch task_id" "$r"
 printf '%s' "$mgr_pane" | grep -q 'report-back --task' && printf '%s' "$mgr_pane" | grep -q 't-1-aaaa' && r=yes || r=no
-check "manager nudge names the open id (self-heal echo instruction)" "$r"
+harness_check "manager nudge names the open id (self-heal echo instruction)" "$r"
 
 # ===========================================================================
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.
@@ -186,7 +180,7 @@ echo 'FLEET_PLUGINS_REQUIRED="claudna@Claudfather"' >> "$BOT_DIR/bot.conf"
 rm -f "$BOT_DIR/data/.reload-pending"
 CLAUDLOBBY_ROOT="$ROOT" PATH="$STUB_BIN:$PATH" "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
 [ -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
-check "reload-fleet marks a running bot with .reload-pending (happy path)" "$r"
+harness_check "reload-fleet marks a running bot with .reload-pending (happy path)" "$r"
 
 # Loud-fail: a failing 'claude plugin update' must be LOUD, never silent.
 printf '#!/bin/bash\necho boom >&2; exit 1\n' > "$STUB_BIN/claude"
@@ -195,12 +189,12 @@ rm -f "$BOT_DIR/data/.reload-pending"
 CLAUDLOBBY_ROOT="$ROOT" PATH="$STUB_BIN:$PATH" "$LIB_DIR/reload-fleet.sh" "$FLEET" >/dev/null 2>&1 || true
 fleet_events=$(ls "$ROOT/state/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
 [ -n "$fleet_events" ] && grep -q '"type":"reload_failed"' "$fleet_events" && r=yes || r=no
-check "reload-fleet emits reload_failed event on failure (loud, not silent)" "$r"
+harness_check "reload-fleet emits reload_failed event on failure (loud, not silent)" "$r"
 mgr_pane=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
 printf '%s' "$mgr_pane" | grep -q 'reload_failed' && r=yes || r=no
-check "reload-fleet alerts the manager on failure (shared emit_failure_alert)" "$r"
+harness_check "reload-fleet alerts the manager on failure (shared emit_failure_alert)" "$r"
 [ ! -f "$BOT_DIR/data/.reload-pending" ] && r=yes || r=no
-check "reload-fleet does not half-reload (no marker when download fails)" "$r"
+harness_check "reload-fleet does not half-reload (no marker when download fails)" "$r"
 
 # ===========================================================================
 # F2(b) consolidated activation — keepalive performs the live reload at idle.
@@ -224,11 +218,11 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$IBOT_DIR" >/dev/null 2>&1 || t
 sleep 1
 ibot_pane=$(tmux capture-pane -t "$IBOT" -p 2>/dev/null || true)
 printf '%s' "$ibot_pane" | grep -q '/reload-plugins' && r=yes || r=no
-check "keepalive sends /reload-plugins to an idle bot with .reload-pending" "$r"
+harness_check "keepalive sends /reload-plugins to an idle bot with .reload-pending" "$r"
 printf '%s' "$ibot_pane" | grep -q '/reload-skills' && r=yes || r=no
-check "keepalive sends /reload-skills to an idle bot with .reload-pending" "$r"
+harness_check "keepalive sends /reload-skills to an idle bot with .reload-pending" "$r"
 [ ! -f "$IBOT_DIR/data/.reload-pending" ] && r=yes || r=no
-check "keepalive clears .reload-pending after firing the reload" "$r"
+harness_check "keepalive clears .reload-pending after firing the reload" "$r"
 
 # WS-1 (#7) long-think path: a bot mid-thought (or a long single tool call) with
 # NO recent tool-call marker — the pane's "esc to interrupt" active-turn affordance
@@ -248,7 +242,7 @@ sleep 1
 touch "$BUSY_DIR/data/.reload-pending"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$BUSY_DIR" >/dev/null 2>&1 || true
 [ -f "$BUSY_DIR/data/.reload-pending" ] && r=yes || r=no
-check "keepalive long-think: esc-to-interrupt pane (no recent marker) → BUSY, NOT reloaded (#7)" "$r"
+harness_check "keepalive long-think: esc-to-interrupt pane (no recent marker) → BUSY, NOT reloaded (#7)" "$r"
 
 # WS-1 (#7) marker path: a bot whose pane looks IDLE (a bare prompt glyph, no
 # active-turn affordance) but made a tool call moments ago — a long op between
@@ -270,9 +264,9 @@ touch "$MBOT_DIR/data/.reload-pending"
 touch "$MBOT_DIR/data/.last-tool-call"   # fresh marker = active recently
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$MBOT_DIR" >/dev/null 2>&1 || true
 [ -f "$MBOT_DIR/data/.reload-pending" ] && r=yes || r=no
-check "keepalive marker path: idle-looking pane + fresh .last-tool-call → BUSY, NOT reloaded (#7)" "$r"
+harness_check "keepalive marker path: idle-looking pane + fresh .last-tool-call → BUSY, NOT reloaded (#7)" "$r"
 [ ! -f "$MBOT_DIR/data/.idle" ] && r=yes || r=no
-check "keepalive marker path: .idle marker not set (fleet-pulse stays consistent)" "$r"
+harness_check "keepalive marker path: .idle marker not set (fleet-pulse stays consistent)" "$r"
 
 # ===========================================================================
 # #453 Phase 5 — Telegram bridge auto-heal (Tier-2, flag-gated F6b). Proves the
@@ -349,35 +343,35 @@ _heal_conf 1 y
 _heal_reset
 run_heal   # tick 1 → bounce #1
 [ "$(cat "$HREC" 2>/dev/null || echo 0)" = "1" ] && r=yes || r=no
-check "heal bounces a dark poller on an idle bot (restart ladder invoked)" "$r"
+harness_check "heal bounces a dark poller on an idle bot (restart ladder invoked)" "$r"
 hev=$(ls "$HDIR/data/events"/keepalive-*.jsonl 2>/dev/null | head -1 || true)
 [ -n "$hev" ] && grep -q '"state":"BRIDGE_HEAL"' "$hev" && r=yes || r=no
-check "heal emits a BRIDGE_HEAL keepalive event" "$r"
+harness_check "heal emits a BRIDGE_HEAL keepalive event" "$r"
 run_heal   # tick 2 → bounce #2 (reaches the cap of 2)
 [ "$(cat "$HREC" 2>/dev/null || echo 0)" = "2" ] && r=yes || r=no
-check "heal retries up to the attempt cap (2nd bounce)" "$r"
+harness_check "heal retries up to the attempt cap (2nd bounce)" "$r"
 run_heal   # tick 3 → budget exhausted → escalate-only, NO 3rd bounce
 [ "$(cat "$HREC" 2>/dev/null || echo 0)" = "2" ] && r=yes || r=no
-check "heal stops bouncing at the cap (no 3rd bounce — F3 escalate-only)" "$r"
+harness_check "heal stops bouncing at the cap (no 3rd bounce — F3 escalate-only)" "$r"
 [ -f "$HDIR/data/.bridge-heal-escalated" ] && r=yes || r=no
-check "heal escalates once when the budget is exhausted" "$r"
+harness_check "heal escalates once when the budget is exhausted" "$r"
 hev=$(ls "$HDIR/data/events"/keepalive-*.jsonl 2>/dev/null | head -1 || true)
 [ -n "$hev" ] && grep -q 'budget exhausted' "$hev" && r=yes || r=no
-check "heal logs budget-exhausted escalation" "$r"
+harness_check "heal logs budget-exhausted escalation" "$r"
 
 # --- Phase B: flag OFF, same dark poller → never bounces (the F6b gate) ---
 _heal_conf 0 y
 _heal_reset
 run_heal
 [ "$(cat "$HREC" 2>/dev/null || echo 0)" = "0" ] && r=yes || r=no
-check "heal is a no-op when OBSERVABILITY_BRIDGE_HEAL!=1 (F6b gate holds)" "$r"
+harness_check "heal is a no-op when OBSERVABILITY_BRIDGE_HEAL!=1 (F6b gate holds)" "$r"
 
 # --- Phase C: flag ON but token unresolvable → no_token, never bounce (F2/5e) ---
 _heal_conf 1 n
 _heal_reset
 run_heal
 [ "$(cat "$HREC" 2>/dev/null || echo 0)" = "0" ] && r=yes || r=no
-check "heal never bounces on no_token (a bounce cannot conjure a missing token)" "$r"
+harness_check "heal never bounces on no_token (a bounce cannot conjure a missing token)" "$r"
 
 # ===========================================================================
 # #608 — a tokenless canary/throwaway (EXPECT_NO_TOKEN=1) must NOT fire the
@@ -411,26 +405,26 @@ _nt_conf "$NTR" n
 # Sanity: identical token-absent input — both classify as no_token.
 { [ "$(bridge_state "$NTC" 2>/dev/null || true)" = "no_token" ] \
   && [ "$(bridge_state "$NTR" 2>/dev/null || true)" = "no_token" ]; } && r=yes || r=no
-check "#608 canary + real both classify no_token (same token-absent input)" "$r"
+harness_check "#608 canary + real both classify no_token (same token-absent input)" "$r"
 
 # --- Bring-up path (bridge_bringup_verify): canary silent, real escalates ---
 ntv="$(CLAUDLOBBY_ROOT="$ROOT" bridge_bringup_verify "$NTC" "$(dirname "$NTC")" 0 2>/dev/null || true)"
 [ "$ntv" = "expected:no_token" ] && r=yes || r=no
-check "#608 canary bring-up verdict is expected:no_token (marker exempts)" "$r"
+harness_check "#608 canary bring-up verdict is expected:no_token (marker exempts)" "$r"
 grep -q 'valcanary Telegram bridge no_token' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=no || r=yes
-check "#608 canary bring-up emits NO bridge_down alert (no fleet event)" "$r"
+harness_check "#608 canary bring-up emits NO bridge_down alert (no fleet event)" "$r"
 
 ntv="$(CLAUDLOBBY_ROOT="$ROOT" bridge_bringup_verify "$NTR" "$(dirname "$NTR")" 0 2>/dev/null || true)"
 [ "$ntv" = "missing:no_token" ] && r=yes || r=no
-check "#608 real-bot bring-up verdict is missing:no_token (still a fault)" "$r"
+harness_check "#608 real-bot bring-up verdict is missing:no_token (still a fault)" "$r"
 grep -q 'valreal Telegram bridge no_token at bring-up' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=yes || r=no
-check "#608 real-bot bring-up DOES emit the no_token bridge_down alert" "$r"
+harness_check "#608 real-bot bring-up DOES emit the no_token bridge_down alert" "$r"
 
 # --- Fleet-pulse path (bridge_down_state, grace 0): canary not-down, real down ---
 CLAUDLOBBY_ROOT="$ROOT" bridge_down_state "$NTC" 0 >/dev/null 2>&1 && r=no || r=yes  # rc 0 = down
-check "#608 canary is NOT actionably down for fleet-pulse (no pulse alert)" "$r"
+harness_check "#608 canary is NOT actionably down for fleet-pulse (no pulse alert)" "$r"
 [ "$(CLAUDLOBBY_ROOT="$ROOT" bridge_down_state "$NTR" 0 2>/dev/null || true)" = "no_token" ] && r=yes || r=no
-check "#608 real bot IS actionably down (no_token) for fleet-pulse" "$r"
+harness_check "#608 real bot IS actionably down (no_token) for fleet-pulse" "$r"
 
 # ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
@@ -456,7 +450,7 @@ CONF
 # (stubbed) restart.
 CLAUDLOBBY_ROOT="$ROOT" "$HLIB/keepalive.sh" "$DDIR" >/dev/null 2>&1 || true
 grep -qE 'RESTART.*session dead' "$DDIR/keepalive.log" 2>/dev/null && r=yes || r=no
-check "keepalive dead-session path emits a RESTART … session dead log line" "$r"
+harness_check "keepalive dead-session path emits a RESTART … session dead log line" "$r"
 # Load-bearing assertion: the REAL uptime parser (parse_keepalive_log, backed by
 # _LOG_LINE_RE) must extract a RESTART from that emitted line — the emitter⇄parser
 # coupling navi flagged as guarded only by a hand-written fixture until now.
@@ -467,7 +461,7 @@ from pathlib import Path
 print(sum(1 for _, s in parse_keepalive_log(Path('$DDIR/keepalive.log')) if s == 'RESTART'))
 " 2>/dev/null || echo 0)
 [ "${dead_restarts:-0}" -ge 1 ] && r=yes || r=no
-check "uptime parser extracts a RESTART from the real emitted keepalive.log (#579)" "$r"
+harness_check "uptime parser extracts a RESTART from the real emitted keepalive.log (#579)" "$r"
 
 # Regression guard: send_reload_command must resend Enter ONLY when the TUI
 # swallowed it (command still on the input line), never after a clean submit.
@@ -506,7 +500,7 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$SBOT_DIR" >/dev/null 2>&1 || t
 sleep 1
 submits=$(wc -l < "$SUBMIT_LOG")
 [ "$submits" -eq 2 ] && r=yes || r=no
-check "send_reload_command fires no spurious Enter on clean submit (verify scoped to prompt)" "$r"
+harness_check "send_reload_command fires no spurious Enter on clean submit (verify scoped to prompt)" "$r"
 
 # === Scenario 2: lossless restart — age-gated resume injection on start ===
 # Drive the REAL start-bot.sh against a throwaway bot whose `claude` is a stub
@@ -560,16 +554,16 @@ echo "=== validate-bot-change: lossless restart (resume on start, age-gated) ===
 _lossless_fail_before=$fail
 pane_fresh="$(_run_startbot fresh)"
 printf '%s' "$pane_fresh" | grep -q '/claudna:session resume' && r=yes || r=no
-check "fresh session.md -> /claudna:session resume injected on start" "$r"
+harness_check "fresh session.md -> /claudna:session resume injected on start" "$r"
 _rln="$(printf '%s\n' "$pane_fresh" | grep -n '/claudna:session resume' | head -1 | cut -d: -f1 || true)"
 _sln="$(printf '%s\n' "$pane_fresh" | grep -n 'ZZZ_STARTUPMARK' | head -1 | cut -d: -f1 || true)"
 { [ -n "$_rln" ] && [ -n "$_sln" ] && [ "$_rln" -lt "$_sln" ]; } && r=yes || r=no
-check "resume keystroke precedes STARTUP_PROMPT in the pane" "$r"
+harness_check "resume keystroke precedes STARTUP_PROMPT in the pane" "$r"
 pane_stale="$(_run_startbot stale)"
 printf '%s' "$pane_stale" | grep -q '/claudna:session resume' && r=no || r=yes
-check "stale session.md -> resume injection skipped (clean start)" "$r"
+harness_check "stale session.md -> resume injection skipped (clean start)" "$r"
 grep -q 'RESUME SKIP' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-check "stale skip recorded in startup.log (RESUME SKIP)" "$r"
+harness_check "stale skip recorded in startup.log (RESUME SKIP)" "$r"
 
 # Surface hermeticity evidence when the lossless checks fail (e.g. a CI runner
 # where this scenario fails but a dev host passes): start-bot.sh's stderr is
@@ -606,9 +600,9 @@ echo ""
 echo "=== validate-bot-change: readiness alerting (#533 items 3-4, #751) ==="
 _rc_fail_before=$fail
 grep -q 'READY —' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-check "bridge_state ready (no_handle bot) -> READY recorded in startup.log" "$r"
+harness_check "bridge_state ready (no_handle bot) -> READY recorded in startup.log" "$r"
 grep -rq '"type":"rc_timeout"' "$RB_DIR/data/events/" 2>/dev/null && r=no || r=yes
-check "ready verdict -> no rc_timeout event (no false alarm, #751)" "$r"
+harness_check "ready verdict -> no rc_timeout event (no false alarm, #751)" "$r"
 
 # Negative: reconfigure valrb as a CHANNEL bot (handle + a resolvable token) whose
 # poller never came up — no bot.pid under TELEGRAM_STATE_DIR -> bridge_state stays
@@ -636,14 +630,14 @@ TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 BRIDGE_READY_TIMEO
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
 sleep 1
 grep -q 'TIMEOUT' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-check "no RC string -> TIMEOUT recorded in startup.log" "$r"
+harness_check "no RC string -> TIMEOUT recorded in startup.log" "$r"
 _rcev="$(grep -rl '"type":"rc_timeout"' "$RB_DIR/data/events/" 2>/dev/null | head -1 || true)"
 [ -n "$_rcev" ] && r=yes || r=no
-check "TIMEOUT emits an rc_timeout fleet event (fleet-pulse escalation input)" "$r"
+harness_check "TIMEOUT emits an rc_timeout fleet event (fleet-pulse escalation input)" "$r"
 if [ -n "$_rcev" ]; then
     python3 -c "import sys,json; e=json.loads(open('$_rcev').readline()); sys.exit(0 if e['type']=='rc_timeout' and e['ts'] else 1)" 2>/dev/null && r=yes || r=no
 else r=no; fi
-check "rc_timeout event is valid JSON with ts+type (fleet-pulse-readable)" "$r"
+harness_check "rc_timeout event is valid JSON with ts+type (fleet-pulse-readable)" "$r"
 
 if [ "$fail" -gt "$_rc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: RC readiness checks failed ---"
@@ -698,7 +692,7 @@ esc_seed escone yes
 esc_seed esctwo yes
 esc_run
 grep -q 'FLEET ALERT: rc_timeout on 2 bots' "$_esc_pages" && r=yes || r=no
-check "rc_timeout burst on >= threshold bots FIRES the escalation page" "$r"
+harness_check "rc_timeout burst on >= threshold bots FIRES the escalation page" "$r"
 
 # Negative: only 1 bot with rc_timeout -> below threshold -> no rc_timeout page.
 rm -rf "$_esc_bots"
@@ -708,7 +702,7 @@ esc_seed escone yes
 esc_seed esctwo no
 esc_run
 grep -q 'rc_timeout' "$_esc_pages" && r=no || r=yes
-check "a single rc_timeout (below threshold) does NOT page (no false alarm)" "$r"
+harness_check "a single rc_timeout (below threshold) does NOT page (no false alarm)" "$r"
 
 if [ "$fail" -gt "$_esc_fail_before" ]; then
     echo "  --- DIAGNOSTIC: escalation pages recorded ---"
@@ -759,20 +753,20 @@ TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=10 CLAUDE_BIN="$RB_R
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$MP_DIR" >"$RB_ROOT/startbot.mp.out" 2>&1 || true
 grep -qx 'plugin marketplace add ExampleOrg/example-plugins' "$RB_ROOT/plugin-argv.log" 2>/dev/null && r=yes || r=no
-check "marketplace add uses the positional owner/repo form (no dead flags)" "$r"
+harness_check "marketplace add uses the positional owner/repo form (no dead flags)" "$r"
 grep -q 'PLUGIN marketplace valmarket registered' "$MP_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-check "registration verified against known_marketplaces.json + logged" "$r"
+harness_check "registration verified against known_marketplaces.json + logged" "$r"
 grep -q 'PLUGIN ERROR marketplace valmarketbad' "$MP_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-check "failed registration logs PLUGIN ERROR (not swallowed)" "$r"
+harness_check "failed registration logs PLUGIN ERROR (not swallowed)" "$r"
 _mpev="$(grep -rl '"type":"plugin_marketplace_failed"' "$MP_DIR/data/events/" 2>/dev/null | head -1 || true)"
 [ -n "$_mpev" ] && r=yes || r=no
-check "failed registration emits plugin_marketplace_failed fleet event (loud, not silent)" "$r"
+harness_check "failed registration emits plugin_marketplace_failed fleet event (loud, not silent)" "$r"
 if [ -n "$_mpev" ]; then
     python3 -c "import sys,json; evs=[json.loads(l) for l in open('$_mpev') if 'plugin_marketplace_failed' in l]; sys.exit(0 if len(evs)==1 and evs[0]['data']['marketplace']=='valmarketbad' else 1)" 2>/dev/null && r=yes || r=no
 else r=no; fi
-check "exactly one failure event, and it names valmarketbad (success stays quiet)" "$r"
+harness_check "exactly one failure event, and it names valmarketbad (success stays quiet)" "$r"
 grep -q 'READY —' "$MP_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-check "registration failure does NOT block startup (session still comes up)" "$r"
+harness_check "registration failure does NOT block startup (session still comes up)" "$r"
 
 if [ "$fail" -gt "$_mp_fail_before" ]; then
     echo "  --- DIAGNOSTIC: marketplace registration checks failed ---"
@@ -803,21 +797,21 @@ wr_events="$(ls "$WR_ROOT/state/events"/fleet-*.jsonl 2>/dev/null | head -1 || t
 echo ""
 echo "=== validate-bot-change: weekly worker-only restart ==="
 grep -q 'skip (manager): wmgr' "$wr_log" 2>/dev/null && r=yes || r=no
-check "weekly restart SKIPS the manager (MANAGER_TMUX==BOT_ID)" "$r"
+harness_check "weekly restart SKIPS the manager (MANAGER_TMUX==BOT_ID)" "$r"
 grep -q 'worker: wworker' "$wr_log" 2>/dev/null && r=yes || r=no
-check "weekly restart PROCESSES the worker" "$r"
+harness_check "weekly restart PROCESSES the worker" "$r"
 grep -q 'worker: wmgr' "$wr_log" 2>/dev/null && r=no || r=yes
-check "manager never entered the worker restart path" "$r"
+harness_check "manager never entered the worker restart path" "$r"
 { [ -n "$wr_events" ] && grep -q '"type":"restart_failed"' "$wr_events"; } && r=yes || r=no
-check "worker restart failure raises a restart_failed alert (shared emit_failure_alert)" "$r"
+harness_check "worker restart failure raises a restart_failed alert (shared emit_failure_alert)" "$r"
 
 # === Scenario 4: daily bounce retired from update-claude-code.sh (static) ===
 echo ""
 echo "=== validate-bot-change: daily bounce retired (download-only) ==="
 grep -Eq 'BOUNCE|spin-up-bot\.sh' "$LIB_DIR/update-claude-code.sh" && r=no || r=yes
-check "update-claude-code.sh no longer bounces the fleet" "$r"
+harness_check "update-claude-code.sh no longer bounces the fleet" "$r"
 grep -q 'npm install -g @anthropic-ai/claude-code@latest' "$LIB_DIR/update-claude-code.sh" && r=yes || r=no
-check "update-claude-code.sh still downloads the binary daily" "$r"
+harness_check "update-claude-code.sh still downloads the binary daily" "$r"
 
 # ===========================================================================
 # #415 — fleet.yaml-authoritative discovery + pane_stuck idle-guard.
@@ -876,15 +870,15 @@ orph_ev=$(ls "$F2_BOTS/$ORPH/data/events"/fleet-*.jsonl 2>/dev/null | head -1 ||
 idlek_ev=$(ls "$F2_BOTS/$IDLEK/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
 
 [ -n "$keep_ev" ] && grep -q '"type":"session_missing"' "$keep_ev" && r=yes || r=no
-check "#415 declared bot is still health-checked (session_missing fired for $KEEP)" "$r"
+harness_check "#415 declared bot is still health-checked (session_missing fired for $KEEP)" "$r"
 
 if [ -z "$orph_ev" ]; then r=yes
 elif grep -qE '"type":"(session_missing|service_down|pane_stuck)"' "$orph_ev"; then r=no
 else r=yes; fi
-check "#415 undeclared orphan dir emits ZERO pulse events (filtered via fleet.yaml)" "$r"
+harness_check "#415 undeclared orphan dir emits ZERO pulse events (filtered via fleet.yaml)" "$r"
 
 [ -n "$idlek_ev" ] && grep -q '"type":"pane_stuck"' "$idlek_ev" && r=no || r=yes
-check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard)" "$r"
+harness_check "#415 pane_stuck suppressed for an idle-at-prompt bot (.idle guard)" "$r"
 
 # ===========================================================================
 # #611 summary socket resolution + pane_stuck busy-guard (this PR).
@@ -959,17 +953,17 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$F2" >/dev/null 2>&1 || true
 busym_ev=$(ls "$F2_BOTS/$BUSYM/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
 busyp_ev=$(ls "$F2_BOTS/$BUSYP/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
 { [ -n "$busym_ev" ] && grep -q '"type":"pane_stuck"' "$busym_ev"; } && r=no || r=yes
-check "pane_stuck NOT fired for a working bot (fresh .last-tool-call, mid-tool-call)" "$r"
+harness_check "pane_stuck NOT fired for a working bot (fresh .last-tool-call, mid-tool-call)" "$r"
 { [ -n "$busyp_ev" ] && grep -q '"type":"pane_stuck"' "$busyp_ev"; } && r=no || r=yes
-check "pane_stuck NOT fired for a working bot (esc-to-interrupt pane, active turn)" "$r"
+harness_check "pane_stuck NOT fired for a working bot (esc-to-interrupt pane, active turn)" "$r"
 
 # #611: the summary must show the TMUX_SOCKET-only bot as up, not a false DOWN.
 _sumfile="$ROOT/state/pulse/pulse-summary.txt"
 printf '%s' "$(grep "^$SOCKB " "$_sumfile" 2>/dev/null || true)" | awk '{print $2}' | grep -qx up && r=yes || r=no
-check "#611 summary session=up for a bot whose TMUX_SOCKET != BOT_SERVICE" "$r"
+harness_check "#611 summary session=up for a bot whose TMUX_SOCKET != BOT_SERVICE" "$r"
 # related: a BOT_SERVICE-less bot must not show a false SERVICE DOWN in the summary.
 printf '%s' "$(grep "^$IDLEK " "$_sumfile" 2>/dev/null || true)" | awk '{print $3}' | grep -qx ok && r=yes || r=no
-check "#611 summary service=ok (not false DOWN) for a BOT_SERVICE-less bot" "$r"
+harness_check "#611 summary service=ok (not false DOWN) for a BOT_SERVICE-less bot" "$r"
 
 # ===========================================================================
 # Per-bot socket isolation (#414) — blast radius = 1 + observable misses.
@@ -980,17 +974,17 @@ echo ""
 echo "=== validate #414: per-bot socket isolation (blast radius + send-miss) ==="
 
 command tmux -L "$(vsock "$MGR")" has-session -t "$MGR" 2>/dev/null && r=yes || r=no
-check "#414 precondition: manager is up on its own private server" "$r"
+harness_check "#414 precondition: manager is up on its own private server" "$r"
 command tmux -L "$(vsock "$BOT")" has-session -t "$BOT" 2>/dev/null && r=yes || r=no
-check "#414 precondition: worker is up on a DISTINCT private server" "$r"
+harness_check "#414 precondition: worker is up on a DISTINCT private server" "$r"
 
 # Crown jewel: kill ONE bot's whole server; only that bot dies.
 command tmux -L "$(vsock "$BOT")" kill-server 2>/dev/null || true
 sleep 0.3
 command tmux -L "$(vsock "$BOT")" has-session -t "$BOT" 2>/dev/null && r=no || r=yes
-check "#414 blast radius: the killed bot's server is gone" "$r"
+harness_check "#414 blast radius: the killed bot's server is gone" "$r"
 command tmux -L "$(vsock "$MGR")" has-session -t "$MGR" 2>/dev/null && r=yes || r=no
-check "#414 blast radius = 1: a peer SURVIVES the kill (shared-server SPOF removed)" "$r"
+harness_check "#414 blast radius = 1: a peer SURVIVES the kill (shared-server SPOF removed)" "$r"
 
 # Observable miss: a cross-socket send to a dead target lands a send_miss event
 # in the caller's ledger — the silent `|| true` is gone.
@@ -998,7 +992,7 @@ BOT_DIR="$BOT_DIR" BOT_ID="$BOT" bash -c \
     '. "'"$LIB_DIR"'/lib-common.sh"; bot_tmux_send "tmux-valgone" "valgone" "ping"' \
     >/dev/null 2>&1 || true
 { ls "$EVENTS"/fleet-*.jsonl >/dev/null 2>&1 && grep -q '"type":"send_miss"' "$EVENTS"/fleet-*.jsonl; } && r=yes || r=no
-check "#414 send-miss: a cross-socket send to a dead target is logged, not silently dropped" "$r"
+harness_check "#414 send-miss: a cross-socket send to a dead target is logged, not silently dropped" "$r"
 
 # ===========================================================================
 # #591 Phase 1 — Telegram bridge poller-hijack mechanism (the regression gate
@@ -1061,7 +1055,7 @@ block = """    process.kill(stale, 0)
     process.kill(stale, 'SIGTERM')"""
 sys.exit(0 if src.count(block) == 1 else 1)
 PY
-    check "plugin reap anchor present exactly once (drift fails loud, never tests nothing)" "$r"
+    harness_check "plugin reap anchor present exactly once (drift fails loud, never tests nothing)" "$r"
 
     if [ "$r" != "yes" ]; then
         echo "  NOTE  plugin at $BH_PLUGIN no longer matches the hijack expectations — update this scenario alongside the plugin (#591 Phase 4)"
@@ -1105,29 +1099,29 @@ PY
         spawn_poller A 8
         BH_A="$BH_PID"
         { [ -n "$BH_A" ] && ps -p "$BH_A" >/dev/null 2>&1; } && r=yes || r=no
-        check "victim poller A up and holding bot.pid (real plugin, fake token)" "$r"
+        harness_check "victim poller A up and holding bot.pid (real plugin, fake token)" "$r"
 
         spawn_poller B 9 "$BH_A"
         BH_B="$BH_PID"
         [ "$(bh_until 6 grep -q "replacing stale poller pid=$BH_A" "$BH_DIR/B.err")" = "yes" ] && r=yes || r=no
-        check "newcomer B SIGTERMs the LIVE holder (last-writer-wins reap fired)" "$r"
+        harness_check "newcomer B SIGTERMs the LIVE holder (last-writer-wins reap fired)" "$r"
 
         { [ "$(bh_until 5 bh_gone "$BH_A")" = "yes" ] && [ "$(bh_until 5 grep -q "shutting down" "$BH_DIR/A.err")" = "yes" ]; } && r=yes || r=no
-        check "victim A exits via the graceful shutdown path" "$r"
+        harness_check "victim A exits via the graceful shutdown path" "$r"
 
         { [ -n "$BH_B" ] && [ "$(cat "$BH_STATE/bot.pid" 2>/dev/null)" = "$BH_B" ]; } && r=yes || r=no
-        check "slot taken over: bot.pid now = newcomer B" "$r"
+        harness_check "slot taken over: bot.pid now = newcomer B" "$r"
 
         exec 9>&-   # transient B loses its client: stdin EOF
         [ "$(bh_until 6 bh_gone "$BH_B")" = "yes" ] && r=yes || r=no
-        check "transient B exits when its client goes away (stdin EOF)" "$r"
+        harness_check "transient B exits when its client goes away (stdin EOF)" "$r"
 
         [ ! -f "$BH_STATE/bot.pid" ] && r=yes || r=no
-        check "B unlinks bot.pid on exit — slot ABANDONED" "$r"
+        harness_check "B unlinks bot.pid on exit — slot ABANDONED" "$r"
 
         sleep 1   # settle window for the negative assertion below
         { [ ! -f "$BH_STATE/bot.pid" ] && bh_gone "${BH_A:-0}" && bh_gone "${BH_B:-0}"; } && r=yes || r=no
-        check "victim never returns: slot stays dark after settle (no respawn, no reclaim)" "$r"
+        harness_check "victim never returns: slot stays dark after settle (no respawn, no reclaim)" "$r"
 
         exec 8>&-   # release the dead victim's writer fd
 
@@ -1176,17 +1170,17 @@ _prev_root="${CLAUDLOBBY_ROOT:-}"
 CLAUDLOBBY_ROOT="$ROOT"
 
 [ "$(resolve_fleet_dir "$NF")" = "$NF_DIR" ] && r=yes || r=no
-check "#602 resolve_fleet_dir finds a fleet nested under a system container" "$r"
+harness_check "#602 resolve_fleet_dir finds a fleet nested under a system container" "$r"
 
 [ "$(resolve_bots_dir "$NF")" = "$NF_BOTS" ] && r=yes || r=no
-check "#602 resolve_bots_dir returns the nested runtime/bots" "$r"
+harness_check "#602 resolve_bots_dir returns the nested runtime/bots" "$r"
 
 host_bots_dirs | grep -qxF "$NF_BOTS" && r=yes || r=no
-check "#602 host_bots_dirs enumerates the nested bots dir" "$r"
+harness_check "#602 host_bots_dirs enumerates the nested bots dir" "$r"
 
 # Byte-identical invariant: the FLAT valfleet must STILL resolve flat, unchanged.
 [ "$(resolve_fleet_dir "$FLEET")" = "$ROOT/local/$FLEET" ] && r=yes || r=no
-check "#602 flat fleet STILL resolves flat (byte-identical invariant holds)" "$r"
+harness_check "#602 flat fleet STILL resolves flat (byte-identical invariant holds)" "$r"
 
 CLAUDLOBBY_ROOT="$_prev_root"
 
@@ -1196,7 +1190,7 @@ CLAUDLOBBY_ROOT="$_prev_root"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$NF" >/dev/null 2>&1 || true
 nbot_ev=$(ls "$NF_BOTS/$NBOT/data/events"/fleet-*.jsonl 2>/dev/null | head -1 || true)
 [ -n "$nbot_ev" ] && grep -q '"type":"session_missing"' "$nbot_ev" && r=yes || r=no
-check "#602 fleet-pulse health-checks a bot in a NESTED fleet (session_missing fired)" "$r"
+harness_check "#602 fleet-pulse health-checks a bot in a NESTED fleet (session_missing fired)" "$r"
 
 # ===========================================================================
 # Scenario: equippable briefing trigger (#627 P3/P4/P6). The timer-fired
@@ -1273,29 +1267,29 @@ sink_pane=$(tmux capture-pane -t "$SINK" -p 2>/dev/null || true)
 
 # (a) the trigger fires — briefing_dispatched on the idle bot's ledger
 { [ -n "$brief_events" ] && grep -q '"type":"briefing_dispatched"' "$brief_events"; } && r=yes || r=no
-check "briefing trigger fires: briefing_dispatched event emitted (idle bot)" "$r"
+harness_check "briefing trigger fires: briefing_dispatched event emitted (idle bot)" "$r"
 
 # (b) bare-slash lands — /briefing morning present, NO set +H; prefix (F6 canary)
 { printf '%s' "$brief_pane" | grep -q '/briefing morning' \
     && ! printf '%s' "$brief_pane" | grep -q 'set +H'; } && r=yes || r=no
-check "briefing dispatch lands as a BARE slash command (no set +H; — F6 regression canary)" "$r"
+harness_check "briefing dispatch lands as a BARE slash command (no set +H; — F6 regression canary)" "$r"
 
 # (c) busy-defer — briefing_deferred/bot_busy, and NOTHING sent to the busy pane
 printf '%s' "$busy_pane" | grep -q '/briefing' && _sent=yes || _sent=no
 { [ -n "$briefbusy_events" ] \
     && grep -q '"type":"briefing_deferred".*"reason":"bot_busy"' "$briefbusy_events" \
     && [ "$_sent" = no ]; } && r=yes || r=no
-check "briefing defers on a busy bot: briefing_deferred/bot_busy, no dispatch" "$r"
+harness_check "briefing defers on a busy bot: briefing_deferred/bot_busy, no dispatch" "$r"
 
 # (d) prose control — a non-slash payload keeps the set +H; guard
 printf '%s' "$sink_pane" | grep -qE 'set \+H; deploy failed alert' && r=yes || r=no
-check "dispatch classifier keeps set +H; on prose (deploy failed !!)" "$r"
+harness_check "dispatch classifier keeps set +H; on prose (deploy failed !!)" "$r"
 
 # (e) classifier edges — file-path prose + leading-whitespace slash keep the guard
 printf '%s' "$sink_pane" | grep -qE 'set \+H; /home/crog/x is broken' && r=yes || r=no
-check "dispatch classifier keeps set +H; on file-path prose (/home/... not a slash cmd)" "$r"
+harness_check "dispatch classifier keeps set +H; on file-path prose (/home/... not a slash cmd)" "$r"
 printf '%s' "$sink_pane" | grep -qE 'set \+H; +/leading-space-prose' && r=yes || r=no
-check "dispatch classifier keeps set +H; on a leading-whitespace slash (not anchored ^/)" "$r"
+harness_check "dispatch classifier keeps set +H; on a leading-whitespace slash (not anchored ^/)" "$r"
 
 # (f) skill env-consumption (F4). The /briefing skill must actually CONSUME the
 # configured sections — the F4 "silently-ignored section list" risk. SKILL.md is
@@ -1313,7 +1307,7 @@ _instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null
 { [ -f "$_skill" ] \
     && printf '%s\n' "$_instr" | grep -q 'BRIEFING_SECTIONS' \
     && printf '%s\n' "$_instr" | grep -qi 'configured section'; } && r=yes || r=no
-check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (read the var + render the configured sections)" "$r"
+harness_check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (read the var + render the configured sections)" "$r"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="

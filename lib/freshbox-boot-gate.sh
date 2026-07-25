@@ -74,15 +74,8 @@ trap cleanup EXIT
 
 pass=0
 fail=0
-check() {  # check "<desc>" "<yes|no>"
-  if [ "$2" = "yes" ]; then
-    printf 'PASS: %s\n' "$1"; pass=$((pass + 1))
-  else
-    printf 'FAIL: %s\n' "$1"; fail=$((fail + 1))
-  fi
-}
 check_no_match() {  # check_no_match "<desc>" <file> <grep-ERE> ; passes iff the pattern is ABSENT
-  if grep -qiE "$3" "$2" 2>/dev/null; then check "$1" "no"; else check "$1" "yes"; fi
+  if grep -qiE "$3" "$2" 2>/dev/null; then harness_check "$1" "no"; else harness_check "$1" "yes"; fi
 }
 json_lines() {  # keep only JSONL objects; drop the non-JSON advisory/banner prose
   # claude -p prints e.g. "Ignoring N permissions.allow entries ... not trusted" as
@@ -164,7 +157,7 @@ SETTINGS="$BOT_DIR/.claude/settings.local.json"
 
 # The composer must have pointed the bot at the fresh CONFIG_DIR (freshbox account).
 composed_cfg="$(bot_conf_get "$BOT_DIR" CLAUDE_CONFIG_DIR "")"
-check "composer emits an active CLAUDE_CONFIG_DIR at the fresh dir" \
+harness_check "composer emits an active CLAUDE_CONFIG_DIR at the fresh dir" \
   "$([ "$composed_cfg" = "$CONFIG_DIR" ] && echo yes || echo no)"
 
 printf '%s\n' "$SENTINEL" > "$BOT_DIR/probe.txt"
@@ -194,9 +187,9 @@ seed_auth_and_trust "$CONFIG_DIR" "$BOT_DIR"
 # skip-flag isolation (rajan/#648): prove NO user-tier settings.json skip-flags
 # exist, so a clean completion below is attributable to the composed
 # project-tier settings.local.json flags — not start-bot's user-tier jq hack.
-check "composed settings.local.json carries the skip-flags" \
+harness_check "composed settings.local.json carries the skip-flags" \
   "$(jq -e '.skipAutoPermissionPrompt==true and .skipDangerousModePermissionPrompt==true' "$SETTINGS" >/dev/null 2>&1 && echo yes || echo no)"
-check "no user-tier settings.json skip-flags seeded (isolates the project-tier flags)" \
+harness_check "no user-tier settings.json skip-flags seeded (isolates the project-tier flags)" \
   "$([ ! -f "$CONFIG_DIR/settings.json" ] && echo yes || echo no)"
 
 # --- L2: the composed session-loop wiring (static — proves composition) -------
@@ -210,7 +203,7 @@ has_all_hooks="yes"
 for suffix in 'hook session-start' 'hook pre-compact' 'hook session-end'; do
   printf '%s' "$loop_cmds" | grep -qF "$suffix" || has_all_hooks="no"
 done
-check "composed settings carry the three claudron session-loop hooks" "$has_all_hooks"
+harness_check "composed settings carry the three claudron session-loop hooks" "$has_all_hooks"
 
 allow_json="$(jq -c '.permissions.allow // []' "$SETTINGS")"
 grants_ok="yes"
@@ -218,7 +211,7 @@ for verb in lookup recall capture status; do
   printf '%s' "$allow_json" | jq -e --arg g "Bash(claudron $verb *)" \
     'any(.[]; . == $g)' >/dev/null 2>&1 || grants_ok="no"
 done
-check "composed settings carry the four narrow claudron verb grants" "$grants_ok"
+harness_check "composed settings carry the four narrow claudron verb grants" "$grants_ok"
 
 check_no_match "no Bash(claudron *) wildcard in composed settings" \
   "$SETTINGS" 'Bash\(claudron \*\)'
@@ -226,7 +219,7 @@ promote_denied="yes"
 printf '%s' "$allow_json" | jq -e \
   'any(.[]; . == "Bash" or . == "Bash(claudron *)" or (tostring | test("claudron +promote")))' \
   >/dev/null 2>&1 && promote_denied="no"
-check "vault-wired bot cannot run claudron promote (no promote grant, no wildcard)" \
+harness_check "vault-wired bot cannot run claudron promote (no promote grant, no wildcard)" \
   "$promote_denied"
 
 # --- boot: claude -p on the fresh, seeded, composed config --------------------
@@ -260,7 +253,7 @@ boot_rc=0
 boot "$CONFIG_DIR" "$TRANSCRIPT" || boot_rc=$?
 
 clean_result="no"; reached_clean_result "$TRANSCRIPT" && clean_result="yes"
-check "reaches a clean (non-error) result on the fresh CONFIG_DIR (rc=$boot_rc, no hang within ${BOOT_TIMEOUT}s)" "$clean_result"
+harness_check "reaches a clean (non-error) result on the fresh CONFIG_DIR (rc=$boot_rc, no hang within ${BOOT_TIMEOUT}s)" "$clean_result"
 
 # The whole composed settings.local.json (allows AND skip-flags) is HONORED — no
 # untrusted-workspace advisory. This is what proves the trust seed took: an
@@ -274,7 +267,7 @@ check_no_match "composed settings.local.json honored — no untrusted-workspace 
 # operates end-to-end on the fresh CONFIG_DIR (not a no-op boot).
 tool_worked="no"
 if bash_tool_used "$TRANSCRIPT" && result_has_sentinel "$TRANSCRIPT"; then tool_worked="yes"; fi
-check "the bot ran a tool and returned the probe token (operates end-to-end on the fresh config)" "$tool_worked"
+harness_check "the bot ran a tool and returned the probe token (operates end-to-end on the fresh config)" "$tool_worked"
 
 # L2: the SessionStart hook injected the recall brief. CONVENTIONS is the
 # always-loaded layer, so its sentinel surfacing in the model's reply proves the
@@ -283,7 +276,7 @@ brief_injected="no"
 if json_lines "$TRANSCRIPT" | jq -rc 'select(.type=="result") | .result // ""' 2>/dev/null | grep -qF "$RECALL_SENTINEL"; then
   brief_injected="yes"
 fi
-check "SessionStart injected the recall brief (CONVENTIONS sentinel observed in the reply)" "$brief_injected"
+harness_check "SessionStart injected the recall brief (CONVENTIONS sentinel observed in the reply)" "$brief_injected"
 
 # auth wall / onboarding wizard would appear if a seed were missing.
 check_no_match "no auth wall (credential drop authenticated the fresh dir)" \
@@ -297,7 +290,7 @@ perm_blocked="no"
 if json_lines "$TRANSCRIPT" | jq -rc 'select(.type=="user") | .message.content[]? | select(.type=="tool_result" and .is_error==true) | (.content | tostring)' 2>/dev/null | grep -qiE 'permission|not allowed|requires approval|denied'; then
   perm_blocked="yes"
 fi
-check "zero permission prompts / missing-perm failures (skip-flags + allow-list held)" \
+harness_check "zero permission prompts / missing-perm failures (skip-flags + allow-list held)" \
   "$([ "$perm_blocked" = no ] && echo yes || echo no)"
 
 # --- transcript tool-set ⊆ composed allow-list --------------------------------
@@ -314,7 +307,7 @@ for t in "${used_tools[@]:-}"; do
     covered="no"; uncovered="$uncovered $t"
   fi
 done
-check "transcript tool-set ⊆ composed allow-list (used:${used_tools[*]:-none}${uncovered:+ uncovered:$uncovered})" "$covered"
+harness_check "transcript tool-set ⊆ composed allow-list (used:${used_tools[*]:-none}${uncovered:+ uncovered:$uncovered})" "$covered"
 
 # --- teeth: strip the trust seed → the whole composed settings.local.json inert -
 # The REAL functional divergence (not a jq artifact): with the trust key stripped,
@@ -337,7 +330,7 @@ seeded_advisory="no"; grep -qiE "$ADVISORY_RE" "$TRANSCRIPT" 2>/dev/null && seed
 # not. Mutation-tested (seed both → no divergence → this goes RED).
 teeth="no"
 if [ "$notrust_advisory" = yes ] && [ "$seeded_advisory" = no ]; then teeth="yes"; fi
-check "trust-seed teeth: no-trust boot drops the whole composed settings.local.json (untrusted advisory present only without the seed)" "$teeth"
+harness_check "trust-seed teeth: no-trust boot drops the whole composed settings.local.json (untrusted advisory present only without the seed)" "$teeth"
 
 # --- verdict ------------------------------------------------------------------
 printf '\nfreshbox-boot-gate: %d passed, %d failed\n' "$pass" "$fail"

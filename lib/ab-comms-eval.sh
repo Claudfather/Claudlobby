@@ -131,9 +131,11 @@ if [ "$DRY_RUN" != 1 ]; then
 fi
 
 # --- scaffolding: OWNED COPY of validate-bot-change.sh (provenance-commented) --
-# The four pieces below are copied inline from validate-bot-change.sh; they are
-# inline there too (not in lib-common.sh) and consolidation is an optional
-# follow-up, not this PR.
+# The pieces below are copied inline from validate-bot-change.sh. Piece [4]'s
+# pass/fail assertion is now shared — lib-common harness_check, adopted here and
+# across the sibling harnesses. [1]-[3] stay owned copies: the tmux/socket shim
+# and the cleanup trap are harness-local by nature (they must not move into the
+# widely-sourced lib-common), so only [4] was safe to hoist.
 #
 # [1] tmux socket-isolation shim (validate-bot-change.sh :36-51). unset FLEET_NAME
 #     so bots resolve to the tmux-<name> fallback; shadow `tmux` so every session
@@ -168,12 +170,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# [4] pass/fail counter (validate-bot-change.sh :126-134).
+# [4] pass/fail counters (ambient; lib-common harness_check reads them).
 pass=0; fail=0
-check() {
-    if [ "$2" = yes ]; then pass=$((pass + 1)); printf '  PASS  %s\n' "$1"
-    else fail=$((fail + 1)); printf '  FAIL  %s\n' "$1"; fi
-}
 
 # --- F2 SEAMS (stubs until Chris ratifies) ----------------------------------
 # battery_* return the per-task dispatch content + the elided-detail ground truth
@@ -412,19 +410,19 @@ printf '%s\n' "$verdict_out" | grep -v '^ANY_STRADDLE='
 # --- scaffolding wiring asserts (what --dry-run proves) ----------------------
 printf '\n=== scaffolding checks ===\n'
 [ -f "$ROOT/runtime/bots/ab-with/bot.conf" ] && r=yes || r=no
-check "ab-with composed by generate" "$r"
+harness_check "ab-with composed by generate" "$r"
 [ -f "$ROOT/runtime/bots/ab-without/bot.conf" ] && r=yes || r=no
-check "ab-without composed by generate" "$r"
+harness_check "ab-without composed by generate" "$r"
 if [ "${PROTO_PLACEHOLDER:-0}" = 1 ]; then
     grep -q 'PLACEHOLDER' "$ROOT/runtime/bots/ab-with/CLAUDE.md" 2>/dev/null && r=yes || r=no
-    check "token-efficiency protocol lands in ab-with" "$r"
+    harness_check "token-efficiency protocol lands in ab-with" "$r"
     grep -q 'PLACEHOLDER' "$ROOT/runtime/bots/ab-without/CLAUDE.md" 2>/dev/null && r=no || r=yes
-    check "ab-without excludes the protocol (only difference)" "$r"
+    harness_check "ab-without excludes the protocol (only difference)" "$r"
 fi
 grep -q '"variant":"with"' "$RESULTS" && r=yes || r=no
-check "results.jsonl has WITH rows" "$r"
+harness_check "results.jsonl has WITH rows" "$r"
 grep -q '"variant":"without"' "$RESULTS" && r=yes || r=no
-check "results.jsonl has WITHOUT rows" "$r"
+harness_check "results.jsonl has WITHOUT rows" "$r"
 python3 -c 'import json,sys
 d=json.load(open(sys.argv[1]))
 assert d["per_task"], "no per_task"
@@ -433,10 +431,10 @@ assert "protocol_sensitive" in t and "cost_weighted_total" in t, "missing an axi
 assert "pins" in d and "weights" in d["pins"], "missing pins/weights"
 assert not (d["overall"]=="PASS" and d["pins"]["threshold"] is None), "PASS without a ratified T"' \
     "$VERDICT" 2>/dev/null && r=yes || r=no
-check "verdict.json valid: both axes, pins, no bare-PASS without T" "$r"
+harness_check "verdict.json valid: both axes, pins, no bare-PASS without T" "$r"
 # zero model calls: no auth landed in either per-bot CLAUDE_CONFIG_DIR
 find "$ROOT"/config-with "$ROOT"/config-without -name '.credentials.json' 2>/dev/null | grep -q . && r=no || r=yes
-check "no CLAUDE_CONFIG_DIR auth touched (zero model calls)" "$r"
+harness_check "no CLAUDE_CONFIG_DIR auth touched (zero model calls)" "$r"
 
 printf '\nROOT=%s\nRESULTS=%s\nVERDICT=%s\n' "$ROOT" "$RESULTS" "$VERDICT"
 printf 'checks: %s passed, %s failed\n' "$pass" "$fail"

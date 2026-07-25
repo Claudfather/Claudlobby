@@ -1710,3 +1710,29 @@ bot_is_manager() {
     bid=${bid%%#*}; bid=${bid//[[:space:]]/}
     [ -n "$bid" ] && [ "$mgr" = "$bid" ]
 }
+
+# --- Test-harness assertion --------------------------------------------------
+
+# harness_check "<desc>" "<yes|no>" — PASS/FAIL assertion for the lib/ rehearsal
+# and gate harnesses. Increments the caller's ambient `pass`/`fail` counters
+# (each harness sets `pass=0; fail=0` before its check block); kept ambient by
+# design so the run summary stays in caller scope.
+harness_check() {
+    if [ "$2" = yes ]; then
+        pass=$((pass + 1)); printf '  PASS  %s\n' "$1"
+    else
+        fail=$((fail + 1)); printf '  FAIL  %s\n' "$1"
+    fi
+}
+
+# --- Fleet event-ledger retention -------------------------------------------
+
+# reap_event_files <events_dir> <name_glob> <reap_days> — delete JSONL event
+# files older than <reap_days>. The caller resolves <reap_days> in its own
+# context (process env, bot.conf, or a script-specific override) and passes it
+# in; only the find shape lives here. No-op when <events_dir> is absent.
+reap_event_files() {
+    local events_dir="$1" name_glob="$2" reap_days="$3"
+    [ -d "$events_dir" ] || return 0
+    find "$events_dir" -name "$name_glob" -type f -mtime +"$reap_days" -delete 2>/dev/null || true
+}
