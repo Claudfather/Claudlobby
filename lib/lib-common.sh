@@ -23,6 +23,7 @@
 #   stat_mtime         — portable file mtime (epoch seconds)
 #   sed_i              — portable in-place sed
 #   df_pcent           — portable disk usage percentage
+#   proc_rss_kb        — portable RSS (KB) of a pid + its direct children
 #   json_escape        — JSON-string escaping incl. control chars (#530)
 #   debounce_notify    — fire-once notification with file-based marker
 #   debounce_clear     — clear a debounce marker for re-firing
@@ -1225,6 +1226,18 @@ df_pcent() {
     else
         df -P "$mount" | awk 'NR==2 {gsub("%",""); print $5}'
     fi
+}
+
+# proc_rss_kb <pid>
+# Sum resident-set size (KB) of a process and its direct children. Portable:
+# `ps -A -o pid=,ppid=,rss=` is read by both GNU and BSD ps, replacing the
+# GNU-only `ps --ppid <pid>` selector, which errors on BSD/macOS and silently
+# yields 0. One level deep — self plus direct children — the shape a tmux pane
+# presents (the pane shell plus its `claude` child).
+proc_rss_kb() {
+    local root="${1:?Usage: proc_rss_kb <pid>}"
+    ps -A -o pid=,ppid=,rss= 2>/dev/null \
+        | awk -v r="$root" '$1 == r || $2 == r { s += $3 } END { print s + 0 }'
 }
 
 # --- Fleet path resolution ---------------------------------------------------

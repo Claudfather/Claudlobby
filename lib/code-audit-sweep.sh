@@ -135,7 +135,10 @@ STALEST_LAST="${STALEST_KEY:-NONE}"
 staleness_days() {
     local iso="$1" then_epoch now
     if [ -z "$iso" ] || [ "$iso" = "NONE" ]; then printf 'null'; return; fi
-    then_epoch=$(date -d "$iso" +%s 2>/dev/null || echo "")
+    # GitHub createdAt is an RFC3339 UTC (Z-suffixed) timestamp; route it through
+    # the portable helper. GNU date -d is Linux-only and failed closed to null on
+    # macOS, killing the staleness telemetry there.
+    then_epoch=$(iso_to_epoch "$iso") || then_epoch=""
     [ -z "$then_epoch" ] && { printf 'null'; return; }
     now=$(date +%s)
     printf '%d' $(( (now - then_epoch) / 86400 ))

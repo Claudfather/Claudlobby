@@ -133,9 +133,9 @@ per_bot_summary() {
         local pane_pid rss_kb=0
         pane_pid=$(bot_tmux "$bot_socket" list-panes -t "$bot_name" -F '#{pane_pid}' 2>/dev/null | head -1) || true
         if [ -n "$pane_pid" ]; then
-            # Walk the process tree rooted at pane_pid
-            rss_kb=$(ps --ppid "$pane_pid" -p "$pane_pid" -o rss= 2>/dev/null \
-                    | awk '{s+=$1} END{print s+0}') || true
+            # Sum the pane process and its direct children (portable helper; the
+            # GNU-only `ps --ppid` this replaces silently reported 0 on macOS).
+            rss_kb=$(proc_rss_kb "$pane_pid") || true
         fi
         local rss_mb
         rss_mb=$(( (rss_kb + 512) / 1024 ))
