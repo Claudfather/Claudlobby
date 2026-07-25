@@ -1375,6 +1375,27 @@ bot_unit_present() {
     esac
 }
 
+# service_is_active <bot_service>
+# rc 0 iff the bot's supervised service is active; non-zero == confirmed down
+# (the actionable service_down signal the caller alerts on). Cross-platform sibling of
+# bot_unit_present (which tests unit-FILE presence — this tests LIVE state), so
+# fleet-pulse detection and its summary column share one OS-dispatch and cannot
+# drift. Linux: `systemctl --user is-active` (non-zero for inactive/failed).
+# macOS: `launchctl print gui/<uid>/<label>` — BOT_SERVICE is the launchd Label
+# verbatim (composer sets the plist Label to the same string); a non-zero print
+# means the job is not bootstrapped. Presence-based, mirroring status.py
+# _check_launchd_service (a loaded KeepAlive agent reads active). _OS is
+# Linux|Darwin by construction (detect_os); an unrecognized OS cannot prove down,
+# so it reports active — the alert path never pages a host it cannot supervise.
+service_is_active() {
+    local svc="${1:?Usage: service_is_active <bot_service>}"
+    case "$_OS" in
+    Linux) systemctl --user is-active "$svc" >/dev/null 2>&1 ;;
+    Darwin) launchctl print "gui/$(id -u)/$svc" >/dev/null 2>&1 ;;
+    *) return 0 ;;
+    esac
+}
+
 # unit_is_dormant <timers-dir> <unit-basename>
 # True when the composed DORMANT manifest lists the unit (an enroll: false
 # job — composed-but-dormant, opt-in via fleet.yaml). One predicate shared by
