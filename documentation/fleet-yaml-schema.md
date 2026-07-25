@@ -22,7 +22,7 @@ fleet:
                                          # OPTIONAL — gate system.yaml injection into defaults (default: true)
 
   defaults:                             # applied to every bot unless overridden
-    model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-6
+    model: opus | sonnet | haiku | fable   # or a pinned model ID, e.g. claude-opus-4-8
     effort: low | medium | high | max
     account: default
     prompt_suggestions: true | false    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION (default: false)

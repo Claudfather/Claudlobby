@@ -25,9 +25,11 @@ KNOWN_MODELS: frozenset[str] = frozenset(
         "sonnet",
         "haiku",
         "fable",
-        # Full model IDs (for explicit version pinning)
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
+        # Full model IDs (for explicit version pinning) — refresh to the
+        # current GA roster when the lineup moves (canonical IDs live in the
+        # claude-api skill / Anthropic model docs).
+        "claude-opus-4-8",
+        "claude-sonnet-5",
         "claude-haiku-4-5-20251001",
         "claude-fable-5",
     }
@@ -39,8 +41,21 @@ KNOWN_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "max"})
 
 # ── Hook events ──────────────────────────────────────────────────
 # Claude Code hook event names. Unknown event = silently ignored hook.
+# Full lifecycle set: the tool-call events plus the session/prompt/compaction
+# events the clauDNA/Claudron vault integration rides (SessionStart, SessionEnd,
+# PreCompact). Refresh from the Claude Code hooks reference when it grows.
 KNOWN_HOOK_EVENTS: frozenset[str] = frozenset(
-    {"PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop"}
+    {
+        "PreToolUse",
+        "PostToolUse",
+        "UserPromptSubmit",
+        "Notification",
+        "Stop",
+        "SubagentStop",
+        "PreCompact",
+        "SessionStart",
+        "SessionEnd",
+    }
 )
 
 # ── Tool types ───────────────────────────────────────────────────

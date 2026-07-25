@@ -64,6 +64,10 @@ class TestSetsPopulated:
         assert "haiku" in KNOWN_MODELS
         assert "fable" in KNOWN_MODELS
         assert "claude-fable-5" in KNOWN_MODELS
+        # Current GA full-ID pins (#771): a bot pinning the live model must
+        # not trip the "not in known models" warning.
+        assert "claude-opus-4-8" in KNOWN_MODELS
+        assert "claude-sonnet-5" in KNOWN_MODELS
 
     def test_known_efforts(self):
         assert KNOWN_EFFORTS == frozenset({"low", "medium", "high", "max"})
@@ -72,6 +76,11 @@ class TestSetsPopulated:
         assert "PreToolUse" in KNOWN_HOOK_EVENTS
         assert "PostToolUse" in KNOWN_HOOK_EVENTS
         assert "Stop" in KNOWN_HOOK_EVENTS
+        # Session/prompt/compaction lifecycle events the clauDNA/Claudron vault
+        # integration depends on — Claude Code honors these, so they must be
+        # recognized, not flagged "silently ignored" (#771).
+        for event in ("SessionStart", "SessionEnd", "PreCompact", "UserPromptSubmit"):
+            assert event in KNOWN_HOOK_EVENTS
 
     def test_permission_modes(self):
         assert "default" in VALID_PERMISSION_MODES
@@ -293,6 +302,15 @@ class TestValidatorModelCheck:
         model_warnings = [w for w in report.warnings if "known models" in w]
         assert len(model_warnings) == 0
 
+    def test_current_full_id_pins_no_warning(self, tmp_path):
+        # A bot pinning a current GA full model ID must not warn (#771).
+        for i, model in enumerate(("claude-opus-4-8", "claude-sonnet-5")):
+            sub = tmp_path / f"case{i}"
+            sub.mkdir()
+            report = self._make_fleet_and_validate(sub, {"model": model})
+            model_warnings = [w for w in report.warnings if "known models" in w]
+            assert model_warnings == [], f"{model} unexpectedly warned"
+
 
 class TestValidatorHookEventCheck:
     """Validator emits warnings for unknown hook events."""
@@ -337,6 +355,20 @@ class TestValidatorHookEventCheck:
         hook_warnings = [w for w in report.warnings if "not recognized" in w]
         assert len(hook_warnings) == 1
         assert "did you mean 'PreToolUse'" in hook_warnings[0]
+
+    def test_session_lifecycle_events_no_warning(self, tmp_path):
+        # The clauDNA/Claudron integration configures these and Claude Code
+        # honors them, so the validator must not warn they'll be "silently
+        # ignored" (#771).
+        hooks = {
+            "SessionStart": [{"command": "echo hi"}],
+            "SessionEnd": [{"command": "echo bye"}],
+            "PreCompact": [{"command": "echo compact"}],
+            "UserPromptSubmit": [{"command": "echo prompt"}],
+        }
+        report = self._make_fleet_and_validate(tmp_path, hooks)
+        hook_warnings = [w for w in report.warnings if "not recognized" in w]
+        assert hook_warnings == []
 
 
 class TestValidatorExpertiseSuggestion:
