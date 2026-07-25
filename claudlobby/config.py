@@ -24,12 +24,30 @@ from .path_audit import ExternalDecl, parse_external_decls
 log = logging.getLogger(__name__)
 
 
+# The env var the telegram channel plugin reads its token from. A token_env that
+# names this same var is "self-referential" (the documented default in
+# fleet.yaml.example): the compositor must not scaffold an empty stub for it — a
+# defined-but-empty value is authoritative to the poller and poisons it (#749/#750).
+TELEGRAM_PLUGIN_TOKEN_VAR = "TELEGRAM_BOT_TOKEN"
+
+
 @dataclass
 class TelegramConfig:
     handle: str | None = None
     token_env: str | None = None
     require_mention: bool = True
     chat_id: str | None = None
+
+    @property
+    def token_env_is_self_referential(self) -> bool:
+        """True when token_env names the plugin's own read var (TELEGRAM_BOT_TOKEN).
+
+        Such a token's home is the plugin's channel-dir .env fallback, not a
+        compositor-scaffolded bot .env stub: the compositor skips scaffolding it and
+        the validator skips its "not set" warning (that tier is not one validate
+        inspects), so neither ever emits the poisoning empty export (#750).
+        """
+        return self.token_env == TELEGRAM_PLUGIN_TOKEN_VAR
 
 
 @dataclass

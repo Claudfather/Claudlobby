@@ -383,8 +383,16 @@ def _validate_bots(
 
         # Telegram token env (warn). Check effective_env so bot-tier .env
         # values count (the common case — per-bot Telegram tokens live in
-        # runtime/bots/<bot>/.env so multi-bot fleets don't cross-wire).
-        if bot.telegram.token_env and bot.telegram.token_env not in effective_env:
+        # runtime/bots/<bot>/.env so multi-bot fleets don't cross-wire). Skip the
+        # self-referential case (token_env == TELEGRAM_BOT_TOKEN): the compositor
+        # deliberately does not scaffold it and its home is the plugin's channel-dir
+        # .env, which is not a tier we inspect — so the check would false-alarm on
+        # the documented default (#750).
+        if (
+            bot.telegram.token_env
+            and not bot.telegram.token_env_is_self_referential
+            and bot.telegram.token_env not in effective_env
+        ):
             report.warnings.append(
                 f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in any tier of .env — bot won't connect to Telegram"
             )
