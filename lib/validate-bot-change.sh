@@ -34,6 +34,10 @@ fi
 # server (-L tmux-<name>), matching what the scripts resolve. The scripts call
 # "$_TMUX_BIN" in their own subprocesses, so this function never affects them.
 unset FLEET_NAME
+# Also drop an ambient CLAUDE_FLAGS: the fixture bot.confs deliberately omit it
+# (minimal composed-looking confs), so a dev's exported CLAUDE_FLAGS would leak
+# into the start-bot.sh boots and MASK a regression that CI (clean env) exposes.
+unset CLAUDE_FLAGS
 vsock() { printf 'tmux-%s' "$1"; }
 tmux() {
     local i sock=""
