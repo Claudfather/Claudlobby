@@ -527,7 +527,6 @@ mkdir -p "$RB_HOME/.claude"
 printf '{"skipAutoPermissionPrompt":true,"skipDangerousModePermissionPrompt":true}\n' > "$RB_HOME/.claude/settings.json"
 cat > "$RB_ROOT/bin/claude" <<'STUB'
 #!/bin/bash
-printf 'remote-control is active\n'
 exec cat
 STUB
 chmod +x "$RB_ROOT/bin/claude"
@@ -590,34 +589,49 @@ if [ "$fail" -gt "$_lossless_fail_before" ]; then
     echo "  ----------------------------------------------------------------"
 fi
 
-# === Scenario 2b: RC readiness probe — READY vs TIMEOUT + rc_timeout event (#533) ===
-# Same REAL start-bot.sh. Positive path first (the fresh/stale runs above used a
-# stub that prints the readiness string): READY must be logged and NO rc_timeout
-# event emitted. Then the negative path: a stub that never prints the string
-# simulates the #478 regression (RC never came up) — the probe must TIMEOUT and
-# emit an rc_timeout event to the ledger fleet-pulse escalates. This is the
-# empirical proof of #533 items 3-4 (unit tests prove composition; only running
-# start-bot proves the event actually fires). RC_READY_TIMEOUT_S=1 keeps the
-# TIMEOUT fast — the 90s default is untestable in a harness.
+# === Scenario 2b: readiness probe — READY vs TIMEOUT + rc_timeout event (#533/#751) ===
+# Same REAL start-bot.sh. The probe now asserts bridge_state ground truth, not a
+# bring-up pane string (#751: the old `remote-control is active` grep drifted out of
+# current builds and false-fired rc_timeout on every start). Positive path first
+# (the fresh/stale valrb above has no TELEGRAM_BOT_HANDLE -> bridge_state no_handle
+# -> ready, no poller to await): READY logged, NO rc_timeout. Then the negative
+# path: a CHANNEL bot whose poller never wrote a live bot.pid -> bridge_state
+# no_bridge -> the probe must TIMEOUT and emit the (now true-positive) rc_timeout
+# event fleet-pulse escalates. Empirical proof of #533 items 3-4 + the #751 fix
+# (unit tests prove composition; only running start-bot proves the event fires —
+# and, for #751, that a ready bot no longer FALSELY fires). RC_READY_TIMEOUT_S=1 and
+# BRIDGE_READY_TIMEOUT_S=1 keep the negative run fast — the 90s/45s defaults are
+# untestable in a harness.
 echo ""
-echo "=== validate-bot-change: RC readiness alerting (#533 items 3-4) ==="
+echo "=== validate-bot-change: readiness alerting (#533 items 3-4, #751) ==="
 _rc_fail_before=$fail
-grep -q 'READY — remote-control active' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
-check "RC string present -> READY recorded in startup.log" "$r"
+grep -q 'READY —' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+check "bridge_state ready (no_handle bot) -> READY recorded in startup.log" "$r"
 grep -rq '"type":"rc_timeout"' "$RB_DIR/data/events/" 2>/dev/null && r=no || r=yes
-check "RC present -> no rc_timeout event (no false alarm)" "$r"
+check "ready verdict -> no rc_timeout event (no false alarm, #751)" "$r"
 
+# Negative: reconfigure valrb as a CHANNEL bot (handle + a resolvable token) whose
+# poller never came up — no bot.pid under TELEGRAM_STATE_DIR -> bridge_state stays
+# no_bridge -> the probe times out and emits the now-true-positive rc_timeout.
 cat > "$RB_ROOT/bin/claude" <<'STUB'
 #!/bin/bash
 exec cat
 STUB
 chmod +x "$RB_ROOT/bin/claude"
+cat >> "$RB_DIR/bot.conf" <<CONF
+TELEGRAM_BOT_HANDLE="valrb"
+TELEGRAM_TOKEN_ENV_NAME="VALRB_TOKEN"
+TELEGRAM_STATE_DIR="$RB_DIR/state"
+CONF
+printf 'VALRB_TOKEN=8888888:AAAAAAAAAAAAAAAAAAAA\n' > "$RB_DIR/.env"
+mkdir -p "$RB_DIR/state"   # exists, but no bot.pid -> bridge_state no_bridge
 rm -rf "$RB_DIR/data/events" 2>/dev/null || true
 tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "2020-01-01T00:00:00Z" \
     > "$RB_DIR/.claude/session.md"
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 CLAUDE_BIN="$RB_ROOT/bin/claude" \
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 BRIDGE_READY_TIMEOUT_S=1 \
+    CLAUDE_BIN="$RB_ROOT/bin/claude" \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
 sleep 1
@@ -738,7 +752,6 @@ if [ "\$1" = plugin ]; then
     fi
     exit 0
 fi
-printf 'remote-control is active\n'
 exec cat
 STUB
 chmod +x "$RB_ROOT/bin/claude"
@@ -758,7 +771,7 @@ if [ -n "$_mpev" ]; then
     python3 -c "import sys,json; evs=[json.loads(l) for l in open('$_mpev') if 'plugin_marketplace_failed' in l]; sys.exit(0 if len(evs)==1 and evs[0]['data']['marketplace']=='valmarketbad' else 1)" 2>/dev/null && r=yes || r=no
 else r=no; fi
 check "exactly one failure event, and it names valmarketbad (success stays quiet)" "$r"
-grep -q 'READY — remote-control active' "$MP_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+grep -q 'READY —' "$MP_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
 check "registration failure does NOT block startup (session still comes up)" "$r"
 
 if [ "$fail" -gt "$_mp_fail_before" ]; then
