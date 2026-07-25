@@ -120,7 +120,7 @@ claudlobby warm-cache            # pre-download npx packages for MCP servers
 
 **Gives you:**
 
-- `library/` — 11 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 43 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 10 MCP fragments (github, gws, notion, slack, shopify, printify, homeassistant, docker, spotify, granola), 20 guardrails, 30 protocols
+- `library/` — 16 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 44 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 14 MCP fragments (github, gws, google-analytics, google-search-console, meta-ads, posthog, notion, slack, shopify, printify, homeassistant, docker, spotify, granola), 21 guardrails, 33 protocols
 - `lib/` — 49 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
 - `bin/claudlobby` — the Python compositor
 - `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
@@ -141,7 +141,7 @@ Bots can edit themselves at runtime — `runtime/bots/` is gitignored, so an in-
 - **Skills** auto-sync because they're symlinks: a bot editing `runtime/bots/X/.claude/skills/foo/SKILL.md` is editing `library/skills/foo/SKILL.md`. The change propagates to every bot using `foo`.
 - **Composed CLAUDE.md** doesn't auto-sync (the next `generate` would overwrite it). Use:
   - `claudlobby diff <bot>` — show drift vs what `generate` would produce
-  - `claudlobby promote <bot>` — pick which drifted lines belong in `library/personas/`, `library/voices/`, or a new guardrail/protocol
+  - `claudlobby promote <bot>` — pick which drifted lines belong in `library/expertise/`, `voices/`, or a new guardrail/protocol
 
 Foundation for the future ML layer: when claudlobby has embeddings + a knowledge graph behind `library/`, runtime drift becomes training data for "what if more bots needed this rule?"
 

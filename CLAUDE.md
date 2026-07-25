@@ -89,6 +89,7 @@ Key lifecycle scripts in `lib/`:
 | `bench-cold-start.sh` | Cold-start timing benchmark — logs CSV rows to `bench-results.log` (no automated regression detection) |
 | `check-npx-cache.sh` | Verify npx package cache state for MCP servers |
 | `sprint-trigger.sh` | Schedule-driven autonomous sprint nudger |
+| `briefing-trigger.sh` | Fire a bot's scheduled briefing as a real slash command — run by the composer-generated per-(bot,slot) briefing timer |
 | `creds-check.sh` | Credential validation for fleet secrets |
 | `bot-sweep-cron.sh` | Periodic bot sweep via cron |
 | `code-audit-sweep.sh` | No-LLM rolling code-audit selector — picks the stalest repo via GitHub `auto-audit` issues, hands off to the owner bot's session — runs as the opt-in `code-audit-sweep` fleet job |
@@ -327,6 +328,8 @@ claudlobby/
   status.py           — Fleet health dashboard (tmux/systemd/fleet-state)
   uptime.py           — Per-bot uptime, MTBR, restart-rate metrics
   utilization.py      — Fleet utilization rollup — per-bot busy/idle % over rolling windows
+  path_audit.py       — L1 path/grant provenance audit (source-side ownership + external_paths)
+  conformance.py      — L4 conformance gates (rename-map drift, boundary invariants)
   workstreams.py      — Read-only view of the per-fleet workstream registry (workstreams.json)
   claudron_compat.py  — Claudron compatibility floor — min capability per integration surface
 ```
