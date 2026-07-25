@@ -361,6 +361,31 @@ def test_interactive_collect_dangerous_is_explicit_opt_in(tmp_path, monkeypatch)
     assert "dangerously_skip_permissions: true" in render_stanza(result)
 
 
+def test_interactive_collect_paste_voice_is_materialized(tmp_path, monkeypatch):
+    """The 'paste a new voice' branch must materialize the pasted text into a
+    voices/<name>.md file and carry the path on the result. It previously
+    assigned voice_text and dropped it, silently discarding the input (#760)."""
+    root = tmp_path / "repo"
+    (root / "library" / "expertise").mkdir(parents=True)
+    (root / "library" / "expertise" / "base-engineering.md").write_text("base")
+    paths = Paths(root=root)
+
+    # Splice the paste answers into the shared wizard sequence: voice choice
+    # "2", then one pasted line + a blank line to terminate. Everything after
+    # the voice prompt (mission onward) stays aligned with _wizard_answers.
+    base = _wizard_answers("")
+    answers = iter(base[:2] + ["2", "Terse and blunt.", ""] + base[3:])
+    # the paste loop calls bare input() (no prompt arg), so accept any args
+    monkeypatch.setattr("builtins.input", lambda *_a: next(answers))
+
+    result = interactive_collect(paths)
+
+    assert result.voice == "voices/bot-a.md"
+    voice_file = root / "voices" / "bot-a.md"
+    assert voice_file.is_file()
+    assert "Terse and blunt." in voice_file.read_text()
+
+
 def test_cli_dangerous_is_opt_in_and_old_flag_removed(tmp_path, capsys):
     """End-to-end non-interactive CLI: --dangerously-skip-permissions is a positive
     opt-in that renders the flag; omitted, the stanza omits it (safe acceptEdits).

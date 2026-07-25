@@ -346,7 +346,6 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
             "at least one expertise is required to generate. Continuing anyway."
         )
 
-    voice_text = None
     voice_arg = None
     print("\nVoice (personality overlay, optional):")
     print("  1. Pick existing voice file from voices/")
@@ -379,6 +378,11 @@ def interactive_collect(paths: Paths) -> NewBotInputs:
             empty_count = 0
             lines.append(line)
         voice_text = "\n\n".join(lines)
+        if voice_text.strip():
+            # Materialize the pasted voice now, through the same helper the
+            # --voice-text CLI flag uses, so the interactive path stops
+            # silently dropping it.
+            voice_arg = maybe_create_voice(paths, name, None, voice_text)
 
     mission = _ask("Mission (one-paragraph charter)")
     model = _ask("Model (opus/sonnet/haiku)", default="opus") or None
