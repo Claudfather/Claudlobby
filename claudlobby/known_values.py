@@ -40,20 +40,42 @@ KNOWN_MODELS: frozenset[str] = frozenset(
 KNOWN_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "max"})
 
 # ── Hook events ──────────────────────────────────────────────────
-# Claude Code hook event names. Unknown event = silently ignored hook.
-# Full lifecycle set: the tool-call events plus the session/prompt/compaction
-# events the clauDNA/Claudron vault integration rides (SessionStart, SessionEnd,
-# PreCompact). Refresh from the Claude Code hooks reference when it grows.
+# The full authoritative Claude Code hook-event set. Unknown event = silently
+# ignored hook, so this must stay COMPLETE — a missing name false-warns a valid
+# hook (the clauDNA/Claudron vault integration rides SessionStart/SessionEnd/
+# PreCompact). Refresh from the canonical reference when it grows:
+# https://code.claude.com/docs/en/hooks.md
 KNOWN_HOOK_EVENTS: frozenset[str] = frozenset(
     {
-        "PreToolUse",
-        "PostToolUse",
-        "UserPromptSubmit",
-        "Notification",
-        "Stop",
-        "SubagentStop",
-        "PreCompact",
         "SessionStart",
+        "Setup",
+        "UserPromptSubmit",
+        "UserPromptExpansion",
+        "PreToolUse",
+        "PermissionRequest",
+        "PermissionDenied",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PostToolBatch",
+        "Notification",
+        "MessageDisplay",
+        "SubagentStart",
+        "SubagentStop",
+        "TaskCreated",
+        "TaskCompleted",
+        "Stop",
+        "StopFailure",
+        "TeammateIdle",
+        "InstructionsLoaded",
+        "ConfigChange",
+        "CwdChanged",
+        "FileChanged",
+        "WorktreeCreate",
+        "WorktreeRemove",
+        "PreCompact",
+        "PostCompact",
+        "Elicitation",
+        "ElicitationResult",
         "SessionEnd",
     }
 )

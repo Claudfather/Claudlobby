@@ -73,14 +73,44 @@ class TestSetsPopulated:
         assert KNOWN_EFFORTS == frozenset({"low", "medium", "high", "max"})
 
     def test_known_hook_events(self):
-        assert "PreToolUse" in KNOWN_HOOK_EVENTS
-        assert "PostToolUse" in KNOWN_HOOK_EVENTS
-        assert "Stop" in KNOWN_HOOK_EVENTS
-        # Session/prompt/compaction lifecycle events the clauDNA/Claudron vault
-        # integration depends on — Claude Code honors these, so they must be
-        # recognized, not flagged "silently ignored" (#771).
-        for event in ("SessionStart", "SessionEnd", "PreCompact", "UserPromptSubmit"):
-            assert event in KNOWN_HOOK_EVENTS
+        # The full authoritative Claude Code hook-event set
+        # (code.claude.com/docs/en/hooks.md), pinned literally here as an
+        # independent spec. Completeness matters: a missing name false-warns a
+        # valid hook as "silently ignored" (#771/#777).
+        authoritative = {
+            "SessionStart",
+            "Setup",
+            "UserPromptSubmit",
+            "UserPromptExpansion",
+            "PreToolUse",
+            "PermissionRequest",
+            "PermissionDenied",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PostToolBatch",
+            "Notification",
+            "MessageDisplay",
+            "SubagentStart",
+            "SubagentStop",
+            "TaskCreated",
+            "TaskCompleted",
+            "Stop",
+            "StopFailure",
+            "TeammateIdle",
+            "InstructionsLoaded",
+            "ConfigChange",
+            "CwdChanged",
+            "FileChanged",
+            "WorktreeCreate",
+            "WorktreeRemove",
+            "PreCompact",
+            "PostCompact",
+            "Elicitation",
+            "ElicitationResult",
+            "SessionEnd",
+        }
+        missing = authoritative - KNOWN_HOOK_EVENTS
+        assert not missing, f"KNOWN_HOOK_EVENTS missing: {sorted(missing)}"
 
     def test_permission_modes(self):
         assert "default" in VALID_PERMISSION_MODES
@@ -356,19 +386,19 @@ class TestValidatorHookEventCheck:
         assert len(hook_warnings) == 1
         assert "did you mean 'PreToolUse'" in hook_warnings[0]
 
-    def test_session_lifecycle_events_no_warning(self, tmp_path):
-        # The clauDNA/Claudron integration configures these and Claude Code
-        # honors them, so the validator must not warn they'll be "silently
-        # ignored" (#771).
-        hooks = {
-            "SessionStart": [{"command": "echo hi"}],
-            "SessionEnd": [{"command": "echo bye"}],
-            "PreCompact": [{"command": "echo compact"}],
-            "UserPromptSubmit": [{"command": "echo prompt"}],
-        }
-        report = self._make_fleet_and_validate(tmp_path, hooks)
-        hook_warnings = [w for w in report.warnings if "not recognized" in w]
-        assert hook_warnings == []
+    def test_all_known_hook_events_validate_clean(self, tmp_path):
+        # Non-vacuous: drive EVERY recognized event through the real validator
+        # and assert zero "not recognized" warnings. (A live-fleet validate is
+        # vacuous — the fleet declares none of these names — so exercise the
+        # allowlist directly, #777.)
+        for i, event in enumerate(sorted(KNOWN_HOOK_EVENTS)):
+            sub = tmp_path / f"e{i}"
+            sub.mkdir()
+            report = self._make_fleet_and_validate(
+                sub, {event: [{"command": "echo hi"}]}
+            )
+            not_recognized = [w for w in report.warnings if "not recognized" in w]
+            assert not_recognized == [], f"{event} unexpectedly warned"
 
 
 class TestValidatorExpertiseSuggestion:
