@@ -102,8 +102,7 @@ for e in events:
 touch "${BOT_DIR:-${PWD}}/data/.last-tool-call" 2>/dev/null || true
 
 # --- Reap old event files ---
-_reap_days="${OBSERVABILITY_REAP_DAYS:-7}"
-find "$events_dir" -name "fleet-*.jsonl" -mtime +"$_reap_days" -delete 2>/dev/null || true
+reap_event_files "$events_dir" "fleet-*.jsonl" "${OBSERVABILITY_REAP_DAYS:-7}"
 
 # Non-blocking hook — always exit 0
 exit 0

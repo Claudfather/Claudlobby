@@ -87,9 +87,7 @@ reap_events() {
     local events_dir="$bot_dir/data/events"
     local reap_days
     reap_days=$(bot_conf_get "$bot_dir" OBSERVABILITY_REAP_DAYS 7)
-    if [ -d "$events_dir" ]; then
-        find "$events_dir" -name "fleet-*.jsonl" -mtime +"$reap_days" -delete 2>/dev/null || true
-    fi
+    reap_event_files "$events_dir" "fleet-*.jsonl" "$reap_days"
 }
 
 # --- Pre-sweep: dispatch-overdue scan (once, not per-bot) ---

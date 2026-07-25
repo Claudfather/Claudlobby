@@ -57,7 +57,7 @@ emit_keepalive_event() {
         "$ts" "$BOT_NAME" "$ev_state" "$detail_json" >> "$events_file"
 
     # Reap old keepalive JSONL files beyond retention window.
-    find "$events_dir" -name 'keepalive-*.jsonl' -type f -mtime +"$KEEPALIVE_REAP_DAYS" -delete 2>/dev/null || true
+    reap_event_files "$events_dir" 'keepalive-*.jsonl' "$KEEPALIVE_REAP_DAYS"
 }
 
 # send_reload_command <slash-command>
