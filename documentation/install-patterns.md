@@ -31,7 +31,7 @@ lib/install-code-audit-sweep.sh <fleet>                  # nightly code-audit sw
 
 Each bot becomes `com.claudlobby.<fleet>.<bot>` in `~/Library/LaunchAgents/`. View with `launchctl list | grep claudlobby` and tail logs at `lib/logs/<bot>.{out,err}.log`.
 
-See [mac-mini-setup-guide.md](./mac-mini-setup-guide.md) for full host setup (SSH, Homebrew, Tailscale, Claude Code).
+See [mac-mini-setup-guide.md](./runbooks/mac-mini-setup-guide.md) for full host setup (SSH, Homebrew, Tailscale, Claude Code).
 
 ## Pattern 2 — Linux systemd
 
@@ -52,7 +52,7 @@ lib/install-code-audit-sweep-systemd.sh <fleet>  # nightly code-audit sweep (onl
 
 Units land in `~/.config/systemd/user/`. View with `systemctl --user list-timers`, follow logs with `journalctl --user -u <name> -f`.
 
-See [pi-setup-guide.md](./pi-setup-guide.md) for full host setup.
+See [pi-setup-guide.md](./runbooks/pi-setup-guide.md) for full host setup.
 
 ## Pattern 3 — cron + tmux
 

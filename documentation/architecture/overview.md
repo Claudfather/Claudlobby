@@ -83,7 +83,7 @@ Defaults flow into every bot. Lists (skills, guardrails, protocols) accumulate; 
 
 `teams` exist so the compositor can inject a "Fleet You Manage" roster table into manager personas — that's how a manager bot knows who its workers are.
 
-See [`fleet-yaml-schema.md`](fleet-yaml-schema.md) for every field.
+See [`fleet-yaml-schema.md`](../fleet-yaml-schema.md) for every field.
 
 ### 3. `runtime/bots/<name>/` — generated output
 
