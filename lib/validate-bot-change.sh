@@ -593,9 +593,9 @@ fi
 # no_bridge -> the probe must TIMEOUT and emit the (now true-positive) rc_timeout
 # event fleet-pulse escalates. Empirical proof of #533 items 3-4 + the #751 fix
 # (unit tests prove composition; only running start-bot proves the event fires —
-# and, for #751, that a ready bot no longer FALSELY fires). RC_READY_TIMEOUT_S=1 and
-# BRIDGE_READY_TIMEOUT_S=1 keep the negative run fast — the 90s/45s defaults are
-# untestable in a harness.
+# and, for #751, that a ready bot no longer FALSELY fires). RC_READY_TIMEOUT_S=1
+# keeps the negative run fast — the 90s default is untestable in a harness (poll 2
+# is a single check now, so there is no second timeout to shorten).
 echo ""
 echo "=== validate-bot-change: readiness alerting (#533 items 3-4, #751) ==="
 _rc_fail_before=$fail
@@ -624,7 +624,7 @@ tmux kill-session -t "$RB_SESSION" 2>/dev/null || true
 sleep 0.3
 printf -- '---\ncwd: %s\nlast_updated: %s\nschema_version: 2\n---\n' "$RB_DIR" "2020-01-01T00:00:00Z" \
     > "$RB_DIR/.claude/session.md"
-TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 BRIDGE_READY_TIMEOUT_S=1 \
+TMPDIR="$RB_ROOT/tmp" BOOT_LOCK_HOLD_S=0 RC_READY_TIMEOUT_S=1 \
     CLAUDE_BIN="$RB_ROOT/bin/claude" \
     HOME="$RB_HOME" PATH="$RB_ROOT/bin:$PATH" CLAUDLOBBY_ROOT="$RB_ROOT" \
     "$LIB_DIR/start-bot.sh" "$RB_DIR" >"$RB_ROOT/startbot.timeout.out" 2>&1 || true
