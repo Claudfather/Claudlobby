@@ -979,6 +979,7 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
 
 
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
+    """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
 
     if not fleet.bots:

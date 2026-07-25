@@ -7,7 +7,7 @@
 # sibling of validate-bot-change.sh with an OWNED COPY of its scaffolding — that
 # harness stubs `claude` and can only prove framework events; this property under
 # test is MODEL behavior, so real runs boot a real interactive `claude` (the
-# mechanic proven by interactive-claude-spike.sh, #729 stage B).
+# mechanic proven by the #729 stage-B spike).
 #
 # SCOPE OF THIS FILE (F2/F4-independent scaffolding):
 #   - the two-variant fixture, composed by real `claudlobby generate`
@@ -27,7 +27,7 @@
 #   AB_EVAL_REAL=1  Real gate. REFUSED by this scaffolding: the battery content is
 #                   an F2 stub and library/protocols/token-efficiency.md is
 #                   unmerged (P1). A real gate needs both. The proven boot/dispatch
-#                   /recover recipe lives in interactive-claude-spike.sh; wiring it
+#                   /recover recipe comes from the #729 stage-B spike; wiring it
 #                   into run_cell is F2 follow-up.
 #
 # The default verdict is INCONCLUSIVE BY CONSTRUCTION: with no F2-ratified
@@ -124,7 +124,7 @@ compute_verdict() {  # $1 results.jsonl  $2 out.json  $3 reps_now
 # --- mode gate --------------------------------------------------------------
 if [ "$DRY_RUN" != 1 ]; then
     if [ "${AB_EVAL_REAL:-0}" = 1 ]; then
-        die "real mode (AB_EVAL_REAL=1) is REFUSED by this scaffolding: the task battery is an F2 stub and library/protocols/token-efficiency.md is unmerged (P1). The proven boot/dispatch/recover recipe lives in interactive-claude-spike.sh; wiring run_cell to it is F2 follow-up. Use --dry-run for the CI-safe wiring check."
+        die "real mode (AB_EVAL_REAL=1) is REFUSED by this scaffolding: the task battery is an F2 stub and library/protocols/token-efficiency.md is unmerged (P1). The proven boot/dispatch/recover recipe comes from the #729 stage-B spike; wiring run_cell to it is F2 follow-up. Use --dry-run for the CI-safe wiring check."
     fi
     printf 'ab-comms-eval: opt-in. Use --dry-run (CI-safe wiring check) or AB_EVAL_REAL=1 (real gate, refused pending F2 battery + P1 protocol).\n'
     exit 0
@@ -333,7 +333,7 @@ synth_transcript() {  # $1 taskidx  $2 rep  $3 variant  $4 dispatch-text -> echo
 
 # --- run one paired cell -----------------------------------------------------
 # In dry-run the cell synthesizes; in real mode (F2 follow-up) it would boot a
-# real session via the interactive-claude-spike.sh recipe (seed auth+trust ->
+# real session via the #729 stage-B spike recipe (seed auth+trust ->
 # start-bot.sh -> dispatch.sh -> await the report-back.jsonl ledger row -> recover
 # the transcript). Real mode is refused upstream, so only the dry branch runs.
 run_cell() {  # $1 task  $2 taskidx  $3 rep  $4 variant

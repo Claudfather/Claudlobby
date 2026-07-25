@@ -178,6 +178,7 @@ def _load_bot_fragments(bot: BotConfig, paths: Paths) -> dict[str, dict]:
 
 
 def compose_mcp_json(bot: BotConfig, paths: Paths) -> dict:
+    """Compose one bot's .mcp.json from its merged MCP fragments; returns the config dict."""
     import shutil
 
     merged: dict = {"mcpServers": {}}
@@ -490,6 +491,7 @@ def _channel_plugins(channels: list[str]) -> list[str]:
 
 
 def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
+    """Render one bot's bot.conf (env exports sourced at startup); returns the file text."""
     # Defense-in-depth: validate identifiers embedded in double-quoted lines
     # that require shell variable expansion ($HOME, $CLAUDLOBBY_ROOT).
     if not _SAFE_NAME_RE.match(bot.bot_id):
@@ -1248,6 +1250,7 @@ def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
 
 
 def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
+    """Compose one bot's CLAUDE.md from expertise, voice, protocols, and guardrails; returns the markdown."""
     ctx = _bot_template_context(bot, fleet, paths)
 
     title_label, expertise_body = _compose_expertise(bot, paths, ctx)
@@ -1974,6 +1977,7 @@ def _reconcile_access_json(
 def compose_bot(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, log=None, *, boot_delay_s: int = 0
 ) -> Path:
+    """Compose one bot's full runtime dir (CLAUDE.md, bot.conf, .mcp.json, units, skill symlinks); returns bot_dir."""
     bot_dir = paths.bot_runtime(bot.bot_id)
     # L1 source guard (#702) — deny an unanchored, undeclared absolute path in any
     # compose source (bot config leaves + loaded MCP fragments) BEFORE the first
@@ -2742,6 +2746,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
 
 
 def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
+    """Compose every bot in the fleet; returns a dict of bot_id -> bot_dir."""
     paths.runtime_bots.mkdir(parents=True, exist_ok=True)
 
     # Scaffold shared documentation directories

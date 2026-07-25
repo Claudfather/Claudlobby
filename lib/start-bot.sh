@@ -55,8 +55,8 @@ source_env_tiered
 # Resolve the Telegram token from the env-var name declared in fleet.yaml.
 # NEVER export an empty TELEGRAM_BOT_TOKEN: the telegram channel plugin server
 # treats a defined-but-empty token as authoritative and skips reading its own
-# channel-dir .env, silently killing the inbound bridge (mac-mini migration
-# 2026-07-25 — every bot booted "Listening" with a dark poller). Export only a
+# channel-dir .env, silently killing the inbound bridge — the bot boots
+# "Listening" but with a dark (non-delivering) poller. Export only a
 # non-empty resolved value; unset any empty leftover so the server's channel-dir
 # .env fallback still works.
 if [ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ] && [ -n "${!TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
@@ -171,7 +171,7 @@ printf 'set +a\n' >> "$BOT_ENV_FILE"
 
 # Resolve the Telegram token via the indirection var set in bot.conf. .env tiers
 # provide the actual secret; TELEGRAM_TOKEN_ENV_NAME names it. Two correctness
-# constraints, both learned the hard way on the macOS mac-mini migration:
+# constraints, both required for cross-shell (bash on Linux, zsh on macOS) correctness:
 #   1. This block is sourced by the tmux session shell, which is zsh by default on
 #      macOS — where bash ${!name} indirection is unavailable. Resolve portably
 #      via eval so the same code works under bash (Linux) and zsh (macOS).
