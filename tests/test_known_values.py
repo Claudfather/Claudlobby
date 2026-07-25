@@ -64,14 +64,53 @@ class TestSetsPopulated:
         assert "haiku" in KNOWN_MODELS
         assert "fable" in KNOWN_MODELS
         assert "claude-fable-5" in KNOWN_MODELS
+        # Current GA full-ID pins (#771): a bot pinning the live model must
+        # not trip the "not in known models" warning.
+        assert "claude-opus-4-8" in KNOWN_MODELS
+        assert "claude-sonnet-5" in KNOWN_MODELS
 
     def test_known_efforts(self):
         assert KNOWN_EFFORTS == frozenset({"low", "medium", "high", "max"})
 
     def test_known_hook_events(self):
-        assert "PreToolUse" in KNOWN_HOOK_EVENTS
-        assert "PostToolUse" in KNOWN_HOOK_EVENTS
-        assert "Stop" in KNOWN_HOOK_EVENTS
+        # The full authoritative Claude Code hook-event set
+        # (code.claude.com/docs/en/hooks.md), pinned literally here as an
+        # independent spec. Completeness matters: a missing name false-warns a
+        # valid hook as "silently ignored" (#771/#777).
+        authoritative = {
+            "SessionStart",
+            "Setup",
+            "UserPromptSubmit",
+            "UserPromptExpansion",
+            "PreToolUse",
+            "PermissionRequest",
+            "PermissionDenied",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PostToolBatch",
+            "Notification",
+            "MessageDisplay",
+            "SubagentStart",
+            "SubagentStop",
+            "TaskCreated",
+            "TaskCompleted",
+            "Stop",
+            "StopFailure",
+            "TeammateIdle",
+            "InstructionsLoaded",
+            "ConfigChange",
+            "CwdChanged",
+            "FileChanged",
+            "WorktreeCreate",
+            "WorktreeRemove",
+            "PreCompact",
+            "PostCompact",
+            "Elicitation",
+            "ElicitationResult",
+            "SessionEnd",
+        }
+        missing = authoritative - KNOWN_HOOK_EVENTS
+        assert not missing, f"KNOWN_HOOK_EVENTS missing: {sorted(missing)}"
 
     def test_permission_modes(self):
         assert "default" in VALID_PERMISSION_MODES
@@ -293,6 +332,15 @@ class TestValidatorModelCheck:
         model_warnings = [w for w in report.warnings if "known models" in w]
         assert len(model_warnings) == 0
 
+    def test_current_full_id_pins_no_warning(self, tmp_path):
+        # A bot pinning a current GA full model ID must not warn (#771).
+        for i, model in enumerate(("claude-opus-4-8", "claude-sonnet-5")):
+            sub = tmp_path / f"case{i}"
+            sub.mkdir()
+            report = self._make_fleet_and_validate(sub, {"model": model})
+            model_warnings = [w for w in report.warnings if "known models" in w]
+            assert model_warnings == [], f"{model} unexpectedly warned"
+
 
 class TestValidatorHookEventCheck:
     """Validator emits warnings for unknown hook events."""
@@ -337,6 +385,20 @@ class TestValidatorHookEventCheck:
         hook_warnings = [w for w in report.warnings if "not recognized" in w]
         assert len(hook_warnings) == 1
         assert "did you mean 'PreToolUse'" in hook_warnings[0]
+
+    def test_all_known_hook_events_validate_clean(self, tmp_path):
+        # Non-vacuous: drive EVERY recognized event through the real validator
+        # and assert zero "not recognized" warnings. (A live-fleet validate is
+        # vacuous — the fleet declares none of these names — so exercise the
+        # allowlist directly, #777.)
+        for i, event in enumerate(sorted(KNOWN_HOOK_EVENTS)):
+            sub = tmp_path / f"e{i}"
+            sub.mkdir()
+            report = self._make_fleet_and_validate(
+                sub, {event: [{"command": "echo hi"}]}
+            )
+            not_recognized = [w for w in report.warnings if "not recognized" in w]
+            assert not_recognized == [], f"{event} unexpectedly warned"
 
 
 class TestValidatorExpertiseSuggestion:

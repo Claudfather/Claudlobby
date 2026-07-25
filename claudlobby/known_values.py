@@ -25,9 +25,11 @@ KNOWN_MODELS: frozenset[str] = frozenset(
         "sonnet",
         "haiku",
         "fable",
-        # Full model IDs (for explicit version pinning)
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
+        # Full model IDs (for explicit version pinning) — refresh to the
+        # current GA roster when the lineup moves (canonical IDs live in the
+        # claude-api skill / Anthropic model docs).
+        "claude-opus-4-8",
+        "claude-sonnet-5",
         "claude-haiku-4-5-20251001",
         "claude-fable-5",
     }
@@ -38,9 +40,44 @@ KNOWN_MODELS: frozenset[str] = frozenset(
 KNOWN_EFFORTS: frozenset[str] = frozenset({"low", "medium", "high", "max"})
 
 # ── Hook events ──────────────────────────────────────────────────
-# Claude Code hook event names. Unknown event = silently ignored hook.
+# The full authoritative Claude Code hook-event set. Unknown event = silently
+# ignored hook, so this must stay COMPLETE — a missing name false-warns a valid
+# hook (the clauDNA/Claudron vault integration rides SessionStart/SessionEnd/
+# PreCompact). Refresh from the canonical reference when it grows:
+# https://code.claude.com/docs/en/hooks.md
 KNOWN_HOOK_EVENTS: frozenset[str] = frozenset(
-    {"PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop"}
+    {
+        "SessionStart",
+        "Setup",
+        "UserPromptSubmit",
+        "UserPromptExpansion",
+        "PreToolUse",
+        "PermissionRequest",
+        "PermissionDenied",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PostToolBatch",
+        "Notification",
+        "MessageDisplay",
+        "SubagentStart",
+        "SubagentStop",
+        "TaskCreated",
+        "TaskCompleted",
+        "Stop",
+        "StopFailure",
+        "TeammateIdle",
+        "InstructionsLoaded",
+        "ConfigChange",
+        "CwdChanged",
+        "FileChanged",
+        "WorktreeCreate",
+        "WorktreeRemove",
+        "PreCompact",
+        "PostCompact",
+        "Elicitation",
+        "ElicitationResult",
+        "SessionEnd",
+    }
 )
 
 # ── Tool types ───────────────────────────────────────────────────
