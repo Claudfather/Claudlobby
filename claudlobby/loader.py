@@ -299,16 +299,6 @@ def _read_skill_grants(skill_dir: Path) -> list[str]:
     return _read_tool_grants(skill_dir / "SKILL.md")
 
 
-def skill_tool_grants(paths, name: str) -> list[str]:
-    """Read a single skill's additive ``tool_grants`` list (F2) from ``<skill>/SKILL.md``.
-
-    The contract lives on the ``SKILL.md`` marker file, never on sibling files in the
-    folder. Returns ``[]`` when the skill, its ``SKILL.md``, or the field is absent.
-    """
-    skill_dir = paths.find_library_dir("skills", name)
-    return _read_skill_grants(skill_dir) if skill_dir is not None else []
-
-
 def integration_tool_grants(paths, name: str) -> list[str]:
     """Read a single integration's additive ``tool_grants`` list (F2) from ``<name>.md``.
 

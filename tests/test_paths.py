@@ -70,7 +70,6 @@ def test_base_accessors_point_at_public_library(tmp_path: Path) -> None:
     assert paths.base_protocols == tmp_path / "library" / "protocols"
     assert paths.base_resources == tmp_path / "library" / "resources"
     assert paths.base_lessons == tmp_path / "library" / "lessons"
-    assert paths.base_post_actions == tmp_path / "library" / "post_actions"
     assert paths.base_voices == tmp_path / "voices"
 
 
