@@ -54,6 +54,10 @@ for dep in "$CLAUDE_BIN" jq python3 claudron; do
   command -v "$dep" >/dev/null 2>&1 || { printf 'SKIP: %s not found\n' "$dep"; exit 2; }
 done
 [ -f "$HOST_CREDS" ] || { printf 'SKIP: no host auth at ~/.claude/.credentials.json to seed\n'; exit 2; }
+# A timeout(1)/gtimeout to bound the real boot: GNU ships timeout, macOS+coreutils
+# gtimeout, stock macOS neither. Skip cleanly when none resolves rather than dying
+# mid-boot with a bare command-not-found. _TIMEOUT_BIN is lib-common resolving both.
+[ -n "$_TIMEOUT_BIN" ] || { printf 'SKIP: no timeout(1)/gtimeout to bound the boot\n'; exit 2; }
 
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-freshbox.XXXXXX")"
 CONFIG_DIR="$ROOT/fbconfig"           # the fresh, empty per-bot CLAUDE_CONFIG_DIR
@@ -240,7 +244,7 @@ boot() {  # boot <config_dir> <out_file>
   # CLAUDRON_VAULT_PATH is exported into the boot so the SessionStart hook resolves
   # the vault (start-bot.sh sources it from bot.conf in production; set directly here).
   ( cd "$BOT_DIR" && CLAUDE_CONFIG_DIR="$1" CLAUDRON_VAULT_PATH="$VAULT" \
-      timeout "$BOOT_TIMEOUT" "$CLAUDE_BIN" -p \
+      with_timeout "$BOOT_TIMEOUT" "$CLAUDE_BIN" -p \
       "$BOOT_PROMPT" \
       --output-format stream-json --verbose --model claude-haiku-4-5-20251001 \
       > "$2" 2>&1 ) || return $?

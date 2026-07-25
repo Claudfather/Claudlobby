@@ -8,6 +8,7 @@ compose_fleet_timers, the SWEEP_* env block in the owner's bot.conf, opt-out
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -323,5 +324,14 @@ class TestSweepSelector:
         # acme/beta is the oldest audit -> stalest -> selected
         assert '"type":"audit_selected"' in log
         assert '"repo":"acme/beta"' in log
+        # staleness_days must be a real integer, not null: the selector routes the
+        # createdAt (Z-suffixed) through iso_to_epoch, so a null here means the
+        # portable parse failed on this runner (#711 site 2 regression guard).
+        m = re.search(r'"staleness_days":(null|-?\d+)', log)
+        assert m, f"no staleness_days field in event: {log}"
+        assert m.group(1) != "null", (
+            "staleness_days null — iso_to_epoch failed to parse createdAt"
+        )
+        assert int(m.group(1)) > 0, f"expected positive staleness, got {m.group(1)}"
         # tmux shim is idle (not busy) -> dispatch fires
         assert '"type":"audit_dispatched"' in log
