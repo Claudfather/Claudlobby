@@ -134,10 +134,17 @@ for bot_dir in "$BOTS_DIR"/*/; do
         debounce_clear "$state_dir" "$bot_id" "session_alerted"
     fi
 
-    # --- Check 2: systemd service state ---
-    if [ -n "$BOT_SERVICE" ] && [ "$_OS" = "Linux" ]; then
-        if ! systemctl --user is-active "$BOT_SERVICE" >/dev/null 2>&1; then
-            state=$(systemctl --user show -p ActiveState --value "$BOT_SERVICE" 2>/dev/null | tr -d '[:cntrl:]' || echo "unknown")
+    # --- Check 2: supervised service state (systemd on Linux, launchd on macOS) ---
+    # Liveness via service_is_active (the OS dispatch lives there). The payload
+    # state string stays per-OS: systemd exposes ActiveState; launchd print has no
+    # cheap sub-state, so a confirmed-down job is labeled not-loaded.
+    if [ -n "$BOT_SERVICE" ]; then
+        if ! service_is_active "$BOT_SERVICE"; then
+            if [ "$_OS" = "Darwin" ]; then
+                state="not-loaded"
+            else
+                state=$(systemctl --user show -p ActiveState --value "$BOT_SERVICE" 2>/dev/null | tr -d '[:cntrl:]' || echo "unknown")
+            fi
             emit_fleet_event "service_down" "pulse" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'"}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "service_alerted" _notify_current_bot \
                 "$bot_id service_down — unit '$BOT_SERVICE' state=$state"
@@ -406,11 +413,12 @@ _summary_tmp=$(safe_mktemp)
         _s_socket=$(tmux_socket_for_bot "$_s_bot_dir" 2>/dev/null || true)
         check_tmux_session "$_s_session_name" "$_s_socket" 2>/dev/null || _s_session_status="DOWN"
         # BOT_SERVICE (empty default + [ -n ] guard, mirroring the main loop) drives
-        # only the systemd column — a BOT_SERVICE-less bot must not be probed as a unit.
+        # the service column via service_is_active — a BOT_SERVICE-less bot must not
+        # be probed as a unit.
         _s_svc=$(bot_conf_get "$_s_bot_dir" BOT_SERVICE "")
         _s_svc_status="ok"
-        if [ "$_OS" = "Linux" ] && [ -n "$_s_svc" ]; then
-            systemctl --user is-active "$_s_svc" >/dev/null 2>&1 || _s_svc_status="DOWN"
+        if [ -n "$_s_svc" ] && ! service_is_active "$_s_svc"; then
+            _s_svc_status="DOWN"
         fi
 
         _s_alerts=""
