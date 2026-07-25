@@ -189,13 +189,6 @@ fi
 [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && unset TELEGRAM_BOT_TOKEN
 TGTOKEOF
 
-# Backwards-compat: if the bot.conf is from before the CLAUDE_FLAGS
-# rename, fall back to the legacy hardcoded flag set + CLAUDE_EXTRA_FLAGS.
-if [ -z "${CLAUDE_FLAGS:-}" ]; then
-    CLAUDE_FLAGS="--channels plugin:telegram@claude-plugins-official --remote-control --dangerously-skip-permissions"
-    [ -n "${CLAUDE_EXTRA_FLAGS:-}" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $CLAUDE_EXTRA_FLAGS"
-fi
-
 # The launched binary is overridable via CLAUDE_BIN so the validation harness
 # (validate-bot-change.sh) can inject a stub for a hermetic, auth-free start;
 # production leaves it unset and `claude` resolves on PATH inside the session.

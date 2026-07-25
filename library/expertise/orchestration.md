@@ -79,7 +79,7 @@ If the fleet shares one Anthropic Opus account (no per-bot API keys, no per-bot 
 
 **Dispatching heuristics:**
 
-- Default reviewers and mechanical designers to **Sonnet** (via `--model sonnet` in `CLAUDE_EXTRA_FLAGS` or per-bot config). Reviewers don't need Opus; mechanical visual audits don't either.
+- Default reviewers and mechanical designers to **Sonnet** (set `model: sonnet` on the bot in `fleet.yaml` — the composer emits it as `--model sonnet` in `CLAUDE_FLAGS`). Reviewers don't need Opus; mechanical visual audits don't either.
 - Save Opus budget for **creative/strategic turns**: product-vision, orchestrator-architecture planning, multi-agent persona design, deep backend reads with lots of cross-cutting synthesis.
 - Before dispatching a heavy synthesis task to an engineer already token-deep in the current session, check their pane for limit warnings. If the fleet is nearing the ceiling, defer or split.
 - When a limit is tripped, the message is per-session ("you've hit your limit · resets Xpm"), but the underlying quota is account-wide. Other bots can still work below the threshold but are vulnerable to hitting it soon.
