@@ -52,10 +52,17 @@ export HOME="$HOME"
 # 3-tier env sourcing: global -> fleet -> bot (later tiers override)
 source_env_tiered
 
-# Resolve the Telegram token from the env-var name declared in fleet.yaml
-if [ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
-    export TELEGRAM_BOT_TOKEN="${!TELEGRAM_TOKEN_ENV_NAME:-}"
+# Resolve the Telegram token from the env-var name declared in fleet.yaml.
+# NEVER export an empty TELEGRAM_BOT_TOKEN: the telegram channel plugin server
+# treats a defined-but-empty token as authoritative and skips reading its own
+# channel-dir .env, silently killing the inbound bridge (mac-mini migration
+# 2026-07-25 — every bot booted "Listening" with a dark poller). Export only a
+# non-empty resolved value; unset any empty leftover so the server's channel-dir
+# .env fallback still works.
+if [ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ] && [ -n "${!TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
+    export TELEGRAM_BOT_TOKEN="${!TELEGRAM_TOKEN_ENV_NAME}"
 fi
+[ -z "${TELEGRAM_BOT_TOKEN:-}" ] && unset TELEGRAM_BOT_TOKEN
 
 cd "$BOT_DIR"
 
@@ -162,9 +169,25 @@ printf 'set -a\n' >> "$BOT_ENV_FILE"
 printf '. %q\n' "$BOT_DIR/bot.conf" >> "$BOT_ENV_FILE"
 printf 'set +a\n' >> "$BOT_ENV_FILE"
 
-# Resolve the Telegram token via the indirection var set in bot.conf.
-# .env tiers provide the actual secret; TELEGRAM_TOKEN_ENV_NAME names it.
-printf '[ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ] && export TELEGRAM_BOT_TOKEN="${!TELEGRAM_TOKEN_ENV_NAME:-}"\n' >> "$BOT_ENV_FILE"
+# Resolve the Telegram token via the indirection var set in bot.conf. .env tiers
+# provide the actual secret; TELEGRAM_TOKEN_ENV_NAME names it. Two correctness
+# constraints, both learned the hard way on the macOS mac-mini migration:
+#   1. This block is sourced by the tmux session shell, which is zsh by default on
+#      macOS — where bash ${!name} indirection is unavailable. Resolve portably
+#      via eval so the same code works under bash (Linux) and zsh (macOS).
+#   2. NEVER leave an empty TELEGRAM_BOT_TOKEN in the exported env. The channel
+#      plugin server treats a defined-but-empty token as authoritative and skips
+#      reading its own channel-dir .env, silently killing the inbound bridge. So
+#      export only a non-empty resolved value, then unset any empty leftover
+#      (e.g. an unfilled scaffold stub) so the server's .env fallback still works.
+cat >> "$BOT_ENV_FILE" <<'TGTOKEOF'
+if [ -n "${TELEGRAM_TOKEN_ENV_NAME:-}" ]; then
+  eval "_tg_tok=\${${TELEGRAM_TOKEN_ENV_NAME}:-}"
+  [ -n "${_tg_tok:-}" ] && export TELEGRAM_BOT_TOKEN="${_tg_tok}"
+  unset _tg_tok
+fi
+[ -z "${TELEGRAM_BOT_TOKEN:-}" ] && unset TELEGRAM_BOT_TOKEN
+TGTOKEOF
 
 # Backwards-compat: if the bot.conf is from before the CLAUDE_FLAGS
 # rename, fall back to the legacy hardcoded flag set + CLAUDE_EXTRA_FLAGS.
