@@ -1324,7 +1324,7 @@ def _merge_system_into_defaults(system: dict, defaults: dict) -> dict:
 
 
 def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
-    """Parse fleet.yaml into a FleetConfig; returns (fleet, raw_config_dict)."""
+    """Parse fleet.yaml into a FleetConfig; returns (fleet, merged_defaults)."""
     if not fleet_yaml.is_file():
         raise FileNotFoundError(f"fleet.yaml not found at {fleet_yaml}")
 
