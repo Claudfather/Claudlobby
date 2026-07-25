@@ -2117,8 +2117,17 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                         source=f"integration/{int_name}",
                     )
 
-        # Telegram token_env
-        if bot.telegram and bot.telegram.token_env:
+        # Telegram token_env — but never the plugin's OWN read var. A
+        # self-referential token_env (== TELEGRAM_BOT_TOKEN) would scaffold a
+        # defined-but-empty export the poller treats as authoritative, skipping its
+        # channel-dir .env fallback and dying before bot.pid (#749/#750). Skip it
+        # here (its home is that fallback); a real value an operator adds to the bot
+        # .env is still preserved by _scaffold_env_merge's existing-key merge.
+        if (
+            bot.telegram
+            and bot.telegram.token_env
+            and not bot.telegram.token_env_is_self_referential
+        ):
             var_name = bot.telegram.token_env
             if var_name not in vars:
                 vars[var_name] = EnvVar(
