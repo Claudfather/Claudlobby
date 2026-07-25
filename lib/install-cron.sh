@@ -98,7 +98,6 @@ TMPBLOCK=$(safe_mktemp)
     echo "# Per-bot keepalive: every 30 min, staggered."
     i=0
     for bot_dir in "${BOTS[@]}"; do
-        bot_name=$(basename "$bot_dir")
         offset=$(( (i * STAGGER_STEP) % 60 ))
         offset2=$(( (offset + 30) % 60 ))
         # Sort numerically so cron line reads naturally.

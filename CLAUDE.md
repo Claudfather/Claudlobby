@@ -103,7 +103,6 @@ Key lifecycle scripts in `lib/`:
 | `install-cron.sh` | Cron job installation |
 | `install-creds-check-systemd.sh` | Creds-check timer enrollment (systemd, thin wrapper) |
 | `install-fleet-pulse-systemd.sh` | Fleet-pulse systemd timer enrollment (systemd) |
-| `setup-mac-mini.sh` | Legacy shim — execs `setup-system` |
 | `setup-system` | Setup backbone: host prereqs + system.yaml host-job enrollment (cross-platform) |
 | `setup-fleet` | Setup backbone: per-fleet apply+enroll — default jobs (dormant opt-ins skipped), atomic legacy-keepalive swap (enable-new → verify → disable-old), bots (skips healthy), reconcile; root mode when invoked without a fleet |
 | `setup-fleets` | Run setup-fleet for every fleet on the host |

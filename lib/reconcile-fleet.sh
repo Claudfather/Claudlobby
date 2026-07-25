@@ -31,10 +31,9 @@ fi
 
 # Bot-name extraction lives in lib-common.sh (parse_fleet_bots) so fleet-pulse,
 # keepalive-all, and reconcile-fleet share ONE fleet.yaml parser — no drift.
-parse_bots() { parse_fleet_bots "$1"; }
 
 # 1. Bots defined in this fleet's yaml (top-level keys under bots:)
-defined=$(parse_bots "$FLEET_YAML" | sort -u)
+defined=$(parse_fleet_bots "$FLEET_YAML" | sort -u)
 
 # 2. Per-bot tmux servers. Each bot runs on its OWN server (-L <socket>), so a
 #    single `tmux ls` only sees the legacy default socket. has_tmux is resolved
@@ -72,7 +71,7 @@ done <<< "$defined"
 # trips set -e. continue keeps the last status 0. (Both flat globs + the nested one.)
 all_defined=$(for fy in "$CLAUDLOBBY_ROOT"/local/*/fleet.yaml "$CLAUDLOBBY_ROOT"/local/*/*/fleet.yaml; do
     [ -f "$fy" ] || continue
-    parse_bots "$fy"
+    parse_fleet_bots "$fy"
 done | sort -u)
 _sock_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
 if [ -d "$_sock_dir" ]; then

@@ -327,10 +327,6 @@ class Paths:
         return self.base_library / "lessons"
 
     @property
-    def base_post_actions(self) -> Path:
-        return self.base_library / "post_actions"
-
-    @property
     def base_voices(self) -> Path:
         return self.root / "voices"
 
