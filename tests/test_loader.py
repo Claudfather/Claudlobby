@@ -17,6 +17,7 @@ from claudlobby.loader import (
     load_library_items_overlay,
     load_voice,
     parse_expertise_file,
+    frontmatter_error,
     parse_frontmatter,
     parse_guardrail_permissions,
 )
@@ -63,13 +64,15 @@ class TestParseFrontmatter:
         text = "---\n: [invalid yaml\n---\n\nBody."
         fm, body = parse_frontmatter(text)
         assert fm == {}
-        assert body == text
+        # malformed block is stripped, never leaked into the body (#791)
+        assert body == "Body."
 
     def test_frontmatter_not_dict(self):
         text = "---\n- a list\n- not a dict\n---\n\nBody."
         fm, body = parse_frontmatter(text)
         assert fm == {}
-        assert body == text
+        # non-mapping frontmatter is stripped, never leaked into the body (#791)
+        assert body == "Body."
 
     def test_frontmatter_with_crlf(self):
         text = "---\r\ntitle: CRLF\r\n---\r\n\r\nBody."
@@ -86,6 +89,29 @@ class TestParseFrontmatter:
         text = "  ---\ntitle: Indented\n---\n\nBody."
         fm, body = parse_frontmatter(text)
         assert fm == {}  # leading spaces disqualify
+
+
+class TestFrontmatterError:
+    def test_none_for_valid(self):
+        assert frontmatter_error("---\ntitle: X\n---\n\nBody.") is None
+
+    def test_none_for_no_frontmatter(self):
+        assert frontmatter_error("Just body text.\n") is None
+
+    def test_none_for_empty_block(self):
+        assert frontmatter_error("---\n---\n\nBody.") is None
+
+    def test_malformed_yaml_reported(self):
+        err = frontmatter_error("---\ndescription: `x` bad\n---\n\nBody.")
+        assert err is not None and "malformed YAML" in err
+
+    def test_not_a_mapping_reported(self):
+        err = frontmatter_error("---\n- a\n- b\n---\n\nBody.")
+        assert err is not None and "not a mapping" in err
+
+    def test_missing_closing_fence_reported(self):
+        err = frontmatter_error("---\ntitle: Oops\nno close")
+        assert err is not None and "closing" in err
 
 
 # ── _derive_title ────────────────────────────────────────────────────

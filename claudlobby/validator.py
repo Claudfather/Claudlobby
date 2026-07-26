@@ -997,6 +997,49 @@ def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
+def _validate_library_frontmatter(paths: Paths, report: ValidationReport) -> None:
+    """Fail loud on malformed YAML frontmatter in any library ``.md`` file.
+
+    ``loader.parse_frontmatter`` degrades safely at compose (it drops an
+    unparseable block), so a malformed library file would otherwise silently
+    lose its frontmatter — and, before the loader was hardened, leak the raw
+    ``---`` block into every equipping bot's composed CLAUDE.md. Catching it
+    here blocks ``validate`` (and ``generate``) until the file is fixed.
+
+    Scans every ``.md`` under the base library and the fleet overlay (READMEs
+    excepted); ``.json`` MCP fragments and ``tool.yaml`` templates carry no
+    markdown frontmatter and are out of scope.
+    """
+    from .loader import frontmatter_error
+
+    roots = [paths.base_library, paths.overlay_library]
+    seen = set()
+    for root in roots:
+        if root is None or not root.is_dir():
+            continue
+        for md in sorted(root.rglob("*.md")):
+            if md.name.startswith("README"):
+                continue
+            resolved = md.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                text = md.read_text(encoding="utf-8")
+            except OSError as exc:
+                report.warnings.append(f"library file unreadable: {md} ({exc})")
+                continue
+            err = frontmatter_error(text)
+            if err is not None:
+                try:
+                    rel = md.relative_to(root)
+                except ValueError:
+                    rel = md
+                report.errors.append(
+                    f"malformed frontmatter in library file '{rel}': {err}"
+                )
+
+
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
@@ -1014,6 +1057,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_sweep(fleet, report)
     _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
+    _validate_library_frontmatter(paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
     if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):

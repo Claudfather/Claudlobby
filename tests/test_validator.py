@@ -42,6 +42,23 @@ class TestValidate:
         assert report.has_errors
         assert any("nonexistent-role" in e for e in report.errors)
 
+    def test_malformed_library_frontmatter_is_error(self, fleet_dir, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        bad = fleet_dir / "library" / "guardrails" / "bad-frontmatter.md"
+        bad.parent.mkdir(parents=True, exist_ok=True)
+        # description value opens with a backtick — a YAML reserved indicator (#791)
+        bad.write_text("---\ndescription: `x` is bad yaml\n---\n\nBody.\n")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        paths = _make_paths(fleet_dir)
+        report = validate(fleet, paths)
+        assert report.has_errors
+        assert any(
+            "malformed frontmatter" in e and "bad-frontmatter.md" in e
+            for e in report.errors
+        )
+
     def test_missing_env_var_is_warning(self, fleet_dir, monkeypatch):
         # Ensure GITHUB_PAT is NOT set
         monkeypatch.delenv("GITHUB_PAT", raising=False)
