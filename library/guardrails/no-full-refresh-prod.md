@@ -1,6 +1,6 @@
 ---
 title: Never Full-Refresh in Prod
-description: `--full-refresh` destroys incremental state — irrecoverable on multi-billion-row models.
+description: "`--full-refresh` destroys incremental state — irrecoverable on multi-billion-row models."
 ---
 
 # Never Full-Refresh in Prod

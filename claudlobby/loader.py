@@ -52,14 +52,22 @@ class ExpertiseItem:
     permissions: ExpertisePermissions | None = None
 
 
-def parse_frontmatter(text: str) -> tuple[dict, str]:
-    """Split a markdown file into (frontmatter dict, body str).
+def _split_frontmatter(text: str) -> tuple[dict | None, str, str | None]:
+    """Core frontmatter splitter shared by ``parse_frontmatter`` (lenient, used
+    at compose) and ``frontmatter_error`` (strict, used by ``validate``).
 
-    Returns ({}, original_text) if no frontmatter present.
+    Returns ``(fm, body, error)``:
+
+    - No frontmatter block (no leading ``---``): ``({}, text, None)``.
+    - Well-formed block: ``(mapping, body, None)``; an empty block (``---``
+      immediately closed) yields ``({}, body, None)``.
+    - Malformed block: ``(None, body, "<reason>")``. ``body`` is the content
+      after the closing fence when one exists, so the unparseable block is
+      dropped rather than emitted; a lone ``---`` with no closing fence keeps
+      the original text (it is content — a horizontal rule — not a leaked block).
     """
     if not text.startswith("---\n") and not text.startswith("---\r\n"):
-        return {}, text
-    # Find closing fence
+        return {}, text, None
     lines = text.splitlines(keepends=True)
     # First line is "---". Find the next line that is exactly "---".
     end = None
@@ -68,17 +76,43 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
             end = i
             break
     if end is None:
-        return {}, text
+        return None, text, "opens with '---' but has no closing '---' fence"
     fm_text = "".join(lines[1:end])
     body = "".join(lines[end + 1 :]).lstrip("\n")
     try:
-        fm = yaml.safe_load(fm_text) or {}
+        fm = yaml.safe_load(fm_text)
     except yaml.YAMLError as exc:
-        log.warning("malformed YAML frontmatter (treating as plain text): %s", exc)
-        return {}, text
+        return None, body, f"malformed YAML frontmatter: {exc}"
+    if fm is None:
+        return {}, body, None
     if not isinstance(fm, dict):
-        return {}, text
+        return None, body, f"frontmatter is not a mapping (got {type(fm).__name__})"
+    return fm, body, None
+
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Split a markdown file into (frontmatter dict, body str).
+
+    Returns ({}, original_text) if no frontmatter is present. Malformed
+    frontmatter degrades safely: the unparseable block is dropped and
+    ({}, body) returned, so raw ``---`` frontmatter is never leaked into
+    composed output. ``validate`` fails loud on the same condition via
+    ``frontmatter_error`` so the offending file is fixed, not silently stripped.
+    """
+    fm, body, err = _split_frontmatter(text)
+    if err is not None:
+        log.warning("malformed frontmatter (%s); dropping the block", err)
+        return {}, body
     return fm, body
+
+
+def frontmatter_error(text: str) -> str | None:
+    """Return a human-readable reason if ``text`` opens a ``---`` frontmatter
+    block that does not parse to a YAML mapping, else ``None``. The strict
+    counterpart to ``parse_frontmatter`` — used by ``validate`` to fail loud on
+    malformed library frontmatter before it reaches compose.
+    """
+    return _split_frontmatter(text)[2]
 
 
 def _derive_title(stem: str) -> str:
