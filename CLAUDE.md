@@ -86,6 +86,7 @@ Key lifecycle scripts in `lib/`:
 | `tg-post.sh` | Bash helper for posting to Telegram |
 | `disk-monitor.sh` | Daily disk-usage check, FLEET ALERT past threshold — runs as the `disk-monitor` host job |
 | `fleet-memory-check.sh` | Daily fleet RSS vs available-RAM check, FLEET ALERT past reserve floor — runs as the `fleet-memory-check` host job |
+| `orphan-browser-reaper.sh` | Daily reap of browser processes a dead automation task orphaned (#807) — matches on the `comm` basename, never a cmdline pattern; "orphaned" means the parent is init *or a subreaper* (systemd `--user` adopts what a bot session orphans, so `ppid == 1` alone misses the common case); reaps the whole descendant tree, FLEET NOTICE on reap. `--dry-run` reports without killing or notifying. Runs as the `orphan-browser-reaper` host job |
 | `bench-cold-start.sh` | Cold-start timing benchmark — logs CSV rows to `bench-results.log` (no automated regression detection) |
 | `check-npx-cache.sh` | Verify npx package cache state for MCP servers |
 | `sprint-trigger.sh` | Schedule-driven autonomous sprint nudger |

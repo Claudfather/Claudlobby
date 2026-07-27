@@ -632,6 +632,11 @@ class TestSystemYamlStructure:
             ("notify-behind", "notify-behind.sh", "*-*-* 08:00:00"),
             ("disk-monitor", "disk-monitor.sh", "*-*-* 05:00:00"),
             ("fleet-memory-check", "fleet-memory-check.sh", "*-*-* 05:30:00"),
+            (
+                "orphan-browser-reaper",
+                "orphan-browser-reaper.sh",
+                "*-*-* 05:45:00",
+            ),
         ],
     )
     def test_host_jobs_declared(self, job, script, schedule):
@@ -845,6 +850,11 @@ class TestComposeHostTimers:
             ("notify-behind", "notify-behind.sh", "*-*-* 08:00:00"),
             ("disk-monitor", "disk-monitor.sh", "*-*-* 05:00:00"),
             ("fleet-memory-check", "fleet-memory-check.sh", "*-*-* 05:30:00"),
+            (
+                "orphan-browser-reaper",
+                "orphan-browser-reaper.sh",
+                "*-*-* 05:45:00",
+            ),
         ],
     )
     def test_emits_host_job_units(self, tmp_path, job, script, schedule):
