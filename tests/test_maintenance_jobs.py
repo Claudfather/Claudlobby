@@ -365,9 +365,16 @@ class TestReloadFailureReasonIsTheRealError:
     the PATH. The reason must carry what actually failed, not the last command
     name; that misdirection is what cost the triage."""
 
-    def _harness(self, tmp_path, claude_body=None, **env_extra):
+    def _harness(self, tmp_path, claude_body=None, sysbin=None, **env_extra):
         """claude_body=None omits the `claude` stub entirely — the literal #805
-        state, where the tool is absent rather than merely failing."""
+        state, where the tool is absent rather than merely failing.
+
+        `sysbin` replaces the real system bin dirs on the harness PATH. Omitting
+        a stub is only half of "the tool is absent": the system dirs below still
+        resolve whatever the host installed there, so a test asserting absence
+        MUST pass a mirror that excludes the tool (see the sysbin_excluding
+        fixture). Tests that write their own stub shadow the host copy from
+        `bindir` and do not need one."""
         root = tmp_path / "root"
         libdir = root / "lib"
         libdir.mkdir(parents=True)
@@ -391,7 +398,7 @@ class TestReloadFailureReasonIsTheRealError:
             ["bash", str(libdir / "reload-fleet.sh")],
             env=_scrubbed_env(
                 CLAUDLOBBY_ROOT=str(root),
-                PATH=f"{bindir}:/usr/bin:/bin:/usr/sbin:/sbin",
+                PATH=f"{bindir}:{sysbin or '/usr/bin:/bin:/usr/sbin:/sbin'}",
                 TG_CAPTURE=str(tmp_path / "tg-capture"),
                 TMUX_TMPDIR=str(tmp_path / "no-tmux"),
                 **env_extra,
@@ -428,13 +435,24 @@ class TestReloadFailureReasonIsTheRealError:
         assert "exit 127" in reason, reason
         assert "claude not found on PATH=" in reason, reason
 
-    def test_absent_claude_names_the_tool_not_the_plugin(self, tmp_path):
+    def test_absent_claude_names_the_tool_not_the_plugin(
+        self, tmp_path, sysbin_excluding
+    ):
         """The literal #805 case: no `claude` anywhere. The preflight must fail
         on the missing TOOL, so the alert is actionable — the old code blamed
-        whichever plugin the loop happened to reach first. CLAUDLOBBY_TOOL_PREFIXES
-        pins the fallback list empty so a host with a real brew claude cannot
-        mask the branch."""
-        r, log = self._harness(tmp_path, claude_body=None, CLAUDLOBBY_TOOL_PREFIXES="")
+        whichever plugin the loop happened to reach first.
+
+        Absence has to be built, on both halves of the PATH: `sysbin` mirrors the
+        system dirs without `claude` (a host with Claude Code at /usr/bin/claude
+        otherwise satisfies the preflight and this test never runs its branch),
+        and CLAUDLOBBY_TOOL_PREFIXES pins own_tool_path's fallback list empty so
+        it cannot append a prefix that puts the tool back."""
+        r, log = self._harness(
+            tmp_path,
+            claude_body=None,
+            sysbin=sysbin_excluding("claude"),
+            CLAUDLOBBY_TOOL_PREFIXES="",
+        )
         assert r.returncode == 1
         reason = self._reason(log)
         assert "claude not found" in reason, reason
