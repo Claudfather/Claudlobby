@@ -1475,3 +1475,89 @@ class TestValidateGenerateParity:
         }
         report = validate(fleet, paths)
         assert not any("/opt/rogue/job.sh" in e for e in report.errors)
+
+
+class TestGitCredentialsWarnings:
+    """Per-org git credential routing has two operator-side gaps that both
+    compose VALID config and then fail at runtime, so both warn (never fail):
+    a declared token that is not in any .env tier, and an [include] target that
+    carries no git identity. Neither is a composition error."""
+
+    def _report(self, fleet_dir, monkeypatch, operator, creds=None):
+        import claudlobby.composer as comp
+
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        monkeypatch.setattr(comp, "_operator_gitconfig", lambda: operator)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].git_credentials = (
+            {"OrgA": "ORG_A_PAT"} if creds is None else creds
+        )
+        return validate(fleet, _make_paths(fleet_dir))
+
+    def _identity_warnings(self, report):
+        """Only the [include]/identity warning — the missing-token warning is a
+        separate gap and fires independently."""
+        return [
+            w
+            for w in report.warnings
+            if "git_credentials" in w and "Author identity unknown" in w
+        ]
+
+    def _token_warnings(self, report):
+        return [w for w in report.warnings if "git_credentials[" in w]
+
+    def test_missing_operator_gitconfig_warns_never_fails(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        report = self._report(fleet_dir, monkeypatch, tmp_path / "absent.gitconfig")
+        warns = self._identity_warnings(report)
+        assert any("does not exist" in w for w in warns), warns
+        assert any("Author identity unknown" in w for w in warns), warns
+        assert not report.errors
+
+    def test_identityless_operator_gitconfig_warns(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        """The file existing is not enough — a ~/.gitconfig with no user.email
+        fails commits identically, and an existence check alone would miss it."""
+        operator = tmp_path / "no-identity.gitconfig"
+        operator.write_text("[init]\n\tdefaultBranch = main\n")
+        warns = self._identity_warnings(self._report(fleet_dir, monkeypatch, operator))
+        assert any("sets no user.email" in w for w in warns), warns
+
+    def test_identity_behind_a_nested_include_is_accepted(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        """Delegating the read to `git config --file` (rather than parsing the
+        file) is what makes this pass: the operator's identity legitimately lives
+        one [include] deeper, and a hand-rolled parse would cry wolf."""
+        inner = tmp_path / "identity.gitconfig"
+        inner.write_text("[user]\n\temail = operator@example.com\n")
+        operator = tmp_path / "outer.gitconfig"
+        operator.write_text(f"[include]\n\tpath = {inner}\n")
+        report = self._report(fleet_dir, monkeypatch, operator)
+        assert self._identity_warnings(report) == []
+
+    def test_no_declaration_means_no_identity_warning(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        """A fleet declaring no git_credentials must not be nagged about a host
+        file it never includes."""
+        report = self._report(
+            fleet_dir, monkeypatch, tmp_path / "absent.gitconfig", creds={}
+        )
+        assert self._identity_warnings(report) == []
+        assert self._token_warnings(report) == []
+
+    def test_declared_token_missing_from_env_warns(
+        self, fleet_dir, tmp_path, monkeypatch
+    ):
+        """A declared org whose token is unset composes valid routing that then
+        presents no credential — git falls through to the host helper and 403s."""
+        operator = tmp_path / "operator.gitconfig"
+        operator.write_text("[user]\n\temail = operator@example.com\n")
+        monkeypatch.delenv("ORG_A_PAT", raising=False)
+        warns = self._token_warnings(self._report(fleet_dir, monkeypatch, operator))
+        assert any("ORG_A_PAT" in w and "403" in w for w in warns), warns

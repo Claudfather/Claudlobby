@@ -532,23 +532,45 @@ def compose_bot_gitconfig(bot: BotConfig) -> str | None:
     presenting the wrong token as a misleading 403. Full root cause:
     documentation/plans/2026-07-27-per-org-git-credential-routing.md.
 
-    Four properties are load-bearing; a reorder breaks routing SILENTLY, so
-    tests/test_composer.py pins each one separately:
+    Three ORDERING properties are load-bearing; a reorder breaks routing
+    SILENTLY, so tests/test_composer.py pins each one separately:
 
-    1. ``useHttpPath = true`` — without it git matches on protocol+host only and
-       an org-scoped section never matches at all.
-    2. ``[include]`` of the operator's config FIRST — preserves user.name /
+    1. ``[include]`` of the operator's config FIRST — preserves user.name /
        user.email per the git-identity-no-overrides guardrail. Replacing global
        config instead of extending it would violate it.
-    3. An empty ``helper =`` reset AFTER that include — the include drags in
+    2. An empty ``helper =`` reset AFTER that include — the include drags in
        gh's own reset+helper pair, and without re-resetting, gh's helper is
        first in the list and wins for every org.
-    4. Org-scoped helper BEFORE the generic fallback — git takes the first
+    3. Org-scoped helper BEFORE the generic fallback — git takes the first
        helper that answers. Ordering *is* the selection mechanism; there is no
        most-specific-wins rule.
 
+    Ordering-sensitivity is safe to build on because both semantics it rests on
+    are git's DOCUMENTED contract, not incidental behaviour — ``gitcredentials``
+    specifies first-both-fields-wins and empty-resets-the-list, with wording
+    unchanged from v2.20.0 to today, and ``credential_apply_config()`` sets
+    ``select_fn = select_all``, explicitly opting credential config out of
+    urlmatch's most-specific-wins arbitration.
+
+    ``useHttpPath = true`` is a fourth line but is NOT one of the three: it does
+    not decide whether an org-scoped section matches. The repo path is already in
+    the credential context at match time, because ``credential_apply_config()``
+    reads config — and does its URL matching — BEFORE the ``!use_http_path`` strip
+    that follows it. That read-then-strip order is a git *internal*, though, where
+    the two semantics above are documented; setting ``useHttpPath`` turns the one
+    undocumented dependency in this design into a configured guarantee. Its actual
+    effect is to forward ``path=`` to the helper, which costs nothing here: the
+    reset above drops every storage-backed helper for this host, so no helper is
+    left that would key credentials per-repo.
+
     The helper embeds ``$VAR``, never a token: the value is read from the
     process env at push time, so this file carries no secret.
+
+    The ``[include]`` target is an EXTERNAL host file this composed artifact
+    depends on. git ignores a missing include path silently, which would leave
+    routing working while ``user.email`` vanished, so its existence is asserted
+    by freshbox (fail) and by the validator (warn) rather than left to surface as
+    a confusing ``rc=128`` at the first commit.
     """
     if not bot.git_credentials:
         return None
@@ -561,8 +583,9 @@ def compose_bot_gitconfig(bot: BotConfig) -> str | None:
 [include]
 \tpath = {_operator_gitconfig()}
 
-# Match on the org path, then discard whatever helper the include installed
-# (gh auth setup-git writes its own reset + helper pair in there).
+# Keep the repo path in the credential context and forward it to helpers, then
+# discard whatever helper the include installed (gh auth setup-git writes its
+# own reset + helper pair in there).
 [credential "https://github.com"]
 \tuseHttpPath = true
 \thelper =

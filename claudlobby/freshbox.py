@@ -322,13 +322,15 @@ def _env_secret_leak_findings(
 def _externals_report(
     bot: BotConfig, fleet: FleetConfig, paths: Paths
 ) -> list[Finding]:
-    """Make the fleet's external coupling visible in one place (INFO), and flag a
-    declaration that blesses nothing (WARN — declaration rot). Surfaces every
+    """Make the fleet's external coupling visible in one place (INFO), flag a
+    declaration that blesses nothing (WARN — declaration rot), and fail on a
+    by-construction external that is not there (FAIL). Surfaces every
     ``external_paths`` entry with the source values it actually blesses (so an
     over-broad ``/**`` silently covering a second use site is readable), plus the
-    declared-by-construction externals: mount targets, the claudron vault path, and
-    a non-default account dir. The default ``~/.claude`` account is the norm, not
-    coupling, so it is not surfaced — a clean bot stays silent here."""
+    declared-by-construction externals: mount targets, the claudron vault path, a
+    non-default account dir, and the two host files per-org git credential routing
+    leans on. The default ``~/.claude`` account is the norm, not coupling, so it is
+    not surfaced — a clean bot stays silent here."""
     from . import dotenv
     from .composer import _load_bot_fragments
     from .path_audit import (
@@ -398,6 +400,50 @@ def _externals_report(
                 f"account {bot.account} → {account_dir} (non-default config dir)",
             )
         )
+
+    # Per-org git credential routing leans on two host files: the operator's own
+    # ~/.gitconfig (included for identity — the git-identity-no-overrides guardrail
+    # forbids composing a per-bot one) and gh's credential helper for undeclared
+    # orgs. The include is the one that breaks quietly: git ignores a missing
+    # include path without a word, so the bot goes on routing credentials
+    # correctly while user.name/user.email vanish, surfacing only as
+    # 'Author identity unknown' at the first commit with nothing pointing back at
+    # the composed file. An absent host prerequisite belongs in the fresh-box gate.
+    if bot.git_credentials:
+        from .composer import _operator_gitconfig, _resolve_gh_executable
+
+        operator = _operator_gitconfig()
+        if operator.is_file():
+            findings.append(
+                Finding(
+                    bot.bot_id,
+                    "external_ref",
+                    INFO,
+                    f"git identity include → {operator}",
+                )
+            )
+        else:
+            findings.append(
+                Finding(
+                    bot.bot_id,
+                    "missing_external",
+                    FAIL,
+                    f"git_credentials composes an [include] of {operator}, which "
+                    "does not exist — git ignores a missing include silently, so "
+                    "credential routing will work while user.name/user.email are "
+                    "unset and every commit fails 'Author identity unknown'. Create "
+                    "it (git config --global user.email …) or drop git_credentials",
+                )
+            )
+        if gh_bin := _resolve_gh_executable():
+            findings.append(
+                Finding(
+                    bot.bot_id,
+                    "external_ref",
+                    INFO,
+                    f"git credential fallback for undeclared orgs → {gh_bin}",
+                )
+            )
     return findings
 
 

@@ -1,10 +1,9 @@
 # Per-org git credential routing — defect report + design proposal
 
-**From:** a downstream consumer fleet. We found this; you own the fix shape.
-**Status:** defect reproduced and root-caused. Phases 1–3 implemented in this PR as a *proposal*.
-Forks F1/F2 open. One open question below (§Open question) where our explanation is inferred from
-behaviour rather than from a documented contract — if you know the answer, it is a one-line reply
-and we would rather be corrected than shipped around.
+**Defect found and root-caused by:** a downstream consumer fleet, who proposed the fix shape.
+**Owned by:** crog-eng-team, who reviewed it, resolved the open question, and carried the fixes.
+**Status:** open question **resolved** (both semantics are git's documented contract — §Open
+question); review findings addressed; forks F1/F2 still awaiting a ratifier.
 **Branch:** `feat/per-org-git-credential-routing` off `main` @ `e413675`.
 
 Org names below are placeholders (`OrgA`, `OrgB`) except where the real target matters:
@@ -94,23 +93,56 @@ helper list**, discarding `gh`'s and leaving ours the only one. That is why it l
 keychain problem — the reset appeared to "clear a cached credential" when it was clearing a
 *config list*.
 
-### Open question — the part we did not derive from a documented contract
+### Open question — RESOLVED: both semantics are contractual
 
-We verified the *behaviour* above repeatedly, but two git semantics we are relying on were inferred
-from observation, not from git's documented contract:
+The proposers flagged that two git semantics this design leans on were inferred from behaviour
+rather than a documented contract, and that if either were incidental the composed file would be
+fragile across git versions and need a different shape. **Both are contractual**, on three
+independent lines of evidence, so the shape stands.
 
-1. **Does an empty `helper` value reset the list across config keys, or only within the same key?**
-   Observed: an org-scoped helper set in an *earlier* section is discarded by a later empty
-   `credential.https://github.com.helper`. That implies one list per credential lookup, reset
-   globally. We did not confirm this is specified rather than incidental.
-2. **Is "first helper that answers wins" guaranteed**, or does git have a specificity rule we are
-   accidentally satisfying by ordering? Observed: an org-scoped section placed *after* the generic
-   one never fires, which suggests no specificity rule — but we are asserting a negative.
+1. **An empty `helper` resets the list across config keys — yes.** There is no "across keys" to
+   begin with: `urlmatch_config_entry()` (`urlmatch.c`) strips the URL from the key and
+   *synthesises* a generic one (`credential.helper`) before dispatch, so a URL-scoped and a generic
+   helper entry are indistinguishable by the time `credential_config_callback()` sees them — the
+   URL is a match filter only. That callback then calls `string_list_clear()` on an empty value,
+   clearing the single accumulated list whatever contributed to it. Documented in
+   `gitcredentials(7)`: *"If `credential.helper` is configured to the empty string, this resets the
+   helper list to empty."*
+2. **First helper that answers wins, and there is no specificity rule — yes.** `credential_fill()`
+   returns as soon as one helper yields both a username and a password. Documented: *"Once Git has
+   acquired both a username and a password, no more helpers will be tried."* The no-specificity
+   half does not require asserting a negative — git states it positively:
+   `credential_apply_config()` sets `select_fn = select_all` (which returns 0 unconditionally),
+   **explicitly opting credential config out** of urlmatch's `cmp_matches()` most-specific-wins
+   arbitration that its other consumers use.
 
-Both matter, because the whole design below is ordering-sensitive. If either is incidental rather
-than contractual, the composed file is fragile across git versions and you will want a different
-shape. **We are not claiming to have settled this.** A team living in this code may recognise it
-instantly.
+**Stability:** the `gitcredentials` wording for both paragraphs is byte-identical at `v2.20.0`
+(2018) and `v2.39.5`. Confirmed empirically with 9 stub-helper probes on git 2.39.5.
+
+Two further properties this shape silently relies on, now pinned by tests:
+
+- **The reset is URL-filtered** — a non-matching url-scoped empty helper does *not* clear the list,
+  so scoping the reset to `https://github.com` leaves the operator's helper intact for every other
+  host. An un-scoped reset would silently break GitLab pushes.
+- **Org sections match a path prefix only at a `/` boundary** — `Claud` does not capture
+  `Claudfather`. Real org names collide this way and the failure would be a wrong token, not an
+  error.
+
+### Correction: `useHttpPath` is not what makes an org section match
+
+The original draft listed `useHttpPath = true` as the first of four ordering properties, on the
+reading that without it "git matches on protocol+host only and an org-scoped section never matches
+at all". That is not what it does — routing is identical with the line stripped.
+
+`credential_apply_config()` builds its match URL from `c->path` and runs the config read (and so
+the URL matching) at `credential.c:197`; the `!use_http_path` strip is at `:205`, *after*. The
+transport populates `c->path` from the remote URL, so the path is present at match time either way.
+
+The line is **kept deliberately**, for a different reason: that read-then-strip order is a git
+*internal*, where the two semantics above are documented, so setting `useHttpPath` turns the one
+undocumented dependency in this design into a configured guarantee. Its actual effect — forwarding
+`path=` to helpers — costs nothing here, because the reset drops every storage-backed helper for
+this host, leaving none that would key credentials per-repo.
 
 ## 4. Proposal
 
@@ -133,7 +165,7 @@ Composes `<bot_dir>/.gitconfig` + `GIT_CONFIG_GLOBAL` in `bot.conf`:
 [include]
 	path = <operator ~/.gitconfig>          # identity/aliases preserved
 [credential "https://github.com"]
-	useHttpPath = true                      # else an org-scoped section never matches
+	useHttpPath = true                      # forwards path= to helpers (see correction above)
 	helper =                                # discard what the include installed
 [credential "https://github.com/OrgA"]
 	helper = "!f(){ echo username=x-access-token; echo password=$ORGA_GITHUB_PAT; };f"
@@ -141,9 +173,9 @@ Composes `<bot_dir>/.gitconfig` + `GIT_CONFIG_GLOBAL` in `bot.conf`:
 	helper = !<gh> auth git-credential      # default for every undeclared org
 ```
 
-Four ordering properties are load-bearing (`useHttpPath`; include first; reset after the include;
-org helper before the generic fallback). Each is pinned by its own test, because a reorder breaks
-routing silently.
+Three ordering properties are load-bearing (include first; reset after the include; org helper
+before the generic fallback). Each is pinned by its own test, because a reorder breaks routing
+silently. `useHttpPath` is a fourth line but not one of the three — see the correction above.
 
 Verified per-org resolution through one composed file:
 
@@ -204,15 +236,23 @@ singular and the motivating case needs two orgs.
 | `claudlobby/config.py` | `git_credentials` on `BotConfig`; `_parse_git_credentials(raw, *, where)` per tier, merged at the call site |
 | `claudlobby/composer.py` | `compose_bot_gitconfig(bot)`; `GIT_CONFIG_GLOBAL` in `bot.conf`; registered in `collect_env_contracts` (fleet tier) so scaffold/doctor/freshbox see the var |
 | `claudlobby/diff.py` | `.gitconfig` drift detection — F1's mitigation, so an in-session edit is not silently lost |
-| `claudlobby/validator.py` | warn (never fail) on a declared var unset in every `.env` tier |
+| `claudlobby/validator.py` | warn (never fail) on a declared var unset in every `.env` tier; and on an `[include]` target that is missing or carries no `user.email` — probed once per run via `git config --file --includes` |
+| `claudlobby/path_audit.py` | `.gitconfig` added to `_WIRING_STATIC`, so the L2 scan covers the new artifact |
+| `claudlobby/freshbox.py` | `_externals_report` extended — the include target and resolved `gh` join the declared-by-construction externals (INFO, beside mount targets and the vault path), and an absent include target is a FAIL |
 | docs | `fleet-yaml-schema.md`, `environment-variables.md`, `library/tools/README.md` (the env-name contract), `fleet.yaml.example` |
 
-23 tests: the four ordering properties, secret hygiene (name referenced, never expanded; pasted-token
-prefixes rejected), multi-org, opt-out inertness, both config tiers with provenance-correct errors,
-and a real `git credential fill` behavioural check with stubbed helpers (no network, no real tokens).
+37 tests: the three ordering properties, secret hygiene (name referenced, never expanded;
+pasted-token prefixes rejected), multi-org, opt-out inertness, both config tiers with
+provenance-correct errors, and real `git credential fill` behavioural checks with stubbed helpers
+(no network, no real tokens) covering per-org resolution, the URL-filtered reset, the org-name
+prefix boundary, and both halves of what `useHttpPath` does and does not do.
 
 Notable: `SHELL_IDENT_RE` alone cannot reject a pasted token — `ghp_xxx` *is* a valid shell
 identifier — so there is an explicit GitHub-token-prefix guard. A test found that.
+
+Also found by a test: the identity probe needs `git config --file --includes`. `--includes` is off
+by default for a `--file` read but ON when git reads the same file as global config — which is how
+the bot reads it — so omitting it warns about identities that resolve perfectly at runtime.
 
 ## 8. Risks
 
@@ -223,7 +263,9 @@ identifier — so there is an explicit GitHub-token-prefix guard. A test found t
 | Adding `git_credentials` needs a **restart**, not `/reload` | Medium | `bot.conf` is sourced at pane creation; `reload-fleet.sh` deliberately does not restart. Documented in `environment-variables.md` |
 | PAT reaches the pane non-exported if a bot's tmux **server** outlives a restart | Low/narrow | `start-bot.sh` sources `.env` tiers *before* its `set -a` block; works today because the parent exports and a fresh server inherits. Not fixed here — it is a pre-existing `start-bot.sh` ordering issue, one line, and changing bot-launch env ordering deserves its own empirical validation |
 | PAT expiry presents as this same `403` | Medium | §2's `POST /git/refs` probe distinguishes them; documented |
-| Ordering assumptions turn out to be incidental | **See §Open question** | unresolved — this is the one we want your read on |
+| Ordering assumptions turn out to be incidental | **Closed** | resolved: both semantics are git's documented contract, wording unchanged v2.20.0 → v2.39.5, and specificity is explicitly disabled in `credential_apply_config()`. See §Open question |
+| Operator's `~/.gitconfig` absent or identity-less | **High** | git ignores a missing `[include]` silently, so routing works while `user.email` is unset and every commit dies `rc=128 Author identity unknown`. `freshbox` FAILs (`missing_external`) and `validate` warns with that exact symptom; `generate` still proceeds (operator gap, not a compose error) |
+| A composed artifact drifting outside the L2 path guard | Medium | `.gitconfig` is in `path_audit._WIRING_STATIC`, so a fleet-shaped absolute in it is a hard error like one in `bot.conf`. Its two external targets (operator gitconfig, resolved `gh`) are surfaced by freshbox's externals report rather than left silent |
 
 ## 9. Verification
 
@@ -236,3 +278,23 @@ identifier — so there is an explicit GitHub-token-prefix guard. A test found t
 
 All six were run. Full suite: zero new failures against a pristine-`main` baseline (identical
 FAILED/ERROR sets; the pre-existing failures are macOS host gaps — systemd, GNU coreutils).
+
+### Canary for the review fixes (owning team, Linux)
+
+Composer changes get a canary before rollout. A throwaway fleet on a clean `/tmp` root with a fake
+`HOME` and a stub `gh` first on `PATH` (so compose-time resolution picks it up and the real `gh` is
+never executed), driving the real `claudlobby` CLI:
+
+- routing unchanged by the fixes — declared org → its own token, undeclared org → host default,
+  operator identity survives the include, no literal token in the composed file
+- **fix #2, before/after on the same planted flat path** — PR head: `0 finding(s): []`; with the
+  fix: `1 finding(s): ['.gitconfig']`
+- **fix #3, before/after on an absent operator gitconfig** — PR head: `freshbox --strict` reports
+  *"Self-contained"* while `user.email` is unset; with the fix: `freshbox` FAILs `missing_external`
+  and exits non-zero, `validate` warns naming `Author identity unknown`, and `generate` still
+  succeeds (an operator gap must not block composition)
+
+Full suite on Linux: **2066 passed, 0 real failures**. The single `FAILED`
+(`test_tmux_env::test_no_cross_contamination`) asserts bot-name markers do not leak into a bot's
+env and trips on a checkout path that literally contains a bot name; 21/21 pass from a neutral
+path. Not attributable to this branch.

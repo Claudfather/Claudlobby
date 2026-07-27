@@ -69,7 +69,19 @@ _ABS_TOKEN_RE = re.compile(r"/[^\s'\":;,<>]+")
 # Bot-dir-relative wiring files whose absolute paths must resolve for the bot to
 # run. Prose (CLAUDE.md) is intentionally excluded — a stale path there does not
 # break wiring and the text legitimately carries example paths.
-_WIRING_STATIC = ("bot.conf", ".mcp.json", ".claude/settings.local.json")
+#
+# Every composed file that can carry an absolute path belongs here: this list is
+# the whole of L2's reach, so an artifact missing from it is not merely unscanned,
+# it is invisible — ``freshbox --strict`` reports a fleet self-contained while the
+# unlisted file dangles. ``.gitconfig`` (per-org git credential routing) is scanned
+# for that reason; its include target and resolved ``gh`` path are external by
+# design and are surfaced separately by freshbox's externals report.
+_WIRING_STATIC = (
+    "bot.conf",
+    ".mcp.json",
+    ".claude/settings.local.json",
+    ".gitconfig",
+)
 
 
 def _anchor_values(bot: BotConfig, paths: Paths) -> dict[str, str]:
