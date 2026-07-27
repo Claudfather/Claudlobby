@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
+import subprocess
 from pathlib import Path
 from textwrap import dedent
 
@@ -18,20 +20,23 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.path_audit import ExternalDecl
-from tests.conftest import install_real_template
+from tests.conftest import _write_exec, install_real_template
 from claudlobby.composer import (
     _compose_hooks,
     _reconcile_access_json,
     _write_timer_units,
     compose_access_json,
     compose_bot,
+    GITCONFIG_FILENAME,
     compose_bot_conf,
+    compose_bot_gitconfig,
     compose_fleet,
     compose_mcp_json,
     compose_settings_local,
     compose_systemd_unit,
     scaffold_env_files,
 )
+from claudlobby.diff import diff_bot
 from claudlobby.paths import Paths
 
 
@@ -3520,3 +3525,217 @@ class TestTimerUnitPath:
             ":"
         )
         assert segs[-1] == f"{tmp_path / 'claudlobby'}/.venv/bin", segs
+
+
+
+def _git_cred_bot(creds=None):
+    """A bot declaring per-org git credentials (default: one org)."""
+    return BotConfig(
+        bot_id="kev",
+        name="kev",
+        expertise=["eng"],
+        telegram=TelegramConfig(handle="kev_bot"),
+        git_credentials={"OrgA": "ORG_A_PAT"} if creds is None else creds,
+    )
+
+
+_GH_STUB = "#!/bin/sh\necho username=x-access-token\necho password=HOST_DEFAULT\n"
+
+
+class TestPerOrgGitCredentialRouting:
+    """A bot pushing to two orgs needs two tokens (fine-grained PATs are
+    single-resource-owner), and `gh auth setup-git` installs a host-wide helper
+    for https://github.com that answers first for every org. Four ordering
+    properties make routing work; each is pinned separately because a reorder
+    breaks routing SILENTLY — git takes the first helper that answers, and there
+    is no most-specific-wins rule.
+
+    Spec: documentation/plans/2026-07-27-per-org-git-credential-routing.md
+    """
+
+    def _render(self, tmp_path, monkeypatch, creds=None):
+        """Both host seams stubbed so the assertions are host-independent — and
+        so a test can never invoke the real gh helper (which would answer with
+        the operator's actual token and print it into pytest output)."""
+        import claudlobby.composer as comp
+
+        monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: "/usr/bin/gh")
+        monkeypatch.setattr(comp, "_operator_gitconfig", lambda: tmp_path / "user.gitconfig")
+        return comp.compose_bot_gitconfig(_git_cred_bot(creds))
+
+    # --- the four load-bearing properties ---------------------------------
+
+    def test_use_http_path_is_set(self, tmp_path, monkeypatch):
+        """Without it git matches protocol+host only, so an org-scoped section
+        never matches and routing is a silent no-op."""
+        assert "useHttpPath = true" in self._render(tmp_path, monkeypatch)
+
+    def test_include_of_operator_config_comes_first(self, tmp_path, monkeypatch):
+        """Preserves user.name/user.email — the git-identity-no-overrides
+        guardrail forbids per-bot identity, so we extend global config."""
+        out = self._render(tmp_path, monkeypatch)
+        assert out.index("[include]") < out.index("useHttpPath")
+
+    def test_reset_follows_the_include(self, tmp_path, monkeypatch):
+        """The include drags in gh's own reset+helper pair; without re-resetting
+        after it, gh's helper is first in the list and wins for every org."""
+        out = self._render(tmp_path, monkeypatch)
+        assert out.index("[include]") < out.index("\thelper =\n")
+
+    def test_org_helper_precedes_the_generic_fallback(self, tmp_path, monkeypatch):
+        """Ordering IS the selection mechanism."""
+        out = self._render(tmp_path, monkeypatch)
+        assert out.index('[credential "https://github.com/OrgA"]') < out.index(
+            "auth git-credential"
+        )
+
+    # --- secret hygiene ---------------------------------------------------
+
+    def test_env_var_is_referenced_never_expanded(self, tmp_path, monkeypatch):
+        """The composed file is world-readable; it must carry the NAME so the
+        token is read from the process env at push time."""
+        out = self._render(tmp_path, monkeypatch)
+        assert "password=$ORG_A_PAT" in out
+        assert "github_pat_" not in out and "ghp_" not in out
+
+    def test_username_is_the_documented_placeholder_not_a_real_login(
+        self, tmp_path, monkeypatch
+    ):
+        """GitHub ignores the username for PAT auth; a real login would be PII
+        and wrong for any other operator."""
+        assert "username=x-access-token" in self._render(tmp_path, monkeypatch)
+
+    # --- multi-org + opt-out ---------------------------------------------
+
+    def test_each_declared_org_gets_its_own_section(self, tmp_path, monkeypatch):
+        out = self._render(tmp_path, monkeypatch, {"OrgA": "A_PAT", "OrgB": "B_PAT"})
+        assert '[credential "https://github.com/OrgA"]' in out
+        assert '[credential "https://github.com/OrgB"]' in out
+        assert "password=$A_PAT" in out and "password=$B_PAT" in out
+
+    def test_no_credentials_declared_composes_nothing(self, tmp_path, monkeypatch):
+        """Fleets declaring none must compose byte-identically to before."""
+        assert self._render(tmp_path, monkeypatch, {}) is None
+
+    def test_bot_conf_exports_git_config_global_only_when_declared(self, tmp_path):
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / "kev").mkdir(parents=True)
+        (root / "lib").mkdir()
+        paths = _make_paths(root)
+        fleet = FleetConfig(name="tl", service_prefix="com.crog.tl")
+        assert 'export GIT_CONFIG_GLOBAL="$BOT_DIR/.gitconfig"' in compose_bot_conf(
+            _git_cred_bot(), fleet, paths
+        )
+        assert "GIT_CONFIG_GLOBAL" not in compose_bot_conf(
+            _git_cred_bot({}), fleet, paths
+        )
+
+
+class TestGitCredentialRoutingResolvesForReal:
+    """The class above pins ORDERING; this pins BEHAVIOUR by running the composed
+    config through real `git credential fill`. No network, no real tokens — a stub
+    helper stands in for gh, and the include points at a fixture.
+
+    CI-runnable proxy for the control/treatment real push recorded in the spec
+    (that needs two real tokens across two orgs)."""
+
+    def _composed(self, tmp_path, monkeypatch, user_cfg=None):
+        import claudlobby.composer as comp
+
+        gh_stub = tmp_path / "gh-stub"
+        _write_exec(str(gh_stub), _GH_STUB)
+        if user_cfg is None:
+            user_cfg = tmp_path / "user.gitconfig"
+            user_cfg.write_text("[user]\n\temail = operator@example.com\n")
+        monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: str(gh_stub))
+        monkeypatch.setattr(comp, "_operator_gitconfig", lambda: user_cfg)
+        cfg = tmp_path / "composed.gitconfig"
+        cfg.write_text(comp.compose_bot_gitconfig(_git_cred_bot()))
+        return cfg
+
+    @staticmethod
+    def _git(cfg, args, extra_env=None):
+        return subprocess.run(
+            ["git", *args],
+            env={
+                **os.environ,
+                **(extra_env or {}),
+                "GIT_CONFIG_GLOBAL": str(cfg),
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+            capture_output=True,
+            text=True,
+        )
+
+    def _fill(self, cfg, path, extra_env):
+        r = subprocess.run(
+            ["git", "credential", "fill"],
+            input=f"protocol=https\nhost=github.com\npath={path}\n\n",
+            env={
+                **os.environ,
+                **extra_env,
+                "GIT_CONFIG_GLOBAL": str(cfg),
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+            capture_output=True,
+            text=True,
+        )
+        for line in r.stdout.splitlines():
+            if line.startswith("password="):
+                return line.removeprefix("password=")
+        return None
+
+    def test_declared_org_and_other_orgs_resolve_to_different_credentials(
+        self, tmp_path, monkeypatch
+    ):
+        """The whole point: same host, different org -> different credential."""
+        cfg = self._composed(tmp_path, monkeypatch)
+        env = {"ORG_A_PAT": "ORG_SPECIFIC"}
+        assert self._fill(cfg, "OrgA/somerepo.git", env) == "ORG_SPECIFIC"
+        assert self._fill(cfg, "OtherOrg/somerepo.git", env) == "HOST_DEFAULT"
+
+    def test_operator_identity_survives_the_include(self, tmp_path, monkeypatch):
+        """The git-identity guardrail forbids per-bot identity, so the composed
+        config must not shadow the operator's user.email."""
+        cfg = self._composed(tmp_path, monkeypatch)
+        r = self._git(cfg, ["config", "--get", "user.email"])
+        assert r.stdout.strip() == "operator@example.com"
+
+
+class TestGitConfigLifecycleThroughComposeBot:
+    """Drives the real compose_bot / diff paths rather than re-asserting the
+    branch in the test body."""
+
+    def test_dropping_the_declaration_removes_a_stale_file(self, fleet_dir):
+        """Stale routing after a fleet.yaml edit would keep using an old token,
+        so compose must DELETE the file, not merely stop writing it. Exercises
+        compose_bot's unlink branch — asserting pathlib.unlink works would be a
+        test of the standard library."""
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot.git_credentials = {}
+        bot_dir = paths.bot_runtime("lead")
+        bot_dir.mkdir(parents=True, exist_ok=True)
+        stale = bot_dir / GITCONFIG_FILENAME
+        stale.write_text("stale routing\n")
+        compose_bot(bot, fleet, paths)
+        assert not stale.exists(), "a dropped declaration must remove the file"
+
+    def test_diff_surfaces_a_hand_edited_gitconfig(self, fleet_dir):
+        """F1's whole mitigation: `git config --global` inside a bot session
+        writes to the composed file and is lost on regenerate, so drift
+        detection is the only thing that surfaces the loss."""
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        bot = fleet.bots["lead"]
+        bot.git_credentials = {"OrgA": "ORG_A_PAT"}
+        compose_bot(bot, fleet, paths)
+        gitconfig = paths.bot_runtime("lead") / GITCONFIG_FILENAME
+        assert gitconfig.is_file()
+        gitconfig.write_text(gitconfig.read_text() + "\n[user]\n\tname = Hand Edited\n")
+        out = diff_bot("lead", fleet, paths)
+        assert ".gitconfig drift in lead" in out
+        assert "Hand Edited" in out

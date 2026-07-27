@@ -307,6 +307,51 @@ Operational boundary. Composed into a `## Scope` section. Common fields:
 
 Any extra fields are passed through verbatim.
 
+`scope.org` is the bot's primary work boundary, **not** a credential binding — a bot may push to
+an org it does not "scope" to (its product org plus the framework repo it contributes back to).
+Credentials are declared separately, below.
+
+### `fleet.defaults.git_credentials` / `bots.<name>.git_credentials`
+
+Maps a **GitHub org** to the **name of the env var** holding that org's token. Declarable
+fleet-wide under `defaults:` and overridable per bot; the two are merged per-org (a bot adds an
+org without restating the fleet's).
+
+```yaml
+fleet:
+  defaults:
+    git_credentials:
+      OrgA: ORGA_GITHUB_PAT       # org -> env var NAME, never a token
+  bots:
+    somebot:
+      git_credentials:
+        OrgB: ORGB_GITHUB_PAT     # merges with the fleet default, per-org
+```
+
+**Why this exists.** GitHub fine-grained PATs are **single-resource-owner**: one token cannot
+carry write access to two orgs. A host whose bots contribute to more than one org therefore needs
+one token per org — and a single git credential helper cannot serve both. Worse, `gh auth
+setup-git` installs a helper for `https://github.com` that answers first for *every* org, so a
+push to the second org presents the first org's token and fails with a `403` that reads like a
+permissions problem and is not one.
+
+**What it composes.** A `<bot_dir>/.gitconfig` that routes per org, plus
+`GIT_CONFIG_GLOBAL` in `bot.conf` pointing at it. That file `include`s the operator's
+`~/.gitconfig` first, so `user.name` / `user.email` are preserved (per the
+`git-identity-no-overrides` guardrail) — it extends global config rather than replacing it. Orgs
+you do not declare keep the host default helper.
+
+**Values are never composed.** The generated helper references `$YOUR_VAR`; git reads the value
+from the process env at push time, so the composed file carries no secret. See the env-name
+contract in [`environment-variables.md`](environment-variables.md).
+
+Keys must be org names — a key containing `/` is rejected, because repo-scoped routing would
+silently never match. A declared var that is unset in every `.env` tier is a `validate` **warning**
+(not an error): a missing token is an operator gap, and generation still succeeds.
+
+Full root cause and the open design forks:
+[`plans/2026-07-27-per-org-git-credential-routing.md`](plans/2026-07-27-per-org-git-credential-routing.md).
+
 ### `bots.<name>.model_strategy`
 
 Escalation rules. When you have a bot that runs Sonnet for routine work but should escalate to Opus for architecturally tricky tasks, declare it here. Composed into a `## Model Strategy` section so the bot is aware of its own escalation pattern. Emitted as `MODEL_STRATEGY_*` env vars in `bot.conf` for skills/protocols to read.

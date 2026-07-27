@@ -47,9 +47,9 @@ def _env_has_value(effective_env: dict[str, str], var: str) -> bool:
     ``var in effective_env`` is True-but-empty. A warning that keyed off mere
     presence fired once (the first cold generate, before the stub existed) then
     went permanently silent even if the operator never filled in a real value
-    (#755). The single predicate behind all three "requires VAR but it's not
+    (#755). The single predicate behind all four "requires VAR but it is not
     set" validator warnings — MCP contract vars, tool env vars, telegram
-    token_env — so a fourth site can't reintroduce the presence-check fork.
+    token_env, git_credentials — so a fifth site cannot reintroduce the fork.
     """
     return bool(effective_env.get(var))
 
@@ -415,6 +415,20 @@ def _validate_bots(
             report.warnings.append(
                 f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in any tier of .env — bot won't connect to Telegram"
             )
+
+        # Git credential env (warn, never fail). Same value-based shape as
+        # telegram.token_env above: a declared org whose token is missing or empty
+        # composes valid routing that then presents no credential, so git silently
+        # falls through to the host default and the push fails with a 403 that reads
+        # like a permissions problem. A missing token is an operator gap, not a
+        # composition error — warn and still generate.
+        for org, env_name in sorted(bot.git_credentials.items()):
+            if not _env_has_value(effective_env, env_name):
+                report.warnings.append(
+                    f"bot '{bot_name}': git_credentials['{org}'] names '{env_name}', "
+                    f"not set in any tier of .env — pushes to {org} will fall back to "
+                    f"the host credential helper and may 403"
+                )
 
         # Observability config (warn). Fields may be None (= use hardcoded default);
         # only validate when explicitly set.

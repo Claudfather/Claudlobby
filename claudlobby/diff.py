@@ -16,7 +16,9 @@ import json
 from pathlib import Path
 
 from .composer import (
+    GITCONFIG_FILENAME,
     compose_bot_conf,
+    compose_bot_gitconfig,
     compose_claude_md,
     compose_mcp_json,
     compose_tool_outputs,
@@ -85,6 +87,28 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
                 actual_conf.splitlines(),
                 fromfile="library-composed (would be regenerated)",
                 tofile=f"runtime/bots/{bot_name}/bot.conf (current)",
+                lineterm="",
+            )
+        )
+
+    # .gitconfig — per-org git credential routing. Compositor-owned and pointed
+    # at by GIT_CONFIG_GLOBAL, which means `git config --global` inside a bot
+    # session writes HERE rather than to ~/.gitconfig. That edit is silently
+    # lost on the next generate, so drift detection is the only thing that
+    # surfaces it — omitting it would make the loss undetectable.
+    expected_gitconfig = compose_bot_gitconfig(bot) or ""
+    actual_gitconfig_path = bot_dir / GITCONFIG_FILENAME
+    actual_gitconfig = (
+        actual_gitconfig_path.read_text() if actual_gitconfig_path.is_file() else ""
+    )
+    if expected_gitconfig != actual_gitconfig:
+        parts.append(f"\n=== .gitconfig drift in {bot_name} ===")
+        parts.extend(
+            difflib.unified_diff(
+                expected_gitconfig.splitlines(),
+                actual_gitconfig.splitlines(),
+                fromfile="library-composed (would be regenerated)",
+                tofile=f"runtime/bots/{bot_name}/{GITCONFIG_FILENAME} (current)",
                 lineterm="",
             )
         )

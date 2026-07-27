@@ -35,6 +35,22 @@ Param values (defaults and per-bot overrides) are **literal values** — they ar
 context inputs, not re-rendered templates. Compose absolute paths inside the
 template around context vars: `SNAPSHOT_DIR = "{{ data_dir }}/{{ snapshot_subdir }}"`.
 
+### `env:` declares NAMES — and belongs in git
+
+The `env:` list holds env var **names**, never values, and a `tool.yaml` carrying it is a
+**tracked, shared** file. `SIMPLEFIN_ACCESS_URL` above is committed; only the value lives in the
+gitignored `.env`.
+
+This trips people up because the var is credential-adjacent and often fleet-specific, which makes
+"put the declaration in the overlay" feel right. It is not: the name is the *interface* the
+validator warns against and an operator provisions from, so it has to be visible. Same rule as
+`library/mcp/*.json`, which are tracked while declaring `${GITHUB_PAT}`. Full statement of the
+contract: [`documentation/environment-variables.md`](../../documentation/environment-variables.md).
+
+A tool belongs in the shared `library/tools/` whenever the *pattern* generalizes, even if today only
+one fleet sets the value. Reach for a `local/<fleet>/library/` overlay only when the tool's logic
+itself is fleet-specific.
+
 ## Template context
 
 Templates render with **StrictUndefined** — an undeclared or unset variable is
