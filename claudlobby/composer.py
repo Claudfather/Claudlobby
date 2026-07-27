@@ -887,7 +887,7 @@ def _render_startup_prompt(prompt: str, bot: BotConfig, fleet: FleetConfig) -> s
 # ----------------------------------------------------------------------
 
 
-def _scheduler_tool_path() -> str:
+def _scheduler_tool_path(root: Path | None = None) -> str:
     """PATH for composed timer units so their jobs can resolve fleet tools.
 
     systemd and launchd hand a scheduled job a minimal PATH that excludes
@@ -901,6 +901,12 @@ def _scheduler_tool_path() -> str:
     /usr/local on Intel, absent off macOS). On Intel the Homebrew segment
     intentionally re-collides with the leading /usr/local/bin, matching
     start-bot.sh's own duplication — a harmless, deliberate mirror.
+
+    ``root`` appends ``<root>/.venv/bin`` (#805). The user-prefix segments above
+    cover ``claude``, but ``claudlobby`` is a *console script* whose location
+    depends on which python ran ``pip install -e .`` — with a repo-local venv it
+    lands in ``.venv/bin`` and on no system PATH at all, so a timer fixed for
+    ``claude`` alone still died one line later on ``claudlobby generate``.
     """
     home = Path.home()
     segments = [
@@ -915,6 +921,8 @@ def _scheduler_tool_path() -> str:
         segments.append(
             "/opt/homebrew/bin" if Path("/opt/homebrew").is_dir() else "/usr/local/bin"
         )
+    if root is not None:
+        segments.append(f"{root}/.venv/bin")
     return ":".join(segments)
 
 
@@ -2344,7 +2352,7 @@ def _write_timer_units(
 
     # Compute the tool PATH once so systemd and launchd emit an identical value
     # (see _scheduler_tool_path, #798); the parity test asserts they match.
-    tool_path = _scheduler_tool_path()
+    tool_path = _scheduler_tool_path(paths.root)
 
     # --- systemd service unit ---
     service_lines = [

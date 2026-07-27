@@ -3497,3 +3497,26 @@ class TestTimerUnitPath:
         assert svc_path == plist_path, (
             f"launchd/systemd PATH diverge:\n  systemd={svc_path}\n  launchd={plist_path}"
         )
+
+    def test_path_includes_the_repo_venv_bin(self, tmp_path):
+        """#805 — the user-prefix segments resolve `claude`, but `claudlobby` is
+        a console script that a repo-local venv puts on no system PATH at all.
+        Without this segment a timer fixed for `claude` still died one line
+        later on `claudlobby generate`. Asserted on both platforms."""
+        d = self._emit(tmp_path)
+        venv_bin = f"{tmp_path / 'claudlobby'}/.venv/bin"
+        for unit, extract in (
+            ("com.t.reload-fleet.service", self._systemd_path),
+            ("com.t.reload-fleet.plist", self._launchd_path),
+        ):
+            segs = extract((d / unit).read_text()).split(":")
+            assert venv_bin in segs, f"{venv_bin} missing from {unit} PATH: {segs}"
+
+    def test_venv_bin_is_last_so_it_never_shadows_a_real_install(self, tmp_path):
+        """The venv is a fallback for the console script, not a preference: a
+        system/user install must keep winning."""
+        d = self._emit(tmp_path)
+        segs = self._systemd_path((d / "com.t.reload-fleet.service").read_text()).split(
+            ":"
+        )
+        assert segs[-1] == f"{tmp_path / 'claudlobby'}/.venv/bin", segs

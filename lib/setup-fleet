@@ -275,7 +275,7 @@ warm_npx_cache() {
     # (mirrors reload-fleet): a miss just means the first MCP init cold-downloads;
     # the cache is host-shared (~/.npm/_npx), so only the first fetch hits network.
     # shellcheck disable=SC2086
-    if claudlobby ${FLEET:+--fleet "$FLEET"} warm-cache >/dev/null 2>&1; then
+    if claudlobby_cli ${FLEET:+--fleet "$FLEET"} warm-cache >/dev/null 2>&1; then
         log "✓ npx cache warmed"
     else
         log "○ warm-cache skipped/failed (non-fatal — first MCP init cold-downloads)"

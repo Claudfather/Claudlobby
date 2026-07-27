@@ -55,6 +55,54 @@ def _write_exec(path, content):
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+_SYSTEM_BIN_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+@pytest.fixture(scope="session")
+def sysbin_excluding(tmp_path_factory):
+    """Build a mirror of the host's system bin dirs with named tools absent.
+
+    A test that asserts what happens when a tool is MISSING cannot put the real
+    system bin dirs on PATH: whether the branch runs then depends on what the
+    host happens to have installed. `claude` at /usr/bin/claude turns such a
+    test into a false result — the tool resolves, the absent-tool branch never
+    executes, and the test reports on a path it never took.
+
+    Mirroring by exclusion keeps every other utility resolvable (no whitelist to
+    fall out of date as the scripts under test grow) while making the excluded
+    name genuinely unresolvable. Returns a builder; results are cached per name
+    set and the mirror is built once per session (~1.9k symlinks, ~0.25s).
+    """
+    cache: dict[tuple[str, ...], Path] = {}
+
+    def _build(*names: str) -> Path:
+        key = tuple(sorted(names))
+        if key in cache:
+            return cache[key]
+        mirror = tmp_path_factory.mktemp("sysbin")
+        excluded = set(names)
+        for src in _SYSTEM_BIN_DIRS:
+            src_dir = Path(src)
+            if not src_dir.is_dir():
+                continue
+            for entry in src_dir.iterdir():
+                if entry.name in excluded:
+                    continue
+                link = mirror / entry.name
+                if link.exists() or link.is_symlink():
+                    continue  # first dir on the list wins, as PATH order would
+                try:
+                    link.symlink_to(entry)
+                except OSError:
+                    pass  # unreadable/racing entry — not worth failing a test over
+        for name in excluded:
+            assert not (mirror / name).exists(), f"{name} leaked into the mirror"
+        cache[key] = mirror
+        return mirror
+
+    return _build
+
+
 def call_lib_fn(fn: str, value: str) -> str:
     """Source lib-common.sh and call one function on a single value, returning
     stdout. The value travels as a positional arg so the shell never

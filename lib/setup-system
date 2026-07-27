@@ -437,11 +437,11 @@ phase_host_jobs() {
     # Compose first — host units are package-owned (system.yaml host.jobs) and
     # need no fleet.yaml, so a cold host gets them before any fleet exists.
     # `claudlobby generate` also emits them; this is the same single source.
-    if command -v claudlobby >/dev/null 2>&1; then
-        run claudlobby host-timers
-    elif python3 -c 'import claudlobby' >/dev/null 2>&1; then
-        run python3 -m claudlobby host-timers
-    else
+    # claudlobby_cli (lib-common) owns the console-script → `python3 -m` ladder
+    # for the whole repo. It also probes the import from $CLAUDLOBBY_ROOT rather
+    # than the caller's cwd, which the inline copy this replaced got wrong, and
+    # returns 127 when neither rung resolves.
+    if ! run claudlobby_cli host-timers; then
         miss "claudlobby package not importable — cannot compose host jobs"
         PREREQ_MISSING+=("host-jobs")
         NEXT_STEPS+=("Install the package (phase 4), then re-run lib/setup-system")

@@ -19,7 +19,9 @@
 # fleet-observability event AND alerts the manager (tmux nudge + Telegram
 # escalation), and marks NO bot — there is no half-reload.
 #
-# Needs `claude` and `claudlobby` on PATH (same as update-claude-code.sh needs npm).
+# Needs `claude` and the claudlobby CLI. A timer environment supplies neither on
+# its minimal PATH, so this script owns tool resolution itself (own_tool_path +
+# claudlobby_cli, lib-common) rather than assuming an interactive PATH.
 #
 # Usage: reload-fleet.sh [<fleet-name>]
 set -euo pipefail
@@ -28,6 +30,8 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
+
+own_tool_path   # timer PATH is minimal, and stale units predate #802 (#805)
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 export CLAUDLOBBY_ROOT
@@ -51,10 +55,34 @@ PLUGINS=""
 _plugin_bot=$(first_bot_with_conf "$BOTS_DIR" FLEET_PLUGINS_REQUIRED || true)
 [ -n "$_plugin_bot" ] && PLUGINS=$(bot_conf_get "$_plugin_bot" FLEET_PLUGINS_REQUIRED "")
 _reason_file=$(safe_mktemp)
+_step_out=$(safe_mktemp)    # reused by every _run_step; one temp, not one per step
 
 _warm_npx() {
     printf '%s npx cache degraded — warming (best-effort, once per episode)\n' "$(ts_iso)" >> "$LOG"
-    claudlobby ${FLEET:+--fleet "$FLEET"} warm-cache >> "$LOG" 2>&1 || true
+    claudlobby_cli ${FLEET:+--fleet "$FLEET"} warm-cache >> "$LOG" 2>&1 || true
+}
+
+# _run_step <label> <command...>
+# Run one critical step, appending its output to $LOG, and on failure record a
+# reason that says what ACTUALLY went wrong — exit status plus the command's own
+# last line of output. The previous code discarded both and reported only the
+# last command name, so a PATH failure (exit 127, "claude: command not found")
+# surfaced as "claude plugin update failed: <plugin>" and read as a broken
+# plugin. That misdirection cost the triage, not the outage (#805). Both the
+# plugin loop and generate route through here so the two cannot drift.
+_run_step() {
+    local label="$1"; shift
+    local cmd="$1" rc=0 detail
+    "$@" >"$_step_out" 2>&1 || rc=$?
+    cat "$_step_out" >> "$LOG"
+    [ "$rc" -eq 0 ] && return 0
+    # Last non-blank line of the command's own output — the real error text.
+    detail=$(grep -v '^[[:space:]]*$' "$_step_out" | tail -n 1)
+    # 127 is the unresolvable-tool signature: name the command and the PATH it
+    # was not found on, so the alert points at the install rather than the work.
+    [ "$rc" -eq 127 ] && detail="$cmd not found on PATH=$PATH"
+    printf '%s failed (exit %d)%s' "$label" "$rc" "${detail:+: $detail}" > "$_reason_file"
+    return 1
 }
 
 _reload_critical() {
@@ -69,18 +97,19 @@ _reload_critical() {
     else
         debounce_notify "${CLAUDLOBBY_ROOT}/state" "npx" "warm-attempted" _warm_npx ""
     fi
+    # Tool preflight: fail on the MISSING TOOL rather than on whichever command
+    # happened to run first. A timer env resolves neither by default, and an
+    # unresolvable tool is an install/PATH fault — naming it is the whole
+    # difference between a 5-minute fix and a two-day silent outage.
+    if [ -n "$PLUGINS" ] && ! command -v claude >/dev/null 2>&1; then
+        printf 'claude not found on PATH=%s — install Claude Code or set CLAUDE_BIN' "$PATH" > "$_reason_file"
+        return 1
+    fi
     local _p
     for _p in $PLUGINS; do
-        if ! claude plugin update "$_p" >> "$LOG" 2>&1; then
-            printf 'claude plugin update failed: %s' "$_p" > "$_reason_file"
-            return 1
-        fi
+        _run_step "claude plugin update $_p" claude plugin update "$_p" || return 1
     done
-    if [ -n "$FLEET" ]; then
-        claudlobby --fleet "$FLEET" generate >> "$LOG" 2>&1 || { printf 'claudlobby generate failed' > "$_reason_file"; return 1; }
-    else
-        claudlobby generate >> "$LOG" 2>&1 || { printf 'claudlobby generate failed' > "$_reason_file"; return 1; }
-    fi
+    _run_step "claudlobby generate" claudlobby_cli ${FLEET:+--fleet "$FLEET"} generate || return 1
 }
 
 if ! with_lock "${CLAUDLOBBY_ROOT}/state/reload-fleet.lock" _reload_critical; then
