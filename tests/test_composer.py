@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 from textwrap import dedent
 
@@ -3418,3 +3419,81 @@ class TestSourceGuardWiring:
         assert "2 bot(s) failed" in msg
         assert "lead" in msg and "worker-1" in msg
         assert "/Users/x/a.json" in msg and "/opt/y/b.json" in msg
+
+
+class TestTimerUnitPath:
+    """#798 — composed timer units must carry a PATH that resolves fleet tools.
+
+    systemd and launchd start jobs with a minimal PATH (roughly ``/usr/bin:/bin``)
+    that excludes Homebrew and the per-user npm/bun/.local bins where ``claude``
+    and ``claudlobby`` live, so a timer such as reload-fleet's
+    ``claude plugin update`` dies with 'command not found' and fires a false
+    ``reload_failed`` alert. The composer mirrors lib/start-bot.sh:49's PATH
+    construction into every emitted timer unit, identically on both platforms
+    (launchd/systemd parity, #708).
+    """
+
+    # The always-present segments (system bins + per-user bins). The Homebrew
+    # segment is host/OS-dependent, so it is deliberately not asserted here.
+    def _required_segments(self) -> list[str]:
+        home = str(Path.home())
+        return [
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            f"{home}/.local/bin",
+            f"{home}/.bun/bin",
+            f"{home}/.npm-global/bin",
+        ]
+
+    def _emit(self, tmp_path: Path) -> Path:
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        paths = _make_paths(root)
+        timers_dir = tmp_path / "timers"
+        timers_dir.mkdir()
+        _write_timer_units(
+            timers_dir,
+            "com.t.reload-fleet",
+            "reload-fleet",
+            {"type": "calendar", "expression": "*-*-* 03:30:00"},
+            "$CLAUDLOBBY_ROOT/lib/reload-fleet.sh",
+            "oneshot",
+            "t",
+            paths,
+        )
+        return timers_dir
+
+    @staticmethod
+    def _systemd_path(service_text: str) -> str:
+        lines = [
+            ln for ln in service_text.splitlines() if ln.startswith("Environment=PATH=")
+        ]
+        assert len(lines) == 1, f"expected one Environment=PATH= line, got {lines}"
+        return lines[0].split("=", 2)[2]
+
+    @staticmethod
+    def _launchd_path(plist_text: str) -> str:
+        # Parse as a real plist so PATH is asserted to live *inside* the
+        # EnvironmentVariables dict — a stray top-level PATH would not appear here.
+        return plistlib.loads(plist_text.encode())["EnvironmentVariables"]["PATH"]
+
+    def test_systemd_service_sets_path(self, tmp_path):
+        svc = (self._emit(tmp_path) / "com.t.reload-fleet.service").read_text()
+        segs = self._systemd_path(svc).split(":")
+        for seg in self._required_segments():
+            assert seg in segs, f"{seg} missing from systemd PATH: {segs}"
+
+    def test_launchd_plist_sets_path_in_env_dict(self, tmp_path):
+        plist = (self._emit(tmp_path) / "com.t.reload-fleet.plist").read_text()
+        segs = self._launchd_path(plist).split(":")
+        for seg in self._required_segments():
+            assert seg in segs, f"{seg} missing from launchd PATH: {segs}"
+
+    def test_launchd_systemd_path_parity(self, tmp_path):
+        d = self._emit(tmp_path)
+        svc_path = self._systemd_path((d / "com.t.reload-fleet.service").read_text())
+        plist_path = self._launchd_path((d / "com.t.reload-fleet.plist").read_text())
+        assert svc_path == plist_path, (
+            f"launchd/systemd PATH diverge:\n  systemd={svc_path}\n  launchd={plist_path}"
+        )
