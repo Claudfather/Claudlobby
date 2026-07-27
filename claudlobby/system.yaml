@@ -66,6 +66,18 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 600
+    # Reclaim browser processes a dead automation task left behind. One leaked
+    # Playwright chromium (18 procs, ~1.4 GB, 51h old) was the bulk of an 11-day
+    # ~490 MB/day headroom drift on a 15 GB Pi -- nothing owns an orphan, so
+    # nothing frees it. Daily, not 6-hourly: the launchd translator reads the
+    # first HH:MM out of the expression, so a multi-hour OnCalendar would
+    # silently run once a day on macOS while running four times on Linux.
+    orphan-browser-reaper:
+      script: "$CLAUDLOBBY_ROOT/lib/orphan-browser-reaper.sh"
+      schedule: "*-*-* 05:45:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
     # Early-warning for the host-hardware failure modes that silently freeze a
     # whole cheap-hardware fleet: under-voltage / thermal throttling (vcgencmd)
     # and storage stalls -- SD/MMC bus hangs, kernel hung-task, FS I/O errors.
