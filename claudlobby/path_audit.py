@@ -148,13 +148,22 @@ def improper_fleet_paths(
     ``paths.fleet_config_dir``. That covers a flat or dangling husk, a cross-fleet
     leak, and a stale absolute hand-typed against a foreign install root that
     dangles the moment the fleet runs elsewhere. A nested-correct absolute path
-    (what the composer itself emits, e.g. FLEET_MISSION_FILE) is fine; the rule
-    is correctness, not "no absolutes".
+    (what the composer itself emits, e.g. FLEET_MISSION_FILE) is fine; so is the
+    fleet's own vault root (``paths.vault_root`` — what ``CLAUDRON_VAULT_PATH``
+    points at, already L1-exempt): the sanctioned shared parent the fleet belongs
+    to, not a leak. The rule is correctness, not "no absolutes".
     """
     resolved = _resolve_anchor_tokens(text, _anchor_values(bot, paths))
     content_roots = _fleet_content_roots(paths)
     layout_needles = _fleet_layout_needles(paths)
     fleet_root = str(paths.fleet_config_dir)
+    # vault_root gets a normpath (fleet_root does not): it comes from the
+    # .claudron bridge string, which is not guaranteed normalized.
+    vault_root = (
+        os.path.normpath(str(paths.vault_root))
+        if paths.vault_root is not None
+        else None
+    )
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
     for m in _ABS_TOKEN_RE.finditer(resolved):
@@ -169,6 +178,12 @@ def improper_fleet_paths(
         norm = os.path.normpath(p)
         if norm == fleet_root or norm.startswith(fleet_root + os.sep):
             continue  # resolves inside the fleet's real overlay root — correct
+        if vault_root is not None and norm == vault_root:
+            # The fleet's OWN vault root — the sanctioned shared parent it belongs
+            # to, i.e. what CLAUDRON_VAULT_PATH points at (already L1-exempt as a
+            # declared-by-construction vault path). Only the root itself is blessed;
+            # any subtree under it stays a cross-fleet leak.
+            continue
         seen.add(p)
         out.append(
             (
