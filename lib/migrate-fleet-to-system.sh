@@ -410,7 +410,7 @@ mfs_verify() {
 # the auto-detected package root), so the generate lands in this vault.
 _mfs_generate() {
     local fleet="${1:?Usage: _mfs_generate <fleet>}"
-    if ! claudlobby --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" generate; then
+    if ! claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" generate; then
         _mfs_die "claudlobby --fleet $fleet generate failed"
         return 1
     fi

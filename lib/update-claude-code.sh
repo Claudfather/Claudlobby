@@ -24,6 +24,8 @@ install_error_trap ""
 # Timer environments carry a minimal PATH; own tool resolution here so npm /
 # claude resolve identically under systemd, launchd, cron, or a shell.
 # _HOMEBREW (lib-common) covers brew-installed node on macOS.
+# PREPENDS (unlike own_tool_path, which appends): must run the NEWEST npm to do
+# the install, while detecting the binary to UPDATE via _FLEET_PATH below (#635).
 PATH="$HOME/.local/bin:$HOME/.npm-global/bin${_HOMEBREW:+:$_HOMEBREW/bin}:$PATH"
 export PATH
 

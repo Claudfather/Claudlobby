@@ -10,6 +10,8 @@
 #   load_bot_conf      — source bot.conf with validation
 #   source_env_tiered  — 3-tier env loading: global -> fleet -> bot
 #   parse_env_file     — restricted .env parser ([export ]KEY=VALUE only)
+#   own_tool_path      — prepend this repo's tool prefixes (timer PATH is minimal)
+#   claudlobby_cli     — run the claudlobby CLI across every install shape
 #   with_timeout       — run a command under timeout(1) if available, else bare
 #   with_lock          — portable mutex (flock if available, else mkdir spinlock)
 #   setup_log_dir      — mkdir -p for log file's parent directory
@@ -83,6 +85,75 @@ if [ -z "$_TMUX_BIN" ]; then
 fi
 : "${_TMUX_BIN:=/usr/bin/tmux}"
 unset _p
+
+# --- Timer-environment tool resolution --------------------------------------
+# systemd, launchd and cron hand a script a MINIMAL PATH (launchd gives bare
+# /usr/bin:/bin:/usr/sbin:/sbin), so a lib/ script a timer invokes resolves none
+# of the tools an interactive shell would. Any such script must own its PATH
+# explicitly or die with a bare "command not found" (#805: reload-fleet.sh did,
+# silently, for two days).
+#
+# Division of labour with the composer: composer.py's _scheduler_tool_path bakes
+# a PATH into every composed timer unit (#798/#802) and is the primary fix. This
+# helper is the belt-and-braces floor for the cases that PATH cannot reach — a
+# unit composed before #802 and not yet re-enrolled, cron, or the documented
+# on-demand `bash lib/reload-fleet.sh` from a shell (where `claudlobby` is on no
+# PATH at all unless the venv is active).
+#
+# own_tool_path APPENDS every prefix this repo installs tools into:
+#   $_HOMEBREW/bin          — Homebrew (macOS node/claude)
+#   $CLAUDLOBBY_ROOT/.venv/bin — repo-local venv (`pip install -e .` inside one)
+#   $HOME/.local/bin        — pip install --user console scripts
+#   $HOME/.bun/bin          — bun global bin (mirrors start-bot.sh:49)
+#   $HOME/.npm-global/bin   — npm global prefix (claude)
+#
+# APPEND, deliberately, not prepend. These are FALLBACKS for an environment that
+# resolves nothing, so whatever PATH the caller already set must keep winning:
+# an operator pinning a binary, a test stubbing one, and the system dirs that
+# start-bot.sh:49 puts FIRST all stay authoritative. Prepending would silently
+# re-point reload-fleet at a shadow user copy of claude while the fleet runs the
+# system one — the exact class of bug #635 fixed in update-claude-code.sh.
+#
+# CLAUDLOBBY_TOOL_PREFIXES (colon-separated) substitutes the fallback list, so a
+# test or an unusual host can pin resolution — the same seam shape as
+# update-claude-code.sh's CLAUDE_UPDATE_FLEET_PATH. Set it empty to add nothing.
+own_tool_path() {
+    # An unset HOME (a bare timer env) yields "/.local/bin" etc, which the -d
+    # test below discards — so no set -u guard is needed on top.
+    local d IFS=:
+    # shellcheck disable=SC2086  # deliberate split on the colon-separated list
+    set -- ${CLAUDLOBBY_TOOL_PREFIXES-${_HOMEBREW:+$_HOMEBREW/bin:}$CLAUDLOBBY_ROOT/.venv/bin:${HOME:-}/.local/bin:${HOME:-}/.bun/bin:${HOME:-}/.npm-global/bin}
+    for d; do
+        [ -d "$d" ] || continue          # absent prefix — resolves nothing
+        case ":$PATH:" in
+            *":$d:"*) ;;                 # already present — do not duplicate
+            *) PATH="$PATH:$d" ;;
+        esac
+    done
+    export PATH
+}
+
+# claudlobby_cli <args...>
+# Run the claudlobby CLI across every install shape getting-started.md supports.
+# `pip install -e .` yields a console script whose location depends entirely on
+# which python did the installing, so PATH alone is not a reliable contract:
+#   1. `claudlobby` on PATH — pipx, or a --user/venv install own_tool_path found.
+#   2. `python3 -m claudlobby` — the documented equivalent invocation.
+# Rung 2 runs from $CLAUDLOBBY_ROOT so an editable/uninstalled checkout resolves
+# on sys.path regardless of the caller's cwd — never rely on cwd being the repo
+# (the launchd plists set WorkingDirectory, the systemd units do not).
+# Returns 127 with a diagnosable message when neither rung resolves.
+claudlobby_cli() {
+    if command -v claudlobby >/dev/null 2>&1; then
+        claudlobby "$@"
+    elif ( cd "$CLAUDLOBBY_ROOT" && python3 -c 'import claudlobby' ) >/dev/null 2>&1; then
+        ( cd "$CLAUDLOBBY_ROOT" && python3 -m claudlobby "$@" )
+    else
+        printf 'claudlobby CLI unresolvable: not on PATH (%s) and not importable from %s. Fix: pip install -e %s\n' \
+            "$PATH" "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" >&2
+        return 127
+    fi
+}
 
 # --- Portable external tools ------------------------------------------------
 # timeout(1) and flock(1) are GNU/util-linux — absent on a stock macOS host.
