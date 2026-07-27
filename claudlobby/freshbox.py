@@ -13,6 +13,12 @@ real-boot half of the gate lives in ``lib/freshbox-boot-gate.sh``.
 (``_externals_report``), the fleet-tier ``.env`` rung generate cannot see
 (``_env_file_findings``, F5), and rendered ``tools/`` scripts in the L2 emitted-path
 scan (F6, in :mod:`path_audit`). All ride the existing severity/report machinery.
+
+#792 adds a per-bot secret-leak rung (``_env_secret_leak_findings``): a per-bot
+identity secret — a var whose env contract is bot-tier, or any bot's Telegram
+``token_env`` — sitting in a host-shared ``.env`` tier (the global ``~/.env`` or the
+deprecated ``$CLAUDLOBBY_ROOT/.env``) is a FAIL, since ``source_env_tiered`` exports
+it to every bot on the host.
 """
 
 from __future__ import annotations
@@ -193,6 +199,18 @@ def _mask(value: str) -> str:
     return f"{value[:1]}…({len(value)} chars)"
 
 
+def _host_env_paths(paths: Paths, *, home: Path | None = None) -> list[Path]:
+    """The host-shared ``.env`` tiers ``source_env_tiered`` inherits into EVERY bot:
+    the deprecated/install-shared ``$CLAUDLOBBY_ROOT/.env`` (always) and the
+    operator's global ``~/.env`` (only when a caller injects ``home`` — the library
+    never reaches into a personal home by default, so a unit audit never touches it).
+    The single definition of "host tier", shared by the F5 rung and the #792 rung."""
+    tiers = [paths.root / ".env"]
+    if home is not None:
+        tiers.append(home / ".env")
+    return tiers
+
+
 def _env_tier_files(
     bot: BotConfig, fleet: FleetConfig, paths: Paths, *, home: Path | None = None
 ) -> list[tuple[Path, str]]:
@@ -208,10 +226,8 @@ def _env_tier_files(
     tiers: list[tuple[Path, str]] = [
         (paths.bot_runtime(bot.bot_id) / ".env", FAIL),
         (paths.fleet_config_dir / ".env", FAIL),
-        (paths.root / ".env", WARN),
     ]
-    if home is not None:
-        tiers.append((home / ".env", WARN))
+    tiers.extend((p, WARN) for p in _host_env_paths(paths, home=home))
     seen: set[str] = set()
     out: list[tuple[Path, str]] = []
     for path, severity in tiers:  # FAIL-first order → first-wins keeps the strictest
@@ -245,6 +261,59 @@ def _env_file_findings(
                         "absolute path in a runtime-sourced .env (invisible at "
                         "generate); anchor it on ${FLEET_ROOT} or declare it via "
                         "external_paths / secret_files",
+                    )
+                )
+    return findings
+
+
+def _env_secret_leak_findings(
+    fleet: FleetConfig, paths: Paths, *, home: Path | None = None
+) -> list[Finding]:
+    """#792: a per-bot identity secret sitting in a host-shared env tier.
+
+    ``source_env_tiered`` (lib/lib-common.sh) sources the global ``~/.env`` and the
+    deprecated/install-shared ``$CLAUDLOBBY_ROOT/.env`` into EVERY bot's process
+    env, so a per-bot secret placed in either leaks host-wide — the A1
+    config-review incident, where one bot's token became readable by another. A
+    var is per-bot when its own env contract is bot-tier (``collect_env_contracts``
+    tier == "bot": Telegram ``token_env``, Slack ``SLACK_TOKEN``, instance-scoped
+    MCP vars). The contract tier is the SSOT — more robust than a key-name pattern,
+    since Slack's ``SLACK_TOKEN`` carries no per-bot affix. Fleet/host-scoped: the
+    host tiers are shared, so this runs once over the fleet (via ``audit_fleet``),
+    not per bot. FAIL — not the F5 rung's host-tier WARN for the same files —
+    because it is a higher-precision signal: the var's own contract says bot-tier,
+    so host-tier placement contradicts it, where F5 flags only a heuristic path
+    grammar. Scoped to the host-shared tiers the issue names; the correct home (the
+    owning bot's ``.env``) is not flagged, and a per-bot secret in the fleet-overlay
+    ``.env`` (a narrower within-fleet leak) is a tracked follow-up. Value masked (R4)."""
+    from . import dotenv
+    from .composer import collect_env_contracts
+
+    bot_tier_vars = {
+        ev.name for ev in collect_env_contracts(fleet, paths) if ev.tier == "bot"
+    }
+    # collect_env_contracts drops a Telegram token_env that is self-referential
+    # (== the plugin's own read var TELEGRAM_BOT_TOKEN) so generate never scaffolds
+    # an authoritative-looking empty stub — but that var is still a per-bot identity
+    # secret (each bot resolves its own), and TELEGRAM_BOT_TOKEN in a shared tier is
+    # the canonical A1 leak. Union every bot's token_env in so it is not missed.
+    for bot in fleet.bots.values():
+        if bot.telegram.token_env:
+            bot_tier_vars.add(bot.telegram.token_env)
+    if not bot_tier_vars:
+        return []
+    findings: list[Finding] = []
+    for path in _host_env_paths(paths, home=home):
+        for key, value in dotenv.read(path).items():
+            if key in bot_tier_vars:
+                findings.append(
+                    Finding(
+                        "(host)",
+                        "env_bot_secret_leaked",
+                        FAIL,
+                        f"{path}: {key}={_mask(value)} — a bot-tier secret in a "
+                        "host-shared .env tier; source_env_tiered exports it to "
+                        "every bot on the host. Move it to the owning bot's .env.",
                     )
                 )
     return findings
@@ -418,6 +487,9 @@ def audit_fleet(
     findings: list[Finding] = []
     for bot in fleet.bots.values():
         findings.extend(audit_bot(bot, fleet, paths, home=home))
+    # Fleet/host-scoped rung — the host-shared .env tiers are the same for every
+    # bot, so scan them once (#792), not once per bot.
+    findings.extend(_env_secret_leak_findings(fleet, paths, home=home))
     return findings
 
 

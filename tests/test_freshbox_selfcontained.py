@@ -18,6 +18,7 @@ from claudlobby.config import (
     BotConfig,
     FleetConfig,
     PluginsConfig,
+    TelegramConfig,
     ToolPermissionsConfig,
 )
 from claudlobby.freshbox import (
@@ -735,3 +736,128 @@ def test_legit_rendered_tool_paths_pass(tmp_path):
 
     improper = [f for f in audit_bot(bot, fleet, paths) if f.kind == "improper_path"]
     assert improper == []
+
+
+# ── #792: per-bot identity secret leaking via a host-shared .env tier ──────────
+# source_env_tiered sources the global ~/.env and the deprecated/install-shared
+# $CLAUDLOBBY_ROOT/.env into EVERY bot, so a per-bot secret placed there leaks
+# host-wide (the A1 config-review incident). A var is per-bot when its own env
+# contract is bot-tier — the robust signal, since Slack's SLACK_TOKEN carries no
+# per-bot affix a key-name regex could catch.
+
+
+def _token_bot(bot_id: str, token_env: str) -> BotConfig:
+    return BotConfig(
+        bot_id=bot_id,
+        name=bot_id,
+        expertise=["eng"],
+        telegram=TelegramConfig(token_env=token_env),
+    )
+
+
+def test_bot_secret_in_deprecated_root_env_is_fail(tmp_path):
+    """A per-bot token in the install-shared/deprecated root/.env — host-wide via
+    source_env_tiered — is a FAIL (value masked, R4); a co-located non-bot-tier var
+    in the same file is left alone (selectivity)."""
+    from claudlobby.freshbox import _env_secret_leak_findings
+
+    root = tmp_path / "cl"
+    _build_library(root)
+    paths = _nested_paths(root)
+    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")})
+    secret = "8888888:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    (root / ".env").write_text(
+        f"TELEGRAM_TOKEN_KEV={secret}\nSOME_SHARED_SETTING=value\n"
+    )
+
+    leaks = [
+        f
+        for f in _env_secret_leak_findings(fleet, paths, home=None)
+        if f.kind == "env_bot_secret_leaked"
+    ]
+    assert [f.severity for f in leaks] == ["fail"]
+    assert "TELEGRAM_TOKEN_KEV" in leaks[0].detail
+    assert "SOME_SHARED_SETTING" not in leaks[0].detail  # only the bot-tier key
+    assert secret not in leaks[0].detail  # R4: value masked
+
+
+def test_bot_secret_in_global_home_env_flagged_only_when_home_injected(tmp_path):
+    """The operator's global ~/.env is scanned only when the CLI injects home; the
+    library default (home=None) never reaches into a personal home."""
+    from claudlobby.freshbox import _env_secret_leak_findings
+
+    root = tmp_path / "cl"
+    _build_library(root)
+    paths = _nested_paths(root)
+    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")})
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
+
+    assert _env_secret_leak_findings(fleet, paths, home=None) == []
+    leaks = [
+        f
+        for f in _env_secret_leak_findings(fleet, paths, home=fake_home)
+        if f.kind == "env_bot_secret_leaked"
+    ]
+    assert [f.severity for f in leaks] == ["fail"]
+    assert "TELEGRAM_TOKEN_KEV" in leaks[0].detail
+
+
+def test_bot_secret_in_bots_own_env_is_not_a_leak(tmp_path):
+    """The bot's own .env is the correct home for a per-bot secret — never flagged."""
+    from claudlobby.freshbox import _env_secret_leak_findings
+
+    root = tmp_path / "cl"
+    _build_library(root)
+    paths = _nested_paths(root)
+    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV")})
+    bot_dir = paths.bot_runtime("kev")
+    bot_dir.mkdir(parents=True)
+    (bot_dir / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
+
+    assert _env_secret_leak_findings(fleet, paths, home=None) == []
+
+
+def test_leak_surfaces_once_through_audit_fleet(tmp_path):
+    """Fleet-scoped: audit_fleet reports a leaked var once, not once per bot."""
+    root = tmp_path / "cl"
+    _build_library(root)
+    paths = _nested_paths(root)
+    fleet = _fleet(
+        {
+            "kev": _token_bot("kev", "TELEGRAM_TOKEN_KEV"),
+            "moe": _token_bot("moe", "TELEGRAM_TOKEN_MOE"),
+        }
+    )
+    (root / ".env").write_text("TELEGRAM_TOKEN_KEV=8888888:AAAA\n")
+
+    leaks = [
+        f
+        for f in audit_fleet(fleet, paths, home=None)
+        if f.kind == "env_bot_secret_leaked"
+    ]
+    assert len(leaks) == 1
+    assert "TELEGRAM_TOKEN_KEV" in leaks[0].detail
+
+
+def test_self_referential_telegram_token_in_shared_tier_is_flagged(tmp_path):
+    """The real-fleet pattern: token_env is self-referential (== TELEGRAM_BOT_TOKEN,
+    the plugin's own read var), which the env contract deliberately omits — yet it
+    is still a per-bot secret, so TELEGRAM_BOT_TOKEN in a host-shared tier must
+    still be flagged (the A1 incident vector, missed by contract-only detection)."""
+    from claudlobby.freshbox import _env_secret_leak_findings
+
+    root = tmp_path / "cl"
+    _build_library(root)
+    paths = _nested_paths(root)
+    fleet = _fleet({"kev": _token_bot("kev", "TELEGRAM_BOT_TOKEN")})
+    (root / ".env").write_text("TELEGRAM_BOT_TOKEN=8888888:AAAA\n")
+
+    leaks = [
+        f
+        for f in _env_secret_leak_findings(fleet, paths, home=None)
+        if f.kind == "env_bot_secret_leaked"
+    ]
+    assert [f.severity for f in leaks] == ["fail"]
+    assert "TELEGRAM_BOT_TOKEN" in leaks[0].detail
