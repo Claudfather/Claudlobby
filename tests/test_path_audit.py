@@ -296,6 +296,39 @@ class TestComposeBotFiresPathGuard:
         with pytest.raises(ValueError, match="absolute path"):
             compose_bot(fleet.bots["kev"], fleet, paths)
 
+    def test_vault_wired_bot_composes_clean(self, fleet_dir):
+        # A bot pointing CLAUDRON_VAULT_PATH at its own vault root composes clean:
+        # the composer emits the absolute vault-root literal, and L2 must treat the
+        # fleet's own vault root as a sanctioned reach, not a dangling/foreign husk.
+        # (Regression for the crog-eng-team ari generate-failure.)
+        from claudlobby.composer import compose_bot
+        from claudlobby.config import load_fleet
+
+        root = fleet_dir
+        vault_root = root / "local"  # the install's local/ overlay IS the vault root
+        nested = root / "local" / "home" / "tl"
+        nested.mkdir(parents=True)
+        (nested / "fleet.yaml").write_text(
+            "fleet:\n"
+            "  name: tl\n"
+            "  service_prefix: com.crog.tl\n"
+            '  telegram_group_chat_id: "-100999"\n'
+            "  accounts:\n"
+            "    default: ~/.claude\n"
+            "  bots:\n"
+            "    kev:\n"
+            "      expertise: [software-engineering]\n"
+            f"      claudron_vault_path: {vault_root}\n"
+            "      telegram:\n"
+            "        handle: kev_bot\n"
+            "        token_env: T\n"
+        )
+        paths = Paths(root=root, fleet_dir=nested, vault_root=vault_root)
+        fleet, _ = load_fleet(nested / "fleet.yaml")
+        bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
+        assert bot_dir.is_dir()
+        assert "CLAUDRON_VAULT_PATH=" in (bot_dir / "bot.conf").read_text()
+
 
 class TestVaultModePathAudit:
     """Vault-mode regression coverage (PR #690 review flagged this branch as
@@ -323,6 +356,16 @@ class TestVaultModePathAudit:
         leak = f"{paths.vault_root}/other-fleet/.secrets/ga4.json"
         bad = improper_fleet_paths(leak, _bot(), paths)
         assert [p for p, _ in bad] == [leak]
+
+    def test_vault_root_itself_is_ok(self, tmp_path):
+        # The fleet's OWN vault root — exactly what CLAUDRON_VAULT_PATH points at —
+        # is the sanctioned shared parent the fleet belongs to, not a cross-fleet
+        # leak. L1 already exempts claudron_vault_path (declared-by-construction);
+        # L2 must honor the same sanction for the emitted vault-root value. Only
+        # the root itself is blessed — a subtree under it stays a leak, per
+        # test_cross_fleet_leak_in_vault_is_flagged.
+        paths = self._vault_paths(tmp_path)
+        assert improper_fleet_paths(str(paths.vault_root), _bot(), paths) == []
 
 
 class TestClassifiedSourcePaths:
