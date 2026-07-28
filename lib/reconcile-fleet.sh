@@ -51,6 +51,10 @@ defined=$(parse_fleet_bots "$FLEET_YAML" | sort -u)
 
 # 3. Build buckets by checking each defined bot against tmux + host service state.
 #    Unit names come from bot.conf (BOT_SERVICE), not from parsing filenames.
+#    Buckets are space-separated single-line word accumulators — consumers
+#    iterate unquoted (for b in $bucket), never a line-oriented read. Names are
+#    word-safe by construction (fleet.yaml keys); single-line is an external
+#    contract (migrate-fleet-to-system.sh parses the healthy: line, head -1).
 healthy=""; orphan=""; missing=""; unsup_down=""; unbound=""
 
 while IFS= read -r b; do
@@ -203,7 +207,6 @@ if [ -n "${missing// /}" ]; then
     echo
     echo "Diagnostics for missing bots:"
     for b in $missing; do
-        [ -z "$b" ] && continue
         _diagnose_missing_bot "$b"
     done
 fi
@@ -224,8 +227,7 @@ fi
 if [ "$ENROLL" = "--enroll" ] && [ -n "${orphan// /}" ]; then
     echo
     echo "Enrolling orphans via spin-up-bot.sh..."
-    while IFS= read -r b; do
-        [ -z "$b" ] && continue
+    for b in $orphan; do
         bot_dir="$RUNTIME_DIR/$b"
         if [ -d "$bot_dir" ]; then
             echo "→ $b"
@@ -235,5 +237,5 @@ if [ "$ENROLL" = "--enroll" ] && [ -n "${orphan// /}" ]; then
         else
             echo "→ $b SKIPPED (no runtime dir at $bot_dir; run 'claudlobby generate' first)"
         fi
-    done <<< "$orphan"
+    done
 fi
