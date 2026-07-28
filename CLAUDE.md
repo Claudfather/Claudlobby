@@ -218,7 +218,7 @@ Each library category has its own format. Check the category's `README.md` for s
 3. Quote all variables. Use `printf '%s'` instead of `echo` for values that may contain tokens
 4. Test on both Linux and macOS where applicable (use `lib-common.sh` OS detection helpers)
 5. Never hardcode fleet names, user home dirs, or Homebrew paths — use env vars and detection
-6. No apostrophes in comments inside `$( )` — bash 3.2 (macOS `/bin/bash`, the shebang target) does not strip comments while scanning a command substitution, so a stray apostrophe corrupts quoting for the rest of the file (gate: `tests/test_bash_parse.py`)
+6. No apostrophes in comments inside `$( )` — bash 3.2 (macOS `/bin/bash`, the shebang target) does not strip comments while scanning a command substitution, so a stray apostrophe corrupts quoting for the rest of the file (gate: `tests/test_bash_parse.py`, which covers `lib/` and every `library/**/*.sh`)
 
 ### Validating changes to how a bot behaves — MANDATORY
 

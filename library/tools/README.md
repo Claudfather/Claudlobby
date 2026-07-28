@@ -2,7 +2,14 @@
 
 Composited bot scripts. A tool is a **directory** `library/tools/<name>/` (fleet
 overlay `local/<fleet>/library/tools/<name>/` wins) that the compositor renders
-into the bot dir at `generate` time. Unlike `data/` content (bot-owned, mutable,
+into the bot dir at `generate` time.
+
+**Tool, or a helper inside a skill?** This category exists for **compose-time
+parameterization** — values baked into the script at `generate` time via
+`tool.yaml` + Jinja. A script that reads everything from runtime env gains
+nothing here, and splitting one capability across two library categories costs
+cohesion: ship it beside its `SKILL.md` instead. See `library/skills/README.md`,
+"Shell helpers". Unlike `data/` content (bot-owned, mutable,
 never regenerated), a tool is generated output like `CLAUDE.md`: never
 hand-edited, always recreated by `claudlobby generate`, reconciled on every run
 (detaching a tool removes its rendered file).
