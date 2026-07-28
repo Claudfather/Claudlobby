@@ -2008,6 +2008,39 @@ harness_check() {
     fi
 }
 
+# seed_claude_auth <config_dir> <host_creds>
+# Drop the host credential file into a throwaway CLAUDE_CONFIG_DIR (the #645
+# Fork F1 credential-file seed) — self-refreshing, and it preserves the native
+# mcp__claude_ai_* connectors a strict scope would drop. The one home for the
+# real-boot harnesses (freshbox-boot-gate, boot-strand-sampler): the trust-JSON
+# keyset below is a Claude Code contract that moves with the binary, and two
+# private copies meant a rename got fixed in one harness while the other
+# silently dropped every boot into the onboarding wizard.
+seed_claude_auth() {
+    local cfg="${1:?seed_claude_auth: <config_dir> required}"
+    local creds="${2:?seed_claude_auth: <host_creds> required}"
+    cp "$creds" "$cfg/.credentials.json"
+    chmod 600 "$cfg/.credentials.json"
+}
+
+# seed_claude_auth_and_trust <config_dir> <project_cwd> <claude_bin> <host_creds>
+# Auth seed plus onboarding/trust: without projects[cwd].hasTrustDialogAccepted
+# the composed settings.local.json allows are silently ignored, and a fresh dir
+# drops a headless boot into the interactive wizard
+# (documentation/decisions/permissions-model.md; #645 P0-S2).
+seed_claude_auth_and_trust() {
+    local cfg="${1:?seed_claude_auth_and_trust: <config_dir> required}"
+    local cwd="${2:?seed_claude_auth_and_trust: <project_cwd> required}"
+    local claude_bin="${3:-claude}" creds="${4:-$HOME/.claude/.credentials.json}" ver
+    seed_claude_auth "$cfg" "$creds"
+    ver="$("$claude_bin" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || true
+    jq -n --arg cwd "$cwd" --arg ver "${ver:-0.0.0}" '{
+        hasCompletedOnboarding: true,
+        lastOnboardingVersion: $ver,
+        projects: { ($cwd): { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true } }
+    }' > "$cfg/.claude.json"
+}
+
 # --- Fleet event-ledger retention -------------------------------------------
 
 # reap_event_files <events_dir> <name_glob> <reap_days> — delete JSONL event
