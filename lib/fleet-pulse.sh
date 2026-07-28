@@ -335,13 +335,18 @@ _rb_today=$(date +%Y-%m-%d)
 # result (bot emitted nothing in the span) is a normal state, not an error:
 # without the explicit return, a missing file on the span's last date makes the
 # failed `[ -f ]` the pipeline's exit status under pipefail, and the `$(...)`
-# assignment call sites abort the whole pulse via set -e (#610).
+# assignment call sites abort the whole pulse via set -e (#610). The `|| true`
+# states that same tolerance to the ERR trap, which `return 0` cannot: the return
+# masks the status for errexit, but the trap has already fired by then, so under
+# errtrace (#844) a normal empty span logged a script_error every pulse — on the
+# per-minute path. Suppressing at the statement is what marks a benign non-zero
+# as intended; masking it afterwards only hides it from one of the two readers.
 _readback_efiles() {
     local _bd="$1" _d _f
     for _d in "$today" "$_rb_today"; do
         _f="$_bd/data/events/fleet-${_d}.jsonl"
         [ -f "$_f" ] && printf '%s\n' "$_f"
-    done | sort -u
+    done | sort -u || true
     return 0
 }
 

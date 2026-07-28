@@ -1788,15 +1788,35 @@ emit_fleet_notice() {
 }
 
 # install_error_trap <bot_dir>
-# Set an ERR trap that emits a script_error event on non-zero exit.
+# Set an ERR trap — arming `set -E` so it is inherited by shell functions — that
+# emits a script_error event on non-zero exit.
 # Call after sourcing lib-common.sh and resolving the bot directory.
 # Pass "" for fleet-level scripts that run outside a bot context.
 # NOTE: does NOT replace existing EXIT traps — only fires on ERR.
+#
+# errtrace is armed here rather than left to callers: a bare ERR trap is not
+# inherited by shell functions, and lib/ does nearly all its work in functions,
+# so without it the trap instruments top-level failures only — the minority of
+# the surface it exists to cover (#844). Arming it at the single call site means
+# no caller of this helper can forget it. That binds callers only: a script that
+# hand-rolls its own bare `trap … ERR` instead of calling this is not covered and
+# still has the #844 defect. Safe to arm because
+# errtrace is control-flow neutral (it changes only whether the trap runs, never
+# whether a script aborts) and deliberate tolerance stays silent: bash suppresses
+# the ERR trap in the same contexts it suppresses errexit — `f || true`, `if f`,
+# `f && g` — and that suppression is inherited by callees.
+#
+# The handler's stdout is discarded because under errtrace the trap fires INSIDE
+# the failing command substitution, so anything it printed would be captured as
+# the caller's value — `local v=$(fn)` silently becoming the handler's output,
+# with no error and no row. The event write is its own redirect to the ledger and
+# is unaffected.
 install_error_trap() {
+    set -E
     local _err_bot_dir="$1"
     local _err_script
     _err_script=$(basename "$0")
-    trap 'emit_script_error "'"$_err_bot_dir"'" "'"$_err_script"'" "$?" "non-zero exit at line $LINENO"' ERR
+    trap 'emit_script_error "'"$_err_bot_dir"'" "'"$_err_script"'" "$?" "non-zero exit at line $LINENO" >/dev/null' ERR
 }
 
 # bot_conf_get <bot_dir> <key> <default>
