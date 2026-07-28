@@ -686,7 +686,7 @@ bridge_bringup_verify() {
     local bot_dir="${1:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
     local bots_dir="${2:?Usage: bridge_bringup_verify <bot_dir> <bots_dir> [timeout]}"
     local timeout="${3:-45}"
-    local marker="$bot_dir/data/.bridge-down" state="" bot_id elapsed=0
+    local marker="$bot_dir/data/.bridge-down" state="" bot_id elapsed=0 heal_note=""
     bot_id="$(basename "$bot_dir")"
 
     # Poll until `up`, a terminal state, or <timeout>s elapse (always checks at
@@ -727,8 +727,19 @@ bridge_bringup_verify() {
         *) # no_bridge (or an empty read) — a verified-dark bridge
             mkdir -p "$bot_dir/data" 2>/dev/null || true
             : > "$marker" 2>/dev/null || true
+            # Promise only the heal keepalive will actually attempt. Its
+            # _bridge_heal is gated on OBSERVABILITY_BRIDGE_HEAL (off fleet-wide),
+            # and even when armed the poller is an MCP stdio child of claude — so
+            # the sole lever is a full bot bounce, never a gentle in-place respawn.
+            # Gate off: inbound stays dark until a restart. Mirror the no_token arm
+            # above, which escalates rather than promising a heal it cannot deliver.
+            if [ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]; then
+                heal_note="keepalive will bounce the bot to recover"
+            else
+                heal_note="inbound dark until restart, manager decides"
+            fi
             emit_failure_alert "$bots_dir" "bridge_down" \
-                "$bot_id Telegram bridge down at bring-up — poller not delivering (tmux dispatch still works; keepalive will heal)" || true
+                "$bot_id Telegram bridge down at bring-up — poller not delivering (tmux dispatch still works; $heal_note)" || true
             printf '%s' "missing:no_bridge" ;;
     esac
 }

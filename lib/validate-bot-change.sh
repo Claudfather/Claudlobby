@@ -431,6 +431,40 @@ harness_check "#608 canary is NOT actionably down for fleet-pulse (no pulse aler
 harness_check "#608 real bot IS actionably down (no_token) for fleet-pulse" "$r"
 
 # ===========================================================================
+# The no_bridge bring-up alert must tell the truth about auto-heal. keepalive's
+# _bridge_heal is gated OFF fleet-wide (OBSERVABILITY_BRIDGE_HEAL != 1), so an
+# alert that promises "keepalive will heal" lies whenever the gate is off — and
+# even when on, the poller is an MCP stdio child of claude, so the only lever is
+# a full bot bounce, never a gentle in-place respawn. Reuse the #453 dark-bridge
+# fixture (valheal: no bot.pid -> no_bridge) and drive the REAL
+# bridge_bringup_verify in both gate states — the verify reads the gate from the
+# env, so one fixture serves both. Assert the emitted alert text tracks reality.
+echo ""
+echo "=== validate bridge_down heal-honesty (OBSERVABILITY_BRIDGE_HEAL gates the wording) ==="
+_heal_conf 0 y   # token present, dark poller -> no_bridge (gate in bot.conf is inert here; verify reads the env)
+
+# Sanity: token resolves + poller absent classifies no_bridge (not no_token/no_handle).
+[ "$(bridge_state "$HDIR" 2>/dev/null || true)" = "no_bridge" ] && r=yes || r=no
+harness_check "heal-honesty fixture classifies no_bridge (token set, poller absent)" "$r"
+
+# --- Gate OFF (fleet default): the alert must NOT promise a heal that never runs ---
+bhv="$(CLAUDLOBBY_ROOT="$ROOT" OBSERVABILITY_BRIDGE_HEAL=0 \
+    bridge_bringup_verify "$HDIR" "$(dirname "$HDIR")" 0 2>/dev/null || true)"
+[ "$bhv" = "missing:no_bridge" ] && r=yes || r=no
+harness_check "gate-off bring-up verdict is missing:no_bridge (unchanged)" "$r"
+bhoff="$(grep -h 'valheal Telegram bridge down at bring-up' "$NTEV"/fleet-*.jsonl 2>/dev/null | tail -n1 || true)"
+printf '%s' "$bhoff" | grep -q 'dark until restart' && r=yes || r=no
+harness_check "gate-off alert states inbound dark until restart (honest, mirrors no_token)" "$r"
+printf '%s' "$bhoff" | grep -q 'keepalive will heal' && r=no || r=yes
+harness_check "gate-off alert drops the false 'keepalive will heal' promise" "$r"
+
+# --- Gate ON: the alert states a bounce (full claude restart), not a respawn ---
+CLAUDLOBBY_ROOT="$ROOT" OBSERVABILITY_BRIDGE_HEAL=1 \
+    bridge_bringup_verify "$HDIR" "$(dirname "$HDIR")" 0 >/dev/null 2>&1 || true
+grep -hq 'valheal Telegram bridge down at bring-up.*bounce' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=yes || r=no
+harness_check "gate-on alert states keepalive will bounce to recover" "$r"
+
+# ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
 # navi's #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
 # nothing drove keepalive's real dead-session branch to prove it EMITS a line the
