@@ -43,7 +43,11 @@ fi
 
 # Try to trigger a handoff via the running session
 if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
-    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" '/claudna:session handoff --auto' Enter || true
+    # Through pane_send_verified, not a bare send-keys: a swallowed Enter here
+    # presents as the 30s timeout below with the session context silently lost,
+    # which is the exact failure the verify-retry exists to catch. Verbatim send
+    # (no sanitize, no 'set +H;') because the payload is a slash command.
+    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" '/claudna:session handoff --auto' || true
     # Wait up to 30 seconds for handoff to complete
     for _ in $(seq 1 30); do
         if [ -f "$HANDOFF_FILE" ]; then

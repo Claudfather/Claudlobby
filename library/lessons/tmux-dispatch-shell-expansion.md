@@ -12,6 +12,6 @@ A literal `!` followed by a word (e.g., `!readOnly`, `!isDashboard`, `!foo && ba
 **Fixes:**
 - **Prefix:** `set +H; <dispatch content>`
 - **Large dispatches (>50 lines):** write to a temp file and `tmux send-keys -t <bot> 'cat /tmp/dispatch.txt | claude' Enter`
-- **If a dispatch lands but doesn't submit:** send a bare `tmux send-keys -t <bot> Enter`
+- **If a dispatch lands but doesn't submit:** send a bare `tmux send-keys -t <bot> Enter`. Dispatches routed through `lib/dispatch.sh` do this for you — `pane_send_verified` polls the input box after the Enter and resends once if the payload is still sitting there, logging a `send_retry` event. Reach for the manual Enter only for a hand-rolled `send-keys` that bypassed the helper.
 
 **Related:** backticks inside double-quoted bash strings also trigger command substitution. Use single quotes for curl/message bodies containing backticks or `!word` patterns. If double quotes are required, escape every backtick as `` \` ``.

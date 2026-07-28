@@ -1019,8 +1019,9 @@ _tmux_send_miss() {
 
 # bot_tmux_send <peer_socket> <session> <text>
 # The ONE safe cross-socket send. Prechecks that <session> exists on
-# <peer_socket>, then sends <text> followed by Enter as two race-safe steps
-# (preserving sanitize_tmux_input). On a miss — empty socket, or session absent
+# <peer_socket>, sanitizes (sanitize_tmux_input), then hands off to
+# pane_send_verified for the settle / Enter / verify-retry. On a miss — empty
+# socket, or session absent
 # on that socket — it emits a send_miss event + stderr breadcrumb and returns
 # non-zero, replacing the old silent `|| true` at every cross-socket call site.
 # Residual TOCTOU (the session dying between precheck and send) surfaces as a
@@ -1042,9 +1043,141 @@ bot_tmux_send() {
     fi
     local safe
     safe=$(sanitize_tmux_input "$text")
-    bot_tmux "$peer_socket" send-keys -t "$session" "$safe"
-    sleep 0.3
-    bot_tmux "$peer_socket" send-keys -t "$session" Enter
+    pane_send_verified "$peer_socket" "$session" "$safe"
+}
+
+# --- verified pane send -------------------------------------------------------
+#
+# Default settle window (seconds) between the text keystroke and the Enter, so
+# the TUI input buffer drains before the submit lands on top of it. Operators
+# override at runtime via PANE_SEND_SETTLE_S (read per call, as the KEEPALIVE_*
+# knobs are — never frozen at source time).
+#
+# 0.3, the value three of the four call sites used, rather than STARTUP_PROMPT's
+# 0.5. A settle too short for a big payload is now RECOVERABLE — that is what the
+# verify-retry below is for — where before it was silent and permanent, so the
+# longer window has stopped earning its cost on every other send.
+_PANE_SEND_SETTLE_DEFAULT=0.3
+# Verify budget: how long to let the input box clear on its own before
+# concluding the Enter was swallowed, as a poll interval x a tick count (both
+# named, so the resulting budget is readable here rather than only derivable
+# from the loop). Polled, not slept: a submit that lands on the first tick costs
+# 0.2s and one capture-pane, where a fixed post-Enter sleep pays its full length
+# every time. Override via PANE_SEND_VERIFY_TICKS.
+#
+# Honest accounting, since one number does not cover every caller: this is a net
+# WIN on cold start (start-bot's two sends drop from 2.1s to 1.0s) and a small
+# LOSS on the cross-socket dispatch path, which previously did not capture the
+# pane at all (0.3s and 0 captures, now 0.5s and 1). That cost buys dispatch the
+# retry — the stuck-payload failure that motivated this was observed on exactly
+# that path, so exempting it to save 0.2s would exempt the reported bug.
+_PANE_VERIFY_POLL_S=0.2
+_PANE_SEND_VERIFY_TICKS_DEFAULT=5
+# A send past a few hundred characters is rendered as a collapsed placeholder
+# instead of the literal text, so no text probe can see an unsubmitted large
+# payload. Matching the placeholder is what lets a stuck dispatch — the failure
+# this helper exists for — be detected at all.
+_PANE_PASTE_COLLAPSE_MARKER='[Pasted text'
+# Longest usable probe. The input box wraps near the pane width, so a probe
+# beyond this straddles a wrap point and cannot match any single rendered line
+# even while the text IS sitting unsubmitted.
+_PANE_PROBE_MAX_CHARS=60
+# Prompt-glyph anchor. Alternation rather than a [>❯] bracket expression so the
+# multibyte glyph stays one literal byte sequence under any locale — byte-safe by
+# construction rather than by luck. (_IDLE_PATTERN_BASE below spells the same
+# glyph set as a bracket; that form did NOT misbehave under LC_ALL=C when tested
+# against these fixtures, so this is a consistency gap to collapse later, not a
+# live defect — folding the two onto one glyph constant means touching a gated
+# SSOT that every idle consumer reads, which does not belong in this change.)
+_PANE_INPUT_GLYPH_RE='^[[:space:]]*(>|❯)'
+
+# pane_input_region <pane_text>
+# The input-box slice of a captured pane on stdout: the last prompt-glyph line
+# through the end of the capture.
+#
+# Anchored to the glyph rather than taken at a fixed tail depth because the
+# number of lines BELOW the input line is variable — box border, hint line and
+# mode footer at rest, more while an agent tree is drawn — so no fixed depth
+# reaches the input line in every state. A depth padded for the worst case
+# instead reaches UP into the transcript, where a cleanly-submitted command is
+# still visible, and would re-fire Enter at an already-idle prompt.
+#
+# Empty output when the pane has no prompt glyph at all: no prompt means nothing
+# is sitting unsubmitted, so the caller must not retry.
+#
+# One awk pass, not grep|tail|cut to find the anchor plus a second serialization
+# through sed to re-slice the same text: this runs per poll tick, and the
+# cold-start bottleneck is CPU, not IO (documentation/runbooks/audit-cold-start-timing.md)
+# — forks here land while every bot on the box is starting at once.
+pane_input_region() {
+    printf '%s\n' "$1" | awk -v re="$_PANE_INPUT_GLYPH_RE" '
+        { line[NR] = $0; if ($0 ~ re) last = NR }
+        END { if (last) for (i = last; i <= NR; i++) print line[i] }'
+}
+
+# pane_holds_unsubmitted <pane_text> <probe>
+# Returns 0 when the input box still holds an unsubmitted payload: <probe> is
+# visible inside it, or the box shows the collapsed-paste placeholder.
+#
+# Positive evidence only. A cleanly-submitted send leaves the box empty and
+# matches neither, and a send that was QUEUED against a busy pane leaves only
+# the TUI's own hint text there, which matches neither either — so the retry
+# cannot fire on a send that actually landed.
+pane_holds_unsubmitted() {
+    local region
+    region=$(pane_input_region "$1")
+    [ -n "$region" ] || return 1
+    # One grep, two literals — the alternative runs both patterns on every CLEAR
+    # pane, which is the common case.
+    printf '%s\n' "$region" | grep -qF -e "$2" -e "$_PANE_PASTE_COLLAPSE_MARKER"
+}
+
+# pane_send_verified <socket> <session> <text>
+# THE verified pane send, and the one home for the send/settle/Enter/verify-retry
+# dance: send <text>, let the buffer settle, send Enter, then poll the input box
+# and re-send Enter once if the payload is still sitting there unsubmitted.
+#
+# Sends <text> VERBATIM — no sanitize pass, no `set +H;` prefix. THIS is why the
+# slash-command sites cannot route through a sanitizing helper: a slash command
+# must be the FIRST characters in the input or Claude Code will not recognise it.
+# Callers that DO want sanitizing (the cross-socket dispatch path) sanitize first
+# and hand the result down; see bot_tmux_send. Callers that want the `set +H;`
+# history-expansion guard prepend it themselves; see start-bot.sh's STARTUP_PROMPT
+# and dispatch.sh's classifier.
+pane_send_verified() {
+    local socket="${1?Usage: pane_send_verified <socket> <session> <text>}"
+    local session="${2:?Usage: pane_send_verified <socket> <session> <text>}"
+    local text="${3:?Usage: pane_send_verified <socket> <session> <text>}"
+    local probe="${text:0:$_PANE_PROBE_MAX_CHARS}"
+
+    bot_tmux "$socket" send-keys -t "$session" "$text" || return 1
+    sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"
+    bot_tmux "$socket" send-keys -t "$session" Enter || return 1
+
+    local tick=0 pane
+    local ticks="${PANE_SEND_VERIFY_TICKS:-$_PANE_SEND_VERIFY_TICKS_DEFAULT}"
+    # A zero budget means "do not verify", not "skip straight to the blind
+    # resend" — without this the knob would invert, buying an operator who set it
+    # to 0 a ghost Enter into an idle pane on every single send.
+    [ "$ticks" -gt 0 ] || return 0
+    while [ "$tick" -lt "$ticks" ]; do
+        sleep "$_PANE_VERIFY_POLL_S"
+        tick=$((tick + 1))
+        pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) || return 0
+        pane_holds_unsubmitted "$pane" "$probe" || return 0
+    done
+    # Still at the input line after the whole budget — the TUI swallowed the
+    # Enter during a render. Best-effort resend; a failure here is never fatal to
+    # the caller (startup and watchdog paths must not abort on a stuck pane).
+    #
+    # Emit the retry, because a silent retry is how this verify shipped dead for
+    # so long: with nothing in the ledger, "the retry never fires" and "the retry
+    # cannot fire" look identical from outside. Distinct from send_miss — the
+    # send DID reach the pane, so this must not read as a dropped dispatch to
+    # fleet-pulse's escalation.
+    emit_fleet_event send_retry dispatch \
+        "$(printf '{"session":"%s","reason":"enter-swallowed"}' "$(json_escape "$session")")"
+    bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
 }
 
 # Base idle-detection regex — single source of truth for keepalive.sh
