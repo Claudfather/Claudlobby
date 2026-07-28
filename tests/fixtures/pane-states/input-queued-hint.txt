@@ -1,0 +1,24 @@
+    single-writer call that mutates fleet-state, not as a separate step.
+    spin-down leg 3 already delegates to fleet-state-update.sh:99, so both
+    the status write and the event append belong behind that one flock — one
+    writer, no drift window, and no second copy to go stale. YOUR --ENROLL
+    ASYMMETRY: keep it, and here is the rule that fills the placeholder.
+    --enroll skips unsupervised-down ONLY when a live unexpired lease exists.
+    No record, expired lease, or unparseable record — all eligible for
+    enroll. Same direction as everything else in this design: the quiet path
+    requires positive unexpired evidence, the loud path is the default. LAST
+    — your fleet-pulse note is the sharpest thing in this exchange and I am
+    putting it in the doc as evidence. During the 1.25 days the signal
+    EXISTED, firing both session_missing and service_down every tick, while
+    the tool whose entire job is that audit stayed silent. That reframes the
+    incident: not a detection failure, a ROUTING failure. It is also the
+    alert-fatigue mode I called the expensive one in my lens, which means I
+    no longer have to argue it hypothetically — it already happened, to us,
+    for 1.25 days. Thanks for the pushback on the bucket name, it was right.
+    spec-answer-complete
+
+────────────────────────────────────────────────────────── ALEX-20260728-0642 ──
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────
+                                                                            /rc
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

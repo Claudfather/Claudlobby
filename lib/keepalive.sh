@@ -61,26 +61,11 @@ emit_keepalive_event() {
 }
 
 # send_reload_command <slash-command>
-# Slash-safe send: a slash command must be the FIRST text in the input — the
-# 'set +H; ' prefix dispatch.sh uses would break Claude Code's slash-command
-# recognition. Two-step send (text, pause, Enter) plus a verify-retry on the
-# Enter, mirroring start-bot.sh's STARTUP_PROMPT pattern. Caller guarantees the
-# pane is IDLE (see the IDLE branch).
+# Verbatim send via pane_send_verified — NOT bot_tmux_send, which sanitizes (see
+# that helper for why a slash command must reach the pane untouched). Caller
+# guarantees the pane is IDLE (see the IDLE branch).
 send_reload_command() {
-    local cmd="$1"
-    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" "$cmd"
-    sleep 0.3
-    bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter
-    sleep 0.3
-    # If the command text is still sitting unsubmitted at the prompt, the TUI
-    # swallowed the Enter during a render — resend it once. Scope the match to the
-    # bottom of the pane (the input line), not the whole pane: after a clean submit
-    # the command scrolls up into the transcript and stays visible there, so a
-    # full-pane match would re-fire Enter on every successful submit and inject an
-    # empty message at the now-idle prompt.
-    if bot_tmux "$TMUX_SOCKET" capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -3 | grep -qF "$cmd"; then
-        bot_tmux "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Enter 2>/dev/null || true
-    fi
+    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$1"
 }
 
 # restart_bot_service <reason>

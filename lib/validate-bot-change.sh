@@ -215,7 +215,12 @@ BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 CONF
 # Idle pane: last line ends in a prompt glyph '>' (matches the idle base pattern).
-tmux new-session -d -s "$IBOT" 'printf "\n> \n"; sleep 600'
+# Draw the prompt with chrome BELOW it, as Claude Code does — this is the pane
+# that exercises keepalive's send_reload_command, so a prompt-as-last-line shape
+# here would validate the reload path against a geometry production never has.
+# classify_pane captures the whole pane (not a tail), so idle detection is
+# unaffected by the extra lines.
+tmux new-session -d -s "$IBOT" 'printf -- "\n--------\n> \n--------\n\n  auto mode on\n"; sleep 600'
 sleep 1
 touch "$IBOT_DIR/data/.reload-pending"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$IBOT_DIR" >/dev/null 2>&1 || true
@@ -523,12 +528,22 @@ SUBMIT_LOG="$SBOT_DIR/submits.log"
 # Idle prompt so keepalive takes the reload branch; each read logs the submission,
 # then prints it and pushes it well above the bottom input line, so only a
 # genuinely-unsubmitted command is still at the prompt for the verify to match.
+#
+# The prompt is drawn inside a bordered box with footer lines BELOW it, because
+# that is where Claude Code puts it — the input line is never the last line of
+# the pane. A fixture that put the prompt last would let a verify that only ever
+# reads the last few lines pass here while never once reaching the input line in
+# production, which is exactly how the pre-#763 `tail -3` verify shipped dead.
 cat > "$SBOT_DIR/fixture.sh" <<FIX
 #!/bin/bash
-printf '> \n'
+draw_prompt() {
+    printf -- '--------\n> \n--------\n\n  auto mode on\n'
+}
+draw_prompt
 while IFS= read -r l; do
     printf '%s\n' "\$l" >> "$SUBMIT_LOG"
-    printf 'sent[%s]\n\n\n\n\n\n\n> \n' "\$l"
+    printf 'sent[%s]\n\n\n\n\n\n\n' "\$l"
+    draw_prompt
 done
 FIX
 tmux new-session -d -s "$SBOT" "bash '$SBOT_DIR/fixture.sh'"

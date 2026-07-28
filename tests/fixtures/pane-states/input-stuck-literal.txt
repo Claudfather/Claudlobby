@@ -1,0 +1,24 @@
+
+❯ set +H; [BOTCOMMAND] ari | task | Claudlobby 763 - the send-keys plus sleep
+  plus Enter plus verify-retry dispatch idiom is copy-pasted across
+  keepalive.sh and start-bot.sh; add pane_send_verified to lib-common.sh and
+  say OK and nothing else
+
+  Searched for 1 pattern, ran 2 shell commands
+
+❯ count slowly from 1 to 40, one number per line
+
+❯ QUEUEPROBE763 second payload
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ reply with exactly: PROOF3OK
+
+● PROOF3OK
+
+✻ Cooked for 2s · 1 shell still running
+
+────────────────────────────────────────────────────────────────────────────────
+❯ /claudna:session resume --auto
+────────────────────────────────────────────────────────────────────────────────
+
+  ⏵⏵ auto mode on · 1 shell
