@@ -1,0 +1,10 @@
+{
+  "id": 99,
+  "title": "Printify Choice",
+  "variants": [
+    {"id": 45748, "title": "White / 2\" × 2\"", "options": {"size": "2\" × 2\"", "surface": "White"}, "placeholders": [{"position": "front", "height": 1024, "width": 1024}]},
+    {"id": 45750, "title": "White / 3\" × 3\"", "options": {"size": "3\" × 3\"", "surface": "White"}, "placeholders": [{"position": "front", "height": 1024, "width": 1024}]},
+    {"id": 45752, "title": "White / 4\" × 4\"", "options": {"size": "4\" × 4\"", "surface": "White"}, "placeholders": [{"position": "front", "height": 1024, "width": 1024}]},
+    {"id": 45754, "title": "White / 6\" × 6\"", "options": {"size": "6\" × 6\"", "surface": "White"}, "placeholders": [{"position": "front", "height": 1024, "width": 1024}]}
+  ]
+}
