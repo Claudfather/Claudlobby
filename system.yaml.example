@@ -119,6 +119,15 @@ defaults:
       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
     PostToolUse:
       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+    # Ingestion layer for the ai-platform fleet-monitor (#785 Phase A): distil
+    # each finished session into one structured JSONL row via a cheap Haiku
+    # pass, so the monitor reasons over per-session digests and never over raw
+    # transcripts (a real transcript is ~19 MB / ~5M tokens and cannot enter a
+    # 200K context at all). Bounded by a qualifying gate + tail-cap; a session
+    # below the gate still gets a row, written without a model call.
+    SessionEnd:
+      - command: "$CLAUDLOBBY_ROOT/lib/transcript-digest.sh"
+        timeout: 150
 
   observability:
     pulse_interval: 300
