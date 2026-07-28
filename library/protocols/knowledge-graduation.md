@@ -18,7 +18,7 @@ Every doc the librarian examines gets exactly one verdict:
 | `promote` | Audience outgrew the rung — move up one rung |
 | `refresh` | Right rung, still true — re-verify, bump `updated:`, extend `expires:` |
 | `demote` | True but over-placed — audience is narrower than the rung implies; move down |
-| `retire` | No longer current — `status: superseded` (a successor exists) or `archived` (none), per the Shared Documentation lifecycle |
+| `retire` | No longer current — set the type's terminal status per the frontmatter schema (`superseded`; plans and audits may close `completed`), then follow the Shared Documentation lifecycle |
 
 ## Promotion criteria — per rung
 
