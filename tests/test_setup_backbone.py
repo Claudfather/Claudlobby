@@ -206,6 +206,7 @@ class Harness:
         for k in (
             "FLEET_NAME",
             "CLAUDLOBBY_FLEET",
+            "FLEET_STATE_PATH",
             "SERVICE_PREFIX",
             "TIMER_DIR",
             "UNIT_NAME",
@@ -507,6 +508,43 @@ class TestReconcileBuckets:
         r = h.run(str(h.root / "lib" / "reconcile-fleet.sh"), "f1")
         assert r.returncode == 0, r.stdout + r.stderr
         assert self._bucket(r.stdout, "unsupervised-down") == []
+
+
+class TestReconcileEnroll:
+    """--enroll must dispatch spin-up-bot.sh once per orphan; audit mode none.
+
+    The --enroll consumer fed the space-separated orphan accumulator through a
+    line-oriented here-string, so the loop ran once with every orphan glued
+    into one value, reported it SKIPPED (no such runtime dir), and never
+    called spin-up-bot.sh — the documented repair path for an unsupervised
+    bot had never enrolled anything.
+    """
+
+    def _two_orphans(self, h):
+        h.use_real_reconcile()
+        f = h.fleet("f1", bots=("o1", "o2"))
+        for b in ("o1", "o2"):
+            h.bot(f, b, healthy=True, unit=False)
+        return f
+
+    def test_enroll_dispatches_spinup_once_per_orphan(self, h):
+        f = self._two_orphans(h)
+        r = h.run(str(h.root / "lib" / "reconcile-fleet.sh"), "f1", "--enroll")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "SKIPPED" not in r.stdout, r.stdout
+        calls = [
+            ln for ln in h.stub_log().splitlines() if ln.startswith("spin-up-bot.sh ")
+        ]
+        assert calls == [
+            f"spin-up-bot.sh {f}/runtime/bots/o1",
+            f"spin-up-bot.sh {f}/runtime/bots/o2",
+        ]
+
+    def test_audit_mode_dispatches_nothing(self, h):
+        self._two_orphans(h)
+        r = h.run(str(h.root / "lib" / "reconcile-fleet.sh"), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "spin-up-bot.sh" not in h.stub_log()
 
 
 class TestLegacyKeepaliveSwap:
