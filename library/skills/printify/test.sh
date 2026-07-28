@@ -50,12 +50,18 @@ if printf '%s' "$body" | jq -e '
 else no "create --dry-run payload"; fi
 
 # 6. create --enable-variants selects a subset
-body=$(PRINTIFY_FIXTURE_VARIANTS="$FIX/choice_variants.json" \
+# Assert the command SUCCEEDED and produced a body, not just that jq liked what
+# it got: when the script dies the body is empty, and jq's exit on empty input is
+# version-dependent (1.6 exits 0, later versions exit 4). Without these two
+# guards a crashing script reads as a pass on some machines and a fail on others
+# -- which is exactly how the $ids|index(.id) context bug stayed hidden here.
+if body=$(PRINTIFY_FIXTURE_VARIANTS="$FIX/choice_variants.json" \
        PRINTIFY_API_KEY=dummy PRINTIFY_SHOP_ID=1234567 \
        "$SH" create --png https://example.com/art.png --title "T" \
-       --blueprint 400 --provider 99 --price 500 --enable-variants 45748,45752 --dry-run 2>/dev/null \
-       | sed -n '/^{/,/^}/p')
-if printf '%s' "$body" | jq -e '([.variants[]|select(.is_enabled)|.id]|sort)==[45748,45752]' >/dev/null 2>&1; then
+       --blueprint 400 --provider 99 --price 500 --enable-variants 45748,45752 --dry-run 2>/dev/null) \
+   && [ -n "$body" ] \
+   && printf '%s' "$body" | sed -n '/^{/,/^}/p' \
+      | jq -e '([.variants[]|select(.is_enabled)|.id]|sort)==[45748,45752]' >/dev/null 2>&1; then
   ok "create --enable-variants enables only the named ids"
 else no "create --enable-variants subset"; fi
 
@@ -99,6 +105,42 @@ pbody=$(env PRINTIFY_API_KEY=dummy PRINTIFY_SHOP_ID=1 "$SH" publish --product AB
 if printf '%s' "$pbody" | jq -e '.title==true and .images==true' >/dev/null 2>&1; then
   ok "publish --dry-run prints publish body"
 else no "publish --dry-run"; fi
+
+# --- hermetic multi-fetch regression (no creds, no network) ---
+# 13/14. The 89d5662 class: a RETURN trap in a fetch helper re-fires on the
+# CALLER's return, where $cfg is out of scope -> "cfg: unbound variable" under
+# set -u the second time a door fetches in its own scope. The live smoke below
+# also covers this, but ONLY where real credentials exist -- so in an OSS CI it
+# skips and the suite goes green with the bug present. Stub curl on PATH and
+# leave the fixtures UNSET so migrate makes both real api_get calls.
+stub="$(mktemp -d)"
+cat > "$stub/curl" <<'STUB'
+#!/usr/bin/env bash
+# Minimal Printify-shaped responses; api_get expects "<body>\n<http_code>".
+url="${!#}"
+case "$url" in
+  *variants.json*) body='{"id":99,"variants":[{"id":45748,"title":"White"}]}' ;;
+  *products/*)     body='{"id":"P","title":"t","description":"d","tags":[],"blueprint_id":400,"print_provider_id":1,"variants":[{"id":45748,"price":500,"is_enabled":true,"title":"White"}],"print_areas":[{"variant_ids":[45748],"placeholders":[]}]}' ;;
+  *)               body='{}' ;;
+esac
+printf '%s\n200' "$body"
+STUB
+chmod +x "$stub/curl"
+mf_out=$(PATH="$stub:$PATH" PRINTIFY_API_KEY=dummy PRINTIFY_SHOP_ID=1234567 \
+         "$SH" migrate --product P --to-provider 99 --dry-run 2>&1); mf_rc=$?
+if [ "$mf_rc" -eq 0 ] && ! printf '%s' "$mf_out" | grep -q 'unbound variable'; then
+  ok "hermetic: two api_get calls in one door scope (no RETURN-trap/unbound crash)"
+else no "hermetic multi-fetch regression (rc=$mf_rc): $(printf '%s' "$mf_out" | grep -i 'unbound\|error' | head -1)"; fi
+
+# 14. Cross-blueprint migrate prints the UNVERIFIED caveat (id matching is only
+# verified across providers within one blueprint).
+xb_out=$(PATH="$stub:$PATH" PRINTIFY_API_KEY=dummy PRINTIFY_SHOP_ID=1234567 \
+         "$SH" migrate --product P --to-provider 99 --to-blueprint 794 --dry-run 2>&1)
+if printf '%s' "$xb_out" | grep -q 'CROSS-BLUEPRINT MIGRATE' \
+   && printf '%s' "$xb_out" | grep -q 'UNVERIFIED'; then
+  ok "cross-blueprint migrate warns the coverage report is unverified"
+else no "cross-blueprint migrate caveat"; fi
+rm -rf "$stub"
 
 # --- live smoke (only with real creds) ---
 TOKEN="${PRINTIFY_API_TOKEN:-${PRINTIFY_API_KEY:-}}"

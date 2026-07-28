@@ -25,7 +25,7 @@ Uses the fleet Printify contract (already exported from `local/<fleet>/.env`, no
 - `PRINTIFY_API_KEY` — Printify Personal Access Token / API key (JWT). Also honors `PRINTIFY_API_TOKEN`.
 - `PRINTIFY_SHOP_ID` — Printify shop id (e.g. `1234567`).
 
-The write doors require `jq` (JSON build/parse) — the read doors keep their no-jq fallback.
+`create` and `migrate` require `jq` (JSON build/parse). `publish` does not (its body is a literal), and the read doors keep their no-jq fallback.
 
 ## The tool
 

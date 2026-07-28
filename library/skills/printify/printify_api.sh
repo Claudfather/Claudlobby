@@ -113,9 +113,18 @@ upload_image() {                     # <path|url> -> image id (stdout)
     http://*|https://*)
       body="$(jq -n --arg fn "$name" --arg url "$src" '{file_name:$fn, url:$url}')" ;;
     *)
+      # -r not just -f: an existing-but-unreadable file would otherwise encode to
+      # EMPTY and be sent as contents:"" -- Printify then answers with a confusing
+      # 400/422 that never mentions the real cause. errexit does not propagate out
+      # of a pipeline inside a function called via command substitution, so capture
+      # the rc explicitly (same pattern api_get/api_send use) and refuse empty.
       [ -f "$src" ] || die "create: --png file not found: $src" 4
+      [ -r "$src" ] || die "create: --png file not readable: $src" 4
       b64f="$(mktemp)"
-      base64 < "$src" | tr -d '\n' > "$b64f"
+      if ! base64 < "$src" | tr -d '\n' > "$b64f"; then
+        rm -f "$b64f"; die "create: could not read or encode --png file: $src" 4
+      fi
+      [ -s "$b64f" ] || { rm -f "$b64f"; die "create: --png encoded to empty content: $src" 4; }
       body="$(jq -n --arg fn "$name" --rawfile c "$b64f" '{file_name:$fn, contents:$c}')"
       rm -f "$b64f" ;;
   esac
@@ -188,9 +197,15 @@ door_create() {
   # 1. variants from the target catalog (fixture-injectable)
   local variants_raw variants_json enabled_ids
   variants_raw="$(fetch_target_variants "$blueprint" "$provider")"
+  # Bind the variant id BEFORE piping into $ids: inside index(...) the input is
+  # $ids (an array), so a bare .id there indexes the array, not the variant, and
+  # jq dies with "Cannot index array with string". Only reachable when $ids is
+  # non-null -- jq short-circuits `or`, so the default --enable-variants all path
+  # never evaluated it. Same bind form the migrate door already uses.
   variants_json="$(printf '%s' "$variants_raw" | jq -c --argjson p "$price" --arg sel "$envars" \
     '(if $sel == "all" then null else ($sel|split(",")|map(tonumber)) end) as $ids
-     | [.variants[] | {id, price:$p, is_enabled: ($ids == null or (($ids|index(.id)) != null))}]')"
+     | [.variants[] | .id as $vid
+        | {id, price:$p, is_enabled: ($ids == null or (($ids|index($vid)) != null))}]')"
   [ "$(printf '%s' "$variants_json" | jq 'length')" -gt 0 ] \
     || die "create: no catalog variants for blueprint $blueprint / provider $provider" 5
   enabled_ids="$(printf '%s' "$variants_json" | jq -c '[.[] | select(.is_enabled) | .id]')"
@@ -241,6 +256,15 @@ print_coverage() {                   # product src_bp tobp toprov matched-json d
   printf '%s' "$matched" | jq -r '.[] | "  [+] \(.id)  \(.title // "")  price=\(.price)"'
   printf 'dropped  (no target variant — COVERAGE LOSS): %s\n' "$nd"
   printf '%s' "$dropped" | jq -r '.[] | "  [-] \(.id)  \(.title // "")  DROPPED"'
+  if [ "$sbp" != "$tbp" ]; then
+    printf '#\n'
+    printf '# !! CROSS-BLUEPRINT MIGRATE (%s -> %s) — TREAT THIS REPORT AS UNVERIFIED.\n' "$sbp" "$tbp"
+    printf '# Matching is by shared numeric variant id. That premise is verified only\n'
+    printf '# ACROSS PROVIDERS WITHIN ONE BLUEPRINT. Across blueprints a coincidental id\n'
+    printf '# collision reads as a legitimate match, so a retained line above may be a\n'
+    printf '# DIFFERENT product attribute. Verify each retained id in the Printify\n'
+    printf '# catalog before accepting this migration.\n'
+  fi
   printf '# Coverage loss is a MERCHANDISING decision: the door reports, a human decides.\n'
 }
 
@@ -268,6 +292,13 @@ door_migrate() {
   src_bp="$(printf '%s' "$src" | jq -r '.blueprint_id')"
   [ -n "$tobp" ] || tobp="$src_bp"
   is_uint "$tobp" || die "migrate: --to-blueprint must be an integer" 64
+  # Variant-id matching is verified only ACROSS PROVIDERS WITHIN ONE BLUEPRINT.
+  # Warn loudly rather than refuse: a cross-blueprint migrate is legitimate, but
+  # the human must not read its coverage report as verified.
+  if [ "$tobp" != "$src_bp" ]; then
+    printf 'printify: WARNING — cross-blueprint migrate (blueprint %s -> %s). Variant-id\n' "$src_bp" "$tobp" >&2
+    printf 'printify: matching is UNVERIFIED across blueprints; see the caveat in the report.\n' >&2
+  fi
   src_title="$(printf '%s' "$src" | jq -r '.title // ""')"
   src_desc="$(printf '%s' "$src" | jq -r '.description // ""')"
   src_tags="$(printf '%s' "$src" | jq -c '.tags // []')"

@@ -91,6 +91,22 @@ def test_suite_skips_live_smoke_without_creds(hermetic_run):
     )
 
 
+@needs_jq
+def test_multi_fetch_regression_runs_without_creds(hermetic_run):
+    """The crash-class regression must be covered in *this* CI, which has no creds.
+
+    A door that calls api_get twice in one scope used to die with "cfg: unbound
+    variable" (a RETURN trap re-firing on the caller's return). That regression
+    was originally guarded only inside the live-creds block — so in an OSS repo
+    it skipped and the suite went green with the bug present, which reads as
+    coverage without being it. Pin that the hermetic arm actually ran: without
+    this, moving the check back behind the credential gate is a silent no-op.
+    """
+    assert (
+        "ok   - hermetic: two api_get calls in one door scope" in hermetic_run.stdout
+    ), "the credential-free multi-fetch regression did not run:\n" + hermetic_run.stdout
+
+
 def test_helper_is_executable_in_the_git_index():
     """Skills are symlinked, never rendered — the mode ships from the index.
 
