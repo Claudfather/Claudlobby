@@ -197,8 +197,13 @@ make_transcript "$T/big.jsonl" 300
 stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
 row="$(run_digest "$T/big.jsonl" SESSION_DIGEST_MIN_TURNS=4 SESSION_DIGEST_TAIL_CHARS=5000)"
 dc="$(field "$row" digest_chars)"
-[ "$dc" -le 5100 ] && r=yes || r=no
-assert_eq "tail-cap 5000 bounds digest_chars (<=5100, got $dc)" yes "$r"
+# The distillation header embeds transcript_path, so digest_chars carries the
+# fixture dir's length on top of the tail-capped text. A fixed slack silently
+# assumed a short ambient /tmp; the bound names the path term instead (#846 —
+# suites now run under a constructed, longer TMPDIR).
+_dc_bound=$((5100 + ${#T}))
+[ "$dc" -le "$_dc_bound" ] && r=yes || r=no
+assert_eq "tail-cap 5000 bounds digest_chars (<=$_dc_bound, got $dc)" yes "$r"
 sz="$(wc -c < "$T/prompt-seen.txt" | tr -d ' ')"
 [ "$sz" -le 7000 ] && r=yes || r=no
 assert_eq "prompt sent to the model stays bounded (<=7000, got $sz)" yes "$r"

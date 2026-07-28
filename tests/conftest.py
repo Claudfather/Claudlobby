@@ -38,13 +38,35 @@ def read_fleet_events(root):
 def _scrubbed_env(**overrides):
     """os.environ minus the bot-session vars that would short-circuit chat
     resolution (FLEET_PULSE_ESCALATION_CHAT_ID et al), repoint the root, or
-    reroute per-bot socket/identity resolution (BOT_*)."""
+    reroute per-bot socket/identity resolution (BOT_*).
+
+    DENYLIST — inherit-and-subtract, only as complete as this prefix list
+    (#846). constructed_env below is the ratified inverse default; migrating
+    this helper's importers onto it is the named follow-up. New tests should
+    not add call sites here."""
     env = {
         k: v
         for k, v in os.environ.items()
         if not k.startswith(("TELEGRAM", "CLAUDLOBBY", "FLEET", "BOT_"))
     }
     env.update(overrides)
+    return env
+
+
+def constructed_env(**overrides):
+    """Minimal CONSTRUCTED child env (#846): built from nothing, never from an
+    os.environ copy. Inheriting ambient env makes isolation a denylist — every
+    production-pointing variable (FLEET_STATE_PATH, escalation chat ids,
+    BOT_DIR) must be remembered and subtracted, and the one nobody thought of
+    is the one that leaks. Built minimal, a new isolation-sensitive variable
+    is absent by construction. PATH is the one deliberate inheritance (host
+    tools); pass PATH=... to prepend stub dirs. LANG pins UTF-8 semantics: with
+    no locale at all, grep/awk match the UTF-8 pane-fixture glyphs bytewise and
+    lib-common's pane classifiers flip one verdict (test_keepalive_classify /
+    test_pane_is_idle, measured). Values are str()-coerced so Paths pass
+    through."""
+    env = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8"}
+    env.update({k: str(v) for k, v in overrides.items()})
     return env
 
 

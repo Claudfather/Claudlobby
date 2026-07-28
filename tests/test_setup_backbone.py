@@ -14,7 +14,7 @@ import subprocess
 
 import pytest
 
-from tests.conftest import _write_exec
+from tests.conftest import _write_exec, constructed_env
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
@@ -191,28 +191,23 @@ class Harness:
             f.write(unit + "\n")
 
     def run(self, *argv, env_extra=None):
-        env = dict(os.environ)
-        env["PATH"] = f"{self.bin}:{env['PATH']}"
-        env["CLAUDLOBBY_ROOT"] = str(self.root)
-        env["HOME"] = str(self.home)
-        env["STUB_LOG"] = str(self.log)
-        env["TMUX_HEALTHY"] = str(self.tmux_healthy)
-        env["STUB_ENROLLED"] = str(self.enrolled)
-        env["STUB_UNIT_FILES"] = str(self.unit_files)
-        env["STUB_ACTIVE"] = str(self.active)
-        env["STUB_START_FAIL"] = str(self.start_fail)
-        # Isolate the unbound-session socket walk from the host's real tmux.
-        env["TMUX_TMPDIR"] = str(self.root / "no-tmux")
-        for k in (
-            "FLEET_NAME",
-            "CLAUDLOBBY_FLEET",
-            "FLEET_STATE_PATH",
-            "SERVICE_PREFIX",
-            "TIMER_DIR",
-            "UNIT_NAME",
-            "TMUX_BIN",
-        ):
-            env.pop(k, None)
+        # Allowlist, never an os.environ copy — a new isolation-sensitive var
+        # is absent by construction (#846; doctrine on constructed_env, gate in
+        # TestHarnessEnvIsConstructed). Scenario vars arrive via env_extra.
+        env = constructed_env(
+            PATH=f"{self.bin}:{os.environ['PATH']}",
+            HOME=self.home,
+            TMPDIR=self.root,
+            CLAUDLOBBY_ROOT=self.root,
+            STUB_LOG=self.log,
+            TMUX_HEALTHY=self.tmux_healthy,
+            STUB_ENROLLED=self.enrolled,
+            STUB_UNIT_FILES=self.unit_files,
+            STUB_ACTIVE=self.active,
+            STUB_START_FAIL=self.start_fail,
+            # Isolate the unbound-session socket walk from the host's real tmux.
+            TMUX_TMPDIR=self.root / "no-tmux",
+        )
         env.update(env_extra or {})
         return subprocess.run(
             list(argv), capture_output=True, text=True, env=env, timeout=30
@@ -229,6 +224,28 @@ def h(tmp_path):
 
 def _sf(h):
     return str(h.root / "lib" / "setup-fleet")
+
+
+class TestHarnessEnvIsConstructed:
+    """The child env is built from scratch, never copied from os.environ (#846).
+
+    The canary is a NOVEL variable: a pop-list can only ever cover variables
+    already known to be dangerous, so the discriminating property is that an
+    arbitrary ambient variable — one no denylist mentions — never reaches the
+    child. FLEET_STATE_PATH rode exactly that gap from a bot-session env into
+    the real fleet-state.json during the #829 validation.
+    """
+
+    def test_ambient_variables_do_not_reach_the_child(self, h, monkeypatch):
+        monkeypatch.setenv("CLAUDLOBBY_CANARY_846", "escaped")
+        monkeypatch.setenv("FLEET_STATE_PATH", "/nonexistent/fleet-state.json")
+        r = h.run(
+            "/bin/sh",
+            "-c",
+            'printf \'%s|%s\' "${CLAUDLOBBY_CANARY_846:-}" "${FLEET_STATE_PATH:-}"',
+        )
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == "|"
 
 
 class TestSetupFleetColdStart:
