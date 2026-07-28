@@ -1,14 +1,23 @@
 #!/bin/bash
 # Reconcile a fleet's runtime state: tmux sessions ↔ host service units ↔ fleet.yaml.
 #
-# Reports four buckets:
-#   ✓ healthy      — defined in fleet.yaml + has unit + has tmux session
-#   ⚠ orphan       — defined in fleet.yaml + has tmux session but NO unit (unsupervised)
-#   ⚠ missing      — defined in fleet.yaml + has unit but NO tmux session (down)
-#   🚨 unbound     — tmux session named like a bot but NOT in any fleet.yaml (rogue)
+# Reports five buckets:
+#   ✓ healthy           — defined in fleet.yaml + has unit + has tmux session
+#   ⚠ orphan            — defined in fleet.yaml + has tmux session but NO unit (unsupervised, up)
+#   ⚠ missing           — defined in fleet.yaml + has unit but NO tmux session (supervised, down)
+#   ⚠ unsupervised-down — defined in fleet.yaml + NO unit and NO tmux session
+#   🚨 unbound          — tmux session named like a bot but NOT in any fleet.yaml (rogue)
+#
+# The bucket names describe what was OBSERVED, never how the bot got there:
+# unsupervised-down covers a torn-down bot, a never-generated one, and a
+# generated-but-never-started one alike. Intent (parked on purpose vs fell off
+# by accident) is not observable from tmux + unit state and is not claimed here.
 #
 # Usage: reconcile-fleet.sh <fleet-name> [--enroll]
-#   --enroll : auto-enroll orphans by calling spin-up-bot.sh on each
+#   --enroll : auto-enroll orphans by calling spin-up-bot.sh on each.
+#              Deliberately NOT extended to unsupervised-down: reviving a bot
+#              that was taken down on purpose needs an intent signal this script
+#              cannot see. Do not "fix" the asymmetry without one.
 set -euo pipefail
 
 FLEET="${1:?Usage: reconcile-fleet.sh <fleet-name> [--enroll]}"
@@ -42,7 +51,7 @@ defined=$(parse_fleet_bots "$FLEET_YAML" | sort -u)
 
 # 3. Build buckets by checking each defined bot against tmux + host service state.
 #    Unit names come from bot.conf (BOT_SERVICE), not from parsing filenames.
-healthy=""; orphan=""; missing=""; unbound=""
+healthy=""; orphan=""; missing=""; unsup_down=""; unbound=""
 
 while IFS= read -r b; do
     [ -z "$b" ] && continue
@@ -55,9 +64,13 @@ while IFS= read -r b; do
     # check setup-fleet's skip-healthy uses, so audit and apply never drift.
     bot_unit_present "$b" "$bot_dir" && has_unit=1
 
+    # Exhaustive by construction: an else, not a fourth condition. A defined bot
+    # that matches no arm is reported in no bucket at all — invisible precisely
+    # when it most needs seeing.
     if   [ $has_tmux = 1 ] && [ $has_unit = 1 ]; then healthy="$healthy $b"
     elif [ $has_tmux = 1 ] && [ $has_unit = 0 ]; then orphan="$orphan $b"
     elif [ $has_tmux = 0 ] && [ $has_unit = 1 ]; then missing="$missing $b"
+    else                                              unsup_down="$unsup_down $b"
     fi
 done <<< "$defined"
 
@@ -89,6 +102,7 @@ echo "Fleet: $FLEET"
 echo "  ✓ healthy:  ${healthy:-(none)}"
 echo "  ⚠ orphan:   ${orphan:-(none)}"
 echo "  ⚠ missing:  ${missing:-(none)}"
+echo "  ⚠ unsupervised-down: ${unsup_down:-(none)}   ← neither supervised nor running; keepalive cannot revive it (fix: claudlobby generate, then lib/spin-up-bot.sh <bot-dir>)"
 echo "  🚨 unbound: ${unbound:-(none)}   ← if non-empty, investigate before killing"
 
 # --- Default-job drift --------------------------------------------------------

@@ -123,7 +123,7 @@ $CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet>          # report only
 $CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll any orphans
 ```
 
-`reconcile-fleet.sh` reports four buckets: healthy (tmux + unit), orphan (tmux but no unit — unsupervised), missing (unit but no tmux — down), unbound (running but not in any fleet.yaml — investigate before killing).
+`reconcile-fleet.sh` reports five buckets: healthy (tmux + unit), orphan (tmux but no unit — unsupervised), missing (unit but no tmux — down), unsupervised-down (neither — declared but nothing running or supervised; keepalive cannot revive it), unbound (running but not in any fleet.yaml — investigate before killing).
 
 ## Preflight: check shared knowledge before dispatch
 

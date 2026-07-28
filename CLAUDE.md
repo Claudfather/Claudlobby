@@ -74,7 +74,7 @@ Key lifecycle scripts in `lib/`:
 | `spin-down-bot.sh` | Inverse of spin-up: guaranteed teardown/reaper for canary/throwaway bots — removes supervision, kills the tmux server, drops the bot's fleet-state key; `--purge` also removes the bot dir |
 | `keepalive.sh` | Per-bot watchdog — restarts if tmux session dies |
 | `keepalive-all.sh` | Fleet-level watchdog — runs keepalive for all bots |
-| `reconcile-fleet.sh` | Audits supervision state: healthy, orphan, missing, unbound |
+| `reconcile-fleet.sh` | Audits supervision state: healthy, orphan, missing, unsupervised-down, unbound |
 | `report-back.sh` | Worker → manager structured reporting via tmux |
 | `fleet-state-update.sh` | Atomic state/fleet-state.json updates with flock locking |
 | `workstream-update.sh` | Single-writer mutator for the per-fleet `workstreams.json` registry (open/progress/renew/block/close/prune); reads go through `claudlobby workstreams` |
