@@ -1301,15 +1301,45 @@ marker_age_within() {
 # --- Debounced notification ---------------------------------------------------
 
 # debounce_notify <state_dir> <bot_id> <marker_suffix> <notify_fn> <message>
-# Fires the notification only if the marker file does not exist (first
-# occurrence). Caller is responsible for clearing the marker via
-# debounce_clear when the condition resolves.
+#                 [recipient] [renotify_after_s]
+# Fires the notification on first occurrence, then debounces. Caller clears the
+# marker via debounce_clear when the condition resolves.
+#
+# <recipient> is an identity for WHO is being notified. The marker records it as
+# its CONTENT, so a changed recipient re-fires: keying on <bot_id>.<suffix>
+# alone recorded only THAT a notification fired, never to whom, so an alert
+# fired once into whatever manager session existed at episode start and every
+# later session was structurally unable to receive it (#831 — a manager restart
+# mid-episode cost a 1.25-day dark-bot outage). Identity is the content and not
+# part of the filename on purpose: one marker per (bot, suffix) cannot
+# accumulate one-per-restart, and debounce_clear needs no glob.
+#
+# <renotify_after_s> re-fires once the marker ages past that many seconds (0 =
+# never). It composes with, rather than replaces, the recipient check: identity
+# cannot cover a send that failed silently or a reused pid, and a long episode
+# should re-surface even to a recipient that never changed.
+#
+# Both are optional. With neither, this is the original fire-once-per-episode
+# behavior, which is what an *action* debounce with no recipient wants
+# (reload-fleet.sh's npx warm attempt).
 debounce_notify() {
     local state_dir="$1" bot_id="$2" suffix="$3" notify_fn="$4" message="$5"
+    local recipient="${6:-}" renotify_after="${7:-0}"
     local marker="$state_dir/${bot_id}.${suffix}"
+    local fire=0 seen=""
     if [ ! -f "$marker" ]; then
+        fire=1
+    else
+        seen=$(cat "$marker" 2>/dev/null || true)
+        if [ -n "$recipient" ] && [ "$seen" != "$recipient" ]; then
+            fire=1
+        elif [ "$renotify_after" -gt 0 ] && ! marker_age_within "$marker" "$renotify_after"; then
+            fire=1
+        fi
+    fi
+    if [ "$fire" -eq 1 ]; then
         "$notify_fn" "$message"
-        touch "$marker"
+        printf '%s' "$recipient" > "$marker"
     fi
 }
 

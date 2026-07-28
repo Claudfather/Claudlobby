@@ -133,6 +133,7 @@ Key lifecycle scripts in `lib/`:
 | `rolling-restart.sh` | Serial fleet restart — bots one at a time, each gated on a fresh Telegram `BRIDGE_READY` before the next, so a mass restart cannot land the fleet inbound-dead (#689) |
 | `host-health-check.sh` | Host-hardware early-warning — FLEET ALERT on under-voltage/thermal throttling (Pi `vcgencmd`) and SD/MMC storage stalls (kernel log), de-duped via a state file — runs as the `host-health-check` host job |
 | `migrate-fleet-to-system.sh` | Staged, reversible migration of a flat `local/<fleet>/` into a nested vault system container (`local/<system>/<fleet>/`), re-pointing every bot supervision unit at the new path |
+| `rehearse-debounce-recipient.sh` | Prove on real tmux that a debounced FLEET-PULSE alert survives a manager restart (#831) — drives the real `fleet-pulse.sh` against a throwaway bot with an unresolved condition, restarts the manager session, and asserts the push lands in the new one; isolated sockets + a fake escalation chat so it can never page the real operator. Wrapped by `tests/test_debounce_recipient_harness.py` |
 | `rehearse-briefing-timer.sh` | Rehearse the composed briefing-timer chain on a throwaway fleet — asserts the equippable `<prefix>.briefing-<bot>-<slot>` unit fires and that removing a slot prunes its units on both platforms; sibling of `rehearse-keepalive-swap.sh` |
 
 ## Repository Hygiene — MANDATORY
