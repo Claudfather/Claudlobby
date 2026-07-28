@@ -15,7 +15,8 @@
 #   3. bots   — spin-up-bot.sh per declared bot, SKIPPING already-healthy
 #               bots (unit present + tmux session alive — reconcile-fleet's
 #               healthy definition) so a re-run never bounces a working bot.
-#   4. audit  — reconcile-fleet.sh (healthy/orphan/missing/unbound buckets +
+#   4. audit  — reconcile-fleet.sh (healthy/orphan/missing/unsupervised-down/
+#               unbound buckets +
 #               default-job drift).
 #
 # Jobs listed in the composed timers/ DORMANT manifest (enroll: false in the

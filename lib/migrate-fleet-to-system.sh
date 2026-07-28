@@ -340,10 +340,10 @@ mfs_reenroll_bots() {
 # Echo the declared bots NOT present in the report healthy: line (space-listed;
 # empty = all healthy). PURE — unit-testable with a canned reconcile string.
 # This is the POSITIVE check: it does not trust orphan/missing being (none),
-# because reconcile-fleet.sh has NO bucket for a bot that is both down and
-# unsupervised (has_tmux=0 AND has_unit=0 falls through its if/elif/elif), so
-# such a bot is invisible to orphan/missing. Requiring presence in healthy is
-# the only gate that catches it.
+# because those two buckets do not partition "not healthy" — a bot that is both
+# down and unsupervised is in neither (it is unsupervised-down). Requiring
+# presence in healthy: is the only gate that stays correct no matter how many
+# non-healthy buckets the report grows.
 _mfs_not_healthy() {
     local declared="$1" report="$2" healthy notyet="" b
     healthy="$(printf '%s\n' "$report" | grep 'healthy:' | sed -e 's/.*healthy:[[:space:]]*//' | head -1)"
@@ -361,8 +361,8 @@ _mfs_not_healthy() {
 # Assert every DECLARED bot is HEALTHY, polling until they settle or a timeout.
 # Closes two failure modes of a one-shot orphan/missing==(none) check:
 #   * false-GREEN — a bot that never re-enrolled (down AND unsupervised) is in
-#     reconcile-fleet.sh no bucket, so orphan/missing read (none) while it is
-#     dead. _mfs_not_healthy requires the positive (present in healthy:).
+#     neither orphan nor missing, so both read (none) while it is dead.
+#     _mfs_not_healthy requires the positive (present in healthy:).
 #   * false-RED — bots boot serially behind a per-bot boot-lock, so one
 #     zero-settle reconcile sees the tail as session-absent. Poll up to
 #     MFS_VERIFY_TIMEOUT_S (default 180) before declaring failure.
