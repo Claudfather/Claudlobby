@@ -174,7 +174,11 @@ per_bot_summary | tee -a "$LOG" || true
 # --- Alert --------------------------------------------------------------------
 
 if [ "$AVAIL_MB" -lt "$RESERVE_MB" ]; then
-    ALERT_MSG="available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) on $(hostname) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. Consider stopping idle bots."
+    # Name the door: "stopping" a bot does not distinguish a stop (stays
+    # enrolled, keepalive revives it) from a spin-down (supervision removed,
+    # nothing revives it). Kept to one clause — this string is also sent into
+    # the manager bot's pane and to Telegram on every fire.
+    ALERT_MSG="available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) on $(hostname) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. To free RAM, STOP an idle bot (systemctl --user stop <unit>) — it stays enrolled and keepalive walks it back up; do not spin it down."
     echo "$TS ALERT — $ALERT_MSG" | tee -a "$LOG"
     # Shared signal path (fleet event + manager tmux nudge + Telegram):
     # delivery works fleet-less (host job) via the cross-fleet fallback.

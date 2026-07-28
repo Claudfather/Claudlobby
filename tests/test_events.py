@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from claudlobby.commands.events import CRITICAL_TYPES, collect_events, format_event_table
+from claudlobby.commands.events import (
+    CRITICAL_TYPES,
+    collect_events,
+    format_event_table,
+)
 
 
 @pytest.fixture
@@ -91,7 +95,9 @@ class TestCollectEvents:
         assert "session_missing" in types
         assert "service_down" in types
 
-    def test_filter_critical_only_includes_bridge_and_lifecycle_failures(self, tmp_path):
+    def test_filter_critical_only_includes_bridge_and_lifecycle_failures(
+        self, tmp_path
+    ):
         """bridge_down/reload_failed/restart_failed are emit_failure_alert events —
         operator-actionable, so they must surface under --critical like service_down."""
         bot_dir = tmp_path / "alpha"
@@ -100,7 +106,15 @@ class TestCollectEvents:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         events_file = events / f"fleet-{today}.jsonl"
         lines = [
-            json.dumps({"ts": "2026-07-06T10:00:00-04:00", "bot": "alpha", "type": t, "source": "s", "data": {}})
+            json.dumps(
+                {
+                    "ts": "2026-07-06T10:00:00-04:00",
+                    "bot": "alpha",
+                    "type": t,
+                    "source": "s",
+                    "data": {},
+                }
+            )
             for t in ("bridge_down", "reload_failed", "restart_failed", "send_miss")
         ]
         events_file.write_text("\n".join(lines) + "\n")
@@ -138,6 +152,67 @@ class TestCollectEvents:
         bots = tmp_path / "bots"
         bots.mkdir()
         assert collect_events(bots) == []
+
+
+@pytest.fixture
+def fleet_ledger(tmp_path):
+    """A fleet-level ledger at <root>/state/events, alongside the bots dir."""
+    ledger = tmp_path / "state" / "events"
+    ledger.mkdir(parents=True)
+    (ledger / "fleet-2026-06-10.jsonl").write_text(
+        "\n".join(
+            json.dumps(ev)
+            for ev in (
+                {
+                    "ts": "2026-06-10T09:00:00-04:00",
+                    "bot": "alpha",
+                    "type": "bot_teardown_started",
+                    "source": "spin-down",
+                    "data": {"action": "spin-down --purge", "actor": "clog"},
+                },
+                {
+                    "ts": "2026-06-10T09:30:00-04:00",
+                    "bot": "fleet",
+                    "type": "reload_failed",
+                    "source": "reload",
+                    "data": {},
+                },
+            )
+        )
+        + "\n"
+    )
+    return ledger
+
+
+class TestFleetLedger:
+    """Events that outlive — or never had — a bot dir live in the fleet ledger.
+
+    Reading only per-bot dirs makes them write-only in practice: a spin-down
+    receipt exists precisely to survive the directory it documents, so a reader
+    blind to that ledger cannot show the one record it was written for.
+    """
+
+    def test_fleet_events_are_collected(self, events_dir, fleet_ledger):
+        events = collect_events(events_dir, fleet_events_dir=fleet_ledger)
+        assert len(events) == 6  # 4 per-bot + 2 fleet-level
+
+    def test_fleet_events_honour_type_filter(self, events_dir, fleet_ledger):
+        events = collect_events(
+            events_dir, event_type="reload_failed", fleet_events_dir=fleet_ledger
+        )
+        assert len(events) == 1
+        assert events[0]["type"] == "reload_failed"
+
+    def test_bot_filter_applies_to_the_shared_ledger(self, events_dir, fleet_ledger):
+        # Per-bot rows are filtered by directory; fleet rows share one file, so
+        # --bot has to key on the field or it would leak other bots' events.
+        events = collect_events(events_dir, bot="alpha", fleet_events_dir=fleet_ledger)
+        assert {e["bot"] for e in events} == {"alpha"}
+        assert any(e["type"] == "bot_teardown_started" for e in events)
+
+    def test_absent_ledger_is_harmless(self, events_dir, tmp_path):
+        events = collect_events(events_dir, fleet_events_dir=tmp_path / "nope")
+        assert len(events) == 4
 
 
 class TestFormatEventTable:
