@@ -96,6 +96,22 @@ defaults:
       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
     PostToolUse:
       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+    # Ingestion layer for the ai-platform fleet-monitor (#785 Phase A): distil
+    # each finished session into one structured JSONL row via a cheap Haiku
+    # pass, so the monitor reasons over per-session digests and never over raw
+    # transcripts (a real transcript is ~19 MB / ~5M tokens and cannot enter a
+    # 200K context at all). Bounded by a qualifying gate + tail-cap; a session
+    # below the gate still gets a row, written without a model call.
+    #
+    # COMPOSED DORMANT. This entry lands in every bot on every fleet, but the
+    # script exits immediately unless the fleet sets SESSION_DIGEST_ENABLED=1 in
+    # its fleet.yaml `env:`. That keeps the rollout per-fleet: generate composes
+    # it everywhere harmlessly, and fleets are armed one at a time with their
+    # Haiku spend watched between. Default-on would have fired across the whole
+    # estate at the next generate or daily reload.
+    SessionEnd:
+      - command: "$CLAUDLOBBY_ROOT/lib/transcript-digest.sh"
+        timeout: 150
 
   observability:
     pulse_interval: 300
