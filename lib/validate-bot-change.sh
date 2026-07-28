@@ -441,24 +441,24 @@ _heal_conf 0 y   # token present, dark poller -> no_bridge (gate in bot.conf is 
 
 # Sanity: token resolves + poller absent classifies no_bridge (not no_token/no_handle).
 [ "$(bridge_state "$HDIR" 2>/dev/null || true)" = "no_bridge" ] && r=yes || r=no
-check "heal-honesty fixture classifies no_bridge (token set, poller absent)" "$r"
+harness_check "heal-honesty fixture classifies no_bridge (token set, poller absent)" "$r"
 
 # --- Gate OFF (fleet default): the alert must NOT promise a heal that never runs ---
 bhv="$(CLAUDLOBBY_ROOT="$ROOT" OBSERVABILITY_BRIDGE_HEAL=0 \
     bridge_bringup_verify "$HDIR" "$(dirname "$HDIR")" 0 2>/dev/null || true)"
 [ "$bhv" = "missing:no_bridge" ] && r=yes || r=no
-check "gate-off bring-up verdict is missing:no_bridge (unchanged)" "$r"
+harness_check "gate-off bring-up verdict is missing:no_bridge (unchanged)" "$r"
 bhoff="$(grep -h 'valheal Telegram bridge down at bring-up' "$NTEV"/fleet-*.jsonl 2>/dev/null | tail -n1 || true)"
 printf '%s' "$bhoff" | grep -q 'dark until restart' && r=yes || r=no
-check "gate-off alert states inbound dark until restart (honest, mirrors no_token)" "$r"
+harness_check "gate-off alert states inbound dark until restart (honest, mirrors no_token)" "$r"
 printf '%s' "$bhoff" | grep -q 'keepalive will heal' && r=no || r=yes
-check "gate-off alert drops the false 'keepalive will heal' promise" "$r"
+harness_check "gate-off alert drops the false 'keepalive will heal' promise" "$r"
 
 # --- Gate ON: the alert states a bounce (full claude restart), not a respawn ---
 CLAUDLOBBY_ROOT="$ROOT" OBSERVABILITY_BRIDGE_HEAL=1 \
     bridge_bringup_verify "$HDIR" "$(dirname "$HDIR")" 0 >/dev/null 2>&1 || true
 grep -hq 'valheal Telegram bridge down at bring-up.*bounce' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=yes || r=no
-check "gate-on alert states keepalive will bounce to recover" "$r"
+harness_check "gate-on alert states keepalive will bounce to recover" "$r"
 
 # ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
