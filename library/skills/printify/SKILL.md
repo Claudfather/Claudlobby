@@ -75,7 +75,7 @@ S="$BOT_DIR/.claude/skills/printify/printify_api.sh"
 # reads
 "$S" status                         # is Printify really connected, and to which shop?
 "$S" products 20                    # catalog overview with description lengths
-"$S" product 69694f04bcd93d95c7022330 | jq -r .description   # the full PDP copy
+"$S" product aaaaaaaaaaaaaaaaaaaaaaaa | jq -r .description   # the full PDP copy
 "$S" orders 10                      # recent order pipeline (no PII)
 
 # writes — always dry-run first (prints the exact request, sends nothing)
