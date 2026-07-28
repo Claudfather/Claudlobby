@@ -198,7 +198,7 @@ launchctl kickstart -k gui/$(id -u)/com.example.claudlobby.lead  # macOS
 
 Skill edits in `library/skills/` are picked up live (symlinks) — no regen required, just `/compact` or restart the bot to clear its cache.
 
-Use `claudlobby diff` to check for drift between generated output and what's in the runtime directory. Use `lib/reconcile-fleet.sh <fleet>` to audit fleet supervision state (healthy, orphan, missing, unbound).
+Use `claudlobby diff` to check for drift between generated output and what's in the runtime directory. Use `lib/reconcile-fleet.sh <fleet>` to audit fleet supervision state (healthy, orphan, missing, unsupervised-down, unbound).
 
 ## Troubleshooting
 

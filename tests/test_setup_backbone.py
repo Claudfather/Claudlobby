@@ -100,6 +100,13 @@ class Harness:
             'for a in "$@"; do [ "$prev" = "-t" ] && session="$a"; prev="$a"; done\n'
             'grep -qx "$session" "$TMUX_HEALTHY" 2>/dev/null\n',
         )
+        # reconcile-fleet's missing-bot diagnostics shell out to journalctl.
+        # Unstubbed it reads the HOST journal — unbounded, and a hole in this
+        # harness's no-host-state contract.
+        _write_exec(
+            self.bin / "journalctl",
+            '#!/bin/bash\necho "journalctl $*" >> "$STUB_LOG"\nexit 0\n',
+        )
         # claudlobby: logs its invocation so warm-cache ordering is assertable.
         _write_exec(
             self.bin / "claudlobby",
@@ -449,6 +456,57 @@ class TestReconcileJobDrift:
         assert r.returncode == 0, r.stdout + r.stderr
         drift_line = next(line for line in r.stdout.splitlines() if "job-drift" in line)
         assert "(none)" in drift_line
+
+
+class TestReconcileBuckets:
+    """Every bot declared in fleet.yaml must land in exactly one bucket.
+
+    The classifier had three arms and no else, so the fourth cell of the
+    tmux x unit matrix — no session AND no unit — matched nothing and was
+    reported nowhere: present in the loop, absent from the output.
+    """
+
+    # Bucket a bot declared in fleet.yaml can land in -> its cell of the
+    # matrix. unbound holds sessions matching no fleet.yaml, and job-drift
+    # holds timer units, so neither can hold a declared bot.
+    MATRIX = {
+        "healthy": dict(healthy=True, unit=True),
+        "orphan": dict(healthy=True, unit=False),
+        "missing": dict(healthy=False, unit=True),
+        "unsupervised-down": dict(healthy=False, unit=False),
+    }
+
+    def _bucket(self, stdout, label):
+        # "  <glyph> <label>: a b c   <- hint" -> ["a", "b", "c"]. Keyed on the
+        # full "<label>:" so the diagnostics block printed below the report
+        # (also indented, also colon-bearing) can never match.
+        line = next(ln for ln in stdout.splitlines() if f"{label}:" in ln)
+        names = line.split(f"{label}:", 1)[1].split("←")[0].split()
+        return [] if names == ["(none)"] else names
+
+    def test_each_matrix_cell_lands_in_its_own_bucket(self, h):
+        h.use_real_reconcile()
+        f = h.fleet("f1", bots=tuple(self.MATRIX))
+        for bucket, state in self.MATRIX.items():
+            h.bot(f, bucket, **state)
+        r = h.run(str(h.root / "lib" / "reconcile-fleet.sh"), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        # Each bot is named for the bucket it belongs in, so this asserts both
+        # correct placement and — because every declared bot must appear —
+        # that no cell falls through to no bucket at all.
+        assert {b: self._bucket(r.stdout, b) for b in self.MATRIX} == {
+            b: [b] for b in self.MATRIX
+        }, f"a defined bot was reported in the wrong bucket, or in none: {r.stdout}"
+
+    def test_unsupervised_down_reads_none_when_empty(self, h):
+        # The bucket must print unconditionally — an operator scanning the
+        # report needs "(none)" to mean checked-and-clear, not omitted.
+        h.use_real_reconcile()
+        f = h.fleet("f1", bots=("hb",))
+        h.bot(f, "hb", healthy=True, unit=True)
+        r = h.run(str(h.root / "lib" / "reconcile-fleet.sh"), "f1")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert self._bucket(r.stdout, "unsupervised-down") == []
 
 
 class TestLegacyKeepaliveSwap:
