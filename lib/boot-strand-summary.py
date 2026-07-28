@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from math import comb
 
 # The #843 pre-fix baseline: 2 strands in 4 deliberately tracked restarts
@@ -35,7 +36,9 @@ def _binom_cdf(k: int, n: int, p: float) -> float:
     return sum(comb(n, i) * p**i * (1.0 - p) ** (n - i) for i in range(0, k + 1))
 
 
-def _bisect(f, lo: float, hi: float, iters: int = 200) -> float:
+def _bisect(f, lo: float, hi: float, iters: int = 60) -> float:
+    # 60 iterations reaches the float64 fixed point on [0,1] (measured 53-62
+    # for the k/n shapes this module sees); more is pure no-op.
     for _ in range(iters):
         mid = (lo + hi) / 2.0
         if f(mid):
@@ -63,30 +66,24 @@ def cp_interval(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
     return (lower, upper)
 
 
-def fisher_one_sided(k1: int, n1: int, k2: int, n2: int) -> float:
-    """P(second group has >= k2 successes | margins) — conditional exact test.
-
-    Illustrative only at these sizes: with the baseline at n=4 the test has
-    almost no power and its p-value must not be read as a verdict.
-    """
-    total_k = k1 + k2
-    total_n = n1 + n2
-    denom = comb(total_n, total_k)
-    p = 0.0
-    for x in range(k2, min(n2, total_k) + 1):
-        if total_k - x <= n1:
-            p += comb(n2, x) * comb(n1, total_k - x) / denom
-    return min(p, 1.0)
-
-
 def load_rows(path: str) -> list[dict]:
+    # Per-line decode guard (dispatch-overdue._load_jsonl shape): a run killed
+    # mid-append leaves a truncated last line, and one bad row must cost one
+    # row, not the whole sample.
     rows = []
     try:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    print(
+                        f"boot-strand-summary: skipping undecodable row: {line[:80]}",
+                        file=sys.stderr,
+                    )
     except OSError as exc:
         print(f"boot-strand-summary: cannot read {path}: {exc}", file=sys.stderr)
     return rows
@@ -122,7 +119,6 @@ def summarize(rows: list[dict]) -> tuple[str, int]:
 
     lo, hi = cp_interval(k, valid)
     blo, bhi = cp_interval(BASELINE_STRANDS, BASELINE_N)
-    p = fisher_one_sided(k, valid, BASELINE_STRANDS, BASELINE_N)
     submits = [r.get("t_submit_s") for r in clean if r.get("t_submit_s") is not None]
 
     out.append("")
@@ -169,11 +165,19 @@ def summarize(rows: list[dict]) -> tuple[str, int]:
             f"input-box draw time (t_glyph): min {gt[0]}s, median {gt[len(gt) // 2]}s, max {gt[-1]}s"
             " (production injects at poller-READY = 3-9s)"
         )
+    # The parity ledger, surfaced (header §3: parity is evidenced, not
+    # asserted): one histogram line per distinct per-boot process tree.
+    par = Counter(
+        (r.get("parity_procs") or "").strip()
+        for r in sample
+        if (r.get("parity_procs") or "").strip()
+    )
+    for tree, count in par.most_common():
+        out.append(f"per-boot process tree x{count}: {tree}")
     out.append("")
     out.append(
         f"pre-fix baseline (#843): {BASELINE_STRANDS}/{BASELINE_N} = {BASELINE_STRANDS / BASELINE_N:.2f}   95% CI [{blo:.3f}, {bhi:.3f}]"
     )
-    out.append(f"fisher exact (one-sided, illustrative): p = {p:.4f}")
     out.append("")
     out.append("READ HONESTLY: the baseline is n=4, so the pre-fix rate is itself only")
     out.append(

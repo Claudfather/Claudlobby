@@ -14,36 +14,18 @@ as a pass.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from tests.conftest import realboot_skip_reason
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "lib" / "freshbox-boot-gate.sh"
-HOST_CREDS = Path.home() / ".claude" / ".credentials.json"
 
-_OPT_IN = os.environ.get("FRESHBOX_REALBOOT") == "1"
-_missing = [
-    name
-    for name, present in (
-        ("claude", shutil.which("claude") is not None),
-        ("jq", shutil.which("jq") is not None),
-        # L2: the gate now wires a vault-wired bot and asserts the injected recall
-        # brief, so the engine CLI must be on PATH for its SessionStart hook.
-        ("claudron", shutil.which("claudron") is not None),
-        ("auth ~/.claude/.credentials.json", HOST_CREDS.is_file()),
-    )
-    if not present
-]
-
-if not _OPT_IN:
-    _skip_reason = "gated job — set FRESHBOX_REALBOOT=1 to run the real-boot gate"
-elif _missing:
-    _skip_reason = f"real-boot gate needs: {', '.join(_missing)}"
-else:
-    _skip_reason = ""
+# Shared real-boot dep contract (claude, jq, claudron, host auth) lives in
+# conftest.realboot_skip_reason so it cannot drift between harness wrappers.
+_skip_reason = realboot_skip_reason("FRESHBOX_REALBOOT")
 
 
 @pytest.mark.skipif(bool(_skip_reason), reason=_skip_reason)

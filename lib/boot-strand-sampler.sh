@@ -38,12 +38,14 @@
 #      startup.logs). STARTUP_PROMPT is therefore injected EARLIER into a
 #      COLDER TUI than production — at least as hard on the send race under
 #      test, so a strand-free sample is not explained by an easier condition.
-#      The poller's own network phase is the one boot component not sampled.
+#      The poller's own network phase is the one boot component not sampled,
+#      and a tokenless bridge does not persist as a live process.
 #   2. SERIAL BOOTS. Production strands were observed on one-at-a-time
 #      restarts, which this reproduces; the mass-restart contention path
 #      (BOOT_LOCK held by peers) is not sampled.
 #   3. The per-boot process ledger (parity_procs: every descendant of the pane)
-#      is recorded so parity is EVIDENCED per boot, not asserted.
+#      is recorded so parity is EVIDENCED per boot, not asserted — the summary
+#      prints the tree histogram.
 #
 # Summary statistics (lib/boot-strand-summary.py, stdlib-only): exact
 # Clopper–Pearson 95% interval on the strand rate, printed next to the pre-fix
@@ -104,9 +106,15 @@ usage() {
 # list_descendants <root_pid> — "pid comm" lines for every live descendant.
 # One ps pass + an awk closure walk: kill/parity logic must see the WHOLE tree
 # (MCP servers are grandchildren via shims), and ppid==direct-child misses them.
+# comm is rejoined from field 3 to NF and basenamed — macOS ps reports a full
+# path that may contain spaces (the orphan-browser-reaper precedent).
 list_descendants() {
     ps -e -ww -o pid=,ppid=,comm= | awk -v root="$1" '
-        { pid[NR] = $1; ppid[NR] = $2; comm[NR] = $3 }
+        {
+            pid[NR] = $1; ppid[NR] = $2
+            c = $3; for (j = 4; j <= NF; j++) c = c " " $j
+            sub(/.*\//, "", c); comm[NR] = c
+        }
         END {
             found[root] = 1; changed = 1
             while (changed) {
@@ -126,28 +134,29 @@ list_descendants() {
 # rc 0 iff a session transcript newer than the boot marker holds a USER-role
 # record containing <marker> — the prompt was genuinely submitted. Assistant
 # records are excluded so a model echo of the marker can never count.
+# Glob + builtin -nt, not find(1): this runs every poll tick, and fork churn
+# during the boot under measurement is the perturbation lib-common warns about.
+# The jq re-parse per tick is an accepted O(file-size x ticks) bound — offset
+# bookkeeping is not worth it under a deadline-bounded loop.
 submitted_evidence() {
     local cfg="$1" newer="$2" marker="$3" f hit=""
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
+    for f in "$cfg"/projects/*/*.jsonl; do
+        [ -f "$f" ] && [ "$f" -nt "$newer" ] || continue
         grep -q -- "$marker" "$f" 2>/dev/null || continue
         hit="$(jq -rc --arg m "$marker" \
             'select(.type=="user") | (.message.content | tostring) | select(contains($m)) | "hit"' \
             "$f" 2>/dev/null | head -1)" || true
         [ "$hit" = "hit" ] && return 0
-    done < <(find "$cfg/projects" -name '*.jsonl' -newer "$newer" 2>/dev/null)
+    done
     return 1
 }
 
-# final_verdict <submitted 0|1> <pane_text> <probe>
-# The outcome precedence in one testable place: submission evidence is decisive
-# (a transcript echo of the probe in the pane must not override it); otherwise
-# the #837 unsubmitted-payload judgment; otherwise other.
+# final_verdict <pane_text> <probe> — the no-submission-evidence outcomes.
+# Reached only after the classification loop found no submitted record (the
+# clean verdict is decided there, by transcript ground truth): the #837
+# unsubmitted-payload judgment maps to strand, anything else to other.
 final_verdict() {
-    local submitted="$1" pane="$2" probe="$3"
-    if [ "$submitted" = "1" ]; then
-        printf 'clean'
-    elif pane_holds_unsubmitted "$pane" "$probe"; then
+    if pane_holds_unsubmitted "$1" "$2"; then
         printf 'strand'
     else
         printf 'other:no_evidence'
@@ -161,16 +170,29 @@ mem_available_mb() {
     return 0
 }
 
-# run_start_bot <root> <bot_dir> — start-bot under a CONSTRUCTED child env
-# (#846: built from nothing, never inherit-and-subtract). Production start-bot
-# runs under systemd with a clean environment; a bot-session caller instead
-# carries its OWN exported TELEGRAM_BOT_TOKEN + TELEGRAM_TOKEN_ENV_NAME, and
-# inherited they make the probe resolve a PRODUCTION token — the readiness
-# gate then waits the full ceiling for a poller that must never exist, and the
-# probe bridge could steal a live bot's getUpdates (caught live on this
-# sampler's first smoke run). PATH is the one deliberate inheritance (host
-# tools); everything else the boot needs comes from bot.conf and the .env
-# tiers, exactly as production sources them.
+# count_send_retries <bot_dir> — send_retry rows across the bot's event ledgers.
+count_send_retries() {
+    local files=("$1"/data/events/*.jsonl)
+    if [ -f "${files[0]}" ]; then
+        awk '/"type":"send_retry"/ { n++ } END { print n + 0 }' "${files[@]}"
+    else
+        printf '0'
+    fi
+    return 0
+}
+
+# run_start_bot <timeout_s> <root> <bot_dir> — start-bot under a CONSTRUCTED
+# child env: built from an explicit base, never inherit-and-subtract (the #846
+# principle; a shared lib-common seam for the estate's six hand-rolled copies
+# is a named follow-up). Production start-bot runs under systemd with a clean
+# environment; a bot-session caller instead carries its OWN exported
+# TELEGRAM_BOT_TOKEN + TELEGRAM_TOKEN_ENV_NAME, and inherited they make the
+# probe resolve a PRODUCTION token — the readiness gate then waits the full
+# ceiling for a poller that must never exist, and the probe bridge could steal
+# a live bot's getUpdates (caught live on this sampler's first smoke run).
+# PATH is the one deliberate inheritance (host tools); everything else the boot
+# needs comes from bot.conf and the .env tiers, exactly as production sources
+# them.
 run_start_bot() {
     local timeout_s="$1" root="$2" bot_dir="$3"
     # timeout wraps env(1), a real command — with_timeout cannot exec a shell
@@ -209,7 +231,11 @@ main() {
     [ -f "$HOST_CREDS" ] || { printf 'SKIP: no host auth at %s to seed\n' "$HOST_CREDS"; exit 2; }
     [ -n "$_TIMEOUT_BIN" ] || { printf 'SKIP: no timeout(1)/gtimeout to bound boots\n'; exit 2; }
     local mem; mem="$(mem_available_mb)"
-    if [ -n "$mem" ] && [ "$mem" -lt "$MEM_FLOOR_MB" ]; then
+    if [ -z "$mem" ]; then
+        # No /proc/meminfo (macOS): the floor cannot be enforced. Disclose
+        # rather than silently proceed as if it were.
+        printf 'NOTE: memory-floor check unavailable on this host (no /proc/meminfo) — proceeding unguarded\n'
+    elif [ "$mem" -lt "$MEM_FLOOR_MB" ]; then
         printf 'SKIP: MemAvailable %sMB below floor %sMB — a starved host risks the live fleet and biases readiness timing\n' \
             "$mem" "$MEM_FLOOR_MB"; exit 2
     fi
@@ -301,7 +327,7 @@ YAML
     harness_check "composer pinned CLAUDE_CONFIG_DIR at the throwaway dir" \
         "$([ "$(bot_conf_get "$BOT_DIR" CLAUDE_CONFIG_DIR "")" = "$CONFIG_DIR" ] && echo yes || echo no)"
     harness_check "composed CLAUDE_FLAGS carry --channels (telegram plugin will spawn)" \
-        "$(grep -q -- '--channels' "$BOT_DIR/bot.conf" && echo yes || echo no)"
+        "$(bot_conf_get "$BOT_DIR" CLAUDE_FLAGS "" | grep -q -- '--channels' && echo yes || echo no)"
     harness_check "composed STARTUP_PROMPT carries the probe marker" \
         "$(bot_conf_get "$BOT_DIR" STARTUP_PROMPT "" | grep -qF "$MARKER" && echo yes || echo no)"
     harness_check "probe declares EXPECT_NO_TOKEN=1 (tokenless canary, no readiness burn)" \
@@ -320,20 +346,16 @@ YAML
     probe_tmux_tmpdir="$(bot_conf_get "$BOT_DIR" TMUX_TMPDIR "")"
     [ -n "$probe_tmux_tmpdir" ] && export TMUX_TMPDIR="$probe_tmux_tmpdir"
     STARTUP_PROMPT_COMPOSED="$(bot_conf_get "$BOT_DIR" STARTUP_PROMPT "")"
-    # The EXACT probe pane_send_verified uses: first _PANE_PROBE_MAX_CHARS of
-    # the sent text, which start-bot prefixes with the history-expansion guard.
-    PROBE="$(printf '%s' "set +H; $STARTUP_PROMPT_COMPOSED" | cut -c1-"${_PANE_PROBE_MAX_CHARS:-60}")"
+    # The EXACT probe pane_send_verified uses: first _PANE_PROBE_MAX_CHARS
+    # (sourced from lib-common) of the sent text, which start-bot.sh:366
+    # prefixes with the history-expansion guard. COUPLING: this must mirror
+    # start-bot's payload construction; if that prefix changes, stranded boots
+    # reclassify as other:no_evidence (loudly counted, never silently clean) —
+    # a pane_send_probe SSOT beside pane_send_verified is a named follow-up.
+    PROBE="$(printf '%s' "set +H; $STARTUP_PROMPT_COMPOSED" | cut -c1-"$_PANE_PROBE_MAX_CHARS")"
 
     # ── seed the persistent throwaway config dir (warm ≈ a production restart) ─
-    cp "$HOST_CREDS" "$CONFIG_DIR/.credentials.json"
-    chmod 600 "$CONFIG_DIR/.credentials.json"
-    local ver
-    ver="$("$CLAUDE_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)" || true
-    jq -n --arg cwd "$BOT_DIR" --arg ver "${ver:-0.0.0}" '{
-        hasCompletedOnboarding: true,
-        lastOnboardingVersion: $ver,
-        projects: { ($cwd): { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true } }
-    }' > "$CONFIG_DIR/.claude.json"
+    seed_claude_auth_and_trust "$CONFIG_DIR" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS"
     # Warm plugin copy from the host cache: production bots restart onto
     # installed plugins, so a cold marketplace clone per boot would sample a
     # different (slower) condition — and versions match production exactly.
@@ -351,8 +373,8 @@ YAML
         "$BOOTS" "$DEADLINE" "$POLL_S" "$SOCKET"
 
     # ── boot loop ─────────────────────────────────────────────────────────────
-    local i=0 kind session outcome t0 t_startbot t_submit rc pane pids
-    local events_before events_after retry_fired parity ready_variant boot_art
+    local i=0 kind session outcome t_startbot t_submit rc pane pids p
+    local events_before events_after="" retry_fired parity boot_art
     local glyph_at_inject t_glyph
     session="$(tmux_session_name "$BOT_DIR")"
     while [ "$i" -le "$BOOTS" ]; do
@@ -364,50 +386,55 @@ YAML
         # would flip the next boot onto the RESUME path and change the condition
         # mid-sample.
         rm -f "$BOT_DIR/.claude/session.md" 2>/dev/null || true
-        events_before="$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"type":"send_retry"' || true)"
+        outcome=""; t_submit=""; pane=""; pids=""; glyph_at_inject=""; t_glyph=""
+        # Carry the ledger count forward — boot i's "before" is boot i-1's
+        # "after"; only the first boot scans cold.
+        events_before="${events_after:-"$(count_send_retries "$BOT_DIR")"}"
         touch "$ROOT/.boot-marker"
-        sleep 1  # -newer needs the marker strictly older than new transcripts
+        sleep 1  # -nt needs the marker strictly older than new transcripts
 
-        t0="$(date +%s)"
         rc=0
+        SECONDS=0
         run_start_bot $((DEADLINE + 120)) "$ROOT" "$BOT_DIR" >> "$LOG" 2>&1 || rc=$?
-        t_startbot=$(( $(date +%s) - t0 ))
+        t_startbot="$SECONDS"
 
-        outcome=""
-        t_submit=""
-        pane=""
-        pids=""
-        # Pane state the moment injection finished: was the input box even
-        # drawn? pane_send_verified treats a glyph-less pane as "nothing stuck"
-        # (its verify cannot fire before the box exists), so this field is what
-        # lets the sample resolve WHERE strands live — it conditions the rate
-        # on TUI-drawn-at-inject, the readiness-tracking hypothesis in #843.
-        glyph_at_inject=""
-        if [ "$rc" -eq 0 ]; then
-            pane="$(bot_tmux "$SOCKET" capture-pane -t "$session" -p 2>/dev/null || true)"
-            printf '%s\n' "$pane" > "$boot_art/pane-at-inject.txt"
-            if [ -n "$(pane_input_region "$pane")" ]; then glyph_at_inject=1; else glyph_at_inject=0; fi
-        fi
-        t_glyph=""
         if [ "$rc" -ne 0 ]; then
             outcome="other:startbot_rc_$rc"
         else
+            # Pane state the moment injection finished: was the input box even
+            # drawn? pane_send_verified treats a glyph-less pane as "nothing
+            # stuck" (its verify cannot fire before the box exists), so this
+            # field is what lets the sample resolve WHERE strands live — it
+            # conditions the rate on TUI-drawn-at-inject, the #843
+            # readiness-tracking hypothesis.
+            pane="$(bot_tmux "$SOCKET" capture-pane -t "$session" -p 2>/dev/null || true)"
+            printf '%s\n' "$pane" > "$boot_art/pane-at-inject.txt"
+            if [ -n "$(pane_input_region "$pane")" ]; then
+                glyph_at_inject=1
+                # Box existed by injection-return: t_glyph is left-censored at
+                # t_startbot (the draw happened at or before it), so the loop's
+                # glyph poll handles only the not-yet-drawn population.
+                t_glyph="$t_startbot"
+            else
+                glyph_at_inject=0
+            fi
             # Classification poll: submission evidence decides immediately; the
             # pane is consulted per tick only until the first prompt glyph
             # appears (t_glyph — when the TUI actually drew its input box,
             # measured against the 3-9s production injection window), then only
-            # at the deadline.
-            while [ $(( $(date +%s) - t0 )) -lt "$DEADLINE" ]; do
-                if ! bot_tmux "$SOCKET" has-session -t "$session" 2>/dev/null; then
+            # at the deadline. SECONDS (bash builtin, still counting from the
+            # pre-boot reset) replaces per-tick date(1) forks.
+            while [ "$SECONDS" -lt "$DEADLINE" ]; do
+                if ! check_tmux_session "$session" "$SOCKET"; then
                     outcome="other:session_died"
                     break
                 fi
                 if [ -z "$t_glyph" ]; then
                     pane="$(bot_tmux "$SOCKET" capture-pane -t "$session" -p 2>/dev/null || true)"
-                    [ -n "$(pane_input_region "$pane")" ] && t_glyph=$(( $(date +%s) - t0 ))
+                    [ -n "$(pane_input_region "$pane")" ] && t_glyph="$SECONDS"
                 fi
                 if submitted_evidence "$CONFIG_DIR" "$ROOT/.boot-marker" "$MARKER"; then
-                    t_submit=$(( $(date +%s) - t0 ))
+                    t_submit="$SECONDS"
                     outcome="clean"
                     break
                 fi
@@ -418,47 +445,42 @@ YAML
             pane="$(bot_tmux "$SOCKET" capture-pane -t "$session" -p 2>/dev/null || true)"
             printf '%s\n' "$pane" > "$boot_art/pane.txt"
             if [ -z "$outcome" ]; then
-                outcome="$(final_verdict 0 "$pane" "$PROBE")"
+                outcome="$(final_verdict "$pane" "$PROBE")"
             fi
         fi
 
-        # Per-boot evidence beyond the verdict: did the #837 retry fire, which
-        # READY variant gated injection, and the live process tree (parity).
-        events_after="$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"type":"send_retry"' || true)"
+        # Per-boot evidence beyond the verdict: did the #837 retry fire, and
+        # the live process tree (parity). startup.log detail lives in the tail
+        # artifact rather than a row field.
+        events_after="$(count_send_retries "$BOT_DIR")"
         retry_fired=$(( ${events_after:-0} - ${events_before:-0} ))
-        ready_variant="$(grep -E 'READY|TIMEOUT' "$BOT_DIR/logs/startup.log" 2>/dev/null | tail -1 | cut -d' ' -f2- | cut -c1-70 || true)"
-        parity="$(awk '{ print $2 }' "$boot_art/procs.txt" 2>/dev/null | sort | uniq -c | awk '{ printf "%s:%s ", $2, $1 }')" || true
+        parity="$(awk '{ $1 = ""; sub(/^ /, ""); print }' "$boot_art/procs.txt" 2>/dev/null | sort | uniq -c | awk '{ c = $1; $1 = ""; sub(/^ /, ""); printf "%s:%s ", $0, c }')" || true
         tail -40 "$BOT_DIR/logs/startup.log" > "$boot_art/startup.log.tail" 2>/dev/null || true
 
         jq -nc --arg i "$i" --arg kind "$kind" --arg outcome "$outcome" \
             --arg t_startbot "$t_startbot" --arg t_submit "${t_submit:-}" \
             --arg retry "$retry_fired" --arg parity "${parity:-}" \
-            --arg ready "${ready_variant:-}" --arg glyph "${glyph_at_inject:-}" \
-            --arg t_glyph "${t_glyph:-}" \
+            --arg glyph "${glyph_at_inject:-}" --arg t_glyph "${t_glyph:-}" \
             '{i: ($i|tonumber), kind: $kind, outcome: $outcome,
               t_startbot_s: ($t_startbot|tonumber),
               t_submit_s: (if $t_submit == "" then null else ($t_submit|tonumber) end),
               retry_fired: ($retry|tonumber), parity_procs: $parity,
-              ready_variant: $ready,
               glyph_at_inject: (if $glyph == "" then null else ($glyph|tonumber) end),
               t_glyph_s: (if $t_glyph == "" then null else ($t_glyph|tonumber) end)}' >> "$ROWS"
         printf 'boot %02d (%s): %s%s%s\n' "$i" "$kind" "$outcome" \
             "${t_submit:+ submit=${t_submit}s}" \
             "$([ "$retry_fired" -gt 0 ] && printf ' [send_retry fired]' || true)"
 
-        # Teardown: the private server first, then any survivors of the tree
-        # (MCP servers can outlive the pane; orphan-reaper lesson — kill the
-        # whole descendant tree, not the direct child).
+        # Teardown: kill-server takes the pane's tree; one liveness-gated KILL
+        # pass sweeps recorded survivors (MCP servers can outlive the pane).
+        # Gated on kill -0 so a recycled pid on this shared host is never hit
+        # (orphan-browser-reaper precedent); no TERM grace — the root is
+        # rm -rf'd at exit, there is nothing for a survivor to flush.
         bot_tmux "$SOCKET" kill-server 2>/dev/null || true
         sleep 1
         if [ -s "$boot_art/procs.txt" ]; then
-            local p
             while read -r p _; do
-                kill -TERM "$p" 2>/dev/null || true
-            done < "$boot_art/procs.txt"
-            sleep 1
-            while read -r p _; do
-                kill -KILL "$p" 2>/dev/null || true
+                kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null || true
             done < "$boot_art/procs.txt"
         fi
 

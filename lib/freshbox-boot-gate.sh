@@ -163,26 +163,10 @@ harness_check "composer emits an active CLAUDE_CONFIG_DIR at the fresh dir" \
 printf '%s\n' "$SENTINEL" > "$BOT_DIR/probe.txt"
 
 # --- the #645 Tier-B seam: seed auth + trust BEFORE first contact -------------
-seed_auth() {  # seed_auth <config_dir>
-  # The credential-file drop (#645 Fork F1) — self-refreshing, and it preserves
-  # native mcp__claude_ai_* connectors a strict scope would drop.
-  cp "$HOST_CREDS" "$1/.credentials.json"
-  chmod 600 "$1/.credentials.json"
-}
-seed_auth_and_trust() {  # seed_auth_and_trust <config_dir> <project_cwd>
-  local cfg="$1" cwd="$2" ver
-  seed_auth "$cfg"
-  # (2) trust + onboarding: without projects[cwd].hasTrustDialogAccepted the
-  #     composed settings.local.json allows are silently ignored, and a fresh
-  #     dir otherwise drops a headless boot into the interactive wizard.
-  ver="$("$CLAUDE_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-  jq -n --arg cwd "$cwd" --arg ver "${ver:-0.0.0}" '{
-    hasCompletedOnboarding: true,
-    lastOnboardingVersion: $ver,
-    projects: { ($cwd): { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true } }
-  }' > "$cfg/.claude.json"
-}
-seed_auth_and_trust "$CONFIG_DIR" "$BOT_DIR"
+# Shared with boot-strand-sampler.sh via lib-common (seed_claude_auth /
+# seed_claude_auth_and_trust) — the trust-JSON keyset is a Claude Code contract
+# that moves with the binary, and it must be fixed in one place, not per harness.
+seed_claude_auth_and_trust "$CONFIG_DIR" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS"
 
 # skip-flag isolation (rajan/#648): prove NO user-tier settings.json skip-flags
 # exist, so a clean completion below is attributable to the composed
@@ -321,7 +305,7 @@ harness_check "transcript tool-set ⊆ composed allow-list (used:${used_tools[*]
 MUT_DIR="$ROOT/fbconfig-notrust"
 MUT_OUT="$ROOT/boot-notrust.jsonl"
 mkdir -p "$MUT_DIR"
-seed_auth "$MUT_DIR"  # auth seeded, trust NOT seeded (no .claude.json).
+seed_claude_auth "$MUT_DIR" "$HOST_CREDS"  # auth seeded, trust NOT seeded (no .claude.json).
 boot "$MUT_DIR" "$MUT_OUT" || true
 notrust_advisory="no"; grep -qiE "$ADVISORY_RE" "$MUT_OUT" 2>/dev/null && notrust_advisory="yes"
 seeded_advisory="no"; grep -qiE "$ADVISORY_RE" "$TRANSCRIPT" 2>/dev/null && seeded_advisory="yes"

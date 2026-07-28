@@ -153,6 +153,37 @@ def load_lib_module(name: str):
     return mod
 
 
+def call_script_fn(script: Path, fn: str, *args: str) -> str:
+    """Source a bash script (guarded-main style) and call one of its functions,
+    returning stdout. Args travel as positionals so the shell never interprets
+    the values. Generalizes call_lib_fn to scripts beyond lib-common.sh."""
+    argv = ["bash", "-c", f'. "{script}"; {fn} "$@"', "_", *args]
+    r = subprocess.run(
+        argv, capture_output=True, text=True, env=dict(os.environ), timeout=30
+    )
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def realboot_skip_reason(opt_in_env: str, extra_bins: tuple[str, ...] = ()) -> str:
+    """Shared gate for the opt-in real-boot harness tests (freshbox idiom):
+    returns the pytest skip reason, or '' to run. Base deps are the real-boot
+    contract — claude binary, jq, claudron, host auth; extra_bins adds
+    harness-specific binaries. One home, so the dep contract cannot drift
+    between harness wrappers."""
+    import shutil
+
+    if os.environ.get(opt_in_env) != "1":
+        return f"gated — set {opt_in_env}=1 to run the real-boot harness"
+    missing = [
+        b for b in ("claude", "jq", "claudron", *extra_bins) if shutil.which(b) is None
+    ]
+    creds = Path.home() / ".claude" / ".credentials.json"
+    if not creds.is_file():
+        missing.append(f"auth {creds}")
+    return f"real-boot harness needs: {', '.join(missing)}" if missing else ""
+
+
 def write_jsonl(path: Path, rows: list) -> None:
     import json
 
