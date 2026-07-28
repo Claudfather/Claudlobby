@@ -34,6 +34,10 @@ fi
 # server (-L tmux-<name>), matching what the scripts resolve. The scripts call
 # "$_TMUX_BIN" in their own subprocesses, so this function never affects them.
 unset FLEET_NAME
+# Also drop an ambient CLAUDE_FLAGS: the fixture bot.confs deliberately omit it
+# (minimal composed-looking confs), so a dev's exported CLAUDE_FLAGS would leak
+# into the start-bot.sh boots and MASK a regression that CI (clean env) exposes.
+unset CLAUDE_FLAGS
 vsock() { printf 'tmux-%s' "$1"; }
 tmux() {
     local i sock=""
@@ -211,7 +215,12 @@ BOT_SERVICE=""
 MANAGER_TMUX="$MGR"
 CONF
 # Idle pane: last line ends in a prompt glyph '>' (matches the idle base pattern).
-tmux new-session -d -s "$IBOT" 'printf "\n> \n"; sleep 600'
+# Draw the prompt with chrome BELOW it, as Claude Code does — this is the pane
+# that exercises keepalive's send_reload_command, so a prompt-as-last-line shape
+# here would validate the reload path against a geometry production never has.
+# classify_pane captures the whole pane (not a tail), so idle detection is
+# unaffected by the extra lines.
+tmux new-session -d -s "$IBOT" 'printf -- "\n--------\n> \n--------\n\n  auto mode on\n"; sleep 600'
 sleep 1
 touch "$IBOT_DIR/data/.reload-pending"
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/keepalive.sh" "$IBOT_DIR" >/dev/null 2>&1 || true
@@ -427,6 +436,40 @@ harness_check "#608 canary is NOT actionably down for fleet-pulse (no pulse aler
 harness_check "#608 real bot IS actionably down (no_token) for fleet-pulse" "$r"
 
 # ===========================================================================
+# The no_bridge bring-up alert must tell the truth about auto-heal. keepalive's
+# _bridge_heal is gated OFF fleet-wide (OBSERVABILITY_BRIDGE_HEAL != 1), so an
+# alert that promises "keepalive will heal" lies whenever the gate is off — and
+# even when on, the poller is an MCP stdio child of claude, so the only lever is
+# a full bot bounce, never a gentle in-place respawn. Reuse the #453 dark-bridge
+# fixture (valheal: no bot.pid -> no_bridge) and drive the REAL
+# bridge_bringup_verify in both gate states — the verify reads the gate from the
+# env, so one fixture serves both. Assert the emitted alert text tracks reality.
+echo ""
+echo "=== validate bridge_down heal-honesty (OBSERVABILITY_BRIDGE_HEAL gates the wording) ==="
+_heal_conf 0 y   # token present, dark poller -> no_bridge (gate in bot.conf is inert here; verify reads the env)
+
+# Sanity: token resolves + poller absent classifies no_bridge (not no_token/no_handle).
+[ "$(bridge_state "$HDIR" 2>/dev/null || true)" = "no_bridge" ] && r=yes || r=no
+harness_check "heal-honesty fixture classifies no_bridge (token set, poller absent)" "$r"
+
+# --- Gate OFF (fleet default): the alert must NOT promise a heal that never runs ---
+bhv="$(CLAUDLOBBY_ROOT="$ROOT" OBSERVABILITY_BRIDGE_HEAL=0 \
+    bridge_bringup_verify "$HDIR" "$(dirname "$HDIR")" 0 2>/dev/null || true)"
+[ "$bhv" = "missing:no_bridge" ] && r=yes || r=no
+harness_check "gate-off bring-up verdict is missing:no_bridge (unchanged)" "$r"
+bhoff="$(grep -h 'valheal Telegram bridge down at bring-up' "$NTEV"/fleet-*.jsonl 2>/dev/null | tail -n1 || true)"
+printf '%s' "$bhoff" | grep -q 'dark until restart' && r=yes || r=no
+harness_check "gate-off alert states inbound dark until restart (honest, mirrors no_token)" "$r"
+printf '%s' "$bhoff" | grep -q 'keepalive will heal' && r=no || r=yes
+harness_check "gate-off alert drops the false 'keepalive will heal' promise" "$r"
+
+# --- Gate ON: the alert states a bounce (full claude restart), not a respawn ---
+CLAUDLOBBY_ROOT="$ROOT" OBSERVABILITY_BRIDGE_HEAL=1 \
+    bridge_bringup_verify "$HDIR" "$(dirname "$HDIR")" 0 >/dev/null 2>&1 || true
+grep -hq 'valheal Telegram bridge down at bring-up.*bounce' "$NTEV"/fleet-*.jsonl 2>/dev/null && r=yes || r=no
+harness_check "gate-on alert states keepalive will bounce to recover" "$r"
+
+# ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
 # navi's #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
 # nothing drove keepalive's real dead-session branch to prove it EMITS a line the
@@ -485,12 +528,22 @@ SUBMIT_LOG="$SBOT_DIR/submits.log"
 # Idle prompt so keepalive takes the reload branch; each read logs the submission,
 # then prints it and pushes it well above the bottom input line, so only a
 # genuinely-unsubmitted command is still at the prompt for the verify to match.
+#
+# The prompt is drawn inside a bordered box with footer lines BELOW it, because
+# that is where Claude Code puts it — the input line is never the last line of
+# the pane. A fixture that put the prompt last would let a verify that only ever
+# reads the last few lines pass here while never once reaching the input line in
+# production, which is exactly how the pre-#763 `tail -3` verify shipped dead.
 cat > "$SBOT_DIR/fixture.sh" <<FIX
 #!/bin/bash
-printf '> \n'
+draw_prompt() {
+    printf -- '--------\n> \n--------\n\n  auto mode on\n'
+}
+draw_prompt
 while IFS= read -r l; do
     printf '%s\n' "\$l" >> "$SUBMIT_LOG"
-    printf 'sent[%s]\n\n\n\n\n\n\n> \n' "\$l"
+    printf 'sent[%s]\n\n\n\n\n\n\n' "\$l"
+    draw_prompt
 done
 FIX
 tmux new-session -d -s "$SBOT" "bash '$SBOT_DIR/fixture.sh'"

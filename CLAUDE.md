@@ -79,7 +79,7 @@ Key lifecycle scripts in `lib/`:
 | `fleet-state-update.sh` | Atomic state/fleet-state.json updates with flock locking |
 | `workstream-update.sh` | Single-writer mutator for the per-fleet `workstreams.json` registry (open/progress/renew/block/close/prune); reads go through `claudlobby workstreams` |
 | `pre-stop-handoff.sh` | Graceful context handoff before service stop |
-| `lib-common.sh` | Shared helpers: OS detection, bot.conf loading, safe mktemp |
+| `lib-common.sh` | Shared helpers: OS detection, bot.conf loading, safe mktemp, and `pane_send_verified` — the ONE send-keys/settle/Enter/verify-retry primitive every keystroke injector routes through (#763). Its verify anchors to the last prompt-glyph line, never a fixed `tail -N`: Claude Code draws border, hint and mode footer *below* the input line, so a fixed depth either never reaches the prompt (the retry silently dies) or reaches up into the transcript (a submitted command is still visible there, so Enter re-fires at an idle prompt) |
 | `log-rotate-fleet.sh` | Fleet-wide log rotation |
 | `log-rotate.sh` | Single-bot log rotation |
 | `git-pull-all.sh` | Pull all repos in a bot's projects/ directory |

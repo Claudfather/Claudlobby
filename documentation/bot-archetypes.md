@@ -148,7 +148,7 @@ Engineer bots are reactive — they only work when dispatched. No scheduled brie
 Dedicated PR reviewer. Fast, thorough, runs on Sonnet to save cost.
 
 **Telegram:** `requireMention: true`
-**Model:** Sonnet (`CLAUDE_EXTRA_FLAGS="--model sonnet"` in bot.conf)
+**Model:** Sonnet (`model: sonnet` in `fleet.yaml`)
 
 ### MCP Servers (minimal)
 
