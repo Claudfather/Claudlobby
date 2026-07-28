@@ -67,6 +67,39 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# The ledger this report is appended to, and that the watchdog joins against —
+# resolved once, through the shared helpers, so the resolver below and the writer
+# further down can never read and write different files.
+REPORT_LEDGER="$(fleet_runtime_dir)/report-back.jsonl"
+
+# Resolve the dispatch this report closes when the caller omitted --task (#835).
+# An id'd dispatch closes ONLY on a terminal report echoing the same id, and
+# workers routinely omit it — so id'd dispatches stayed open until they aged out
+# and the watchdog cried wolf over finished work. Correct by default rather than
+# by discipline: the worker no longer has to remember.
+#
+# Terminal statuses only: a progress report closes nothing, so resolving one
+# would spend the lookup to stamp an id no consumer reads.
+#
+# This does NOT loosen the watchdog's join (that would be the #447 blanket-close
+# bug). dispatch-overdue.py owns "which dispatch is open" for both readers, so
+# the id supplied here is one this bot genuinely has open — and the watchdog
+# still verifies it independently. Fail-open at every step: a missing python3, an
+# unreadable ledger, or nothing open all leave TASK_ID empty and the report
+# behaves exactly as it did before. A report-back must never fail because a
+# watchdog helper was unavailable.
+case "$STATUS" in
+    completed|failed|blocked)
+        if [ -z "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
+            _rb_dispatch="$(dispatch_ledger_path)"
+            if [ -f "$_rb_dispatch" ]; then
+                TASK_ID="$(python3 "$LIB_DIR/dispatch-overdue.py" --open-task \
+                    "$BOT" "$_rb_dispatch" "$REPORT_LEDGER" 2>/dev/null || true)"
+            fi
+        fi
+        ;;
+esac
+
 EXTRAS=""
 [ -n "$PROGRESS" ] && EXTRAS="$EXTRAS | progress:$PROGRESS"
 for arg in "${POSITIONAL_EXTRAS[@]+"${POSITIONAL_EXTRAS[@]}"}"; do
@@ -87,10 +120,8 @@ bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" "$MESSAGE" || true
 # Path follows overlay convention: local/<fleet>/runtime/ or root runtime/fleet/
 # (fleet_runtime_dir owns that rule; Python twin: Paths.fleet_state).
 _emit_ledger_event() {
-    local ledger_dir
-    ledger_dir="$(fleet_runtime_dir)"
-    mkdir -p "$ledger_dir"
-    local ledger="$ledger_dir/report-back.jsonl"
+    local ledger="$REPORT_LEDGER"
+    mkdir -p "$(dirname "$ledger")"
     local ts
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 

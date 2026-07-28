@@ -190,9 +190,8 @@ fi
 
 MANAGER="${BOT_ID:-${BOT_NAME:-unknown}}"
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
-LEDGER_DIR="$CLAUDLOBBY_ROOT/state"
-mkdir -p "$LEDGER_DIR"
-LEDGER="$LEDGER_DIR/dispatch-log.jsonl"
+LEDGER="$(dispatch_ledger_path)"
+mkdir -p "$(dirname "$LEDGER")"
 
 now_epoch=$(date +%s)
 expected_by=$(( now_epoch + DEADLINE_S ))

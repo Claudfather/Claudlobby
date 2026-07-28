@@ -115,7 +115,7 @@ Key lifecycle scripts in `lib/`:
 | `data-sweep.sh` | Weekly per-bot data/ ephemeral purge — only `events/*.jsonl`, vetted text-log names, and `*.bak` age out (30d default, fleet-overridable); durable files are never swept — runs as the `data-sweep` fleet job |
 | `dispatch.sh` | Dispatch helper for manager → worker |
 | `dispatch-task.sh` | Task dispatch helper |
-| `dispatch-overdue.py` | Finds overdue dispatches — the matcher behind the `fleet-pulse.sh` watchdog (age-capped via `DISPATCH_OVERDUE_MAX_AGE_S`) |
+| `dispatch-overdue.py` | Finds overdue dispatches — the matcher behind the `fleet-pulse.sh` watchdog (age-capped via `DISPATCH_OVERDUE_MAX_AGE_S`). Also owns the two #835 doors: `--open-task` (the id `report-back.sh` resolves when a worker omits `--task`, so an id-less report still closes its dispatch) and `--orphans` (past-deadline rows whose worker respawned after dispatch — inert for alerting because the session holding the id is gone, but listed, since work lost to a restart is actionable) |
 | `telegram-instant-ack.sh` | Telegram instant acknowledgment for inbound messages |
 | `fleet-utilization.sh` | Fleet utilization rollup — per-bot busy/idle % |
 | `transcript-usage.py` | Per-session token accounting from Claude Code transcripts — sums the four `message.usage` components (flat, never `iterations[]`) over assistant turns, splits sidechains, emits `protocol_sensitive` + `cost_weighted_total` axes and an outbound-comms estimate (`--comms-share`). Prize-sizing instrument for the token-efficiency protocol (#716/#729); #717 extends it |
