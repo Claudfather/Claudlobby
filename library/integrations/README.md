@@ -62,6 +62,20 @@ tool_grants:
 
 Each entry is one of three shapes (the grant grammar): an `mcp__<server>__*` glob, a `Bash(<cmd> *)` pattern, or a bare CamelCase tool name. For an MCP-paired integration the prefix is rewritten per instance (`gws` + instance `personal` → `mcp__gws-personal__*`); a connector-backed grant (`mcp__claude_ai_*`, no wire fragment) is emitted literally. The compositor validates each entry's shape and warns on a malformed grant or an over-broad bare `Bash`. Validation is folder-aware: a `dir/` folder-expansion equip resolves every member integration's contract, so a malformed grant nested in an expanded folder is not silently skipped.
 
+## Companion skills (`skills:`)
+
+An integration may declare **companion skills** that auto-attach whenever the integration is equipped — the tool→skills dependency framework (#678), the skill-side analogue of the mcp↔integration auto-pairing and the direct sibling of the additive `tool_grants:` contract. Declare them in frontmatter:
+
+```yaml
+---
+title: Printify
+skills:
+  - printify        # library/skills/printify/ — auto-equipped with this integration
+---
+```
+
+`composer.py::resolve_effective_skills` unions each effective integration's `skills` into the bot's skill set via `_merge_lists` (explicit `bot.skills` first; a skill two tools declare — or one already listed — loads once). Because integrations auto-pair with their MCP by filename, **selecting `mcp: [printify]` auto-equips the `/printify` skill** — no separate `skills:` entry on the bot needed. The declared skill is then symlinked, made invocable (`Skill(<name>)`), and its own `tool_grants` composed — indistinguishable from an explicitly-listed skill. A declared skill that names a missing `library/skills/<name>/` dir is logged and skipped at compose time. Use it for an actuator skill that complements an MCP (e.g. a direct-REST fallback/writer); put the field on the integration `.md`, never on the MCP fragment. Cross-tool skills that need *several* tools present (the `requires:` all-of gate, #678 Fork F2b) are a planned extension for the analytics decision skills.
+
 ## Example
 
 `library/integrations/github.md` (MCP-paired, but omits `type:`/`env_contract:` despite fitting the MCP flavor clearly — real content, abbreviated):

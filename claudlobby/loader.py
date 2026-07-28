@@ -308,6 +308,26 @@ def integration_tool_grants(paths, name: str) -> list[str]:
     return _read_tool_grants(int_path) if int_path is not None else []
 
 
+def integration_skills(paths, name: str) -> list[str]:
+    """Read an integration's ``skills`` list from ``<name>.md`` frontmatter (#678).
+
+    The tool→skills dependency: an integration ships companion skills, so when it
+    is equipped (explicitly, or auto-paired via its matching MCP) each named skill
+    is auto-provided to the bot too — the skill-side analogue of the mcp↔integration
+    auto-pairing, the direct sibling of the additive ``tool_grants`` contract.
+    Returns ``[]`` when the file or the field is absent.
+    """
+    int_path = paths.find_library_file("integrations", name, ".md")
+    if int_path is None or not int_path.is_file():
+        return []
+    try:
+        fm, _ = parse_frontmatter(int_path.read_text())
+    except OSError:
+        return []
+    skills = fm.get("skills")
+    return [str(s) for s in skills] if isinstance(skills, list) else []
+
+
 def parse_guardrail_permissions(path: Path) -> ExpertisePermissions | None:
     """Read a guardrail's deny-capable ``permissions:`` block (F2), if declared.
 

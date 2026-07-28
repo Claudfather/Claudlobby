@@ -23,12 +23,13 @@ import jinja2
 from jinja2.sandbox import SandboxedEnvironment
 
 from . import dotenv, tool_resolve
-from .config import BotConfig, FleetConfig, load_host_jobs
+from .config import BotConfig, FleetConfig, _merge_lists, load_host_jobs
 from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
     ExpertisePermissions,
     LibraryItem,
     _demote_headings,
+    integration_skills,
     iter_guardrail_permissions,
     iter_skill_grants,
     load_library_items_overlay,
@@ -1005,7 +1006,7 @@ def link_skills(bot: BotConfig, paths: Paths, log) -> None:
         linked[leaf] = src
         (bot_skills_dir / leaf).symlink_to(src.resolve())
 
-    for skill in bot.skills:
+    for skill in resolve_effective_skills(bot, paths):
         if skill.endswith("/"):
             dir_name = skill.rstrip("/")
             collected = paths.expand_skill_folder(dir_name)
@@ -1242,6 +1243,27 @@ def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
         if name not in result:
             result.append(name)
     return result
+
+
+def resolve_effective_skills(bot: BotConfig, paths: Paths) -> list[str]:
+    """Return the skills to equip: explicit ``bot.skills`` unioned with the
+    ``skills`` each of the bot's effective integrations declares — the tool→skills
+    dependency framework (#678).
+
+    An integration ships companion skills: equipping it (explicitly, or auto-paired
+    via its matching MCP) auto-provides them — the skill-side analogue of the
+    mcp↔integration auto-pairing, one level down. ``_merge_lists`` keeps explicit
+    ``bot.skills`` first and dedups, so a skill two tools declare (or one already
+    listed) loads once. The result feeds all three ``bot.skills`` consumers
+    (symlink, invocation permission, tool_grants). When no effective integration
+    declares ``skills`` this is exactly ``bot.skills``.
+    """
+    declared = [
+        skill
+        for integ in resolve_effective_integrations(bot, paths)
+        for skill in integration_skills(paths, integ)
+    ]
+    return _merge_lists(bot.skills, declared)
 
 
 # ----------------------------------------------------------------------
@@ -1535,13 +1557,15 @@ def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     return tools
 
 
-def _resolve_skill_permissions(bot: BotConfig) -> list[str]:
-    """Auto-derive Skill() permission patterns from bot's skill list.
+def _resolve_skill_permissions(bot: BotConfig, paths: Paths) -> list[str]:
+    """Auto-derive Skill() permission patterns from the bot's effective skills.
 
     Each skill needs both Skill(<name>) and Skill(<name>:*) for full operation.
+    Uses the effective set (bot.skills + integrations' paired_skills) so a
+    paired skill is invocable without a prompt, like an explicit one.
     """
     patterns: list[str] = []
-    for skill in bot.skills:
+    for skill in resolve_effective_skills(bot, paths):
         patterns.append(f"Skill({skill})")
         patterns.append(f"Skill({skill}:*)")
     return patterns
@@ -1560,7 +1584,9 @@ def _resolve_skill_grants(bot: BotConfig, paths: Paths) -> list[str]:
     """
     return [
         grant
-        for _name, grants in iter_skill_grants(paths, bot.skills)
+        for _name, grants in iter_skill_grants(
+            paths, resolve_effective_skills(bot, paths)
+        )
         for grant in grants
     ]
 
@@ -1772,8 +1798,9 @@ def compose_settings_local(
     # Layer 4: Channel/plugin tools (auto-derived from config)
     allow_patterns.extend(_resolve_channel_permissions(bot))
 
-    # Layer 5: Skill patterns (auto-derived from bot.skills)
-    allow_patterns.extend(_resolve_skill_permissions(bot))
+    # Layer 5: Skill patterns (auto-derived from the effective skill set —
+    # bot.skills plus any paired_skills shipped by the bot's integrations)
+    allow_patterns.extend(_resolve_skill_permissions(bot, paths))
 
     # Layer 5b: Skill tool_grants — the Bash/mcp/bare tools a skill body actually
     # runs, declared on its SKILL.md (F2/F6). Joins integration grants on the

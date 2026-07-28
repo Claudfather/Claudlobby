@@ -19,6 +19,8 @@ tool_grants:
   - "mcp__printify__how_to_use"
   - "mcp__printify__list_products"
   - "mcp__printify__list_shops"
+skills:
+  - printify
 ---
 
 # Printify
@@ -26,6 +28,10 @@ tool_grants:
 ### Printify MCP
 
 Wire config: shipped as the shared fragment `library/mcp/printify.json` — add `printify` to a bot's `mcp:` list and the compositor merges it into `.mcp.json`. It runs the published package (`npx -y printify-mcp`) and reads `PRINTIFY_API_KEY` + `PRINTIFY_SHOP_ID` (both fleet-tier `.env`). To get order-management tools, override it locally with a fork (below).
+
+#### Paired skill: `/printify` (direct-REST actuator)
+
+This integration ships a companion skill via its `skills: [printify]` frontmatter (the tool→skills dependency, #678) — attaching the `printify` MCP (or listing this integration) **auto-equips the `/printify` skill** too, with no separate per-bot `skills:` entry needed. `/printify` (`library/skills/printify/`) is a direct-REST actuator sharing the same `PRINTIFY_API_KEY` + `PRINTIFY_SHOP_ID` contract: it reads what the MCP is lossy at (real shop/status, lossless descriptions, orders) and performs the **draft-first writes** the MCP is buggy/limited at — `create` a product from a PNG, `migrate` a discontinued product onto a new provider (with a coverage report), and `publish` (explicit, `--yes`-gated). One env contract, two tools; see `library/skills/printify/mcp-vs-api.md` for the which-tool-when guide. Writes always leave a DRAFT and never auto-publish.
 
 #### Forked MCP with Order Tools
 

@@ -1192,7 +1192,7 @@ class TestResolveChannelPermissions:
 class TestResolveSkillPermissions:
     """_resolve_skill_permissions generates Skill() patterns from bot.skills."""
 
-    def test_generates_both_patterns_per_skill(self):
+    def test_generates_both_patterns_per_skill(self, tmp_path):
         from claudlobby.composer import _resolve_skill_permissions
 
         bot = BotConfig(
@@ -1201,14 +1201,15 @@ class TestResolveSkillPermissions:
             expertise=["eng"],
             skills=["lifecycle", "prs"],
         )
-        result = _resolve_skill_permissions(bot)
+        paths = Paths(root=tmp_path, fleet_dir=tmp_path)
+        result = _resolve_skill_permissions(bot, paths)
         assert "Skill(lifecycle)" in result
         assert "Skill(lifecycle:*)" in result
         assert "Skill(prs)" in result
         assert "Skill(prs:*)" in result
         assert len(result) == 4
 
-    def test_empty_skills_returns_empty(self):
+    def test_empty_skills_returns_empty(self, tmp_path):
         from claudlobby.composer import _resolve_skill_permissions
 
         bot = BotConfig(
@@ -1217,10 +1218,11 @@ class TestResolveSkillPermissions:
             expertise=["eng"],
             skills=[],
         )
-        result = _resolve_skill_permissions(bot)
+        paths = Paths(root=tmp_path, fleet_dir=tmp_path)
+        result = _resolve_skill_permissions(bot, paths)
         assert result == []
 
-    def test_single_skill(self):
+    def test_single_skill(self, tmp_path):
         from claudlobby.composer import _resolve_skill_permissions
 
         bot = BotConfig(
@@ -1229,7 +1231,8 @@ class TestResolveSkillPermissions:
             expertise=["eng"],
             skills=["commit"],
         )
-        result = _resolve_skill_permissions(bot)
+        paths = Paths(root=tmp_path, fleet_dir=tmp_path)
+        result = _resolve_skill_permissions(bot, paths)
         assert result == ["Skill(commit)", "Skill(commit:*)"]
 
 
@@ -2939,10 +2942,11 @@ def _write_integration(
     name: str,
     *,
     tool_grants: list[str] | None = None,
+    skills: list[str] | None = None,
     type_: str | None = None,
     body: str = "doc",
 ) -> None:
-    """Write a minimal library/integrations/<name>.md with optional tool_grants."""
+    """Write a minimal library/integrations/<name>.md with optional tool_grants / skills."""
     d = root / "library" / "integrations"
     d.mkdir(parents=True, exist_ok=True)
     fm = ["---", f"title: {name}"]
@@ -2951,8 +2955,109 @@ def _write_integration(
     if tool_grants is not None:
         fm.append("tool_grants:")
         fm.extend(f'  - "{g}"' for g in tool_grants)
+    if skills is not None:
+        fm.append("skills:")
+        fm.extend(f"  - {s}" for s in skills)
     fm.append("---")
     (d / f"{name}.md").write_text("\n".join(fm) + f"\n# {name}\n\n{body}\n")
+
+
+def _write_skill(
+    root: Path, name: str, *, tool_grants: list[str] | None = None
+) -> None:
+    """Write a minimal library/skills/<name>/SKILL.md."""
+    d = root / "library" / "skills" / name
+    d.mkdir(parents=True, exist_ok=True)
+    fm = ["---", f"name: {name}", f"description: {name} skill"]
+    if tool_grants is not None:
+        fm.append("tool_grants:")
+        fm.extend(f'  - "{g}"' for g in tool_grants)
+    fm.append("---")
+    (d / "SKILL.md").write_text("\n".join(fm) + f"\n# {name}\n")
+
+
+class TestIntegrationSkills:
+    """resolve_effective_skills: an integration's declared ``skills`` auto-attach
+    to a bot that equips it (explicitly, or auto-paired via its MCP) — the
+    tool→skills dependency framework (#678)."""
+
+    def _setup(self, tmp_path: Path) -> Paths:
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / "w").mkdir(parents=True)
+        (root / "lib").mkdir(exist_ok=True)
+        return Paths(root=root, fleet_dir=root)
+
+    def test_paired_skill_auto_attaches_via_mcp(self, tmp_path):
+        from claudlobby.composer import resolve_effective_skills
+
+        paths = self._setup(tmp_path)
+        _write_integration(paths.root, "printify", skills=["printify"])
+        _write_skill(paths.root, "printify")
+        # mcp:[printify] auto-pairs the integration, which ships the printify skill
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="printify")]
+        )
+        assert resolve_effective_skills(bot, paths) == ["printify"]
+
+    def test_paired_skill_via_explicit_integration(self, tmp_path):
+        from claudlobby.composer import resolve_effective_skills
+
+        paths = self._setup(tmp_path)
+        _write_integration(paths.root, "printify", skills=["printify"])
+        _write_skill(paths.root, "printify")
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], integrations=["printify"]
+        )
+        assert resolve_effective_skills(bot, paths) == ["printify"]
+
+    def test_explicit_skill_first_no_duplicate(self, tmp_path):
+        from claudlobby.composer import resolve_effective_skills
+
+        paths = self._setup(tmp_path)
+        _write_integration(paths.root, "printify", skills=["printify"])
+        _write_skill(paths.root, "printify")
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            skills=["printify", "lifecycle"],
+            mcp=[McpEntry(name="printify")],
+        )
+        # explicit skills preserved and first; the paired 'printify' is not duplicated
+        assert resolve_effective_skills(bot, paths) == ["printify", "lifecycle"]
+
+    def test_no_paired_skills_is_exactly_bot_skills(self, tmp_path):
+        from claudlobby.composer import resolve_effective_skills
+
+        paths = self._setup(tmp_path)
+        _write_integration(paths.root, "printify")  # no paired_skills field
+        bot = BotConfig(
+            bot_id="w",
+            name="w",
+            expertise=["eng"],
+            skills=["lifecycle"],
+            mcp=[McpEntry(name="printify")],
+        )
+        assert resolve_effective_skills(bot, paths) == ["lifecycle"]
+
+    def test_paired_skill_symlinked_and_invocable(self, tmp_path):
+        """End-to-end: the paired skill is symlinked into .claude/skills and gets
+        a Skill() permission grant, indistinguishable from an explicit skill."""
+        from claudlobby.composer import compose_settings_local, link_skills
+
+        paths = self._setup(tmp_path)
+        _write_integration(paths.root, "printify", skills=["printify"])
+        _write_skill(paths.root, "printify")
+        bot = BotConfig(
+            bot_id="w", name="w", expertise=["eng"], mcp=[McpEntry(name="printify")]
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
+        link_skills(bot, paths, lambda m: None)
+        symlink = paths.bot_runtime("w") / ".claude" / "skills" / "printify"
+        assert symlink.is_symlink()
+        settings = compose_settings_local(bot, fleet, paths)
+        allow = settings.get("permissions", {}).get("allow", [])
+        assert "Skill(printify)" in allow
 
 
 class TestResolveEffectiveIntegrationsUnion:
