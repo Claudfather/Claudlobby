@@ -43,6 +43,17 @@ trap 'rm -rf "$TMPD"' EXIT
 SENT_LOG="$TMPD/sent.log"
 PANE_SCRIPT="$TMPD/panes"   # newline-separated fixture paths, one per capture
 
+# CONSTRUCTED event destination, suite-wide (#846 instance 3). Any
+# pane_send_verified call in this file can emit; with the destination inherited
+# from the ambient session, those rows landed in real per-bot and fleet
+# ledgers. Every emit now lands under $TMPD by construction.
+# The dot makes the marker unholdable by a real bot: compose_bot_conf rejects
+# ids outside [A-Za-z0-9_-] (claudlobby/composer.py _SAFE_NAME_RE).
+SYNTH_ID="synthetic.paneprobe"
+export BOT_DIR="$TMPD/synth-bot" BOT_ID="$SYNTH_ID"
+export CLAUDLOBBY_ROOT="$TMPD/synth-root"
+mkdir -p "$BOT_DIR/data"
+
 # Stub the single tmux chokepoint. send-keys appends its payload to SENT_LOG;
 # capture-pane pops the next fixture from PANE_SCRIPT (repeating the last one),
 # so a test can hand the poll loop a different pane on each tick.
@@ -71,7 +82,7 @@ run_send() {
     local text="$1"; shift
     : > "$SENT_LOG"
     printf '%s\n' "$@" > "$PANE_SCRIPT"
-    pane_send_verified sock session "$text"
+    pane_send_verified sock "$SYNTH_ID" "$text"
     wc -l < "$SENT_LOG" | tr -d ' '
 }
 
@@ -145,8 +156,9 @@ echo "=== the retry is observable (a silent retry is how the old one hid) ==="
 # without an unmatched glob or a zero-match grep aborting the suite under
 # pipefail — a missing event must report FAIL, not kill the run.
 count_events() { cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c "$1" || true; }
-export BOT_DIR="$TMPD/bot" BOT_ID=paneprobe
-mkdir -p "$BOT_DIR/data"
+# Zero the ledger: earlier run_send calls already emitted retries into it and
+# the counts below assert exact totals. emit_fleet_event re-mkdirs on write.
+rm -rf "$BOT_DIR/data/events"
 run_send '/claudna:session resume --auto' "$FIXTURES/input-stuck-literal.txt" >/dev/null
 r=$(count_events '"type":"send_retry"')
 assert_eq "a fired retry emits a send_retry event" "1" "$r"
@@ -157,7 +169,6 @@ assert_eq "the event names the reason" "1" "$r"
 run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt" >/dev/null
 r=$(count_events '"type":"send_retry"')
 assert_eq "a clean submit emits NO send_retry event" "1" "$r"
-unset BOT_DIR BOT_ID
 
 echo "=== probe cap: a wrapped payload is still detected ==="
 

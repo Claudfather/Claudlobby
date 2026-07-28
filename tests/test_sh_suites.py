@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import constructed_env
+
 TESTS_DIR = Path(__file__).resolve().parent
 
 # Every bash suite in tests/, discovered by glob so the collected set never drifts
@@ -37,13 +39,24 @@ def test_sh_suites_discovered():
 
 
 @pytest.mark.parametrize("suite", SH_SUITES)
-def test_hermetic_bash_suite(suite):
+def test_hermetic_bash_suite(suite, tmp_path):
     path = TESTS_DIR / suite
     assert path.is_file(), f"missing bash suite: {suite}"
     bash = shutil.which("bash") or "/bin/bash"
     # Bounded so a wedged suite fails CI instead of hanging the runner forever.
+    # Constructed env (#846): this spawn is the choke point every suite passes
+    # through, and inheriting the caller's env handed bot-session vars
+    # (BOT_DIR, CLAUDLOBBY_ROOT, FLEET_STATE_PATH, ...) to all of them — the
+    # vector that wrote synthetic send_retry rows into six production ledgers.
+    # The wrapper now enforces the env half of the hermetic contract it
+    # declares; a direct `bash tests/<suite>.sh` still relies on the suite's
+    # own constructed destinations.
     proc = subprocess.run(
-        [bash, str(path)], capture_output=True, text=True, timeout=120
+        [bash, str(path)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=constructed_env(HOME=tmp_path, TMPDIR=tmp_path),
     )
     assert proc.returncode == 0, (
         f"{suite} failed (exit {proc.returncode}):\n"
