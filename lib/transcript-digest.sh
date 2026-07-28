@@ -94,14 +94,45 @@ if not path and sid:
 # Redact BEFORE the model sees anything: a transcript carries tokens and
 # connection strings, and the digest lands in a shared log. Scrubbing the input
 # is strictly stronger than asking the model not to echo what it was shown.
+# Ordered: a PEM block first (it spans the other rules), then vendor prefixes,
+# then the generic name=value catch-all last so a specific rule gets first say.
+# Bias is deliberately toward over-redacting: a redacted word costs a little
+# digest signal, a leaked credential in a shared fleet-wide log costs a lot.
 SECRETS = [
+    # Private-key blocks. The truncated form is a separate rule because the
+    # distiller caps each content block at 600 chars, so an END marker is often
+    # already gone by the time this runs.
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "[REDACTED]"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[A-Za-z0-9+/=\s]*"), "[REDACTED]"),
+    # Vendor-prefixed tokens.
     (re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{16,})"), "[REDACTED]"),
     (re.compile(r"\b(sk-[A-Za-z0-9_\-]{16,})"), "[REDACTED]"),
+    # Stripe-style UNDERSCORE keys — sk_live/sk_test/rk_/pk_. The sk- rule above
+    # is hyphen-anchored and does not reach these.
+    (re.compile(r"\b[a-z]{2}_(?:live|test)_[A-Za-z0-9]{8,}"), "[REDACTED]"),
+    (re.compile(r"\b(?:sk|rk)_[A-Za-z0-9]{16,}"), "[REDACTED]"),
+    # AWS access-key IDs (AKIA/ASIA/AROA/... + 12+ uppercase-alnum). The 40-char
+    # secret-access-key has no distinguishing shape; it is caught by the generic
+    # name=value rule below, which is why that rule is not optional.
+    (re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA|AROA|AIDA|ANPA|ANVA|APKA)[A-Z0-9]{12,}"), "[REDACTED]"),
+    # Slack.
+    (re.compile(r"\bxox[abprse]-[A-Za-z0-9\-]{10,}"), "[REDACTED]"),
+    # JWTs — three dot-separated base64url segments starting with the {"alg" header.
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "[REDACTED]"),
     (re.compile(r"\b(ntn_[A-Za-z0-9]{16,})"), "[REDACTED]"),
     (re.compile(r"\b(napi_[A-Za-z0-9]{16,})"), "[REDACTED]"),
     (re.compile(r"\b\d{6,12}:AA[A-Za-z0-9_\-]{30,}"), "[REDACTED]"),
     (re.compile(r"(?i)(authorization:\s*bearer\s+)\S+"), r"\1[REDACTED]"),
     (re.compile(r"([a-z][a-z0-9+.\-]*://[^\s:/@]+):[^\s@/]+@"), r"\1:[REDACTED]@"),
+    # Generic env-dump: a secret-ish NAME assigned a secret-ish VALUE. The name
+    # is kept — "a credential was involved here" is signal the monitor wants —
+    # and only the value dies. The 8-char floor keeps prose ("the TOKEN= form")
+    # and short non-secrets out.
+    (re.compile(
+        r"(?i)\b([A-Z0-9_]*(?:PASSWORD|PASSWD|PASSPHRASE|PASS|SECRET|TOKEN|API_?KEY|"
+        r"ACCESS_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|(?<![A-Z])PAT(?![A-Z]))"
+        r"[A-Z0-9_]*)\s*[:=]\s*[\"']?([^\s\"']{8,})"
+    ), r"\1=[REDACTED]"),
 ]
 
 def scrub(s):

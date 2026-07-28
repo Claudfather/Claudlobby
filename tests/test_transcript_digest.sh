@@ -104,6 +104,59 @@ assert_eq "credential does NOT reach the model" no "$r"
 case "$seen" in *REDACTED*) r=yes ;; *) r=no ;; esac
 assert_eq "credential was replaced, not silently dropped" yes "$r"
 
+# --- 3b. the rest of the credential families ---------------------------------
+# Every value below is SYNTHETIC or a vendor's own published documentation
+# example — never a real credential. Each is embedded in a transcript and driven
+# through the real script; the assertion is that it never reaches the model.
+# Added after an adversarial battery found six families walking straight past
+# the original list: the `sk-` rule is hyphen-anchored and missed Stripe's
+# underscore forms, and AWS / Slack / JWT / env-dump / PEM had no rule at all.
+# This hook runs fleet-wide and writes to a shared log, so the blast radius of a
+# miss is every session on the host.
+check_family() {  # <label> <synthetic-secret> [needle]
+    local label="$1" secret="$2" needle="${3:-$2}"
+    make_transcript "$T/sec.jsonl" 4 "$secret"
+    stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
+    run_digest "$T/sec.jsonl" SESSION_DIGEST_MIN_TURNS=4 >/dev/null
+    local seen r
+    seen="$(cat "$T/prompt-seen.txt" 2>/dev/null || true)"
+    case "$seen" in *"$needle"*) r=yes ;; *) r=no ;; esac
+    assert_eq "$label does NOT reach the model" no "$r"
+}
+
+# Vendor-shaped fixtures are ASSEMBLED AT RUNTIME from fragments, never written
+# as contiguous literals. Two reasons, and the first one bit: GitHub push
+# protection rejected this file when the literals were inline (Stripe x2, Slack)
+# — and the right answer to a secret-scanner hit is a fixture no scanner can
+# mistake for real, never an unblock URL. Second, it keeps the repo honest: no
+# line here is a credential shape even out of context. The runtime value is
+# byte-identical to what the rule must catch, so the test loses nothing.
+_SK="sk"; _RK="rk"; _U="_"; _A="AKIA"; _XOX="xox"; _EY="ey"
+check_family "AWS access-key id"   "${_A}IOSFODNN7EXAMPLE"
+check_family "AWS secret (env-dump form)" "aws_secret_access_key=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY" "wJalrXUtnFEMI"
+check_family "Stripe sk_live"      "${_SK}${_U}live${_U}4eC39HqLyjWDarjtT1zdp7dc"
+check_family "Stripe sk_test"      "${_SK}${_U}test${_U}4eC39HqLyjWDarjtT1zdp7dc"
+check_family "Stripe rk_ key"      "${_RK}${_U}live${_U}51H8xQzExampleRestrictedKey0000"
+check_family "Slack xox token"     "${_XOX}b-0000000000-0000000000-AAAAAAAAAAAAAAAAAAAAAAAA"
+check_family "JWT"                 "${_EY}JhbGciOiJIUzI1NiJ9.${_EY}JzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1rXwW1gFWFOEjXk"
+check_family "env-dump PASSWORD"   "PASSWORD=hunter2hunter2hunter2" "hunter2hunter2"
+check_family "env-dump *_SECRET"   "APP_SECRET=s3cr3tvaluethatislong" "s3cr3tvaluethat"
+check_family "env-dump *_PAT"      "GITHUB_PAT=abcd1234abcd1234abcd" "abcd1234abcd1234"
+check_family "PEM private key"     "-----BEGIN RSA PRIVATE KEY-----MIIEowIBAAKCAQEA0Zx-----END RSA PRIVATE KEY-----" "MIIEowIBAAKCAQEA"
+
+# --- 3c. over-redaction guard ------------------------------------------------
+# The generic name=value rule must not eat ordinary session content. PATH and
+# PATTERN both contain "PAT"; redacting them would blind the digest to exactly
+# the kind of detail these rows exist to carry.
+make_transcript "$T/keep.jsonl" 4 "PATH=/usr/local/bin:/usr/bin PATTERN=chromium min_turns=6"
+stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
+run_digest "$T/keep.jsonl" SESSION_DIGEST_MIN_TURNS=4 >/dev/null
+seen="$(cat "$T/prompt-seen.txt" 2>/dev/null || true)"
+case "$seen" in *"PATH=/usr/local/bin"*) r=yes ;; *) r=no ;; esac
+assert_eq "PATH= survives the generic rule"    yes "$r"
+case "$seen" in *"PATTERN=chromium"*) r=yes ;; *) r=no ;; esac
+assert_eq "PATTERN= survives the generic rule" yes "$r"
+
 # --- 4. the qualifying gate: a row, at zero model cost -----------------------
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_MIN_TURNS=99)"
 assert_eq "below-gate session still emits a row" skipped "$(field "$row" status)"
