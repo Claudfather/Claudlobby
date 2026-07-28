@@ -8,6 +8,7 @@ real nested location and passes; a hand-typed flat husk fails.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
@@ -31,13 +32,15 @@ def _paths(tmp_path):
     return Paths(root=root, fleet_dir=fleet_dir)
 
 
-def _bot():
-    return BotConfig(
+def _bot(**overrides):
+    base = dict(
         bot_id="kev",
         name="kev",
         expertise=["eng"],
         telegram=TelegramConfig(handle="kev_bot"),
     )
+    base.update(overrides)
+    return BotConfig(**base)
 
 
 def _fleet():
@@ -296,11 +299,15 @@ class TestComposeBotFiresPathGuard:
         with pytest.raises(ValueError, match="absolute path"):
             compose_bot(fleet.bots["kev"], fleet, paths)
 
-    def test_vault_wired_bot_composes_clean(self, fleet_dir):
+    @pytest.mark.parametrize("bridged", [True, False], ids=["bridge", "bridge-less"])
+    def test_vault_wired_bot_composes_clean(self, fleet_dir, bridged):
         # A bot pointing CLAUDRON_VAULT_PATH at its own vault root composes clean:
         # the composer emits the absolute vault-root literal, and L2 must treat the
         # fleet's own vault root as a sanctioned reach, not a dangling/foreign husk.
-        # (Regression for the crog-eng-team ari generate-failure.)
+        # Bridge-less (never ran `claudron plug`): paths.vault_root is None and the
+        # bot's own claudron_vault_path declaration is the only provenance — the
+        # composer's own first-class key must not hard-fail generate.
+        # (Regression for the crog-eng-team ari generate-failure, both halves.)
         from claudlobby.composer import compose_bot
         from claudlobby.config import load_fleet
 
@@ -323,7 +330,9 @@ class TestComposeBotFiresPathGuard:
             "        handle: kev_bot\n"
             "        token_env: T\n"
         )
-        paths = Paths(root=root, fleet_dir=nested, vault_root=vault_root)
+        paths = Paths(
+            root=root, fleet_dir=nested, vault_root=vault_root if bridged else None
+        )
         fleet, _ = load_fleet(nested / "fleet.yaml")
         bot_dir = compose_bot(fleet.bots["kev"], fleet, paths)
         assert bot_dir.is_dir()
@@ -366,6 +375,52 @@ class TestVaultModePathAudit:
         # test_cross_fleet_leak_in_vault_is_flagged.
         paths = self._vault_paths(tmp_path)
         assert improper_fleet_paths(str(paths.vault_root), _bot(), paths) == []
+
+
+class TestDeclaredVaultPathAudit:
+    """The per-bot DECLARED vault root (``claudron_vault_path``) is sanctioned the
+    same way as the bridge-derived ``paths.vault_root``: L1 already exempts the
+    key as declared-by-construction, and a deployment that never ran ``claudron
+    plug`` has no bridge to derive a vault root from — the declaration is the
+    only provenance there is. Root-only, exactly like the derived root (the
+    crog-eng-team ari generate-failure, second half: #804 blessed the derived
+    root, but a bridge-less host still failed on the identical declared value)."""
+
+    def test_declared_vault_root_without_bridge_is_ok(self, tmp_path):
+        # No .claudron bridge (vault_root=None): the declared root must still pass.
+        paths = _paths(tmp_path)
+        declared = paths.root / "local"  # parent of the fleet overlay — the ari shape
+        txt = f"export CLAUDRON_VAULT_PATH={declared}"
+        bot = _bot(claudron_vault_path=str(declared))
+        assert improper_fleet_paths(txt, bot, paths) == []
+
+    def test_declared_vault_root_needs_the_declaration(self, tmp_path):
+        # The same value on a bot that does NOT declare it stays denied —
+        # provenance is the declaration, not the string.
+        paths = _paths(tmp_path)
+        undeclared = f"{paths.root}/local"
+        bad = improper_fleet_paths(
+            f"export CLAUDRON_VAULT_PATH={undeclared}", _bot(), paths
+        )
+        assert [p for p, _ in bad] == [undeclared]
+
+    def test_subtree_of_declared_vault_stays_flagged(self, tmp_path):
+        # Root-only, same stance as the derived root: a subtree is still a leak.
+        paths = _paths(tmp_path)
+        declared = paths.root / "local"
+        leak = f"{declared}/other-fleet/.secrets/ga4.json"
+        bad = improper_fleet_paths(leak, _bot(claudron_vault_path=str(declared)), paths)
+        assert [p for p, _ in bad] == [leak]
+
+    def test_declared_and_derived_may_differ_both_pass(self, tmp_path):
+        # A bridge pointing at one vault and a bot declaring another (per-bot
+        # vaults are legal — the key is per-bot, the bridge is per-install):
+        # the declared root passes on its own provenance.
+        paths = dataclasses.replace(_paths(tmp_path), vault_root=tmp_path / "vault")
+        declared = paths.root / "local"
+        txt = f"export CLAUDRON_VAULT_PATH={declared}"
+        bot = _bot(claudron_vault_path=str(declared))
+        assert improper_fleet_paths(txt, bot, paths) == []
 
 
 class TestClassifiedSourcePaths:
