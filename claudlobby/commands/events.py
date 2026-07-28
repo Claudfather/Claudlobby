@@ -26,15 +26,23 @@ def collect_events(
     event_type: str | None = None,
     source: str | None = None,
     critical_only: bool = False,
+    fleet_events_dir: Path | str | None = None,
 ) -> list[dict]:
-    """Read JSONL events from all bots, optionally filtered."""
+    """Read JSONL events from all bots and the fleet-level ledger, filtered."""
     bots_dir = Path(bots_dir)
     events: list[dict] = []
 
+    # (dir, bot-to-match): per-bot rows are selected by which directory they
+    # came from, so they need no field match. The fleet ledger holds every bot's
+    # rows in one file — plus events that outlive, or never had, a bot dir
+    # (host-job alerts, script_error breadcrumbs, a teardown receipt whose whole
+    # purpose is surviving the dir it documents) — so --bot must key on the row.
     bot_dirs = [bots_dir / bot] if bot else sorted(bots_dir.iterdir())
+    ledgers = [(bd / "data" / "events", None) for bd in bot_dirs]
+    if fleet_events_dir is not None:
+        ledgers.append((Path(fleet_events_dir), bot))
 
-    for bd in bot_dirs:
-        events_path = bd / "data" / "events"
+    for events_path, want_bot in ledgers:
         if not events_path.is_dir():
             continue
         for f in sorted(events_path.glob("*.jsonl")):
@@ -46,6 +54,8 @@ def collect_events(
                     try:
                         ev = json.loads(line)
                     except json.JSONDecodeError:
+                        continue
+                    if want_bot and ev.get("bot") != want_bot:
                         continue
                     if event_type and ev.get("type") != event_type:
                         continue
@@ -82,7 +92,20 @@ def format_event_table(events: list[dict]) -> str:
 
         detail_parts = []
         for k, v in data.items():
-            if k in ("session", "unit", "tool", "script", "state", "detail", "event"):
+            # actor/reason carry a teardown's who and why. Without them the row
+            # falls back to raw JSON and is truncated mid-field, so the one
+            # question a teardown record exists to answer goes unanswered.
+            if k in (
+                "session",
+                "unit",
+                "tool",
+                "script",
+                "state",
+                "detail",
+                "event",
+                "actor",
+                "reason",
+            ):
                 detail_parts.append(f"{k}={v}")
         detail = ", ".join(detail_parts) or json.dumps(data, separators=(",", ":"))
         if len(detail) > 60:
@@ -110,6 +133,7 @@ def cmd_events(args) -> int:
         event_type=args.type,
         source=args.source,
         critical_only=args.critical,
+        fleet_events_dir=paths.root / "state" / "events",
     )
 
     if args.json:

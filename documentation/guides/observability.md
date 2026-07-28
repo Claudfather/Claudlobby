@@ -50,11 +50,12 @@ Bot activity
 | `overdue_dispatch` | pulse | A dispatched task passed its deadline with no report |
 | `script_error` | lib | A lifecycle script exited non-zero |
 | `bridge_down` | pulse / alert | Live tmux session, but the bot's Telegram bridge (channel poller) isn't delivering. Raised per-pulse by `fleet-pulse.sh` once down past `OBSERVABILITY_BRIDGE_DOWN_GRACE` seconds, and separately by `start-bot.sh` at bring-up on a verified-dark bridge or missing token |
+| `bot_teardown_started` | spin-down | `spin-down-bot.sh` was invoked on a bot: records the door (`action`), `actor`, `fleet`, `bot_dir`, `expected_return`, and `reason`. Emitted BEFORE the teardown legs run, so it records an intent, not a confirmed outcome — a crash mid-teardown still leaves the record. **Dormant unless the fleet sets `SPINDOWN_RECEIPT_ENABLED=1`**, so an unarmed fleet writes no rows and an empty result means *not armed*, not *no teardowns* |
 | `reload_failed` | alert | Daily `reload-fleet.sh` plugin/skill update or `claudlobby generate` failed |
 | `restart_failed` | alert | Weekly worker bounce (`weekly-worker-restart.sh`) failed to bring the bot back up |
 | `rc_timeout` | startup / alert | `start-bot.sh`'s remote-control readiness probe hit its `RC_READY_TIMEOUT_S` ceiling — the bot came up without `--remote-control`, so channel replies drop while inbound still arrives (the #533 outage class). Emitted once per (re)start; `fleet-pulse.sh` escalates it like its other crit types, so a fleet-wide TIMEOUT pages instead of sitting silent in every `startup.log` |
 
-> **Not yet caught by `--critical`:** `bridge_down`, `reload_failed`, and `restart_failed` are operationally critical — all three page the manager via a tmux nudge + Telegram through `emit_failure_alert`/`emit_fleet_notice` — but aren't in `claudlobby/commands/events.py`'s `CRITICAL_TYPES` set, so `claudlobby events --critical` won't surface them. Query them explicitly (`claudlobby events --type bridge_down`). `reload_failed`, `restart_failed`, and `bridge_down` raised at bot bring-up also write to the fleet-root `state/events/` directory (see File Locations below), which `claudlobby events` doesn't read at all — only the pulse-sourced `bridge_down` lands in the normal per-bot `data/events/` path.
+> **Two ledgers, one reader:** `reload_failed`, `restart_failed`, and `bridge_down` raised at bot bring-up write to the fleet-root `state/events/` directory rather than a bot's `data/events/` (see File Locations below); only the pulse-sourced `bridge_down` takes the per-bot path. `claudlobby events` reads both, so a type can appear from either. `bot_teardown_started` is deliberately **not** in `CRITICAL_TYPES` — `spin-down-bot.sh` is also the throwaway-canary reaper, so `--critical` would fill with expected noise. Query it explicitly (`claudlobby events --type bot_teardown_started`).
 
 ### Informational
 
@@ -109,7 +110,7 @@ Bot activity
 | `state/pulse/pulse-summary.txt` | Last fleet-pulse human-readable output | Overwritten each run |
 | `state/pulse/<bot>.pane_hash` | Pane change detection markers | Persistent |
 | `state/dispatch-log.jsonl` | Dispatch history for overdue tracking | Persistent |
-| `state/events/fleet-*.jsonl` | Fleet-root events not tied to one bot (`bot:"fleet"`) — `reload_failed`, `restart_failed`, `bridge_down` at bring-up (via `emit_failure_alert`/`emit_fleet_notice`), plus `script_error`/`send_miss` when emitted outside a bot context (host jobs). **Not read by `claudlobby events`**, which only scans per-bot `data/events/` | Not currently reaped — no `OBSERVABILITY_REAP_DAYS` sweep touches this path |
+| `state/events/fleet-*.jsonl` | Fleet-root events not tied to one bot, or that must outlive one — `reload_failed`, `restart_failed`, `bridge_down` at bring-up (via `emit_failure_alert`/`emit_fleet_notice`), `bot_teardown_started` (survives `spin-down --purge` deleting the bot dir), plus `script_error`/`send_miss` emitted outside a bot context (host jobs). Read by `claudlobby events` alongside the per-bot ledgers | Not currently reaped — no `OBSERVABILITY_REAP_DAYS` sweep touches this path. Deliberate for teardown receipts, whose audit value is long-lived |
 
 ## Configuration
 
