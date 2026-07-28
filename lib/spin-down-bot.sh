@@ -19,6 +19,13 @@
 #   $SPINDOWN_ACTOR    overrides the recorded actor, so a bot-driven teardown
 #                      names itself instead of masquerading as the host user.
 #
+# $SPINDOWN_RECEIPT_ENABLED — "1" ARMS the teardown receipt for this fleet.
+# DEFAULT 0 (dormant): the flags above still parse and the teardown is
+# unchanged, but no ledger row is written. lib/ is a shared install, so this is
+# what keeps a root-pull from making new behavior live on a destructive door
+# without a canary. Arm per fleet in fleet.yaml `env:`, canary on a throwaway
+# first.
+#
 # NOT the tool for transient RAM pressure — see $_sd_warning below / --help.
 set -euo pipefail
 
@@ -73,8 +80,23 @@ sd_log() { printf 'spin-down[%s]: %s\n' "$SLUG" "$*"; }
 # host-global, so the fleet is also what distinguishes same-named bots.
 emit_teardown_receipt() {
     local action="spin-down" actor fleet data
+    # DORMANT BY DEFAULT — the rollout contract. lib/ is a SHARED install: every
+    # bot on every fleet reads this same file, so a change here cannot be staged
+    # per-bot and a routine root-pull for something unrelated would otherwise
+    # make new behavior live on the destructive teardown door with no canary.
+    # Only an explicit "1" arms it; a fleet opts in via SPINDOWN_RECEIPT_ENABLED
+    # in its fleet.yaml `env:`, one fleet at a time. Same shape as
+    # SESSION_DIGEST_ENABLED in transcript-digest.sh.
+    if [ "${SPINDOWN_RECEIPT_ENABLED:-0}" != "1" ]; then
+        sd_log "receipt: dormant (set SPINDOWN_RECEIPT_ENABLED=1 to arm this fleet)"
+        return 0
+    fi
     [ "$PURGE" -eq 1 ] && action="spin-down --purge"
-    actor="${SPINDOWN_ACTOR:-${USER:-unknown}@$(hostname)}"
+    # Every substitution below degrades instead of failing. This function runs
+    # BEFORE the destructive legs, so under set -e a non-zero command here would
+    # abort the script and strand a bot that the operator asked to tear down --
+    # the record must never cost the teardown.
+    actor="${SPINDOWN_ACTOR:-${USER:-unknown}@$(hostname 2>/dev/null || echo unknown)}"
     fleet="${FLEET_NAME:-unknown}"
     data=$(printf '{"action":"%s","actor":"%s","fleet":"%s","bot_dir":"%s","expected_return":"%s","reason":"%s"}' \
         "$(json_escape "$action")" "$(json_escape "$actor")" \
@@ -153,7 +175,12 @@ reap_fleet_state() {
 
 # Receipt first: a crash mid-teardown then leaves a record of an unfinished
 # teardown, never a finished teardown with no record.
-emit_teardown_receipt
+#
+# `|| ...` is load-bearing, not decoration. Running first on a DESTRUCTIVE path
+# means any non-zero status in here would abort under set -e and leave the bot
+# standing. The teardown must not be contingent on the bookkeeping succeeding,
+# so the receipt is allowed to fail loudly and the legs run regardless.
+emit_teardown_receipt || sd_log "receipt: FAILED to record — continuing teardown"
 reap_supervision
 reap_tmux
 reap_fleet_state

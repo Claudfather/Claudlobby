@@ -3,9 +3,13 @@
 # Real spin-down-bot.sh + stub systemctl/tmux: asserts every teardown leaves a
 # durable record of WHO tore the bot down and WHY, in a ledger that survives the
 # bot directory it documents (the --purge case), with absence recorded
-# explicitly rather than left ambiguous. Runs hermetically under env -i so the
-# real fleet's units, sockets and state can never be reached. Standalone bash
-# (not pytest-collected); runs under macOS /bin/bash (3.2).
+# explicitly rather than left ambiguous. Also pins the rollout contract -- the
+# whole thing stays DORMANT until a fleet arms it, since lib/ is a shared
+# install where a root-pull would otherwise make this live on a destructive
+# door uncanaried -- and that a fault in the receipt can never cost the
+# teardown. Runs hermetically under env -i so the real fleet's units, sockets
+# and state can never be reached. Standalone bash (not pytest-collected); runs
+# under macOS /bin/bash (3.2).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +41,7 @@ spin_down() {
         "$bot" "$bot" "$bot" "$ROOT/state/fleet-state.json" > "$bdir/bot.conf"
     env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
         FLEET_NAME=f1 SPINDOWN_ACTOR="${SPINDOWN_ACTOR:-}" \
+        SPINDOWN_RECEIPT_ENABLED="${SPINDOWN_RECEIPT_ENABLED-1}" \
         bash "$LIB_DIR/spin-down-bot.sh" "$bdir" "$@" 2>&1 || true
 }
 
@@ -102,6 +107,46 @@ mkdir -p "$ROOT/local/f1/runtime/bots/ghost"
 env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T" CLAUDLOBBY_ROOT="$ROOT" USER=testuser \
     bash "$LIB_DIR/spin-down-bot.sh" "$ROOT/local/f1/runtime/bots/ghost" >/dev/null 2>&1 || true
 assert_eq "no receipt for a bot that was never there" "" "$(receipt_row)"
+
+# --- the rollout contract: dormant until a fleet arms it ---------------------
+# lib/ is a SHARED install -- every bot on every fleet reads this same file, so
+# this change cannot be staged per-bot. Default-on would mean a routine
+# root-pull for something unrelated silently activates new behavior on the
+# DESTRUCTIVE teardown door. It must do nothing until a fleet opts in.
+reset
+SPINDOWN_RECEIPT_ENABLED="" spin_down bot6 --reason "should not be recorded" >/dev/null
+assert_eq "unarmed fleet writes NO receipt" "" "$(receipt_row)"
+assert_eq "unarmed fleet does not even create the ledger dir" "no" \
+    "$([ -d "$ROOT/state/events" ] && echo yes || echo no)"
+# Dormant means dormant only for the RECORD -- the teardown itself is unchanged,
+# so a dormant fleet is never left with a bot that failed to reap.
+assert_eq "unarmed teardown still reaps supervision" "yes" \
+    "$(SPINDOWN_RECEIPT_ENABLED="" spin_down bot7 | grep -q 'stopped + disabled + removed' && echo yes || echo no)"
+
+# Only an explicit "1" arms it -- a stray truthy-looking value must not.
+for v in 0 yes true ""; do
+    reset
+    SPINDOWN_RECEIPT_ENABLED="$v" spin_down bot8 >/dev/null
+    assert_eq "SPINDOWN_RECEIPT_ENABLED='$v' stays dormant" "" "$(receipt_row)"
+done
+reset
+SPINDOWN_RECEIPT_ENABLED=1 spin_down bot9 >/dev/null
+assert_eq "SPINDOWN_RECEIPT_ENABLED=1 arms it" "bot9" "$(field "$(receipt_row)" bot)"
+
+echo ""
+# --- the record must never cost the teardown --------------------------------
+# emit_teardown_receipt runs BEFORE the destructive legs, so under set -e any
+# non-zero command inside it aborts the script and leaves standing a bot the
+# operator asked to tear down. Fault-injected on the one surface with no
+# fallback behind it: hostname, absent on a trimmed PATH or a minimal env.
+reset
+printf '#!/bin/bash\nexit 127\n' > "$T/bin/hostname"; chmod +x "$T/bin/hostname"
+out="$(spin_down bot10)"
+assert_eq "a broken hostname still tears the bot down" "yes" \
+    "$(printf '%s\n' "$out" | grep -q 'stopped + disabled + removed' && echo yes || echo no)"
+assert_eq "and the receipt degrades rather than failing" "unknown" \
+    "$(field "$(receipt_row)" actor | cut -d@ -f2)"
+rm -f "$T/bin/hostname"
 
 echo ""
 echo "=== $PASS/$TOTAL passed ==="
