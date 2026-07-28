@@ -38,7 +38,9 @@
 # happened" about a session that did qualify. The monitor needs to tell those apart.
 #
 # Env:
-#   SESSION_DIGEST_ENABLED     — "0" disables entirely (default: enabled)
+#   SESSION_DIGEST_ENABLED     — "1" ARMS this fleet. DEFAULT 0 (dormant): the
+#                                hook composes everywhere and does nothing until
+#                                a fleet opts in. Roll one fleet at a time.
 #   SESSION_DIGEST_MIN_TURNS   — qualifying gate, user+assistant turns (default 6)
 #   SESSION_DIGEST_TAIL_CHARS  — tail-cap on the distilled text (default 80000)
 #   SESSION_DIGEST_MODEL       — extraction model (default haiku)
@@ -56,7 +58,16 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 
-[ "${SESSION_DIGEST_ENABLED:-1}" = "0" ] && exit 0
+# OPT-IN, not opt-out — the equippable-dormant pattern (#627/#673 precedent).
+# The hook composes into every bot on every fleet but stays DORMANT until a
+# fleet sets SESSION_DIGEST_ENABLED=1 in its fleet.yaml `env:` (which lands in
+# bot.conf and is inherited by hooks). Merging and generating therefore change
+# nothing anywhere; a fleet is switched on deliberately, one at a time, with its
+# Haiku spend watched before the next. Default-on would have fired across every
+# bot on the estate at the next generate or daily reload — an uncanaried
+# fleet-wide quota roll, which is exactly what the per-fleet canary rule exists
+# to prevent. Checked before any other work so a dormant bot costs nothing.
+[ "${SESSION_DIGEST_ENABLED:-0}" = "1" ] || exit 0
 
 MIN_TURNS="${SESSION_DIGEST_MIN_TURNS:-6}"
 TAIL_CHARS="${SESSION_DIGEST_TAIL_CHARS:-80000}"

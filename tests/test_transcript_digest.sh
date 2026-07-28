@@ -62,9 +62,24 @@ run_digest() {
     rm -rf "$T/out"; : > "$T/prompt-seen.txt"
     local pay
     pay="$(TX="$tx" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
+    # ENABLED=1 first so a caller's explicit assignment in "$@" still wins (env
+    # takes the last). The hook is dormant by default, so every behavioural case
+    # below has to arm it — which is itself the point being asserted in §9.
     printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
         PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_LOG_DIR="$T/out" \
-        "$@" bash "$DIGEST" >/dev/null 2>&1 || true
+        SESSION_DIGEST_ENABLED=1 "$@" bash "$DIGEST" >/dev/null 2>&1 || true
+    cat "$T/out"/*.jsonl 2>/dev/null || true
+}
+
+# run_digest_unarmed <transcript> — no SESSION_DIGEST_ENABLED at all, i.e. what
+# an un-opted-in fleet actually runs after generate composes the hook.
+run_digest_unarmed() {
+    rm -rf "$T/out"; : > "$T/prompt-seen.txt"
+    local pay
+    pay="$(TX="$1" python3 -c 'import json,os;print(json.dumps({"session_id":"sess-1","transcript_path":os.environ["TX"],"cwd":"/tmp","reason":"clear"}))')"
+    printf '%s' "$pay" | env CLAUDLOBBY_ROOT="$T/root" BOT_ID=tbot CLAUDLOBBY_FLEET=tfleet \
+        PATH="$T/bin:/usr/bin:/bin" CLAUDE_BIN=claude SESSION_DIGEST_LOG_DIR="$T/out" \
+        bash "$DIGEST" >/dev/null 2>&1 || true
     cat "$T/out"/*.jsonl 2>/dev/null || true
 }
 
@@ -218,6 +233,27 @@ assert_eq "empty payload still exits 0" 0 "$rc"
 rm -rf "$T/out"
 row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED=0)"
 assert_eq "SESSION_DIGEST_ENABLED=0 writes nothing at all" "" "$row"
+
+# --- 9. dormant by default (the rollout contract) ----------------------------
+# The hook composes into every bot on every fleet the moment this merges. If it
+# were default-on, the next generate or daily reload would arm ~17 bots across
+# 4 fleets simultaneously — an uncanaried estate-wide Haiku roll. It must do
+# NOTHING until a fleet opts in, so that rollout is one fleet at a time.
+stub_model "'{\"context\":\"c\",\"worked\":\"\",\"failed\":\"\",\"would_change\":\"\",\"reusable\":\"\"}'"
+row="$(run_digest_unarmed "$T/tx.jsonl")"
+assert_eq "unarmed fleet writes NO row" "" "$row"
+[ -s "$T/prompt-seen.txt" ] && r=yes || r=no
+assert_eq "unarmed fleet spends NO model call" no "$r"
+[ -d "$T/out" ] && r=yes || r=no
+assert_eq "unarmed fleet does not even create the log dir" no "$r"
+
+# Only an explicit "1" arms it — a stray truthy-looking value must not.
+for v in 0 yes true ""; do
+    row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED="$v")"
+    assert_eq "SESSION_DIGEST_ENABLED='$v' stays dormant" "" "$row"
+done
+row="$(run_digest "$T/tx.jsonl" SESSION_DIGEST_ENABLED=1)"
+assert_eq "SESSION_DIGEST_ENABLED=1 arms it" ok "$(field "$row" status)"
 
 echo
 echo "  $PASS/$TOTAL passed"
