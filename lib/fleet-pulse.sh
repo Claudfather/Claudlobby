@@ -44,19 +44,25 @@ ts=$(ts_iso)
 state_dir="${CLAUDLOBBY_ROOT}/state/pulse"
 mkdir -p "$state_dir"
 
+# Re-notify window for the debounced pushes below (#831). A changed recipient
+# re-fires immediately; this is the second leg, covering what identity cannot
+# see — a send that failed silently, a reused pid, or simply an episode long
+# enough that one delivery has stopped being a live signal. The 2026-07-27
+# outage ran ~360 ticks on a single delivery. Set 0 to disable.
+_RENOTIFY_AFTER_S="${FLEET_PULSE_RENOTIFY_AFTER_S:-21600}"  # 6h
+
 # Dispatch watchdog inputs: the manager-written dispatch ledger and the
 # worker-written report ledger (overlay path first, root fallback — matches
 # report-back.sh). The overdue matcher cross-references them per bot.
 dispatch_log="$(dispatch_ledger_path)"
 report_ledger="$(fleet_runtime_dir "$fleet")/report-back.jsonl"
 
-# --- Helper: actively notify a bot's manager via its tmux session ---
-# The system is pull-based by design, but silent stalls (the reason this exists)
-# mean the manager can't rely on polling. We push a one-line [FLEET-PULSE] note
-# into the manager's session — the same channel report-back.sh uses — leaving
-# the human-facing escalation as the manager's decision (see fleet-observability).
-notify_manager() {
-    local bot_dir="$1" msg="$2" mgr="" mgr_socket=""
+# --- Helpers: push to a bot's manager, and identify which manager instance ---
+# The manager this bot notifies, as "<socket>|<session>" (empty when none is
+# configured). One resolver, because the push and the recipient identity below
+# must agree on which session they mean.
+_manager_target() {
+    local bot_dir="$1" mgr="" mgr_socket=""
     mgr=$(bot_conf_get "$bot_dir" MANAGER_TMUX "")
     [ -n "$mgr" ] || return 0
     # Manager's private socket: prefer the composed field, else reverse-look-up
@@ -64,6 +70,41 @@ notify_manager() {
     # manager's own socket, the check below would hit the default socket and
     # always pass post-migration — silently killing pulse alerts.
     mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$bot_dir" MANAGER_TMUX_SOCKET "")" "$mgr" "$(dirname "$bot_dir")")
+    printf '%s|%s' "$mgr_socket" "$mgr"
+}
+
+# Identity of the manager session INSTANCE this bot would notify (#831).
+# session_created alone is not enough: start-bot.sh runs CLAUDE_CMD as the pane
+# command, so pane_pid IS the claude process, and a claude restart inside a
+# surviving session loses the message just as surely as a session restart.
+# Empty when no manager resolves or the session is gone — itself a distinct
+# recipient value, so an alert that fired into the void re-fires once a real
+# manager appears.
+_mgr_token_key=""; _mgr_token_val=""
+# Sets _mgr_token rather than echoing it: a `$( )` capture runs in a subshell,
+# which would discard the memo below and silently turn one tmux round-trip per
+# sweep back into one per bot per tick -- a cache that never hits.
+_resolve_manager_token() {
+    local target mgr_socket mgr
+    _mgr_token=""
+    target=$(_manager_target "$1") || return 0
+    [ -n "$target" ] || return 0
+    # Memoized on the resolved target: a fleet shares one manager, so the round
+    # trip is paid once per sweep, not once per bot on every healthy fleet.
+    if [ "$target" != "$_mgr_token_key" ]; then
+        _mgr_token_key="$target"
+        mgr_socket="${target%%|*}"; mgr="${target##*|}"
+        _mgr_token_val=$(bot_tmux "$mgr_socket" display-message -p -t "$mgr" \
+            '#{session_created}-#{pane_pid}' 2>/dev/null || true)
+    fi
+    _mgr_token="$_mgr_token_val"
+}
+
+notify_manager() {
+    local bot_dir="$1" msg="$2" target="" mgr="" mgr_socket=""
+    target=$(_manager_target "$bot_dir") || return 0
+    [ -n "$target" ] || return 0
+    mgr_socket="${target%%|*}"; mgr="${target##*|}"
     check_tmux_session "$mgr" "$mgr_socket" || return 0
     # Attribute any send_miss to THIS bot's ledger — it is the one whose manager
     # could not be reached. bot_tmux_send sanitizes + two-step sends.
@@ -136,6 +177,9 @@ for bot_dir in "$BOTS_DIR"/*/; do
     bot_id=$(basename "$bot_dir")
     bot_in_fleet "$bot_id" "$declared_bots" || continue   # skip undeclared (stale/cross-fleet) dirs
     _current_bot_dir="$bot_dir"
+    # Who the debounced pushes below would reach, resolved once per bot. A
+    # restart mid-episode changes this, which is what re-arms the alert.
+    _resolve_manager_token "$bot_dir"
 
     # Load BOT_SERVICE via the helper (handles `export` prefix + no-match safely).
     BOT_SERVICE=$(bot_conf_get "$bot_dir" BOT_SERVICE "")
@@ -159,7 +203,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     if [ "$_session_alive" -eq 0 ]; then
         emit_fleet_event "session_missing" "pulse" '{"session":"'"$session_name"'"}' "$bot_dir" "$bot_id"
         debounce_notify "$state_dir" "$bot_id" "session_alerted" _notify_current_bot \
-            "$bot_id session_missing — tmux session '$session_name' is gone"
+            "$bot_id session_missing — tmux session '$session_name' is gone" "$_mgr_token" "$_RENOTIFY_AFTER_S"
     else
         debounce_clear "$state_dir" "$bot_id" "session_alerted"
     fi
@@ -177,7 +221,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
             fi
             emit_fleet_event "service_down" "pulse" '{"unit":"'"$BOT_SERVICE"'","state":"'"$state"'"}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "service_alerted" _notify_current_bot \
-                "$bot_id service_down — unit '$BOT_SERVICE' state=$state"
+                "$bot_id service_down — unit '$BOT_SERVICE' state=$state" "$_mgr_token" "$_RENOTIFY_AFTER_S"
         else
             debounce_clear "$state_dir" "$bot_id" "service_alerted"
         fi
@@ -196,7 +240,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
         if _bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace"); then
             emit_fleet_event "bridge_down" "pulse" '{"state":"'"$_bridge_st"'"}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "bridge_alerted" _notify_current_bot \
-                "$bot_id bridge_down — Telegram bridge '$_bridge_st' (live session, poller not delivering)"
+                "$bot_id bridge_down — Telegram bridge '$_bridge_st' (live session, poller not delivering)" "$_mgr_token" "$_RENOTIFY_AFTER_S"
         else
             debounce_clear "$state_dir" "$bot_id" "bridge_alerted"
         fi
@@ -278,7 +322,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
                 emit_fleet_event "activity_stuck" "pulse" \
                     '{"last_tool_call_epoch":'"$last_epoch"',"elapsed_seconds":'"$gap"'}' "$bot_dir" "$bot_id"
                 debounce_notify "$state_dir" "$bot_id" "activity_alerted" _notify_current_bot \
-                    "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)"
+                    "$bot_id activity_stuck — no tool calls for ${gap}s while not idle (likely hung mid-task)" "$_mgr_token" "$_RENOTIFY_AFTER_S"
             else
                 debounce_clear "$state_dir" "$bot_id" "activity_alerted"
             fi
@@ -308,7 +352,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
             # arrived at all, or the worker holds several open at once. Name
             # the ids for the manager to act on, not for the worker to echo.
             debounce_notify "$state_dir" "$bot_id" "dispatch_alerted" _notify_current_bot \
-                "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report${overdue_ids:+ — no report has closed: $overdue_ids}"
+                "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report${overdue_ids:+ — no report has closed: $overdue_ids}" "$_mgr_token" "$_RENOTIFY_AFTER_S"
         else
             debounce_clear "$state_dir" "$bot_id" "dispatch_alerted"
         fi
