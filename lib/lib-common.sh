@@ -1516,6 +1516,20 @@ fleet_runtime_dir() {
     fi
 }
 
+# dispatch_ledger_path
+# The manager-written dispatch ledger, on stdout. Host-global (one file per
+# CLAUDLOBBY_ROOT), unlike the per-fleet report ledger fleet_runtime_dir locates.
+# One home because the writer (dispatch-task.sh) and both readers (fleet-pulse's
+# watchdog, report-back's open-dispatch resolver) must agree byte-for-byte: a
+# resolver reading a different file than the watchdog would re-resolve rows the
+# watchdog still considers open. Self-locating fallback so a caller with no
+# CLAUDLOBBY_ROOT exported still resolves the install it was invoked from.
+dispatch_ledger_path() {
+    local root="${CLAUDLOBBY_ROOT:-}"
+    [ -n "$root" ] || root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    printf '%s' "$root/state/dispatch-log.jsonl"
+}
+
 # host_bots_dirs
 # Emit every bots dir on this host (one per line): root-mode runtime/bots when
 # present, plus each local/<fleet>/runtime/bots. The named enumerator for

@@ -20,12 +20,28 @@ Single-bot mode (original):
 
 All-bots mode (fleet-pulse optimization -- reads files once):
   dispatch-overdue.py --all <dispatch_log> <report_ledger> [<now_epoch>]
-  Prints: "<bot_id> <dispatched_at> <expected_by> <elapsed_seconds>"
+  Prints: "<bot_id> <dispatched_at> <expected_by> <elapsed_seconds> <task_id>"
+
+Orphan mode (#835) -- past-deadline rows whose worker RESPAWNED after dispatch,
+split out of --all so they stop alarming, and listable so they are not simply
+deleted:
+  dispatch-overdue.py --orphans <dispatch_log> <report_ledger> [<now_epoch>] --bots-dir <dir>
+
+Open-task mode (#835) -- the id report-back.sh should echo when --task is
+omitted, so the common path closes its dispatch by default:
+  dispatch-overdue.py --open-task <bot_id> <dispatch_log> <report_ledger>
+  Prints one task id, or nothing when the bot has none open.
+
+`--bots-dir <dir>` goes last and enables respawn detection; without it no row is
+ever classified as an orphan. It is also the one input that is NOT one of the two
+ledgers: orphan classification reads `.spawn` mtimes, so that mode alone depends
+on ambient filesystem state. Everything else stays a pure function of
+(dispatch log, report ledger, clock).
 
 No output (and exit 0) when nothing is overdue.
 
-Kept as a standalone, dependency-free script so it is unit-testable in isolation
-and callable from fleet-pulse.sh.
+Kept as a standalone, stdlib-only script so it is unit-testable in isolation and
+callable from fleet-pulse.sh.
 """
 
 from __future__ import annotations
@@ -88,30 +104,57 @@ def overdue(
     report_ledger: str,
     now: int,
     max_age: int = DEFAULT_OVERDUE_MAX_AGE_S,
+    bots_dir: str | None = None,
 ) -> list[tuple[int, int, int, str]]:
     """Single-bot variant — delegates to overdue_all and filters."""
-    return overdue_all(dispatch_log, report_ledger, now, max_age).get(bot.lower(), [])
+    return overdue_all(dispatch_log, report_ledger, now, max_age, bots_dir).get(
+        bot.lower(), []
+    )
 
 
-def overdue_all(
+def _terminal_reported_ids(reports: list[dict]) -> set[tuple[str, str]]:
+    """(bot, task_id) pairs closed by a terminal report.
+
+    THE definition of "this dispatch is closed", shared by the watchdog join and
+    by open_task_id. Two copies would let the resolver hand back an id the
+    watchdog still considers open — the same desync class this module exists to
+    catch. Scoped by bot: a peer echoing (or mishearing) another bot's id must
+    not close the real owner's dispatch (#518 review).
+    """
+    return {
+        (str(r.get("bot", "")).lower(), str(r.get("task_id")))
+        for r in reports
+        if r.get("status") in _TERMINAL and r.get("task_id")
+    }
+
+
+def _spawn_epoch(bots_dir: str, bot: str) -> int | None:
+    """Mtime of <bots_dir>/<bot>/data/.spawn, or None when unreadable.
+
+    start-bot.sh touches that marker on EVERY start, so it dates the current
+    incarnation of the session (the same marker bridge_down_state graces from).
+    """
+    try:
+        return int(os.path.getmtime(os.path.join(bots_dir, bot, "data", ".spawn")))
+    except OSError:
+        return None
+
+
+def _classify_all(
     dispatch_log: str,
     report_ledger: str,
     now: int,
     max_age: int = DEFAULT_OVERDUE_MAX_AGE_S,
-) -> dict[str, list[tuple[int, int, int, str]]]:
-    """Return overdue dispatches for ALL bots, reading each file once.
+    bots_dir: str | None = None,
+) -> tuple[
+    dict[str, list[tuple[int, int, int, str]]],
+    dict[str, list[tuple[int, int, int, str]]],
+]:
+    """Shared core: return (overdue, orphaned) for ALL bots, files read once.
 
-    Each entry is (dispatched_at, expected_by, elapsed_past_deadline,
-    task_id) — task_id is "-" for legacy id-less rows, so shell consumers
-    can always read a stable 4th field.
-
-    Join matrix (goal-aware plan P4): an id'd dispatch is closed ONLY by a
-    terminal report echoing the same task_id — an id-less terminal report
-    never closes it (LLM echo non-compliance is normal, and blanket-closing
-    was exactly the #447 bug class). An id-less dispatch — raw-mode sends
-    mint these permanently, not just pre-migration rows — keeps the
-    (bot, ts >= dispatched_at) semantics, and any terminal report — id'd or
-    not — satisfies it. No flag-day.
+    THE in-process door when a caller wants both sets — overdue_all and
+    orphaned_all each re-parse both ledgers, so calling them in pairs doubles
+    the work. Contracts live on those two; this is the implementation.
     """
     dispatches = _load_jsonl(dispatch_log)
     reports = _load_jsonl(report_ledger)
@@ -121,19 +164,22 @@ def overdue_all(
     # echoing (or mishearing) another bot's task id must not silence the
     # watchdog on the real owner's still-open dispatch (#518 review).
     report_index: dict[str, list[int]] = {}
-    reported_ids: set[tuple[str, str]] = set()
+    reported_ids = _terminal_reported_ids(reports)
     for r in reports:
         if r.get("status") not in _TERMINAL:
             continue
-        bot_key = str(r.get("bot", "")).lower()
-        tid = r.get("task_id")
-        if tid:
-            reported_ids.add((bot_key, str(tid)))
         ep = _iso_to_epoch(r.get("ts", ""))
         if ep is not None:
-            report_index.setdefault(bot_key, []).append(ep)
+            report_index.setdefault(str(r.get("bot", "")).lower(), []).append(ep)
 
     out: dict[str, list[tuple[int, int, int, str]]] = {}
+    orphans: dict[str, list[tuple[int, int, int, str]]] = {}
+    # One stat per BOT, not per row: a bot with many open rows is the common
+    # shape, and every row of a given bot reads the same marker. Populated
+    # lazily, so a sweep where nothing is overdue stats nothing. Not
+    # lru_cache — the memo must not outlive the call, since .spawn moves
+    # between sweeps.
+    spawn_cache: dict[str, int | None] = {}
     for d in dispatches:
         bot_key = str(d.get("bot", "")).lower()
         exp, da = d.get("expected_by"), d.get("dispatched_at")
@@ -153,10 +199,127 @@ def overdue_all(
         # expired. max_age <= 0 disables the cap.
         if max_age > 0 and (now - da) > max_age:
             continue
-        out.setdefault(bot_key, []).append(
-            (da, exp, now - exp, str(tid) if tid else "-")
-        )
-    return out
+        row = (da, exp, now - exp, str(tid) if tid else "-")
+        # Orphan split (#835). Only id'd rows can orphan: an id-less dispatch
+        # closes on ANY later terminal report, so a respawned worker's next
+        # report still retires it — there is nothing it must remember.
+        if tid and bots_dir:
+            if bot_key not in spawn_cache:
+                spawn_cache[bot_key] = _spawn_epoch(bots_dir, bot_key)
+            spawn = spawn_cache[bot_key]
+            if spawn is not None and spawn > da:
+                orphans.setdefault(bot_key, []).append(row)
+                continue
+        out.setdefault(bot_key, []).append(row)
+    return out, orphans
+
+
+def overdue_all(
+    dispatch_log: str,
+    report_ledger: str,
+    now: int,
+    max_age: int = DEFAULT_OVERDUE_MAX_AGE_S,
+    bots_dir: str | None = None,
+) -> dict[str, list[tuple[int, int, int, str]]]:
+    """Overdue dispatches for ALL bots, reading each file once.
+
+    Each entry is (dispatched_at, expected_by, elapsed_past_deadline,
+    task_id) — task_id is "-" for legacy id-less rows, so shell consumers
+    can always read a stable 4th field.
+
+    Join matrix (goal-aware plan P4): an id'd dispatch is closed ONLY by a
+    terminal report echoing the same task_id — an id-less terminal report
+    never closes it (LLM echo non-compliance is normal, and blanket-closing
+    was exactly the #447 bug class). An id-less dispatch — raw-mode sends
+    mint these permanently, not just pre-migration rows — keeps the
+    (bot, ts >= dispatched_at) semantics, and any terminal report — id'd or
+    not — satisfies it. No flag-day.
+
+    With <bots_dir>, rows whose worker respawned after dispatch are NOT
+    returned here — see orphaned_all.
+    """
+    return _classify_all(dispatch_log, report_ledger, now, max_age, bots_dir)[0]
+
+
+def orphaned_all(
+    dispatch_log: str,
+    report_ledger: str,
+    now: int,
+    max_age: int = DEFAULT_OVERDUE_MAX_AGE_S,
+    bots_dir: str | None = None,
+) -> dict[str, list[tuple[int, int, int, str]]]:
+    """Past-deadline dispatches whose worker RESPAWNED after they were sent.
+
+    The session that received the id is gone, so the worker cannot echo what it
+    can no longer see: the row could never close, and the watchdog would flag it
+    every cycle until max_age. The predicate is respawn, NOT session-absence — a
+    restarted bot keeps its session NAME, so an existence check reads a fresh
+    incarnation as the original one. Only id'd rows can orphan; an id-less
+    dispatch closes on any later terminal report and so survives a respawn.
+
+    Split out of overdue_all rather than deleted: an aged-out row (#460) is an
+    abandoned task, but an orphan is work the fleet lost to its own restart,
+    which is actionable. Same row shape as overdue_all.
+
+    Empty without <bots_dir> — respawn cannot be determined without the marker,
+    and the safe default is to keep reporting a row overdue rather than silently
+    retiring one that might still be live.
+    """
+    return _classify_all(dispatch_log, report_ledger, now, max_age, bots_dir)[1]
+
+
+def open_task_id(
+    bot: str,
+    dispatch_log: str,
+    report_ledger: str,
+) -> str | None:
+    """The bot's OLDEST still-open id'd dispatch, or None.
+
+    What report-back.sh resolves when the worker omits --task, so the common
+    path closes its dispatch by default instead of by discipline — workers
+    routinely omit the id, which leaves every id'd dispatch open until it ages
+    out and the watchdog alarms over finished work.
+
+    OLDEST, not newest. A worker is a serial session draining a queued buffer
+    in FIFO order, so the dispatch it just finished is the oldest one still
+    open; and the oldest is the one actually past its deadline and alarming,
+    where the newest is usually still inside it. Resolving newest-first would
+    close the quiet row and leave the loud one open — the fix would not reach
+    the alarms it exists to stop. Multiple open dispatches are the normal case,
+    not an edge one (measured: most active bots carry two or three).
+
+    FIFO also makes a wrong guess self-correcting: one report closes exactly
+    one dispatch, so N reports for N queued tasks retire them in the order they
+    were sent. A worker that reports only once still leaves the unreported rows
+    open, which is the honest outcome.
+
+    Deliberately NOT a loosening of the join in _classify_all — that would be
+    the #447 blanket-close bug again. The join stays exactly as strict; this
+    only supplies the id the report should have carried, so the row that closes
+    is one this bot actually has open, and the watchdog still verifies it
+    independently. Deadline is irrelevant here: a report arriving before
+    expected_by must close its dispatch too.
+
+    SCOPE CAVEAT: the dispatch log is host-global while the report ledger is
+    per-fleet, and the join is on bot name alone. Two fleets under one root that
+    reuse a bot name would cross-resolve. Pre-existing in the watchdog join; it
+    matters more here because this writes the result. Fleet-scoping the join
+    needs fleet identity threaded through both readers — tracked separately.
+    """
+    bot_key = bot.lower()
+    reported = _terminal_reported_ids(_load_jsonl(report_ledger))
+    best: tuple[int, str] | None = None
+    for d in _load_jsonl(dispatch_log):
+        if str(d.get("bot", "")).lower() != bot_key:
+            continue
+        tid, da = d.get("task_id"), d.get("dispatched_at")
+        if not tid or not isinstance(da, int):
+            continue
+        if (bot_key, str(tid)) in reported:
+            continue
+        if best is None or da < best[0]:
+            best = (da, str(tid))
+    return best[1] if best else None
 
 
 def missing_id_count(report_ledger: str) -> int:
@@ -171,35 +334,63 @@ def missing_id_count(report_ledger: str) -> int:
     )
 
 
+def _take_bots_dir(argv: list[str]) -> tuple[list[str], str | None]:
+    """Strip a trailing `--bots-dir <dir>` from argv.
+
+    Kept out of the positional grammar so the existing arg positions (and every
+    caller written against them) are untouched. Trailing-only by design: a
+    valueless flag anywhere else would survive the strip and then be read as a
+    positional.
+    """
+    if len(argv) >= 2 and argv[-2] == "--bots-dir":
+        return argv[:-2], argv[-1]
+    return argv, None
+
+
 def main() -> int:
-    if len(sys.argv) < 3:
+    argv, bots_dir = _take_bots_dir(sys.argv)
+    if len(argv) < 3:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         return 2
 
     max_age = _resolve_max_age()
 
-    if sys.argv[1] == "--all":
-        dlog, rlog = sys.argv[2], sys.argv[3]
+    # report-back.sh's resolver: print the id the omitted --task should carry.
+    # Silent (rc 0, no output) when nothing is open, so the caller degrades to an
+    # id-less report exactly as before rather than failing a report-back.
+    if argv[1] == "--open-task":
+        if len(argv) < 5:
+            print(__doc__.strip().splitlines()[0], file=sys.stderr)
+            return 2
+        tid = open_task_id(argv[2], argv[3], argv[4])
+        if tid:
+            print(tid)
+        return 0
+
+    if argv[1] in ("--all", "--orphans"):
+        dlog, rlog = argv[2], argv[3]
         now = (
-            int(sys.argv[4])
-            if len(sys.argv) > 4
+            int(argv[4])
+            if len(argv) > 4
             else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
         )
-        for bot_id, entries in sorted(overdue_all(dlog, rlog, now, max_age).items()):
+        over, orph = _classify_all(dlog, rlog, now, max_age, bots_dir)
+        rows = over if argv[1] == "--all" else orph
+        for bot_id, entries in sorted(rows.items()):
             for da, exp, elapsed, tid in entries:
                 print(f"{bot_id} {da} {exp} {elapsed} {tid}")
         return 0
 
-    if len(sys.argv) < 4:
+    if len(argv) < 4:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         return 2
-    bot, dlog, rlog = sys.argv[1], sys.argv[2], sys.argv[3]
+    bot, dlog, rlog = argv[1], argv[2], argv[3]
     now = (
-        int(sys.argv[4])
-        if len(sys.argv) > 4
+        int(argv[4])
+        if len(argv) > 4
         else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     )
-    for da, exp, elapsed, tid in overdue(bot, dlog, rlog, now, max_age):
+    for da, exp, elapsed, tid in overdue(bot, dlog, rlog, now, max_age, bots_dir):
         print(f"{da} {exp} {elapsed} {tid}")
     return 0
 

@@ -3,6 +3,8 @@ including the P4 task-id join matrix (semantics: overdue_all docstring)."""
 
 from __future__ import annotations
 
+import os
+
 from tests.conftest import (
     dispatch_row as _dispatch,
     load_lib_module,
@@ -250,3 +252,174 @@ class TestMissingIdCounter:
         )
         # terminal + id-less: w1's first report and w2's failed report
         assert dispatch_overdue.missing_id_count(str(rlog)) == 2
+
+
+class TestOrphanSplit:
+    """#835 — a past-deadline row whose worker RESPAWNED after dispatch.
+
+    The session holding the task id is gone, so the id can never be echoed and
+    the row would alarm every cycle until it aged out. Split it out of overdue,
+    but keep it listable: a task lost to a restart is evidence, not noise.
+    """
+
+    NOW = 2000
+
+    def _bots_dir(self, tmp_path, bot, spawn_epoch):
+        data = tmp_path / "bots" / bot / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        marker = data / ".spawn"
+        marker.write_text("")
+        os.utime(marker, (spawn_epoch, spawn_epoch))
+        return str(tmp_path / "bots")
+
+    def _logs(self, tmp_path, dispatches, reports):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, reports)
+        return str(dlog), str(rlog)
+
+    def test_respawn_after_dispatch_moves_row_out_of_overdue(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
+        )
+        bots = self._bots_dir(tmp_path, "w1", 500)  # respawned AFTER dispatch
+        assert dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
+        orphans = dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots)
+        assert [d[3] for d in orphans["w1"]] == ["t-100-aaaa"], (
+            "the orphan must stay listable — reaping it silently deletes the "
+            "evidence that a task was lost to a restart"
+        )
+
+    def test_same_incarnation_still_reports_overdue(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
+        )
+        bots = self._bots_dir(tmp_path, "w1", 50)  # spawned BEFORE dispatch
+        assert "w1" in dispatch_overdue.overdue_all(
+            dlog, rlog, self.NOW, bots_dir=bots
+        )
+        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
+
+    def test_without_bots_dir_nothing_is_orphaned(self, tmp_path):
+        """No marker access => keep alarming. Never retire a row on a guess."""
+        dlog, rlog = self._logs(
+            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
+        )
+        assert "w1" in dispatch_overdue.overdue_all(dlog, rlog, self.NOW)
+        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW) == {}
+
+    def test_missing_spawn_marker_keeps_row_overdue(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
+        )
+        (tmp_path / "bots").mkdir()
+        bots = str(tmp_path / "bots")
+        assert "w1" in dispatch_overdue.overdue_all(
+            dlog, rlog, self.NOW, bots_dir=bots
+        )
+
+    def test_idless_dispatch_never_orphans(self, tmp_path):
+        """An id-less row closes on ANY later terminal report, so a respawned
+        worker's next report still retires it — nothing to remember, nothing to
+        orphan."""
+        dlog, rlog = self._logs(tmp_path, [_dispatch("w1", 100, 1000)], [])
+        bots = self._bots_dir(tmp_path, "w1", 500)
+        assert "w1" in dispatch_overdue.overdue_all(
+            dlog, rlog, self.NOW, bots_dir=bots
+        )
+        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
+
+    def test_a_closed_row_is_neither_overdue_nor_orphan(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path,
+            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+            [_report("w1", "1970-01-01T00:05:00Z", task_id="t-100-aaaa")],
+        )
+        bots = self._bots_dir(tmp_path, "w1", 500)
+        assert dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
+        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
+
+
+class TestOpenTaskResolution:
+    """#835 — the id report-back.sh supplies when the worker omits --task."""
+
+    def _logs(self, tmp_path, dispatches, reports):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, reports)
+        return str(dlog), str(rlog)
+
+    def test_resolves_the_oldest_open_dispatch(self, tmp_path):
+        """Oldest, not newest: the oldest is the row past its deadline and
+        alarming, and it is what a serial FIFO worker just finished. Rows are
+        written out of dispatch order to pin that this is time-ordered, not
+        file-ordered."""
+        dlog, rlog = self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
+                _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+                _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
+            ],
+            [],
+        )
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-100-aaaa"
+
+    def test_concurrent_dispatches_retire_in_dispatch_order(self, tmp_path):
+        """The normal case, not an edge one — most active bots carry 2-3 open.
+        Each report closes exactly one row, oldest first, so a sequence of
+        reports drains the queue in the order it was sent."""
+        dispatches = [
+            _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+            _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
+            _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
+        ]
+        reports: list = []
+        drained = []
+        for _ in range(3):
+            dlog, rlog = self._logs(tmp_path, dispatches, reports)
+            tid = dispatch_overdue.open_task_id("w1", dlog, rlog)
+            drained.append(tid)
+            reports.append(_report("w1", "1970-01-01T00:20:00Z", task_id=tid))
+        assert drained == ["t-100-aaaa", "t-200-bbbb", "t-300-cccc"]
+        dlog, rlog = self._logs(tmp_path, dispatches, reports)
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) is None
+
+    def test_skips_already_closed_dispatches(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+                _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
+            ],
+            [_report("w1", "1970-01-01T00:10:00Z", task_id="t-300-cccc")],
+        )
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-100-aaaa"
+
+    def test_none_when_nothing_open(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path,
+            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+            [_report("w1", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")],
+        )
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) is None
+
+    def test_scoped_to_the_bot(self, tmp_path):
+        """A peer's open dispatch must never be handed to this bot — that is
+        the cross-bot leak the watchdog join is deliberately scoped against."""
+        dlog, rlog = self._logs(
+            tmp_path, [_dispatch("w2", 300, 1000, task_id="t-300-cccc")], []
+        )
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) is None
+
+    def test_idless_dispatches_are_not_resolvable(self, tmp_path):
+        dlog, rlog = self._logs(tmp_path, [_dispatch("w1", 100, 1000)], [])
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) is None
+
+    def test_a_peers_report_does_not_close_this_bots_dispatch(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path,
+            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+            [_report("w2", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")],
+        )
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-100-aaaa"

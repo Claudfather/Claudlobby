@@ -38,6 +38,19 @@ unset FLEET_NAME
 # (minimal composed-looking confs), so a dev's exported CLAUDE_FLAGS would leak
 # into the start-bot.sh boots and MASK a regression that CI (clean env) exposes.
 unset CLAUDE_FLAGS
+# Pin the escalation chat id for the WHOLE run (#846). fleet-pulse's critical
+# alerts do NOT travel through MANAGER_TMUX — the isolation this harness provides
+# by shadowing tmux — they go straight out via tg-post.sh, keyed on this var. So
+# every fleet-pulse invocation below inherits the real fleet chat unless it is
+# overridden, and the send is `2>/dev/null || true`, so a harness run that reaches
+# production succeeds silently. It has: a two-throwaway-bot scenario crosses the
+# session_missing threshold of 2 and paged a human.
+#
+# Run-wide, not per call site: the harness drives fleet-pulse from ten places and
+# only the one scenario that deliberately tests escalation used to set this.
+# Isolation is the default here; that scenario re-exports the same fake id
+# explicitly, which is the shape it should have had from the start.
+export FLEET_PULSE_ESCALATION_CHAT_ID="-100999"
 vsock() { printf 'tmux-%s' "$1"; }
 tmux() {
     local i sock=""
@@ -144,10 +157,11 @@ harness_check "bridge_down event emitted (live session, Telegram poller not deli
 # #460: a never-closing dispatch must age out of the overdue set so fleet-pulse
 # stops re-emitting overdue_dispatch every cycle. Drive the real matcher (the CLI
 # fleet-pulse consumes) with a 25h-old, never-reported dispatch and assert nothing.
+VAL_REPORT_LEDGER="$ROOT/local/$FLEET/runtime/report-back.jsonl"
 aged_log="$ROOT/state/dispatch-log-aged.jsonl"
 printf '{"ts":"t","manager":"%s","bot":"%s","task":"x","dispatched_at":%s,"expected_by":%s}\n' \
     "$MGR" "$BOT" "$((now - 90000))" "$((now - 89400))" > "$aged_log"
-aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$aged_log" "$ROOT/state/report-back.jsonl" "$now" 2>/dev/null || true)
+aged_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$aged_log" "$VAL_REPORT_LEDGER" "$now" 2>/dev/null || true)
 [ -z "$aged_out" ] && r=yes || r=no
 harness_check "overdue_dispatch expires past max age (#460 — no re-emit for a 25h-old dispatch)" "$r"
 
@@ -162,8 +176,96 @@ echo "=== validate task-id end-to-end (P4: event + nudge carry the id) ==="
 [ -n "$events_file" ] && grep -q '"type":"overdue_dispatch"' "$events_file" \
     && grep '"type":"overdue_dispatch"' "$events_file" | grep -q '"task_id":"t-1-aaaa"' && r=yes || r=no
 harness_check "overdue_dispatch event carries the dispatch task_id" "$r"
-printf '%s' "$mgr_pane" | grep -q 'report-back --task' && printf '%s' "$mgr_pane" | grep -q 't-1-aaaa' && r=yes || r=no
-harness_check "manager nudge names the open id (self-heal echo instruction)" "$r"
+printf '%s' "$mgr_pane" | grep -q 'no report has closed' && printf '%s' "$mgr_pane" | grep -q 't-1-aaaa' && r=yes || r=no
+harness_check "manager nudge names the open id (for the manager to act on)" "$r"
+
+# ===========================================================================
+# #835 — the two halves that stop the watchdog crying wolf over finished work.
+# Both drive the REAL scripts: report-back.sh for the resolve, fleet-pulse.sh
+# for the orphan split. Unit semantics are in tests/test_dispatch_overdue.py;
+# what only running the code can prove is that the id actually lands in the
+# ledger and that the pulse actually stops emitting.
+# ===========================================================================
+echo ""
+echo "=== validate #835: an id-less report closes its dispatch; a respawn orphan goes quiet ==="
+
+# --- Half 1: report-back.sh with NO --task must resolve the open dispatch. ---
+T835_BOT="valrb835"
+T835_DIR="$ROOT/local/$FLEET/runtime/bots/$T835_BOT"
+mkdir -p "$T835_DIR/data"
+cat > "$T835_DIR/bot.conf" <<CONF
+BOT_NAME="$T835_BOT"
+BOT_ID="$T835_BOT"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+t835_dispatch="$ROOT/state/dispatch-log.jsonl"
+printf '{"ts":"2026-05-27T10:00:00Z","manager":"%s","bot":"%s","task_id":"t-835-open","task":"do y","dispatched_at":%s,"expected_by":%s}\n' \
+    "$MGR" "$T835_BOT" "$((now - 600))" "$((now - 10))" >> "$t835_dispatch"
+
+# Deliberately NO --task, the way every worker actually calls it.
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="$MGR" \
+    "$LIB_DIR/report-back.sh" "$T835_BOT" completed "finished the thing" >/dev/null 2>&1 || true
+
+t835_ledger="$VAL_REPORT_LEDGER"
+grep -q '"bot":"'"$T835_BOT"'"' "$t835_ledger" 2>/dev/null \
+    && grep '"bot":"'"$T835_BOT"'"' "$t835_ledger" | grep -q '"task_id":"t-835-open"' && r=yes || r=no
+harness_check "#835 report-back without --task stamps the resolved task id into the ledger" "$r"
+
+# The join is unchanged — so the row closing is proof the id is the RIGHT one.
+t835_left=$(python3 "$LIB_DIR/dispatch-overdue.py" --all "$t835_dispatch" "$t835_ledger" "$now" 2>/dev/null \
+    | grep -c "^$T835_BOT " || true)
+[ "${t835_left:-1}" -eq 0 ] && r=yes || r=no
+harness_check "#835 the resolved id actually closes the dispatch (watchdog join untouched)" "$r"
+
+# A second id-less report with nothing open must stay id-less, not grab a peer's.
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="$MGR" \
+    "$LIB_DIR/report-back.sh" "$T835_BOT" completed "and again" >/dev/null 2>&1 || true
+t835_blank=$(grep '"bot":"'"$T835_BOT"'"' "$t835_ledger" | tail -1 | grep -c '"task_id":""' || true)
+[ "${t835_blank:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#835 nothing open -> report stays id-less (no scavenging a peer's row)" "$r"
+
+# --- Half 2: a respawn orphan must stop reaching the pulse's overdue path. ---
+# Same bot dir, but .spawn is now NEWER than the dispatch: the session that
+# received the id is gone, so it can never be echoed.
+OR_BOT="valor835"
+OR_DIR="$ROOT/local/$FLEET/runtime/bots/$OR_BOT"
+mkdir -p "$OR_DIR/data/events"
+cat > "$OR_DIR/bot.conf" <<CONF
+BOT_NAME="$OR_BOT"
+BOT_ID="$OR_BOT"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+printf '{"ts":"2026-05-27T10:00:00Z","manager":"%s","bot":"%s","task_id":"t-835-orphan","task":"do z","dispatched_at":%s,"expected_by":%s}\n' \
+    "$MGR" "$OR_BOT" "$((now - 600))" "$((now - 10))" >> "$t835_dispatch"
+touch "$OR_DIR/data/.spawn"   # respawned just now, i.e. after the dispatch
+
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
+
+# Scope the match to overdue_dispatch specifically: the orphan DOES get a
+# dispatch_orphaned event in this same file, and a bare task-id grep would
+# match that and read a correctly-silenced alarm as a firing one.
+or_overdue=$(grep -h '"type":"overdue_dispatch"' "$OR_DIR"/data/events/fleet-*.jsonl 2>/dev/null | grep -c 't-835-orphan' || true)
+[ "${or_overdue:-1}" -eq 0 ] && r=yes || r=no
+harness_check "#835 respawn orphan emits NO overdue_dispatch from the real pulse" "$r"
+
+or_listed=$(python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$t835_dispatch" "$t835_ledger" "$now" \
+    --bots-dir "$ROOT/local/$FLEET/runtime/bots" 2>/dev/null | grep -c 't-835-orphan' || true)
+[ "${or_listed:-0}" -ge 1 ] && r=yes || r=no
+harness_check "#835 the orphan is still listable (evidence kept, not reaped away)" "$r"
+
+# Inert for the ALARM, but recorded once — a task lost to a restart is
+# actionable, and silence would trade this issue's noise for #826/#831/#833's.
+or_ev=$(grep -h '"type":"dispatch_orphaned"' "$OR_DIR"/data/events/fleet-*.jsonl 2>/dev/null | grep -c 't-835-orphan' || true)
+[ "${or_ev:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#835 the orphan is recorded once as dispatch_orphaned" "$r"
+
+# Latched on id-set membership, so a second sweep must not re-record it.
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
+or_ev2=$(grep -h '"type":"dispatch_orphaned"' "$OR_DIR"/data/events/fleet-*.jsonl 2>/dev/null | grep -c 't-835-orphan' || true)
+[ "${or_ev2:-0}" -eq 1 ] && r=yes || r=no
+harness_check "#835 a second sweep does NOT re-record the same orphan (latch holds)" "$r"
 
 # ===========================================================================
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.

@@ -47,12 +47,8 @@ mkdir -p "$state_dir"
 # Dispatch watchdog inputs: the manager-written dispatch ledger and the
 # worker-written report ledger (overlay path first, root fallback — matches
 # report-back.sh). The overdue matcher cross-references them per bot.
-dispatch_log="${CLAUDLOBBY_ROOT}/state/dispatch-log.jsonl"
-if [ -d "$fleet_dir/runtime" ]; then
-    report_ledger="$fleet_dir/runtime/report-back.jsonl"
-else
-    report_ledger="${CLAUDLOBBY_ROOT}/runtime/fleet/report-back.jsonl"
-fi
+dispatch_log="$(dispatch_ledger_path)"
+report_ledger="$(fleet_runtime_dir "$fleet")/report-back.jsonl"
 
 # --- Helper: actively notify a bot's manager via its tmux session ---
 # The system is pull-based by design, but silent stalls (the reason this exists)
@@ -93,10 +89,46 @@ reap_events() {
 # --- Pre-sweep: dispatch-overdue scan (once, not per-bot) ---
 # Runs dispatch-overdue.py --all to read both ledger files exactly once.
 # Output is stored in a temp file for per-bot lookup inside the loop.
+# --bots-dir enables respawn detection (#835): a past-deadline row whose worker
+# restarted after it was dispatched is split into the orphan set instead of the
+# overdue set. The session holding that task id is gone, so it can never be
+# echoed and the row would alarm every cycle until it aged out.
 _overdue_cache=$(safe_mktemp)
+_orphan_cache=$(safe_mktemp)
 if [ -f "$dispatch_log" ]; then
-    python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" 2>/dev/null > "$_overdue_cache" || true
+    python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" \
+        --bots-dir "$BOTS_DIR" 2>/dev/null > "$_overdue_cache" || true
+    python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$dispatch_log" "$report_ledger" \
+        --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
 fi
+
+# _emit_new_orphans <bot_dir> <bot_id>
+# Record each orphaned dispatch ONCE, the first sweep it is seen (#835).
+#
+# An aged-out row (#460) is an abandoned task — nothing to do. An orphan is work
+# the fleet lost to its OWN restart, which is actionable: it can be re-dispatched.
+# Making it inert for the alarm and otherwise unrecorded would trade this issue's
+# noise for the silence of #826/#831/#833, which defeats the operator the same way.
+#
+# Latched on task-id set membership, not a time window: orphan-ness is monotonic
+# (once .spawn is newer than the dispatch it stays newer), so "have I seen this
+# id" is the natural once-only test and it needs none of debounce_notify's
+# machinery. It also survives the marker moving — a bot dir reset that removes
+# .spawn would otherwise let long-dead rows revert to overdue and alarm afresh.
+# Recorded to the event ledger only; deliberately no manager push, because the
+# whole point is that these are not the operator's emergency.
+_emit_new_orphans() {
+    local _o_dir="$1" _o_bot="$2" _seen="$state_dir/${2}.orphaned" _tid
+    [ -s "$_orphan_cache" ] || return 0
+    while read -r _ob _oda _oexp _oel _tid; do
+        [ "${_tid:--}" != "-" ] || continue
+        grep -qxF "$_tid" "$_seen" 2>/dev/null && continue
+        printf '%s\n' "$_tid" >> "$_seen"
+        emit_fleet_event "dispatch_orphaned" "pulse" \
+            '{"dispatched_at":'"$_oda"',"expected_by":'"$_oexp"',"task_id":"'"$_tid"'","reason":"worker respawned after dispatch"}' \
+            "$_o_dir" "$_o_bot"
+    done < <(grep "^${_o_bot} " "$_orphan_cache" || true)
+}
 
 # --- Iterate all bots ---
 for bot_dir in "$BOTS_DIR"/*/; do
@@ -270,14 +302,18 @@ for bot_dir in "$BOTS_DIR"/*/; do
                     overdue_ids="${overdue_ids:+$overdue_ids }$_tid"
                 fi
             done <<< "$overdue_lines"
-            # Self-heal: name the open ids — an id-less re-report cannot
-            # close an id'd dispatch.
+            # Name the open ids. The echo instruction is no longer the
+            # self-heal it was: report-back.sh resolves the open dispatch
+            # itself now (#835), so a row still overdue here means no report
+            # arrived at all, or the worker holds several open at once. Name
+            # the ids for the manager to act on, not for the worker to echo.
             debounce_notify "$state_dir" "$bot_id" "dispatch_alerted" _notify_current_bot \
-                "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report${overdue_ids:+ — worker must report-back --task <id> for: $overdue_ids}"
+                "$bot_id overdue_dispatch — a dispatched task is ${oldest_elapsed}s past its deadline with no report${overdue_ids:+ — no report has closed: $overdue_ids}"
         else
             debounce_clear "$state_dir" "$bot_id" "dispatch_alerted"
         fi
     fi
+    _emit_new_orphans "$bot_dir" "$bot_id"
 
     # Reap old event files for this bot
     reap_events "$bot_dir"
