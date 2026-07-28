@@ -189,13 +189,6 @@ fi
 [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && unset TELEGRAM_BOT_TOKEN
 TGTOKEOF
 
-# Backwards-compat: if the bot.conf is from before the CLAUDE_FLAGS
-# rename, fall back to the legacy hardcoded flag set + CLAUDE_EXTRA_FLAGS.
-if [ -z "${CLAUDE_FLAGS:-}" ]; then
-    CLAUDE_FLAGS="--channels plugin:telegram@claude-plugins-official --remote-control --dangerously-skip-permissions"
-    [ -n "${CLAUDE_EXTRA_FLAGS:-}" ] && CLAUDE_FLAGS="$CLAUDE_FLAGS $CLAUDE_EXTRA_FLAGS"
-fi
-
 # The launched binary is overridable via CLAUDE_BIN so the validation harness
 # (validate-bot-change.sh) can inject a stub for a hermetic, auth-free start;
 # production leaves it unset and `claude` resolves on PATH inside the session.
@@ -209,7 +202,9 @@ fi
 # token-less bot lands in a keepalive restart loop. Masked when a prior tmux
 # server already exported the token into the new pane; bites on a fresh server.
 CLAUDE="${CLAUDE_BIN:-claude}"
-CLAUDE_CMD=". '$BOT_ENV_FILE'; exec $CLAUDE $CLAUDE_FLAGS --name \"$SESSION_NAME\""
+# CLAUDE_FLAGS is composed into every bot.conf; the :- guard keeps a minimal or
+# hand-written conf that omits it from aborting boot under `set -u`.
+CLAUDE_CMD=". '$BOT_ENV_FILE'; exec $CLAUDE ${CLAUDE_FLAGS:-} --name \"$SESSION_NAME\""
 
 # Update third-party plugins before launch. Handles cold start (fresh
 # host with no plugins installed) through full lifecycle: register
