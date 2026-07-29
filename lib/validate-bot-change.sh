@@ -38,6 +38,15 @@ unset FLEET_NAME
 # (minimal composed-looking confs), so a dev's exported CLAUDE_FLAGS would leak
 # into the start-bot.sh boots and MASK a regression that CI (clean env) exposes.
 unset CLAUDE_FLAGS
+
+# Compress the #860 input-box readiness budget. This harness stubs `claude` with
+# `exec cat`, so those panes never draw a box BY CONSTRUCTION — the gate would
+# sit out its full 45s per send waiting for a TUI that the stub cannot render,
+# across 18 start-bot invocations. Nothing about the behaviour under test
+# changes; only the wait for a box that will never appear. The real budget is
+# exercised against real boots in lib/boot-strand-sampler.sh, which is where it
+# belongs, and the unit contract is pinned in tests/test_pane_send_verified.sh.
+export PANE_READY_POLL_S=0.05 PANE_READY_TICKS=4
 # Pin the escalation chat id for the WHOLE run (#846). fleet-pulse's critical
 # alerts do NOT travel through MANAGER_TMUX — the isolation this harness provides
 # by shadowing tmux — they go straight out via tg-post.sh, keyed on this var. So

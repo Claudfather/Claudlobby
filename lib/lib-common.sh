@@ -1082,6 +1082,28 @@ _PANE_PASTE_COLLAPSE_MARKER='[Pasted text'
 # beyond this straddles a wrap point and cannot match any single rendered line
 # even while the text IS sitting unsubmitted.
 _PANE_PROBE_MAX_CHARS=60
+
+# Readiness budget: how long to wait for the TUI to draw its input box before
+# sending into it (#860). Sized off the measured draw, not a guess — a
+# production-shaped bot (plugins + MCP servers + channels) takes 16-19s to
+# render its box (lib/boot-strand-sampler.sh t_glyph), while start-bot injects
+# at 3-9s, so the payload was routinely typed into a pane that could not yet
+# receive it. 45s leaves headroom for a loaded host booting several bots at
+# once. A coarser poll than the verify's: this waits out whole seconds of
+# startup, and per-tick forks land while every bot on the box is starting
+# (documentation/runbooks/audit-cold-start-timing.md).
+# Opt-in, not on by default, and the distinction is the whole altitude of this
+# gate: a send is only ever LOST into a pane whose TUI has not drawn, and the
+# only caller that injects into a possibly-undrawn TUI is start-bot on a cold
+# boot. Every other caller of pane_send_verified — report-back/dispatch via
+# bot_tmux_send, keepalive's reload, pre-stop-handoff — targets an already
+# running bot whose box exists by definition, so for them the wait is pure
+# downside: an empty capture (a stubbed tmux, a session dying mid-send) is
+# indistinguishable from pre-draw, and waiting it out would block a worker's
+# report-back for the whole budget. Measured the hard way — defaulting this ON
+# put a 45s block on report-back.sh and timed out its contract test.
+_PANE_READY_POLL_S=0.5
+_PANE_READY_TICKS_BOOT=90
 # Prompt-glyph anchor. Alternation rather than a [>❯] bracket expression so the
 # multibyte glyph stays one literal byte sequence under any locale — byte-safe by
 # construction rather than by luck. (_IDLE_PATTERN_BASE below spells the same
@@ -1132,6 +1154,56 @@ pane_holds_unsubmitted() {
     printf '%s\n' "$region" | grep -qF -e "$2" -e "$_PANE_PASTE_COLLAPSE_MARKER"
 }
 
+# pane_await_input_box <socket> <session>
+# Block until the pane has an input box to receive keystrokes, bounded.
+# rc 0 = box present (or waiting disabled); rc 1 = budget expired.
+#
+# The box's ABSENCE is the readiness signal, and it is the only signal that
+# means one thing. Measured on real boots rather than inferred: before the TUI
+# renders, the pane is EMPTY — not glyph-less-with-content, zero bytes — and
+# once drawn it keeps its box in every state, mid-turn included (the input
+# region stayed constant across a 30s streaming turn). So a pane with no prompt
+# glyph has not drawn yet, and a busy pane still has one, which is why gating
+# here cannot stall a dispatch to a working bot.
+#
+# Two other discriminators were measured and rejected: classify_pane, because a
+# box holding text reads UNKNOWN rather than IDLE (pane_is_idle wants the glyph
+# at end-of-line); and "glyph-less and not busy", because a real thinking pane
+# can lack the esc-to-interrupt affordance, so that gate would have injected a
+# payload into a working session — a worse failure than the one being fixed.
+#
+# Captures BEFORE sleeping, so an already-drawn pane pays one capture and no
+# latency. A capture failure ends the wait rather than burning the budget on a
+# dead pane: the send below is best-effort and owns that outcome.
+pane_await_input_box() {
+    local socket="$1" session="$2" pane tick=0
+    # Default 0 (no wait). Boot injectors arm it; see _PANE_READY_TICKS_BOOT.
+    local ticks="${PANE_READY_TICKS:-0}"
+    [ "$ticks" -gt 0 ] || return 0
+    while [ "$tick" -lt "$ticks" ]; do
+        pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) || return 0
+        # Ready on a glyph — the box exists, send into it. Matches the glyph SSOT
+        # directly rather than through pane_input_region: the question here is
+        # only "is there a box", not "what is in it", and slicing the region
+        # costs an awk buffer-and-reslice per tick (measured ~26% more than the
+        # grep) for a substring nothing reads. Same style as pane_is_idle.
+        printf '%s\n' "$pane" | grep -qE "$_PANE_INPUT_GLYPH_RE" && return 0
+        # Also stop on ANY rendered content. Waiting is only ever right while the
+        # pane looks un-rendered, and pre-draw is EMPTY (measured: zero bytes
+        # until the TUI paints, then fully drawn). A pane that has content but no
+        # glyph is something else entirely — a shell, a crashed session, a
+        # non-TUI command — and none of those will ever grow a box, so waiting
+        # out the budget on one buys nothing and costs the caller the whole
+        # budget. That is not hypothetical: report-back.sh reaches this through
+        # bot_tmux_send, so a glyph-only wait puts a 45s block on every worker
+        # report whose manager pane is not showing a prompt.
+        [ -z "$(printf '%s' "$pane" | tr -d '[:space:]')" ] || return 0
+        tick=$((tick + 1))
+        sleep "${PANE_READY_POLL_S:-$_PANE_READY_POLL_S}"
+    done
+    return 1
+}
+
 # pane_send_verified <socket> <session> <text>
 # THE verified pane send, and the one home for the send/settle/Enter/verify-retry
 # dance: send <text>, let the buffer settle, send Enter, then poll the input box
@@ -1149,6 +1221,18 @@ pane_send_verified() {
     local session="${2:?Usage: pane_send_verified <socket> <session> <text>}"
     local text="${3:?Usage: pane_send_verified <socket> <session> <text>}"
     local probe="${text:0:$_PANE_PROBE_MAX_CHARS}"
+
+    # Wait for a box to send into (#860). A pre-draw send is lost outright and
+    # the verify below cannot see it: a glyph-less pane reads as "nothing
+    # unsubmitted", so the poll returns success on its first tick and the boot
+    # looks clean. Best-effort — a pane that never draws still gets the payload,
+    # because refusing to send would trade a lost prompt for a stuck start-bot.
+    # The miss is recorded, since the whole reason this shipped undetected is
+    # that a lost send left no evidence anywhere.
+    if ! pane_await_input_box "$socket" "$session"; then
+        emit_fleet_event send_blind dispatch \
+            "$(printf '{"session":"%s","reason":"input-box-never-drawn"}' "$(json_escape "$session")")"
+    fi
 
     bot_tmux "$socket" send-keys -t "$session" "$text" || return 1
     sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"

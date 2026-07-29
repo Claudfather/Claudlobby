@@ -57,6 +57,19 @@ mkdir -p "$BOT_DIR/data"
 # Stub the single tmux chokepoint. send-keys appends its payload to SENT_LOG;
 # capture-pane pops the next fixture from PANE_SCRIPT (repeating the last one),
 # so a test can hand the poll loop a different pane on each tick.
+# ORDER_LOG records the INTERLEAVING of captures and sends, which counting
+# send-keys cannot express. #860 is an ordering defect — the payload was sent
+# into a pane whose input box did not exist yet — so the property under test is
+# "no send precedes a drawn capture", not "how many sends happened".
+ORDER_LOG="$TMPD/order.log"
+: > "$ORDER_LOG"
+
+# Compress the #860 readiness budget suite-wide. In production it is 45s (0.5s x
+# 90), sized off the 16-19s measured box draw; here every capture is a stub, so
+# the wall-clock wait buys nothing and any glyph-less fixture would otherwise
+# make the suite sit out the full budget before its assertion runs.
+export PANE_READY_POLL_S=0.02 PANE_READY_TICKS=6
+
 bot_tmux() {
     shift  # socket
     case "${1:-}" in
@@ -64,6 +77,7 @@ bot_tmux() {
             shift 2  # send-keys -t
             shift    # session
             printf '%s\n' "$*" >> "$SENT_LOG"
+            printf 'send\n' >> "$ORDER_LOG"
             ;;
         capture-pane)
             local remaining fixture
@@ -71,6 +85,13 @@ bot_tmux() {
             fixture=$(printf '%s\n' "$remaining" | head -1)
             printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
             [ -s "$PANE_SCRIPT.tmp" ] && mv "$PANE_SCRIPT.tmp" "$PANE_SCRIPT" || rm -f "$PANE_SCRIPT.tmp"
+            # Classify for the order log by the same signal the gate uses, so the
+            # log cannot disagree with the code about what "drawn" means.
+            if [ -n "$(pane_input_region "$(cat "$fixture")")" ]; then
+                printf 'capture:drawn\n' >> "$ORDER_LOG"
+            else
+                printf 'capture:predraw\n' >> "$ORDER_LOG"
+            fi
             cat "$fixture"
             ;;
     esac
@@ -80,10 +101,18 @@ bot_tmux() {
 # 2 = text + Enter (clean submit). 3 = text + Enter + retry Enter.
 run_send() {
     local text="$1"; shift
-    : > "$SENT_LOG"
+    : > "$SENT_LOG"; : > "$ORDER_LOG"
     printf '%s\n' "$@" > "$PANE_SCRIPT"
     pane_send_verified sock "$SYNTH_ID" "$text"
     wc -l < "$SENT_LOG" | tr -d ' '
+}
+
+# Did any send happen before the first capture that showed a drawn input box?
+# "none" is the healthy answer; "sent-blind" is #860.
+send_before_draw() {
+    awk '/^send$/ { print "sent-blind"; exit }
+         /^capture:drawn$/ { print "none"; exit }
+         END { if (!NR) print "none" }' "$ORDER_LOG"
 }
 
 echo "=== pane_input_region: anchors to the input line, not a fixed depth ==="
@@ -131,6 +160,63 @@ assert_eq "send queued against a busy pane (TUI hint in box) -> NO spurious Ente
 
 r=$(run_send 'anything' "$FIXTURES/busy-spinner.txt")
 assert_eq "no prompt glyph (mid-turn) -> NO spurious Enter" "2" "$r"
+
+echo "=== pane_send_verified: never sends into a pane with no input box (#860) ==="
+
+# #837 closed the POST-draw swallow and left the PRE-draw loss uncovered. The
+# two are not the same failure: post-draw the text IS in the box and only Enter
+# was eaten, so resending Enter repairs it; pre-draw the text never arrived at
+# all, and no amount of Enter helps. Worse, the verify REPORTS SUCCESS —
+# pane_holds_unsubmitted reads a glyph-less pane as "nothing unsubmitted", so
+# the poll returns 0 on its first tick and the boot looks clean.
+#
+# The discriminator is the input box itself, and it took measuring a real boot
+# to find it. classify_pane cannot serve: a box holding text is UNKNOWN, not
+# IDLE (input-stuck-literal has a 311-byte region and classifies UNKNOWN). Nor
+# can "glyph-less and not busy": verb-no-esc.txt is a genuinely working pane,
+# and gating on that would inject a payload into a thinking bot. What holds is
+# narrower and measured — a real pane is EMPTY before the TUI renders and keeps
+# its box in every drawn state, mid-turn included (region stayed 309 across a
+# 30s streaming turn). So the box's absence means one thing only: not drawn yet.
+# predraw-empty.txt is suite-owned rather than reusing unknown-blank.txt, which
+# belongs to test_keepalive_classify's UNKNOWN cases: an edit made to serve
+# classify_pane would silently change what these assertions mean. The two are
+# NOT behaviourally distinguishable here — a real pre-draw capture is 0 bytes
+# while unknown-blank is whitespace, but every consumer reads the fixture
+# through $( ), which strips trailing newlines before any predicate sees it.
+r=$(run_send 'STARTUP860 payload' \
+    "$FIXTURES/predraw-empty.txt" "$FIXTURES/predraw-empty.txt" \
+    "$FIXTURES/idle-prompt.txt" "$FIXTURES/input-clean-submit.txt")
+assert_eq "pre-draw pane: payload is NOT sent before the box is drawn" "none" "$(send_before_draw)"
+assert_eq "pre-draw pane: payload still lands once the box appears" "2" "$r"
+
+# A drawn pane must not pay for the gate: one capture, then send.
+r=$(run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt")
+assert_eq "already-drawn pane: no send precedes the draw check" "none" "$(send_before_draw)"
+assert_eq "already-drawn pane: still exactly two sends" "2" "$r"
+
+# The gate is best-effort, never a block: a pane that never draws must still get
+# the payload rather than hanging start-bot or silently dropping it.
+# Zero the ledger first — earlier glyph-less cases in this file exhaust the same
+# budget and emit too, and this assertion counts an exact total.
+rm -rf "$BOT_DIR/data/events"
+r=$(run_send 'NEVERDRAWN860' "$FIXTURES/predraw-empty.txt")
+assert_eq "box never drawn: payload is still sent (best-effort, not dropped)" "2" "$r"
+r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"input-box-never-drawn"' || true)
+assert_eq "box never drawn: emits evidence rather than failing silently" "1" "$r"
+
+# The wait is OPT-IN, which splits the contract in two and both halves need
+# pinning. Default-off keeps it off the paths where it is a hazard rather than a
+# safeguard: defaulting it ON put a 45s block on report-back.sh (via
+# bot_tmux_send) and blew through pre-stop-handoff's documented 30s bound,
+# serially, on a fleet-wide restart. And an opt-in that a caller must REMEMBER is
+# the failure mode #844 was, so the one caller that needs it is asserted here
+# rather than trusted — a cold-boot injector that silently stops arming this is
+# #860 all over again, and nothing else in the suite would notice.
+r=$(PANE_READY_TICKS= bash -c '. lib/lib-common.sh; echo "${PANE_READY_TICKS:-0}"' 2>/dev/null)
+assert_eq "the readiness wait is off unless a caller arms it" "0" "$r"
+r=$(grep -c 'export PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"' "$SCRIPT_DIR/../lib/start-bot.sh" || true)
+assert_eq "start-bot arms the readiness wait for its cold-boot sends" "1" "$r"
 
 echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
 
