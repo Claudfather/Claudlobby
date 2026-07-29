@@ -85,13 +85,14 @@ USAGE
 }
 
 EXPERIMENT="token-efficiency"
+REPS_SET=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY_RUN=1 ;;
         --experiment) EXPERIMENT="$2"; shift ;;
         --tasks) TASKS_ARG="$2"; shift ;;
-        --reps) REPS="$2"; shift ;;
+        --reps) REPS="$2"; REPS_SET=1; shift ;;
         --reps-max) REPS_MAX="$2"; shift ;;
         --threshold) THRESHOLD="$2"; shift ;;
         --cost-threshold) COST_THRESHOLD="$2"; shift ;;
@@ -103,6 +104,13 @@ while [ $# -gt 0 ]; do
 done
 
 die() { printf 'ab-comms-eval: %s\n' "$*" >&2; exit 1; }
+
+# Validate the enum at parse time — the late check was unreachable on the
+# default path (the token-efficiency opt-in gate exited 0 first).
+case "$EXPERIMENT" in
+    token-efficiency|coverage-honesty) ;;
+    *) die "unknown --experiment: $EXPERIMENT" ;;
+esac
 
 _sha256() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
@@ -160,6 +168,18 @@ cov_task_max_turns() {
         T1) printf 8 ;;
         T2) printf 5 ;;
         T3) printf 3 ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# cov_task_arm <task> — bounded (clause-applicable) vs control. Defined HERE,
+# beside the battery that gives the classification its meaning, and emitted
+# into every row so results.jsonl is self-describing for re-analysis.
+cov_task_arm() {
+    case "$1" in
+        T1|T2) printf 'bounded' ;;
+        T3) printf 'control' ;;
         *) return 1 ;;
     esac
     return 0
@@ -229,8 +249,35 @@ PY
 
 # cov_setup_variants — two compose sub-roots; the ONLY divergence is the
 # guardrail file content. Composed-output isolation is asserted afterwards.
+# _link_library_tree <dest_lib_dir> <real_subdir> — mirror $SRC/library as
+# symlinks with ONE subdir carved out real (the experiment's variant axis),
+# plus the templates/lib/voices links every compose root needs. Shared by both
+# experiments in this file so the mirror cannot drift between them (it already
+# had once: one copy linked voices, the other did not).
+_link_library_tree() {
+    local dest="$1" real_subdir="$2" root e name
+    root="$(dirname "$dest")"
+    mkdir -p "$dest/$real_subdir"
+    for e in "$SRC"/library/*; do
+        name="$(basename "$e")"
+        [ "$name" = "$real_subdir" ] && continue
+        ln -s "$e" "$dest/$name"
+    done
+    ln -s "$SRC/templates" "$root/templates"
+    ln -s "$SRC/lib" "$root/lib"
+    ln -s "$SRC/voices" "$root/voices" 2>/dev/null || true
+}
+
+# _generate_or_die <root> <label> — the compose-or-fail block, once.
+_generate_or_die() {
+    if ! CLAUDLOBBY_ROOT="$1" PYTHONPATH="$SRC" python3 -m claudlobby generate >"$1/generate.out" 2>&1; then
+        cat "$1/generate.out" >&2
+        die "claudlobby generate failed for $2"
+    fi
+}
+
 cov_setup_variants() {
-    local variant sub e name
+    local variant sub e name src
     WITHOUT_SRC="$ROOT/no-fabrication-preclause.md"
     git -C "$SRC" show "${COV_PRECLAUSE_REF}:${COV_GUARDRAIL_REL}" > "$WITHOUT_SRC" 2>/dev/null \
         || die "cannot resolve ${COV_PRECLAUSE_REF}:${COV_GUARDRAIL_REL} — the WITHOUT variant needs the pre-clause file from git history"
@@ -239,24 +286,16 @@ cov_setup_variants() {
 
     for variant in without with; do
         sub="$ROOT/$variant"
-        mkdir -p "$sub/library/guardrails" "$sub/config"
-        for e in "$SRC"/library/*; do
-            name="$(basename "$e")"
-            [ "$name" = guardrails ] && continue
-            ln -s "$e" "$sub/library/$name"
-        done
+        mkdir -p "$sub/config"
+        _link_library_tree "$sub/library" guardrails
         for e in "$SRC"/library/guardrails/*; do
             name="$(basename "$e")"
-            [ "$name" = no-fabrication.md ] && continue
+            [ "$name" = "$(basename "$COV_GUARDRAIL_REL")" ] && continue
             ln -s "$e" "$sub/library/guardrails/$name"
         done
-        if [ "$variant" = without ]; then
-            cp "$WITHOUT_SRC" "$sub/library/guardrails/no-fabrication.md"
-        else
-            cp "$SRC/$COV_GUARDRAIL_REL" "$sub/library/guardrails/no-fabrication.md"
-        fi
-        ln -s "$SRC/templates" "$sub/templates"
-        ln -s "$SRC/lib" "$sub/lib"
+        src="$SRC/$COV_GUARDRAIL_REL"
+        [ "$variant" = without ] && src="$WITHOUT_SRC"
+        cp "$src" "$sub/library/guardrails/$(basename "$COV_GUARDRAIL_REL")"
 
         cat > "$sub/fleet.yaml" <<YAML
 fleet:
@@ -280,12 +319,21 @@ fleet:
       telegram:
         handle: cov_probe_bot
 YAML
-        if ! CLAUDLOBBY_ROOT="$sub" PYTHONPATH="$SRC" python3 -m claudlobby generate >"$sub/generate.out" 2>&1; then
-            cat "$sub/generate.out" >&2
-            die "claudlobby generate failed for the $variant variant"
-        fi
-        cov_seed_corpus "$sub/runtime/bots/cov-probe"
+        _generate_or_die "$sub" "the $variant variant"
+        # Abnormal-exit cover: the shared trap scrubs whatever is registered.
+        CLEANUP_SCRUB="$CLEANUP_SCRUB $sub/config/.credentials.json"
     done
+    # Corpus: real-run material only (dry cells synthesize their text). Seed
+    # once, copy — identical bytes by construction, not by seed argument; each
+    # variant needs its OWN copy because sessions run with cwd inside the bot
+    # dir and may write there.
+    if [ "$DRY_RUN" != 1 ]; then
+        cov_seed_corpus "$ROOT/without/runtime/bots/cov-probe"
+        cp -a "$ROOT/without/runtime/bots/cov-probe/data" \
+              "$ROOT/without/runtime/bots/cov-probe/tools" \
+              "$ROOT/without/runtime/bots/cov-probe/notes" \
+              "$ROOT/with/runtime/bots/cov-probe/"
+    fi
 }
 
 # cov_assert_clause_only — run-blocking: every line differing between the two
@@ -312,20 +360,24 @@ cov_assert_clause_only() {
 }
 
 # cov_count_re <ere> <file> — case-insensitive match count, grep -c semantics
-# over occurrences (grep -o) so multiple hits per line all count.
+# over occurrences (grep -o) so multiple hits per line all count. This IS the
+# measurement engine the published numbers came from; tests drive this exact
+# function (sourced), never a re-implementation in another regex engine.
 cov_count_re() {
     local n
     n="$(grep -oiE "$1" "$2" 2>/dev/null | wc -l | tr -d ' ')" || true
-    printf '%s' "${n:-0}"
+    printf '%s' "$n"
     return 0
 }
 
 # cov_run_cell <task> <rep> <variant> — one headless real session; row appended.
-# Constructed child env (#846/#861): a bot-session caller's exported fleet vars
-# must not reach the probe.
+# Constructed child env (#846/#861 class): a bot-session caller's exported
+# fleet vars must not reach the probe. Deliberately NOT with_timeout — that
+# helper degrades to unbounded when timeout(1) is absent, which is wrong for a
+# timed experiment; cov_main hard-requires the binary instead.
 cov_run_cell() {
     local task="$1" rep="$2" variant="$3"
-    local sub="$ROOT/$variant" bot cfg out text_f len verif disc model valid t0 dur mt
+    local sub="$ROOT/$variant" bot cfg out text_f len verif disc model valid t0 dur mt parsed
     bot="$sub/runtime/bots/cov-probe"
     cfg="$sub/config"
     out="$ROOT/cells/${task}-${variant}-r${rep}.jsonl"
@@ -353,35 +405,43 @@ cov_run_cell() {
             "$_TIMEOUT_BIN" "$COV_CELL_TIMEOUT_S" claude -p "$(cov_task_text "$task")" \
                 --output-format stream-json --verbose --max-turns "$mt" \
                 > "$out" 2>&1 ) || true
-        grep '^{' "$out" 2>/dev/null \
-            | python3 -c 'import json,sys
-res=None; model=""
-for line in sys.stdin:
-    try: d=json.loads(line)
-    except Exception: continue
-    if d.get("type")=="assistant":
-        model=(d.get("message") or {}).get("model") or model
-    if d.get("type")=="result":
-        res=d
-import pathlib
+        # Parser stderr goes to a per-cell .err artifact, never /dev/null — a
+        # parser bug must not silently mark every real cell invalid. model is
+        # recorded per row because #866 pre-registers it.
+        parsed="$(python3 - "$out" "$text_f" <<'PYCELL' 2>"$ROOT/cells/${task}-${variant}-r${rep}.err" || printf 'false\n?\n'
+import json, pathlib, sys
+res = None
+model = ""
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if d.get("type") == "assistant":
+        model = (d.get("message") or {}).get("model") or model
+    if d.get("type") == "result":
+        res = d
 ok = res is not None and not res.get("is_error", True)
-pathlib.Path(sys.argv[1]).write_text(res.get("result") or "" if ok else "")
-print("true" if ok and (res.get("result") or "").strip() else "false"); print(model or (res or {}).get("model") or "?")' \
-            "$text_f" > "$ROOT/cells/.parse" 2>/dev/null || printf 'false\n?\n' > "$ROOT/cells/.parse"
-        valid="$(sed -n 1p "$ROOT/cells/.parse")"
-        model="$(sed -n 2p "$ROOT/cells/.parse")"
+text = (res.get("result") or "") if ok else ""
+pathlib.Path(sys.argv[2]).write_text(text)
+print("true" if text.strip() else "false")
+print(model or (res or {}).get("model") or "?")
+PYCELL
+)"
+        valid="${parsed%%$'\n'*}"
+        model="${parsed##*$'\n'}"
     fi
     dur=$(( $(date +%s) - t0 ))
     len="$(wc -c < "$text_f" | tr -d ' ')"
     verif="$(cov_count_re "$COV_VERIF_RE" "$text_f")"
     disc=false
     [ "$(cov_count_re "$COV_DISCLOSE_RE" "$text_f")" -gt 0 ] && disc=true
-    jq -nc --arg task "$task" --arg variant "$variant" --arg rep "$rep" \
-        --arg len "$len" --arg verif "$verif" --arg model "$model" \
-        --arg dur "$dur" --argjson disc "$disc" --argjson valid "${valid:-false}" \
-        '{task:$task, variant:$variant, rep:($rep|tonumber), len_chars:($len|tonumber),
-          verif_matches:($verif|tonumber), disclosure:$disc, model:$model,
-          wall_s:($dur|tonumber), valid:$valid}' >> "$RESULTS"
+    jq -nc --arg task "$task" --arg arm "$(cov_task_arm "$task")" --arg variant "$variant" \
+        --arg rep "$rep" --arg len "$len" --arg verif "$verif" --arg model "$model" \
+        --arg dur "$dur" --argjson disc "$disc" --argjson valid "$valid" \
+        '{task:$task, arm:$arm, variant:$variant, rep:($rep|tonumber),
+          len_chars:($len|tonumber), verif_matches:($verif|tonumber),
+          disclosure:$disc, model:$model, wall_s:($dur|tonumber), valid:$valid}' >> "$RESULTS"
     printf '  %s %s rep%s: %sc verif=%s disclose=%s valid=%s\n' \
         "$task" "$variant" "$rep" "$len" "$verif" "$disc" "$valid"
     return 0
@@ -395,13 +455,18 @@ cov_main() {
     [ "$DRY_RUN" = 1 ] || [ -n "$_TIMEOUT_BIN" ] || die "no timeout(1) to bound cells"
     [ "$DRY_RUN" = 1 ] || [ -f "$HOME/.claude/.credentials.json" ] || die "no host auth to seed"
 
-    local reps="${REPS_COV:-$COV_REPS_DEFAULT}" rep task variant
+    # Pre-registered n=6; --reps overrides for wiring checks only.
+    local reps="$COV_REPS_DEFAULT" rep task variant
+    [ "$REPS_SET" = 1 ] && reps="$REPS"
     printf '=== ab-comms-eval --experiment coverage-honesty (%s) — #866 pre-registered ===\n' \
         "$([ "$DRY_RUN" = 1 ] && printf 'dry-run' || printf 'REAL')"
     cov_setup_variants
+    harness_check "both variants composed by generate" \
+        "$([ -f "$ROOT/with/runtime/bots/cov-probe/bot.conf" ] && [ -f "$ROOT/without/runtime/bots/cov-probe/bot.conf" ] && echo yes || echo no)"
     cov_assert_clause_only
-    printf 'variant isolation OK: composed delta == clause block. hashes without=%s with=%s\n' \
-        "${COV_HASH_WITHOUT:0:12}" "${COV_HASH_WITH:0:12}"
+    harness_check "variant isolation: composed delta == clause block" yes
+    printf 'hashes: without=%s with=%s\n' "${COV_HASH_WITHOUT:0:12}" "${COV_HASH_WITH:0:12}"
+    [ "$fail" -eq 0 ] || die "fixture checks failed"
 
     if [ "$DRY_RUN" != 1 ]; then
         seed_claude_auth_and_trust "$ROOT/without/config" "$ROOT/without/runtime/bots/cov-probe" claude "$HOME/.claude/.credentials.json"
@@ -420,16 +485,16 @@ cov_main() {
         done
     done
 
+    # Print the artifact paths BEFORE exiting on the analyzer's verdict — its
+    # rc=1 (no analyzable pairs) is exactly when the paths matter most.
     printf '\n=== verdict (lib/ab-coverage-verdict.py, decision rule per #866) ===\n'
-    python3 "$LIB/ab-coverage-verdict.py" "$RESULTS" \
+    local vrc=0 verdict_out
+    verdict_out="$(python3 "$LIB/ab-coverage-verdict.py" "$RESULTS" \
         --hash-without "$COV_HASH_WITHOUT" --hash-with "$COV_HASH_WITH" \
-        --claude-version "$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || printf dry)" \
-        | tee "$ROOT/verdict.txt"
+        --claude-version "$CLAUDE_VER")" || vrc=$?
+    printf '%s\n' "$verdict_out" | tee "$ROOT/verdict.txt"
     printf '\nROOT=%s\nRESULTS=%s\n' "$ROOT" "$RESULTS"
-    # Secrets scrub here AND in the trap (abnormal-exit cover); artifacts
-    # follow the normal --keep semantics via the cleanup trap.
-    rm -f "$ROOT/without/config/.credentials.json" "$ROOT/with/config/.credentials.json" 2>/dev/null || true
-    exit 0
+    exit "$vrc"
 }
 
 # --- verdict computation: thin wrapper over lib/ab-comms-verdict.py ----------
@@ -452,11 +517,16 @@ compute_verdict() {  # $1 results.jsonl  $2 out.json  $3 reps_now
         $ph
 }
 
+# Sourced for unit tests (conftest call_script_fn drives cov_count_re and the
+# frozen constants with the REAL engine): every function above is defined;
+# stop before any side-effectful mode logic.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
 # --- mode gate --------------------------------------------------------------
-# The token-efficiency real gate stays REFUSED (F2 battery + P1 pending). The
-# coverage-honesty experiment (#866, pre-registered, Chris-authorized) gates
-# itself inside cov_main — it must pass through to the scaffolding below.
-if [ "$EXPERIMENT" != "coverage-honesty" ] && [ "$DRY_RUN" != 1 ]; then
+# The token-efficiency real gate stays REFUSED (F2 battery + P1 pending). Each
+# experiment owns its real-run gate — coverage-honesty gates itself inside
+# cov_main, so only the token-efficiency default is handled here.
+if [ "$EXPERIMENT" = "token-efficiency" ] && [ "$DRY_RUN" != 1 ]; then
     if [ "${AB_EVAL_REAL:-0}" = 1 ]; then
         die "real mode (AB_EVAL_REAL=1) is REFUSED by this scaffolding: the task battery is an F2 stub and library/protocols/token-efficiency.md is unmerged (P1). The proven boot/dispatch/recover recipe comes from the #729 stage-B spike; wiring run_cell to it is F2 follow-up. Use --dry-run for the CI-safe wiring check."
     fi
@@ -494,13 +564,17 @@ ROOT="$(mktemp -d /tmp/ab-comms-eval.XXXXXX)"
 TMUX_TMPDIR="$(mktemp -d /tmp/ab-comms-eval-sock.XXXXXX)"
 export TMUX_TMPDIR
 
-# [3] cleanup trap (validate-bot-change.sh :80-91). Coverage-experiment creds
-# are scrubbed here too so an abnormal exit cannot leave them under a kept root.
+# [3] cleanup trap (validate-bot-change.sh :80-91). The trap fires on EVERY
+# exit — normal ones included — so secrets registered in CLEANUP_SCRUB are
+# scrubbed before the KEEP decision, and experiments register their own paths
+# rather than the shared trap knowing any experiment's layout.
+CLEANUP_SCRUB=""
 cleanup() {
     for _s in ab-with ab-without; do
         command tmux -L "$(vsock "$_s")" kill-server 2>/dev/null || true
     done
-    rm -f "$ROOT/without/config/.credentials.json" "$ROOT/with/config/.credentials.json" 2>/dev/null || true
+    local _f
+    for _f in $CLEANUP_SCRUB; do rm -f "$_f" 2>/dev/null || true; done
     [ "$KEEP" = 1 ] || rm -rf "$ROOT" "$TMUX_TMPDIR"
     return 0
 }
@@ -509,11 +583,13 @@ trap cleanup EXIT
 # [4] pass/fail counters (ambient; lib-common harness_check reads them).
 pass=0; fail=0
 
+CLAUDE_VER="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+[ -n "$CLAUDE_VER" ] || CLAUDE_VER="dry-run"
+
 # Coverage-honesty experiment (#866) dispatches here — cov_main exits.
 if [ "$EXPERIMENT" = "coverage-honesty" ]; then
     cov_main
 fi
-[ "$EXPERIMENT" = "token-efficiency" ] || die "unknown --experiment: $EXPERIMENT"
 
 # --- F2 SEAMS (stubs until Chris ratifies) ----------------------------------
 # battery_* return the per-task dispatch content + the elided-detail ground truth
@@ -540,22 +616,14 @@ mechanical_check() {  # $1 task  $2 must_persist  $3 transcript -> "true"|"false
 
 # --- variant fixture: composed by REAL claudlobby generate -------------------
 setup_variants() {
-    # Own library tree: symlink each real library entry, EXCEPT protocols, which
-    # is a real dir so the placeholder token-efficiency protocol can be injected
-    # when P1 is unmerged (real gate runs refuse the placeholder).
-    mkdir -p "$ROOT/library/protocols"
-    local e name
-    for e in "$SRC"/library/*; do
-        name="$(basename "$e")"
-        [ "$name" = protocols ] && continue
-        ln -s "$e" "$ROOT/library/$name"
-    done
+    # Own library tree via the shared mirror: protocols is the real dir so the
+    # placeholder token-efficiency protocol can be injected when P1 is unmerged
+    # (real gate runs refuse the placeholder).
+    local e
+    _link_library_tree "$ROOT/library" protocols
     for e in "$SRC"/library/protocols/*; do
         ln -s "$e" "$ROOT/library/protocols/$(basename "$e")"
     done
-    ln -s "$SRC/templates" "$ROOT/templates"
-    ln -s "$SRC/voices" "$ROOT/voices" 2>/dev/null || true
-    ln -s "$SRC/lib" "$ROOT/lib"
 
     local proto="$ROOT/library/protocols/token-efficiency.md"
     if [ -e "$SRC/library/protocols/token-efficiency.md" ]; then
@@ -611,10 +679,7 @@ fleet:
       telegram:
         handle: ab_with_bot
 YAML
-    if ! CLAUDLOBBY_ROOT="$ROOT" PYTHONPATH="$SRC" python3 -m claudlobby generate >"$ROOT/generate.out" 2>&1; then
-        cat "$ROOT/generate.out" >&2
-        die "claudlobby generate failed for the A/B fixture"
-    fi
+    _generate_or_die "$ROOT" "the A/B fixture"
 }
 
 # --- token measurement: the two gated axes via transcript-usage.py -----------
@@ -711,9 +776,7 @@ resolve_tasks() {
 }
 
 # --- main --------------------------------------------------------------------
-CLAUDE_VER="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-[ -n "$CLAUDE_VER" ] || CLAUDE_VER="dry-run"
-
+# CLAUDE_VER resolved once above the experiment dispatch.
 printf '=== ab-comms-eval (dry-run): compose A/B fixture ===\n'
 setup_variants
 WEIGHTS_FILE="$ROOT/weights.json"

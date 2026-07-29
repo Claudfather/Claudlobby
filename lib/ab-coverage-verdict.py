@@ -2,22 +2,33 @@
 """#866 coverage-honesty A/B — pre-registered analysis over the sampler rows.
 
 Standalone stdlib module (dispatch-overdue.py / ab-comms-verdict.py precedent).
-The endpoints, pairing, interval machinery, and decision rule are FROZEN by the
+The endpoints, pairing, interval level, and decision rule are FROZEN by the
 #866 pre-registration; this module implements them and nothing else:
 
 - PRIMARY: median of per-(task,rep) paired relative length deltas
-  (with-without)/without, pooled over the bounded tasks T1+T2; seeded
-  bootstrap 95% CI (bootstrap_ci imported from ab-comms-verdict.py so the seed
-  and machinery are shared, pinned in the output).
-- SECONDARY: identical treatment of verification-phrase density per 1k chars
-  (matches counted upstream with the frozen regex; density derived here).
-- MANIPULATION CHECK: coverage-disclosure rate per variant on T1+T2.
-- T3 is the discriminant-validity control, computed identically, reported
-  alongside; the decision rule reads T1+T2 against T3 exactly as #866 states.
+  (with-without)/without, pooled over the bounded arm; seeded bootstrap 95% CI.
+- SECONDARY: identical treatment of verification-phrase density per 1k chars.
+- MANIPULATION CHECK: coverage-disclosure rate per variant on the bounded arm.
+- The control arm is computed identically and reported alongside; the decision
+  rule reads bounded against control exactly as #866 states.
+
+Interval machinery: the resample-medians algorithm, seed and resample count
+are shared with ab-comms-verdict.py by import, but the LEVEL is computed here
+at 95% — the pre-registration text says 95%, while the imported bootstrap_ci
+hardcodes that module's CI_PCT=90. The first published readout carried 90%
+intervals mislabeled "95%"; the #866 erratum records the correction, and this
+module now computes what the registration text says.
+
+Arm membership comes from each row's `arm` field (emitted by the harness,
+beside the battery that defines it); rows from the first published run predate
+the field, so a task-name fallback keeps the archived results re-analyzable.
 
 INCONCLUSIVE is first-class: a primary CI spanning zero reports "does not
-corroborate at this n" — never "no effect". Invalid rows are excluded and
-disclosed with their cells (coverage honesty applies to the analyzer too).
+corroborate at this n" — never "no effect". A primary CI excluding zero in the
+NEGATIVE direction is outside the pre-registered branch set and is reported as
+exactly that, not shoehorned into a branch whose text would be false. Invalid
+rows and zero-baseline pairs are excluded and disclosed (coverage honesty
+applies to the analyzer too).
 
 Exit: 0 verdict printed · 1 no analyzable pairs.
 """
@@ -27,6 +38,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import random
 import statistics
 import sys
 from pathlib import Path
@@ -36,14 +48,34 @@ _spec = importlib.util.spec_from_file_location(
 )
 _acv = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_acv)
-bootstrap_ci = _acv.bootstrap_ci
 BOOTSTRAP_SEED = _acv.BOOTSTRAP_SEED
+BOOTSTRAP_N = _acv.BOOTSTRAP_N
 
-BOUNDED = ("T1", "T2")
-CONTROL = "T3"
+CI_PCT = 95  # the #866 registration text governs; see module docstring
+_ARM_FALLBACK = {"T1": "bounded", "T2": "bounded", "T3": "control"}
+
+
+def bootstrap_ci(xs: list[float]) -> tuple[float | None, float | None]:
+    """Seeded bootstrap CI on the median at CI_PCT — same algorithm, seed and
+    resample count as ab_comms_verdict.bootstrap_ci, level per #866."""
+    if not xs:
+        return (None, None)
+    if len(xs) == 1:
+        return (xs[0], xs[0])
+    rng = random.Random(BOOTSTRAP_SEED)
+    n = len(xs)
+    meds = sorted(
+        statistics.median([xs[rng.randrange(n)] for _ in range(n)])
+        for _ in range(BOOTSTRAP_N)
+    )
+    tail = (100 - CI_PCT) / 2 / 100
+    lo = meds[int(tail * len(meds))]
+    hi = meds[min(int((1 - tail) * len(meds)), len(meds) - 1)]
+    return (lo, hi)
 
 
 def load_rows(path: str) -> list[dict]:
+    # Per-line decode guard: one bad row costs one row, not the sample.
     rows = []
     try:
         with open(path, encoding="utf-8") as fh:
@@ -63,6 +95,14 @@ def load_rows(path: str) -> list[dict]:
     return rows
 
 
+def _arm(row: dict) -> str | None:
+    return row.get("arm") or _ARM_FALLBACK.get(row.get("task", ""))
+
+
+def _length(row: dict) -> float:
+    return row.get("len_chars", 0)
+
+
 def _density(row: dict) -> float:
     length = row.get("len_chars") or 0
     if length <= 0:
@@ -70,26 +110,21 @@ def _density(row: dict) -> float:
     return row.get("verif_matches", 0) / (length / 1000.0)
 
 
-def paired_deltas(
-    rows: list[dict], tasks: tuple[str, ...], value
-) -> tuple[list[float], int]:
-    """Per-(task,rep) relative deltas (with-without)/without for valid pairs.
-
-    Returns (deltas, dropped): a zero-baseline pair has an undefined relative
-    delta and is dropped — but COUNTED, so the readout can disclose the shrunk
-    n instead of silently narrowing it.
-    """
+def paired_deltas(rows: list[dict], arm: str, value) -> tuple[list[float], int]:
+    """Per-(task,rep) relative deltas (with-without)/without for valid pairs in
+    <arm>. Returns (deltas, dropped): a zero-baseline pair has an undefined
+    relative delta and is dropped — but COUNTED, so the readout discloses the
+    shrunk n instead of silently narrowing it."""
     cells: dict[tuple[str, int, str], dict] = {}
     for r in rows:
-        if r.get("valid") and r.get("task") in tasks:
+        if r.get("valid") and _arm(r) == arm:
             cells[(r["task"], r["rep"], r["variant"])] = r
     deltas: list[float] = []
     dropped = 0
-    for task, rep, variant in sorted(cells):
+    for (task, rep, variant), wo in sorted(cells.items()):
         if variant != "without":
             continue
         w = cells.get((task, rep, "with"))
-        wo = cells[(task, rep, "without")]
         if w is None:
             continue
         base = value(wo)
@@ -98,6 +133,29 @@ def paired_deltas(
             continue
         deltas.append((value(w) - base) / base)
     return deltas, dropped
+
+
+def _endpoint(rows: list[dict], arm: str, value) -> dict:
+    deltas, dropped = paired_deltas(rows, arm, value)
+    lo, hi = bootstrap_ci(deltas)
+    return {
+        "deltas": deltas,
+        "dropped": dropped,
+        "n": len(deltas),
+        "median": statistics.median(deltas) if deltas else None,
+        "lo": lo,
+        "hi": hi,
+    }
+
+
+def _fmt(name: str, e: dict) -> str:
+    note = f" ({e['dropped']} pair(s) dropped: zero baseline)" if e["dropped"] else ""
+    if not e["deltas"]:
+        return f"{name}: no analyzable pairs{note}"
+    return (
+        f"{name}: median {e['median']:+.3f}  {CI_PCT}% CI [{e['lo']:+.3f}, {e['hi']:+.3f}]  "
+        f"n={e['n']} pairs{note}"
+    )
 
 
 def analyze(rows: list[dict]) -> tuple[str, int]:
@@ -113,38 +171,28 @@ def analyze(rows: list[dict]) -> tuple[str, int]:
         )
         out.append(f"invalid rows excluded and disclosed: {detail}")
 
-    length = lambda r: r.get("len_chars", 0)  # noqa: E731
-    prim, prim_drop = paired_deltas(valid, BOUNDED, length)
-    prim_ctl, prim_ctl_drop = paired_deltas(valid, (CONTROL,), length)
-    sec, sec_drop = paired_deltas(valid, BOUNDED, _density)
-    sec_ctl, sec_ctl_drop = paired_deltas(valid, (CONTROL,), _density)
+    ep = {
+        "primary": _endpoint(valid, "bounded", _length),
+        "primary_ctl": _endpoint(valid, "control", _length),
+        "secondary": _endpoint(valid, "bounded", _density),
+        "secondary_ctl": _endpoint(valid, "control", _density),
+    }
 
-    if not prim:
+    if not ep["primary"]["deltas"]:
         out.append(
-            "NO ANALYZABLE BOUNDED-TASK PAIRS — nothing to conclude; see artifacts."
+            "NO ANALYZABLE BOUNDED-ARM PAIRS — nothing to conclude; see artifacts."
         )
         return ("\n".join(out), 1)
 
-    def block(name, deltas, dropped):
-        note = f" ({dropped} pair(s) dropped: zero baseline)" if dropped else ""
-        if not deltas:
-            return f"{name}: no analyzable pairs{note}"
-        med = statistics.median(deltas)
-        lo, hi = bootstrap_ci(deltas)
-        return (
-            f"{name}: median {med:+.3f}  95% CI [{lo:+.3f}, {hi:+.3f}]  "
-            f"n={len(deltas)} pairs{note}"
-        )
-
     out.append("")
-    out.append(block("PRIMARY   length rel-delta, T1+T2", prim, prim_drop))
-    out.append(block("          length rel-delta, T3 ctl", prim_ctl, prim_ctl_drop))
-    out.append(block("SECONDARY density rel-delta, T1+T2", sec, sec_drop))
-    out.append(block("          density rel-delta, T3 ctl", sec_ctl, sec_ctl_drop))
+    out.append(_fmt("PRIMARY   length rel-delta, bounded", ep["primary"]))
+    out.append(_fmt("          length rel-delta, control", ep["primary_ctl"]))
+    out.append(_fmt("SECONDARY density rel-delta, bounded", ep["secondary"]))
+    out.append(_fmt("          density rel-delta, control", ep["secondary_ctl"]))
 
     disc = {"with": [], "without": []}
     for r in valid:
-        if r.get("task") in BOUNDED:
+        if _arm(r) == "bounded":
             disc[r["variant"]].append(bool(r.get("disclosure")))
     out.append("")
     for variant in ("without", "with"):
@@ -155,15 +203,24 @@ def analyze(rows: list[dict]) -> tuple[str, int]:
                 f"{sum(hits)}/{len(hits)} = {sum(hits) / len(hits):.2f}"
             )
 
-    # Decision rule, verbatim from #866.
-    p_lo, p_hi = bootstrap_ci(prim)
-    c_lo, c_hi = bootstrap_ci(prim_ctl) if prim_ctl else (None, None)
-    prim_positive = p_lo is not None and p_lo > 0
+    # Decision rule, verbatim from #866. A negatively-signed exclusion is
+    # outside the registered branch set and is named as such — never described
+    # with the INCONCLUSIVE branch's "CI includes 0" text, which would be false.
+    p_lo, p_hi = ep["primary"]["lo"], ep["primary"]["hi"]
+    c_lo, c_hi = ep["primary_ctl"]["lo"], ep["primary_ctl"]["hi"]
+    prim_spans_zero = p_lo <= 0 <= p_hi
     ctl_spans_zero = c_lo is None or (c_lo <= 0 <= c_hi)
-    if prim_positive and ctl_spans_zero:
-        verdict = "CLAUSE-SPECIFIC EFFECT: bounded-task length CI excludes 0 (positive); control CI does not."
-    elif prim_positive and not ctl_spans_zero and c_lo is not None and c_lo > 0:
-        verdict = "GENERIC-VERBOSITY EFFECT: length CI positive on bounded AND control tasks — not specific to coverage reporting."
+    if not prim_spans_zero and p_lo > 0 and ctl_spans_zero:
+        verdict = "CLAUSE-SPECIFIC EFFECT: bounded-arm length CI excludes 0 (positive); control CI does not."
+    elif not prim_spans_zero and p_lo > 0:
+        verdict = "GENERIC-VERBOSITY EFFECT: length CI positive on bounded AND control arms — not specific to coverage reporting."
+    elif not prim_spans_zero and p_hi < 0:
+        verdict = (
+            "DIRECTIONAL-NEGATIVE (outside the pre-registered branch set): the "
+            "bounded-arm length CI excludes 0 BELOW — the clause is associated "
+            "with SHORTER output here. Flagged for interpretation, not mapped "
+            "onto a registered branch."
+        )
     else:
         verdict = (
             "INCONCLUSIVE: the primary CI includes 0 at this n — the A/B does not "
@@ -172,11 +229,12 @@ def analyze(rows: list[dict]) -> tuple[str, int]:
     out.append("")
     out.append(f"VERDICT: {verdict}")
 
-    med = statistics.median(prim)
+    t3_med = ep["primary_ctl"]["median"]
     out.append("")
     out.append(
-        f"COVERAGE_AB_RESULT primary_median={med:+.3f} ci95={p_lo:+.3f},{p_hi:+.3f} "
-        f"n_pairs={len(prim)} t3_median={statistics.median(prim_ctl) if prim_ctl else 0:+.3f} "
+        f"COVERAGE_AB_RESULT primary_median={ep['primary']['median']:+.3f} "
+        f"ci{CI_PCT}={p_lo:+.3f},{p_hi:+.3f} n_pairs={ep['primary']['n']} "
+        f"t3_median={f'{t3_med:+.3f}' if t3_med is not None else 'none'} "
         f"disclose_without={sum(disc['without'])}/{len(disc['without'])} "
         f"disclose_with={sum(disc['with'])}/{len(disc['with'])} seed={BOOTSTRAP_SEED}"
     )
@@ -194,7 +252,7 @@ def main(argv=None) -> int:
     print(text)
     print(
         f"pins: guardrail_without={args.hash_without[:12]} guardrail_with={args.hash_with[:12]} "
-        f"claude={args.claude_version} bootstrap_seed={BOOTSTRAP_SEED}"
+        f"claude={args.claude_version} bootstrap_seed={BOOTSTRAP_SEED} ci_pct={CI_PCT}"
     )
     return rc
 
