@@ -30,13 +30,17 @@ Passing the database_id to a query endpoint returns `404 object_not_found`. If a
 
 #### Block Children Schema Gotcha
 
-`API-patch-block-children` — and page creation passing `children` — declares `children` as an array of **strings** in its tool schema. The API rejects JSON-encoded strings with `400 validation_error` and requires actual block **objects**. Pass objects; the declared schema is wrong, and following it fails every time.
+`API-post-page` declares `children` as an array of **strings** (`items: {type: string}`). The API rejects JSON-encoded strings with `400 validation_error` — it requires actual block **objects**. Pass objects; that schema is wrong.
+
+`API-patch-block-children` declares `children` correctly (`items: $ref blockObjectRequest`) and is not affected.
 
 #### Block Edit Gotcha
 
-`API-update-a-block` cannot change a block's text through this MCP. The payload lands nested under `body.type` and Notion rejects it with `body.type should be not present`. Only the `archived` flag works through that tool.
+`API-update-a-block` cannot change a block's text. Its `type` payload lands nested under `body.type`, which Notion rejects with `body.type should be not present`. And `archived` defaults to **true**, so a `block_id`-only call archives the block instead of inspecting it.
 
-To revise a block: `API-patch-block-children` with `after` set to the block being replaced, then `API-delete-a-block` on the original. Appending before archiving preserves both position and block count.
+To revise a block: `API-patch-block-children` with `block_id` set to the **parent container** and `after` set to the block being replaced, then `API-delete-a-block` on the original. Passing the replaced block as `block_id` nests the replacement inside it rather than inserting a sibling — no error, just the wrong shape.
+
+`blockObjectRequest` is `anyOf [paragraph, bulleted_list_item]` only, so this recipe cannot express a heading, code or callout block.
 
 #### Common Ops
 
@@ -49,6 +53,7 @@ To revise a block: `API-patch-block-children` with `after` set to the block bein
 
 - `404 object_not_found` on query → likely using database_id instead of data_source_id
 - `400 validation_error` on property → property name or type doesn't match schema; use `API-retrieve-a-database` to check current schema
-- `400 validation_error` on `children` → blocks passed as JSON strings; pass block objects (see Block Children Schema Gotcha)
+- `400 validation_error` on `children` → `API-post-page` blocks passed as JSON strings; pass block objects (see Block Children Schema Gotcha)
 - `body.type should be not present` on `API-update-a-block` → that tool cannot edit block text; append-then-archive instead (see Block Edit Gotcha)
+- block appeared nested inside the block it should have replaced → `block_id` was the replaced block, not its parent container (see Block Edit Gotcha)
 - `401 unauthorized` → token expired or database not shared with integration
