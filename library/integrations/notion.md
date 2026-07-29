@@ -28,6 +28,10 @@ The Notion API (`Notion-Version: 2025-09-03`) splits **databases** from **querya
 
 Passing the database_id to a query endpoint returns `404 object_not_found`. If an ID stops working, re-resolve via `API-post-search` with the database name.
 
+#### Block Children Schema Gotcha
+
+`API-patch-block-children` — and page creation passing `children` — declares `children` as an array of **strings** in its tool schema. The API rejects JSON-encoded strings with `400 validation_error` and requires actual block **objects**. Pass objects; the declared schema is wrong, and following it fails every time.
+
 #### Common Ops
 
 - **Query a database:** `mcp__notion__API-query-data-source` with `data_source_id`, `filter`, `sorts`
@@ -39,4 +43,5 @@ Passing the database_id to a query endpoint returns `404 object_not_found`. If a
 
 - `404 object_not_found` on query → likely using database_id instead of data_source_id
 - `400 validation_error` on property → property name or type doesn't match schema; use `API-retrieve-a-database` to check current schema
+- `400 validation_error` on `children` → blocks passed as JSON strings; pass block objects (see Block Children Schema Gotcha)
 - `401 unauthorized` → token expired or database not shared with integration
