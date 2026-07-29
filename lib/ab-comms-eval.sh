@@ -277,10 +277,26 @@ _generate_or_die() {
 }
 
 cov_setup_variants() {
-    local variant sub e name src
-    WITHOUT_SRC="$ROOT/no-fabrication-preclause.md"
-    git -C "$SRC" show "${COV_PRECLAUSE_REF}:${COV_GUARDRAIL_REL}" > "$WITHOUT_SRC" 2>/dev/null \
-        || die "cannot resolve ${COV_PRECLAUSE_REF}:${COV_GUARDRAIL_REL} — the WITHOUT variant needs the pre-clause file from git history"
+    local variant sub e name src histfile
+    # The WITHOUT variant is the VENDORED fixture, not a live git-show: CI runs
+    # on a depth-1 checkout where f890c69^ does not exist and never will (the
+    # first CI run of this harness failed exactly there). The revision is
+    # immutable history, so vendoring cannot go stale — and provenance is kept
+    # by the fail-LOUD drift guard below, which fires wherever history IS
+    # available (every full working clone, i.e. where drift would originate).
+    WITHOUT_SRC="$SRC/tests/fixtures/guardrails/no-fabrication-preclause.md"
+    [ -f "$WITHOUT_SRC" ] \
+        || die "vendored pre-clause fixture missing: $WITHOUT_SRC (the WITHOUT variant is defined by it)"
+    histfile="$ROOT/no-fabrication-preclause.from-history.md"
+    if git -C "$SRC" show "${COV_PRECLAUSE_REF}:${COV_GUARDRAIL_REL}" > "$histfile" 2>/dev/null; then
+        cmp -s "$WITHOUT_SRC" "$histfile" \
+            || die "vendored fixture DRIFTED from ${COV_PRECLAUSE_REF}:${COV_GUARDRAIL_REL} — it no longer is the revision it claims to be; refusing to run"
+        printf 'pre-clause fixture: provenance-verified against %s\n' "$COV_PRECLAUSE_REF"
+    else
+        # Shallow/absent history (the CI condition): the fixture alone defines
+        # the variant. Disclosed, not skipped — the run proceeds identically.
+        printf 'pre-clause fixture: history unavailable (shallow clone) — provenance check not performed this run\n'
+    fi
     COV_HASH_WITHOUT="$(_sha256 "$WITHOUT_SRC")"
     COV_HASH_WITH="$(_sha256 "$SRC/$COV_GUARDRAIL_REL")"
 
