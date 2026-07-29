@@ -485,10 +485,11 @@ def cmd_warm_cache(args) -> int:
             continue
         # Use --help or a quick-exit to trigger download without running the server
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 ["npx", "-y", pkg, "--help"],
                 capture_output=True,
                 timeout=120,
+                text=True,
             )
         except subprocess.TimeoutExpired:
             log.warning("  timeout warming %s (120s) — may still have cached", pkg)
@@ -498,11 +499,36 @@ def cmd_warm_cache(args) -> int:
         except (subprocess.SubprocessError, OSError) as e:
             log.warning("  failed to warm %s: %s", pkg, e)
             failed.append(pkg)
+        else:
+            # Nothing above fires when the child simply exits non-zero: run()
+            # without check=True does not raise, so without this branch a failed
+            # warm fell through to "cache warm complete". capture_output holds
+            # the diagnostic that explains it -- report it rather than discard it.
+            if proc.returncode != 0:
+                out = (proc.stderr or proc.stdout or "").strip().splitlines()
+                log.warning(
+                    "  %s exited %d: %s",
+                    pkg,
+                    proc.returncode,
+                    out[-1].strip() if out else "(no output)",
+                )
+                failed.append(pkg)
 
     if args.dry_run:
         log.info("(dry run — no downloads)")
     elif failed:
-        log.warning("%d packages failed to warm: %s", len(failed), ", ".join(failed))
+        log.warning(
+            "%d of %d packages failed to warm: %s",
+            len(failed),
+            len(npx_packages),
+            ", ".join(failed),
+        )
+        # Exit non-zero so a caller cannot read silence as success. Note what
+        # this still cannot tell you: a non-zero child does NOT prove the cache
+        # is unpopulated -- a package whose CLI rejects `--help` (mcp-remote
+        # parses its first positional as a URL) may well have downloaded first.
+        # The status is reported; neither outcome is claimed.
+        return 1
     else:
         log.info("cache warm complete")
     return 0
