@@ -337,10 +337,25 @@ if [ "$_ready" -eq 0 ]; then
     emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s}}"
 fi
 
-# No sleep here: the bridge-readiness wait loop above already confirms Claude Code
-# is fully initialized (MCP servers connected, channel plugin active). A fixed
-# sleep after that point is wasted CPU time — especially costly when 8 bots
-# start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
+# No sleep here, and no readiness assumption either. The bridge-readiness wait
+# above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn
+# an input box, and treating it as a proxy for that is what #860 was. Measured:
+# the poller reports ready at 3-9s while a production-shaped bot renders its box
+# at 10-19s (lib/boot-strand-sampler.sh t_glyph), so both sends below were
+# routinely typed into a pane that could not receive them — and a tokenless bot,
+# whose readiness gate short-circuits, injects earlier still.
+#
+# A fixed sleep remains the wrong instrument regardless: wasted CPU when the box
+# is already up, too short when it is not, and costliest when 8 bots start in
+# parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
+#
+# Arm the readiness wait for the two sends below, and ONLY them. This is the one
+# place in the fleet that injects into a TUI that may not have drawn yet; every
+# other pane_send_verified caller targets a running bot whose box exists, and a
+# long wait there is a hazard rather than a safeguard — it would put a 45s block
+# on report-back.sh via bot_tmux_send, and blow through pre-stop-handoff's
+# documented 30s bound serially on a fleet-wide restart.
+export PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT"
 
 # Resume prior context (lossless restart) before STARTUP_PROMPT. Every start —
 # intentional, crash, or weekly bounce — injects /claudna:session resume --auto
