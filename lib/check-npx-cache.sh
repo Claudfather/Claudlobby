@@ -85,8 +85,35 @@ if [ ${#PACKAGES[@]} -eq 0 ]; then
     exit 0
 fi
 
-# Check cache for each package
+# Classify each package into one of three states rather than the two the old
+# probe could express. "Absent from the cache" had been collapsed into MISSING,
+# which is what made the warning unsatisfiable: a globally installed package
+# reported missing has no remedy, so the operator's only correct response was to
+# ignore the check.
 MISSING=()
+GLOBAL=()
+
+# Resolved on the FIRST cache miss, not up front: reconcile-fleet runs this check
+# on every pass and the normal state is "everything cached", so an eager
+# `npm root -g` would spawn npm on the hot path for an answer nobody reads.
+# Empty when npm is absent, which disables the global probe rather than failing
+# the check. Called bare, never as `$(...)` -- a command substitution runs in a
+# subshell and would discard the memo, making it resolve once per package.
+_global_root=""
+_global_root_done=0
+_resolve_global_root() {
+    [ "$_global_root_done" -eq 1 ] && return 0
+    _global_root_done=1
+    _global_root="${NPM_GLOBAL_ROOT:-$(npm root -g 2>/dev/null || true)}"
+}
+
+# One description of a global install, used by both outcomes below.
+_report_global() {
+    for _g in ${GLOBAL[@]+"${GLOBAL[@]}"}; do
+        echo "  - $_g (global install — npx resolves it; it will never populate the npx cache)"
+    done
+}
+
 for pkg in "${PACKAGES[@]}"; do
     # npx caches in content-addressed dirs. Strategy:
     # Strip version suffix, then search node_modules for the package dir.
@@ -110,20 +137,47 @@ for pkg in "${PACKAGES[@]}"; do
             fi
         fi
     fi
+    # The npx cache is not the only place a package can already be resolvable,
+    # and cache residency is a proxy for the question the caller actually has:
+    # "will `npx <pkg>` run without a download?". A globally installed package
+    # answers yes -- npx resolves it and so never populates _npx for it -- which
+    # is why probing only the cache reported it MISSING forever, with no amount
+    # of warm-cache able to create the entry it waited for (#852).
+    #
+    # Global installs sit flat under `npm root -g` (<root>/<name>/package.json,
+    # <root>/@org/name/package.json), not nested under node_modules/ the way the
+    # npx cache lays them out -- so this is a direct test, not a find.
+    if [ $found -eq 0 ]; then
+        _resolve_global_root
+        if [ -n "$_global_root" ] && [ -f "$_global_root/$pkg_bare/package.json" ]; then
+            GLOBAL+=("$pkg")
+            found=1
+        fi
+    fi
     if [ $found -eq 0 ]; then
         MISSING+=("$pkg")
     fi
 done
 
+# What this probe still cannot see, stated so a future reader does not mistake a
+# pass for more than it is: the version suffix is stripped before matching, so a
+# package present at the WRONG version reads as present; a cache entry that
+# exists but is corrupt or partial reads as present; and resolvability via a
+# project-local node_modules, or via an npm prefix other than the one
+# `npm root -g` reports, is invisible. It answers "is this resolvable without a
+# download, here", not "will this run".
+_global_n=${#GLOBAL[@]}
 if [ ${#MISSING[@]} -eq 0 ]; then
-    echo "check-npx-cache: all ${#PACKAGES[@]} packages cached ✓"
+    echo "check-npx-cache: all ${#PACKAGES[@]} packages resolvable ✓ ($(( ${#PACKAGES[@]} - _global_n )) cached, $_global_n global)"
     echo "  cache size: $(du -sh "$NPX_CACHE" 2>/dev/null | cut -f1)"
+    _report_global
     exit 0
 else
-    echo "check-npx-cache: ${#MISSING[@]}/${#PACKAGES[@]} packages MISSING from cache:"
+    echo "check-npx-cache: ${#MISSING[@]}/${#PACKAGES[@]} packages MISSING (not cached, not installed globally):"
     for pkg in "${MISSING[@]}"; do
         echo "  - $pkg"
     done
+    _report_global
     echo ""
     echo "  Fix: claudlobby warm-cache (or: npx -y <pkg> --help)"
     exit 1
