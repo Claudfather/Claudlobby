@@ -253,6 +253,11 @@ systemctl --user start bot1 bot2 bot3 ...  # same list
 systemctl --user start <service_prefix>.keepalive.timer
 ```
 
+> **If this procedure is interrupted** (Ctrl-C, dropped SSH session) after the
+> first step, the fleet is left with keepalive DISARMED and nothing re-arms it.
+> Before walking away, run
+> `systemctl --user start <service_prefix>.keepalive.timer`.
+
 The cache typically occupies 500-800 MB. This is expected and should not be reclaimed.
 
 ## SSH Tunnel for OAuth Flows

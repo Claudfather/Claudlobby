@@ -181,9 +181,10 @@ if [ "$AVAIL_MB" -lt "$RESERVE_MB" ]; then
     # replaced. Spin-down is the durable lever precisely because
     # de-enrolment is the one thing keepalive cannot walk back; #828 keeps
     # the result visible as unsupervised-down in reconcile-fleet. Kept
-    # tight — this string also reaches the manager pane and Telegram, and
-    # is read on a phone.
-    ALERT_MSG="available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) on $(hostname) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. To free RAM: check for uncommitted WIP, then SPIN DOWN an idle bot — lib/spin-down-bot.sh <bot-dir>. De-enrolment is what keepalive cannot walk back; reconcile shows it as unsupervised-down. Do NOT use systemctl --user stop: keepalive restarts it within 60s and it frees nothing."
+    # tight, ordered action → do-not warning → rationale: this string also
+    # reaches the manager pane and Telegram, and the 5am phone skimmer
+    # stops reading early.
+    ALERT_MSG="available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) on $(hostname) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. To free RAM: check for uncommitted WIP, then SPIN DOWN an idle bot — lib/spin-down-bot.sh <bot-dir>. Do NOT use systemctl --user stop: keepalive restarts it within 60s and it frees nothing. De-enrolment is what keepalive cannot walk back; reconcile shows it as unsupervised-down."
     echo "$TS ALERT — $ALERT_MSG" | tee -a "$LOG"
     # Shared signal path (fleet event + manager tmux nudge + Telegram):
     # delivery works fleet-less (host job) via the cross-fleet fallback.
