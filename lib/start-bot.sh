@@ -337,10 +337,24 @@ if [ "$_ready" -eq 0 ]; then
     emit_fleet_event "rc_timeout" "startup" "{\"timeout_s\":${_rc_timeout_s}}"
 fi
 
-# No sleep here: the bridge-readiness wait loop above already confirms Claude Code
-# is fully initialized (MCP servers connected, channel plugin active). A fixed
-# sleep after that point is wasted CPU time — especially costly when 8 bots
-# start in parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
+# No sleep here, and no readiness assumption either. The bridge-readiness wait
+# above confirms the Telegram POLLER is up; it does not confirm the TUI has drawn
+# an input box, and treating it as a proxy for that is what #860 was. Measured:
+# the poller reports ready at 3-9s while a production-shaped bot renders its box
+# at 10-19s (lib/boot-strand-sampler.sh t_glyph), so both sends below were
+# routinely typed into a pane that could not receive them — and a tokenless bot,
+# whose readiness gate short-circuits, injects earlier still.
+#
+# A fixed sleep remains the wrong instrument regardless: wasted CPU when the box
+# is already up, too short when it is not, and costliest when 8 bots start in
+# parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
+#
+# The readiness wait is armed per call below, NOT exported. An export outlives
+# the two sends it is meant for: bridge_bringup_verify further down reaches
+# pane_send_verified through emit_failure_alert -> bot_tmux_send, targeting the
+# MANAGER pane, and would inherit the whole cold-boot budget for an alert about
+# this bot being unreachable. A one-shot assignment prefix is scoped to the single
+# command and does not persist afterwards.
 
 # Resume prior context (lossless restart) before STARTUP_PROMPT. Every start —
 # intentional, crash, or weekly bounce — injects /claudna:session resume --auto
@@ -354,7 +368,8 @@ _SESSION_MD="$BOT_DIR/.claude/session.md"
 _RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
     echo "$(ts_iso) RESUME — injecting /claudna:session resume --auto (fresh checkpoint)" >> "$LOG"
-    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" '/claudna:session resume --auto'
+    PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
+        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" '/claudna:session resume --auto'
 elif [ -f "$_SESSION_MD" ]; then
     echo "$(ts_iso) RESUME SKIP — checkpoint older than ${_RESUME_MAX_AGE_S}s, clean-starting" >> "$LOG"
 fi
@@ -363,7 +378,8 @@ if [ -n "${STARTUP_PROMPT:-}" ]; then
     # Prose, so it keeps the 'set +H; ' history-expansion guard the resume send
     # above must omit. The TUI's input buffer can race on cold start, leaving the
     # prompt typed but unsubmitted; pane_send_verified owns the catch.
-    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
+    PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
+        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails

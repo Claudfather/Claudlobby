@@ -57,6 +57,21 @@ mkdir -p "$BOT_DIR/data"
 # Stub the single tmux chokepoint. send-keys appends its payload to SENT_LOG;
 # capture-pane pops the next fixture from PANE_SCRIPT (repeating the last one),
 # so a test can hand the poll loop a different pane on each tick.
+# ORDER_LOG records the INTERLEAVING of captures and sends, which counting
+# send-keys cannot express. #860 is an ordering defect — the payload was sent
+# into a pane whose input box did not exist yet — so the property under test is
+# "no send precedes a drawn capture", not "how many sends happened".
+ORDER_LOG="$TMPD/order.log"
+: > "$ORDER_LOG"
+
+# Compress the #860 readiness budget suite-wide. In production it is 45s (0.5s x
+# 90), sized off the 10-19s measured box draw; here every capture is a stub, so
+# the wall-clock wait buys nothing and any glyph-less fixture would otherwise
+# make the suite sit out the full budget before its assertion runs.
+export PANE_READY_POLL_S=0.02 PANE_READY_TICKS=6
+# And the recovery budget for a box that never drew (production 60 x 0.2s = 12s).
+export PANE_RECOVER_TICKS=2
+
 bot_tmux() {
     shift  # socket
     case "${1:-}" in
@@ -64,6 +79,7 @@ bot_tmux() {
             shift 2  # send-keys -t
             shift    # session
             printf '%s\n' "$*" >> "$SENT_LOG"
+            printf 'send\n' >> "$ORDER_LOG"
             ;;
         capture-pane)
             local remaining fixture
@@ -71,6 +87,13 @@ bot_tmux() {
             fixture=$(printf '%s\n' "$remaining" | head -1)
             printf '%s\n' "$remaining" | tail -n +2 > "$PANE_SCRIPT.tmp"
             [ -s "$PANE_SCRIPT.tmp" ] && mv "$PANE_SCRIPT.tmp" "$PANE_SCRIPT" || rm -f "$PANE_SCRIPT.tmp"
+            # Classify for the order log by the same signal the gate uses, so the
+            # log cannot disagree with the code about what "drawn" means.
+            if [ -n "$(pane_input_region "$(cat "$fixture")")" ]; then
+                printf 'capture:drawn\n' >> "$ORDER_LOG"
+            else
+                printf 'capture:predraw\n' >> "$ORDER_LOG"
+            fi
             cat "$fixture"
             ;;
     esac
@@ -80,10 +103,18 @@ bot_tmux() {
 # 2 = text + Enter (clean submit). 3 = text + Enter + retry Enter.
 run_send() {
     local text="$1"; shift
-    : > "$SENT_LOG"
+    : > "$SENT_LOG"; : > "$ORDER_LOG"
     printf '%s\n' "$@" > "$PANE_SCRIPT"
     pane_send_verified sock "$SYNTH_ID" "$text"
     wc -l < "$SENT_LOG" | tr -d ' '
+}
+
+# Did any send happen before the first capture that showed a drawn input box?
+# "none" is the healthy answer; "sent-blind" is #860.
+send_before_draw() {
+    awk '/^send$/ { print "sent-blind"; exit }
+         /^capture:drawn$/ { print "none"; exit }
+         END { if (!NR) print "none" }' "$ORDER_LOG"
 }
 
 echo "=== pane_input_region: anchors to the input line, not a fixed depth ==="
@@ -131,6 +162,171 @@ assert_eq "send queued against a busy pane (TUI hint in box) -> NO spurious Ente
 
 r=$(run_send 'anything' "$FIXTURES/busy-spinner.txt")
 assert_eq "no prompt glyph (mid-turn) -> NO spurious Enter" "2" "$r"
+
+echo "=== pane_send_verified: never sends into a pane with no input box (#860) ==="
+
+# #837 closed the POST-draw swallow and left the PRE-draw loss uncovered. The
+# two are not the same failure: post-draw the text IS in the box and only Enter
+# was eaten, so resending Enter repairs it; pre-draw the text never arrived at
+# all, and no amount of Enter helps. Worse, the verify REPORTS SUCCESS —
+# pane_holds_unsubmitted reads a glyph-less pane as "nothing unsubmitted", so
+# the poll returns 0 on its first tick and the boot looks clean.
+#
+# The discriminator is the input box itself; the alternatives were measured and
+# rejected beside the verdict constants in lib-common.sh. predraw-empty.txt is
+# suite-owned rather than reusing unknown-blank.txt, which belongs to
+# test_keepalive_classify's UNKNOWN cases — an edit made to serve classify_pane
+# would silently change what these assertions mean.
+r=$(run_send 'STARTUP860 payload' \
+    "$FIXTURES/predraw-empty.txt" "$FIXTURES/predraw-empty.txt" \
+    "$FIXTURES/idle-prompt.txt" "$FIXTURES/input-clean-submit.txt")
+assert_eq "pre-draw pane: payload is NOT sent before the box is drawn" "none" "$(send_before_draw)"
+assert_eq "pre-draw pane: payload still lands once the box appears" "2" "$r"
+
+# A drawn pane must not pay for the gate: one capture, then send.
+r=$(run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt")
+assert_eq "already-drawn pane: no send precedes the draw check" "none" "$(send_before_draw)"
+assert_eq "already-drawn pane: still exactly two sends" "2" "$r"
+
+# The gate is best-effort, never a block: a pane that never draws must still get
+# the payload rather than hanging start-bot or silently dropping it.
+# Zero the ledger first — earlier glyph-less cases in this file exhaust the same
+# budget and emit too, and this assertion counts an exact total.
+rm -rf "$BOT_DIR/data/events"
+r=$(run_send 'NEVERDRAWN860' "$FIXTURES/predraw-empty.txt")
+assert_eq "box never drawn: payload is still sent (best-effort, not dropped)" "2" "$r"
+r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"input-box-never-drawn"' || true)
+assert_eq "box never drawn: emits evidence rather than failing silently" "1" "$r"
+
+# The wait is OPT-IN, which splits the contract in two and both halves need
+# pinning. Default-off keeps it off the paths where it is a hazard rather than a
+# safeguard: defaulting it ON put a 45s block on report-back.sh (via
+# bot_tmux_send) and blew through pre-stop-handoff's documented 30s bound,
+# serially, on a fleet-wide restart. And an opt-in that a caller must REMEMBER is
+# the failure mode #844 was, so the one caller that needs it is asserted here
+# rather than trusted — a cold-boot injector that silently stops arming this is
+# #860 all over again, and nothing else in the suite would notice.
+# Ask the FUNCTION, not the expansion. The earlier form here echoed
+# "${PANE_READY_TICKS:-0}" from a subshell, which is 0 by definition — it never
+# called pane_await_input_box, so it could not have noticed the default flipping
+# inside it, which is the only thing that matters.
+r=$(env -u PANE_READY_TICKS bash -c '
+    . "$1"/lib-common.sh
+    printf "%s\n" "$(pane_await_input_box sock nosuchsession)"' _ "$LIB_DIR")
+assert_eq "unarmed: the wait is off inside the function, not just in the env" "unwaited" "$r"
+
+# And the arming is SCOPED. A bare `export` would outlive the two cold-boot sends
+# and hand the 45s budget to bridge_bringup_verify's failure alert, which targets
+# the MANAGER pane through bot_tmux_send — a 45s block plus a recovery poll inside
+# ExecStart, for an alert about this bot being unreachable. Assert the property
+# (per-call prefix, no process-wide export) rather than one literal line, so a
+# requote or rename does not redden a behaviourally identical change.
+r=$(grep -cE '^[[:space:]]*PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"[[:space:]]*\\?$' \
+    "$SCRIPT_DIR/../lib/start-bot.sh" || true)
+assert_eq "start-bot arms the wait per call, once for each cold-boot send" "2" "$r"
+r=$(grep -cE '^[[:space:]]*export[[:space:]]+PANE_READY_TICKS' "$SCRIPT_DIR/../lib/start-bot.sh" || true)
+assert_eq "start-bot never exports it process-wide (it would leak past the sends)" "0" "$r"
+
+echo "=== the readiness verdict: what was observed, not just pass/fail (#860) ==="
+
+# The gate above is a PRE-condition, and a pre-condition can only sidestep the
+# ambiguity on the one path that arms it. The verify downstream still has to
+# classify a glyph-less pane, and that is what these assertions cover.
+#
+# Why a verdict at all: "box present" and "budget expired" and "looked and could
+# not tell" and "never looked" are four different observations, and the original
+# gate collapsed them into rc 0/1. A pass/fail cannot carry which — so the verify
+# had nothing to read, and fell back to the assumption that an empty box means a
+# submitted payload. Assert the classifier directly rather than only its side
+# effects: an oracle whose output is never inspected is how the mid-turn
+# assumption survived two fix attempts wearing a passing test.
+rep() { local n="$1" f="$2"; while [ "$n" -gt 0 ]; do printf '%s\n' "$f"; n=$((n - 1)); done; }
+verdict() { printf '%s\n' "$@" > "$PANE_SCRIPT"; pane_await_input_box sock "$SYNTH_ID"; }
+
+assert_eq "a drawn box reports 'drawn'" "drawn" "$(verdict "$FIXTURES/idle-prompt.txt")"
+assert_eq "an empty pane through the whole budget reports 'never-drawn'" \
+    "never-drawn" "$(verdict "$FIXTURES/predraw-empty.txt")"
+# Content without a glyph is NOT pre-draw and NOT confirmed-drawn. A TUI caught
+# mid-paint looks like this, and so does a dead shell; one capture cannot tell
+# them apart, so the verdict says so instead of guessing.
+assert_eq "content but no glyph reports 'unverified'" \
+    "unverified" "$(verdict "$FIXTURES/busy-spinner.txt")"
+assert_eq "an unarmed caller reports 'unwaited' (no observation, no opinion)" \
+    "unwaited" "$(PANE_READY_TICKS=0 verdict "$FIXTURES/predraw-empty.txt")"
+
+echo "=== glyph-less at verify: the latch decides, not the frame (#860) ==="
+
+# THE defect, stated as a pair. Both runs below hand the verify a pane with no
+# input glyph. Pre-fix they were indistinguishable — pane_holds_unsubmitted reads
+# a glyph-less pane as "nothing unsubmitted" and the poll returns SUCCESS on its
+# first tick — so the code took the mid-turn reading in both cases, and the suite
+# asserted that reading as correct ("no prompt glyph (mid-turn) -> NO spurious
+# Enter"). That assertion is true. It is also what locked the bug in, which is why
+# more coverage of it could never have found this.
+#
+# The two causes have opposite correct responses, so no single predicate over the
+# current frame can serve. What separates them is a second signal with the
+# opposite blind spot: the frame knows only the present, the latch knows only
+# whether a box was EVER confirmed.
+
+# (a) Box confirmed, then glyph-less at verify -> mid-turn. The payload went into
+# a box that demonstrably existed, so its absence means submitted. No resend.
+r=$(run_send 'MIDTURN860 payload' \
+    "$FIXTURES/idle-prompt.txt" "$FIXTURES/busy-spinner.txt")
+assert_eq "drawn box then glyph-less verify -> submitted, no resend" "2" "$r"
+
+# (b) Box never drawn, then a box appears holding nothing -> the keystrokes were
+# typed at a TUI that did not exist and are gone. Resending Enter repairs nothing
+# (there is no text in the box to submit), so the PAYLOAD goes again.
+# Pre-fix this returned success on tick 1 and the prompt was lost silently.
+rm -rf "$BOT_DIR/data/events"
+r=$(run_send 'LOSTPAYLOAD860' \
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt")
+assert_eq "never-drawn then a box appears empty -> full payload resent" "4" "$r"
+r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"resent-after-box-drew"' || true)
+assert_eq "the recovery is on the ledger (an invisible repair is how this hid)" "1" "$r"
+
+# The resend must be the payload, not a bare Enter: a lost send has nothing in the
+# box for an Enter to submit. Distinguishes this repair from #837's.
+r=$(grep -c '^LOSTPAYLOAD860$' "$SENT_LOG" || true)
+assert_eq "the resend carries the payload itself, twice in total" "2" "$r"
+
+echo "=== the recovery needs positive evidence too (#860) ==="
+
+# Symmetric discipline to pane_holds_unsubmitted: never act on an absence. If the
+# payload is visible ANYWHERE in the frame it did arrive, so resending would
+# double-deliver a startup prompt. The transcript echo is the evidence — a
+# submitted payload leaves the input box and is rendered above it.
+r=$(run_send 'PROBE763TRANSCRIPT reply ok' \
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/input-clean-submit.txt")
+assert_eq "never-drawn but the payload shows in the transcript -> NOT resent" "2" "$r"
+
+# A payload past the paste threshold renders as [Pasted text #N], so its literal
+# text is nowhere in the pane even when it landed perfectly. Matching on text
+# alone would read every landed paste as a vanished one and resend it.
+#
+# This case also keeps the two repairs from blurring. The paste DID arrive and is
+# sitting in the box unsubmitted, so the correct repair is #837's — one more Enter
+# — even though the box was never confirmed before the send. Three sends, not
+# four: the Enter fires, the payload does not go again.
+big="set +H; [BOTCOMMAND] ari | task | $(printf 'filler %.0s' $(seq 1 60))"
+r=$(run_send "$big" \
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/input-stuck-collapsed-paste.txt")
+assert_eq "never-drawn but a collapsed paste landed -> Enter resent, not the payload" "3" "$r"
+r=$(grep -cF "$big" "$SENT_LOG" || true)
+assert_eq "the collapsed payload is sent exactly once (no double-delivery)" "1" "$r"
+
+# A box that never appears at all: nothing to recover and nothing to submit. The
+# post-budget Enter must NOT fire — it would spend a send on a pane that cannot
+# receive it and file a send_retry, misattributing a pre-draw loss as a post-draw
+# swallow. fleet-pulse reads those rows; the two must not blur.
+rm -rf "$BOT_DIR/data/events"
+r=$(run_send 'NEVERAPPEARS860' "$FIXTURES/predraw-empty.txt")
+assert_eq "box never appears -> no phantom Enter retry" "2" "$r"
+r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"enter-swallowed"' || true)
+assert_eq "box never appears -> no send_retry misattribution" "0" "$r"
+r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"input-box-never-drawn"' || true)
+assert_eq "box never appears -> the loss IS recorded as send_blind" "1" "$r"
 
 echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
 
