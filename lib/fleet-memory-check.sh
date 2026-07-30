@@ -174,11 +174,16 @@ per_bot_summary | tee -a "$LOG" || true
 # --- Alert --------------------------------------------------------------------
 
 if [ "$AVAIL_MB" -lt "$RESERVE_MB" ]; then
-    # Name the door: "stopping" a bot does not distinguish a stop (stays
-    # enrolled, keepalive revives it) from a spin-down (supervision removed,
-    # nothing revives it). Kept to one clause — this string is also sent into
-    # the manager bot's pane and to Telegram on every fire.
-    ALERT_MSG="available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) on $(hostname) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. To free RAM, STOP an idle bot (systemctl --user stop <unit>) — it stays enrolled and keepalive walks it back up; do not spin it down."
+    # Name the door — with its direction. Under the 60s keepalive a
+    # `systemctl --user stop` cannot free RAM: restart_bot_service has no
+    # deliberately-stopped check, so a stopped bot is walked back up within
+    # a minute and the cold boot briefly spikes above the steady state it
+    # replaced. Spin-down is the durable lever precisely because
+    # de-enrolment is the one thing keepalive cannot walk back; #828 keeps
+    # the result visible as unsupervised-down in reconcile-fleet. Kept
+    # tight — this string also reaches the manager pane and Telegram, and
+    # is read on a phone.
+    ALERT_MSG="available RAM ${AVAIL_MB} MB (${AVAIL_PCT}% of total) on $(hostname) is below reserve floor ${RESERVE_MB} MB (${RESERVE_PCT}%). Fleet RSS ${FLEET_RSS_MB} MB. To free RAM: check for uncommitted WIP, then SPIN DOWN an idle bot — lib/spin-down-bot.sh <bot-dir>. De-enrolment is what keepalive cannot walk back; reconcile shows it as unsupervised-down. Do NOT use systemctl --user stop: keepalive restarts it within 60s and it frees nothing."
     echo "$TS ALERT — $ALERT_MSG" | tee -a "$LOG"
     # Shared signal path (fleet event + manager tmux nudge + Telegram):
     # delivery works fleet-less (host job) via the cross-fleet fallback.

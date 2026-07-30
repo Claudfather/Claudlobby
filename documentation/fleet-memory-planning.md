@@ -137,8 +137,13 @@ decision.
 ## What to Do When the Alert Fires
 
 1. Check which bots are idle: `lib/reconcile-fleet.sh <fleet>`
-2. Stop the most RAM-hungry idle bots:
-   `systemctl --user stop <bot-name>.service`
+2. Check the candidate bot for uncommitted WIP (its `projects/` checkouts), then
+   spin it down: `lib/spin-down-bot.sh <bot-dir>`. De-enrolment is the one thing
+   keepalive cannot walk back; `reconcile-fleet.sh` reports the bot as
+   `unsupervised-down` (#828) until spun back up. Do **not** use
+   `systemctl --user stop` to free RAM — the 60s keepalive restarts a stopped
+   bot within a minute, so it frees nothing and the cold boot briefly spikes
+   above the steady state it replaced.
 3. If all bots are active, defer new dispatches until at least one completes.
 4. Consider scaling to a host with more RAM if alerts are frequent.
 5. Review MCP server counts — each unnecessary MCP adds ~70 MB.

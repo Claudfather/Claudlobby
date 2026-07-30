@@ -26,7 +26,8 @@
 # without a canary. Arm per fleet in fleet.yaml `env:`, canary on a throwaway
 # first.
 #
-# NOT the tool for transient RAM pressure — see $_sd_warning below / --help.
+# The RAM lever that holds under keepalive — and a destructive door; see
+# $_sd_warning below / --help.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,12 +35,12 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 
 _sd_usage='Usage: spin-down-bot.sh [--purge] [--reason <text>] [--expected-return <iso8601|none>] <bot-dir>'
-_sd_warning='NOT the tool for transient RAM pressure. To free a bots memory and get it back:
-  systemctl --user stop <BOT_SERVICE>      (launchctl bootout ... on macOS)
-That frees the identical RAM, leaves the bot ENROLLED, and lets keepalive walk it
-back up. This script REMOVES supervision: nothing will revive the bot, and it
-reports as unsupervised-down until spun back up. Reserve it for a genuine
-decommission or a throwaway canary.'
+_sd_warning='The durable lever for RAM pressure — and a destructive door. This script
+REMOVES supervision: nothing revives the bot, and reconcile-fleet reports it as
+unsupervised-down until spun back up. Check the bot for uncommitted WIP first.
+Do NOT reach for `systemctl --user stop` to free RAM: under the 60s keepalive a
+stopped bot is walked back up within a minute and the stop frees nothing.
+Spin-down holds because de-enrolment is the one thing keepalive cannot undo.'
 PURGE=0
 BOT_DIR=""
 REASON="unspecified"

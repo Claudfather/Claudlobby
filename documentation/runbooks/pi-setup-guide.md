@@ -238,14 +238,19 @@ claudlobby warm-cache                    # pre-download any missing packages
 **Recovery if cache is cleared:**
 
 ```bash
-# Stop all bots first to avoid contention
+# Stop the fleet keepalive timer FIRST — otherwise it revives the stopped
+# bots within 60s, mid-warm
+systemctl --user stop <service_prefix>.keepalive.timer
+
+# Then stop all bots to avoid contention
 systemctl --user stop bot1 bot2 bot3 ...   # all bots in the fleet
 
 # Re-warm the cache serially (not in parallel)
 claudlobby --fleet <name> warm-cache
 
-# Restart fleet
+# Restart fleet, then re-arm keepalive
 systemctl --user start bot1 bot2 bot3 ...  # same list
+systemctl --user start <service_prefix>.keepalive.timer
 ```
 
 The cache typically occupies 500-800 MB. This is expected and should not be reclaimed.
