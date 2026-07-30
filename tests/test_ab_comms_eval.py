@@ -129,6 +129,46 @@ class TestDryRun:
             shutil.rmtree(root, ignore_errors=True)
 
 
+class TestChannelBrevityDryRun:
+    """#728 P1 gate wiring (--experiment channel-brevity), CI-safe dry path."""
+
+    def test_dry_run_isolates_variants_and_reaches_verdict(self):
+        r = _run(
+            "--dry-run", "--keep", "--experiment", "channel-brevity", "--reps", "2"
+        )
+        assert r.returncode == 0, r.stderr + r.stdout
+        # The run-blocking isolation assertion must have PASSED (it caught a
+        # real leak on its first execution: report-back's {{CLAUDLOBBY_ROOT}}
+        # interpolation diverging per sub-root — the baseline is chosen
+        # placeholder-clean so the composed delta is exactly the component).
+        assert "variant isolation: composed delta == component block" in r.stdout
+        assert " FAIL " not in r.stdout
+        # Deterministic synth exercises the SUPPORTED branch end to end:
+        # channel shorter WITH, control identical, facts held everywhere.
+        assert "VERDICT: SUPPORTED" in r.stdout
+        assert "CHANNEL_BREVITY_AB_RESULT" in r.stdout
+        assert "ci_pct=95" in r.stdout
+        root = Path(_kv(r.stdout, "ROOT"))
+        try:
+            body = Path(_kv(r.stdout, "RESULTS")).read_text()
+            assert '"arm":"channel"' in body and '"arm":"control"' in body
+            assert '"facts_ok":true' in body
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_dry_run_touches_no_auth(self):
+        r = _run(
+            "--dry-run", "--keep", "--experiment", "channel-brevity", "--reps", "1"
+        )
+        assert r.returncode == 0, r.stderr + r.stdout
+        root = Path(_kv(r.stdout, "ROOT"))
+        try:
+            creds = list(root.glob("**/.credentials.json"))
+            assert creds == [], f"auth leaked into the fixture: {creds}"
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class TestComputeVerdict:
     def test_pass_when_both_axes_clear_the_bar(self, tmp_path):
         rows = []
