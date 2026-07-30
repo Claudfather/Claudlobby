@@ -349,13 +349,12 @@ fi
 # is already up, too short when it is not, and costliest when 8 bots start in
 # parallel on a 4-core machine. See documentation/runbooks/audit-cold-start-timing.md.
 #
-# Arm the readiness wait for the two sends below, and ONLY them. This is the one
-# place in the fleet that injects into a TUI that may not have drawn yet; every
-# other pane_send_verified caller targets a running bot whose box exists, and a
-# long wait there is a hazard rather than a safeguard — it would put a 45s block
-# on report-back.sh via bot_tmux_send, and blow through pre-stop-handoff's
-# documented 30s bound serially on a fleet-wide restart.
-export PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT"
+# The readiness wait is armed per call below, NOT exported. An export outlives
+# the two sends it is meant for: bridge_bringup_verify further down reaches
+# pane_send_verified through emit_failure_alert -> bot_tmux_send, targeting the
+# MANAGER pane, and would inherit the whole cold-boot budget for an alert about
+# this bot being unreachable. A one-shot assignment prefix is scoped to the single
+# command and does not persist afterwards.
 
 # Resume prior context (lossless restart) before STARTUP_PROMPT. Every start —
 # intentional, crash, or weekly bounce — injects /claudna:session resume --auto
@@ -369,7 +368,8 @@ _SESSION_MD="$BOT_DIR/.claude/session.md"
 _RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
     echo "$(ts_iso) RESUME — injecting /claudna:session resume --auto (fresh checkpoint)" >> "$LOG"
-    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" '/claudna:session resume --auto'
+    PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
+        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" '/claudna:session resume --auto'
 elif [ -f "$_SESSION_MD" ]; then
     echo "$(ts_iso) RESUME SKIP — checkpoint older than ${_RESUME_MAX_AGE_S}s, clean-starting" >> "$LOG"
 fi
@@ -378,7 +378,8 @@ if [ -n "${STARTUP_PROMPT:-}" ]; then
     # Prose, so it keeps the 'set +H; ' history-expansion guard the resume send
     # above must omit. The TUI's input buffer can race on cold start, leaving the
     # prompt typed but unsubmitted; pane_send_verified owns the catch.
-    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
+    PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
+        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "set +H; $STARTUP_PROMPT"
 fi
 
 # Mark bot as idle in fleet-state — non-fatal if helper is missing or fails

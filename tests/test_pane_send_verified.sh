@@ -65,10 +65,12 @@ ORDER_LOG="$TMPD/order.log"
 : > "$ORDER_LOG"
 
 # Compress the #860 readiness budget suite-wide. In production it is 45s (0.5s x
-# 90), sized off the 16-19s measured box draw; here every capture is a stub, so
+# 90), sized off the 10-19s measured box draw; here every capture is a stub, so
 # the wall-clock wait buys nothing and any glyph-less fixture would otherwise
 # make the suite sit out the full budget before its assertion runs.
 export PANE_READY_POLL_S=0.02 PANE_READY_TICKS=6
+# And the recovery budget for a box that never drew (production 60 x 0.2s = 12s).
+export PANE_RECOVER_TICKS=2
 
 bot_tmux() {
     shift  # socket
@@ -170,20 +172,11 @@ echo "=== pane_send_verified: never sends into a pane with no input box (#860) =
 # pane_holds_unsubmitted reads a glyph-less pane as "nothing unsubmitted", so
 # the poll returns 0 on its first tick and the boot looks clean.
 #
-# The discriminator is the input box itself, and it took measuring a real boot
-# to find it. classify_pane cannot serve: a box holding text is UNKNOWN, not
-# IDLE (input-stuck-literal has a 311-byte region and classifies UNKNOWN). Nor
-# can "glyph-less and not busy": verb-no-esc.txt is a genuinely working pane,
-# and gating on that would inject a payload into a thinking bot. What holds is
-# narrower and measured — a real pane is EMPTY before the TUI renders and keeps
-# its box in every drawn state, mid-turn included (region stayed 309 across a
-# 30s streaming turn). So the box's absence means one thing only: not drawn yet.
-# predraw-empty.txt is suite-owned rather than reusing unknown-blank.txt, which
-# belongs to test_keepalive_classify's UNKNOWN cases: an edit made to serve
-# classify_pane would silently change what these assertions mean. The two are
-# NOT behaviourally distinguishable here — a real pre-draw capture is 0 bytes
-# while unknown-blank is whitespace, but every consumer reads the fixture
-# through $( ), which strips trailing newlines before any predicate sees it.
+# The discriminator is the input box itself; the alternatives were measured and
+# rejected beside the verdict constants in lib-common.sh. predraw-empty.txt is
+# suite-owned rather than reusing unknown-blank.txt, which belongs to
+# test_keepalive_classify's UNKNOWN cases — an edit made to serve classify_pane
+# would silently change what these assertions mean.
 r=$(run_send 'STARTUP860 payload' \
     "$FIXTURES/predraw-empty.txt" "$FIXTURES/predraw-empty.txt" \
     "$FIXTURES/idle-prompt.txt" "$FIXTURES/input-clean-submit.txt")
@@ -213,10 +206,127 @@ assert_eq "box never drawn: emits evidence rather than failing silently" "1" "$r
 # the failure mode #844 was, so the one caller that needs it is asserted here
 # rather than trusted — a cold-boot injector that silently stops arming this is
 # #860 all over again, and nothing else in the suite would notice.
-r=$(PANE_READY_TICKS= bash -c '. lib/lib-common.sh; echo "${PANE_READY_TICKS:-0}"' 2>/dev/null)
-assert_eq "the readiness wait is off unless a caller arms it" "0" "$r"
-r=$(grep -c 'export PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"' "$SCRIPT_DIR/../lib/start-bot.sh" || true)
-assert_eq "start-bot arms the readiness wait for its cold-boot sends" "1" "$r"
+# Ask the FUNCTION, not the expansion. The earlier form here echoed
+# "${PANE_READY_TICKS:-0}" from a subshell, which is 0 by definition — it never
+# called pane_await_input_box, so it could not have noticed the default flipping
+# inside it, which is the only thing that matters.
+r=$(env -u PANE_READY_TICKS bash -c '
+    . "$1"/lib-common.sh
+    printf "%s\n" "$(pane_await_input_box sock nosuchsession)"' _ "$LIB_DIR")
+assert_eq "unarmed: the wait is off inside the function, not just in the env" "unwaited" "$r"
+
+# And the arming is SCOPED. A bare `export` would outlive the two cold-boot sends
+# and hand the 45s budget to bridge_bringup_verify's failure alert, which targets
+# the MANAGER pane through bot_tmux_send — a 45s block plus a recovery poll inside
+# ExecStart, for an alert about this bot being unreachable. Assert the property
+# (per-call prefix, no process-wide export) rather than one literal line, so a
+# requote or rename does not redden a behaviourally identical change.
+r=$(grep -cE '^[[:space:]]*PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"[[:space:]]*\\?$' \
+    "$SCRIPT_DIR/../lib/start-bot.sh" || true)
+assert_eq "start-bot arms the wait per call, once for each cold-boot send" "2" "$r"
+r=$(grep -cE '^[[:space:]]*export[[:space:]]+PANE_READY_TICKS' "$SCRIPT_DIR/../lib/start-bot.sh" || true)
+assert_eq "start-bot never exports it process-wide (it would leak past the sends)" "0" "$r"
+
+echo "=== the readiness verdict: what was observed, not just pass/fail (#860) ==="
+
+# The gate above is a PRE-condition, and a pre-condition can only sidestep the
+# ambiguity on the one path that arms it. The verify downstream still has to
+# classify a glyph-less pane, and that is what these assertions cover.
+#
+# Why a verdict at all: "box present" and "budget expired" and "looked and could
+# not tell" and "never looked" are four different observations, and the original
+# gate collapsed them into rc 0/1. A pass/fail cannot carry which — so the verify
+# had nothing to read, and fell back to the assumption that an empty box means a
+# submitted payload. Assert the classifier directly rather than only its side
+# effects: an oracle whose output is never inspected is how the mid-turn
+# assumption survived two fix attempts wearing a passing test.
+rep() { local n="$1" f="$2"; while [ "$n" -gt 0 ]; do printf '%s\n' "$f"; n=$((n - 1)); done; }
+verdict() { printf '%s\n' "$@" > "$PANE_SCRIPT"; pane_await_input_box sock "$SYNTH_ID"; }
+
+assert_eq "a drawn box reports 'drawn'" "drawn" "$(verdict "$FIXTURES/idle-prompt.txt")"
+assert_eq "an empty pane through the whole budget reports 'never-drawn'" \
+    "never-drawn" "$(verdict "$FIXTURES/predraw-empty.txt")"
+# Content without a glyph is NOT pre-draw and NOT confirmed-drawn. A TUI caught
+# mid-paint looks like this, and so does a dead shell; one capture cannot tell
+# them apart, so the verdict says so instead of guessing.
+assert_eq "content but no glyph reports 'unverified'" \
+    "unverified" "$(verdict "$FIXTURES/busy-spinner.txt")"
+assert_eq "an unarmed caller reports 'unwaited' (no observation, no opinion)" \
+    "unwaited" "$(PANE_READY_TICKS=0 verdict "$FIXTURES/predraw-empty.txt")"
+
+echo "=== glyph-less at verify: the latch decides, not the frame (#860) ==="
+
+# THE defect, stated as a pair. Both runs below hand the verify a pane with no
+# input glyph. Pre-fix they were indistinguishable — pane_holds_unsubmitted reads
+# a glyph-less pane as "nothing unsubmitted" and the poll returns SUCCESS on its
+# first tick — so the code took the mid-turn reading in both cases, and the suite
+# asserted that reading as correct ("no prompt glyph (mid-turn) -> NO spurious
+# Enter"). That assertion is true. It is also what locked the bug in, which is why
+# more coverage of it could never have found this.
+#
+# The two causes have opposite correct responses, so no single predicate over the
+# current frame can serve. What separates them is a second signal with the
+# opposite blind spot: the frame knows only the present, the latch knows only
+# whether a box was EVER confirmed.
+
+# (a) Box confirmed, then glyph-less at verify -> mid-turn. The payload went into
+# a box that demonstrably existed, so its absence means submitted. No resend.
+r=$(run_send 'MIDTURN860 payload' \
+    "$FIXTURES/idle-prompt.txt" "$FIXTURES/busy-spinner.txt")
+assert_eq "drawn box then glyph-less verify -> submitted, no resend" "2" "$r"
+
+# (b) Box never drawn, then a box appears holding nothing -> the keystrokes were
+# typed at a TUI that did not exist and are gone. Resending Enter repairs nothing
+# (there is no text in the box to submit), so the PAYLOAD goes again.
+# Pre-fix this returned success on tick 1 and the prompt was lost silently.
+rm -rf "$BOT_DIR/data/events"
+r=$(run_send 'LOSTPAYLOAD860' \
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/idle-prompt.txt")
+assert_eq "never-drawn then a box appears empty -> full payload resent" "4" "$r"
+r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"resent-after-box-drew"' || true)
+assert_eq "the recovery is on the ledger (an invisible repair is how this hid)" "1" "$r"
+
+# The resend must be the payload, not a bare Enter: a lost send has nothing in the
+# box for an Enter to submit. Distinguishes this repair from #837's.
+r=$(grep -c '^LOSTPAYLOAD860$' "$SENT_LOG" || true)
+assert_eq "the resend carries the payload itself, twice in total" "2" "$r"
+
+echo "=== the recovery needs positive evidence too (#860) ==="
+
+# Symmetric discipline to pane_holds_unsubmitted: never act on an absence. If the
+# payload is visible ANYWHERE in the frame it did arrive, so resending would
+# double-deliver a startup prompt. The transcript echo is the evidence — a
+# submitted payload leaves the input box and is rendered above it.
+r=$(run_send 'PROBE763TRANSCRIPT reply ok' \
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/input-clean-submit.txt")
+assert_eq "never-drawn but the payload shows in the transcript -> NOT resent" "2" "$r"
+
+# A payload past the paste threshold renders as [Pasted text #N], so its literal
+# text is nowhere in the pane even when it landed perfectly. Matching on text
+# alone would read every landed paste as a vanished one and resend it.
+#
+# This case also keeps the two repairs from blurring. The paste DID arrive and is
+# sitting in the box unsubmitted, so the correct repair is #837's — one more Enter
+# — even though the box was never confirmed before the send. Three sends, not
+# four: the Enter fires, the payload does not go again.
+big="set +H; [BOTCOMMAND] ari | task | $(printf 'filler %.0s' $(seq 1 60))"
+r=$(run_send "$big" \
+    $(rep "$PANE_READY_TICKS" "$FIXTURES/predraw-empty.txt") "$FIXTURES/input-stuck-collapsed-paste.txt")
+assert_eq "never-drawn but a collapsed paste landed -> Enter resent, not the payload" "3" "$r"
+r=$(grep -cF "$big" "$SENT_LOG" || true)
+assert_eq "the collapsed payload is sent exactly once (no double-delivery)" "1" "$r"
+
+# A box that never appears at all: nothing to recover and nothing to submit. The
+# post-budget Enter must NOT fire — it would spend a send on a pane that cannot
+# receive it and file a send_retry, misattributing a pre-draw loss as a post-draw
+# swallow. fleet-pulse reads those rows; the two must not blur.
+rm -rf "$BOT_DIR/data/events"
+r=$(run_send 'NEVERAPPEARS860' "$FIXTURES/predraw-empty.txt")
+assert_eq "box never appears -> no phantom Enter retry" "2" "$r"
+r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"enter-swallowed"' || true)
+assert_eq "box never appears -> no send_retry misattribution" "0" "$r"
+r=$(cat "$BOT_DIR"/data/events/*.jsonl 2>/dev/null | grep -c '"reason":"input-box-never-drawn"' || true)
+assert_eq "box never appears -> the loss IS recorded as send_blind" "1" "$r"
 
 echo "=== pane_send_verified: the poll gives a slow render time to settle ==="
 

@@ -1085,7 +1085,7 @@ _PANE_PROBE_MAX_CHARS=60
 
 # Readiness budget: how long to wait for the TUI to draw its input box before
 # sending into it (#860). Sized off the measured draw, not a guess — a
-# production-shaped bot (plugins + MCP servers + channels) takes 16-19s to
+# production-shaped bot (plugins + MCP servers + channels) takes 10-19s to
 # render its box (lib/boot-strand-sampler.sh t_glyph), while start-bot injects
 # at 3-9s, so the payload was routinely typed into a pane that could not yet
 # receive it. 45s leaves headroom for a loaded host booting several bots at
@@ -1104,6 +1104,38 @@ _PANE_PROBE_MAX_CHARS=60
 # put a 45s block on report-back.sh and timed out its contract test.
 _PANE_READY_POLL_S=0.5
 _PANE_READY_TICKS_BOOT=90
+
+# Readiness verdicts — what pane_await_input_box observed BEFORE the send, read
+# back by the verify below. This is the whole #860 oracle, and it is a PAIR of
+# signals rather than a smarter single predicate, because no single predicate can
+# work: a glyph-less pane at verify time has two causes with opposite correct
+# responses (mid-turn, where retrying would inject into a working session, and
+# box-never-drawn, where the payload is gone and only a resend recovers it), and
+# a capture cannot tell them apart. It cannot because a pane capture has no past
+# — Claude Code renders in the alternate screen buffer (measured: alternate_on=1,
+# history_size=12, so every -S depth flag against a bot pane is inert), and a
+# capture only ever answers "what is true right now".
+#
+# So the second signal has to carry the memory. These verdicts are latched from
+# an observation taken before the keystrokes went out, and the verify reads the
+# pair: the current frame says whether a box is there NOW, the latch says whether
+# one was EVER confirmed. Neither alone classifies; together they do. Same shape
+# as the fleet's dead-turn diagnosis, where a stale .last-tool-call marker said
+# no work happened and the current frame said why, and neither alone sufficed.
+# Verify budget for a send whose box never drew, in _PANE_VERIFY_POLL_S ticks
+# (60 x 0.2s = 12s). Deliberately not the standard verify budget: that one is 5
+# ticks, one second, sized for "did the TUI swallow the Enter during a render",
+# and reusing it here would ship a recovery that fires almost never — code
+# present, effect absent, which is the hollow shape of a check that cannot do
+# its job. "Will the box appear" is a 10-19s question. Only reachable on an armed
+# cold boot whose box already missed the whole 45s readiness budget, so the added
+# wait lands on an already-pathological boot and never on a healthy one.
+_PANE_RECOVER_TICKS_DEFAULT=60
+
+_PANE_BOX_DRAWN='drawn'            # glyph seen before sending — the box existed
+_PANE_BOX_NEVER='never-drawn'      # armed, polled the whole budget, pane stayed empty
+_PANE_BOX_UNVERIFIED='unverified'  # armed but unclassifiable (content without a glyph, or capture failed)
+_PANE_BOX_UNWAITED='unwaited'      # wait not armed — no observation, so no opinion
 # Prompt-glyph anchor. Alternation rather than a [>❯] bracket expression so the
 # multibyte glyph stays one literal byte sequence under any locale — byte-safe by
 # construction rather than by luck. (_IDLE_PATTERN_BASE below spells the same
@@ -1145,18 +1177,28 @@ pane_input_region() {
 # matches neither, and a send that was QUEUED against a busy pane leaves only
 # the TUI's own hint text there, which matches neither either — so the retry
 # cannot fire on a send that actually landed.
+# The same predicate as pane_shows_payload, narrowed to the input region: "is it
+# still pending" is "is it visible" asked of the box alone. Delegating rather than
+# repeating the match keeps one home for what counts as the payload — the literal
+# text or the collapsed-paste placeholder — so the two can never disagree about it.
 pane_holds_unsubmitted() {
     local region
     region=$(pane_input_region "$1")
     [ -n "$region" ] || return 1
-    # One grep, two literals — the alternative runs both patterns on every CLEAR
-    # pane, which is the common case.
-    printf '%s\n' "$region" | grep -qF -e "$2" -e "$_PANE_PASTE_COLLAPSE_MARKER"
+    pane_shows_payload "$region" "$2"
 }
 
 # pane_await_input_box <socket> <session>
-# Block until the pane has an input box to receive keystrokes, bounded.
-# rc 0 = box present (or waiting disabled); rc 1 = budget expired.
+# Block until the pane has an input box to receive keystrokes, bounded, and echo
+# what was observed: drawn / never-drawn / unverified / unwaited (see the verdict
+# constants above). Always rc 0 — the verdict is the return value, and a caller
+# that cannot proceed is not this function to decide.
+#
+# Echoing a verdict rather than returning a bare pass/fail is the point. "Budget
+# expired" and "never looked" and "looked and could not tell" are three different
+# states, and collapsing them to rc 1 is what made the original gate a single
+# predicate: the verify downstream needs to know WHICH, because it is the only
+# thing that can disambiguate a glyph-less pane later.
 #
 # The box's ABSENCE is the readiness signal, and it is the only signal that
 # means one thing. Measured on real boots rather than inferred: before the TUI
@@ -1179,29 +1221,102 @@ pane_await_input_box() {
     local socket="$1" session="$2" pane tick=0
     # Default 0 (no wait). Boot injectors arm it; see _PANE_READY_TICKS_BOOT.
     local ticks="${PANE_READY_TICKS:-0}"
-    [ "$ticks" -gt 0 ] || return 0
+    [ "$ticks" -gt 0 ] || { printf '%s\n' "$_PANE_BOX_UNWAITED"; return 0; }
     while [ "$tick" -lt "$ticks" ]; do
-        pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) || return 0
+        pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) \
+            || { printf '%s\n' "$_PANE_BOX_UNVERIFIED"; return 0; }
         # Ready on a glyph — the box exists, send into it. Matches the glyph SSOT
         # directly rather than through pane_input_region: the question here is
         # only "is there a box", not "what is in it", and slicing the region
         # costs an awk buffer-and-reslice per tick (measured ~26% more than the
         # grep) for a substring nothing reads. Same style as pane_is_idle.
-        printf '%s\n' "$pane" | grep -qE "$_PANE_INPUT_GLYPH_RE" && return 0
-        # Also stop on ANY rendered content. Waiting is only ever right while the
-        # pane looks un-rendered, and pre-draw is EMPTY (measured: zero bytes
-        # until the TUI paints, then fully drawn). A pane that has content but no
-        # glyph is something else entirely — a shell, a crashed session, a
-        # non-TUI command — and none of those will ever grow a box, so waiting
-        # out the budget on one buys nothing and costs the caller the whole
-        # budget. That is not hypothetical: report-back.sh reaches this through
-        # bot_tmux_send, so a glyph-only wait puts a 45s block on every worker
-        # report whose manager pane is not showing a prompt.
-        [ -z "$(printf '%s' "$pane" | tr -d '[:space:]')" ] || return 0
-        tick=$((tick + 1))
-        sleep "${PANE_READY_POLL_S:-$_PANE_READY_POLL_S}"
+        # Blankness first, with a builtin, because it is the answer on every
+        # waiting tick and a blank pane cannot hold a glyph. The grep and the
+        # tr-pipeline below are 5 forks that a pre-draw pane never needed; this
+        # ordering spends 0 on the common case. Measured on this host: ~2.7ms of
+        # fork per waiting tick removed, ~0.5s of CPU across an 8-bot cold boot.
+        case "$pane" in
+            *[![:space:]]*) ;;
+            *)  tick=$((tick + 1))
+                sleep "${PANE_READY_POLL_S:-$_PANE_READY_POLL_S}"
+                continue ;;
+        esac
+        printf '%s\n' "$pane" | grep -qE "$_PANE_INPUT_GLYPH_RE" \
+            && { printf '%s\n' "$_PANE_BOX_DRAWN"; return 0; }
+        # Content, but no glyph. Waiting is only ever right while the pane looks
+        # un-rendered — pre-draw is EMPTY, measured at zero bytes until the TUI
+        # paints — so this is usually something that will never grow a box: a
+        # shell, a crashed session, a non-TUI command. Sitting out the budget on
+        # one buys nothing and costs the caller everything (see the opt-in note on
+        # _PANE_READY_TICKS_BOOT), so the wait ends here.
+        #
+        # But "usually" is not "always", and an earlier cut of this gate asserted
+        # the certain form — that such a pane is definitionally not a TUI. It
+        # cannot know that: a TUI caught mid-paint has content and no glyph yet,
+        # and one capture cannot separate it from a dead shell. Hence UNVERIFIED
+        # rather than drawn — stop blocking, but do not claim a box was confirmed.
+        printf '%s\n' "$_PANE_BOX_UNVERIFIED"
+        return 0
     done
-    return 1
+    printf '%s\n' "$_PANE_BOX_NEVER"
+}
+
+# pane_shows_payload <text> <probe>
+# Returns 0 when <text> shows the payload: the probe itself, or the collapsed-paste
+# placeholder. The one definition of "the payload is visible here" — pane_holds_
+# unsubmitted asks it of the input region, the recovery path asks it of the whole
+# frame, and the difference between them is only which slice is handed in.
+#
+# Asked of a whole capture it means "did this ever arrive", because a submitted
+# payload leaves the box and is echoed into the transcript above it. Asked of the
+# region alone it means "is this still pending".
+#
+# The collapse marker counts: a payload past the paste threshold renders as
+# [Pasted text #N] and its literal text appears nowhere, so matching on text alone
+# would read a landed paste as a vanished one.
+#
+# One grep, two literals — the alternative runs both patterns on every clear pane,
+# which is the common case.
+pane_shows_payload() {
+    printf '%s\n' "$1" | grep -qF -e "$2" -e "$_PANE_PASTE_COLLAPSE_MARKER"
+}
+
+# _pane_recover_unconfirmed_send <socket> <session> <text> <probe> <pane>
+# The verify tick for a send whose input box was never confirmed.
+# rc 0 = ruled (landed, or resent); rc 1 = cannot rule yet, keep polling.
+#
+# #837 repairs a swallowed Enter, which is the POST-draw failure: the text is in
+# the box and only the submit was eaten, so one more Enter finishes it. Pre-draw
+# is a different failure with a different repair — the keystrokes were typed at a
+# TUI that did not exist, so there is nothing in the box for an Enter to submit
+# and resending Enter is a no-op. The payload itself has to go again.
+#
+# Ordered by what the evidence can support, strongest first, so a resend is only
+# ever the last reading rather than the default one.
+_pane_recover_unconfirmed_send() {
+    local socket="$1" session="$2" text="$3" probe="$4" pane="$5"
+
+    # No box yet: unchanged from the send, still unrecoverable, still not clean.
+    # Returning 1 keeps the poll alive instead of reporting success off an
+    # absence — which is the exact inference this whole change exists to remove.
+    [ -n "$(pane_input_region "$pane")" ] || return 1
+
+    # A box exists now. If the payload shows anywhere in the frame it did arrive
+    # and was submitted (out of the box, echoed into the transcript above it), so
+    # the send is good and a resend would double-deliver.
+    pane_shows_payload "$pane" "$probe" && return 0
+
+    # Box present, payload nowhere in the frame: typed before the TUI could
+    # receive it, and lost. This is the case the old code reported as a clean
+    # send. Resend the whole payload, and record it — a repair nobody can see is
+    # how the original defect stayed invisible through two fix attempts.
+    emit_fleet_event send_blind_recovered dispatch \
+        "$(printf '{"session":"%s","reason":"resent-after-box-drew","box":"%s"}' \
+            "$(json_escape "$session")" "$_PANE_BOX_NEVER")"
+    bot_tmux "$socket" send-keys -t "$session" "$text" 2>/dev/null || return 0
+    sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"
+    bot_tmux "$socket" send-keys -t "$session" Enter 2>/dev/null || true
+    return 0
 }
 
 # pane_send_verified <socket> <session> <text>
@@ -1229,9 +1344,12 @@ pane_send_verified() {
     # because refusing to send would trade a lost prompt for a stuck start-bot.
     # The miss is recorded, since the whole reason this shipped undetected is
     # that a lost send left no evidence anywhere.
-    if ! pane_await_input_box "$socket" "$session"; then
+    local box
+    box=$(pane_await_input_box "$socket" "$session")
+    if [ "$box" = "$_PANE_BOX_NEVER" ]; then
         emit_fleet_event send_blind dispatch \
-            "$(printf '{"session":"%s","reason":"input-box-never-drawn"}' "$(json_escape "$session")")"
+            "$(printf '{"session":"%s","reason":"input-box-never-drawn","box":"%s"}' \
+                "$(json_escape "$session")" "$box")"
     fi
 
     bot_tmux "$socket" send-keys -t "$session" "$text" || return 1
@@ -1244,12 +1362,59 @@ pane_send_verified() {
     # resend" — without this the knob would invert, buying an operator who set it
     # to 0 a ghost Enter into an idle pane on every single send.
     [ "$ticks" -gt 0 ] || return 0
+    # A send into a box that never drew gets the longer window; see
+    # _PANE_RECOVER_TICKS_DEFAULT. Nested under the zero-budget guard above, so
+    # PANE_SEND_VERIFY_TICKS=0 still means no verification at all — an operator
+    # who turns the verify off does not get a 12s recovery poll instead.
+    # An if, not a `[ ] && ticks=...` one-liner: that compound returns the test's
+    # status, so on the common path (box drawn, test false) it would abort every
+    # caller under set -e.
+    if [ "$box" = "$_PANE_BOX_NEVER" ]; then
+        ticks="${PANE_RECOVER_TICKS:-$_PANE_RECOVER_TICKS_DEFAULT}"
+    fi
     while [ "$tick" -lt "$ticks" ]; do
         sleep "$_PANE_VERIFY_POLL_S"
         tick=$((tick + 1))
         pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) || return 0
-        pane_holds_unsubmitted "$pane" "$probe" || return 0
+        pane_holds_unsubmitted "$pane" "$probe" && continue
+        # The payload is not sitting in the box. Whether that means it was
+        # SUBMITTED or was never RECEIVED is the #860 ambiguity, and the frame in
+        # hand cannot answer it — the latch has to.
+        #
+        # An explicit allow-list of verdicts under which an empty box PROVES
+        # submission, rather than an implicit assumption that it always does.
+        #
+        # drawn: the box was there before the keystrokes, so the payload could
+        # only have gone into it. unwaited: nobody looked, the default for every
+        # non-boot caller, and their panes belong to running bots whose box exists
+        # by definition. unverified: the pane had content but no glyph, which
+        # cannot be separated from a mid-turn pane by any single capture — and
+        # mid-turn is overwhelmingly the common cause, since start-bot's second
+        # send lands while the first is still being processed. Treating that as
+        # unconfirmed would file a phantom loss and run a recovery poll on
+        # essentially every boot, to catch a mid-paint race that is far rarer than
+        # the false alarms it would generate. So it stays here, deliberately, and
+        # the residual race is a stated bound rather than a silent one.
+        #
+        # This is the long-standing contract, bit-for-bit unchanged: every
+        # existing assertion in tests/test_pane_send_verified.sh lands here,
+        # including the mid-turn one that used to make this ambiguity look solved.
+        case "$box" in
+            "$_PANE_BOX_DRAWN"|"$_PANE_BOX_UNWAITED"|"$_PANE_BOX_UNVERIFIED") return 0 ;;
+        esac
+        # Box never confirmed: absence proves nothing, so do not report a clean
+        # send off it. Keep polling until the recovery path can rule.
+        _pane_recover_unconfirmed_send "$socket" "$session" "$text" "$probe" "$pane" && return 0
     done
+    # Budget spent with no box ever drawn. Only the never-confirmed path can land
+    # here glyph-less — a confirmed box reaches this line only by holding the
+    # payload every tick, which requires a region to hold it in — so this is not a
+    # swallowed Enter and there is nothing for one to submit. Firing it anyway
+    # would spend a send on a pane that cannot receive it and file a send_retry
+    # that misattributes a pre-draw loss as a post-draw swallow. The loss is
+    # already on the ledger as send_blind.
+    [ -n "$(pane_input_region "$pane")" ] || return 0
+
     # Still at the input line after the whole budget — the TUI swallowed the
     # Enter during a render. Best-effort resend; a failure here is never fatal to
     # the caller (startup and watchdog paths must not abort on a stuck pane).

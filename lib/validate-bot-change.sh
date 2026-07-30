@@ -39,14 +39,19 @@ unset FLEET_NAME
 # into the start-bot.sh boots and MASK a regression that CI (clean env) exposes.
 unset CLAUDE_FLAGS
 
-# Compress the #860 input-box readiness budget. This harness stubs `claude` with
-# `exec cat`, so those panes never draw a box BY CONSTRUCTION — the gate would
-# sit out its full 45s per send waiting for a TUI that the stub cannot render,
-# across 18 start-bot invocations. Nothing about the behaviour under test
-# changes; only the wait for a box that will never appear. The real budget is
-# exercised against real boots in lib/boot-strand-sampler.sh, which is where it
-# belongs, and the unit contract is pinned in tests/test_pane_send_verified.sh.
-export PANE_READY_POLL_S=0.05 PANE_READY_TICKS=4
+# Compress BOTH #860 budgets. This harness stubs `claude` with `exec cat`, so its
+# panes never draw a box BY CONSTRUCTION — which means every send here classifies
+# as never-drawn and pays both waits: the 45s readiness budget, and then the 12s
+# recovery poll that a never-drawn send earns, across 18 start-bot invocations.
+# Uncompressed that is minutes of waiting for a TUI the stub cannot render, and
+# the settle sleep on top of it. PANE_READY_TICKS is deliberately NOT set: start-bot
+# arms its own per-call value, and every other caller runs at the production default.
+# it timed out this harness at 120s when only the first was compressed.
+# Nothing about the behaviour under test changes; only the wait for a box that
+# will never appear. The real budgets are exercised against real boots in
+# lib/boot-strand-sampler.sh, which is where they belong, and the unit contract
+# is pinned in tests/test_pane_send_verified.sh.
+export PANE_READY_POLL_S=0.05 PANE_RECOVER_TICKS=2 PANE_SEND_SETTLE_S=0
 # Pin the escalation chat id for the WHOLE run (#846). fleet-pulse's critical
 # alerts do NOT travel through MANAGER_TMUX — the isolation this harness provides
 # by shadowing tmux — they go straight out via tg-post.sh, keyed on this var. So
