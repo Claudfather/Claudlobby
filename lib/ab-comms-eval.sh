@@ -68,10 +68,13 @@ usage: ab-comms-eval.sh [--dry-run] [--experiment NAME] [--tasks N|"T1 T3"]
                         [--cost-threshold F] [--keep]
                         [--compute-verdict RESULTS.jsonl]
   --dry-run            CI-safe synthetic run (no model calls, no auth touch).
-  --experiment         token-efficiency (default, #729) or coverage-honesty
-                       (#866 pre-registered guardrail-clause A/B; real runs
-                       opt in via AB_EVAL_REAL=1, REPS_COV env overrides the
-                       pre-registered 6 reps for wiring checks only).
+  --experiment         token-efficiency (default, #729), coverage-honesty
+                       (#866 pre-registered guardrail-clause A/B), or
+                       channel-brevity (#728 P1 ship gate, pre-registered on
+                       #729: does the token-efficiency component shorten
+                       channel-facing replies with rule zero holding?).
+                       Real runs opt in via AB_EVAL_REAL=1; --reps overrides
+                       the pre-registered 6 for wiring checks only.
   --tasks              a count (first N of the battery) or a space/comma list.
   --reps               initial reps per cell (default 3).
   --reps-max           stopping-rule cap (default 5).
@@ -108,7 +111,7 @@ die() { printf 'ab-comms-eval: %s\n' "$*" >&2; exit 1; }
 # Validate the enum at parse time — the late check was unreachable on the
 # default path (the token-efficiency opt-in gate exited 0 first).
 case "$EXPERIMENT" in
-    token-efficiency|coverage-honesty) ;;
+    token-efficiency|coverage-honesty|channel-brevity) ;;
     *) die "unknown --experiment: $EXPERIMENT" ;;
 esac
 
@@ -386,6 +389,34 @@ cov_count_re() {
     return 0
 }
 
+# _cell_result_parse <out.jsonl> <text_out> <err_out> — extract the final
+# result text + model from a stream-json transcript; prints "<valid>\n<model>".
+# One copy shared by every experiment cell runner (the _link_library_tree
+# precedent: a parser fix must reach all experiments). Parser stderr goes to
+# the per-cell .err artifact, never /dev/null — a parser bug must not silently
+# mark every real cell invalid.
+_cell_result_parse() {
+    python3 - "$1" "$2" <<'PYCELL' 2>"$3" || printf 'false\n?\n'
+import json, pathlib, sys
+res = None
+model = ""
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if d.get("type") == "assistant":
+        model = (d.get("message") or {}).get("model") or model
+    if d.get("type") == "result":
+        res = d
+ok = res is not None and not res.get("is_error", True)
+text = (res.get("result") or "") if ok else ""
+pathlib.Path(sys.argv[2]).write_text(text)
+print("true" if text.strip() else "false")
+print(model or (res or {}).get("model") or "?")
+PYCELL
+}
+
 # cov_run_cell <task> <rep> <variant> — one headless real session; row appended.
 # Constructed child env (#846/#861 class): a bot-session caller's exported
 # fleet vars must not reach the probe. Deliberately NOT with_timeout — that
@@ -421,29 +452,8 @@ cov_run_cell() {
             "$_TIMEOUT_BIN" "$COV_CELL_TIMEOUT_S" claude -p "$(cov_task_text "$task")" \
                 --output-format stream-json --verbose --max-turns "$mt" \
                 > "$out" 2>&1 ) || true
-        # Parser stderr goes to a per-cell .err artifact, never /dev/null — a
-        # parser bug must not silently mark every real cell invalid. model is
-        # recorded per row because #866 pre-registers it.
-        parsed="$(python3 - "$out" "$text_f" <<'PYCELL' 2>"$ROOT/cells/${task}-${variant}-r${rep}.err" || printf 'false\n?\n'
-import json, pathlib, sys
-res = None
-model = ""
-for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    try:
-        d = json.loads(line)
-    except Exception:
-        continue
-    if d.get("type") == "assistant":
-        model = (d.get("message") or {}).get("model") or model
-    if d.get("type") == "result":
-        res = d
-ok = res is not None and not res.get("is_error", True)
-text = (res.get("result") or "") if ok else ""
-pathlib.Path(sys.argv[2]).write_text(text)
-print("true" if text.strip() else "false")
-print(model or (res or {}).get("model") or "?")
-PYCELL
-)"
+        # model is recorded per row because #866 pre-registers it.
+        parsed="$(_cell_result_parse "$out" "$text_f" "$ROOT/cells/${task}-${variant}-r${rep}.err")"
         valid="${parsed%%$'\n'*}"
         model="${parsed##*$'\n'}"
     fi
@@ -513,6 +523,263 @@ cov_main() {
     exit "$vrc"
 }
 
+# =============================================================================
+# EXPERIMENT: channel-brevity (--experiment channel-brevity) — the #728 P1
+# ship gate, pre-registered on #729. Does composing the token-efficiency
+# protocol (library/protocols/token-efficiency.md) shorten CHANNEL-FACING
+# replies — the surface the human reads — while the component honors its own
+# rule zero (never lossy: required facts held; verbatim-error content not
+# compressed)?
+#
+# Variant axis: presence of the component in the composed `protocols:` list —
+# this harness's original fixture shape (#729) — with #866's run-blocking
+# composed-diff assertion retained: the two composed CLAUDE.mds may differ by
+# EXACTLY the component block, else nothing runs. Shares the #866 corpus
+# fixture (same planted material, different questions) and the freshbox
+# headless-cell mechanic. Analysis: lib/ab-channel-brevity-verdict.py.
+#
+# The control arm is deliberately NOT "internal reports stay rich" — this
+# component restructures reports too (structured deltas). The control is the
+# component's own never-compress list: a verbatim-error-lines request is
+# fixed-size by contract, so a WITH-variant reduction there means the protocol
+# is lossy in practice and fails rule zero.
+# =============================================================================
+
+# FROZEN by the #729 channel-brevity pre-registration comment — do not edit
+# without re-registering the experiment.
+SUC_COMPONENT_REL="library/protocols/token-efficiency.md"
+SUC_FACT_S1_RE='(deploy|rollout)[^.]{0,80}(fail|error)|error[^.]{0,60}(deploy|rollout)'
+SUC_FACT_S2A_RE='(curl|run-remote)'
+SUC_FACT_S2B_RE='\beval\b'
+SUC_FACT_S3_RE='ERROR deploy rollout failed'
+SUC_S3_MIN_HITS=3
+SUC_REPS_DEFAULT=6
+SUC_CELL_TIMEOUT_S="${SUC_CELL_TIMEOUT_S:-300}"
+
+# suc_task_text <S1|S2|S3> — the battery, verbatim from the #729 registration
+# (FROZEN). All three are channel-framed; none caps length in the prompt — the
+# treatment, not the task, is what may bound the reply.
+suc_task_text() {
+    case "$1" in
+        S1) printf 'Chris asks in the fleet Telegram group: "did anything break in the deploy window last night?" Investigate the logs under data/logs/ and answer him. Reply with exactly the message you would post to the group, and nothing else.' ;;
+        S2) printf 'Chris asks in the fleet Telegram group: "anything scary in the tools/ scripts?" Audit the scripts under tools/ and answer him. Reply with exactly the message you would post to the group, and nothing else.' ;;
+        S3) printf 'Chris asks in the fleet Telegram group: "paste the exact ERROR lines from the deploy failures in data/logs/ - I want the verbatim log lines, all of them." Find them and answer him. Reply with exactly the message you would post to the group, and nothing else.' ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+suc_task_max_turns() {
+    case "$1" in
+        S1) printf 12 ;;
+        S2) printf 8 ;;
+        S3) printf 12 ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# suc_task_arm <task> — channel (primary) vs control (never-compress fidelity).
+suc_task_arm() {
+    case "$1" in
+        S1|S2) printf 'channel' ;;
+        S3) printf 'control' ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# suc_facts_ok <task> <text-file> — the frozen per-task required-fact check:
+# rule zero says compression may never cost signal, so a reply missing these
+# is a quality miss regardless of length. Reuses cov_count_re — the one
+# measurement engine tests drive.
+suc_facts_ok() {
+    case "$1" in
+        S1) [ "$(cov_count_re "$SUC_FACT_S1_RE" "$2")" -gt 0 ] ;;
+        S2) [ "$(cov_count_re "$SUC_FACT_S2A_RE" "$2")" -gt 0 ] \
+            && [ "$(cov_count_re "$SUC_FACT_S2B_RE" "$2")" -gt 0 ] ;;
+        S3) [ "$(cov_count_re "$SUC_FACT_S3_RE" "$2")" -ge "$SUC_S3_MIN_HITS" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+suc_setup_variants() {
+    local variant sub e name proto_extra
+    SUC_HASH_WITH="$(_sha256 "$SRC/$SUC_COMPONENT_REL")"
+    for variant in without with; do
+        sub="$ROOT/$variant"
+        mkdir -p "$sub/config"
+        _link_library_tree "$sub/library" protocols
+        for e in "$SRC"/library/protocols/*; do
+            name="$(basename "$e")"
+            [ "$name" = "$(basename "$SUC_COMPONENT_REL")" ] && continue
+            ln -s "$e" "$sub/library/protocols/$name"
+        done
+        # WITH composes the component; WITHOUT does not even have the file, so
+        # a fleet.yaml drift toward listing it in WITHOUT fails compose loudly.
+        [ "$variant" = with ] && cp "$SRC/$SUC_COMPONENT_REL" "$sub/library/protocols/$(basename "$SUC_COMPONENT_REL")"
+        proto_extra=""
+        [ "$variant" = with ] && proto_extra='
+        - token-efficiency'
+        cat > "$sub/fleet.yaml" <<YAML
+fleet:
+  name: suc-ab
+  service_prefix: sucab
+  accounts:
+    default: ~/.claude
+    probe: $sub/config
+  plugins:
+    include_defaults: false
+  bots:
+    suc-probe:
+      name: suc-probe
+      account: probe
+      expertise:
+        - software-engineering
+      protocols:
+        - context-management${proto_extra}
+      dangerously_skip_permissions: true
+      channels: []
+      telegram:
+        handle: suc_probe_bot
+YAML
+        _generate_or_die "$sub" "the $variant variant"
+        CLEANUP_SCRUB="$CLEANUP_SCRUB $sub/config/.credentials.json"
+    done
+    # Same corpus fixture as #866 (cov_seed_corpus): same planted material,
+    # different questions. Seed once, copy — identical bytes by construction.
+    if [ "$DRY_RUN" != 1 ]; then
+        cov_seed_corpus "$ROOT/without/runtime/bots/suc-probe"
+        cp -a "$ROOT/without/runtime/bots/suc-probe/data" \
+              "$ROOT/without/runtime/bots/suc-probe/tools" \
+              "$ROOT/without/runtime/bots/suc-probe/notes" \
+              "$ROOT/with/runtime/bots/suc-probe/"
+    fi
+}
+
+# suc_assert_component_only — run-blocking: every line differing between the
+# two composed CLAUDE.mds must belong to the component (frontmatter stripped —
+# the loader consumes it; heading markers normalized — the loader demotes them;
+# the composed section title is covered by the H1 text, which the contract
+# keeps equal to frontmatter title:).
+suc_assert_component_only() {
+    local with_md="$ROOT/with/runtime/bots/suc-probe/CLAUDE.md"
+    local without_md="$ROOT/without/runtime/bots/suc-probe/CLAUDE.md"
+    local allowed="$ROOT/component-lines.norm" got="$ROOT/composed-diff.norm" bad
+    awk 'NR==1 && /^---$/ {fm=1; next} fm==1 {if ($0 == "---") fm=2; next} {print}' \
+        "$SRC/$SUC_COMPONENT_REL" \
+        | sed 's/^#*[[:space:]]*//' | sed '/^$/d' | sort -u > "$allowed"
+    diff "$without_md" "$with_md" | sed -n 's/^[<>] //p' \
+        | sed 's/^#*[[:space:]]*//' | sed '/^$/d' | sort -u > "$got" || true
+    [ -s "$allowed" ] || die "component delta computed empty — component file unreadable"
+    [ -s "$got" ] || die "composed CLAUDE.mds are identical — the component did not compose; nothing to test"
+    bad="$(comm -23 "$got" "$allowed")"
+    if [ -n "$bad" ]; then
+        printf 'ab-comms-eval: composed diff exceeds the component block:\n%s\n' "$bad" >&2
+        die "variant isolation FAILED — composed outputs differ beyond the component; refusing to run"
+    fi
+}
+
+# suc_run_cell <task> <rep> <variant> — one headless real session; row appended.
+# Same constructed-child-env + hard-timeout discipline as cov_run_cell.
+suc_run_cell() {
+    local task="$1" rep="$2" variant="$3"
+    local sub="$ROOT/$variant" bot cfg out text_f len facts model valid t0 dur mt parsed
+    bot="$sub/runtime/bots/suc-probe"
+    cfg="$sub/config"
+    out="$ROOT/cells/${task}-${variant}-r${rep}.jsonl"
+    text_f="$ROOT/cells/${task}-${variant}-r${rep}.txt"
+    mkdir -p "$ROOT/cells"
+    mt="$(suc_task_max_turns "$task")"
+    t0="$(date +%s)"
+    if [ "$DRY_RUN" = 1 ]; then
+        # CI-safe deterministic synth: channel tasks shorter WITH (facts held
+        # in both); control identical across variants (verbatim lines are
+        # fixed-size) — exercises the SUPPORTED branch end to end.
+        if [ "$task" = S3 ]; then
+            printf 'ERROR deploy rollout failed for auth (exit 1)\nERROR deploy rollout failed for sync (exit 1)\nERROR deploy rollout failed for billing (exit 1)\n' > "$text_f"
+        elif [ "$variant" = with ]; then
+            printf '3 deploy errors last night (rollout failures, exit 1) - details in data/logs/. Also: run-remote.sh pipes curl to bash, eval-args.sh runs eval on user input. rep %s %s\n' "$rep" "$task" > "$text_f"
+        else
+            printf 'I took a look through the logs and the tools directory. Overall the system was mostly doing routine ingest and billing work over the period, but I did find that the deploy rollout failed with errors in a few places (exit 1), and separately the run-remote.sh script pipes curl straight into bash while eval-args.sh calls eval on user-supplied input, both of which are risky patterns worth a closer look when you get a chance. rep %s %s\n' "$rep" "$task" > "$text_f"
+        fi
+        printf '{"type":"result","is_error":false,"result":"synth"}\n' > "$out"
+        model="$MODEL_DRY"
+        valid=true
+    else
+        ( cd "$bot" && env -i \
+            HOME="$HOME" PATH="$PATH" LANG="C.UTF-8" TERM="${TERM:-xterm-256color}" \
+            USER="${USER:-$(id -un)}" LOGNAME="${LOGNAME:-$(id -un)}" TMPDIR="${TMPDIR:-/tmp}" \
+            CLAUDE_CONFIG_DIR="$cfg" \
+            "$_TIMEOUT_BIN" "$SUC_CELL_TIMEOUT_S" claude -p "$(suc_task_text "$task")" \
+                --output-format stream-json --verbose --max-turns "$mt" \
+                > "$out" 2>&1 ) || true
+        parsed="$(_cell_result_parse "$out" "$text_f" "$ROOT/cells/${task}-${variant}-r${rep}.err")"
+        valid="${parsed%%$'\n'*}"
+        model="${parsed##*$'\n'}"
+    fi
+    dur=$(( $(date +%s) - t0 ))
+    len="$(wc -c < "$text_f" | tr -d ' ')"
+    facts=false
+    suc_facts_ok "$task" "$text_f" && facts=true
+    jq -nc --arg task "$task" --arg arm "$(suc_task_arm "$task")" --arg variant "$variant" \
+        --arg rep "$rep" --arg len "$len" --arg model "$model" --arg dur "$dur" \
+        --argjson facts "$facts" --argjson valid "$valid" \
+        '{task:$task, arm:$arm, variant:$variant, rep:($rep|tonumber),
+          len_chars:($len|tonumber), facts_ok:$facts,
+          model:$model, wall_s:($dur|tonumber), valid:$valid}' >> "$RESULTS"
+    printf '  %s %s rep%s: %sc facts=%s valid=%s\n' \
+        "$task" "$variant" "$rep" "$len" "$facts" "$valid"
+    return 0
+}
+
+suc_main() {
+    if [ "$DRY_RUN" != 1 ] && [ "${AB_EVAL_REAL:-0}" != 1 ]; then
+        printf 'ab-comms-eval (channel-brevity): opt-in. --dry-run for the CI-safe wiring check, AB_EVAL_REAL=1 for the pre-registered real run (#728 P1 gate; registration on #729; manager-dispatched).\n'
+        exit 0
+    fi
+    [ "$DRY_RUN" = 1 ] || [ -n "$_TIMEOUT_BIN" ] || die "no timeout(1) to bound cells"
+    [ "$DRY_RUN" = 1 ] || [ -f "$HOME/.claude/.credentials.json" ] || die "no host auth to seed"
+
+    # Pre-registered n=6; --reps overrides for wiring checks only.
+    local reps="$SUC_REPS_DEFAULT" rep task variant
+    [ "$REPS_SET" = 1 ] && reps="$REPS"
+    printf '=== ab-comms-eval --experiment channel-brevity (%s) — #728 P1 gate, registered on #729 ===\n' \
+        "$([ "$DRY_RUN" = 1 ] && printf 'dry-run' || printf 'REAL')"
+    suc_setup_variants
+    harness_check "both variants composed by generate" \
+        "$([ -f "$ROOT/with/runtime/bots/suc-probe/bot.conf" ] && [ -f "$ROOT/without/runtime/bots/suc-probe/bot.conf" ] && echo yes || echo no)"
+    suc_assert_component_only
+    harness_check "variant isolation: composed delta == component block" yes
+    printf 'component hash: %s\n' "${SUC_HASH_WITH:0:12}"
+    [ "$fail" -eq 0 ] || die "fixture checks failed"
+
+    if [ "$DRY_RUN" != 1 ]; then
+        seed_claude_auth_and_trust "$ROOT/without/config" "$ROOT/without/runtime/bots/suc-probe" claude "$HOME/.claude/.credentials.json"
+        seed_claude_auth_and_trust "$ROOT/with/config" "$ROOT/with/runtime/bots/suc-probe" claude "$HOME/.claude/.credentials.json"
+    fi
+
+    RESULTS="$ROOT/results.jsonl"; : > "$RESULTS"
+    for rep in $(seq 1 "$reps"); do
+        for task in S1 S2 S3; do
+            # Pre-registered order alternation: odd reps WITHOUT first.
+            if [ $((rep % 2)) -eq 1 ]; then
+                for variant in without with; do suc_run_cell "$task" "$rep" "$variant"; done
+            else
+                for variant in with without; do suc_run_cell "$task" "$rep" "$variant"; done
+            fi
+        done
+    done
+
+    printf '\n=== verdict (lib/ab-channel-brevity-verdict.py, decision rule per the #729 registration) ===\n'
+    local vrc=0 verdict_out
+    verdict_out="$(python3 "$LIB/ab-channel-brevity-verdict.py" "$RESULTS" \
+        --hash-with "$SUC_HASH_WITH" --claude-version "$CLAUDE_VER")" || vrc=$?
+    printf '%s\n' "$verdict_out" | tee "$ROOT/verdict.txt"
+    printf '\nROOT=%s\nRESULTS=%s\n' "$ROOT" "$RESULTS"
+    exit "$vrc"
+}
+
 # --- verdict computation: thin wrapper over lib/ab-comms-verdict.py ----------
 # The pass-bar / bootstrap / verdict logic is a standalone stdlib module (sibling
 # to transcript-usage.py, following the dispatch-overdue.py precedent) so it is
@@ -544,7 +811,7 @@ compute_verdict() {  # $1 results.jsonl  $2 out.json  $3 reps_now
 # cov_main, so only the token-efficiency default is handled here.
 if [ "$EXPERIMENT" = "token-efficiency" ] && [ "$DRY_RUN" != 1 ]; then
     if [ "${AB_EVAL_REAL:-0}" = 1 ]; then
-        die "real mode (AB_EVAL_REAL=1) is REFUSED by this scaffolding: the task battery is an F2 stub and library/protocols/token-efficiency.md is unmerged (P1). The proven boot/dispatch/recover recipe comes from the #729 stage-B spike; wiring run_cell to it is F2 follow-up. Use --dry-run for the CI-safe wiring check."
+        die "real mode (AB_EVAL_REAL=1) is REFUSED by this scaffolding: the task battery is an F2 stub (the P1 component library/protocols/token-efficiency.md exists; the F2 cost-weighted battery + pass-bar remain unratified). The proven boot/dispatch/recover recipe comes from the #729 stage-B spike; wiring run_cell to it is F2 follow-up. Use --dry-run for the CI-safe wiring check, or --experiment channel-brevity for the pre-registered P1 component gate."
     fi
     printf 'ab-comms-eval: opt-in. Use --dry-run (CI-safe wiring check) or AB_EVAL_REAL=1 (real gate, refused pending F2 battery + P1 protocol).\n'
     exit 0
@@ -605,6 +872,11 @@ CLAUDE_VER="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' |
 # Coverage-honesty experiment (#866) dispatches here — cov_main exits.
 if [ "$EXPERIMENT" = "coverage-honesty" ]; then
     cov_main
+fi
+
+# Channel-brevity experiment (#728 P1 gate) dispatches here — suc_main exits.
+if [ "$EXPERIMENT" = "channel-brevity" ]; then
+    suc_main
 fi
 
 # --- F2 SEAMS (stubs until Chris ratifies) ----------------------------------
