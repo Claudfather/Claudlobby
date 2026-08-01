@@ -15,16 +15,18 @@ Every outbound message costs tokens twice — once to write, once in every conte
 
 ### The bars
 
-A disposition nobody can fail is not a rule. These are countable, so check before you send:
+A rule needs a unit that bounds size. "Outcome in 1–3 sentences" *is* a count — but a sentence has no length ceiling, so clause-stacking satisfies it with 400 words in good faith. Count the characters instead:
 
-| Surface | Bar | Overflow goes |
-|---|---|---|
-| Telegram / chat message | **≤ 600 chars** | a pointer — issue, PR, doc path |
-| `[BOTREPORT]` summary | **≤ 200 chars**, one line | the PR/issue body, or your `data/` |
-| Progress post | **≤ 200 chars** | the work itself |
-| Dispatch payload | **≤ 800 chars** | paths and issue refs the worker reads |
+| Surface | Bar | Basis | Overflow goes |
+|---|---|---|---|
+| Telegram / chat message | **≤ 600 chars** | roughly a phone screen without scrolling | a pointer — issue, PR, doc path |
+| `[BOTREPORT]` summary | **≤ 200 chars**, one line | measured: real verdicts carrying finding + pointer land at 155–165 | the PR/issue body, or your `data/` |
+| Progress post | **≤ 200 chars** | same class as a report summary | the work itself |
+| Dispatch payload | **≤ 2000 chars** | measured 1,400–1,600 of load-bearing content; loosest because its reader is a fresh agent with no shared context, so it must stand alone | paths and issue refs the worker reads |
 
-**One line is not a length.** A 2,000-character single line satisfies "stays one line" and defeats the entire point — the reader has to parse a wall to find the verdict. Line *count* was never the constraint; reading cost is.
+**Observations, not physics.** Each number is calibrated against real traffic and should move when traffic says otherwise — but deliberately, in a PR, with the measurement. A bar quietly widened to fit today's message is not a bar.
+
+**One line is not a length.** A 2,500-character single line satisfies "stays one line" and defeats the entire point — the reader parses a wall to find the verdict. Line *count* was never the constraint; reading cost is.
 
 **Lead with the decision.** First sentence = the outcome or the ask. Evidence, caveats, and method come after, or at a pointer. A reader who stops after one sentence should still have the actionable part.
 

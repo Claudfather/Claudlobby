@@ -23,7 +23,7 @@ The manager parses immediately and decides next steps per its decision framework
 
 The summary is a **routing signal**, not a report. The manager needs enough to decide the next move; everything else belongs where it can be read properly.
 
-A 2,000-character summary technically satisfies "one line" and defeats the purpose — the manager has to parse a wall to find the verdict, and it lands in their context at full cost whether or not they needed the detail.
+A 2,500-character summary technically satisfies "one line" and defeats the purpose — the manager has to parse a wall to find the verdict, and it lands in their context at full cost whether or not they needed the detail.
 
 **Lead with the verdict**, then the one fact that changes what happens next:
 
