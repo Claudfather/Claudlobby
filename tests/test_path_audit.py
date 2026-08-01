@@ -196,6 +196,36 @@ class TestAuditBotPaths:
         with pytest.raises(ValueError, match="improper absolute fleet path"):
             assert_bot_paths(_bot(), _fleet(), paths)
 
+    def test_flat_path_in_gitconfig_is_flagged(self, tmp_path):
+        """.gitconfig is composed wiring like bot.conf, so it gets the same scan.
+
+        It is the newest emitted artifact and the one most likely to be forgotten:
+        the scan set is L2's entire reach, so an artifact left out of it is not
+        merely unscanned — freshbox reports the fleet self-contained while the
+        file dangles. Per-org credential routing writes real absolute paths here
+        (the operator gitconfig include, the resolved gh binary), so a fleet-shaped
+        one must surface.
+        """
+        paths = _paths(tmp_path)
+        bot_dir = self._seed_bot_dir(paths)
+        flat = f"{paths.root}/local/tl/gitconfig-include"  # flat husk
+        (bot_dir / ".gitconfig").write_text(f"[include]\n\tpath = {flat}\n")
+        findings = audit_bot_paths(_bot(), _fleet(), paths)
+        assert [f.file for f in findings] == [".gitconfig"]
+        assert findings[0].path == flat
+
+    def test_operator_home_gitconfig_include_is_not_a_fleet_path(self, tmp_path):
+        """The normal composed include points into the operator's home, which is
+        external-by-design, not a fleet path — L2 must stay quiet about it or the
+        guard fires on every correctly-composed bot."""
+        paths = _paths(tmp_path)
+        bot_dir = self._seed_bot_dir(paths)
+        (bot_dir / ".gitconfig").write_text(
+            "[include]\n\tpath = /home/operator/.gitconfig\n"
+            "[credential]\n\thelper = !/usr/bin/gh auth git-credential\n"
+        )
+        assert audit_bot_paths(_bot(), _fleet(), paths) == []
+
     def test_flat_path_in_bot_conf_is_flagged(self, tmp_path):
         paths = _paths(tmp_path)
         bot_dir = self._seed_bot_dir(paths)
