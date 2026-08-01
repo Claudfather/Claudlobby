@@ -25,6 +25,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 README = REPO_ROOT / "README.md"
 GETTING_STARTED = REPO_ROOT / "documentation" / "getting-started.md"
+# CLAUDE.md is an onboarding doc too — it is what a contributor (or an agent)
+# reads first, and it carried the same bare-`pip` instruction long after the
+# user-facing docs were fixed. Anything that tells a human what to type counts.
+CONTRIBUTOR_GUIDE = REPO_ROOT / "CLAUDE.md"
 SETUP_SKILL = REPO_ROOT / ".claude" / "skills" / "setup" / "SKILL.md"
 LIB_COMMON = REPO_ROOT / "lib" / "lib-common.sh"
 
@@ -45,7 +49,9 @@ def _shell_lines(doc: Path) -> list[str]:
 class TestDocumentedInstallPath:
     """The install commands the docs hand a user must work on a stock host."""
 
-    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    @pytest.mark.parametrize(
+        "doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name
+    )
     def test_no_bare_pip_invocation(self, doc: Path):
         """`pip ...` as a command is not portable — Homebrew ships pip3 only.
 
@@ -64,7 +70,9 @@ class TestDocumentedInstallPath:
             + "\nUse 'python3 -m pip install' (or a venv interpreter) instead."
         )
 
-    @pytest.mark.parametrize("doc", [README, GETTING_STARTED], ids=lambda p: p.name)
+    @pytest.mark.parametrize(
+        "doc", [README, GETTING_STARTED, CONTRIBUTOR_GUIDE], ids=lambda p: p.name
+    )
     def test_install_is_accompanied_by_a_venv(self, doc: Path):
         """Any doc that installs the package must first create a virtualenv.
 
@@ -74,7 +82,12 @@ class TestDocumentedInstallPath:
         install instruction without a venv is a blocker, not a style nit.
         """
         lines = _shell_lines(doc)
-        installs_package = any(re.search(r"pip\s+install\s+-e\s+\.", ln) for ln in lines)
+        # Match the extras form too — `-e '.[dev]'` is how the contributor guide
+        # installs, and an earlier bare `-e \.` pattern silently *skipped* that
+        # file rather than checking it.
+        installs_package = any(
+            re.search(r"pip\s+install\s+-e\s+['\"]?\.", ln) for ln in lines
+        )
         if not installs_package:
             pytest.skip(f"{doc.name} does not install the package")
 
