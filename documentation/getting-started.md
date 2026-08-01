@@ -19,57 +19,122 @@ Bring a fresh fleet up in about 30 minutes (excluding waiting on Telegram BotFat
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git
 cd Claudlobby
-pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
 ```
 
-The `-e .` editable install creates a `claudlobby` console script. You can also use `python3 -m claudlobby` directly.
+**The virtualenv is required, not a style preference.** Homebrew python (macOS) and Debian /
+Raspberry Pi OS system python are both marked externally-managed under
+[PEP 668](https://peps.python.org/pep-0668/); installing into them fails with
+`error: externally-managed-environment`. Those are the two hosts this project targets first.
+Also note `python3 -m pip` rather than `pip` — Homebrew ships `pip3` only, so bare `pip` is not
+a command on a stock Mac.
+
+Rather not do it by hand? `lib/setup-system` creates the venv, installs claudlobby, and checks
+every other host prerequisite in one idempotent pass:
+
+```bash
+lib/setup-system --dry-run     # preview: reports what is present and what it would do
+lib/setup-system               # apply
+```
+
+**The real run needs `sudo`** and will prompt for it: its managed-settings phase writes the
+root-owned `/Library/Application Support/ClaudeCode/managed-settings.json` (channel-plugin
+approvals), and on Linux it installs apt packages. `--dry-run` needs no privileges and prints
+every command it would run, so preview first if that matters to you.
+
+The `-e .` editable install creates a `claudlobby` console script at `.venv/bin/claudlobby`.
+You can also use `python3 -m claudlobby` directly.
+
+> **PATH caveat.** The console script only resolves while the venv is activated. Supervised
+> runs (launchd/systemd) never source it, so `lib/` scripts locate the CLI themselves via
+> `claudlobby_cli` in `lib/lib-common.sh`, which prefers `$CLAUDLOBBY_ROOT/.venv/bin/python`.
+> Keeping the venv at `.venv` inside the repo is what makes supervision work unattended.
 
 ## 2. Set up secrets
 
-Create `.env` at the repo root (gitignored):
+`.env` lives at the repo root and is gitignored. Start from the seed template — it pairs with
+`fleet.yaml.seed`, which §3 uses:
 
 ```bash
-# GitHub — single PAT shared by the fleet
+cp .env.seed.example .env
+```
+
+**A `.env` template and a `fleet.yaml` template are a pair.** The variable names in `.env` must
+match what `fleet.yaml` declares as each bot's `token_env`, so mixing templates silently gives
+you a bot whose token is never found:
+
+| `.env` template | pairs with | Telegram variable(s) |
+|---|---|---|
+| `.env.seed.example` | `fleet.yaml.seed` | `TELEGRAM_TOKEN_CLAUDFATHER` |
+| `.env.example` (fuller reference — every MCP integration) | `fleet.yaml.example` | whatever each bot's `token_env` names |
+
+The seed needs exactly two values, one of them optional:
+
+```bash
+TELEGRAM_TOKEN_CLAUDFATHER=      # claudfather's bot token, from @BotFather
+# GITHUB_PAT=                    # optional — only if claudfather should touch repos
+```
+
+As the fleet grows, `.env.example` covers the rest (Notion, Slack, Shopify, Printify, …). A
+multi-bot fleet running one BotFather bot per bot looks like:
+
+```bash
 GITHUB_PAT=ghp_xxxxxxxxxxxxxxxxxxxx
-
-# Notion (if any bot uses Notion) — full walkthrough in documentation/integrations/notion-integration.md
 NOTION_TOKEN=ntn_xxxxxxxxxxxxxxxxxxxx
-
-# Slack (optional)
 SLACK_TOKEN=xoxp-xxxxxxxxxxxxxxxxxxxx
 
-# Per-bot Telegram tokens (one BotFather bot per fleet bot)
+# One BotFather bot per fleet bot — names must match fleet.yaml's token_env
 TELEGRAM_TOKEN_LEAD=8888888:AAAAAAAAAAAAAAAAAAAA
 TELEGRAM_TOKEN_ENG1=9999999:BBBBBBBBBBBBBBBBBBBB
 TELEGRAM_TOKEN_REV1=7777777:CCCCCCCCCCCCCCCCCCCC
-
-# Other MCP credentials as needed
-SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxxxxxxxxx
-SHOPIFY_STORE_DOMAIN=mystore.myshopify.com
-PRINTIFY_API_KEY=eyJ...
-PRINTIFY_SHOP_ID=12345678
 ```
 
 Token rules:
 
 - One Telegram bot per fleet bot (create via [@BotFather](https://t.me/BotFather)). Disable group privacy on each bot so it can read group messages. The env-var name (`TELEGRAM_TOKEN_LEAD`) must match what `fleet.yaml` declares as `token_env`.
 - All `${VAR}` placeholders in `library/mcp/*.json` resolve from this `.env`. Missing vars produce a warning at validate time and a runtime failure when the MCP server starts.
+- **`token_env: TELEGRAM_BOT_TOKEN` is the one name `validate` cannot check for you.** That is
+  the Telegram plugin's own read variable, so its home is the plugin's channel-dir `.env`, not a
+  tier the compositor inspects — the missing-token warning is deliberately suppressed for it to
+  avoid a permanent false alarm. `fleet.yaml.example` uses it as the shared-token default, so if
+  you start from that template, a clean `validate` tells you nothing about whether your bot can
+  actually reach Telegram. Prefer a distinctly named var (`TELEGRAM_TOKEN_<BOT>`, as
+  `fleet.yaml.seed` does) if you want that check to work.
 
 ## 3. Write fleet.yaml
 
 You can run claudlobby in **root mode** (fleet.yaml at repo root) or **overlay mode** (fleet-specific config in `local/<fleet>/`). Overlay mode keeps fleet-specific content isolated and is recommended for multi-fleet setups.
 
+**Which template to start from:**
+
+| File | Size | Use it for |
+|------|------|-----------|
+| `fleet.yaml.seed` | ~60 lines, one bot | **Your first fleet.** Ships `claudfather`, the setup assistant. |
+| `fleet.yaml.example` | ~600 lines, full fleet | **Reference.** Documents every available field; copy fragments out of it. |
+
+Start from the seed. Copying the example as a first fleet means debugging a dozen bots you did
+not choose before anything runs.
+
 **Root mode:**
 ```bash
-cp fleet.yaml.example fleet.yaml
+cp fleet.yaml.seed fleet.yaml
 $EDITOR fleet.yaml
 ```
 
-**Overlay mode (recommended):**
+**Overlay mode (recommended for multi-fleet):**
 ```bash
 mkdir -p local/my-fleet
-cp fleet.yaml.example local/my-fleet/fleet.yaml
+cp fleet.yaml.seed local/my-fleet/fleet.yaml
 $EDITOR local/my-fleet/fleet.yaml
+```
+
+There is also a **seed mode** that reads `fleet.yaml.seed` in place, without copying — handy for
+a throwaway trial run (output lands in `runtime/seed/bots/`):
+
+```bash
+claudlobby --seed validate && claudlobby --seed generate
 ```
 
 Key fields to customize:
@@ -94,7 +159,17 @@ claudlobby validate                        # root mode
 claudlobby --fleet my-fleet validate       # overlay mode
 ```
 
-Expect a clean run, or warnings only (missing env vars, etc.). Hard errors mean a missing expertise file — fix `fleet.yaml` and re-run.
+Expect a clean run, or warnings only (missing env vars, etc.). Hard errors mean a missing
+expertise file, or an unreplaced template placeholder — fix `fleet.yaml` and re-run.
+
+Validate hard-fails on any `REPLACE_ME` left in `telegram_group_chat_id`, `human_telegram_id`,
+or a bot's `telegram.handle`. `generate` re-runs validation and refuses too
+(`ERROR validation errors — refusing to generate`), so you cannot compose a fleet around an
+unfilled placeholder.
+
+The check was added because, without it, these were the one class of mistake that failed
+*silently*: validate passed at exit 0, generate composed a bot, it booted, and the only symptom
+was a Telegram API error at runtime — arbitrarily far from the cause.
 
 ## 5. Generate
 
@@ -204,6 +279,23 @@ Use `claudlobby diff` to check for drift between generated output and what's in 
 
 - **MCP server fails to start** → check `.env` has the env vars referenced in `library/mcp/<server>.json`
 - **Bot doesn't respond in Telegram** → verify `TELEGRAM_TOKEN_<X>` matches BotFather, and group privacy is disabled on the bot in BotFather
+- **Bot went quiet in a group that used to work, with no error anywhere** → the group probably
+  migrated from a basic group to a supergroup, which **changes its chat ID**. Nothing logs this;
+  the bot is simply talking to an ID that no longer exists. Confirm and recover:
+
+  ```bash
+  curl -s "https://api.telegram.org/bot$TOKEN/getChat?chat_id=$OLD_ID" | jq '.ok, .description'
+  ```
+
+  A failed lookup (or a `.result.id` that differs from what you configured) means it migrated.
+  Re-run [@RawDataBot](https://t.me/raw_data_bot) in the group for the new ID, update
+  `telegram_group_chat_id` in `fleet.yaml`, `claudlobby generate`, and restart the bot.
+
+  Telegram converts a basic group to a supergroup as a **side effect** of other settings — making
+  chat history visible to new members, assigning a public username, enabling slow mode, or passing
+  200 members. There is no "upgrade" button and the conversion is one-way, so you generally
+  discover it by having caused it accidentally. A basic group is fine to run on; just know this is
+  the failure mode.
 - **Bot loops on restart** → `journalctl --user -u <bot> -n 50` (Linux) or `tail lib/logs/<bot>.err.log` (macOS) — most often a missing token or a Claude Code auth issue
 - **Skill not loading** → confirm symlink exists in `runtime/bots/<bot>/.claude/skills/<skill>` and points to `library/skills/<skill>/`
 

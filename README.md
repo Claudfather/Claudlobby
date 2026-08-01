@@ -28,26 +28,42 @@ Add a 9th bot? Add 10 lines to `fleet.yaml`. Update a guardrail? Edit one file i
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git
 cd Claudlobby
-pip install -e .
+python3 -m venv .venv               # required — see note below
+source .venv/bin/activate
+python3 -m pip install -e .
 claude                              # opens Claude Code in the repo
 ```
 
 Then type `/setup` — it checks your host, collects credentials, and spins up claudfather (the built-in setup assistant) on Telegram. Continue setup from your phone.
+
+> **Why the venv is not optional.** Homebrew python (macOS) and Debian/Raspberry Pi system
+> python are both marked externally-managed under [PEP 668](https://peps.python.org/pep-0668/),
+> so a bare `pip install -e .` is *refused* on the two hosts this project targets first. Note
+> `python3 -m pip`, not `pip` — Homebrew ships `pip3` only, so plain `pip` is not a command.
+>
+> Prefer not to manage it yourself? `lib/setup-system` creates the venv, installs claudlobby,
+> and checks every other host prerequisite in one idempotent pass (`--dry-run` to preview).
+> **It will prompt for `sudo`** — its managed-settings phase writes the root-owned
+> `/Library/Application Support/ClaudeCode/managed-settings.json` (and on Linux it installs
+> packages). Use `--dry-run` first if you want to see everything it would touch.
 
 **Manual setup:**
 
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git
 cd Claudlobby
-pip install -e .
+python3 -m venv .venv && source .venv/bin/activate && python3 -m pip install -e .
 
-cp fleet.yaml.example fleet.yaml
+cp fleet.yaml.seed fleet.yaml       # one bot (claudfather) — the blessed first run
 cp .env.seed.example .env           # fill in your Telegram token + GitHub PAT
-$EDITOR fleet.yaml                  # set chat IDs, bot handles, pick personas
+$EDITOR fleet.yaml                  # replace every REPLACE_ME (validate enforces this)
 
 claudlobby validate && claudlobby generate
-lib/spin-up-bot.sh runtime/bots/<your-bot>
+lib/setup-fleet                     # enrolls timers + starts every declared bot
 ```
+
+Start from `fleet.yaml.seed` (one bot, ~60 lines). `fleet.yaml.example` is the **reference** —
+a full multi-bot manifest documenting every available field — not a starting point.
 
 The generated `runtime/bots/<bot>/` is everything Claude Code needs — `CLAUDE.md`, `.mcp.json`, `bot.conf`, `.claude/skills/` symlinks, plus a systemd `<bot>.service` and a launchd `<bot>.plist`. Pick the right one for your host.
 

@@ -344,6 +344,12 @@ class TestClaudlobbyCli:
         pkg.mkdir(parents=True)
         (pkg / "__init__.py").write_text("")
         (pkg / "__main__.py").write_text("import sys; print('MODULE', *sys.argv[1:])")
+        # claudlobby_cli probes `import claudlobby.composer` rather than the bare
+        # package, because the bare import succeeds from cwd with no dependencies
+        # installed and so cannot tell a usable checkout from an unusable one.
+        # An empty file satisfies that probe; the fixture stands in for "some
+        # importable checkout", and a real one always has a composer module.
+        (pkg / "composer.py").write_text("")
         r = subprocess.run(
             ["bash", "-c", f'. "{LIB}/lib-common.sh"\nclaudlobby_cli generate'],
             env=_scrubbed_env(CLAUDLOBBY_ROOT=str(root), PATH="/usr/bin:/bin"),

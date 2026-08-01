@@ -209,10 +209,35 @@ Each library category has its own format. Check the category's `README.md` for s
 ### Adding compositor features
 
 1. Edit Python source in `claudlobby/`
-2. Run tests: `pip install -e '.[dev]' && pytest`
+2. Run tests: `python3 -m venv .venv && ./.venv/bin/python -m pip install -e '.[dev]'`, then `./.venv/bin/pytest`
 3. Test against your local fleet: `claudlobby --fleet <name> validate` then `generate`
 4. Run `claudlobby --fleet <name> diff` to verify no unintended drift
 5. Commit to a branch, PR, review
+
+**Two things about the test suite that will otherwise cost you an hour.**
+
+*Run it unsandboxed — and do not diff sandboxed runs either.* `lib/` scripts call `mktemp -d`
+into the real `$TMPDIR`. Under a restrictive agent sandbox those calls return `Operation not
+permitted` and roughly **250 phantom failures** appear across every bash-script suite. They are
+not real.
+
+It is tempting to assume a *diff* of two sandboxed runs is still sound, since the sandbox
+penalises both equally. **It is not.** A test the sandbox already breaks fails in the before run
+*and* the after run, so it cancels out of the diff — and any regression you introduce inside it
+is invisible. That is not hypothetical: it is exactly how a `claudlobby_cli` regression reached
+CI in #947, after a sandboxed diff reported one clean delta. Take the baseline unsandboxed or
+not at all.
+
+*Know the baseline.* The suite is **not fully green** on macOS — as of 2026-08-01 it is
+**34 failed / 2125 passed**, 24 of them the `tests/test_setup_backbone.py` cluster (#951). Do not
+assume your change caused a failure, and do not assume it didn't because the *count* matched —
+compare the failing test **names**:
+
+```bash
+git stash push -u && ./.venv/bin/pytest -q --tb=no | grep ^FAILED | sort > /tmp/before.txt
+git stash pop     && ./.venv/bin/pytest -q --tb=no | grep ^FAILED | sort > /tmp/after.txt
+comm -13 /tmp/before.txt /tmp/after.txt      # failures YOU introduced
+```
 
 ### Adding or modifying lib/ scripts
 
@@ -237,6 +262,25 @@ Any change that affects **how a bot behaves at runtime** (lib/ supervision & obs
 **Cite the observation in the PR body** ("ran `validate-bot-change.sh` → activity_stuck + overdue_dispatch fired; manager notified") — claimed evidence is not evidence. This is also how latent bugs surface: the harness above caught a `fleet-pulse.sh` sweep-abort that every unit test missed.
 
 **This gate proves the code; it does not prove the rollout.** Clearing it is mandatory for every runtime change. Separately, when a change to the framework itself (claudlobby, clauDNA, claudron) ships **live fleet-wide** — supervision/`lib` scripts, plugins, the bridge, composed `bot.conf` — the manager should *by default* canary the rollout on one production bot before rolling the fleet: a strong default for fleet-wide framework changes, not a universal mandate (skip it for single-bot, product-repo, or non-runtime work). See the `canary-rollout` protocol.
+
+### Validating changes to the onboarding path — MANDATORY
+
+Any change to **what a brand-new user is told to run** — `README.md`, `documentation/getting-started.md`, `.claude/skills/setup/SKILL.md`, `lib/setup-system`, `lib/setup-fleet`, `fleet.yaml.seed`, `.env.seed.example` — must be validated **on a cold host**, not from your checkout.
+
+**Why this is its own gate.** A warm checkout cannot detect onboarding rot, and neither can CI. The maintainer checkout has had a `.venv` for months, so the documented path is never re-run. CI installs on `ubuntu-latest`, where `pip` exists and `setup-python` provides a non-externally-managed environment — so PEP 668 never fires there. Both blind spots pointed the same way, and the result was that `pip install -e .`, **the first command in the README**, failed outright on both first-class hosts for months against a green suite (#947).
+
+The loop:
+
+1. **Export, do not clone** — `git archive <ref> | tar -x -C <dir>`. A clone carries `.git`, and the commit messages describe the very defects you are trying to rediscover.
+2. **Run the documented commands verbatim.** Not the ones you know work — the ones the doc prints. Copy-paste them.
+3. **Log every exploration event** — any time you read source, grep, guess a flag, or apply knowledge not on the page. *Each one is a documentation defect whether or not you solved it.* Report the count.
+4. **Stop at the credential gate.** Essentially every onboarding defect lives before it, so needing real tokens is not a reason to skip the exercise.
+
+`tests/test_cold_start_contract.py` gates the mechanical half of this (no bare `pip`, a venv accompanies every install, all entry points name one template, the CLI resolver probes a submodule and prefers `.venv`). **It is a floor, not a substitute** — it cannot tell you that a doc is confusing, only that it is inconsistent.
+
+**Cite the cold run in the PR body**, same rule as the runtime gate: claimed evidence is not evidence.
+
+For the strongest version — blind agents on both the fixed branch and `main`, so improvements are attributable rather than assumed — see [`documentation/validating-cold-start.md`](documentation/validating-cold-start.md).
 
 ### Never hand-edit generated output
 
@@ -284,8 +328,10 @@ claudlobby cron-migrate                # migrate crontab entries to new paths
 claudlobby memory-migrate              # copy memory files from ~/.claude/projects/ to per-bot dirs
 claudlobby lessons-migrate             # migrate referential library/lessons/ into the Claudron vault (dry-run by default)
 
-# Testing
-pip install -e '.[dev]' && pytest      # run test suite
+# Testing (the venv is required — PEP 668 refuses a bare install on Homebrew/Debian)
+python3 -m venv .venv
+./.venv/bin/python -m pip install -e '.[dev]'
+./.venv/bin/pytest                     # run test suite (unsandboxed; baseline is not green)
 ```
 
 Use `--fleet <name>` for overlay mode: `claudlobby --fleet <your-fleet> generate`

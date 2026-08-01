@@ -14,13 +14,49 @@ Before each step, check filesystem state. Skip completed steps:
 
 | Check | Skip to |
 |-------|---------|
+| `claudlobby.composer` imports | Step 1 |
 | All host deps present | Step 2 |
 | `.env` exists with `TELEGRAM_TOKEN_CLAUDFATHER` filled in | Step 4 |
 | `fleet.yaml` exists | Step 4 (validate + generate) |
 | `runtime/bots/claudfather/CLAUDE.md` exists | Step 5 |
 | tmux session `claudfather` running | Step 5 (setup-fleet is idempotent: converges timer enrollment, skips the healthy bot), then report success |
 
-If `--check-only` was passed, run Step 1 only and exit.
+If `--check-only` was passed, run Steps 0 and 1 only, then exit.
+
+## Step 0: Is claudlobby itself installed?
+
+**Do this before anything else.** Every later step shells out to `claudlobby`, so a
+missing package makes the whole flow fail in confusing ways — and the user may
+well be here *because* the documented install did not work for them.
+
+```bash
+python3 -c 'import claudlobby.composer' 2>/dev/null && echo INSTALLED || echo MISSING
+```
+
+Import `claudlobby.composer`, **not** `claudlobby`. The bare package is a plain
+directory at the repo root, so it imports from cwd even when nothing is
+installed — a false positive that reports success on a host with no
+dependencies at all.
+
+If MISSING, create the repo-local venv and install into it:
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -e .
+```
+
+Why a venv rather than `pip install -e .`: Homebrew python (macOS) and Debian /
+Raspberry Pi system python are both externally-managed under PEP 668 and refuse
+the install outright. Note `python3 -m pip`, not `pip` — Homebrew ships `pip3`
+only, so bare `pip` is not a command. `lib/setup-system` does exactly this, and
+`claudlobby_cli` prefers `$CLAUDLOBBY_ROOT/.venv`, which is what lets supervised
+launchd/systemd runs resolve the CLI without an activated shell.
+
+Then re-check the import before continuing. If it still fails, stop and show the
+user the real error — do not proceed into Step 1 on a broken install.
+
+**For the rest of this skill:** if the venv exists but is not activated, invoke
+the CLI as `./.venv/bin/claudlobby ...` rather than bare `claudlobby`.
 
 ## Step 1: Host Readiness
 
@@ -92,10 +128,30 @@ Tell the user:
 1. Create a new Telegram group (or use an existing one)
 2. Add your new bot to the group
 3. Add @RawDataBot to the group — it will print a message containing the chat ID
-4. The chat ID starts with `-100` (e.g., `-1001234567890`)
+4. The chat ID is **negative**. Two valid shapes, both fine:
+   - **supergroup / channel** — `-100` prefix, e.g. `-1001234567890`
+   - **basic group** — plain negative, e.g. `-5556622542`
 5. You can remove @RawDataBot after getting the ID
 
-Validate: must be a numeric string starting with `-100`.
+Validate: a negative integer. **Do not require the `-100` prefix** — that rejects every basic
+group, which is what you get by default when you create a group and add a couple of members.
+
+If it is a basic group, tell the user this once and let them decide:
+
+> That's a basic group. It works, but Telegram silently migrates basic groups to supergroups
+> (on growth, on adding a username, on some admin actions) and **the chat ID changes** when it
+> does — a bot pinned to the old ID stops delivering, with no error. For a supervised bot that
+> is worth avoiding up front; converting the group now, or creating it as a supergroup, keeps
+> the ID stable.
+
+Once the token is known, confirm the real shape rather than guessing from the digits:
+
+```bash
+curl -s "https://api.telegram.org/bot$TOKEN/getChat?chat_id=$CHAT_ID" | jq '.ok, .result.type, .result.id'
+```
+
+`type` is `group` (basic) or `supergroup`. A mismatch between the id you were given and
+`result.id` means the group already migrated — use `result.id`.
 
 ### 2c. Human Telegram User ID
 

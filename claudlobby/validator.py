@@ -864,9 +864,16 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
     installed_plugins = installed.get("plugins", {})
     for plugin in fleet.plugins.required:
         if plugin not in installed_plugins:
+            # Say when it resolves itself. Declared-but-absent is the NORMAL
+            # state before a bot has ever started: start-bot.sh installs declared
+            # plugins at launch. Without that context the warning reads as a
+            # contradiction of the documented "auto-installed as a fleet default,
+            # no manual setup needed", and sends users to install by hand.
             report.warnings.append(
-                f"plugin '{plugin}' declared in fleet.yaml but not installed — "
-                f"run 'claude plugin install {plugin}'"
+                f"plugin '{plugin}' declared in fleet.yaml but not installed yet — "
+                "bots install declared plugins at startup, so this usually clears "
+                "on first start; to install now, run "
+                f"'claude plugin install {plugin}'"
             )
 
 
@@ -1110,12 +1117,60 @@ def _validate_library_frontmatter(paths: Paths, report: ValidationReport) -> Non
                 )
 
 
+# Literal placeholder tokens shipped in fleet.yaml.seed (three of them). Reaching
+# validate() with one still in place means the template was copied but never
+# filled in.
+#
+# This is an ERROR, never a warning. getting-started.md §4 tells the user that a
+# run with "warnings only" is a success, so a warning here reads as "fine" — the
+# user generates, spins the bot up, and claudfather tries to post to chat id
+# REPLACE_ME. The failure then surfaces much later as a Telegram API error, far
+# from its cause. Catching it pre-flight turns the most likely first-run mistake
+# into an actionable message.
+_PLACEHOLDER_TOKENS = {"replace_me", "change_me"}
+
+
+def _is_placeholder(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() in _PLACEHOLDER_TOKENS
+
+
+def _validate_placeholders(fleet: FleetConfig, report: ValidationReport) -> None:
+    """Hard-fail on unreplaced template placeholders."""
+    if _is_placeholder(fleet.telegram_group_chat_id):
+        report.errors.append(
+            f"fleet.telegram_group_chat_id is still the template placeholder "
+            f"'{fleet.telegram_group_chat_id}' — set your Telegram group id "
+            "(add @RawDataBot to the group; it is a negative number — "
+            "-100... for a supergroup, plain negative for a basic group)"
+        )
+    if _is_placeholder(fleet.human_telegram_id):
+        report.errors.append(
+            f"fleet.human_telegram_id is still the template placeholder "
+            f"'{fleet.human_telegram_id}' — set your Telegram user id "
+            "(message @userinfobot to get it)"
+        )
+
+    for bot_name, bot in fleet.bots.items():
+        if _is_placeholder(bot.telegram.handle):
+            report.errors.append(
+                f"bot '{bot_name}': telegram.handle is still the template placeholder "
+                f"'{bot.telegram.handle}' — set the @handle BotFather gave the bot"
+            )
+        if _is_placeholder(bot.telegram.chat_id):
+            report.errors.append(
+                f"bot '{bot_name}': telegram.chat_id is still the template placeholder "
+                f"'{bot.telegram.chat_id}' — set the bot's Telegram chat id"
+            )
+
+
 def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     """Validate a fleet against the library (env vars, MCP refs, scopes); returns a ValidationReport."""
     report = ValidationReport()
 
     if not fleet.bots:
         report.errors.append("fleet.bots is empty — nothing to compose")
+
+    _validate_placeholders(fleet, report)
 
     fleet_env = dotenv.read(paths.env_file)
     _validate_bots(fleet, paths, fleet_env, report)

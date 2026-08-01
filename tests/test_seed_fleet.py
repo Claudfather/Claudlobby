@@ -217,12 +217,49 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
     return root
 
 
+def _fill_in_placeholders(root: Path) -> None:
+    """Replace the three REPLACE_ME values the seed ships with, as /setup does."""
+    seed = root / "fleet.yaml.seed"
+    seed.write_text(
+        seed.read_text()
+        .replace(
+            'telegram_group_chat_id: "REPLACE_ME"',
+            'telegram_group_chat_id: "-1001234567890"',
+        )
+        .replace('human_telegram_id: "REPLACE_ME"', 'human_telegram_id: "1234567890"')
+        .replace("handle: REPLACE_ME", "handle: my_claudfather_bot")
+    )
+
+
 class TestSeedFleetValidation:
-    def test_seed_fleet_validates(self, tmp_path):
-        """Seed fleet passes validate with no errors."""
+    def test_shipped_seed_hard_fails_on_unreplaced_placeholders(self, tmp_path):
+        """The seed ships three REPLACE_ME values — validate must ERROR on them.
+
+        Regression guard for the cold-start trap: these used to validate clean at
+        exit 0, and getting-started tells the user a warnings-only run is a
+        success. So copying the seed and skipping the edit produced a bot that
+        composed fine, booted fine, and then failed at runtime trying to post to
+        chat id REPLACE_ME — a symptom arbitrarily far from its cause.
+        """
         from claudlobby.validator import validate
 
         root = _setup_seed_tree(tmp_path)
+        paths = Paths(root=root, seed=True)
+        fleet, _md = load_fleet(paths.fleet_yaml)
+        report = validate(fleet, paths)
+
+        assert report.has_errors, "unreplaced placeholders must be a hard error"
+        joined = "\n".join(report.errors)
+        assert "telegram_group_chat_id" in joined
+        assert "human_telegram_id" in joined
+        assert "telegram.handle" in joined
+
+    def test_seed_fleet_validates_once_filled_in(self, tmp_path):
+        """Seed fleet passes validate with no errors once the placeholders are real."""
+        from claudlobby.validator import validate
+
+        root = _setup_seed_tree(tmp_path)
+        _fill_in_placeholders(root)
         paths = Paths(root=root, seed=True)
         fleet, _md = load_fleet(paths.fleet_yaml)
         report = validate(fleet, paths)

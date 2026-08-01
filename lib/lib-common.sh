@@ -138,19 +138,54 @@ own_tool_path() {
 # `pip install -e .` yields a console script whose location depends entirely on
 # which python did the installing, so PATH alone is not a reliable contract:
 #   1. `claudlobby` on PATH — pipx, or a --user/venv install own_tool_path found.
-#   2. `python3 -m claudlobby` — the documented equivalent invocation.
-# Rung 2 runs from $CLAUDLOBBY_ROOT so an editable/uninstalled checkout resolves
-# on sys.path regardless of the caller's cwd — never rely on cwd being the repo
-# (the launchd plists set WorkingDirectory, the systemd units do not).
-# Returns 127 with a diagnosable message when neither rung resolves.
+#   2. $CLAUDLOBBY_ROOT/.venv — the venv getting-started.md tells users to make.
+#      PEP 668 makes a venv the only supported install shape on Homebrew macOS
+#      and on Debian/Pi, and a venv console script is NOT on PATH under launchd
+#      or systemd, so this rung is the common supervised case, not an exotic one.
+#   3. `python3 -m claudlobby` — the documented equivalent invocation.
+# Rungs 2 and 3 run from $CLAUDLOBBY_ROOT so an editable/uninstalled checkout
+# resolves on sys.path regardless of the caller cwd — never rely on cwd being the
+# repo (the launchd plists set WorkingDirectory, the systemd units do not).
+# Returns 127 with a diagnosable message when no rung resolves.
+#
+# Usability probe. Two ways to get this wrong, and it has to dodge both:
+#
+#   FALSE POSITIVE — a bare `import claudlobby` succeeds from cwd alone, because
+#   claudlobby/ is a plain package directory at the repo root. On a host with no
+#   dependencies that sends the caller down a rung that dies on a raw
+#   ModuleNotFoundError (jinja2) instead of reaching the diagnosable message
+#   below — precisely the likeliest failure mode (venv install, non-activated
+#   shell, i.e. every supervised run).
+#
+#   FALSE NEGATIVE — demanding claudlobby.composer outright rejects a checkout
+#   that legitimately has no composer module. A minimal package of __init__.py +
+#   __main__.py runs fine under `python3 -m claudlobby`, and refusing it breaks
+#   rung 3 for exactly the uninstalled-checkout case rung 3 exists to serve.
+#
+# So: import the submodule, and treat the failure as fatal ONLY when what went
+# missing is not part of claudlobby itself — i.e. an absent third-party dep.
+_CLAUDLOBBY_USABLE='
+import importlib, sys
+try:
+    importlib.import_module("claudlobby.composer")
+except ModuleNotFoundError as exc:
+    if (exc.name or "").split(".")[0] != "claudlobby":
+        sys.exit(1)          # a dependency is missing -> not usable
+    importlib.import_module("claudlobby")   # no composer -> minimal layout, fine
+'
+
 claudlobby_cli() {
+    local venv_py="$CLAUDLOBBY_ROOT/.venv/bin/python"
     if command -v claudlobby >/dev/null 2>&1; then
         claudlobby "$@"
-    elif ( cd "$CLAUDLOBBY_ROOT" && python3 -c 'import claudlobby' ) >/dev/null 2>&1; then
+    elif [ -x "$venv_py" ] && ( cd "$CLAUDLOBBY_ROOT" && "$venv_py" -c "$_CLAUDLOBBY_USABLE" ) >/dev/null 2>&1; then
+        ( cd "$CLAUDLOBBY_ROOT" && "$venv_py" -m claudlobby "$@" )
+    elif ( cd "$CLAUDLOBBY_ROOT" && python3 -c "$_CLAUDLOBBY_USABLE" ) >/dev/null 2>&1; then
         ( cd "$CLAUDLOBBY_ROOT" && python3 -m claudlobby "$@" )
     else
-        printf 'claudlobby CLI unresolvable: not on PATH (%s) and not importable from %s. Fix: pip install -e %s\n' \
-            "$PATH" "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" >&2
+        printf 'claudlobby CLI unresolvable: not on PATH (%s), no usable venv at %s, not importable from %s. Fix: python3 -m venv %s/.venv && %s/.venv/bin/python -m pip install -e %s\n' \
+            "$PATH" "$venv_py" "$CLAUDLOBBY_ROOT" \
+            "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" >&2
         return 127
     fi
 }

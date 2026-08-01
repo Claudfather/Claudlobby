@@ -111,7 +111,16 @@ ensure_apt_pkg() {
 
 ensure_brew_pkg() {
     local pkg="$1"
-    if brew list --formula "$pkg" >/dev/null 2>&1; then
+    local found
+    # Ask whether the tool is USABLE, not whether brew is what installed it.
+    # A stock macOS ships jq at /usr/bin/jq via the Xcode CLT, and MacPorts, nix
+    # and asdf all place working binaries outside the brew prefix. Testing
+    # `brew list` alone reported every such host as missing and reinstalled on
+    # top of a perfectly good tool.
+    if found="$(command -v "$pkg" 2>/dev/null)"; then
+        ok "$pkg already available ($found)"
+        PREREQ_OK+=("$pkg")
+    elif brew list --formula "$pkg" >/dev/null 2>&1; then
         ok "brew $pkg already installed"
         PREREQ_OK+=("$pkg")
     else
@@ -119,6 +128,20 @@ ensure_brew_pkg() {
         run brew install --quiet "$pkg"
         PREREQ_OK+=("$pkg")
     fi
+}
+
+# _claudlobby_importable
+# True when the claudlobby package is actually USABLE. Imports a module that
+# pulls the third-party deps, so a bare package directory on sys.path with
+# nothing installed cannot register as a false positive — the same trap
+# claudlobby_cli hit (a plain `import claudlobby` succeeds from cwd with zero
+# dependencies present).
+_claudlobby_importable() {
+    local venv_py="$CLAUDLOBBY_ROOT/.venv/bin/python"
+    if [ -x "$venv_py" ] && ( cd "$CLAUDLOBBY_ROOT" && "$venv_py" -c 'import claudlobby.composer' ) >/dev/null 2>&1; then
+        return 0
+    fi
+    ( cd "$CLAUDLOBBY_ROOT" && python3 -c 'import claudlobby.composer' ) >/dev/null 2>&1
 }
 
 phase_packages() {
@@ -237,20 +260,55 @@ phase_python() {
     ok "python3 $py_version"
     PREREQ_OK+=("python3")
 
-    # Install claudlobby package
-    log "installing claudlobby package via pip"
-    if [ "$DRY_RUN" != 1 ]; then
-        python3 -m pip install -e "$CLAUDLOBBY_ROOT" --quiet 2>&1 || {
-            miss "pip install claudlobby failed — see output above"
-            PREREQ_MISSING+=("claudlobby-pip")
-            NEXT_STEPS+=("Run 'pip install -e $CLAUDLOBBY_ROOT' manually to debug")
-            return
-        }
-    else
-        printf 'setup-system: [dry-run] would run: python3 -m pip install -e %s\n' "$CLAUDLOBBY_ROOT"
+    # Install the claudlobby package.
+    #
+    # PEP 668 marks Homebrew python and Debian/Pi system python as
+    # externally-managed, so `python3 -m pip install -e` into the interpreter is
+    # REFUSED outright on both first-class hosts. A repo-local venv is the only
+    # install shape that works unattended everywhere, and it is what
+    # getting-started.md documents; claudlobby_cli prefers the same venv so
+    # supervised launchd/systemd invocations resolve without an activated shell.
+    local venv_dir="$CLAUDLOBBY_ROOT/.venv"
+    local venv_py="$venv_dir/bin/python"
+
+    # Already usable — nothing to do, in either mode.
+    if _claudlobby_importable; then
+        ok "claudlobby package installed"
+        PREREQ_OK+=("claudlobby-pip")
+        return
     fi
-    ok "claudlobby package installed"
-    PREREQ_OK+=("claudlobby-pip")
+
+    log "installing claudlobby package into $venv_dir"
+    if [ "$DRY_RUN" = 1 ]; then
+        printf 'setup-system: [dry-run] would run: python3 -m venv %s && %s -m pip install -e %s\n' \
+            "$venv_dir" "$venv_py" "$CLAUDLOBBY_ROOT"
+        # Report the state that ACTUALLY holds right now. Reporting the
+        # post-condition of an action dry-run did not take produced a false
+        # green ("prereqs missing: (none)") on a host with no claudlobby at all
+        # — and the /setup skill is told to parse this output and skip ahead.
+        miss "claudlobby package not installed yet"
+        PREREQ_MISSING+=("claudlobby-pip")
+        NEXT_STEPS+=("Re-run without --dry-run to create $venv_dir and install claudlobby")
+        return
+    fi
+
+    [ -x "$venv_py" ] || run python3 -m venv "$venv_dir"
+    "$venv_py" -m pip install -e "$CLAUDLOBBY_ROOT" --quiet 2>&1 || {
+        miss "pip install claudlobby failed — see output above"
+        PREREQ_MISSING+=("claudlobby-pip")
+        NEXT_STEPS+=("Run '$venv_py -m pip install -e $CLAUDLOBBY_ROOT' manually to debug")
+        return
+    }
+
+    # Verify the post-condition instead of asserting it.
+    if _claudlobby_importable; then
+        ok "claudlobby package installed"
+        PREREQ_OK+=("claudlobby-pip")
+    else
+        miss "claudlobby installed but not importable"
+        PREREQ_MISSING+=("claudlobby-pip")
+        NEXT_STEPS+=("Debug with '$venv_py -m claudlobby --help'")
+    fi
 }
 
 # ---------------------------------------------------------------------------
