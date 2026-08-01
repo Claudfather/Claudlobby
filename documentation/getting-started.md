@@ -19,10 +19,33 @@ Bring a fresh fleet up in about 30 minutes (excluding waiting on Telegram BotFat
 ```bash
 git clone https://github.com/Claudfather/Claudlobby.git
 cd Claudlobby
-pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e .
 ```
 
-The `-e .` editable install creates a `claudlobby` console script. You can also use `python3 -m claudlobby` directly.
+**The virtualenv is required, not a style preference.** Homebrew python (macOS) and Debian /
+Raspberry Pi OS system python are both marked externally-managed under
+[PEP 668](https://peps.python.org/pep-0668/); installing into them fails with
+`error: externally-managed-environment`. Those are the two hosts this project targets first.
+Also note `python3 -m pip` rather than `pip` — Homebrew ships `pip3` only, so bare `pip` is not
+a command on a stock Mac.
+
+Rather not do it by hand? `lib/setup-system` creates the venv, installs claudlobby, and checks
+every other host prerequisite in one idempotent pass:
+
+```bash
+lib/setup-system --dry-run     # preview: reports what is present and what it would do
+lib/setup-system               # apply
+```
+
+The `-e .` editable install creates a `claudlobby` console script at `.venv/bin/claudlobby`.
+You can also use `python3 -m claudlobby` directly.
+
+> **PATH caveat.** The console script only resolves while the venv is activated. Supervised
+> runs (launchd/systemd) never source it, so `lib/` scripts locate the CLI themselves via
+> `claudlobby_cli` in `lib/lib-common.sh`, which prefers `$CLAUDLOBBY_ROOT/.venv/bin/python`.
+> Keeping the venv at `.venv` inside the repo is what makes supervision work unattended.
 
 ## 2. Set up secrets
 
@@ -59,17 +82,34 @@ Token rules:
 
 You can run claudlobby in **root mode** (fleet.yaml at repo root) or **overlay mode** (fleet-specific config in `local/<fleet>/`). Overlay mode keeps fleet-specific content isolated and is recommended for multi-fleet setups.
 
+**Which template to start from:**
+
+| File | Size | Use it for |
+|------|------|-----------|
+| `fleet.yaml.seed` | ~60 lines, one bot | **Your first fleet.** Ships `claudfather`, the setup assistant. |
+| `fleet.yaml.example` | ~600 lines, full fleet | **Reference.** Documents every available field; copy fragments out of it. |
+
+Start from the seed. Copying the example as a first fleet means debugging a dozen bots you did
+not choose before anything runs.
+
 **Root mode:**
 ```bash
-cp fleet.yaml.example fleet.yaml
+cp fleet.yaml.seed fleet.yaml
 $EDITOR fleet.yaml
 ```
 
-**Overlay mode (recommended):**
+**Overlay mode (recommended for multi-fleet):**
 ```bash
 mkdir -p local/my-fleet
-cp fleet.yaml.example local/my-fleet/fleet.yaml
+cp fleet.yaml.seed local/my-fleet/fleet.yaml
 $EDITOR local/my-fleet/fleet.yaml
+```
+
+There is also a **seed mode** that reads `fleet.yaml.seed` in place, without copying — handy for
+a throwaway trial run (output lands in `runtime/seed/bots/`):
+
+```bash
+claudlobby --seed validate && claudlobby --seed generate
 ```
 
 Key fields to customize:
@@ -94,7 +134,13 @@ claudlobby validate                        # root mode
 claudlobby --fleet my-fleet validate       # overlay mode
 ```
 
-Expect a clean run, or warnings only (missing env vars, etc.). Hard errors mean a missing expertise file — fix `fleet.yaml` and re-run.
+Expect a clean run, or warnings only (missing env vars, etc.). Hard errors mean a missing
+expertise file, or an unreplaced template placeholder — fix `fleet.yaml` and re-run.
+
+Validate hard-fails on any `REPLACE_ME` left in `telegram_group_chat_id`, `human_telegram_id`,
+or a bot's `telegram.handle`. That check exists because those values fail *silently* otherwise:
+generation succeeds, the bot boots, and the only symptom is a Telegram API error at runtime,
+long after the cause.
 
 ## 5. Generate
 

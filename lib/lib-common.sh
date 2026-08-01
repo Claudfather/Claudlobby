@@ -138,19 +138,34 @@ own_tool_path() {
 # `pip install -e .` yields a console script whose location depends entirely on
 # which python did the installing, so PATH alone is not a reliable contract:
 #   1. `claudlobby` on PATH — pipx, or a --user/venv install own_tool_path found.
-#   2. `python3 -m claudlobby` — the documented equivalent invocation.
-# Rung 2 runs from $CLAUDLOBBY_ROOT so an editable/uninstalled checkout resolves
-# on sys.path regardless of the caller's cwd — never rely on cwd being the repo
-# (the launchd plists set WorkingDirectory, the systemd units do not).
-# Returns 127 with a diagnosable message when neither rung resolves.
+#   2. $CLAUDLOBBY_ROOT/.venv — the venv getting-started.md tells users to make.
+#      PEP 668 makes a venv the only supported install shape on Homebrew macOS
+#      and on Debian/Pi, and a venv console script is NOT on PATH under launchd
+#      or systemd, so this rung is the common supervised case, not an exotic one.
+#   3. `python3 -m claudlobby` — the documented equivalent invocation.
+# Rungs 2 and 3 run from $CLAUDLOBBY_ROOT so an editable/uninstalled checkout
+# resolves on sys.path regardless of the caller cwd — never rely on cwd being the
+# repo (the launchd plists set WorkingDirectory, the systemd units do not).
+# Returns 127 with a diagnosable message when no rung resolves.
+#
+# The importability probe must import a module that pulls the third-party deps.
+# A bare `import claudlobby` is a FALSE POSITIVE: claudlobby/ is a plain package
+# directory at the repo root, so it imports from cwd alone even with zero deps
+# installed. That sent a dependency-less host down rung 3 to die on a raw
+# ModuleNotFoundError (jinja2) instead of reaching the diagnosable message below,
+# in precisely the most likely failure mode — venv install, non-activated shell.
 claudlobby_cli() {
+    local venv_py="$CLAUDLOBBY_ROOT/.venv/bin/python"
     if command -v claudlobby >/dev/null 2>&1; then
         claudlobby "$@"
-    elif ( cd "$CLAUDLOBBY_ROOT" && python3 -c 'import claudlobby' ) >/dev/null 2>&1; then
+    elif [ -x "$venv_py" ] && ( cd "$CLAUDLOBBY_ROOT" && "$venv_py" -c 'import claudlobby.composer' ) >/dev/null 2>&1; then
+        ( cd "$CLAUDLOBBY_ROOT" && "$venv_py" -m claudlobby "$@" )
+    elif ( cd "$CLAUDLOBBY_ROOT" && python3 -c 'import claudlobby.composer' ) >/dev/null 2>&1; then
         ( cd "$CLAUDLOBBY_ROOT" && python3 -m claudlobby "$@" )
     else
-        printf 'claudlobby CLI unresolvable: not on PATH (%s) and not importable from %s. Fix: pip install -e %s\n' \
-            "$PATH" "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" >&2
+        printf 'claudlobby CLI unresolvable: not on PATH (%s), no usable venv at %s, not importable from %s. Fix: python3 -m venv %s/.venv && %s/.venv/bin/python -m pip install -e %s\n' \
+            "$PATH" "$venv_py" "$CLAUDLOBBY_ROOT" \
+            "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" "$CLAUDLOBBY_ROOT" >&2
         return 127
     fi
 }
