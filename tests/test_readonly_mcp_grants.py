@@ -335,7 +335,9 @@ class TestShippedLibraryContent:
         # so all 8 write tools ARE registered and callable — this list plus the
         # compositor grant is the ONLY layer keeping them prompt-gated, where
         # meta-ads has two. Verified against the pinned tarball's dist/client.js:
-        # 15 GET call-sites (the read_only_tools set) vs POST/DELETE for these.
+        # 15 GET-issuing tool methods (the read_only_tools set) vs POST/DELETE
+        # for these 8. Count methods, not "GET" literals — a naive grep returns
+        # 17, because two are cache lookups inside request().
         # send_dm is the one to watch — it messages real customers.
         "meta-business": [
             "publish_media",
