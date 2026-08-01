@@ -216,13 +216,22 @@ Each library category has its own format. Check the category's `README.md` for s
 
 **Two things about the test suite that will otherwise cost you an hour.**
 
-*Run it unsandboxed.* `lib/` scripts call `mktemp -d` into the real `$TMPDIR`. Under a
-restrictive agent sandbox those calls return `Operation not permitted` and roughly **250 phantom
-failures** appear across every bash-script suite. They are not real.
+*Run it unsandboxed — and do not diff sandboxed runs either.* `lib/` scripts call `mktemp -d`
+into the real `$TMPDIR`. Under a restrictive agent sandbox those calls return `Operation not
+permitted` and roughly **250 phantom failures** appear across every bash-script suite. They are
+not real.
+
+It is tempting to assume a *diff* of two sandboxed runs is still sound, since the sandbox
+penalises both equally. **It is not.** A test the sandbox already breaks fails in the before run
+*and* the after run, so it cancels out of the diff — and any regression you introduce inside it
+is invisible. That is not hypothetical: it is exactly how a `claudlobby_cli` regression reached
+CI in #947, after a sandboxed diff reported one clean delta. Take the baseline unsandboxed or
+not at all.
 
 *Know the baseline.* The suite is **not fully green** on macOS — as of 2026-08-01 it is
-**35 failed / 2122 passed**, 24 of them the `tests/test_setup_backbone.py` cluster (#951). Do not
-assume your change caused a failure; diff against a stashed baseline before concluding anything:
+**34 failed / 2125 passed**, 24 of them the `tests/test_setup_backbone.py` cluster (#951). Do not
+assume your change caused a failure, and do not assume it didn't because the *count* matched —
+compare the failing test **names**:
 
 ```bash
 git stash push -u && ./.venv/bin/pytest -q --tb=no | grep ^FAILED | sort > /tmp/before.txt

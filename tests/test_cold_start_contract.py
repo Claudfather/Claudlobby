@@ -169,9 +169,17 @@ class TestCliResolutionProbe:
             "with no dependencies installed. Probe a submodule that imports the "
             "third-party deps (e.g. claudlobby.composer)."
         )
-        assert "import claudlobby." in src, (
-            "expected a submodule import probe (e.g. `import claudlobby.composer`) "
-            "in claudlobby_cli"
+        assert "claudlobby.composer" in src, (
+            "expected a submodule probe (e.g. claudlobby.composer) in claudlobby_cli"
+        )
+        # ...but the probe must not be *only* that. Demanding the submodule
+        # outright is a false negative for a minimal __init__+__main__ checkout,
+        # which runs fine under `python3 -m claudlobby` — and that is the very
+        # case the module-fallback rung exists to serve. Guarded because the
+        # first version of this fix broke it and only CI caught it.
+        assert "ModuleNotFoundError" in src, (
+            "the probe must distinguish a missing claudlobby submodule (fine — "
+            "minimal layout) from a missing third-party dependency (not usable)"
         )
 
     def test_resolver_prefers_the_repo_local_venv(self):
