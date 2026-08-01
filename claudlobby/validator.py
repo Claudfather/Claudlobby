@@ -1140,7 +1140,8 @@ def _validate_placeholders(fleet: FleetConfig, report: ValidationReport) -> None
         report.errors.append(
             f"fleet.telegram_group_chat_id is still the template placeholder "
             f"'{fleet.telegram_group_chat_id}' — set your Telegram group id "
-            "(add @RawDataBot to the group; the id starts with -100)"
+            "(add @RawDataBot to the group; it is a negative number — "
+            "-100... for a supergroup, plain negative for a basic group)"
         )
     if _is_placeholder(fleet.human_telegram_id):
         report.errors.append(

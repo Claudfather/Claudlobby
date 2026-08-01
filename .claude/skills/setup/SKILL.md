@@ -128,10 +128,30 @@ Tell the user:
 1. Create a new Telegram group (or use an existing one)
 2. Add your new bot to the group
 3. Add @RawDataBot to the group — it will print a message containing the chat ID
-4. The chat ID starts with `-100` (e.g., `-1001234567890`)
+4. The chat ID is **negative**. Two valid shapes, both fine:
+   - **supergroup / channel** — `-100` prefix, e.g. `-1001234567890`
+   - **basic group** — plain negative, e.g. `-5556622542`
 5. You can remove @RawDataBot after getting the ID
 
-Validate: must be a numeric string starting with `-100`.
+Validate: a negative integer. **Do not require the `-100` prefix** — that rejects every basic
+group, which is what you get by default when you create a group and add a couple of members.
+
+If it is a basic group, tell the user this once and let them decide:
+
+> That's a basic group. It works, but Telegram silently migrates basic groups to supergroups
+> (on growth, on adding a username, on some admin actions) and **the chat ID changes** when it
+> does — a bot pinned to the old ID stops delivering, with no error. For a supervised bot that
+> is worth avoiding up front; converting the group now, or creating it as a supergroup, keeps
+> the ID stable.
+
+Once the token is known, confirm the real shape rather than guessing from the digits:
+
+```bash
+curl -s "https://api.telegram.org/bot$TOKEN/getChat?chat_id=$CHAT_ID" | jq '.ok, .result.type, .result.id'
+```
+
+`type` is `group` (basic) or `supergroup`. A mismatch between the id you were given and
+`result.id` means the group already migrated — use `result.id`.
 
 ### 2c. Human Telegram User ID
 
