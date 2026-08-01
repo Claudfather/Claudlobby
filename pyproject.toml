@@ -27,6 +27,10 @@ claudlobby = "claudlobby.__main__:main"
 packages = ["claudlobby", "claudlobby.commands"]
 
 [tool.pytest.ini_options]
+# The framework's suite is exactly tests/. Bare `pytest` from the root otherwise
+# walks local/, which holds operator-owned fleet state and bot projects/ git
+# checkouts — third-party trees whose conftest.py collides with ours.
+testpaths = ["tests"]
 # Registered so `pytest -m vault` selects the vault-mode gate and unknown-marker
 # warnings stay quiet. These tests importorskip/skipif on the [vault] extra, so
 # they SKIP in the default `.[dev]` lane and RUN in the dedicated vault-tests CI
