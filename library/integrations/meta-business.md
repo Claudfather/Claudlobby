@@ -37,6 +37,46 @@ The DM surface is the reason this fragment exists: `get_conversations` and
 customer questions, order chases and sales conversations become fleet-legible
 instead of living in one person's phone.
 
+## Requires the Facebook Login path — not Instagram Login
+
+Meta offers two ways to reach an Instagram Professional account, and **this
+server only supports the older one**:
+
+| | Instagram API with **Facebook Login** | Instagram API with **Instagram Login** |
+|---|---|---|
+| host | `graph.facebook.com` | `graph.instagram.com` |
+| linked Facebook Page | **required** | not required |
+| conversations via | `<page-id>/conversations` | `<ig-id>/conversations` |
+| scopes | `instagram_manage_messages`, … | `instagram_business_manage_messages`, … |
+
+`@mcpware/instagram-mcp@1.0.4` hardcodes `graph.facebook.com` (**zero**
+occurrences of `graph.instagram.com` in `dist/`), and `getConversations` resolves
+the inbox by calling `me/accounts` for Facebook Pages. Under Instagram Login there
+are no Pages, so the DM tools cannot work at all — the token is for the wrong host
+and the lookup has nothing to find. Its README also still cites the pre-2025 scope
+names, which is consistent with it targeting the older path.
+
+**So equipping this fragment commits you to creating and linking a Facebook
+Page.** If you would rather use Instagram Login — newer, simpler, no Page — this
+is the wrong server and the fragment needs re-pointing at `graph.instagram.com`
+against one that supports it.
+
+## App Review is probably not required
+
+Meta's conversations documentation draws the line by *ownership*, not by feature:
+
+> Advanced Access if your app serves Instagram professional accounts you don't
+> own or manage … Standard Access if your app serves Instagram professional
+> accounts you own or manage and have added to your app in the App Dashboard.
+
+A fleet reading **its own** business inbox is the second case, so Standard Access
+should cover it and App Review should not be on the critical path. Advanced Access
+— and the App Review, screencast and Business Verification that come with it — is
+for serving *other people's* accounts.
+
+Verify against the live console before planning around either answer; this was
+established from documentation, not from a working credential.
+
 ## Auth model
 
 **Two** env vars, both fleet-tier, declared in the paired fragment.
@@ -134,10 +174,11 @@ exists, not after the first briefing leaks an address.
 
 ## Gotchas
 
-- **Advanced Access gates every DM tool.** `instagram_manage_messages` is not
-  granted on request — it requires Meta App Review, measured in days to weeks.
-  Standard Access covers insights, media and comments immediately, so phases 1–2
-  of a rollout work long before DMs light up. Nothing in claudlobby shortens this.
+- **Check your access level before assuming a wait.** See "App Review is probably
+  not required" above: reading an inbox you own should fall under Standard Access.
+  Advanced Access — with App Review, a screencast and Business Verification — is
+  for serving accounts you don't own. Don't plan a multi-week rollout without
+  first confirming which case you're in.
 - **~60-day token expiry.** Long-lived tokens are not permanent. Refresh before
   expiry or the whole fragment goes dark at once; `validate_access_token`
   distinguishes an expired token from a broken call.
