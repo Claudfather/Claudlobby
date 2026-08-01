@@ -396,6 +396,8 @@ class BotConfig:
     reports_to: str | None = None  # bot_id this bot reports to
     manages: list[str] | None = None  # bot_ids this bot manages
     scope: ScopeConfig | None = None
+    # org -> env var NAME; see _parse_git_credentials
+    git_credentials: dict[str, str] = field(default_factory=dict)
     model_strategy: ModelStrategyConfig | None = None
     account: str = "default"
     model: str | None = None
@@ -744,6 +746,55 @@ def _coerce_scope(raw: dict | None) -> ScopeConfig | None:
             if k not in {"org", "repos", "snowflake_targets"}
         },
     )
+
+
+# GitHub's documented token prefixes. A token is a valid shell identifier, so
+# this is the only way to tell a pasted secret from an env var name.
+_GITHUB_TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
+
+
+def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
+    """Validate one tier's ``git_credentials`` block (org -> env var NAME).
+
+    One tier at a time, with a ``where`` label, so a mistake in fleet defaults is
+    not reported against a bot (the ``_parse_tools_list`` precedent). Callers
+    dict-merge the tiers.
+
+    Values are env var NAMES, never tokens: names are contracts and belong in
+    git, values live in the gitignored .env. The name is interpolated into a
+    shell function in the composed .gitconfig, so it must satisfy the same
+    SHELL_IDENT_RE contract as every other composed env-var name (bot.env keys,
+    secret_files keys, project tier vars).
+    """
+    mapping = _shaped(
+        f"{where}: git_credentials", raw, dict, "{MyOrg: MYORG_GITHUB_PAT}"
+    )
+    out: dict[str, str] = {}
+    for key, env_name in mapping.items():
+        org = str(key)
+        if "/" in org:
+            raise ValueError(
+                f"{where}: git_credentials key '{org}' must be an org name, not "
+                f"'org/repo' — credential routing is org-scoped and a repo-scoped "
+                f"key would silently never match"
+            )
+        if not isinstance(env_name, str) or not SHELL_IDENT_RE.match(env_name):
+            raise ValueError(
+                f"{where}: git_credentials['{org}'] must be an env var NAME "
+                f"(e.g. MYORG_GITHUB_PAT), not a token value — got {env_name!r}"
+            )
+        # SHELL_IDENT_RE alone cannot catch this: a real token like
+        # "ghp_xxx" / "github_pat_xxx" IS a valid shell identifier, so it would
+        # pass as a "name" and then be interpolated verbatim into the composed,
+        # world-readable .gitconfig. Refuse the known GitHub token prefixes —
+        # the one place a leak could be introduced by a plausible typo.
+        if env_name.lower().startswith(_GITHUB_TOKEN_PREFIXES):
+            raise ValueError(
+                f"{where}: git_credentials['{org}'] looks like a TOKEN VALUE, not "
+                f"an env var name. Put the value in .env and name the var here"
+            )
+        out[org] = env_name
+    return out
 
 
 def is_pos_int(v: object) -> bool:
@@ -1113,6 +1164,14 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         reports_to=raw.get("reports_to"),
         manages=_as_list(raw.get("manages")) or None,
         scope=_coerce_scope(raw.get("scope") or defaults.get("scope")),
+        git_credentials={
+            **_parse_git_credentials(
+                defaults.get("git_credentials"), where="fleet defaults"
+            ),
+            **_parse_git_credentials(
+                raw.get("git_credentials"), where=f"bot '{name}'"
+            ),
+        },
         model_strategy=_coerce_model_strategy(
             raw.get("model_strategy") or defaults.get("model_strategy")
         ),

@@ -787,3 +787,132 @@ class TestObservabilityConfig:
         assert obs.bridge_heal is True
         # System-only key threads through merged_defaults into _coerce_bot.
         assert obs.reap_days == 7
+
+
+class TestGitCredentialsParsing:
+    """`git_credentials` maps org -> env var NAME. Names are contracts and belong
+    in git; only values live in the gitignored .env. Every rejection path is
+    tested here because each one exists to stop config that would otherwise
+    compose successfully and then silently not work.
+
+    Spec: documentation/plans/2026-07-27-per-org-git-credential-routing.md
+    """
+
+    def _load(self, root, body: str):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "fleet.yaml").write_text(
+            dedent(f"""\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  bots:
+                    lead:
+                      expertise: [eng]
+                {body}
+            """)
+        )
+        return load_fleet(root / "fleet.yaml")
+
+    def test_bot_tier_merges_over_fleet_defaults_per_org(self, tmp_path):
+        """Merge, not replace — a bot adds an org without restating the fleet's."""
+        root = tmp_path / "f"
+        root.mkdir(parents=True)
+        (root / "fleet.yaml").write_text(
+            dedent("""\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  defaults:
+                    git_credentials:
+                      OrgA: ORG_A_PAT
+                  bots:
+                    lead:
+                      expertise: [eng]
+                      git_credentials:
+                        OrgB: ORG_B_PAT
+            """)
+        )
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        assert fleet.bots["lead"].git_credentials == {
+            "OrgA": "ORG_A_PAT",
+            "OrgB": "ORG_B_PAT",
+        }
+
+    def test_bot_tier_wins_for_the_same_org(self, tmp_path):
+        root = tmp_path / "f"
+        root.mkdir(parents=True)
+        (root / "fleet.yaml").write_text(
+            dedent("""\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  defaults:
+                    git_credentials:
+                      OrgA: FLEET_PAT
+                  bots:
+                    lead:
+                      expertise: [eng]
+                      git_credentials:
+                        OrgA: BOT_PAT
+            """)
+        )
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        assert fleet.bots["lead"].git_credentials == {"OrgA": "BOT_PAT"}
+
+    def test_absent_is_empty_not_an_error(self, tmp_path):
+        fleet, _md = self._load(tmp_path / "f", "")
+        assert fleet.bots["lead"].git_credentials == {}
+
+    def test_repo_scoped_key_is_rejected(self, tmp_path):
+        """A repo-scoped key would silently never match, so fail loudly."""
+        with pytest.raises(ValueError, match="must be an org name"):
+            self._load(
+                tmp_path / "f",
+                "      git_credentials:\n                        OrgA/repo: SOME_PAT",
+            )
+
+    def test_a_pasted_token_is_rejected(self, tmp_path):
+        """A real token IS a valid shell identifier, so the name check alone
+        cannot catch it — and it would be interpolated verbatim into a composed,
+        world-readable gitconfig. The prefix guard is the only thing standing
+        between a plausible typo and a leaked secret."""
+        with pytest.raises(ValueError, match="looks like a TOKEN VALUE"):
+            self._load(
+                tmp_path / "f",
+                "      git_credentials:\n"
+                "                        OrgA: ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            )
+
+    def test_a_malformed_env_var_name_is_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="must be an env var NAME"):
+            self._load(
+                tmp_path / "f",
+                "      git_credentials:\n                        OrgA: 'not a name!'",
+            )
+
+    def test_non_mapping_is_rejected_with_the_expected_shape(self, tmp_path):
+        with pytest.raises(ValueError, match="git_credentials"):
+            self._load(
+                tmp_path / "f", "      git_credentials: [OrgA, ORG_A_PAT]"
+            )
+
+    def test_fleet_tier_error_names_the_fleet_not_the_bot(self, tmp_path):
+        """Provenance matters: a mistake in fleet defaults must not be reported
+        against a bot that merely inherited it."""
+        root = tmp_path / "f"
+        root.mkdir(parents=True)
+        (root / "fleet.yaml").write_text(
+            dedent("""\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  defaults:
+                    git_credentials:
+                      OrgA/repo: SOME_PAT
+                  bots:
+                    lead:
+                      expertise: [eng]
+            """)
+        )
+        with pytest.raises(ValueError, match="fleet defaults"):
+            load_fleet(root / "fleet.yaml")

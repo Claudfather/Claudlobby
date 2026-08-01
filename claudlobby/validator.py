@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,11 +48,46 @@ def _env_has_value(effective_env: dict[str, str], var: str) -> bool:
     ``var in effective_env`` is True-but-empty. A warning that keyed off mere
     presence fired once (the first cold generate, before the stub existed) then
     went permanently silent even if the operator never filled in a real value
-    (#755). The single predicate behind all three "requires VAR but it's not
+    (#755). The single predicate behind all four "requires VAR but it is not
     set" validator warnings — MCP contract vars, tool env vars, telegram
-    token_env — so a fourth site can't reintroduce the presence-check fork.
+    token_env, git_credentials — so a fifth site cannot reintroduce the fork.
     """
     return bool(effective_env.get(var))
+
+
+def _operator_git_identity_problem() -> str | None:
+    """Why the composed ``.gitconfig``'s ``[include]`` would not yield a git
+    identity, or None when it is fine.
+
+    ``git_credentials`` composes an include of the operator's own ``~/.gitconfig``
+    rather than a per-bot identity (the git-identity-no-overrides guardrail), and
+    git ignores a missing or identity-less include SILENTLY: credential routing
+    keeps working, ``user.email`` is simply never set, and the first commit dies
+    with ``Author identity unknown``. Nothing in that failure points back here, so
+    it is worth naming at validate time.
+
+    Delegates the read to ``git config --file --includes`` rather than parsing the
+    file, because an operator's identity legitimately lives one ``[include]``
+    deeper and a hand-rolled parse would cry wolf. ``--includes`` is not optional
+    here: it is off by default for ``--file`` reads, but ON when git reads the
+    same file as global config — which is exactly how the bot will read it — so
+    omitting it would warn about identities that resolve perfectly at runtime.
+    """
+    from .composer import _operator_gitconfig  # local: composer imports config, not us
+
+    operator = _operator_gitconfig()
+    if not operator.is_file():
+        return f"{operator} does not exist"
+    if not shutil.which("git"):
+        return None  # cannot check; not the validator's business to guess
+    probe = subprocess.run(
+        ["git", "config", "--file", str(operator), "--includes", "--get", "user.email"],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return f"{operator} sets no user.email"
+    return None
 
 
 @dataclass
@@ -154,6 +190,14 @@ def _validate_bots(
 
     # The claudron CLI door is host state, not per-bot state — probe once.
     claudron_on_path = shutil.which("claudron") is not None
+    # Same shape: the operator's git identity is one host file every bot's
+    # composed .gitconfig includes, and the probe shells out — so resolve it once,
+    # and only when some bot actually declares git_credentials.
+    git_identity_problem = (
+        _operator_git_identity_problem()
+        if any(b.git_credentials for b in fleet.bots.values())
+        else None
+    )
     # Vault resolution is a full walk-up + scan per call, and `claudron_vault_path`
     # falls back to a fleet-wide default (config.py) — so every bot in a fleet
     # typically resolves the *same* path. Memo per run, same reason as above.
@@ -414,6 +458,32 @@ def _validate_bots(
         ):
             report.warnings.append(
                 f"bot '{bot_name}': telegram.token_env '{bot.telegram.token_env}' not set in any tier of .env — bot won't connect to Telegram"
+            )
+
+        # Git credential env (warn, never fail). Same value-based shape as
+        # telegram.token_env above: a declared org whose token is missing or empty
+        # composes valid routing that then presents no credential, so git silently
+        # falls through to the host default and the push fails with a 403 that reads
+        # like a permissions problem. A missing token is an operator gap, not a
+        # composition error — warn and still generate.
+        for org, env_name in sorted(bot.git_credentials.items()):
+            if not _env_has_value(effective_env, env_name):
+                report.warnings.append(
+                    f"bot '{bot_name}': git_credentials['{org}'] names '{env_name}', "
+                    f"not set in any tier of .env — pushes to {org} will fall back to "
+                    f"the host credential helper and may 403"
+                )
+
+        # The other half of the same declaration: routing composes an [include] of
+        # the operator's ~/.gitconfig for identity, and git ignores a missing or
+        # identity-less include silently — so the bot pushes fine and then cannot
+        # commit at all. Warn (never fail): it is an operator-side host gap, same
+        # severity as the missing token above.
+        if bot.git_credentials and git_identity_problem:
+            report.warnings.append(
+                f"bot '{bot_name}': git_credentials composes an [include] for git "
+                f"identity, but {git_identity_problem} — credential routing will work "
+                f"while every commit fails 'Author identity unknown'"
             )
 
         # Observability config (warn). Fields may be None (= use hardcoded default);

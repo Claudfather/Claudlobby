@@ -2,6 +2,33 @@
 
 The compositor writes environment variables to each bot's `bot.conf`. These are sourced at startup by `lib/start-bot.sh` and available to all lib/ scripts, hooks, and skills.
 
+## The env contract: names in git, values in `.env`
+
+**An env var NAME is a contract and belongs in git. Only its VALUE is a secret and belongs in the
+gitignored `.env`.**
+
+This is the rule for every declaration surface in the shared package — `library/mcp/*.json`
+(`${GITHUB_PAT}`, `${NOTION_TOKEN}`), `library/tools/<name>/tool.yaml` (`env: [SIMPLEFIN_ACCESS_URL]`),
+and `fleet.defaults.git_credentials`. All of those files are **tracked**, and they name variables
+without ever holding a value.
+
+The reason is that a name is what the compositor and validator must both agree on: `validate`
+warns when a declared var is unset, `freshbox` audits declarations against `.env` tiers, and a
+reader needs to know what to provision. None of that works if names live only in an untracked file.
+A value in a tracked file, by contrast, is a leaked credential.
+
+So the split is:
+
+| Lives in | Example | Tracked? |
+|---|---|---|
+| Declaration (the **name**) | `env: [MYORG_GITHUB_PAT]`, `${GITHUB_PAT}`, `git_credentials: {OrgA: ORGA_GITHUB_PAT}` | **yes** — `library/`, `fleet.yaml.example`, docs |
+| Value | `MYORG_GITHUB_PAT=github_pat_xxxxxxxxxxxxxxxxxxxx` | **never** — `.env`, `local/` |
+
+The one thing that is *not* obvious and is worth stating plainly: this holds for **fleet-specific
+env var names too**. A name like `MYORG_GITHUB_PAT` is not fleet-specific data even if only
+one fleet sets it — it is the interface. Reasoning from "anything credential-adjacent is secret" to
+"the name goes in the overlay" is a natural inference and the wrong one.
+
 ## Bot Identity
 
 | Variable | Source | Description |
@@ -107,6 +134,29 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 | `CLAUDE_CODE_SYNC_PLUGIN_INSTALL` | `fleet.plugins` | Semicolon-separated plugin install commands |
 | `FLEET_PLUGINS_REQUIRED` | `fleet.plugins.additional` | Space-separated required plugins (`name@marketplace`) |
 | `FLEET_PLUGINS_MARKETPLACES` | `fleet.plugins.marketplaces` | Space-separated `name=type:repo` pairs (e.g. `mymarket=github:MyOrg/my-plugins`) |
+
+## Git
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `GIT_CONFIG_GLOBAL` | `git_credentials` (fleet or bot) | Path to the composed `<bot_dir>/.gitconfig` that routes git credentials per GitHub org. Emitted **only** when the bot declares `git_credentials`. The composed file `include`s the operator's `~/.gitconfig` first, so identity and aliases are preserved. See [`fleet-yaml-schema.md`](fleet-yaml-schema.md#fleetdefaultsgit_credentials--botsnamegit_credentials) |
+
+Two operational notes:
+
+**Adding `git_credentials` needs a restart, not a reload.** `bot.conf` is sourced once when the
+pane is created, so a live session keeps whatever `GIT_CONFIG_GLOBAL` it started with (usually
+none). `lib/reload-fleet.sh` deliberately does not restart, so waiting for the daily reload leaves
+a composed `.gitconfig` that nothing points at.
+
+**A `403` here has two causes that look identical.** Either the routing is not active (no
+`GIT_CONFIG_GLOBAL` in the session) or the token itself is invalid. To tell them apart, `POST
+/git/refs` with an existing ref: a valid token returns `422 Reference already exists`, an invalid
+one returns `403`.
+
+Note the consequence of `GIT_CONFIG_GLOBAL`: inside a bot session, `git config --global` writes to
+the **composed** file, not `~/.gitconfig` — and the composed file is regenerated, so such a write is
+lost on the next `claudlobby generate`. Change credential routing in `fleet.yaml`, not with
+`git config`.
 
 ## Bot-Specific Env
 

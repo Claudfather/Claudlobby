@@ -861,3 +861,67 @@ def test_self_referential_telegram_token_in_shared_tier_is_flagged(tmp_path):
     ]
     assert [f.severity for f in leaks] == ["fail"]
     assert "TELEGRAM_BOT_TOKEN" in leaks[0].detail
+
+
+# ── per-org git credential routing: the externals it depends on ──────
+
+
+def _git_cred_fleet(tmp_path, monkeypatch, *, operator_exists=True, gh="/usr/bin/gh"):
+    """A composed bot declaring git_credentials, with both host seams stubbed."""
+    import claudlobby.composer as comp
+
+    root = tmp_path / "cl"
+    _build_library(root)
+    operator = tmp_path / "operator.gitconfig"
+    if operator_exists:
+        operator.write_text("[user]\n\temail = operator@example.com\n")
+    monkeypatch.setattr(comp, "_operator_gitconfig", lambda: operator)
+    monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: gh)
+    bot = BotConfig(
+        bot_id="kev",
+        name="kev",
+        expertise=["eng"],
+        git_credentials={"OrgA": "ORG_A_PAT"},
+    )
+    fleet = _fleet({"kev": bot})
+    paths = Paths(root=root, fleet_dir=root)
+    _seed_bot_dir(paths)
+    return bot, fleet, paths, operator
+
+
+def test_missing_operator_gitconfig_is_a_fail(tmp_path, monkeypatch):
+    """git ignores a missing [include] SILENTLY, so routing keeps working while
+    user.email vanishes and every commit dies 'Author identity unknown' — a
+    failure with nothing pointing back at the composed file. The whole point of
+    a fresh-box gate is to catch an absent host prerequisite here instead."""
+    bot, fleet, paths, operator = _git_cred_fleet(
+        tmp_path, monkeypatch, operator_exists=False
+    )
+    findings = [f for f in audit_bot(bot, fleet, paths) if f.kind == "missing_external"]
+    assert [f.severity for f in findings] == ["fail"]
+    assert str(operator) in findings[0].detail
+    assert has_failures(audit_bot(bot, fleet, paths))
+
+
+def test_present_operator_gitconfig_is_reported_as_external_not_failure(
+    tmp_path, monkeypatch
+):
+    """Both host files the composed .gitconfig leans on are external coupling and
+    belong in the visibility report — but INFO, so a correctly-composed bot does
+    not fail the gate."""
+    bot, fleet, paths, operator = _git_cred_fleet(tmp_path, monkeypatch)
+    findings = audit_bot(bot, fleet, paths)
+    assert not has_failures(findings)
+    details = [f.detail for f in findings if f.kind == "external_ref"]
+    assert any(str(operator) in d for d in details), details
+    assert any("/usr/bin/gh" in d for d in details), details
+
+
+def test_no_git_credentials_reports_no_git_externals(tmp_path, monkeypatch):
+    """Inertness: a fleet declaring none must not grow report lines about a file
+    it never includes."""
+    bot, fleet, paths, _ = _git_cred_fleet(tmp_path, monkeypatch)
+    bot.git_credentials = {}
+    findings = audit_bot(bot, fleet, paths)
+    assert not [f for f in findings if f.kind == "missing_external"]
+    assert not [f for f in findings if "git " in f.detail]

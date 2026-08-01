@@ -66,6 +66,10 @@ fleet:
     mcp: [github]                             # MCP servers all bots use (bot stanza merges, not replaces)
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication, no-merge-own-pr]
     protocols: [report-back, context-management, telegram-routing, telegram-formatting]
+    # git_credentials:                         # OPTIONAL — org -> env var NAME (never a token)
+    #   MyOrg: MYORG_GITHUB_PAT                # needed when bots push to >1 org: fine-grained
+    #   OtherOrg: OTHERORG_GITHUB_PAT          # PATs are single-owner, so one token can't do both.
+    #                                          # Composes <bot_dir>/.gitconfig + GIT_CONFIG_GLOBAL.
     telegram:                                  # telegram defaults — bot stanza overrides per field
       token_env: TELEGRAM_BOT_TOKEN            # shared token (most fleets use one bot token)
       require_mention: true                    # workers respond to @-mentions only
