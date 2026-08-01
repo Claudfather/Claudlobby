@@ -14,13 +14,49 @@ Before each step, check filesystem state. Skip completed steps:
 
 | Check | Skip to |
 |-------|---------|
+| `claudlobby.composer` imports | Step 1 |
 | All host deps present | Step 2 |
 | `.env` exists with `TELEGRAM_TOKEN_CLAUDFATHER` filled in | Step 4 |
 | `fleet.yaml` exists | Step 4 (validate + generate) |
 | `runtime/bots/claudfather/CLAUDE.md` exists | Step 5 |
 | tmux session `claudfather` running | Step 5 (setup-fleet is idempotent: converges timer enrollment, skips the healthy bot), then report success |
 
-If `--check-only` was passed, run Step 1 only and exit.
+If `--check-only` was passed, run Steps 0 and 1 only, then exit.
+
+## Step 0: Is claudlobby itself installed?
+
+**Do this before anything else.** Every later step shells out to `claudlobby`, so a
+missing package makes the whole flow fail in confusing ways — and the user may
+well be here *because* the documented install did not work for them.
+
+```bash
+python3 -c 'import claudlobby.composer' 2>/dev/null && echo INSTALLED || echo MISSING
+```
+
+Import `claudlobby.composer`, **not** `claudlobby`. The bare package is a plain
+directory at the repo root, so it imports from cwd even when nothing is
+installed — a false positive that reports success on a host with no
+dependencies at all.
+
+If MISSING, create the repo-local venv and install into it:
+
+```bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -e .
+```
+
+Why a venv rather than `pip install -e .`: Homebrew python (macOS) and Debian /
+Raspberry Pi system python are both externally-managed under PEP 668 and refuse
+the install outright. Note `python3 -m pip`, not `pip` — Homebrew ships `pip3`
+only, so bare `pip` is not a command. `lib/setup-system` does exactly this, and
+`claudlobby_cli` prefers `$CLAUDLOBBY_ROOT/.venv`, which is what lets supervised
+launchd/systemd runs resolve the CLI without an activated shell.
+
+Then re-check the import before continuing. If it still fails, stop and show the
+user the real error — do not proceed into Step 1 on a broken install.
+
+**For the rest of this skill:** if the venv exists but is not activated, invoke
+the CLI as `./.venv/bin/claudlobby ...` rather than bare `claudlobby`.
 
 ## Step 1: Host Readiness
 
