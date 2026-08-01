@@ -794,9 +794,16 @@ def _validate_fleet(fleet: FleetConfig, report: ValidationReport) -> None:
     installed_plugins = installed.get("plugins", {})
     for plugin in fleet.plugins.required:
         if plugin not in installed_plugins:
+            # Say when it resolves itself. Declared-but-absent is the NORMAL
+            # state before a bot has ever started: start-bot.sh installs declared
+            # plugins at launch. Without that context the warning reads as a
+            # contradiction of the documented "auto-installed as a fleet default,
+            # no manual setup needed", and sends users to install by hand.
             report.warnings.append(
-                f"plugin '{plugin}' declared in fleet.yaml but not installed — "
-                f"run 'claude plugin install {plugin}'"
+                f"plugin '{plugin}' declared in fleet.yaml but not installed yet — "
+                "bots install declared plugins at startup, so this usually clears "
+                "on first start; to install now, run "
+                f"'claude plugin install {plugin}'"
             )
 
 

@@ -54,34 +54,54 @@ You can also use `python3 -m claudlobby` directly.
 
 ## 2. Set up secrets
 
-Create `.env` at the repo root (gitignored):
+`.env` lives at the repo root and is gitignored. Start from the seed template — it pairs with
+`fleet.yaml.seed`, which §3 uses:
 
 ```bash
-# GitHub — single PAT shared by the fleet
+cp .env.seed.example .env
+```
+
+**A `.env` template and a `fleet.yaml` template are a pair.** The variable names in `.env` must
+match what `fleet.yaml` declares as each bot's `token_env`, so mixing templates silently gives
+you a bot whose token is never found:
+
+| `.env` template | pairs with | Telegram variable(s) |
+|---|---|---|
+| `.env.seed.example` | `fleet.yaml.seed` | `TELEGRAM_TOKEN_CLAUDFATHER` |
+| `.env.example` (fuller reference — every MCP integration) | `fleet.yaml.example` | whatever each bot's `token_env` names |
+
+The seed needs exactly two values, one of them optional:
+
+```bash
+TELEGRAM_TOKEN_CLAUDFATHER=      # claudfather's bot token, from @BotFather
+# GITHUB_PAT=                    # optional — only if claudfather should touch repos
+```
+
+As the fleet grows, `.env.example` covers the rest (Notion, Slack, Shopify, Printify, …). A
+multi-bot fleet running one BotFather bot per bot looks like:
+
+```bash
 GITHUB_PAT=ghp_xxxxxxxxxxxxxxxxxxxx
-
-# Notion (if any bot uses Notion) — full walkthrough in documentation/integrations/notion-integration.md
 NOTION_TOKEN=ntn_xxxxxxxxxxxxxxxxxxxx
-
-# Slack (optional)
 SLACK_TOKEN=xoxp-xxxxxxxxxxxxxxxxxxxx
 
-# Per-bot Telegram tokens (one BotFather bot per fleet bot)
+# One BotFather bot per fleet bot — names must match fleet.yaml's token_env
 TELEGRAM_TOKEN_LEAD=8888888:AAAAAAAAAAAAAAAAAAAA
 TELEGRAM_TOKEN_ENG1=9999999:BBBBBBBBBBBBBBBBBBBB
 TELEGRAM_TOKEN_REV1=7777777:CCCCCCCCCCCCCCCCCCCC
-
-# Other MCP credentials as needed
-SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxxxxxxxxx
-SHOPIFY_STORE_DOMAIN=mystore.myshopify.com
-PRINTIFY_API_KEY=eyJ...
-PRINTIFY_SHOP_ID=12345678
 ```
 
 Token rules:
 
 - One Telegram bot per fleet bot (create via [@BotFather](https://t.me/BotFather)). Disable group privacy on each bot so it can read group messages. The env-var name (`TELEGRAM_TOKEN_LEAD`) must match what `fleet.yaml` declares as `token_env`.
 - All `${VAR}` placeholders in `library/mcp/*.json` resolve from this `.env`. Missing vars produce a warning at validate time and a runtime failure when the MCP server starts.
+- **`token_env: TELEGRAM_BOT_TOKEN` is the one name `validate` cannot check for you.** That is
+  the Telegram plugin's own read variable, so its home is the plugin's channel-dir `.env`, not a
+  tier the compositor inspects — the missing-token warning is deliberately suppressed for it to
+  avoid a permanent false alarm. `fleet.yaml.example` uses it as the shared-token default, so if
+  you start from that template, a clean `validate` tells you nothing about whether your bot can
+  actually reach Telegram. Prefer a distinctly named var (`TELEGRAM_TOKEN_<BOT>`, as
+  `fleet.yaml.seed` does) if you want that check to work.
 
 ## 3. Write fleet.yaml
 
