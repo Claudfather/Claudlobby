@@ -1,0 +1,74 @@
+{
+  "_env_contract": {
+    "INSTAGRAM_ACCESS_TOKEN": {
+      "description": "Long-lived Meta Graph API access token for an Instagram Professional (Business or Creator) account. Long-lived tokens expire after ~60 days and must be refreshed before expiry — see the refresh note in library/integrations/meta-business.md. DM tools additionally require the instagram_manage_messages permission, which is Advanced Access and only granted after Meta App Review. Gitignored — never commit; store only in the fleet .env.",
+      "tier": "fleet"
+    },
+    "INSTAGRAM_BUSINESS_ACCOUNT_ID": {
+      "description": "Numeric id of the Instagram Professional account this bot acts for. Not a secret, but fleet-specific — it identifies a real account, so it belongs in the fleet .env rather than a committed file.",
+      "tier": "fleet"
+    },
+    "FACEBOOK_APP_ID": {
+      "description": "Meta app id the access token was issued under. Required for the server's token-refresh path.",
+      "tier": "fleet"
+    },
+    "FACEBOOK_APP_SECRET": {
+      "description": "Meta app secret, paired with FACEBOOK_APP_ID for token refresh. A real credential — treat it exactly like the access token.",
+      "tier": "fleet"
+    }
+  },
+  "_permissions_contract": {
+    "tools": [
+      "get_profile_info",
+      "get_account_pages",
+      "get_account_insights",
+      "validate_access_token",
+      "get_media_posts",
+      "get_media_insights",
+      "get_content_publishing_limit",
+      "publish_media",
+      "publish_carousel",
+      "publish_reel",
+      "get_comments",
+      "post_comment",
+      "reply_to_comment",
+      "delete_comment",
+      "hide_comment",
+      "get_conversations",
+      "get_conversation_messages",
+      "send_dm",
+      "search_hashtag",
+      "get_hashtag_media",
+      "get_stories",
+      "get_mentions",
+      "business_discovery"
+    ],
+    "read_only_tools": [
+      "get_profile_info",
+      "get_account_pages",
+      "get_account_insights",
+      "validate_access_token",
+      "get_media_posts",
+      "get_media_insights",
+      "get_content_publishing_limit",
+      "get_comments",
+      "get_conversations",
+      "get_conversation_messages",
+      "search_hashtag",
+      "get_hashtag_media",
+      "get_stories",
+      "get_mentions",
+      "business_discovery"
+    ]
+  },
+  "meta-business": {
+    "command": "npx",
+    "args": ["-y", "@mcpware/instagram-mcp@1.0.4"],
+    "env": {
+      "INSTAGRAM_ACCESS_TOKEN": "${INSTAGRAM_ACCESS_TOKEN}",
+      "INSTAGRAM_BUSINESS_ACCOUNT_ID": "${INSTAGRAM_BUSINESS_ACCOUNT_ID}",
+      "FACEBOOK_APP_ID": "${FACEBOOK_APP_ID}",
+      "FACEBOOK_APP_SECRET": "${FACEBOOK_APP_SECRET}"
+    }
+  }
+}
