@@ -74,18 +74,41 @@ the next person automatically. A workaround you merely remember helps one bot
 once. If the only available fix is "the operator should have known", that is a
 documentation defect and it is yours to file.
 
-**Search before you file — always.** This practice manufactures duplicates faster
-than anything else you do, because a symptom that is obvious to you today was
-obvious to someone else last week. Before writing up any friction, search the
-backlog for the *symptom*, not for your phrasing of the cause:
+**Search before you file — and search more than once.** This practice
+manufactures duplicates faster than anything else you do, because friction
+obvious to you today was obvious to someone else last week.
+
+One search is not enough, and the reason is mechanical: **GitHub issue search is
+lexical, not semantic.** It cannot match a defect you described in different
+words than the original filer used. Rephrasing toward the *symptom* does not fix
+this — symptom-level queries miss too, whenever your vocabulary and theirs differ.
+
+So run **two or three deliberately different searches** before concluding
+anything is unfiled: the symptom, the component or file name, and one synonym.
 
 ```bash
-gh issue list --repo Claudfather/<repo> --state all --search '<symptom>'
+gh issue list --repo Claudfather/<repo> --state all --search 'orphan browser reaper'
+gh issue list --repo Claudfather/<repo> --state all --search 'orphan-browser-reaper.sh'
+gh issue list --repo Claudfather/<repo> --state all --search 'chrome_crashpad_handler'
 ```
 
-When a match exists, the contribution is **fresh evidence on the open issue** — a
-live reproduction, a widened blast radius, a field observation it lacked — not a
-second issue. Duplicates make a backlog less trustworthy, not more complete.
+The component name is usually the strongest of the three — file and function names
+are the one vocabulary two reporters reliably share.
+
+**A match is a routing decision, not a terminal disposition.** "Already filed" is
+where the work starts, not where it stops. Read the matched issue and decide:
+
+- Does it actually own this ground, or is it merely adjacent? The right home may
+  be a *different* open issue than the one your search surfaced first.
+- Is part of what you found genuinely absent from it? Then that part still needs
+  saying — as a comment on the issue that owns it, with your evidence.
+- Does your evidence *change* it — falsify a claim, break a proposed fix, widen
+  the blast radius? That is worth more than a new issue and is easily lost by
+  filing one.
+
+Stopping at the first match buries real distinctions under an existing number,
+and they never get fixed. Duplicates make a backlog less trustworthy; misrouted
+findings make it quietly wrong.
 
 ## Quality gates
 
@@ -93,8 +116,9 @@ Never violated, regardless of role:
 
 - **No finding without a citation.** If you cannot name the row, file, or command
   output behind a claim, it is a hypothesis — label it one or drop it.
-- **No new issue without a backlog search.** State what you searched. An
-  unsearched finding is a duplicate until proven otherwise.
+- **No new issue without two or three differently-worded backlog searches.**
+  State every query you ran. One search that returned nothing is evidence of
+  vocabulary mismatch, not of absence.
 - **No silent caps.** If you sampled, truncated, capped, or skipped anything,
   the output says so and says how much. A report that quietly covers 40% of the
   estate while reading as complete is worse than no report.
