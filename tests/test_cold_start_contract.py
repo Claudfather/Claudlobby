@@ -350,3 +350,43 @@ class TestSetupSystemHonesty:
             "dry-run must report claudlobby as missing when it is missing, "
             "rather than asserting the install it only described"
         )
+
+    def test_dry_run_never_ticks_something_it_only_described(self):
+        """Behavioural, against real `--dry-run` output on this host.
+
+        The invariant: a line announcing an action was *skipped* must never be
+        immediately followed by a tick claiming that action succeeded. That is
+        the whole bug class — the success line living outside the if/else — and
+        it shipped twice: phase 4 (claudlobby, fixed first) and phase 6 (the
+        claudna plugin, found only by re-running setup end to end afterwards).
+
+        A source-grep version of this would have passed on phase 6 while it was
+        still broken, since each phase spells the mistake differently. Parsing
+        real output catches any phase, including ones not written yet.
+        """
+        proc = subprocess.run(
+            ["bash", str(REPO_ROOT / "lib" / "setup-system"), "--dry-run"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=str(REPO_ROOT),
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"setup-system --dry-run did not complete here: {proc.stderr[-400:]}")
+
+        lines = [ln.strip() for ln in proc.stdout.splitlines()]
+        offenders = []
+        for i, line in enumerate(lines[:-1]):
+            if "[dry-run] would run" not in line:
+                continue
+            nxt = lines[i + 1]
+            # ✓ is the ok() marker; ○ (miss) and further would-run lines are fine.
+            if "✓" in nxt:
+                offenders.append(f"{line}\n    -> {nxt}")
+
+        assert not offenders, (
+            "dry-run reported success for an action it skipped:\n"
+            + "\n".join(offenders)
+            + "\n\nThe /setup skill is told to parse this output and skip ahead, "
+            "so a tick here sends the guided flow past a missing dependency."
+        )

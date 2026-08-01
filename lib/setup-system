@@ -67,6 +67,26 @@ run()  {
     fi
 }
 
+# record_install_outcome <name>
+# Record the result of an install that `run` may have SKIPPED.
+#
+# Under --dry-run nothing was installed, so the thing is still missing. Saying
+# otherwise is not cosmetic: the /setup skill is explicitly told to run this
+# script with --dry-run and parse its output instead of doing its own checks, so
+# a success recorded here sends the guided flow past a genuinely absent
+# dependency. Phase 4 shipped that bug and printed "prereqs missing: (none)" on
+# a host with no claudlobby at all; every call site that reports after `run`
+# has the same shape, so they all route through here rather than each deciding.
+record_install_outcome() {
+    local name="$1"
+    if [ "$DRY_RUN" = 1 ]; then
+        PREREQ_MISSING+=("$name")
+        NEXT_STEPS+=("Re-run without --dry-run to install $name")
+    else
+        PREREQ_OK+=("$name")
+    fi
+}
+
 PREREQ_OK=()
 PREREQ_MISSING=()
 NEXT_STEPS=()
@@ -105,7 +125,7 @@ ensure_apt_pkg() {
     else
         miss "apt $pkg missing — installing"
         run sudo apt-get install -y -qq "$pkg"
-        PREREQ_OK+=("$pkg")
+        record_install_outcome "$pkg"
     fi
 }
 
@@ -126,7 +146,7 @@ ensure_brew_pkg() {
     else
         miss "brew $pkg missing — installing"
         run brew install --quiet "$pkg"
-        PREREQ_OK+=("$pkg")
+        record_install_outcome "$pkg"
     fi
 }
 
@@ -171,7 +191,7 @@ phase_packages() {
             else
                 printf 'setup-system: [dry-run] would run: install gh from GitHub apt repo\n'
             fi
-            PREREQ_OK+=("gh")
+            record_install_outcome gh
         fi
     elif [ "$_OS" = "Darwin" ]; then
         if ! command -v brew >/dev/null 2>&1; then
@@ -384,6 +404,9 @@ phase_plugins() {
             }
         else
             printf 'setup-system: [dry-run] would run: claude plugin marketplace add Claudfather/clauDNA + install claudna\n'
+            miss "claudna plugin still missing (dry-run made no changes)"
+            NEXT_STEPS+=("Re-run without --dry-run to install the claudna plugin")
+            return
         fi
         ok "claudna plugin installed"
     fi
