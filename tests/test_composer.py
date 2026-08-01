@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import plistlib
 import subprocess
 from pathlib import Path
@@ -3823,3 +3824,68 @@ class TestGitConfigLifecycleThroughComposeBot:
         out = diff_bot("lead", fleet, paths)
         assert ".gitconfig drift in lead" in out
         assert "Hand Edited" in out
+
+
+class TestBotEnvStubDoesNotShadowUpstream:
+    """A bot-tier stub must never blank a value the fleet tier already set.
+
+    start-bot.sh sources .env tiers in order and the bot tier is LAST, so a live
+    `export FOO=` in the bot's scaffold wins over the operator's real value.
+    Following the /setup skill exactly hit this: the skill writes the Telegram
+    token to the fleet-tier .env, generate then scaffolded an empty bot-tier
+    stub, and the bot booted with no token and a dead inbound bridge — with
+    nothing in the logs pointing at the cause.
+    """
+
+    def _env_var(self, name: str):
+        from claudlobby.composer import EnvVar
+
+        return EnvVar(name=name, description="test var", tier="bot", source="test")
+
+    def test_upstream_provided_var_is_commented_not_live(self, tmp_path):
+        from claudlobby.composer import _scaffold_env_merge
+
+        bot_env = tmp_path / "bot.env"
+        _scaffold_env_merge(
+            bot_env,
+            "# Bot environment for: test",
+            [self._env_var("TELEGRAM_TOKEN_X")],
+            provided_upstream=frozenset({"TELEGRAM_TOKEN_X"}),
+        )
+        text = bot_env.read_text()
+        assert "# export TELEGRAM_TOKEN_X=" in text
+        assert not re.search(r"^export TELEGRAM_TOKEN_X=", text, re.MULTILINE), (
+            "a live empty export would override the upstream value:\n" + text
+        )
+
+    def test_var_absent_upstream_still_gets_a_live_stub(self, tmp_path):
+        from claudlobby.composer import _scaffold_env_merge
+
+        bot_env = tmp_path / "bot.env"
+        _scaffold_env_merge(
+            bot_env, "# Bot environment for: test", [self._env_var("SOME_OTHER_TOKEN")]
+        )
+        assert re.search(
+            r"^export SOME_OTHER_TOKEN=", bot_env.read_text(), re.MULTILINE
+        ), "vars with no upstream value must still be prompted for"
+
+    def test_upstream_value_survives_real_shell_sourcing_order(self, tmp_path):
+        """The property that actually matters, exercised through bash."""
+        from claudlobby.composer import _scaffold_env_merge
+
+        fleet_env = tmp_path / "fleet.env"
+        fleet_env.write_text("TELEGRAM_TOKEN_X=realvalue123\n")
+        bot_env = tmp_path / "bot.env"
+        _scaffold_env_merge(
+            bot_env,
+            "# Bot environment for: test",
+            [self._env_var("TELEGRAM_TOKEN_X")],
+            provided_upstream=frozenset({"TELEGRAM_TOKEN_X"}),
+        )
+        script = f'set -a; . "{fleet_env}"; . "{bot_env}"; printf "%s" "${{TELEGRAM_TOKEN_X:-EMPTY}}"'
+        out = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True
+        ).stdout
+        assert out == "realvalue123", (
+            f"bot-tier scaffold clobbered the fleet-tier value: got {out!r}"
+        )

@@ -2343,12 +2343,23 @@ def _scaffold_env_merge(
     header: str,
     required: list[EnvVar],
     log=None,
+    provided_upstream: frozenset[str] = frozenset(),
 ) -> None:
     """Idempotent .env scaffold: preserve existing values, append new stubs.
 
     Reads the file (if it exists), keeps every existing line verbatim, then
     appends stub entries for any contract vars not already present.
     Re-running is safe: no values are lost and new vars always surface.
+
+    ``provided_upstream`` names vars that already resolve to a NON-EMPTY value at
+    a higher .env tier. Their stubs are emitted commented-out, because
+    start-bot.sh sources the bot tier *last* — so a live ``export FOO=`` here
+    silently blanks a value the operator already set at the fleet tier. That is
+    not hypothetical: following the /setup skill exactly (which writes the
+    Telegram token to the fleet-tier .env) produced a bot whose token was wiped
+    by its own scaffold, leaving a dead inbound bridge with nothing in the logs
+    to explain it. A commented stub still documents the per-bot override point,
+    which is the real reason bot-tier stubs exist (one BotFather bot per bot).
     """
     existing_keys: set[str] = set()
     existing_content = ""
@@ -2381,7 +2392,15 @@ def _scaffold_env_merge(
         for ev in new_vars:
             source_note = f" (from {ev.source})" if ev.source else ""
             lines.append(f"# {ev.description}{source_note}")
-            lines.append(f"export {ev.name}=")
+            if ev.name in provided_upstream:
+                # Commented, not live: an empty export here would override the
+                # value already set upstream, because the bot tier is sourced last.
+                lines.append(
+                    f"# export {ev.name}=   "
+                    "# already set at a higher .env tier; uncomment to override for this bot"
+                )
+            else:
+                lines.append(f"export {ev.name}=")
 
     env_path.write_text("\n".join(lines) + "\n")
     env_path.chmod(0o600)
@@ -2412,12 +2431,19 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
         )
 
     if bot_vars:
+        # Vars already carrying a real value upstream must not be re-stubbed live
+        # at the bot tier — start-bot.sh sources the bot tier last, so an empty
+        # export would win over the operator's actual value.
+        upstream = frozenset(
+            name for name, value in dotenv.read(paths.env_file).items() if value
+        )
         for bot_name in fleet.bots:
             _scaffold_env_merge(
                 paths.bot_runtime(bot_name) / ".env",
                 f"# Bot environment for: {bot_name}",
                 bot_vars,
                 log=log,
+                provided_upstream=upstream,
             )
 
 

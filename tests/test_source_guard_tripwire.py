@@ -76,6 +76,14 @@ _BLESSED_RAW_READS = {
     ("composer.py", "int_path.read_text()"),
     ("composer.py", "env_path.read_text()"),
     ("composer.py", "dotenv.read(env_path)"),
+    # Fleet-tier sibling of the read above, in scaffold_env_files. EXEMPT, and
+    # narrowly so: only the KEYS and the emptiness of each value are consumed —
+    # `frozenset(name for name, value in ... if value)` — to decide whether a
+    # bot-tier stub must be commented out rather than emitted live (a live empty
+    # export would blank the fleet-tier value, since the bot tier is sourced
+    # last). No value crosses into a path, a grant, or composed output, so this
+    # adds no fleet.yaml-shaped source surface for L1 to miss.
+    ("composer.py", "dotenv.read(paths.env_file)"),
 }
 
 

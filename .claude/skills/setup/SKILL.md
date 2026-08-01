@@ -113,13 +113,34 @@ Walk the user through @BotFather:
 4. Copy the token BotFather gives you
 5. Important: in BotFather, go to `/mybots` → select your bot → Bot Settings → Group Privacy → Turn off
 
-When the user provides the token, validate it:
+When the user provides the token, validate it — and check privacy mode in the same call:
 
 ```bash
-curl -s "https://api.telegram.org/bot$TOKEN/getMe" | jq -r '.ok'
+curl -s "https://api.telegram.org/bot$TOKEN/getMe" \
+  | jq '{ok, username: .result.username, can_read_all_group_messages: .result.can_read_all_group_messages}'
 ```
 
-Must return `true`. Extract the bot username from the response for use in fleet.yaml.
+`ok` must be `true`. Take the bot username from the response for `fleet.yaml`.
+
+**`can_read_all_group_messages` must be `true` for a group bot — verify it, do not just
+instruct it.** Step 5 above tells the user to turn Group Privacy off, but telling is not
+checking, and this is silent when wrong: the bot boots, the bridge reports ready, it can post
+perfectly well, and it simply never sees most messages. The seed sets
+`telegram.require_mention: false`, meaning claudfather is expected to answer everything in the
+group — which privacy mode makes impossible.
+
+If it is `false`, stop and give the user both fixes:
+
+> Group Privacy is still on, so the bot cannot see normal group messages — only ones that
+> @mention it.
+> - **Make the bot an admin in the group** — takes effect immediately; admins always see
+>   everything regardless of privacy mode. Simplest fix.
+> - **Or** BotFather → `/mybots` → your bot → Bot Settings → Group Privacy → Turn off, **then
+>   remove and re-add the bot to the group.** The change only applies on re-join, so flipping it
+>   without re-adding looks like it worked and changes nothing.
+
+Re-run `getMe` after they act, and only continue once it reports `true` (or the user explicitly
+chooses to run mention-only).
 
 ### 2b. Telegram Group Chat ID
 
@@ -209,13 +230,35 @@ re-running never restarts a working claudfather. warm-cache stays as a
 network prefetch so first boot doesn't pay a cold npx download inside the
 readiness window.
 
-After `setup-fleet`, poll for the tmux session to confirm claudfather is alive:
+After `setup-fleet`, confirm claudfather is alive. **Each bot runs on its own private tmux
+server** (`-L <socket>` where the socket is `BOT_SERVICE`), so the default-server check finds
+nothing even on a perfectly healthy boot:
 
 ```bash
-tmux has-session -t claudfather 2>/dev/null
+tmux has-session -t claudfather          # WRONG — queries the default server
+# error connecting to /private/tmp/tmux-501/default (No such file or directory)
 ```
 
-Poll up to 90 seconds (matching `start-bot.sh` readiness timeout). If the session doesn't appear, report the failure and suggest checking logs at `runtime/bots/claudfather/logs/`.
+Use the bot's own socket:
+
+```bash
+SOCK=$(grep -E 'BOT_SERVICE=' runtime/bots/claudfather/bot.conf | head -1 | sed -E 's/.*BOT_SERVICE="?([^"]*)"?.*/\1/')
+tmux -L "$SOCK" has-session -t claudfather 2>/dev/null && echo ALIVE
+```
+
+Poll up to 90 seconds (matching `start-bot.sh` readiness timeout).
+
+Two stronger signals worth checking, both cheaper than the pane:
+
+```bash
+launchctl print "gui/$(id -u)/com.claudlobby.seed.claudfather" | grep -E 'state|pid'   # macOS
+grep -E 'BRIDGE_READY|READY|POLL_START' runtime/bots/claudfather/logs/startup.log
+```
+
+`BRIDGE_READY — Telegram poller up` is the one that means inbound actually works. A session that
+exists is not the same as a bot that can receive messages.
+
+If it doesn't come up, report the failure and check `runtime/bots/claudfather/logs/`.
 
 ## Step 6: Success
 
