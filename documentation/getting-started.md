@@ -279,6 +279,23 @@ Use `claudlobby diff` to check for drift between generated output and what's in 
 
 - **MCP server fails to start** → check `.env` has the env vars referenced in `library/mcp/<server>.json`
 - **Bot doesn't respond in Telegram** → verify `TELEGRAM_TOKEN_<X>` matches BotFather, and group privacy is disabled on the bot in BotFather
+- **Bot went quiet in a group that used to work, with no error anywhere** → the group probably
+  migrated from a basic group to a supergroup, which **changes its chat ID**. Nothing logs this;
+  the bot is simply talking to an ID that no longer exists. Confirm and recover:
+
+  ```bash
+  curl -s "https://api.telegram.org/bot$TOKEN/getChat?chat_id=$OLD_ID" | jq '.ok, .description'
+  ```
+
+  A failed lookup (or a `.result.id` that differs from what you configured) means it migrated.
+  Re-run [@RawDataBot](https://t.me/raw_data_bot) in the group for the new ID, update
+  `telegram_group_chat_id` in `fleet.yaml`, `claudlobby generate`, and restart the bot.
+
+  Telegram converts a basic group to a supergroup as a **side effect** of other settings — making
+  chat history visible to new members, assigning a public username, enabling slow mode, or passing
+  200 members. There is no "upgrade" button and the conversion is one-way, so you generally
+  discover it by having caused it accidentally. A basic group is fine to run on; just know this is
+  the failure mode.
 - **Bot loops on restart** → `journalctl --user -u <bot> -n 50` (Linux) or `tail lib/logs/<bot>.err.log` (macOS) — most often a missing token or a Claude Code auth issue
 - **Skill not loading** → confirm symlink exists in `runtime/bots/<bot>/.claude/skills/<skill>` and points to `library/skills/<skill>/`
 
