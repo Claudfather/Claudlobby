@@ -39,6 +39,11 @@ lib/setup-system --dry-run     # preview: reports what is present and what it wo
 lib/setup-system               # apply
 ```
 
+**The real run needs `sudo`** and will prompt for it: its managed-settings phase writes the
+root-owned `/Library/Application Support/ClaudeCode/managed-settings.json` (channel-plugin
+approvals), and on Linux it installs apt packages. `--dry-run` needs no privileges and prints
+every command it would run, so preview first if that matters to you.
+
 The `-e .` editable install creates a `claudlobby` console script at `.venv/bin/claudlobby`.
 You can also use `python3 -m claudlobby` directly.
 
@@ -138,9 +143,13 @@ Expect a clean run, or warnings only (missing env vars, etc.). Hard errors mean 
 expertise file, or an unreplaced template placeholder — fix `fleet.yaml` and re-run.
 
 Validate hard-fails on any `REPLACE_ME` left in `telegram_group_chat_id`, `human_telegram_id`,
-or a bot's `telegram.handle`. That check exists because those values fail *silently* otherwise:
-generation succeeds, the bot boots, and the only symptom is a Telegram API error at runtime,
-long after the cause.
+or a bot's `telegram.handle`. `generate` re-runs validation and refuses too
+(`ERROR validation errors — refusing to generate`), so you cannot compose a fleet around an
+unfilled placeholder.
+
+The check was added because, without it, these were the one class of mistake that failed
+*silently*: validate passed at exit 0, generate composed a bot, it booted, and the only symptom
+was a Telegram API error at runtime — arbitrarily far from the cause.
 
 ## 5. Generate
 

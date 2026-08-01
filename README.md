@@ -43,6 +43,9 @@ Then type `/setup` — it checks your host, collects credentials, and spins up c
 >
 > Prefer not to manage it yourself? `lib/setup-system` creates the venv, installs claudlobby,
 > and checks every other host prerequisite in one idempotent pass (`--dry-run` to preview).
+> **It will prompt for `sudo`** — its managed-settings phase writes the root-owned
+> `/Library/Application Support/ClaudeCode/managed-settings.json` (and on Linux it installs
+> packages). Use `--dry-run` first if you want to see everything it would touch.
 
 **Manual setup:**
 
