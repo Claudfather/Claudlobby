@@ -17,7 +17,6 @@ import re
 import shutil
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -44,6 +43,33 @@ def _shell_lines(doc: Path) -> list[str]:
             if line:
                 out.append(line)
     return out
+
+
+def _synthetic_root(tmp_path: Path) -> Path:
+    """A CLAUDLOBBY_ROOT where **both** resolver rungs would succeed.
+
+    That is the point: the fixture package imports under any interpreter, so the
+    system-python rung is viable, and a stub `.venv/bin/python` makes the venv
+    rung viable too. With only one rung viable a test cannot tell which one ran,
+    which is how a rung-order mutation survived the previous test.
+
+    The stub venv is a shell wrapper that announces itself and then execs the
+    real interpreter, so its use is observable in stdout. No actual virtualenv
+    is created — that kept the old test skipped on CI and on fresh clones.
+    """
+    root = tmp_path / "clroot"
+    pkg = root / "claudlobby"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "composer.py").write_text("")  # satisfies the usability probe
+    (pkg / "__main__.py").write_text("import sys; print('MODULE', *sys.argv[1:])")
+
+    venv_bin = root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    stub = venv_bin / "python"
+    stub.write_text(f'#!/bin/bash\nprintf "VENVPY\\n"\nexec "{sys.executable}" "$@"\n')
+    stub.chmod(0o755)
+    return root
 
 
 class TestDocumentedInstallPath:
@@ -169,17 +195,12 @@ class TestCliResolutionProbe:
             "with no dependencies installed. Probe a submodule that imports the "
             "third-party deps (e.g. claudlobby.composer)."
         )
+        # Renaming composer.py must fail here rather than silently breaking CLI
+        # resolution on every supervised bot — that CI cost is what makes the
+        # probe's coupling to a module name acceptable.
         assert "claudlobby.composer" in src, (
-            "expected a submodule probe (e.g. claudlobby.composer) in claudlobby_cli"
-        )
-        # ...but the probe must not be *only* that. Demanding the submodule
-        # outright is a false negative for a minimal __init__+__main__ checkout,
-        # which runs fine under `python3 -m claudlobby` — and that is the very
-        # case the module-fallback rung exists to serve. Guarded because the
-        # first version of this fix broke it and only CI caught it.
-        assert "ModuleNotFoundError" in src, (
-            "the probe must distinguish a missing claudlobby submodule (fine — "
-            "minimal layout) from a missing third-party dependency (not usable)"
+            "expected a submodule probe (claudlobby.composer) in claudlobby_cli — "
+            "if composer.py was renamed, update the probe with it"
         )
 
     def test_resolver_prefers_the_repo_local_venv(self):
@@ -195,36 +216,68 @@ class TestCliResolutionProbe:
             "runs will fall through to a system python without the deps"
         )
 
-    @pytest.mark.skipif(
-        not (REPO_ROOT / ".venv" / "bin" / "python").exists(),
-        reason="no repo-local .venv on this host",
-    )
-    def test_cli_resolves_with_the_venv_off_path(self, tmp_path: Path):
-        """End-to-end: strip PATH the way launchd does and resolve the CLI."""
-        script = tmp_path / "probe.sh"
-        script.write_text(
-            textwrap.dedent(
-                f"""\
-                export CLAUDLOBBY_ROOT="{REPO_ROOT}"
-                . "$CLAUDLOBBY_ROOT/lib/lib-common.sh"
-                claudlobby_cli --version
-                """
-            )
-        )
-        # A deliberately minimal PATH: no venv, no pipx shims.
+    def test_prefers_the_repo_local_venv_over_system_python(self, tmp_path: Path):
+        """Behavioural rung-order check — asserts WHICH interpreter served the call.
+
+        Replaces a version that was `skipif` on a repo-local `.venv` existing.
+        That guard never fired on CI or on a fresh clone (neither creates one),
+        so the only behavioural test of CLI resolution was dormant exactly where
+        it mattered. Worse, when it *did* run it still passed a mutation that
+        swapped the rung order — it asserted only that the CLI resolved, never
+        that the venv served it, which is the entire property F3 rests on
+        (PR #947 review).
+
+        Here both rungs are deliberately viable: the fixture package imports
+        under any interpreter, and a stub `.venv/bin/python` announces itself.
+        So the assertion can distinguish them.
+        """
+        root = _synthetic_root(tmp_path)
         result = subprocess.run(
-            ["bash", str(script)],
+            ["bash", "-c", f'. "{LIB_COMMON}"\nclaudlobby_cli generate'],
+            env={
+                "CLAUDLOBBY_ROOT": str(root),
+                "PATH": "/usr/bin:/bin",  # no console script, no pipx shims
+                "HOME": str(tmp_path),
+                # The reviewer hit a false PASS from an editable claudlobby in
+                # user site-packages, which resolves regardless of cwd. Scrub it.
+                "PYTHONNOUSERSITE": "1",
+            },
+            cwd="/",  # deliberately not the repo root
             capture_output=True,
             text=True,
+        )
+        assert "MODULE generate" in result.stdout, result.stdout + result.stderr
+        assert "VENVPY" in result.stdout, (
+            "claudlobby_cli resolved via system python3 rather than "
+            "$CLAUDLOBBY_ROOT/.venv. The venv rung must win: a venv console "
+            "script is not on PATH under launchd/systemd, so preferring the "
+            "system interpreter silently drops the dependencies.\n"
+            + result.stdout
+            + result.stderr
+        )
+
+    def test_falls_through_to_system_python_when_no_venv(self, tmp_path: Path):
+        """The venv preference must not become a venv *requirement*.
+
+        Rung 3 exists for a checkout whose deps are installed system-wide (the
+        Pi/apt case). Removing the stub venv must fall through, not fail.
+        """
+        root = _synthetic_root(tmp_path)
+        shutil.rmtree(root / ".venv")
+        result = subprocess.run(
+            ["bash", "-c", f'. "{LIB_COMMON}"\nclaudlobby_cli generate'],
             env={
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "CLAUDLOBBY_ROOT": str(root),
+                "PATH": "/usr/bin:/bin",
                 "HOME": str(tmp_path),
+                "PYTHONNOUSERSITE": "1",
             },
+            cwd="/",
+            capture_output=True,
+            text=True,
         )
-        assert result.returncode == 0, (
-            f"claudlobby_cli failed with the venv off PATH:\n{result.stderr}"
-        )
-        assert "claudlobby" in result.stdout.lower(), result.stdout
+        assert "MODULE generate" in result.stdout, result.stdout + result.stderr
+        assert "VENVPY" not in result.stdout
 
 
 class TestSeedPlaceholderContract:
@@ -244,23 +297,35 @@ class TestSeedPlaceholderContract:
             "check is dead weight"
         )
 
-    def test_validator_treats_placeholders_as_errors_not_warnings(self):
-        """Warnings are documented as an acceptable outcome, so this must error.
+    def test_shipped_seed_actually_fails_validation(self):
+        """Behavioural, against the real seed and the real library.
 
-        getting-started tells the user a warnings-only run is a success. A
-        placeholder warning would therefore read as 'fine' and ship a bot that
-        posts to chat id REPLACE_ME.
+        This replaces a source-pattern version that inspected the body of
+        `_validate_placeholders` for `report.errors.append`. That version stayed
+        green when the guard was **unwired** — commenting out the call site left
+        the function, and both assertions, untouched (PR #947 review). Only
+        calling `validate()` catches that, so this calls it.
+
+        Errors, never warnings: getting-started documents a warnings-only run as
+        success, so a placeholder warning would read as 'fine' and ship a bot
+        pointed at chat id REPLACE_ME.
         """
-        src = (REPO_ROOT / "claudlobby" / "validator.py").read_text()
-        block = re.search(
-            r"def _validate_placeholders.*?(?=\ndef |\Z)", src, re.DOTALL
+        from claudlobby.config import load_fleet
+        from claudlobby.paths import Paths
+        from claudlobby.validator import validate
+
+        paths = Paths(root=REPO_ROOT, seed=True)
+        fleet, _meta = load_fleet(paths.fleet_yaml)
+        report = validate(fleet, paths)
+
+        assert report.has_errors, (
+            "the shipped fleet.yaml.seed must fail validation on its own "
+            "REPLACE_ME values — is _validate_placeholders still wired into "
+            "validate()?"
         )
-        assert block, "_validate_placeholders is gone — the F6 guard was removed"
-        body = block.group(0)
-        assert "report.errors.append" in body
-        assert "report.warnings.append" not in body, (
-            "placeholders must be hard errors, not warnings"
-        )
+        joined = "\n".join(report.errors)
+        for field in ("telegram_group_chat_id", "human_telegram_id", "telegram.handle"):
+            assert field in joined, f"no placeholder error for {field}:\n{joined}"
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash required")
