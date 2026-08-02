@@ -133,14 +133,18 @@ If it is `false`, stop and give the user both fixes:
 
 > Group Privacy is still on, so the bot cannot see normal group messages — only ones that
 > @mention it.
-> - **Make the bot an admin in the group** — takes effect immediately; admins always see
->   everything regardless of privacy mode. Simplest fix.
+> - **Make the bot an admin in the group** — takes effect immediately, and admins receive every
+>   message regardless of privacy mode. Simplest fix. Note `getMe` will still report
+>   `can_read_all_group_messages: false` afterwards: that flag is the **global BotFather
+>   setting**, not per-group behaviour, so it is not the way to confirm this route worked.
 > - **Or** BotFather → `/mybots` → your bot → Bot Settings → Group Privacy → Turn off, **then
 >   remove and re-add the bot to the group.** The change only applies on re-join, so flipping it
->   without re-adding looks like it worked and changes nothing.
+>   without re-adding looks like it worked and changes nothing. This route *does* flip the
+>   `getMe` flag to `true`.
 
-Re-run `getMe` after they act, and only continue once it reports `true` (or the user explicitly
-chooses to run mention-only).
+Confirm by the route the user actually took — re-run `getMe` for the privacy-off route, or send a
+plain (un-mentioned) message in the group and check the bot saw it for the admin route. Do not
+block on `getMe` reporting `true` if they chose admin; it never will.
 
 ### 2b. Telegram Group Chat ID
 
@@ -239,9 +243,10 @@ tmux has-session -t claudfather          # WRONG — queries the default server
 # error connecting to /private/tmp/tmux-501/default (No such file or directory)
 ```
 
-**Ask the CLI rather than resolving the socket by hand.** `claudlobby status` already resolves
-each bot's socket through the shared resolver (`tmux_socket_for_bot`), so it cannot drift from
-what the lib scripts do:
+**Ask the CLI rather than resolving the socket by hand.** `claudlobby status` resolves each bot's
+socket through `claudlobby/paths.py`'s `tmux_socket_for_bot` — a Python twin of the shell helper
+of the same name, so it is a maintained pair rather than one source, but far better than a
+third hand-rolled parse in prose:
 
 ```bash
 claudlobby status --bot claudfather
@@ -254,7 +259,7 @@ gates readiness on, and it verifies a *live, owned* poller process:
 
 ```bash
 . lib/lib-common.sh
-bridge_state runtime/bots/claudfather     # -> up | no_token | no_handle | down | unknown
+bridge_state runtime/bots/claudfather   # -> up | no_bridge | no_token | no_handle | unknown
 ```
 
 Only `up` means inbound actually works. Do **not** substitute

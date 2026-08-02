@@ -2367,6 +2367,13 @@ def _scaffold_env_merge(
     if env_path.is_file():
         existing_content = env_path.read_text()
         existing_keys = set(dotenv.read(env_path).keys())
+        # dotenv.read skips comment lines, so a stub this function previously
+        # commented out is invisible to it and would be appended again on the
+        # next run — unbounded growth, once per generate, and reload-fleet.sh
+        # runs generate on a daily fleet-wide timer. Count them as present.
+        existing_keys |= set(
+            _COMMENTED_STUB_RE.findall(existing_content)
+        )
         # Neutralise a stub that was written live BEFORE its var gained an
         # upstream value. `provided_upstream` is otherwise consulted only when a
         # key is first scaffolded, so the ordinary dev loop — generate while
@@ -2377,20 +2384,22 @@ def _scaffold_env_merge(
         # disk, so anything carrying a value, a comment, or different spacing is
         # left exactly as found.
         if provided_upstream:
+            # split("\n"), never splitlines(): the latter also breaks on \x0b,
+            # \x0c, \x1c-\x1e, \x85, \u2028 and \u2029, none of which end a
+            # line in sh. A secret containing any of them was rewritten as two
+            # lines — destroyed in place, and the .env left unsourceable.
             rewritten = [
                 (
                     f"# {ln}   # already set at a higher .env tier; "
                     "uncomment to override for this bot"
-                    if ln.strip().removeprefix("export ").rstrip("=").strip()
-                    in provided_upstream
-                    and ln.strip().endswith("=")
-                    and ln.strip().startswith("export ")
+                    if (_m := _PRISTINE_STUB_RE.fullmatch(ln.strip()))
+                    and _m.group(1) in provided_upstream
                     else ln
                 )
-                for ln in existing_content.splitlines()
+                for ln in existing_content.split("\n")
             ]
-            rewrote_stub = rewritten != existing_content.splitlines()
-            existing_content = "\n".join(rewritten) + "\n"
+            rewrote_stub = rewritten != existing_content.split("\n")
+            existing_content = "\n".join(rewritten)
 
     new_vars = [
         ev
@@ -2419,9 +2428,13 @@ def _scaffold_env_merge(
             lines.append(f"# {ev.description}{source_note}")
             if ev.name in provided_upstream:
                 # Commented, not live — see the docstring on provided_upstream.
+                # The hint must not itself be a blanking stub: uncommenting
+                # `# export FOO=` yields an empty value and reproduces exactly
+                # the bug this branch exists to prevent. Make it unusable until
+                # a value is supplied.
                 lines.append(
-                    f"# export {ev.name}=   "
-                    "# already set at a higher .env tier; uncomment to override for this bot"
+                    f"# Set at a higher .env tier. To override for this bot only,"
+                    f" uncomment and supply a value:\n# export {ev.name}=<value>"
                 )
             else:
                 lines.append(f"export {ev.name}=")
@@ -2434,6 +2447,12 @@ def _scaffold_env_merge(
         _log.info("%s: added %d new vars (%s)", env_path.name, len(new_vars), new_names)
         if log is not None:
             log(msg)
+
+
+# Anchored so only an untouched scaffold stub matches. `rstrip("=")` also ate a
+# real value of "==" (export TOK===), silently dropping a per-bot override.
+_PRISTINE_STUB_RE = re.compile(r"export ([A-Za-z_]\w*)=")
+_COMMENTED_STUB_RE = re.compile(r"^#\s*export ([A-Za-z_]\w*)=", re.MULTILINE)
 
 
 def _upstream_env_names(paths: Paths) -> frozenset[str]:
@@ -2452,8 +2471,11 @@ def _upstream_env_names(paths: Paths) -> frozenset[str]:
         try:
             if tier.is_file():
                 names |= {n for n, v in dotenv.read(tier).items() if v}
-        except OSError:
-            continue  # an unreadable tier is not worth failing a generate over
+        except (OSError, UnicodeDecodeError):
+            # UnicodeDecodeError is a ValueError, not an OSError: one latin-1
+            # byte in a password in ~/.env would otherwise abort the whole
+            # generate, which is exactly what this guard exists to prevent.
+            continue
     return frozenset(names)
 
 

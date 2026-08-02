@@ -3946,6 +3946,39 @@ class TestBotEnvStubDoesNotShadowUpstream:
             "a per-bot override the operator set was clobbered"
         )
 
+    def test_upstream_spans_home_and_root_tiers_not_just_the_fleet_env(
+        self, tmp_path, monkeypatch
+    ):
+        """The tier list must match start-bot.sh, and be TESTED to match.
+
+        Crippling _upstream_env_names to (paths.env_file,) — the exact "one tier
+        of four" bug — left every other test in this file passing, because the
+        fleet fixture sets fleet_dir == root and so collapses two tiers onto one
+        file. A var in $HOME/.env, which lib-common.sh's own deprecation notice
+        tells operators to use, was never exercised at all.
+        """
+        from claudlobby.composer import _upstream_env_names
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".env").write_text("HOME_TIER_TOKEN=realvalue\nEMPTY_ONE=\n")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / ".env").write_text("ROOT_TIER_TOKEN=realvalue\n")
+        paths = _make_paths(root)
+
+        names = _upstream_env_names(paths)
+        assert "HOME_TIER_TOKEN" in names, (
+            "$HOME/.env is sourced above the bot tier by start-bot.sh and must "
+            f"count as upstream; got {sorted(names)}"
+        )
+        assert "ROOT_TIER_TOKEN" in names, (
+            f"the repo-root .env tier is also upstream; got {sorted(names)}"
+        )
+        assert "EMPTY_ONE" not in names, "an empty value is not 'provided'"
+
     def test_upstream_value_survives_real_shell_sourcing_order(self, tmp_path):
         """The property that actually matters, exercised through bash."""
         from claudlobby.composer import _scaffold_env_merge
