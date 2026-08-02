@@ -74,9 +74,12 @@ run()  {
 # otherwise is not cosmetic: the /setup skill is explicitly told to run this
 # script with --dry-run and parse its output instead of doing its own checks, so
 # a success recorded here sends the guided flow past a genuinely absent
-# dependency. Phase 4 shipped that bug and printed "prereqs missing: (none)" on
-# a host with no claudlobby at all; every call site that reports after `run`
-# has the same shape, so they all route through here rather than each deciding.
+# dependency. Phase 4 shipped exactly that and printed "prereqs missing: (none)"
+# on a host with no claudlobby at all.
+#
+# Prefer run_tracked below. This exists for the sites that cannot use it — an
+# install that is several commands, or one already wrapped in its own DRY_RUN
+# guard — where the outcome still has to be recorded as a separate statement.
 record_install_outcome() {
     local name="$1"
     if [ "$DRY_RUN" = 1 ]; then
@@ -85,6 +88,34 @@ record_install_outcome() {
     else
         PREREQ_OK+=("$name")
     fi
+}
+
+# run_tracked <name> <cmd...>
+# Execute (or, under --dry-run, announce and skip) AND record the outcome, in
+# one call.
+#
+# This shape exists because the bug it replaces was structural, not clerical.
+# `run` returns 0 whether it executed or skipped, so its exit status cannot tell
+# the two apart — which forced every caller to record the outcome in a SECOND,
+# separate, forgettable statement. Three phases forgot it in different ways, and
+# two of those survived the first fix precisely because the fix patched the
+# sites someone had noticed rather than the obligation itself. With execute and
+# record collapsed into one call there is no trailing statement left to omit.
+run_tracked() {
+    local name="$1"; shift
+    if [ "$DRY_RUN" = 1 ]; then
+        printf 'setup-system: [dry-run] would run: %s\n' "$*"
+        PREREQ_MISSING+=("$name")
+        NEXT_STEPS+=("Re-run without --dry-run to install $name")
+        return 1
+    fi
+    if "$@"; then
+        PREREQ_OK+=("$name")
+        return 0
+    fi
+    miss "$name install failed"
+    PREREQ_MISSING+=("$name")
+    return 1
 }
 
 PREREQ_OK=()
@@ -124,8 +155,7 @@ ensure_apt_pkg() {
         PREREQ_OK+=("$pkg")
     else
         miss "apt $pkg missing — installing"
-        run sudo apt-get install -y -qq "$pkg"
-        record_install_outcome "$pkg"
+        run_tracked "$pkg" sudo apt-get install -y -qq "$pkg" || true
     fi
 }
 
@@ -145,8 +175,7 @@ ensure_brew_pkg() {
         PREREQ_OK+=("$pkg")
     else
         miss "brew $pkg missing — installing"
-        run brew install --quiet "$pkg"
-        record_install_outcome "$pkg"
+        run_tracked "$pkg" brew install --quiet "$pkg" || true
     fi
 }
 
@@ -240,7 +269,10 @@ phase_node() {
         elif [ "$_OS" = "Darwin" ]; then
             run brew install --quiet node
         fi
-        PREREQ_OK+=("node")
+        # Not PREREQ_OK unconditionally: under --dry-run nothing was installed.
+        # This branch prints no checkmark, so the false claim surfaced only in
+        # the summary array — invisible to a test that scans for a tick.
+        record_install_outcome node
     fi
 
     # Note bun availability (informational only)
@@ -495,8 +527,9 @@ phase_systemd() {
         ok "loginctl linger enabled for $USER"
     else
         miss "loginctl linger not enabled — enabling"
-        run sudo loginctl enable-linger "$USER"
-        ok "loginctl linger enabled"
+        if run_tracked loginctl-linger sudo loginctl enable-linger "$USER"; then
+            ok "loginctl linger enabled"
+        fi
     fi
 
     # Check XDG_RUNTIME_DIR

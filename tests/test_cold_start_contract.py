@@ -13,6 +13,7 @@ host-independent, so they run everywhere the rest of the suite does.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -351,7 +352,9 @@ class TestSetupSystemHonesty:
             "rather than asserting the install it only described"
         )
 
-    def test_dry_run_never_ticks_something_it_only_described(self):
+    def test_dry_run_never_ticks_something_it_only_described(
+        self, setup_system_dry_run
+    ):
         """Behavioural, against real `--dry-run` output on this host.
 
         The invariant: a line announcing an action was *skipped* must never be
@@ -363,30 +366,70 @@ class TestSetupSystemHonesty:
         A source-grep version of this would have passed on phase 6 while it was
         still broken, since each phase spells the mistake differently. Parsing
         real output catches any phase, including ones not written yet.
+
+        Uses the session-scoped fixture rather than spawning its own run: the
+        script probes real tools and costs ~0.6s, and tests/test_setup_system.py
+        already invoked it. Sharing also keeps one contract for what a non-zero
+        exit means, instead of this module skipping where that one asserts.
         """
-        proc = subprocess.run(
-            ["bash", str(REPO_ROOT / "lib" / "setup-system"), "--dry-run"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=str(REPO_ROOT),
-        )
-        if proc.returncode != 0:
-            pytest.skip(f"setup-system --dry-run did not complete here: {proc.stderr[-400:]}")
+        proc = setup_system_dry_run
+        assert proc.returncode == 0, f"setup-system --dry-run failed: {proc.stderr}"
 
         lines = [ln.strip() for ln in proc.stdout.splitlines()]
-        offenders = []
-        for i, line in enumerate(lines[:-1]):
-            if "[dry-run] would run" not in line:
-                continue
-            nxt = lines[i + 1]
-            # ✓ is the ok() marker; ○ (miss) and further would-run lines are fine.
-            if "✓" in nxt:
-                offenders.append(f"{line}\n    -> {nxt}")
+        # Pairwise over consecutive lines; ✓ is the ok() marker, ○ (miss) and a
+        # further would-run line are both fine.
+        offenders = [
+            f"{line}\n    -> {nxt}"
+            for line, nxt in zip(lines, lines[1:])
+            if "[dry-run] would run" in line and "✓" in nxt
+        ]
 
         assert not offenders, (
             "dry-run reported success for an action it skipped:\n"
             + "\n".join(offenders)
             + "\n\nThe /setup skill is told to parse this output and skip ahead, "
             "so a tick here sends the guided flow past a missing dependency."
+        )
+
+    def test_dry_run_summary_does_not_claim_a_genuinely_absent_tool(
+        self, sysbin_excluding
+    ):
+        """The same lie, in the variant the test above structurally cannot see.
+
+        `phase_node` recorded PREREQ_OK unconditionally but printed no ✓, so its
+        false claim reached only the summary array — invisible to a scan for a
+        tick following a would-run line. Two phases carried the bug past the
+        first fix for exactly that reason.
+
+        So this asserts the summary itself. PATH is narrowed to a mirror of the
+        system bin dirs, which excludes the Homebrew prefix where node lives, so
+        node is genuinely unresolvable and the install branch really executes.
+        """
+        mirror = sysbin_excluding()  # no exclusions needed; the mirror omits brew/node
+        proc = subprocess.run(
+            [str(REPO_ROOT / "lib" / "setup-system"), "--dry-run"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={"PATH": str(mirror), "HOME": os.environ.get("HOME", "/tmp")},
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"setup-system could not run on the narrowed PATH: {proc.stderr[-300:]}")
+
+        ok_line = next(
+            (ln for ln in proc.stdout.splitlines() if "prereqs ok:" in ln), ""
+        )
+        missing_line = next(
+            (ln for ln in proc.stdout.splitlines() if "prereqs missing:" in ln), ""
+        )
+        assert ok_line, f"no summary in output:\n{proc.stdout[-800:]}"
+
+        assert "node" not in ok_line.split(":", 1)[1].split(), (
+            "dry-run listed node under 'prereqs ok' on a host where node is not "
+            f"resolvable and it only ever said it *would* install it.\n"
+            f"{ok_line}\n{missing_line}"
+        )
+        assert "node" in missing_line, (
+            f"node was absent and never installed, so it belongs in "
+            f"'prereqs missing'.\n{ok_line}\n{missing_line}"
         )
