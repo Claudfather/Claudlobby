@@ -156,7 +156,16 @@ phase_preflight() {
 # ---------------------------------------------------------------------------
 ensure_apt_pkg() {
     local pkg="$1"
-    if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+    local found
+    # Same rule as ensure_brew_pkg: ask whether the tool is USABLE, not whether
+    # apt is what installed it. Checking dpkg alone reported a tool absent when
+    # it came from nix/asdf/source, and reported it present when the package is
+    # installed but the binary is not resolvable — the F5 fix was applied to the
+    # brew path only, leaving Linux with the behaviour it was meant to correct.
+    if found="$(command -v "$pkg" 2>/dev/null)"; then
+        ok "$pkg already available ($found)"
+        PREREQ_OK+=("$pkg")
+    elif dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
         ok "apt $pkg already installed"
         PREREQ_OK+=("$pkg")
     else

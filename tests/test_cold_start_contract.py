@@ -442,7 +442,12 @@ class TestSetupSystemHonesty:
             "no install was even attempted — the narrowed PATH did not hide the "
             f"tools, so this check proves nothing.\n{proc.stdout[-600:]}"
         )
-        for tool in ("node", "tmux", "gh"):
+        # node and gh only. Hiding a binary from PATH does not make every check
+        # fail: on Linux tmux/jq/curl resolve through `dpkg -l`, which still
+        # reports the package installed, so asserting on them tests the mirror
+        # rather than the script. node and gh are PATH-determined on both
+        # platforms, so their verdicts genuinely depend on the fix.
+        for tool in ("node", "gh"):
             assert tool not in claimed_ok, (
                 f"dry-run listed {tool} under 'prereqs ok' on a host where it is "
                 f"not resolvable and it only ever said it *would* install it.\n"
