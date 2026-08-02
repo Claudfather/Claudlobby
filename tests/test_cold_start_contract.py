@@ -405,13 +405,24 @@ class TestSetupSystemHonesty:
         system bin dirs, which excludes the Homebrew prefix where node lives, so
         node is genuinely unresolvable and the install branch really executes.
         """
-        mirror = sysbin_excluding()  # no exclusions needed; the mirror omits brew/node
+        # Exclude explicitly rather than relying on the Homebrew prefix being
+        # absent: on Linux these live in /usr/bin and the mirror would include
+        # them, so the install branch would never run and the test would pass
+        # without testing anything.
+        mirror = sysbin_excluding("node", "tmux", "gh")
         proc = subprocess.run(
             [str(REPO_ROOT / "lib" / "setup-system"), "--dry-run"],
             capture_output=True,
             text=True,
             timeout=120,
-            env={"PATH": str(mirror), "HOME": os.environ.get("HOME", "/tmp")},
+            env={
+                "PATH": str(mirror),
+                "HOME": os.environ.get("HOME", "/tmp"),
+                # phase_systemd dereferences $USER under `set -u`; without it the
+                # script exits non-zero on Linux and the skip below swallows the
+                # whole check — the Linux-only bugs would go unguarded.
+                "USER": os.environ.get("USER", "runner"),
+            },
         )
         if proc.returncode != 0:
             pytest.skip(f"setup-system could not run on the narrowed PATH: {proc.stderr[-300:]}")
@@ -424,12 +435,20 @@ class TestSetupSystemHonesty:
         )
         assert ok_line, f"no summary in output:\n{proc.stdout[-800:]}"
 
-        assert "node" not in ok_line.split(":", 1)[1].split(), (
-            "dry-run listed node under 'prereqs ok' on a host where node is not "
-            f"resolvable and it only ever said it *would* install it.\n"
-            f"{ok_line}\n{missing_line}"
+        claimed_ok = set(ok_line.split(":", 1)[1].split())
+        # Non-vacuous: if the mirror failed to hide these, the assertions below
+        # would pass by describing nothing.
+        assert "[dry-run] would run" in proc.stdout, (
+            "no install was even attempted — the narrowed PATH did not hide the "
+            f"tools, so this check proves nothing.\n{proc.stdout[-600:]}"
         )
-        assert "node" in missing_line, (
-            f"node was absent and never installed, so it belongs in "
-            f"'prereqs missing'.\n{ok_line}\n{missing_line}"
-        )
+        for tool in ("node", "tmux", "gh"):
+            assert tool not in claimed_ok, (
+                f"dry-run listed {tool} under 'prereqs ok' on a host where it is "
+                f"not resolvable and it only ever said it *would* install it.\n"
+                f"{ok_line}\n{missing_line}"
+            )
+            assert tool in missing_line, (
+                f"{tool} was absent and never installed, so it belongs in "
+                f"'prereqs missing'.\n{ok_line}\n{missing_line}"
+            )

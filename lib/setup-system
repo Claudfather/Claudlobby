@@ -101,6 +101,11 @@ record_install_outcome() {
 # two of those survived the first fix precisely because the fix patched the
 # sites someone had noticed rather than the obligation itself. With execute and
 # record collapsed into one call there is no trailing statement left to omit.
+#
+# RETURN CONTRACT: non-zero when the command was SKIPPED (--dry-run) or FAILED;
+# zero only when it actually ran and succeeded. Never call it bare under
+# `set -e` — guard with `|| true` when the outcome is only collected for the
+# summary, or with `if` when you need to branch. A bare call aborts the dry-run.
 run_tracked() {
     local name="$1"; shift
     if [ "$DRY_RUN" = 1 ]; then
@@ -115,6 +120,7 @@ run_tracked() {
     fi
     miss "$name install failed"
     PREREQ_MISSING+=("$name")
+    NEXT_STEPS+=("Install $name manually — its install command failed above")
     return 1
 }
 
@@ -225,7 +231,15 @@ phase_packages() {
     elif [ "$_OS" = "Darwin" ]; then
         if ! command -v brew >/dev/null 2>&1; then
             miss "homebrew missing — installing"
-            run /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            # Guarded, not `run`-wrapped: `run` decides to skip only AFTER the
+            # shell has expanded its arguments, so a $( curl ... ) here downloads
+            # the 36KB installer on every --dry-run — a live network call inside
+            # the test suite, and inside a preview that promises to touch nothing.
+            if [ "$DRY_RUN" = 1 ]; then
+                printf 'setup-system: [dry-run] would run: install homebrew from raw.githubusercontent.com\n'
+            else
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            fi
         else
             ok "homebrew already installed"
         fi
@@ -475,7 +489,12 @@ phase_managed_settings() {
         dir="/etc/claude-code"
     fi
     target="$dir/managed-settings.json"
-    count="$(printf '%s' "$MANAGED_CHANNEL_APPROVALS" | jq '.allowedChannelPlugins | length')"
+    # jq is itself a prereq this script installs, so it may legitimately be
+    # absent here. Computing the count unguarded killed the run at phase 7 on a
+    # jq-less host — phases 8-10 and the whole summary never printed, and the
+    # /setup skill is told to parse that summary.
+    count="$(printf '%s' "$MANAGED_CHANNEL_APPROVALS" | jq '.allowedChannelPlugins | length' 2>/dev/null)" || count=""
+    [ -n "$count" ] || count="an unknown number of"
 
     if [ "$DRY_RUN" = 1 ]; then
         printf 'setup-system: [dry-run] would write %s with %s channel-plugin approvals\n' "$target" "$count"
@@ -529,6 +548,10 @@ phase_systemd() {
         miss "loginctl linger not enabled — enabling"
         if run_tracked loginctl-linger sudo loginctl enable-linger "$USER"; then
             ok "loginctl linger enabled"
+        else
+            # Without linger, user units do not survive logout — phase 9 would
+            # enroll timers that silently never fire once the session ends.
+            NEXT_STEPS+=("Enable linger: sudo loginctl enable-linger $USER (user timers do not survive logout without it)")
         fi
     fi
 
@@ -555,6 +578,15 @@ phase_host_jobs() {
     # for the whole repo. It also probes the import from $CLAUDLOBBY_ROOT rather
     # than the caller's cwd, which the inline copy this replaced got wrong, and
     # returns 127 when neither rung resolves.
+    if [ "$DRY_RUN" = 1 ] && ! _claudlobby_importable; then
+        # `run` returns 0 whether it executed or skipped, so the check below
+        # cannot fire under --dry-run. Probe directly instead, or host-jobs goes
+        # unreported in BOTH summary columns on a host with no claudlobby.
+        miss "claudlobby package not importable — cannot compose host jobs"
+        PREREQ_MISSING+=("host-jobs")
+        NEXT_STEPS+=("Install claudlobby, then re-run to enroll host job timers")
+        return
+    fi
     if ! run claudlobby_cli host-timers; then
         miss "claudlobby package not importable — cannot compose host jobs"
         PREREQ_MISSING+=("host-jobs")
