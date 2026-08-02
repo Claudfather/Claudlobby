@@ -330,6 +330,25 @@ class TestShippedLibraryContent:
         # the same server-side write-drop as posthog's readonly=true. Empty
         # list = a verified pure-read fragment.
         "meta-ads": [],
+        # meta-business: NOT pure-read, and deliberately unlike its meta-ads
+        # sibling. @mcpware/instagram-mcp@1.0.4 exposes no write-disable switch,
+        # so all 8 write tools ARE registered and callable — this list plus the
+        # compositor grant is the ONLY layer keeping them prompt-gated, where
+        # meta-ads has two. Verified against the pinned tarball's dist/client.js:
+        # 15 GET-issuing tool methods (the read_only_tools set) vs POST/DELETE
+        # for these 8. Count methods, not "GET" literals — a naive grep returns
+        # 17, because two are cache lookups inside request().
+        # send_dm is the one to watch — it messages real customers.
+        "meta-business": [
+            "publish_media",
+            "publish_carousel",
+            "publish_reel",
+            "post_comment",
+            "reply_to_comment",
+            "delete_comment",
+            "hide_comment",
+            "send_dm",
+        ],
     }
 
     # Verified read-only tools whose names don't match READ_NAME_RE's get_*/list_*
@@ -337,6 +356,17 @@ class TestShippedLibraryContent:
     # listing it here is the deliberate human sign-off. shopify/printify need no
     # entry — their reads all fit the heuristic.
     VERIFIED_NONSTANDARD_READS = {
+        # meta-business: three reads that don't fit get_*/list_*. Each confirmed
+        # side-effect-free in the pinned @mcpware/instagram-mcp@1.0.4 tarball's
+        # dist/client.js — all three issue a bare GET and mutate nothing:
+        #   validate_access_token -> GET me?fields=id (returns a bool)
+        #   search_hashtag        -> GET ig_hashtag_search
+        #   business_discovery    -> GET <ig-account-id>?fields=business_discovery(...)
+        "meta-business": {
+            "validate_access_token",
+            "search_hashtag",
+            "business_discovery",
+        },
         # GA4: keyword schema search over dimension/metric names (read).
         "google-analytics": {"search_schema"},
         # posthog uses <resource>-<action> naming; none fit get_*/list_*.

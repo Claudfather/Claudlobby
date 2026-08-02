@@ -1,0 +1,66 @@
+{
+  "_safety_note": "SINGLE-LAYER write protection, unlike meta-ads.json. This server has no write-disable switch (compare META_ADS_ENABLE_WRITE_TOOLS there), so all 8 write tools — including send_dm, which messages real customers — are registered and callable. The read_only_tools split below is the ONLY thing keeping them behind a permission prompt. Do not add a wildcard grant for this server.",
+  "_env_contract": {
+    "INSTAGRAM_ACCESS_TOKEN": {
+      "description": "Long-lived Meta Graph API access token for an Instagram Professional (Business or Creator) account. Long-lived tokens expire after ~60 days; refreshing is an operator-side Graph API call — this server has no refresh path. DM tools additionally require the instagram_manage_messages permission, which is Advanced Access and only granted after Meta App Review. Gitignored — never commit; store only in the fleet .env.",
+      "tier": "fleet"
+    },
+    "INSTAGRAM_BUSINESS_ACCOUNT_ID": {
+      "description": "Numeric id of the Instagram Professional account this bot acts for. Mapped to the server's own INSTAGRAM_ACCOUNT_ID env var. Not a secret, but fleet-specific — it identifies a real account, so it belongs in the fleet .env rather than a committed file.",
+      "tier": "fleet"
+    }
+  },
+  "_permissions_contract": {
+    "tools": [
+      "get_profile_info",
+      "get_account_pages",
+      "get_account_insights",
+      "validate_access_token",
+      "get_media_posts",
+      "get_media_insights",
+      "get_content_publishing_limit",
+      "publish_media",
+      "publish_carousel",
+      "publish_reel",
+      "get_comments",
+      "post_comment",
+      "reply_to_comment",
+      "delete_comment",
+      "hide_comment",
+      "get_conversations",
+      "get_conversation_messages",
+      "send_dm",
+      "search_hashtag",
+      "get_hashtag_media",
+      "get_stories",
+      "get_mentions",
+      "business_discovery"
+    ],
+    "read_only_tools": [
+      "get_profile_info",
+      "get_account_pages",
+      "get_account_insights",
+      "validate_access_token",
+      "get_media_posts",
+      "get_media_insights",
+      "get_content_publishing_limit",
+      "get_comments",
+      "get_conversations",
+      "get_conversation_messages",
+      "search_hashtag",
+      "get_hashtag_media",
+      "get_stories",
+      "get_mentions",
+      "business_discovery"
+    ]
+  },
+  "meta-business": {
+    "command": "npx",
+    "args": ["-y", "@mcpware/instagram-mcp@1.0.4"],
+    "env": {
+      "INSTAGRAM_ACCESS_TOKEN": "${INSTAGRAM_ACCESS_TOKEN}",
+      "INSTAGRAM_ACCOUNT_ID": "${INSTAGRAM_BUSINESS_ACCOUNT_ID}",
+      "INSTAGRAM_API_VERSION": "v22.0"
+    }
+  }
+}
