@@ -239,24 +239,38 @@ tmux has-session -t claudfather          # WRONG — queries the default server
 # error connecting to /private/tmp/tmux-501/default (No such file or directory)
 ```
 
-Use the bot's own socket:
+**Ask the CLI rather than resolving the socket by hand.** `claudlobby status` already resolves
+each bot's socket through the shared resolver (`tmux_socket_for_bot`), so it cannot drift from
+what the lib scripts do:
 
 ```bash
-SOCK=$(grep -E 'BOT_SERVICE=' runtime/bots/claudfather/bot.conf | head -1 | sed -E 's/.*BOT_SERVICE="?([^"]*)"?.*/\1/')
-tmux -L "$SOCK" has-session -t claudfather 2>/dev/null && echo ALIVE
+claudlobby status --bot claudfather
 ```
 
 Poll up to 90 seconds (matching `start-bot.sh` readiness timeout).
 
-Two stronger signals worth checking, both cheaper than the pane:
+**For inbound, ask `bridge_state` — not the log.** It is the classifier `start-bot.sh` itself
+gates readiness on, and it verifies a *live, owned* poller process:
 
 ```bash
-launchctl print "gui/$(id -u)/com.claudlobby.seed.claudfather" | grep -E 'state|pid'   # macOS
-grep -E 'BRIDGE_READY|READY|POLL_START' runtime/bots/claudfather/logs/startup.log
+. lib/lib-common.sh
+bridge_state runtime/bots/claudfather     # -> up | no_token | no_handle | down | unknown
 ```
 
-`BRIDGE_READY — Telegram poller up` is the one that means inbound actually works. A session that
-exists is not the same as a bot that can receive messages.
+Only `up` means inbound actually works. Do **not** substitute
+`grep BRIDGE_READY .../logs/startup.log`: that file is opened append-only and survives restarts,
+so a line from a previous boot reads exactly like a live bridge — the check passes while the bot
+is deaf. A tmux session existing is likewise not the same as a bot that can receive messages.
+
+Platform service state, if you want it:
+
+```bash
+launchctl print "gui/$(id -u)/<service_prefix>.claudfather" | grep state   # macOS
+```
+
+Note `state = not running` here is **not** a failure on its own: `start-bot.sh` launches the
+detached tmux server and exits 0, so the launchd job finishing is the normal steady state.
+`keepalive` is what revives the session if it dies.
 
 If it doesn't come up, report the failure and check `runtime/bots/claudfather/logs/`.
 

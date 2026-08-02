@@ -3869,6 +3869,83 @@ class TestBotEnvStubDoesNotShadowUpstream:
             r"^export SOME_OTHER_TOKEN=", bot_env.read_text(), re.MULTILINE
         ), "vars with no upstream value must still be prompted for"
 
+    def test_scaffold_env_files_derives_upstream_from_the_real_fleet_env(
+        self, tmp_path
+    ):
+        """End-to-end through the PUBLIC entry point, not the private merge.
+
+        The three tests around this one hand-feed `provided_upstream`, which
+        leaves the part most likely to be miswired — `scaffold_env_files`
+        actually reading the fleet-tier .env off disk and threading the result
+        through the per-bot loop — with no coverage at all. This drives the real
+        function against a real fleet tree so that wiring is exercised.
+
+        Reuses TestScaffoldEnvMerge._setup_fleet rather than standing up a
+        second fleet idiom in the same file; its `worker` bot already declares a
+        bot-tier token_env (TG_TOKEN_W), which is exactly the shape at issue.
+        """
+        root, paths = TestScaffoldEnvMerge()._setup_fleet(tmp_path)
+        # Operator has already set the token at the FLEET tier — as /setup does.
+        (root / ".env").write_text("TG_TOKEN_W=realvalue123\n")
+
+        fleet, _md = load_fleet(root / "fleet.yaml")
+        scaffold_env_files(fleet, paths, log=lambda m: None)
+
+        bot_env = (root / "runtime" / "bots" / "worker" / ".env").read_text()
+        assert "# export TG_TOKEN_W=" in bot_env, bot_env
+        assert not re.search(r"^export TG_TOKEN_W=", bot_env, re.MULTILINE), (
+            "scaffold_env_files emitted a live empty stub over a fleet-tier "
+            f"value:\n{bot_env}"
+        )
+
+    def test_live_stub_is_neutralised_once_upstream_gains_a_value(self, tmp_path):
+        """The ordinary dev loop, which the first version of this fix did not survive.
+
+        Generate before the token exists (live stub is written), obtain the
+        token, fill it in at the fleet tier, generate again. provided_upstream is
+        consulted only when a key is FIRST scaffolded, so the original blanking
+        stub used to survive every later generate and reproduce the bug in full —
+        proven by running _scaffold_env_merge three times and watching the live
+        stub persist unchanged.
+        """
+        from claudlobby.composer import _scaffold_env_merge
+
+        bot_env = tmp_path / "bot.env"
+        # Run 1: nothing upstream yet -> a live stub, correctly.
+        _scaffold_env_merge(
+            bot_env, "# Bot environment for: test", [self._env_var("TELEGRAM_TOKEN_X")]
+        )
+        assert re.search(r"^export TELEGRAM_TOKEN_X=", bot_env.read_text(), re.MULTILINE)
+
+        # Run 2: operator has since set it at the fleet tier.
+        _scaffold_env_merge(
+            bot_env,
+            "# Bot environment for: test",
+            [self._env_var("TELEGRAM_TOKEN_X")],
+            provided_upstream=frozenset({"TELEGRAM_TOKEN_X"}),
+        )
+        text = bot_env.read_text()
+        assert not re.search(r"^export TELEGRAM_TOKEN_X=", text, re.MULTILINE), (
+            "the pre-existing live stub still blanks the upstream value:\n" + text
+        )
+        assert "# export TELEGRAM_TOKEN_X=" in text
+
+    def test_operator_written_value_is_never_rewritten(self, tmp_path):
+        """Only a pristine `export FOO=` is neutralised — never a real value."""
+        from claudlobby.composer import _scaffold_env_merge
+
+        bot_env = tmp_path / "bot.env"
+        bot_env.write_text("# Bot environment for: test\nexport TELEGRAM_TOKEN_X=perbot\n")
+        _scaffold_env_merge(
+            bot_env,
+            "# Bot environment for: test",
+            [self._env_var("TELEGRAM_TOKEN_X")],
+            provided_upstream=frozenset({"TELEGRAM_TOKEN_X"}),
+        )
+        assert "export TELEGRAM_TOKEN_X=perbot" in bot_env.read_text(), (
+            "a per-bot override the operator set was clobbered"
+        )
+
     def test_upstream_value_survives_real_shell_sourcing_order(self, tmp_path):
         """The property that actually matters, exercised through bash."""
         from claudlobby.composer import _scaffold_env_merge
