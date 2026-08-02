@@ -13,6 +13,7 @@ host-independent, so they run everywhere the rest of the suite does.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -350,3 +351,109 @@ class TestSetupSystemHonesty:
             "dry-run must report claudlobby as missing when it is missing, "
             "rather than asserting the install it only described"
         )
+
+    def test_dry_run_never_ticks_something_it_only_described(
+        self, setup_system_dry_run
+    ):
+        """Behavioural, against real `--dry-run` output on this host.
+
+        The invariant: a line announcing an action was *skipped* must never be
+        immediately followed by a tick claiming that action succeeded. That is
+        the whole bug class — the success line living outside the if/else — and
+        it shipped twice: phase 4 (claudlobby, fixed first) and phase 6 (the
+        claudna plugin, found only by re-running setup end to end afterwards).
+
+        A source-grep version of this would have passed on phase 6 while it was
+        still broken, since each phase spells the mistake differently. Parsing
+        real output catches any phase, including ones not written yet.
+
+        Uses the session-scoped fixture rather than spawning its own run: the
+        script probes real tools and costs ~0.6s, and tests/test_setup_system.py
+        already invoked it. Sharing also keeps one contract for what a non-zero
+        exit means, instead of this module skipping where that one asserts.
+        """
+        proc = setup_system_dry_run
+        assert proc.returncode == 0, f"setup-system --dry-run failed: {proc.stderr}"
+
+        lines = [ln.strip() for ln in proc.stdout.splitlines()]
+        # Pairwise over consecutive lines; ✓ is the ok() marker, ○ (miss) and a
+        # further would-run line are both fine.
+        offenders = [
+            f"{line}\n    -> {nxt}"
+            for line, nxt in zip(lines, lines[1:])
+            if "[dry-run] would run" in line and "✓" in nxt
+        ]
+
+        assert not offenders, (
+            "dry-run reported success for an action it skipped:\n"
+            + "\n".join(offenders)
+            + "\n\nThe /setup skill is told to parse this output and skip ahead, "
+            "so a tick here sends the guided flow past a missing dependency."
+        )
+
+    def test_dry_run_summary_does_not_claim_a_genuinely_absent_tool(
+        self, sysbin_excluding
+    ):
+        """The same lie, in the variant the test above structurally cannot see.
+
+        `phase_node` recorded PREREQ_OK unconditionally but printed no ✓, so its
+        false claim reached only the summary array — invisible to a scan for a
+        tick following a would-run line. Two phases carried the bug past the
+        first fix for exactly that reason.
+
+        So this asserts the summary itself. PATH is narrowed to a mirror of the
+        system bin dirs, which excludes the Homebrew prefix where node lives, so
+        node is genuinely unresolvable and the install branch really executes.
+        """
+        # Exclude explicitly rather than relying on the Homebrew prefix being
+        # absent: on Linux these live in /usr/bin and the mirror would include
+        # them, so the install branch would never run and the test would pass
+        # without testing anything.
+        mirror = sysbin_excluding("node", "tmux", "gh")
+        proc = subprocess.run(
+            [str(REPO_ROOT / "lib" / "setup-system"), "--dry-run"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={
+                "PATH": str(mirror),
+                "HOME": os.environ.get("HOME", "/tmp"),
+                # phase_systemd dereferences $USER under `set -u`; without it the
+                # script exits non-zero on Linux and the skip below swallows the
+                # whole check — the Linux-only bugs would go unguarded.
+                "USER": os.environ.get("USER", "runner"),
+            },
+        )
+        if proc.returncode != 0:
+            pytest.skip(f"setup-system could not run on the narrowed PATH: {proc.stderr[-300:]}")
+
+        ok_line = next(
+            (ln for ln in proc.stdout.splitlines() if "prereqs ok:" in ln), ""
+        )
+        missing_line = next(
+            (ln for ln in proc.stdout.splitlines() if "prereqs missing:" in ln), ""
+        )
+        assert ok_line, f"no summary in output:\n{proc.stdout[-800:]}"
+
+        claimed_ok = set(ok_line.split(":", 1)[1].split())
+        # Non-vacuous: if the mirror failed to hide these, the assertions below
+        # would pass by describing nothing.
+        assert "[dry-run] would run" in proc.stdout, (
+            "no install was even attempted — the narrowed PATH did not hide the "
+            f"tools, so this check proves nothing.\n{proc.stdout[-600:]}"
+        )
+        # node and gh only. Hiding a binary from PATH does not make every check
+        # fail: on Linux tmux/jq/curl resolve through `dpkg -l`, which still
+        # reports the package installed, so asserting on them tests the mirror
+        # rather than the script. node and gh are PATH-determined on both
+        # platforms, so their verdicts genuinely depend on the fix.
+        for tool in ("node", "gh"):
+            assert tool not in claimed_ok, (
+                f"dry-run listed {tool} under 'prereqs ok' on a host where it is "
+                f"not resolvable and it only ever said it *would* install it.\n"
+                f"{ok_line}\n{missing_line}"
+            )
+            assert tool in missing_line, (
+                f"{tool} was absent and never installed, so it belongs in "
+                f"'prereqs missing'.\n{ok_line}\n{missing_line}"
+            )

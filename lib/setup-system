@@ -67,6 +67,63 @@ run()  {
     fi
 }
 
+# record_install_outcome <name>
+# Record the result of an install that `run` may have SKIPPED.
+#
+# Under --dry-run nothing was installed, so the thing is still missing. Saying
+# otherwise is not cosmetic: the /setup skill is explicitly told to run this
+# script with --dry-run and parse its output instead of doing its own checks, so
+# a success recorded here sends the guided flow past a genuinely absent
+# dependency. Phase 4 shipped exactly that and printed "prereqs missing: (none)"
+# on a host with no claudlobby at all.
+#
+# Prefer run_tracked below. This exists for the sites that cannot use it — an
+# install that is several commands, or one already wrapped in its own DRY_RUN
+# guard — where the outcome still has to be recorded as a separate statement.
+record_install_outcome() {
+    local name="$1"
+    if [ "$DRY_RUN" = 1 ]; then
+        PREREQ_MISSING+=("$name")
+        NEXT_STEPS+=("Re-run without --dry-run to install $name")
+    else
+        PREREQ_OK+=("$name")
+    fi
+}
+
+# run_tracked <name> <cmd...>
+# Execute (or, under --dry-run, announce and skip) AND record the outcome, in
+# one call.
+#
+# This shape exists because the bug it replaces was structural, not clerical.
+# `run` returns 0 whether it executed or skipped, so its exit status cannot tell
+# the two apart — which forced every caller to record the outcome in a SECOND,
+# separate, forgettable statement. Three phases forgot it in different ways, and
+# two of those survived the first fix precisely because the fix patched the
+# sites someone had noticed rather than the obligation itself. With execute and
+# record collapsed into one call there is no trailing statement left to omit.
+#
+# RETURN CONTRACT: non-zero when the command was SKIPPED (--dry-run) or FAILED;
+# zero only when it actually ran and succeeded. Never call it bare under
+# `set -e` — guard with `|| true` when the outcome is only collected for the
+# summary, or with `if` when you need to branch. A bare call aborts the dry-run.
+run_tracked() {
+    local name="$1"; shift
+    if [ "$DRY_RUN" = 1 ]; then
+        printf 'setup-system: [dry-run] would run: %s\n' "$*"
+        PREREQ_MISSING+=("$name")
+        NEXT_STEPS+=("Re-run without --dry-run to install $name")
+        return 1
+    fi
+    if "$@"; then
+        PREREQ_OK+=("$name")
+        return 0
+    fi
+    miss "$name install failed"
+    PREREQ_MISSING+=("$name")
+    NEXT_STEPS+=("Install $name manually — its install command failed above")
+    return 1
+}
+
 PREREQ_OK=()
 PREREQ_MISSING=()
 NEXT_STEPS=()
@@ -99,13 +156,21 @@ phase_preflight() {
 # ---------------------------------------------------------------------------
 ensure_apt_pkg() {
     local pkg="$1"
-    if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+    local found
+    # Same rule as ensure_brew_pkg: ask whether the tool is USABLE, not whether
+    # apt is what installed it. Checking dpkg alone reported a tool absent when
+    # it came from nix/asdf/source, and reported it present when the package is
+    # installed but the binary is not resolvable — the F5 fix was applied to the
+    # brew path only, leaving Linux with the behaviour it was meant to correct.
+    if found="$(command -v "$pkg" 2>/dev/null)"; then
+        ok "$pkg already available ($found)"
+        PREREQ_OK+=("$pkg")
+    elif dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
         ok "apt $pkg already installed"
         PREREQ_OK+=("$pkg")
     else
         miss "apt $pkg missing — installing"
-        run sudo apt-get install -y -qq "$pkg"
-        PREREQ_OK+=("$pkg")
+        run_tracked "$pkg" sudo apt-get install -y -qq "$pkg" || true
     fi
 }
 
@@ -125,8 +190,7 @@ ensure_brew_pkg() {
         PREREQ_OK+=("$pkg")
     else
         miss "brew $pkg missing — installing"
-        run brew install --quiet "$pkg"
-        PREREQ_OK+=("$pkg")
+        run_tracked "$pkg" brew install --quiet "$pkg" || true
     fi
 }
 
@@ -171,12 +235,20 @@ phase_packages() {
             else
                 printf 'setup-system: [dry-run] would run: install gh from GitHub apt repo\n'
             fi
-            PREREQ_OK+=("gh")
+            record_install_outcome gh
         fi
     elif [ "$_OS" = "Darwin" ]; then
         if ! command -v brew >/dev/null 2>&1; then
             miss "homebrew missing — installing"
-            run /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            # Guarded, not `run`-wrapped: `run` decides to skip only AFTER the
+            # shell has expanded its arguments, so a $( curl ... ) here downloads
+            # the 36KB installer on every --dry-run — a live network call inside
+            # the test suite, and inside a preview that promises to touch nothing.
+            if [ "$DRY_RUN" = 1 ]; then
+                printf 'setup-system: [dry-run] would run: install homebrew from raw.githubusercontent.com\n'
+            else
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            fi
         else
             ok "homebrew already installed"
         fi
@@ -220,7 +292,10 @@ phase_node() {
         elif [ "$_OS" = "Darwin" ]; then
             run brew install --quiet node
         fi
-        PREREQ_OK+=("node")
+        # Not PREREQ_OK unconditionally: under --dry-run nothing was installed.
+        # This branch prints no checkmark, so the false claim surfaced only in
+        # the summary array — invisible to a test that scans for a tick.
+        record_install_outcome node
     fi
 
     # Note bun availability (informational only)
@@ -384,6 +459,9 @@ phase_plugins() {
             }
         else
             printf 'setup-system: [dry-run] would run: claude plugin marketplace add Claudfather/clauDNA + install claudna\n'
+            miss "claudna plugin still missing (dry-run made no changes)"
+            NEXT_STEPS+=("Re-run without --dry-run to install the claudna plugin")
+            return
         fi
         ok "claudna plugin installed"
     fi
@@ -420,7 +498,12 @@ phase_managed_settings() {
         dir="/etc/claude-code"
     fi
     target="$dir/managed-settings.json"
-    count="$(printf '%s' "$MANAGED_CHANNEL_APPROVALS" | jq '.allowedChannelPlugins | length')"
+    # jq is itself a prereq this script installs, so it may legitimately be
+    # absent here. Computing the count unguarded killed the run at phase 7 on a
+    # jq-less host — phases 8-10 and the whole summary never printed, and the
+    # /setup skill is told to parse that summary.
+    count="$(printf '%s' "$MANAGED_CHANNEL_APPROVALS" | jq '.allowedChannelPlugins | length' 2>/dev/null)" || count=""
+    [ -n "$count" ] || count="an unknown number of"
 
     if [ "$DRY_RUN" = 1 ]; then
         printf 'setup-system: [dry-run] would write %s with %s channel-plugin approvals\n' "$target" "$count"
@@ -472,8 +555,13 @@ phase_systemd() {
         ok "loginctl linger enabled for $USER"
     else
         miss "loginctl linger not enabled — enabling"
-        run sudo loginctl enable-linger "$USER"
-        ok "loginctl linger enabled"
+        if run_tracked loginctl-linger sudo loginctl enable-linger "$USER"; then
+            ok "loginctl linger enabled"
+        else
+            # Without linger, user units do not survive logout — phase 9 would
+            # enroll timers that silently never fire once the session ends.
+            NEXT_STEPS+=("Enable linger: sudo loginctl enable-linger $USER (user timers do not survive logout without it)")
+        fi
     fi
 
     # Check XDG_RUNTIME_DIR
@@ -499,6 +587,15 @@ phase_host_jobs() {
     # for the whole repo. It also probes the import from $CLAUDLOBBY_ROOT rather
     # than the caller's cwd, which the inline copy this replaced got wrong, and
     # returns 127 when neither rung resolves.
+    if [ "$DRY_RUN" = 1 ] && ! _claudlobby_importable; then
+        # `run` returns 0 whether it executed or skipped, so the check below
+        # cannot fire under --dry-run. Probe directly instead, or host-jobs goes
+        # unreported in BOTH summary columns on a host with no claudlobby.
+        miss "claudlobby package not importable — cannot compose host jobs"
+        PREREQ_MISSING+=("host-jobs")
+        NEXT_STEPS+=("Install claudlobby, then re-run to enroll host job timers")
+        return
+    fi
     if ! run claudlobby_cli host-timers; then
         miss "claudlobby package not importable — cannot compose host jobs"
         PREREQ_MISSING+=("host-jobs")

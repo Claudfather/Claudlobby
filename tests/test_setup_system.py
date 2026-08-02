@@ -12,11 +12,14 @@ SCRIPT = os.path.join(REPO_ROOT, "lib", "setup-system")
 
 
 @pytest.fixture(scope="module")
-def dry_run():
-    """One --dry-run per module — the 10-phase script probes real tools."""
-    return subprocess.run(
-        [SCRIPT, "--dry-run"], capture_output=True, text=True, timeout=30
-    )
+def dry_run(setup_system_dry_run):
+    """Delegates to the session-scoped fixture in conftest.
+
+    Kept as a thin alias so this module's existing tests read unchanged, while
+    the actual `--dry-run` runs once per session rather than once per module —
+    a second module now asserts against the same output.
+    """
+    return setup_system_dry_run
 
 
 def test_setup_system_exists():
