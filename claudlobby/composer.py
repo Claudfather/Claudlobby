@@ -2343,25 +2343,70 @@ def _scaffold_env_merge(
     header: str,
     required: list[EnvVar],
     log=None,
+    provided_upstream: frozenset[str] = frozenset(),
 ) -> None:
     """Idempotent .env scaffold: preserve existing values, append new stubs.
 
     Reads the file (if it exists), keeps every existing line verbatim, then
     appends stub entries for any contract vars not already present.
     Re-running is safe: no values are lost and new vars always surface.
+
+    ``provided_upstream`` names vars that already resolve to a NON-EMPTY value at
+    a higher .env tier. Their stubs are emitted commented-out, because
+    start-bot.sh sources the bot tier *last* — so a live ``export FOO=`` here
+    silently blanks a value the operator already set at the fleet tier. That is
+    not hypothetical: following the /setup skill exactly (which writes the
+    Telegram token to the fleet-tier .env) produced a bot whose token was wiped
+    by its own scaffold, leaving a dead inbound bridge with nothing in the logs
+    to explain it. A commented stub still documents the per-bot override point,
+    which is the real reason bot-tier stubs exist (one BotFather bot per bot).
     """
     existing_keys: set[str] = set()
     existing_content = ""
+    rewrote_stub = False
     if env_path.is_file():
         existing_content = env_path.read_text()
         existing_keys = set(dotenv.read(env_path).keys())
+        # dotenv.read skips comment lines, so a stub this function previously
+        # commented out is invisible to it and would be appended again on the
+        # next run — unbounded growth, once per generate, and reload-fleet.sh
+        # runs generate on a daily fleet-wide timer. Count them as present.
+        existing_keys |= set(
+            _COMMENTED_STUB_RE.findall(existing_content)
+        )
+        # Neutralise a stub that was written live BEFORE its var gained an
+        # upstream value. `provided_upstream` is otherwise consulted only when a
+        # key is first scaffolded, so the ordinary dev loop — generate while
+        # iterating on fleet.yaml, obtain the token, fill it in, generate again —
+        # leaves the original blanking stub in place forever and reproduces the
+        # bug in full. Only an untouched `export FOO=` is rewritten: an empty
+        # value the operator typed themselves is indistinguishable from this on
+        # disk, so anything carrying a value, a comment, or different spacing is
+        # left exactly as found.
+        if provided_upstream:
+            # split("\n"), never splitlines(): the latter also breaks on \x0b,
+            # \x0c, \x1c-\x1e, \x85, \u2028 and \u2029, none of which end a
+            # line in sh. A secret containing any of them was rewritten as two
+            # lines — destroyed in place, and the .env left unsourceable.
+            rewritten = [
+                (
+                    f"# {ln}   # already set at a higher .env tier; "
+                    "uncomment to override for this bot"
+                    if (_m := _PRISTINE_STUB_RE.fullmatch(ln.strip()))
+                    and _m.group(1) in provided_upstream
+                    else ln
+                )
+                for ln in existing_content.split("\n")
+            ]
+            rewrote_stub = rewritten != existing_content.split("\n")
+            existing_content = "\n".join(rewritten)
 
     new_vars = [
         ev
         for ev in sorted(required, key=lambda e: e.name)
         if ev.name not in existing_keys
     ]
-    if not new_vars and existing_content:
+    if not new_vars and existing_content and not rewrote_stub:
         env_path.chmod(0o600)
         _log.debug("%s: up to date", env_path.name)
         if log is not None:
@@ -2381,7 +2426,18 @@ def _scaffold_env_merge(
         for ev in new_vars:
             source_note = f" (from {ev.source})" if ev.source else ""
             lines.append(f"# {ev.description}{source_note}")
-            lines.append(f"export {ev.name}=")
+            if ev.name in provided_upstream:
+                # Commented, not live — see the docstring on provided_upstream.
+                # The hint must not itself be a blanking stub: uncommenting
+                # `# export FOO=` yields an empty value and reproduces exactly
+                # the bug this branch exists to prevent. Make it unusable until
+                # a value is supplied.
+                lines.append(
+                    f"# Set at a higher .env tier. To override for this bot only,"
+                    f" uncomment and supply a value:\n# export {ev.name}=<value>"
+                )
+            else:
+                lines.append(f"export {ev.name}=")
 
     env_path.write_text("\n".join(lines) + "\n")
     env_path.chmod(0o600)
@@ -2391,6 +2447,36 @@ def _scaffold_env_merge(
         _log.info("%s: added %d new vars (%s)", env_path.name, len(new_vars), new_names)
         if log is not None:
             log(msg)
+
+
+# Anchored so only an untouched scaffold stub matches. `rstrip("=")` also ate a
+# real value of "==" (export TOK===), silently dropping a per-bot override.
+_PRISTINE_STUB_RE = re.compile(r"export ([A-Za-z_]\w*)=")
+_COMMENTED_STUB_RE = re.compile(r"^#\s*export ([A-Za-z_]\w*)=", re.MULTILINE)
+
+
+def _upstream_env_names(paths: Paths) -> frozenset[str]:
+    """Vars carrying a NON-EMPTY value in any tier sourced above the bot tier.
+
+    start-bot.sh sources $HOME/.env, then the (deprecated) repo-root .env, then
+    the fleet .env, then the bot .env — so all three of the first are upstream of
+    a bot-tier stub and any of them can be blanked by one. Reading only the fleet
+    tier missed a secret placed in ~/.env, which is where lib-common.sh's own
+    deprecation notice tells operators to put it, and missed the repo-root tier
+    entirely in overlay mode (paths.env_file resolves to the fleet file once one
+    exists). Names only; values are never retained.
+    """
+    names: set[str] = set()
+    for tier in (Path.home() / ".env", paths.root / ".env", paths.env_file):
+        try:
+            if tier.is_file():
+                names |= {n for n, v in dotenv.read(tier).items() if v}
+        except (OSError, UnicodeDecodeError):
+            # UnicodeDecodeError is a ValueError, not an OSError: one latin-1
+            # byte in a password in ~/.env would otherwise abort the whole
+            # generate, which is exactly what this guard exists to prevent.
+            continue
+    return frozenset(names)
 
 
 def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
@@ -2412,12 +2498,17 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
         )
 
     if bot_vars:
+        # Vars already carrying a real value upstream must not be re-stubbed live
+        # at the bot tier — start-bot.sh sources the bot tier last, so an empty
+        # export would win over the operator's actual value.
+        upstream = _upstream_env_names(paths)
         for bot_name in fleet.bots:
             _scaffold_env_merge(
                 paths.bot_runtime(bot_name) / ".env",
                 f"# Bot environment for: {bot_name}",
                 bot_vars,
                 log=log,
+                provided_upstream=upstream,
             )
 
 

@@ -113,13 +113,38 @@ Walk the user through @BotFather:
 4. Copy the token BotFather gives you
 5. Important: in BotFather, go to `/mybots` → select your bot → Bot Settings → Group Privacy → Turn off
 
-When the user provides the token, validate it:
+When the user provides the token, validate it — and check privacy mode in the same call:
 
 ```bash
-curl -s "https://api.telegram.org/bot$TOKEN/getMe" | jq -r '.ok'
+curl -s "https://api.telegram.org/bot$TOKEN/getMe" \
+  | jq '{ok, username: .result.username, can_read_all_group_messages: .result.can_read_all_group_messages}'
 ```
 
-Must return `true`. Extract the bot username from the response for use in fleet.yaml.
+`ok` must be `true`. Take the bot username from the response for `fleet.yaml`.
+
+**`can_read_all_group_messages` must be `true` for a group bot — verify it, do not just
+instruct it.** Step 5 above tells the user to turn Group Privacy off, but telling is not
+checking, and this is silent when wrong: the bot boots, the bridge reports ready, it can post
+perfectly well, and it simply never sees most messages. The seed sets
+`telegram.require_mention: false`, meaning claudfather is expected to answer everything in the
+group — which privacy mode makes impossible.
+
+If it is `false`, stop and give the user both fixes:
+
+> Group Privacy is still on, so the bot cannot see normal group messages — only ones that
+> @mention it.
+> - **Make the bot an admin in the group** — takes effect immediately, and admins receive every
+>   message regardless of privacy mode. Simplest fix. Note `getMe` will still report
+>   `can_read_all_group_messages: false` afterwards: that flag is the **global BotFather
+>   setting**, not per-group behaviour, so it is not the way to confirm this route worked.
+> - **Or** BotFather → `/mybots` → your bot → Bot Settings → Group Privacy → Turn off, **then
+>   remove and re-add the bot to the group.** The change only applies on re-join, so flipping it
+>   without re-adding looks like it worked and changes nothing. This route *does* flip the
+>   `getMe` flag to `true`.
+
+Confirm by the route the user actually took — re-run `getMe` for the privacy-off route, or send a
+plain (un-mentioned) message in the group and check the bot saw it for the admin route. Do not
+block on `getMe` reporting `true` if they chose admin; it never will.
 
 ### 2b. Telegram Group Chat ID
 
@@ -209,13 +234,50 @@ re-running never restarts a working claudfather. warm-cache stays as a
 network prefetch so first boot doesn't pay a cold npx download inside the
 readiness window.
 
-After `setup-fleet`, poll for the tmux session to confirm claudfather is alive:
+After `setup-fleet`, confirm claudfather is alive. **Each bot runs on its own private tmux
+server** (`-L <socket>` where the socket is `BOT_SERVICE`), so the default-server check finds
+nothing even on a perfectly healthy boot:
 
 ```bash
-tmux has-session -t claudfather 2>/dev/null
+tmux has-session -t claudfather          # WRONG — queries the default server
+# error connecting to /private/tmp/tmux-501/default (No such file or directory)
 ```
 
-Poll up to 90 seconds (matching `start-bot.sh` readiness timeout). If the session doesn't appear, report the failure and suggest checking logs at `runtime/bots/claudfather/logs/`.
+**Ask the CLI rather than resolving the socket by hand.** `claudlobby status` resolves each bot's
+socket through `claudlobby/paths.py`'s `tmux_socket_for_bot` — a Python twin of the shell helper
+of the same name, so it is a maintained pair rather than one source, but far better than a
+third hand-rolled parse in prose:
+
+```bash
+claudlobby status --bot claudfather
+```
+
+Poll up to 90 seconds (matching `start-bot.sh` readiness timeout).
+
+**For inbound, ask `bridge_state` — not the log.** It is the classifier `start-bot.sh` itself
+gates readiness on, and it verifies a *live, owned* poller process:
+
+```bash
+. lib/lib-common.sh
+bridge_state runtime/bots/claudfather   # -> up | no_bridge | no_token | no_handle | unknown
+```
+
+Only `up` means inbound actually works. Do **not** substitute
+`grep BRIDGE_READY .../logs/startup.log`: that file is opened append-only and survives restarts,
+so a line from a previous boot reads exactly like a live bridge — the check passes while the bot
+is deaf. A tmux session existing is likewise not the same as a bot that can receive messages.
+
+Platform service state, if you want it:
+
+```bash
+launchctl print "gui/$(id -u)/<service_prefix>.claudfather" | grep state   # macOS
+```
+
+Note `state = not running` here is **not** a failure on its own: `start-bot.sh` launches the
+detached tmux server and exits 0, so the launchd job finishing is the normal steady state.
+`keepalive` is what revives the session if it dies.
+
+If it doesn't come up, report the failure and check `runtime/bots/claudfather/logs/`.
 
 ## Step 6: Success
 

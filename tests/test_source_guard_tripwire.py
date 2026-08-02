@@ -76,6 +76,13 @@ _BLESSED_RAW_READS = {
     ("composer.py", "int_path.read_text()"),
     ("composer.py", "env_path.read_text()"),
     ("composer.py", "dotenv.read(env_path)"),
+    # _upstream_env_names walks $HOME/.env, the repo-root .env and the fleet
+    # .env, because start-bot.sh sources all three above the bot tier. EXEMPT,
+    # narrowly: only the KEYS and the emptiness of each value are consumed, to
+    # decide whether a bot-tier stub must be commented rather than emitted live.
+    # No value crosses into a path, a grant, or composed output, so this adds no
+    # fleet.yaml-shaped source surface for L1 to miss.
+    ("composer.py", "dotenv.read(tier)"),
 }
 
 
