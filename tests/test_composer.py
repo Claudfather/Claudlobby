@@ -3999,3 +3999,60 @@ class TestBotEnvStubDoesNotShadowUpstream:
         assert out == "realvalue123", (
             f"bot-tier scaffold clobbered the fleet-tier value: got {out!r}"
         )
+class TestLaunchdArgvSplitting:
+    """A job whose `script` carries flags must still yield a valid plist (#969).
+
+    systemd and launchd disagree about what a command string is. `ExecStart=` is
+    a command LINE that systemd splits on whitespace, so
+    `.../data-sweep.sh --purge` works there. launchd's `ProgramArguments[0]` is
+    the executable PATH, so the same string becomes a file that does not exist
+    and the job can never exec — silently, and only on macOS.
+
+    Observed: the composed `data-sweep` plist on a real host had
+    `argv[0] == '<root>/lib/data-sweep.sh --purge'`, `os.path.exists() == False`.
+    It was also the only job of thirteen carrying a flag, which is why it went
+    unnoticed — but the asymmetry is structural, so any future flag-bearing job
+    would break the same way.
+    """
+
+    def _plist(self, tmp_path, script):
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        paths = _make_paths(root)
+        timers_dir = tmp_path / "timers"
+        timers_dir.mkdir(exist_ok=True)
+        _write_timer_units(
+            timers_dir,
+            "com.t.job",
+            "job",
+            {"type": "calendar", "expression": "daily"},
+            script,
+            "oneshot",
+            "t",
+            paths,
+        )
+        return plistlib.loads((timers_dir / "com.t.job.plist").read_bytes())
+
+    def test_flagged_script_splits_into_separate_argv_entries(self, tmp_path):
+        pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge")
+        argv = pl["ProgramArguments"]
+        assert argv[0].endswith("/lib/data-sweep.sh"), (
+            f"argv[0] must be the executable alone, got {argv[0]!r}"
+        )
+        assert " " not in argv[0], f"argv[0] contains a space: {argv[0]!r}"
+        assert "--purge" in argv, f"the flag was dropped: {argv}"
+
+    def test_flag_precedes_fleet_name_as_on_systemd(self, tmp_path):
+        """Order must match the systemd form (`script --purge <fleet>`), or the
+        two platforms would pass arguments differently to the same script."""
+        pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge")
+        argv = pl["ProgramArguments"]
+        assert argv.index("--purge") < argv.index("t"), (
+            f"flag must precede the fleet name, got {argv}"
+        )
+
+    def test_unflagged_script_is_unchanged(self, tmp_path):
+        pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/plain.sh")
+        argv = pl["ProgramArguments"]
+        assert argv[0].endswith("/lib/plain.sh")
+        assert argv[1] == "t"
