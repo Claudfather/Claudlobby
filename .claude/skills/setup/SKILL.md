@@ -209,15 +209,32 @@ re-running never restarts a working claudfather. warm-cache stays as a
 network prefetch so first boot doesn't pay a cold npx download inside the
 readiness window.
 
-After `setup-fleet`, poll for the tmux session to confirm claudfather is alive:
+After `setup-fleet`, poll for the tmux session to confirm claudfather is alive.
+
+**Every bot runs on its own tmux server**, so a bare `tmux has-session` queries the
+default server — where no bot session ever exists — and can never succeed. The socket
+name is the bot's `TMUX_SOCKET` (equal to `BOT_SERVICE`) from its composed `bot.conf`:
 
 ```bash
-tmux has-session -t claudfather 2>/dev/null
+SOCK=$(grep -E '^(TMUX_SOCKET|BOT_SERVICE)=' runtime/bots/claudfather/bot.conf \
+       | head -1 | cut -d= -f2- | tr -d "\"'")
+tmux -L "$SOCK" has-session -t claudfather 2>/dev/null
 ```
 
 Poll up to 90 seconds (matching `start-bot.sh` readiness timeout). If the session doesn't appear, report the failure and suggest checking logs at `runtime/bots/claudfather/logs/`.
 
+**A live tmux session is not proof the bot works.** It goes up in a few seconds, long
+before Claude Code has booted, and stays up when the bot is blocked on an interactive
+prompt or its Telegram bridge never came up. Before reporting success, check
+`runtime/bots/claudfather/logs/startup.log` for the bridge verdict — `BRIDGE_MISSING`
+there means claudfather is **not** reachable on Telegram, whatever tmux says.
+
 ## Step 6: Success
+
+Only report success once the bridge verdict in `startup.log` is not `BRIDGE_MISSING`.
+If it is, say so plainly and point at the log rather than claiming a ready message that
+will never arrive — a bot that is up but unreachable is the failure this step most often
+hides.
 
 Print:
 

@@ -350,3 +350,58 @@ class TestSetupSystemHonesty:
             "dry-run must report claudlobby as missing when it is missing, "
             "rather than asserting the install it only described"
         )
+
+
+class TestPerBotTmuxSocketContract:
+    """No onboarding doc may query tmux without naming the bot's socket (#971).
+
+    Every bot runs on its OWN tmux server — a private `-L <socket>` equal to its
+    BOT_SERVICE — so that one server's death drops only that bot rather than the
+    whole fleet. A bare `tmux has-session -t <bot>` therefore queries the DEFAULT
+    server, where no bot session ever exists, and can never succeed. The /setup
+    skill told users to poll exactly that for up to 90 seconds, so a correct,
+    healthy boot was reported as a failure.
+
+    This is the same shape as the bare-`pip` rule above: a documented command
+    that cannot work, invisible to a suite that never executes the docs.
+    """
+
+    DOCS = (README, GETTING_STARTED, CONTRIBUTOR_GUIDE, SETUP_SKILL)
+
+    def test_no_bare_tmux_has_session(self):
+        offenders: list[tuple[str, str]] = []
+        for doc in self.DOCS:
+            if not doc.exists():
+                continue
+            for line in _shell_lines(doc):
+                if "tmux" not in line or "has-session" not in line:
+                    continue
+                # `-L <socket>` may be literal or a variable; either is fine.
+                if " -L " not in line:
+                    offenders.append((doc.name, line.strip()))
+        assert not offenders, (
+            "onboarding docs query the default tmux server, where no bot "
+            "session exists — every bot runs on its own `-L <socket>`:\n"
+            + "\n".join(f"  {d}: {ln}" for d, ln in offenders)
+        )
+
+    def test_setup_skill_resolves_the_socket_from_bot_conf(self):
+        """The socket must be derived, not hardcoded — service_prefix is
+        fleet-configurable, so a literal `com.claudlobby.seed.*` would be wrong
+        for every fleet that renamed it."""
+        text = SETUP_SKILL.read_text()
+        assert "TMUX_SOCKET" in text or "BOT_SERVICE" in text, (
+            "the setup skill must resolve the tmux socket from the composed "
+            "bot.conf (TMUX_SOCKET / BOT_SERVICE), not hardcode a prefix"
+        )
+
+    def test_setup_skill_does_not_treat_tmux_liveness_as_success(self):
+        """A live tmux session is not proof the bot works: it comes up in
+        seconds, before Claude Code has booted, and stays up when the bot is
+        blocked on a prompt or its Telegram bridge never started. The skill must
+        mention the bridge verdict before claiming success."""
+        text = SETUP_SKILL.read_text()
+        assert "BRIDGE_MISSING" in text, (
+            "the setup skill reports success on tmux liveness alone; it must "
+            "check the bridge verdict in startup.log first"
+        )
