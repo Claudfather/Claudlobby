@@ -649,7 +649,16 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         f"TMUX_SOCKET={_shq(bot_service)}",
         f"BOT_LABEL={_shq(bot.bot_id.upper())}",
         bot_dir_line,
-        f'TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{bot.telegram.handle or bot.bot_id}"',
+        # Exported, unlike the bot.conf vars above: lib/ reads those from the
+        # file via bot_conf_get, but this one must reach the `claude` CHILD
+        # process environment. The telegram plugin resolves its state dir from
+        # process.env.TELEGRAM_STATE_DIR and silently falls back to the shared
+        # ~/.claude/channels/telegram when unset — which parks bot.pid outside
+        # this bot's dir, and the plugin enforces a singleton per state dir, so
+        # only one bot per host can then hold a poller. lib-common.sh's ownership
+        # check greps the poller's environ for this exact KEY=VALUE, so the
+        # export is a contract between compositor and consumer (#976).
+        f'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{bot.telegram.handle or bot.bot_id}"',
         "",
         "# Claude Code config dir (multi-account support)",
     ]
