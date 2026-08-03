@@ -77,6 +77,14 @@ write_snapshot() {
 }
 
 # New items = present now, absent in the snapshot.
+#
+# For units this is NOT sufficient on its own. macOS churns per-app agents
+# constantly (Spotlight spawns com.apple.mdworker.shared.* between any two
+# samples), so a raw set difference reports OS noise as "created by the run" —
+# and reap would then bootout Apple daemons. Ownership is therefore established
+# positively: a unit we enrolled always has a corresponding NEW unit file in the
+# user unit directory, which a transient system agent never does. The
+# com.apple.* exclusion is belt-and-braces on top of that.
 new_since() {
     local kind="$1" now
     now="$(safe_mktemp)"
@@ -85,7 +93,24 @@ new_since() {
         unitfiles) snap_unit_files    > "$now" ;;
         sockets)   snap_tmux_sockets  > "$now" ;;
     esac
-    comm -13 "$SNAP/$kind.txt" "$now"
+    if [ "$kind" != "units" ]; then
+        comm -13 "$SNAP/$kind.txt" "$now"
+        return 0
+    fi
+
+    local files unit
+    files="$(safe_mktemp)"
+    snap_unit_files | comm -13 "$SNAP/unitfiles.txt" - > "$files"
+    comm -13 "$SNAP/units.txt" "$now" | while IFS= read -r unit; do
+        [ -n "$unit" ] || continue
+        case "$unit" in com.apple.*) continue ;; esac
+        # Keep only units backed by a unit file this run also introduced.
+        if grep -qxF "$unit.plist" "$files" 2>/dev/null \
+           || grep -qxF "$unit" "$files" 2>/dev/null \
+           || grep -qxF "$unit.service" "$files" 2>/dev/null; then
+            printf '%s\n' "$unit"
+        fi
+    done
 }
 
 # ------------------------------------------------------------------- preflight
@@ -146,6 +171,10 @@ cmd_prepare() {
     {
         printf 'ref=%s\n' "$(git -C "$CLAUDLOBBY_SRC" rev-parse "$ref")"
         printf 'tree=%s\n' "$dir"
+        # Recorded now, while the tree still exists: Claude Code keys its project
+        # dir by the REALPATH, and transcript lookup has to keep working after
+        # reap has deleted the tree — at which point pwd -P can no longer resolve.
+        printf 'tree_real=%s\n' "$(cd "$dir" && pwd -P)"
         printf 'src=%s\n'  "$CLAUDLOBBY_SRC"
     } > "$STATE_DIR/run.env"
 
@@ -244,14 +273,24 @@ cmd_transcript() {
     # shellcheck source=/dev/null
     [ -f "$STATE_DIR/run.env" ] || die "no run recorded — run 'prepare' first"
     . "$STATE_DIR/run.env"
-    # Claude Code keys a project dir by the cwd with slashes turned into dashes.
-    local key proj
-    key="$(printf '%s' "$tree" | tr '/' '-')"
-    proj="$HOME/.claude/projects/$key"
-    if [ ! -d "$proj" ]; then
-        proj="$(find "$HOME/.claude/projects" -maxdepth 1 -type d -name "*$(basename "$tree")*" 2>/dev/null | head -1)"
-    fi
-    [ -n "$proj" ] && [ -d "$proj" ] || die "no transcript found for $tree"
+    # Claude Code keys a project dir by the session cwd with slashes turned into
+    # dashes — and it records the REALPATH. On macOS /tmp and /var are symlinks
+    # into /private, so the symlink form yields a key that never exists. Try the
+    # resolved path first, then the literal one.
+    local key proj real
+    # Prefer the realpath recorded at prepare time; fall back to resolving now
+    # (older run.env, or a tree that still exists).
+    real="${tree_real:-}"
+    [ -n "$real" ] || real="$(cd "$tree" 2>/dev/null && pwd -P)" || real="$tree"
+    for key in "$(printf '%s' "$real" | tr '/' '-')" "$(printf '%s' "$tree" | tr '/' '-')"; do
+        if [ -d "$HOME/.claude/projects/$key" ]; then
+            proj="$HOME/.claude/projects/$key"; break
+        fi
+    done
+    # No basename glob fallback: the default tree basename is "tree", which
+    # matches unrelated projects (any path containing "worktrees"), and silently
+    # analysing the wrong session is far worse than reporting none.
+    [ -n "${proj:-}" ] && [ -d "$proj" ] || die "no transcript dir for $tree (looked for key $(printf '%s' "$real" | tr '/' '-'))"
     say "transcripts for the cold run:"
     find "$proj" -name '*.jsonl' -exec ls -la {} \;
     # Sibling dirs exist for any bot the run booted; surface those too.
