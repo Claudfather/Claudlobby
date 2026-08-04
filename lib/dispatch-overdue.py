@@ -59,6 +59,34 @@ _TERMINAL = {"completed", "failed", "blocked"}
 DEFAULT_OVERDUE_MAX_AGE_S = 86400
 
 
+# A dispatch whose worker reported progress within this window is treated as ALIVE,
+# not overdue. Measured, not chosen round (2026-08-04, 33 progress reports over 7 days
+# across 5 bots): the gap from a progress report to that bot's next report of any kind
+# clusters at <=30min (29 of 33; median 9, p75 22) and then jumps straight to 60, 76,
+# 357, 616 — an empty band between 30 and 60 separating "still working" from "stopped".
+# 45min sits in that band: 1.5x margin over the worst observed in-work cadence, while
+# still alarming 15min before the shortest gap that looked like a stall.
+#
+# WHY THIS DOES NOT HIDE A DEAD WORKER, which is the property that matters more than
+# the number: a stuck or crashed session emits nothing, so its last progress report
+# ages out of this window and the dispatch alarms exactly as it does today, just later
+# by at most the grace. Only a worker actively reporting can defer, and it can only
+# defer as long as it keeps reporting.
+DEFAULT_PROGRESS_GRACE_S = 2700
+
+
+def _resolve_progress_grace() -> int:
+    """Read the progress grace window from env, falling back to the default.
+
+    Same TypeError/ValueError funnel as _resolve_max_age: an unset var and a malformed
+    one take the same path. <= 0 disables progress-based deferral entirely.
+    """
+    try:
+        return int(os.environ.get("DISPATCH_PROGRESS_GRACE_S"))
+    except (TypeError, ValueError):
+        return DEFAULT_PROGRESS_GRACE_S
+
+
 def _resolve_max_age() -> int:
     """Read the expiry cap from env, falling back to the default.
 
@@ -165,12 +193,23 @@ def _classify_all(
     # watchdog on the real owner's still-open dispatch (#518 review).
     report_index: dict[str, list[int]] = {}
     reported_ids = _terminal_reported_ids(reports)
+    # Latest progress report per bot. A progress report closes NOTHING — it is not
+    # terminal and never will be — but it is proof the worker is alive, which is the
+    # question the watchdog is actually asking. See _progress_grace below.
+    last_progress: dict[str, int] = {}
     for r in reports:
-        if r.get("status") not in _TERMINAL:
-            continue
+        status = r.get("status")
         ep = _iso_to_epoch(r.get("ts", ""))
-        if ep is not None:
-            report_index.setdefault(str(r.get("bot", "")).lower(), []).append(ep)
+        if ep is None:
+            continue
+        bot_l = str(r.get("bot", "")).lower()
+        if status == "progress":
+            if ep > last_progress.get(bot_l, 0):
+                last_progress[bot_l] = ep
+            continue
+        if status not in _TERMINAL:
+            continue
+        report_index.setdefault(bot_l, []).append(ep)
 
     out: dict[str, list[tuple[int, int, int, str]]] = {}
     orphans: dict[str, list[tuple[int, int, int, str]]] = {}
@@ -180,6 +219,7 @@ def _classify_all(
     # lru_cache — the memo must not outlive the call, since .spawn moves
     # between sweeps.
     spawn_cache: dict[str, int | None] = {}
+    progress_grace = _resolve_progress_grace()
     for d in dispatches:
         bot_key = str(d.get("bot", "")).lower()
         exp, da = d.get("expected_by"), d.get("dispatched_at")
@@ -193,6 +233,26 @@ def _classify_all(
                 continue
         elif any(e >= da for e in report_index.get(bot_key, [])):
             continue
+        # Liveness gate: the worker reported progress recently, so it is working, not
+        # stuck. Deferral is bounded by the grace window and by the worker's own
+        # silence — stop reporting and this stops suppressing. Checked AFTER the
+        # report gate so a closed dispatch still reads as closed rather than as
+        # deferred, and BEFORE the expiry cap so a deferred row keeps its real age.
+        #
+        # Scoped per BOT rather than per dispatch because progress reports carry no
+        # task id (report-back.sh only resolves one for terminal statuses — resolving
+        # a progress report would stamp an id no consumer reads). A bot working its
+        # queue is alive for every row it holds, which is the honest reading: the
+        # claim being made is "this session is not stuck", not "this task advanced".
+        if progress_grace > 0:
+            lp = last_progress.get(bot_key)
+            # da < lp <= now. The upper bound is load-bearing: a future-dated report
+            # (clock skew, a hand-edited ledger) would otherwise give a NEGATIVE age
+            # that satisfies any grace and suppress the alarm permanently — a silent
+            # mute, which is the one outcome this change must never produce.
+            if lp is not None and da < lp <= now and (now - lp) <= progress_grace:
+                continue
+
         # Expiry cap (#460): once a still-open dispatch is older than max_age, the
         # watchdog stops flagging it so fleet-pulse quits re-emitting every cycle.
         # Checked after the report gate so a closed dispatch reads as closed, not
