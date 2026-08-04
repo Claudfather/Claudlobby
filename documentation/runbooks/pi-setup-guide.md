@@ -308,11 +308,116 @@ sudo systemctl disable --now cups cups-browsed ModemManager
 
 ## Swap (Recommended for 4+ Bots)
 
+**Set `CONF_MAXSWAP` as well as `CONF_SWAPSIZE`, or you silently get 2 GB.**
+`/sbin/dphys-swapfile` hardcodes `CONF_MAXSWAP=2048` and clamps `CONF_SWAPSIZE`
+down to it (`restricting to config limit: 2048MBytes`, easy to miss in the
+output). Setting only `CONF_SWAPSIZE=4096` leaves you with half what you asked
+for and no error.
+
 ```bash
-sudo dphys-swapfile swapoff
-sudo sed -i 's/CONF_SWAPSIZE=.*/CONF_SWAPSIZE=4096/' /etc/dphys-swapfile
-sudo dphys-swapfile setup
-sudo dphys-swapfile swapon
+sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=4096/' /etc/dphys-swapfile
+# raise the ceiling too — add the line if it is absent, it usually is
+grep -q '^CONF_MAXSWAP=' /etc/dphys-swapfile \
+  && sudo sed -i 's/^CONF_MAXSWAP=.*/CONF_MAXSWAP=4096/' /etc/dphys-swapfile \
+  || echo 'CONF_MAXSWAP=4096' | sudo tee -a /etc/dphys-swapfile
+
+sudo dphys-swapfile swapoff && sudo dphys-swapfile setup && sudo dphys-swapfile swapon
+```
+
+**Verify the number, do not trust the config:**
+
+```bash
+cat /proc/swaps        # Size column is in KB — 4194288 ≈ 4.0 GB, 2097148 ≈ 2.0 GB
+free -h | grep Swap
+```
+
+**Before `swapoff`, check you have RAM to absorb it.** `swapoff` pages everything
+back into memory; on a host already under pressure that can OOM. `free -m` should
+show `available` comfortably above the in-use swap figure.
+
+**The tradeoff, stated honestly:** on a stock Pi the swapfile lives on the SD
+card, so more swap means more SD writes — and SD stress is itself a hang suspect
+(see *SD card stability* above). Swap that absorbs a spike still beats a livelock,
+but the two mitigations pull against each other. If the host has NVMe, put the
+swapfile there and the tension disappears.
+
+**Sizing signal:** if `/proc/swaps` shows the Used column near Size on a
+199 MB default, the host is already swapping hard and this is overdue rather
+than precautionary.
+
+## Hardware watchdog (strongly recommended for unattended hosts)
+
+A Pi running a fleet 24/7 will eventually hard-hang. Without a watchdog it stays
+hung until a human power-cycles it — an overnight hang costs the whole night.
+The BCM2835 watchdog is present on every Pi but ships **inactive**, and systemd
+defaults `RuntimeWatchdogSec=off`, so out of the box nothing is watching.
+
+```bash
+sudo mkdir -p /etc/systemd/system.conf.d
+sudo tee /etc/systemd/system.conf.d/10-claudlobby-watchdog.conf >/dev/null <<'EOF'
+[Manager]
+RuntimeWatchdogSec=14
+RebootWatchdogSec=10min
+EOF
+sudo systemctl daemon-reexec
+```
+
+**Use 14s, not the 30s that circulates in most guides.** Check the ceiling first:
+
+```bash
+cat /sys/class/watchdog/watchdog0/timeout    # BCM2835: 15
+```
+
+systemd pings the watchdog at **half** the configured interval. Set a value above
+the hardware ceiling and the driver clamps the timeout to its own maximum while
+systemd keeps pinging on the longer schedule you asked for — so the device can
+expire between pings and reset a perfectly healthy host. Stay strictly under the
+ceiling; 14 on a 15s device gives a 7s ping.
+
+**Verify it is actually armed** — enrolling is not the same as running:
+
+```bash
+systemctl show -p RuntimeWatchdogUSec          # RuntimeWatchdogUSec=14s
+cat /sys/class/watchdog/watchdog0/state        # active
+cat /sys/class/watchdog/watchdog0/timeleft     # counts down = being petted
+journalctl -b 0 | grep -i 'hardware watchdog'  # "Watchdog running with a hardware timeout of 14s"
+```
+
+`RebootWatchdogSec` is separate: it guards the *shutdown* path so a reboot that
+wedges still completes. 10min is the sensible default.
+
+## Host jobs — enrolling is a separate step from declaring
+
+`system.yaml` `host.jobs` *declares* the host-level timers (`claude-update`,
+`notify-behind`, `disk-monitor`, `fleet-memory-check`, `orphan-browser-reaper`,
+`host-health-check`). `claudlobby host-timers` *composes* the units into
+`runtime/_host/timers/`. Neither step enrolls them — `lib/setup-system` does.
+
+A host that was set up before a job was added keeps running happily with that job
+composed-but-never-enrolled, and nothing surfaces it. Audit periodically:
+
+```bash
+ls runtime/_host/timers/*.timer | xargs -n1 basename | sed 's/.timer//' | sort > /tmp/composed
+systemctl --user list-timers --all | grep -oE 'claudlobby-[a-z-]+' | sort -u > /tmp/enrolled
+comm -23 /tmp/composed /tmp/enrolled     # composed but NOT enrolled
+```
+
+Then enroll a specific one:
+
+```bash
+TIMER_DIR=$CLAUDLOBBY_ROOT/runtime/_host/timers \
+UNIT_NAME=claudlobby-<job> \
+  lib/install_fleet_timer.sh <job>
+```
+
+**Always start the service once by hand after enrolling.** A timer can enroll
+cleanly and still fail every fire — a non-executable `ExecStart` gives
+`status=203/EXEC` and only shows up in the journal:
+
+```bash
+systemctl --user start claudlobby-<job>.service
+systemctl --user show claudlobby-<job>.service -p Result -p ExecMainStatus
+journalctl --user -u claudlobby-<job>.service -n 20
 ```
 
 ## Installing the fleet (pick one pattern)

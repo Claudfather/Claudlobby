@@ -49,6 +49,7 @@ lib/fleet-state.json
 lib/fleet-state.json.lock
 lib/creds-check-state.json
 lib/creds-check-state.json.lock
+lib/host-health-check.state
 
 *.log
 
