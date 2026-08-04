@@ -49,6 +49,23 @@ cat /sys/kernel/debug/mmc0/ios | grep -E "clock|timing|signal"
 
 Performance halves (~90 → ~45 MB/s sequential) — irrelevant for a fleet workload of logs + state writes. See `library/lessons/raspberry-pi/sdhci-uhs-quirk.md` for the full postmortem.
 
+> **It reduces this class; it does not eliminate it.** The "eliminates" claim above predates
+> counter-evidence and is being narrowed here rather than left standing. On a Pi 5 fleet host with
+> the quirk **already applied and verified live** on `/proc/cmdline`, the kernel still logged
+> `mmc_rescan` / `__mmc_claim_host` stalls on 2026-07-19, 07-21 and 07-29. The 07-19 trace is the
+> stark one: successive lines of a *single* kernel stack trace are timestamped 10:02 through 12:28
+> — over two hours to emit one trace — and that boot ends there.
+>
+> So: apply the quirk, it is cheap and it helps. But **do not treat it as a fix for a card that is
+> failing.** If stalls persist under it, the remaining move is hardware — move the root filesystem
+> to NVMe (the Pi 5 has the slot) rather than tuning the SD bus further. SD cards do not expose
+> `life_time`, so wear cannot be read directly to confirm; persistence under the quirk is the
+> signal you get.
+>
+> This matters more once a hardware watchdog is armed (below): a `pid1` blocked in uninterruptible
+> D-state on a stalled controller is the failure most likely to trigger a reset, and it is invisible
+> to `schedstat`, which measures runqueue wait and therefore records nothing for a D-state process.
+
 **Note:** the legacy `dtparam=sd_overclock=N` and `dtparam=sd_disable_uhs=1` parameters from Pi 1-4 do NOT take effect on Pi 5 (different driver). Use the cmdline approach above.
 
 ## Required Software
