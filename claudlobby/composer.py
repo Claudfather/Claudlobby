@@ -21,6 +21,7 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 import jinja2
+import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
 from . import dotenv, tool_resolve
@@ -37,7 +38,7 @@ from .loader import (
     parse_expertise_file,
 )
 from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
-from .paths import Paths
+from .paths import Paths, _iter_fleet_dirs
 
 
 # ----------------------------------------------------------------------
@@ -1069,6 +1070,18 @@ Type=simple
 # control-group cleanup kills the tmux server we just started. KillMode=process
 # limits the kill to the main process; RemainAfterExit=yes keeps the unit
 # "active" while tmux runs underneath.
+#
+# LOAD-BEARING BEYOND CLEANUP: Type=simple + a spawner ExecStart that exits +
+# RemainAfterExit=yes is what makes SubState a boot-progress signal, and
+# service_is_starting (lib-common.sh) reads it as one:
+#   activating      ExecStartPre — the boot stagger sleep
+#   active/running  start-bot.sh executing; tmux session not up yet
+#   active/exited   steady state — spawner done, tmux running underneath
+# If ExecStart ever execs into a foreground process, or RemainAfterExit is
+# dropped, active/running becomes the STEADY state and keepalive's dead-session
+# watchdog silently stops restarting anything — a failure shaped exactly like a
+# healthy fleet. tests/test_composer.py asserts this triple; do not relax it
+# without reading service_is_starting first.
 RemainAfterExit=yes
 KillMode=process
 WorkingDirectory={bot_dir}{stagger}
@@ -2141,9 +2154,24 @@ def _reconcile_access_json(
 
 
 def compose_bot(
-    bot: BotConfig, fleet: FleetConfig, paths: Paths, log=None, *, boot_delay_s: int = 0
+    bot: BotConfig,
+    fleet: FleetConfig,
+    paths: Paths,
+    log=None,
+    *,
+    boot_delay_s: int | None = None,
 ) -> Path:
-    """Compose one bot's full runtime dir (CLAUDE.md, bot.conf, .mcp.json, units, skill symlinks); returns bot_dir."""
+    """Compose one bot's full runtime dir (CLAUDE.md, bot.conf, .mcp.json, units, skill symlinks); returns bot_dir.
+
+    ``boot_delay_s`` defaults to this bot's own rung on the host boot ladder,
+    DERIVED rather than threaded: every caller that composes a single bot
+    (``generate --bot``, ``move-bot``, ``new-bot``) would otherwise silently
+    write a unit with no stagger at all, collapsing that bot to rung 0 and
+    re-creating the collision the ladder exists to prevent (#1002). Pass an
+    explicit value only to compose a unit off the host ladder, e.g. in tests.
+    """
+    if boot_delay_s is None:
+        boot_delay_s = bot_boot_delay_s(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
     # L1 source guard (#702) — deny an unanchored, undeclared absolute path in any
     # compose source (bot config leaves + loaded MCP fragments) BEFORE the first
@@ -2371,9 +2399,7 @@ def _scaffold_env_merge(
         # commented out is invisible to it and would be appended again on the
         # next run — unbounded growth, once per generate, and reload-fleet.sh
         # runs generate on a daily fleet-wide timer. Count them as present.
-        existing_keys |= set(
-            _COMMENTED_STUB_RE.findall(existing_content)
-        )
+        existing_keys |= set(_COMMENTED_STUB_RE.findall(existing_content))
         # Neutralise a stub that was written live BEFORE its var gained an
         # upstream value. `provided_upstream` is otherwise consulted only when a
         # key is first scaffolded, so the ordinary dev loop — generate while
@@ -2513,6 +2539,74 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
 
 
 _BOOT_STAGGER_SECONDS = 3  # delay between each bot's startup on fleet boot
+
+
+def _fleet_bot_count(fleet_yaml: Path) -> int:
+    """Bot count from a fleet.yaml, read cheaply and without validating it.
+
+    A sibling fleet's manifest is read here only to size its rung block, so a
+    manifest that is missing, unparseable, or mid-edit contributes 0 rather
+    than raising: one fleet's broken config must never block another fleet's
+    generate. The cost of the soft failure is a stale offset — which is the
+    un-offset behaviour, not a new failure mode.
+    """
+    try:
+        data = yaml.safe_load(fleet_yaml.read_text(encoding="utf-8")) or {}
+        return len((data.get("fleet") or {}).get("bots") or {})
+    except Exception:  # unreadable, malformed, or not a mapping
+        return 0
+
+
+def _host_boot_offset_rungs(paths: Paths) -> int:
+    """Rungs this fleet's boot ladder starts at, so fleets do not overlap.
+
+    Each fleet ladders ``ExecStartPre=/bin/sleep`` from zero. On a host running
+    several fleets that puts one bot from *every* fleet on every early rung, so
+    a host reboot fires N simultaneous cold starts — and it does so on the rungs
+    where host load is still climbing toward peak, which is where a cold start
+    is least able to absorb the contention. Starting each fleet where the
+    previous one ended turns N independent ladders into a single host-global
+    ladder: one bot per rung, ordered.
+
+    The order is the sorted overlay enumeration shared with the collision scan
+    and move-bot autodetect (``_iter_fleet_dirs``), so the assignment is
+    deterministic and identical no matter which fleet is being generated.
+
+    Offsets are computed from the manifests present at generate time, so ADDING,
+    REMOVING or RENAMING a fleet — not only adding a bot — reshuffles the rungs
+    of every fleet sorted after it, and those fleets keep their old ladder until
+    *they* regenerate. Until then some rungs can collide again, degrading to
+    today's behaviour, never worse. ``lib/setup-fleets`` regenerates every fleet
+    in one pass, which is the sanctioned way to re-converge the ladder.
+    """
+    if paths.fleet_dir is None:  # root mode: one fleet, nothing to offset past
+        return 0
+    here = paths.fleet_dir.resolve()
+    rungs = 0
+    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
+        if fleet_dir.resolve() == here:
+            return rungs
+        # A container or non-fleet dir has no manifest and contributes 0 — the
+        # same answer _fleet_bot_count already gives for an unreadable file, so
+        # what a non-fleet dir is worth is decided in exactly one place.
+        rungs += _fleet_bot_count(fleet_dir / "fleet.yaml")
+    # This fleet is not under local/ (an explicitly-pointed overlay). It cannot
+    # be placed in the host ladder, so it keeps the un-offset ladder.
+    return 0
+
+
+def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
+    """This bot's rung on the host-global boot ladder, in seconds.
+
+    Derived from (fleet position on the host, bot position within the fleet), so
+    every compose path lands on the same rung without threading an index through
+    its callers.
+    """
+    try:
+        index = list(fleet.bots).index(bot.bot_id)
+    except ValueError:  # composing a bot the fleet does not list (scaffolding)
+        index = 0
+    return (_host_boot_offset_rungs(paths) + index) * _BOOT_STAGGER_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -3059,14 +3153,18 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
     # one generate should surface all offenders, so an operator fixes the fleet in
     # a single pass instead of whack-a-mole.
     failures: list[tuple[str, str]] = []
-    for i, (bot_name, bot) in enumerate(fleet.bots.items()):
+    for bot_name, bot in fleet.bots.items():
         _log.info("composing %s...", bot_name)
         if log is not None:
             log(f"composing {bot_name}...")
         try:
-            out[bot_name] = compose_bot(
-                bot, fleet, paths, log=log, boot_delay_s=i * _BOOT_STAGGER_SECONDS
-            )
+            # boot_delay_s is deliberately NOT passed: compose_bot derives every
+            # bot's rung the same way for every entry point, so `generate --bot`
+            # and move-bot cannot compose a unit that disagrees with this one.
+            # The re-derivation re-reads sibling manifests per bot (~50ms worst
+            # case on a 4-fleet host); a cache here would be the wrong trade,
+            # since it would also have to know when a manifest changed.
+            out[bot_name] = compose_bot(bot, fleet, paths, log=log)
         except ValueError as e:
             failures.append((bot_name, str(e)))
     if failures:

@@ -23,7 +23,10 @@ from claudlobby.config import (
 from claudlobby.path_audit import ExternalDecl
 from tests.conftest import _write_exec, install_real_template
 from claudlobby.composer import (
+    _BOOT_STAGGER_SECONDS,
     _compose_hooks,
+    _host_boot_offset_rungs,
+    bot_boot_delay_s,
     _reconcile_access_json,
     _write_timer_units,
     compose_access_json,
@@ -2037,22 +2040,121 @@ class TestComposeSystemdUnit:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
         return bot, fleet, paths
 
+    # Anchored to line starts: the unit body documents the boot state machine in
+    # comments, and a comment naming a directive is not that directive.
+    @staticmethod
+    def _stagger(unit: str) -> str | None:
+        m = re.search(r"^ExecStartPre=(.*)$", unit, re.M)
+        return m.group(1) if m else None
+
     def test_no_stagger_when_delay_zero(self, tmp_path):
         bot, fleet, paths = self._make(tmp_path)
         unit = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
-        assert "ExecStartPre" not in unit
+        assert self._stagger(unit) is None
 
     def test_stagger_injected_when_delay_positive(self, tmp_path):
         bot, fleet, paths = self._make(tmp_path)
         unit = compose_systemd_unit(bot, fleet, paths, boot_delay_s=3)
-        assert "ExecStartPre=/bin/sleep 3" in unit
+        assert self._stagger(unit) == "/bin/sleep 3"
 
     def test_stagger_value_varies(self, tmp_path):
         bot, fleet, paths = self._make(tmp_path)
         unit6 = compose_systemd_unit(bot, fleet, paths, boot_delay_s=6)
-        assert "ExecStartPre=/bin/sleep 6" in unit6
+        assert self._stagger(unit6) == "/bin/sleep 6"
         unit0 = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
-        assert "ExecStartPre" not in unit0
+        assert self._stagger(unit0) is None
+
+    def test_unit_shape_keeps_substate_meaningful(self, tmp_path):
+        """The three directives service_is_starting depends on (#1002).
+
+        lib/lib-common.sh service_is_starting reads active/running as "boot in
+        flight". That is only true while ExecStart is a spawner that exits and
+        RemainAfterExit holds the unit active afterwards — together they make
+        active/exited the steady state. Drop either and active/running becomes
+        the steady state, so the predicate returns "starting" forever and
+        BOTH keepalive's dead-session watchdog and fleet-pulse's service_down
+        alarm go permanently quiet while every surface reads healthy.
+
+        This asserts the shape so that change breaks a test instead.
+        """
+        bot, fleet, paths = self._make(tmp_path)
+        unit = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
+        assert "Type=simple" in unit
+        assert "RemainAfterExit=yes" in unit
+        # The spawner half: ExecStart runs start-bot.sh, which backgrounds tmux
+        # and returns. A foreground exec here would invert SubState's meaning.
+        assert re.search(r"^ExecStart=\S*start-bot\.sh ", unit, re.M)
+
+
+class TestHostBootOffset:
+    """Host-global boot ladder: fleet N starts where fleet N-1 ended (#1002)."""
+
+    def _host(self, tmp_path, fleets: dict[str, int], nested: bool = False):
+        """Build local/<fleet>/fleet.yaml (or local/<system>/<fleet>/) trees."""
+        root = tmp_path / "claudlobby"
+        local = root / "local"
+        for name, n_bots in fleets.items():
+            d = (local / "sys" / name) if nested else (local / name)
+            d.mkdir(parents=True)
+            bots = "\n".join(f"    b{i}: {{expertise: [eng]}}" for i in range(n_bots))
+            (d / "fleet.yaml").write_text(
+                f"fleet:\n  name: {name}\n  bots:\n{bots}\n", encoding="utf-8"
+            )
+        return root, local
+
+    def test_first_fleet_starts_at_zero(self, tmp_path):
+        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2})
+        paths = Paths(root=root, fleet_dir=local / "aaa")
+        assert _host_boot_offset_rungs(paths) == 0
+
+    def test_later_fleet_starts_past_the_earlier_ones(self, tmp_path):
+        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2, "ccc": 4})
+        assert _host_boot_offset_rungs(Paths(root=root, fleet_dir=local / "bbb")) == 3
+        assert _host_boot_offset_rungs(Paths(root=root, fleet_dir=local / "ccc")) == 5
+
+    def test_no_two_bots_share_a_rung(self, tmp_path):
+        """The property the fix exists for, asserted end to end."""
+        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2, "ccc": 4})
+        rungs = []
+        for name, n_bots in (("aaa", 3), ("bbb", 2), ("ccc", 4)):
+            base = _host_boot_offset_rungs(Paths(root=root, fleet_dir=local / name))
+            rungs += [(base + i) * _BOOT_STAGGER_SECONDS for i in range(n_bots)]
+        assert len(rungs) == len(set(rungs)) == 9
+        assert sorted(rungs) == [i * _BOOT_STAGGER_SECONDS for i in range(9)]
+
+    def test_nested_system_container_fleets_are_ordered_too(self, tmp_path):
+        """local/<system>/<fleet>/ resolves like the flat layout."""
+        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2}, nested=True)
+        paths = Paths(root=root, fleet_dir=local / "sys" / "bbb")
+        assert _host_boot_offset_rungs(paths) == 3
+
+    def test_root_mode_has_no_offset(self, tmp_path):
+        root, _ = self._host(tmp_path, {"aaa": 3})
+        assert _host_boot_offset_rungs(Paths(root=root, fleet_dir=None)) == 0
+
+    def test_unparseable_sibling_does_not_block_generate(self, tmp_path):
+        """A broken fleet contributes 0 rungs; it must never raise here."""
+        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2})
+        (local / "aaa" / "fleet.yaml").write_text("fleet: [oops\n", encoding="utf-8")
+        assert _host_boot_offset_rungs(Paths(root=root, fleet_dir=local / "bbb")) == 0
+
+    def test_bot_boot_delay_places_each_bot_on_its_own_rung(self, tmp_path):
+        """The derivation every compose entry point shares.
+
+        Threading the rung from compose_fleet is what let `generate --bot` and
+        move-bot write a unit with NO stagger at all (#1002), so the rung is
+        derived from (fleet position, bot position) instead — and this asserts
+        the derivation, not a re-implementation of it in the test body.
+        """
+        root, local = self._host(tmp_path, {"aaa": 2, "bbb": 3})
+        paths = Paths(root=root, fleet_dir=local / "bbb")
+        bots = {
+            f"b{i}": BotConfig(bot_id=f"b{i}", name=f"b{i}", expertise=["eng"])
+            for i in range(3)
+        }
+        fleet = FleetConfig(name="bbb", service_prefix="p", bots=bots)
+        # aaa owns rungs 0-1, so bbb starts at rung 2 → 6s, 9s, 12s.
+        assert [bot_boot_delay_s(b, fleet, paths) for b in bots.values()] == [6, 9, 12]
 
 
 class TestPluginsBotConf:
@@ -3915,7 +4017,9 @@ class TestBotEnvStubDoesNotShadowUpstream:
         _scaffold_env_merge(
             bot_env, "# Bot environment for: test", [self._env_var("TELEGRAM_TOKEN_X")]
         )
-        assert re.search(r"^export TELEGRAM_TOKEN_X=", bot_env.read_text(), re.MULTILINE)
+        assert re.search(
+            r"^export TELEGRAM_TOKEN_X=", bot_env.read_text(), re.MULTILINE
+        )
 
         # Run 2: operator has since set it at the fleet tier.
         _scaffold_env_merge(
@@ -3935,7 +4039,9 @@ class TestBotEnvStubDoesNotShadowUpstream:
         from claudlobby.composer import _scaffold_env_merge
 
         bot_env = tmp_path / "bot.env"
-        bot_env.write_text("# Bot environment for: test\nexport TELEGRAM_TOKEN_X=perbot\n")
+        bot_env.write_text(
+            "# Bot environment for: test\nexport TELEGRAM_TOKEN_X=perbot\n"
+        )
         _scaffold_env_merge(
             bot_env,
             "# Bot environment for: test",

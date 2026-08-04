@@ -483,3 +483,25 @@ class TestComposeFleet:
         result = compose_fleet(fleet, paths)
         assert isinstance(result, dict)
         assert len(result) == 2  # lead + worker-1
+
+    def test_written_units_carry_distinct_boot_rungs(self, fleet_dir):
+        """The boot ladder reaches the unit ON DISK (#1002).
+
+        Asserted against the real generate rather than the helper: the defect
+        this guards is a compose path that never applies the rung, which a test
+        that recomputes the delay itself and calls compose_systemd_unit by hand
+        cannot see.
+        """
+        import re
+
+        paths = _make_paths(fleet_dir)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        result = compose_fleet(fleet, paths)
+
+        rungs = {}
+        for bot_id, bot_dir in result.items():
+            unit = (bot_dir / f"{fleet.service_prefix}.{bot_id}.service").read_text()
+            m = re.search(r"^ExecStartPre=/bin/sleep (\d+)$", unit, re.M)
+            rungs[bot_id] = int(m.group(1)) if m else 0
+
+        assert len(set(rungs.values())) == len(rungs), f"bots share a rung: {rungs}"
