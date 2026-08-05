@@ -4,6 +4,8 @@ Compositor for Claude Code agent fleets. Transforms `fleet.yaml` + `library/` in
 
 **North star:** Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and to point that fleet at a goal (fleets know the mission they serve, pick work that advances it, and close it at each project's declared rigor).
 
+**What that is for:** specialist agent teams that take on the work a team of people would otherwise do. Such a team **communicates in plain terms to the human while keeping the rigor behind it intact** — simplified for the reader, never simplified in the doing (`library/principles/simple-outside-rigorous-inside.md`). It works toward a business goal with enough autonomy to parallelize its own workstreams and fill its own idle time, and sustains that over days rather than a session. **Long-running is the precondition for the rest**: a fleet that cannot survive a restart with its context intact cannot hold a goal. Tracked as #974.
+
 **New here?** See [`documentation/getting-started.md`](documentation/getting-started.md) for the clone-to-fleet walkthrough and [`documentation/fleet-yaml-schema.md`](documentation/fleet-yaml-schema.md) for every config field.
 
 ## Ecosystem boundary
