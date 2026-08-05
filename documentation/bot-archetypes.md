@@ -72,7 +72,7 @@ The brain of the fleet. Converses freely, delegates to workers, monitors health.
 |-------|---------|
 | `/dispatch` | Send tasks to fleet bots via tmux with structured tracking |
 | `/lifecycle` | Full pipeline: implement → review → iterate → merge → retro → issues |
-| `/fleet-status` | Health check across all bots (alive/dead, context %, idle/working) |
+| `/fleet-status` | Health check across all bots (alive/dead, reported context-degraded state, idle/working) |
 | `/fleet-pulse` | Actionable fleet health — restart dead workers, flag stuck panes, protect WIP |
 | `/prs` | PR activity across repos: authored, review requests, CI status |
 | `/status` | Self-diagnostic — session health, MCP connectivity, tmux fleet state, fleet-state ledger |

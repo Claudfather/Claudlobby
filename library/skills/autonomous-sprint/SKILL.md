@@ -123,9 +123,12 @@ For each issue, sequentially:
 
 3. **After merge**: engineer runs `/compact` before next issue
 
-4. **Between issues**: check engineer's context level
-   - If >60%: restart bot before next issue
-   - If OK: dispatch next issue
+4. **Between issues**: check the engineer's reported state — NOT a context
+   percentage, which no bot can measure (`context-management`)
+   - If it reported `context-degraded`, or shows ~3+ completed rows in
+     `claudlobby report-back --bot <b> --status completed --since 24h`:
+     restart the bot before the next issue
+   - Otherwise: dispatch next issue
 
 **Step 8: Sprint summary**
 

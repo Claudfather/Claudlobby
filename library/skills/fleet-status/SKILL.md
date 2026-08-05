@@ -1,6 +1,6 @@
 ---
 name: fleet-status
-description: "Quick health check across all fleet bots — tmux sessions, service status, context usage, who's idle/working/dead."
+description: "Quick health check across all fleet bots — tmux sessions, service status, reported context-degraded state, who's idle/working/dead."
 argument-hint: "[bot-name]"
 ---
 
@@ -37,6 +37,20 @@ Compare expected bots against running tmux sessions to identify bots that should
 If the fleet config is unavailable, report only what tmux shows.
 
 ## Checks
+
+### Reported context state
+
+No bot can measure a context percentage, so do not ask for one and do not
+report one (`context-management`). What IS available is the worker's own
+`context-degraded` report:
+
+```bash
+claudlobby report-back --since 24h | grep -i context-degraded
+```
+
+Any bot listed there is asking to be restarted — pair it with its completed
+count in the same window before deciding.
+
 
 For each discovered bot:
 

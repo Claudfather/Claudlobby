@@ -86,7 +86,13 @@ Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the tabl
 
 **Not yet captured via hooks:** several fleet-health signals are not derivable from the Claude Code PreToolUse/PostToolUse hook payload. Managers must use live checks for these until the hook schema exposes them:
 
-- **`context_warning` / `rate_limit`** — not present in the payload at all. Use live checks (capture-pane, direct query) for context percentage and rate-limit status.
+- **`rate_limit`** — not present in the payload at all. Use live checks
+  (capture-pane, direct query) for rate-limit status.
+- **`context_warning`** — not present in the payload, **and not obtainable by
+  any other route either.** Capture-pane does not close this gap: no percentage
+  is ever rendered, so there is nothing to capture, and a bot cannot
+  self-measure it. The supported signal is the worker's own `context-degraded`
+  report plus completed-work counts — see the `context-management` protocol.
 - **`mcp_error`** — a failing tool call (including an MCP server returning `isError`) fires the `PostToolUseFailure` hook event rather than `PostToolUse`, and only that event carries an error field. The `bot-vitals.sh` hook is wired to Pre/PostToolUse, so no `mcp_error` event is produced. Detecting dead or erroring MCP servers requires a dedicated mechanism (e.g. a `PostToolUseFailure` hook or an out-of-band liveness probe).
 
 ## Reading Events
