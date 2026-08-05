@@ -1956,6 +1956,122 @@ service_is_active() {
     esac
 }
 
+# Upper bound on how long service_is_starting will call a unit mid-boot.
+# The cap exists for the boot that never finishes: without it a wedged spawner
+# would suppress both the restart and the alarm forever — a bot that never comes
+# back and nothing says so, the manufactured all-clear shape (#933), strictly
+# worse than the false positives this predicate exists to remove.
+#
+# Budgeted against ONE PHASE, not the whole boot, which is why the composed boot
+# stagger cannot eat it (see the age read below): the ExecStart phase is bounded
+# by start-bot.sh's own RC_READY_TIMEOUT_S (90s default), so 300s is >3x headroom
+# and stays correct however long the host ladder grows. Matches the 300s default
+# the bridge grace already uses. Override per-bot with KEEPALIVE_BOOT_GRACE_S
+# (documented in documentation/environment-variables.md).
+_BOOT_GRACE_S_DEFAULT=300
+
+# service_is_starting <bot_service>
+# rc 0 iff the unit is provably MID-START: a boot is in flight, so an absent
+# tmux session is expected and means neither "down" (fleet-pulse) nor "restart
+# me" (keepalive). One predicate, two consumers, so detection and healing can
+# never disagree about whether a bot is booting.
+#
+# Linux reads two systemd fields in one show, because the boot spans two states:
+#   activating      → ExecStartPre, i.e. the boot-stagger sleep (3s..N)
+#   active/running  → ExecStart (start-bot.sh) executing; tmux not up yet
+#   active/exited   → steady state; a missing session here is REAL
+#
+# THE ASSUMPTION THIS RESTS ON, stated because violating it is silent:
+# active/running means mid-boot ONLY while the composed unit keeps BOTH of
+#   (a) an ExecStart that spawns and exits (start-bot.sh backgrounds tmux), and
+#   (b) RemainAfterExit=yes, which holds the unit active after (a) exits.
+# Drop either and active/running becomes the STEADY state of a healthy bot —
+# this predicate would then return 0 forever, permanently disabling keepalive's
+# dead-session watchdog and fleet-pulse's service_down alarm while every surface
+# reads green. compose_systemd_unit carries the same warning, and
+# tests/test_composer.py asserts the unit shape so a change breaks a test rather
+# than the watchdog.
+#
+# ActiveState alone is NOT sufficient and was measured so: on the 2026-08-04
+# boot storm all three of rajan's mid-boot restarts landed in active/running
+# (unit active 17:23:41, restarts 17:24:34 / 17:25:32 / 17:26:19), never in
+# activating. The activating window is only as wide as the stagger sleep; the
+# window that actually strands a boot is 35-178s wide. See #1002.
+#
+# Sound in one direction only: rc 0 requires positive proof of a start in
+# flight. macOS (launchctl print exposes no cheap sub-state) and any
+# unrecognized OS return non-zero — the caller keeps its pre-existing behaviour
+# rather than inheriting a suppression this function cannot justify.
+service_is_starting() {
+    local svc="${1:?Usage: service_is_starting <bot_service>}"
+    [ "$_OS" = "Linux" ] || return 1
+
+    local active="" sub="" enter_us="" exec_us="" since_us up_s grace _k _v
+    # ONE show for all four properties: separate calls could straddle a state
+    # change and compose a state pair that never existed.
+    #
+    # Parsed BY NAME (Key=Value), never by position, and deliberately without
+    # --value: systemctl emits properties in ITS OWN order, not the order they
+    # were requested. Positional reads happen to line up for some property sets
+    # and silently transpose for others — adding a fourth -p here reordered the
+    # output to ExecMainStart / ActiveState / SubState / InactiveExit, so the
+    # state test read a timestamp as the ActiveState and the predicate answered
+    # "not starting" for every unit in every state. Name-keyed parsing cannot
+    # drift that way, and an absent property simply leaves its var empty.
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+        ActiveState) active=$_v ;;
+        SubState) sub=$_v ;;
+        InactiveExitTimestampMonotonic) enter_us=$_v ;;
+        ExecMainStartTimestampMonotonic) exec_us=$_v ;;
+        esac
+    done <<EOF
+$(systemctl --user show -p ActiveState -p SubState \
+    -p InactiveExitTimestampMonotonic -p ExecMainStartTimestampMonotonic \
+    "$svc" 2>/dev/null | tr -d '\r')
+EOF
+
+    case "$active/$sub" in
+    activating/*) since_us=$enter_us ;; # ExecStartPre: age from the start attempt
+    active/running) since_us=$exec_us ;; # ExecStart: age from the spawner alone
+    *) return 1 ;;
+    esac
+
+    # Age the CURRENT PHASE, not the whole boot. Both stamps are set by systemd
+    # and reset by every restart, so unlike data/.spawn (touched after session
+    # creation, hence stale through exactly the window this guards) neither can
+    # carry a previous boot's value.
+    #
+    # Two stamps rather than one because InactiveExit fires at inactive->activating
+    # and therefore INCLUDES the composed ExecStartPre stagger, which is host-global
+    # (#1002) and grows with every fleet added. Measured on this host the last rung
+    # is already 60s; billing that to the ExecStart budget would silently shrink it
+    # as the estate grows, and the tail bot — the one the ladder pushed latest — is
+    # exactly the bot that can least afford it. ExecMainStart fires when the spawner
+    # actually starts, so the grace stays a statement about start-bot.sh alone.
+    case "$since_us" in "" | *[!0-9]*) return 0 ;; esac # unreadable age: trust the state
+    grace="${KEEPALIVE_BOOT_GRACE_S:-$_BOOT_GRACE_S_DEFAULT}"
+    case "$grace" in "" | *[!0-9]*) grace=$_BOOT_GRACE_S_DEFAULT ;; esac
+    # Builtin read, no forks; compare in whole seconds so the µs stamp needs no
+    # scaling. Truncating both sides costs at most 1s against a 300s cap.
+    # `10#` pins base 10 — an all-digit string with a leading zero is octal to
+    # $(( )), and "value too great for base" aborts the caller under `set -e`,
+    # at the one moment (just after a boot) this predicate matters most.
+    read -r up_s _ < /proc/uptime || return 0 # unreadable clock: trust the state
+    case "$up_s" in "" | *[!0-9.]*) return 0 ;; esac
+    [ "$((10#${up_s%.*} - since_us / 1000000))" -lt "$grace" ]
+}
+
+# systemd_user_bus_available
+# rc 0 iff a usable `systemctl --user` bus is reachable. The gate for harnesses
+# that install a real user unit: macOS and any container without a user manager
+# must SKIP rather than fail. Lives here because two private copies of a
+# capability probe is how one harness gets fixed and its sibling silently keeps
+# skipping (the seed_claude_auth lesson, below).
+systemd_user_bus_available() {
+    [ "$_OS" = "Linux" ] && systemctl --user show-environment >/dev/null 2>&1
+}
+
 # unit_is_dormant <timers-dir> <unit-basename>
 # True when the composed DORMANT manifest lists the unit (an enroll: false
 # job — composed-but-dormant, opt-in via fleet.yaml). One predicate shared by

@@ -83,6 +83,16 @@ _BLESSED_RAW_READS = {
     # No value crosses into a path, a grant, or composed output, so this adds no
     # fleet.yaml-shaped source surface for L1 to miss.
     ("composer.py", "dotenv.read(tier)"),
+    # _fleet_bot_count reads a SIBLING fleet's manifest to size its block of the
+    # host-global boot ladder (#1002). EXEMPT, narrowly, on the dotenv.read(tier)
+    # precedent: the only thing consumed is len(fleet.bots) — an integer. No
+    # value from the parsed document crosses into a path, a grant, or composed
+    # output, so this adds no fleet.yaml-shaped source surface for L1 to miss.
+    # It is deliberately raw and fail-soft rather than routed through the
+    # validating loader: a sibling fleet with a broken manifest must not be able
+    # to fail this fleet's generate.
+    ("composer.py", "fleet_yaml.read_text(encoding='utf-8')"),
+    ("composer.py", "yaml.safe_load(fleet_yaml.read_text(encoding='utf-8'))"),
 }
 
 

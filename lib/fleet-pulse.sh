@@ -199,8 +199,28 @@ for bot_dir in "$BOTS_DIR"/*/; do
         _pane_buf=$(bot_tmux "$_bot_socket" capture-pane -t "$session_name" -p 2>/dev/null || true)
     fi
 
+    # --- Boot gate: is this bot's supervised start still in flight? ---
+    # A bot whose unit is mid-start has no tmux session and no active unit YET,
+    # which is indistinguishable from a dead one by state alone — so Checks 1
+    # and 2 both fire on a perfectly healthy boot. Evidence (#1002): on the
+    # 2026-08-04 boot storm saul emitted session_missing at 17:27:24 and
+    # service_down state=activating at 17:27:26, one tick, one healthy boot, two
+    # pages. A service_down whose own payload says "activating" is self-proving
+    # as a false positive, and it was the only service_down in that day's ledger.
+    #
+    # Computed once, before both checks, so they cannot disagree about whether
+    # this bot is booting. Mid-start is NO VERDICT, not an all-clear: neither
+    # emit nor debounce_clear runs, leaving any genuine pre-existing alert state
+    # intact to re-fire once the unit settles.
+    _svc_starting=0
+    if [ -n "$BOT_SERVICE" ] && service_is_starting "$BOT_SERVICE"; then
+        _svc_starting=1
+    fi
+
     # --- Check 1: tmux session exists ---
-    if [ "$_session_alive" -eq 0 ]; then
+    if [ "$_svc_starting" -eq 1 ]; then
+        : # boot in flight — the session is expected to be absent
+    elif [ "$_session_alive" -eq 0 ]; then
         emit_fleet_event "session_missing" "pulse" '{"session":"'"$session_name"'"}' "$bot_dir" "$bot_id"
         debounce_notify "$state_dir" "$bot_id" "session_alerted" _notify_current_bot \
             "$bot_id session_missing — tmux session '$session_name' is gone" "$_mgr_token" "$_RENOTIFY_AFTER_S"
@@ -212,7 +232,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # Liveness via service_is_active (the OS dispatch lives there). The payload
     # state string stays per-OS: systemd exposes ActiveState; launchd print has no
     # cheap sub-state, so a confirmed-down job is labeled not-loaded.
-    if [ -n "$BOT_SERVICE" ]; then
+    if [ -n "$BOT_SERVICE" ] && [ "$_svc_starting" -eq 0 ]; then
         if ! service_is_active "$BOT_SERVICE"; then
             if [ "$_OS" = "Darwin" ]; then
                 state="not-loaded"
@@ -502,6 +522,16 @@ _summary_tmp=$(safe_mktemp)
         _s_svc_status="ok"
         if [ -n "$_s_svc" ] && ! service_is_active "$_s_svc"; then
             _s_svc_status="DOWN"
+        fi
+        # Same boot gate as the main loop, for the same reason and by the same
+        # predicate. Without it this run reports two verdicts about one bot: the
+        # loop correctly stays silent for a mid-boot bot while this block prints
+        # SESSION DOWN / SERVICE DOWN to the journal and pulse-summary.txt — the
+        # pre-fix answer, from the file that fixed it. "starting" is its own
+        # column value, never folded into "up": a boot is not health.
+        if [ -n "$_s_svc" ] && service_is_starting "$_s_svc"; then
+            [ "$_s_session_status" = "DOWN" ] && _s_session_status="starting"
+            [ "$_s_svc_status" = "DOWN" ] && _s_svc_status="starting"
         fi
 
         _s_alerts=""

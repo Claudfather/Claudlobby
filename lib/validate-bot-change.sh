@@ -117,7 +117,17 @@ cleanup() {
     # still-alive ones so a mid-scenario abort never leaks a poller.
     # shellcheck disable=SC2086
     for _p in ${BH_PIDS:-}; do kill -TERM "$_p" 2>/dev/null || true; done
-    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "$TMUX_TMPDIR"
+    # The #1002 boot probe installs a REAL systemd user unit. Torn down from the
+    # trap and ONLY the trap, so an abort mid-scenario cannot leave an enabled
+    # throwaway unit behind on a production host.
+    if [ -n "${BP_SVC:-}" ]; then
+        systemctl --user stop "$BP_SVC" >/dev/null 2>&1 || true
+        rm -f "$HOME/.config/systemd/user/$BP_SVC.service"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        systemctl --user reset-failed "$BP_SVC" >/dev/null 2>&1 || true
+        command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
+    fi
+    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -1477,6 +1487,148 @@ _instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null
     && printf '%s\n' "$_instr" | grep -q 'BRIEFING_SECTIONS' \
     && printf '%s\n' "$_instr" | grep -qi 'configured section'; } && r=yes || r=no
 harness_check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (read the var + render the configured sections)" "$r"
+
+# ===========================================================================
+# #1002 — the boot window. A bot whose unit is mid-start has no tmux session
+# yet, which by state alone is indistinguishable from a dead one: fleet-pulse
+# alarmed on it (service_down carrying state=activating, self-proving false)
+# and keepalive restarted it, killing the very boot that would have produced
+# the session.
+#
+# Only running this proves it. A stubbed systemctl would let the predicate
+# assert whatever it likes about a state machine it never met, so this drives a
+# REAL systemd user unit built to the composed shape (Type=simple +
+# RemainAfterExit=yes + a spawner ExecStart that exits) through all three of its
+# states, and drives the REAL keepalive.sh and fleet-pulse.sh against it.
+#
+# The control at the end is the load-bearing half: a settled unit with a dead
+# session MUST still restart. Without it, a predicate that simply returned
+# "starting" always — permanently disabling the watchdog while every surface
+# reads healthy — would pass every other assertion here.
+# ===========================================================================
+echo ""
+echo "=== validate #1002: the boot window is not down, and not a restart trigger ==="
+
+# Gated: needs a real systemd --user bus. macOS and CI containers without a
+# user manager skip rather than fail — a harness that cannot run the mechanism
+# must not report a verdict about it (coverage honesty).
+if ! systemd_user_bus_available; then
+    echo "  SKIP  #1002 boot-window scenario — no systemd --user bus (needs Linux + linger)"
+    echo "        NOT a pass: the activating / active-running / active-exited"
+    echo "        transitions and both consumers went unexercised on this host."
+else
+    BP_SVC="claudlobby-vbc-bootprobe-$$"
+    BP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-bp.XXXXXX")"
+    BP_FLEET="bpfleet"
+    BP_BOT="bootprobe"
+    BP_DIR="$BP_ROOT/local/$BP_FLEET/runtime/bots/$BP_BOT"
+    BP_UNIT="$HOME/.config/systemd/user/$BP_SVC.service"
+    BP_EVENTS="$BP_DIR/data/events"
+    mkdir -p "$BP_DIR/data" "$BP_ROOT/state" "$HOME/.config/systemd/user"
+
+    # Mirror start-bot.sh: do slow pre-session work (there, plugin install), THEN
+    # create the session, THEN exit. The gap between "unit went active" and
+    # "session exists" is the window that stranded rajan for 35-178s.
+    cat > "$BP_ROOT/spawner.sh" <<BPSPAWN
+#!/bin/bash
+sleep 8
+tmux -L "$BP_SVC" new-session -d -s "$BP_BOT" 'sleep 600'
+BPSPAWN
+    chmod +x "$BP_ROOT/spawner.sh"
+
+    cat > "$BP_UNIT" <<BPUNIT
+[Unit]
+Description=claudlobby validate-bot-change boot-window probe
+[Service]
+Type=simple
+RemainAfterExit=yes
+KillMode=process
+ExecStartPre=/bin/sleep 4
+ExecStart=$BP_ROOT/spawner.sh
+BPUNIT
+
+    cat > "$BP_DIR/bot.conf" <<BPCONF
+BOT_NAME=$BP_BOT
+BOT_SERVICE=$BP_SVC
+TMUX_SESSION=$BP_BOT
+BPCONF
+
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user start --no-block "$BP_SVC" >/dev/null 2>&1 || true
+
+    bp_state() { systemctl --user show -p ActiveState -p SubState --value "$BP_SVC" 2>/dev/null | paste -sd/ -; }
+    bp_starting() { service_is_starting "$BP_SVC"; }
+
+    bp_pulse() {
+        CLAUDLOBBY_ROOT="$BP_ROOT" FLEET_PULSE_ESCALATE_CHAT_ID="" \
+            "$LIB_DIR/fleet-pulse.sh" "$BP_FLEET" >/dev/null 2>&1 || true
+    }
+
+    # --- State 1: activating (ExecStartPre — the boot-stagger sleep) ---
+    sleep 2
+    _s1=$(bp_state)
+    bp_starting && r=yes || r=no
+    harness_check "activating unit reads as mid-start (observed $_s1)" "$r"
+    [ "$_s1" = "activating/start-pre" ] && r=yes || r=no
+    harness_check "  ...and that state really was activating, not assumed" "$r"
+
+    # Pulse HERE, in the activating window. This is the only state where
+    # service_is_active reports not-active, so it is the only state that can
+    # reach the service_down branch — the finding-B false positive (saul's
+    # service_down state=activating) lives here and nowhere else. Sampling the
+    # pulse only in the later active/running window would leave finding B
+    # entirely unexercised while reading green.
+    bp_pulse
+
+    # --- State 2: active/running (spawner executing, session not up yet) ---
+    # The state ActiveState alone cannot see, and where all 3 rajan restarts landed.
+    sleep 6
+    _s2=$(bp_state)
+    _sess2=no; command tmux -L "$BP_SVC" has-session -t "$BP_BOT" 2>/dev/null && _sess2=yes
+    [ "$_s2" = "active/running" ] && [ "$_sess2" = no ] && r=yes || r=no
+    harness_check "mid-boot window reached: unit active/running with NO session (observed $_s2, session=$_sess2)" "$r"
+    bp_starting && r=yes || r=no
+    harness_check "  ...and service_is_starting still reads mid-start there" "$r"
+
+    # Consumer C: the real keepalive must NOT restart this boot.
+    CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
+    _kl="$BP_DIR/keepalive.log"
+    grep -q 'boot in flight' "$_kl" 2>/dev/null && r=yes || r=no
+    harness_check "keepalive SKIPs a boot in flight instead of restarting it" "$r"
+    grep -q 'RESTART' "$_kl" 2>/dev/null && r=no || r=yes
+    harness_check "  ...and emitted no RESTART line for it" "$r"
+
+    # Consumer B: the real fleet-pulse must not alarm anywhere in the boot. The
+    # ledger below accumulates BOTH pulse runs — the activating one above and
+    # this active/running one — so the assertions cover the whole window rather
+    # than whichever state happened to be sampled.
+    bp_pulse
+    _bpev=$(ls "$BP_EVENTS"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+    { [ -z "$_bpev" ] || ! grep -q '"type":"service_down"' "$_bpev"; } && r=yes || r=no
+    harness_check "fleet-pulse emits no service_down across the boot (incl. the activating window, where it is reachable)" "$r"
+    { [ -z "$_bpev" ] || ! grep -q '"type":"session_missing"' "$_bpev"; } && r=yes || r=no
+    harness_check "  ...and no session_missing either (same tick, same non-problem)" "$r"
+
+    # --- State 3: active/exited — settled. The assumption the predicate rests on. ---
+    for _i in $(seq 1 100); do
+        [ "$(bp_state)" = "active/exited" ] && break
+        sleep 0.2
+    done
+    _s3=$(bp_state)
+    [ "$_s3" = "active/exited" ] && r=yes || r=no
+    harness_check "a SETTLED bot unit reads active/exited (observed $_s3) — if this ever reads active/running, SubState stops meaning mid-boot and the watchdog silently dies" "$r"
+    bp_starting && r=no || r=yes
+    harness_check "  ...and service_is_starting stops suppressing once settled" "$r"
+
+    # --- CONTROL: settled unit + dead session MUST still restart. ---
+    # This is what distinguishes the fix from "disable the watchdog".
+    command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
+    : > "$_kl"
+    CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
+    grep -q 'RESTART' "$_kl" 2>/dev/null && r=yes || r=no
+    harness_check "CONTROL: a genuinely dead session on a settled unit still restarts" "$r"
+
+fi
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
