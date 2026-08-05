@@ -96,7 +96,11 @@ def cmd_validate(args) -> int:
 
 
 def cmd_generate(args) -> int:
-    from ..composer import compose_fleet_timers, compose_host_timers
+    from ..composer import (
+        compose_fleet_timers,
+        compose_host_bot_handles,
+        compose_host_timers,
+    )
 
     paths = _resolve_paths(args)
     _load_env(paths)
@@ -141,6 +145,13 @@ def cmd_generate(args) -> int:
     if host_timers_dir.is_dir():
         log.info("composed host timers → %s", host_timers_dir)
 
+    # The GitHub mention guard's name list (#1019). Host-wide, so it is written
+    # on every generate regardless of which fleet was named — a bot references
+    # other fleets' bots constantly, and those are the mentions most likely to
+    # be written by someone with no relationship to that bot.
+    handles = compose_host_bot_handles(paths)
+    log.info("composed bot-handle guard list → %s", handles)
+
     return 0
 
 
@@ -151,7 +162,7 @@ def cmd_host_timers(args) -> int:
     before enrollment so a cold host (no fleet composed yet) still gets its
     host units.
     """
-    from ..composer import compose_host_timers
+    from ..composer import compose_host_bot_handles, compose_host_timers
 
     paths = _resolve_paths(args)
     host_timers_dir = compose_host_timers(paths)

@@ -3105,6 +3105,61 @@ def compose_fleet_timers(
     return timers_dir
 
 
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) -> Path:
+    """Write every bot name on the HOST, one per line, for the mention guard.
+
+    Consumed by ``lib/gh-mention-guard.sh`` (#1019), which rewrites ``@<name>``
+    out of GitHub-bound tool calls. Every one of this estate's bot names is also
+    a real GitHub account — 19 of 21 belonging to real people — so an unguarded
+    teammate reference emails a stranger. One of them asked us to stop.
+
+    COMPOSED, never hardcoded: a literal list re-breaks the moment a bot is
+    added, which is #1009's defect class exactly.
+
+    HOST-WIDE, not fleet-scoped, and that is load-bearing rather than tidy.
+    Cross-fleet references are routine — this fleet's issues name bots from
+    three other fleets constantly — so a fleet-scoped list would miss precisely
+    the mentions written by someone with no relationship to that bot. Built by
+    enumerating every fleet under ``local/`` via the same ``_iter_fleet_dirs``
+    the collision scan and move-bot autodetect use.
+
+    A sibling fleet whose manifest is missing or unparseable contributes
+    nothing rather than raising: one fleet's broken config must not stop another
+    fleet's generate. The cost is a narrower guard, which the hook reports.
+    """
+    names: set[str] = set()
+    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
+        manifest = fleet_dir / "fleet.yaml"
+        if not manifest.is_file():  # a container or a non-fleet dir
+            continue
+        try:
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            # A sibling fleet's unreadable manifest must not stop this generate.
+            # Narrow ON PURPOSE: the first cut caught bare Exception, so a
+            # missing `import yaml` raised NameError on EVERY fleet and was
+            # swallowed as "all four manifests are broken" — the guard composed
+            # an empty list and would have protected nothing, silently.
+            continue
+        if isinstance(data, dict):
+            names.update((data.get("fleet") or {}).get("bots") or {})
+    base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "bot-handles"
+    # Only names safe to drop into the hook's regex alternation. Deliberately
+    # NOT SHELL_IDENT_RE, which forbids hyphens — `worker-1` is a real bot name
+    # shape (fleet.yaml.example uses it), and excluding it would leave exactly
+    # those bots unguarded while looking covered. This charset carries no regex
+    # metacharacters, and matches the hook's own `grep -Ex` filter so the two
+    # cannot disagree about which names are admissible.
+    safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
+    target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    return target
+
+
 def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path:
     """Emit host-global singleton units from system.yaml ``host.jobs``.
 
