@@ -127,7 +127,7 @@ cleanup() {
         systemctl --user reset-failed "$BP_SVC" >/dev/null 2>&1 || true
         command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
     fi
-    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "$TMUX_TMPDIR"
+    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -1686,6 +1686,225 @@ printf '%s' "$_gm" | grep -q 'rc=0' && r=yes || r=no
 harness_check "a missing handle manifest FAILS OPEN (never blocks the whole fleet from GitHub)" "$r"
 
 rm -rf "$GM_ROOT"
+
+# ===========================================================================
+# #1009 — source currency across the framework, not just claudlobby.
+#
+# Composition cannot prove any of this. A unit test showing the script reads a
+# second repo says nothing about whether the notice actually fires, whether the
+# pull actually moves HEAD, or — the part that matters most — whether the
+# guards actually STOP a pull on a tree somebody is working in. So this drives
+# the REAL notify-behind.sh and update-siblings.sh against REAL git repos, and
+# asserts on HEAD movement and emitted events.
+#
+# Fixture: throwaway repos with controlled remotes, an "org" that matches
+# the fake claudlobby root, and one that does not.
+# ===========================================================================
+echo ""
+echo "=== validate #1009: sibling currency — reports, pulls, and refuses to pull ==="
+
+SC_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-sc.XXXXXX")"
+SC_FLEET="scfleet"
+SC_BOT="scbot"
+SC_DIR="$SC_ROOT/local/$SC_FLEET/runtime/bots/$SC_BOT"
+mkdir -p "$SC_DIR/data" "$SC_ROOT/state" "$SC_ROOT/origins"
+
+# sc_mkrepo <name> <org> — a bare upstream + a clone whose origin URL carries
+# <org>. The URL stays a real forge-shaped string (that is what repo_remote_org
+# parses) while url.<path>.insteadOf points the actual transport at the local
+# bare repo — so discovery sees the org and git can still fetch. Rewriting the
+# URL to the bare path instead would delete the very field under test.
+sc_mkrepo() {
+    local name="$1" org="$2" up="$SC_ROOT/origins/$1.git" work="$SC_ROOT/$1"
+    local url="https://github.com/$org/$name.git"
+    git init --quiet --bare "$up"
+    git init --quiet "$work"
+    git -C "$work" config user.email v@example.com
+    git -C "$work" config user.name validate
+    git -C "$work" config commit.gpgsign false
+    git -C "$work" config "url.$up.insteadOf" "$url"
+    echo v1 > "$work/f.txt"
+    git -C "$work" add f.txt
+    git -C "$work" commit --quiet -m c1
+    git -C "$work" branch -M main
+    git -C "$work" remote add origin "$url"
+    git -C "$work" push --quiet origin main
+    # Point the bare repo's HEAD at main, so a later clone of it checks out a
+    # branch and origin/HEAD resolves — repo_default_branch reads exactly that.
+    git -C "$up" symbolic-ref HEAD refs/heads/main
+    git -C "$work" remote set-head origin -a >/dev/null 2>&1 || true
+    git -C "$work" branch --quiet --set-upstream-to=origin/main main
+    printf '%s' "$work"
+}
+
+# sc_advance <name> — add an upstream commit the clone is now behind by.
+sc_advance() {
+    local work="$SC_ROOT/$1" tmp="$SC_ROOT/.adv-$1"
+    rm -rf "$tmp"
+    git clone --quiet "$SC_ROOT/origins/$1.git" "$tmp" 2>/dev/null
+    git -C "$tmp" config user.email v@example.com
+    git -C "$tmp" config user.name validate
+    git -C "$tmp" config commit.gpgsign false
+    echo v2 >> "$tmp/f.txt"
+    git -C "$tmp" add f.txt
+    git -C "$tmp" commit --quiet -m c2
+    git -C "$tmp" push --quiet origin main
+    rm -rf "$tmp"
+    git -C "$work" fetch --quiet origin 2>/dev/null || true
+}
+
+# The fake claudlobby root defines the org every sibling is matched against.
+SC_HOME=$(sc_mkrepo "claudlobby" "testorg")
+SC_SIB=$(sc_mkrepo "sibling" "testorg")     # framework — must be watched
+SC_PROD=$(sc_mkrepo "productrepo" "otherorg") # product — must NOT be watched
+SC_DIRTY=$(sc_mkrepo "dirtysib" "testorg")  # framework, but someone is mid-work
+
+cat > "$SC_DIR/bot.conf" <<SCCONF
+BOT_NAME=$SC_BOT
+MANAGER_TMUX=
+SCCONF
+
+# ONE invocation path for both scripts. Only the pip layer is stubbed — the org
+# match, the dedupe, the git top-level resolution, the guards and every git
+# operation are the real code. $_SC_LOCS is what pip would have reported.
+sc_run() {  # sc_run <script.sh> [args...]     ($_SC_LOCS = discovered locations)
+    local script="$1"; shift
+    CLAUDLOBBY_ROOT="$SC_HOME" \
+    CLAUDLOBBY_FLEET="$SC_FLEET" \
+    _SC_LOCS="$_SC_LOCS" \
+    _SC_BOTS="$SC_ROOT/local/$SC_FLEET/runtime/bots" \
+        bash -c '
+            . "'"$LIB_DIR"'/lib-common.sh"
+            _editable_project_locations() { printf "%s\n" "$_SC_LOCS"; }
+            resolve_bots_dir() { printf "%s" "$_SC_BOTS"; }
+            s="$1"; shift; . "$s" "$@"
+        ' _ "$LIB_DIR/$script" "$@" >/dev/null 2>&1 || true
+}
+
+sc_discover() {
+    CLAUDLOBBY_ROOT="$SC_HOME" _SC_LOCS="$_SC_LOCS" bash -c '
+        . "'"$LIB_DIR"'/lib-common.sh"
+        _editable_project_locations() { printf "%s\n" "$_SC_LOCS"; }
+        discover_framework_checkouts' 2>/dev/null
+}
+
+# Host jobs run with no bot context, so emit_fleet_event takes its
+# fleet-level branch: $CLAUDLOBBY_ROOT/state/events, not the bot dir.
+SC_EVENTS="$SC_HOME/state/events"
+sc_events() { cat "$SC_EVENTS"/fleet-*.jsonl 2>/dev/null || true; }
+sc_head() { git -C "$1" rev-parse HEAD; }
+
+# --- Discovery: the org test picks framework and drops product ---
+_SC_LOCS="$SC_SIB
+$SC_PROD
+$SC_DIRTY"
+sc_watched=$(sc_discover)
+printf '%s\n' "$sc_watched" | grep -qx "$SC_SIB" && r=yes || r=no
+harness_check "discovery watches a same-org sibling (no path was configured)" "$r"
+printf '%s\n' "$sc_watched" | grep -qx "$SC_PROD" && r=no || r=yes
+harness_check "discovery EXCLUDES an other-org product repo (bots install those too)" "$r"
+[ "$(printf '%s\n' "$sc_watched" | grep -cx "$SC_HOME")" = 1 ] && r=yes || r=no
+harness_check "claudlobby appears exactly once (it is itself an editable install)" "$r"
+
+# --- notify-behind: reports, and still never pulls ---
+sc_advance sibling
+sib_before=$(sc_head "$SC_SIB")
+sc_run notify-behind.sh
+sc_events | grep -q '"type":"source_behind"' && r=yes || r=no
+harness_check "notify-behind emits source_behind for a stale SIBLING" "$r"
+[ "$(sc_head "$SC_SIB")" = "$sib_before" ] && r=yes || r=no
+harness_check "notify-behind moved nothing — the reporter is still notice-only" "$r"
+
+# --- update-siblings: the guards, before the pull ---
+echo "uncommitted" >> "$SC_DIRTY/f.txt"
+sc_advance dirtysib
+dirty_before=$(sc_head "$SC_DIRTY")
+
+# A local unpushed commit is the other "somebody is mid-work" shape.
+SC_AHEAD=$(sc_mkrepo "aheadsib" "testorg")
+sc_advance aheadsib
+git -C "$SC_AHEAD" config user.email v@example.com
+git -C "$SC_AHEAD" config user.name validate
+echo local > "$SC_AHEAD/local.txt"
+git -C "$SC_AHEAD" add local.txt
+git -C "$SC_AHEAD" commit --quiet -m "local work"
+ahead_before=$(sc_head "$SC_AHEAD")
+
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+_SC_LOCS="$SC_SIB
+$SC_PROD
+$SC_DIRTY
+$SC_AHEAD"
+sc_run update-siblings.sh --dry-run
+[ "$(sc_head "$SC_SIB")" = "$sib_before" ] && r=yes || r=no
+harness_check "--dry-run moves nothing" "$r"
+
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+sc_run update-siblings.sh
+
+# HEAD-did-not-move is NOT sufficient here and asserting only that is a trap:
+# `git merge --ff-only` refuses a dirty tree by itself, so those assertions pass
+# with repo_pull_blocker deleted. Verified by neutering it — all 17 stayed
+# green. The discriminator is WHICH event fired: sibling_update_blocked naming
+# the human reason (the guard refused, before touching git) versus
+# sibling_update_failed (git was asked and would not).
+[ "$(sc_head "$SC_DIRTY")" = "$dirty_before" ] && r=yes || r=no
+harness_check "GUARD: a DIRTY working tree is not pulled (somebody is mid-work)" "$r"
+sc_events | grep '"type":"sibling_update_blocked"' | grep -q 'dirty working tree' && r=yes || r=no
+harness_check "  ...refused BY THE GUARD, naming the reason — not merely refused by git" "$r"
+[ "$(sc_head "$SC_AHEAD")" = "$ahead_before" ] && r=yes || r=no
+harness_check "GUARD: a tree with unpushed local commits is not pulled" "$r"
+sc_events | grep '"type":"sibling_update_blocked"' | grep -q 'local commits not pushed' && r=yes || r=no
+harness_check "  ...also refused by the guard, naming the unpushed work" "$r"
+sc_events | grep -q '"type":"sibling_update_failed"' && r=no || r=yes
+harness_check "  ...and no git operation was even attempted on either (no sibling_update_failed)" "$r"
+grep -q "uncommitted" "$SC_DIRTY/f.txt" && r=yes || r=no
+harness_check "  ...and the uncommitted edit is still there, unstashed" "$r"
+
+# --- update-siblings: the pull it IS supposed to do ---
+[ "$(sc_head "$SC_SIB")" != "$sib_before" ] && r=yes || r=no
+harness_check "a CLEAN stale sibling is fast-forwarded (the #1009 fix actually applies)" "$r"
+sc_events | grep -q '"type":"sibling_updated"' && r=yes || r=no
+harness_check "  ...and every movement emits sibling_updated (an invisible auto-update is #1009 inverted)" "$r"
+# Give the product repo something a leak WOULD have pulled — without this its
+# upstream never moves, so "HEAD is unchanged" holds whether or not discovery
+# leaked it, and the assertion cannot fail.
+sc_advance productrepo
+[ "$(git -C "$SC_PROD" rev-list --count HEAD)" = 1 ] && r=yes || r=no
+harness_check "the other-org product repo was never touched (its upstream HAD moved)" "$r"
+
+# --- The release track: the exact shape #1009 was filed from -----------------
+# A TAGGED sibling sitting on its newest release while main has moved on. This
+# is Claudron on this host — v0.4.0 is the newest tag, and the two fixes that
+# started all of this are on main only. The fixtures above are untagged, so
+# without this the release-vs-main rule would ship unexercised.
+SC_TAGGED=$(sc_mkrepo "taggedsib" "testorg")
+git -C "$SC_TAGGED" tag v1.0.0
+git -C "$SC_TAGGED" push --quiet origin v1.0.0
+sc_advance taggedsib                 # main moves ahead of the tag
+tagged_before=$(sc_head "$SC_TAGGED")
+
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+_SC_LOCS="$SC_TAGGED"
+sc_run notify-behind.sh
+sc_events | grep -q '"type":"source_release_gap"' && r=yes || r=no
+harness_check "RELEASE GAP: on the newest tag with main ahead reports source_release_gap, not source_behind" "$r"
+sc_events | grep -q '"type":"source_behind"' && r=no || r=yes
+harness_check "  ...and does NOT tell the operator to pull unreleased code" "$r"
+
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+sc_run update-siblings.sh
+[ "$(sc_head "$SC_TAGGED")" = "$tagged_before" ] && r=yes || r=no
+harness_check "  ...and update-siblings leaves it alone (a dependency tracks releases, not dev)" "$r"
+
+# Cutting a release is what makes it move — the remedy the notice names.
+git -C "$SC_TAGGED" fetch --quiet origin
+git -C "$SC_TAGGED" tag v1.1.0 "$(git -C "$SC_TAGGED" rev-parse origin/main)"
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+sc_run update-siblings.sh
+[ "$(sc_head "$SC_TAGGED")" != "$tagged_before" ] && r=yes || r=no
+harness_check "  ...and DOES fast-forward once a newer release is cut" "$r"
+
 
 echo ""
 echo "=== $pass passed, $fail failed ==="
