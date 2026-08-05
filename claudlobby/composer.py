@@ -3117,6 +3117,54 @@ def compose_fleet_timers(
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
+def compose_host_mention_allowlist(
+    paths: Paths, *, output_dir: Path | None = None
+) -> Path:
+    """Handles a bot MAY @-mention on GitHub. Everything else is rewritten.
+
+    The inversion (#1019 follow-up). The merged guard matched a denylist of
+    composed bot names, which is correct as far as it goes and provably does not
+    go far enough: of the eleven real accounts we notified, `Botfather`,
+    `latest` and `216` are on no bot-name list and never could be. The harm
+    class is "any @word that happens to be a real handle" — unbounded, and it
+    grows without us doing anything, so it cannot be enumerated.
+
+    So the guard defaults to rewriting and this file is the exception list. It
+    is bounded where a denylist is not: the set of people we intend to notify
+    from a bot is tiny and changes rarely, while the set of strings that happen
+    to be real handles is neither.
+
+    Declared per fleet under ``fleet.github.mention_allowlist`` and unioned
+    across the host, because a handle worth notifying from one fleet is worth
+    notifying from all of them. Empty by default: no mention notifies anyone
+    until someone says so, in writing, in a manifest.
+
+    A composed BOT name always wins over this list — see the deny-override in
+    lib/mention-rewrite.py. Without that, someone eventually allowlists a bot's
+    name meaning our bot and silently re-arms the original bug.
+    """
+    names: set[str] = set()
+    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
+        manifest = fleet_dir / "fleet.yaml"
+        if not manifest.is_file():
+            continue
+        try:
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(data, dict):
+            gh = (data.get("fleet") or {}).get("github") or {}
+            if isinstance(gh, dict):
+                names.update(gh.get("mention_allowlist") or [])
+
+    base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "mention-allowlist"
+    safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
+    target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    return target
+
+
 def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) -> Path:
     """Write every bot name on the HOST, one per line, for the mention guard.
 

@@ -99,6 +99,7 @@ def cmd_generate(args) -> int:
     from ..composer import (
         compose_fleet_timers,
         compose_host_bot_handles,
+        compose_host_mention_allowlist,
         compose_host_timers,
     )
 
@@ -151,6 +152,8 @@ def cmd_generate(args) -> int:
     # be written by someone with no relationship to that bot.
     handles = compose_host_bot_handles(paths)
     log.info("composed bot-handle guard list → %s", handles)
+    allowlist = compose_host_mention_allowlist(paths)
+    log.info("composed mention allowlist → %s", allowlist)
 
     return 0
 
@@ -162,7 +165,11 @@ def cmd_host_timers(args) -> int:
     before enrollment so a cold host (no fleet composed yet) still gets its
     host units.
     """
-    from ..composer import compose_host_bot_handles, compose_host_timers
+    from ..composer import (
+        compose_host_bot_handles,
+        compose_host_mention_allowlist,
+        compose_host_timers,
+    )
 
     paths = _resolve_paths(args)
     host_timers_dir = compose_host_timers(paths)

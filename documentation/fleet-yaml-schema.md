@@ -744,3 +744,26 @@ fleet:
         token_env: TELEGRAM_TOKEN_ENG1
         require_mention: true
 ```
+
+
+## `fleet.github.mention_allowlist`
+
+Handles a bot may `@`-mention on GitHub. **Everything else is rewritten** —
+`@name` becomes `` `name` `` — because the harm class is any `@word` that
+happens to be a real account, which is unbounded (#1019).
+
+```yaml
+fleet:
+  github:
+    mention_allowlist:
+      - chrisrogers37
+```
+
+Optional; **empty by default, and that default is deliberate**: no mention
+notifies anyone until someone declares it in a manifest. Unioned across every
+fleet on the host, since a handle worth notifying from one fleet is worth
+notifying from all.
+
+A composed **bot name always wins over this list** and cannot be allowlisted.
+Without that, someone eventually adds a bot's name here meaning *our* bot and
+silently re-arms the original bug.
