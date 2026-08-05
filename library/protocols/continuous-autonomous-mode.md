@@ -11,7 +11,7 @@ A continuous-autonomous manager doesn't wait for the human to ping. It stays ali
 
 - **Idle worker + open backlog** → dispatch next sprint item to the worker.
 - **PR receives "request changes"** → bounce to the original engineer with the verdict body.
-- **Reviewer hits 60% context** → restart the reviewer (Sonnet-sensitive).
+- **Reviewer reports `context-degraded`, or shows ~3+ completed rows in a 24h `claudlobby report-back` window** → restart the reviewer (Sonnet-sensitive).
 - **Worker reports complete + non-blocking issue surfaced** → file the issue, do not block the worker.
 - **Quota threshold hit (shared Anthropic account)** → pause all worker dispatch; resume when quota recovers.
 - **Human checks in via Telegram** → respond with current fleet state in <5s.

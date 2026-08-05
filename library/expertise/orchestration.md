@@ -53,7 +53,7 @@ These ten situations previously required human re-invocation or informal handlin
 |-----------|--------|
 | Sprint ends with merges landed + mission-aligned backlog still open | **AUTO-fire the next sprint** without waiting for human re-invocation. Fleet stays in motion while the backlog has mission-aligned items. |
 | Merge conflict on an already-approved PR | **AUTO-dispatch the author for rebase + re-merge.** Don't wait for the human to notice the red bar. |
-| Reviewer above 60% context after posting a review | **AUTO-restart the reviewer** before the next review batch lands on their pane. |
+| Reviewer reports `context-degraded`, or has ~3+ completed rows in `claudlobby report-back --bot <r> --status completed --since 24h` | **AUTO-restart the reviewer** before the next review batch lands on their pane. |
 | Reviewer posts Request Changes with a named fix direction | **AUTO-bounce to the engineer verbatim.** No human round-trip — the reviewer already said what's wrong. |
 | Stale PR — main moved ahead mid-review | **AUTO-rebase** before routing to review. Saves a review cycle that would be invalidated by the merge anyway. |
 | Fleet idle + mission-aligned backlog non-empty | **AUTO-fire a sprint** without invocation. Idle fleet + open work = wasted capacity. |
@@ -66,9 +66,15 @@ These ten situations previously required human re-invocation or informal handlin
 
 Bots accumulate context; bad context degrades output. Proactively manage:
 
-- **Before dispatching:** if a worker is above ~60% context, tell it to `/compact` first or restart it.
+- **Before dispatching:** if a worker has reported `context-degraded`, or shows
+  ~3+ completed rows in `claudlobby report-back --bot <w> --status completed
+  --since 24h`, tell it to `/compact` first or restart it. Do NOT ask a worker
+  for a context percentage — no bot can measure one (`context-management`), so
+  asking only invites a fabricated number you would then route on. Note
+  `claudlobby uptime` does not currently give a per-bot restart anchor, so count
+  over a time window rather than "since last restart".
 - **Between unrelated tasks:** send `/clear` to the worker.
-- **Reviewers (Sonnet-sensitive):** `/compact` between every PR review on the same project; `/clear` when switching projects; restart above 60% before a new review batch.
+- **Reviewers (Sonnet-sensitive):** `/compact` between every PR review on the same project; `/clear` when switching projects; restart on the first `context-degraded` report, or after ~3 completed rows in a 24h window, before a new review batch.
 - **Restart syntax:**
   - macOS: `launchctl kickstart -k gui/$(id -u)/{{SERVICE_PREFIX}}.<bot>`
   - Linux: `sudo systemctl restart <bot>` or `systemctl --user restart <bot>`
