@@ -224,10 +224,17 @@ class TestJoinMatrix:
         )
         assert out.get("w1")
 
-    def test_progress_report_with_id_does_not_close(self, tmp_path):
-        out = self._run(
-            tmp_path,
-            [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")],
+    def test_progress_report_with_id_defers_but_never_closes(self, tmp_path):
+        """Progress DEFERS the alarm while it is fresh and never closes the dispatch.
+
+        Both halves matter. Asserting only the deferral would pass against a change
+        that silenced the row permanently — which is closing by another name, and the
+        thing this test originally existed to forbid.
+        """
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")])
+        _write_jsonl(
+            rlog,
             [
                 _report(
                     "w1", "1970-01-01T00:05:00Z", status="progress",
@@ -235,7 +242,13 @@ class TestJoinMatrix:
                 )
             ],
         )
-        assert out.get("w1"), "non-terminal progress reuses the id, never closes"
+        # progress at epoch 300; at NOW=2000 it is 1700s old, inside the grace
+        assert not dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW).get("w1")
+        # once the grace lapses the row is overdue again — deferred, never closed
+        later = 300 + dispatch_overdue.DEFAULT_PROGRESS_GRACE_S + 1
+        assert dispatch_overdue.overdue_all(str(dlog), str(rlog), later).get(
+            "w1"
+        ), "a progress report must never permanently close a dispatch"
 
 
 class TestMissingIdCounter:
@@ -423,3 +436,111 @@ class TestOpenTaskResolution:
             [_report("w2", "1970-01-01T00:10:00Z", task_id="t-100-aaaa")],
         )
         assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-100-aaaa"
+
+
+class TestProgressLiveness:
+    """The #1390-shaped question: does the alarm distinguish BUSY from STUCK?
+
+    A fixed 30-minute budget was applied to every dispatch (measured 2026-08-04: 66 of
+    66), while real tasks routinely ran longer — so the watchdog fired at T+30 on work
+    still being done, and by the time the manager read the page the work was merged.
+    Paging on finished work trains the reader to ignore the alarm, which costs the day
+    something genuinely IS stuck.
+
+    The two halves are inseparable. Silencing a busy worker is only safe if a dead one
+    still alarms; a test for either alone passes against a change that breaks the other.
+    """
+
+    GRACE = 2700  # DEFAULT_PROGRESS_GRACE_S; asserted equal below so it cannot drift
+
+    def _overdue(self, tmp_path, reports, now):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        # dispatched at 1000, due at 2800 — the real 30-minute budget
+        _write_jsonl(dlog, [_dispatch("eng-1", 1000, 2800, task_id="t-1000-aaaa")])
+        _write_jsonl(rlog, reports)
+        return dispatch_overdue.overdue("eng-1", str(dlog), str(rlog), now)
+
+    def test_grace_matches_the_measured_default(self):
+        assert dispatch_overdue.DEFAULT_PROGRESS_GRACE_S == self.GRACE
+
+    def test_a_busy_worker_is_silenced(self, tmp_path):
+        """Past deadline, but reported progress 10 minutes ago → working, not stuck."""
+        res = self._overdue(
+            tmp_path,
+            [_report("eng-1", "1970-01-01T01:00:00Z", status="progress")],  # epoch 3600
+            now=3600 + 600,
+        )
+        assert res == [], "a worker reporting progress 10min ago was paged as overdue"
+
+    def test_a_dead_worker_still_alarms(self, tmp_path):
+        """Same dispatch, same single progress report — but the worker then went silent.
+
+        This is the half that makes the other half safe. Deferral is bounded by the
+        worker's own reporting: stop, and the alarm returns.
+        """
+        res = self._overdue(
+            tmp_path,
+            [_report("eng-1", "1970-01-01T01:00:00Z", status="progress")],  # epoch 3600
+            now=3600 + self.GRACE + 1,
+        )
+        assert res, "a worker silent for longer than the grace must still alarm"
+
+    def test_progress_before_the_dispatch_does_not_defer(self, tmp_path):
+        """Liveness must be evidence about THIS dispatch's lifetime.
+
+        A progress report from before the work was even handed out says nothing about
+        whether the worker is on it now — the same reasoning as the existing
+        stale-report-before-dispatch guard for terminal reports.
+        """
+        # epoch 900 — BEFORE the dispatch at 1000, but only 2100s before now=3000, so
+        # it is comfortably inside the 2700s grace. Only the `da < lp` bound can reject
+        # it. An earlier draft used epoch 30, which the grace bound rejected on age
+        # alone: the test passed while saying nothing about the bound it names, and the
+        # mutation run caught it.
+        res = self._overdue(
+            tmp_path,
+            [_report("eng-1", "1970-01-01T00:15:00Z", status="progress")],
+            now=3000,
+        )
+        assert res, "a progress report predating the dispatch deferred the alarm"
+
+    def test_a_future_dated_progress_report_cannot_mute_the_alarm(self, tmp_path):
+        """Clock skew or a hand-edited ledger must not buy silence.
+
+        A report dated ahead of `now` yields a negative age, which satisfies any grace
+        bound and would suppress the row forever — a permanent silent mute, the one
+        outcome this change must never produce. Found by an existing test failing
+        against the first draft, not by inspection.
+        """
+        res = self._overdue(
+            tmp_path,
+            [_report("eng-1", "2099-01-01T00:00:00Z", status="progress")],
+            now=3000,
+        )
+        assert res, "a future-dated progress report muted the alarm"
+
+    def test_grace_of_zero_disables_deferral(self, tmp_path, monkeypatch):
+        """The escape hatch, mirroring DISPATCH_OVERDUE_MAX_AGE_S's `<= 0 disables`."""
+        monkeypatch.setenv("DISPATCH_PROGRESS_GRACE_S", "0")
+        res = self._overdue(
+            tmp_path,
+            [_report("eng-1", "1970-01-01T01:00:00Z", status="progress")],
+            now=3600 + 600,
+        )
+        assert res, "grace=0 must restore the pre-change behaviour exactly"
+
+    def test_terminal_report_still_closes_regardless_of_progress(self, tmp_path):
+        """Deferral must not shadow closure: a finished dispatch reads closed, not
+        deferred, so the row never reappears when the grace lapses."""
+        res = self._overdue(
+            tmp_path,
+            [
+                _report("eng-1", "1970-01-01T01:00:00Z", status="progress"),
+                _report(
+                    "eng-1", "1970-01-01T01:05:00Z", status="completed",
+                    task_id="t-1000-aaaa",
+                ),
+            ],
+            now=3600 + self.GRACE + 5000,
+        )
+        assert res == [], "a completed dispatch reappeared after the grace lapsed"
