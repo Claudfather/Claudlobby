@@ -2087,6 +2087,279 @@ systemd_user_bus_available() {
     [ "$_OS" = "Linux" ] && systemctl --user show-environment >/dev/null 2>&1
 }
 
+# ---------------------------------------------------------------------------
+# Framework source currency (#1009)
+# ---------------------------------------------------------------------------
+# One discovery predicate shared by the reporter (notify-behind.sh) and the
+# applier (update-siblings.sh). Two private copies is how a watcher and an
+# updater come to disagree about which repos exist — and #1009 is already a
+# case of a currency surface silently not covering what everyone assumed it did.
+
+# repo_remote_org <checkout>
+# Owner segment of a checkout's origin remote, lowercased; empty when absent.
+# Handles both spellings git produces:
+#   https://host/Org/Repo.git   and   git@host:Org/Repo.git
+# Lowercased because a remote's case is cosmetic to the forge but not to `=`,
+# and a mismatch would silently unwatch a sibling.
+#
+# Reads the RAW configured value, not `git remote get-url`, which applies
+# url.<base>.insteadOf rewriting: on a host with a corporate mirror rewrite the
+# rewritten URL carries the MIRROR's owner, so every sibling would be judged
+# against the wrong org. The configured value is the repo's stated identity;
+# the rewrite is a transport detail.
+repo_remote_org() {
+    local url
+    url=$(git -C "${1:?repo_remote_org: <checkout> required}" config --get remote.origin.url 2>/dev/null) || return 0
+    url=${url%.git}
+    url=${url%/}
+    # Branch on the URL FORM. An unconditional strip chain cannot do this: the
+    # scp form is already reduced to Org/Repo once `user@host:` is gone, so the
+    # https form's `host/` strip then eats the ORG — git@github.com:Org/Repo
+    # parsed as "repo", every SSH-remote sibling silently failed the org match,
+    # and #1009 came back. tests/test_source_currency.py pins all three forms.
+    case "$url" in
+    *://*)                # scheme://[user@]host/Org/Repo
+        url=${url#*://}
+        url=${url#*@}
+        url=${url#*/}
+        ;;
+    *@*:*)                # user@host:Org/Repo  (scp-style)
+        url=${url#*@}
+        url=${url#*:}
+        ;;
+    *:*)                  # host:Org/Repo
+        url=${url#*:}
+        ;;
+    esac
+    printf '%s' "${url%%/*}" | tr '[:upper:]' '[:lower:]'
+}
+
+# repo_default_branch <checkout>
+# Remote default branch from origin/HEAD, falling back to main. Resolved per
+# repo rather than assumed: hardcoding main reports "in sync" forever for a
+# sibling on master, and a watcher that cannot see a repo is worse than one
+# that admits it, because silence reads as coverage.
+repo_default_branch() {
+    local ref
+    ref=$(git -C "${1:?repo_default_branch: <checkout> required}" symbolic-ref --quiet \
+        refs/remotes/origin/HEAD 2>/dev/null) || true
+    [ -n "$ref" ] && printf '%s' "${ref##*/}" && return 0
+    printf 'main'
+}
+
+# repo_newest_tag <checkout>
+# Highest RELEASE tag known locally, or empty. Version-sorted, not
+# chronological: a backport tagged after a later release must not read as
+# newest.
+#
+# Constrained to v<num>.<num>[.<num>] and pre-releases excluded, because this
+# feeds an unattended fast-forward on a production fleet: an unfiltered
+# `--sort=-v:refname` ranks v1.1.0-rc1 above v1.0.0, and a stray `nightly` or
+# `backup-2026-08` tag outranks both. A release candidate is not a release.
+#
+# EMPTY IS MEANINGFUL and is the release-track rule both callers share: a repo
+# with no release tags does not ship by cutting versions, so its default branch
+# IS its release track. Measured on this host — claudlobby carries zero tags
+# (it ships by merging to main) and Claudron carries three (it ships by cutting
+# versions). Imposing one track on both would either leave claudlobby
+# permanently un-updatable or auto-pull Claudron to unreleased dev code.
+repo_newest_tag() {
+    # `|| true`: grep exits 1 when a repo has NO release tags — the common,
+    # expected case (claudlobby has none) — and `tag=$(repo_newest_tag ...)`
+    # would propagate that straight into an errexit abort of the caller.
+    git -C "${1:?repo_newest_tag: <checkout> required}" tag --list --sort=-v:refname \
+        'v[0-9]*' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1 || true
+}
+
+# notify_currency <repo-name> <event_type> <distinct-value> <message>
+# A source-currency FLEET NOTICE, debounced per (repo, event_type).
+#
+# Debounced because the loudest of these conditions cannot be cleared by the
+# fleet. `source_release_gap` — on the newest release while main has moved — is
+# the NORMAL state of any actively-developed sibling, and it clears only when a
+# human cuts a release; `sibling_update_blocked` on a dirty framework checkout
+# is the normal state of a dogfooding host. Undebounced, those are a Telegram
+# post a day and one a week, forever, on conditions nobody can resolve today.
+# That trains operators to ignore FLEET NOTICE — which is the failure class
+# #1009 is itself an instance of, so re-arming it here would be self-defeating.
+#
+# <distinct-value> is passed as debounce_notify's recipient, so the notice
+# re-fires when the SITUATION CHANGES (the distance moved, a release was cut, a
+# different commit landed) and otherwise only after the renotify window. A
+# stalled condition stays quiet; a worsening one speaks up.
+#
+# Requires BOTS_DIR and STATE_DIR in the caller's scope.
+notify_currency() {
+    local name="${1:?notify_currency: <repo-name> required}"
+    local etype="${2:?notify_currency: <event_type> required}"
+    local distinct="${3-}" message="${4:?notify_currency: <message> required}"
+    _nc_emit() { emit_fleet_notice "$BOTS_DIR" "$etype" "$1"; }
+    debounce_notify "$STATE_DIR" "$name" "$etype" _nc_emit \
+        "$message" "$distinct" "${CURRENCY_RENOTIFY_S:-604800}"
+}
+
+# currency_clear <repo-name> <event_type>
+# Drop a debounce marker so the condition speaks again next time it appears.
+currency_clear() {
+    debounce_clear "$STATE_DIR" "$1" "$2"
+}
+
+# repo_currency_target <checkout>
+# The ref this repo should be measured against and fast-forwarded to: its
+# newest release tag, or origin/<default branch> when it has none.
+#
+# ONE rule, shared, because the reporter and the applier disagreeing about the
+# target is worse than either being wrong alone — the operator would be told
+# "cut a release" about a repo the machine fast-forwards the same week. This is
+# the same argument discover_framework_checkouts makes about the repo SET,
+# applied to the REF, which the first cut of #1009 forked between two files.
+repo_currency_target() {
+    local repo="${1:?repo_currency_target: <checkout> required}" tag
+    tag=$(repo_newest_tag "$repo")
+    [ -n "$tag" ] && printf '%s' "$tag" && return 0
+    printf 'origin/%s' "$(repo_default_branch "$repo")"
+}
+
+# repo_pull_blocker <checkout>
+# Echo a human-readable reason this checkout must NOT be auto-pulled, or
+# nothing when a fast-forward is safe. rc is always 0 — the ANSWER is the
+# string, so a caller cannot mistake "no blocker" for a failed check.
+#
+# Every blocker here means "a person is mid-something in this tree". #1009's
+# fix pulls a dependency automatically, and the one outcome strictly worse than
+# a stale sibling is an automated pull that eats somebody's uncommitted work.
+# Detached HEAD counts: a bisect or a pinned-version checkout is a deliberate
+# position, and fast-forwarding it silently discards that intent.
+repo_pull_blocker() {
+    local repo="${1:?repo_pull_blocker: <checkout> required}" branch ahead
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'not a git checkout'; return 0; }
+    [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ] && { printf 'dirty working tree'; return 0; }
+    branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+        || { printf 'detached HEAD'; return 0; }
+    git -C "$repo" rev-parse --verify --quiet "origin/$branch" >/dev/null 2>&1 \
+        || { printf 'no upstream origin/%s' "$branch"; return 0; }
+    ahead=$(git -C "$repo" rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo 0)
+    [ "${ahead:-0}" -gt 0 ] && { printf 'local commits not pushed (%s ahead)' "$ahead"; return 0; }
+    return 0
+}
+
+# _editable_project_locations
+# Project locations of editable-installed Python distributions, one per line.
+#
+# Reads importlib.metadata IN-PROCESS rather than shelling out to
+# `pip list --editable`. Three reasons, all measured:
+#   * pip need not exist. A `python3 -m venv --without-pip` or a `uv venv` has
+#     no pip, and the pip path then prints nothing and exits 0 — discovery
+#     silently collapsing to claudlobby-only, which is #1009 re-armed and
+#     invisible. importlib.metadata is stdlib and always present.
+#   * ~10x cheaper (101ms vs 1026ms here) because it skips a second interpreter
+#     start and pip's import.
+#   * `direct_url.json` (PEP 610) misses legacy `setup.py develop` egg-links —
+#     one such install exists on this host — so the egg-link fallback below is
+#     load-bearing, not belt-and-braces.
+#
+# EVERY candidate interpreter is queried and the results unioned, not
+# first-one-wins: the environments hold different distributions, and the .venv
+# is exactly where an operator following the documented dev setup would hide
+# the siblings from a root-interpreter-only probe. Deduping is the caller's
+# (discover_framework_checkouts resolves each to a git top-level anyway).
+_editable_project_locations() {
+    local py seen=""
+    for py in "${CLAUDLOBBY_ROOT:-}/.venv/bin/python" python3; do
+        command -v "$py" >/dev/null 2>&1 || continue
+        # Same interpreter reachable by two names — query it once.
+        local real
+        real=$(command -v "$py" 2>/dev/null || printf '%s' "$py")
+        case "$seen" in *"|$real|"*) continue ;; esac
+        seen="$seen|$real|"
+        "$py" - 2>/dev/null <<'PY' || true
+import importlib.metadata as md
+from pathlib import Path
+import json
+
+for dist in md.distributions():
+    loc = None
+    try:
+        raw = dist.read_text("direct_url.json")
+        if raw:
+            info = json.loads(raw)
+            if info.get("dir_info", {}).get("editable") and info.get("url", "").startswith("file://"):
+                loc = info["url"][7:]
+    except Exception:
+        pass
+    if not loc:
+        # setup.py develop / egg-link: the dist-info parent IS the project.
+        try:
+            p = getattr(dist, "_path", None)
+            if p and Path(p).suffix == ".egg-info" and (Path(p).parent / "setup.py").exists():
+                loc = str(Path(p).parent)
+        except Exception:
+            pass
+    if loc:
+        print(loc)
+PY
+    done
+    return 0
+}
+
+# discover_framework_checkouts
+# Absolute git top-levels of the framework this fleet RUNS ON, one per line:
+# $CLAUDLOBBY_ROOT always, plus every editable-installed Python distribution
+# whose git remote sits in the SAME ORG as $CLAUDLOBBY_ROOT's own remote.
+#
+# Discovered rather than listed, because a list is the bug (#1009): notify-behind
+# watched claudlobby, Claudron went 16 commits stale carrying two data-integrity
+# fixes, and nothing said anything — the watched repo was the healthy one.
+# Naming three paths would reproduce that the next time a fourth sibling ships.
+# Deriving the org from the compositor's own remote also means a FORK of the
+# framework watches its own siblings, not this one's.
+#
+# The org test is what keeps PRODUCT repos out. Bots install the repos they work
+# on as editable packages too, from other orgs — measured on this host,
+# `pip list --editable` returns two framework checkouts and two product ones.
+# The fleet RUNS ON the framework and WORKS ON the products; only the former
+# going stale is a fleet-health fact, and pulling the latter would be an
+# automated commit-swap under somebody's active feature branch.
+#
+# NOT covered here, because they already have a currency path: the Claude Code
+# binary (update-claude-code.sh) and Claude Code plugins incl. clauDNA
+# (reload-fleet.sh `claude plugin update`). Measured, not assumed — the clauDNA
+# marketplace clone read behind=0 while Claudron sat 16 behind, which is what
+# isolates the remaining gap to Python CLI installs.
+discover_framework_checkouts() {
+    local root="${CLAUDLOBBY_ROOT:-}" org loc top seen w
+    [ -n "$root" ] || return 0
+    git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+
+    # Seeded with the canonicalized path, not the raw env value: every later
+    # comparison is against `rev-parse --show-toplevel`, so a symlinked
+    # CLAUDLOBBY_ROOT would miss its own duplicate and the root would be
+    # fetched, reported and pulled twice.
+    root=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$root")
+    local found=("$root")
+    printf '%s\n' "$root"
+
+    org=$(repo_remote_org "$root")
+    [ -n "$org" ] || return 0 # no remote to match siblings against
+
+    while IFS= read -r loc; do
+        [ -n "$loc" ] && [ -d "$loc" ] || continue
+        top=$(git -C "$loc" rev-parse --show-toplevel 2>/dev/null) || continue
+        # claudlobby is itself an editable install, so without this it would be
+        # fetched, reported and pulled twice.
+        seen=0
+        for w in "${found[@]}"; do
+            if [ "$w" = "$top" ]; then seen=1; break; fi
+        done
+        [ "$seen" -eq 1 ] && continue
+        [ "$(repo_remote_org "$top")" = "$org" ] || continue
+        found+=("$top")
+        printf '%s\n' "$top"
+    done <<EOF
+$(_editable_project_locations)
+EOF
+}
+
 # unit_is_dormant <timers-dir> <unit-basename>
 # True when the composed DORMANT manifest lists the unit (an enroll: false
 # job — composed-but-dormant, opt-in via fleet.yaml). One predicate shared by

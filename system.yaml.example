@@ -62,17 +62,45 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 600
-    # Source-currency nudge (read-only): report how many commits the shared
-    # install is behind origin/main and notify the operator to pull. It never
-    # pulls -- the ff-only auto-pull (root-self-update) is a separate opt-in
-    # follow-up, so "the operator knows to pull" is the whole default-tier
-    # source-currency behavior.
+    # Source-currency REPORT (read-only, never pulls): how far each framework
+    # checkout -- claudlobby AND its discovered siblings -- is behind its newest
+    # release, plus the distinct "on the newest release but main has moved"
+    # case. Daily, because reporting is cheap and harmless. Applying is
+    # update-siblings.sh on a weekly clock; the two are split so the signal
+    # survives on a host that never enrolled the applier.
     notify-behind:
       script: "$CLAUDLOBBY_ROOT/lib/notify-behind.sh"
       schedule: "*-*-* 08:00:00"
       type: oneshot
       persistent: true
       randomized_delay: 600
+    # Source-currency APPLY: fast-forward stale SIBLING checkouts to their newest
+    # cut release, guarded (never a dirty tree, unpushed commits, or a diverged
+    # one; ff-only) and loud (an event on every movement). $CLAUDLOBBY_ROOT is
+    # deliberately excluded -- pulling the compositor is root-self-update, which
+    # line 11 says ships behind its own toggle, and the script lives in that repo.
+    #
+    # COMPOSED-BUT-DORMANT, for the same reason line 11 gives: this is the first
+    # host job that mutates the operator'"'"'s source, and a root pull must not
+    # arrive with it switched on. A fleet arms it in fleet.yaml:
+    #   defaults: { jobs: { update-siblings: { enroll: true } } }
+    # notify-behind REPORTS regardless, so #1009'"'"'s blind spot is closed even
+    # with this dormant; enrolling only automates the remedy.
+    #
+    # Weekly, not daily: editable installs mean a pull changes the CLI for the
+    # next subprocess call, so each run crosses a version boundary under a live
+    # fleet. Sun 04:30 sits 30min ahead of weekly-worker-restart (Sun 05:00) so
+    # that where BOTH are enrolled a restart applies it almost immediately --
+    # the stage-then-apply split claude-update uses for the binary. Where the
+    # restart is not enrolled the exposure runs to each bot'"'"'s next natural
+    # restart, which is the exposure the staged binary already carries.
+    update-siblings:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/update-siblings.sh"
+      schedule: "Sun *-*-* 04:30:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 300
     # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
     # north star): daily root-usage check, FLEET ALERT past the threshold.
     disk-monitor:
