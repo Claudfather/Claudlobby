@@ -1674,8 +1674,13 @@ harness_check "  ...no @mention survives in the MCP payload" "$r"
 harness_check "TELEGRAM is untouched — tagging there is correct and load-bearing" "$r"
 [ -z "$(gm_run '{"tool_name":"mcp__plugin_telegram_telegram__reply","tool_input":{"chat_id":"1","text":"@dara done"}}')" ] && r=yes || r=no
 harness_check "  ...including the Telegram MCP tool" "$r"
-[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 --body \"cc @chrisrogers37\""}}')" ] && r=yes || r=no
-harness_check "a real collaborator handle is NOT rewritten (this guards US, not every mention)" "$r"
+# POLICY CHANGE, deliberate: the merged denylist guard let any non-bot handle
+# through, so this asserted @chrisrogers37 was untouched. Under the inversion
+# nothing notifies unless DECLARED — which is the whole point, since Botfather,
+# latest and 216 were all non-bot handles that emailed real people. The
+# declared-handle case is asserted below, once an allowlist exists.
+[ -n "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 --body \"cc @chrisrogers37\""}}')" ] && r=yes || r=no
+harness_check "an UNDECLARED handle is rewritten (default-deny; was allowed pre-inversion)" "$r"
 [ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr view 1018 --json body"}}')" ] && r=yes || r=no
 harness_check "a gh READ is not rewritten (only writes can notify)" "$r"
 
@@ -1684,6 +1689,66 @@ _gm=$(GH_MENTION_HANDLES_FILE=/nonexistent CLAUDLOBBY_ROOT="$GM_ROOT" \
     bash "$LIB_DIR/gh-mention-guard.sh" <<<'{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -b \"@vera\""}}' 2>/dev/null; echo "rc=$?")
 printf '%s' "$_gm" | grep -q 'rc=0' && r=yes || r=no
 harness_check "a missing handle manifest FAILS OPEN (never blocks the whole fleet from GitHub)" "$r"
+
+# --- the inversion: the three real accounts the denylist guard misses --------
+# Botfather, latest and 216 are actual GitHub users we notified. None is a fleet
+# bot, so none would ever appear on the composed bot-handle list.
+printf 'chrisrogers37\n' > "$GM_ROOT/runtime/_host/mention-allowlist"
+gm_inv() {
+    GH_MENTION_HANDLES_FILE="$GM_ROOT/runtime/_host/bot-handles" \
+    GH_MENTION_ALLOWLIST_FILE="$GM_ROOT/runtime/_host/mention-allowlist" \
+    CLAUDLOBBY_ROOT="$GM_ROOT" bash "$LIB_DIR/gh-mention-guard.sh" <<<"$1" 2>/dev/null
+}
+
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"see @Botfather @latest @216"}}')
+for h in Botfather latest 216; do
+    printf '%s' "$_inv" | grep -q "\`$h\`" && r=yes || r=no
+    harness_check "  INVERSION: @$h (a real account, not a bot) is rewritten" "$r"
+done
+printf '%s' "$_inv" | grep -q '@Botfather\|@latest\|@216' && r=no || r=yes
+harness_check "  ...and no @ survives for any of the three" "$r"
+
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"cc @chrisrogers37"}}')
+[ -z "$_inv" ] && r=yes || r=no
+harness_check "  a DECLARED handle is left alone (the allowlist works)" "$r"
+
+# Fail-toward-rewriting, driven through the composed hook rather than the module.
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"a\n```\n@vera after an UNCLOSED fence"}}')
+printf '%s' "$_inv" | grep -q 'vera' && r=yes || r=no
+harness_check "  INVARIANT: an unclosed fence does NOT protect a mention" "$r"
+
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"x\n```\n@vera in a closed fence\n```\ny"}}')
+[ -z "$_inv" ] && r=yes || r=no
+harness_check "  ...but a CLOSED fence is respected (GitHub does not linkify it)" "$r"
+
+# --- by-reference content: the bypass vera found ----------------------------
+# gh can take the body from a FILE, so the hook sees only a filename and the
+# command carries no mention at all. #1019 — the issue filed ABOUT us spamming
+# a stranger — was itself filed this way and re-notified her.
+GM_CLEAN="$GM_ROOT/clean.md"; printf 'an ordinary body\nno mentions\n' > "$GM_CLEAN"
+GM_DIRTY="$GM_ROOT/dirty.md"; printf 'intro\nthanks vera and @latest\n' > "$GM_DIRTY"
+# An ALLOW is empty output, not JSON — jq on empty stdin prints nothing, so the
+# empty case must be named here rather than left to a jq default that never runs.
+_dec() {
+    local o; o="$(gm_inv "$1")"
+    [ -z "$o" ] && { printf 'none'; return; }
+    printf '%s' "$o" | jq -r '.hookSpecificOutput.permissionDecision // "rewrite"' 2>/dev/null
+}
+
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh issue comment 1 --body-file '"$GM_CLEAN"'"}}')" = none ] && r=yes || r=no
+harness_check "  BY-REF: a body FILE with no mention passes untouched (common path costs nothing)" "$r"
+
+for _shape in "--body-file $GM_DIRTY" "--body-file=$GM_DIRTY" "--notes-file $GM_DIRTY"; do
+    [ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh issue comment 1 '"$_shape"'"}}')" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: a body FILE with a mention is REFUSED ($_shape)" "$r"
+done
+
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"cat x | gh issue comment 1 --body-file -"}}')" = deny ] && r=yes || r=no
+harness_check "  BY-REF: STDIN is refused — unreadable, so unverifiable" "$r"
+
+# The whole reason this refuses rather than rewrites: the file is the author's.
+grep -q 'vera' "$GM_DIRTY" && r=yes || r=no
+harness_check "  BY-REF: the refused file is NOT modified on disk (it is the author's)" "$r"
 
 rm -rf "$GM_ROOT"
 
