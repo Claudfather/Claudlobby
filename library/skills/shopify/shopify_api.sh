@@ -21,9 +21,14 @@
 #   raw <path>                authenticated GET passthrough (escape hatch)
 #   help
 #
-# Read-only by construction: every door issues GET only. There is no write door,
-# deliberately — a status flip is destructive in ways traps.md 7 explains, and
-# belongs behind a human, not behind a convenience wrapper.
+# Read-only, enforced in code rather than asserted in this comment: the HTTP
+# method is allowlisted, POST is reachable only for the GraphQL endpoint, and a
+# GraphQL document carrying a mutation or subscription is refused. The guards are
+# assert_read_only and assert_query_only below; their comments carry the why.
+#
+# There is no write door, deliberately — a status flip is destructive in ways
+# traps.md 7 explains, and belongs behind a human, not behind a convenience
+# wrapper.
 #
 # Surfaces the REAL HTTP error on failure. Never fabricates data.
 set -euo pipefail
@@ -47,8 +52,81 @@ need_env() {
 # CALLER's return too, where $cfg is out of scope -> "unbound variable" under
 # set -u as soon as a door calls this more than once in its own scope. Same
 # footgun the printify actuator documents.
+# ---------------------------------------------------------------------------
+# The read-only guarantee, as code (#998 review).
+#
+# It previously lived in a header comment claiming "every door issues GET only",
+# which was false about this very file: gql() POSTs, so two doors already did
+# not. A safety claim that exists only as a comment is worse than no claim,
+# because it gets trusted. Two independent findings landed on it — a wired REST
+# write door walked past both the bash and pytest guards, because those grepped
+# the source for a literal "-X DELETE" that this file never spells (it passes
+# -X "$method"); and a GraphQL mutation rides POST, so no method check alone can
+# see one.
+#
+# Hence two guards, not one. assert_read_only is NOT the load-bearing half:
+# without assert_query_only, POST-to-GraphQL is a single open door through which
+# the entire store can be mutated.
+#
+# Exit 7 is reserved for a refusal so a test can tell "the guard stopped it"
+# apart from "it failed for some other reason". A guard indistinguishable from a
+# network error is a guard nobody can prove.
+# ---------------------------------------------------------------------------
+GUARD_RC=7
+
+assert_read_only() {
+  local method="$1" url="$2"
+  case "$method" in
+    GET) ;;
+    POST)
+      # Reachable only for GraphQL. A REST write is a non-GET verb at a REST
+      # path; pinning POST to graphql.json means a wired REST write door cannot
+      # reach the network even if someone adds one.
+      case "${url%%\?*}" in
+        */graphql.json) ;;
+        *) die "refusing POST to a non-GraphQL endpoint ($url). This actuator is read-only; see the header." "$GUARD_RC" ;;
+      esac
+      ;;
+    *)
+      die "refusing HTTP method $method. This actuator is read-only: GET, or POST to graphql.json only." "$GUARD_RC"
+      ;;
+  esac
+}
+
+# A GraphQL mutation is a POST with a query-shaped envelope, so assert_read_only
+# cannot see it. Only the operation type can, which is why this exists.
+#
+# Fails CLOSED and over-rejects on purpose: a document is refused if the words
+# mutation or subscription appear as bare tokens ANYWHERE in it, and it must
+# begin with query, {, or fragment. String literals and # comments are blanked
+# first so neither can smuggle a token in or trip the scan from inside a value.
+#
+# STATED BOUND: a legitimate query selecting a FIELD named "mutation" or
+# "subscription" would be refused. Shopify's Admin QueryRoot exposes no such
+# field, and for a read-only guarantee the safe direction is to reject a valid
+# query rather than admit an invalid one. Checking every operation rather than
+# only the first is deliberate — a document may carry several, and
+# 'query { a } mutation { b }' is one POST.
+assert_query_only() {
+  local doc="$1" stripped head
+  stripped="$(printf '%s' "$doc" | sed -e 's/"[^"]*"/""/g' -e 's/#[^\n]*//g')"
+
+  if printf '%s' "$stripped" | grep -qiE '(^|[^A-Za-z0-9_])(mutation|subscription)([^A-Za-z0-9_]|$)'; then
+    die "refusing a GraphQL document containing a mutation or subscription. This actuator is read-only." "$GUARD_RC"
+  fi
+
+  head="$(printf '%s' "$stripped" | tr '\n' ' ' | sed -e 's/^[[:space:]]*//')"
+  case "$head" in
+    query[[:space:]]*|query\{*|'{'*|fragment[[:space:]]*) ;;
+    *) die "refusing a GraphQL document that does not begin with a query, { or fragment. This actuator is read-only." "$GUARD_RC" ;;
+  esac
+}
+
 api() {
   local method="$1" url="$2" body="${3:-}" cfg out http payload rc=0
+  # BEFORE need_env, deliberately: a forbidden method is refused whether or not
+  # credentials happen to be present, and the refusal stays provable without them.
+  assert_read_only "$method" "$url"
   need_env
   cfg="$(mktemp)"
   {
@@ -79,6 +157,7 @@ rest() { api GET "https://$DOMAIN/admin/api/$VERSION/$1"; }
 gql() {
   local q="$1" out
   need_jq
+  assert_query_only "$q"
   out="$(api POST "https://$DOMAIN/admin/api/$VERSION/graphql.json" "$(jq -cn --arg q "$q" '{query:$q}')")"
   if printf '%s' "$out" | jq -e '.errors' >/dev/null 2>&1; then
     die "GraphQL error: $(printf '%s' "$out" | jq -c '.errors')" 6
@@ -241,8 +320,22 @@ door_health_check() {
 }
 
 usage() {
-  sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Derived, not a hardcoded line range. It used to be `sed -n '2,28p'`, which
+  # silently truncated the help the moment the header changed length — which
+  # editing this file for the read-only fix did. Print the leading comment block
+  # up to the first non-comment line, then drop that line.
+  sed -n '2,/^[^#]/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
 }
+
+# Dispatch only when EXECUTED, not when sourced. This is what lets the guards be
+# tested by behaviour — a test can source this file and call api/gql directly to
+# prove a refusal actually happens. The old guards grepped the source text for a
+# write verb instead, and a wired write door walked straight past them because
+# this file never spells the verb literally. A guard you cannot execute is a
+# guard you cannot trust.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+  return 0
+fi
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in

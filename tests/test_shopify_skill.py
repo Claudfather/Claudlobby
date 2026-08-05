@@ -12,11 +12,15 @@ Four surfaces:
   - The **execute bit**, in the git index. Skills are symlinked rather than
     rendered, so the helper runs at whatever mode git recorded. A helper checked
     in 100644 is a skill that cannot run on a fresh clone.
-  - **Read-only by construction.** The helper has no write door on purpose: the
-    obvious one to add is a status flip, which silently 404s every redirect
+  - **Read-only, proven by execution.** The helper has no write door on purpose:
+    the obvious one to add is a status flip, which silently 404s every redirect
     pointing at the product and unpublishes it from all channels irreversibly
-    (traps.md 7). Pin the absence, or a future convenience commit erases the
-    reasoning.
+    (traps.md 7). This used to be pinned with a regex over the source for
+    ``-X (PUT|DELETE|PATCH)``, which could never match — the script passes
+    ``-X "$method"`` and never spells a verb literally, so a wired write door
+    walked past it. The checks now source the script and call the guards, and a
+    reserved exit code separates a refusal from any other failure. A guard you
+    cannot run is a guard nobody can trust.
   - **Public-repo hygiene.** This repo is public and the skill was authored from
     a real store's data. GitGuardian catches credentials; it does not catch a
     store domain or a product id, so those get their own assertion.
@@ -91,15 +95,87 @@ def test_helper_is_executable_in_the_git_index() -> None:
     )
 
 
-def test_actuator_has_no_write_door() -> None:
-    """Read-only by construction — see the module docstring and traps.md 7."""
-    body = SCRIPT.read_text()
-    assert not re.search(r"-X\s*(PUT|DELETE|PATCH)", body), (
-        "shopify_api.sh must stay read-only. A status flip breaks every redirect "
-        "pointing at the product and unpublishes it from all channels."
+def _guard(snippet: str) -> subprocess.CompletedProcess[str]:
+    """Source the actuator and run `snippet` against it, with no credentials.
+
+    Sourcing works because the script only dispatches when executed. That is the
+    whole point: a guard has to be *run* to be believed.
+    """
+    return subprocess.run(
+        ["bash", "-c", f"source {SCRIPT}; {snippet}"],
+        capture_output=True,
+        text=True,
+        env=_scrubbed_env(),
+        timeout=60,
     )
-    # The single POST reaches the GraphQL endpoint, which is a read.
-    assert body.count("api POST") == 1
+
+
+# Exit 7 is reserved by the script for a guard refusal, so it distinguishes
+# "the guard stopped this" from "it failed for some other reason".
+GUARD_REFUSED = 7
+NO_CREDENTIALS = 2
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "api DELETE https://x.example/y",
+        "api PUT https://x.example/y",
+        "api PATCH https://x.example/y",
+        # The REST write door: a POST at a REST path, which the method
+        # allowlist alone would happily let through.
+        "api POST https://x.example/admin/api/2026-04/products.json '{}'",
+        # The load-bearing case. A mutation is a POST with a query-shaped
+        # envelope, so NO method-level check can see it.
+        "gql 'mutation { productUpdate(input:{}) { product { id } } }'",
+        "gql 'subscription { x }'",
+        # A document may carry several operations; checking only the first
+        # would miss this one.
+        "gql 'query { a } mutation { b }'",
+    ],
+)
+def test_write_attempts_are_refused_when_executed(snippet: str) -> None:
+    """Read-only, proven by running it — see traps.md 7 and the script header.
+
+    This replaces a regex over the source for ``-X (PUT|DELETE|PATCH)``. That
+    pattern could never match: the script passes ``-X "$method"`` and never
+    spells a verb literally, so a wired write door walked past this guard and
+    the bash one. Both asserted the appearance of the property.
+    """
+    proc = _guard(snippet)
+    assert proc.returncode == GUARD_REFUSED, (
+        f"{snippet!r} was not refused by a guard "
+        f"(rc={proc.returncode}, expected {GUARD_REFUSED}).\n{proc.stderr}"
+    )
+
+
+@pytest.mark.parametrize("query", ["query { shop { name } }", "{ shop { name } }"])
+def test_a_real_read_still_passes_the_guard(query: str) -> None:
+    """The guard must not reject the reads the skill exists to perform.
+
+    Without this, a guard that refused everything would pass every assertion
+    above. A valid query gets through and stops at the absent credentials.
+    """
+    proc = _guard(f"gql '{query}'")
+    assert proc.returncode == NO_CREDENTIALS, (
+        f"a valid read was blocked (rc={proc.returncode}, expected "
+        f"{NO_CREDENTIALS}).\n{proc.stderr}"
+    )
+
+
+def test_curl_is_invoked_only_inside_api() -> None:
+    """Secondary and structural: no door may issue its own request.
+
+    Deliberately not the load-bearing check — that is what the executed
+    refusals above are for. Counts invocations rather than the word, because
+    the header prose contains "anyone can curl Shopify" and a check that counts
+    prose repeats the mistake this file just removed.
+    """
+    invocations = re.findall(r"^[^#\n]*\bcurl\s+-", SCRIPT.read_text(), re.M)
+    assert len(invocations) == 2, (
+        f"expected curl only in api() (with body / without); found "
+        f"{len(invocations)} invocation(s) — a door may be bypassing the guards"
+    )
 
 
 def test_frontmatter_is_valid_and_routes() -> None:

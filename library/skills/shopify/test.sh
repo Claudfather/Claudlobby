@@ -39,16 +39,55 @@ if scrub "$SH" raw >/dev/null 2>&1; then
   no "raw with no path should fail"
 else ok "raw with no path exits non-zero"; fi
 
-# --- the actuator is read-only by construction ------------------------------
+# --- the actuator is read-only, PROVEN BY EXECUTION -------------------------
+#
+# These checks used to grep the source for "-X DELETE". That could never match,
+# because the script passes -X "$method" from a variable and never spells a verb
+# literally — so a wired write door walked straight past this guard and the
+# pytest one. Both pinned the appearance of the property, not the property.
+#
+# So: source the script and call the guards. Exit 7 means a guard refused, and
+# nothing else in the script uses 7, so a refusal is distinguishable from a
+# network or credential failure.
 
-if grep -qE '\-X[[:space:]]*(PUT|DELETE|PATCH)' "$SH"; then
-  no "actuator must not contain PUT/DELETE/PATCH — it is read-only by design"
-else ok "no write verbs in the actuator (read-only by construction)"; fi
+refused() {
+  local desc="$1" code="$2" rc=0
+  scrub bash -c "source '$SH'; $code" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 7 ]; then ok "$desc"; else no "$desc (rc=$rc, expected 7)"; fi
+}
 
-# POST exists only to reach the GraphQL endpoint, which is a read.
-if [ "$(grep -cE 'api POST' "$SH")" -eq 1 ]; then
-  ok "the single POST is the GraphQL read path"
-else no "unexpected number of POST call sites"; fi
+refused "api refuses DELETE" "api DELETE https://x.example/y"
+refused "api refuses PUT"    "api PUT https://x.example/y"
+refused "api refuses PATCH"  "api PATCH https://x.example/y"
+refused "api refuses POST to a REST path" \
+        "api POST https://x.example/admin/api/2026-04/products.json '{}'"
+
+# The load-bearing half: a mutation is a POST, so no method check can see it.
+refused "gql refuses a mutation" \
+        "gql 'mutation { productUpdate(input:{}) { product { id } } }'"
+refused "gql refuses a subscription" "gql 'subscription { x }'"
+refused "gql refuses a second operation smuggled after a query" \
+        "gql 'query { a } mutation { b }'"
+
+# ...and it must NOT reject the reads this skill exists to perform. A valid
+# query passes the guard and dies on the absent credentials instead (2, not 7).
+# Without this, a guard that rejected everything would score full marks above.
+for q in "query { shop { name } }" "{ shop { name } }"; do
+  rc=0
+  scrub bash -c "source '$SH'; gql '$q'" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -eq 2 ]; then ok "a valid query reaches the credential check: $q"
+  else no "a valid query was blocked ($q, rc=$rc, expected 2)"; fi
+done
+
+# Secondary and structural: curl must appear only inside api(), or a future door
+# could issue its own request and bypass both guards. Deliberately NOT the
+# load-bearing check — that is what the executed refusals above are for.
+# Counts INVOCATIONS, not the word: the header prose says "anyone can curl
+# Shopify", and a check that counts prose is the same mistake as the greps this
+# section replaced.
+if [ "$(grep -cE '^[^#]*\bcurl[[:space:]]+-' "$SH")" -eq 2 ]; then
+  ok "curl is invoked only in api() (2 sites: with body / without)"
+else no "unexpected curl call sites — a door may be bypassing the guards"; fi
 
 # --- traps.md logic, driven by fixtures (no creds, no network) --------------
 
