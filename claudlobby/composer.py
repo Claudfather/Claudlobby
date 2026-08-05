@@ -2682,8 +2682,17 @@ def _write_timer_units(
         f"  <string>{service_name}</string>",
         "  <key>ProgramArguments</key>",
         "  <array>",
-        f"    <string>{script_expanded}</string>",
     ]
+    # launchd's ProgramArguments[0] is the executable PATH; systemd's ExecStart=
+    # is a command LINE that it splits on whitespace. A job whose `script`
+    # carries flags (data-sweep's `--purge`) is therefore valid on Linux and, if
+    # passed through whole, becomes a file that does not exist on macOS — the
+    # job then silently never execs. Split here so both platforms receive the
+    # same argv, flags before the fleet name exactly as systemd would pass them
+    # (#969).
+    plist_lines.extend(
+        f"    <string>{part}</string>" for part in shlex.split(script_expanded)
+    )
     if fleet_name:
         plist_lines.append(f"    <string>{fleet_name}</string>")
     for arg in exec_args or []:
