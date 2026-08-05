@@ -31,6 +31,12 @@ packages = ["claudlobby", "claudlobby.commands"]
 # walks local/, which holds operator-owned fleet state and bot projects/ git
 # checkouts — third-party trees whose conftest.py collides with ours.
 testpaths = ["tests"]
+# -rs: print every skip WITH ITS REASON on every run (#1012). Without it a skip
+# renders as a bare `s` in the progress dots and a count in the summary, so an
+# unrun platform-gated test is nearly as invisible as a trivially-passing one —
+# and "2299 passed, 7 skipped" reads like coverage. The reasons already existed;
+# nothing was printing them.
+addopts = "-rs"
 # Registered so `pytest -m vault` selects the vault-mode gate and unknown-marker
 # warnings stay quiet. These tests importorskip/skipif on the [vault] extra, so
 # they SKIP in the default `.[dev]` lane and RUN in the dedicated vault-tests CI
