@@ -1630,6 +1630,63 @@ BPCONF
 
 fi
 
+# ===========================================================================
+# #1019 — the GitHub mention guard. Bots wrote @teammate in PR comments;
+# every fleet bot name is also a real GitHub account, and one of those people
+# asked us to stop. Composition cannot prove this: what matters is whether a
+# real gh invocation is actually rewritten before it runs, and whether Telegram
+# is genuinely left alone.
+# ===========================================================================
+echo ""
+echo "=== validate #1019: GitHub mention guard rewrites, and spares Telegram ==="
+
+GM_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-gm.XXXXXX")"
+mkdir -p "$GM_ROOT/runtime/_host"
+printf 'ravi\nvera\ndara\nworker-1\n' > "$GM_ROOT/runtime/_host/bot-handles"
+
+gm_run() {  # gm_run <payload-json> -> stdout of the hook
+    GH_MENTION_HANDLES_FILE="$GM_ROOT/runtime/_host/bot-handles" \
+    CLAUDLOBBY_ROOT="$GM_ROOT" bash "$LIB_DIR/gh-mention-guard.sh" <<<"$1" 2>/dev/null
+}
+
+# --- the exact shape that caused the incident ---
+_gm=$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1018 --body \"thanks @vera\""}}')
+printf '%s' "$_gm" | grep -q '"updatedInput"' && r=yes || r=no
+harness_check "a real \`gh pr comment\` carrying @vera is rewritten before it runs" "$r"
+printf '%s' "$_gm" | grep -q '@vera' && r=no || r=yes
+harness_check "  ...and the @ sigil is gone from the command GitHub would see" "$r"
+
+# The Bash surface must NOT gain backticks: a comment body sits inside a
+# double-quoted shell string, where a backtick is command substitution. The
+# naive fix would turn a notification bug into arbitrary execution.
+printf '%s' "$_gm" | grep -q '`' && r=no || r=yes
+harness_check "  ...with NO backticks injected into the shell command (would be command substitution)" "$r"
+
+# --- MCP writers, the half a Bash-only hook would miss entirely ---
+_gm=$(gm_run '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"owner":"o","repo":"r","body":"@vera and @worker-1 found it"}}')
+printf '%s' "$_gm" | grep -q '`vera`' && r=yes || r=no
+harness_check "an mcp__github__* body is rewritten too (backticks are safe in JSON)" "$r"
+printf '%s' "$_gm" | grep -q '@vera' && r=no || r=yes
+harness_check "  ...no @mention survives in the MCP payload" "$r"
+
+# --- what must NOT be touched ---
+[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"tg-post.sh \"done @dara\""}}')" ] && r=yes || r=no
+harness_check "TELEGRAM is untouched — tagging there is correct and load-bearing" "$r"
+[ -z "$(gm_run '{"tool_name":"mcp__plugin_telegram_telegram__reply","tool_input":{"chat_id":"1","text":"@dara done"}}')" ] && r=yes || r=no
+harness_check "  ...including the Telegram MCP tool" "$r"
+[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 --body \"cc @chrisrogers37\""}}')" ] && r=yes || r=no
+harness_check "a real collaborator handle is NOT rewritten (this guards US, not every mention)" "$r"
+[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr view 1018 --json body"}}')" ] && r=yes || r=no
+harness_check "a gh READ is not rewritten (only writes can notify)" "$r"
+
+# --- fails open, loudly, rather than blocking every GitHub write ---
+_gm=$(GH_MENTION_HANDLES_FILE=/nonexistent CLAUDLOBBY_ROOT="$GM_ROOT" \
+    bash "$LIB_DIR/gh-mention-guard.sh" <<<'{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -b \"@vera\""}}' 2>/dev/null; echo "rc=$?")
+printf '%s' "$_gm" | grep -q 'rc=0' && r=yes || r=no
+harness_check "a missing handle manifest FAILS OPEN (never blocks the whole fleet from GitHub)" "$r"
+
+rm -rf "$GM_ROOT"
+
 echo ""
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

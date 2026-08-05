@@ -93,6 +93,17 @@ _BLESSED_RAW_READS = {
     # to fail this fleet's generate.
     ("composer.py", "fleet_yaml.read_text(encoding='utf-8')"),
     ("composer.py", "yaml.safe_load(fleet_yaml.read_text(encoding='utf-8'))"),
+    # compose_host_bot_handles reads every fleet's manifest to build the GitHub
+    # mention guard's name list (#1019). EXEMPT on the dotenv.read(tier)
+    # precedent: the only thing consumed is the KEYS of fleet.bots, filtered to
+    # ^[A-Za-z0-9][A-Za-z0-9_-]*$ before anything downstream sees them. No value
+    # from the parsed document reaches a path, a grant, or composed bot output —
+    # it reaches a regex alternation, and the charset filter is what makes that
+    # safe. Deliberately raw and fail-soft rather than routed through the
+    # validating loader: a sibling fleet with a broken manifest must not be able
+    # to fail this fleet's generate, nor silently empty the guard.
+    ("composer.py", "manifest.read_text(encoding='utf-8')"),
+    ("composer.py", "yaml.safe_load(manifest.read_text(encoding='utf-8'))"),
 }
 
 

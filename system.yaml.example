@@ -117,6 +117,14 @@ defaults:
   hooks:
     PreToolUse:
       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+      # Rewrite `@<botname>` out of GitHub-bound tool calls before they run
+      # (#1019). Every fleet bot name is also a real GitHub account -- 19 of 21
+      # belong to real people -- so an unguarded teammate reference emails a
+      # stranger, and one has asked us to stop. Not a guardrail: nothing ever
+      # INSTRUCTED @-mentioning on GitHub; the habit leaks from Telegram, where
+      # it is correct, and an instruction cannot catch a correct convention
+      # applied mid-prose to the wrong surface. Telegram is untouched.
+      - command: "$CLAUDLOBBY_ROOT/lib/gh-mention-guard.sh"
     PostToolUse:
       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
     # Ingestion layer for the ai-platform fleet-monitor (#785 Phase A): distil
