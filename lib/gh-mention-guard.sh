@@ -80,8 +80,12 @@ _allow() { exit 0; } # no decision — normal permission flow applies
 # Deliberately BEFORE sourcing lib-common or spawning jq. A payload with no `@`
 # cannot contain a mention, and that is the overwhelming majority of tool calls.
 payload="$(cat)"
+# The `@` test alone is NOT sufficient, and assuming it was cost a silent
+# bypass: content passed BY REFERENCE (--body-file, --notes-file, $(cat …))
+# carries its mentions in a FILE, so the command legitimately contains no `@`
+# at all. Those markers must survive the prefilter or step 2b never runs.
 case "$payload" in
-*@*) ;;
+*@* | *--body-file* | *--notes-file* | *'$(cat '*) ;;
 *) _allow ;;
 esac
 
@@ -183,6 +187,65 @@ case "$payload" in
     fi
     ;;
 esac
+
+# --- step 2b: content passed BY REFERENCE ------------------------------------
+# REWRITE WHAT THE TOOL CALL OWNS; REFUSE WHAT THE AUTHOR OWNS.
+#
+# That is the whole rule, and it explains why rewriting is right for a command
+# string and wrong for a file without either being a special case. A command
+# string is EPHEMERAL: it exists for one invocation, nobody reads it again, and
+# rewriting it loses nothing while preserving the intent ("post this"). A file
+# is DURABLE: someone authored it deliberately, may reuse it, may commit it —
+# and an edit made behind their back is invisible at the moment it happens.
+#
+# This is not theoretical. This guard silently stripped every sigil from a test
+# file WHILE IT WAS BEING AUTHORED (the command quoted a `gh … body=` example,
+# which made the whole command writer-shaped). It was caught only because the
+# tests failed. The by-reference case would do that directly and routinely.
+#
+# So: scan, never mutate. No mention -> allow untouched, which is the common
+# case and costs nothing. A mention that would notify -> REFUSE, naming file,
+# line, handle and the fix. Blocking costs one visible, recoverable turn;
+# mutating costs an invisible change to somebody's artifact; allowing emails a
+# stranger. Block is the cheapest of the three and the only one that teaches.
+#
+# vera found `--body-file`; it was seven forms in three classes.
+_deny() { # <reason>
+    jq -n --arg r "$1" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
+    exit 0
+}
+
+if [ "$surface" = "bash" ]; then
+    # (a) STDIN — content lives in a pipeline that has not run. Unreadable, so
+    # unscannable and unrewritable. The guard must not appear to cover a path it
+    # cannot see (that is the manufactured all-clear shape), so it refuses and
+    # names the one-line fix. Verified before ruling: nothing in lib/, library/
+    # or claudlobby/ pipes stdin to gh, so this breaks no shipped tooling.
+    if grep -Eq -- '--body-file[= ]+-([[:space:]]|$)|(body|title)=@-([[:space:]]|$)' <<<"$cmd"; then
+        _deny "gh reading the body from STDIN cannot be checked for @-mentions — the content is in a pipeline this hook cannot read, and every fleet bot name is a real GitHub account (#1019). Write the body to a temp file and pass --body-file <path>; the file is scanned and passes untouched when it holds no mention."
+    fi
+
+    # (b) A FILE ON DISK — readable, so scan it. Covers --body-file, --notes-file
+    # (both space- and equals-separated), -F/--field/-f/--raw-field body=@FILE,
+    # and --body "$(cat FILE)".
+    _refs=$(grep -oE -- '--(body|notes)-file[= ]+[^[:space:]"]+|(body|title)=@[^[:space:]"]+|\$\(cat [^)]+\)' <<<"$cmd" \
+        | sed -E 's/^--(body|notes)-file[= ]+//; s/^(body|title)=@//; s/^\$\(cat //; s/\)$//' | tr -d '"' | sort -u)
+    for _f in $_refs; do
+        [ "$_f" = "-" ] && continue
+        [ -r "$_f" ] || continue   # unreadable/nonexistent: nothing to scan
+        if _hits=$("$PY_BIN" "$REWRITER" --bots "$BOTS_FILE" --allow "$ALLOW_FILE" --report < "$_f"); then
+            continue               # exit 0 => no mention => allow untouched
+        fi
+        _deny "$(printf '%s carries @-mentions that would notify real GitHub accounts (#1019):\n%s\nEvery fleet bot name is a real account, and so are handles like Botfather, latest and 216. Edit the file to use backticks (`name`) and retry — the file is NOT modified for you, because it is yours.' "$_f" "$_hits")"
+    done
+
+    # (c) NOT COVERED, stated rather than pretended: `gh pr create --fill` takes
+    # the body from commit messages, which is scannable via git log but is more
+    # machinery than this belongs in. Declaring the gap is the honest move; a
+    # guard that silently misses a path it appears to cover is the defect this
+    # whole issue is about. Filed separately.
+fi
 
 # --- step 3: rewrite ---------------------------------------------------------
 _rw() { "$PY_BIN" "$REWRITER" --bots "$BOTS_FILE" --allow "$ALLOW_FILE" "$@"; }

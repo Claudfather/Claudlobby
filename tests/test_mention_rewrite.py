@@ -30,6 +30,7 @@ _spec = importlib.util.spec_from_file_location("mention_rewrite", _SRC)
 mr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mr)
 
+AT = chr(64)  # never written literally: this file is itself gh-bound content
 BOTS = {"vera", "ravi", "dara", "ari"}
 ALLOW = {"chrisrogers37"}
 
@@ -191,3 +192,29 @@ class TestShellSurfaceNeverGetsBackticks:
 
     def test_no_backtick_is_ever_emitted_in_bare_style(self):
         assert "`" not in rw("@vera @Botfather @216", style="bare")
+
+
+class TestReportMode:
+    """`--report` backs the refusal message for by-reference content.
+
+    A block saying "this file has a mention" is barely better than a silent
+    rewrite. One that names line and handle lets the author fix it in the same
+    turn without re-deriving anything.
+    """
+
+    def test_reports_line_and_handle(self):
+        text = "intro\nthanks " + AT + "vera\nnothing\nand " + AT + "latest\n"
+        assert mr.report(text, BOTS, ALLOW) == [(2, "vera"), (4, "latest")]
+
+    def test_clean_text_reports_nothing(self):
+        assert mr.report("an ordinary body\nno mentions\n", BOTS, ALLOW) == []
+
+    def test_allowlisted_handle_is_not_reported(self):
+        """Otherwise a declared mention would block a post it should permit."""
+        assert mr.report("cc " + AT + "chrisrogers37", BOTS, ALLOW) == []
+
+    def test_a_mention_inside_a_fence_is_not_reported(self):
+        """Same fence rules as the rewriter — a block and a rewrite must not
+        disagree about what counts, or a file gets refused for a mention that
+        would never have notified."""
+        assert mr.report("```\n" + AT + "vera\n```\n", BOTS, ALLOW) == []

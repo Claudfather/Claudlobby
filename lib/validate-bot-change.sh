@@ -1721,6 +1721,35 @@ _inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body
 [ -z "$_inv" ] && r=yes || r=no
 harness_check "  ...but a CLOSED fence is respected (GitHub does not linkify it)" "$r"
 
+# --- by-reference content: the bypass vera found ----------------------------
+# gh can take the body from a FILE, so the hook sees only a filename and the
+# command carries no mention at all. #1019 — the issue filed ABOUT us spamming
+# a stranger — was itself filed this way and re-notified her.
+GM_CLEAN="$GM_ROOT/clean.md"; printf 'an ordinary body\nno mentions\n' > "$GM_CLEAN"
+GM_DIRTY="$GM_ROOT/dirty.md"; printf 'intro\nthanks vera and @latest\n' > "$GM_DIRTY"
+# An ALLOW is empty output, not JSON — jq on empty stdin prints nothing, so the
+# empty case must be named here rather than left to a jq default that never runs.
+_dec() {
+    local o; o="$(gm_inv "$1")"
+    [ -z "$o" ] && { printf 'none'; return; }
+    printf '%s' "$o" | jq -r '.hookSpecificOutput.permissionDecision // "rewrite"' 2>/dev/null
+}
+
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh issue comment 1 --body-file '"$GM_CLEAN"'"}}')" = none ] && r=yes || r=no
+harness_check "  BY-REF: a body FILE with no mention passes untouched (common path costs nothing)" "$r"
+
+for _shape in "--body-file $GM_DIRTY" "--body-file=$GM_DIRTY" "--notes-file $GM_DIRTY"; do
+    [ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh issue comment 1 '"$_shape"'"}}')" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: a body FILE with a mention is REFUSED ($_shape)" "$r"
+done
+
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"cat x | gh issue comment 1 --body-file -"}}')" = deny ] && r=yes || r=no
+harness_check "  BY-REF: STDIN is refused — unreadable, so unverifiable" "$r"
+
+# The whole reason this refuses rather than rewrites: the file is the author's.
+grep -q 'vera' "$GM_DIRTY" && r=yes || r=no
+harness_check "  BY-REF: the refused file is NOT modified on disk (it is the author's)" "$r"
+
 rm -rf "$GM_ROOT"
 
 # ===========================================================================

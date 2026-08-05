@@ -171,6 +171,38 @@ def rewrite(
     return _MENTION.sub(_sub, text)
 
 
+def report(text: str, bot_names: set[str], allowlist: set[str]) -> list[tuple[int, str]]:
+    """(line_no, handle) for every mention that WOULD be rewritten.
+
+    Used to explain a refusal. A block that says "this file has a mention" is
+    barely better than a silent rewrite; one that names the line and the handle
+    lets the author fix it in the same turn without re-deriving anything.
+
+    Evaluated over the WHOLE text, never line by line. A first cut scanned each
+    line independently, which loses fence context and reported a mention inside
+    a closed code block — so a file would have been REFUSED for a mention that
+    could never have notified. Report and rewrite must agree exactly about what
+    counts, or the refusal is arguing with the fix it recommends.
+    """
+    lowered_bots = {n.lower() for n in bot_names}
+    lowered_alw = {n.lower() for n in allowlist}
+    guarded = protected_regions(text)
+    starts = [m.start() for m in re.finditer(r"\n", text)]
+
+    def line_of(pos: int) -> int:
+        return sum(1 for s in starts if s < pos) + 1
+
+    hits: list[tuple[int, str]] = []
+    for m in _MENTION.finditer(text):
+        if any(a <= m.start() < b for a, b in guarded):
+            continue
+        low = m.group(1).lower()
+        if low not in lowered_bots and low in lowered_alw:
+            continue
+        hits.append((line_of(m.start()), m.group(1)))
+    return hits
+
+
 def _load(path: str | None) -> set[str]:
     if not path:
         return set()
@@ -187,6 +219,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--allow", help="file of intended-mention handles, one per line")
     ap.add_argument("--style", choices=("backtick", "bare"), default="backtick")
     ap.add_argument(
+        "--report",
+        action="store_true",
+        help="print line:handle for mentions that would be rewritten; exit 1 if any",
+    )
+    ap.add_argument(
         "--field",
         action="append",
         default=[],
@@ -196,6 +233,18 @@ def main(argv: list[str] | None = None) -> int:
 
     bots, allow = _load(args.bots), _load(args.allow)
     raw = sys.stdin.read()
+
+    if args.report:
+        hits = report(raw, bots, allow)
+        for n, h in hits:
+            print(f"{n}:{h}")
+        return 1 if hits else 0
+
+    if args.report:
+        hits = report(raw, bots, allow)
+        for n, h in hits:
+            print(f"{n}:{h}")
+        return 1 if hits else 0
 
     if not args.field:
         sys.stdout.write(rewrite(raw, bots, allow, style=args.style))
