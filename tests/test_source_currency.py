@@ -14,12 +14,55 @@ blocker" reads exactly like a guard that is working.
 
 from __future__ import annotations
 
+import atexit
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 LIB_COMMON = Path(__file__).resolve().parent.parent / "lib" / "lib-common.sh"
+
+# A private HOME for every git subprocess this module starts, and a CLOSED env.
+#
+# Both halves are load-bearing, and both were bugs (found root-causing a flake
+# on PR #1013 — 6 of these 7 blocker tests failed in one full-suite run, passed
+# on rerun and in isolation):
+#
+#   * The fixture helpers used to inherit the ambient environment. Any GIT_*
+#     variable in the pytest process then reshapes fixture creation: exporting
+#     GIT_DIR or GIT_WORK_TREE reproduces that exact 6-of-7 signature on demand,
+#     and the one survivor is test_non_git_dir_blocks — which passes for the
+#     WRONG REASON, because every repo now looks like "not a git checkout".
+#     Env leaks across files are real here: `_load_env` (commands/_helpers.py)
+#     injects a fleet .env into os.environ permanently, and test_main.py leaves
+#     MY_TEST_VAR/MY_OTHER_VAR behind — measured reaching this module mid-suite.
+#   * HOME pointed at /tmp, which is shared with every process on the host. Any
+#     /tmp/.gitconfig any of them writes becomes this module's GLOBAL git config.
+#
+# So: no inheritance, a per-module HOME nothing else knows the path of, and both
+# git config tiers routed to /dev/null. These tests now depend on nothing outside
+# themselves — which is why the exact trigger for that one run no longer has to
+# be identified to be sure it cannot recur here.
+_GIT_HOME = Path(tempfile.mkdtemp(prefix="claudlobby-test-githome-"))
+atexit.register(shutil.rmtree, _GIT_HOME, True)
+
+
+def _clean_env(extra: dict | None = None) -> dict:
+    return {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(_GIT_HOME),
+        # Ambient git config cannot reach these tests from any tier.
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        # Deterministic identity, so a host with no git identity still commits.
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        **(extra or {}),
+    }
 
 
 def _sh(script: str, env: dict | None = None) -> str:
@@ -28,14 +71,19 @@ def _sh(script: str, env: dict | None = None) -> str:
         ["bash", "-c", f'. "$1"; shift; {script}', "_", str(LIB_COMMON)],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", **(env or {})},
+        env=_clean_env(env),
         timeout=60,
     )
     return proc.stdout.strip()
 
 
 def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        env=_clean_env(),
+    )
 
 
 def _repo(tmp_path: Path, name: str, origin: str | None = None) -> Path:
@@ -149,7 +197,12 @@ class TestRepoPullBlocker:
 
     def _with_upstream(self, tmp_path, name="r") -> Path:
         bare = tmp_path / f"{name}.git"
-        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        subprocess.run(
+            ["git", "init", "-q", "--bare", str(bare)],
+            check=True,
+            capture_output=True,
+            env=_clean_env(),
+        )
         repo = _repo(tmp_path, name, origin=str(bare))
         _git(repo, "push", "-q", "origin", "main")
         _git(repo, "branch", "--set-upstream-to=origin/main", "main")
@@ -259,3 +312,40 @@ class TestEditableEnumeration:
         assert (
             "pip" not in src.split("_editable_project_locations()")[1].split("\n}")[0]
         )
+
+
+class TestHermeticity:
+    """The isolation itself, exercised — not just asserted in a comment.
+
+    Root-causing the #1013 flake: exporting GIT_DIR (or GIT_WORK_TREE) made 6 of
+    the 7 TestRepoPullBlocker tests fail on demand, with the seventh passing for
+    the wrong reason. That is the signature that was reported as host load. These
+    run the real fixture path under those exact variables, so a future edit that
+    drops `env=_clean_env()` from a helper fails HERE rather than surfacing as an
+    unexplained flake in somebody else's full-suite run.
+    """
+
+    @pytest.mark.parametrize(
+        "var,value",
+        [
+            ("GIT_DIR", "/nonexistent/poison.git"),
+            ("GIT_WORK_TREE", "/tmp"),
+            ("GIT_INDEX_FILE", "/nonexistent/poison-index"),
+            ("GIT_CONFIG_GLOBAL", "/nonexistent/poison.gitconfig"),
+            ("HOME", "/nonexistent/poison-home"),
+        ],
+    )
+    def test_ambient_git_env_cannot_reach_the_fixtures(self, tmp_path, monkeypatch, var, value):
+        monkeypatch.setenv(var, value)
+        repo = _repo(tmp_path, "r", origin="https://github.com/Org/R.git")
+        (repo / "f.txt").write_text("edited")
+        assert "dirty" in _sh(f'repo_pull_blocker "{repo}"')
+        assert _sh(f'repo_remote_org "{repo}"') == "org"
+
+    def test_clean_env_declares_no_repo_pointing_git_vars(self):
+        """A closed allowlist, not a denylist: anything not named here is gone."""
+        env = _clean_env()
+        for leaky in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"):
+            assert leaky not in env
+        assert env["HOME"] != "/tmp", "HOME must not be the shared /tmp"
+        assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
