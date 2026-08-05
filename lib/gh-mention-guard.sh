@@ -142,18 +142,38 @@ case "$payload" in
     # `gh api … body=` is included deliberately: it is a real writer, and the
     # scrub of this very incident was performed with it.
     #
-    # IF YOU ARE HAND-PROBING WHETHER THIS GUARD IS LIVE, USE A WRITER.
-    # A reader — `gh pr list`, `gh pr view`, `gh --version` — is ALLOWED here by
-    # design, because nothing it does can notify anyone. So a probe built on one
-    # produces no rewrite, which is indistinguishable from the guard being
-    # absent, and reads as proof that it is. Three people reached that wrong
-    # conclusion independently before one of them caught it, and it cost a
-    # reversed deployment decision on the way.
+    # ─────────────────────────────────────────────────────────────────────
+    # HAND-PROBING THIS GUARD? THREE WAYS TO GET A FALSE NEGATIVE.
+    # All three were hit for real, by different people, on the same day. Each
+    # produces "no rewrite", which is indistinguishable from the guard being
+    # absent — so each reads as proof that it is dead. Copy the working probe
+    # at the bottom rather than composing your own.
     #
-    # A safe writer-shaped probe that posts nothing:
-    #   echo 'gh pr comment 1 --body "hi @<a-bot-name>"'
-    # Feed that as the Bash tool_input.command; the returned command should come
-    # back with the sigil stripped.
+    # 1. A READER measures nothing. `gh pr list`, `gh pr view`, `gh --version`
+    #    are allowed BY DESIGN — nothing they do can notify anyone.
+    #        gh pr list                      -> no fire (correct)
+    #
+    # 2. A WRITER VERB IS NOT ENOUGH. The patterns below need `gh` at a real
+    #    word boundary: (^|[;&|(]|whitespace). Inside a quoted echo the
+    #    preceding character is a QUOTE, so the boundary never matches and the
+    #    correct verb still does not fire:
+    #        echo "gh pr comment test vera"  -> no fire (LOOKS broken, is not)
+    #        gh pr comment 1 --body "vera"   -> fires
+    #
+    # 3. DO NOT BATCH YOUR CONTROLS. One Bash call is ONE command string. If
+    #    any part of it matches a writer, the rewrite applies to the WHOLE
+    #    string — including the reader line you added as a control, which then
+    #    falsely appears to have been stripped:
+    #        gh pr comment 1 -b "vera"
+    #        gh pr list # alex            <- alex gets rewritten too
+    #    Run each control as its OWN call. This also bites indirectly: a probe
+    #    merely CONTAINING the text `gh api ... body=` makes its own command a
+    #    writer, so your test data is rewritten before your program reads it.
+    #
+    # WORKING PROBE — posts nothing, one call, writer-shaped:
+    #     gh pr comment 1 --body "hi @<a-bot-name>"
+    # Feed as the Bash tool_input.command; expect the sigil stripped on return.
+    # ─────────────────────────────────────────────────────────────────────
     if grep -Eq '(^|[;&|(]|\s)gh\s+(issue|pr)\s+(comment|create|edit|review)\b' <<<"$cmd" \
         || grep -Eq '(^|[;&|(]|\s)gh\s+api\b.*\b(body|title)=' <<<"$cmd" \
         || grep -Eq '(^|[;&|(]|\s)gh\s+release\s+create\b' <<<"$cmd"; then

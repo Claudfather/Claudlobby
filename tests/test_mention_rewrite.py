@@ -117,6 +117,33 @@ class TestNotAMention:
         assert rw(f"@{long}") == f"@{long}"
 
 
+class TestMentionAfterAQuote:
+    """Regression: a mention immediately after a quote was NOT rewritten.
+
+    Found while documenting the probe traps — a batched-probe repro printed
+    `-b "@vera"` back unchanged, which looked like the guard under-firing and
+    was. The `@` was only matched after whitespace or an opening bracket, so a
+    body that OPENS by addressing someone slipped through:
+
+        gh pr comment 1 --body "@vera thanks for the catch"
+
+    That is a natural shape, and it is a false negative — the direction that
+    emails a stranger.
+    """
+
+    @pytest.mark.parametrize("q", ['"', "'"])
+    def test_mention_right_after_a_quote_is_rewritten(self, q):
+        assert rw(f"{q}@vera{q}") == f"{q}`vera`{q}"
+
+    def test_a_body_opening_with_a_mention(self):
+        assert rw('--body "@latest thanks"') == '--body "`latest` thanks"'
+
+    def test_email_and_shell_at_still_excluded(self):
+        """The fix must not widen into these — an alphanumeric still blocks."""
+        assert rw("user@example.com") == "user@example.com"
+        assert rw("-F body=@- x") == "-F body=@- x"
+
+
 class TestFailTowardRewriting:
     """THE INVARIANT: when unsure whether text is code, REWRITE.
 

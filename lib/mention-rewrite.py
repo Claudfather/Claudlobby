@@ -63,10 +63,20 @@ import sys
 # `user@example.com` must not read as mentions.
 _HANDLE = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 
-# A mention only notifies when the `@` starts a token: begins the string or
-# follows whitespace or an opening bracket/paren. This is what excludes
-# `-F body=@-`, `user@example.com`, and `npm i @scope/pkg` mid-path.
-_MENTION = re.compile(rf"(?<![^\s(\[{{])@({_HANDLE})\b")
+# A mention only notifies when the `@` starts a token: the string start, or
+# after whitespace, an opening bracket/paren, or a QUOTE. This is what excludes
+# `-F body=@-` and `user@example.com`, where an alphanumeric precedes.
+#
+# The quotes are not cosmetic — omitting them was a live false negative. A
+# comment that OPENS by addressing someone is a natural shape:
+#
+#     gh pr comment 1 --body "vera thanks for the catch"
+#
+# and with `"` excluded the `@` there never matched, so the mention sailed
+# through and would have notified. Found while documenting the probe traps for
+# #1019: the batched-probe repro printed `-b "vera"` back UNCHANGED, which
+# looked like the guard under-firing and was.
+_MENTION = re.compile(rf"(?<![^\s(\[{{\"'])@({_HANDLE})\b")
 
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 # A URL run — never rewrite inside one; an @ there is userinfo, not a mention.
