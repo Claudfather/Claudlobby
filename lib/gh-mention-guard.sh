@@ -141,6 +141,19 @@ case "$payload" in
     # Only gh invocations that WRITE something a person can be notified by.
     # `gh api … body=` is included deliberately: it is a real writer, and the
     # scrub of this very incident was performed with it.
+    #
+    # IF YOU ARE HAND-PROBING WHETHER THIS GUARD IS LIVE, USE A WRITER.
+    # A reader — `gh pr list`, `gh pr view`, `gh --version` — is ALLOWED here by
+    # design, because nothing it does can notify anyone. So a probe built on one
+    # produces no rewrite, which is indistinguishable from the guard being
+    # absent, and reads as proof that it is. Three people reached that wrong
+    # conclusion independently before one of them caught it, and it cost a
+    # reversed deployment decision on the way.
+    #
+    # A safe writer-shaped probe that posts nothing:
+    #   echo 'gh pr comment 1 --body "hi @<a-bot-name>"'
+    # Feed that as the Bash tool_input.command; the returned command should come
+    # back with the sigil stripped.
     if grep -Eq '(^|[;&|(]|\s)gh\s+(issue|pr)\s+(comment|create|edit|review)\b' <<<"$cmd" \
         || grep -Eq '(^|[;&|(]|\s)gh\s+api\b.*\b(body|title)=' <<<"$cmd" \
         || grep -Eq '(^|[;&|(]|\s)gh\s+release\s+create\b' <<<"$cmd"; then
