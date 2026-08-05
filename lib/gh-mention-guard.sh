@@ -85,6 +85,14 @@ HANDLES_FILE="${GH_MENTION_HANDLES_FILE:-${CLAUDLOBBY_ROOT:-}/runtime/_host/bot-
 [ -r "$HANDLES_FILE" ] || _bail "no bot-handles manifest at $HANDLES_FILE (run: claudlobby generate)"
 
 # One alternation of shell-safe names. Anchored with word boundaries at use.
+#
+# KNOWN AND ACCEPTED: this cannot distinguish a bot writing `@vera` from a
+# deliberate mention of the real Vera Clemens, who genuinely holds that handle —
+# every match is rewritten. That is the intended bound, not an oversight: a bot
+# should not be @-mentioning her at all, which is the whole reason this exists.
+# Do NOT add a heuristic that guesses intent; guessing wrong re-sends the email
+# this guard was written to stop. A human who means to reach a real person can
+# say so outside a bot's tool call.
 names="$(grep -Ex '[A-Za-z0-9][A-Za-z0-9_-]*' "$HANDLES_FILE" 2>/dev/null | sort -u | paste -sd'|' -)"
 [ -n "$names" ] || _bail "bot-handles manifest is empty"
 
