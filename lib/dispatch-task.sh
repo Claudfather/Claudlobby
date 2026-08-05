@@ -20,7 +20,7 @@
 # false-positive overdue, since the worker cannot echo what it never saw.
 #
 # Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by,
-# claudron_hits} to state/dispatch-log.jsonl (self-rotated via
+# claudron_hits,supersedes} to state/dispatch-log.jsonl (self-rotated via
 # rotate_jsonl_by_ts) so the fleet-pulse watchdog can flag `overdue_dispatch`
 # if no terminal [BOTREPORT] (completed|failed|blocked) arrives by expected_by.
 # Manager identity is this bot's $BOT_ID; the deadline defaults to
@@ -48,6 +48,7 @@ DISPATCH_REPO=""
 DISPATCH_PRIORITY=""
 DISPATCH_REF=""
 DISPATCH_WORKSTREAM=""
+DISPATCH_SUPERSEDES=""
 FORCE_ENVELOPE=""
 
 # _flag_val <flag> <value?> — explicit missing-value guard (NOT ${2:?}: see
