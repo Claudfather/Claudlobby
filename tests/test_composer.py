@@ -4162,3 +4162,66 @@ class TestLaunchdArgvSplitting:
         argv = pl["ProgramArguments"]
         assert argv[0].endswith("/lib/plain.sh")
         assert argv[1] == "t"
+
+
+class TestComposeBotConfTelegramStateDirExported:
+    """TELEGRAM_STATE_DIR must be EXPORTED into bot.conf (#976).
+
+    Most bot.conf lines deliberately lack `export` — lib/ reads them from the
+    file via `bot_conf_get`. This one is different: it has to reach the `claude`
+    CHILD process environment, because the telegram plugin resolves its state
+    directory from `process.env.TELEGRAM_STATE_DIR` and silently falls back to
+    the shared `~/.claude/channels/telegram` when it is unset. That fallback
+    parks every bot's `bot.pid` outside its own state dir, and since the plugin
+    enforces a singleton per state dir, only one bot on a host can ever hold a
+    poller.
+
+    `lib-common.sh` already assumes the export happened — its ownership check
+    greps the poller's environ for this exact `KEY=VALUE`. So the export is a
+    contract between compositor and consumer, not a stylistic choice.
+
+    Observed unexported: ten per-handle channel dirs on one host, spanning bots
+    created over three months, had never contained a `bot.pid`.
+    """
+
+    def _compose(self, tmp_path, handle="w_bot"):
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle=handle),
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_bot_conf(bot, fleet, paths)
+
+    def test_state_dir_is_exported(self, tmp_path):
+        conf = self._compose(tmp_path)
+        assert "export TELEGRAM_STATE_DIR=" in conf, (
+            "TELEGRAM_STATE_DIR is emitted without `export`, so it never reaches "
+            "the claude child process and the telegram plugin falls back to the "
+            "shared channel dir (#976)."
+        )
+
+    def test_state_dir_is_per_handle(self, tmp_path):
+        conf = self._compose(tmp_path, handle="w_bot")
+        assert "telegram-w_bot" in conf
+
+    def test_no_unexported_state_dir_line_remains(self, tmp_path):
+        """Guard against a regression that adds the export while leaving the
+        original bare assignment behind — the later line would win."""
+        conf = self._compose(tmp_path)
+        bare = [
+            ln
+            for ln in conf.splitlines()
+            if ln.strip().startswith("TELEGRAM_STATE_DIR=")
+        ]
+        assert not bare, f"unexported TELEGRAM_STATE_DIR line(s) present: {bare}"

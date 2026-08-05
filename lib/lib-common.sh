@@ -556,7 +556,7 @@ bot_expects_no_token() {
 
 bridge_state() {
     local bot_dir="${1:?Usage: bridge_state /path/to/bot/dir}"
-    local handle state_dir token pidfile pid comm ppid pcomm environ environ_lines args psline _anc _hop
+    local handle state_dir token pidfile pid comm ppid pcomm environ environ_lines args psline _anc _hop _exe
 
     handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "")" || true
     if [ -z "$handle" ]; then printf '%s' "no_handle"; return 1; fi
@@ -587,7 +587,22 @@ bridge_state() {
 
     # Footgun guard: a real bridge is a `bun` process running server.ts — never a
     # shell that merely has "server.ts" on its command line (kills phantom counts).
-    case "$comm" in
+    #
+    # The executable comes from `args`, NOT `comm` (#973). macOS `ps` truncates
+    # any non-final column to 16 chars, and `-ww` widens only the LAST field —
+    # so in this very call (comm,ppid,args) an absolute interpreter path arrives
+    # cut mid-word, e.g. /Users/<name>/.bun/bin/bun -> /Users/<name>/.bu, which
+    # never matches */bun. Note the stored comm is not itself truncated: `ps -o
+    # comm=` alone returns it in full. It is the multi-column format that cuts
+    # it, which is why this survived every existing test — the live-bridge tests
+    # require Linux /proc, and their force_os="Darwin" case only switches the
+    # ownership read, not the host's ps behaviour.
+    #
+    # The guard's intent is preserved: args is untruncated here, and a shell
+    # that merely carries server.ts on its command line still has the shell
+    # itself as the first token.
+    _exe="${args%% *}"
+    case "$_exe" in
         bun | */bun) ;;
         *) printf '%s' "no_bridge"; return 1 ;;
     esac

@@ -360,3 +360,117 @@ def test_killed_bridge_flips_to_no_bridge_and_actionable_down(tmp_path, force_os
     )
     assert down.stdout.strip() == "no_bridge", f"got {down.stdout!r}"
     assert down.returncode == 0
+
+
+# --- native-host live bridge: macOS ps column truncation (#973) ---------------
+#
+# Everything above is gated on Linux /proc and skips on macOS, and the
+# force_os="Darwin" parametrisation only switches the ownership READ branch
+# (ps eww vs /proc/<pid>/environ). Running that on Linux cannot reproduce
+# another kernel's ps FORMATTING, so the macOS branch had never executed on
+# macOS — which is exactly where #973 lived.
+#
+# Two obstacles had to be cleared to test natively:
+#
+#   1. _fake_bins copies /bin/bash. macOS SIGKILLs (exit 137) copies of
+#      Apple-signed binaries, so nothing spawns there. A copy of homebrew
+#      python3 runs, but python3 re-execs the framework binary, so `comm`
+#      reports .../Python and can never impersonate bun/claude. node is a
+#      standalone binary whose copy reports its own path — and node is already
+#      a documented claudlobby prereq.
+#
+#   2. The truncation is NOT MAXCOMLEN on the stored comm. `ps -o comm=` alone
+#      returns the full path; `ps -ww -o comm=,ppid=,args=` — bridge_state's own
+#      call — truncates the comm COLUMN to 16 chars, because -ww widens only the
+#      FINAL field. The lineage walk asks for `ppid=,comm=`, where comm IS final
+#      and therefore arrives intact; only the executable guard was affected.
+
+_NODE = shutil.which("node")
+requires_node = pytest.mark.skipif(
+    _NODE is None, reason="native live-bridge fixture needs node (a claudlobby prereq)"
+)
+
+
+def _fake_bins_native(tmp_path: Path) -> Path:
+    """`bun`/`claude` stand-ins that run natively AND report their own path as
+    `comm` — see the note above for why bash and python3 cannot be used."""
+    bindir = tmp_path / "nbin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    for name in ("bun", "claude"):
+        dst = bindir / name
+        shutil.copy(_NODE, dst)
+        os.chmod(dst, 0o755)
+    return bindir
+
+
+def _spawn_bridge_native(bindir: Path, state_dir: Path):
+    """Reproduce the production tree with native stand-ins:
+
+        claude -> bun (`start` shim) -> bun server.ts   <- writes bot.pid
+
+    so the lineage walk has real ancestors to traverse and `claude` is the
+    GRANDPARENT, as in production.
+    """
+    state_dir.mkdir(parents=True, exist_ok=True)
+    bun, claude = bindir / "bun", bindir / "claude"
+    pidfile = state_dir / "bot.pid"
+
+    leaf = bindir / "leaf.js"
+    leaf.write_text(
+        "require('fs').writeFileSync(%r, String(process.pid));\n"
+        "setTimeout(() => {}, 60000);\n" % str(pidfile)
+    )
+    wrapper = bindir / "wrapper.js"
+    wrapper.write_text(
+        "require('child_process').spawnSync(%r, [%r, 'server.ts'], "
+        "{stdio: 'inherit'});\n" % (str(bun), str(leaf))
+    )
+    tree = bindir / "tree.js"
+    tree.write_text(
+        "require('child_process').spawnSync(%r, [%r, 'start'], "
+        "{stdio: 'inherit'});\n" % (str(bun), str(wrapper))
+    )
+
+    env = {**os.environ, "TELEGRAM_STATE_DIR": str(state_dir)}
+    proc = subprocess.Popen(
+        [str(claude), str(tree)], env=env, start_new_session=True
+    )
+    _wait_pidfile(pidfile)
+    return proc
+
+
+@requires_node
+def test_native_host_long_exec_path_reads_up(tmp_path):
+    """A healthy, owned poller with a long exec path must read `up` on THIS
+    host — the regression gate for #973.
+
+    Before the fix, the executable guard matched the truncated comm column
+    against `bun | */bun`, so every healthy macOS poller reported no_bridge
+    forever and keepalive could never heal what was not broken. The assertion
+    message reports the host's own comm split so a future failure self-explains.
+    """
+    bindir = _fake_bins_native(tmp_path)
+    sd = tmp_path / "state"
+    bot = tmp_path / "bots" / "b1"
+    _write_bot_conf(bot, handle="b1", state_dir=sd, token_env="B1_TG_TOKEN")
+    (bot / ".env").write_text("B1_TG_TOKEN=x\n")
+
+    proc = _spawn_bridge_native(bindir, sd)
+    try:
+        pid = (sd / "bot.pid").read_text().strip()
+        raw = subprocess.run(
+            ["ps", "-ww", "-o", "comm=,ppid=,args=", "-p", pid],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        comm = raw.split()[0] if raw else ""
+        out, rc = _bridge_state(bot, tmp_path)
+        assert out == "up", (
+            f"got {out!r} for a healthy owned poller.\n"
+            f"  exec path : {bindir / 'bun'}\n"
+            f"  ps comm   : {comm!r} (len {len(comm)}) <- truncated column\n"
+            "  the executable guard must come from args, not comm."
+        )
+        assert rc == 0
+    finally:
+        _kill_tree(proc)
