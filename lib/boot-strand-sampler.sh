@@ -42,7 +42,12 @@
 #      and a tokenless bridge does not persist as a live process.
 #   2. SERIAL BOOTS. Production strands were observed on one-at-a-time
 #      restarts, which this reproduces; the mass-restart contention path
-#      (BOOT_LOCK held by peers) is not sampled.
+#      (BOOT_LOCK held by peers) is not sampled. --load N closes the CPU half
+#      of that gap, and it is not an optional refinement: on an idle host this
+#      sampler measures a condition under which the strand does not occur (#933
+#      measurement — clean at loadavg ~10, stranded 5 of 6 at loadavg 19-31).
+#      A strand-free sample taken WITHOUT --load says nothing about the
+#      contended boot, which is the one that produced every observed incident.
 #   3. The per-boot process ledger (parity_procs: every descendant of the pane)
 #      is recorded so parity is EVIDENCED per boot, not asserted — the summary
 #      prints the tree histogram.
@@ -53,12 +58,20 @@
 # estimated and no sample size makes the fix "proven"; the interval is the
 # result, not a verdict.
 #
-# Usage: boot-strand-sampler.sh [-n BOOTS] [--deadline SECS] [--keep]
+# Usage: boot-strand-sampler.sh [-n BOOTS] [--deadline SECS] [--load N] [--keep]
 #   -n BOOTS         sample size, default 20 (a warm-up boot runs first and is
 #                    reported separately, never counted)
 #   --deadline SECS  per-boot classification deadline, default 120. Healthy
 #                    boots submit in seconds and strands never resolve (#843
 #                    timing evidence), so the gap tolerates a generous value.
+#   --load N         run the sample against N synthetic CPU burners, to sample
+#                    the CONTENDED boot rather than the idle one (see divergence
+#                    2 above). N is a burner count, not a target loadavg: on the
+#                    4-core reference host N=20 settles near loadavg 25, which
+#                    brackets the 23.7-31 measured during the incident. Burners
+#                    are hard-timeout'd and killed by recorded PID, so neither a
+#                    crash of this script nor a pattern match on its own command
+#                    line can leave the host loaded.
 #   --keep           keep $ROOT artifacts (secrets are scrubbed either way)
 # Env: CLAUDLOBBY_SRC (checkout under test, default: this script's repo),
 #      CLAUDE_BIN (default: real `claude` — the point), SAMPLER_MEM_FLOOR_MB
@@ -86,7 +99,14 @@ BOOTS=20
 DEADLINE=120
 KEEP=""
 POLL_S=2
+LOAD_BURNERS=0
 MEM_FLOOR_MB="${SAMPLER_MEM_FLOOR_MB:-1200}"
+
+# PIDs of the synthetic-load burners, so teardown targets what this run started
+# and nothing else. Killing by recorded PID rather than `pkill -f <pattern>` is
+# deliberate: the pattern also matches the command line of whatever invoked the
+# sampler, so a pattern kill can take out its own caller.
+_LOAD_PIDS=""
 
 # The probe marker is the submission ground truth: greppable in the session
 # JSONL user record, and inside the first pane-rendered line of the payload so
@@ -170,6 +190,41 @@ mem_available_mb() {
     return 0
 }
 
+# loadavg_1m — 1-minute load average, or empty where /proc is absent (macOS).
+# Recorded per boot rather than assumed from the burner count: burners are an
+# INPUT, loadavg is what the host actually experienced, and on a shared host the
+# live fleet contributes too. A sample that reports only "--load 20" cannot be
+# compared against an incident that reported a loadavg.
+loadavg_1m() {
+    awk '{ print $1 }' /proc/loadavg 2>/dev/null
+    return 0
+}
+
+# start_load_burners <n> <max_secs> — spawn N hard-timeout'd CPU burners.
+# The timeout is a backstop, not the mechanism: teardown kills by PID. It exists
+# so a SIGKILL of the sampler (which skips the EXIT trap) still cannot leave a
+# shared host loaded indefinitely.
+start_load_burners() {
+    local n="$1" max="$2" i
+    [ "$n" -gt 0 ] 2>/dev/null || return 0
+    for i in $(seq 1 "$n"); do
+        "$_TIMEOUT_BIN" "$max" bash -c 'while :; do :; done' >/dev/null 2>&1 &
+        _LOAD_PIDS="$_LOAD_PIDS $!"
+    done
+    return 0
+}
+
+# stop_load_burners — kill exactly the PIDs this run recorded. Idempotent, and
+# safe to call from a trap that may fire more than once.
+stop_load_burners() {
+    local p
+    for p in $_LOAD_PIDS; do
+        kill "$p" 2>/dev/null || true
+    done
+    _LOAD_PIDS=""
+    return 0
+}
+
 # count_send_retries <bot_dir> — send_retry rows across the bot's event ledgers.
 count_send_retries() {
     local files=("$1"/data/events/*.jsonl)
@@ -216,6 +271,7 @@ main() {
         case "$1" in
             -n)         BOOTS="${2:?-n needs a value}"; shift 2 ;;
             --deadline) DEADLINE="${2:?--deadline needs a value}"; shift 2 ;;
+            --load)     LOAD_BURNERS="${2:?--load needs a value}"; shift 2 ;;
             --keep)     KEEP=1; shift ;;
             -h|--help)  usage; exit 0 ;;
             *)          printf 'unknown arg: %s\n' "$1" >&2; usage >&2; exit 1 ;;
@@ -223,6 +279,7 @@ main() {
     done
     case "$BOOTS" in ''|*[!0-9]*) printf 'bad -n: %s\n' "$BOOTS" >&2; exit 1 ;; esac
     case "$DEADLINE" in ''|*[!0-9]*) printf 'bad --deadline: %s\n' "$DEADLINE" >&2; exit 1 ;; esac
+    case "$LOAD_BURNERS" in ''|*[!0-9]*) printf 'bad --load: %s\n' "$LOAD_BURNERS" >&2; exit 1 ;; esac
 
     # Preconditions — skip (2), never fail, when a heavy dep is absent.
     for dep in "$CLAUDE_BIN" jq python3 tmux claudron; do
@@ -252,6 +309,10 @@ main() {
 
     cleanup() {
         _lc_cleanup
+        # Synthetic load dies first: it is the only thing this harness does that
+        # degrades a SHARED host, so it must not outlive any later teardown step
+        # that could itself hang.
+        stop_load_burners
         # Kill the probe tmux server + any surviving descendants, always.
         if [ -n "$SOCKET" ]; then
             bot_tmux "$SOCKET" kill-server 2>/dev/null || true
@@ -372,10 +433,24 @@ YAML
     printf 'sampling: %d boots (+1 warm-up), deadline %ss, poll %ss, socket %s\n' \
         "$BOOTS" "$DEADLINE" "$POLL_S" "$SOCKET"
 
+    # ── contended-boot arm ────────────────────────────────────────────────────
+    # Started here rather than before compose: compose is not a boot, and loading
+    # the host through it would slow the setup without sampling anything. The
+    # ceiling is the whole remaining run plus slack, so the backstop can only
+    # fire after the sample is over.
+    if [ "$LOAD_BURNERS" -gt 0 ]; then
+        start_load_burners "$LOAD_BURNERS" $(( (BOOTS + 2) * (DEADLINE + 120) ))
+        sleep 15   # let loadavg climb to steady state before boot 0
+        printf 'load arm: %d burners, loadavg now %s (contended boot — see divergence 2)\n' \
+            "$LOAD_BURNERS" "$(loadavg_1m)"
+    else
+        printf 'load arm: OFF — this samples the IDLE boot, which is not the condition that strands (#933)\n'
+    fi
+
     # ── boot loop ─────────────────────────────────────────────────────────────
     local i=0 kind session outcome t_startbot t_submit rc pane pids p
     local events_before events_after="" retry_fired parity boot_art
-    local glyph_at_inject t_glyph
+    local glyph_at_inject t_glyph boot_la
     session="$(tmux_session_name "$BOT_DIR")"
     while [ "$i" -le "$BOOTS" ]; do
         if [ "$i" -eq 0 ]; then kind="warmup"; else kind="sample"; fi
@@ -392,6 +467,10 @@ YAML
         events_before="${events_after:-"$(count_send_retries "$BOT_DIR")"}"
         touch "$ROOT/.boot-marker"
         sleep 1  # -nt needs the marker strictly older than new transcripts
+        # Sampled at the boot that experienced it, not once for the run: the
+        # live fleet on a shared host moves under us, so a per-run figure would
+        # attribute one boot's contention to all of them.
+        boot_la="$(loadavg_1m)"
 
         rc=0
         SECONDS=0
@@ -461,14 +540,18 @@ YAML
             --arg t_startbot "$t_startbot" --arg t_submit "${t_submit:-}" \
             --arg retry "$retry_fired" --arg parity "${parity:-}" \
             --arg glyph "${glyph_at_inject:-}" --arg t_glyph "${t_glyph:-}" \
+            --arg burners "$LOAD_BURNERS" --arg la "${boot_la:-}" \
             '{i: ($i|tonumber), kind: $kind, outcome: $outcome,
               t_startbot_s: ($t_startbot|tonumber),
               t_submit_s: (if $t_submit == "" then null else ($t_submit|tonumber) end),
               retry_fired: ($retry|tonumber), parity_procs: $parity,
               glyph_at_inject: (if $glyph == "" then null else ($glyph|tonumber) end),
-              t_glyph_s: (if $t_glyph == "" then null else ($t_glyph|tonumber) end)}' >> "$ROWS"
-        printf 'boot %02d (%s): %s%s%s\n' "$i" "$kind" "$outcome" \
+              t_glyph_s: (if $t_glyph == "" then null else ($t_glyph|tonumber) end),
+              load_burners: ($burners|tonumber),
+              loadavg_1m: (if $la == "" then null else ($la|tonumber) end)}' >> "$ROWS"
+        printf 'boot %02d (%s): %s%s%s%s\n' "$i" "$kind" "$outcome" \
             "${t_submit:+ submit=${t_submit}s}" \
+            "${boot_la:+ la=${boot_la}}" \
             "$([ "$retry_fired" -gt 0 ] && printf ' [send_retry fired]' || true)"
 
         # Teardown: kill-server takes the pane's tree; one liveness-gated KILL
