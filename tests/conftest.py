@@ -10,6 +10,8 @@ from textwrap import dedent
 
 import pytest
 
+from claudlobby.config import DEFAULT_GUARDRAILS
+
 
 @pytest.fixture(autouse=True)
 def _isolate_claudlobby_root(monkeypatch):
@@ -335,6 +337,12 @@ def fleet_dir(tmp_path: Path) -> Path:
     (root / "library" / "guardrails" / "no-push-main.md").write_text(
         "---\ntitle: No push to main\n---\n\nNever push to main.\n"
     )
+    # Every bot composes DEFAULT_GUARDRAILS, so the minimal library must carry
+    # them or the validator warns per bot about a guardrail it cannot resolve.
+    for _default_guardrail in DEFAULT_GUARDRAILS:
+        (root / "library" / "guardrails" / f"{_default_guardrail}.md").write_text(
+            f"---\ntitle: {_default_guardrail}\n---\n\nDefault guardrail.\n"
+        )
     (root / "library" / "protocols" / "report-back.md").write_text(
         "---\ntitle: Report-Back Protocol\n---\n\nReport back when done.\n"
     )

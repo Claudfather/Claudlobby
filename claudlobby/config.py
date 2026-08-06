@@ -97,6 +97,7 @@ class SystemDefaultsConfig:
     hooks: bool = True
     timers: bool = True
     observability: bool = True
+    guardrails: bool = True
 
 
 @dataclass
@@ -511,6 +512,18 @@ DEFAULT_MARKETPLACES: dict[str, dict] = {
 DEFAULT_PLUGINS: list[str] = [
     "claudna@Claudfather",
     "superpowers@claude-plugins-official",
+]
+
+# Guardrails composed onto every bot unless system_defaults.guardrails is false.
+#
+# Membership test for adding one: a rule whose protective value depends on
+# UNIVERSAL coverage, because the harm it prevents is estate-wide rather than
+# scoped to the bot carrying it. claudlobby-dev-in-projects qualifies — the
+# shared install is CLAUDLOBBY_ROOT for every bot on the host, so one bot
+# branching there swaps supervision and dispatch scripts for all of them. A rule
+# that only protects the fleet holding it does NOT qualify and stays opt-in.
+DEFAULT_GUARDRAILS: list[str] = [
+    "claudlobby-dev-in-projects",
 ]
 
 
@@ -1317,6 +1330,7 @@ def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
             hooks=bool(raw.get("hooks", True)),
             timers=bool(raw.get("timers", True)),
             observability=bool(raw.get("observability", True)),
+            guardrails=bool(raw.get("guardrails", True)),
         )
     return SystemDefaultsConfig()
 
@@ -1445,8 +1459,19 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
             # jobs flow through the defaults merge so fleet.yaml can override an
             # individual job by name; compose_fleet_timers reads merged["jobs"].
             effective_system["jobs"] = system_section.get("jobs", {})
-
     merged_defaults = _merge_system_into_defaults(effective_system, defaults)
+
+    if system_defaults_cfg.enabled and system_defaults_cfg.guardrails:
+        # Applied AFTER the system.yaml merge, and unioned rather than assigned.
+        # fleet.yaml.seed ships a `defaults.guardrails` list, so every newly
+        # seeded fleet supplies one — and the merge above replaces a fleet-set
+        # key rather than combining it, which would drop these for exactly the
+        # new fleets the default exists to protect. Opting out is
+        # `system_defaults.guardrails: false`, visible in fleet.yaml; declaring
+        # a guardrail list is not an opt-out and must not act as one.
+        merged_defaults["guardrails"] = _merge_lists(
+            DEFAULT_GUARDRAILS, merged_defaults.get("guardrails")
+        )
 
     bots = {
         bot_name: _coerce_bot(bot_name, bot_def, merged_defaults)
