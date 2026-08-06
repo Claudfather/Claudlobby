@@ -107,6 +107,23 @@ run_snapshot() {  # run_snapshot <journal_epoch> [extra env assignments...]
         "$@" bash "$SNAP" 2>&1
 }
 
+# A composed systemd unit carrying this bot's rung on the boot ladder. The
+# decoy comment is deliberate: the real composed unit carries an explanatory
+# line mentioning ExecStartPre, and an unanchored match reads it as the
+# directive and picks up the wrong number (or none).
+mk_unit() {  # mk_unit <fleet> <bot> <rung_seconds>
+    local d; d="$(bot_dir "$1" "$2")"
+    mkdir -p "$d"
+    {
+        echo "[Unit]"
+        echo "#   activating      ExecStartPre — the boot stagger sleep"
+        echo "[Service]"
+        echo "ExecStartPre=/bin/sleep $3"
+    } > "$d/com.test.$2.service"
+}
+
+iso_now() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
+
 # Which section a bot printed under.
 section_of() {  # section_of "<output>" <bot>
     printf '%s\n' "$1" | awk -v b="$2" '
@@ -318,6 +335,63 @@ assert_contains "incomplete headline is stamped, not just the banner" \
     "*** INCOMPLETE" "$OUT6"
 assert_contains "incomplete page says N must not be used" \
     "must NOT be compared against the baseline" "$OUT6"
+
+# ── Case 6: the boot ladder gate ────────────────────────────────────────────
+# A bot whose ExecStartPre rung has not elapsed has not been launched by
+# systemd, so it cannot have written anything and is NOT a strand. Counting it
+# as one measures the elapsed clock rather than self-starting, and at boot+20s
+# on a 21-bot host that renders as "0 of 21" against a 6-of-21 baseline — a
+# catastrophe that has not happened, read during an incident, by someone
+# deciding whether to intervene (#1050).
+echo "== boot ladder gate, mid-ladder =="
+ROOT="$T/root2"; CFG="$T/cfg2"
+BOOT=$(( $(date +%s) - 20 ))
+declare_fleet ladder early late norung_bot
+for b in early late norung_bot; do mk_dir ladder "$b"; done
+mk_unit ladder early 3     # rung elapsed: it has had its chance
+mk_unit ladder late 60     # rung NOT elapsed: systemd is still sleeping on it
+# norung_bot deliberately gets no unit, so the gate cannot be applied to it.
+mk_transcript ladder early fresh "$(iso_now)" 2
+# `late` also carries a fat pre-crash transcript, which is the RAW false
+# positive shape. Not-yet-launched must dominate that verdict too.
+mk_transcript ladder late precrash "$PRE_TS" 400
+
+OUT7="$(run_snapshot "$BOOT")"; RC7=$?
+
+assert_contains "too-early banner fires" "TOO EARLY" "$OUT7"
+assert_contains "headline refuses to state a result" "NOT A RESULT" "$OUT7"
+assert_contains "banner says how many were never launched" \
+    "of 3 bots have NOT BEEN LAUNCHED yet" "$OUT7"
+assert_contains "banner names the re-run instant" "Re-run at" "$OUT7"
+assert_contains "banner offers the rescue-anyway escape" \
+    "rescue" "$OUT7"
+assert_contains "first-turn allowance is printed with its provenance" \
+    "observed at load 31" "$OUT7"
+
+assert_eq "unlaunched bot is NOT-YET-DUE, not stranded" \
+    "NOT-YET-DUE" "$(section_of "$OUT7" late)"
+assert_eq "not-yet-due dominates the pre-crash RAW false positive" \
+    "400" "$(field_of "$OUT7" late raw)"
+assert_eq "a bot past its rung that DID start is still self-started" \
+    "SELF-STARTED" "$(section_of "$OUT7" early)"
+assert_contains "bot with no readable rung is disclosed, not silently gated" \
+    "no boot rung readable" "$OUT7"
+assert_contains "and it is named" "norung_bot" "$OUT7"
+
+# Positive control on the gate: past the window the same fixtures must produce
+# a real result, and the unlaunched bot must become a genuine strand. Without
+# this, the test above would pass against a script that gates unconditionally.
+echo "== boot ladder gate, past the window =="
+BOOT=$(( $(date +%s) - 300 ))
+OUT8="$(run_snapshot "$BOOT")"; RC8=$?
+
+assert_eq "past the window it exits 0" "0" "$RC8"
+assert_absent "no too-early banner once the ladder has finished" "TOO EARLY" "$OUT8"
+assert_contains "headline states a real result" "SELF-START SNAPSHOT:  1 of 3" "$OUT8"
+assert_contains "result is marked valid" "result valid  : yes" "$OUT8"
+assert_eq "the unlaunched bot is now a genuine strand" \
+    "STRANDED" "$(section_of "$OUT8" late)"
+assert_eq "nothing is left in NOT-YET-DUE" "" "$(section_of "$OUT8" early | grep NOT-YET-DUE)"
 
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"

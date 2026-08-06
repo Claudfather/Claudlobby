@@ -190,7 +190,10 @@ BOOT_ISO="$(epoch_to_iso_utc "$BOOT_EPOCH")"
 # boundary to .000 keeps the lexicographic compare apples-to-apples, so a record
 # in the boot second is not mis-ordered by the missing fractional part.
 BOOT_CMP="${BOOT_ISO}.000Z"
-NOW_ISO="$(epoch_to_iso_utc "$(date +%s)")"
+NOW_EPOCH="$(date +%s)"
+NOW_ISO="$(epoch_to_iso_utc "$NOW_EPOCH")"
+ELAPSED=$(( NOW_EPOCH - BOOT_EPOCH ))
+[ "$ELAPSED" -lt 0 ] && ELAPSED=0
 
 JOURNAL_EPOCH="$(journal_boot_epoch)"
 if [ -z "$JOURNAL_EPOCH" ]; then
@@ -345,16 +348,58 @@ TOTAL="$(wc -l < "$TMP/declared" | tr -d ' ')"
 # Claude Code projects root.
 transcript_dir_for() { printf '%s/projects/%s\n' "$CFG_DIR" "$(printf '%s' "$1" | tr '/' '-')"; }
 
+# A bot cannot have self-started before systemd has launched it, and the boot
+# ladder means most of them have not for the first minute. Each bot waits on an
+# `ExecStartPre=/bin/sleep N` rung composed into its own unit (3s stagger,
+# host-global, so a 21-bot host runs rungs 0..60). Read the rung rather than
+# assume one: the stagger is a composer constant that will move, and hardcoding
+# it here would silently decay.
+#
+# Anchored to start-of-line because the composed unit carries an explanatory
+# COMMENT mentioning ExecStartPre, which an unanchored match would read as the
+# directive. Returns -1 when no rung can be read (no unit, or a launchd plist,
+# which staggers elsewhere) — never 0, because "no gate" and "gate at zero" must
+# not be the same answer: an unreadable rung has to be reported as unknown
+# rather than quietly asserting the bot was due.
+boot_rung_for() {
+    local d="$1" u r
+    for u in "$d"/*.service; do
+        [ -f "$u" ] || continue
+        r="$(grep -E '^[[:space:]]*ExecStartPre=.*sleep[[:space:]]+[0-9]+' "$u" 2>/dev/null \
+             | sed -n 's/.*sleep[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -1)"
+        if [ -n "$r" ]; then printf '%s\n' "$r"; return 0; fi
+    done
+    printf '%s\n' "-1"
+}
+
 : > "$TMP/rows"
+: > "$TMP/rungs"
+: > "$TMP/norung"
 while IFS="$(printf '\t')" read -r bot fleet botdir; do
     [ -n "$bot" ] || continue
     tdir="$(transcript_dir_for "$botdir")"
     files="$(ls -1t "$tdir"/*.jsonl 2>/dev/null)"
 
+    rung="$(boot_rung_for "$botdir")"
+    not_due=0
+    if [ "$rung" -ge 0 ]; then
+        printf '%s\n' "$rung" >> "$TMP/rungs"
+        [ "$rung" -gt "$ELAPSED" ] && not_due=1
+    else
+        printf '%s\n' "$bot" >> "$TMP/norung"
+    fi
+
     if [ -z "$files" ]; then
         # Declared, but no transcript at all — the third blind spot. A naive
-        # transcript walk drops this bot from both lists entirely.
-        printf '%s\t%s\tSTRAND\t0\t0\t-\t-\tno transcript file at all\n' "$bot" "$fleet" >> "$TMP/rows"
+        # transcript walk drops this bot from both lists entirely. Still not a
+        # strand if its rung has not elapsed: systemd has not launched it, so
+        # there is nothing it could have written.
+        if [ "$not_due" -eq 1 ]; then
+            printf '%s\t%s\tNOT-YET-DUE\t0\t0\t-\t-\tboot rung %ss, only %ss since boot — not launched yet\n' \
+                "$bot" "$fleet" "$rung" "$ELAPSED" >> "$TMP/rows"
+        else
+            printf '%s\t%s\tSTRAND\t0\t0\t-\t-\tno transcript file at all\n' "$bot" "$fleet" >> "$TMP/rows"
+        fi
         continue
     fi
 
@@ -388,6 +433,12 @@ EOF
 
     if [ "$filtered" -gt 0 ]; then
         cls="SELF-STARTED"; why="post-boot assistant records present"
+    elif [ "$not_due" -eq 1 ]; then
+        # Dominates every negative verdict below, including the pre-crash-file
+        # case: nothing negative can be concluded about a bot systemd has not
+        # launched. Calling it a strand measures the elapsed clock, not
+        # self-starting (#1050).
+        cls="NOT-YET-DUE"; why="boot rung ${rung}s, only ${ELAPSED}s since boot — not launched yet"
     elif [ "$raw" -eq 0 ]; then
         cls="STRAND"; why="transcript exists but zero assistant records"
     elif [ "$CLOCK_VERDICT" = "STALE" ]; then
@@ -427,8 +478,31 @@ n_strand="$(awk -F'\t' '$3=="STRAND"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_adj="$(awk -F'\t' '$3=="ADJUDICATE"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_raw_pos="$(awk -F'\t' '$4>0' "$TMP/rows" | wc -l | tr -d ' ')"
 n_filt_pos="$(awk -F'\t' '$5>0' "$TMP/rows" | wc -l | tr -d ' ')"
+n_notdue="$(awk -F'\t' '$3=="NOT-YET-DUE"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_disagree="$(awk -F'\t' '($4>0)!=($5>0)' "$TMP/rows" | wc -l | tr -d ' ')"
 n_rows="$(wc -l < "$TMP/rows" | tr -d ' ')"
+
+# ── Is this reading a result yet? ───────────────────────────────────────────
+# Two gates, and they are different kinds of claim (#1050).
+#
+# HARD, and derived: a bot whose ExecStartPre rung has not elapsed has not been
+# launched, full stop. That is a fact about systemd, not an estimate, so those
+# bots are NOT-YET-DUE rather than stranded.
+#
+# SOFT, and stated: a bot that HAS launched still needs time to reach a first
+# turn. That latency is a measurement, not a derivation — 17-34s observed at
+# load 31 on 2026-08-06, and longer under worse load, which is exactly when
+# this gets run. The allowance is therefore printed with its provenance rather
+# than applied silently, and it is overridable. On a 21-bot host the two gates
+# together land at boot+120s, matching the operating rule.
+FIRST_TURN_ALLOWANCE_S="${SELFSTART_FIRST_TURN_ALLOWANCE_S:-60}"
+MAX_RUNG=0
+if [ -s "$TMP/rungs" ]; then
+    MAX_RUNG="$(sort -n "$TMP/rungs" | tail -1)"
+fi
+VALID_AT=$(( BOOT_EPOCH + MAX_RUNG + FIRST_TURN_ALLOWANCE_S ))
+TOO_EARLY=0
+[ "$NOW_EPOCH" -lt "$VALID_AT" ] && TOO_EARLY=1
 
 # ── Completeness assertion ──────────────────────────────────────────────────
 # Every declared bot must have produced a row, and every row must have landed
@@ -439,7 +513,7 @@ n_rows="$(wc -l < "$TMP/rows" | tr -d ' ')"
 # mode obliges the script to prove it finished (#1045 review, dara).
 EXIT_CODE=0
 INCOMPLETE=0
-if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj ))" -ne "$TOTAL" ]; then
+if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj + n_notdue ))" -ne "$TOTAL" ]; then
     INCOMPLETE=1
     EXIT_CODE=4
     echo
@@ -449,8 +523,8 @@ if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj ))" -ne "$TOTA
     echo "##"
     echo "##  Declared bots      : $TOTAL"
     echo "##  Rows produced      : $n_rows"
-    echo "##  Rows classified    : $(( n_self + n_strand + n_adj ))"
-    echo "##    self-started $n_self · stranded $n_strand · adjudicate $n_adj"
+    echo "##  Rows classified    : $(( n_self + n_strand + n_adj + n_notdue ))"
+    echo "##    self-started $n_self · stranded $n_strand · adjudicate $n_adj · not-yet-due $n_notdue"
     echo "##"
     echo "##  Bots are missing from the counts below, so N is short and"
     echo "##  must NOT be compared against the baseline. Exit code 4."
@@ -458,8 +532,38 @@ if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj ))" -ne "$TOTA
     echo
 fi
 
+if [ "$TOO_EARLY" -eq 1 ]; then
+    echo
+    echo "############################################################"
+    echo "##  TOO EARLY — THIS IS NOT A RESULT YET. DO NOT ACT ON IT ##"
+    echo "############################################################"
+    echo "##"
+    echo "##  Only ${ELAPSED}s since boot."
+    if [ "$n_notdue" -gt 0 ]; then
+        echo "##  $n_notdue of $TOTAL bots have NOT BEEN LAUNCHED yet — systemd is"
+        echo "##  still sleeping on their boot rung. They cannot have written"
+        echo "##  anything, so they are NOT strands."
+    fi
+    echo "##  Boot ladder runs to ${MAX_RUNG}s; first turn adds ~${FIRST_TURN_ALLOWANCE_S}s"
+    echo "##  (17-34s observed at load 31 on 2026-08-06, longer under worse"
+    echo "##  load — override with SELFSTART_FIRST_TURN_ALLOWANCE_S)."
+    echo "##"
+    echo "##  A low count here measures the CLOCK, not self-starting, and"
+    echo "##  against the baseline it reads as a catastrophe that has not"
+    echo "##  happened. Re-run at $(epoch_to_iso_utc "$VALID_AT")Z, in $(( VALID_AT - NOW_EPOCH ))s."
+    echo "##"
+    echo "##  If something is visibly wedged and waiting is worse: rescue"
+    echo "##  now and record the measurement as void. A lost measurement"
+    echo "##  is recoverable at the next crash; a fleet left down is not."
+    echo "############################################################"
+    echo
+fi
+
 echo "==============================================================="
-if [ "$n_adj" -gt 0 ]; then
+if [ "$TOO_EARLY" -eq 1 ]; then
+    echo "  SELF-START SNAPSHOT:  NOT A RESULT — only ${ELAPSED}s since boot"
+    echo "                        (provisional: $n_self of $TOTAL, $n_notdue not launched yet)"
+elif [ "$n_adj" -gt 0 ]; then
     echo "  SELF-START SNAPSHOT:  $n_self of $TOTAL self-started"
     echo "                        range $n_self-$(( n_self + n_adj )) — $n_adj unresolved, see ADJUDICATE"
 else
@@ -480,7 +584,12 @@ else
 fi
 echo "  clock at boot : $CLOCK_VERDICT — $CLOCK_DETAIL"
 echo "  boot instant  : ${BOOT_ISO}Z (epoch $BOOT_EPOCH)"
-echo "  snapshot at   : ${NOW_ISO}Z"
+echo "  snapshot at   : ${NOW_ISO}Z (${ELAPSED}s after boot)"
+if [ "$TOO_EARLY" -eq 1 ]; then
+    echo "  result valid  : NOT YET — re-run at $(epoch_to_iso_utc "$VALID_AT")Z (ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s)"
+else
+    echo "  result valid  : yes — past ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s"
+fi
 echo "  denominator   : $TOTAL declared bots across $(wc -l < "$TMP/manifests" | tr -d ' ') fleet manifest(s)"
 echo
 
@@ -500,7 +609,17 @@ print_section() {
 
 print_section "SELF-STARTED" "SELF-STARTED"
 print_section "STRAND"       "STRANDED"
+print_section "NOT-YET-DUE"  "NOT YET DUE — systemd has not launched these, they are NOT strands"
 print_section "ADJUDICATE"   "ADJUDICATE — counts disagree and cannot be resolved mechanically"
+
+if [ -s "$TMP/norung" ]; then
+    echo "NOTE: no boot rung readable for these bots, so the not-yet-launched"
+    echo "      gate could not be applied to them. They may be misreported as"
+    echo "      strands if this ran early (no composed .service unit — a"
+    echo "      launchd host staggers elsewhere):"
+    sort -u "$TMP/norung" | sed 's/^/        /'
+    echo
+fi
 
 if [ "$n_disagree" -gt 0 ]; then
     echo "DISAGREEMENT DETAIL (evidence for adjudication)"
