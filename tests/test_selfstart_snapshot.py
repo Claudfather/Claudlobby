@@ -29,7 +29,7 @@ HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 # Every case dara named in the dispatch, plus the two denominator traps and the
 # two #1045-review regressions. Raise this when cases are added; never lower it
 # to make a red wrapper green.
-MIN_ASSERTIONS = 54
+MIN_ASSERTIONS = 75
 
 
 @pytest.fixture(scope="module")
@@ -97,6 +97,52 @@ def test_each_override_is_scoped_to_its_own_condition(run):
         "PASS: duplicate override does NOT waive an unparseable manifest" in run.stdout
     )
     assert "PASS: duplicate override stamps the headline" in run.stdout
+
+
+def test_a_reading_taken_before_the_boot_ladder_finishes_refuses_to_be_a_result(run):
+    """#1050. The failure mode this guards is the worst-shaped one available.
+
+    A bot whose ExecStartPre rung has not elapsed has not been launched, so it
+    cannot have written a post-boot record. Counting it as stranded measures the
+    elapsed clock, not self-starting — and at boot+20s on a 21-bot host that
+    renders as "0 of 21" against a 6-of-21 baseline. Read during an incident by
+    someone deciding whether to intervene, that is a catastrophe that has not
+    happened, and it argues for exactly the panicked mass-restart the standing
+    posture exists to prevent.
+
+    The gate refuses rather than caveats: the headline stops claiming a result
+    at all, the provisional number stays visible but labelled, and not-launched
+    is a separate class from stranded.
+    """
+    assert "PASS: headline refuses to state a result" in run.stdout
+    assert "PASS: unlaunched bot is NOT-YET-DUE, not stranded" in run.stdout
+    assert "PASS: not-yet-due dominates the pre-crash RAW false positive" in run.stdout
+    assert "PASS: banner names the re-run instant" in run.stdout
+    # Positive control: past the window the same fixtures must yield a real
+    # result, or this would pass against a script that gates unconditionally.
+    assert "PASS: no too-early banner once the ladder has finished" in run.stdout
+    assert "PASS: the unlaunched bot is now a genuine strand" in run.stdout
+
+
+def test_every_refusal_carries_a_non_zero_exit_code(run):
+    """A refusal that exits 0 is a caveat (#1051 review, vera).
+
+    The banner is advisory to a human reading the text and invisible to anything
+    else, so without its own code a TOO EARLY page is indistinguishable to a
+    programmatic consumer from a trustworthy result. The exit code is where
+    refuse-rather-than-caveat either holds or quietly does not — and it was the
+    one RC in the harness with no assertion on it, which is exactly the shape
+    that silently regresses.
+
+    Precedence is asserted too: 4 (incomplete) outranks 5 (too early) when both
+    hold, because re-running fixes early and need not fix incomplete.
+    """
+    assert "PASS: too-early run exits non-zero, and with its own code" in run.stdout
+    assert "PASS: incomplete outranks too-early in the exit code" in run.stdout
+    assert "PASS: but both banners still print — early" in run.stdout
+    # Positive control: the healthy run must still be 0, or a blanket non-zero
+    # would satisfy the assertions above.
+    assert "PASS: past the window it exits 0" in run.stdout
 
 
 def test_the_run_proves_it_covered_every_declared_bot(run):

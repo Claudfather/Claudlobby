@@ -107,14 +107,38 @@ run_snapshot() {  # run_snapshot <journal_epoch> [extra env assignments...]
         "$@" bash "$SNAP" 2>&1
 }
 
+# A composed systemd unit carrying this bot's rung on the boot ladder. The
+# decoy comment is deliberate: the real composed unit carries an explanatory
+# line mentioning ExecStartPre, and an unanchored match reads it as the
+# directive and picks up the wrong number (or none).
+mk_unit() {  # mk_unit <fleet> <bot> <rung_seconds>
+    local d; d="$(bot_dir "$1" "$2")"
+    mkdir -p "$d"
+    {
+        echo "[Unit]"
+        echo "#   activating      ExecStartPre — the boot stagger sleep"
+        echo "[Service]"
+        echo "ExecStartPre=/bin/sleep $3"
+    } > "$d/com.test.$2.service"
+}
+
+iso_now() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
+
 # Which section a bot printed under.
+# The leading unindented-line rule CLEARS the section before the specific rules
+# can set it, so an unrecognised block yields "" rather than inheriting the
+# previous one. That matters: this helper used to fail OPEN, and when the
+# NOT-YET-DUE section was added it silently reported those bots as STRANDED —
+# the previous section label leaking across a header it did not match. A test
+# helper that reports a wrong classification as a right one is worse than one
+# that reports nothing, so unknown sections now fail closed.
 section_of() {  # section_of "<output>" <bot>
     printf '%s\n' "$1" | awk -v b="$2" '
+        /^[^ ]/                { s="" }
         /^SELF-STARTED \(/     { s="SELF-STARTED"; next }
         /^STRANDED \(/         { s="STRANDED";     next }
+        /^NOT YET DUE/         { s="NOT-YET-DUE";  next }
         /^ADJUDICATE /         { s="ADJUDICATE";   next }
-        /^DISAGREEMENT DETAIL/ { s="";             next }
-        /^NOTE:/               { s="";             next }
         s != "" && $1 == b { print s; exit }
     '
 }
@@ -318,6 +342,83 @@ assert_contains "incomplete headline is stamped, not just the banner" \
     "*** INCOMPLETE" "$OUT6"
 assert_contains "incomplete page says N must not be used" \
     "must NOT be compared against the baseline" "$OUT6"
+
+# ── Case 6: the boot ladder gate ────────────────────────────────────────────
+# A bot whose ExecStartPre rung has not elapsed has not been launched by
+# systemd, so it cannot have written anything and is NOT a strand. Counting it
+# as one measures the elapsed clock rather than self-starting, and at boot+20s
+# on a 21-bot host that renders as "0 of 21" against a 6-of-21 baseline — a
+# catastrophe that has not happened, read during an incident, by someone
+# deciding whether to intervene (#1050).
+echo "== boot ladder gate, mid-ladder =="
+ROOT="$T/root2"; CFG="$T/cfg2"
+BOOT=$(( $(date +%s) - 20 ))
+declare_fleet ladder early late norung_bot
+for b in early late norung_bot; do mk_dir ladder "$b"; done
+mk_unit ladder early 3     # rung elapsed: it has had its chance
+mk_unit ladder late 60     # rung NOT elapsed: systemd is still sleeping on it
+# norung_bot deliberately gets no unit, so the gate cannot be applied to it.
+mk_transcript ladder early fresh "$(iso_now)" 2
+# `late` also carries a fat pre-crash transcript, which is the RAW false
+# positive shape. Not-yet-launched must dominate that verdict too.
+mk_transcript ladder late precrash "$PRE_TS" 400
+
+OUT7="$(run_snapshot "$BOOT")"; RC7=$?
+
+# The exit code, which was the one RC in this file with no assertion on it
+# (#1051 review, vera). A refusal that exits 0 is a caveat: the banner is
+# advisory to a human and invisible to everything else, so the code is where
+# refuse-rather-than-caveat either holds or quietly does not.
+assert_eq "too-early run exits non-zero, and with its own code" "5" "$RC7"
+assert_contains "too-early banner fires" "TOO EARLY" "$OUT7"
+assert_contains "headline refuses to state a result" "NOT A RESULT" "$OUT7"
+assert_contains "banner says how many were never launched" \
+    "of 3 bots have NOT BEEN LAUNCHED yet" "$OUT7"
+assert_contains "banner names the re-run instant" "Re-run at" "$OUT7"
+assert_contains "banner offers the rescue-anyway escape" \
+    "rescue" "$OUT7"
+assert_contains "first-turn allowance is printed with its provenance" \
+    "observed at load 31" "$OUT7"
+
+assert_eq "unlaunched bot is NOT-YET-DUE, not stranded" \
+    "NOT-YET-DUE" "$(section_of "$OUT7" late)"
+assert_eq "not-yet-due dominates the pre-crash RAW false positive" \
+    "400" "$(field_of "$OUT7" late raw)"
+assert_eq "a bot past its rung that DID start is still self-started" \
+    "SELF-STARTED" "$(section_of "$OUT7" early)"
+assert_contains "bot with no readable rung is disclosed, not silently gated" \
+    "no boot rung readable" "$OUT7"
+assert_contains "and it is named" "norung_bot" "$OUT7"
+
+# Positive control on the gate: past the window the same fixtures must produce
+# a real result, and the unlaunched bot must become a genuine strand. Without
+# this, the test above would pass against a script that gates unconditionally.
+echo "== boot ladder gate, past the window =="
+BOOT=$(( $(date +%s) - 300 ))
+OUT8="$(run_snapshot "$BOOT")"; RC8=$?
+
+assert_eq "past the window it exits 0" "0" "$RC8"
+assert_absent "no too-early banner once the ladder has finished" "TOO EARLY" "$OUT8"
+assert_contains "headline states a real result" "SELF-START SNAPSHOT:  1 of 3" "$OUT8"
+assert_contains "result is marked valid" "result valid  : yes" "$OUT8"
+assert_eq "the unlaunched bot is now a genuine strand" \
+    "STRANDED" "$(section_of "$OUT8" late)"
+assert_contains "the not-yet-due section is empty past the window" \
+    "they are NOT strands (0)" "$OUT8"
+
+# ── Case 7: exit-code precedence when both refusals hold ────────────────────
+# TOO_EARLY (5) and INCOMPLETE (4) are independent, so both can fire at once and
+# only one number reaches a caller. 4 must win: early is a property of WHEN the
+# run happened and re-running at the stated instant fixes it; incomplete is a
+# property of the run itself and re-running need not. The operator who sees one
+# code should get the one that does not resolve on its own.
+echo "== both refusals at once =="
+BOOT=$(( $(date +%s) - 20 ))
+OUT9="$(run_snapshot "$BOOT" "PATH=$T/bin:$PATH")"; RC9=$?
+
+assert_eq "incomplete outranks too-early in the exit code" "4" "$RC9"
+assert_contains "but both banners still print — early" "TOO EARLY" "$OUT9"
+assert_contains "but both banners still print — incomplete" "INCOMPLETE SNAPSHOT" "$OUT9"
 
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"
