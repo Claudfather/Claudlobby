@@ -29,7 +29,7 @@ HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 # Every case dara named in the dispatch, plus the two denominator traps and the
 # two #1045-review regressions. Raise this when cases are added; never lower it
 # to make a red wrapper green.
-MIN_ASSERTIONS = 71
+MIN_ASSERTIONS = 75
 
 
 @pytest.fixture(scope="module")
@@ -122,6 +122,27 @@ def test_a_reading_taken_before_the_boot_ladder_finishes_refuses_to_be_a_result(
     # result, or this would pass against a script that gates unconditionally.
     assert "PASS: no too-early banner once the ladder has finished" in run.stdout
     assert "PASS: the unlaunched bot is now a genuine strand" in run.stdout
+
+
+def test_every_refusal_carries_a_non_zero_exit_code(run):
+    """A refusal that exits 0 is a caveat (#1051 review, vera).
+
+    The banner is advisory to a human reading the text and invisible to anything
+    else, so without its own code a TOO EARLY page is indistinguishable to a
+    programmatic consumer from a trustworthy result. The exit code is where
+    refuse-rather-than-caveat either holds or quietly does not — and it was the
+    one RC in the harness with no assertion on it, which is exactly the shape
+    that silently regresses.
+
+    Precedence is asserted too: 4 (incomplete) outranks 5 (too early) when both
+    hold, because re-running fixes early and need not fix incomplete.
+    """
+    assert "PASS: too-early run exits non-zero, and with its own code" in run.stdout
+    assert "PASS: incomplete outranks too-early in the exit code" in run.stdout
+    assert "PASS: but both banners still print — early" in run.stdout
+    # Positive control: the healthy run must still be 0, or a blanket non-zero
+    # would satisfy the assertions above.
+    assert "PASS: past the window it exits 0" in run.stdout
 
 
 def test_the_run_proves_it_covered_every_declared_bot(run):

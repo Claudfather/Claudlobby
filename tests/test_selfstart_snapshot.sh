@@ -365,6 +365,11 @@ mk_transcript ladder late precrash "$PRE_TS" 400
 
 OUT7="$(run_snapshot "$BOOT")"; RC7=$?
 
+# The exit code, which was the one RC in this file with no assertion on it
+# (#1051 review, vera). A refusal that exits 0 is a caveat: the banner is
+# advisory to a human and invisible to everything else, so the code is where
+# refuse-rather-than-caveat either holds or quietly does not.
+assert_eq "too-early run exits non-zero, and with its own code" "5" "$RC7"
 assert_contains "too-early banner fires" "TOO EARLY" "$OUT7"
 assert_contains "headline refuses to state a result" "NOT A RESULT" "$OUT7"
 assert_contains "banner says how many were never launched" \
@@ -400,6 +405,20 @@ assert_eq "the unlaunched bot is now a genuine strand" \
     "STRANDED" "$(section_of "$OUT8" late)"
 assert_contains "the not-yet-due section is empty past the window" \
     "they are NOT strands (0)" "$OUT8"
+
+# ── Case 7: exit-code precedence when both refusals hold ────────────────────
+# TOO_EARLY (5) and INCOMPLETE (4) are independent, so both can fire at once and
+# only one number reaches a caller. 4 must win: early is a property of WHEN the
+# run happened and re-running at the stated instant fixes it; incomplete is a
+# property of the run itself and re-running need not. The operator who sees one
+# code should get the one that does not resolve on its own.
+echo "== both refusals at once =="
+BOOT=$(( $(date +%s) - 20 ))
+OUT9="$(run_snapshot "$BOOT" "PATH=$T/bin:$PATH")"; RC9=$?
+
+assert_eq "incomplete outranks too-early in the exit code" "4" "$RC9"
+assert_contains "but both banners still print — early" "TOO EARLY" "$OUT9"
+assert_contains "but both banners still print — incomplete" "INCOMPLETE SNAPSHOT" "$OUT9"
 
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"

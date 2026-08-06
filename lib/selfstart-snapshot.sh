@@ -93,6 +93,10 @@ Exit codes:
   3  boot instant could not be determined, or no temp dir.
   4  snapshot ran but did not cover every declared bot. The page is printed
      and stamped INCOMPLETE; N is short and must not be used.
+  5  ran too early to be a result — the boot ladder had not finished, or the
+     first-turn allowance had not elapsed. The page is printed and stamped
+     TOO EARLY; re-run at the instant it names. Takes 4 if both apply, since
+     re-running fixes early and need not fix incomplete.
 EOF
 }
 
@@ -504,6 +508,15 @@ VALID_AT=$(( BOOT_EPOCH + MAX_RUNG + FIRST_TURN_ALLOWANCE_S ))
 TOO_EARLY=0
 [ "$NOW_EPOCH" -lt "$VALID_AT" ] && TOO_EARLY=1
 
+# A refusal that exits 0 is a caveat, not a refusal (#1051 review, vera). The
+# banner below is advisory to a human reading the text and invisible to anything
+# else, so without its own code a TOO EARLY page is indistinguishable to a
+# programmatic consumer from a trustworthy 21-of-21. The whole argument for this
+# gate was refuse-rather-than-caveat, and the exit code is where that either
+# holds or quietly does not.
+EXIT_CODE=0
+[ "$TOO_EARLY" -eq 1 ] && EXIT_CODE=5
+
 # ── Completeness assertion ──────────────────────────────────────────────────
 # Every declared bot must have produced a row, and every row must have landed
 # in exactly one bucket. Asserted positively, because without `set -e` there is
@@ -511,7 +524,12 @@ TOO_EARLY=0
 # otherwise print a two-thirds page that EXITS 0, which is strictly worse than
 # the aborted page dropping -e was meant to prevent. Removing the loud failure
 # mode obliges the script to prove it finished (#1045 review, dara).
-EXIT_CODE=0
+#
+# PRECEDENCE: 4 overrides a TOO_EARLY 5 when both hold, and they are independent
+# so both can. Early is a property of WHEN it ran and is fixed by re-running at
+# the stated instant; incomplete is a property of the run itself and re-running
+# need not fix it. The operator who gets only one number should get the one that
+# does not resolve on its own.
 INCOMPLETE=0
 if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj + n_notdue ))" -ne "$TOTAL" ]; then
     INCOMPLETE=1
