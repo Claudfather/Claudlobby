@@ -16,6 +16,7 @@ from claudlobby.config import (
     BotConfig,
     FleetConfig,
     McpEntry,
+    TeamConfig,
     TelegramConfig,
     ToolPermissionsConfig,
     load_fleet,
@@ -2155,6 +2156,110 @@ class TestHostBootOffset:
         fleet = FleetConfig(name="bbb", service_prefix="p", bots=bots)
         # aaa owns rungs 0-1, so bbb starts at rung 2 → 6s, 9s, 12s.
         assert [bot_boot_delay_s(b, fleet, paths) for b in bots.values()] == [6, 9, 12]
+
+
+class TestCrossFleetManagerRecognition:
+    """manager_bots() must see a manager whose reports live in OTHER fleets.
+
+    `teams:` can only name a manager of a team in its own fleet. A top-level
+    coordinator whose reports are themselves managers of other fleets is named
+    by no `teams:` block anywhere, so the predicate missed it — while the same
+    manifest declared `manages: [...]` all along.
+    """
+
+    LIB_COMMON = Path(__file__).resolve().parents[1] / "lib" / "lib-common.sh"
+
+    def _fleet(self, name="crog", **bots):
+        """bots kwargs: name=(manages_list_or_None); teams built separately."""
+        return FleetConfig(
+            name=name,
+            service_prefix="p",
+            bots={
+                b: BotConfig(bot_id=b, name=b, expertise=["eng"], manages=m)
+                for b, m in bots.items()
+            },
+        )
+
+    def _bash_is_manager(self, bot_dir: Path) -> bool:
+        """The real shipped predicate, not a reimplementation of it."""
+        proc = subprocess.run(
+            ["bash", "-c", '. "$1"; bot_is_manager "$2"', "_",
+             str(self.LIB_COMMON), str(bot_dir)],
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode == 0
+
+    def _compose_conf(self, tmp_path, fleet, bot_id):
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        d = tmp_path / bot_id
+        d.mkdir()
+        (d / "bot.conf").write_text(
+            compose_bot_conf(fleet.bots[bot_id], fleet, paths), encoding="utf-8"
+        )
+        return d
+
+    # -- the predicate itself ------------------------------------------------
+
+    def test_manages_makes_a_manager_with_no_team_at_all(self):
+        """The clog shape: zero teams declared, manages: [...] present."""
+        fleet = self._fleet(clog=["ari", "kev"])
+        assert fleet.manager_bots() == {"clog"}
+
+    def test_manages_targets_outside_this_fleet_still_count(self):
+        """The whole point — the reports are in other fleets.
+
+        _validate_teams warns rather than errors on exactly this, because
+        "bot_ids may reference other fleets". ari/kev are absent from
+        fleet.bots here, and clog is still a manager.
+        """
+        fleet = self._fleet(clog=["ari", "kev"])
+        assert "ari" not in fleet.bots and "kev" not in fleet.bots
+        assert "clog" in fleet.manager_bots()
+
+    def test_a_plain_worker_is_still_not_a_manager(self):
+        """CONTROL. A predicate that answers True for everything is not a fix."""
+        fleet = self._fleet(name="tl", todd=None)
+        assert fleet.manager_bots() == set()
+
+    def test_the_predicate_is_not_unanimous_on_a_mixed_fleet(self):
+        """The unanimity tell, asserted directly rather than hoped for."""
+        fleet = self._fleet(name="mixed", clog=["ari"], todd=None, greg=None)
+        assert fleet.manager_bots() == {"clog"}  # exactly one, not all three
+
+    def test_empty_manages_is_not_a_claim_to_manage_anyone(self):
+        assert self._fleet(z=[]).manager_bots() == set()
+        assert self._fleet(z=None).manager_bots() == set()
+
+    def test_teams_only_managers_are_untouched(self):
+        """No regression for the ordinary within-fleet case."""
+        fleet = self._fleet(name="eng", ari=None, alex=None)
+        fleet.teams = {"personal": TeamConfig(name="personal", manager="ari")}
+        assert fleet.manager_bots() == {"ari"}
+
+    # -- outcome, through real composition and the real bash predicate -------
+
+    def test_bash_bot_is_manager_is_true_for_a_manages_only_manager(self, tmp_path):
+        """End to end: no teams block anywhere, and bot_is_manager still says yes.
+
+        This is the assertion that lets the `teams: estate: manager: clog`
+        workaround be deleted rather than merely tolerated.
+        """
+        fleet = self._fleet(clog=["ari", "kev"])
+        assert fleet.teams == {}  # the workaround block is genuinely absent
+        d = self._compose_conf(tmp_path, fleet, "clog")
+        assert "MANAGER_TMUX" in (d / "bot.conf").read_text()
+        assert self._bash_is_manager(d) is True
+
+    def test_bash_bot_is_manager_is_false_for_a_real_worker(self, tmp_path):
+        """CONTROL, through the same composition path."""
+        fleet = self._fleet(name="tl", kev=["todd"], todd=None)
+        fleet.teams = {"tl": TeamConfig(name="tl", manager="kev", workers=["todd"])}
+        d = self._compose_conf(tmp_path, fleet, "todd")
+        assert self._bash_is_manager(d) is False
 
 
 class TestPluginsBotConf:
