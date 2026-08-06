@@ -203,6 +203,11 @@ assert_eq "undeclared leftover dir is NOT classified" "" "$(section_of "$OUT" gh
 assert_contains "headline leads with the count" "SELF-START SNAPSHOT:  3 of 8" "$OUT"
 assert_contains "baseline printed next to it" "baseline to beat" "$OUT"
 
+# Positive control for the completeness assertion below: a run that DID cover
+# every declared bot must carry no stamp and exit 0. Without this, the
+# incomplete-run test could pass against a script that stamps unconditionally.
+assert_absent "healthy run carries no INCOMPLETE stamp" "INCOMPLETE" "$OUT"
+
 # The headline must be the first thing on the page — a stressed reader at 3am
 # should not have to scroll past lists to reach it.
 assert_contains "headline is in the first 4 lines" "SELF-START SNAPSHOT" \
@@ -257,6 +262,62 @@ declare_fleet beta clean
 OUT5="$(run_snapshot "$SANE_JOURNAL")"; RC5=$?
 assert_eq "duplicate name exits non-zero" "2" "$RC5"
 assert_contains "duplicate name is named in the banner" "clean" "$OUT5"
+
+# REGRESSION (#1045 review, found by vera). SELFSTART_ALLOW_PARTIAL used to
+# waive this check as well as the manifest-parse one it was built for, and it
+# did so in total silence: no banner, no PARTIAL stamp, exit 0, a page that read
+# as an ordinary trustworthy snapshot. An override advertised for one condition
+# must never be honoured by a second.
+OUT5b="$(run_snapshot "$SANE_JOURNAL" SELFSTART_ALLOW_PARTIAL=1)"; RC5b=$?
+assert_eq "ALLOW_PARTIAL does NOT waive the duplicate check" "2" "$RC5b"
+assert_contains "refusal states the flag does not apply here" \
+    "SELFSTART_ALLOW_PARTIAL does NOT waive this" "$OUT5b"
+assert_absent "no snapshot page is printed under the bypass attempt" \
+    "SELF-START SNAPSHOT:" "$OUT5b"
+
+# The duplicate has its own override, and unlike the old bypass it is loud.
+OUT5c="$(run_snapshot "$SANE_JOURNAL" SELFSTART_ALLOW_DUPLICATE_NAMES=1)"; RC5c=$?
+assert_eq "dedicated duplicate override proceeds" "0" "$RC5c"
+assert_contains "duplicate override stamps the headline" \
+    "DUPLICATE BOT NAMES ACCEPTED" "$OUT5c"
+assert_contains "duplicate override explains the ambiguity" \
+    "identify two different bots each" "$OUT5c"
+# The symmetric half: scoping has to hold in BOTH directions, or the new
+# override just reintroduces the same bug with the operands swapped.
+mkdir -p "$ROOT/local/home/gamma"
+printf 'fleet:\n  name: gamma\n  # no bots block at all\n' > "$ROOT/local/home/gamma/fleet.yaml"
+OUT5d="$(run_snapshot "$SANE_JOURNAL" SELFSTART_ALLOW_DUPLICATE_NAMES=1)"; RC5d=$?
+assert_eq "duplicate override does NOT waive an unparseable manifest" "2" "$RC5d"
+assert_contains "and the refusal is about the manifest, not the duplicate" \
+    "could not be parsed" "$OUT5d"
+rm -rf "$ROOT/local/home/gamma"
+
+# ── Case 5: the run must prove it covered every declared bot ────────────────
+# With `set -e` deliberately absent, "did it finish" cannot be inferred from the
+# absence of a crash, so it is asserted positively. Fault-injected via a PATH
+# stub for `wc` that inflates the declared-bot total by one — the shape of a bot
+# that was declared but never produced a row. Content-keyed on the 3-field
+# declared file, so the row and manifest counts are left untouched.
+echo "== completeness assertion =="
+declare_fleet beta solo
+mkdir -p "$T/bin"
+cat > "$T/bin/wc" <<'STUB'
+#!/bin/bash
+tmp=$(mktemp); cat > "$tmp"
+n=$(/usr/bin/wc -l < "$tmp" | tr -d ' ')
+if [ "$(head -1 "$tmp" | awk -F'\t' '{print NF}')" = "3" ]; then n=$((n + 1)); fi
+rm -f "$tmp"; echo "$n"
+STUB
+chmod +x "$T/bin/wc"
+
+OUT6="$(run_snapshot "$SANE_JOURNAL" "PATH=$T/bin:$PATH")"; RC6=$?
+assert_eq "an incomplete run exits non-zero" "4" "$RC6"
+assert_contains "incomplete banner is unmissable" "INCOMPLETE SNAPSHOT" "$OUT6"
+assert_contains "incomplete banner shows the arithmetic" "Rows produced" "$OUT6"
+assert_contains "incomplete headline is stamped, not just the banner" \
+    "*** INCOMPLETE" "$OUT6"
+assert_contains "incomplete page says N must not be used" \
+    "must NOT be compared against the baseline" "$OUT6"
 
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"

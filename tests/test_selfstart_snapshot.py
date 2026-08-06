@@ -26,9 +26,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 
-# Every case dara named in the dispatch, plus the two denominator traps. Raise
-# this when cases are added; never lower it to make a red wrapper green.
-MIN_ASSERTIONS = 40
+# Every case dara named in the dispatch, plus the two denominator traps and the
+# two #1045-review regressions. Raise this when cases are added; never lower it
+# to make a red wrapper green.
+MIN_ASSERTIONS = 54
 
 
 @pytest.fixture(scope="module")
@@ -77,3 +78,34 @@ def test_unparseable_manifest_is_fatal_not_skipped(run):
     """Soft-skipping a manifest reintroduces the same bug one layer up."""
     assert "PASS: unparseable manifest exits non-zero" in run.stdout
     assert "PASS: no counts are printed alongside the refusal" in run.stdout
+
+
+def test_each_override_is_scoped_to_its_own_condition(run):
+    """#1045 review regression, found by vera.
+
+    SELFSTART_ALLOW_PARTIAL used to waive the duplicate-name check as well as
+    the manifest-parse one it was built for, and silently: no banner, no PARTIAL
+    stamp, exit 0, a page that read as an ordinary trustworthy snapshot. An
+    override advertised on one banner must never be honoured by a second check —
+    that is the silent denominator getting back in through the door built to
+    make partiality loud. Asserted in both directions, since a fix that only
+    holds one way just swaps the operands.
+    """
+    assert "PASS: ALLOW_PARTIAL does NOT waive the duplicate check" in run.stdout
+    assert "PASS: no snapshot page is printed under the bypass attempt" in run.stdout
+    assert (
+        "PASS: duplicate override does NOT waive an unparseable manifest" in run.stdout
+    )
+    assert "PASS: duplicate override stamps the headline" in run.stdout
+
+
+def test_the_run_proves_it_covered_every_declared_bot(run):
+    """Without `set -e`, completion cannot be inferred from the absence of a crash.
+
+    The failure dropping -e was meant to prevent — a two-thirds page that reads
+    as complete — comes straight back as a two-thirds page that exits 0 unless
+    coverage is asserted positively.
+    """
+    assert "PASS: an incomplete run exits non-zero" in run.stdout
+    assert "PASS: incomplete headline is stamped, not just the banner" in run.stdout
+    assert "PASS: healthy run carries no INCOMPLETE stamp" in run.stdout

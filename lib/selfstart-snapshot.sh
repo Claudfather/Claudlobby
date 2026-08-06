@@ -62,6 +62,11 @@
 #   SELFSTART_BOOT_EPOCH          override the boot instant
 #   SELFSTART_JOURNAL_BOOT_EPOCH  override the journal boot record
 #   SELFSTART_ALLOW_PARTIAL=1     proceed past an unparseable manifest, loudly
+#   SELFSTART_ALLOW_DUPLICATE_NAMES=1
+#                                 proceed past a bot name declared in two
+#                                 fleets, loudly. Separate from ALLOW_PARTIAL on
+#                                 purpose: one override per fatal condition, so
+#                                 accepting one degradation never waives another
 set -uo pipefail
 
 BASELINE_TEXT="6 of 21 (2026-08-06, load 31, pre-fix ladder)"
@@ -86,6 +91,8 @@ Exit codes:
   2  denominator could not be trusted (unparseable fleet.yaml, no bots found,
      duplicate bot name across fleets). Nothing is printed but the banner.
   3  boot instant could not be determined, or no temp dir.
+  4  snapshot ran but did not cover every declared bot. The page is printed
+     and stamped INCOMPLETE; N is short and must not be used.
 EOF
 }
 
@@ -97,6 +104,12 @@ esac
 
 # ── Loud failure ────────────────────────────────────────────────────────────
 # The denominator has no degraded mode. See the note above list_manifests.
+#
+# ESCAPE_HINT names the override for THIS refusal and nothing else. Each fatal
+# condition owns its own escape, because an override advertised on one banner
+# and honoured by a second, unrelated check is how a silent denominator gets
+# back in through the door built to make partiality loud (#1045 review).
+ESCAPE_HINT="SELFSTART_ALLOW_PARTIAL=1 to accept a declared-partial denominator"
 die_loud() {
     echo
     echo "############################################################"
@@ -108,8 +121,7 @@ die_loud() {
     echo "##  No counts are printed. A wrong N would be compared"
     echo "##  against the baseline ($BASELINE_TEXT)"
     echo "##  and believed. Fix the manifest, or re-run with"
-    echo "##  SELFSTART_ALLOW_PARTIAL=1 to accept a declared-partial"
-    echo "##  denominator."
+    echo "##  $ESCAPE_HINT."
     echo "############################################################"
     echo
     exit 2
@@ -295,13 +307,35 @@ if [ ! -s "$TMP/declared" ]; then
     die_loud "No bots declared in any fleet.yaml under $ROOT/local/"
 fi
 
-# A duplicate name across fleets breaks the union: two distinct bots would
-# collapse into one row and N would be short. Fatal, not a warning.
+# A duplicate name across fleets makes every row keyed on bot name ambiguous:
+# two distinct bots print under one identifier, and a page whose identifiers do
+# not identify anything is not a measurement. Fatal, not a warning.
+#
+# SELFSTART_ALLOW_PARTIAL deliberately does NOT reach this check, and that is a
+# fix rather than an oversight. It used to, which meant setting the flag for its
+# real purpose — one manifest that will not parse — silently waived an unrelated
+# fatal condition as well, with no banner and no PARTIAL stamp in the headline,
+# exiting 0 on a page that read as entirely normal. That is the silent
+# denominator this whole script exists to prevent, reachable through the door
+# built to make partiality loud. Found by vera in review of #1045.
+#
+# A duplicate gets its own override because it needs its own banner: the two
+# conditions degrade the page differently and an operator must be told which
+# one they accepted.
 DUPES="$(cut -f1 "$TMP/declared" | sort | uniq -d)"
-if [ -n "$DUPES" ] && [ "${SELFSTART_ALLOW_PARTIAL:-0}" != "1" ]; then
-    die_loud "Bot name declared in more than one fleet.yaml — the union would" \
-             "collapse two distinct bots into one row:" \
-             "$(printf '%s' "$DUPES" | tr '\n' ' ')"
+DUP_TOLERATED=0
+if [ -n "$DUPES" ]; then
+    if [ "${SELFSTART_ALLOW_DUPLICATE_NAMES:-0}" = "1" ]; then
+        DUP_TOLERATED=1
+    else
+        ESCAPE_HINT="SELFSTART_ALLOW_DUPLICATE_NAMES=1 to accept ambiguous rows"
+        die_loud "Bot name declared in more than one fleet.yaml — two distinct" \
+                 "bots would print under one identifier:" \
+                 "$(printf '%s' "$DUPES" | tr '\n' ' ')" \
+                 "" \
+                 "SELFSTART_ALLOW_PARTIAL does NOT waive this. It is scoped to" \
+                 "an unparseable manifest and nothing else."
+    fi
 fi
 
 TOTAL="$(wc -l < "$TMP/declared" | tr -d ' ')"
@@ -394,6 +428,35 @@ n_adj="$(awk -F'\t' '$3=="ADJUDICATE"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_raw_pos="$(awk -F'\t' '$4>0' "$TMP/rows" | wc -l | tr -d ' ')"
 n_filt_pos="$(awk -F'\t' '$5>0' "$TMP/rows" | wc -l | tr -d ' ')"
 n_disagree="$(awk -F'\t' '($4>0)!=($5>0)' "$TMP/rows" | wc -l | tr -d ' ')"
+n_rows="$(wc -l < "$TMP/rows" | tr -d ' ')"
+
+# ── Completeness assertion ──────────────────────────────────────────────────
+# Every declared bot must have produced a row, and every row must have landed
+# in exactly one bucket. Asserted positively, because without `set -e` there is
+# no crash to infer completion from: a per-bot read that dies quietly would
+# otherwise print a two-thirds page that EXITS 0, which is strictly worse than
+# the aborted page dropping -e was meant to prevent. Removing the loud failure
+# mode obliges the script to prove it finished (#1045 review, dara).
+EXIT_CODE=0
+INCOMPLETE=0
+if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj ))" -ne "$TOTAL" ]; then
+    INCOMPLETE=1
+    EXIT_CODE=4
+    echo
+    echo "############################################################"
+    echo "##  INCOMPLETE SNAPSHOT — THE PAGE BELOW IS NOT A RESULT   ##"
+    echo "############################################################"
+    echo "##"
+    echo "##  Declared bots      : $TOTAL"
+    echo "##  Rows produced      : $n_rows"
+    echo "##  Rows classified    : $(( n_self + n_strand + n_adj ))"
+    echo "##    self-started $n_self · stranded $n_strand · adjudicate $n_adj"
+    echo "##"
+    echo "##  Bots are missing from the counts below, so N is short and"
+    echo "##  must NOT be compared against the baseline. Exit code 4."
+    echo "############################################################"
+    echo
+fi
 
 echo "==============================================================="
 if [ "$n_adj" -gt 0 ]; then
@@ -403,7 +466,9 @@ else
     echo "  SELF-START SNAPSHOT:  $n_self of $TOTAL self-started"
 fi
 echo "  baseline to beat:     $BASELINE_TEXT"
+[ "$INCOMPLETE" -eq 1 ] && echo "  *** INCOMPLETE — $n_rows of $TOTAL bots produced a row, N IS SHORT ***"
 [ "$PARTIAL" -eq 1 ] && echo "  *** PARTIAL DENOMINATOR — a manifest was skipped, N IS SHORT ***"
+[ "$DUP_TOLERATED" -eq 1 ] && echo "  *** DUPLICATE BOT NAMES ACCEPTED — rows below are ambiguous: $(printf '%s' "$DUPES" | tr '\n' ' ') ***"
 echo "==============================================================="
 echo
 echo "  RAW      (assistant records in newest transcript) : $n_raw_pos of $TOTAL"
@@ -460,4 +525,13 @@ if [ "$PARTIAL" -eq 1 ]; then
     echo
 fi
 
-exit 0
+if [ "$DUP_TOLERATED" -eq 1 ]; then
+    echo "DUPLICATE BOT NAMES ACCEPTED via SELFSTART_ALLOW_DUPLICATE_NAMES — these"
+    echo "      names are declared in more than one fleet.yaml, so the rows above"
+    echo "      that carry them identify two different bots each. Read them with"
+    echo "      the [fleet] column, and do not key anything on the name alone:"
+    printf '%s\n' "$DUPES" | sed 's/^/        /'
+    echo
+fi
+
+exit "$EXIT_CODE"
