@@ -125,13 +125,20 @@ mk_unit() {  # mk_unit <fleet> <bot> <rung_seconds>
 iso_now() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
 
 # Which section a bot printed under.
+# The leading unindented-line rule CLEARS the section before the specific rules
+# can set it, so an unrecognised block yields "" rather than inheriting the
+# previous one. That matters: this helper used to fail OPEN, and when the
+# NOT-YET-DUE section was added it silently reported those bots as STRANDED —
+# the previous section label leaking across a header it did not match. A test
+# helper that reports a wrong classification as a right one is worse than one
+# that reports nothing, so unknown sections now fail closed.
 section_of() {  # section_of "<output>" <bot>
     printf '%s\n' "$1" | awk -v b="$2" '
+        /^[^ ]/                { s="" }
         /^SELF-STARTED \(/     { s="SELF-STARTED"; next }
         /^STRANDED \(/         { s="STRANDED";     next }
+        /^NOT YET DUE/         { s="NOT-YET-DUE";  next }
         /^ADJUDICATE /         { s="ADJUDICATE";   next }
-        /^DISAGREEMENT DETAIL/ { s="";             next }
-        /^NOTE:/               { s="";             next }
         s != "" && $1 == b { print s; exit }
     '
 }
@@ -391,7 +398,8 @@ assert_contains "headline states a real result" "SELF-START SNAPSHOT:  1 of 3" "
 assert_contains "result is marked valid" "result valid  : yes" "$OUT8"
 assert_eq "the unlaunched bot is now a genuine strand" \
     "STRANDED" "$(section_of "$OUT8" late)"
-assert_eq "nothing is left in NOT-YET-DUE" "" "$(section_of "$OUT8" early | grep NOT-YET-DUE)"
+assert_contains "the not-yet-due section is empty past the window" \
+    "they are NOT strands (0)" "$OUT8"
 
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"

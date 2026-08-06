@@ -29,7 +29,7 @@ HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 # Every case dara named in the dispatch, plus the two denominator traps and the
 # two #1045-review regressions. Raise this when cases are added; never lower it
 # to make a red wrapper green.
-MIN_ASSERTIONS = 54
+MIN_ASSERTIONS = 71
 
 
 @pytest.fixture(scope="module")
@@ -97,6 +97,31 @@ def test_each_override_is_scoped_to_its_own_condition(run):
         "PASS: duplicate override does NOT waive an unparseable manifest" in run.stdout
     )
     assert "PASS: duplicate override stamps the headline" in run.stdout
+
+
+def test_a_reading_taken_before_the_boot_ladder_finishes_refuses_to_be_a_result(run):
+    """#1050. The failure mode this guards is the worst-shaped one available.
+
+    A bot whose ExecStartPre rung has not elapsed has not been launched, so it
+    cannot have written a post-boot record. Counting it as stranded measures the
+    elapsed clock, not self-starting — and at boot+20s on a 21-bot host that
+    renders as "0 of 21" against a 6-of-21 baseline. Read during an incident by
+    someone deciding whether to intervene, that is a catastrophe that has not
+    happened, and it argues for exactly the panicked mass-restart the standing
+    posture exists to prevent.
+
+    The gate refuses rather than caveats: the headline stops claiming a result
+    at all, the provisional number stays visible but labelled, and not-launched
+    is a separate class from stranded.
+    """
+    assert "PASS: headline refuses to state a result" in run.stdout
+    assert "PASS: unlaunched bot is NOT-YET-DUE, not stranded" in run.stdout
+    assert "PASS: not-yet-due dominates the pre-crash RAW false positive" in run.stdout
+    assert "PASS: banner names the re-run instant" in run.stdout
+    # Positive control: past the window the same fixtures must yield a real
+    # result, or this would pass against a script that gates unconditionally.
+    assert "PASS: no too-early banner once the ladder has finished" in run.stdout
+    assert "PASS: the unlaunched bot is now a genuine strand" in run.stdout
 
 
 def test_the_run_proves_it_covered_every_declared_bot(run):
