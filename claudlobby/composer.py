@@ -2741,72 +2741,131 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
 _BOOT_STAGGER_SECONDS = 3  # delay between each bot's startup on fleet boot
 
 
-def _fleet_bot_count(fleet_yaml: Path) -> int:
-    """Bot count from a fleet.yaml, read cheaply and without validating it.
+def _fleet_manager_worker_counts(fleet_yaml: Path) -> tuple[int, int]:
+    """(managers, workers) from a fleet.yaml, read cheaply and without validating.
 
-    A sibling fleet's manifest is read here only to size its rung block, so a
-    manifest that is missing, unparseable, or mid-edit contributes 0 rather
+    A bot is a manager when a team names it, which is the same declaration
+    ``FleetConfig.manager_bots`` reads and the composer turns into
+    ``MANAGER_TMUX``. Only bots the manifest actually lists are counted: a team
+    naming an absent bot would otherwise inflate the manager tier and shift
+    every later fleet off its rung.
+
+    A sibling fleet's manifest is read here only to size its rung blocks, so a
+    manifest that is missing, unparseable, or mid-edit contributes (0, 0) rather
     than raising: one fleet's broken config must never block another fleet's
     generate. The cost of the soft failure is a stale offset — which is the
     un-offset behaviour, not a new failure mode.
     """
     try:
-        data = yaml.safe_load(fleet_yaml.read_text(encoding="utf-8")) or {}
-        return len((data.get("fleet") or {}).get("bots") or {})
-    except Exception:  # unreadable, malformed, or not a mapping
-        return 0
+        data = yaml.safe_load(fleet_yaml.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):  # missing, unreadable, or malformed
+        return 0, 0
+    # Shape is checked rather than caught: a bare `except Exception` here would
+    # also swallow a NameError in this function and report every fleet as empty,
+    # which is how the sibling host composers silently produced empty output.
+    fleet = data.get("fleet") if isinstance(data, dict) else None
+    if not isinstance(fleet, dict):
+        return 0, 0
+    bots = fleet.get("bots")
+    bots = set(bots) if isinstance(bots, (dict, list)) else set()
+    teams = fleet.get("teams")
+    named = (
+        {t.get("manager") for t in teams.values() if isinstance(t, dict)}
+        if isinstance(teams, dict)
+        else set()
+    )
+    managers = named & bots
+    return len(managers), len(bots) - len(managers)
 
 
-def _host_boot_offset_rungs(paths: Paths) -> int:
-    """Rungs this fleet's boot ladder starts at, so fleets do not overlap.
+@functools.cache
+def _host_boot_rung_bases(paths: Paths, own_managers: int) -> tuple[int, int]:
+    """This fleet's first manager rung and first worker rung on the host ladder.
 
     Each fleet ladders ``ExecStartPre=/bin/sleep`` from zero. On a host running
     several fleets that puts one bot from *every* fleet on every early rung, so
-    a host reboot fires N simultaneous cold starts — and it does so on the rungs
-    where host load is still climbing toward peak, which is where a cold start
-    is least able to absorb the contention. Starting each fleet where the
-    previous one ended turns N independent ladders into a single host-global
-    ladder: one bot per rung, ordered.
+    a host reboot fires N simultaneous cold starts. Laddering the fleets into a
+    single host-global sequence fixes that: one bot per rung, ordered.
 
-    The order is the sorted overlay enumeration shared with the collision scan
-    and move-bot autodetect (``_iter_fleet_dirs``), so the assignment is
-    deterministic and identical no matter which fleet is being generated.
+    Within that sequence the host boots in two tiers — **every manager on the
+    host first, then every worker**. The reason is recovery latency, not boot
+    success: a stranded worker is recoverable because its manager notices, while
+    a stranded manager means nothing is watching that fleet at all. Front-loading
+    the managers puts the whole observation layer up in the first few rungs, so a
+    strand anywhere is noticed sooner. It does **not** make any bot less likely
+    to strand — rung is not predictive of strand (#1002) — and it costs nothing:
+    same one-bot-per-rung property, same total spread.
 
-    Offsets are computed from the manifests present at generate time, so ADDING,
-    REMOVING or RENAMING a fleet — not only adding a bot — reshuffles the rungs
-    of every fleet sorted after it, and those fleets keep their old ladder until
-    *they* regenerate. Until then some rungs can collide again, degrading to
-    today's behaviour, never worse. ``lib/setup-fleets`` regenerates every fleet
-    in one pass, which is the sanctioned way to re-converge the ladder.
+    The order within each tier is the sorted overlay enumeration shared with the
+    collision scan and move-bot autodetect (``_iter_fleet_dirs``), so the
+    assignment is deterministic and identical no matter which fleet is being
+    generated. Worker rungs start past *every* manager on the host, which is why
+    the walk continues after this fleet is found rather than returning early.
+
+    Bases are computed from the manifests present at generate time, so ADDING,
+    REMOVING or RENAMING a fleet — or promoting a bot to manager — reshuffles the
+    rungs of other fleets, and those fleets keep their old ladder until *they*
+    regenerate. Until then some rungs can collide again, degrading to today's
+    behaviour, never worse. ``lib/setup-fleets`` regenerates every fleet in one
+    pass, which is the sanctioned way to re-converge the ladder.
+
+    A fleet with no place in the host ladder — root mode, or an explicitly-
+    pointed overlay outside ``local/`` — ladders standalone off ``own_managers``,
+    still manager-tier first. That keeps "managers occupy the first block" true
+    in one place rather than leaving the caller to restate it.
+
+    Cached for the process: every bot in a fleet asks the same question, and the
+    walk parses every sibling manifest to answer it. No shipped path mutates a
+    manifest and re-composes without re-exec — ``generate`` is one-shot,
+    ``setup-fleets`` forks per fleet, and ``move-bot`` requires the target stanza
+    to exist before it runs.
     """
-    if paths.fleet_dir is None:  # root mode: one fleet, nothing to offset past
-        return 0
+    standalone = (0, own_managers)
+    if paths.fleet_dir is None:  # root mode: one fleet, nothing to ladder past
+        return standalone
     here = paths.fleet_dir.resolve()
-    rungs = 0
+    managers_before = workers_before = None
+    managers_total = workers_total = 0
     for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
         if fleet_dir.resolve() == here:
-            return rungs
-        # A container or non-fleet dir has no manifest and contributes 0 — the
-        # same answer _fleet_bot_count already gives for an unreadable file, so
-        # what a non-fleet dir is worth is decided in exactly one place.
-        rungs += _fleet_bot_count(fleet_dir / "fleet.yaml")
-    # This fleet is not under local/ (an explicitly-pointed overlay). It cannot
-    # be placed in the host ladder, so it keeps the un-offset ladder.
-    return 0
+            managers_before, workers_before = managers_total, workers_total
+        # A container or non-fleet dir has no manifest and contributes (0, 0) —
+        # the same answer _fleet_manager_worker_counts already gives for an
+        # unreadable file, so what a non-fleet dir is worth is decided in
+        # exactly one place.
+        managers, workers = _fleet_manager_worker_counts(fleet_dir / "fleet.yaml")
+        managers_total += managers
+        workers_total += workers
+    if managers_before is None:
+        return standalone  # not under local/: no placement in the host ladder
+    return managers_before, managers_total + workers_before
 
 
 def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
     """This bot's rung on the host-global boot ladder, in seconds.
 
-    Derived from (fleet position on the host, bot position within the fleet), so
-    every compose path lands on the same rung without threading an index through
-    its callers.
+    Derived from (manager or worker, fleet position on the host, position among
+    that fleet's same-tier bots), so every compose path lands on the same rung
+    without threading an index through its callers.
+
+    Manager-ness comes from ``FleetConfig.manager_bots`` — the same declaration
+    that decides what ``MANAGER_TMUX`` is composed to. It is deliberately not
+    re-derived from the composed value, which carries a trailing comment that a
+    naive parse gets wrong.
     """
+    # Intersected with the bot list so this fleet's tier is sized by the same
+    # rule _fleet_manager_worker_counts applies to every sibling: a team naming
+    # an absent bot must not inflate one side of the ladder and not the other.
+    managers = fleet.manager_bots() & set(fleet.bots)
+    is_manager = bot.bot_id in managers
+    tier = [b for b in fleet.bots if (b in managers) == is_manager]
     try:
-        index = list(fleet.bots).index(bot.bot_id)
+        index = tier.index(bot.bot_id)
     except ValueError:  # composing a bot the fleet does not list (scaffolding)
         index = 0
-    return (_host_boot_offset_rungs(paths) + index) * _BOOT_STAGGER_SECONDS
+    manager_base, worker_base = _host_boot_rung_bases(paths, len(managers))
+    base = manager_base if is_manager else worker_base
+    return (base + index) * _BOOT_STAGGER_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -3497,9 +3556,9 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
             # boot_delay_s is deliberately NOT passed: compose_bot derives every
             # bot's rung the same way for every entry point, so `generate --bot`
             # and move-bot cannot compose a unit that disagrees with this one.
-            # The re-derivation re-reads sibling manifests per bot (~50ms worst
-            # case on a 4-fleet host); a cache here would be the wrong trade,
-            # since it would also have to know when a manifest changed.
+            # The sibling-manifest walk behind that derivation is cached for the
+            # process (see _host_boot_rung_bases), so the re-derivation costs one
+            # walk per fleet rather than one per bot.
             out[bot_name] = compose_bot(bot, fleet, paths, log=log)
         except ValueError as e:
             failures.append((bot_name, str(e)))
