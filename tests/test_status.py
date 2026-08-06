@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 
 import pytest
 
 from claudlobby.status import (
+    _SVC_UNDETERMINED,
     BotStatus,
+    _check_launchd_service,
+    _check_systemd_service,
     _health_indicator,
+    _service_display,
     _heartbeat_display,
     _parse_keepalive_log,
     _state_display,
@@ -168,7 +173,11 @@ class TestHealthIndicator:
         assert _health_indicator(bs) == "x"
 
     def test_service_down(self):
-        bs = BotStatus(name="x", tmux_alive=True, service_active=False)
+        # service_sub is explicit: the default now means "never asked", which is
+        # a different state and renders differently.
+        bs = BotStatus(
+            name="x", tmux_alive=True, service_active=False, service_sub="dead"
+        )
         assert _health_indicator(bs) == "x"
 
     def test_healthy(self):
@@ -178,6 +187,32 @@ class TestHealthIndicator:
     def test_blocked(self):
         bs = BotStatus(name="x", tmux_alive=True, service_active=True, state="blocked")
         assert _health_indicator(bs) == "!"
+
+    def test_service_undetermined_is_not_a_failure(self):
+        """A supervisor that never answered must not render as a dead one."""
+        bs = BotStatus(
+            name="x",
+            tmux_alive=True,
+            service_active=False,
+            service_sub=_SVC_UNDETERMINED,
+            state="idle",
+        )
+        assert _health_indicator(bs) == "?"
+
+    def test_tmux_down_outranks_undetermined_service(self):
+        """A missing pane still reports x, even when the service did not answer.
+
+        Note this is a scope statement, not a claim that tmux presence is always
+        known: _check_tmux_sessions swallows the same timeout. Modelling tmux
+        uncertainty is deliberately out of scope for #1044.
+        """
+        bs = BotStatus(
+            name="x",
+            tmux_alive=False,
+            service_active=False,
+            service_sub=_SVC_UNDETERMINED,
+        )
+        assert _health_indicator(bs) == "x"
 
     def test_stale_heartbeat(self):
         old = datetime.now(timezone.utc) - timedelta(minutes=15)
@@ -189,6 +224,134 @@ class TestHealthIndicator:
             last_heartbeat=old,
         )
         assert _health_indicator(bs) == "~"
+
+
+# -- Service rendering (#1044) ------------------------------------------------
+
+
+def _svc(sub: str, active: bool = False) -> BotStatus:
+    return BotStatus(name="x", tmux_alive=True, service_active=active, service_sub=sub)
+
+
+# The four things the SVC column can mean. Names are what an operator would say.
+_SVC_CASES = {
+    "up": _svc("running", active=True),
+    "not-enrolled": _svc("not-found"),
+    "undetermined": _svc(_SVC_UNDETERMINED),
+    "down": _svc("dead"),
+}
+
+
+class TestServiceCheckSentinel:
+    """The check functions must distinguish a real absence from no answer."""
+
+    @pytest.mark.parametrize(
+        "check,args",
+        [
+            (_check_systemd_service, ("bot", "svc")),
+            (_check_launchd_service, ("bot", "svc")),
+        ],
+        ids=["systemd", "launchd"],
+    )
+    @pytest.mark.parametrize(
+        "exc",
+        [subprocess.TimeoutExpired(cmd="x", timeout=5), FileNotFoundError()],
+        ids=["timeout", "no-binary"],
+    )
+    def test_no_answer_is_undetermined(self, check, args, exc):
+        with patch("claudlobby.status.subprocess.run", side_effect=exc):
+            assert check(*args) == (False, _SVC_UNDETERMINED)
+
+    def test_systemd_nonzero_is_still_not_found(self):
+        """A real absence keeps its own answer — this is the existing precedent."""
+        with patch("claudlobby.status.subprocess.run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stdout = ""
+            assert _check_systemd_service("bot", "svc") == (False, "not-found")
+
+    def test_undetermined_is_not_the_string_systemd_can_report(self):
+        """systemd reports a literal SubState of 'unknown' on calls that SUCCEED.
+
+        If the sentinel were that same string, a successful check would render
+        as "we could not tell" — the inverse of this bug.
+        """
+        assert _SVC_UNDETERMINED != "unknown"
+        with patch("claudlobby.status.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "ActiveState=failed\nSubState=unknown\n"
+            active, sub = _check_systemd_service("bot", "svc")
+        assert (active, sub) == (False, "unknown")
+        assert _service_display(_svc(sub)) == "down"  # a real answer, rendered red
+
+    def test_never_asked_defaults_to_undetermined(self):
+        """collect_fleet_status runs no check on a non-Linux host with no label."""
+        assert BotStatus(name="x").service_undetermined is True
+
+
+class TestServiceDisplayStatesAreDistinct:
+    """The point of the fix: undetermined must be unmistakable for up OR down."""
+
+    def test_all_four_states_render_differently(self):
+        # Explicit patch: a module-level autouse fixture forces colour OFF, so
+        # without this this test would duplicate the no-colour one below.
+        with patch("claudlobby.status._COLOR", True):
+            rendered = {k: _service_display(bs) for k, bs in _SVC_CASES.items()}
+        assert len(set(rendered.values())) == 4, rendered
+
+    def test_all_four_states_render_differently_without_color(self):
+        """Colour is not the carrier — a no-colour terminal must still separate them.
+
+        This is the assertion that fails if "undetermined" is rendered as a
+        yellow "down": identical glyphs, distinguished only by an SGR code that
+        a pipe, a log file or a colour-blind reader never receives.
+        """
+        rendered = {k: _service_display(bs) for k, bs in _SVC_CASES.items()}
+        assert len(set(rendered.values())) == 4, rendered
+        assert rendered["undetermined"] == "?"
+
+
+class TestUndeterminedInAggregates:
+    """The summary line, table, detail view and JSON are reports too."""
+
+    def test_summary_names_undetermined_rather_than_implying_down(self):
+        statuses = [
+            _svc("running", active=True),
+            _svc(_SVC_UNDETERMINED),
+            _svc(_SVC_UNDETERMINED),
+        ]
+        out = format_table(statuses, "fleet")
+        # The shortfall in "1/3 up" is explained rather than left to read as down.
+        assert "1/3 up" in out
+        assert "2 undetermined" in out
+
+    def test_summary_omits_the_word_when_nothing_is_undetermined(self):
+        statuses = [_svc("running", active=True), _svc("dead")]
+        out = format_table(statuses, "fleet")
+        assert "undetermined" not in out
+
+    def test_table_row_is_not_the_row_a_dead_unit_gets(self):
+        """Sensitive to the rendering, not just to the sentinel's spelling."""
+        undet = format_table([_svc(_SVC_UNDETERMINED)], "fleet")
+        down = format_table([_svc("dead")], "fleet")
+        assert undet != down
+        assert "down" in down
+        assert "down" not in undet
+
+    def test_detail_view_distinguishes_it_from_down(self):
+        undet = format_bot_detail(_svc(_SVC_UNDETERMINED))
+        down = format_bot_detail(_svc("dead"))
+        assert "down" in down
+        assert "down" not in undet
+        assert "undetermined" in undet
+
+    def test_json_carries_an_explicit_flag(self):
+        """A scripted `if not service_active` must not repeat this bug."""
+        doc = json.loads(format_json([_svc(_SVC_UNDETERMINED), _svc("dead")], "fleet"))
+        undet, down = doc["bots"]
+        assert undet["service_undetermined"] is True
+        assert down["service_undetermined"] is False
+        # Both are service_active False — the flag is the only discriminator.
+        assert undet["service_active"] == down["service_active"] is False
 
 
 # -- Display helpers ---------------------------------------------------------
