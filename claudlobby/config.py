@@ -1201,9 +1201,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             **_parse_git_credentials(
                 defaults.get("git_credentials"), where="fleet defaults"
             ),
-            **_parse_git_credentials(
-                raw.get("git_credentials"), where=f"bot '{name}'"
-            ),
+            **_parse_git_credentials(raw.get("git_credentials"), where=f"bot '{name}'"),
         },
         model_strategy=_coerce_model_strategy(
             raw.get("model_strategy") or defaults.get("model_strategy")
