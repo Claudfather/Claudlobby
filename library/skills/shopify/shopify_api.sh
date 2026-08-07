@@ -18,6 +18,11 @@
 #   catalog [--unfulfillable] product inventory truth, not the placeholder fields
 #   discounts                 CODE count, not the node count everyone reports
 #   collections [handle]      membership WITH full pagination (never a bare first:)
+#   webhooks                  registered topics AND the critical ones that are MISSING
+#   copy                      description defects, including the ones invisible in JSON
+#   redirects                 301 destinations that 404, and sources that came back
+#   orphans                   sitemap entries nothing links to  (triage, not a delete list)
+#   consent                   marketing-consent tally, fully counted or bound stated
 #   raw <path>                authenticated GET passthrough (escape hatch)
 #   help
 #
@@ -122,8 +127,14 @@ assert_query_only() {
   esac
 }
 
+#
+# A 4th argument names a file to dump response headers into. It is requested
+# through the curl CONFIG FILE (dump-header) rather than as another curl
+# invocation, deliberately: every request in this script must go through this one
+# call site, or the read-only guarantee stops being auditable by looking at one
+# function. test.sh counts curl invocations for exactly that reason.
 api() {
-  local method="$1" url="$2" body="${3:-}" cfg out http payload rc=0
+  local method="$1" url="$2" body="${3:-}" hdr_out="${4:-}" cfg out http payload rc=0
   # BEFORE need_env, deliberately: a forbidden method is refused whether or not
   # credentials happen to be present, and the refusal stays provable without them.
   assert_read_only "$method" "$url"
@@ -132,6 +143,7 @@ api() {
   {
     printf 'header = "X-Shopify-Access-Token: %s"\n' "$TOKEN"
     printf 'header = "Content-Type: application/json"\n'
+    [ -n "$hdr_out" ] && printf 'dump-header = "%s"\n' "$hdr_out"
   } > "$cfg"
   if [ -n "$body" ]; then
     out="$(curl -sS --max-time 60 --config "$cfg" -X "$method" -d "$body" -w $'\n%{http_code}' "$url")" || rc=$?
@@ -151,6 +163,41 @@ api() {
 }
 
 rest() { api GET "https://$DOMAIN/admin/api/$VERSION/$1"; }
+
+# Cursor-paginated REST, following the Link header to exhaustion.
+#
+# This exists because REST pagination is INVISIBLE in the body: page 1 of a
+# 15,000-row collection is a well-formed 200 that looks exactly like a complete
+# answer. The only signal that more exists is a `Link: <...>; rel="next"` header,
+# which api() throws away. Every "we have N customers" figure derived from a
+# single customers.json call is page 1 of the truth (traps.md 12).
+#
+# Emits one JSON object per page on stdout; the caller reduces. Prints the page
+# count to stderr so a caller that stops early can DISCLOSE the bound rather
+# than silently reporting a sample as a total.
+rest_paged() {
+  local path="$1" max_pages="${2:-0}" url hdr pages=0 next
+  url="https://$DOMAIN/admin/api/$VERSION/$path"
+  while [ -n "$url" ]; do
+    pages=$((pages + 1))
+    hdr="$(mktemp)"
+    # Through api(), so the method allowlist and the error mapping apply here
+    # exactly as they do everywhere else.
+    printf '%s\n' "$(api GET "$url" "" "$hdr")"
+    # Only rel="next" advances. A Link header commonly carries rel="previous"
+    # too, and matching the URL without checking the rel walks backwards forever.
+    next="$(tr -d '\r' < "$hdr" | grep -i '^link:' | tr ',' '\n' \
+            | grep 'rel="next"' | sed -e 's/.*<//' -e 's/>.*//' | head -1)"
+    rm -f "$hdr"
+    url="$next"
+    if [ "$max_pages" -gt 0 ] && [ "$pages" -ge "$max_pages" ] && [ -n "$url" ]; then
+      printf 'shopify: STOPPED at %s pages with more remaining — result is a SAMPLE, not a total\n' "$pages" >&2
+      printf '%s\n' '{"__truncated__":true}'
+      break
+    fi
+  done
+  printf 'shopify: fetched %s page(s)\n' "$pages" >&2
+}
 
 # GraphQL errors arrive inside a 200, so they must be checked separately —
 # treating any 200 as success is how a failed query becomes "zero results".
@@ -319,6 +366,242 @@ door_health_check() {
   }'
 }
 
+# ---------------------------------------------------------------------------
+# webhooks — what is registered, and more importantly what is NOT
+#
+# traps.md 9. Shopify never tells you a webhook is absent. There is no error, no
+# empty-result marker, no degraded mode: the events simply never arrive, and
+# every downstream consumer reports a clean zero. An orders webhook that was
+# never created looks identical to a store that has taken no orders.
+#
+# So the answer this door gives is the MISSING list, not the registered list.
+# Listing what exists is the query anyone would write; naming what is absent is
+# the one that would have caught it.
+# ---------------------------------------------------------------------------
+
+# Topics whose absence silently breaks attribution or fulfilment. Not "all
+# useful topics" — the ones where nothing anywhere reports the gap.
+SHOPIFY_CRITICAL_TOPICS="orders/create orders/paid orders/updated orders/cancelled"
+
+door_webhooks() {
+  need_jq
+  local data registered missing
+  data="$(rest 'webhooks.json?limit=250')"
+  registered="$(printf '%s' "$data" | jq -c '[.webhooks[].topic] | unique')"
+
+  missing='[]'
+  local t
+  for t in $SHOPIFY_CRITICAL_TOPICS; do
+    printf '%s' "$registered" | jq -e --arg t "$t" 'index($t)' >/dev/null 2>&1 \
+      || missing="$(jq -cn --argjson m "$missing" --arg t "$t" '$m + [$t]')"
+  done
+
+  jq -n --argjson d "$data" --argjson r "$registered" --argjson m "$missing" '{
+    registered_count: ($d.webhooks | length),
+    registered_topics: $r,
+    critical_missing: $m,
+    subscriptions: [ $d.webhooks[] | {topic, address, created_at, api_version} ],
+    warnings: ([
+      (if ($m|length) > 0 then
+        "MISSING critical topic(s): \($m|join(", ")). Shopify reports absence as nothing at all — no error, no empty marker. Downstream this reads as \"no orders\", not \"no webhook\" (traps.md 9)." else empty end),
+      (if ($d.webhooks | length) == 0 then
+        "ZERO webhooks registered. Every event-driven integration on this store is silently inert." else empty end)
+    ]),
+    bound: "REGISTRATION ONLY. This proves a subscription exists, NOT that it has ever delivered. Shopify exposes no last-delivered timestamp here, so a registered-but-failing endpoint looks identical to a healthy one — confirm receipt at the consumer."
+  }'
+}
+
+# ---------------------------------------------------------------------------
+# copy — description defects, including the class humans cannot see
+#
+# traps.md 10. The `.:` marker is the reason this door exists rather than a
+# human reading descriptions. In JSON it reads as punctuation and the eye skips
+# it; on the rendered page it prints literally. Three reviewers read the same
+# descriptions in API output and none saw it — it was only caught by rendering
+# in a browser. A defect that survives careful reading is a defect that has to
+# be matched by machine.
+# ---------------------------------------------------------------------------
+door_copy() {
+  need_jq
+  local data
+  data="$(rest 'products.json?limit=250&fields=id,title,handle,status,body_html')"
+
+  printf '%s' "$data" | jq '
+    def body: (.body_html // "");
+    [ .products[] | . as $p | {
+        handle, title, status,
+        empty:        (body | gsub("<[^>]*>";"") | gsub("\\s";"") | length == 0),
+        dot_colon:    (body | test("\\.:")),
+        size_table:   (body | test("(?i)<table|size chart|size guide")),
+        em_dash:      (body | test("—")),
+        boilerplate:  (body | test("(?i)made to order|machine wash|100% cotton|please allow|due to the nature"))
+      } ] as $rows |
+    { products_checked: ($rows|length),
+      defects: {
+        empty_description: [ $rows[] | select(.empty)       | .handle ],
+        dot_colon_marker:  [ $rows[] | select(.dot_colon)   | .handle ],
+        size_table:        [ $rows[] | select(.size_table)  | .handle ],
+        em_dash:           [ $rows[] | select(.em_dash)     | .handle ],
+        supplier_boilerplate: [ $rows[] | select(.boilerplate) | .handle ]
+      },
+      warnings: ([
+        (if ([$rows[]|select(.dot_colon)]|length) > 0 then
+          "\([$rows[]|select(.dot_colon)]|length) description(s) contain a literal \".:\" marker. This is INVISIBLE when reading API output — it reads as punctuation in JSON and renders literally on the page (traps.md 10). Do not ask a human to re-check by reading; render it." else empty end),
+        (if ([$rows[]|select(.empty)]|length) > 0 then
+          "\([$rows[]|select(.empty)]|length) product(s) have no description text at all — markup only, or nothing." else empty end)
+      ]),
+      bound: "Pattern-matched, not judged. Boilerplate and size-table patterns are heuristics and will both miss and over-flag; the dot-colon and empty checks are exact."
+    }'
+}
+
+# ---------------------------------------------------------------------------
+# redirects — both directions, because each one breaks differently
+#
+# traps.md 11 (and 7). A redirect map is a snapshot; the catalogue is not. Two
+# independent failure directions, and checking only the first is the common
+# mistake:
+#
+#   dead DESTINATION — the target was drafted/deleted, so the 301 now delivers
+#                      shoppers to a 404 they had to click through to reach
+#   revived SOURCE   — the product came back at its own handle, and the redirect
+#                      runs BEFORE routing, so a live sellable product is
+#                      unreachable at its canonical URL
+# ---------------------------------------------------------------------------
+door_redirects() {
+  need_jq
+  local reds prods colls
+  reds="$(rest_paged 'redirects.json?limit=250' 2>/dev/null | jq -sc '[.[].redirects[]?]')"
+  prods="$(rest 'products.json?limit=250&fields=id,handle,status' | jq -c '[.products[]]')"
+  colls="$(rest 'custom_collections.json?limit=250&fields=id,handle' | jq -c '[.custom_collections[]?]')"
+
+  jq -n --argjson r "$reds" --argjson p "$prods" --argjson c "$colls" '
+    ([ $p[] | select(.status == "active") | .handle ]) as $live_products |
+    ([ $p[] | .handle ]) as $all_products |
+    ([ $c[] | .handle ]) as $collections |
+    def handle_of($path): ($path | capture("^/(?<kind>products|collections)/(?<h>[^/?#]+)") // null);
+    [ $r[] | . as $red
+      | (handle_of($red.target)) as $t
+      | select($t != null)
+      | select( if $t.kind == "products" then ($live_products | index($t.h)) == null
+                else ($collections | index($t.h)) == null end )
+      | {path: $red.path, target: $red.target, reason:
+          (if ($all_products | index($t.h)) != null then "target exists but is NOT active (drafted/archived)"
+           else "target handle does not exist" end)} ] as $dead |
+    [ $r[] | . as $red
+      | (handle_of($red.path)) as $s
+      | select($s != null and $s.kind == "products")
+      | select(($live_products | index($s.h)) != null)
+      | {path: $red.path, target: $red.target} ] as $revived |
+    { redirects_checked: ($r|length),
+      dead_destinations: $dead,
+      revived_sources: $revived,
+      warnings: ([
+        (if ($dead|length) > 0 then
+          "\($dead|length) redirect(s) point at something that no longer resolves. Drafting a product does NOT clear redirects aimed at it (traps.md 7) — the shopper now clicks through to the same 404." else empty end),
+        (if ($revived|length) > 0 then
+          "\($revived|length) redirect SOURCE(s) are live active products. Redirects run before routing, so these products are unreachable at their own canonical URL — from every link ever shared (traps.md 11)." else empty end)
+      ]),
+      bound: "Checks handles against the catalogue, not HTTP. A target outside /products/ or /collections/ (a page, a blog, an external URL) is NOT evaluated here — resolve those over HTTP."
+    }'
+}
+
+# ---------------------------------------------------------------------------
+# orphans — reachability triage, and deliberately NOT a delete list
+#
+# traps.md 12 is the whole point of this door. "Orphaned" is a symptom with at
+# least three different correct responses, and they are not interchangeable:
+#
+#   * a container that should be UNLISTED    — remove it from the sitemap
+#   * a discovery GAP                        — the thing is good, link to it
+#   * orphaned BY DESIGN                     — unlinked on purpose; leave it
+#
+# A door that returned "delete these" would be wrong on two of the three. So this
+# returns candidates with the question attached, never a verdict.
+# ---------------------------------------------------------------------------
+door_orphans() {
+  need_jq
+  local prods colls smart membership
+  prods="$(rest 'products.json?limit=250&fields=id,handle,title,status,product_type,tags' | jq -c '[.products[]]')"
+  colls="$(rest 'custom_collections.json?limit=250&fields=id,handle' | jq -c '[.custom_collections[]?]')"
+  smart="$(rest 'smart_collections.json?limit=250&fields=id,handle' | jq -c '[.smart_collections[]?]')"
+
+  membership='[]'
+  local cid
+  for cid in $(jq -r '.[].id' <<<"$colls" 2>/dev/null) $(jq -r '.[].id' <<<"$smart" 2>/dev/null); do
+    membership="$(jq -cn --argjson m "$membership" \
+      --argjson x "$(rest "collects.json?collection_id=$cid&limit=250&fields=product_id" | jq -c '[.collects[]?.product_id]')" \
+      '$m + $x')"
+  done
+
+  jq -n --argjson p "$prods" --argjson m "$membership" '
+    ($m | map(tostring) | unique) as $in_collection |
+    def hidden_tag: (.tags // "") | test("(^|, *)hidden( *,|$)");
+    [ $p[] | select(.status == "active")
+      | select(($in_collection | index(.id|tostring)) == null)
+      | {handle, title, product_type,
+         intentionally_unlinked: ((.product_type == "Hidden") or hidden_tag)} ] as $orphans |
+    { active_products: ([$p[] | select(.status=="active")] | length),
+      orphan_candidates: ($orphans | length),
+      by_likely_action: {
+        leave_alone_orphaned_by_design: [ $orphans[] | select(.intentionally_unlinked) | .handle ],
+        needs_a_decision:              [ $orphans[] | select(.intentionally_unlinked | not) | .handle ]
+      },
+      warnings: ([
+        (if ($orphans|length) > 0 then
+          "\($orphans|length) active product(s) belong to no collection. This is a TRIAGE list, not a delete list — the correct action differs per item and at least one of them is usually \"link to it\", not \"remove it\" (traps.md 12)." else empty end)
+      ]),
+      bound: "Collection membership is a PROXY for inbound links, not a measurement of them. A product linked only from a blog post, the nav, or a hand-built page reads as an orphan here and is not one. A true inbound-link audit needs a crawl of the rendered storefront, which this door does not do."
+    }'
+}
+
+# ---------------------------------------------------------------------------
+# consent — a real count, or an explicitly bounded one. Never a silent sample.
+#
+# traps.md 13. The obvious query is GraphQL customersCount, which returns
+# `precision: AT_LEAST` and saturates at 10000 — so on any store past that size
+# it reports 10000 forever and reads like a real number. The REST list endpoint
+# is authoritative but paginates through the Link header, and page 1 of a large
+# store is a well-formed 200 that looks complete.
+#
+# Both failure modes produce a confident wrong total. So this counts every page,
+# and if it is told to stop early it says so in the output rather than reporting
+# a sample as a rate.
+# ---------------------------------------------------------------------------
+door_consent() {
+  need_jq
+  local max_pages=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --max-pages) max_pages="${2:?--max-pages needs a number}"; shift 2 ;;
+      *) die "consent: unknown option $1" 2 ;;
+    esac
+  done
+  case "$max_pages" in ''|*[!0-9]*) die "consent: --max-pages must be a number" 2 ;; esac
+
+  local pages
+  pages="$(rest_paged "customers.json?limit=250&fields=id,email_marketing_consent" "$max_pages" 2>/dev/null)"
+
+  printf '%s' "$pages" | jq -s '
+    (map(select(.__truncated__ == true)) | length > 0) as $truncated |
+    [ .[] | .customers[]? ] as $c |
+    { customers_counted: ($c|length),
+      by_state: ( $c
+        | group_by(.email_marketing_consent.state // "null")
+        | map({key: (.[0].email_marketing_consent.state // "null"), value: length})
+        | from_entries ),
+      subscribed_rate: (if ($c|length) > 0
+        then (([ $c[] | select(.email_marketing_consent.state == "subscribed") ] | length) / ($c|length))
+        else null end),
+      complete: ($truncated | not),
+      warnings: (if $truncated then
+        ["STOPPED EARLY — this is a SAMPLE, not the store. The rate above describes the customers counted, not all customers. Re-run without --max-pages before quoting it (traps.md 13)."]
+        else [] end),
+      bound: (if $truncated
+        then "SAMPLE of the first pages only."
+        else "Complete: every page followed to exhaustion via the Link header. Do NOT cross-check against GraphQL customersCount — it saturates at 10000 with precision AT_LEAST (traps.md 13)." end)
+    }'
+}
+
 usage() {
   # Derived, not a hardcoded line range. It used to be `sed -n '2,28p'`, which
   # silently truncated the help the moment the header changed length — which
@@ -344,6 +627,11 @@ case "$cmd" in
   catalog)      door_catalog "$@" ;;
   discounts)    door_discounts "$@" ;;
   collections)  door_collections "$@" ;;
+  webhooks)     door_webhooks "$@" ;;
+  copy)         door_copy "$@" ;;
+  redirects)    door_redirects "$@" ;;
+  orphans)      door_orphans "$@" ;;
+  consent)      door_consent "$@" ;;
   raw)          [ $# -ge 1 ] || die "raw needs a path, e.g. raw shop.json" 2; rest "$1" ;;
   help|-h|--help) usage ;;
   *) usage >&2; die "unknown command: $cmd" 2 ;;

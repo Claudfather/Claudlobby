@@ -175,6 +175,124 @@ as "the product could not be found".
 
 ---
 
+## 9. A missing webhook is silent, total, and indistinguishable from no activity
+
+Shopify does not report the absence of a webhook. There is no error, no empty-result marker,
+no degraded mode. The events simply never arrive.
+
+The consequence is that **absence and inactivity produce identical downstream evidence.** A
+store with no `orders/create` subscription looks exactly like a store that has taken no
+orders: every consumer reports a clean zero, every dashboard renders an honest-looking empty
+state, and nothing anywhere raises a flag.
+
+**Measured on a live store, 2026-08-04:** no orders webhook had ever fired. Not "was failing"
+— had never existed. The visible symptom was that 0 of 25 real, paid orders were attributable
+to any session or channel, which read for weeks as an attribution-modelling problem rather
+than a missing subscription.
+
+**Do instead:** ask what is MISSING, not what is registered. Listing registered topics is the
+query anyone writes and it cannot find this; the answer has to be a set difference against
+the topics you require. `webhooks` does that.
+
+**And know the bound:** registration is not delivery. Shopify exposes no last-delivered
+timestamp on the subscription, so a registered endpoint that 500s on every call looks
+identical to a healthy one from the Admin API. Confirm receipt at the consumer, not here.
+
+---
+
+## 10. The `.:` marker is invisible in API output and renders literally on the page
+
+Supplier-imported descriptions can carry a literal `.:` sequence. In JSON it reads as
+punctuation — the eye takes it for a bullet or a typo in the escaping and moves on. On the
+rendered product page it prints as-is, in the copy the customer reads.
+
+**This survives careful human review.** Three people read the same descriptions in API
+output and none of them saw it; it was caught only by rendering the page in a browser. That
+is what makes it worth a door rather than a checklist item: the defect is invisible in the
+medium where the reviewing happens.
+
+**Do instead:** match it by machine (`test("\\.:")`), and treat a human "I read them and
+they looked fine" as no evidence either way. If a defect class is invisible in the medium
+you inspect, more inspection in that medium buys nothing.
+
+Generalises past this one marker: **before trusting a read-through, ask whether the defect
+you are looking for is even visible in the representation you are reading.**
+
+---
+
+## 11. A redirect breaks in two directions, and the second one is worse
+
+Verifying a redirect map means checking both ends. Only one is obvious.
+
+**Dead destination** — the target was drafted, archived or deleted, so the `301` now delivers
+the shopper to a 404 *they had to click through to reach*. Strictly worse than the original
+404: the click is wasted, and search engines follow the redirect and index the failure. See
+trap 7 for why drafting causes this silently.
+
+**Revived source** — the product came back at its own handle while a redirect still points
+away from it. Redirects run at the edge **before** routing, so the live, sellable product is
+unreachable at its canonical URL — from every link ever shared, every index entry, every
+saved bookmark. Nothing in the catalogue looks wrong; the product is ACTIVE and correct.
+
+The second direction is rarer and costs more, and a checker written from the obvious
+direction alone will never see it.
+
+**Do instead:** check destinations resolve AND that no source is live. `redirects` does both.
+A redirect map is a snapshot; the catalogue is not — so this needs re-running against the
+live store, not asserting once in a unit test.
+
+---
+
+## 12. "Orphaned" is a symptom with several different correct answers
+
+A page nothing links to is not automatically a page to delete. Observed on one sweep, three
+orphans with three different correct actions:
+
+| what it was | correct action |
+|---|---|
+| a container that should not be publicly listed | remove it from the sitemap |
+| a good page nobody had linked yet | **link to it** — a discovery gap, not stale content |
+| a drop container deliberately kept unlinked | leave it exactly as it is |
+
+Two of those three are actively harmed by deletion, and the middle one is the opposite of
+deletion. So **a tool that emits "orphans" as a delete list is wrong more often than it is
+right**, and it is wrong in the expensive direction — removing a page that needed promoting.
+
+**Do instead:** return candidates with the question attached, never a verdict. Separate the
+ones that are unlinked *on purpose* (an explicit hidden convention — trap 6) from the ones
+that need a human decision. `orphans` does that.
+
+**And know the proxy:** collection membership is a stand-in for inbound links, not a
+measurement of them. Something linked only from the nav, a blog post or a hand-built page
+reads as an orphan and is not one. A true inbound-link audit needs a crawl of the rendered
+storefront.
+
+---
+
+## 13. `customersCount` saturates at 10,000, and REST hides the rest behind a header
+
+Two ways to get a confidently wrong customer total.
+
+**GraphQL `customersCount`** returns an object carrying `precision: AT_LEAST`, and on any
+store past ten thousand it reports `10000` — permanently, and without ever looking like an
+error. The field name promises a count; the value is a floor.
+
+**REST `customers.json`** is authoritative but paginates through the `Link` response header.
+Page one of a fifteen-thousand-customer store is a well-formed `200` containing 250 rows that
+looks *exactly* like a complete answer. The body carries no marker that more exists — the
+only signal is a header most clients discard.
+
+**Measured 2026-08-04:** a marketing-consent rate was computed from 3,000 of 15,704 customers
+and reported as the store rate. Nothing in the response indicated the shortfall.
+
+**Do instead:** follow `Link: <…>; rel="next"` to exhaustion, and match on the **rel**, not
+just the URL — the header commonly also carries `rel="previous"`, and advancing on that walks
+backwards forever. If you must stop early, **say so in the output**: a sample reported as a
+total is the failure this trap is about, and adding a caveat in conversation does not travel
+with the number. `consent` counts fully by default and marks itself incomplete when bounded.
+
+---
+
 ## How to add to this file
 
 One entry per trap, and every entry needs a **measurement or a reproduction**, not a

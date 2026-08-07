@@ -1,0 +1,7 @@
+{"products":[
+  {"id":1,"handle":"clean-one","title":"Clean","status":"active","body_html":"<p>A plain honest description.</p>"},
+  {"id":2,"handle":"dot-colon-one","title":"Marker","status":"active","body_html":"<p>Fabric.: 100% cotton</p>"},
+  {"id":3,"handle":"empty-one","title":"Empty","status":"active","body_html":"<p></p>"},
+  {"id":4,"handle":"table-one","title":"Sized","status":"active","body_html":"<table><tr><td>S</td></tr></table>"},
+  {"id":5,"handle":"emdash-one","title":"Dashed","status":"active","body_html":"<p>Soft — and heavy.</p>"}
+]}

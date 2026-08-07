@@ -1,0 +1,7 @@
+{"redirects":[
+  {"id":1,"path":"/products/retired-item","target":"/products/live-item"},
+  {"id":2,"path":"/products/came-back","target":"/products/live-item"},
+  {"id":3,"path":"/products/old-thing","target":"/products/drafted-item"},
+  {"id":4,"path":"/products/gone","target":"/products/never-existed"},
+  {"id":5,"path":"/products/x","target":"https://elsewhere.test/page"}
+]}

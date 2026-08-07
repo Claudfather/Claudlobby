@@ -1,0 +1,5 @@
+{"products":[
+  {"id":10,"handle":"live-item","status":"active"},
+  {"id":11,"handle":"came-back","status":"active"},
+  {"id":12,"handle":"drafted-item","status":"draft"}
+]}

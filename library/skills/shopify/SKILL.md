@@ -53,8 +53,18 @@ skills: [shopify]
 | `catalog --unfulfillable --fulfiller-ids <file>` | What can we not actually ship? | set difference against the fulfiller, because `fulfillment_service` is `manual` on everything — [1](./traps.md), [3](./traps.md) |
 | `discounts` | How much discounting is live? | counts **codes**, not nodes — one node can hold thousands — [5](./traps.md) |
 | `collections [handle]` | What is actually in this collection? | full cursor pagination; a bare `first:` truncates in silence — [4](./traps.md) |
+| `webhooks` | Which critical topics are **not** registered? | absence is silent and total — a missing orders webhook is indistinguishable from no orders — [9](./traps.md) |
+| `copy` | Which descriptions are defective? | matches the `.:` marker, which is invisible in API output and renders literally — [10](./traps.md) |
+| `redirects` | Which 301s are broken, in **either** direction? | dead destinations *and* revived sources; the second is rarer and costs more — [11](./traps.md), [7](./traps.md) |
+| `orphans` | What does nothing link to? | returns candidates with the question attached — "orphaned" has several correct answers, and deletion is usually the wrong one — [12](./traps.md) |
+| `consent` | What is the marketing-consent split? | counts every page via the `Link` header; `customersCount` saturates at 10,000 — [13](./traps.md) |
 | `orders [limit]` | Recent order pipeline | PII-light by default; full order objects carry customer data |
 | `raw <path>` | Authenticated GET passthrough | escape hatch |
+
+Each door encodes what the person who hit the underlying problem learned, and is reviewed
+by them: `webhooks` — kenny · `copy` — todd · `redirects` — greg · `orphans` — saul ·
+`consent` — kev. The query in each is trivial; **the trap is the product.** Read
+[traps.md](./traps.md) before extending any of them.
 
 ### Read-only by construction
 
