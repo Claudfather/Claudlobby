@@ -17,7 +17,7 @@
 
 
 ────────────────────────────────────────────────────────────────────────────────
-❯ set +H; PROBE1082EARLY Confirm the counts, then
+❯ set +H; PROBE1082EARLY Confirm the counts — then
   report DEAD/ALIVE/UNDECIDED with evidence classes attached
 ────────────────────────────────────────────────────────────────────────────────
 

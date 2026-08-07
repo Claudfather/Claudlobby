@@ -389,7 +389,15 @@ assert_eq "wrapped payload stuck at the input line -> Enter resent" "3" "$r"
 # A test named for the right property, exercising the right mechanism, on a
 # fixture structurally incapable of exhibiting the failure. Keep BOTH fixtures:
 # the pair is the evidence that the wrap point moves.
-early='set +H; PROBE1082EARLY Confirm the counts, then report DEAD/ALIVE/UNDECIDED with evidence classes attached'
+# The payload carries an EM-DASH (U+2014), deliberately. Every fixture em-dash
+# before this one sat in pane chrome, never on a payload line, and no test
+# payload contained one at all — so the matcher's handling of a multibyte
+# character INSIDE the string it compares was entirely unexercised. This code
+# territory is exactly where that bites: the predicate strips U+276F and U+00A0
+# and compares bytes, and a detector was corrupted this week by gsub-ing the
+# box-drawing U+2500 while the live payload carried U+2014. ASCII-only fixtures
+# cannot catch that class. Keep the em-dash.
+early='set +H; PROBE1082EARLY Confirm the counts — then report DEAD/ALIVE/UNDECIDED with evidence classes attached'
 epane=$(cat "$FIXTURES/input-stuck-wrapped-early.txt")
 r=$(printf '%s\n' "$epane" | grep -qF "${early:0:60}" && echo yes || echo no)
 assert_eq "a 60-char prefix probe does NOT match an early wrap (the bug)" "no" "$r"

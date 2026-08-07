@@ -251,6 +251,24 @@ count_send_retries() {
 # them.
 run_start_bot() {
     local timeout_s="$1" root="$2" bot_dir="$3"
+    # PANE_SEND_VERIFY_TICKS is passed through when — and ONLY when — the caller
+    # set it. The allowlist above is deliberately explicit rather than
+    # inherit-and-subtract (#846), which is right, and it means a variable this
+    # harness exists to VARY must be named here or it is silently dropped.
+    #
+    # Silently is the operative word. A ladder that sweeps the tick budget with
+    # this variable scrubbed returns IDENTICAL strand rates at every value —
+    # because every run is secretly the default — which reads as "the verify
+    # budget makes no difference to the strand". That is a refutation
+    # MANUFACTURED BY THE HARNESS, indistinguishable from a measured one, and it
+    # would send the #843 fix somewhere else entirely. Nothing in the output
+    # would disclose it.
+    #
+    # Conditional, not unconditional: an empty value would shadow lib-common's
+    # default and reach `[ "$ticks" -gt 0 ]` as a non-integer.
+    local tick_env=""
+    [ -n "${PANE_SEND_VERIFY_TICKS:-}" ] \
+        && tick_env="PANE_SEND_VERIFY_TICKS=$PANE_SEND_VERIFY_TICKS"
     # timeout wraps env(1), a real command — with_timeout cannot exec a shell
     # function, so the bound lives here rather than at the call site.
     with_timeout "$timeout_s" env -i \
@@ -262,6 +280,7 @@ run_start_bot() {
         LOGNAME="${LOGNAME:-$(id -un)}" \
         TMPDIR="${TMPDIR:-/tmp}" \
         CLAUDLOBBY_ROOT="$root" \
+        ${tick_env:+"$tick_env"} \
         bash "$root/lib/start-bot.sh" "$bot_dir"
 }
 
