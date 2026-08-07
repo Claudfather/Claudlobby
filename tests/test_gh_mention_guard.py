@@ -3,8 +3,8 @@
 Every fleet bot name is also a real GitHub account — all 21 resolve, 19 of them
 to real people and 2 to organizations — so `@teammate` in a PR comment emails a
 stranger. One asked us to stop. There is no safe name: an organization is
-rejected by person-valued fields rather than accepted, which is a better
-failure, not an exemption.
+still an account we do not control. Whether a person-valued field accepts or
+rejects one is untested — settling it needs a real assignment attempt.
 `lib/gh-mention-guard.sh` rewrites those mentions out of GitHub-bound tool calls;
 this covers the list it reads.
 
