@@ -144,6 +144,7 @@ class TestSystemDefaultsConfig:
         assert cfg.hooks is True
         assert cfg.timers is True
         assert cfg.observability is True
+        assert cfg.guardrails is True
 
     def test_false_disables_all(self):
         from claudlobby.config import _coerce_system_defaults
@@ -159,6 +160,15 @@ class TestSystemDefaultsConfig:
         assert cfg.hooks is False
         assert cfg.timers is False
         assert cfg.observability is True
+        assert cfg.guardrails is True
+
+    def test_per_category_disable_guardrails(self):
+        from claudlobby.config import _coerce_system_defaults
+
+        cfg = _coerce_system_defaults({"guardrails": False})
+        assert cfg.enabled is True
+        assert cfg.guardrails is False
+        assert cfg.hooks is True
 
     def test_none_returns_default(self):
         from claudlobby.config import _coerce_system_defaults
@@ -326,6 +336,115 @@ class TestLoadFleetSystemDefaults:
 # ---------------------------------------------------------------------------
 # system_defaults.yaml file
 # ---------------------------------------------------------------------------
+
+
+class TestDefaultGuardrails:
+    """DEFAULT_GUARDRAILS compose onto every bot unless explicitly opted out."""
+
+    def test_lands_on_every_bot_with_no_config(self, tmp_path):
+        fleet, _ = load_fleet(
+            _write_fleet(
+                tmp_path / "claudlobby",
+                """\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  bots:
+                    worker:
+                      expertise: [eng]
+                    second:
+                      expertise: [eng]
+                """,
+            )
+        )
+        for name in ("worker", "second"):
+            assert "claudlobby-dev-in-projects" in fleet.bots[name].guardrails
+
+    def test_per_category_opt_out(self, tmp_path):
+        fleet, _ = load_fleet(
+            _write_fleet(
+                tmp_path / "claudlobby",
+                """\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  system_defaults:
+                    guardrails: false
+                  bots:
+                    worker:
+                      expertise: [eng]
+                """,
+            )
+        )
+        assert "claudlobby-dev-in-projects" not in fleet.bots["worker"].guardrails
+
+    def test_kill_switch_opts_out(self, tmp_path):
+        fleet, _ = load_fleet(
+            _write_fleet(
+                tmp_path / "claudlobby",
+                """\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  system_defaults: false
+                  bots:
+                    worker:
+                      expertise: [eng]
+                """,
+            )
+        )
+        assert "claudlobby-dev-in-projects" not in fleet.bots["worker"].guardrails
+
+    def test_fleet_declaring_defaults_guardrails_does_not_drop_the_default(
+        self, tmp_path
+    ):
+        """A fleet listing its own guardrails must not silently lose the default.
+
+        Not hypothetical: fleet.yaml.seed ships a `defaults.guardrails` list, so
+        EVERY newly seeded fleet declares one.  _merge_system_into_defaults
+        replaces a fleet-set key rather than combining it, so applying the
+        default through that merge would drop it for exactly the new fleets this
+        change exists to protect — while every other test in the suite still
+        passed.
+        """
+        fleet, _ = load_fleet(
+            _write_fleet(
+                tmp_path / "claudlobby",
+                """\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  defaults:
+                    guardrails: [no-push-main, no-destructive-git, pii-protection]
+                  bots:
+                    worker:
+                      expertise: [eng]
+                """,
+            )
+        )
+        guardrails = fleet.bots["worker"].guardrails
+        assert "claudlobby-dev-in-projects" in guardrails
+        # The fleet's own declarations survive alongside it.
+        assert "no-push-main" in guardrails
+        assert "pii-protection" in guardrails
+
+    def test_not_duplicated_when_already_declared(self, tmp_path):
+        fleet, _ = load_fleet(
+            _write_fleet(
+                tmp_path / "claudlobby",
+                """\
+                fleet:
+                  name: test-fleet
+                  service_prefix: com.test
+                  bots:
+                    worker:
+                      expertise: [eng]
+                      guardrails: [claudlobby-dev-in-projects]
+                """,
+            )
+        )
+        guardrails = fleet.bots["worker"].guardrails
+        assert guardrails.count("claudlobby-dev-in-projects") == 1
 
 
 class TestSystemDefaultsFile:
