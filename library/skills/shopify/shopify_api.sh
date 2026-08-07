@@ -183,7 +183,18 @@ rest_paged() {
     hdr="$(mktemp)"
     # Through api(), so the method allowlist and the error mapping apply here
     # exactly as they do everywhere else.
-    printf '%s\n' "$(api GET "$url" "" "$hdr")"
+    #
+    # Captured and status-checked rather than `printf "$(api ...)"`: api() ends in
+    # die(), which EXITS — but inside command substitution that only kills the
+    # subshell, so the caller sails on with an empty body and a zero status. That
+    # turned "no credentials" into "an empty store, all clear", which is the one
+    # outcome this actuator must never produce.
+    local body rc=0
+    body="$(api GET "$url" "" "$hdr")" || rc=$?
+    # rc captured BEFORE the cleanup: `|| { rm -f "$hdr"; return $?; }` returns
+    # rm's status, which is 0, so the failure evaporated on the way out.
+    if [ "$rc" -ne 0 ]; then rm -f "$hdr"; return "$rc"; fi
+    printf '%s\n' "$body"
     # Only rel="next" advances. A Link header commonly carries rel="previous"
     # too, and matching the URL without checking the rel walks backwards forever.
     next="$(tr -d '\r' < "$hdr" | grep -i '^link:' | tr ',' '\n' \
@@ -212,6 +223,34 @@ gql() {
   printf '%s' "$out"
 }
 
+# Whole-catalogue read, paginated.
+#
+# `products.json?limit=250` is a silent truncation the moment a store passes 250
+# products — the same shape as traps.md 4, one endpoint over: a well-formed 200
+# that looks like the whole catalogue. Five doors had their own copy of that
+# call. They all come through here now, so the fix cannot be half-applied again.
+all_products() {
+  # Declared then assigned on separate lines ON PURPOSE: `local x="$(cmd)"`
+  # returns local's status, not the command's, so a failing fetch would look
+  # like a successful empty catalogue. That is the "unreachable is not clean"
+  # failure this whole actuator exists to refuse.
+  local pages
+  pages="$(rest_paged "products.json?limit=250&fields=$1")" || return $?
+  printf '%s' "$pages" | jq -s '{products: [.[].products[]?]}'
+}
+
+# Every collection handle, BOTH kinds.
+#
+# custom_collections and smart_collections are separate endpoints and a store
+# uses both. Reading only the custom half makes a live smart collection look
+# like it does not exist — which turns a correct redirect into a reported dead
+# one, i.e. a false positive that sends someone to "fix" something that works.
+all_collection_handles() {
+  jq -cn --argjson c "$(rest 'custom_collections.json?limit=250&fields=id,handle' | jq -c '[.custom_collections[]?]')" \
+         --argjson s "$(rest 'smart_collections.json?limit=250&fields=id,handle'  | jq -c '[.smart_collections[]?]')" \
+         '$c + $s'
+}
+
 # ---------------------------------------------------------------------------
 # catalog — inventory truth
 #
@@ -230,7 +269,7 @@ door_catalog() {
     esac
   done
 
-  local data; data="$(rest 'products.json?limit=250&fields=id,title,handle,status,product_type,tags,variants')"
+  local data; data="$(all_products 'id,title,handle,status,product_type,tags,variants')"
 
   if [ "$unfulfillable" -eq 1 ]; then
     [ -n "$ids_file" ] || die "catalog --unfulfillable needs --fulfiller-ids <file>: the set of Shopify product ids your fulfiller has created. traps.md 3 explains why Shopify alone cannot answer this." 2
@@ -326,12 +365,51 @@ door_orders() {
 }
 
 # ---------------------------------------------------------------------------
-# health-check — the sweep, every check trap-aware
+# health-check — the sweep, every check trap-aware, and HONEST ABOUT ITS EDGES
+#
+# This door used to call exactly one other door while SKILL.md described it as
+# "all of them, in one sweep". That is a coverage-honesty violation inside the
+# skill built to enforce coverage honesty — and the sharpest instance of it was
+# `webhooks`, which exists precisely because absence is silent and total, being
+# itself absent from the sweep claiming completeness. The one door a naive
+# operator runs was the one silent about the silent failure.
+#
+# So the sweep now runs every door that CAN be swept, and emits `coverage` naming
+# what it did not run and why. The exclusions are real and each has a reason that
+# is not "we forgot":
+#
+#   collections  needs a handle — there is no store-wide form to sweep
+#   consent      would have to paginate every customer; a bounded run inside a
+#                sweep would report a SAMPLE, which is the exact failure its own
+#                trap is about (traps.md 13)
+#   orders       a PII-bearing listing, not a check — nothing to assert
+#   raw          an escape hatch, not a check
+#
+# The list is machine-readable rather than prose, and test.sh asserts every
+# dispatchable door is either swept or named here. That is what stops this gap
+# reopening the next time someone adds a door.
 # ---------------------------------------------------------------------------
+
+# Doors the sweep invokes. Adding a door here is all it takes to widen coverage.
+SHOPIFY_SWEPT_DOORS="webhooks copy redirects orphans"
+
+# Covered by health-check inline rather than by calling the door: its own
+# products query answers traps 1/2/6/7, and door_discounts is called directly
+# for trap 5. Listed so coverage accounting stays complete.
+SHOPIFY_SWEPT_INLINE="catalog discounts"
+
+# Doors deliberately outside the sweep, each with the reason it cannot be in it.
+SHOPIFY_NOT_SWEPT_JSON='[
+  {"door":"collections","why":"needs a handle — no store-wide form exists to sweep"},
+  {"door":"consent","why":"would paginate every customer; a bounded run inside a sweep reports a SAMPLE, the exact failure traps.md 13 is about. Run it directly."},
+  {"door":"orders","why":"a PII-bearing listing, not a check — there is nothing to assert"},
+  {"door":"raw","why":"an escape hatch, not a check"}
+]'
+
 door_health_check() {
   need_jq
   local prod disc findings
-  prod="$(rest 'products.json?limit=250&fields=id,title,handle,status,product_type,tags,variants')"
+  prod="$(all_products 'id,title,handle,status,product_type,tags,variants')"
   disc="$(door_discounts)"
 
   findings="$(printf '%s' "$prod" | jq '
@@ -348,10 +426,44 @@ door_health_check() {
         | select((.product_type=="Hidden") != (hidden_tag))
         | {handle, product_type, has_hidden_tag: hidden_tag} ] }')"
 
-  jq -n --argjson f "$findings" --argjson d "$disc" '{
+  # Run each sweepable door in a SUBSHELL, so a door that calls die() (a missing
+  # scope, a 403) cannot take the whole sweep down with it. A door that fails is
+  # recorded as a coverage gap, never skipped silently — "could not check" and
+  # "checked, clean" must not render the same.
+  # Built from SHOPIFY_SWEPT_INLINE rather than hardcoded here, so the coverage
+  # report and the list the tests read can never disagree.
+  local inline='[]' i
+  for i in $SHOPIFY_SWEPT_INLINE; do
+    inline="$(jq -cn --argjson a "$inline" --arg d "$i" '$a + [{door:$d, ran:true, how:"inline"}]')"
+  done
+
+  local swept='[]' sweep_warnings='[]' d out rc
+  for d in $SHOPIFY_SWEPT_DOORS; do
+    rc=0
+    out="$("door_$d" 2>/dev/null)" || rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+      swept="$(jq -cn --argjson s "$swept" --arg d "$d" '$s + [{door:$d, ran:false}]')"
+      sweep_warnings="$(jq -cn --argjson w "$sweep_warnings" --arg d "$d" --arg rc "$rc" \
+        '$w + ["[\($d)] DID NOT RUN (exit \($rc)) — this sweep is INCOMPLETE, not clean. Run the door directly for the real error."]')"
+    else
+      swept="$(jq -cn --argjson s "$swept" --arg d "$d" '$s + [{door:$d, ran:true}]')"
+      sweep_warnings="$(jq -cn --argjson w "$sweep_warnings" --argjson o "$out" --arg d "$d" \
+        '$w + (($o.warnings // []) | map("[\($d)] " + .))')"
+    fi
+  done
+
+  jq -n --argjson f "$findings" --argjson d "$disc" \
+        --argjson swept "$swept" --argjson notswept "$SHOPIFY_NOT_SWEPT_JSON" \
+        --argjson inline "$inline" \
+        --argjson sw "$sweep_warnings" '{
     catalog: $f,
     discounts: {nodes: $d.discount_nodes, codes: $d.total_codes},
-    warnings: ([
+    coverage: {
+      swept: ($inline + $swept),
+      not_swept: $notswept,
+      note: "A clean result here covers the swept doors ONLY. The doors in not_swept were not run — a green sweep says nothing about them."
+    },
+    warnings: ($sw + [
       (if $f.supplier_signal_usable | not then
         "fulfillment_service is \"manual\" store-wide — it cannot identify a supplier (traps.md 1). Use the fulfiller set-difference instead: catalog --unfulfillable --fulfiller-ids <file>." else empty end),
       (if $f.untracked_with_nonzero_quantity > 0 then
@@ -424,7 +536,7 @@ door_webhooks() {
 door_copy() {
   need_jq
   local data
-  data="$(rest 'products.json?limit=250&fields=id,title,handle,status,body_html')"
+  data="$(all_products 'id,title,handle,status,body_html')"
 
   printf '%s' "$data" | jq '
     def body: (.body_html // "");
@@ -433,16 +545,14 @@ door_copy() {
         empty:        (body | gsub("<[^>]*>";"") | gsub("\\s";"") | length == 0),
         dot_colon:    (body | test("\\.:")),
         size_table:   (body | test("(?i)<table|size chart|size guide")),
-        em_dash:      (body | test("—")),
-        boilerplate:  (body | test("(?i)made to order|machine wash|100% cotton|please allow|due to the nature"))
+        em_dash:      (body | test("—"))
       } ] as $rows |
     { products_checked: ($rows|length),
       defects: {
         empty_description: [ $rows[] | select(.empty)       | .handle ],
         dot_colon_marker:  [ $rows[] | select(.dot_colon)   | .handle ],
         size_table:        [ $rows[] | select(.size_table)  | .handle ],
-        em_dash:           [ $rows[] | select(.em_dash)     | .handle ],
-        supplier_boilerplate: [ $rows[] | select(.boilerplate) | .handle ]
+        em_dash:           [ $rows[] | select(.em_dash)     | .handle ]
       },
       warnings: ([
         (if ([$rows[]|select(.dot_colon)]|length) > 0 then
@@ -450,7 +560,7 @@ door_copy() {
         (if ([$rows[]|select(.empty)]|length) > 0 then
           "\([$rows[]|select(.empty)]|length) product(s) have no description text at all — markup only, or nothing." else empty end)
       ]),
-      bound: "Pattern-matched, not judged. Boilerplate and size-table patterns are heuristics and will both miss and over-flag; the dot-colon and empty checks are exact."
+      bound: "Every check here is EXACT — a literal the defect always contains. There is deliberately NO supplier-boilerplate check: the obvious regex flagged \"100% cotton\", which is a product spec, on 8 products including the best-selling correct-format exemplar, while missing real regulatory blocks that carry no keyword. It was wrong in both directions. A prose heuristic that names your best page as defective is worse than no check, because a false positive in a diagnostic arrives with instructions. If you need that check, it needs a sound signal, not a longer regex."
     }'
 }
 
@@ -470,9 +580,15 @@ door_copy() {
 door_redirects() {
   need_jq
   local reds prods colls
-  reds="$(rest_paged 'redirects.json?limit=250' 2>/dev/null | jq -sc '[.[].redirects[]?]')"
-  prods="$(rest 'products.json?limit=250&fields=id,handle,status' | jq -c '[.products[]]')"
-  colls="$(rest 'custom_collections.json?limit=250&fields=id,handle' | jq -c '[.custom_collections[]?]')"
+  local redpages
+  redpages="$(rest_paged 'redirects.json?limit=250')" || return $?
+  reds="$(printf '%s' "$redpages" | jq -sc '[.[].redirects[]?]')"
+  prods="$(all_products 'id,handle,status' | jq -c '[.products[]]')"
+  # BOTH kinds. Reading only custom_collections made a live SMART collection look
+  # nonexistent, so a perfectly good redirect was reported DEAD — a false positive
+  # that sends someone to fix something that works. door_orphans had this right
+  # fifty lines below; the inconsistency inside one file was the tell.
+  colls="$(all_collection_handles)"
 
   jq -n --argjson r "$reds" --argjson p "$prods" --argjson c "$colls" '
     ([ $p[] | select(.status == "active") | .handle ]) as $live_products |
@@ -520,16 +636,30 @@ door_redirects() {
 # ---------------------------------------------------------------------------
 door_orphans() {
   need_jq
-  local prods colls smart membership
-  prods="$(rest 'products.json?limit=250&fields=id,handle,title,status,product_type,tags' | jq -c '[.products[]]')"
-  colls="$(rest 'custom_collections.json?limit=250&fields=id,handle' | jq -c '[.custom_collections[]?]')"
-  smart="$(rest 'smart_collections.json?limit=250&fields=id,handle' | jq -c '[.smart_collections[]?]')"
+  local prods colls membership
+  prods="$(all_products 'id,handle,title,status,product_type,tags' | jq -c '[.products[]]')"
+  colls="$(all_collection_handles)"
 
+  # Membership via collections/<id>/products.json, NOT collects.json.
+  #
+  # collects.json 404s on a SMART collection — verified live, with a custom
+  # collection as the control returning 200, so the endpoint is fine and the
+  # collection type is the variable. Under set -e that 404 killed the whole door:
+  # it produced no output at all and exited 2.
+  #
+  # The obvious repair — tolerate the 404 and carry on — is WORSE THAN THE BUG,
+  # and this is checked rather than assumed: every product whose only home is a
+  # smart collection then reads as unlinked, yielding 30 false orphans against 0
+  # true ones. That hands an operator 30 healthy pages as deletion candidates,
+  # which is the failure mode this door was written to avoid (traps.md 12).
+  #
+  # collections/<id>/products.json resolves membership for BOTH types, so this is
+  # one endpoint rather than a branch on collection type.
   membership='[]'
   local cid
-  for cid in $(jq -r '.[].id' <<<"$colls" 2>/dev/null) $(jq -r '.[].id' <<<"$smart" 2>/dev/null); do
+  for cid in $(jq -r '.[].id' <<<"$colls" 2>/dev/null); do
     membership="$(jq -cn --argjson m "$membership" \
-      --argjson x "$(rest "collects.json?collection_id=$cid&limit=250&fields=product_id" | jq -c '[.collects[]?.product_id]')" \
+      --argjson x "$(rest "collections/$cid/products.json?limit=250&fields=id" | jq -c '[.products[]?.id]')" \
       '$m + $x')"
   done
 
@@ -584,7 +714,7 @@ door_consent() {
   case "$max_pages" in ''|*[!0-9]*) die "consent: --max-pages must be a number" 2 ;; esac
 
   local pages
-  pages="$(rest_paged "customers.json?limit=250&fields=id,email_marketing_consent" "$max_pages" 2>/dev/null)"
+  pages="$(rest_paged "customers.json?limit=250&fields=id,email_marketing_consent" "$max_pages")" || return $?
 
   printf '%s' "$pages" | jq -s '
     (map(select(.__truncated__ == true)) | length > 0) as $truncated |

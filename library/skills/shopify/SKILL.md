@@ -1,13 +1,13 @@
 ---
 name: shopify
 description: "Shopify Admin API actuator built around the fields that lie. Answers the questions people actually ask — is anything unfulfillable, how much discounting is live, what is really in this collection, is the catalogue healthy — using the field that is SOUND rather than the obvious field that silently returns a wrong answer. Read-only by construction. Every trap it encodes was measured against a live store, not recalled."
-argument-hint: "[health-check|catalog [--unfulfillable --fulfiller-ids <file>]|discounts|collections [handle]|orders [limit]|raw <path>]"
+argument-hint: "[health-check|catalog [--unfulfillable --fulfiller-ids <file>]|discounts|collections [handle]|webhooks|copy|redirects|orphans|consent [--max-pages N]|orders [limit]|raw <path>]"
 ---
 
 # Shopify
 
 Direct reads against the Shopify Admin API. The calls are trivial — anyone can curl
-Shopify. **The value is [traps.md](./traps.md)**: eight fields and endpoints that return a
+Shopify. **The value is [traps.md](./traps.md)**: thirteen fields and endpoints that return a
 confident, plausible, wrong answer, each one re-measured against a live store before
 being written down.
 
@@ -48,7 +48,7 @@ skills: [shopify]
 
 | Command | Answers | The trap it routes around |
 |---------|---------|---------------------------|
-| `health-check` | Is the catalogue sound? Emits a `warnings` array, not a dashboard | all of them, in one sweep |
+| `health-check` | Is the catalogue sound? Emits a `warnings` array plus a `coverage` block | traps 1/2/5/6/7 inline, then runs `webhooks`, `copy`, `redirects`, `orphans`. **Names what it does not cover** rather than implying completeness |
 | `catalog` | What is the inventory picture really? | reports `inventory_management`, never the `inventory_quantity` placeholder — [2](./traps.md) |
 | `catalog --unfulfillable --fulfiller-ids <file>` | What can we not actually ship? | set difference against the fulfiller, because `fulfillment_service` is `manual` on everything — [1](./traps.md), [3](./traps.md) |
 | `discounts` | How much discounting is live? | counts **codes**, not nodes — one node can hold thousands — [5](./traps.md) |

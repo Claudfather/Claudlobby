@@ -293,6 +293,34 @@ with the number. `consent` counts fully by default and marks itself incomplete w
 
 ---
 
+## A note on false positives, which outrank missing checks
+
+Every blocker raised against the five doors added in #998 was the same shape, and none was a
+missed defect:
+
+| the check | what it did |
+|---|---|
+| `health-check` | claimed to sweep "all of them" while calling one door of nine |
+| `redirects` | reported a **live** smart collection as a dead destination |
+| `copy` | flagged the best-selling correct-format product as supplier boilerplate |
+| `orphans` | would have presented 30 healthy pages as deletion candidates |
+
+**A false positive in a diagnostic is worse than a missing check, because it arrives with
+instructions.** A missing check leaves an operator where they were; a false positive sends them
+to fix something that works. Three of the four above would have caused real damage if acted on,
+and the fourth hid the door that exists to catch a silent failure.
+
+Two consequences for anything added here:
+
+1. **Prefer an exact signal to a plausible one.** A literal the defect always contains beats a
+   prose heuristic. If no exact signal exists, ship no check and say why — `copy` carries no
+   boilerplate detector for exactly this reason.
+2. **A design being right is not the check being right.** All five doors were judged
+   well-designed; what failed was what they did on contact with a real store. Run it against the
+   real thing before believing it.
+
+---
+
 ## How to add to this file
 
 One entry per trap, and every entry needs a **measurement or a reproduction**, not a

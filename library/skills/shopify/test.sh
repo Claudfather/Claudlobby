@@ -167,29 +167,71 @@ jq_is "webhooks: still reports what IS registered" "$wh" ".registered_topics | i
 jq_is "webhooks: states that registration is not delivery" "$wh" ".bound | test(\"REGISTRATION ONLY\")"
 
 # copy: the .: marker is the one a human reading JSON cannot see (trap 10).
-cp_="$(door_out door_copy "rest() { cat '$DIR/fixtures/products_copy_defects.json'; }")"
+cp_="$(door_out door_copy "rest_paged() { cat '$DIR/fixtures/products_copy_defects.json'; }")"
 jq_is "copy: matches the invisible .: marker exactly" "$cp_" ".defects.dot_colon_marker == [\"dot-colon-one\"]"
 jq_is "copy: markup-only body counts as empty" "$cp_" ".defects.empty_description == [\"empty-one\"]"
 jq_is "copy: does not flag a clean description" "$cp_" ".defects.dot_colon_marker | index(\"clean-one\") | not"
 
 # redirects: BOTH directions, and the second is the one people miss (trap 11).
 rd="$(door_out door_redirects "
-  rest_paged() { cat '$DIR/fixtures/redirects_both_directions.json'; }
-  rest() { case \"\$1\" in products.json*) cat '$DIR/fixtures/redirect_catalogue.json' ;; *) printf '{}' ;; esac; }")"
+  rest_paged() { case \"\$1\" in
+      redirects.json*) cat '$DIR/fixtures/redirects_both_directions.json' ;;
+      products.json*)  cat '$DIR/fixtures/redirect_catalogue.json' ;;
+    esac; }
+  rest() { case \"\$1\" in
+      custom_collections.json*) printf '%s' '{\"custom_collections\":[]}' ;;
+      smart_collections.json*)  printf '%s' '{\"smart_collections\":[]}' ;;
+    esac; }")"
 jq_is "redirects: a drafted target counts as dead (trap 7)" "$rd" "[.dead_destinations[].target] | index(\"/products/drafted-item\")"
 jq_is "redirects: flags a revived SOURCE, the expensive direction" "$rd" "[.revived_sources[].path] | index(\"/products/came-back\")"
 jq_is "redirects: does not judge an off-catalogue target it cannot check" "$rd" "[.dead_destinations[].target] | index(\"https://elsewhere.test/page\") | not"
 
+# A live SMART collection must not be reported dead. door_redirects read only
+# custom_collections while door_orphans read both, so a smart-collection target
+# came back DEAD — a false positive that sends someone to fix a working redirect.
+# This test is the point: consistency without a test that binds it is a fix with
+# an expiry date, and the next refactor would silently undo it while the suite
+# stayed green.
+rd_smart="$(door_out door_redirects "
+  rest_paged() { case \"\$1\" in
+      redirects.json*) cat '$DIR/fixtures/redirects_smart_target.json' ;;
+      products.json*)  printf '%s' '{\"products\":[]}' ;;
+    esac; }
+  rest() { case \"\$1\" in
+    custom_collections.json*) printf '%s' '{\"custom_collections\":[]}' ;;
+    smart_collections.json*) printf '%s' '{\"smart_collections\":[{\"id\":5,\"handle\":\"smart-one\"}]}' ;;
+  esac; }")"
+jq_is "redirects: a SMART collection target is NOT reported dead" "$rd_smart" \
+      '.dead_destinations == []'
+
+# The same catalogue read must back both doors, or they drift apart again.
+if [ "$(grep -c 'all_collection_handles' "$SH")" -ge 3 ]; then
+  ok "redirects and orphans share one collection reader (custom + smart)"
+else no "the two doors read collections differently again — that is the greg blocker"; fi
+
+# copy: a product SPEC is not supplier boilerplate (todd). The regex that flagged
+# "100% cotton" hit the best-selling correct-format exemplar, and missed real
+# regulatory blocks carrying no keyword — wrong in both directions, so the check
+# was removed rather than re-guessed.
+jq_is "copy: does not flag a product spec as a defect" "$cp_" \
+      '[.defects[] | select(type=="array") | .[]] | index("spec-one") | not'
+if grep -q 'supplier_boilerplate' "$SH"; then
+  no "the prose boilerplate heuristic is back — it flags correct copy"
+else ok "copy: no prose-heuristic defect class (exact checks only)"; fi
+
 # orphans: a triage list, never a delete list (trap 12).
 or_="$(door_out door_orphans "
+  rest_paged() { printf '%s' '{\"products\":[{\"id\":1,\"handle\":\"in-custom\",\"title\":\"C\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"},{\"id\":2,\"handle\":\"in-smart\",\"title\":\"S\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"},{\"id\":3,\"handle\":\"by-design\",\"title\":\"D\",\"status\":\"active\",\"product_type\":\"Hidden\",\"tags\":\"hidden\"},{\"id\":4,\"handle\":\"lonely\",\"title\":\"O\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"}]}'; }
   rest() { case \"\$1\" in
-    products.json*) printf '%s' '{\"products\":[{\"id\":1,\"handle\":\"linked\",\"title\":\"L\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"},{\"id\":2,\"handle\":\"lonely\",\"title\":\"O\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"},{\"id\":3,\"handle\":\"by-design\",\"title\":\"D\",\"status\":\"active\",\"product_type\":\"Hidden\",\"tags\":\"hidden\"}]}' ;;
     custom_collections.json*) printf '%s' '{\"custom_collections\":[{\"id\":9,\"handle\":\"c\"}]}' ;;
-    smart_collections.json*) printf '%s' '{\"smart_collections\":[]}' ;;
-    collects.json*) printf '%s' '{\"collects\":[{\"product_id\":1}]}' ;;
+    smart_collections.json*) printf '%s' '{\"smart_collections\":[{\"id\":7,\"handle\":\"s\"}]}' ;;
+    collections/9/products.json*) printf '%s' '{\"products\":[{\"id\":1}]}' ;;
+    collections/7/products.json*) printf '%s' '{\"products\":[{\"id\":2}]}' ;;
   esac; }")"
 jq_is "orphans: an unlinked product needs a decision" "$or_" ".by_likely_action.needs_a_decision == [\"lonely\"]"
 jq_is "orphans: separates deliberately-unlinked from accidental (trap 6 + 12)" "$or_" ".by_likely_action.leave_alone_orphaned_by_design == [\"by-design\"]"
+jq_is "orphans: a product linked ONLY via a SMART collection is not an orphan (saul)" "$or_" \
+      "[.by_likely_action[][]] | index(\"in-smart\") | not"
 jq_is "orphans: states that collection membership is a proxy for inbound links" "$or_" ".bound | test(\"PROXY\")"
 
 # consent: a sample must never be reported as a total (trap 13).
@@ -205,6 +247,21 @@ nexturl="$(tr -d '\r' < "$DIR/fixtures/link_header_next_and_prev.txt" | grep -i 
 if printf '%s' "$nexturl" | grep -q 'page_info=FWD'; then
   ok "Link header: follows rel=next, not rel=previous"
 else no "Link header: picked the wrong rel — this walks backwards forever"; fi
+
+# EVERY dispatchable door must carry a coverage decision: swept by health-check,
+# swept inline, or named in not_swept WITH a reason. This is the guard that stops
+# kenny's gap reopening — health-check called one door of nine while SKILL.md
+# claimed it swept "all of them". Add a door without deciding its coverage and
+# this goes red, which a doc edit alone could never do.
+swept_l="$(scrub bash -c "source '$SH'; printf '%s %s' \"\$SHOPIFY_SWEPT_DOORS\" \"\$SHOPIFY_SWEPT_INLINE\"")"
+notswept_l="$(scrub bash -c "source '$SH'; printf '%s' \"\$SHOPIFY_NOT_SWEPT_JSON\"" | jq -r '.[].door' | tr '\n' ' ')"
+undecided=""
+for d in $(sed -n '/^case "$cmd" in/,/^esac/p' "$SH" | grep -oE '^  [a-z-]+\)' | tr -d ' )'); do
+  case "$d" in health-check|help) continue ;; esac
+  case " $swept_l $notswept_l " in *" $d "*) ;; *) undecided="$undecided $d" ;; esac
+done
+if [ -z "$undecided" ]; then ok "every door has a coverage decision (swept or declared not-swept)"
+else no "door(s) with no coverage decision:$undecided — health-check would claim completeness it does not have"; fi
 
 # --- documentation contract -------------------------------------------------
 
