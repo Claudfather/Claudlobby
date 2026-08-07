@@ -67,6 +67,15 @@ def _bold(t: str) -> str:
 
 # -- Data collection -------------------------------------------------------
 
+# SubState sentinel for "nobody got an answer" — the supervisor was unreachable,
+# too slow, or never asked. Whether the unit is up is UNKNOWN, not false, and it
+# is rendered as a third state rather than as a failure (#1044).
+#
+# Deliberately NOT the string "unknown": systemd reports a literal SubState of
+# "unknown" from a call that SUCCEEDED, and conflating a real answer with the
+# absence of one is the inverse of this bug.
+_SVC_UNDETERMINED = "undetermined"
+
 
 @dataclass
 class BotStatus:
@@ -79,7 +88,10 @@ class BotStatus:
     tmux_alive: bool = False
     # systemd/launchd
     service_active: bool = False
-    service_sub: str = ""  # e.g. "running", "exited", "dead"
+    # Defaults to the sentinel, not "": collect_fleet_status runs neither check
+    # on a host that is not Linux and has no service label, and "we never asked"
+    # must not render as "we asked and it is down".
+    service_sub: str = _SVC_UNDETERMINED  # e.g. "running", "exited", "dead"
     # keepalive
     last_heartbeat: datetime | None = None
     pane_state: str = ""  # BUSY/IDLE/UNKNOWN
@@ -87,6 +99,11 @@ class BotStatus:
     busy_pct_24h: float | None = None
     idle_since: datetime | None = None
     current_task_age_secs: int | None = None
+
+    @property
+    def service_undetermined(self) -> bool:
+        """True when nothing ever answered, so up-or-down is not known."""
+        return self.service_sub == _SVC_UNDETERMINED
 
 
 def _check_tmux_sessions(fleet, paths) -> set[str]:
@@ -156,7 +173,9 @@ def _check_systemd_service(bot_id: str, service_label: str = "") -> tuple[bool, 
         sub = props.get("SubState", "unknown")
         return active, sub
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False, "unknown"
+        # The 5s timeout expires under host load — exactly when this dashboard
+        # gets read.
+        return False, _SVC_UNDETERMINED
 
 
 def _check_launchd_service(bot_id: str, service_label: str) -> tuple[bool, str]:
@@ -172,7 +191,7 @@ def _check_launchd_service(bot_id: str, service_label: str) -> tuple[bool, str]:
             return False, "not-found"
         return True, "running"
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False, "unknown"
+        return False, _SVC_UNDETERMINED
 
 
 def _parse_keepalive_log(bot_dir: Path) -> tuple[datetime | None, str]:
@@ -280,9 +299,14 @@ def collect_fleet_status(
 
 
 def _health_indicator(bs: BotStatus) -> str:
-    """Single-char health: green dot, yellow dot, red dot."""
-    if not bs.tmux_alive or not bs.service_active:
+    """Single-char health: o healthy, ~ stale, ! blocked, x down, ? not known."""
+    if not bs.tmux_alive:
         return _red("x")
+    if not bs.service_active:
+        # Same precedence as _service_display: a confirmed-active service is
+        # never undetermined, so the sentinel is only consulted once we know
+        # the unit was not reported active.
+        return _yellow("?") if bs.service_undetermined else _red("x")
     if bs.last_heartbeat:
         age = (
             datetime.now(timezone.utc) - bs.last_heartbeat.astimezone(timezone.utc)
@@ -325,10 +349,16 @@ def _heartbeat_display(bs: BotStatus) -> str:
 
 
 def _service_display(bs: BotStatus) -> str:
+    """Four states, none mistakable for another at a glance, colour or not.
+
+    green up / dim -- not enrolled / yellow ? not known / red down.
+    """
     if bs.service_active:
         return _green("up")
     if bs.service_sub == "not-found":
         return _dim("--")
+    if bs.service_undetermined:
+        return _yellow("?")
     return _red("down")
 
 
@@ -459,9 +489,13 @@ def format_table(statuses: list[BotStatus], fleet_name: str) -> str:
     total = len(statuses)
     working = sum(1 for bs in statuses if bs.state == "working")
     blocked = sum(1 for bs in statuses if bs.state == "blocked")
+    undetermined = sum(1 for bs in statuses if bs.service_undetermined)
 
     lines.append("")
     summary_parts = [f"{up_count}/{total} up"]
+    if undetermined:
+        # Without this the shortfall in "N/M up" reads as N-M bots being DOWN.
+        summary_parts.append(_yellow(f"{undetermined} undetermined"))
     if working:
         summary_parts.append(f"{working} working")
     if blocked:
@@ -504,6 +538,9 @@ def format_json(statuses: list[BotStatus], fleet_name: str) -> str:
                 "state": bs.state,
                 "service_active": bs.service_active,
                 "service_sub": bs.service_sub,
+                # Explicit: the obvious scripted read is `if not
+                # service_active`, which is the same collapse this fixes.
+                "service_undetermined": bs.service_undetermined,
                 "tmux_alive": bs.tmux_alive,
                 "last_heartbeat": (
                     bs.last_heartbeat.isoformat() if bs.last_heartbeat else None

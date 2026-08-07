@@ -566,8 +566,28 @@ class FleetConfig:
         return any(b.briefing and b.briefing.slots for b in self.bots.values())
 
     def manager_bots(self) -> set[str]:
-        """Bot names that manage at least one team."""
-        return {team.manager for team in self.teams.values()}
+        """Bot names that manage anyone — a team in this fleet, or bots anywhere.
+
+        Two declarations, because a manager's reports are not always in the same
+        fleet. ``teams:`` names a within-fleet manager and answers "does a team
+        here name this bot". ``bots.<id>.manages:`` names the reports directly,
+        and is the only one of the two that can express a CROSS-FLEET report — a
+        top-level coordinator whose reports are themselves managers of other
+        fleets is named by no ``teams:`` block anywhere, and so was invisible
+        here despite the fleet declaring exactly who it manages.
+
+        That is not a stretch of the schema: ``_validate_teams`` already warns
+        rather than errors on a ``manages`` target outside ``fleet.bots``,
+        precisely because "bot_ids may reference other fleets".
+
+        Widely consumed, including by guards where a missing bot silently loses
+        a protection rather than merely being mislabelled — so widen it here,
+        once, rather than special-casing whichever consumer notices first.
+        """
+        from_teams = {team.manager for team in self.teams.values()}
+        # An empty or absent `manages:` list is not a claim to manage anyone.
+        from_manages = {name for name, bot in self.bots.items() if bot.manages}
+        return from_teams | from_manages
 
     def teams_for_manager(self, bot_name: str) -> list[TeamConfig]:
         return [team for team in self.teams.values() if team.manager == bot_name]

@@ -1,0 +1,674 @@
+#!/usr/bin/env bash
+# lib/selfstart-snapshot.sh — record how many bots SELF-STARTED after a host boot.
+#
+# The #1002 pre-registration asks one question at the next unplanned reboot:
+# how many bots came up without help? Baseline to beat is 6 of 21 (2026-08-06,
+# load 31, pre-fix ladder). Run this BEFORE rescuing anything, then rescue
+# immediately — the snapshot is what removes the trade between a clean
+# experiment and leaving bots stranded (issue #1043).
+#
+# ── Two counts, opposite blind spots ────────────────────────────────────────
+# RAW      assistant records in the newest transcript file.
+#          Blind spot: a bot whose service failed never wrote a new transcript,
+#          so `ls -t` returns the PRE-CRASH file with hundreds of turns and the
+#          dead bot scores as a self-starter. Silent false POSITIVE.
+# FILTERED assistant records timestamped after the boot instant.
+#          Blind spot: absolute clock correctness. This host has no RTC battery,
+#          so fake-hwclock restores a stale clock at boot and NTP corrects
+#          minutes later. A genuine self-starter writing inside that window
+#          carries a pre-boot timestamp and is dropped. False NEGATIVE, which
+#          makes the new ladder look worse than it is.
+# They agree when the clock is sane, so a DISAGREEMENT is itself the signal.
+# Neither is silently preferred; both are printed and disagreement is called out.
+#
+# ── The counts are independent by construction ──────────────────────────────
+# RAW reads exactly one file (the newest by mtime). FILTERED reads every
+# transcript file the bot has. That asymmetry is deliberate: if both read the
+# same file they would share a file-selection failure mode and stop being two
+# independent measurements. It also covers the nasty tail of the stale-clock
+# case, where the fresh file can carry an OLDER mtime than the pre-crash file
+# and `ls -t` picks the wrong one.
+#
+# Scanning every file is affordable because a transcript file cannot span a
+# reboot: start-bot.sh passes no --continue/--resume/--session-id, so every boot
+# opens a new transcript (verified in #1043 against the script and against a real
+# transcript). One file therefore belongs to exactly one boot, and reading its
+# FIRST timestamped record classifies the whole file. Only files that classify
+# as post-boot are read in full, and those are small. So there is no sampling
+# cap here to declare — coverage is complete.
+#
+# ── Why this script is deliberately self-contained ──────────────────────────
+# It does not source lib-common.sh, call the claudlobby CLI, touch the network,
+# or require any bot to be up. Pure bash + coreutils + awk, with journalctl used
+# only for the clock assertion and degrading to UNKNOWN when it is absent. The
+# one time this script is ever run is the one time the host is least healthy —
+# a half-booted machine at load 31 — so every dependency it does not have is a
+# way it cannot fail. Do not "fix" this by wiring it into the shared helpers.
+#
+# ── Why `set -e` is deliberately absent ─────────────────────────────────────
+# House rule is `set -euo pipefail`. Not here, and the reason is the contract:
+# under -e an unhandled failure at bot 14 of 21 aborts and prints a page that
+# READS AS COMPLETE while covering two thirds of the estate. That is precisely
+# the silent-denominator failure this script exists to prevent, so the failure
+# mode is worse than the one -e protects against. Errors that matter are checked
+# explicitly instead, and the denominator is validated up front and fails loud.
+#
+# ── Test seams ──────────────────────────────────────────────────────────────
+# A real crash cannot be staged, so these env vars let the harness drive the
+# real logic against synthetic fixtures. They are also useful operationally for
+# re-deriving a snapshot against a known boot instant.
+#   CLAUDLOBBY_ROOT               repo root (denominator source)
+#   CLAUDE_CONFIG_DIR             transcript root (default ~/.claude)
+#   SELFSTART_BOOT_EPOCH          override the boot instant
+#   SELFSTART_JOURNAL_BOOT_EPOCH  override the journal boot record
+#   SELFSTART_ALLOW_PARTIAL=1     proceed past an unparseable manifest, loudly
+#   SELFSTART_ALLOW_DUPLICATE_NAMES=1
+#                                 proceed past a bot name declared in two
+#                                 fleets, loudly. Separate from ALLOW_PARTIAL on
+#                                 purpose: one override per fatal condition, so
+#                                 accepting one degradation never waives another
+set -uo pipefail
+
+BASELINE_TEXT="6 of 21 (2026-08-06, load 31, pre-fix ladder)"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${CLAUDLOBBY_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/selfstart.XXXXXX")" || {
+    echo "selfstart-snapshot: cannot create temp dir" >&2; exit 3; }
+trap 'rm -rf "$TMP"' EXIT
+
+usage() {
+    cat <<'EOF'
+Usage: selfstart-snapshot.sh [--help]
+
+Records how many declared bots self-started after the current host boot.
+Run BEFORE rescuing anything. Prints the headline first, lists after.
+
+Exit codes:
+  0  snapshot printed
+  2  denominator could not be trusted (unparseable fleet.yaml, no bots found,
+     duplicate bot name across fleets). Nothing is printed but the banner.
+  3  boot instant could not be determined, or no temp dir.
+  4  snapshot ran but did not cover every declared bot. The page is printed
+     and stamped INCOMPLETE; N is short and must not be used.
+  5  ran too early to be a result — the boot ladder had not finished, or the
+     first-turn allowance had not elapsed. The page is printed and stamped
+     TOO EARLY; re-run at the instant it names. Takes 4 if both apply, since
+     re-running fixes early and need not fix incomplete.
+EOF
+}
+
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+    "") ;;
+    *) echo "selfstart-snapshot: unknown argument: $1" >&2; usage >&2; exit 3 ;;
+esac
+
+# ── Loud failure ────────────────────────────────────────────────────────────
+# The denominator has no degraded mode. See the note above list_manifests.
+#
+# ESCAPE_HINT names the override for THIS refusal and nothing else. Each fatal
+# condition owns its own escape, because an override advertised on one banner
+# and honoured by a second, unrelated check is how a silent denominator gets
+# back in through the door built to make partiality loud (#1045 review).
+ESCAPE_HINT="SELFSTART_ALLOW_PARTIAL=1 to accept a declared-partial denominator"
+die_loud() {
+    echo
+    echo "############################################################"
+    echo "##  SELF-START SNAPSHOT REFUSED — DENOMINATOR NOT TRUSTED  ##"
+    echo "############################################################"
+    echo "##"
+    while [ $# -gt 0 ]; do echo "##  $1"; shift; done
+    echo "##"
+    echo "##  No counts are printed. A wrong N would be compared"
+    echo "##  against the baseline ($BASELINE_TEXT)"
+    echo "##  and believed. Fix the manifest, or re-run with"
+    echo "##  $ESCAPE_HINT."
+    echo "############################################################"
+    echo
+    exit 2
+}
+
+# ── Boot instant ────────────────────────────────────────────────────────────
+# GOTCHA (#1043): never `date -u -d "$(uptime -s)"`. uptime -s prints LOCAL
+# time; -u makes date re-read that local string AS UTC, landing one offset off —
+# silently wrong rather than obviously wrong. Parse local -> epoch first, then
+# format FROM the epoch with -u.
+resolve_boot_epoch() {
+    if [ -n "${SELFSTART_BOOT_EPOCH:-}" ]; then
+        printf '%s\n' "$SELFSTART_BOOT_EPOCH"; return 0
+    fi
+    local s e
+    s="$(uptime -s 2>/dev/null)"
+    if [ -n "$s" ]; then
+        e="$(date -d "$s" +%s 2>/dev/null)"
+        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
+    fi
+    # macOS has no `uptime -s`; kern.boottime prints  { sec = 1786..., usec = ... }
+    s="$(sysctl -n kern.boottime 2>/dev/null)"
+    if [ -n "$s" ]; then
+        e="$(printf '%s\n' "$s" | sed -n 's/.*sec *= *\([0-9][0-9]*\).*/\1/p' | head -1)"
+        if [ -n "$e" ]; then printf '%s\n' "$e"; return 0; fi
+    fi
+    # Linux without uptime(1): /proc/uptime is monotonic seconds since boot.
+    if [ -r /proc/uptime ]; then
+        local up now
+        up="$(cut -d. -f1 < /proc/uptime 2>/dev/null)"
+        now="$(date +%s 2>/dev/null)"
+        if [ -n "$up" ] && [ -n "$now" ]; then printf '%s\n' "$((now - up))"; return 0; fi
+    fi
+    return 1
+}
+
+epoch_to_iso_utc() {
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%S 2>/dev/null \
+        || date -u -r "$1" +%Y-%m-%dT%H:%M:%S 2>/dev/null
+}
+
+# The journal boot record is what the clock SAID at boot; `uptime -s` is
+# now-minus-monotonic-uptime, so it is the TRUE boot instant once NTP has
+# corrected. A gap between them is the stale-clock signal, measured rather
+# than assumed — which is the assumption the whole FILTERED count rests on.
+journal_boot_epoch() {
+    if [ -n "${SELFSTART_JOURNAL_BOOT_EPOCH:-}" ]; then
+        printf '%s\n' "$SELFSTART_JOURNAL_BOOT_EPOCH"; return 0
+    fi
+    command -v journalctl >/dev/null 2>&1 || return 1
+    local line e
+    line="$(journalctl -b -o short-iso --no-pager 2>/dev/null | head -1 | awk '{print $1}')"
+    [ -n "$line" ] || return 1
+    e="$(date -d "$line" +%s 2>/dev/null)"
+    [ -n "$e" ] || return 1
+    printf '%s\n' "$e"
+}
+
+BOOT_EPOCH="$(resolve_boot_epoch)"
+if [ -z "$BOOT_EPOCH" ]; then
+    echo "selfstart-snapshot: cannot determine boot instant (no uptime -s, no kern.boottime, no /proc/uptime)" >&2
+    exit 3
+fi
+BOOT_ISO="$(epoch_to_iso_utc "$BOOT_EPOCH")"
+# Records carry sub-second precision (2026-08-06T13:01:12.939Z). Padding the
+# boundary to .000 keeps the lexicographic compare apples-to-apples, so a record
+# in the boot second is not mis-ordered by the missing fractional part.
+BOOT_CMP="${BOOT_ISO}.000Z"
+NOW_EPOCH="$(date +%s)"
+NOW_ISO="$(epoch_to_iso_utc "$NOW_EPOCH")"
+ELAPSED=$(( NOW_EPOCH - BOOT_EPOCH ))
+[ "$ELAPSED" -lt 0 ] && ELAPSED=0
+
+JOURNAL_EPOCH="$(journal_boot_epoch)"
+if [ -z "$JOURNAL_EPOCH" ]; then
+    CLOCK_VERDICT="UNKNOWN"
+    CLOCK_DETAIL="journal boot record unavailable — stale-clock check could not run"
+else
+    CLOCK_DELTA=$(( BOOT_EPOCH - JOURNAL_EPOCH ))
+    [ "$CLOCK_DELTA" -lt 0 ] && CLOCK_DELTA=$(( -CLOCK_DELTA ))
+    if [ "$CLOCK_DELTA" -le 60 ]; then
+        CLOCK_VERDICT="SANE"
+        CLOCK_DETAIL="uptime -s and journal boot record agree within ${CLOCK_DELTA}s"
+    else
+        CLOCK_VERDICT="STALE"
+        CLOCK_DETAIL="uptime -s and journal boot record differ by ${CLOCK_DELTA}s — clock was stale at boot, FILTERED under-counts"
+    fi
+fi
+
+# ── Denominator ─────────────────────────────────────────────────────────────
+# Enumerated from the bots DECLARED in every fleet.yaml, as a union across
+# fleets, then transcripts are joined onto it. Never from directories on disk.
+# Two failure modes that a directory walk cannot see:
+#   - a bot whose service failed so hard it never created a transcript is
+#     skipped by a naive "for each transcript" loop and vanishes from BOTH
+#     lists, so 6 of 21 silently becomes 6 of 19 and the baseline stops being
+#     comparable. It must print as a strand, never be absent.
+#   - a leftover directory for an undeclared bot would inflate the total and
+#     read as a permanent strand forever.
+#
+# DO NOT copy claudlobby/composer.py::_fleet_bot_count() here. It reads a
+# sibling manifest and returns 0 on ANY exception, and it is RIGHT to do so:
+# one fleet broken config must never block another fleet generate, and the cost
+# of that soft failure is a stale boot-ladder offset, which is the un-offset
+# behaviour rather than a new failure mode. That reasoning does not transfer.
+# `generate` produces an ACTION with a valid degraded mode; this script produces
+# a MEASUREMENT, and a measurement has no degraded mode — a wrong N is worse
+# than no N, because it will be compared against the baseline and believed.
+# Same code shape, opposite correct answer; the discriminator is action versus
+# measurement. Hence: parse failure is loud and fatal here.
+list_manifests() {
+    # Both supported overlay depths: local/<fleet>/ and local/<system>/<fleet>/.
+    ls -1 "$ROOT"/local/*/fleet.yaml "$ROOT"/local/*/*/fleet.yaml 2>/dev/null | sort -u
+}
+
+# Bot keys are the first nesting level under the `bots:` mapping. Comments,
+# blank lines, deeper keys and sibling top-level keys are all excluded, and an
+# anchor on the key (`alex: &base`) is still a bot.
+bots_from_manifest() {
+    awk '
+        /^[[:space:]]*#/ { next }
+        !inbots && $0 ~ /^[[:space:]]*bots:[[:space:]]*(#.*)?$/ {
+            match($0, /^[ ]*/); ind = RLENGTH; inbots = 1; botind = 0; next
+        }
+        inbots {
+            if ($0 ~ /^[[:space:]]*$/) next
+            match($0, /^[ ]*/); cur = RLENGTH
+            if (cur <= ind) { inbots = 0; next }
+            if (botind == 0) botind = cur
+            if (cur == botind && $0 ~ /^[ ]*[A-Za-z0-9_-]+:[ ]*(&[A-Za-z0-9_-]+)?[ ]*(#.*)?$/) {
+                k = $0; sub(/^[ ]*/, "", k); sub(/:.*$/, "", k); print k
+            }
+        }
+    ' "$1" 2>/dev/null
+}
+
+MANIFESTS="$(list_manifests)"
+[ -n "$MANIFESTS" ] && printf '%s\n' "$MANIFESTS" > "$TMP/manifests"
+if [ ! -s "$TMP/manifests" ]; then
+    die_loud "No fleet.yaml found under $ROOT/local/" \
+             "Looked at local/*/fleet.yaml and local/*/*/fleet.yaml"
+fi
+
+: > "$TMP/declared"
+: > "$TMP/badman"
+while IFS= read -r man; do
+    [ -n "$man" ] || continue
+    fleet="$(basename "$(dirname "$man")")"
+    if [ ! -r "$man" ]; then
+        printf '%s\tunreadable\n' "$man" >> "$TMP/badman"; continue
+    fi
+    if ! grep -qE '^[[:space:]]*bots:[[:space:]]*(#.*)?$' "$man" 2>/dev/null; then
+        printf '%s\tno bots: block\n' "$man" >> "$TMP/badman"; continue
+    fi
+    names="$(bots_from_manifest "$man")"
+    if [ -z "$names" ]; then
+        printf '%s\tbots: block declares no bots\n' "$man" >> "$TMP/badman"; continue
+    fi
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        printf '%s\t%s\t%s\n' "$b" "$fleet" "$(dirname "$man")/runtime/bots/$b" >> "$TMP/declared"
+    done <<EOF
+$names
+EOF
+done < "$TMP/manifests"
+
+PARTIAL=0
+if [ -s "$TMP/badman" ]; then
+    if [ "${SELFSTART_ALLOW_PARTIAL:-0}" = "1" ]; then
+        PARTIAL=1
+    else
+        # Build one banner line per broken manifest, then hand them to die_loud
+        # as separate arguments. bash 3.2 has no arrays worth the noise here, so
+        # the lines are collected in a file and read back positionally.
+        set --
+        while IFS="$(printf '\t')" read -r bad why; do
+            set -- "$@" "$bad — $why"
+        done < "$TMP/badman"
+        die_loud "A fleet manifest could not be parsed, so the union of declared" \
+                 "bots is incomplete and N would be short by a whole fleet:" \
+                 "" "$@"
+    fi
+fi
+
+if [ ! -s "$TMP/declared" ]; then
+    die_loud "No bots declared in any fleet.yaml under $ROOT/local/"
+fi
+
+# A duplicate name across fleets makes every row keyed on bot name ambiguous:
+# two distinct bots print under one identifier, and a page whose identifiers do
+# not identify anything is not a measurement. Fatal, not a warning.
+#
+# SELFSTART_ALLOW_PARTIAL deliberately does NOT reach this check, and that is a
+# fix rather than an oversight. It used to, which meant setting the flag for its
+# real purpose — one manifest that will not parse — silently waived an unrelated
+# fatal condition as well, with no banner and no PARTIAL stamp in the headline,
+# exiting 0 on a page that read as entirely normal. That is the silent
+# denominator this whole script exists to prevent, reachable through the door
+# built to make partiality loud. Found by vera in review of #1045.
+#
+# A duplicate gets its own override because it needs its own banner: the two
+# conditions degrade the page differently and an operator must be told which
+# one they accepted.
+DUPES="$(cut -f1 "$TMP/declared" | sort | uniq -d)"
+DUP_TOLERATED=0
+if [ -n "$DUPES" ]; then
+    if [ "${SELFSTART_ALLOW_DUPLICATE_NAMES:-0}" = "1" ]; then
+        DUP_TOLERATED=1
+    else
+        ESCAPE_HINT="SELFSTART_ALLOW_DUPLICATE_NAMES=1 to accept ambiguous rows"
+        die_loud "Bot name declared in more than one fleet.yaml — two distinct" \
+                 "bots would print under one identifier:" \
+                 "$(printf '%s' "$DUPES" | tr '\n' ' ')" \
+                 "" \
+                 "SELFSTART_ALLOW_PARTIAL does NOT waive this. It is scoped to" \
+                 "an unparseable manifest and nothing else."
+    fi
+fi
+
+TOTAL="$(wc -l < "$TMP/declared" | tr -d ' ')"
+
+# ── Per-bot snapshot ────────────────────────────────────────────────────────
+# Transcript dir is the bot working directory with / replaced by -, under the
+# Claude Code projects root.
+transcript_dir_for() { printf '%s/projects/%s\n' "$CFG_DIR" "$(printf '%s' "$1" | tr '/' '-')"; }
+
+# A bot cannot have self-started before systemd has launched it, and the boot
+# ladder means most of them have not for the first minute. Each bot waits on an
+# `ExecStartPre=/bin/sleep N` rung composed into its own unit (3s stagger,
+# host-global, so a 21-bot host runs rungs 0..60). Read the rung rather than
+# assume one: the stagger is a composer constant that will move, and hardcoding
+# it here would silently decay.
+#
+# Anchored to start-of-line because the composed unit carries an explanatory
+# COMMENT mentioning ExecStartPre, which an unanchored match would read as the
+# directive. Returns -1 when no rung can be read (no unit, or a launchd plist,
+# which staggers elsewhere) — never 0, because "no gate" and "gate at zero" must
+# not be the same answer: an unreadable rung has to be reported as unknown
+# rather than quietly asserting the bot was due.
+boot_rung_for() {
+    local d="$1" u r
+    for u in "$d"/*.service; do
+        [ -f "$u" ] || continue
+        r="$(grep -E '^[[:space:]]*ExecStartPre=.*sleep[[:space:]]+[0-9]+' "$u" 2>/dev/null \
+             | sed -n 's/.*sleep[[:space:]]*\([0-9][0-9]*\).*/\1/p' | tail -1)"
+        if [ -n "$r" ]; then printf '%s\n' "$r"; return 0; fi
+    done
+    printf '%s\n' "-1"
+}
+
+: > "$TMP/rows"
+: > "$TMP/rungs"
+: > "$TMP/norung"
+while IFS="$(printf '\t')" read -r bot fleet botdir; do
+    [ -n "$bot" ] || continue
+    tdir="$(transcript_dir_for "$botdir")"
+    files="$(ls -1t "$tdir"/*.jsonl 2>/dev/null)"
+
+    rung="$(boot_rung_for "$botdir")"
+    not_due=0
+    if [ "$rung" -ge 0 ]; then
+        printf '%s\n' "$rung" >> "$TMP/rungs"
+        [ "$rung" -gt "$ELAPSED" ] && not_due=1
+    else
+        printf '%s\n' "$bot" >> "$TMP/norung"
+    fi
+
+    if [ -z "$files" ]; then
+        # Declared, but no transcript at all — the third blind spot. A naive
+        # transcript walk drops this bot from both lists entirely. Still not a
+        # strand if its rung has not elapsed: systemd has not launched it, so
+        # there is nothing it could have written.
+        if [ "$not_due" -eq 1 ]; then
+            printf '%s\t%s\tNOT-YET-DUE\t0\t0\t-\t-\tboot rung %ss, only %ss since boot — not launched yet\n' \
+                "$bot" "$fleet" "$rung" "$ELAPSED" >> "$TMP/rows"
+        else
+            printf '%s\t%s\tSTRAND\t0\t0\t-\t-\tno transcript file at all\n' "$bot" "$fleet" >> "$TMP/rows"
+        fi
+        continue
+    fi
+
+    newest="$(printf '%s\n' "$files" | head -1)"
+    raw="$(grep -c '"type":"assistant"' "$newest" 2>/dev/null)"
+    [ -n "$raw" ] || raw=0
+
+    # First timestamped record of the newest file — the ambiguous-case
+    # discriminator: a fresh file postdates boot, a pre-crash file does not.
+    first_ts="$(grep -m1 -o '"timestamp":"[^"]*"' "$newest" 2>/dev/null | sed 's/.*:"//; s/"$//')"
+    [ -n "$first_ts" ] || first_ts="-"
+
+    # FILTERED across every file. One file belongs to one boot, so the first
+    # timestamped record classifies it; only post-boot files are read in full.
+    filtered=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        fts="$(grep -m1 -o '"timestamp":"[^"]*"' "$f" 2>/dev/null | sed 's/.*:"//; s/"$//')"
+        [ -n "$fts" ] || continue
+        if [ "$fts" \> "$BOOT_CMP" ]; then
+            n="$(grep -c '"type":"assistant"' "$f" 2>/dev/null)"
+            [ -n "$n" ] || n=0
+            filtered=$(( filtered + n ))
+        fi
+    done <<EOF
+$files
+EOF
+
+    fresh_file=0
+    [ "$first_ts" != "-" ] && [ "$first_ts" \> "$BOOT_CMP" ] && fresh_file=1
+
+    if [ "$filtered" -gt 0 ]; then
+        cls="SELF-STARTED"; why="post-boot assistant records present"
+    elif [ "$not_due" -eq 1 ]; then
+        # Dominates every negative verdict below, including the pre-crash-file
+        # case: nothing negative can be concluded about a bot systemd has not
+        # launched. Calling it a strand measures the elapsed clock, not
+        # self-starting (#1050).
+        cls="NOT-YET-DUE"; why="boot rung ${rung}s, only ${ELAPSED}s since boot — not launched yet"
+    elif [ "$raw" -eq 0 ]; then
+        cls="STRAND"; why="transcript exists but zero assistant records"
+    elif [ "$CLOCK_VERDICT" = "STALE" ]; then
+        # FILTERED is not trustworthy this boot, so the disagreement cannot be
+        # resolved mechanically. Fail closed: flag it, do not pick a side.
+        cls="ADJUDICATE"; why="RAW $raw vs FILTERED 0 under a stale boot clock — provisionally SELF-STARTED"
+    elif [ "$CLOCK_VERDICT" = "UNKNOWN" ]; then
+        cls="ADJUDICATE"; why="RAW $raw vs FILTERED 0 and the clock check could not run"
+    elif [ "$fresh_file" -eq 1 ]; then
+        # Should not happen: a file whose first record postdates boot ought to
+        # contribute to FILTERED. Flag rather than guess.
+        cls="ADJUDICATE"; why="RAW $raw vs FILTERED 0 but newest file postdates boot — inconsistent, inspect"
+    else
+        cls="STRAND"; why="newest transcript predates boot — pre-crash file, RAW false positive"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$bot" "$fleet" "$cls" "$raw" "$filtered" "$(basename "$newest")" "$first_ts" "$why" >> "$TMP/rows"
+done < "$TMP/declared"
+
+# ── Undeclared leftovers (reported, never counted) ──────────────────────────
+: > "$TMP/undeclared"
+while IFS= read -r man; do
+    [ -n "$man" ] || continue
+    bdir="$(dirname "$man")/runtime/bots"
+    [ -d "$bdir" ] || continue
+    for d in "$bdir"/*/; do
+        [ -d "$d" ] || continue
+        b="$(basename "$d")"
+        cut -f1 "$TMP/declared" | grep -qx "$b" || printf '%s\n' "$b" >> "$TMP/undeclared"
+    done
+done < "$TMP/manifests"
+
+# ── Report — headline first ─────────────────────────────────────────────────
+n_self="$(awk -F'\t' '$3=="SELF-STARTED"' "$TMP/rows" | wc -l | tr -d ' ')"
+n_strand="$(awk -F'\t' '$3=="STRAND"' "$TMP/rows" | wc -l | tr -d ' ')"
+n_adj="$(awk -F'\t' '$3=="ADJUDICATE"' "$TMP/rows" | wc -l | tr -d ' ')"
+n_raw_pos="$(awk -F'\t' '$4>0' "$TMP/rows" | wc -l | tr -d ' ')"
+n_filt_pos="$(awk -F'\t' '$5>0' "$TMP/rows" | wc -l | tr -d ' ')"
+n_notdue="$(awk -F'\t' '$3=="NOT-YET-DUE"' "$TMP/rows" | wc -l | tr -d ' ')"
+n_disagree="$(awk -F'\t' '($4>0)!=($5>0)' "$TMP/rows" | wc -l | tr -d ' ')"
+n_rows="$(wc -l < "$TMP/rows" | tr -d ' ')"
+
+# ── Is this reading a result yet? ───────────────────────────────────────────
+# Two gates, and they are different kinds of claim (#1050).
+#
+# HARD, and derived: a bot whose ExecStartPre rung has not elapsed has not been
+# launched, full stop. That is a fact about systemd, not an estimate, so those
+# bots are NOT-YET-DUE rather than stranded.
+#
+# SOFT, and stated: a bot that HAS launched still needs time to reach a first
+# turn. That latency is a measurement, not a derivation — 17-34s observed at
+# load 31 on 2026-08-06, and longer under worse load, which is exactly when
+# this gets run. The allowance is therefore printed with its provenance rather
+# than applied silently, and it is overridable. On a 21-bot host the two gates
+# together land at boot+120s, matching the operating rule.
+FIRST_TURN_ALLOWANCE_S="${SELFSTART_FIRST_TURN_ALLOWANCE_S:-60}"
+MAX_RUNG=0
+if [ -s "$TMP/rungs" ]; then
+    MAX_RUNG="$(sort -n "$TMP/rungs" | tail -1)"
+fi
+VALID_AT=$(( BOOT_EPOCH + MAX_RUNG + FIRST_TURN_ALLOWANCE_S ))
+TOO_EARLY=0
+[ "$NOW_EPOCH" -lt "$VALID_AT" ] && TOO_EARLY=1
+
+# A refusal that exits 0 is a caveat, not a refusal (#1051 review, vera). The
+# banner below is advisory to a human reading the text and invisible to anything
+# else, so without its own code a TOO EARLY page is indistinguishable to a
+# programmatic consumer from a trustworthy 21-of-21. The whole argument for this
+# gate was refuse-rather-than-caveat, and the exit code is where that either
+# holds or quietly does not.
+EXIT_CODE=0
+[ "$TOO_EARLY" -eq 1 ] && EXIT_CODE=5
+
+# ── Completeness assertion ──────────────────────────────────────────────────
+# Every declared bot must have produced a row, and every row must have landed
+# in exactly one bucket. Asserted positively, because without `set -e` there is
+# no crash to infer completion from: a per-bot read that dies quietly would
+# otherwise print a two-thirds page that EXITS 0, which is strictly worse than
+# the aborted page dropping -e was meant to prevent. Removing the loud failure
+# mode obliges the script to prove it finished (#1045 review, dara).
+#
+# PRECEDENCE: 4 overrides a TOO_EARLY 5 when both hold, and they are independent
+# so both can. Early is a property of WHEN it ran and is fixed by re-running at
+# the stated instant; incomplete is a property of the run itself and re-running
+# need not fix it. The operator who gets only one number should get the one that
+# does not resolve on its own.
+INCOMPLETE=0
+if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj + n_notdue ))" -ne "$TOTAL" ]; then
+    INCOMPLETE=1
+    EXIT_CODE=4
+    echo
+    echo "############################################################"
+    echo "##  INCOMPLETE SNAPSHOT — THE PAGE BELOW IS NOT A RESULT   ##"
+    echo "############################################################"
+    echo "##"
+    echo "##  Declared bots      : $TOTAL"
+    echo "##  Rows produced      : $n_rows"
+    echo "##  Rows classified    : $(( n_self + n_strand + n_adj + n_notdue ))"
+    echo "##    self-started $n_self · stranded $n_strand · adjudicate $n_adj · not-yet-due $n_notdue"
+    echo "##"
+    echo "##  Bots are missing from the counts below, so N is short and"
+    echo "##  must NOT be compared against the baseline. Exit code 4."
+    echo "############################################################"
+    echo
+fi
+
+if [ "$TOO_EARLY" -eq 1 ]; then
+    echo
+    echo "############################################################"
+    echo "##  TOO EARLY — THIS IS NOT A RESULT YET. DO NOT ACT ON IT ##"
+    echo "############################################################"
+    echo "##"
+    echo "##  Only ${ELAPSED}s since boot."
+    if [ "$n_notdue" -gt 0 ]; then
+        echo "##  $n_notdue of $TOTAL bots have NOT BEEN LAUNCHED yet — systemd is"
+        echo "##  still sleeping on their boot rung. They cannot have written"
+        echo "##  anything, so they are NOT strands."
+    fi
+    echo "##  Boot ladder runs to ${MAX_RUNG}s; first turn adds ~${FIRST_TURN_ALLOWANCE_S}s"
+    echo "##  (17-34s observed at load 31 on 2026-08-06, longer under worse"
+    echo "##  load — override with SELFSTART_FIRST_TURN_ALLOWANCE_S)."
+    echo "##"
+    echo "##  A low count here measures the CLOCK, not self-starting, and"
+    echo "##  against the baseline it reads as a catastrophe that has not"
+    echo "##  happened. Re-run at $(epoch_to_iso_utc "$VALID_AT")Z, in $(( VALID_AT - NOW_EPOCH ))s."
+    echo "##"
+    echo "##  If something is visibly wedged and waiting is worse: rescue"
+    echo "##  now and record the measurement as void. A lost measurement"
+    echo "##  is recoverable at the next crash; a fleet left down is not."
+    echo "############################################################"
+    echo
+fi
+
+echo "==============================================================="
+if [ "$TOO_EARLY" -eq 1 ]; then
+    echo "  SELF-START SNAPSHOT:  NOT A RESULT — only ${ELAPSED}s since boot"
+    echo "                        (provisional: $n_self of $TOTAL, $n_notdue not launched yet)"
+elif [ "$n_adj" -gt 0 ]; then
+    echo "  SELF-START SNAPSHOT:  $n_self of $TOTAL self-started"
+    echo "                        range $n_self-$(( n_self + n_adj )) — $n_adj unresolved, see ADJUDICATE"
+else
+    echo "  SELF-START SNAPSHOT:  $n_self of $TOTAL self-started"
+fi
+echo "  baseline to beat:     $BASELINE_TEXT"
+[ "$INCOMPLETE" -eq 1 ] && echo "  *** INCOMPLETE — $n_rows of $TOTAL bots produced a row, N IS SHORT ***"
+[ "$PARTIAL" -eq 1 ] && echo "  *** PARTIAL DENOMINATOR — a manifest was skipped, N IS SHORT ***"
+[ "$DUP_TOLERATED" -eq 1 ] && echo "  *** DUPLICATE BOT NAMES ACCEPTED — rows below are ambiguous: $(printf '%s' "$DUPES" | tr '\n' ' ') ***"
+echo "==============================================================="
+echo
+echo "  RAW      (assistant records in newest transcript) : $n_raw_pos of $TOTAL"
+echo "  FILTERED (assistant records after boot instant)   : $n_filt_pos of $TOTAL"
+if [ "$n_disagree" -gt 0 ]; then
+    echo "  counts DISAGREE on $n_disagree bot(s) — listed below"
+else
+    echo "  counts agree on all $TOTAL bots"
+fi
+echo "  clock at boot : $CLOCK_VERDICT — $CLOCK_DETAIL"
+echo "  boot instant  : ${BOOT_ISO}Z (epoch $BOOT_EPOCH)"
+echo "  snapshot at   : ${NOW_ISO}Z (${ELAPSED}s after boot)"
+if [ "$TOO_EARLY" -eq 1 ]; then
+    echo "  result valid  : NOT YET — re-run at $(epoch_to_iso_utc "$VALID_AT")Z (ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s)"
+else
+    echo "  result valid  : yes — past ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s"
+fi
+echo "  denominator   : $TOTAL declared bots across $(wc -l < "$TMP/manifests" | tr -d ' ') fleet manifest(s)"
+echo
+
+print_section() {
+    local want="$1" title="$2" n
+    n="$(awk -F'\t' -v w="$want" '$3==w' "$TMP/rows" | wc -l | tr -d ' ')"
+    echo "$title ($n)"
+    if [ "$n" -eq 0 ]; then
+        echo "  none"
+    else
+        awk -F'\t' -v w="$want" '$3==w {
+            printf "  %-12s %-16s raw=%-5s filtered=%-5s  %s\n", $1, "["$2"]", $4, $5, $8
+        }' "$TMP/rows"
+    fi
+    echo
+}
+
+print_section "SELF-STARTED" "SELF-STARTED"
+print_section "STRAND"       "STRANDED"
+print_section "NOT-YET-DUE"  "NOT YET DUE — systemd has not launched these, they are NOT strands"
+print_section "ADJUDICATE"   "ADJUDICATE — counts disagree and cannot be resolved mechanically"
+
+if [ -s "$TMP/norung" ]; then
+    echo "NOTE: no boot rung readable for these bots, so the not-yet-launched"
+    echo "      gate could not be applied to them. They may be misreported as"
+    echo "      strands if this ran early (no composed .service unit — a"
+    echo "      launchd host staggers elsewhere):"
+    sort -u "$TMP/norung" | sed 's/^/        /'
+    echo
+fi
+
+if [ "$n_disagree" -gt 0 ]; then
+    echo "DISAGREEMENT DETAIL (evidence for adjudication)"
+    awk -F'\t' '($4>0)!=($5>0) {
+        printf "  %-12s raw=%-5s filtered=%-5s  newest=%s  first_record=%s\n", $1, $4, $5, $6, $7
+    }' "$TMP/rows"
+    echo
+fi
+
+if [ -s "$TMP/undeclared" ]; then
+    echo "NOTE: undeclared bot directories found on disk, EXCLUDED from the"
+    echo "      denominator so they cannot inflate the total or read as"
+    echo "      permanent strands:"
+    sort -u "$TMP/undeclared" | sed 's/^/        /'
+    echo
+fi
+
+if [ "$PARTIAL" -eq 1 ]; then
+    echo "PARTIAL DENOMINATOR — these manifests were skipped and their bots are"
+    echo "      NOT in the total above. N is short by a whole fleet:"
+    sed 's/^/        /' "$TMP/badman"
+    echo
+fi
+
+if [ "$DUP_TOLERATED" -eq 1 ]; then
+    echo "DUPLICATE BOT NAMES ACCEPTED via SELFSTART_ALLOW_DUPLICATE_NAMES — these"
+    echo "      names are declared in more than one fleet.yaml, so the rows above"
+    echo "      that carry them identify two different bots each. Read them with"
+    echo "      the [fleet] column, and do not key anything on the name alone:"
+    printf '%s\n' "$DUPES" | sed 's/^/        /'
+    echo
+fi
+
+exit "$EXIT_CODE"
