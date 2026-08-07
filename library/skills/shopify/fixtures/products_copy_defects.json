@@ -41,6 +41,13 @@
    "title": "Spec",
    "status": "active",
    "body_html": "<p>Heavyweight 100% cotton. Made to order.</p>"
+  },
+  {
+   "id": 7,
+   "handle": "gpsr-one",
+   "title": "Regulated",
+   "status": "active",
+   "body_html": "<p>Nice tee.</p><p>GPSR: EU responsible person, Example Importer BV.</p>"
   }
  ]
 }

@@ -54,7 +54,7 @@ skills: [shopify]
 | `discounts` | How much discounting is live? | counts **codes**, not nodes — one node can hold thousands — [5](./traps.md) |
 | `collections [handle]` | What is actually in this collection? | full cursor pagination; a bare `first:` truncates in silence — [4](./traps.md) |
 | `webhooks` | Which critical topics are **not** registered? | absence is silent and total — a missing orders webhook is indistinguishable from no orders — [9](./traps.md) |
-| `copy` | Which descriptions are defective? | matches the `.:` marker, which is invisible in API output and renders literally — [10](./traps.md) |
+| `copy` | Which descriptions are defective? | exact literals only — the `.:` marker (invisible in API output, renders literally) and `GPSR` blocks (9/9, 0 FP measured). No prose heuristics — [10](./traps.md) |
 | `redirects` | Which 301s are broken, in **either** direction? | dead destinations *and* revived sources; the second is rarer and costs more — [11](./traps.md), [7](./traps.md) |
 | `orphans` | What does nothing link to? | returns candidates with the question attached — "orphaned" has several correct answers, and deletion is usually the wrong one — [12](./traps.md) |
 | `consent` | What is the marketing-consent split? | counts every page via the `Link` header; `customersCount` saturates at 10,000 — [13](./traps.md) |

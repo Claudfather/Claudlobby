@@ -213,6 +213,15 @@ else no "the two doors read collections differently again — that is the greg b
 # "100% cotton" hit the best-selling correct-format exemplar, and missed real
 # regulatory blocks carrying no keyword — wrong in both directions, so the check
 # was removed rather than re-guessed.
+# todd, measured: the bare literal "GPSR" is 9/9 recall, 0 false positives over
+# 188 bodies. That clears this door's own bar — an exact literal the defect
+# always contains — so the gap it declared was closable rather than inherent.
+jq_is "copy: flags a GPSR regulatory block (exact literal, 9/9 measured)" "$cp_" \
+      '.defects.gpsr_block == ["gpsr-one"]'
+# ...and the fuzzy terms stay gone. This is the pair that matters: the spec
+# product must remain clean while the GPSR one is caught.
+jq_is "copy: GPSR check does not drag back the 100%-cotton false positive" "$cp_" \
+      '.defects.gpsr_block | index("spec-one") | not'
 jq_is "copy: does not flag a product spec as a defect" "$cp_" \
       '[.defects[] | select(type=="array") | .[]] | index("spec-one") | not'
 if grep -q 'supplier_boilerplate' "$SH"; then

@@ -545,14 +545,20 @@ door_copy() {
         empty:        (body | gsub("<[^>]*>";"") | gsub("\\s";"") | length == 0),
         dot_colon:    (body | test("\\.:")),
         size_table:   (body | test("(?i)<table|size chart|size guide")),
-        em_dash:      (body | test("—"))
+        em_dash:      (body | test("—")),
+        # Case-SENSITIVE, and that is the measured form: the literal "GPSR" scored
+        # 9/9 recall with zero false positives across 188 bodies, checked against
+        # independent ground truth. Lower-casing it would widen a match that was
+        # measured exact, so the number would no longer describe this check.
+        gpsr:         (body | test("GPSR"))
       } ] as $rows |
     { products_checked: ($rows|length),
       defects: {
         empty_description: [ $rows[] | select(.empty)       | .handle ],
         dot_colon_marker:  [ $rows[] | select(.dot_colon)   | .handle ],
         size_table:        [ $rows[] | select(.size_table)  | .handle ],
-        em_dash:           [ $rows[] | select(.em_dash)     | .handle ]
+        em_dash:           [ $rows[] | select(.em_dash)     | .handle ],
+        gpsr_block:        [ $rows[] | select(.gpsr)        | .handle ]
       },
       warnings: ([
         (if ([$rows[]|select(.dot_colon)]|length) > 0 then
@@ -560,7 +566,7 @@ door_copy() {
         (if ([$rows[]|select(.empty)]|length) > 0 then
           "\([$rows[]|select(.empty)]|length) product(s) have no description text at all — markup only, or nothing." else empty end)
       ]),
-      bound: "Every check here is EXACT — a literal the defect always contains. There is deliberately NO supplier-boilerplate check: the obvious regex flagged \"100% cotton\", which is a product spec, on 8 products including the best-selling correct-format exemplar, while missing real regulatory blocks that carry no keyword. It was wrong in both directions. A prose heuristic that names your best page as defective is worse than no check, because a false positive in a diagnostic arrives with instructions. If you need that check, it needs a sound signal, not a longer regex."
+      bound: "Every check here is EXACT — a literal the defect always contains. gpsr_block is the measured case: the bare literal \"GPSR\" scored 9/9 recall and ZERO false positives across 188 bodies against independent ground truth. STILL NOT COVERED: general supplier boilerplate with no literal marker. The obvious regex for it flagged \"100% cotton\" — a product spec — on 8 products including the best-selling correct-format exemplar, while missing real regulatory blocks carrying no keyword; wrong in both directions, so it is not here and must not come back. A prose heuristic that names your best page defective is worse than no check, because a false positive in a diagnostic arrives with instructions. Close that gap only with another exact literal that has been measured, never a longer regex."
     }'
 }
 
