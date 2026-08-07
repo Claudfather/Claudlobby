@@ -61,9 +61,6 @@ After the skill completes, collect:
 - All GitHub issue URLs created
 - Key findings summary with severity levels
 - Positive notes (what's well-implemented)
-- What this pass did NOT cover — directories you skipped, files you
-  pattern-matched rather than read, caps or limits you hit, sources that were
-  unreachable
 
 Return a structured summary with:
 - REPO: {REPO}
@@ -71,15 +68,23 @@ Return a structured summary with:
 - TYPE: {TYPE}
 - ISSUES: comma-separated list of issue URLs
 - FINDINGS: brief summary of key findings
-- BOUNDS: what this pass did NOT cover, concretely. "Read all 14 files under
-  api/; grepped but did not read the 40 files under vendor/; skipped tests/."
-  Say "exhaustive: <what was fully read>" only if that is literally true.
-  Never "n/a" or "none" — a pass always has bounds, and a zero-finding audit
-  without them reads as a thorough all-clear.
+- FILES_FOUND: how many files in {DIR} were in scope for this audit type
+- FILES_READ: how many of those you actually opened and read
+- FILES_GREPPED: how many you only pattern-matched, never read
+- SKIPPED: each path you did not cover, and why — or the single word `none`
+- CAP_HIT: the limit that stopped you (tool cap, time, context, unreachable
+  source), or the single word `none`
 ```
 
-BOUNDS is what the tracker records as this pass's coverage. Only the subagent
-knows it, which is why it is collected here rather than composed afterwards.
+**These are counts, not prose, and that is the point.** The parent composes the
+tracker's bounds string from them below. A number cannot be produced without
+having done the counting, so an engineer who did not do the work cannot fill
+this in — where a free-text "bounds" field can always be satisfied with
+something plausible-sounding that describes no particular sweep.
+
+`SKIPPED` and `CAP_HIT` still carry free text, and that half is **not**
+derivable — a reason for skipping is a judgement. Treat those as unverified
+context around the counts, which are the load-bearing part.
 
 **IMPORTANT: The subagent needs full permissions.** It will:
 - Read many files across the repo (Glob, Grep, Read)
@@ -91,30 +96,37 @@ If the subagent can't create issues due to permissions, the sweep fails silently
 
 **Step 4: Process results**
 
-When the subagent completes, parse its output for REPO, DIR, TYPE, ISSUES, FINDINGS, and BOUNDS.
+When the subagent completes, parse its output for REPO, DIR, TYPE, ISSUES,
+FINDINGS, and the five coverage fields.
 
-Log the audit:
-```bash
-python3 <ASSISTANT_TOOLS_DIR>/audit-tracker.py log --repo {REPO} --directory {DIR} --type {TYPE} --issues {ISSUE_URLS} --bounds "{BOUNDS}"
-```
-
-`--bounds` is required and the tracker refuses the record without it. **Pass
-through what the subagent reported — do not compose one here.** You did not do
-the scanning, so any bounds you write yourself is a guess about someone else's
-coverage, which is the failure the flag exists to catch.
-
-**If the subagent returned no BOUNDS**, that is itself the honest bounds — log
-it as such and say so in `latest.md`:
+**Build the bounds string from the counts — do not retype it as prose.** Fill
+every brace from a reported value:
 
 ```bash
 python3 <ASSISTANT_TOOLS_DIR>/audit-tracker.py log --repo {REPO} --directory {DIR} --type {TYPE} --issues {ISSUE_URLS} \
-  --bounds "coverage unknown: subagent completed and reported findings but no BOUNDS; treat this area as unaudited"
+  --bounds "read {FILES_READ} of {FILES_FOUND} in-scope files in {DIR}; {FILES_GREPPED} pattern-matched only; skipped: {SKIPPED}; cap: {CAP_HIT}"
 ```
 
-Never substitute `"n/a"`, `"none"`, or an empty string to get the command to
-run. Those parse, so the record lands looking compliant and reads as a clean
-all-clear that nobody can falsify — strictly worse than the loud failure of
-omitting the flag.
+This is derivation, not validation, and the difference is the whole point.
+A bounds statement the engineer *types* can always be satisfied by something
+plausible — `"Reviewed the repository structure and did not find significant
+issues in the areas examined"` is not `"n/a"`, parses fine, and describes any
+sweep of any repo unchanged. A bounds statement **composed from counts the
+sweep actually produced** cannot be written without having done the counting.
+Banning bad values is a deny-list, and the next bad value is never on it.
+
+Backstop for the free-text halves: **a bounds statement that could describe any
+sweep of any repo, unchanged, is not a real one.** It must name at least one
+specific file, directory, count, or limit actually hit this pass.
+
+**If the subagent did not return the counts**, that is itself the honest bounds.
+Do not estimate them — you did not do the scanning, and a fabricated count is
+worse than an admitted gap because it looks like evidence:
+
+```bash
+python3 <ASSISTANT_TOOLS_DIR>/audit-tracker.py log --repo {REPO} --directory {DIR} --type {TYPE} --issues {ISSUE_URLS} \
+  --bounds "coverage unknown: subagent completed and reported findings but no file counts; treat this area as unaudited"
+```
 
 **Step 5: Write summary**
 
@@ -126,7 +138,7 @@ Overwrite `<ASSISTANT_TOOLS_DIR>/audit-results/latest.md` with:
 **Directory:** {DIR}
 **Type:** {TYPE}
 **Issues Created:** {COUNT}
-**Coverage:** {BOUNDS}
+**Coverage:** read {FILES_READ} of {FILES_FOUND} in-scope files; {FILES_GREPPED} pattern-matched only; skipped: {SKIPPED}; cap: {CAP_HIT}
 
 ## High Priority ({N})
 - [#{NUM}](URL) — one-line description
@@ -196,7 +208,7 @@ The 9pm weekday cron (`evening-audit.sh`) sends `/sweep` to the tmux session. Th
 1. Always use `rolling-audit.sh suggest` to pick the target — never choose manually
 2. Always pull latest code before auditing
 3. Always run via background subagent — don't block the main session
-4. Always log with `audit-tracker.py` after completion, even on failure — and always with a real `--bounds`. On the success path pass through the subagent's BOUNDS; on the failure path write what you observed. `"n/a"` parses and defeats the gate, which is worse than not logging at all
+4. Always log with `audit-tracker.py` after completion, even on failure — and always build `--bounds` from values the run actually produced: the subagent's file counts on the success path, what you observed on the failure path. A bounds string that could describe any sweep of any repo unchanged is not one, however plausible it reads
 5. Always overwrite `latest.md` with fresh results
 6. The directory suggestion is a hint — if it doesn't exist, let the planning skill discover the right paths
 

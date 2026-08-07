@@ -83,9 +83,6 @@ After the skill completes, collect:
 - All GitHub issue URLs created
 - Key findings summary with severity levels
 - Positive notes (what's well-implemented)
-- What this pass did NOT cover — directories you skipped, files you
-  pattern-matched rather than read, caps or limits you hit, sources that were
-  unreachable
 
 Return a structured summary:
 - REPO: <REPO>
@@ -93,11 +90,18 @@ Return a structured summary:
 - TYPE: <TYPE>
 - ISSUES: comma-separated list of issue URLs
 - FINDINGS: brief summary
-- BOUNDS: what this pass did NOT cover, concretely. "Read all 14 files under
-  api/; grepped but did not read the 40 files under vendor/; skipped tests/."
-  Say "exhaustive: <what was fully read>" only if that is literally true.
-  Never "n/a" or "none" — a pass always has bounds.
+- FILES_FOUND: how many files in <DIR> were in scope for this audit type
+- FILES_READ: how many of those you actually opened and read
+- FILES_GREPPED: how many you only pattern-matched, never read
+- SKIPPED: each path you did not cover, and why — or the single word `none`
+- CAP_HIT: the limit that stopped you (tool cap, time, context, unreachable
+  source), or the single word `none`
 ```
+
+**Counts, not prose.** The coverage line recorded in Step 5 is composed from
+these, and a number cannot be produced without having done the counting — where
+a free-text coverage field can always be filled with something plausible that
+describes no particular sweep.
 
 **IMPORTANT: The subagent needs full permissions.** It will:
 - Read many files (Glob, Grep, Read)
@@ -115,12 +119,19 @@ Update your sweep tracker (whatever you use — a JSON file, a Notion DB, a dedi
 - Timestamp
 - Issue URLs created
 - Count of findings
-- **Coverage bounds** — the subagent's BOUNDS, verbatim
+- **Coverage bounds**, composed from the subagent's counts:
+  `read <FILES_READ> of <FILES_FOUND> in-scope files; <FILES_GREPPED> pattern-matched only; skipped: <SKIPPED>; cap: <CAP_HIT>`
 
 The bounds field is not optional bookkeeping. A record of "0 findings" without
 it is indistinguishable from a thorough all-clear, and whatever selects the
 next target reads that as "audited, park it". Record what was NOT covered or
-the count means nothing. If your tracker has no bounds field, add one before
+the count means nothing.
+
+Build it from the counts rather than retyping a summary. A coverage line the
+engineer composes freehand can always be satisfied by something that sounds
+thorough and describes any sweep of any repo unchanged; one built from numbers
+the sweep produced cannot be written without the sweep. If a line you wrote
+would read the same against a different repo, it is not a bounds statement. If your tracker has no bounds field, add one before
 recording; if the sweep died, record that nothing was covered rather than
 omitting the entry — a missing record usually reads as "never audited", which
 is right by accident, but an entry with a timestamp and no bounds reads as
