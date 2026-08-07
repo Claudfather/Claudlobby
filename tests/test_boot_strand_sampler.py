@@ -37,9 +37,14 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures" / "pane-states"
 
 summary = load_lib_module("boot-strand-summary")
 
-# A stranded STARTUP_PROMPT probe, capped exactly as pane_send_verified caps it.
+# A stranded STARTUP_PROMPT payload, passed in FULL exactly as pane_send_verified
+# now passes it (#1082). It used to be truncated to 60 chars here, mirroring the
+# retired `_PANE_PROBE_MAX_CHARS` cap; under reversed containment a truncated
+# probe is actively wrong, because a rendered line longer than the prefix is not
+# a substring of it and a genuinely-stranded boot reclassifies as no-evidence.
 WRAPPED_PROBE = (
-    "set +H; PROBE763WRAP You just started up. Read your CLAUDE.md, then post"[:60]
+    "set +H; PROBE763WRAP You just started up. Read your CLAUDE.md, then post a "
+    "brief ready message and wait for task assignments."
 )
 
 

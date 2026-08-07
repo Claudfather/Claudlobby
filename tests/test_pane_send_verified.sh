@@ -366,20 +366,43 @@ run_send 'PROBE763TRANSCRIPT reply ok' "$FIXTURES/input-clean-submit.txt" >/dev/
 r=$(count_events '"type":"send_retry"')
 assert_eq "a clean submit emits NO send_retry event" "1" "$r"
 
-echo "=== probe cap: a wrapped payload is still detected ==="
+echo "=== wrapped payloads are detected regardless of WHERE the box breaks (#1082) ==="
 
-# The STARTUP_PROMPT shape — a payload too long for one rendered line, wrapped
-# across the input box but not long enough to collapse into a placeholder. The
-# probe cap is what makes this detectable: the full text spans a wrap point and
-# matches no single line, so a verify probing the whole payload sees nothing.
+# The STARTUP_PROMPT shape — too long for one rendered line, wrapped across the
+# input box but not long enough to collapse into a placeholder.
 wrapped='set +H; PROBE763WRAP You just started up. Read your CLAUDE.md, then post a brief ready message and wait for task assignments.'
 wpane=$(cat "$FIXTURES/input-stuck-wrapped.txt")
 r=$(printf '%s\n' "$wpane" | grep -qF "$wrapped" && echo yes || echo no)
 assert_eq "the full payload matches no single rendered line (it is wrapped)" "no" "$r"
-r=$(printf '%s\n' "$wpane" | grep -qF "${wrapped:0:$_PANE_PROBE_MAX_CHARS}" && echo yes || echo no)
-assert_eq "the capped probe DOES match a rendered line" "yes" "$r"
+r=$(pane_holds_unsubmitted "$wpane" "$wrapped" && echo yes || echo no)
+assert_eq "reversed containment still detects it (late wrap)" "yes" "$r"
 r=$(run_send "$wrapped" "$FIXTURES/input-stuck-wrapped.txt")
 assert_eq "wrapped payload stuck at the input line -> Enter resent" "3" "$r"
+
+# THE REGRESSION THIS FILE PREVIOUSLY MISSED, and the reason it missed it.
+# The block above passed under the retired 60-char prefix probe — but only
+# because its fixture happens to wrap LATE: that glyph line carries 76 chars, so
+# a 60-char prefix fits on it. The box WORD-wraps, so the break point is a
+# property of the text, not a constant. This fixture wraps at 47 chars, which is
+# the ordinary case for a real dispatch, and the prefix probe cannot see it.
+#
+# A test named for the right property, exercising the right mechanism, on a
+# fixture structurally incapable of exhibiting the failure. Keep BOTH fixtures:
+# the pair is the evidence that the wrap point moves.
+early='set +H; PROBE1082EARLY Confirm the counts, then report DEAD/ALIVE/UNDECIDED with evidence classes attached'
+epane=$(cat "$FIXTURES/input-stuck-wrapped-early.txt")
+r=$(printf '%s\n' "$epane" | grep -qF "${early:0:60}" && echo yes || echo no)
+assert_eq "a 60-char prefix probe does NOT match an early wrap (the bug)" "no" "$r"
+r=$(pane_holds_unsubmitted "$epane" "$early" && echo yes || echo no)
+assert_eq "reversed containment DOES detect it (early wrap)" "yes" "$r"
+r=$(run_send "$early" "$FIXTURES/input-stuck-wrapped-early.txt")
+assert_eq "early-wrapped payload stuck -> Enter resent" "3" "$r"
+
+# The direction that must never regress: an EMPTY box is not evidence of a held
+# payload. The empty string is a substring of everything, so reversed
+# containment without a floor would fire a ghost Enter into an idle pane.
+r=$(pane_holds_unsubmitted "$(printf '❯ \n────\n  auto mode on\n')" "$early" && echo yes || echo no)
+assert_eq "an EMPTY box is NOT held (no ghost Enter)" "no" "$r"
 
 echo ""
 echo "=== $PASS/$TOTAL passed, $FAIL failed ==="
