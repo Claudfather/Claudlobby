@@ -223,7 +223,7 @@ Each library category has its own format. Check the category's `README.md` for s
 4. Run `claudlobby --fleet <name> diff` to verify no unintended drift
 5. Commit to a branch, PR, review
 
-**Two things about the test suite that will otherwise cost you an hour.**
+**Three things about the test suite that will otherwise cost you an hour.**
 
 *Run it unsandboxed — and do not diff sandboxed runs either.* `lib/` scripts call `mktemp -d`
 into the real `$TMPDIR`. Under a restrictive agent sandbox those calls return `Operation not
@@ -243,10 +243,38 @@ assume your change caused a failure, and do not assume it didn't because the *co
 compare the failing test **names**:
 
 ```bash
-git stash push -u && ./.venv/bin/pytest -q --tb=no | grep ^FAILED | sort > /tmp/before.txt
-git stash pop     && ./.venv/bin/pytest -q --tb=no | grep ^FAILED | sort > /tmp/after.txt
+git stash push -u
+./.venv/bin/pytest --tb=no -ra > /tmp/run_before.txt 2>&1; rc_before=$?
+awk "/short test summary info/,0" /tmp/run_before.txt | grep -E "^(FAILED|ERROR)" | sort > /tmp/before.txt
+git stash pop
+./.venv/bin/pytest --tb=no -ra > /tmp/run_after.txt 2>&1; rc_after=$?
+awk "/short test summary info/,0" /tmp/run_after.txt | grep -E "^(FAILED|ERROR)" | sort > /tmp/after.txt
 comm -13 /tmp/before.txt /tmp/after.txt      # failures YOU introduced
 ```
+
+*And check `rc` — an empty diff is not the same as a clean one.* The naive
+`pytest | grep ^FAILED` this recipe used to print was wrong in **two independent
+directions**, and the two fixes above are each the *sole* defense for one of them (#1035).
+Drop either and a live hole reopens.
+
+| rc | situation | what the naive check did |
+|---|---|---|
+| 0 / 1 | passed / real failures | missed every failure — `addopts = "-rs"` **replaces** pytest's default `fE` reportchars (`-r` is store, not append), so no `FAILED` line is ever printed |
+| 2 | collection error, suite aborted | printed `ERROR`, not `FAILED` — and the count line reads `1 error`, so a count check misses it too |
+| 4 | bad path or flag | **invented a failure** — `ERROR: file or directory not found:` matches, so a typo in the *after* run fabricates a regression |
+| 5 | nothing collected | nothing to match — reads clean |
+| 127 | no `.venv` (e.g. run from the shared install, not your checkout) | nothing to match — reads clean |
+
+- **`rc` not in {0,1} → the diff is not evidence.** This is the only thing that sees rc 2 /
+  5 / 127, where zero or partial tests ran. Scoping cannot: those emit no summary block.
+- **Scoping to the summary block** is the only thing that sees the rc 0 / rc 1 phantoms —
+  captured logs and `log_cli` output both appear *above* that banner, only pytest's verdict
+  lines appear inside it. The gate cannot: those exit 0 or 1, inside the band it certifies.
+  This also makes `--tb=no`, verbosity and `log_cli` irrelevant by construction.
+- **Never pipe pytest into grep.** You would capture *grep's* status, which is only ever 0
+  or 1 — every broken mode laundered into "this is evidence" and the gate passes silently.
+  Redirect, read `$?`, then grep the file. Same `${PIPESTATUS[0]}` trap this file documents
+  for `gh api ... | head`.
 
 ### Adding or modifying lib/ scripts
 
