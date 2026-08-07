@@ -119,11 +119,33 @@ _claudron_query_before() {
     # claudron-less hosts); every failure past here is caught by the
     # 2>/dev/null + return-0 net on the invocations themselves.
     command -v claudron >/dev/null 2>&1 || return 0
-    local raw parsed pointers
-    # The whole task is one quoted query argument (lookup tokenizes
-    # internally; quoting avoids glob expansion of task text).
+    local raw parsed pointers query
+    # QUERY IS THE HEAD OF THE TASK, NOT THE WHOLE TASK.
+    #
+    # Passing the entire payload collapses the ranking rather than widening it.
+    # Measured: a short query graded 160/120/80/80 across candidates; the same
+    # lookup with a full dispatch as the query returned a FLAT 200 for four
+    # unrelated notes. Whatever sits at the global ceiling comes back, because a
+    # paragraph resembles nothing in particular. The result is a pointer set that
+    # is topically INERT — the same handful returned across unrelated subjects.
+    #
+    # And a signal that fires on every input carries no information about the
+    # input. Two readers independently reported these pointers becoming chrome
+    # within an hour — including, on the day it applied, the note whose title
+    # names the exact error class both of them then committed. That is the case
+    # for this fix on its own, separate from anything the ranking does.
+    #
+    # A CHARACTER cap, not a line cap: `TASK="$*"` and a dispatch is one line by
+    # construction (the tmux send is single-line), so "first line or two" is the
+    # whole payload and would change nothing.
+    #
+    # The head is the right slice rather than an arbitrary one: the fleet's own
+    # comms protocol requires a dispatch to lead with the decision or the ask, so
+    # the subject is front-loaded by construction. The `[fleet memory: …]` prefix
+    # is prepended BELOW, after this lookup, so it cannot poison its own query.
+    query=$(printf '%s' "$TASK" | cut -c1-"${CLAUDRON_QUERY_MAX_CHARS:-200}")
     raw=$(claudron lookup --json \
-        --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$TASK" 2>/dev/null) || return 0
+        --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$query" 2>/dev/null) || return 0
     # Emits "<count>\t<title (abs path); ...>". Claudron-supplied strings are
     # sanitized to printable-by-construction before use: pipes become "/"
     # (the [BOTCOMMAND] envelope is pipe-delimited) and runs of whitespace OR

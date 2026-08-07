@@ -279,3 +279,76 @@ def test_clean_output_is_fixed_point_of_tmux_sanitizer(tmp_path):
     assert r.returncode == 0, r.stderr
     assert row["claudron_hits"] == "1"
     assert call_lib_fn("sanitize_tmux_input", row["task"]) == row["task"]
+
+
+# ── query truncation (#claudron-query-collapse) ───────────────────────────────
+#
+# Passing the WHOLE dispatch as the lookup query collapses the ranking: measured,
+# a short query graded 160/120/80/80 while a full dispatch returned a FLAT 200
+# for four unrelated notes. The pointer set then stops varying with the subject —
+# and a signal that fires on every input carries no information about the input.
+#
+# The acceptance criterion is a PAIR, and neither half proves anything alone:
+#   different subjects -> different pointer sets   (else the set is inert)
+#   same query twice   -> the SAME pointer set     (else the variance is NOISE)
+# Variance alone is satisfiable by a nondeterministic lookup, which would pass
+# while grading nothing. These tests assert the pair at the QUERY layer, which is
+# what this repo controls; the pointer-set version needs a real vault and is the
+# gated acceptance run.
+
+
+def _query_sent(tmp_path: Path) -> str:
+    """The query argument the wedge actually handed to `claudron lookup`."""
+    argv = (tmp_path / "claudron-argv.txt").read_text().splitlines()
+    return argv[-1]
+
+
+def _query_for(tmp_path: Path, task: str, sub: str, **extra) -> str:
+    """One dispatch in its OWN directory, returning the query claudron saw.
+    Separate dirs because _fake_lib mkdirs without exist_ok, so two runs cannot
+    share a root — and comparing two runs is the whole point of the pair below."""
+    root = tmp_path / sub
+    root.mkdir()
+    env = {**_wedge_env(root, json.dumps(TWO_HITS)), **extra}
+    _run_dispatch(root, env, task=task)
+    return _query_sent(root)
+
+
+def test_query_is_capped_not_the_whole_task(tmp_path):
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    long_task = "restore the ranking " * 40  # ~800 chars, one line
+    _run_dispatch(tmp_path, env, task=long_task)
+    sent = _query_sent(tmp_path)
+    assert len(sent) == 200, f"expected a 200-char cap, got {len(sent)}"
+    assert sent == long_task[:200]
+
+
+def test_short_task_passes_through_whole(tmp_path):
+    # The cap must not perturb the common case.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    short = "fix the spotify rate limit job"
+    _run_dispatch(tmp_path, env, task=short)
+    assert _query_sent(tmp_path) == short
+
+
+def test_same_task_yields_an_identical_query(tmp_path):
+    # DETERMINISM half. Without it, "different subjects differ" is satisfied by
+    # noise — and a randomly-varying pointer set is worse than a flat one,
+    # because at least a flat set is stable enough to learn to ignore.
+    task = "investigate the boot strand on pranav " * 12
+    assert _query_for(tmp_path, task, "run1") == _query_for(tmp_path, task, "run2")
+
+
+def test_different_subjects_yield_different_queries(tmp_path):
+    # VARIANCE half. Both tasks exceed the cap, so before truncation both were
+    # simply "the whole payload" — long, and topically indistinguishable to a
+    # ranker that returns its global ceiling for any paragraph.
+    a = _query_for(tmp_path, "restore the claudron ranking " * 20, "subjA")
+    b = _query_for(tmp_path, "extend the pane verify budget " * 20, "subjB")
+    assert a != b
+
+
+def test_cap_is_overridable(tmp_path):
+    env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "40"}
+    _run_dispatch(tmp_path, env, task="restore the ranking " * 40)
+    assert len(_query_sent(tmp_path)) == 40
