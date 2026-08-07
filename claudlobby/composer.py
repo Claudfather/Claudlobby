@@ -3170,8 +3170,9 @@ def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) ->
 
     Consumed by ``lib/gh-mention-guard.sh`` (#1019), which rewrites ``@<name>``
     out of GitHub-bound tool calls. Every one of this estate's bot names is also
-    a real GitHub account — 19 of 21 belonging to real people — so an unguarded
-    teammate reference emails a stranger. One of them asked us to stop.
+    a real GitHub account — all 21 resolve, 19 of them to real people and 2 to
+    organizations — so an unguarded teammate reference emails a stranger. One of
+    them asked us to stop. There is no safe name.
 
     COMPOSED, never hardcoded: a literal list re-breaks the moment a bot is
     added, which is #1009's defect class exactly.
