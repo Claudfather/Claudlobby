@@ -325,6 +325,12 @@ fleet:
     probe: $sub/config
   plugins:
     include_defaults: false
+  # Probe bots opt out of default guardrails for the same isolation reason they
+  # opt out of default plugins above: the two variants compose at DIFFERENT
+  # roots, so any defaulted content rendering {{CLAUDLOBBY_ROOT}} differs per
+  # variant and trips the clause-only gate on a path, not on the clause.
+  system_defaults:
+    guardrails: false
   bots:
     cov-probe:
       name: cov-probe
@@ -630,6 +636,10 @@ fleet:
     probe: $sub/config
   plugins:
     include_defaults: false
+  # See cov-ab above: per-variant roots make any {{CLAUDLOBBY_ROOT}}-rendering
+  # default trip the component-only gate on a path rather than the component.
+  system_defaults:
+    guardrails: false
   bots:
     suc-probe:
       name: suc-probe
