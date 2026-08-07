@@ -14,6 +14,11 @@ Two tiers, mirroring tests/test_freshbox_boot_harness.py:
    1-boot sample against the real claude binary and asserts the
    SAMPLER_RESULT contract. The n=20 measurement run for #843 is an operator
    action, not a test.
+
+3. #933 red-first reproducer (separately gated, EXPECTED RED on main):
+   BOOT_SAMPLER_LOAD_REPRO=1 boots under synthetic CPU load and asserts that a
+   stranded boot is never reported as a clean send. It has its own gate because
+   it is deliberately failing and it loads a shared host.
 """
 
 from __future__ import annotations
@@ -178,3 +183,87 @@ def test_real_boot_smoke_one_boot():
     fields = dict(kv.split("=", 1) for kv in line[0].split()[1:])
     assert fields["n"] == "1"
     assert json.loads(fields["strands"]) in (0, 1)
+
+
+# ── #933 red-first reproducer ─────────────────────────────────────────────────
+#
+# EXPECTED TO FAIL on current main. That is the point: it states the contract
+# pane_send_verified is supposed to hold, under the condition that actually
+# occurs in production, and current code does not hold it.
+#
+# The contract: a boot classified `strand` means the payload was never
+# submitted and is still sitting in a drawn input box. pane_send_verified saw
+# that box and returned CLEAN anyway, emitting nothing. So for every stranded
+# boot there must be some ledger evidence that the send path did not consider
+# itself finished — today `retry_fired` is 0 for exactly those boots.
+#
+# Load is not a tuning parameter here, it is the reproduction condition:
+# measured on the 4-core reference host, the idle arm submits and the loaded
+# arm strands. Running this without --load samples the wrong condition and
+# passes for the wrong reason, which is how the path shipped green.
+#
+# Separate opt-in from the smoke test above: it is deliberately red, it burns
+# CPU on a shared host, and a run takes minutes per boot.
+_load_skip = _skip or (
+    ""
+    if os.environ.get("BOOT_SAMPLER_LOAD_REPRO") == "1"
+    else "set BOOT_SAMPLER_LOAD_REPRO=1 (red-first #933 reproducer; loads the host)"
+)
+
+
+@pytest.mark.skipif(bool(_load_skip), reason=_load_skip)
+def test_strand_under_load_is_never_reported_as_a_clean_send():
+    env = {**os.environ, "CLAUDLOBBY_SRC": str(REPO_ROOT)}
+    burners = os.environ.get("BOOT_SAMPLER_LOAD_BURNERS", "20")
+    result = subprocess.run(
+        [
+            "bash",
+            str(SAMPLER),
+            "-n",
+            "6",
+            "--deadline",
+            "90",
+            "--load",
+            burners,
+            "--keep",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        env=env,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, f"sampler failed:\n{out}"
+
+    kept = [
+        ln.split(": ", 1)[1]
+        for ln in out.splitlines()
+        if ln.startswith("kept artifacts")
+    ]
+    assert kept, f"no kept-artifacts path to read rows from:\n{out}"
+    rows = [
+        json.loads(ln)
+        for ln in (Path(kept[0]) / "artifacts" / "rows.jsonl").read_text().splitlines()
+        if ln.strip()
+    ]
+    sample = [r for r in rows if r["kind"] == "sample"]
+    strands = [r for r in sample if r["outcome"] == "strand"]
+
+    # A run with no strands has not exercised the contract. Report that as a
+    # skip rather than a pass: a green light off zero observations is the same
+    # false all-clear #933 is about.
+    if not strands:
+        pytest.skip(
+            "no strands at loadavg "
+            f"{[r.get('loadavg_1m') for r in sample]} — condition not reproduced, "
+            "nothing asserted (raise BOOT_SAMPLER_LOAD_BURNERS)"
+        )
+
+    silent = [r for r in strands if not r["retry_fired"]]
+    assert not silent, (
+        f"{len(silent)} of {len(strands)} stranded boots were reported as CLEAN sends "
+        f"(retry_fired=0). loadavg at those boots: "
+        f"{[r.get('loadavg_1m') for r in silent]}. "
+        "pane_send_verified decided the box was empty and returned success on a "
+        "payload that is still sitting in it."
+    )
