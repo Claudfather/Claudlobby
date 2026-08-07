@@ -1880,6 +1880,39 @@ host_bots_dirs() {
     return 0
 }
 
+discover_fleet_manifests() {
+    # Emit "<fleet-name><TAB><path to its fleet.yaml>" for every fleet overlay on
+    # this host, one per line.
+    #
+    # Bash sibling of claudlobby/paths.py::_iter_fleet_dirs, with ONE deliberate
+    # difference: that helper yields candidate DIRS ungated at depth 1 so its
+    # callers can filter, while every caller here needs to PARSE the manifest, so
+    # this one yields only dirs that actually carry one.
+    #
+    # Enumerates depth 1 (local/<fleet>/) and depth 2 (local/<system>/<fleet>/),
+    # descending only into depth-1 dirs that are CONTAINERS (no fleet.yaml of
+    # their own) — never past two levels. Fleet name is the directory basename.
+    #
+    # Why this exists at all: fleet-state.json is host-shared, so attributing a
+    # row to the fleet that declares it is a HOST-wide question and no bash
+    # helper answered it. Hand-rolling that glob per caller is how two readers
+    # end up disagreeing about which fleets exist (#892).
+    local root="${CLAUDLOBBY_ROOT:?}" d c
+    [ -d "$root/local" ] || return 0
+    for d in "$root"/local/*/; do
+        [ -d "$d" ] || continue
+        if [ -f "${d}fleet.yaml" ]; then
+            printf '%s\t%s\n' "$(basename "$d")" "${d}fleet.yaml"
+            continue
+        fi
+        for c in "$d"*/; do
+            [ -d "$c" ] || continue
+            [ -f "${c}fleet.yaml" ] || continue
+            printf '%s\t%s\n' "$(basename "$c")" "${c}fleet.yaml"
+        done
+    done
+}
+
 parse_fleet_bots() {
     # Emit the bot names declared in a fleet.yaml (one per line) — the single
     # source of truth for "which bots does this fleet own". Supervision scripts

@@ -1972,5 +1972,60 @@ harness_check "  ...and DOES fast-forward once a newer release is cut" "$r"
 
 
 echo ""
+echo "=== validate #892: an audit verb with no --enroll must not write ==="
+# state/fleet-state.json is ONE host-shared file, while prune builds its keep-list
+# from a SINGLE fleet manifest — so every bot outside the invoking fleet is
+# undeclared BY CONSTRUCTION and gets deleted on a perfect parse. That fired at
+# least seven times in one day across three managers, on ordinary session-start
+# hygiene, and none of them caught it: the verb is named, documented and flagged
+# as report-only, and the output read as routine housekeeping.
+#
+# FLEET_STATE_PATH is set explicitly below rather than inherited. This harness
+# overrides CLAUDLOBBY_ROOT at every call site but never FLEET_STATE_PATH, which
+# fleet-state-update.sh PREFERS — so a bot running the harness writes its fixture
+# rows into REAL host state. That leak is filed separately; this section must not
+# depend on it being fixed, and must not contribute to it.
+FS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-fs.XXXXXX")"
+mkdir -p "$FS_ROOT/local/f-alpha/runtime/bots" "$FS_ROOT/local/f-beta/runtime/bots" "$FS_ROOT/state"
+printf 'fleet:\n  name: f-alpha\n  bots:\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/fleet.yaml"
+printf 'fleet:\n  name: f-beta\n  bots:\n    b1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-beta/fleet.yaml"
+FS_STATE="$FS_ROOT/state/fleet-state.json"
+fs_seed() { printf '{"updated":"x","bots":{"a1":{"status":"idle"},"b1":{"status":"working"}},"queue":[]}' > "$FS_STATE"; }
+fs_reconcile() { CLAUDLOBBY_ROOT="$FS_ROOT" FLEET_STATE_PATH="$FS_STATE" "$LIB_DIR/reconcile-fleet.sh" "$@" 2>&1 || true; }
+
+# The incident, reproduced: f-alpha audits, and f-beta must survive it.
+fs_seed
+fs_before="$(cat "$FS_STATE")"
+fs_out="$(fs_reconcile f-alpha)"
+[ "$(cat "$FS_STATE")" = "$fs_before" ] && r=yes || r=no
+harness_check "AUDIT (no --enroll) writes NOTHING to host-shared fleet-state" "$r"
+[ "$(printf '%s' "$fs_out" | grep -c 'WOULD prune')" -ge 1 ] && r=yes || r=no
+harness_check "  ...but still REPORTS what would go (the audit keeps its signal)" "$r"
+printf '%s' "$fs_out" | grep -q 'f-beta (NOT this fleet' && r=yes || r=no
+harness_check "  ...naming the OTHER fleet whose rows they are" "$r"
+printf '%s' "$fs_out" | grep -q 'host-declared bots have NO row' && r=yes || r=no
+harness_check "  ...and what is MISSING, not merely what this run would remove" "$r"
+
+# --enroll still applies it: the write moved behind the flag, it did not vanish.
+fs_seed
+fs_reconcile f-alpha --enroll >/dev/null
+[ "$(jq -r '.bots | has("b1")' "$FS_STATE")" = "false" ] && r=yes || r=no
+harness_check "--enroll DOES apply the prune (the write moved, it did not vanish)" "$r"
+[ "$(jq -r '.updated' "$FS_STATE")" != "x" ] && r=yes || r=no
+harness_check "  ...and stamps .updated, like the delete and update arms" "$r"
+
+# Zero extraction is the guard the wipe needed: an empty keep-set matches no key.
+printf 'fleet:\n  name: f-alpha\n  bots:  # my bots\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/drift.yaml"
+fs_seed
+fs_before="$(cat "$FS_STATE")"
+CLAUDLOBBY_ROOT="$FS_ROOT" FLEET_STATE_PATH="$FS_STATE" \
+    "$LIB_DIR/fleet-state-update.sh" prune "$FS_ROOT/local/f-alpha/drift.yaml" >/dev/null 2>&1 && r=no || r=yes
+harness_check "zero-extraction (PyYAML-valid trailing comment) REFUSES, nonzero" "$r"
+[ "$(cat "$FS_STATE")" = "$fs_before" ] && r=yes || r=no
+harness_check "  ...and touched no rows (an empty keep-set would delete every one)" "$r"
+
+rm -rf "$FS_ROOT"
+
+echo ""
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]
