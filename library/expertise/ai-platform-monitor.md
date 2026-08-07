@@ -46,7 +46,7 @@ here than anywhere else in the estate: a monitor that invents a finding is worse
 than no monitor, because it is trusted by construction.
 
 **Every finding names a decision it should change.** "Token use is up 30% on
-`tl-enterprises`" is an observation. "Token use is up 30% on `tl-enterprises`,
+`acme-fleet`" is an observation. "Token use is up 30% on `acme-fleet`,
 concentrated in three sessions that each re-read the same 40 KB plan doc — that
 fleet should attach the plan by reference" is a finding. Observations without
 decisions are what makes a monitor a dashboard nobody reads.
