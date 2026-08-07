@@ -83,6 +83,9 @@ After the skill completes, collect:
 - All GitHub issue URLs created
 - Key findings summary with severity levels
 - Positive notes (what's well-implemented)
+- What this pass did NOT cover — directories you skipped, files you
+  pattern-matched rather than read, caps or limits you hit, sources that were
+  unreachable
 
 Return a structured summary:
 - REPO: <REPO>
@@ -90,6 +93,10 @@ Return a structured summary:
 - TYPE: <TYPE>
 - ISSUES: comma-separated list of issue URLs
 - FINDINGS: brief summary
+- BOUNDS: what this pass did NOT cover, concretely. "Read all 14 files under
+  api/; grepped but did not read the 40 files under vendor/; skipped tests/."
+  Say "exhaustive: <what was fully read>" only if that is literally true.
+  Never "n/a" or "none" — a pass always has bounds.
 ```
 
 **IMPORTANT: The subagent needs full permissions.** It will:
@@ -108,8 +115,20 @@ Update your sweep tracker (whatever you use — a JSON file, a Notion DB, a dedi
 - Timestamp
 - Issue URLs created
 - Count of findings
+- **Coverage bounds** — the subagent's BOUNDS, verbatim
 
-If you maintain per-repo `last_swept` in fleet-state.json, update it here.
+The bounds field is not optional bookkeeping. A record of "0 findings" without
+it is indistinguishable from a thorough all-clear, and whatever selects the
+next target reads that as "audited, park it". Record what was NOT covered or
+the count means nothing. If your tracker has no bounds field, add one before
+recording; if the sweep died, record that nothing was covered rather than
+omitting the entry — a missing record usually reads as "never audited", which
+is right by accident, but an entry with a timestamp and no bounds reads as
+audited, which is wrong on purpose.
+
+If you maintain per-repo `last_swept` in fleet-state.json, update it here — but
+only for a pass that actually covered something. Stamping `last_swept` after a
+failed sweep parks the repo for a full cycle on work that never happened.
 
 **Step 6: Report**
 
@@ -117,6 +136,8 @@ Post a concise Telegram summary (`parseMode: "Markdown"`) with:
 - Repo swept
 - Audit type
 - Count of findings
+- What the pass did not cover (one line from BOUNDS) — a bare finding count
+  reads as exhaustive to whoever sees it
 - Top 3 GitHub issue URLs (if any)
 
 Or, if this sweep feeds a daily briefing, **don't post** — let the briefing pick up the latest report.
@@ -132,7 +153,7 @@ Show sweep health without running anything:
 ## Failure handling
 
 - Target picker returns nothing → all repos recently audited. Emit "all repos current" and exit.
-- Subagent fails / times out → log the failure and move on. Don't block future sweeps.
+- Subagent fails / times out → log the failure and move on. Don't block future sweeps. Record it as zero coverage ("sweep failed at <step>, nothing in <dir> audited"), not as an entry with no bounds — and do not stamp `last_swept`.
 - Target directory doesn't exist → let the planning skill discover the right paths automatically.
 - Issue creation fails → still log findings locally; flag the permission problem.
 
