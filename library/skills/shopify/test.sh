@@ -161,7 +161,7 @@ jq_is() {  # jq_is <desc> <json> <filter>
 }
 
 # webhooks: the answer is the MISSING list, not the registered one (trap 9).
-wh="$(door_out door_webhooks "rest() { cat '$DIR/fixtures/webhooks_missing_orders.json'; }")"
+wh="$(door_out door_webhooks "rest_paged() { cat '$DIR/fixtures/webhooks_missing_orders.json'; }")"
 jq_is "webhooks: flags a missing orders/create topic" "$wh" ".critical_missing | index(\"orders/create\")"
 jq_is "webhooks: still reports what IS registered" "$wh" ".registered_topics | index(\"products/update\")"
 jq_is "webhooks: states that registration is not delivery" "$wh" ".bound | test(\"REGISTRATION ONLY\")"
@@ -175,10 +175,8 @@ jq_is "copy: does not flag a clean description" "$cp_" ".defects.dot_colon_marke
 # redirects: BOTH directions, and the second is the one people miss (trap 11).
 rd="$(door_out door_redirects "
   rest_paged() { case \"\$1\" in
-      redirects.json*) cat '$DIR/fixtures/redirects_both_directions.json' ;;
-      products.json*)  cat '$DIR/fixtures/redirect_catalogue.json' ;;
-    esac; }
-  rest() { case \"\$1\" in
+      redirects.json*)          cat '$DIR/fixtures/redirects_both_directions.json' ;;
+      products.json*)           cat '$DIR/fixtures/redirect_catalogue.json' ;;
       custom_collections.json*) printf '%s' '{\"custom_collections\":[]}' ;;
       smart_collections.json*)  printf '%s' '{\"smart_collections\":[]}' ;;
     esac; }")"
@@ -194,13 +192,11 @@ jq_is "redirects: does not judge an off-catalogue target it cannot check" "$rd" 
 # stayed green.
 rd_smart="$(door_out door_redirects "
   rest_paged() { case \"\$1\" in
-      redirects.json*) cat '$DIR/fixtures/redirects_smart_target.json' ;;
-      products.json*)  printf '%s' '{\"products\":[]}' ;;
-    esac; }
-  rest() { case \"\$1\" in
-    custom_collections.json*) printf '%s' '{\"custom_collections\":[]}' ;;
-    smart_collections.json*) printf '%s' '{\"smart_collections\":[{\"id\":5,\"handle\":\"smart-one\"}]}' ;;
-  esac; }")"
+      redirects.json*)          cat '$DIR/fixtures/redirects_smart_target.json' ;;
+      products.json*)           printf '%s' '{\"products\":[]}' ;;
+      custom_collections.json*) printf '%s' '{\"custom_collections\":[]}' ;;
+      smart_collections.json*)  printf '%s' '{\"smart_collections\":[{\"id\":5,\"handle\":\"smart-one\"}]}' ;;
+    esac; }")"
 jq_is "redirects: a SMART collection target is NOT reported dead" "$rd_smart" \
       '.dead_destinations == []'
 
@@ -230,10 +226,12 @@ else ok "copy: no prose-heuristic defect class (exact checks only)"; fi
 
 # orphans: a triage list, never a delete list (trap 12).
 or_="$(door_out door_orphans "
-  rest_paged() { printf '%s' '{\"products\":[{\"id\":1,\"handle\":\"in-custom\",\"title\":\"C\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"},{\"id\":2,\"handle\":\"in-smart\",\"title\":\"S\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"},{\"id\":3,\"handle\":\"by-design\",\"title\":\"D\",\"status\":\"active\",\"product_type\":\"Hidden\",\"tags\":\"hidden\"},{\"id\":4,\"handle\":\"lonely\",\"title\":\"O\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"}]}'; }
-  rest() { case \"\$1\" in
+  rest_paged() { case \"\$1\" in
+    products.json*)           printf '%s' '{\"products\":[{\"id\":1,\"handle\":\"in-custom\",\"title\":\"C\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"},{\"id\":2,\"handle\":\"in-smart\",\"title\":\"S\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"},{\"id\":3,\"handle\":\"by-design\",\"title\":\"D\",\"status\":\"active\",\"product_type\":\"Hidden\",\"tags\":\"hidden\"},{\"id\":4,\"handle\":\"lonely\",\"title\":\"O\",\"status\":\"active\",\"product_type\":\"Tees\",\"tags\":\"\"}]}' ;;
     custom_collections.json*) printf '%s' '{\"custom_collections\":[{\"id\":9,\"handle\":\"c\"}]}' ;;
-    smart_collections.json*) printf '%s' '{\"smart_collections\":[{\"id\":7,\"handle\":\"s\"}]}' ;;
+    smart_collections.json*)  printf '%s' '{\"smart_collections\":[{\"id\":7,\"handle\":\"s\"}]}' ;;
+  esac; }
+  rest() { case \"\$1\" in
     collections/9/products.json*) printf '%s' '{\"products\":[{\"id\":1}]}' ;;
     collections/7/products.json*) printf '%s' '{\"products\":[{\"id\":2}]}' ;;
   esac; }")"

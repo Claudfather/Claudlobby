@@ -237,6 +237,13 @@ saved bookmark. Nothing in the catalogue looks wrong; the product is ACTIVE and 
 The second direction is rarer and costs more, and a checker written from the obvious
 direction alone will never see it.
 
+**Whose 404 it is depends on your topology, and a checker cannot see that.** Shopify's
+`redirects.json` is served by the **myshopify storefront only**. On a headless store the
+public front end never consults it, so those URLs simply 404 as they always did and no
+shopper clicks through anything. The redirect table is still wrong — it is just wrong as
+data hygiene rather than as lost customers. State the data fault; do not assert an impact
+you have not observed.
+
 **Do instead:** check destinations resolve AND that no source is live. `redirects` does both.
 A redirect map is a snapshot; the catalogue is not — so this needs re-running against the
 live store, not asserting once in a unit test.

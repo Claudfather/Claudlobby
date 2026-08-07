@@ -246,8 +246,11 @@ all_products() {
 # like it does not exist — which turns a correct redirect into a reported dead
 # one, i.e. a false positive that sends someone to "fix" something that works.
 all_collection_handles() {
-  jq -cn --argjson c "$(rest 'custom_collections.json?limit=250&fields=id,handle' | jq -c '[.custom_collections[]?]')" \
-         --argjson s "$(rest 'smart_collections.json?limit=250&fields=id,handle'  | jq -c '[.smart_collections[]?]')" \
+  local cust smart
+  cust="$(rest_paged 'custom_collections.json?limit=250&fields=id,handle')" || return $?
+  smart="$(rest_paged 'smart_collections.json?limit=250&fields=id,handle')"  || return $?
+  jq -cn --argjson c "$(printf '%s' "$cust"  | jq -s -c '[.[].custom_collections[]?]')" \
+         --argjson s "$(printf '%s' "$smart" | jq -s -c '[.[].smart_collections[]?]')" \
          '$c + $s'
 }
 
@@ -498,7 +501,9 @@ SHOPIFY_CRITICAL_TOPICS="orders/create orders/paid orders/updated orders/cancell
 door_webhooks() {
   need_jq
   local data registered missing
-  data="$(rest 'webhooks.json?limit=250')"
+  local whpages
+  whpages="$(rest_paged 'webhooks.json?limit=250')" || return $?
+  data="$(printf '%s' "$whpages" | jq -s -c '{webhooks: [.[].webhooks[]?]}')"
   registered="$(printf '%s' "$data" | jq -c '[.webhooks[].topic] | unique')"
 
   missing='[]'
@@ -619,11 +624,11 @@ door_redirects() {
       revived_sources: $revived,
       warnings: ([
         (if ($dead|length) > 0 then
-          "\($dead|length) redirect(s) point at something that no longer resolves. Drafting a product does NOT clear redirects aimed at it (traps.md 7) — the shopper now clicks through to the same 404." else empty end),
+          "\($dead|length) redirect(s) point at something that no longer resolves. Drafting a product does NOT clear redirects aimed at it (traps.md 7). IMPACT DEPENDS ON TOPOLOGY, which this door cannot see: these redirects are served by the myshopify storefront only. If that storefront takes customer traffic, a shopper clicks through to a 404; on a headless store where it does not, this is data hygiene, not a customer-facing fault." else empty end),
         (if ($revived|length) > 0 then
-          "\($revived|length) redirect SOURCE(s) are live active products. Redirects run before routing, so these products are unreachable at their own canonical URL — from every link ever shared (traps.md 11)." else empty end)
+          "\($revived|length) redirect SOURCE(s) are live active products. Where these redirects are served, they run before routing, so the product is unreachable at its own canonical URL (traps.md 11). Same topology caveat as above — the myshopify storefront serves them; a headless front end does not." else empty end)
       ]),
-      bound: "Checks handles against the catalogue, not HTTP. A target outside /products/ or /collections/ (a page, a blog, an external URL) is NOT evaluated here — resolve those over HTTP."
+      bound: "Reports a DATA fault, not a measured customer impact — redirects.json governs the myshopify storefront only, and this door cannot tell whether that storefront serves your customers. Checks handles against the catalogue, not HTTP. A target outside /products/ or /collections/ (a page, a blog, an external URL) is NOT evaluated here — resolve those over HTTP."
     }'
 }
 
@@ -691,7 +696,7 @@ door_orphans() {
         (if ($orphans|length) > 0 then
           "\($orphans|length) active product(s) belong to no collection. This is a TRIAGE list, not a delete list — the correct action differs per item and at least one of them is usually \"link to it\", not \"remove it\" (traps.md 12)." else empty end)
       ]),
-      bound: "Collection membership is a PROXY for inbound links, not a measurement of them. A product linked only from a blog post, the nav, or a hand-built page reads as an orphan here and is not one. A true inbound-link audit needs a crawl of the rendered storefront, which this door does not do."
+      bound: "PRODUCTS ONLY — pages, blog posts and collections can be orphaned too and are not examined here. Collection membership is a PROXY for inbound links, not a measurement of them. A product linked only from a blog post, the nav, or a hand-built page reads as an orphan here and is not one. A true inbound-link audit needs a crawl of the rendered storefront, which this door does not do."
     }'
 }
 
