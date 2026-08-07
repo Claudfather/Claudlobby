@@ -14,7 +14,11 @@
 # by accident) is not observable from tmux + unit state and is not claimed here.
 #
 # Usage: reconcile-fleet.sh <fleet-name> [--enroll]
-#   --enroll : auto-enroll orphans by calling spin-up-bot.sh on each.
+#   (no flag) : AUDIT — reports supervision state and writes nothing at all.
+#   --enroll  : auto-enroll orphans by calling spin-up-bot.sh on each, AND apply
+#               the fleet-state prune. The prune deletes rows belonging to other
+#               fleets on this host, because state/fleet-state.json is a single
+#               host-shared file — so it belongs behind an explicit flag.
 #              Deliberately NOT extended to unsupervised-down: reviving a bot
 #              that was taken down on purpose needs an intent signal this script
 #              cannot see. Do not "fix" the asymmetry without one.
@@ -212,9 +216,21 @@ if [ -n "${missing// /}" ]; then
 fi
 # --- end root-cause diagnostics ----------------------------------------------
 
-# Prune fleet-state entries for bots no longer in fleet.yaml
+# Prune fleet-state entries for bots no longer in fleet.yaml.
+#
+# WITHOUT --enroll this is an AUDIT and must not write. The verb name, the docs
+# and the absent flag all promise report-only, while fleet-state.json is shared
+# by every fleet on the host — so the old unconditional call deleted sibling
+# fleets rows on ordinary session-start hygiene. It fired at least seven times
+# across three managers in a single day and every operator read the output as
+# routine housekeeping, because it was accurate and unremarkable at the same
+# time. Reporting still happens; only the write moves behind the flag (#892).
 if [ -x "$LIB_DIR/fleet-state-update.sh" ]; then
-    "$LIB_DIR/fleet-state-update.sh" prune "$FLEET_YAML" || true
+    if [ "$ENROLL" = "--enroll" ]; then
+        "$LIB_DIR/fleet-state-update.sh" prune "$FLEET_YAML" || true
+    else
+        "$LIB_DIR/fleet-state-update.sh" prune "$FLEET_YAML" --dry-run || true
+    fi
 fi
 
 # NPX cache health check
