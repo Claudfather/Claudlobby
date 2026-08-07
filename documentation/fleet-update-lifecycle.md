@@ -96,12 +96,20 @@ bot at once (`root-pull` and `silently activating`: 0 files in `library/`, 1 eac
 in the repo `CLAUDE.md`).
 
 **If you re-measure this by grep, expect an ambiguous answer**, and this is why:
-`SPINDOWN_RECEIPT_ENABLED` appears in 0 of 25 composed bot `CLAUDE.md` on this
+`SPINDOWN_RECEIPT_ENABLED` appears in 0 of 21 composed bot `CLAUDE.md` on this
 host, but `SESSION_DIGEST_ENABLED` appears in 1 — carried by a monitoring caveat
 ("absence of rows means the instrument is off, not that the fleet is quiet"),
 which is the same string serving an entirely different purpose. So a grep for
 the flag names returns a hit that is *not* the rationale. Search for the
 rationale, not the flag.
+
+**And take the denominator from the manifest, not the filesystem.** 21 is the
+union of bots declared across every `fleet.yaml`; a `find` over `runtime/bots/`
+also returns test fixtures nested inside a checked-out copy of this repo, which
+are not bots this or any carrier reaches. Enumerate from the manifests and look
+each one up — the same rule `lib/selfstart-snapshot.sh` already applies, and for
+the same reason: a denominator drawn from directories silently changes when
+something unrelated appears on disk.
 
 ## Mechanism 1 — daily live reload (plugins + skills)
 
