@@ -109,8 +109,9 @@ MEM_FLOOR_MB="${SAMPLER_MEM_FLOOR_MB:-1200}"
 _LOAD_PIDS=""
 
 # The probe marker is the submission ground truth: greppable in the session
-# JSONL user record, and inside the first pane-rendered line of the payload so
-# the strand probe (first 60 chars, the pane_send_verified cap) carries it.
+# JSONL user record. It no longer needs to sit inside the first rendered line —
+# that constraint came from the retired 60-char prefix probe, and #1082 replaced
+# the prefix with reversed containment over the full payload.
 MARKER="BSPROBE_843"
 STARTUP_PROMPT_TEXT="Boot probe ${MARKER}: reply with exactly BSPROBE_ACK and nothing else. Do not use any tools. Do not post to any channel. Then wait silently."
 
@@ -413,7 +414,11 @@ YAML
     # start-bot's payload construction; if that prefix changes, stranded boots
     # reclassify as other:no_evidence (loudly counted, never silently clean) —
     # a pane_send_probe SSOT beside pane_send_verified is a named follow-up.
-    PROBE="$(printf '%s' "set +H; $STARTUP_PROMPT_COMPOSED" | cut -c1-"$_PANE_PROBE_MAX_CHARS")"
+    # The FULL sent payload, not a prefix (#1082). pane_shows_payload reverses the
+    # containment — it asks whether the rendering is part of what we sent — so a
+    # truncated probe would silently reintroduce the interior-window half of the
+    # bug here even after lib-common was fixed.
+    PROBE="set +H; $STARTUP_PROMPT_COMPOSED"
 
     # ── seed the persistent throwaway config dir (warm ≈ a production restart) ─
     seed_claude_auth_and_trust "$CONFIG_DIR" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS"

@@ -1,0 +1,24 @@
+
+╭─── Claude Code v2.1.220 ─────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting        │
+│                 Welcome back Chris!                │ started                 │
+│                                                    │ Run /init to create a … │
+│                       ▐▛███▜▌                      │ ─────────────────────── │
+│                      ▝▜█████▛▘                     │ What's new              │
+│                        ▘▘ ▝▝                       │ Bug fixes and reliabil… │
+│    Opus 5 (1M context) · Claude Max ·              │ Added Claude Opus 5 (`… │
+│    user@example.com's Organization        │ Added `sandbox.network… │
+│               /workspace/project                     │ /release-notes for more │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+ ▎ [✻] [✻] [✻] · Share Claude Code and earn $10 in usage credits · /passes
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ set +H; PROBE1082EARLY Confirm the counts, then
+  report DEAD/ALIVE/UNDECIDED with evidence classes attached
+────────────────────────────────────────────────────────────────────────────────
+
+  ⏵⏵ auto mode on (shift+tab to cycle)

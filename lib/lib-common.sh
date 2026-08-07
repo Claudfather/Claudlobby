@@ -1128,10 +1128,17 @@ _PANE_SEND_VERIFY_TICKS_DEFAULT=5
 # payload. Matching the placeholder is what lets a stuck dispatch — the failure
 # this helper exists for — be detected at all.
 _PANE_PASTE_COLLAPSE_MARKER='[Pasted text'
-# Longest usable probe. The input box wraps near the pane width, so a probe
-# beyond this straddles a wrap point and cannot match any single rendered line
-# even while the text IS sitting unsubmitted.
-_PANE_PROBE_MAX_CHARS=60
+# RETIRED (#1082). This was a fixed-length prefix meant to dodge the input box's
+# wrapping — "a probe beyond this straddles a wrap point and cannot match any
+# single rendered line". The reasoning was right and the remedy could not work:
+# the box WORD-wraps, so the first rendered line is a variable length that can
+# fall BELOW any constant chosen here. Measured at 55 chars against this 60, on a
+# payload sitting plainly in the box. A constant cannot track a moving wrap point.
+#
+# pane_shows_payload now reverses the containment and takes the FULL payload, so
+# there is nothing left to truncate. Kept as a tombstone rather than deleted
+# silently: the next person to hit a wrap problem should find out that a prefix
+# probe was tried and why it failed, not reinvent it.
 
 # Readiness budget: how long to wait for the TUI to draw its input box before
 # sending into it (#860). Sized off the measured draw, not a guess — a
@@ -1327,8 +1334,89 @@ pane_await_input_box() {
 #
 # One grep, two literals — the alternative runs both patterns on every clear pane,
 # which is the common case.
+# _PANE_MIN_VISIBLE_MATCH — floor on how much rendered text may vouch for a
+# payload. REVERSED containment needs one, and it is load-bearing rather than
+# tidy: the empty string is a substring of every payload, so an EMPTY box would
+# otherwise read as HELD and fire a ghost Enter into an idle pane — the exact
+# failure the positive-evidence-only rule exists to prevent. Floored at the
+# payload length for short sends, so `/reload` still vouches for itself.
+_PANE_MIN_VISIBLE_MATCH=12
+
+# _pane_strip_chrome <rendered_line>
+# The rendered line with the renderer's own decoration removed, so what is left
+# is candidate payload text.
+#
+# The separator the TUI puts after the prompt glyph is U+00A0 NON-BREAKING SPACE,
+# not an ASCII space — and `[[:space:]]` does not match it. That cost a real
+# regression here: reversed containment on an unstripped line kept a leading NBSP
+# and stopped being a substring of the payload, so a plainly-held `/claudna:session
+# resume --auto` read as NOT held. The old forward containment never noticed,
+# because searching WITHIN a line tolerates leading chrome; asking whether the
+# line is part of the payload does not.
+#
+# Parameter expansion rather than sed: bash 3.2 is the shebang target, portable
+# NBSP handling in sed differs across BSD and GNU, and this runs per rendered
+# line on the send-verify hot path.
+_pane_strip_chrome() {
+    local s="$1" nbsp
+    nbsp=$(printf '\302\240')
+    while :; do
+        case "$s" in
+            ' '*|"$(printf '\t')"*) s="${s#?}" ;;
+            "$nbsp"*)               s="${s#"$nbsp"}" ;;
+            '❯'*)                   s="${s#❯}" ;;
+            '>'*)                   s="${s#>}" ;;
+            *) break ;;
+        esac
+    done
+    while :; do
+        case "$s" in
+            *' '|*"$(printf '\t')") s="${s%?}" ;;
+            *"$nbsp")               s="${s%"$nbsp"}" ;;
+            *) break ;;
+        esac
+    done
+    printf '%s' "$s"
+}
+
 pane_shows_payload() {
-    printf '%s\n' "$1" | grep -qF -e "$2" -e "$_PANE_PASTE_COLLAPSE_MARKER"
+    # REVERSED CONTAINMENT (#1082). The old test asked "is the whole probe
+    # visible on some single line" — and `grep -F` matches within ONE line while
+    # the input box WORD-WRAPS, so the first rendered line is a variable length
+    # that can fall below the probe. Measured: a 151-char payload wraps at 55
+    # chars, the 60-char probe straddles the break, and the predicate reports
+    # NOT-HELD for a payload sitting plainly in the box. pane_send_verified then
+    # reads that as a clean send and never retries (a live dispatch was lost this
+    # way). The `_PANE_PROBE_MAX_CHARS` cap was introduced to dodge exactly this
+    # and does not, because it is a constant and the wrap point is not.
+    #
+    # So ask the question the other way round: is what is VISIBLE part of our
+    # payload? Every rendered slice of a held payload — a wrapped line, or an
+    # interior window when the box is taller than the pane — is a CONTIGUOUS
+    # SUBSTRING of it by construction. That property holds no matter where the
+    # renderer breaks, which is why this survives a moving wrap point where a
+    # fixed-length probe cannot.
+    #
+    # Callers pass the FULL payload, not a prefix: a prefix would still fail the
+    # interior-window case, since a window past the opening is a substring of the
+    # payload but not of its first N characters.
+    local pane="$1" payload="$2" floor line stripped
+    # Collapsed paste — the box shows a placeholder INSTEAD of any payload text,
+    # so no containment test of either direction can see it. Checked first.
+    printf '%s\n' "$pane" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER" && return 0
+    [ -n "$payload" ] || return 1
+    floor=$_PANE_MIN_VISIBLE_MATCH
+    [ "${#payload}" -lt "$floor" ] && floor=${#payload}
+    while IFS= read -r line; do
+        stripped=$(_pane_strip_chrome "$line")
+        [ "${#stripped}" -ge "$floor" ] || continue
+        # Quoted inside the pattern so glob metacharacters in the rendering are
+        # literal, not wildcards.
+        case "$payload" in *"$stripped"*) return 0 ;; esac
+    done <<EOF
+$pane
+EOF
+    return 1
 }
 
 # _pane_recover_unconfirmed_send <socket> <session> <text> <probe> <pane>
@@ -1385,7 +1473,11 @@ pane_send_verified() {
     local socket="${1?Usage: pane_send_verified <socket> <session> <text>}"
     local session="${2:?Usage: pane_send_verified <socket> <session> <text>}"
     local text="${3:?Usage: pane_send_verified <socket> <session> <text>}"
-    local probe="${text:0:$_PANE_PROBE_MAX_CHARS}"
+    # The FULL payload, never a prefix (#1082). Reversed containment asks whether
+    # what is rendered is part of what we sent, and a rendered interior window is
+    # a substring of the payload but NOT of its first N characters — so truncating
+    # here would silently reintroduce half the bug.
+    local probe="$text"
 
     # Wait for a box to send into (#860). A pre-draw send is lost outright and
     # the verify below cannot see it: a glyph-less pane reads as "nothing
