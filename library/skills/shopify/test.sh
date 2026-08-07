@@ -142,43 +142,43 @@ door_out() {  # door_out <door-fn> <stub-body>
   scrub bash -c "source '$SH'; $2; $1" 2>/dev/null
 }
 
+# Assert on a door's output, having first proven there IS output.
+#
+# `jq -e` EXITS 0 ON EMPTY INPUT. So the obvious form —
+#   printf '%s' "$out" | jq -e '<claim>' && ok ...
+# reports a pass when the door printed nothing at all, which is exactly what a
+# door that died looks like. A broken door sailed through this block until CI
+# disagreed with a green local run. Same family as the greps this suite already
+# replaced: an assertion whose failure mode is a tick.
+jq_is() {  # jq_is <desc> <json> <filter>
+  local desc="$1" json="$2" filter="$3"
+  if [ -z "$json" ]; then no "$desc — the door produced NO output"; return; fi
+  if ! printf '%s' "$json" | jq -e . >/dev/null 2>&1; then
+    no "$desc — the door output is not valid JSON"; return
+  fi
+  if printf '%s' "$json" | jq -e "$filter" >/dev/null 2>&1; then ok "$desc"
+  else no "$desc"; fi
+}
+
 # webhooks: the answer is the MISSING list, not the registered one (trap 9).
 wh="$(door_out door_webhooks "rest() { cat '$DIR/fixtures/webhooks_missing_orders.json'; }")"
-if printf '%s' "$wh" | jq -e '.critical_missing | index("orders/create")' >/dev/null 2>&1; then
-  ok "webhooks: flags a missing orders/create topic"
-else no "webhooks: did not flag the missing orders topic"; fi
-if printf '%s' "$wh" | jq -e '.registered_topics | index("products/update")' >/dev/null 2>&1; then
-  ok "webhooks: still reports what IS registered"
-else no "webhooks: lost the registered list"; fi
-if printf '%s' "$wh" | jq -e '.bound | test("REGISTRATION ONLY")' >/dev/null 2>&1; then
-  ok "webhooks: states that registration is not delivery"
-else no "webhooks: missing the registration-vs-delivery bound"; fi
+jq_is "webhooks: flags a missing orders/create topic" "$wh" ".critical_missing | index(\"orders/create\")"
+jq_is "webhooks: still reports what IS registered" "$wh" ".registered_topics | index(\"products/update\")"
+jq_is "webhooks: states that registration is not delivery" "$wh" ".bound | test(\"REGISTRATION ONLY\")"
 
 # copy: the .: marker is the one a human reading JSON cannot see (trap 10).
 cp_="$(door_out door_copy "rest() { cat '$DIR/fixtures/products_copy_defects.json'; }")"
-if printf '%s' "$cp_" | jq -e '.defects.dot_colon_marker == ["dot-colon-one"]' >/dev/null 2>&1; then
-  ok "copy: matches the invisible .: marker exactly"
-else no "copy: .: detection wrong"; fi
-if printf '%s' "$cp_" | jq -e '.defects.empty_description == ["empty-one"]' >/dev/null 2>&1; then
-  ok "copy: markup-only body counts as empty"
-else no "copy: empty-description detection wrong"; fi
-if printf '%s' "$cp_" | jq -e '.defects.dot_colon_marker | index("clean-one") | not' >/dev/null 2>&1; then
-  ok "copy: does not flag a clean description"
-else no "copy: false positive on clean copy"; fi
+jq_is "copy: matches the invisible .: marker exactly" "$cp_" ".defects.dot_colon_marker == [\"dot-colon-one\"]"
+jq_is "copy: markup-only body counts as empty" "$cp_" ".defects.empty_description == [\"empty-one\"]"
+jq_is "copy: does not flag a clean description" "$cp_" ".defects.dot_colon_marker | index(\"clean-one\") | not"
 
 # redirects: BOTH directions, and the second is the one people miss (trap 11).
 rd="$(door_out door_redirects "
   rest_paged() { cat '$DIR/fixtures/redirects_both_directions.json'; }
   rest() { case \"\$1\" in products.json*) cat '$DIR/fixtures/redirect_catalogue.json' ;; *) printf '{}' ;; esac; }")"
-if printf '%s' "$rd" | jq -e '[.dead_destinations[].target] | index("/products/drafted-item")' >/dev/null 2>&1; then
-  ok "redirects: a drafted target counts as dead (trap 7)"
-else no "redirects: missed the drafted destination"; fi
-if printf '%s' "$rd" | jq -e '[.revived_sources[].path] | index("/products/came-back")' >/dev/null 2>&1; then
-  ok "redirects: flags a revived SOURCE, the expensive direction"
-else no "redirects: missed the revived source"; fi
-if printf '%s' "$rd" | jq -e '[.dead_destinations[].target] | index("https://elsewhere.test/page") | not' >/dev/null 2>&1; then
-  ok "redirects: does not judge an off-catalogue target it cannot check"
-else no "redirects: claimed a verdict on an external URL"; fi
+jq_is "redirects: a drafted target counts as dead (trap 7)" "$rd" "[.dead_destinations[].target] | index(\"/products/drafted-item\")"
+jq_is "redirects: flags a revived SOURCE, the expensive direction" "$rd" "[.revived_sources[].path] | index(\"/products/came-back\")"
+jq_is "redirects: does not judge an off-catalogue target it cannot check" "$rd" "[.dead_destinations[].target] | index(\"https://elsewhere.test/page\") | not"
 
 # orphans: a triage list, never a delete list (trap 12).
 or_="$(door_out door_orphans "
@@ -188,28 +188,16 @@ or_="$(door_out door_orphans "
     smart_collections.json*) printf '%s' '{\"smart_collections\":[]}' ;;
     collects.json*) printf '%s' '{\"collects\":[{\"product_id\":1}]}' ;;
   esac; }")"
-if printf '%s' "$or_" | jq -e '.by_likely_action.needs_a_decision == ["lonely"]' >/dev/null 2>&1; then
-  ok "orphans: an unlinked product needs a decision"
-else no "orphans: triage bucket wrong"; fi
-if printf '%s' "$or_" | jq -e '.by_likely_action.leave_alone_orphaned_by_design == ["by-design"]' >/dev/null 2>&1; then
-  ok "orphans: separates deliberately-unlinked from accidental (trap 6 + 12)"
-else no "orphans: did not separate by-design orphans"; fi
-if printf '%s' "$or_" | jq -e '.bound | test("PROXY")' >/dev/null 2>&1; then
-  ok "orphans: states that collection membership is a proxy for inbound links"
-else no "orphans: missing the proxy bound"; fi
+jq_is "orphans: an unlinked product needs a decision" "$or_" ".by_likely_action.needs_a_decision == [\"lonely\"]"
+jq_is "orphans: separates deliberately-unlinked from accidental (trap 6 + 12)" "$or_" ".by_likely_action.leave_alone_orphaned_by_design == [\"by-design\"]"
+jq_is "orphans: states that collection membership is a proxy for inbound links" "$or_" ".bound | test(\"PROXY\")"
 
 # consent: a sample must never be reported as a total (trap 13).
 cs="$(door_out door_consent "rest_paged() { cat '$DIR/fixtures/customers_consent.json'; }")"
-if printf '%s' "$cs" | jq -e '.complete == true and .customers_counted == 4' >/dev/null 2>&1; then
-  ok "consent: a complete run is marked complete"
-else no "consent: completeness flag wrong"; fi
-if printf '%s' "$cs" | jq -e '.by_state.subscribed == 2 and .by_state.null == 1' >/dev/null 2>&1; then
-  ok "consent: tallies states including a null consent object"
-else no "consent: state tally wrong"; fi
+jq_is "consent: a complete run is marked complete" "$cs" ".complete == true and .customers_counted == 4"
+jq_is "consent: tallies states including a null consent object" "$cs" ".by_state.subscribed == 2 and .by_state.null == 1"
 cs_trunc="$(door_out door_consent "rest_paged() { cat '$DIR/fixtures/customers_consent.json'; printf '%s\\n' '{\"__truncated__\":true}'; }")"
-if printf '%s' "$cs_trunc" | jq -e '.complete == false and (.warnings|length) > 0' >/dev/null 2>&1; then
-  ok "consent: a bounded run declares itself a SAMPLE, not a total"
-else no "consent: truncation was not disclosed — the exact failure trap 13 is about"; fi
+jq_is "consent: a bounded run declares itself a SAMPLE, not a total" "$cs_trunc" ".complete == false and (.warnings|length) > 0"
 
 # The Link-header rel discrimination, which is what makes full counting possible.
 nexturl="$(tr -d '\r' < "$DIR/fixtures/link_header_next_and_prev.txt" | grep -i '^link:' | tr ',' '\n' \

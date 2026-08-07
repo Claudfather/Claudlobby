@@ -536,10 +536,15 @@ door_orphans() {
   jq -n --argjson p "$prods" --argjson m "$membership" '
     ($m | map(tostring) | unique) as $in_collection |
     def hidden_tag: (.tags // "") | test("(^|, *)hidden( *,|$)");
-    [ $p[] | select(.status == "active")
-      | select(($in_collection | index(.id|tostring)) == null)
+    [ $p[] | select(.status == "active") | . as $prod
+      # $prod, not a bare .id: inside index() jq binds `.` to the ARRAY being
+      # searched, so `.id` there indexes the array and the whole door dies with
+      # "Cannot index array with string". It fails loudly on a non-empty
+      # membership list and stays silent on an empty one, which is the worst
+      # shape for a bug — it looks fine on a store where nothing is collected.
+      | select(($in_collection | index($prod.id | tostring)) == null)
       | {handle, title, product_type,
-         intentionally_unlinked: ((.product_type == "Hidden") or hidden_tag)} ] as $orphans |
+         intentionally_unlinked: (($prod.product_type == "Hidden") or hidden_tag)} ] as $orphans |
     { active_products: ([$p[] | select(.status=="active")] | length),
       orphan_candidates: ($orphans | length),
       by_likely_action: {
