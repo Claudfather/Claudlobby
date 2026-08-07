@@ -46,7 +46,23 @@ cd <REPO_PATH> && git checkout main && git pull
 ```
 Always sweep against the latest main branch.
 
-**Step 3: Launch the audit subagent**
+**Step 3: Count the in-scope files, then launch the audit subagent**
+
+Count first, in the parent, **before** dispatching:
+
+```bash
+FILES_FOUND=$(find <REPO_PATH>/{DIR} -type f {TYPE_FILTER} | wc -l)
+```
+
+This is the one coverage number that does not come from the thing being
+measured. Everything the subagent reports about its own coverage is a
+self-report; this is not, so it is the value the others get checked against.
+
+Pick `{TYPE_FILTER}` to match what the audit skill treats as in scope (e.g.
+`-name '*.py'` for a Python tech-debt pass). **The anchor is only as good as
+that match** — a filter wider or narrower than the audit's own notion of scope
+makes `FILES_FOUND` wrong in a different direction, so keep it aligned with the
+skill you are about to run rather than counting every file in the tree.
 
 Spawn a **background** Agent (subagent_type: general-purpose) with this prompt structure:
 
@@ -68,23 +84,28 @@ Return a structured summary with:
 - TYPE: {TYPE}
 - ISSUES: comma-separated list of issue URLs
 - FINDINGS: brief summary of key findings
-- FILES_FOUND: how many files in {DIR} were in scope for this audit type
-- FILES_READ: how many of those you actually opened and read
+- FILES_READ: how many files you actually opened and read
 - FILES_GREPPED: how many you only pattern-matched, never read
 - SKIPPED: each path you did not cover, and why — or the single word `none`
 - CAP_HIT: the limit that stopped you (tool cap, time, context, unreachable
   source), or the single word `none`
 ```
 
-**These are counts, not prose, and that is the point.** The parent composes the
-tracker's bounds string from them below. A number cannot be produced without
-having done the counting, so an engineer who did not do the work cannot fill
-this in — where a free-text "bounds" field can always be satisfied with
-something plausible-sounding that describes no particular sweep.
+Do not ask the subagent for `FILES_FOUND`. The parent counted it in Step 3, and
+asking the thing being measured to also report the denominator would remove the
+only number in the record that is not a self-report.
 
-`SKIPPED` and `CAP_HIT` still carry free text, and that half is **not**
-derivable — a reason for skipping is a judgement. Treat those as unverified
-context around the counts, which are the load-bearing part.
+**What this does and does not guarantee — read this before trusting a record.**
+These four fields are **still self-reported and unverified**. Nothing here
+counts real tool calls, so a subagent can report `FILES_READ: 14` without
+opening a file, exactly as it could have written a plausible sentence. Numbers
+are in some ways *worse* than prose here, because specific figures read as more
+rigorous to anyone scanning the tracker.
+
+What structuring actually buys: casual fabrication becomes more effortful, the
+fields become checkable against the Step 3 anchor, and there is somewhere for a
+real check to attach later. That is a raised floor, not a closed hole. The
+honest one-line version is **one anchored field, four self-reported ones.**
 
 **IMPORTANT: The subagent needs full permissions.** It will:
 - Read many files across the repo (Glob, Grep, Read)
@@ -107,17 +128,29 @@ python3 <ASSISTANT_TOOLS_DIR>/audit-tracker.py log --repo {REPO} --directory {DI
   --bounds "read {FILES_READ} of {FILES_FOUND} in-scope files in {DIR}; {FILES_GREPPED} pattern-matched only; skipped: {SKIPPED}; cap: {CAP_HIT}"
 ```
 
-This is derivation, not validation, and the difference is the whole point.
-A bounds statement the engineer *types* can always be satisfied by something
-plausible — `"Reviewed the repository structure and did not find significant
-issues in the areas examined"` is not `"n/a"`, parses fine, and describes any
-sweep of any repo unchanged. A bounds statement **composed from counts the
-sweep actually produced** cannot be written without having done the counting.
-Banning bad values is a deny-list, and the next bad value is never on it.
+`{FILES_FOUND}` is the parent's count from Step 3, never the subagent's.
 
-Backstop for the free-text halves: **a bounds statement that could describe any
-sweep of any repo, unchanged, is not a real one.** It must name at least one
-specific file, directory, count, or limit actually hit this pass.
+**Sanity-check the self-reported counts against the anchor before logging.**
+`FILES_READ + FILES_GREPPED` cannot exceed `FILES_FOUND` — the subagent cannot
+have covered more files than exist in scope. If it does, the report is
+internally inconsistent and the counts are not usable:
+
+```bash
+python3 <ASSISTANT_TOOLS_DIR>/audit-tracker.py log --repo {REPO} --directory {DIR} --type {TYPE} --issues {ISSUE_URLS} \
+  --bounds "coverage unreliable: subagent reported {FILES_READ} read + {FILES_GREPPED} grepped against {FILES_FOUND} in-scope files, which is impossible; treat this area as unaudited"
+```
+
+This catches an inconsistent report, not a plausible one. A subagent reporting
+`FILES_READ` equal to the real `FILES_FOUND` passes every check here and may
+still have read nothing — see the honest-limits note in Step 3.
+
+Backstop, and it now covers the numbers too: **anything that could describe any
+sweep of any repo, unchanged, is not a real bounds statement.** It must name at
+least one specific file, directory, count or limit actually hit this pass. Apply
+the same suspicion to the figures — counts that never vary between sweeps, or a
+`FILES_READ` that always equals `FILES_FOUND`, deserve exactly the doubt a vague
+sentence would get. A run of suspiciously round, suspiciously complete records
+is the signal that the self-reported half has stopped meaning anything.
 
 **If the subagent did not return the counts**, that is itself the honest bounds.
 Do not estimate them — you did not do the scanning, and a fabricated count is

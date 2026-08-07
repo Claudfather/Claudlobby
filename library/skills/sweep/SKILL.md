@@ -68,7 +68,18 @@ cd <REPOS_ROOT>/<repo> && git checkout main && git pull
 
 Always sweep against the latest main.
 
-**Step 4: Launch the audit subagent**
+**Step 4: Count the in-scope files, then launch the audit subagent**
+
+Count first, in the parent, **before** dispatching:
+
+```bash
+FILES_FOUND=$(find <REPOS_ROOT>/<REPO>/<DIR> -type f <TYPE_FILTER> | wc -l)
+```
+
+This is the only coverage number that does not come from the thing being
+measured, so it is what the subagent's self-reported counts get checked
+against. Match `<TYPE_FILTER>` to what the audit skill treats as in scope — the
+anchor is only as good as that match.
 
 Spawn a **background** Agent (subagent_type: general-purpose) with this prompt structure:
 
@@ -90,18 +101,23 @@ Return a structured summary:
 - TYPE: <TYPE>
 - ISSUES: comma-separated list of issue URLs
 - FINDINGS: brief summary
-- FILES_FOUND: how many files in <DIR> were in scope for this audit type
-- FILES_READ: how many of those you actually opened and read
+- FILES_READ: how many files you actually opened and read
 - FILES_GREPPED: how many you only pattern-matched, never read
 - SKIPPED: each path you did not cover, and why — or the single word `none`
 - CAP_HIT: the limit that stopped you (tool cap, time, context, unreachable
   source), or the single word `none`
 ```
 
-**Counts, not prose.** The coverage line recorded in Step 5 is composed from
-these, and a number cannot be produced without having done the counting — where
-a free-text coverage field can always be filled with something plausible that
-describes no particular sweep.
+Do not ask the subagent for `FILES_FOUND` — the parent counted it in Step 4,
+and asking the thing being measured for the denominator would remove the only
+number in the record that is not a self-report.
+
+**These four are still self-reported and unverified.** Nothing counts real tool
+calls, so a subagent can report `FILES_READ: 14` without opening a file, just as
+it could have written a plausible sentence — and specific figures read as *more*
+rigorous to whoever scans the record, which makes them worse in that respect.
+Structuring buys effort and a checkable shape, not a guarantee. One anchored
+field, four self-reported ones.
 
 **IMPORTANT: The subagent needs full permissions.** It will:
 - Read many files (Glob, Grep, Read)
@@ -127,11 +143,19 @@ it is indistinguishable from a thorough all-clear, and whatever selects the
 next target reads that as "audited, park it". Record what was NOT covered or
 the count means nothing.
 
-Build it from the counts rather than retyping a summary. A coverage line the
-engineer composes freehand can always be satisfied by something that sounds
-thorough and describes any sweep of any repo unchanged; one built from numbers
-the sweep produced cannot be written without the sweep. If a line you wrote
-would read the same against a different repo, it is not a bounds statement. If your tracker has no bounds field, add one before
+`<FILES_FOUND>` is the parent's Step 4 count, never the subagent's. Check the
+self-reported pair against it before recording: `FILES_READ + FILES_GREPPED`
+cannot exceed `FILES_FOUND`. If it does, the report is internally inconsistent
+— record "coverage unreliable" rather than the numbers.
+
+That catches an inconsistent report, not a plausible one, and the difference is
+worth being clear about: a subagent reporting a `FILES_READ` equal to the real
+`FILES_FOUND` passes every check available here and may still have read nothing.
+
+Apply the smell test to the figures as well as the prose: **anything that could
+describe any sweep of any repo, unchanged, is not a coverage statement.** Counts
+that never vary between sweeps, or a `FILES_READ` that always equals
+`FILES_FOUND`, deserve the same doubt as a vague sentence. If your tracker has no bounds field, add one before
 recording; if the sweep died, record that nothing was covered rather than
 omitting the entry — a missing record usually reads as "never audited", which
 is right by accident, but an entry with a timestamp and no bounds reads as
