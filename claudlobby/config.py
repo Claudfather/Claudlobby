@@ -479,6 +479,10 @@ class BotConfig:
     claudosseum_tenant_id: str | None = None
     autonomous_runner: AutonomousRunnerConfig | None = None
     briefing: BriefingConfig | None = None  # equippable briefing feature (#627)
+    # #904 M1 (epic #1102 R3, fork R3-F1): SessionStart boot brief. Default off;
+    # arming is additionally gated at compose time on the installed CLI exposing
+    # `brief --boot` (composed settings outlive installs on this estate).
+    brief_on_start: bool = False
 
 
 @dataclass
@@ -1130,6 +1134,25 @@ def _coerce_autonomous_runner(
     )
 
 
+def _parse_brief(raw: Any) -> bool:
+    """Parse the bot-level ``brief:`` stanza (#904 M1) to its arming bool.
+
+    STRICT on purpose: this knob arms runtime behavior (a composed SessionStart
+    hook), and the loose ``bool()`` coercion the cosmetic knobs use would arm it
+    on any typo — ``on_start: tue`` is a YAML *string*, truthy under ``bool()``,
+    and a silently armed knob is the no-silent-switches failure exactly. Only a
+    real YAML boolean arms; anything else is a parse error naming the value.
+    """
+    raw = _shaped("brief", raw, dict, "{on_start: true}")
+    on_start = raw.get("on_start", False)
+    if not isinstance(on_start, bool):
+        raise ValueError(
+            f"'brief.on_start' must be a YAML boolean, got {on_start!r} — "
+            "an arming knob must not switch on via a typo"
+        )
+    return on_start
+
+
 def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | None:
     """Validate a string field against a known set. Returns value or raises."""
     if value is None:
@@ -1309,6 +1332,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         or defaults.get("claudosseum_tenant_id"),
         autonomous_runner=_coerce_autonomous_runner(raw.get("autonomous_runner"), name),
         briefing=_coerce_briefing(raw.get("briefing")),
+        brief_on_start=_parse_brief(raw.get("brief", defaults.get("brief"))),
     )
 
 

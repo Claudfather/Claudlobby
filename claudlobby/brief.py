@@ -870,24 +870,14 @@ def format_brief(brief: dict) -> str:
     AND listed in full at the end — the inline marker is where the reader's eye
     already is, the block is where the detail belongs."""
     deg = brief.get("degraded", [])
-    by_field: dict[str, list[dict]] = {}
-    for d in deg:
-        by_field.setdefault(d["field"], []).append(d)
 
     def mark(section: str) -> str:
-        """Marker for a section header, covering its sub-fields too.
-
-        A degradation scoped to ``dispatches.open`` still degrades the
-        DISPATCHES section: without the prefix match the header renders clean
-        above an ``open (0)`` that is not a measurement at all — a silently
-        wrong zero, which is the one output this door must never produce.
-        """
-        entries = [
-            e
-            for f, es in by_field.items()
-            if f == section or f.startswith(section + ".")
-            for e in es
-        ]
+        """Marker for a section header, covering its sub-fields too — the
+        scope rule (a degradation on ``dispatches.open`` still degrades the
+        DISPATCHES header) lives in ``_section_degraded``, shared with the
+        boot renderer: a separately-worded copy per renderer is how that
+        invariant dies in one of them silently."""
+        entries = _section_degraded(deg, section)
         if not entries:
             return ""
         issues = ", ".join(sorted({e["issue"] for e in entries}))
@@ -1014,3 +1004,222 @@ def format_brief(brief: dict) -> str:
         out.append("")
 
     return "\n".join(out)
+
+# --- shared degraded-marker helpers (both renderers) ---------------------------
+
+
+def _section_degraded(deg: list[dict], section: str) -> list[dict]:
+    """Degradations scoped to ``section``, INCLUDING its sub-fields.
+
+    The prefix match is the load-bearing half: a degradation scoped to
+    ``dispatches.open`` still degrades the DISPATCHES section — without it a
+    clean header floats above a zero that is not a measurement at all, the one
+    output this door must never produce. Both renderers consume this; a
+    separately-worded copy in each is how the invariant dies in one of them
+    silently.
+    """
+    return [
+        e
+        for e in deg
+        if e["field"] == section or e["field"].startswith(section + ".")
+    ]
+
+
+def _degraded_mark(entries: list[dict]) -> str:
+    """`` [degraded: #x, #y]`` for a section header, or ``""`` when clean."""
+    if not entries:
+        return ""
+    return f" [degraded: {', '.join(sorted({e['issue'] for e in entries}))}]"
+
+
+# --- the boot payload (#1102 R3 / M1, locked fork R3-F1: O-B+r) ---------------
+
+# Render-time budget for the boot payload, in characters (~4 chars/token, so
+# ~250 tokens). Enforced by dropping DETAIL lines lowest-priority-first — never
+# the header, the empty/degraded provenance lines, the overflow disclosure, or
+# the door line, which are cap-exempt: coverage honesty must not lose by cap
+# arithmetic. The constant lives here, alone, so the canary can move it.
+BOOT_CHAR_BUDGET = 1000
+
+# Detail rows the boot payload will print across all dispatch classes.
+# Priority when over: ORPHANED first (the respawned session reading this
+# payload is the ONLY natural consumer of the orphan door — dispatch delivery
+# is ephemeral tmux and the party that should act no longer exists anywhere
+# else), then overdue, then open oldest-first.
+BOOT_DETAIL_LIMIT = 3
+
+
+def boot_provenance(paths: Paths, now: int) -> dict:
+    """The door-side facts the boot payload's empty-state line renders.
+
+    Interim for #1122: the never-vs-quiet distinction ("no work in flight" vs
+    "no recorded fleet history" — different answers, and the gap between them
+    is the motivating incident) is not expressible in the schema-1 envelope,
+    so the boot mode computes it here from the same files the door already
+    reads. When #1122 lands these facts move into the envelope and this helper
+    is deleted.
+
+    Same read discipline as the door: presence is distinguished from emptiness,
+    and an absent source reports its state rather than a zero. The registry is
+    read RAW here rather than via ``load_workstreams``, which flattens
+    absent/corrupt/empty to ``{}`` — through it, a corrupt registry would
+    render "0 entries", a false-quiet on exactly the property this helper
+    exists to carry (#1122 owns the envelope-level fix).
+    """
+
+    def _row_epoch(v) -> int | None:
+        # The raw ledger stores epoch seconds (the matcher's numeric
+        # contract); ISO strings are tolerated so a future writer change
+        # degrades to a parse rather than a silent zero.
+        if isinstance(v, (int, float)):
+            return int(v)
+        return _epoch(v)
+
+    ledger = _read_ledger(dispatch_ledger_path(paths))
+    dl: dict = {"state": ledger.state}
+    if ledger.state == LEDGER_OK:
+        dl["rows_ever"] = len(ledger.rows)
+        # A fixed 24h recency window, deliberately NOT the watchdog's
+        # DISPATCH_OVERDUE_MAX_AGE_S mirror: the line self-describes as
+        # "in 24h", a human-scale recency fact, not an open/overdue semantic.
+        cutoff = now - 24 * 3600
+        dl["rows_24h"] = sum(
+            1
+            for r in ledger.rows
+            if (_row_epoch(r.get("dispatched_at") or r.get("ts")) or 0) >= cutoff
+        )
+
+    rp = registry_path(paths)
+    reg: dict = {"present": rp.is_file()}
+    if reg["present"]:
+        try:
+            raw = json.loads(rp.read_text())
+            ws = raw.get("workstreams", []) if isinstance(raw, dict) else None
+            reg["entries"] = len(ws) if isinstance(ws, list) else None
+        except (OSError, json.JSONDecodeError):
+            reg["entries"] = None
+    return {"dispatch_ledger": dl, "registry": reg}
+
+
+def _boot_detail_lines(d: dict, now: int) -> tuple[list[str], int]:
+    """(detail lines in priority order, hidden-count) for the dispatch section."""
+    # The door's `open` is deliberately a SUPERSET (deadline-blind, #904), so a
+    # row can appear as both overdue and open; the boot payload shows each task
+    # once, at its highest-priority class.
+    seen: set = set()
+    prioritized = []
+    for label, rows_ in (
+        ("ORPHANED", d["orphaned"]),
+        ("overdue", d["overdue"]),
+        ("open", sorted(d["open"], key=lambda r: r["dispatched_at"] or "")),
+    ):
+        for r in rows_:
+            if r["task_id"] in seen:
+                continue
+            seen.add(r["task_id"])
+            prioritized.append((label, r))
+    lines = []
+    for label, r in prioritized[:BOOT_DETAIL_LIMIT]:
+        age_s = max(0, now - (_epoch(r.get("dispatched_at")) or now))
+        age = f"{age_s // 3600}h" if age_s >= 3600 else f"{age_s // 60}m"
+        note = ""
+        if label == "ORPHANED":
+            note = " (issued pre-restart; may need re-issue)"
+        elif label == "overdue":
+            note = f" (+{r.get('overdue_by_s', 0) // 60}m past due)"
+        lines.append(f"  {label} {r['task_id']} — sent {age} ago{note}")
+    return lines, max(0, len(prioritized) - BOOT_DETAIL_LIMIT)
+
+
+def format_boot_brief(brief: dict, prov: dict) -> str:
+    """The SessionStart boot payload — the locked O-B+r shape, and nothing else.
+
+    Deliberately NOT ``format_brief``: that renderer is the on-demand full view
+    (wall-capable — a live run rendered 335 report lines). This one is standing
+    context re-read for the life of every session that carries it, so it is
+    pointer-first, hard-capped, and mission-free (mission is already composed
+    into every bot's CLAUDE.md — injecting it again is duplicate spend).
+
+    The empty state is the point, not a collapse case (fork R3-F1, #1102): an
+    all-quiet boot renders WHY it is quiet, with source provenance — never
+    silence, never a bare zero. "0 open (ledger: N rows ever)" and "no recorded
+    fleet history" are different answers; the motivating incident was the gap
+    between them.
+    """
+    bot = brief["bot"]
+    door = f"full state: claudlobby brief --bot {bot} [--json]"
+    header = (
+        f"fleet-brief — {bot} @ {brief['fleet']} "
+        f"(as of {_short(brief['generated_at'])}, schema {brief['schema']})"
+    )
+
+    d_deg = _section_degraded(brief.get("degraded", []), "dispatches")
+    issues = ", ".join(sorted({e["issue"] for e in d_deg}))
+    mark = f" [degraded: {issues}]" if issues else ""
+    d = brief.get("dispatches")
+
+    exempt: list[str] = [header]
+    detail: list[str] = []
+
+    if not d:
+        # OMITTED by the door's trust rule. "Nothing to say" and "nothing
+        # served" are textually identical unless degraded[] is consulted, so
+        # this branch synthesizes its line from there — rendering a zero here
+        # would re-manufacture the false all-clear the door refuses to emit.
+        exempt.append(
+            f"dispatches UNAVAILABLE — {issues or 'see door'} "
+            "(fail-closed, not zero) — see door"
+        )
+    else:
+        n_open, n_over, n_orph = len(d["open"]), len(d["overdue"]), len(d["orphaned"])
+        if n_open or n_over or n_orph:
+            exempt.append(
+                f"dispatches: {n_open} open, {n_over} overdue, {n_orph} orphaned{mark}"
+            )
+            lines, hidden = _boot_detail_lines(d, _epoch(brief["generated_at"]) or 0)
+            detail.extend(lines)
+            if hidden:
+                exempt.append(f"  (+{hidden} more — door)")
+        else:
+            # The all-quiet line, with provenance. Never a bare zero.
+            dl = prov.get("dispatch_ledger", {})
+            if dl.get("state") == LEDGER_OK:
+                led = (
+                    f"ledger: {dl.get('rows_ever', 0)} rows ever, "
+                    f"{dl.get('rows_24h', 0)} in 24h"
+                )
+            else:
+                led = f"ledger: {dl.get('state', 'unknown')}"
+            reg = prov.get("registry", {})
+            if reg.get("present"):
+                entries = reg.get("entries")
+                reg_txt = (
+                    f"registry: {entries} entr{'y' if entries == 1 else 'ies'}"
+                    if entries is not None
+                    else "registry: present (unreadable)"
+                )
+            else:
+                reg_txt = "registry: absent on this fleet"
+            exempt.append(
+                f"all quiet for this bot: 0 open dispatches ({led}); {reg_txt}{mark}"
+            )
+
+    # Token cap, enforced in characters at render time (the line cap alone
+    # disagrees with the token cap ~2x at real path density). Detail lines
+    # drop lowest-priority-first into the disclosed remainder, so truncation
+    # is never silent. Re-rendering per drop is deliberate: the remainder
+    # line's own width changes with the count, so measuring the real artifact
+    # cannot drift the way an arithmetic model of it would.
+    dropped = 0
+
+    def _render() -> str:
+        parts = list(exempt) + detail
+        if dropped:
+            parts.append(f"  (+{dropped} more capped — door)")
+        parts.append(door)
+        return "\n".join(parts)
+
+    while len(_render()) > BOOT_CHAR_BUDGET and detail:
+        detail.pop()  # lowest priority is last
+        dropped += 1
+    return _render()

@@ -420,7 +420,13 @@ def cmd_brief(args) -> int:
     report cursor. Every other artifact it touches (dispatch log, report
     ledger, workstream registry, event files) is opened for reading only.
     """
-    from ..brief import build_brief, format_brief, write_cursor
+    from ..brief import (
+        boot_provenance,
+        build_brief,
+        format_boot_brief,
+        format_brief,
+        write_cursor,
+    )
 
     paths = _resolve_paths(args)
     _load_env(paths)  # WORKSTREAM_LEASE_DAYS / DISPATCH_* knobs live in .env
@@ -431,8 +437,20 @@ def cmd_brief(args) -> int:
         log.error("bot %r not found in fleet %r", bot_id, fleet.name)
         return 1
 
+    boot = args.boot
+    if boot and (args.json or args.ack):
+        # The boot payload is a render mode, not a session: it must never ack
+        # (a hook that advances the cursor marks unread work handled on every
+        # boot), and its JSON is the plain envelope --json already serves.
+        log.error("--boot is mutually exclusive with --json and --ack")
+        return 1
+
     now = int(datetime.now(timezone.utc).timestamp())
     brief = build_brief(fleet, paths, bot_id, now)
+
+    if boot:
+        print(format_boot_brief(brief, boot_provenance(paths, now)))
+        return 0
 
     if args.json:
         print(_json.dumps(brief, indent=2))

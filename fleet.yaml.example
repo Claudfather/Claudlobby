@@ -187,6 +187,18 @@ fleet:
 #     # Setting this explicitly overrides auto-pairing. Omit to let mcp drive it.
 #     integrations: [neon, railway, vercel]
 #
+#     # brief — the SessionStart boot brief (#904 M1, epic #1102 R3). DEFAULT
+#     # OFF. When armed, the composer adds a SessionStart hook (sources:
+#     # startup + compact only) running `claudlobby brief --bot <id> --boot` —
+#     # own dispatch lines + an empty-state line with provenance + the door
+#     # line, token-capped (~250), fail-open, explicit 10s timeout. Arming is
+#     # gated at compose time on the INSTALLED CLI serving `brief --boot`
+#     # (composed settings outlive installs; generate refuses loudly if the
+#     # install predates the verb). Operator-held rollout gate: arm ONE canary
+#     # bot only until the canary's cost/latency numbers are ratified.
+#     brief:
+#       on_start: true
+#
 #     # briefing — equippable scheduled briefing (#627). Each slot becomes a
 #     # composed per-(bot,slot) OnCalendar timer that dispatches /briefing <slot>
 #     # into THIS bot's session via lib/briefing-trigger.sh — never hand-install
