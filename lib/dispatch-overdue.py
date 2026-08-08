@@ -32,6 +32,13 @@ omitted, so the common path closes its dispatch by default:
   dispatch-overdue.py --open-task <bot_id> <dispatch_log> <report_ledger>
   Prints one task id, or nothing when the bot has none open.
 
+Open-list mode (#904) -- every still-open id'd row, not just the one the
+resolver would pick, so "open but not yet due" is readable by the read door:
+  dispatch-overdue.py --open <bot_id> <dispatch_log> <report_ledger>
+  Prints: "<dispatched_at> <expected_by> <task_id>" per row, oldest first
+  (expected_by is "-" when the row carries none). Deadline-blind, so this is a
+  strict superset of --all's rows for the same bot; --open-task is its head.
+
 `--bots-dir <dir>` goes last and enables respawn detection; without it no row is
 ever classified as an orphan. It is also the one input that is NOT one of the two
 ledgers: orphan classification reads `.spawn` mtimes, so that mode alone depends
@@ -328,6 +335,53 @@ def orphaned_all(
     return _classify_all(dispatch_log, report_ledger, now, max_age, bots_dir)[1]
 
 
+def open_dispatches(
+    bot: str,
+    dispatch_log: str,
+    report_ledger: str,
+) -> list[tuple[int, int | None, str]]:
+    """The bot's still-open id'd dispatches, OLDEST FIRST.
+
+    Each entry is (dispatched_at, expected_by, task_id). ``expected_by`` is
+    None when the row carries none (or a non-int one) — deliberately NOT a
+    filter, so this set stays a strict superset of what ``open_task_id``
+    considers. A row that can supply the resolver's id must also be listable
+    here, or the door would hide work the resolver can still close.
+
+    OPEN is deadline-blind, and that is the whole point of this door: a
+    dispatch is open until a terminal report echoing its id closes it, whether
+    or not ``now`` has passed ``expected_by``. That makes it strictly wider
+    than the watchdog's OVERDUE — every overdue row is an open row — so
+    "carrying three tasks, none late yet" becomes readable, which is a state
+    no existing mode could express.
+
+    THE loop behind ``open_task_id``, which is now just this list's head. Two
+    loops would let the resolver hand back an id this list does not contain —
+    the same desync class ``_terminal_reported_ids`` exists to prevent, one
+    level up.
+
+    The join is NOT loosened: only a terminal report carrying the same
+    (bot, task_id) closes a row, exactly as in ``_classify_all``.
+    """
+    bot_key = bot.lower()
+    reported = _terminal_reported_ids(_load_jsonl(report_ledger))
+    rows: list[tuple[int, int | None, str]] = []
+    for d in _load_jsonl(dispatch_log):
+        if str(d.get("bot", "")).lower() != bot_key:
+            continue
+        tid, da = d.get("task_id"), d.get("dispatched_at")
+        if not tid or not isinstance(da, int):
+            continue
+        if (bot_key, str(tid)) in reported:
+            continue
+        exp = d.get("expected_by")
+        rows.append((da, exp if isinstance(exp, int) else None, str(tid)))
+    # Stable sort, so rows dispatched in the same second keep ledger order —
+    # matching the strict-< tie-break open_task_id used when it kept its own min.
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
 def open_task_id(
     bot: str,
     dispatch_log: str,
@@ -366,20 +420,8 @@ def open_task_id(
     matters more here because this writes the result. Fleet-scoping the join
     needs fleet identity threaded through both readers — tracked separately.
     """
-    bot_key = bot.lower()
-    reported = _terminal_reported_ids(_load_jsonl(report_ledger))
-    best: tuple[int, str] | None = None
-    for d in _load_jsonl(dispatch_log):
-        if str(d.get("bot", "")).lower() != bot_key:
-            continue
-        tid, da = d.get("task_id"), d.get("dispatched_at")
-        if not tid or not isinstance(da, int):
-            continue
-        if (bot_key, str(tid)) in reported:
-            continue
-        if best is None or da < best[0]:
-            best = (da, str(tid))
-    return best[1] if best else None
+    rows = open_dispatches(bot, dispatch_log, report_ledger)
+    return rows[0][2] if rows else None
 
 
 def missing_id_count(report_ledger: str) -> int:
@@ -425,6 +467,16 @@ def main() -> int:
         tid = open_task_id(argv[2], argv[3], argv[4])
         if tid:
             print(tid)
+        return 0
+
+    # The read door's list form (#904). Same silence-on-empty contract as
+    # --open-task: no rows means no output and rc 0, never an error.
+    if argv[1] == "--open":
+        if len(argv) < 5:
+            print(__doc__.strip().splitlines()[0], file=sys.stderr)
+            return 2
+        for da, exp, tid in open_dispatches(argv[2], argv[3], argv[4]):
+            print(f"{da} {exp if exp is not None else '-'} {tid}")
         return 0
 
     if argv[1] in ("--all", "--orphans"):

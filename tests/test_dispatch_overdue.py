@@ -544,3 +544,130 @@ class TestProgressLiveness:
             now=3600 + self.GRACE + 5000,
         )
         assert res == [], "a completed dispatch reappeared after the grace lapsed"
+
+
+class TestOpenList:
+    """#904 — the read door's list form. Same join as the resolver, wider set."""
+
+    def _logs(self, tmp_path, dispatches, reports):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, reports)
+        return str(dlog), str(rlog)
+
+    def test_lists_every_open_row_oldest_first(self, tmp_path):
+        """Written out of dispatch order, to pin that this is time-ordered."""
+        dlog, rlog = self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 300, 1000, task_id="t-300-cccc"),
+                _dispatch("w1", 100, 1000, task_id="t-100-aaaa"),
+                _dispatch("w1", 200, 1000, task_id="t-200-bbbb"),
+            ],
+            [],
+        )
+        rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        assert [t for _, _, t in rows] == ["t-100-aaaa", "t-200-bbbb", "t-300-cccc"]
+
+    def test_open_task_id_is_this_lists_head(self, tmp_path):
+        """One loop, not two: a resolver that could hand back an id this list
+        does not contain is the desync class the module exists to prevent."""
+        dlog, rlog = self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 300, 1000, task_id="t-c"),
+                _dispatch("w1", 100, 1000, task_id="t-a"),
+            ],
+            [],
+        )
+        rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2]
+
+    def test_is_deadline_blind(self, tmp_path):
+        """A row inside its deadline is OPEN but not overdue — the distinction
+        the door was added to make readable."""
+        dlog, rlog = self._logs(
+            tmp_path, [_dispatch("w1", 100, 9_999_999, task_id="t-early")], []
+        )
+        assert [t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)] == [
+            "t-early"
+        ]
+        assert dispatch_overdue.overdue("w1", dlog, rlog, 1000) == []
+
+    def test_is_a_superset_of_overdue(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-late"),
+                _dispatch("w1", 200, 9_999_999, task_id="t-early"),
+            ],
+            [],
+        )
+        open_ids = {t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)}
+        overdue_ids = {t for *_, t in dispatch_overdue.overdue("w1", dlog, rlog, 5000)}
+        assert overdue_ids == {"t-late"}
+        assert overdue_ids <= open_ids
+
+    def test_terminal_report_removes_the_row(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path,
+            [_dispatch("w1", 100, 1000, task_id="t-a")],
+            [_report("w1", "2026-05-27T10:05:00Z", task_id="t-a")],
+        )
+        assert dispatch_overdue.open_dispatches("w1", dlog, rlog) == []
+
+    def test_a_peers_report_does_not_close_this_bots_row(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path,
+            [_dispatch("w1", 100, 1000, task_id="t-a")],
+            [_report("w2", "2026-05-27T10:05:00Z", task_id="t-a")],
+        )
+        assert [t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)] == [
+            "t-a"
+        ]
+
+    def test_idless_rows_are_not_listed(self, tmp_path):
+        """Same gate as the resolver: only id'd rows are addressable."""
+        dlog, rlog = self._logs(tmp_path, [_dispatch("w1", 100, 1000)], [])
+        assert dispatch_overdue.open_dispatches("w1", dlog, rlog) == []
+
+    def test_missing_expected_by_is_None_not_a_filter(self, tmp_path):
+        """A row the resolver would still hand back must remain listable, or
+        the door hides work that can still be closed."""
+        row = _dispatch("w1", 100, 1000, task_id="t-a")
+        del row["expected_by"]
+        dlog, rlog = self._logs(tmp_path, [row], [])
+        assert dispatch_overdue.open_dispatches("w1", dlog, rlog) == [(100, None, "t-a")]
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-a"
+
+    def test_scoped_to_the_bot(self, tmp_path):
+        dlog, rlog = self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-mine"),
+                _dispatch("w2", 100, 1000, task_id="t-theirs"),
+            ],
+            [],
+        )
+        assert [t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)] == [
+            "t-mine"
+        ]
+
+    def test_cli_open_mode_prints_rows(self, tmp_path, monkeypatch, capsys):
+        row = _dispatch("w1", 100, 1000, task_id="t-a")
+        idless = _dispatch("w1", 150, 1000, task_id="t-b")
+        del idless["expected_by"]
+        dlog, rlog = self._logs(tmp_path, [row, idless], [])
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out == "100 1000 t-a\n150 - t-b\n"
+
+    def test_cli_open_mode_is_silent_when_nothing_is_open(self, tmp_path, monkeypatch, capsys):
+        dlog, rlog = self._logs(tmp_path, [], [])
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out == ""

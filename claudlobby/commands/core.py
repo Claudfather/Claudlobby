@@ -166,8 +166,6 @@ def cmd_host_timers(args) -> int:
     host units.
     """
     from ..composer import (
-        compose_host_bot_handles,
-        compose_host_mention_allowlist,
         compose_host_timers,
     )
 
@@ -412,6 +410,62 @@ def cmd_report_back(args) -> int:
         print(f"{ts:<22} {bot:<12} {status:<10} {summary:<50} {pr}")
 
     print(f"\n{len(entries)} event(s)")
+    return 0
+
+
+def cmd_brief(args) -> int:
+    """The fleet's one read door — composed state for one bot.
+
+    Read-only apart from a single write: ``--ack`` advances that viewer's
+    report cursor. Every other artifact it touches (dispatch log, report
+    ledger, workstream registry, event files) is opened for reading only.
+    """
+    from ..brief import build_brief, format_brief, write_cursor
+
+    paths = _resolve_paths(args)
+    _load_env(paths)  # WORKSTREAM_LEASE_DAYS / DISPATCH_* knobs live in .env
+    fleet, _md = _load_fleet_or_exit(paths)
+
+    bot_id = args.bot
+    if bot_id not in fleet.bots:
+        log.error("bot %r not found in fleet %r", bot_id, fleet.name)
+        return 1
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    brief = build_brief(fleet, paths, bot_id, now)
+
+    if args.json:
+        print(_json.dumps(brief, indent=2))
+    else:
+        sys.stdout.write(format_brief(brief))
+
+    if args.ack:
+        reports = brief.get("reports") or {}
+        if not reports:
+            # The section was omitted, so the ledger could not be read. Refusing
+            # is the whole point: advancing a cursor past reports nobody could
+            # see would mark unread work as handled, permanently. "Nothing to
+            # ack" would be a claim we are in no position to make.
+            log.error(
+                "refusing to ack for %s — the report section was not served "
+                "(see the degraded block); nothing was read, so nothing can be "
+                "marked seen",
+                bot_id,
+            )
+            return 1
+        # Advance to the newest row the caller was just shown, so the ack covers
+        # exactly what was rendered — never a row that arrived mid-run.
+        unacked = reports.get("unacked", [])
+        if unacked:
+            write_cursor(paths, bot_id, unacked[-1]["ts"])
+            log.info(
+                "acked %d report(s) for %s — cursor at %s",
+                len(unacked),
+                bot_id,
+                unacked[-1]["ts"],
+            )
+        else:
+            log.info("nothing to ack for %s", bot_id)
     return 0
 
 
