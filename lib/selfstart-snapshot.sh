@@ -2,10 +2,15 @@
 # lib/selfstart-snapshot.sh — record how many bots SELF-STARTED after a host boot.
 #
 # The #1002 pre-registration asks one question at the next unplanned reboot:
-# how many bots came up without help? Baseline to beat is 6 of 21 (2026-08-06,
-# load 31, pre-fix ladder). Run this BEFORE rescuing anything, then rescue
-# immediately — the snapshot is what removes the trade between a clean
+# how many bots came up without help? Run this BEFORE rescuing anything, then
+# rescue immediately — the snapshot is what removes the trade between a clean
 # experiment and leaving bots stranded (issue #1043).
+#
+# The prior 6-of-21 figure (2026-08-06, load 31) is NOT a baseline this script's
+# output can be compared against: it was produced by presence-of-record, which
+# cannot see an inbound-woken session or a half-submitted boot injection, so it
+# counted bots this classifier does not. Re-derive it before claiming better,
+# worse or flat.
 #
 # ── Two counts, opposite blind spots ────────────────────────────────────────
 # RAW      assistant records in the newest transcript file.
@@ -37,13 +42,57 @@
 # as post-boot are read in full, and those are small. So there is no sampling
 # cap here to declare — coverage is complete.
 #
-# ── Why this script is deliberately self-contained ──────────────────────────
-# It does not source lib-common.sh, call the claudlobby CLI, touch the network,
-# or require any bot to be up. Pure bash + coreutils + awk, with journalctl used
-# only for the clock assertion and degrading to UNKNOWN when it is absent. The
-# one time this script is ever run is the one time the host is least healthy —
-# a half-booted machine at load 31 — so every dependency it does not have is a
-# way it cannot fail. Do not "fix" this by wiring it into the shared helpers.
+# ── Presence of a record cannot see a RESCUE, and that is the bigger hole ───
+# Both counts above classify on records EXISTING. A bot that was carried by a
+# rescuer has records exactly like one that woke up, so both counts are blind to
+# rescue by construction and no amount of care with them closes it. On
+# 2026-08-08 this host read 7 of 21 before a rescue and 19-20 of 21 three
+# minutes after one, both stamped `result valid: yes`. The defect was never the
+# number; it was the validity claim printed over it.
+#
+# So the classification is not "did records appear" but HOW THE SESSION CAME TO
+# LIFE, which is boot_start_class in lib-common.sh (see there for the design
+# rule). It types the first post-boot user record as a submitted payload, an
+# inbound channel message, or nothing — and only then is a timestamp compared.
+# Typing first is what makes the comparison meaningful: on the 2026-08-08 data
+# the first post-boot user record for two bots was an inbound Telegram message,
+# so comparing THAT instant against anything answers a question nobody asked.
+#
+# INBOUND-WOKEN is the class that matters. A bot woken by a human messaging it
+# runs real work, reports normally, and looks healthy to every liveness signal —
+# while never having started on its own. On 2026-08-08 the bot that ran the
+# measurement and repaired twelve others was itself in this class. Liveness is
+# not self-start, and nothing else in the estate separates them.
+#
+# ── The boundary comes from OUTSIDE the data, never from a gap in it ────────
+# Once a payload is typed, self-start and rescue are told apart by comparing its
+# instant against a `fleet_rescue` receipt written by whoever did the rescuing.
+# It is tempting instead to encode the gap the populations showed on 2026-08-08
+# (the two bands were tens of seconds apart with zero overlap). Do not. That
+# separation is an artifact of the rescue having landed ~500s after boot; a
+# rescue at boot+90s closes it. The gap is evidence that the instrument
+# separates, NOT a threshold — and the bands were labelled FROM the receipt, so
+# their separation says the partition is separable, not that it is correct.
+#
+# A receipt carries TWO independent facts, an explicit list of bots touched and
+# a stamp, and a real one disagreed with itself. Both are used, and when they
+# contradict the bot is refused BY NAME rather than resolved toward either.
+# A receipt that discloses it was written after the event is telling you its
+# stamp was typed rather than read, so the comparison is suppressed entirely —
+# but the NAME LIST still stands, because a list of who was touched is not
+# reconstructed by being written down late.
+#
+# ── What this script depends on, and what it still refuses to depend on ─────
+# It sources lib-common.sh for exactly two doors — the strict roster
+# (declared_bots_strict) and the boot classifier (boot_start_class) — because
+# both are contracts other callers need and a private copy here would be the
+# second reader that eventually disagrees with the first. It still does NOT call
+# the claudlobby CLI, touch the network, or require any bot to be up, and
+# journalctl is used only for the clock assertion and degrades to UNKNOWN when
+# absent. The one time this script runs is the one time the host is least
+# healthy, so a missing lib-common.sh is a REFUSAL rather than a fallback: a
+# measurement has no degraded mode, and a private reimplementation of a shared
+# predicate is how a fleet-wide fact quietly forks.
 #
 # ── Why `set -e` is deliberately absent ─────────────────────────────────────
 # House rule is `set -euo pipefail`. Not here, and the reason is the contract:
@@ -69,15 +118,65 @@
 #                                 accepting one degradation never waives another
 set -uo pipefail
 
-BASELINE_TEXT="6 of 21 (2026-08-06, load 31, pre-fix ladder)"
+# NOT "the baseline to beat" any more, and the wording is deliberate. The 6 of
+# 21 was taken with an instrument that could not see an inbound-woken session or
+# a half-submitted injection, so it counts bots this classifier does not. A
+# number from here and that number are not on the same scale, and printing them
+# side by side as though they were is how "flat", "better" or "worse" gets
+# claimed without support. The baseline has to be RE-DERIVED with the typed
+# classifier before any comparison is legitimate (#843).
+BASELINE_TEXT="6 of 21 (2026-08-06) — NOT COMPARABLE, see below"
+BASELINE_NOTE="the 6 of 21 was measured by presence-of-record, which cannot see
+                        inbound-woken or half-submitted boots. Re-derive it with this
+                        classifier before calling any new figure better or worse."
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${CLAUDLOBBY_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
+# Exported because the shared doors resolve the estate from it, and the test
+# seam sets it. Assigned back so an unset environment still gets the derived
+# value rather than tripping the doors' own :? guards.
+CLAUDLOBBY_ROOT="$ROOT"
+export CLAUDLOBBY_ROOT
+
+if [ ! -r "$SCRIPT_DIR/lib-common.sh" ]; then
+    echo "selfstart-snapshot: cannot read $SCRIPT_DIR/lib-common.sh — refusing." >&2
+    echo "  The roster and boot-classifier doors live there. Reimplementing them" >&2
+    echo "  here would fork a fleet-wide predicate, and a measurement taken with" >&2
+    echo "  a private copy of one is not comparable to the baseline." >&2
+    exit 3
+fi
+# shellcheck source=lib-common.sh
+. "$SCRIPT_DIR/lib-common.sh"
+
+# lib-common.sh runs `set -euo pipefail` AT SOURCE TIME, so sourcing it re-arms
+# errexit inside a script whose whole contract is not having it. That is not a
+# style point: measured on the first run after wiring, the per-bot sweep aborted
+# at the first bot with no transcript and the script exited having printed
+# NOTHING. Under a smaller fault it would instead have printed a page covering
+# part of the estate, which is the silent-denominator failure this file exists
+# to prevent, arriving through the helper it just started trusting.
+#
+# So errexit is disabled again immediately, and deliberately: -u and pipefail
+# are kept, only -e is dropped. Do not "tidy" this line away — see the `set -e`
+# note in the header for what it buys.
+set +e
+
+# install_error_trap is likewise NOT armed, for the same reason: an ERR trap
+# that aborts mid-sweep prints a two-thirds page.
+#
+# lib-common.sh also installs its own EXIT trap (_lc_cleanup), and bash keeps
+# exactly one per signal, so the trap below would silently replace it and leak
+# whatever lib-common had queued for cleanup. Chained rather than overwritten.
+_selfstart_cleanup() {
+    rm -rf "${TMP:-}"
+    if type _lc_cleanup >/dev/null 2>&1; then _lc_cleanup; fi
+}
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/selfstart.XXXXXX")" || {
     echo "selfstart-snapshot: cannot create temp dir" >&2; exit 3; }
-trap 'rm -rf "$TMP"' EXIT
+trap '_selfstart_cleanup' EXIT
 
 usage() {
     cat <<'EOF'
@@ -97,6 +196,10 @@ Exit codes:
      first-turn allowance had not elapsed. The page is printed and stamped
      TOO EARLY; re-run at the instant it names. Takes 4 if both apply, since
      re-running fixes early and need not fix incomplete.
+  6  ran too LATE to be a result — a fleet_rescue receipt covers this boot, so
+     the page is a reconstruction rather than the measurement. Printed and
+     stamped CONTAMINATED. Outranks 5 (re-running never un-contaminates a boot)
+     and is outranked by 4.
 EOF
 }
 
@@ -215,6 +318,165 @@ else
     fi
 fi
 
+# ── Rescue receipt — the contamination gate ─────────────────────────────────
+# States, and each is a different KIND of answer rather than a confidence level:
+#   NONE        no receipt covers this boot. Contamination cannot be ruled out
+#               at all — see the honest limit printed with the report.
+#   USABLE      stamp and names both trustworthy: full comparison.
+#   NAMES-ONLY  the stamp is reconstructed, ambiguous or not a comparable
+#               instant. The comparison is suppressed; the name list still
+#               applies, because it is not reconstructed by being written late.
+RESCUE_STATE="NONE"
+RESCUE_STAMP=""
+RESCUE_STAMP_CMP=""
+RESCUE_WHY=""
+: > "$TMP/rescued_names"
+
+# Pad a fractionless stamp, the same trick BOOT_CMP uses: without it
+# 14:15:00.500Z sorts BEFORE 14:15:00Z, because "." is below "Z", and a bot half
+# a second the wrong side of the boundary silently flips class.
+pad_iso_frac() {
+    case "$1" in
+        *.*Z) printf '%s' "$1" ;;
+        *Z)   printf '%s' "${1%Z}.000Z" ;;
+        *)    printf '%s' "$1" ;;
+    esac
+}
+
+# A boundary this script may compare against has to be an ISO instant in UTC.
+# Anything else — a local offset, a date alone, prose — is not comparable, and
+# guessing at one is how a typed value becomes a measured one.
+iso_utc_shaped() {
+    case "$1" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*Z) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Ledger files that could hold a receipt for THIS boot: dated at or after the
+# day BEFORE the boot date. The filename carries a LOCAL date while the boot
+# instant here is UTC, so a boot either side of midnight would otherwise skip
+# the very file holding its own rescue — and missing a receipt fails OPEN, the
+# one direction this gate must never fail in.
+ledger_files_for_boot() {
+    local since="$1" f b d
+    for f in "$ROOT"/state/events/fleet-*.jsonl; do
+        [ -f "$f" ] || continue
+        b="$(basename "$f")"; d="${b#fleet-}"; d="${d%.jsonl}"
+        case "$d" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+            *) continue ;;
+        esac
+        [ "$d" \< "$since" ] || printf '%s\n' "$f"
+    done
+}
+
+# One JSON string field, and EMPTY when the row carries more than one distinct
+# value for it. Field-name extraction without jq is a structural read, but it
+# cannot tell a real key from the same text quoted inside a prose value.
+# Refusing on ambiguity is cheaper than being subtly wrong about which instant
+# bounds the measurement. rc 1 absent, rc 2 ambiguous.
+row_field() {
+    local row="$1" key="$2" vals n
+    vals="$(printf '%s\n' "$row" | grep -o "\"$key\":\"[^\"]*\"" \
+            | sed "s/^\"$key\":\"//; s/\"\$//" | sort -u)"
+    [ -n "$vals" ] || return 1
+    n="$(printf '%s\n' "$vals" | wc -l | tr -d ' ')"
+    [ "$n" = "1" ] || return 2
+    printf '%s' "$vals"
+}
+
+# Names out of data.bots_rescued. The key itself sits inside the captured
+# segment, so it is dropped BY NAME rather than by position.
+row_rescued_names() {
+    printf '%s\n' "$1" \
+        | grep -o '"bots_rescued":\[[^]]*\]' | head -1 \
+        | grep -o '"[^"]*"' | sed 's/^"//; s/"$//' \
+        | grep -v '^bots_rescued$'
+}
+
+SCAN_SINCE="$(epoch_to_iso_utc "$(( BOOT_EPOCH - 86400 ))")"
+SCAN_SINCE="${SCAN_SINCE%%T*}"
+[ -n "$SCAN_SINCE" ] || SCAN_SINCE="${BOOT_ISO%%T*}"
+
+: > "$TMP/receipt_rows"
+: > "$TMP/receipt_files"
+while IFS= read -r lf; do
+    [ -n "$lf" ] || continue
+    # The closing quote is load-bearing: without it this also swallows
+    # fleet_rescue_correction rows, which are metadata ABOUT a receipt and carry
+    # none of its fields. A prefix match here would read a correction as a
+    # receipt with no stamp and refuse the whole page for it.
+    if grep '"type":"fleet_rescue"' "$lf" >> "$TMP/receipt_rows" 2>/dev/null; then
+        basename "$lf" >> "$TMP/receipt_files"
+    fi
+done <<EOF
+$(ledger_files_for_boot "$SCAN_SINCE")
+EOF
+
+while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    r_stamp="$(row_field "$row" "selfstart_measurement_valid_before")"; r_rc=$?
+    r_cmp=""
+    if [ "$r_rc" -eq 0 ] && iso_utc_shaped "$r_stamp"; then
+        r_cmp="$(pad_iso_frac "$r_stamp")"
+    fi
+
+    # A receipt whose boundary predates this boot belongs to an EARLIER one.
+    # A receipt with no usable boundary cannot be placed, so the file-date
+    # window is all that bounds it and it is treated as applicable — guessing
+    # the other way fails open.
+    if [ -n "$r_cmp" ] && [ ! "$r_cmp" \> "$BOOT_CMP" ]; then
+        continue
+    fi
+
+    row_rescued_names "$row" >> "$TMP/rescued_names"
+
+    if [ -z "$r_cmp" ]; then
+        RESCUE_STATE="NAMES-ONLY"
+        if [ "$r_rc" -eq 2 ]; then
+            RESCUE_WHY="receipt carries more than one distinct measurement boundary — ambiguous"
+        elif [ "$r_rc" -ne 0 ]; then
+            RESCUE_WHY="receipt carries no selfstart_measurement_valid_before boundary"
+        else
+            RESCUE_WHY="receipt boundary is not a comparable UTC instant: $r_stamp"
+        fi
+        continue
+    fi
+
+    # A `recorded` field is DISCLOSURE: a receipt written in the same operation
+    # that read the clock has nothing to disclose and omits it. Presence is
+    # therefore the property, and the prose is deliberately NOT read — matching
+    # on what it SAYS would be a pattern match standing in for a property check,
+    # and this one is structural.
+    #
+    # RECEIPT-WRITER CONTRACT, the other half of this fix and not implemented
+    # here: read the stamp in the same operation that writes the row, and omit
+    # `recorded` when you do. This side only declines to trust what the writer
+    # itself admits was reconstructed.
+    if printf '%s\n' "$row" | grep -q '"recorded":'; then
+        RESCUE_STATE="NAMES-ONLY"
+        RESCUE_WHY="receipt declares itself recorded after the fact, so its boundary was typed rather than read"
+        continue
+    fi
+
+    [ "$RESCUE_STATE" = "NAMES-ONLY" ] || RESCUE_STATE="USABLE"
+    # Earliest boundary wins when several rescues cover one boot: it is the most
+    # conservative, and a later rescue cannot un-suspect a bot an earlier one
+    # already covers.
+    if [ -z "$RESCUE_STAMP_CMP" ] || [ "$r_cmp" \< "$RESCUE_STAMP_CMP" ]; then
+        RESCUE_STAMP="$r_stamp"; RESCUE_STAMP_CMP="$r_cmp"
+    fi
+done < "$TMP/receipt_rows"
+
+# One place where a suppressed boundary is actually removed, so no later branch
+# can reach a stamp the state above says must not be compared against.
+if [ "$RESCUE_STATE" != "USABLE" ]; then
+    RESCUE_STAMP=""; RESCUE_STAMP_CMP=""
+fi
+N_RESCUE_NAMED="$(sort -u "$TMP/rescued_names" | grep -c . || true)"
+[ -n "$N_RESCUE_NAMED" ] || N_RESCUE_NAMED=0
+
 # ── Denominator ─────────────────────────────────────────────────────────────
 # Enumerated from the bots DECLARED in every fleet.yaml, as a union across
 # fleets, then transcripts are joined onto it. Never from directories on disk.
@@ -236,34 +498,10 @@ fi
 # than no N, because it will be compared against the baseline and believed.
 # Same code shape, opposite correct answer; the discriminator is action versus
 # measurement. Hence: parse failure is loud and fatal here.
-list_manifests() {
-    # Both supported overlay depths: local/<fleet>/ and local/<system>/<fleet>/.
-    ls -1 "$ROOT"/local/*/fleet.yaml "$ROOT"/local/*/*/fleet.yaml 2>/dev/null | sort -u
-}
-
-# Bot keys are the first nesting level under the `bots:` mapping. Comments,
-# blank lines, deeper keys and sibling top-level keys are all excluded, and an
-# anchor on the key (`alex: &base`) is still a bot.
-bots_from_manifest() {
-    awk '
-        /^[[:space:]]*#/ { next }
-        !inbots && $0 ~ /^[[:space:]]*bots:[[:space:]]*(#.*)?$/ {
-            match($0, /^[ ]*/); ind = RLENGTH; inbots = 1; botind = 0; next
-        }
-        inbots {
-            if ($0 ~ /^[[:space:]]*$/) next
-            match($0, /^[ ]*/); cur = RLENGTH
-            if (cur <= ind) { inbots = 0; next }
-            if (botind == 0) botind = cur
-            if (cur == botind && $0 ~ /^[ ]*[A-Za-z0-9_-]+:[ ]*(&[A-Za-z0-9_-]+)?[ ]*(#.*)?$/) {
-                k = $0; sub(/^[ ]*/, "", k); sub(/:.*$/, "", k); print k
-            }
-        }
-    ' "$1" 2>/dev/null
-}
-
-MANIFESTS="$(list_manifests)"
-[ -n "$MANIFESTS" ] && printf '%s\n' "$MANIFESTS" > "$TMP/manifests"
+# The roster comes from declared_bots_strict, the LOUD door — never
+# parse_fleet_bots. See that function for why there are two doors and why
+# swapping this one for the soft sibling silently reinstates the bug above.
+discover_fleet_manifests | cut -f2 | sort -u > "$TMP/manifests"
 if [ ! -s "$TMP/manifests" ]; then
     die_loud "No fleet.yaml found under $ROOT/local/" \
              "Looked at local/*/fleet.yaml and local/*/*/fleet.yaml"
@@ -271,26 +509,7 @@ fi
 
 : > "$TMP/declared"
 : > "$TMP/badman"
-while IFS= read -r man; do
-    [ -n "$man" ] || continue
-    fleet="$(basename "$(dirname "$man")")"
-    if [ ! -r "$man" ]; then
-        printf '%s\tunreadable\n' "$man" >> "$TMP/badman"; continue
-    fi
-    if ! grep -qE '^[[:space:]]*bots:[[:space:]]*(#.*)?$' "$man" 2>/dev/null; then
-        printf '%s\tno bots: block\n' "$man" >> "$TMP/badman"; continue
-    fi
-    names="$(bots_from_manifest "$man")"
-    if [ -z "$names" ]; then
-        printf '%s\tbots: block declares no bots\n' "$man" >> "$TMP/badman"; continue
-    fi
-    while IFS= read -r b; do
-        [ -n "$b" ] || continue
-        printf '%s\t%s\t%s\n' "$b" "$fleet" "$(dirname "$man")/runtime/bots/$b" >> "$TMP/declared"
-    done <<EOF
-$names
-EOF
-done < "$TMP/manifests"
+declared_bots_strict "$TMP/badman" > "$TMP/declared"
 
 PARTIAL=0
 if [ -s "$TMP/badman" ]; then
@@ -379,6 +598,7 @@ boot_rung_for() {
 : > "$TMP/rows"
 : > "$TMP/rungs"
 : > "$TMP/norung"
+: > "$TMP/noprompt"
 while IFS="$(printf '\t')" read -r bot fleet botdir; do
     [ -n "$bot" ] || continue
     tdir="$(transcript_dir_for "$botdir")"
@@ -399,10 +619,10 @@ while IFS="$(printf '\t')" read -r bot fleet botdir; do
         # strand if its rung has not elapsed: systemd has not launched it, so
         # there is nothing it could have written.
         if [ "$not_due" -eq 1 ]; then
-            printf '%s\t%s\tNOT-YET-DUE\t0\t0\t-\t-\tboot rung %ss, only %ss since boot — not launched yet\n' \
+            printf '%s\t%s\tNOT-YET-DUE\t0\t0\t-\t-\tboot rung %ss, only %ss since boot — not launched yet\t-\n' \
                 "$bot" "$fleet" "$rung" "$ELAPSED" >> "$TMP/rows"
         else
-            printf '%s\t%s\tSTRAND\t0\t0\t-\t-\tno transcript file at all\n' "$bot" "$fleet" >> "$TMP/rows"
+            printf '%s\t%s\tSTRAND\t0\t0\t-\t-\tno transcript file at all\t-\n' "$bot" "$fleet" >> "$TMP/rows"
         fi
         continue
     fi
@@ -435,8 +655,97 @@ EOF
     fresh_file=0
     [ "$first_ts" != "-" ] && [ "$first_ts" \> "$BOOT_CMP" ] && fresh_file=1
 
-    if [ "$filtered" -gt 0 ]; then
-        cls="SELF-STARTED"; why="post-boot assistant records present"
+    # HOW the session came to life, which is the question presence-of-record
+    # cannot answer. Typed before any instant is compared.
+    #
+    # The bot's own composed prompt is passed so the classifier can assert the
+    # WHOLE injection landed rather than merely something startup-shaped. A bot
+    # with no composed prompt cannot have that asserted, so it is disclosed
+    # below rather than silently credited with a clean boot.
+    startup_prompt="$(bot_conf_get "$botdir" STARTUP_PROMPT "")"
+    [ -n "$startup_prompt" ] || printf '%s\n' "$bot" >> "$TMP/noprompt"
+    start_line="$(boot_start_class "$tdir" "$BOOT_CMP" "$startup_prompt")"
+    start_cls="$(printf '%s' "$start_line" | cut -f1)"
+    start_ts="$(printf '%s' "$start_line" | cut -f2)"
+
+    named_rescued=0
+    grep -qx "$bot" "$TMP/rescued_names" 2>/dev/null && named_rescued=1
+
+    # The rescue verdict, consulted only where a payload was actually submitted.
+    #
+    # THE NAME LIST IS NON-EXHAUSTIVE, and this is the load-bearing asymmetry:
+    #   presence => rescued, definitively.
+    #   absence  => UNKNOWN. Never a self-start verdict on its own.
+    # A list is only as complete as the discipline of whoever writes it, and that
+    # discipline failed on its first live test: a second rescue happened hours
+    # after the receipt was designed, performed by the person who proposed it,
+    # and went unrecorded. So absence falls through to the boundary — and where
+    # there is no usable boundary to fall through TO, it is refused rather than
+    # resolved. Reading "not on the list" as "started on its own" is how an
+    # unrecorded rescue silently becomes a self-start.
+    #
+    # The stamp is the opposite kind of fact: a BOUNDARY, so everything after it
+    # is suspect. list-says-rescued against boundary-says-clean is therefore a
+    # CONTRADICTION and is refused by name; boundary-says-rescued against a name
+    # merely missing from the list is not a contradiction at all, because the
+    # list never claimed to be complete.
+    rescue_v="NONE"
+    if [ "$RESCUE_STATE" = "USABLE" ]; then
+        if [ "$start_ts" \> "$RESCUE_STAMP_CMP" ]; then
+            rescue_v="RESCUED"
+        elif [ "$named_rescued" -eq 1 ]; then
+            rescue_v="CONTRADICTION"
+        fi
+    elif [ "$RESCUE_STATE" = "NAMES-ONLY" ]; then
+        if [ "$named_rescued" -eq 1 ]; then
+            rescue_v="RESCUED-BY-NAME"
+        else
+            # A suppressed boundary AND a list that does not claim completeness
+            # leaves nothing that could certify this bot. Refuse; print the
+            # payload instant as evidence and let a human settle it.
+            rescue_v="UNCERTIFIABLE"
+        fi
+    fi
+
+    if [ "$start_cls" = "payload" ] && [ "$filtered" -gt 0 ]; then
+        case "$rescue_v" in
+            RESCUED)
+                cls="RESCUED"
+                why="payload submitted $start_ts, after the rescue boundary $RESCUE_STAMP — carried, not woken" ;;
+            RESCUED-BY-NAME)
+                cls="RESCUED"
+                why="named on the rescue receipt; payload submitted $start_ts (boundary not comparable)" ;;
+            CONTRADICTION)
+                cls="ADJUDICATE"
+                why="RECEIPT CONTRADICTS ITSELF: named as rescued, yet payload submitted $start_ts BEFORE its own boundary $RESCUE_STAMP" ;;
+            UNCERTIFIABLE)
+                cls="ADJUDICATE"
+                why="payload submitted $start_ts, but the receipt boundary is unusable and its name list is not exhaustive — nothing here can certify a self-start" ;;
+            *)
+                cls="SELF-STARTED"
+                why="payload submitted $start_ts, unaided" ;;
+        esac
+    elif [ "$start_cls" = "partial" ] && [ "$filtered" -gt 0 ]; then
+        # Half a boot. Something startup-shaped submitted, but this bot's own
+        # composed prompt did not — so it is running without the instructions it
+        # was composed with, and it is NOT a self-start.
+        #
+        # A receipt verdict outranks this: "a human carried it" is the more
+        # decision-relevant fact, and PARTIAL exists to stop a bot reading as a
+        # SELF-START on half an injection, not to relabel one already known
+        # carried.
+        case "$rescue_v" in
+            RESCUED|RESCUED-BY-NAME)
+                cls="RESCUED"
+                why="carried by a rescuer; its own composed prompt never submitted (first startup-shaped record $start_ts)" ;;
+            *)
+                cls="PARTIAL"
+                why="boot injection only HALF submitted — startup-shaped record at $start_ts, but the composed STARTUP_PROMPT never landed" ;;
+        esac
+    elif [ "$start_cls" = "inbound" ] && [ "$filtered" -gt 0 ]; then
+        # Alive, working, and never self-started. Counted OUT of the headline.
+        cls="INBOUND-WOKEN"
+        why="woken by an inbound channel message at $start_ts — no startup payload was submitted"
     elif [ "$not_due" -eq 1 ]; then
         # Dominates every negative verdict below, including the pre-crash-file
         # case: nothing negative can be concluded about a bot systemd has not
@@ -459,8 +768,9 @@ EOF
         cls="STRAND"; why="newest transcript predates boot — pre-crash file, RAW false positive"
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$bot" "$fleet" "$cls" "$raw" "$filtered" "$(basename "$newest")" "$first_ts" "$why" >> "$TMP/rows"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$bot" "$fleet" "$cls" "$raw" "$filtered" "$(basename "$newest")" "$first_ts" "$why" \
+        "$start_cls:$start_ts" >> "$TMP/rows"
 done < "$TMP/declared"
 
 # ── Undeclared leftovers (reported, never counted) ──────────────────────────
@@ -483,6 +793,9 @@ n_adj="$(awk -F'\t' '$3=="ADJUDICATE"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_raw_pos="$(awk -F'\t' '$4>0' "$TMP/rows" | wc -l | tr -d ' ')"
 n_filt_pos="$(awk -F'\t' '$5>0' "$TMP/rows" | wc -l | tr -d ' ')"
 n_notdue="$(awk -F'\t' '$3=="NOT-YET-DUE"' "$TMP/rows" | wc -l | tr -d ' ')"
+n_rescued="$(awk -F'\t' '$3=="RESCUED"' "$TMP/rows" | wc -l | tr -d ' ')"
+n_inbound="$(awk -F'\t' '$3=="INBOUND-WOKEN"' "$TMP/rows" | wc -l | tr -d ' ')"
+n_partial="$(awk -F'\t' '$3=="PARTIAL"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_disagree="$(awk -F'\t' '($4>0)!=($5>0)' "$TMP/rows" | wc -l | tr -d ' ')"
 n_rows="$(wc -l < "$TMP/rows" | tr -d ' ')"
 
@@ -517,6 +830,23 @@ TOO_EARLY=0
 EXIT_CODE=0
 [ "$TOO_EARLY" -eq 1 ] && EXIT_CODE=5
 
+# ── Was this taken after someone started rescuing? ──────────────────────────
+# The mirror of the too-early gate, and it refuses on the same terms. Any
+# applicable receipt contaminates the page, even if no bot ended up classified
+# RESCUED: a rescue sweep was under way while this ran, so what it produces is a
+# reconstruction rather than the pre-registered measurement, which is defined as
+# a reading taken BEFORE any rescue.
+#
+# Precedence 4 > 6 > 5: incomplete and contaminated are both permanent for this
+# boot, while early resolves by re-running at the stated instant. Incomplete
+# outranks contaminated because a short denominator invalidates the whole page
+# including its contamination reading.
+CONTAMINATED=0
+if [ "$RESCUE_STATE" != "NONE" ]; then
+    CONTAMINATED=1
+    EXIT_CODE=6
+fi
+
 # ── Completeness assertion ──────────────────────────────────────────────────
 # Every declared bot must have produced a row, and every row must have landed
 # in exactly one bucket. Asserted positively, because without `set -e` there is
@@ -531,7 +861,7 @@ EXIT_CODE=0
 # need not fix it. The operator who gets only one number should get the one that
 # does not resolve on its own.
 INCOMPLETE=0
-if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj + n_notdue ))" -ne "$TOTAL" ]; then
+if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj + n_notdue + n_rescued + n_inbound + n_partial ))" -ne "$TOTAL" ]; then
     INCOMPLETE=1
     EXIT_CODE=4
     echo
@@ -541,8 +871,9 @@ if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj + n_notdue ))"
     echo "##"
     echo "##  Declared bots      : $TOTAL"
     echo "##  Rows produced      : $n_rows"
-    echo "##  Rows classified    : $(( n_self + n_strand + n_adj + n_notdue ))"
+    echo "##  Rows classified    : $(( n_self + n_strand + n_adj + n_notdue + n_rescued + n_inbound + n_partial ))"
     echo "##    self-started $n_self · stranded $n_strand · adjudicate $n_adj · not-yet-due $n_notdue"
+    echo "##    rescued $n_rescued · inbound-woken $n_inbound · partial $n_partial"
     echo "##"
     echo "##  Bots are missing from the counts below, so N is short and"
     echo "##  must NOT be compared against the baseline. Exit code 4."
@@ -577,8 +908,40 @@ if [ "$TOO_EARLY" -eq 1 ]; then
     echo
 fi
 
+if [ "$CONTAMINATED" -eq 1 ]; then
+    echo
+    echo "############################################################"
+    echo "##  CONTAMINATED — TAKEN AFTER A RESCUE, NOT A RESULT      ##"
+    echo "############################################################"
+    echo "##"
+    echo "##  A fleet_rescue receipt covers this boot, so this run is a"
+    echo "##  reconstruction, not the #1002 measurement — which is defined"
+    echo "##  as a reading taken BEFORE anyone rescues anything."
+    echo "##"
+    if [ "$RESCUE_STATE" = "USABLE" ]; then
+        echo "##  Rescue boundary   : $RESCUE_STAMP"
+    else
+        echo "##  Rescue boundary   : UNUSABLE — $RESCUE_WHY"
+        echo "##  Bots are therefore split by the receipt NAME LIST alone."
+    fi
+    echo "##  Named as rescued  : $N_RESCUE_NAMED bot(s)"
+    echo "##  Classified rescued: $n_rescued  ·  inbound-woken: $n_inbound"
+    echo "##"
+    echo "##  $n_self of $TOTAL is what is LEFT after excluding those, and it is"
+    echo "##  a lower bound on nothing: a bot rescued before it would have"
+    echo "##  woken on its own is unrecoverable after the fact."
+    echo "##"
+    echo "##  Next time: run this BEFORE the first rescue. That is the whole"
+    echo "##  reason it exists, and it costs one command."
+    echo "############################################################"
+    echo
+fi
+
 echo "==============================================================="
-if [ "$TOO_EARLY" -eq 1 ]; then
+if [ "$CONTAMINATED" -eq 1 ]; then
+    echo "  SELF-START SNAPSHOT:  NOT A RESULT — a rescue covers this boot"
+    echo "                        (provisional: $n_self of $TOTAL, $n_rescued carried, $n_inbound woken by inbound)"
+elif [ "$TOO_EARLY" -eq 1 ]; then
     echo "  SELF-START SNAPSHOT:  NOT A RESULT — only ${ELAPSED}s since boot"
     echo "                        (provisional: $n_self of $TOTAL, $n_notdue not launched yet)"
 elif [ "$n_adj" -gt 0 ]; then
@@ -587,7 +950,8 @@ elif [ "$n_adj" -gt 0 ]; then
 else
     echo "  SELF-START SNAPSHOT:  $n_self of $TOTAL self-started"
 fi
-echo "  baseline to beat:     $BASELINE_TEXT"
+echo "  prior figure:         $BASELINE_TEXT"
+echo "                        $BASELINE_NOTE"
 [ "$INCOMPLETE" -eq 1 ] && echo "  *** INCOMPLETE — $n_rows of $TOTAL bots produced a row, N IS SHORT ***"
 [ "$PARTIAL" -eq 1 ] && echo "  *** PARTIAL DENOMINATOR — a manifest was skipped, N IS SHORT ***"
 [ "$DUP_TOLERATED" -eq 1 ] && echo "  *** DUPLICATE BOT NAMES ACCEPTED — rows below are ambiguous: $(printf '%s' "$DUPES" | tr '\n' ' ') ***"
@@ -601,9 +965,20 @@ else
     echo "  counts agree on all $TOTAL bots"
 fi
 echo "  clock at boot : $CLOCK_VERDICT — $CLOCK_DETAIL"
+case "$RESCUE_STATE" in
+    NONE)
+        echo "  rescue receipt: none covers this boot — contamination CANNOT be ruled out" ;;
+    USABLE)
+        echo "  rescue receipt: boundary $RESCUE_STAMP, $N_RESCUE_NAMED bot(s) named ($(tr '\n' ' ' < "$TMP/receipt_files"))" ;;
+    *)
+        echo "  rescue receipt: boundary UNUSABLE — $RESCUE_WHY"
+        echo "                  $N_RESCUE_NAMED bot(s) named; the name list still applies" ;;
+esac
 echo "  boot instant  : ${BOOT_ISO}Z (epoch $BOOT_EPOCH)"
 echo "  snapshot at   : ${NOW_ISO}Z (${ELAPSED}s after boot)"
-if [ "$TOO_EARLY" -eq 1 ]; then
+if [ "$CONTAMINATED" -eq 1 ]; then
+    echo "  result valid  : NO — a rescue covers this boot, see the CONTAMINATED banner"
+elif [ "$TOO_EARLY" -eq 1 ]; then
     echo "  result valid  : NOT YET — re-run at $(epoch_to_iso_utc "$VALID_AT")Z (ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s)"
 else
     echo "  result valid  : yes — past ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s"
@@ -625,10 +1000,32 @@ print_section() {
     echo
 }
 
-print_section "SELF-STARTED" "SELF-STARTED"
-print_section "STRAND"       "STRANDED"
-print_section "NOT-YET-DUE"  "NOT YET DUE — systemd has not launched these, they are NOT strands"
-print_section "ADJUDICATE"   "ADJUDICATE — counts disagree and cannot be resolved mechanically"
+print_section "SELF-STARTED"  "SELF-STARTED"
+print_section "PARTIAL"       "HALF-BOOTED — a startup-shaped record landed but the bot's OWN composed prompt never did. Running without the instructions it was composed with, and NOT a self-start"
+print_section "RESCUED"       "RESCUED — carried by a rescuer, NOT self-started"
+print_section "INBOUND-WOKEN" "STRANDED ON BOOT, WOKEN BY AN INBOUND MESSAGE — these are NOT self-starts. A bot here looks healthy to every liveness signal: session up, pane active, work being done. It never started on its own"
+print_section "STRAND"        "STRANDED"
+print_section "NOT-YET-DUE"   "NOT YET DUE — systemd has not launched these, they are NOT strands"
+print_section "ADJUDICATE"    "ADJUDICATE — counts disagree and cannot be resolved mechanically"
+
+if [ "$RESCUE_STATE" = "NONE" ]; then
+    echo "NOTE: no rescue receipt covers this boot. That is NOT evidence that"
+    echo "      nobody rescued anything — with no external boundary to compare"
+    echo "      against, a carried bot and a woken one are the same shape here."
+    echo "      Only the per-bot classes above are decidable; contamination is"
+    echo "      not. Run this BEFORE any rescue, and have whoever rescues write"
+    echo "      a fleet_rescue receipt, or this limit is permanent for the boot."
+    echo
+fi
+
+if [ -s "$TMP/noprompt" ]; then
+    echo "NOTE: no composed STARTUP_PROMPT readable for these bots, so the"
+    echo "      whole-injection assertion could not be applied. A half-submitted"
+    echo "      boot would read as a clean one here — they are disclosed rather"
+    echo "      than credited:"
+    sort -u "$TMP/noprompt" | sed 's/^/        /'
+    echo
+fi
 
 if [ -s "$TMP/norung" ]; then
     echo "NOTE: no boot rung readable for these bots, so the not-yet-launched"
