@@ -878,6 +878,28 @@ class TestPairing:
         assert all(r["block"] is not None and r["pos"] is not None for r in rows)
         assert [r["pos"] for r in rows] == [0, 1, 0, 1, 0, 1, 0, 1]
 
+    def test_minimal_paired_sample_of_one_block_is_not_read_as_sequential(self):
+        # The smallest legitimate pairing: ONE block, one boot per arm. Here
+        # `runs == n_arms` holds TRIVIALLY — with one boot per arm every
+        # possible order has exactly n_arms runs — so the arm-run count
+        # carries no information about contiguity and must not be read as
+        # arm-sequential. The `len(seq) > n_arms` conjunct is the whole guard.
+        #
+        # Dropping it wrongly refuses this sample and withholds its
+        # between-arm figure, and every other test in this file stays green
+        # (mason M3 surviving mutant). The failure direction is conservative —
+        # it suppresses a real figure rather than inventing one — which is
+        # exactly why nothing else would have surfaced it.
+        for spec in ({0.3: "s", 1.5: "c"}, {0.3: "s", 1.5: "c", 6.0: "c"}):
+            rows = _paired_rows(spec)
+            assert {r["block"] for r in rows} == {0}, "fixture must be ONE block"
+            assert len(rows) == len(spec), "one boot per arm — the degenerate case"
+            text, rc = summary.summarize(rows)
+            assert rc == 0
+            assert f"PAIRED: 1 complete block(s) x {len(spec)} arms" in text
+            assert "BETWEEN-ARM DIFFERENCE SUPPRESSED" not in text
+            assert "── between-arm (control - treatment)" in text
+
     def test_one_arm_per_block_is_caught_even_though_every_block_validates(self):
         # The shape a per-block DRIVER produces: it stamps block ids but does
         # not own the boot loop, so it can only put one arm in each block. Every

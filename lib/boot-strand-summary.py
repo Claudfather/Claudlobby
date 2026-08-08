@@ -388,6 +388,14 @@ def verify_pairing(
     n_arms = len(labelled)
     blocks, unblocked = _declared_blocks(sample)
     refusals = block_refusals(blocks)
+    # The second conjunct is load-bearing and must not be simplified away.
+    # With exactly one boot per arm, `runs == n_arms` is true for EVERY
+    # possible order — the count cannot distinguish contiguous from
+    # alternating, because there is nothing to alternate. Without the length
+    # guard the smallest legitimate pairing (one block, one boot per arm) is
+    # read as arm-sequential and refused its own between-arm figure, and the
+    # failure is conservative enough that nothing else in the suite notices
+    # (gated by test_minimal_paired_sample_of_one_block_is_not_read_as_sequential).
     contiguous_by_arm = runs == n_arms and len(seq) > n_arms
 
     lines = ["── pairing (pre-registration v2 §4 BASELINE) " + "─" * 24]
