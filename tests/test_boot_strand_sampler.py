@@ -272,3 +272,50 @@ def test_strand_under_load_is_never_reported_as_a_clean_send():
         "pane_send_verified decided the box was empty and returned success on a "
         "payload that is still sitting in it."
     )
+
+
+class TestTickKnobPassthrough:
+    """#843 ladder enabler: the sampler must be able to VARY the verify budget.
+
+    ``run_start_bot`` builds its child env with ``env -i`` and an explicit
+    allowlist (#846). That is the right shape — but a variable this harness
+    exists to SWEEP has to be named there or it is silently dropped.
+
+    Dropped, a tick-ladder returns identical strand rates at 5, 15 and 50,
+    because every run is secretly the default. That reads as "the verify budget
+    makes no difference to the strand" — a refutation MANUFACTURED BY THE
+    HARNESS, indistinguishable from a measured one, and nothing in the output
+    discloses it. These assert on the child ENVIRONMENT rather than on whether a
+    boot looked different, because the boot path is what the knob is meant to
+    change and would beg the question.
+    """
+
+    def _ticks_seen_by_start_bot(self, tmp_path: Path, tick: str | None) -> str:
+        (tmp_path / "lib").mkdir(exist_ok=True)
+        stub = tmp_path / "lib" / "start-bot.sh"
+        stub.write_text(
+            '#!/usr/bin/env bash\necho "TICKS=${PANE_SEND_VERIFY_TICKS:-<UNSET>}"\n'
+        )
+        stub.chmod(0o755)
+        env = dict(os.environ)
+        env.pop("PANE_SEND_VERIFY_TICKS", None)
+        if tick is not None:
+            env["PANE_SEND_VERIFY_TICKS"] = tick
+        r = subprocess.run(
+            [
+                "bash", "-c", f'. "{SAMPLER}"; run_start_bot "$@"', "_",
+                "10", str(tmp_path), str(tmp_path / "botdir"),
+            ],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+
+    def test_knob_reaches_start_bot(self, tmp_path):
+        assert self._ticks_seen_by_start_bot(tmp_path, "200") == "TICKS=200"
+
+    def test_unset_knob_does_not_leak_an_empty_value(self, tmp_path):
+        # Passing it unconditionally would send an EMPTY string, shadowing
+        # lib-common's default and reaching `[ "$ticks" -gt 0 ]` as a
+        # non-integer. Absent is not the same as empty here.
+        assert self._ticks_seen_by_start_bot(tmp_path, None) == "TICKS=<UNSET>"
