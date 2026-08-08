@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import call_lib_fn
 from tests.test_task_id_dispatch import _bash, _fake_lib
 
@@ -417,3 +419,63 @@ def test_unterminated_preamble_terminates(tmp_path):
     task = "[fleet memory: never closed and then some subject matter"
     _run_dispatch(tmp_path, env, task=task)
     assert _query_sent(tmp_path) == task
+
+
+# A strip rule is a pattern match, and pattern matches have edges. Over-matching
+# eats subject matter -- the same defect being fixed, pointing the other way --
+# so the boundary is pinned here rather than left to be rediscovered.
+
+
+def _lookup_ran(tmp_path) -> bool:
+    return (tmp_path / "claudron-argv.txt").exists()
+
+
+def test_preamble_only_task_does_not_query_on_empty(tmp_path):
+    # The over-match case with teeth. A task that was ONLY a preamble strips to
+    # nothing, and an EMPTY query is not a degraded lookup -- it is the original
+    # defect through the opposite door, because with no subject to rank against
+    # whatever sits at the global ceiling comes back. That is precisely the inert
+    # pointer set this wedge exists to stop emitting. So: no subject, no lookup.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=PREAMBLE)
+    assert not _lookup_ran(tmp_path), "queried the vault on an empty string"
+
+
+def test_preamble_plus_whitespace_does_not_query(tmp_path):
+    # Same case, reached via trailing whitespace rather than an exact boundary.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=PREAMBLE + "   ")
+    assert not _lookup_ran(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "task,expected,why",
+    [
+        (
+            "[fleet memory: note [draft] one (/v/a.md)] real subject here",
+            "one (/v/a.md)] real subject here",
+            "a ] inside a pointer title leaves RESIDUE -- the deliberate "
+            "direction, since consuming to the last ] would eat the subject",
+        ),
+        (
+            "[fleet memory:x] real subject here",
+            "[fleet memory:x] real subject here",
+            "no space after the colon is not our prefix; left whole rather "
+            "than guessed at",
+        ),
+        (
+            "[urgent] fix the ranking collapse",
+            "[urgent] fix the ranking collapse",
+            "an unrelated leading bracket block is subject matter, not ours",
+        ),
+        (
+            "[fleet memory: never closed and then subject",
+            "[fleet memory: never closed and then subject",
+            "no closing bracket: nothing to strip to, so nothing is stripped",
+        ),
+    ],
+)
+def test_strip_boundary(tmp_path, task, expected, why):
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=task)
+    assert _query_sent(tmp_path) == expected, why

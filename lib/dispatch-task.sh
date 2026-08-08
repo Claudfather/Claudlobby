@@ -170,6 +170,15 @@ _claudron_query_before() {
         [ "$stripped" != "$subject" ] || break
         subject="$stripped"
     done
+    # A task that was ONLY a preamble strips to nothing. Querying on empty is
+    # not a degraded lookup, it is the ORIGINAL defect through the opposite
+    # door: with no subject to rank against, whatever sits at the global ceiling
+    # comes back, which is the inert pointer set this wedge exists to stop
+    # emitting. Nothing to search on means no pointers, not arbitrary ones.
+    case "$subject" in
+        *[![:space:]]*) : ;;
+        *) return 0 ;;
+    esac
     query=$(printf '%s' "$subject" | cut -c1-"${CLAUDRON_QUERY_MAX_CHARS:-200}")
     raw=$(claudron lookup --json \
         --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$query" 2>/dev/null) || return 0
