@@ -506,8 +506,11 @@ N_RESCUE_NAMED="$(sort -u "$TMP/rescued_names" | grep -c . || true)"
 # `generate` produces an ACTION with a valid degraded mode; this script produces
 # a MEASUREMENT, and a measurement has no degraded mode — a wrong N is worse
 # than no N, because it will be compared against the baseline and believed.
-# Same code shape, opposite correct answer; the discriminator is action versus
-# measurement. Hence: parse failure is loud and fatal here.
+# Same code shape, opposite correct answer. The discriminator is what the caller
+# does with an EMPTY result, not action versus measurement (#1146 — the older
+# framing endorsed a destructive prune in #1143): soft is right where empty means
+# do nothing, and wrong here, where an empty roster licenses a WRONG N. Hence:
+# parse failure is loud and fatal here.
 # The roster comes from declared_bots_strict, the LOUD door — never
 # parse_fleet_bots. See that function for why there are two doors and why
 # swapping this one for the soft sibling silently reinstates the bug above.

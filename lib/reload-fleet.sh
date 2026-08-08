@@ -125,6 +125,8 @@ fi
 # BOTS_DIR is resolve_bots_dir's local/<fleet>/runtime/bots (or runtime/bots in
 # root mode), so its grandparent holds fleet.yaml for both. Empty list (no/
 # unreadable fleet.yaml) → bot_in_fleet treats every dir as declared.
+# #1146: over-inclusive, not a no-op — a drifted manifest marks .reload-pending
+# inside every bot dir on the host, other fleets included.
 declared_bots=$(parse_fleet_bots "$(dirname "$(dirname "$BOTS_DIR")")/fleet.yaml")
 marked=0
 if [ -d "$BOTS_DIR" ]; then

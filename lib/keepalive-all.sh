@@ -61,6 +61,11 @@ if [ -n "$_kf_fleet" ]; then
 else
     _kf_yaml="$(dirname "$(dirname "$BOTS_DIR")")/fleet.yaml"
 fi
+# #1146: an empty roster here does NOT mean do-nothing — bot_in_fleet reads
+# empty as "declared", so a manifest that drifts out of the documented
+# 2/4-space shape makes this act on EVERY bot dir on the host, other fleets
+# included. Classified as over-inclusive-action, not a delete; if this ever
+# grows a destructive leg, move it to declared_bots_strict (the loud door).
 declared_bots=$(parse_fleet_bots "$_kf_yaml")
 
 AGENTS_DIR="$HOME/Library/LaunchAgents"

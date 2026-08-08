@@ -78,6 +78,11 @@ rr_process_fleet() {
         return 0
     fi
     fleet_dir="$(resolve_fleet_dir "$fleet")" || fleet_dir="$CLAUDLOBBY_ROOT/local/$fleet"
+    # #1146: an empty roster here does NOT mean do-nothing — bot_in_fleet reads
+    # empty as "declared", so a manifest that drifts out of the documented
+    # 2/4-space shape makes this act on EVERY bot dir on the host, other fleets
+    # included. Classified as over-inclusive-action, not a delete; if this ever
+    # grows a destructive leg, move it to declared_bots_strict (the loud door).
     declared="$(parse_fleet_bots "$fleet_dir/fleet.yaml")"
 
     echo "$(ts_iso) FLEET $fleet — rolling restart (ceiling ${CEILING}s, skip_healthy=$SKIP_HEALTHY workers_only=$WORKERS_ONLY)" >> "$LOG"
