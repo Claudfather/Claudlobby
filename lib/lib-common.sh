@@ -1276,7 +1276,20 @@ pane_holds_unsubmitted() {
 # dead pane: the send below is best-effort and owns that outcome.
 pane_await_input_box() {
     local socket="$1" session="$2" pane tick=0
-    # Default 0 (no wait). Boot injectors arm it; see _PANE_READY_TICKS_BOOT.
+    # Default 0 (no wait). Boot injectors arm it UNCONDITIONALLY — an inherited
+    # override is IGNORED on the boot path (start-bot.sh:371,381 assign
+    # PANE_READY_TICKS=$_PANE_READY_TICKS_BOOT rather than `${PANE_READY_TICKS:-...}`,
+    # so the `:-` convention one screen up does NOT hold there). Exporting this
+    # knob and measuring no change means the knob never moved, not that the wait
+    # does not matter — the manufactured-null class (#1084, #1109). #1115 tracks
+    # making the boot sites honour an override; when it lands, this reads "arm it
+    # as a default" and the two call sites are the thing to re-check.
+    # The other four overridable pane knobs (PANE_READY_POLL_S, PANE_SEND_SETTLE_S,
+    # PANE_SEND_VERIFY_TICKS, PANE_RECOVER_TICKS) have NO such defeat site: swept
+    # 2026-08-08, start-bot.sh is the only PRODUCTION caller that assigns a PANE_*
+    # knob, and it assigns only this one. Harnesses do set the others
+    # (validate-bot-change.sh:54, tests/) — that is a caller choosing a value,
+    # which is the override convention working rather than being defeated. #1117.
     local ticks="${PANE_READY_TICKS:-0}"
     [ "$ticks" -gt 0 ] || { printf '%s\n' "$_PANE_BOX_UNWAITED"; return 0; }
     while [ "$tick" -lt "$ticks" ]; do
