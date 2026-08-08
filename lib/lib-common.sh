@@ -1732,6 +1732,27 @@ marker_age_within() {
 # fails under an age floor ("restarted manager receives the alert": expected 1,
 # got 0) and passes under this, because one restart is one change. The
 # discriminator is how MANY changes, not how much time has passed.
+#
+# WHY 1800, since the number is the part a reader will want to change. Three
+# constraints, and the value is the middle of them rather than a measurement:
+#   - well ABOVE the 300s pulse interval, or a crashloop still pages every tick
+#     — 1800 is six ticks, bounding it at two pages an hour instead of twelve
+#   - well BELOW _RENOTIFY_AFTER_S (fleet-pulse.sh, 6h), or the recipient-change
+#     path becomes less responsive than the time-based leg and the token stops
+#     earning its place
+#   - long enough that a crashloop is damped, short enough that a SECOND genuine
+#     restart in the same episode is not swallowed for long
+# UNRATIFIED: chosen to satisfy those three, never measured against operator
+# tolerance, which is the only thing that could actually settle it. Raise it
+# during a known crashloop via FLEET_PULSE_REARM_WINDOW_S; 0 disables the bound
+# and restores pre-#1088 behaviour exactly.
+#
+# SHARED-FUNCTION CAVEAT: this lives in lib-common's debounce_notify, so it
+# bounds EVERY caller, not only fleet-pulse. notify_currency's documented
+# re-fires-on-situation-change contract is narrowed by the same window. Verified
+# inert at the time of writing — its only callers are daily/weekly jobs, which
+# cannot tick fast enough to reach the bound — but that is a property of the
+# current call pattern, not of the design, and one faster caller makes it real.
 _REARM_WINDOW_S_DEFAULT=1800
 
 debounce_notify() {
