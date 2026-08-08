@@ -467,19 +467,43 @@ It is **off by default** because it is the only pulse check whose subject is the
 
 **`unassigned_max_age` is a trade in both directions, and the second one matters here.** Past the cap the check stops reporting a strand *and clears its debounce state*, so the emitted signal becomes indistinguishable from "the strand resolved" — a worker idle longer than the window goes quiet again. That is bounded rather than immediate (roughly 3–4 pushes at the default 6h renotify cadence before it lapses) and it is the same expiry `overdue_dispatch` already applies via `DISPATCH_OVERDUE_MAX_AGE_S`, so it is a deliberate symmetry rather than a gap unique to this check. But a check that exists to close a silent failure does reopen a narrower one at the far end: set `unassigned_max_age: 0` to refuse the trade and keep reporting indefinitely.
 
-**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries exactly four `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`) and `lib/fleet-pulse.sh` sources no `.env` file, so a fleet-tier setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
+**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries a fixed set of `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`, plus any `fleet_pulse:` knobs — see below) and `lib/fleet-pulse.sh` sources no `.env` file, so a fleet-tier `.env` setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
 
 Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`, `OBSERVABILITY_UNASSIGNED_CHECK`, `OBSERVABILITY_UNASSIGNED_THRESHOLD`, `OBSERVABILITY_UNASSIGNED_MAX_AGE`.
 
 ### Fleet-pulse escalation (environment overrides)
 
-`lib/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`) affects multiple bots within a short window. These are tuned by environment variables read directly by the script — they are **not** `fleet.yaml` fields. Set them in your fleet's `.env` or the fleet-pulse systemd unit's environment.
+`lib/fleet-pulse.sh` escalates to Telegram when the same critical event (`service_down`, `session_missing`) affects multiple bots within a short window.
+
+Set these in the fleet-level `fleet_pulse:` block. The composer emits them as `Environment=` lines on the fleet-pulse timer unit, which is the only tier the script can read:
+
+```yaml
+fleet_pulse:
+  escalation_threshold: 3
+  escalation_window: 15
+  escalation_chat_id: "-1001234567890"
+  renotify_after_s: 21600
+  rearm_window_s: 0
+```
+
+Omit a key to keep the script's own default; the composer emits only what is set, so a default lives in exactly one place.
+
+> **Do not put these in a `.env` file.** Earlier revisions of this section said to
+> use the fleet `.env` or to edit the unit's environment. **Neither worked** (#1120):
+> the timer unit sources no `.env` at any tier, and the unit is generated — a
+> hand-edit is reverted by the next `generate`, and its first line says so. Both
+> paths failed silently, which is why they are now a `claudlobby freshbox` FAIL
+> (`fleet_pulse_env_inert`) rather than something an audit finds weeks later.
+
+The composed env vars, and what each does:
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `FLEET_PULSE_ESCALATION_CHAT_ID` | _(fallback)_ | Operator override for the fleet-wide alert chat ID, honored by **all** env-less alert paths (fleet-pulse escalation, creds-check, and lib-common `_emit_fleet_signal`) via the shared `resolve_alert_target` resolver. Full precedence: this override → the composed `TELEGRAM_GROUP_CHAT_ID` (baked into every fleet timer unit) → a scan of the fleet's bots for the first non-empty `TELEGRAM_GROUP_CHAT_ID` in bot.conf (bots that omit it are skipped). If none resolves, fleet-pulse escalation is disabled and logs a warning rather than failing silently. |
 | `FLEET_PULSE_ESCALATION_THRESHOLD` | `2` | Number of distinct bots that must hit the same critical event within the window to trigger escalation. |
 | `FLEET_PULSE_ESCALATION_WINDOW` | `10` | Lookback window, in minutes, for counting affected bots. |
+| `FLEET_PULSE_RENOTIFY_AFTER_S` | `21600` (6h) | Age at which a debounce marker re-fires, so an unresolved episode is not announced once and then silent forever (#831). `0` disables the re-fire. |
+| `FLEET_PULSE_REARM_WINDOW_S` | _(lib-common default)_ | Bounds debounce re-arming during a known crashloop. `0` disables the bound. |
 
 Set `FLEET_PULSE_ESCALATION_CHAT_ID` explicitly so alert targeting never depends on bot directory ordering.
 

@@ -2834,6 +2834,10 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
     return {"type": "interval", "seconds": timer_cfg.get("interval", 300)}
 
 
+# The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
+_FLEET_PULSE_JOB = "fleet-pulse"
+
+
 def _write_timer_units(
     timers_dir: Path,
     service_name: str,
@@ -2848,6 +2852,7 @@ def _write_timer_units(
     randomized_delay: int = 0,
     exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
+    fleet_pulse_env: dict[str, str] | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -2919,6 +2924,15 @@ def _write_timer_units(
         service_lines.append(
             f"Environment=TELEGRAM_GROUP_CHAT_ID={telegram_group_chat_id}"
         )
+    # #1120: the fleet-pulse escalation knobs. Same reasoning as the line above
+    # and the same door — a scheduler starts with almost no environment, and
+    # this unit sources no .env, so an Environment= line is the only thing the
+    # script can actually read. Scoped to the one job whose script reads them
+    # rather than every fleet timer: the vars are FLEET_PULSE_-prefixed and no
+    # other job consumes them, so a wider grant would buy nothing.
+    if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
+        for var, value in fleet_pulse_env.items():
+            service_lines.append(f"Environment={var}={value}")
     service_lines.append(f"ExecStart={exec_start}")
     (timers_dir / f"{service_name}.service").write_text("\n".join(service_lines) + "\n")
 
@@ -3017,6 +3031,12 @@ def _write_timer_units(
                 f"    <string>{telegram_group_chat_id}</string>",
             ]
         )
+    # #1120 — parity with the systemd half above; the env-parity test compares
+    # the two, so emitting on one platform only would fail there rather than in
+    # production eight weeks later.
+    if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
+        for var, value in fleet_pulse_env.items():
+            plist_lines.extend([f"    <key>{var}</key>", f"    <string>{value}</string>"])
     plist_lines.append("  </dict>")
     plist_lines.extend(
         [
@@ -3236,6 +3256,9 @@ def compose_fleet_timers(
                 persistent=bool(cfg.get("persistent", False)),
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
+                fleet_pulse_env=(
+                    fleet.fleet_pulse.env() if fleet.fleet_pulse else None
+                ),
             )
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)

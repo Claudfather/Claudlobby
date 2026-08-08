@@ -140,6 +140,54 @@ class ObservabilityConfig:
     unassigned_max_age: int | None = None
 
 
+# Field -> environment variable, for the fleet-pulse escalation knobs (#1120).
+# ONE definition: the composer emits from it and freshbox's .env rung denies
+# from it, so the emitter and the guard against misplacing them cannot drift
+# into disagreeing about which keys are involved.
+FLEET_PULSE_ENV_KEYS: dict[str, str] = {
+    "escalation_threshold": "FLEET_PULSE_ESCALATION_THRESHOLD",
+    "escalation_window": "FLEET_PULSE_ESCALATION_WINDOW",
+    "escalation_chat_id": "FLEET_PULSE_ESCALATION_CHAT_ID",
+    "renotify_after_s": "FLEET_PULSE_RENOTIFY_AFTER_S",
+    "rearm_window_s": "FLEET_PULSE_REARM_WINDOW_S",
+}
+
+
+@dataclass
+class FleetPulseConfig:
+    """Fleet-pulse escalation knobs — the alert-volume controls (#1120).
+
+    **Fleet-scoped, not per-bot**, and that is what decides the transport.
+    ``lib/fleet-pulse.sh`` resolves these once at top level, outside its per-bot
+    loop, so ``bot.conf`` — the tier ``bridge_heal`` and ``unassigned_check``
+    use, per the note on :class:`ObservabilityConfig` — cannot carry them
+    without electing an arbitrary bot's conf. That is precisely the
+    directory-order fragility ``FLEET_PULSE_ESCALATION_CHAT_ID`` exists to
+    avoid, so reusing that tier would cure the silence and inherit the bug.
+
+    They ride the composed timer unit's ``Environment=`` instead — the same door
+    that already carries ``TELEGRAM_GROUP_CHAT_ID`` into a fleet timer, for the
+    same reason (a scheduler starts with almost no environment). Absent block ⇒
+    ``None`` ⇒ nothing emitted and the script keeps its own defaults.
+    """
+
+    escalation_threshold: int | None = None
+    escalation_window: int | None = None
+    escalation_chat_id: str | None = None
+    renotify_after_s: int | None = None
+    rearm_window_s: int | None = None
+
+    def env(self) -> dict[str, str]:
+        """The subset actually set, as ``VAR: value``. Unset stays unset so the
+        script's own default remains the single definition of each default."""
+        out: dict[str, str] = {}
+        for field_name, var in FLEET_PULSE_ENV_KEYS.items():
+            value = getattr(self, field_name)
+            if value is not None and str(value) != "":
+                out[var] = str(value)
+        return out
+
+
 @dataclass
 class SweepConfig:
     """Fleet rolling code-audit sweep — opt-in via the fleet.yaml `sweep:` block.
@@ -577,6 +625,7 @@ class FleetConfig:
     teams: dict[str, TeamConfig] = field(default_factory=dict)
     bots: dict[str, BotConfig] = field(default_factory=dict)
     sweep: SweepConfig | None = None
+    fleet_pulse: FleetPulseConfig | None = None
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
     # Fleet-level mission: `mission` is the one-paragraph anchor EVERY bot
     # receives; `mission_file` points at a fuller charter (fleet-relative)
@@ -975,6 +1024,25 @@ def _coerce_sweep(raw: dict | None) -> SweepConfig | None:
         label=str(raw.get("label", "auto-audit")),
         schedule=str(raw.get("schedule", "*-*-* 03:00:00")),
         audit_types=audit_types,
+    )
+
+
+def _coerce_fleet_pulse(raw: dict | None) -> FleetPulseConfig | None:
+    """Coerce the fleet-level ``fleet_pulse:`` block. None when absent."""
+    if not isinstance(raw, dict):
+        return None
+
+    def _int(key: str) -> int | None:
+        v = raw.get(key)
+        return None if v is None or v == "" else int(v)
+
+    chat = raw.get("escalation_chat_id")
+    return FleetPulseConfig(
+        escalation_threshold=_int("escalation_threshold"),
+        escalation_window=_int("escalation_window"),
+        escalation_chat_id=None if chat is None else str(chat),
+        renotify_after_s=_int("renotify_after_s"),
+        rearm_window_s=_int("rearm_window_s"),
     )
 
 
@@ -1543,6 +1611,7 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         teams=teams,
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
+        fleet_pulse=_coerce_fleet_pulse(fleet.get("fleet_pulse")),
         projects=load_projects(fleet_yaml.parent / "projects.yaml"),
         mission=_shaped(
             "fleet.mission", fleet.get("mission"), str, "mission: one paragraph"
