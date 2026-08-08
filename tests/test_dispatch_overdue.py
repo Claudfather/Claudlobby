@@ -830,13 +830,18 @@ class TestUnassigned:
         )
 
     def test_five_stale_open_dispatches_do_not_mask_the_strand(self, tmp_path):
-        """THE case the design exists for (dara, 2026-08-08).
+        """THE case the design exists for, and it is a real one.
 
-        One logical task amended six times in 35 minutes; the worker answers
-        only the last id, so five rows stay open forever. Measured on the live
-        ledger the same day: eight bots carried 20-36 never-closed ids each.
-        A predicate keyed on "has an open dispatch" reads those as still-busy
-        and never fires — the #1024 incident recurring inside its own watchdog.
+        Six dispatches to one worker inside 2143s for a single evolving task;
+        the worker answers only the last id, so five rows stay open afterwards.
+        Replayed against the real ledgers at successive cutoffs, this function
+        is silent through the busy stretch, raises at the 4797s gap that
+        follows, and goes silent again when the next dispatch lands — with all
+        five stale ids open throughout (vera, review of #1121).
+
+        A predicate keyed on "has an open dispatch" reads those five as
+        still-busy and never fires — the #1024 incident recurring inside its own
+        watchdog. The fixture below is that shape, reduced.
         """
         dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
         _write_jsonl(

@@ -382,7 +382,7 @@ harness_check "#1024 DEFAULT OFF — no event without the composed knob" "$r"
 ua_fired valunmgr && r=no || r=yes
 harness_check "#1024 a manager is excluded (bot_is_manager, trailing comment and all)" "$r"
 ua_fired valunold && r=no || r=yes
-harness_check "#1024 a strand past max_age stops being reported (alert stays meaningful)" "$r"
+harness_check "#1024 a strand past max_age stops being reported — and so goes silent, the deliberate half of the trade" "$r"
 mgr_pane2=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
 printf '%s' "$mgr_pane2" | grep -q 'worker_unassigned' && r=yes || r=no
 harness_check "#1024 the manager is actually pushed the strand via [FLEET-PULSE]" "$r"

@@ -445,6 +445,17 @@ for bot_dir in "$BOTS_DIR"/*/; do
                     # window is how a real alert becomes wallpaper. Measured:
                     # two bots on this host last reported 66 DAYS ago. <= 0
                     # disables the cap, matching DISPATCH_OVERDUE_MAX_AGE_S.
+                    #
+                    # AND THE FLIP SIDE, because this check exists to close a
+                    # SILENT gap and the cap reopens one: past max_age it stops
+                    # firing and the else-branch below clears the debounce
+                    # marker, so the emitted signal becomes indistinguishable
+                    # from resolved. A strand outliving 24h goes quiet again.
+                    # Bounded rather than immediate — roughly 3-4 pushes at the
+                    # 6h renotify cadence first — and an exact structural mirror
+                    # of overdue_dispatch's own expiry, so it is a deliberate
+                    # trade and not an oversight. Set <= 0 to refuse the trade
+                    # (found by vera, review of #1121).
                     if [ "$_ua_maxage" -le 0 ] || [ "$_ua_idle" -le "$_ua_maxage" ]; then
                         _ua_fire=1
                     fi

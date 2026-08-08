@@ -133,7 +133,10 @@ class ObservabilityConfig:
     unassigned_threshold: int | None = None
     # seconds past which a strand stops being reported: a long-idle bot is a
     # known state, not an event, and re-paging it forever is how the alert
-    # becomes wallpaper. <= 0 disables the cap.
+    # becomes wallpaper. The trade is real in both directions — past this age
+    # the check also clears its debounce, so the signal stops being
+    # distinguishable from "resolved" and a strand outliving the window goes
+    # quiet. <= 0 disables the cap and keeps reporting forever.
     unassigned_max_age: int | None = None
 
 

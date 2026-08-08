@@ -438,14 +438,22 @@ def unassigned_all(
 
     That restraint is the load-bearing part, not an optimisation. A manager
     amending a task re-dispatches repeatedly, and every superseded row stays open
-    forever because the worker answers only the last id — one live case ran six
-    dispatches for a single piece of work in 35 minutes, of which four fired
-    overdue_dispatch. Measured on the live ledger the same day: eight bots
-    carried 20-36 never-closed dispatch ids each. So "this bot has an open
-    dispatch" is true of nearly every bot nearly always. Keyed on it, this check
-    fails in BOTH directions — page on every re-dispatching manager (the common
-    case, not an edge one), or read those stale rows as "still busy" and never
-    fire, which is the #1024 incident recurring inside its own watchdog.
+    forever because the worker answers only the last id.
+
+    Verified against a real chain rather than a fixture (vera, review of #1121):
+    six dispatches to one worker inside 2143s for a single evolving task, five of
+    the six ids still open afterwards, while that worker was demonstrably working
+    throughout. Replaying this function over the same two ledgers truncated to
+    successive cutoffs — not merely varying `now`, which cannot replay history —
+    it stays silent through the busy stretch, raises at the real 4797s gap that
+    followed, and goes silent again the instant the next dispatch lands. All five
+    stale ids are open the entire time and change nothing.
+
+    So "this bot has an open dispatch" carries no information about whether it is
+    working. Keyed on it, this check fails in BOTH directions — page on every
+    re-dispatching manager (the common case, not an edge one), or read those
+    stale rows as "still busy" and never fire, which is the #1024 incident
+    recurring inside its own watchdog.
 
     Comparing instants makes supersession irrelevant by construction: stale rows
     are all older than the report that closed the real task, so they can neither
