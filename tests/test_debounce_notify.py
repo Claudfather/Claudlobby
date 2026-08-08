@@ -156,3 +156,81 @@ class TestAgeOut:
             """,
         )
         assert sent == ["down"]
+
+
+class TestRearmRateLimit:
+    """#1088: a churning recipient must not page on every pulse tick.
+
+    pane_pid is the claude process, so pid churn is a REAL signal — each new pid
+    never saw the alert. The token stays; only the RE-ARM RATE is bounded.
+
+    The load-bearing choice is that the FIRST recipient change is always free.
+    An earlier attempt floored re-arming on marker AGE instead, which also
+    suppressed the first change — and that is #831's property. It failed the
+    real-tmux rehearsal ("restarted manager receives the alert": expected 1, got
+    0). Every test in the classes above passes here UNMODIFIED, which is the
+    evidence that this bounds the rate without weakening the guarantee.
+    """
+
+    def test_pid_churn_does_not_page_every_tick(self, tmp_path):
+        """Red against pre-#1088: 8 pulses, a new pid each, 8 pages."""
+        sent = _run(
+            tmp_path,
+            'for i in $(seq 8); do\n'
+            '  debounce_notify "$state" bot1 session_alerted _notify "m" "tok-$i" 21600\n'
+            'done',
+        )
+        # Two, not one: the opening alert plus one free change. The free change
+        # IS #831 being honoured — a fix that returned 1 here would have
+        # suppressed a genuine restart.
+        assert len(sent) == 2, f"expected opening alert + one free change, got {len(sent)}"
+
+    def test_the_first_recipient_change_is_always_free(self, tmp_path):
+        """THE property that separates this from an age floor. No aging, no
+        sleep — a manager that restarted once is told immediately."""
+        sent = _run(
+            tmp_path,
+            'debounce_notify "$state" bot1 session_alerted _notify "m" "mgr-A" 21600\n'
+            'debounce_notify "$state" bot1 session_alerted _notify "m" "mgr-A" 21600\n'
+            'debounce_notify "$state" bot1 session_alerted _notify "m" "mgr-B" 21600',
+        )
+        assert len(sent) == 2
+
+    def test_a_legacy_marker_does_not_swallow_the_next_change(self, tmp_path):
+        """Markers written before #1088 hold a bare recipient with no separator.
+        They must read as zero prior re-arms, or the upgrade itself eats one
+        genuine restart per bot."""
+        sent = _run(
+            tmp_path,
+            'printf "mgr-OLD" > "$state/bot1.session_alerted"\n'
+            'debounce_notify "$state" bot1 session_alerted _notify "m" "mgr-NEW" 21600',
+        )
+        assert len(sent) == 1
+
+    def test_window_of_zero_restores_pre_fix_behaviour(self, tmp_path):
+        """The escape hatch has to actually escape."""
+        sent = _run(
+            tmp_path,
+            'export FLEET_PULSE_REARM_WINDOW_S=0\n'
+            'for i in $(seq 8); do\n'
+            '  debounce_notify "$state" bot1 session_alerted _notify "m" "tok-$i" 21600\n'
+            'done',
+        )
+        assert len(sent) == 8
+
+    def test_the_age_out_leg_does_not_consume_the_rearm_budget(self, tmp_path):
+        """A renotify fired by the 6h age-out is not a re-arm. If it stamped the
+        re-arm clock, a long episode would silently spend the allowance a
+        genuine restart is entitled to."""
+        _run(
+            tmp_path,
+            'debounce_notify "$state" bot1 session_alerted _notify "m" "mgr-A" 3600',
+        )
+        os.utime(_marker(tmp_path), (0, 0))  # age past the renotify window
+        sent = _run(
+            tmp_path,
+            'debounce_notify "$state" bot1 session_alerted _notify "m" "mgr-A" 3600\n'
+            'debounce_notify "$state" bot1 session_alerted _notify "m" "mgr-B" 3600',
+        )
+        # age-out fires, then the restart still gets its free change
+        assert len(sent) == 3

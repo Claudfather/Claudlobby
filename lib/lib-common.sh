@@ -1713,24 +1713,68 @@ marker_age_within() {
 # Both are optional. With neither, this is the original fire-once-per-episode
 # behavior, which is what an *action* debounce with no recipient wants
 # (reload-fleet.sh's npx warm attempt).
+# Rate limit on RE-ARMING after a recipient change (#1088). Not a limit on
+# alerting: the first alert of an episode and the FIRST recipient change both
+# fire unconditionally. Only the second and later changes inside the window are
+# suppressed.
+#
+# Why the rate rather than the signal. The recipient token is
+# `<session_created>-<pane_pid>`, and pane_pid churn is NOT a false signal —
+# start-bot.sh runs CLAUDE_CMD as the pane command, so pane_pid IS the claude
+# process, and a restart inside a surviving session loses the message just as
+# surely as a session restart. Every new pid is genuinely a process that never
+# saw the alert. So the token is right; what was missing is a bound on how often
+# it may re-arm. A crashlooping manager produced 8 pages in 20 minutes.
+#
+# Why "first change is free" rather than a floor on marker age. Flooring the age
+# suppresses the FIRST change too, which is the #831 property: a manager that
+# restarted once must still be told. Measured — the real-tmux #831 rehearsal
+# fails under an age floor ("restarted manager receives the alert": expected 1,
+# got 0) and passes under this, because one restart is one change. The
+# discriminator is how MANY changes, not how much time has passed.
+_REARM_WINDOW_S_DEFAULT=1800
+
 debounce_notify() {
     local state_dir="$1" bot_id="$2" suffix="$3" notify_fn="$4" message="$5"
     local recipient="${6:-}" renotify_after="${7:-0}"
     local marker="$state_dir/${bot_id}.${suffix}"
-    local fire=0 seen=""
+    local window="${FLEET_PULSE_REARM_WINDOW_S:-$_REARM_WINDOW_S_DEFAULT}"
+    local fire=0 seen="" raw="" last_rearm=0 new_rearm=0 now
     if [ ! -f "$marker" ]; then
+        # First sighting of the condition always fires, and records NO re-arm —
+        # so the first recipient change afterwards is still free.
         fire=1
+        new_rearm=0
     else
-        seen=$(cat "$marker" 2>/dev/null || true)
+        raw=$(cat "$marker" 2>/dev/null || true)
+        # Marker format is `<recipient>|<last_rearm_epoch>`. A marker written
+        # before #1088 is a bare recipient with no separator; it reads as zero
+        # prior re-arms, so an upgrade never swallows the next change.
+        case "$raw" in
+            *"|"*) seen="${raw%%|*}"; last_rearm="${raw#*|}" ;;
+            *)     seen="$raw"; last_rearm=0 ;;
+        esac
+        case "$last_rearm" in ''|*[!0-9]*) last_rearm=0 ;; esac
+        new_rearm="$last_rearm"
         if [ -n "$recipient" ] && [ "$seen" != "$recipient" ]; then
-            fire=1
+            now=$(date +%s)
+            # Free unless another change already re-armed inside this window.
+            if [ "$window" -le 0 ] || [ "$(( now - last_rearm ))" -gt "$window" ]; then
+                fire=1
+                new_rearm="$now"
+            fi
         elif [ "$renotify_after" -gt 0 ] && ! marker_age_within "$marker" "$renotify_after"; then
+            # The age-out leg is not a re-arm, so it must not consume the budget
+            # a genuine restart is entitled to.
             fire=1
         fi
     fi
     if [ "$fire" -eq 1 ]; then
         "$notify_fn" "$message"
-        printf '%s' "$recipient" > "$marker"
+        # Written only on fire, deliberately: the marker's MTIME is what
+        # marker_age_within reads for the renotify window above, so touching it
+        # on a suppressed tick would silently disable that second leg entirely.
+        printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
     fi
 }
 
