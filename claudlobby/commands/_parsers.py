@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ._helpers import _add_migration_args
 from .core import (
+    cmd_brief,
     cmd_diff,
     cmd_doctor,
     cmd_freshbox,
@@ -111,6 +112,21 @@ def register_subparsers(sub) -> None:
         "--json", action="store_true", help="Output raw JSONL instead of table"
     )
     prb.set_defaults(func=cmd_report_back)
+
+    pb = sub.add_parser(
+        "brief",
+        help="One read door over fleet state for a bot (mission, dispatches, "
+        "workstreams, unacked reports, alerts)",
+    )
+    pb.add_argument("--bot", required=True, help="Bot to brief (required in v1)")
+    pb.add_argument("--json", action="store_true", help="Schema-1 JSON envelope")
+    pb.add_argument(
+        "--ack",
+        action="store_true",
+        help="Advance this bot's report cursor past everything just shown "
+        "(the only write this command performs)",
+    )
+    pb.set_defaults(func=cmd_brief)
 
     pws = sub.add_parser(
         "workstreams",
