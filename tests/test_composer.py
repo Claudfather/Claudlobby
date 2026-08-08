@@ -39,6 +39,7 @@ from claudlobby.composer import (
     compose_settings_local,
     compose_systemd_unit,
     scaffold_env_files,
+    telegram_handle,
 )
 from claudlobby.diff import diff_bot
 from claudlobby.paths import Paths
@@ -347,8 +348,9 @@ class TestComposeSettingsLocal:
         )
 
     def test_no_tools_no_siblings(self, tmp_path):
+        # channels=[] — a bot with no Telegram channel; see #1107.
         paths = self._make_paths_with_runtime(tmp_path)
-        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" not in result
@@ -1155,6 +1157,100 @@ class TestHooksMergeAndSettings:
         assert bot.hooks["PostToolUse"][0]["command"] == "fleet-log.sh"
 
 
+class TestTelegramHandleDefault:
+    """The handle defaults to bot_id for a channel bot (#1097, #1107).
+
+    `fleet.yaml` documents "handle defaults to bot_id" and TELEGRAM_STATE_DIR has
+    applied that since #43. The handle VARIABLE did not, so a fleet using the
+    default composed a live bridge with no TELEGRAM_BOT_HANDLE — and every
+    consumer reading it classified a working channel bot as non-channel.
+    """
+
+    def test_explicit_handle_wins(self):
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="custom_handle"),
+        )
+        assert telegram_handle(bot) == "custom_handle"
+
+    def test_defaults_to_bot_id_for_channel_bot(self):
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        assert telegram_handle(bot) == "worker"
+
+    def test_defaults_to_bot_id_not_display_name(self):
+        """bot_id, never name: the state dir keys off bot_id and the two must agree."""
+        bot = BotConfig(bot_id="worker", name="Display Name", expertise=["eng"])
+        assert telegram_handle(bot) == "worker"
+
+    def test_none_for_non_channel_bot(self):
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[])
+        assert telegram_handle(bot) is None
+
+    def test_bare_channel_name_counts_as_telegram(self):
+        bot = BotConfig(
+            bot_id="worker", name="worker", expertise=["eng"], channels=["telegram"]
+        )
+        assert telegram_handle(bot) == "worker"
+
+    def test_non_telegram_channel_is_not_a_telegram_bot(self):
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            channels=["plugin:slack@somewhere"],
+        )
+        assert telegram_handle(bot) is None
+
+    def test_bot_conf_emits_defaulted_handle(self, tmp_path):
+        """The regression that broke bridge_state and creds-check: the emitted line."""
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "export TELEGRAM_BOT_HANDLE=worker" in conf
+
+    def test_bot_conf_omits_handle_for_non_channel_bot(self, tmp_path):
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "TELEGRAM_BOT_HANDLE" not in conf
+
+    def test_declared_handle_also_emits_username(self, tmp_path):
+        """A declared handle is a @username too — creds-check's cross-wire input."""
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="artemis_worker_bot"),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "export TELEGRAM_BOT_HANDLE=artemis_worker_bot" in conf
+        assert "export TELEGRAM_BOT_USERNAME=artemis_worker_bot" in conf
+
+    def test_defaulted_handle_emits_no_username(self, tmp_path):
+        """A slug is not a username: comparing them false-fails a correct token."""
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "export TELEGRAM_BOT_HANDLE=worker" in conf
+        assert "TELEGRAM_BOT_USERNAME" not in conf
+
+    def test_state_dir_and_handle_agree(self, tmp_path):
+        """Both sites resolve through one function, so they cannot drift apart again."""
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "channels/telegram-worker" in conf
+        assert "export TELEGRAM_BOT_HANDLE=worker" in conf
+
+
 class TestResolveChannelPermissions:
     """_resolve_channel_permissions auto-derives Telegram plugin tools."""
 
@@ -1174,7 +1270,13 @@ class TestResolveChannelPermissions:
         assert "mcp__plugin_telegram_telegram__download_attachment" in result
         assert len(result) == 4
 
-    def test_returns_empty_when_no_handle(self):
+    def test_returns_telegram_tools_when_handle_defaulted(self):
+        """A channel bot relying on the documented handle default still gets its tools.
+
+        Keying off the raw field granted these to zero bots on a fleet that omits
+        `handle` — the #1097/#1107 conflation of "no explicit handle" with "no
+        channel". A bot's own reply tools must not depend on spelling its handle.
+        """
         from claudlobby.composer import _resolve_channel_permissions
 
         bot = BotConfig(
@@ -1184,9 +1286,23 @@ class TestResolveChannelPermissions:
             telegram=TelegramConfig(handle=None),
         )
         result = _resolve_channel_permissions(bot)
-        assert result == []
+        assert len(result) == 4
+        assert "mcp__plugin_telegram_telegram__reply" in result
 
-    def test_returns_empty_when_handle_is_empty_string(self):
+    def test_returns_empty_when_no_telegram_channel(self):
+        """The genuine non-channel class — the invariant #901's gate contract rests on."""
+        from claudlobby.composer import _resolve_channel_permissions
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            channels=[],
+            telegram=TelegramConfig(handle=None),
+        )
+        assert _resolve_channel_permissions(bot) == []
+
+    def test_empty_string_handle_falls_back_to_default(self):
         from claudlobby.composer import _resolve_channel_permissions
 
         bot = BotConfig(
@@ -1196,7 +1312,7 @@ class TestResolveChannelPermissions:
             telegram=TelegramConfig(handle=""),
         )
         result = _resolve_channel_permissions(bot)
-        assert result == []
+        assert len(result) == 4
 
 
 class TestResolveSkillPermissions:
@@ -1318,9 +1434,13 @@ class TestChannelSkillInSettingsLocal:
         assert "mcp__plugin_telegram_telegram__reply" in result["permissions"]["allow"]
 
     def test_no_telegram_no_skills_no_permissions(self, tmp_path):
-        """Bot with no telegram, no skills, no explicit tools → no permissions block."""
+        """Bot with no telegram, no skills, no explicit tools → no permissions block.
+
+        `channels=[]` is what "no telegram" means; omitting the handle does not,
+        since `channels` defaults to the Telegram plugin (#1107).
+        """
         paths = self._make_paths_with_runtime(tmp_path)
-        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" not in result
@@ -2183,8 +2303,14 @@ class TestCrossFleetManagerRecognition:
     def _bash_is_manager(self, bot_dir: Path) -> bool:
         """The real shipped predicate, not a reimplementation of it."""
         proc = subprocess.run(
-            ["bash", "-c", '. "$1"; bot_is_manager "$2"', "_",
-             str(self.LIB_COMMON), str(bot_dir)],
+            [
+                "bash",
+                "-c",
+                '. "$1"; bot_is_manager "$2"',
+                "_",
+                str(self.LIB_COMMON),
+                str(bot_dir),
+            ],
             capture_output=True,
             text=True,
         )
@@ -4210,6 +4336,8 @@ class TestBotEnvStubDoesNotShadowUpstream:
         assert out == "realvalue123", (
             f"bot-tier scaffold clobbered the fleet-tier value: got {out!r}"
         )
+
+
 class TestLaunchdArgvSplitting:
     """A job whose `script` carries flags must still yield a valid plist (#969).
 
