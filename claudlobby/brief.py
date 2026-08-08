@@ -92,8 +92,21 @@ classification returns a clean empty set when it has no bots dir to read
 ``.spawn`` mtimes from (#1014's family), which is indistinguishable from "no
 work was lost to a restart" — labeled, since open and overdue stay sound.
 
-None of this modifies the doors. They are shared with the watchdog and are not
-this issue's to change; #526, #1014 and #878 track the fixes.
+None of the above lives in the matcher — every probe and every omission is in
+this module. Be precise about the neighbouring claim, though, because the two
+are different and only one of them is true:
+
+  * The matcher's **behaviour is unchanged**. `_classify_all`, `overdue_all`,
+    `orphaned_all` and `_terminal_reported_ids` are byte-identical, and the
+    `--all` / `--orphans` / `--open-task` contracts are what they were.
+  * The **file is not untouched.** `lib/dispatch-overdue.py` is `+66/-14` here:
+    a net-new `--open` mode (the one #904 specifies), and `open_task_id`
+    refactored to be that list's head rather than a second loop over the same
+    join — two copies is how a resolver ends up handing back an id the list
+    does not contain. The 14 removed lines are that one function body.
+
+The fail-open modes themselves are NOT fixed here — they are the doors' own,
+shared with the watchdog, and #526, #1014 and #878 track them.
 """
 
 from __future__ import annotations
