@@ -3,6 +3,7 @@ including the P4 task-id join matrix (semantics: overdue_all docstring)."""
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 
 from tests.conftest import (
@@ -212,9 +213,7 @@ class TestJoinMatrix:
             [_dispatch("worker-a", 100, 1000, task_id="t-100-aaaa")],
             [_report("worker-b", "1970-01-01T00:05:00Z", task_id="t-100-aaaa")],
         )
-        assert out.get("worker-a"), (
-            "wrong-bot report must not close the dispatch"
-        )
+        assert out.get("worker-a"), "wrong-bot report must not close the dispatch"
 
     def test_wrong_id_does_not_close(self, tmp_path):
         out = self._run(
@@ -237,18 +236,22 @@ class TestJoinMatrix:
             rlog,
             [
                 _report(
-                    "w1", "1970-01-01T00:05:00Z", status="progress",
+                    "w1",
+                    "1970-01-01T00:05:00Z",
+                    status="progress",
                     task_id="t-100-aaaa",
                 )
             ],
         )
         # progress at epoch 300; at NOW=2000 it is 1700s old, inside the grace
-        assert not dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW).get("w1")
+        assert not dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW).get(
+            "w1"
+        )
         # once the grace lapses the row is overdue again — deferred, never closed
         later = 300 + dispatch_overdue.DEFAULT_PROGRESS_GRACE_S + 1
-        assert dispatch_overdue.overdue_all(str(dlog), str(rlog), later).get(
-            "w1"
-        ), "a progress report must never permanently close a dispatch"
+        assert dispatch_overdue.overdue_all(str(dlog), str(rlog), later).get("w1"), (
+            "a progress report must never permanently close a dispatch"
+        )
 
 
 class TestMissingIdCounter:
@@ -308,9 +311,7 @@ class TestOrphanSplit:
             tmp_path, [_dispatch("w1", 100, 1000, task_id="t-100-aaaa")], []
         )
         bots = self._bots_dir(tmp_path, "w1", 50)  # spawned BEFORE dispatch
-        assert "w1" in dispatch_overdue.overdue_all(
-            dlog, rlog, self.NOW, bots_dir=bots
-        )
+        assert "w1" in dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots)
         assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
 
     def test_without_bots_dir_nothing_is_orphaned(self, tmp_path):
@@ -327,9 +328,7 @@ class TestOrphanSplit:
         )
         (tmp_path / "bots").mkdir()
         bots = str(tmp_path / "bots")
-        assert "w1" in dispatch_overdue.overdue_all(
-            dlog, rlog, self.NOW, bots_dir=bots
-        )
+        assert "w1" in dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots)
 
     def test_idless_dispatch_never_orphans(self, tmp_path):
         """An id-less row closes on ANY later terminal report, so a respawned
@@ -337,9 +336,7 @@ class TestOrphanSplit:
         orphan."""
         dlog, rlog = self._logs(tmp_path, [_dispatch("w1", 100, 1000)], [])
         bots = self._bots_dir(tmp_path, "w1", 500)
-        assert "w1" in dispatch_overdue.overdue_all(
-            dlog, rlog, self.NOW, bots_dir=bots
-        )
+        assert "w1" in dispatch_overdue.overdue_all(dlog, rlog, self.NOW, bots_dir=bots)
         assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=bots) == {}
 
     def test_a_closed_row_is_neither_overdue_nor_orphan(self, tmp_path):
@@ -537,7 +534,9 @@ class TestProgressLiveness:
             [
                 _report("eng-1", "1970-01-01T01:00:00Z", status="progress"),
                 _report(
-                    "eng-1", "1970-01-01T01:05:00Z", status="completed",
+                    "eng-1",
+                    "1970-01-01T01:05:00Z",
+                    status="completed",
                     task_id="t-1000-aaaa",
                 ),
             ],
@@ -789,3 +788,130 @@ class TestSupersession:
             ],
         )
         assert [r[3] for r in out.get("w1", [])] == ["t-5"]
+class TestUnassigned:
+    """#1024 — the MIRROR of overdue: reported, then never re-dispatched.
+
+    The join is the point, and so is what it refuses to look at. Semantics live
+    in the unassigned_all docstring; these pin the behaviour that decides whether
+    the check is useful or noise.
+    """
+
+    # Derived, never hardcoded: the two must agree exactly or every case below
+    # silently becomes a different one — a stale dispatch epoch lands AFTER the
+    # report and the row reads as re-tasked, which is a pass-shaped failure.
+    T10 = "2026-05-27T10:00:00Z"
+    E10 = int(_dt.datetime.fromisoformat(T10.replace("Z", "+00:00")).timestamp())
+
+    def test_reported_and_never_retasked_is_flagged(self, tmp_path):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
+        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed")])
+        res = dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300)
+        assert "eng-1" in res
+        reported_at, idle, _tid, status = res["eng-1"]
+        assert reported_at == self.E10
+        assert idle == 7300
+        assert status == "completed"
+
+    def test_retasked_after_reporting_is_not_flagged(self, tmp_path):
+        """The positive control. Without it, a check that fired on every
+        terminal report would satisfy every other test in this class."""
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(
+            dlog,
+            [
+                _dispatch("eng-1", self.E10 - 3600, self.E10 - 3000),
+                _dispatch("eng-1", self.E10 + 60, self.E10 + 660),
+            ],
+        )
+        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed")])
+        assert (
+            dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300) == {}
+        )
+
+    def test_five_stale_open_dispatches_do_not_mask_the_strand(self, tmp_path):
+        """THE case the design exists for (dara, 2026-08-08).
+
+        One logical task amended six times in 35 minutes; the worker answers
+        only the last id, so five rows stay open forever. Measured on the live
+        ledger the same day: eight bots carried 20-36 never-closed ids each.
+        A predicate keyed on "has an open dispatch" reads those as still-busy
+        and never fires — the #1024 incident recurring inside its own watchdog.
+        """
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(
+            dlog,
+            [
+                _dispatch(
+                    "eng-1",
+                    self.E10 - 2100 + i * 300,
+                    self.E10 - 1500 + i * 300,
+                    task_id=f"t-{i}",
+                )
+                for i in range(6)
+            ],
+        )
+        # Terminal report against the LAST id only; t-0..t-4 remain open.
+        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed", task_id="t-5")])
+        res = dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300)
+        assert "eng-1" in res, "five stale open rows masked a genuine strand"
+
+    def test_progress_as_newest_report_is_not_flagged(self, tmp_path):
+        """Still working, or stalled mid-task — the stall is overdue's to report."""
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
+        _write_jsonl(
+            rlog,
+            [
+                _report("eng-1", "2026-05-27T09:00:00Z", "completed"),
+                _report("eng-1", self.T10, "progress"),
+            ],
+        )
+        assert (
+            dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300) == {}
+        )
+
+    def test_a_bot_that_never_reported_is_not_flagged(self, tmp_path):
+        """No terminal report means nothing came back, so there is nothing to be
+        unassigned FROM. That case belongs to overdue_all, not here."""
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
+        _write_jsonl(rlog, [])
+        assert (
+            dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300) == {}
+        )
+
+    def test_threshold_filters_when_asked(self, tmp_path):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [_dispatch("eng-1", self.E10 - 3600, self.E10 - 3000)])
+        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed")])
+        now = self.E10 + 100
+        assert dispatch_overdue.unassigned_all(str(dlog), str(rlog), now, 7200) == {}
+        # ...and defaults to reporting everything, because fleet-pulse applies
+        # the threshold per bot and one scan must serve differently-tuned bots.
+        assert "eng-1" in dispatch_overdue.unassigned_all(str(dlog), str(rlog), now)
+
+    def test_never_dispatched_bot_that_reported_is_flagged(self, tmp_path):
+        """No dispatch row at all is still an unassigned worker, not an error."""
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [])
+        _write_jsonl(rlog, [_report("eng-1", self.T10, "blocked")])
+        res = dispatch_overdue.unassigned_all(str(dlog), str(rlog), self.E10 + 7300)
+        assert res["eng-1"][3] == "blocked"
+
+    def test_bot_scoping(self, tmp_path):
+        """One bot's dispatch must not clear another's strand."""
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [_dispatch("eng-2", self.E10 + 60, self.E10 + 660)])
+        _write_jsonl(rlog, [_report("eng-1", self.T10, "completed")])
+        assert "eng-1" in dispatch_overdue.unassigned_all(
+            str(dlog), str(rlog), self.E10 + 7300
+        )
+
+    def test_missing_ledgers_are_empty_not_fatal(self, tmp_path):
+        assert (
+            dispatch_overdue.unassigned_all(
+                str(tmp_path / "nope.jsonl"), str(tmp_path / "nada.jsonl"), self.E10
+            )
+            == {}
+        )

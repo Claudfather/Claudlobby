@@ -38,6 +38,12 @@ resolver would pick, so "open but not yet due" is readable by the read door:
   Prints: "<dispatched_at> <expected_by> <task_id>" per row, oldest first
   (expected_by is "-" when the row carries none). Deadline-blind, so this is a
   strict superset of --all's rows for the same bot; --open-task is its head.
+Unassigned mode (#1024) -- the MIRROR of overdue: a worker that reported and was
+never re-tasked. Purely temporal (newest dispatch vs newest report); it never
+reads whether a dispatch is open, because superseded rows stay open forever and
+that signal is noise in both directions. See unassigned_all:
+  dispatch-overdue.py --unassigned <dispatch_log> <report_ledger> [<now_epoch>]
+  Prints: "<bot_id> <reported_at> <idle_seconds> <task_id> <status>"
 
 `--bots-dir <dir>` goes last and enables respawn detection; without it no row is
 ever classified as an orphan. It is also the one input that is NOT one of the two
@@ -408,6 +414,99 @@ def open_dispatches(
     # matching the strict-< tie-break open_task_id used when it kept its own min.
     rows.sort(key=lambda r: r[0])
     return rows
+def unassigned_all(
+    dispatch_log: str,
+    report_ledger: str,
+    now: int,
+    idle_threshold: int = 0,
+) -> dict[str, tuple[int, int, str, str]]:
+    """Workers that reported terminal and were never re-tasked — the #1024 mirror.
+
+    Returns {bot: (reported_at, idle_seconds, task_id, status)}.
+
+    overdue_all answers "work was sent and never came back". This answers the
+    mirror, which had no detector at all: **work came back and nothing was
+    sent.** A worker that finishes cleanly and is then forgotten is
+    indistinguishable from one legitimately idle, and activity_stuck cannot see
+    it — a genuinely idle bot IS idle, so keepalive re-stamps `.idle` and that
+    branch never fires. Correct for its purpose, and precisely why this case was
+    invisible for 16 hours.
+
+    THE PREDICATE IS PURELY TEMPORAL, AND THAT IS THE WHOLE DESIGN. It compares
+    the newest dispatch instant against the newest report instant. It never asks
+    whether any dispatch is OPEN.
+
+    That restraint is the load-bearing part, not an optimisation. A manager
+    amending a task re-dispatches repeatedly, and every superseded row stays open
+    forever because the worker answers only the last id — one live case ran six
+    dispatches for a single piece of work in 35 minutes, of which four fired
+    overdue_dispatch. Measured on the live ledger the same day: eight bots
+    carried 20-36 never-closed dispatch ids each. So "this bot has an open
+    dispatch" is true of nearly every bot nearly always. Keyed on it, this check
+    fails in BOTH directions — page on every re-dispatching manager (the common
+    case, not an edge one), or read those stale rows as "still busy" and never
+    fire, which is the #1024 incident recurring inside its own watchdog.
+
+    Comparing instants makes supersession irrelevant by construction: stale rows
+    are all older than the report that closed the real task, so they can neither
+    mask a strand nor manufacture one. This is also why nothing here consumes
+    #1027's `supersedes` field, and why its absence costs nothing — there is no
+    ambiguity left for a declaration to resolve.
+
+    A bot whose newest report is `progress` is NOT returned: it is working, or it
+    has stalled mid-task, and the stall is overdue_all's to report. Only a
+    terminal newest report means the worker is done and waiting.
+
+    Threshold filtering defaults OFF (0 = report every match with its idle time).
+    fleet-pulse applies the threshold and the staleness cap PER BOT from
+    bot.conf, the same split activity_stuck uses: this owns the join, the caller
+    owns the policy. One scan therefore serves bots with different thresholds.
+    """
+    reports = _load_jsonl(report_ledger)
+    dispatches = _load_jsonl(dispatch_log)
+
+    # Newest report per bot, whatever its status — taking the newest TERMINAL one
+    # instead would read a bot that reported progress after finishing as idle.
+    newest_report: dict[str, tuple[int, str, str]] = {}
+    for r in reports:
+        bot = str(r.get("bot", "")).lower()
+        ts = _iso_to_epoch(str(r.get("ts", "")))
+        if not bot or ts is None:
+            continue
+        if ts >= newest_report.get(bot, (-1,))[0]:
+            newest_report[bot] = (
+                ts,
+                str(r.get("status", "")),
+                str(r.get("task_id") or "-"),
+            )
+
+    # Newest dispatch per bot. `dispatched_at` is the epoch the manager sent it;
+    # fall back to `ts` for rows that predate that field.
+    newest_dispatch: dict[str, int] = {}
+    for d in dispatches:
+        bot = str(d.get("bot", "")).lower()
+        if not bot:
+            continue
+        da = d.get("dispatched_at")
+        if not isinstance(da, int):
+            da = _iso_to_epoch(str(d.get("ts", "")))
+        if da is None:
+            continue
+        if da > newest_dispatch.get(bot, -1):
+            newest_dispatch[bot] = da
+
+    out: dict[str, tuple[int, int, str, str]] = {}
+    for bot, (rts, status, tid) in newest_report.items():
+        if status not in _TERMINAL:
+            continue
+        last_d = newest_dispatch.get(bot)
+        if last_d is not None and last_d > rts:
+            continue  # re-tasked after reporting — the loop is intact
+        idle = now - rts
+        if idle < 0 or idle < idle_threshold:
+            continue
+        out[bot] = (rts, idle, tid, status)
+    return out
 
 
 def open_task_id(
@@ -505,6 +604,21 @@ def main() -> int:
             return 2
         for da, exp, tid in open_dispatches(argv[2], argv[3], argv[4]):
             print(f"{da} {exp if exp is not None else '-'} {tid}")
+    # #1024 mirror watchdog. No threshold here: fleet-pulse applies its own per
+    # bot, so one scan serves a fleet whose bots are tuned differently.
+    if argv[1] == "--unassigned":
+        if len(argv) < 4:
+            print(__doc__.strip().splitlines()[0], file=sys.stderr)
+            return 2
+        now = (
+            int(argv[4])
+            if len(argv) > 4
+            else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        )
+        for bot_id, (rts, idle, tid, status) in sorted(
+            unassigned_all(argv[2], argv[3], now).items()
+        ):
+            print(f"{bot_id} {rts} {idle} {tid} {status}")
         return 0
 
     if argv[1] in ("--all", "--orphans"):

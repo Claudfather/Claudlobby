@@ -442,13 +442,22 @@ observability:
   dispatch_deadline: 1800       # seconds after manager dispatch before flagged overdue (default: 1800)
   bridge_heal: true             # enable the keepalive Telegram-bridge auto-heal ladder (default: off)
   bridge_heal_max_attempts: 3   # heal bounce cap before escalation (keepalive default: 3)
+  unassigned_check: true        # enable the reported-but-never-re-dispatched watchdog (default: off)
+  unassigned_threshold: 7200    # seconds since the terminal report before flagging (default: 7200)
+  unassigned_max_age: 86400     # stop reporting a strand past this age (default: 86400; <= 0 never stops)
 ```
 
 The four threshold fields are optional integers with sensible defaults. `bridge_heal` is a boolean. Can be set in `defaults:` to apply fleet-wide; bot-level overrides (a per-bot `bridge_heal: false` opts a bot out of a fleet default-on). The validator warns if `pulse_interval` is `<= 0` or greater than `3600` (1 hour), if `reap_days` is `<= 0` or greater than `365`, and if `bridge_heal_max_attempts` is outside `1..10`. There is currently no validation on `activity_stuck_threshold` or `dispatch_deadline`.
 
 **`bridge_heal` must be set here, not via a `.env` tier.** The keepalive watchdog (`lib/keepalive.sh`) loads `bot.conf` only — it never sources the fleet `.env` tiers (those reach the bot's `claude` session via `start-bot.sh`, not the supervisor). Setting `OBSERVABILITY_BRIDGE_HEAL` in `defaults.env` (silently dropped) or a fleet `.env` file leaves keepalive's gate closed and the heal a no-op. This structured field is the one path that composes into every `bot.conf`, where keepalive's per-tick read picks it up. `bridge_heal` emits as the shell boolean `1`/`0` that the gate (`[ "${OBSERVABILITY_BRIDGE_HEAL:-0}" = "1" ]`) expects.
 
-Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`.
+**`unassigned_check` is the mirror of the overdue-dispatch watchdog** (#1024). `overdue_dispatch` answers "work was sent and never came back"; this answers "work came back and nothing was sent" — a worker that reported terminal and was then forgotten. `activity_stuck` cannot cover it: a genuinely idle bot *is* idle, so keepalive re-stamps `.idle` and that branch never fires. The check emits `worker_unassigned` and pushes a debounced `[FLEET-PULSE]` line, exactly like `overdue_dispatch`.
+
+It is **off by default** because it is the only pulse check whose subject is the *assignment loop* rather than a process: it reports that a human or manager stopped assigning, which a fleet with nobody to act on it can only read as noise. Managers are excluded automatically (a manager has no assigner, so reported-and-not-re-tasked is its resting state).
+
+**These three must be set here, not via a `.env` tier** — the same constraint as `bridge_heal`, for a different reason. The composed fleet-pulse unit carries exactly four `Environment=` lines (`CLAUDLOBBY_ROOT`, `PATH`, `CLAUDLOBBY_FLEET`, `TELEGRAM_GROUP_CHAT_ID`) and `lib/fleet-pulse.sh` sources no `.env` file, so a fleet-tier setting never reaches it. `bot.conf` is the one path that does, and the per-bot granularity is useful in its own right: a deliberately parked bot can set `unassigned_check: false` and stop tripping the alarm without disarming the fleet.
+
+Emitted env vars: `OBSERVABILITY_PULSE_INTERVAL`, `OBSERVABILITY_REAP_DAYS`, `OBSERVABILITY_ACTIVITY_STUCK_THRESHOLD`, `OBSERVABILITY_DISPATCH_DEADLINE`, `OBSERVABILITY_BRIDGE_HEAL`, `BRIDGE_HEAL_MAX_ATTEMPTS`, `OBSERVABILITY_UNASSIGNED_CHECK`, `OBSERVABILITY_UNASSIGNED_THRESHOLD`, `OBSERVABILITY_UNASSIGNED_MAX_AGE`.
 
 ### Fleet-pulse escalation (environment overrides)
 
