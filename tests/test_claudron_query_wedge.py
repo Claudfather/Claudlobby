@@ -352,3 +352,68 @@ def test_cap_is_overridable(tmp_path):
     env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "40"}
     _run_dispatch(tmp_path, env, task="restore the ranking " * 40)
     assert len(_query_sent(tmp_path)) == 40
+
+
+# The cap alone assumes the head of a task IS the subject. That is a convention
+# about what CALLERS compose, which this file cannot enforce -- and real traffic
+# breaks it: an envelope dispatch leads with a `[fleet memory: ...]` block, so
+# the 200-char window fills with pure boilerplate and the query is topically
+# inert again. Same defect the cap exists to fix, reached by saturation rather
+# than by length.
+#
+# NOT circular: the wedge does not poison its own query. Its prepend runs after
+# the lookup -- verified by execution, in the first test below, which asserts the
+# titles a run injects are absent from the query that same run sent. A line-number
+# argument would not settle that; these tests are the reason it does not have to.
+
+PREAMBLE = (
+    "[fleet memory: artemis-skills full-system spec extraction "
+    "(/vault/skills-framework-index.md); Correct-then-sweep: a fix applied only "
+    "where it was pointed out leaves the superseded claim alive in the same "
+    "document (/vault/correct-then-sweep.md)] "
+)
+SUBJECT = "restore the claudron ranking for enveloped dispatches"
+
+
+def test_leading_fleet_memory_preamble_is_stripped_before_the_cap(tmp_path):
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=PREAMBLE + SUBJECT)
+    sent = _query_sent(tmp_path)
+    assert sent == SUBJECT, f"expected the subject alone, got {sent!r}"
+    # The failure this closes: without the strip the whole 200-char window is
+    # preamble and none of the subject survives.
+    assert "[fleet memory:" not in sent
+    # ORDERING, asserted rather than argued: the pointers this very run prepends
+    # must not appear in the query it sent. If they did, the prepend preceded the
+    # lookup and the wedge would be feeding on its own output.
+    for hit in TWO_HITS["results"]:
+        assert hit["title"] not in sent
+
+
+def test_stacked_preambles_are_all_stripped(tmp_path):
+    # A dispatch composed from an already-rendered one carries two. Stripping
+    # only the outermost puts the query straight back at 100% boilerplate, which
+    # is the same defect rather than a milder one -- so the strip repeats.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=PREAMBLE + PREAMBLE + SUBJECT)
+    assert _query_sent(tmp_path) == SUBJECT
+
+
+def test_preamble_shaped_text_after_the_head_is_left_alone(tmp_path):
+    # Only a LEADING block is boilerplate. The same shape further in is the
+    # caller talking about a preamble, which is subject matter -- and eating it
+    # would be the very failure being fixed, self-inflicted.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    task = "explain why " + PREAMBLE + "saturates the query"
+    _run_dispatch(tmp_path, env, task=task)
+    assert _query_sent(tmp_path) == task[:200]
+    assert _query_sent(tmp_path).startswith("explain why ")
+
+
+def test_unterminated_preamble_terminates(tmp_path):
+    # A malformed head has no "] " to strip to, so the expansion is a no-op. The
+    # guard is what stops the loop; without it this test does not fail, it HANGS.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    task = "[fleet memory: never closed and then some subject matter"
+    _run_dispatch(tmp_path, env, task=task)
+    assert _query_sent(tmp_path) == task

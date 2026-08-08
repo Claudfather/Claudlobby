@@ -119,7 +119,7 @@ _claudron_query_before() {
     # claudron-less hosts); every failure past here is caught by the
     # 2>/dev/null + return-0 net on the invocations themselves.
     command -v claudron >/dev/null 2>&1 || return 0
-    local raw parsed pointers query
+    local raw parsed pointers query subject stripped
     # QUERY IS THE HEAD OF THE TASK, NOT THE WHOLE TASK.
     #
     # Passing the entire payload collapses the ranking rather than widening it.
@@ -139,11 +139,38 @@ _claudron_query_before() {
     # construction (the tmux send is single-line), so "first line or two" is the
     # whole payload and would change nothing.
     #
-    # The head is the right slice rather than an arbitrary one: the fleet's own
-    # comms protocol requires a dispatch to lead with the decision or the ask, so
-    # the subject is front-loaded by construction. The `[fleet memory: …]` prefix
-    # is prepended BELOW, after this lookup, so it cannot poison its own query.
-    query=$(printf '%s' "$TASK" | cut -c1-"${CLAUDRON_QUERY_MAX_CHARS:-200}")
+    # The head is only the subject when the CALLER leads with the subject. The
+    # fleet comms protocol asks for that, but this file cannot enforce a
+    # convention about text composed before it ever runs -- and measured traffic
+    # breaks it. A real dispatch whose head is a `[fleet memory: ...]` preamble
+    # caps to 200 characters of pure boilerplate, cut mid-word, with ZERO subject
+    # matter in it. That reproduces the exact defect this wedge exists to fix,
+    # via saturation instead of raw length. So the one known-shape prefix is
+    # stripped before the cap, the same way claudron strings are sanitized to a
+    # known shape below.
+    #
+    # This wedge does not poison its OWN query. The prepend at the foot of this
+    # function runs after the lookup -- verified by execution rather than by line
+    # order: the pointer titles a run injects are absent from the query that same
+    # run sent. Any preamble seen here was carried in by the caller.
+    #
+    # The loop, rather than a single strip: a stacked preamble (a dispatch
+    # composed from an already-rendered one) puts the query straight back at 100%
+    # boilerplate, which is the same defect and not a different one.
+    #
+    # Stripping to the FIRST "] " is deliberate. A note title containing "]"
+    # leaves residue behind; consuming to the LAST one would eat subject matter.
+    # Residue only degrades the query, eating the subject reproduces the bug --
+    # so the ambiguous case fails toward residue.
+    subject="$TASK"
+    while [ "${subject#\[fleet memory: }" != "$subject" ]; do
+        # Guards the malformed no-"] " case: the expansion below is then a no-op
+        # and the loop would never terminate.
+        stripped="${subject#*\] }"
+        [ "$stripped" != "$subject" ] || break
+        subject="$stripped"
+    done
+    query=$(printf '%s' "$subject" | cut -c1-"${CLAUDRON_QUERY_MAX_CHARS:-200}")
     raw=$(claudron lookup --json \
         --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$query" 2>/dev/null) || return 0
     # Emits "<count>\t<title (abs path); ...>". Claudron-supplied strings are
