@@ -300,22 +300,6 @@ class TestKnobPassthrough:
     boot path is what a knob changes, so it cannot also be the oracle.
     """
 
-    def _child_env_seen_by_start_bot(
-        self, tmp_path: Path, overrides: dict[str, str]
-    ) -> str:
-        (tmp_path / "lib").mkdir(exist_ok=True)
-        stub = tmp_path / "lib" / "start-bot.sh"
-        stub.write_text("#!/usr/bin/env bash\nenv\n")
-        stub.chmod(0o755)
-        return call_script_fn(
-            SAMPLER,
-            "run_start_bot",
-            "10",
-            str(tmp_path),
-            str(tmp_path / "botdir"),
-            env=_sampler_env(**overrides),
-        )
-
     def test_every_forwarded_knob_reaches_start_bot(self, tmp_path):
         # Generic over the list, so forwarding stays true for every knob the
         # list ever holds: a knob added to _FORWARDED_PANE_KNOBS without
@@ -326,7 +310,7 @@ class TestKnobPassthrough:
         ).split()
         assert knobs, "forwarded-knob list is empty — sampler contract broken"
         for knob in knobs:
-            out = self._child_env_seen_by_start_bot(tmp_path, {knob: "7"})
+            out = _child_env_seen_by_start_bot(tmp_path, {knob: "7"})
             assert f"{knob}=7" in out, f"{knob} did not reach the child env"
 
     def test_unset_knobs_do_not_leak_into_the_child_env(self, tmp_path):
@@ -334,7 +318,7 @@ class TestKnobPassthrough:
         # lib-common defaults and reaching arithmetic tests as non-integers.
         # Absent is not the same as empty: with nothing set, NO pane knob may
         # appear in the child env at all.
-        out = self._child_env_seen_by_start_bot(tmp_path, {})
+        out = _child_env_seen_by_start_bot(tmp_path, {})
         assert "PANE_" not in out
 
 
@@ -436,3 +420,394 @@ class TestKnobDisclosure:
             "start-bot.sh no longer arms PANE_READY_TICKS unconditionally at "
             "exactly its two injection sites; re-derive the INERT disclosure."
         )
+
+
+# ── #843 arm identity: the row must evidence its own IV ───────────────────────
+#
+# The blocker these close: a settle=0.3 row and a settle=6.0 row were
+# byte-identical in shape, so arm identity lived only in a filename. A
+# mislabelled arm is undetectable from the artifact afterwards — the failure
+# has no symptom, only a clean confident number nobody can audit. So the tests
+# below assert on the RECORD the boot produces, never on a label a caller
+# supplied, and the summarizer ones assert refusals BY NAME rather than on the
+# absence of a rate (an empty report and a refused one read alike otherwise).
+
+
+def _arm_record(**overrides) -> dict:
+    return json.loads(
+        call_script_fn(SAMPLER, "arm_knobs_json", env=_sampler_env(**overrides))
+    )
+
+
+def _lib_common() -> str:
+    return (REPO_ROOT / "lib" / "lib-common.sh").read_text(encoding="utf-8")
+
+
+def _lib_common_constants() -> dict[str, str]:
+    """Every `_PANE_*=<number>` constant lib-common declares, by name."""
+    return dict(
+        re.findall(r"^(_PANE_[A-Z0-9_]+)=([0-9.]+)", _lib_common(), re.MULTILINE)
+    )
+
+
+def _forwarded_knobs() -> list[str]:
+    return call_script_fn(
+        SAMPLER, 'echo "$_FORWARDED_PANE_KNOBS"', env=_sampler_env()
+    ).split()
+
+
+def _child_env_seen_by_start_bot(tmp_path: Path, overrides: dict[str, str]) -> str:
+    """The environment run_start_bot actually hands the child, via a start-bot
+    stub that just prints it. Module-level because both the passthrough tests
+    and the arm-record tests need it — the same env is the subject of one and
+    the oracle of the other."""
+    (tmp_path / "lib").mkdir(exist_ok=True)
+    stub = tmp_path / "lib" / "start-bot.sh"
+    stub.write_text("#!/usr/bin/env bash\nenv\n")
+    stub.chmod(0o755)
+    return call_script_fn(
+        SAMPLER,
+        "run_start_bot",
+        "10",
+        str(tmp_path),
+        str(tmp_path / "botdir"),
+        env=_sampler_env(**overrides),
+    )
+
+
+class TestArmRecording:
+    def test_every_forwarded_knob_has_a_declared_fate(self):
+        # Currency pin, same shape as the knob-list pin above: a knob joining
+        # _FORWARDED_PANE_KNOBS without a case in pane_knob_fate would be
+        # recorded with no in-force value at all, and every row in that arm
+        # would evidence one knob less than it forwards. Fails HERE by name.
+        rec = _arm_record()
+        knobs = _forwarded_knobs()
+        assert set(rec) == set(knobs)
+        unresolved = [k for k, v in rec.items() if v["src"] == "UNRESOLVED"]
+        assert not unresolved, f"no fate declared for {unresolved} in pane_knob_fate"
+
+    def test_arm_record_env_field_matches_the_child_env(self, tmp_path):
+        # THE invariant that keeps the recorded arm honest. run_start_bot
+        # decides what reaches the child; pane_knob_fate decides what the row
+        # says reached it. They are two reads of the same variable, so they can
+        # drift apart in a one-line edit — and a row claiming a knob it did not
+        # forward is the mislabel, arriving through the door built to prevent
+        # it. Generic over the list so a new knob is covered on arrival.
+        for knob in _forwarded_knobs():
+            child = _child_env_seen_by_start_bot(tmp_path, {knob: "7"})
+            rec = _arm_record(**{knob: "7"})
+            in_child = f"{knob}=7" in child
+            assert (rec[knob]["env"] == "7") == in_child, (
+                f"{knob}: arm record says env={rec[knob]['env']!r} but the child "
+                f"env {'carries' if in_child else 'does not carry'} it"
+            )
+
+    def test_unset_knob_records_the_lib_common_default_not_a_local_literal(self):
+        # The in-force value must track lib-common, or a default that moves
+        # there leaves every historical row silently re-describing a condition
+        # that changed. Read from lib-common source rather than hardcoded here,
+        # so this pin cannot drift with the thing it pins.
+        declared = _lib_common_constants()
+        rec = _arm_record()
+        assert rec["PANE_SEND_SETTLE_S"] == {
+            "env": None,
+            "v": float(declared["_PANE_SEND_SETTLE_DEFAULT"]),
+            "src": "default",
+        }
+        assert rec["PANE_SEND_VERIFY_TICKS"]["v"] == int(
+            declared["_PANE_SEND_VERIFY_TICKS_DEFAULT"]
+        )
+
+    def test_default_fate_tracks_the_constant_lib_common_ACTUALLY_READS(self):
+        # The sibling test above pins the recorded value against the
+        # constant's DEFINITION. That is not enough on its own, and the gap is
+        # not theoretical: repoint lib-common's `${PANE_SEND_SETTLE_S:-...}`
+        # read sites at a new constant while leaving the old one defined but
+        # dead, and every boot runs at the new value while every row records
+        # the old one — a mislabelled arm manufactured by the recorder, which
+        # is the exact class this change exists to close. Verified by mutation:
+        # the suite stayed fully green under that edit before this pin existed.
+        #
+        # So walk the read site, not the definition: for every knob whose fate
+        # is `default`, find what lib-common falls back to and confirm the
+        # recorded in-force value is THAT number. Generic over the fate table,
+        # the same shape as the two currency pins above.
+        text, consts = _lib_common(), _lib_common_constants()
+        rec = _arm_record()
+        checked = []
+        for knob, got in rec.items():
+            if got["src"] != "default":
+                continue
+            sites = set(re.findall(r"\$\{" + knob + r":-\$(\w+)\}", text))
+            assert sites, (
+                f"{knob} is recorded as `default` but lib-common has no "
+                f"${{{knob}:-$CONST}} read site — the recorded value has no source"
+            )
+            assert len(sites) == 1, (
+                f"{knob} falls back to {sorted(sites)} at different read sites; "
+                "the arm record can only be true of one of them"
+            )
+            const = sites.pop()
+            assert const in consts, f"{knob} falls back to undeclared ${const}"
+            assert float(got["v"]) == float(consts[const]), (
+                f"{knob}: rows record {got['v']}, but lib-common reads "
+                f"${const}={consts[const]} — every boot ran at a value the "
+                "artifact does not name"
+            )
+            checked.append(knob)
+        assert checked, "no knob resolved to `default` — this pin checked nothing"
+
+    def test_forwarded_settle_is_recorded_as_the_arm(self):
+        assert _arm_record(PANE_SEND_SETTLE_S="1.5")["PANE_SEND_SETTLE_S"] == {
+            "env": "1.5",
+            "v": 1.5,
+            "src": "forwarded",
+        }
+
+    def test_boot_armed_knob_records_the_value_in_force_not_the_override(self):
+        # Why "what the caller set" is the wrong thing to record: start-bot
+        # arms PANE_READY_TICKS itself at both injection sites, so a run
+        # launched with 200 ran every boot at the boot-armed value. Recording
+        # caller intent would label it a 200 arm — a mislabel manufactured by
+        # the recorder, which is the exact class this record exists to close.
+        armed = int(_lib_common_constants()["_PANE_READY_TICKS_BOOT"])
+        rec = _arm_record(PANE_READY_TICKS="200")["PANE_READY_TICKS"]
+        assert rec == {"env": "200", "v": armed, "src": "boot-armed"}
+        assert rec["v"] != 200
+
+    def test_settle_s_is_hoisted_from_the_arm_record_not_supplied_beside_it(self):
+        # Two independently-supplied copies of one fact is how a row comes to
+        # disagree with itself. The emitter derives the hoisted IV from $arm in
+        # the same jq expression, so disagreement is unreachable at write time;
+        # boot-strand-summary.py catches it at read time for rows edited after
+        # the fact. This pins the write-time half.
+        src = SAMPLER.read_text(encoding="utf-8")
+        assert 'settle_s: ($arm | if . == null then null else .["PANE_SEND_SETTLE_S"].v end)' in src
+        assert "--arg settle" not in src, "settle_s must not have a second source"
+
+    def test_disclosure_and_arm_record_agree_on_every_knob(self):
+        # One resolution, two renderings. knob_disclosure is what a human reads
+        # in the run log and arm_knobs is what the analysis reads; a run whose
+        # log says one arm while its rows say another is unauditable in the
+        # worst way, because both look authoritative.
+        env = {"PANE_SEND_SETTLE_S": "6.0", "PANE_READY_TICKS": "200"}
+        line = call_script_fn(SAMPLER, "knob_disclosure", env=_sampler_env(**env))
+        rec = _arm_record(**env)
+        assert "PANE_SEND_SETTLE_S=6.0(forwarded)" in line
+        assert rec["PANE_SEND_SETTLE_S"]["v"] == 6.0
+        assert f"start-bot-arms-{rec['PANE_READY_TICKS']['v']}" in line
+
+
+# ── #843 arm grouping: the two-arm statistic, and the refusals guarding it ────
+
+
+def _knobs(settle: float, ticks: int = 5) -> dict:
+    return {
+        "PANE_SEND_VERIFY_TICKS": {"env": None, "v": ticks, "src": "default"},
+        "PANE_SEND_SETTLE_S": {"env": str(settle), "v": settle, "src": "forwarded"},
+        "PANE_READY_TICKS": {"env": None, "v": 90, "src": "boot-armed"},
+    }
+
+
+def _armed_rows(
+    settle: float, outcomes: str, ticks: int = 5, burners: int = 0, start: int = 1
+) -> list[dict]:
+    """One arm's sample rows. `outcomes` is a compact string: c=clean, s=strand."""
+    return [
+        {
+            "i": start + n,
+            "kind": "sample",
+            "outcome": {"c": "clean", "s": "strand"}[ch],
+            "retry_fired": 0,
+            "t_submit_s": 9 if ch == "c" else None,
+            "load_burners": burners,
+            "arm_knobs": _knobs(settle, ticks),
+            "settle_s": settle,
+        }
+        for n, ch in enumerate(outcomes)
+    ]
+
+
+class TestArmGrouping:
+    """The other half of the blocker: with no arm grouping, summarize() was
+    single-arm only, so no two-arm figure was reachable and a real run could
+    only ever return INCONCLUSIVE. Pooling the arms instead would have been
+    worse than refusing — it averages the independent variable away and reports
+    the result as a measurement.
+    """
+
+    def test_arms_are_reported_separately_never_pooled(self):
+        text, rc = summary.summarize(
+            _armed_rows(0.3, "sssscccccc") + _armed_rows(1.5, "sccccccccc", start=11)
+        )
+        assert rc == 0
+        assert "── arm settle_s=0.3" in text
+        assert "── arm settle_s=1.5" in text
+        assert "strand rate: 4/10" in text and "strand rate: 1/10" in text
+        # The pooled rate (5/20) must appear nowhere: it is the answer this
+        # grouping exists to stop being given.
+        assert "5/20" not in text
+
+    def test_machine_line_per_arm_carries_its_arm(self):
+        text, _ = summary.summarize(
+            _armed_rows(0.3, "sscccc") + _armed_rows(6.0, "cccccc", start=11)
+        )
+        lines = [ln for ln in text.splitlines() if ln.startswith("SAMPLER_RESULT ")]
+        assert len(lines) == 2
+        assert "strands=2 n=6" in lines[0] and "settle_s=0.3" in lines[0]
+        assert "strands=0 n=6" in lines[1] and "settle_s=6" in lines[1]
+
+    def test_difference_interval_names_its_method_and_says_it_is_unratified(self):
+        text, _ = summary.summarize(
+            _armed_rows(0.3, "s" * 30 + "c" * 10)
+            + _armed_rows(1.5, "s" * 4 + "c" * 36, start=101)
+        )
+        assert "── between-arm (control - treatment)" in text
+        assert "MOVER" in text and "Clopper-Pearson" in text
+        assert "UNRATIFIED" in text
+        assert "0.3 - 1.5:" in text
+
+    def test_no_verdict_is_emitted(self):
+        # The pre-registration's bar is not ratified for the difference, and a
+        # summarizer that declared SUPPORTED off an unratified statistic would
+        # pre-empt the ratification (ab-recoverability-scorer.py precedent).
+        text, _ = summary.summarize(
+            _armed_rows(0.3, "ssssssssss") + _armed_rows(1.5, "cccccccccc", start=11)
+        )
+        assert "NO VERDICT EMITTED" in text
+        assert not [ln for ln in text.splitlines() if ln.startswith("VERDICT")]
+
+    def test_stratifier_reports_both_strata_never_pooled(self):
+        rows = _armed_rows(0.3, "sscc")
+        rows[0]["retry_fired"] = 1
+        text, _ = summary.summarize(rows)
+        assert "strand rate | settle_s=0.3, retry_fired > 0: 1/1" in text
+        assert "strand rate | settle_s=0.3, retry_fired == 0: 1/3" in text
+
+    def test_control_arm_is_overridable_and_stated(self):
+        rows = _armed_rows(0.3, "sscc") + _armed_rows(1.5, "sccc", start=11)
+        default_text, _ = summary.summarize(rows)
+        assert "control arm: settle_s=0.3 (smallest arm" in default_text
+        chosen, _ = summary.summarize(rows, control=1.5)
+        assert "control arm: settle_s=1.5" in chosen
+        assert "1.5 - 0.3:" in chosen
+
+    def test_absent_control_is_stated_not_silently_substituted(self):
+        text, rc = summary.summarize(
+            _armed_rows(0.3, "sscc") + _armed_rows(1.5, "sccc", start=11), control=9.9
+        )
+        assert rc == 0
+        assert "control 9.9 is not present in this sample" in text
+        assert "── between-arm" not in text
+
+    def test_load_burner_drift_between_arms_is_disclosed(self):
+        text, _ = summary.summarize(
+            _armed_rows(0.3, "sscc", burners=0)
+            + _armed_rows(1.5, "sccc", burners=8, start=11)
+        )
+        assert "BETWEEN-ARM CONFOUND: load_burners is not constant across arms" in text
+
+    def test_unlabelled_rows_report_one_arm_and_say_they_cannot_evidence_it(self):
+        text, rc = summary.summarize(
+            [
+                {"i": 1, "kind": "sample", "outcome": "strand", "retry_fired": 0},
+                {"i": 2, "kind": "sample", "outcome": "clean", "retry_fired": 0},
+            ]
+        )
+        assert rc == 0
+        assert "ARM: UNLABELLED" in text
+        assert "cannot evidence the settle window it ran under" in text
+        assert "── between-arm" not in text
+
+
+class TestArmRefusals:
+    """Every refusal is named individually and asserted BY NAME. A refusal that
+    only manifested as a missing rate would be indistinguishable from an empty
+    sample — and 'no rate printed' is exactly what a broken summarizer also
+    looks like.
+    """
+
+    @staticmethod
+    def _refusal(rows: list[dict]) -> str:
+        text, rc = summary.summarize(rows)
+        assert rc == summary.REFUSE_RC, f"expected refusal, got rc={rc}:\n{text}"
+        # A refusal must not ALSO print a rate: half a report reads as a
+        # measurement with a warning attached, which is how a caveat gets
+        # skimmed past.
+        assert "strand rate:" not in text
+        assert "SAMPLER_RESULT" not in text
+        return text
+
+    def test_hoisted_iv_disagreeing_with_the_arm_record_is_refused(self):
+        # The planted mislabel: the row says one arm, its own record says
+        # another. Unreachable at write time (one jq expression), so its only
+        # cause is an edit after the fact — which is precisely the tampering an
+        # arm recorded in a filename could never have exposed.
+        rows = _armed_rows(0.3, "scc")
+        rows[1]["settle_s"] = 6.0
+        assert "MISLABELLED-ARM/arm-disagrees-with-record" in self._refusal(rows)
+
+    def test_covarying_second_knob_within_one_arm_is_refused(self):
+        # Two runs at the same settle but different verify budgets concatenate
+        # into a group that reads as one arm and is not one. The IV agreeing is
+        # not the condition agreeing.
+        rows = _armed_rows(0.3, "scc") + _armed_rows(0.3, "scc", ticks=250, start=11)
+        text = self._refusal(rows)
+        assert "MISLABELLED-ARM/covarying-knob" in text
+        assert "PANE_SEND_VERIFY_TICKS" in text
+
+    def test_mixed_labelled_and_unlabelled_is_refused(self):
+        rows = _armed_rows(0.3, "scc")
+        rows.append({"i": 99, "kind": "sample", "outcome": "strand", "retry_fired": 0})
+        assert "MISLABELLED-ARM/mixed-labelled-and-unlabelled" in self._refusal(rows)
+
+    def test_arm_record_missing_while_the_iv_is_present_is_refused(self):
+        rows = _armed_rows(0.3, "scc")
+        del rows[1]["arm_knobs"]
+        assert "MISLABELLED-ARM/missing-arm-record" in self._refusal(rows)
+
+    def test_iv_missing_from_the_arm_record_is_refused(self):
+        rows = _armed_rows(0.3, "scc")
+        del rows[1]["arm_knobs"]["PANE_SEND_SETTLE_S"]
+        assert "MISLABELLED-ARM/missing-arm-record" in self._refusal(rows)
+
+    def test_non_numeric_arm_is_refused(self):
+        rows = _armed_rows(0.3, "scc")
+        rows[1]["settle_s"] = "0.3"
+        rows[1]["arm_knobs"]["PANE_SEND_SETTLE_S"]["v"] = "0.3"
+        assert "MISLABELLED-ARM/non-numeric-arm" in self._refusal(rows)
+
+    def test_boolean_arm_is_not_accepted_as_a_number(self):
+        # bool is an int subclass in Python; a JSON true would otherwise group
+        # as arm 1.0 and read as a legitimate ladder rung.
+        rows = _armed_rows(0.3, "scc")
+        rows[1]["settle_s"] = True
+        rows[1]["arm_knobs"]["PANE_SEND_SETTLE_S"]["v"] = True
+        assert "MISLABELLED-ARM/non-numeric-arm" in self._refusal(rows)
+
+    def test_refusal_names_the_offending_boot(self):
+        rows = _armed_rows(0.3, "sccccc")
+        rows[3]["settle_s"] = 6.0
+        assert "boot 4" in self._refusal(rows)
+
+
+class TestMoverDifference:
+    def test_matches_the_hand_computed_mover_combination(self):
+        d, lo, hi = summary.mover_difference(7, 10, 2, 10)
+        lo1, hi1 = summary.cp_interval(7, 10)
+        lo2, hi2 = summary.cp_interval(2, 10)
+        assert abs(d - 0.5) < 1e-12
+        assert abs(lo - (0.5 - ((0.7 - lo1) ** 2 + (hi2 - 0.2) ** 2) ** 0.5)) < 1e-12
+        assert abs(hi - (0.5 + ((hi1 - 0.7) ** 2 + (0.2 - lo2) ** 2) ** 0.5)) < 1e-12
+
+    def test_defined_at_the_degenerate_ends(self):
+        # k=0 and k=n are the arms a ceiling is meant to produce. A Wald
+        # interval collapses to zero width there and reports a clean separation
+        # that the data does not support; the exact inputs keep width.
+        d, lo, hi = summary.mover_difference(20, 20, 0, 20)
+        assert d == 1.0 and lo < 1.0 and hi > 1.0 - 1e-9
+
+    def test_identical_arms_straddle_zero(self):
+        _, lo, hi = summary.mover_difference(5, 20, 5, 20)
+        assert lo < 0 < hi
