@@ -77,6 +77,11 @@
 #      CLAUDE_BIN (default: real `claude` — the point), SAMPLER_MEM_FLOOR_MB
 #      (default 1200; refuses to run on a starved host, which would both risk
 #      the live fleet and bias readiness timing).
+#      Pane knobs PANE_SEND_VERIFY_TICKS / PANE_SEND_SETTLE_S /
+#      PANE_READY_TICKS forward into the boot when set; the "pane knobs:"
+#      output line states each one's effective fate — forwarded, default,
+#      INERT (PANE_READY_TICKS: start-bot arms its own value at the injection
+#      sites), or SCRUBBED (a lib-common pane knob env -i drops).
 #
 # Exit: 0 sample completed (the summary is the product; strands do not fail
 #         the run) · 1 harness failure (setup assertion failed, or zero boots
@@ -237,6 +242,61 @@ count_send_retries() {
     return 0
 }
 
+# ── #1109 knob contract: what the constructed child env forwards ──────────────
+# The pane knobs lib-common reads from the environment, split by whether
+# run_start_bot forwards them. tests/test_boot_strand_sampler.py pins the UNION
+# of these lists against lib-common's actual `${PANE_*}` env reads, so a new
+# knob fails CI here instead of joining the scrubbed-silently class (#1084).
+#
+# Forwarded — the measurement knobs. PANE_SEND_VERIFY_TICKS bounds the
+# stuck-payload verify loop (#1084); PANE_SEND_SETTLE_S bounds the repaint
+# window between send-keys and Enter (the #1109 hypothesis knob);
+# PANE_READY_TICKS governs the pre-send box wait, forwarded so an arming change
+# in start-bot.sh starts honoring it with no sampler change — but INERT today:
+# start-bot.sh arms its own value at both pane_send_verified call sites
+# (start-bot.sh:371,381 as of #1109), so a forwarded override cannot reach the
+# injection path. knob_disclosure says so in the output.
+#
+# Unforwarded — no pre-registered ladder sweeps them. Set in the caller env
+# they are dropped by env -i, and knob_disclosure prints them as SCRUBBED
+# rather than letting the run silently measure defaults.
+_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS"
+_UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS"
+
+# knob_disclosure — one line stating the effective fate of every pane knob the
+# child boot could consume, so a run artifact self-documents which knob a
+# ladder actually varied. An override whose fate is knowable only by reading
+# two sources is how a refutation gets manufactured (#1084, #1109); this line
+# is the output-visible half of the fix. Printed before the precondition
+# gates, so even an aborted run carries it.
+knob_disclosure() {
+    local k v line="pane knobs:"
+    for k in $_FORWARDED_PANE_KNOBS; do
+        eval "v=\${$k:-}"
+        if [ "$k" = "PANE_READY_TICKS" ]; then
+            # Unset is not the lib-common default here: start-bot arms its
+            # own value at the injection sites either way.
+            if [ -n "$v" ]; then
+                line="$line $k=$v(forwarded-but-INERT:start-bot-arms-own-value)"
+            else
+                line="$line $k=(default:boot-armed)"
+            fi
+        elif [ -n "$v" ]; then
+            line="$line $k=$v(forwarded)"
+        else
+            line="$line $k=(default)"
+        fi
+    done
+    for k in $_UNFORWARDED_PANE_KNOBS; do
+        eval "v=\${$k:-}"
+        if [ -n "$v" ]; then
+            line="$line $k=$v(SCRUBBED:not-on-the-env-allowlist)"
+        fi
+    done
+    printf '%s\n' "$line"
+    return 0
+}
+
 # run_start_bot <timeout_s> <root> <bot_dir> — start-bot under a CONSTRUCTED
 # child env: built from an explicit base, never inherit-and-subtract (the #846
 # principle; a shared lib-common seam for the estate's six hand-rolled copies
@@ -251,24 +311,20 @@ count_send_retries() {
 # them.
 run_start_bot() {
     local timeout_s="$1" root="$2" bot_dir="$3"
-    # PANE_SEND_VERIFY_TICKS is passed through when — and ONLY when — the caller
-    # set it. The allowlist above is deliberately explicit rather than
-    # inherit-and-subtract (#846), which is right, and it means a variable this
-    # harness exists to VARY must be named here or it is silently dropped.
-    #
-    # Silently is the operative word. A ladder that sweeps the tick budget with
-    # this variable scrubbed returns IDENTICAL strand rates at every value —
-    # because every run is secretly the default — which reads as "the verify
-    # budget makes no difference to the strand". That is a refutation
-    # MANUFACTURED BY THE HARNESS, indistinguishable from a measured one, and it
-    # would send the #843 fix somewhere else entirely. Nothing in the output
-    # would disclose it.
-    #
-    # Conditional, not unconditional: an empty value would shadow lib-common's
-    # default and reach `[ "$ticks" -gt 0 ]` as a non-integer.
-    local tick_env=""
-    [ -n "${PANE_SEND_VERIFY_TICKS:-}" ] \
-        && tick_env="PANE_SEND_VERIFY_TICKS=$PANE_SEND_VERIFY_TICKS"
+    # Forwarding is DERIVED from _FORWARDED_PANE_KNOBS (rationale at the list),
+    # so list membership IS forwarding and knob_disclosure can never call a
+    # knob forwarded while this function scrubs it — that drift is the
+    # manufactured-refutation class itself (#1084, #1109). Set-and-nonempty
+    # only: an empty value would shadow the lib-common default and reach an
+    # arithmetic test as a non-integer.
+    local k v
+    local knob_env=()
+    for k in $_FORWARDED_PANE_KNOBS; do
+        eval "v=\${$k:-}"
+        if [ -n "$v" ]; then
+            knob_env+=("$k=$v")
+        fi
+    done
     # timeout wraps env(1), a real command — with_timeout cannot exec a shell
     # function, so the bound lives here rather than at the call site.
     with_timeout "$timeout_s" env -i \
@@ -280,7 +336,7 @@ run_start_bot() {
         LOGNAME="${LOGNAME:-$(id -un)}" \
         TMPDIR="${TMPDIR:-/tmp}" \
         CLAUDLOBBY_ROOT="$root" \
-        ${tick_env:+"$tick_env"} \
+        "${knob_env[@]+"${knob_env[@]}"}" \
         bash "$root/lib/start-bot.sh" "$bot_dir"
 }
 
@@ -300,6 +356,9 @@ main() {
     case "$BOOTS" in ''|*[!0-9]*) printf 'bad -n: %s\n' "$BOOTS" >&2; exit 1 ;; esac
     case "$DEADLINE" in ''|*[!0-9]*) printf 'bad --deadline: %s\n' "$DEADLINE" >&2; exit 1 ;; esac
     case "$LOAD_BURNERS" in ''|*[!0-9]*) printf 'bad --load: %s\n' "$LOAD_BURNERS" >&2; exit 1 ;; esac
+
+    # Before the gates: an aborted run must still carry its knob state (#1109).
+    knob_disclosure
 
     # Preconditions — skip (2), never fail, when a heavy dep is absent.
     for dep in "$CLAUDE_BIN" jq python3 tmux claudron; do
