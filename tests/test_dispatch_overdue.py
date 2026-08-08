@@ -670,6 +670,43 @@ class TestOpenList:
         )
         assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == ""
+
+    def test_ties_keep_ledger_order_matching_the_old_strict_min(self, tmp_path):
+        """The tie-break was asserted from reading the sort's stability; this
+        pins it. `open_task_id` USED to scan with a strict `<`, which keeps the
+        FIRST row seen on a tie. `list.sort` is stable, so it must agree — if it
+        ever did not, the resolver would close a different dispatch than the one
+        the list shows first, silently."""
+        dlog, rlog = self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-first"),
+                _dispatch("w1", 100, 1000, task_id="t-second"),
+                _dispatch("w1", 100, 1000, task_id="t-third"),
+            ],
+            [],
+        )
+        rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        assert [t for _, _, t in rows] == ["t-first", "t-second", "t-third"]
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-first"
+
+    def test_a_tie_at_the_head_still_resolves_to_the_head(self, tmp_path):
+        """Tie at the oldest timestamp, with a younger row written first — so
+        file order and time order disagree and only the sort can be right."""
+        dlog, rlog = self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 500, 1000, task_id="t-young"),
+                _dispatch("w1", 100, 1000, task_id="t-old-a"),
+                _dispatch("w1", 100, 1000, task_id="t-old-b"),
+            ],
+            [],
+        )
+        rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        assert [t for _, _, t in rows] == ["t-old-a", "t-old-b", "t-young"]
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2] == "t-old-a"
+
+
 class TestSupersession:
     """A re-dispatch replaces an earlier task, so the older row is never answered.
 

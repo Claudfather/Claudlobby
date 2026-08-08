@@ -92,8 +92,21 @@ classification returns a clean empty set when it has no bots dir to read
 ``.spawn`` mtimes from (#1014's family), which is indistinguishable from "no
 work was lost to a restart" — labeled, since open and overdue stay sound.
 
-None of this modifies the doors. They are shared with the watchdog and are not
-this issue's to change; #526, #1014 and #878 track the fixes.
+None of the above lives in the matcher — every probe and every omission is in
+this module. Be precise about the neighbouring claim, though, because the two
+are different and only one of them is true:
+
+  * The matcher's **behaviour is unchanged**. `_classify_all`, `overdue_all`,
+    `orphaned_all` and `_terminal_reported_ids` are byte-identical, and the
+    `--all` / `--orphans` / `--open-task` contracts are what they were.
+  * The **file is not untouched.** `lib/dispatch-overdue.py` is `+66/-14` here:
+    a net-new `--open` mode (the one #904 specifies), and `open_task_id`
+    refactored to be that list's head rather than a second loop over the same
+    join — two copies is how a resolver ends up handing back an id the list
+    does not contain. The 14 removed lines are that one function body.
+
+The fail-open modes themselves are NOT fixed here — they are the doors' own,
+shared with the watchdog, and #526, #1014 and #878 track them.
 """
 
 from __future__ import annotations
@@ -167,12 +180,21 @@ class Degradation:
 
     ``mode`` is ``labeled`` (present, bounded) or ``omitted`` (absent by
     design). ``issue`` is the tracking issue whose fix retires the entry.
+
+    ``count`` is how many rows the degradation covers, when that is knowable —
+    and on an ``omitted`` entry it is the difference between a hidden true
+    positive and a disclosed one. An omission suppresses real rows as well as
+    false ones (it must: in that state no row can be adjudicated), so without a
+    count "unavailable" reads the same whether it is hiding nothing or hiding a
+    dispatch that has been silently rotting for a day. ``None`` means the count
+    itself could not be taken, which is stated rather than rendered as 0.
     """
 
     field: str
     mode: str
     reason: str
     issue: str
+    count: int | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -180,6 +202,7 @@ class Degradation:
             "mode": self.mode,
             "reason": self.reason,
             "issue": self.issue,
+            "count": self.count,
         }
 
 
@@ -424,10 +447,14 @@ def _dispatch_section(
     # Existence, not emptiness, is the test — see LedgerRead. Checked here
     # rather than fixed in the matcher on purpose: the doors are shared with the
     # watchdog and are not this issue's to change.
-    for what, path, issue, consequence in (
+    dispatch_read = _read_ledger(dlog)
+    report_read = _read_ledger(rlog)
+
+    for what, path, read, issue, consequence in (
         (
             "report ledger",
             rlog,
+            report_read,
             "#526",
             "with no reports to join against, every past-deadline dispatch "
             "would read as overdue and every id'd dispatch as open",
@@ -435,25 +462,55 @@ def _dispatch_section(
         (
             "dispatch log",
             dlog,
+            dispatch_read,
             "#1014",
             "with no dispatches to read, all three lists would be empty — a "
             "manufactured all-clear",
         ),
     ):
-        read = _read_ledger(path)
-        if read.state != LEDGER_OK:
-            degraded.append(
-                Degradation(
-                    field="dispatches",
-                    mode="omitted",
-                    reason=(
-                        f"the {what} is {read.state} at {path}; {consequence}, "
-                        "so no dispatch state is served rather than a wrong one"
-                    ),
-                    issue=issue,
-                )
+        if read.state == LEDGER_OK:
+            continue
+
+        # AN OMISSION SUPPRESSES TRUE ROWS TOO, and that is not optional: with
+        # no ledger, a genuinely overdue dispatch and a finished one are the
+        # same bytes, so nothing here can tell them apart. What IS avoidable is
+        # letting the real one go unmentioned. Under-reporting is the worse
+        # failure — a noisy watchdog gets audited, a silent one does not — so
+        # the rows that could not be adjudicated are COUNTED even though they
+        # cannot be classified. "12 dispatches past deadline, status
+        # undeterminable" is actionable; a bare "unavailable" is not.
+        #
+        # The count deliberately claims nothing about overdue-ness. It is
+        # None — stated, never rendered as 0 — when the dispatch log is the
+        # unreadable side, because then even the denominator is unknown.
+        unadjudicated = None
+        if dispatch_read.state == LEDGER_OK:
+            unadjudicated = sum(
+                1
+                for d in dispatch_read.rows
+                if str(d.get("bot", "")).lower() == bot_id.lower()
+                and isinstance(d.get("expected_by"), int)
+                and now > d["expected_by"]
             )
-            return {}
+        tail = (
+            f"; {unadjudicated} dispatch row(s) for this bot are past deadline "
+            "and could not be adjudicated either way"
+            if unadjudicated
+            else ""
+        )
+        degraded.append(
+            Degradation(
+                field="dispatches",
+                mode="omitted",
+                reason=(
+                    f"the {what} is {read.state} at {path}; {consequence}, "
+                    f"so no dispatch state is served rather than a wrong one{tail}"
+                ),
+                issue=issue,
+                count=unadjudicated,
+            )
+        )
+        return {}
 
     if doors is None:
         degraded.append(
@@ -931,7 +988,26 @@ def format_brief(brief: dict) -> str:
     d = brief.get("dispatches")
     out.append(f"DISPATCHES{mark('dispatches')}")
     if not d:
-        out.append("  (unavailable — see DEGRADED)")
+        # Carry the count up to the section, not just into the degraded block:
+        # "unavailable" alone reads identically whether it is hiding nothing or
+        # hiding a dispatch that has been rotting for a day.
+        n = next(
+            (
+                e["count"]
+                for e in deg
+                if e["field"] == "dispatches"
+                and e["mode"] == "omitted"
+                and e.get("count")
+            ),
+            None,
+        )
+        if n:
+            out.append(
+                f"  (unavailable — {n} row(s) past deadline, status "
+                f"undeterminable; see DEGRADED)"
+            )
+        else:
+            out.append("  (unavailable — see DEGRADED)")
     else:
         shown, more = rows(d["open"])
         out.append(f"  open ({len(d['open'])})")
