@@ -135,10 +135,13 @@ iso_now() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
 section_of() {  # section_of "<output>" <bot>
     printf '%s\n' "$1" | awk -v b="$2" '
         /^[^ ]/                { s="" }
-        /^SELF-STARTED \(/     { s="SELF-STARTED"; next }
-        /^STRANDED \(/         { s="STRANDED";     next }
-        /^NOT YET DUE/         { s="NOT-YET-DUE";  next }
-        /^ADJUDICATE /         { s="ADJUDICATE";   next }
+        /^SELF-STARTED \(/     { s="SELF-STARTED";  next }
+        /^STRANDED \(/         { s="STRANDED";      next }
+        /^NOT YET DUE/         { s="NOT-YET-DUE";   next }
+        /^ADJUDICATE /         { s="ADJUDICATE";    next }
+        /^RESCUED /            { s="RESCUED";       next }
+        /^HALF-BOOTED/         { s="PARTIAL";       next }
+        /^STRANDED ON BOOT/    { s="INBOUND-WOKEN"; next }
         s != "" && $1 == b { print s; exit }
     '
 }
@@ -225,7 +228,13 @@ assert_contains "undeclared leftover dir is reported" "ghost" "$OUT"
 assert_eq "undeclared leftover dir is NOT classified" "" "$(section_of "$OUT" ghost)"
 
 assert_contains "headline leads with the count" "SELF-START SNAPSHOT:  3 of 8" "$OUT"
-assert_contains "baseline printed next to it" "baseline to beat" "$OUT"
+# The prior figure is printed as NOT COMPARABLE rather than as a target. It was
+# measured by presence-of-record, which cannot see an inbound-woken or
+# half-submitted boot, so it counts bots this classifier does not. Printing the
+# two side by side as a target is how "flat" gets claimed without support.
+assert_contains "prior figure is printed" "prior figure:" "$OUT"
+assert_contains "and is labelled not comparable" "NOT COMPARABLE" "$OUT"
+assert_absent "it is NOT offered as a target to beat" "baseline to beat" "$OUT"
 
 # Positive control for the completeness assertion below: a run that DID cover
 # every declared bot must carry no stamp and exit 0. Without this, the
@@ -419,6 +428,251 @@ OUT9="$(run_snapshot "$BOOT" "PATH=$T/bin:$PATH")"; RC9=$?
 assert_eq "incomplete outranks too-early in the exit code" "4" "$RC9"
 assert_contains "but both banners still print — early" "TOO EARLY" "$OUT9"
 assert_contains "but both banners still print — incomplete" "INCOMPLETE SNAPSHOT" "$OUT9"
+
+# ── Case 8: how the session came to life ────────────────────────────────────
+# Presence of a post-boot record cannot tell a bot that woke up from one that
+# was carried, or from one a human messaged. So the first post-boot USER record
+# is typed before any instant is compared, and the typing is a DENYLIST: the
+# channel injection and the tool_result record are the only shapes that do not
+# vary, so those are matched and "payload" is whatever is left. Every detector
+# that instead tried to RECOGNISE a startup payload failed, because payloads are
+# authored per bot — one is prose, the next a bare slash command with no prose
+# at all, and a rescuer types an approximation of neither.
+echo "== boot classification: payload vs inbound vs nothing =="
+ROOT="$T/root3"; CFG="$T/cfg3"
+BOOT=1786020000
+BOUNDARY="2026-08-06T12:50:00Z"        # BOOT+600s
+PRE_B="2026-08-06T12:45:00.000Z"       # before the boundary
+POST_B="2026-08-06T12:55:00.000Z"      # after it
+
+declare_fleet rescue selfstarter rescuedbot contradictor inboundbot toolfirst nopayload
+for b in selfstarter rescuedbot contradictor inboundbot toolfirst nopayload; do
+    mk_dir rescue "$b"
+done
+
+# add_rec <fleet> <bot> <file> <ts> <raw-json-body-after-timestamp>
+add_rec() {
+    local p; p="$(proj_dir "$1" "$2")"; mkdir -p "$p"
+    printf '{"type":"user","timestamp":"%s",%s}\n' "$4" "$5" >> "$p/$3.jsonl"
+}
+add_asst() {  # add_asst <fleet> <bot> <file> <ts> <n>
+    local p; p="$(proj_dir "$1" "$2")"; mkdir -p "$p"
+    local i=0
+    while [ "$i" -lt "$5" ]; do
+        printf '{"type":"assistant","timestamp":"%s","sessionId":"%s"}\n' "$4" "$3" >> "$p/$3.jsonl"
+        i=$((i + 1))
+    done
+}
+PAYLOAD='"message":{"role":"user","content":"set +H; Welcome back. Read your CLAUDE.md."}'
+# The bridge injection carries isMeta — which is exactly why isMeta must NOT be
+# filtered as system noise. Doing so drops the only evidence of this class.
+CHANNEL='"isMeta":true,"message":{"role":"user","content":"<channel source=\"plugin:telegram:telegram\" chat_id=\"-100123\">\nping"}'
+TOOLRES='"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}'
+
+add_rec  rescue selfstarter  s "$PRE_B"  "$PAYLOAD";  add_asst rescue selfstarter  s "$PRE_B"  3
+add_rec  rescue rescuedbot   s "$POST_B" "$PAYLOAD";  add_asst rescue rescuedbot   s "$POST_B" 3
+add_rec  rescue contradictor s "$PRE_B"  "$PAYLOAD";  add_asst rescue contradictor s "$PRE_B"  3
+# The case that matters: woken by a human message, then fully alive. Session up,
+# work being done, reporting normally — and it never self-started.
+add_rec  rescue inboundbot   s "$PRE_B"  "$CHANNEL";  add_asst rescue inboundbot   s "$PRE_B"  9
+# A tool_result lands BEFORE the channel record. If tool_result records were not
+# excluded, this bot would type as "payload" (no channel marker in it) and read
+# as a self-starter — the exclusion is load-bearing, not tidiness.
+add_rec  rescue toolfirst    s "2026-08-06T12:44:00.000Z" "$TOOLRES"
+add_rec  rescue toolfirst    s "$PRE_B"  "$CHANNEL";  add_asst rescue toolfirst    s "$PRE_B"  4
+# Assistant records but no post-boot user record at all.
+add_asst rescue nopayload    s "$PRE_B"  5
+
+mk_receipt() {  # mk_receipt <file-date> <row-json>
+    mkdir -p "$ROOT/state/events"
+    printf '%s\n' "$2" >> "$ROOT/state/events/fleet-$1.jsonl"
+}
+RECEIPT_BASE='"ts":"2026-08-06T08:50:00-04:00","bot":"fleet","type":"fleet_rescue","source":"manual"'
+
+# ---- 8a: no receipt at all. The classes still hold; contamination does not. --
+OUT10="$(run_snapshot "$BOOT")"; RC10=$?
+assert_eq "no receipt: exits 0" "0" "$RC10"
+assert_eq "payload before any rescue is a self-start" \
+    "SELF-STARTED" "$(section_of "$OUT10" selfstarter)"
+assert_eq "inbound-woken is NOT a self-start" \
+    "INBOUND-WOKEN" "$(section_of "$OUT10" inboundbot)"
+assert_eq "tool_result records are excluded from the typing" \
+    "INBOUND-WOKEN" "$(section_of "$OUT10" toolfirst)"
+# Something spoke with nothing submitted. That is the two instruments
+# disagreeing, and it is refused per bot rather than resolved either way —
+# calling it a self-start would credit a boot nobody can evidence, and calling
+# it a strand would deny one that is visibly running.
+assert_eq "assistant records with NO user record are refused, not guessed" \
+    "ADJUDICATE" "$(section_of "$OUT10" nopayload)"
+assert_contains "inbound-woken section says liveness is not self-start" \
+    "It never started on its own" "$OUT10"
+assert_contains "absence of a receipt is disclosed, not read as absence of rescue" \
+    "contamination CANNOT be ruled out" "$OUT10"
+assert_eq "headline counts only genuine self-starts" \
+    "3" "$(printf '%s\n' "$OUT10" | sed -n 's/.*SNAPSHOT:  \([0-9]*\) of 6.*/\1/p')"
+
+# ---- 8b: a usable receipt splits payload into self-start vs carried ---------
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\",\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT11="$(run_snapshot "$BOOT")"; RC11=$?
+
+assert_eq "a contaminated page refuses with its own exit code" "6" "$RC11"
+assert_contains "contamination banner fires" "CONTAMINATED" "$OUT11"
+assert_contains "headline stops claiming a result" "NOT A RESULT — a rescue covers this boot" "$OUT11"
+assert_contains "validity line says no" "result valid  : NO" "$OUT11"
+assert_eq "payload after the boundary is RESCUED, not self-started" \
+    "RESCUED" "$(section_of "$OUT11" rescuedbot)"
+assert_eq "payload before the boundary is still a self-start" \
+    "SELF-STARTED" "$(section_of "$OUT11" selfstarter)"
+# Positive control on the asymmetry: where the boundary IS usable, an unnamed
+# bot falls through to the timestamp rather than being refused. Absence never
+# certifies, but it also must not block a comparison that can decide.
+assert_contains "an unnamed bot is decided by the boundary, not by the list" \
+    "unaided" "$OUT11"
+# The amendment case: the receipt disagrees with itself. Never resolved toward
+# either fact — refused, by name.
+assert_eq "named-as-rescued yet predating the boundary is a CONTRADICTION" \
+    "ADJUDICATE" "$(section_of "$OUT11" contradictor)"
+assert_contains "and the contradiction is spelled out" "RECEIPT CONTRADICTS ITSELF" "$OUT11"
+assert_contains "the contradicting bot is named" "contradictor" "$OUT11"
+assert_absent "no honest-limit note when a receipt IS present" \
+    "contamination CANNOT be ruled out" "$OUT11"
+
+# ---- 8c: a retroactive receipt — names stand, the stamp does not ------------
+# `recorded` is the receipt disclosing that its stamp was TYPED, not read. The
+# comparison is suppressed entirely; the name list survives, because a list of
+# who was touched is not reconstructed by being written down late.
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"recorded\":\"after the fact, not at repair time\",\"bots_rescued\":[\"rescuedbot\",\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT12="$(run_snapshot "$BOOT")"; RC12=$?
+
+assert_eq "a retroactive receipt still refuses" "6" "$RC12"
+assert_contains "and says why the boundary is unusable" "recorded after the fact" "$OUT12"
+assert_eq "a named bot is still RESCUED without any comparison" \
+    "RESCUED" "$(section_of "$OUT12" rescuedbot)"
+# The contradiction cannot arise here: with no comparable boundary there is
+# nothing for the name list to disagree WITH, so the name is simply believed.
+assert_eq "the named bot that predates is now believed, not adjudicated" \
+    "RESCUED" "$(section_of "$OUT12" contradictor)"
+# THE ASYMMETRY THAT MATTERS. The name list is NON-EXHAUSTIVE — presence means
+# rescued definitively, absence means UNKNOWN. That is not theoretical: a second
+# rescue went unrecorded hours after the receipt was designed, by the person who
+# proposed it. So with the boundary suppressed there is nothing left that could
+# certify this bot, and it is refused rather than promoted. Reading "not on the
+# list" as "started on its own" is how an unrecorded rescue becomes a self-start.
+assert_eq "absence from a non-exhaustive list is NOT evidence of self-start" \
+    "ADJUDICATE" "$(section_of "$OUT12" selfstarter)"
+assert_contains "and the refusal says why nothing can certify it" \
+    "name list is not exhaustive" "$OUT12"
+
+# ---- 8d: a correction row is not a receipt ---------------------------------
+# The closing quote in the type match is load-bearing: a prefix match reads
+# fleet_rescue_correction as a receipt with no boundary and refuses the page.
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+mk_receipt 2026-08-06 '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet","type":"fleet_rescue_correction","source":"manual","data":{"corrects":"a prior row"}}'
+OUT13="$(run_snapshot "$BOOT")"; RC13=$?
+assert_eq "a correction row alone does not contaminate" "0" "$RC13"
+assert_absent "and raises no contamination banner" "CONTAMINATED" "$OUT13"
+
+# ---- 8e: a receipt for an EARLIER boot must not bleed forward ---------------
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06T11:00:00Z\"}}"
+OUT14="$(run_snapshot "$BOOT")"; RC14=$?
+assert_eq "a boundary predating this boot belongs to an earlier one" "0" "$RC14"
+assert_eq "so its named bot is not marked rescued" \
+    "SELF-STARTED" "$(section_of "$OUT14" rescuedbot)"
+
+# ---- 8f: sub-second boundary arithmetic ------------------------------------
+# A fractionless boundary compared against a fractional record: without padding,
+# "12:50:00.500Z" sorts BEFORE "12:50:00Z" because "." is below "Z", and a bot
+# half a second the wrong side silently flips class.
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+rm -rf "$(proj_dir rescue rescuedbot)"
+add_rec  rescue rescuedbot s "2026-08-06T12:50:00.500Z" "$PAYLOAD"
+add_asst rescue rescuedbot s "2026-08-06T12:50:00.500Z" 2
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT15="$(run_snapshot "$BOOT")"
+assert_eq "half a second past a fractionless boundary is still RESCUED" \
+    "RESCUED" "$(section_of "$OUT15" rescuedbot)"
+
+# ---- 8g: precedence against the other two refusals -------------------------
+# Contaminated outranks too-early: re-running fixes early and can never
+# un-contaminate a boot. Incomplete outranks both.
+BOOT=$(( $(date +%s) - 20 ))
+rm -f "$ROOT"/state/events/*.jsonl
+mk_receipt "$(date -u +%Y-%m-%d)" "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"$(date -u +%Y-%m-%dT%H:%M:%S)Z\"}}"
+mk_unit rescue selfstarter 60
+OUT16="$(run_snapshot "$BOOT")"; RC16=$?
+assert_eq "contaminated outranks too-early in the exit code" "6" "$RC16"
+assert_contains "but the too-early banner still prints" "TOO EARLY" "$OUT16"
+assert_contains "and the contaminated banner still prints" "CONTAMINATED" "$OUT16"
+
+OUT17="$(run_snapshot "$BOOT" "PATH=$T/bin:$PATH")"; RC17=$?
+assert_eq "incomplete outranks contaminated" "4" "$RC17"
+
+# ── Case 9: the WHOLE boot injection, not merely something startup-shaped ───
+# A boot is TWO sends: a bare `/claudna:session resume --auto` and then
+# `set +H; $STARTUP_PROMPT`. Asserting that something startup-shaped arrived
+# passes a bot whose injection only half landed — measured on real bots, one
+# composed prompt was still unsubmitted 39 minutes after boot and another never
+# arrived at all, and both read as clean self-starters under the earlier
+# contract. Those are not self-starts: the bot is running without the
+# instructions it was composed with.
+echo "== whole-injection assertion =="
+ROOT="$T/root4"; CFG="$T/cfg4"
+BOOT=1786020000
+WHOLE_TS="2026-08-06T12:45:00.000Z"
+
+declare_fleet inject bothparts slashonly noconf
+for b in bothparts slashonly noconf; do mk_dir inject "$b"; done
+
+mk_botconf() {  # mk_botconf <fleet> <bot> <prompt>
+    printf 'export BOT_NAME="%s"\nexport STARTUP_PROMPT="%s"\n' "$2" "$3" \
+        > "$(bot_dir "$1" "$2")/bot.conf"
+}
+PROMPT='Welcome back. Read your CLAUDE.md. Idle and await Telegram messages.'
+SLASH='"message":{"role":"user","content":"<command-message>claudna:session</command-message>\n<command-name>/claudna:session</command-name>\n<command-args>resume --auto</command-args>"}'
+PROSE="\"message\":{\"role\":\"user\",\"content\":\"set +H; $PROMPT\"}"
+
+mk_botconf inject bothparts "$PROMPT"
+mk_botconf inject slashonly "$PROMPT"
+# noconf deliberately gets no bot.conf: the assertion cannot run for it.
+
+# Both halves landed, slash first exactly as start-bot.sh sends them.
+add_rec  inject bothparts s "2026-08-06T12:44:50.000Z" "$SLASH"
+add_rec  inject bothparts s "$WHOLE_TS" "$PROSE"
+add_asst inject bothparts s "$WHOLE_TS" 3
+# Only the slash half. This is the shape that used to read as a clean boot.
+add_rec  inject slashonly s "2026-08-06T12:44:50.000Z" "$SLASH"
+add_asst inject slashonly s "2026-08-06T12:44:50.000Z" 3
+add_rec  inject noconf    s "$WHOLE_TS" "$PROSE"
+add_asst inject noconf    s "$WHOLE_TS" 3
+
+OUT18="$(run_snapshot "$BOOT")"
+
+assert_eq "both halves submitted is a genuine self-start" \
+    "SELF-STARTED" "$(section_of "$OUT18" bothparts)"
+assert_eq "only the slash half submitted is PARTIAL, not a self-start" \
+    "PARTIAL" "$(section_of "$OUT18" slashonly)"
+assert_contains "and the half-boot is spelled out" "only HALF submitted" "$OUT18"
+assert_contains "the section says what it means operationally" \
+    "Running without the instructions it was composed with" "$OUT18"
+# The count is the point: a half-booted bot must not be inside N.
+assert_eq "a half-booted bot is excluded from the headline count" \
+    "2" "$(printf '%s\n' "$OUT18" | sed -n 's/.*SNAPSHOT:  \([0-9]*\) of 3.*/\1/p')"
+# A bot whose composed prompt cannot be read cannot have the assertion applied,
+# so it is disclosed rather than silently credited with a clean boot.
+assert_contains "a bot with no composed prompt is disclosed" \
+    "no composed STARTUP_PROMPT readable" "$OUT18"
+assert_contains "and it is named" "noconf" "$OUT18"
+
+# The assertion is against the bot's OWN composed value, so a resend of some
+# OTHER bot's prompt does not satisfy it.
+rm -rf "$(proj_dir inject slashonly)"
+add_rec  inject slashonly s "$WHOLE_TS" '"message":{"role":"user","content":"set +H; You just started up. Read your CLAUDE.md."}'
+add_asst inject slashonly s "$WHOLE_TS" 3
+OUT19="$(run_snapshot "$BOOT")"
+assert_eq "a prompt that is not THIS bot composed one does not satisfy it" \
+    "PARTIAL" "$(section_of "$OUT19" slashonly)"
 
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"
