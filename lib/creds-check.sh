@@ -245,7 +245,7 @@ check_telegram_tokens() {
     fleet_dir="$(resolve_fleet_dir "$FLEET_ARG")" || fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_ARG"
     declared_bots=$(parse_fleet_bots "$fleet_dir/fleet.yaml")
 
-    local d bot key handle token resp okflag username errcode
+    local d bot key handle token resp okflag username errcode declared_username
     for d in "$bots_dir"/*/; do
         [ -f "$d/bot.conf" ] || continue
         bot="$(basename "$d")"
@@ -289,10 +289,23 @@ check_telegram_tokens() {
         fi
 
         username="$(printf '%s' "$resp" | "$JQ" -r '.result.username // ""' 2>/dev/null)" || username=""
-        if [ -n "$username" ] && [ "$(_lc "$username")" != "$(_lc "$handle")" ]; then
+        # Compare against the DECLARED @username, never TELEGRAM_BOT_HANDLE. The
+        # handle is channel identity — a state-dir slug that defaults to bot_id —
+        # and a slug is not a username. Measured on a live 9-bot fleet: every bot
+        # held a CORRECT, distinct token whose getMe answered @artemis_*_bot while
+        # the slug read @<bot_id>, so comparing those declares all nine cross-wired
+        # and edge-alerts once per bot, on the channel that must stay trustworthy
+        # (#1095). TELEGRAM_BOT_USERNAME is emitted only when a fleet spells the
+        # handle out, so empty means UNKNOWN, not mismatched: skip the comparison
+        # and let getMe above still prove the token. A fleet that declares one
+        # keeps the full cross-wire check, including when it equals the bot_id.
+        # See #1097/#1107.
+        declared_username="$(bot_conf_get "$d" TELEGRAM_BOT_USERNAME "")"
+        if [ -n "$username" ] && [ -n "$declared_username" ] \
+           && [ "$(_lc "$username")" != "$(_lc "$declared_username")" ]; then
             # Valid token for the WRONG bot — cross-wired .env.
             record_and_alert "$key" "fail" \
-                "getMe answers @$username but bot.conf handle is @$handle (cross-wired token)"
+                "getMe answers @$username but bot.conf declares @$declared_username (cross-wired token)"
             continue
         fi
 

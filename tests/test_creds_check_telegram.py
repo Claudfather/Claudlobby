@@ -62,7 +62,9 @@ esac
 def _fleet(
     tmp_path: Path,
     real_tgpost: bool = False,
-    roster: list[tuple[str, str | None, str, str | None]] | None = None,
+    # Tuples are splatted into bot(): (name, handle, token_var, token,
+    # [expect_no_token], [declare_username]).
+    roster: list[tuple] | None = None,
 ) -> dict:
     root = tmp_path / "root"
     (root / "lib").mkdir(parents=True)
@@ -89,12 +91,18 @@ def _fleet(
         token_var: str,
         token: str | None,
         expect_no_token: bool = False,
+        declare_username: bool = True,
     ):
         d = root / "local" / "f" / "runtime" / "bots" / name
         (d / "data").mkdir(parents=True)
         conf = [f'export BOT_ID="{name}"', f'export BOT_SERVICE="com.t.f.{name}"']
         if handle:
             conf.append(f'export TELEGRAM_BOT_HANDLE="{handle}"')
+            # Mirrors the composer: a DECLARED handle emits the @username too, a
+            # handle defaulted to bot_id emits only the slug (declare_username
+            # False). creds-check cross-wire-checks the username, never the slug.
+            if declare_username:
+                conf.append(f'export TELEGRAM_BOT_USERNAME="{handle}"')
             conf.append(f'export TELEGRAM_TOKEN_ENV_NAME="{token_var}"')
         if expect_no_token:
             conf.append("export EXPECT_NO_TOKEN=1")
@@ -211,6 +219,41 @@ def test_handle_mismatch_fails(tmp_path):
     assert state["telegram_f_bot5"]["status"] == "fail"
     d = state["telegram_f_bot5"]["detail"]
     assert "some_other_bot" in d and "bot_five_bot" in d
+
+
+def test_undeclared_username_does_not_false_fail_as_cross_wired(tmp_path):
+    """A composed slug is not a @username, so an undeclared username is UNKNOWN.
+
+    The composer defaults TELEGRAM_BOT_HANDLE to bot_id (#1097/#1107) and emits
+    TELEGRAM_BOT_USERNAME only when a fleet spells the handle out. Measured on a
+    live 9-bot fleet, every bot held a CORRECT distinct token whose getMe
+    answered @artemis_*_bot while the slug read @<bot_id> — comparing those
+    declares all nine cross-wired and edge-alerts once per bot (#1095). getMe
+    still proves the token; only the comparison is skipped.
+    """
+    f = _fleet(
+        tmp_path,
+        roster=[("somebot", "somebot", "T_TOKEN", WRONGBOT_TOKEN, False, False)],
+    )
+    state = _run(f)
+    assert state["telegram_f_somebot"]["status"] == "ok"
+    assert "some_other_bot" in state["telegram_f_somebot"]["detail"]
+
+
+def test_declared_username_equal_to_bot_id_still_cross_wire_checked(tmp_path):
+    """Declaring a username restores the check even when it equals the bot_id.
+
+    This is exactly the case a "handle == BOT_ID means defaulted" heuristic
+    would have silently skipped. Keying off a separately-emitted declared
+    username, rather than re-deriving intent from BOT_ID, keeps it covered.
+    """
+    f = _fleet(
+        tmp_path,
+        roster=[("somebot", "somebot", "T_TOKEN", WRONGBOT_TOKEN, False, True)],
+    )
+    state = _run(f)
+    assert state["telegram_f_somebot"]["status"] == "fail"
+    assert "cross-wired" in state["telegram_f_somebot"]["detail"]
 
 
 def test_non_channel_bot_not_checked(tmp_path):

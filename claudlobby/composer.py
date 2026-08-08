@@ -492,6 +492,46 @@ def _channel_plugins(channels: list[str]) -> list[str]:
     return plugins
 
 
+def _has_telegram_channel(channels: list[str]) -> bool:
+    """True when a bot launches with a Telegram channel.
+
+    A channel entry names the channel either bare (``telegram``) or as a
+    marketplace-pinned plugin ref (``plugin:telegram@claude-plugins-official``);
+    both mean the same channel. ``channels: []`` — the documented way to declare
+    a bot with no channel — yields False.
+    """
+    return any(
+        chan.removeprefix("plugin:").split("@", 1)[0] == "telegram" for chan in channels
+    )
+
+
+def telegram_handle(bot: BotConfig) -> str | None:
+    """This bot's Telegram handle, or None when it is not a channel bot.
+
+    ``handle`` is optional and ``fleet.yaml`` documents the default plainly —
+    "handle defaults to bot_id". TELEGRAM_STATE_DIR has applied that default
+    since #43; the readers of the handle VARIABLE never did. So a fleet using
+    the documented default composed a working state dir, a live bridge, and no
+    TELEGRAM_BOT_HANDLE — and every consumer keyed off that variable concluded
+    the bot had no channel at all: bridge_state returned `no_handle` for a
+    provably live bridge, halting rolling-restart on its first bot (#1107), and
+    creds-check's Telegram probe skipped every bot on the host (#1097). One
+    resolver, so the default cannot drift apart again.
+
+    Returns None for a bot with no Telegram channel AND no declared handle —
+    the genuine non-channel class, which must stay expressible because
+    `bridge_state`'s `no_handle` and the restart gates' non-channel contract
+    (#901) both rest on it. An explicitly declared handle still wins outright,
+    channel or not: it names an existing state dir, and silently re-pointing
+    that path would orphan a live channel.
+    """
+    if bot.telegram.handle:
+        return bot.telegram.handle
+    if _has_telegram_channel(bot.channels):
+        return bot.bot_id
+    return None
+
+
 GITCONFIG_FILENAME = ".gitconfig"
 
 # GitHub ignores the username when the password is a PAT; this is its documented
@@ -617,7 +657,13 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         raise ValueError(f"bot_id {bot.bot_id!r} contains shell-unsafe characters")
     if not _SAFE_NAME_RE.match(bot.name):
         raise ValueError(f"bot name {bot.name!r} contains shell-unsafe characters")
-    tg_handle = (bot.telegram.handle if bot.telegram else None) or bot.bot_id
+    # Resolved once, consumed by both the state-dir path and the handle export
+    # below — a second hand-rolled `handle or bot_id` here is exactly the drift
+    # that produced #1097/#1107. `tg_channel_handle` is None for a bot with no
+    # Telegram channel; `tg_handle` is the slug, which the state-dir path always
+    # needs a value for even then.
+    tg_channel_handle = telegram_handle(bot)
+    tg_handle = tg_channel_handle or bot.bot_id
     if not _TELEGRAM_HANDLE_RE.match(tg_handle):
         raise ValueError(
             f"telegram handle {tg_handle!r} contains shell-unsafe characters"
@@ -658,7 +704,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         # only one bot per host can then hold a poller. lib-common.sh's ownership
         # check greps the poller's environ for this exact KEY=VALUE, so the
         # export is a contract between compositor and consumer (#976).
-        f'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{bot.telegram.handle or bot.bot_id}"',
+        f'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{tg_handle}"',
         "",
         "# Claude Code config dir (multi-account support)",
     ]
@@ -740,8 +786,26 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         lines.append(
             f"export TELEGRAM_REQUIRE_MENTION={_shq(str(bot.telegram.require_mention).lower())}"
         )
+    # Resolved, not raw: a fleet that relies on the documented "handle defaults
+    # to bot_id" otherwise composes no handle at all, and every consumer reading
+    # this variable then classifies a live channel bot as non-channel (#1097,
+    # #1107). A bot with no Telegram channel still emits nothing — that is the
+    # signal `bridge_state`'s `no_handle` and #901's gate contract rest on.
+    if tg_channel_handle:
+        lines.append(f"export TELEGRAM_BOT_HANDLE={_shq(tg_channel_handle)}")
+
+    # The DECLARED BotFather @username — emitted ONLY when the fleet spelled a
+    # handle out, and deliberately a separate variable from TELEGRAM_BOT_HANDLE.
+    # The handle is channel identity (a state-dir slug that now defaults to
+    # bot_id); a slug is not a username. creds-check's cross-wire check compares
+    # getMe's answer against a username, so it must read a value that is absent
+    # when we were never told one — otherwise it compares a slug and declares a
+    # correctly-wired bot cross-wired, edge-alerting once per bot (#1095).
+    # "Was a username declared?" is a fact known here; making bash re-derive it
+    # by comparing the handle against BOT_ID would couple it to this default,
+    # and silently resume false-paging if the default ever moved.
     if bot.telegram.handle:
-        lines.append(f"export TELEGRAM_BOT_HANDLE={_shq(bot.telegram.handle)}")
+        lines.append(f"export TELEGRAM_BOT_USERNAME={_shq(bot.telegram.handle)}")
 
     # Model strategy — config-driven model escalation / compaction / subagent models.
     if bot.model_strategy:
@@ -1373,6 +1437,16 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
     Telegram plugin picks up correct settings on first boot — preventing
     the default-config bug where requireMention defaults to false.
     """
+    # DELIBERATELY the raw handle, not telegram_handle(bot) — do not "fix" this
+    # to match the other three sites without reading #1107 first. Composing
+    # access.json for a fleet that never had one is not additive: the reconcile
+    # path below OVERWRITES groups.<chat_id>.requireMention from fleet config.
+    # Measured on a live 9-bot fleet, applying the default here flipped the
+    # manager's own group from requireMention:false to true — a manager that no
+    # longer sees un-mentioned messages is a dispatch outage. Extending the
+    # default here therefore needs each fleet's require_mention reconciled to
+    # its live access.json FIRST. Tracked separately; the other sites only ever
+    # add capability, which is why they lead and this one does not.
     if not bot.telegram or not bot.telegram.handle:
         return None
 
@@ -1715,10 +1789,15 @@ _TELEGRAM_PLUGIN_TOOLS = [
 def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     """Auto-derive tool permissions from configured channels.
 
-    When a bot has a Telegram handle set, include the 4 plugin tools.
+    Keyed off the CHANNEL, not the handle: the precondition for granting the
+    Telegram plugin tools is that the plugin is loaded, which is what `channels`
+    says. Gating on the handle field was wrong in both directions — it granted
+    nothing to a fleet using the documented handle default (these tools reached
+    zero bots, masked only by permission-mode auto), and it would over-grant to
+    a bot that keeps a declared handle while turning its channel off.
     """
     tools: list[str] = []
-    if bot.telegram.handle:
+    if _has_telegram_channel(bot.channels):
         tools.extend(_TELEGRAM_PLUGIN_TOOLS)
     return tools
 
