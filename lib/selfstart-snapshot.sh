@@ -339,6 +339,16 @@ pad_iso_frac() {
     case "$1" in
         *.*Z) printf '%s' "$1" ;;
         *Z)   printf '%s' "${1%Z}.000Z" ;;
+        # Unreachable from the only call site, which is gated behind
+        # iso_utc_shaped and therefore only ever hands over a stamp ending in Z.
+        # Kept deliberately rather than deleted: a `case` that matches no arm
+        # prints NOTHING and still returns 0, so removing this line does not
+        # delete dead code — it turns a total function into one that silently
+        # yields an empty string for the next caller that is not gated the same
+        # way, and an empty boundary sorts BEFORE every instant, which is the
+        # exact failure the padding exists to prevent. The reachability is a
+        # property of the call site, not of the padder; leaving the identity arm
+        # here keeps that precondition out of the callee.
         *)    printf '%s' "$1" ;;
     esac
 }

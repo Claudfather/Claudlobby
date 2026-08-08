@@ -609,6 +609,129 @@ assert_contains "and the contaminated banner still prints" "CONTAMINATED" "$OUT1
 OUT17="$(run_snapshot "$BOOT" "PATH=$T/bin:$PATH")"; RC17=$?
 assert_eq "incomplete outranks contaminated" "4" "$RC17"
 
+# ---- 8h-8k: the three ways a boundary fails to be one ----------------------
+# 8b-8g drive the paths where the receipt HAS a comparable boundary. These four
+# drive the paths where it does not, which is where the script has to refuse
+# rather than guess — the property the whole of #1043 rests on.
+#
+# All three failures land in the same CLASS (NAMES-ONLY, boundary suppressed),
+# so the class cannot tell them apart and asserting on it alone would pass
+# against any of the three arms being wired to any of the others. The reason
+# string is the only discriminator, and it is the operator-facing half: "the
+# writer omitted the field", "the writer emitted two", and "the writer emitted
+# something uncomparable" are fixed in three different places.
+#
+# 8k is the positive control. Without it, 8i is equally satisfied by a helper
+# that refuses ANY repetition, which is an over-refusal that throws away a
+# perfectly good boundary.
+#
+# 8g left the clock 20s past a synthetic boot and a receipt dated today; both
+# are reset here. The 60s rung it composed onto `selfstarter` is left in place
+# and is inert, because BOOT is now days in the past.
+BOOT=1786020000
+
+# ---- 8h: the boundary field is ABSENT (row_field rc=1) ---------------------
+# A receipt from a writer that never stamped the field. The name list still
+# stands — a rescue is not undone by being written down without a boundary —
+# but nothing is comparable, so an unnamed bot cannot be certified.
+#
+# WOULD FAIL IF: row_field stopped distinguishing absent from present-and-empty
+# (an empty value falls through to 8j's message instead), the rc=1 arm were
+# dropped, or absence stopped suppressing the boundary at all.
+rm -f "$ROOT"/state/events/*.jsonl
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"]}}"
+OUT20="$(run_snapshot "$BOOT")"; RC20=$?
+
+assert_eq "a receipt with no boundary field still refuses the page" "6" "$RC20"
+assert_contains "and reports the field as ABSENT" \
+    "receipt carries no selfstart_measurement_valid_before boundary" "$OUT20"
+assert_absent "absence is not reported as a present-but-unusable stamp" \
+    "not a comparable UTC instant" "$OUT20"
+assert_eq "the name list still applies with no boundary at all" \
+    "RESCUED" "$(section_of "$OUT20" rescuedbot)"
+assert_eq "and an unnamed bot is refused rather than promoted" \
+    "ADJUDICATE" "$(section_of "$OUT20" selfstarter)"
+
+# ---- 8i: two distinct boundaries in ONE row (row_field rc=2) ---------------
+# Refusing on ambiguity is doing real work here. Measured, not assumed: with the
+# distinct-count arm gone the two values survive as a two-line string that
+# `iso_utc_shaped` ACCEPTS — its trailing-Z glob spans the newline — so the run
+# adopts a garbage boundary, marks it USABLE, and compares every bot against it.
+# Confident and wrong, which is the exact failure this branch exists to prevent.
+#
+# WOULD FAIL IF: the distinct-count arm were dropped (state goes USABLE and the
+# ambiguity line never prints), or rc=2 were folded into rc=1's message.
+rm -f "$ROOT"/state/events/*.jsonl
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"selfstart_measurement_valid_before\":\"2026-08-06T13:30:00Z\",\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT21="$(run_snapshot "$BOOT")"; RC21=$?
+
+assert_eq "an ambiguous boundary refuses the page" "6" "$RC21"
+assert_contains "and names ambiguity as the reason" \
+    "more than one distinct measurement boundary" "$OUT21"
+assert_absent "ambiguity is not reported as absence" \
+    "receipt carries no selfstart_measurement_valid_before boundary" "$OUT21"
+assert_contains "and neither of the two candidates is adopted" \
+    "Rescue boundary   : UNUSABLE" "$OUT21"
+assert_eq "the name list survives the ambiguity" \
+    "RESCUED" "$(section_of "$OUT21" rescuedbot)"
+
+# ---- 8j: a present, unambiguous, uncomparable stamp (iso_utc_shaped false) --
+# The realistic shape is the first one: the writer copied the row's own `ts`,
+# which is a LOCAL offset. Same instant, four hours out as a string — and every
+# comparison here is a string comparison, so adopting it moves every bot sitting
+# in that window to the wrong side. The bare date is the second shape and is
+# rejected for a different reason (no time at all, rather than no Z), so both
+# halves of the glob are exercised rather than just the tail.
+#
+# WOULD FAIL IF: iso_utc_shaped stopped requiring the trailing Z (the offset
+# stamp is adopted) or stopped requiring the T hh:mm:ss middle (the bare date
+# is adopted). Either weakening flips the state to USABLE.
+rm -f "$ROOT"/state/events/*.jsonl
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06T08:50:00-04:00\"}}"
+OUT22="$(run_snapshot "$BOOT")"; RC22=$?
+
+assert_eq "a local-offset boundary refuses the page" "6" "$RC22"
+assert_contains "and echoes the stamp so it can be repaired" \
+    "not a comparable UTC instant: 2026-08-06T08:50:00-04:00" "$OUT22"
+assert_absent "a present stamp is not reported as absent" \
+    "receipt carries no selfstart_measurement_valid_before boundary" "$OUT22"
+assert_contains "and the uncomparable stamp is never adopted" \
+    "Rescue boundary   : UNUSABLE" "$OUT22"
+
+rm -f "$ROOT"/state/events/*.jsonl
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[\"rescuedbot\"],\"selfstart_measurement_valid_before\":\"2026-08-06\"}}"
+OUT23="$(run_snapshot "$BOOT")"; RC23=$?
+
+assert_eq "a date with no time is equally uncomparable" "6" "$RC23"
+assert_contains "and is refused as a non-instant" \
+    "not a comparable UTC instant: 2026-08-06" "$OUT23"
+
+# ---- 8k: the SAME boundary twice is NOT ambiguity (positive control) -------
+# 8i alone is satisfied by a helper that refuses any repetition at all, and that
+# would be an over-refusal with a real cost: a verbose-but-consistent receipt
+# gets thrown away and every unnamed bot drops to ADJUDICATE for nothing. The
+# count is over DISTINCT values, and this is the case that proves it still is.
+#
+# The two per-bot assertions are the point. The name list is deliberately EMPTY,
+# so nothing but a working boundary comparison can separate these two bots —
+# without it, "USABLE" would be a label with no behaviour behind it.
+#
+# WOULD FAIL IF: -u were dropped from row_field's sort, or the count moved from
+# distinct values to raw match count. Either turns this row into 8i.
+rm -f "$ROOT"/state/events/*.jsonl
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"selfstart_measurement_valid_before\":\"$BOUNDARY\",\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT24="$(run_snapshot "$BOOT")"; RC24=$?
+
+assert_eq "a repeated but consistent boundary still refuses — a rescue covers the boot" "6" "$RC24"
+assert_contains "yet the boundary is ADOPTED, not refused as ambiguous" \
+    "Rescue boundary   : $BOUNDARY" "$OUT24"
+assert_absent "and ambiguity is not claimed" \
+    "more than one distinct measurement boundary" "$OUT24"
+assert_eq "a payload after the adopted boundary is RESCUED" \
+    "RESCUED" "$(section_of "$OUT24" rescuedbot)"
+assert_eq "a payload before it is still a self-start" \
+    "SELF-STARTED" "$(section_of "$OUT24" selfstarter)"
+
 # ── Case 9: the WHOLE boot injection, not merely something startup-shaped ───
 # A boot is TWO sends: a bare `/claudna:session resume --auto` and then
 # `set +H; $STARTUP_PROMPT`. Asserting that something startup-shaped arrived
