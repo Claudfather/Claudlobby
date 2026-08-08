@@ -292,14 +292,25 @@ def attribute_arms(
 #       INCONCLUSIVE as the only reachable verdict, by construction.
 
 
-def _arm_sequence(sample: list[dict]) -> list[float]:
-    """In-force arms ordered by boot index — the record independent of labels."""
-    seq = []
-    for r in sorted(sample, key=lambda r: r.get("i") or 0):
+def _arms_of(rows: list[dict]) -> list[float]:
+    """In-force arm of every row that has one, in the order given.
+
+    One reading of the arm per row: the `[row_arm(r)[0] for r in rows if
+    row_arm(r)[1] is None]` shape resolves each row twice and states the
+    valid-arm rule at every call site, which is how two of them come to
+    disagree about what counts as attributable.
+    """
+    out = []
+    for r in rows:
         arm, slug = row_arm(r)
         if slug is None and arm is not None:
-            seq.append(arm)
-    return seq
+            out.append(arm)
+    return out
+
+
+def _arm_sequence(sample: list[dict]) -> list[float]:
+    """In-force arms ordered by boot index — the record independent of labels."""
+    return _arms_of(sorted(sample, key=lambda r: r.get("i") or 0))
 
 
 def _arm_runs(seq: list[float]) -> int:
@@ -336,7 +347,7 @@ def block_refusals(blocks: dict[int, list[dict]]) -> list[str]:
     refusals: list[str] = []
     for bid in sorted(blocks):
         rows = blocks[bid]
-        arms = [row_arm(r)[0] for r in rows if row_arm(r)[1] is None]
+        arms = _arms_of(rows)
         dup = sorted({a for a in arms if arms.count(a) > 1})
         if dup:
             refusals.append(
@@ -424,7 +435,7 @@ def verify_pairing(
     complete: dict[int, list[dict]] = {}
     partial = 0
     for bid, rows in blocks.items():
-        if {row_arm(r)[0] for r in rows if row_arm(r)[1] is None} == set(labelled):
+        if set(_arms_of(rows)) == set(labelled):
             complete[bid] = rows
         else:
             partial += 1
@@ -606,7 +617,14 @@ def arm_block(rows: list[dict], arm: float | None) -> tuple[list[str], str, int,
 def comparison_block(
     figures: list[tuple[float, int, int]], control: float | None
 ) -> list[str]:
-    """Between-arm differences against the control arm. Figures, not a verdict."""
+    """Between-arm differences against the control arm. Figures, not a verdict.
+
+    Everything below the early return is reachable only from a PAIRED sample:
+    it needs two arms, and summarize withholds the comparison from any sample
+    whose arms did not alternate. So the no-verdict note can state that the
+    drift band was applied without a flag to say so — there is no path here
+    that reaches it with an unfiltered set.
+    """
     usable = [(a, k, n) for a, k, n in figures if n > 0]
     if len(usable) < 2:
         return []
@@ -649,9 +667,9 @@ def comparison_block(
         "pre-registration calls REPAINT SUPPORTED, but that reading also requires the"
     )
     out.append(
-        "ceiling-arm delivery check and the drift-exclusion band, neither of which is"
+        "ceiling-arm delivery check, which is not computed here (see NOT MEASURED"
     )
-    out.append("computed here (see NOT MEASURED below).")
+    out.append("below). The drift-exclusion band IS applied — stated above.")
     return out
 
 
@@ -767,9 +785,16 @@ def summarize(rows: list[dict], control: float | None = None) -> tuple[str, int]
             )
             out.append("  condition on its own, whatever the interval below shows.")
 
+        # Grouped in one pass rather than re-scanning every surviving row per
+        # arm, which resolved each row once per arm on the ladder.
         paired_rows = [r for rs in kept.values() for r in rs]
+        by_arm: dict[float, list[dict]] = {}
+        for r in paired_rows:
+            arm, slug = row_arm(r)
+            if slug is None and arm is not None:
+                by_arm.setdefault(arm, []).append(r)
         diff_figures = [
-            (arm, *_rate([r for r in paired_rows if row_arm(r)[0] == arm]))
+            (arm, *_rate(by_arm.get(arm, [])))
             for arm in sorted(a for a in arms if a is not None)
         ]
         if paired_rows:

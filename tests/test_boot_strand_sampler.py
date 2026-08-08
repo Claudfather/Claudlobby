@@ -878,6 +878,34 @@ class TestPairing:
         assert all(r["block"] is not None and r["pos"] is not None for r in rows)
         assert [r["pos"] for r in rows] == [0, 1, 0, 1, 0, 1, 0, 1]
 
+    def test_one_arm_per_block_is_caught_even_though_every_block_validates(self):
+        # The shape a per-block DRIVER produces: it stamps block ids but does
+        # not own the boot loop, so it can only put one arm in each block. Every
+        # structural check passes — no duplicate arm, pos is a valid one-element
+        # permutation, blocks are contiguous — and the run is still arm-sequential.
+        # Only the in-force sequence sees it, which is why the block record
+        # cannot be the evidence.
+        rows = []
+        for n, arm in enumerate([0.3, 0.3, 1.5, 1.5]):
+            rows.append(
+                {
+                    "i": n + 1,
+                    "kind": "sample",
+                    "outcome": "clean",
+                    "retry_fired": 0,
+                    "loadavg_1m": 12.0,
+                    "load_burners": 0,
+                    "arm_knobs": _knobs(arm),
+                    "settle_s": arm,
+                    "block": n,
+                    "pos": 0,
+                }
+            )
+        text, rc = summary.summarize(rows)
+        assert rc == 0
+        assert "blocks are declared, but the in-force arms are contiguous by" in text
+        assert "BETWEEN-ARM DIFFERENCE SUPPRESSED" in text
+
     def test_concatenated_single_arm_runs_get_no_between_arm_figure(self):
         # The ladder procedure the sampler header used to document: invoke once
         # per settle value, concatenate the rows files. §4 BASELINE forbids it
@@ -985,6 +1013,24 @@ class TestPairing:
         text, _ = summary.summarize(_paired_rows({0.3: "sscc", 1.5: "cccc"}))
         assert "ESTIMATOR GAP" in text
         assert "does not yet enter the interval" in text
+
+    def test_no_verdict_note_stops_calling_the_band_uncomputed_once_it_runs(self):
+        # Blocks made the drift band computable, so the note listing it as
+        # uncomputed became false the moment a paired sample existed — a
+        # disclosure that outlives its defect is its own untruth. The note is
+        # reachable ONLY from a paired sample (comparison_block returns early
+        # below two arms, and an unpaired sample never gets that far), which is
+        # why it can state this outright instead of carrying a flag.
+        paired = summary.summarize(_paired_rows({0.3: "sscc", 1.5: "cccc"}))[0]
+        assert "The drift-exclusion band IS applied" in paired
+        assert "neither of which is" not in paired
+        for unpaired in (
+            summary.summarize(_armed_rows(0.3, "sscc"))[0],
+            summary.summarize(
+                _armed_rows(0.3, "sscc") + _armed_rows(1.5, "cccc", start=11)
+            )[0],
+        ):
+            assert "NO VERDICT EMITTED" not in unpaired
 
     def test_single_arm_sample_is_untouched_by_any_of_this(self):
         # Regression guard: pairing is meaningless with one arm, and the
