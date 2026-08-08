@@ -83,10 +83,21 @@
 #      INERT (PANE_READY_TICKS: start-bot arms its own value at the injection
 #      sites), or SCRUBBED (a lib-common pane knob env -i drops).
 #
+# ARM IDENTITY. One invocation samples ONE arm — the ladder is run by invoking
+# the sampler once per settle value and concatenating the rows files. Every
+# emitted row therefore carries `arm_knobs` (each forwarded knob as
+# {env, v, src}) plus the hoisted `settle_s`, resolved AT THE BOOT from the
+# live environment rather than from a caller-supplied label. Without it a
+# settle=0.3 row and a settle=6.0 row are byte-identical in shape, arm identity
+# lives only in a filename, and a mislabelled arm is undetectable from the
+# artifact afterwards — so boot-strand-summary.py refuses a sample it cannot
+# attribute rather than pooling it.
+#
 # Exit: 0 sample completed (the summary is the product; strands do not fail
 #         the run) · 1 harness failure (setup assertion failed, or zero boots
 #         reached a clean/strand verdict — a sample of others-only must not
-#         read as a measurement) · 2 precondition/dep missing (skip).
+#         read as a measurement) · 2 precondition/dep missing (skip) ·
+#         3 the sample cannot be attributed to arms (summary refused).
 
 set -euo pipefail
 
@@ -112,6 +123,10 @@ MEM_FLOOR_MB="${SAMPLER_MEM_FLOOR_MB:-1200}"
 # deliberate: the pattern also matches the command line of whatever invoked the
 # sampler, so a pattern kill can take out its own caller.
 _LOAD_PIDS=""
+
+# The arm record for the boot currently in flight — see arm_knobs_json. The
+# boot loop sets it just before each boot; the row emitter reads it.
+_ARM_KNOBS_JSON=""
 
 # The probe marker is the submission ground truth: greppable in the session
 # JSONL user record. It no longer needs to sit inside the first rendered line —
@@ -263,6 +278,85 @@ count_send_retries() {
 _FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS"
 _UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS"
 
+# Field separator for the fate records below: ASCII unit separator, NOT a tab.
+# Tab is an IFS-whitespace character, so `IFS=<tab> read` collapses adjacent
+# delimiters and an unset knob (an empty field) silently shifts every field
+# after it left — which read a default-valued knob as UNRESOLVED. \037 is not
+# IFS whitespace, so empty fields survive, and it cannot occur in a knob value.
+_FS=$'\037'
+
+# pane_knob_fate <knob> — one TSV line: knob, the value put in the CHILD ENV
+# (empty when unset), the value ACTUALLY IN FORCE on the measured path, and the
+# fate that produced it. The single source both consumers read: knob_disclosure
+# renders it for a human, arm_knobs_json records it in the row. Two renderings
+# of one resolution cannot disagree, which is the same reason forwarding is
+# derived from _FORWARDED_PANE_KNOBS rather than restated (#1084, #1109).
+#
+# Three fates, and the third is why "what the caller set" is the wrong thing to
+# record:
+#   forwarded   caller set it, env -i carries it, lib-common reads it
+#   default     caller left it unset; the lib-common default governs
+#   boot-armed  start-bot.sh arms its own value at BOTH injection sites, so
+#               neither of the above reaches the measured path
+# Recording caller intent would label a PANE_READY_TICKS=200 run as a 200 arm
+# when every boot in it ran at _PANE_READY_TICKS_BOOT.
+#
+# In-force values come from the lib-common constants, never a literal copied
+# here: a default that moves in lib-common must move the recorded arm with it,
+# or every historical row silently re-describes a condition that changed.
+# The case decides ONLY what differs per knob — its default constant, or that
+# it has no reachable default at all. The forwarded-vs-default rule itself is
+# written once, below the case, so it cannot come to mean two things.
+pane_knob_fate() {
+    local knob="$1" set_val default_val="" inforce="" src=""
+    eval "set_val=\${$knob:-}"
+    case "$knob" in
+        # start-bot.sh arms its own value at BOTH injection sites, so neither
+        # the caller value nor the lib-common default reaches the measured path.
+        PANE_READY_TICKS)       inforce="$_PANE_READY_TICKS_BOOT"; src="boot-armed" ;;
+        PANE_SEND_SETTLE_S)     default_val="$_PANE_SEND_SETTLE_DEFAULT" ;;
+        PANE_SEND_VERIFY_TICKS) default_val="$_PANE_SEND_VERIFY_TICKS_DEFAULT" ;;
+        # A knob joining _FORWARDED_PANE_KNOBS without a branch here would
+        # otherwise be recorded as if it had no fate — the scrubbed-silently
+        # class one level up. Loud, and pinned by the test suite.
+        *)                      src="UNRESOLVED" ;;
+    esac
+    if [ -z "$src" ]; then
+        if [ -n "$set_val" ]; then
+            inforce="$set_val"; src="forwarded"
+        else
+            inforce="$default_val"; src="default"
+        fi
+    fi
+    printf '%s\n' "$knob$_FS$set_val$_FS$inforce$_FS$src"
+    return 0
+}
+
+# arm_knobs_json — the per-boot ARM RECORD: every forwarded knob as
+# {env, v, src}. Its SHAPE is derived from _FORWARDED_PANE_KNOBS, so a knob
+# added to the list appears in the row automatically; its FATE still needs a
+# branch in pane_knob_fate, and a knob without one lands as UNRESOLVED and
+# fails CI (test_every_forwarded_knob_has_a_declared_fate) rather than
+# recording a null in-force value that reads like a measurement.
+#
+# This is what closes "the row cannot evidence its own IV": without it a
+# settle=0.3 boot and a settle=6.0 boot are byte-identical in shape, arm
+# identity lives only in a filename, and a mislabelled arm is undetectable
+# from the artifact afterwards. No pipefail suppression: a row that cannot
+# record its arm must abort the run, never be written bare.
+arm_knobs_json() {
+    local k
+    for k in $_FORWARDED_PANE_KNOBS; do
+        pane_knob_fate "$k"
+    done | jq -R -s --arg fs "$_FS" '
+        split("\n") | map(select(length > 0)) | map(split($fs))
+        | map({key: .[0], value: {
+              env: (if .[1] == "" then null else .[1] end),
+              v:   (.[2] | if . == "" then null else (try tonumber catch .) end),
+              src: .[3]}})
+        | from_entries'
+}
+
 # knob_disclosure — one line stating the effective fate of every pane knob the
 # child boot could consume, so a run artifact self-documents which knob a
 # ladder actually varied. An override whose fate is knowable only by reading
@@ -270,23 +364,22 @@ _UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS"
 # is the output-visible half of the fix. Printed before the precondition
 # gates, so even an aborted run carries it.
 knob_disclosure() {
-    local k v line="pane knobs:"
-    for k in $_FORWARDED_PANE_KNOBS; do
-        eval "v=\${$k:-}"
-        if [ "$k" = "PANE_READY_TICKS" ]; then
-            # Unset is not the lib-common default here: start-bot arms its
-            # own value at the injection sites either way.
-            if [ -n "$v" ]; then
-                line="$line $k=$v(forwarded-but-INERT:start-bot-arms-own-value)"
-            else
-                line="$line $k=(default:boot-armed)"
-            fi
-        elif [ -n "$v" ]; then
-            line="$line $k=$v(forwarded)"
-        else
-            line="$line $k=(default)"
-        fi
-    done
+    local k v line="pane knobs:" knob envv inforce src
+    while IFS="$_FS" read -r knob envv inforce src; do
+        case "$src" in
+            boot-armed)
+                if [ -n "$envv" ]; then
+                    line="$line $knob=$envv(forwarded-but-INERT:start-bot-arms-$inforce)"
+                else
+                    line="$line $knob=$inforce(default:boot-armed)"
+                fi ;;
+            forwarded) line="$line $knob=$envv(forwarded)" ;;
+            default)   line="$line $knob=$inforce(default)" ;;
+            *)         line="$line $knob=$envv(UNRESOLVED:no-fate-declared)" ;;
+        esac
+    done <<EOF
+$(for k in $_FORWARDED_PANE_KNOBS; do pane_knob_fate "$k"; done)
+EOF
     for k in $_UNFORWARDED_PANE_KNOBS; do
         eval "v=\${$k:-}"
         if [ -n "$v" ]; then
@@ -554,6 +647,17 @@ YAML
         # live fleet on a shared host moves under us, so a per-run figure would
         # attribute one boot's contention to all of them.
         boot_la="$(loadavg_1m)"
+        # The arm is resolved per boot, from the live environment — never from
+        # a caller-supplied label, and never hoisted out of the loop, so a
+        # runner that varies the knob between boots is recorded truthfully
+        # rather than stamped with whatever was set at startup. Set BEFORE the
+        # child runs, so a boot that fails outright still carries its arm, and
+        # before SECONDS=0, so its jq fork (measured 66ms on the reference
+        # host) stays outside the window t_startbot_s reports: SECONDS is
+        # integer-valued, so a constant overhead there rounds ~7% of boots up
+        # by a whole second. The instrument must not add noise to its own
+        # reading.
+        _ARM_KNOBS_JSON="$(arm_knobs_json)"
 
         rc=0
         SECONDS=0
@@ -619,11 +723,16 @@ YAML
         parity="$(awk '{ $1 = ""; sub(/^ /, ""); print }' "$boot_art/procs.txt" 2>/dev/null | sort | uniq -c | awk '{ c = $1; $1 = ""; sub(/^ /, ""); printf "%s:%s ", $0, c }')" || true
         tail -40 "$BOT_DIR/logs/startup.log" > "$boot_art/startup.log.tail" 2>/dev/null || true
 
+        # settle_s is HOISTED from arm_knobs in the same expression rather than
+        # passed alongside it: two independently-supplied copies of one fact is
+        # how a row comes to disagree with itself, and the summarizer refuses a
+        # row whose hoisted IV does not match its arm record.
         jq -nc --arg i "$i" --arg kind "$kind" --arg outcome "$outcome" \
             --arg t_startbot "$t_startbot" --arg t_submit "${t_submit:-}" \
             --arg retry "$retry_fired" --arg parity "${parity:-}" \
             --arg glyph "${glyph_at_inject:-}" --arg t_glyph "${t_glyph:-}" \
             --arg burners "$LOAD_BURNERS" --arg la "${boot_la:-}" \
+            --argjson arm "${_ARM_KNOBS_JSON:-null}" \
             '{i: ($i|tonumber), kind: $kind, outcome: $outcome,
               t_startbot_s: ($t_startbot|tonumber),
               t_submit_s: (if $t_submit == "" then null else ($t_submit|tonumber) end),
@@ -631,7 +740,9 @@ YAML
               glyph_at_inject: (if $glyph == "" then null else ($glyph|tonumber) end),
               t_glyph_s: (if $t_glyph == "" then null else ($t_glyph|tonumber) end),
               load_burners: ($burners|tonumber),
-              loadavg_1m: (if $la == "" then null else ($la|tonumber) end)}' >> "$ROWS"
+              loadavg_1m: (if $la == "" then null else ($la|tonumber) end),
+              arm_knobs: $arm,
+              settle_s: ($arm | if . == null then null else .["PANE_SEND_SETTLE_S"].v end)}' >> "$ROWS"
         printf 'boot %02d (%s): %s%s%s%s\n' "$i" "$kind" "$outcome" \
             "${t_submit:+ submit=${t_submit}s}" \
             "${boot_la:+ la=${boot_la}}" \
@@ -654,9 +765,14 @@ YAML
     done
 
     # ── summary (the product) ─────────────────────────────────────────────────
+    # Exit code PROPAGATED, not flattened to 1: the summarizer distinguishes
+    # "measured nothing" (1) from "refuses to pool a mislabelled sample" (3),
+    # and collapsing them would hide the one that means the artifact is wrong
+    # rather than empty.
     printf '\n'
-    python3 "$LIB_DIR/boot-strand-summary.py" "$ROWS" || exit 1
-    exit 0
+    local summary_rc=0
+    python3 "$LIB_DIR/boot-strand-summary.py" "$ROWS" || summary_rc=$?
+    exit "$summary_rc"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
