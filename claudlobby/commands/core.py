@@ -9,9 +9,6 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ..composer import compose_bot, compose_fleet
-from ..diff import diff_bot, promote_bot
-from ..validator import validate
 from ._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
 
 log = logging.getLogger("claudlobby")
@@ -75,6 +72,8 @@ def cmd_freshbox(args) -> int:
 
 
 def cmd_validate(args) -> int:
+    from ..validator import validate
+
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet, _ = _load_fleet_or_exit(paths)
@@ -96,12 +95,17 @@ def cmd_validate(args) -> int:
 
 
 def cmd_generate(args) -> int:
+    # Heavy imports resolved at dispatch, not module load (#1123): a read-only
+    # verb in this module must not pay the composer stack at CLI startup.
     from ..composer import (
+        compose_bot,
+        compose_fleet,
         compose_fleet_timers,
         compose_host_bot_handles,
         compose_host_mention_allowlist,
         compose_host_timers,
     )
+    from ..validator import validate
 
     paths = _resolve_paths(args)
     _load_env(paths)
@@ -273,6 +277,7 @@ def cmd_list_library(args) -> int:
 
 
 def cmd_diff(args) -> int:
+    from ..diff import diff_bot
     from ..diff import diff_fleet_timers
 
     paths = _resolve_paths(args)
@@ -291,6 +296,8 @@ def cmd_diff(args) -> int:
 
 
 def cmd_promote(args) -> int:
+    from ..diff import promote_bot
+
     paths = _resolve_paths(args)
     fleet, _md = _load_fleet_or_exit(paths)
     sys.stdout.write(promote_bot(args.bot, fleet, paths))

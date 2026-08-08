@@ -3,29 +3,25 @@
 from __future__ import annotations
 
 from ._helpers import _add_migration_args
-from .core import (
-    cmd_brief,
-    cmd_diff,
-    cmd_doctor,
-    cmd_freshbox,
-    cmd_generate,
-    cmd_host_timers,
-    cmd_list_library,
-    cmd_promote,
-    cmd_report_back,
-    cmd_workstreams,
-    cmd_status,
-    cmd_uptime,
-    cmd_validate,
-    cmd_warm_cache,
-)
-from .cron_migrate import cmd_cron_migrate
-from .data_migrate import cmd_data_migrate
-from .env_migrate import cmd_env_migrate
-from .lessons_migrate import cmd_lessons_migrate
-from .memory_migrate import cmd_memory_migrate
-from .move_bot import cmd_move_bot
-from .scaffolding import cmd_new_bot, cmd_new_guardrail, cmd_new_skill
+
+
+def _lazy(module: str, attr: str):
+    """Resolve a command function at dispatch, not registration (#1123).
+
+    Registration-time imports made every CLI startup — including read-only
+    verbs and --help — pay the composer import stack (#904 PR1's "keep
+    imports light" sentence, previously enforced nowhere). The chosen
+    subcommand imports its module only when it actually runs; the pin lives
+    in tests/test_lazy_cli_dispatch.py.
+    """
+
+    def run(args):
+        import importlib
+
+        mod = importlib.import_module(module, package=__package__)
+        return getattr(mod, attr)(args)
+
+    return run
 
 
 def register_subparsers(sub) -> None:
@@ -33,13 +29,13 @@ def register_subparsers(sub) -> None:
 
     pv = sub.add_parser("validate", help="Validate fleet.yaml against library/")
     pv.add_argument("--strict", action="store_true", help="Fail on warnings")
-    pv.set_defaults(func=cmd_validate)
+    pv.set_defaults(func=_lazy(".core", "cmd_validate"))
 
     pdr = sub.add_parser(
         "doctor",
         help="Pre-flight fleet health diagnostic (env, MCP, services, creds)",
     )
-    pdr.set_defaults(func=cmd_doctor)
+    pdr.set_defaults(func=_lazy(".core", "cmd_doctor"))
 
     pfb = sub.add_parser(
         "freshbox",
@@ -55,7 +51,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="Remove stale orphan supervision units (short-form <bot>.plist)",
     )
-    pfb.set_defaults(func=cmd_freshbox)
+    pfb.set_defaults(func=_lazy(".core", "cmd_freshbox"))
 
     pg = sub.add_parser(
         "generate", help="Compose runtime/bots/ from fleet.yaml + library/"
@@ -64,37 +60,37 @@ def register_subparsers(sub) -> None:
     pg.add_argument(
         "--strict", action="store_true", help="Refuse to generate on warnings"
     )
-    pg.set_defaults(func=cmd_generate)
+    pg.set_defaults(func=_lazy(".core", "cmd_generate"))
 
     pht = sub.add_parser(
         "host-timers",
         help="Compose host-global timer units from system.yaml host.jobs",
     )
-    pht.set_defaults(func=cmd_host_timers)
+    pht.set_defaults(func=_lazy(".core", "cmd_host_timers"))
 
     pl = sub.add_parser(
         "list-library",
         help="List available personas, skills, mcp, guardrails, protocols, voices",
     )
-    pl.set_defaults(func=cmd_list_library)
+    pl.set_defaults(func=_lazy(".core", "cmd_list_library"))
 
     pd = sub.add_parser(
         "diff",
         help="Show drift between runtime/bots/<bot>/ and what generate would produce",
     )
     pd.add_argument("--bot", help="Diff only one bot (default: all)")
-    pd.set_defaults(func=cmd_diff)
+    pd.set_defaults(func=_lazy(".core", "cmd_diff"))
 
     pp = sub.add_parser("promote", help="Promote runtime drift back to library/")
     pp.add_argument("bot", help="Bot name")
-    pp.set_defaults(func=cmd_promote)
+    pp.set_defaults(func=_lazy(".core", "cmd_promote"))
 
     ps = sub.add_parser("status", help="Fleet health dashboard")
     ps.add_argument("--bot", help="Show detailed status for one bot")
     ps.add_argument(
         "--json", action="store_true", dest="json", help="JSON output for scripting"
     )
-    ps.set_defaults(func=cmd_status)
+    ps.set_defaults(func=_lazy(".core", "cmd_status"))
 
     prb = sub.add_parser(
         "report-back",
@@ -111,7 +107,7 @@ def register_subparsers(sub) -> None:
     prb.add_argument(
         "--json", action="store_true", help="Output raw JSONL instead of table"
     )
-    prb.set_defaults(func=cmd_report_back)
+    prb.set_defaults(func=_lazy(".core", "cmd_report_back"))
 
     pb = sub.add_parser(
         "brief",
@@ -133,13 +129,13 @@ def register_subparsers(sub) -> None:
         "lines + empty-state provenance + door line, token-capped — the "
         "composed hook's mode, never the full brief",
     )
-    pb.set_defaults(func=cmd_brief)
+    pb.set_defaults(func=_lazy(".core", "cmd_brief"))
 
     pws = sub.add_parser(
         "workstreams",
         help="Read-only view of the fleet workstream registry",
     )
-    pws.set_defaults(func=cmd_workstreams, ws_command="list")
+    pws.set_defaults(func=_lazy(".core", "cmd_workstreams"), ws_command="list")
     ws_sub = pws.add_subparsers(dest="ws_command")
     ws_sub.add_parser("list", help="List all workstreams (default)")
     pws_show = ws_sub.add_parser("show", help="Show one workstream by id")
@@ -156,14 +152,14 @@ def register_subparsers(sub) -> None:
         help="Time window (default: show all three in JSON, 24h for table)",
     )
     pu.add_argument("--json", action="store_true", dest="json", help="JSON output")
-    pu.set_defaults(func=cmd_uptime)
+    pu.set_defaults(func=_lazy(".core", "cmd_uptime"))
 
     pe = sub.add_parser(
         "env-migrate",
         help="Extract secrets from an existing bot setup into tiered .env files (dry-run by default)",
     )
     _add_migration_args(pe)
-    pe.set_defaults(func=cmd_env_migrate)
+    pe.set_defaults(func=_lazy(".env_migrate", "cmd_env_migrate"))
 
     pdm = sub.add_parser(
         "data-migrate",
@@ -178,14 +174,14 @@ def register_subparsers(sub) -> None:
         "--exclude",
         help="Comma-separated subdir names to skip (e.g. 'personal-projects,work-projects' to keep big git checkouts in place)",
     )
-    pdm.set_defaults(func=cmd_data_migrate)
+    pdm.set_defaults(func=_lazy(".data_migrate", "cmd_data_migrate"))
 
     pcm = sub.add_parser(
         "cron-migrate",
         help="Rewrite cron entries from a legacy bot-fleet path layout to claudlobby's (dry-run by default)",
     )
     _add_migration_args(pcm)
-    pcm.set_defaults(func=cmd_cron_migrate)
+    pcm.set_defaults(func=_lazy(".cron_migrate", "cmd_cron_migrate"))
 
     pm = sub.add_parser(
         "memory-migrate",
@@ -199,7 +195,7 @@ def register_subparsers(sub) -> None:
     pm.add_argument(
         "--force", action="store_true", help="Overwrite existing memory files"
     )
-    pm.set_defaults(func=cmd_memory_migrate)
+    pm.set_defaults(func=_lazy(".memory_migrate", "cmd_memory_migrate"))
 
     plm = sub.add_parser(
         "lessons-migrate",
@@ -225,7 +221,7 @@ def register_subparsers(sub) -> None:
         dest="claudron_bin",
         help="Path to the claudron executable (default: `claudron` on PATH)",
     )
-    plm.set_defaults(func=cmd_lessons_migrate)
+    plm.set_defaults(func=_lazy(".lessons_migrate", "cmd_lessons_migrate"))
 
     pn = sub.add_parser(
         "new-bot",
@@ -297,7 +293,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="Run `claudlobby generate --bot <name>` after writing",
     )
-    pn.set_defaults(func=cmd_new_bot)
+    pn.set_defaults(func=_lazy(".scaffolding", "cmd_new_bot"))
 
     pns = sub.add_parser(
         "new-skill",
@@ -317,7 +313,7 @@ def register_subparsers(sub) -> None:
     pns.add_argument(
         "--dry-run", action="store_true", help="Show output but don't write"
     )
-    pns.set_defaults(func=cmd_new_skill)
+    pns.set_defaults(func=_lazy(".scaffolding", "cmd_new_skill"))
 
     png = sub.add_parser(
         "new-guardrail",
@@ -334,7 +330,7 @@ def register_subparsers(sub) -> None:
     png.add_argument(
         "--dry-run", action="store_true", help="Show output but don't write"
     )
-    png.set_defaults(func=cmd_new_guardrail)
+    png.set_defaults(func=_lazy(".scaffolding", "cmd_new_guardrail"))
 
     pw = sub.add_parser(
         "warm-cache",
@@ -345,7 +341,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="Show packages that would be warmed without downloading",
     )
-    pw.set_defaults(func=cmd_warm_cache)
+    pw.set_defaults(func=_lazy(".core", "cmd_warm_cache"))
 
     pmb = sub.add_parser(
         "move-bot",
@@ -374,7 +370,7 @@ def register_subparsers(sub) -> None:
         action="store_true",
         help="Override pre-flight checks (e.g. active tmux session)",
     )
-    pmb.set_defaults(func=cmd_move_bot)
+    pmb.set_defaults(func=_lazy(".move_bot", "cmd_move_bot"))
 
     pev = sub.add_parser(
         "events",
@@ -402,4 +398,4 @@ def register_subparsers(sub) -> None:
 
     from .events import cmd_events  # local import to avoid circular at module top-level
 
-    pev.set_defaults(func=cmd_events)
+    pev.set_defaults(func=_lazy(".core", "cmd_events"))
