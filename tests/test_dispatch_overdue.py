@@ -706,6 +706,69 @@ class TestOpenList:
         assert [t for _, _, t in rows] == ["t-old-a", "t-old-b", "t-young"]
         assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2] == "t-old-a"
 
+    # --- #1124: the identical-dispatched_at tie-break -------------------------
+    #
+    # open_task_id resolves the dispatch an id-less report-back closes, which is
+    # MOST reports (report-back.sh omits --task in the common path, #847). #904
+    # replaced its inline `da < best[0]` scan — strict less-than, so the first
+    # row in ledger order wins a tie — with `rows[0]` off open_dispatches()'s
+    # stable-sorted list. The two agree, and open_dispatches' docstring states
+    # the guarantee, but nothing enforced it: it held by measurement, not by
+    # mechanism, and one refactor away from silently inverting.
+    #
+    # Live harm class, not hypothetical (#878): on 2026-08-08 three ai-platform
+    # reports resolved to task ids dispatched 2026-08-04 — a 4.6-day gap. A
+    # tie-break regression adds one more way for an id-less report to close the
+    # wrong dispatch: the finished task never shows done, the wrong one is
+    # marked closed, and the watchdog alarms on work that actually completed.
+    #
+    # THE IDS ARE CHOSEN SO FILE ORDER AND ALPHABETICAL ORDER DISAGREE. An
+    # implementation that broke ties by sorting on task_id would satisfy a
+    # same-order-only test by coincidence; with t-bbb written first, ledger
+    # order says t-bbb and alphabetical says t-aaa, so the two are separable.
+
+    def _tied(self, tmp_path, first, second):
+        """Two dispatches to one bot with IDENTICAL dispatched_at, in file order."""
+        return self._logs(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id=first),
+                _dispatch("w1", 100, 1000, task_id=second),
+            ],
+            [],
+        )
+
+    def test_tie_resolves_to_the_row_written_first(self, tmp_path):
+        dlog, rlog = self._tied(tmp_path, "t-bbb", "t-aaa")
+        # Ledger order, NOT the alphabetically-smaller id.
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-bbb"
+
+    def test_tie_reversed_file_order_resolves_to_the_other_row(self, tmp_path):
+        """Step 3, and the whole point: same two rows, order swapped, other
+        answer. Without this a constant-by-coincidence implementation passes."""
+        dlog, rlog = self._tied(tmp_path, "t-aaa", "t-bbb")
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-aaa"
+
+    def test_tie_answer_is_order_dependent_not_a_fixed_value(self, tmp_path):
+        """States the property directly: the two orders must disagree. A single
+        assertion no implementation can satisfy by returning a constant."""
+        a, _ = self._tied(tmp_path, "t-bbb", "t-aaa")
+        first = dispatch_overdue.open_task_id("w1", a, str(tmp_path / "r.jsonl"))
+        b, _ = self._tied(tmp_path, "t-aaa", "t-bbb")
+        second = dispatch_overdue.open_task_id("w1", b, str(tmp_path / "r.jsonl"))
+        assert first != second, "tie-break is not order-dependent"
+        assert {first, second} == {"t-aaa", "t-bbb"}
+
+    def test_tie_head_of_open_dispatches_matches_the_resolver(self, tmp_path):
+        """The resolver is the list's head — the invariant #904 created and the
+        reason a tie-break regression would desync them rather than just
+        reorder a display."""
+        for first, second in (("t-bbb", "t-aaa"), ("t-aaa", "t-bbb")):
+            dlog, rlog = self._tied(tmp_path, first, second)
+            rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
+            assert [t for _, _, t in rows] == [first, second]
+            assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2]
+
 
 class TestSupersession:
     """A re-dispatch replaces an earlier task, so the older row is never answered.
