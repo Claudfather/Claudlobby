@@ -433,6 +433,32 @@ run_start_bot() {
         bash "$root/lib/start-bot.sh" "$bot_dir"
 }
 
+# emit_summary <rows> — print the summary and EXIT with the summarizer's status.
+#
+# Extracted from main solely to be TESTABLE (#1141). The refusal it carries is
+# the safety property of the whole arm-identity mechanism: boot-strand-summary.py
+# exits 3 rather than pool a sample it cannot attribute to arms, and that refusal
+# protects nothing unless a caller notices it. Swallowing the status here turns
+# "this sample is not attributable and no rate is printed" into a silent success —
+# the exact failure the refusal exists to prevent, one layer down. Reaching this
+# code through main means passing every dependency gate and a real boot loop, so
+# without a seam the propagation was unreachable by any test, and a mutation of
+# it left the whole suite green.
+#
+# Exit code PROPAGATED, not flattened to 1: the summarizer distinguishes
+# "measured nothing" (1) from "refuses to pool a mislabelled sample" (3), and
+# collapsing them would hide the one that means the artifact is wrong rather
+# than empty.
+#
+# The `|| rc=$?` is load-bearing under `set -e` (:102) and must not be
+# simplified to a bare call plus `exit $?`: a legitimate refusal would then
+# abort through the ERR path instead of returning its own verdict.
+emit_summary() {
+    local rc=0
+    python3 "$LIB_DIR/boot-strand-summary.py" "$1" || rc=$?
+    exit "$rc"
+}
+
 # ── the sampler ───────────────────────────────────────────────────────────────
 
 main() {
@@ -765,14 +791,8 @@ YAML
     done
 
     # ── summary (the product) ─────────────────────────────────────────────────
-    # Exit code PROPAGATED, not flattened to 1: the summarizer distinguishes
-    # "measured nothing" (1) from "refuses to pool a mislabelled sample" (3),
-    # and collapsing them would hide the one that means the artifact is wrong
-    # rather than empty.
     printf '\n'
-    local summary_rc=0
-    python3 "$LIB_DIR/boot-strand-summary.py" "$ROWS" || summary_rc=$?
-    exit "$summary_rc"
+    emit_summary "$ROWS"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
