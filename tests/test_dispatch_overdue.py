@@ -680,15 +680,15 @@ class TestOpenList:
         dlog, rlog = self._logs(
             tmp_path,
             [
-                _dispatch("w1", 100, 1000, task_id="t-first"),
-                _dispatch("w1", 100, 1000, task_id="t-second"),
-                _dispatch("w1", 100, 1000, task_id="t-third"),
+                _dispatch("w1", 100, 1000, task_id="t-ccc"),
+                _dispatch("w1", 100, 1000, task_id="t-bbb"),
+                _dispatch("w1", 100, 1000, task_id="t-aaa"),
             ],
             [],
         )
         rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
-        assert [t for _, _, t in rows] == ["t-first", "t-second", "t-third"]
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-first"
+        assert [t for _, _, t in rows] == ["t-ccc", "t-bbb", "t-aaa"]
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-ccc"
 
     def test_a_tie_at_the_head_still_resolves_to_the_head(self, tmp_path):
         """Tie at the oldest timestamp, with a younger row written first — so
@@ -697,14 +697,14 @@ class TestOpenList:
             tmp_path,
             [
                 _dispatch("w1", 500, 1000, task_id="t-young"),
+                _dispatch("w1", 100, 1000, task_id="t-old-z"),
                 _dispatch("w1", 100, 1000, task_id="t-old-a"),
-                _dispatch("w1", 100, 1000, task_id="t-old-b"),
             ],
             [],
         )
         rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
-        assert [t for _, _, t in rows] == ["t-old-a", "t-old-b", "t-young"]
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2] == "t-old-a"
+        assert [t for _, _, t in rows] == ["t-old-z", "t-old-a", "t-young"]
+        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2] == "t-old-z"
 
     # --- #1124: the identical-dispatched_at tie-break -------------------------
     #
