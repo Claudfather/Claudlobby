@@ -101,6 +101,35 @@ def test_dispatch_task_mints_ledgers_and_envelopes(tmp_path):
     assert f"task:{row['task_id']}" in sent, "envelope must carry the minted id"
 
 
+def test_a_clean_dispatch_writes_nothing_to_stderr(tmp_path):
+    """The happy path must be SILENT, not merely successful.
+
+    This asserts a channel, not a behaviour, and it exists because the suite was
+    structurally blind to that channel: every call in tests/test_dispatch_task.sh
+    redirects `2>/dev/null`, and the assertions here read stderr only as a failure
+    MESSAGE (`assert r.returncode == 0, r.stderr`), which is invisible while the
+    run passes. A defect that is noisy but exits 0 therefore had nowhere to fail.
+
+    One did. `--supersedes` landed with no default init beside its five siblings,
+    so under `set -u` the ledger printf's `$(json_escape "$DISPATCH_SUPERSEDES")`
+    faulted on EVERY dispatch that omitted the flag. It stayed invisible because
+    the fault is confined to the command substitution's subshell: that subshell
+    dies, expands to empty, and the parent printf still succeeds — the row is
+    correct, the exit code is 0, and only stderr ever knew. Exactly the state a
+    return-code assertion cannot distinguish.
+
+    Scoped honestly: this closes the channel for ONE path. The shell suite's
+    blanket `2>/dev/null` is untouched and still hides the same class elsewhere.
+    """
+    libdir, env = _fake_lib(tmp_path, "#!/bin/bash\nexit 0\n")
+    r = _bash(f'"{libdir}/dispatch-task.sh" w1 "fix the widget"', env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == "", (
+        f"a successful dispatch wrote to stderr: {r.stderr!r} — an exit-0 run that "
+        "complains is a defect the return code cannot report"
+    )
+
+
 def test_missing_flag_value_is_a_loud_error(tmp_path):
     # ${2:?} guards exit 0 through the EXIT trap on bash 3.2 — the explicit
     # _flag_val guard must fail loudly instead (review 6b).

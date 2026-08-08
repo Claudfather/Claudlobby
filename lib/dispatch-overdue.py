@@ -163,6 +163,27 @@ def _terminal_reported_ids(reports: list[dict]) -> set[tuple[str, str]]:
     }
 
 
+def _superseded_ids(dispatches: list[dict]) -> set[tuple[str, str]]:
+    """(bot, task_id) pairs a LATER dispatch explicitly declared it replaces.
+
+    The dispatcher records `supersedes` at the moment of re-dispatch, because that is
+    the only moment the intent exists. Two dispatches to one bot are indistinguishable
+    in this ledger — the second may replace the first or queue behind it — so a
+    superseded row can only be recognised if the caller said so. Inferring it from
+    timing was measured and rejected: 14 of 189 closed rows had a later row close
+    first and were still answered afterwards, 3 of them genuine work answered 6-7h
+    late (2026-08-05). Retiring on that signal would drop tasks someone still owed.
+
+    Scoped by bot for the same reason `_terminal_reported_ids` is: one bot's dispatch
+    must not retire another's row, however the id was typed (#518 review).
+    """
+    return {
+        (str(d.get("bot", "")).lower(), str(d["supersedes"]))
+        for d in dispatches
+        if d.get("supersedes")
+    }
+
+
 def _spawn_epoch(bots_dir: str, bot: str) -> int | None:
     """Mtime of <bots_dir>/<bot>/data/.spawn, or None when unreadable.
 
@@ -200,6 +221,7 @@ def _classify_all(
     # watchdog on the real owner's still-open dispatch (#518 review).
     report_index: dict[str, list[int]] = {}
     reported_ids = _terminal_reported_ids(reports)
+    superseded_ids = _superseded_ids(dispatches)
     # Latest progress report per bot. A progress report closes NOTHING — it is not
     # terminal and never will be — but it is proof the worker is alive, which is the
     # question the watchdog is actually asking. See _progress_grace below.
@@ -237,6 +259,12 @@ def _classify_all(
         tid = d.get("task_id")
         if tid:
             if (bot_key, str(tid)) in reported_ids:
+                continue
+            # Retired by declaration: a later dispatch to this bot said it replaces
+            # this row, so nobody will ever report against it. Checked only for id'd
+            # rows — an id-less row already closes on any later terminal report, so it
+            # has nothing to be stranded by.
+            if (bot_key, str(tid)) in superseded_ids:
                 continue
         elif any(e >= da for e in report_index.get(bot_key, [])):
             continue

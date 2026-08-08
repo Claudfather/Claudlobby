@@ -671,3 +671,121 @@ class TestOpenList:
         )
         assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == ""
+class TestSupersession:
+    """A re-dispatch replaces an earlier task, so the older row is never answered.
+
+    It then ages out and pages the manager about work that already shipped — six such
+    rows in one night, five of them one thread re-dispatched five times. Asking workers
+    to echo the right id was broadcast three times and did not hold, which is #835's
+    own argument arriving: correct by default beats correct by discipline.
+
+    THE BOUNDARY IS THE WHOLE DESIGN. Retiring too eagerly converts a false-page bug
+    into a silently-dropped-task bug, which is strictly worse — nobody chases a task
+    that looks finished. So retirement happens ONLY on an explicit declaration from the
+    dispatcher, never on a pattern inferred afterwards. Inference was measured against
+    the real ledger and rejected: of 189 closed rows, 14 had a later row close first and
+    were still answered after, 3 unambiguously genuine (work answered 6-7h late).
+    """
+
+    NOW = 5000
+
+    def _overdue(self, tmp_path, dispatches):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, [])
+        return dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW)
+
+    def test_an_explicitly_superseded_row_is_retired(self, tmp_path):
+        """The stranded row goes quiet; the replacement stays accountable."""
+        out = self._overdue(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-old"),
+                _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+            ],
+        )
+        ids = [row[3] for row in out.get("w1", [])]
+        assert "t-100-old" not in ids, "the superseded row still pages"
+        assert "t-200-new" in ids, (
+            "the REPLACEMENT was retired too — a re-dispatch must still be answered, "
+            "or supersession becomes a way to silence live work"
+        )
+
+    def test_a_queued_fifo_dispatch_is_NOT_retired(self, tmp_path):
+        """The property that keeps this from becoming a dropped-task generator.
+
+        Same shape as above minus the declaration: two dispatches to one bot, nothing
+        saying the second replaces the first. Both are owed, both must stay visible.
+        This is what the oldest-first resolver exists to serve, and it is exactly the
+        case timing-based inference got wrong.
+        """
+        out = self._overdue(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-a"),
+                _dispatch("w1", 200, 1100, task_id="t-200-b"),
+            ],
+        )
+        ids = sorted(row[3] for row in out.get("w1", []))
+        assert ids == ["t-100-a", "t-200-b"], (
+            f"a queued dispatch was retired without any declaration: {ids}"
+        )
+
+    def test_omitting_the_field_reproduces_prior_behaviour_exactly(self, tmp_path):
+        """The inert-failure property: a forgotten flag costs a false page, never a
+        dropped task. Rows with no `supersedes` key at all must behave as before."""
+        rows = [_dispatch("w1", 100, 1000, task_id="t-100-a")]
+        assert "supersedes" not in rows[0]
+        assert [r[3] for r in self._overdue(tmp_path, rows).get("w1", [])] == ["t-100-a"]
+
+    def test_supersedes_is_scoped_by_bot(self, tmp_path):
+        """One bot's dispatch must not retire another's row, however the id was typed —
+        the same scoping `_terminal_reported_ids` carries for the same reason (#518)."""
+        out = self._overdue(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-old"),
+                _dispatch("w2", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+            ],
+        )
+        assert [r[3] for r in out.get("w1", [])] == ["t-100-old"], (
+            "w2's declaration silenced w1's dispatch"
+        )
+
+    def test_an_empty_supersedes_retires_nothing(self, tmp_path):
+        """The dispatcher always emits the key, so the common row carries
+        `supersedes: ""`. Empty must be falsy, not a wildcard.
+
+        HONEST LABEL: this documents an invariant it cannot currently violate. An empty
+        value can only match a row whose `task_id` is also empty, and such a row takes
+        the id-LESS branch above, so the pathological case is unreachable. Removing the
+        falsy guard leaves all 48 tests green — the mutation run proved that. The guard
+        stays as defence against a future caller that emits a placeholder rather than an
+        empty string; the test is a statement of intent, not a detector.
+        """
+        out = self._overdue(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-a", supersedes=""),
+                _dispatch("w1", 200, 1100, task_id="t-200-b", supersedes=""),
+            ],
+        )
+        assert sorted(r[3] for r in out.get("w1", [])) == ["t-100-a", "t-200-b"]
+
+    def test_a_chain_of_re_dispatches_retires_every_link_but_the_last(self, tmp_path):
+        """The observed shape: one thread re-dispatched five times leaves four strays.
+
+        Each link names its immediate predecessor, so the chain collapses to the row
+        that is actually live.
+        """
+        out = self._overdue(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 200, task_id="t-1"),
+                _dispatch("w1", 300, 400, task_id="t-2", supersedes="t-1"),
+                _dispatch("w1", 500, 600, task_id="t-3", supersedes="t-2"),
+                _dispatch("w1", 700, 800, task_id="t-4", supersedes="t-3"),
+                _dispatch("w1", 900, 1000, task_id="t-5", supersedes="t-4"),
+            ],
+        )
+        assert [r[3] for r in out.get("w1", [])] == ["t-5"]

@@ -8,6 +8,9 @@
 #   --priority LEVEL   Priority level (adds priority:<LEVEL> to envelope)
 #   --ref URL          Reference URL (adds ref:<URL> to envelope)
 #   --workstream ID    Workstream this task advances (envelope + ledger)
+#   --supersedes ID    This dispatch REPLACES an earlier one; the named task id is
+#                      retired rather than left to age out and page. Opt-in, and
+#                      inert when omitted — see the ledger-write comment below.
 #   --botcommand       Force the [BOTCOMMAND] envelope with no other fields
 #
 # Envelope sends MINT a task id (mint_task_id, lib-common), record it in the
@@ -17,7 +20,7 @@
 # false-positive overdue, since the worker cannot echo what it never saw.
 #
 # Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by,
-# claudron_hits} to state/dispatch-log.jsonl (self-rotated via
+# claudron_hits,supersedes} to state/dispatch-log.jsonl (self-rotated via
 # rotate_jsonl_by_ts) so the fleet-pulse watchdog can flag `overdue_dispatch`
 # if no terminal [BOTREPORT] (completed|failed|blocked) arrives by expected_by.
 # Manager identity is this bot's $BOT_ID; the deadline defaults to
@@ -45,6 +48,7 @@ DISPATCH_REPO=""
 DISPATCH_PRIORITY=""
 DISPATCH_REF=""
 DISPATCH_WORKSTREAM=""
+DISPATCH_SUPERSEDES=""
 FORCE_ENVELOPE=""
 
 # _flag_val <flag> <value?> — explicit missing-value guard (NOT ${2:?}: see
@@ -64,6 +68,7 @@ while [ $# -gt 0 ]; do
         --priority)     DISPATCH_PRIORITY=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --ref)          DISPATCH_REF=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --workstream)   DISPATCH_WORKSTREAM=$(_flag_val "$1" "${2:-}"); shift 2 ;;
+        --supersedes)   DISPATCH_SUPERSEDES=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --botcommand)   FORCE_ENVELOPE=1; shift ;;
         -*)             echo "dispatch-task: unknown flag '$1'" >&2; exit 1 ;;
         *)              break ;;
@@ -201,12 +206,30 @@ ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 safe_task=$(json_escape "$TASK")
 
 _append_ledger() {
-    # Schema-uniform rows: task_id/workstream/claudron_hits always emitted
+    # `supersedes` is the one field that records INTENT rather than what happened.
+    # A re-dispatch replaces an earlier task; the older row will never be separately
+    # answered, so it ages out and pages the manager about work that shipped. Nothing
+    # downstream can infer that from the ledger, because the ledger records what was
+    # SENT, never what was MEANT — two dispatches to one bot look identical whether
+    # the second replaces the first or queues behind it. Only the caller knows, and
+    # only at this moment.
+    #
+    # OPT-IN, AND THAT IS THE SAFETY PROPERTY. Omitting the flag reproduces today's
+    # behaviour exactly: the row retires on nothing and the watchdog eventually pages.
+    # So a forgotten flag costs a false page — the status quo — and can never retire a
+    # dispatch someone still owes. The failure mode of forgetting is inert, which is
+    # what makes this safe to default off. Inferring supersession from timing instead
+    # was measured and rejected: over 189 closed rows, 14 were "superseded" by a later
+    # closure and still answered afterwards, 3 of them unambiguously genuine work
+    # answered 6-7h late. Retiring those would have turned a false-page bug into a
+    # silently-dropped-task bug.
+    #
+    # Schema-uniform rows: task_id/workstream/claudron_hits/supersedes always emitted
     # (empty = absent, matching the report ledger's always-emit convention;
     # every consumer treats "" as falsy). claudron_hits is digits-or-empty by
     # construction (the preflight parser prints a count), so no escaping.
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s"}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" "$CLAUDRON_HITS" >> "$LEDGER"
+    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s"}\n' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" >> "$LEDGER"
     rotate_jsonl_by_ts "$LEDGER"
 }
 with_lock "$LEDGER.lock" _append_ledger
