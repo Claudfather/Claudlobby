@@ -1106,21 +1106,50 @@ def _validate_cross_fleet_collisions(
         if fleet_dir.name == current_fleet:
             continue
         manifest = fleet_dir / "fleet.yaml"
-        if not manifest.is_file():
-            continue  # not a fleet — a container dir, or a bare husk
-        declared = _declared_bots(manifest)
-        if declared is None:
-            report.warnings.append(
-                f"could not read declared bots from {manifest} — that fleet is "
-                f"NOT covered by the cross-fleet bot-name uniqueness check"
-            )
+
+        if manifest.is_file():
+            declared = _declared_bots(manifest)
+            if declared is None:
+                report.warnings.append(
+                    f"could not read declared bots from {manifest} — that fleet is "
+                    f"NOT covered by the cross-fleet bot-name uniqueness check"
+                )
+                continue
+            # A manifest is authoritative for its own fleet, which is what makes
+            # a leftover runtime/bots/<name>/ it no longer declares correctly
+            # invisible here: residue is not a claim on the name.
+            _record(fleet_dir.name, declared)
             continue
-        _record(fleet_dir.name, declared)
+
+        # No manifest at all — a container dir, or a husk. Not a fleet, so there
+        # is nothing to declare; but generated bot dirs under it are REAL bots
+        # whose tmux sessions still collide, and no manifest exists to say
+        # whether they are live or abandoned. Counting them keeps the coverage
+        # the disk scan had; not counting them would silently drop every bot of
+        # a fleet whose fleet.yaml was moved or lost.
+        on_disk = fleet_dir / "runtime" / "bots"
+        if not on_disk.is_dir():
+            continue
+        orphaned = {
+            d.name
+            for d in sorted(on_disk.iterdir())
+            if d.is_dir() and (d / "bot.conf").is_file()
+        }
+        if orphaned:
+            _record(f"{fleet_dir.name} (no fleet.yaml — generated bots only)", orphaned)
 
     for bot, fleets in sorted(seen.items()):
         if len(fleets) > 1:
             where = ", ".join(f"'{f}'" for f in sorted(fleets))
-            report.errors.append(
+            # WARNING, not error, and the reason is specific rather than timid:
+            # `move-bot` REQUIRES the bot to be declared in both the source and
+            # target fleet.yaml at once (move_bot.py refuses otherwise — "add the
+            # stanza first, then retry" — and never writes either manifest), so a
+            # duplicate is a precondition of a supported operation, not only an
+            # accident. A hard error here aborts every move. Severity is tracked
+            # on #1125; `validate --strict` already turns this into a failure for
+            # CI, which is where the loud gate belongs today.
+            report.warnings.append(
                 f"bot name '{bot}' is declared by {len(fleets)} fleets on this "
                 f"host ({where}) — names must be unique host-wide: tmux sessions "
                 f"collide, and the dispatch/report join (#526) keys on bare bot "

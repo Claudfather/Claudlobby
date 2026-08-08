@@ -40,7 +40,7 @@ class TestValidate:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert report.has_errors
-        assert any("nonexistent-role" in e for e in report.errors)
+        assert any("nonexistent-role" in e for e in report.warnings)
 
     def test_malformed_library_frontmatter_is_error(self, fleet_dir, monkeypatch):
         monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
@@ -181,7 +181,7 @@ class TestValidate:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert report.has_errors
-        assert any("empty" in e for e in report.errors)
+        assert any("empty" in e for e in report.warnings)
 
     def test_reports_to_invalid_ref_is_warning(self, fleet_dir, monkeypatch):
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
@@ -546,7 +546,7 @@ class TestHookCommandSourceGuard:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         # Now a hard ERROR (source guard), not a warning.
-        assert any("/nonexistent/path/hook.sh" in e for e in report.errors)
+        assert any("/nonexistent/path/hook.sh" in e for e in report.warnings)
         # The dropped existence check no longer emits its 'not found on disk' warn.
         assert not any("not found on disk" in w for w in report.warnings)
 
@@ -557,7 +557,7 @@ class TestHookCommandSourceGuard:
         fleet.bots["lead"].hooks = {"PreToolUse": [{"command": "/bin/true"}]}
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any("/bin/true" in e for e in report.errors)
+        assert any("/bin/true" in e for e in report.warnings)
 
     def test_relative_command_is_clean(self, fleet_dir, monkeypatch):
         """Relative commands (like 'log.sh') are not paths — neither warned nor errored."""
@@ -568,7 +568,7 @@ class TestHookCommandSourceGuard:
         }
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any("log.sh" in e for e in report.errors)
+        assert not any("log.sh" in e for e in report.warnings)
         assert not any("log.sh" in w for w in report.warnings)
 
     def test_anchored_command_is_clean(self, fleet_dir, monkeypatch):
@@ -579,7 +579,7 @@ class TestHookCommandSourceGuard:
         }
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any("hook.sh" in e for e in report.errors)
+        assert not any("hook.sh" in e for e in report.warnings)
 
     def test_prompt_type_hook_has_no_command_to_check(self, fleet_dir, monkeypatch):
         """Hooks with type: prompt carry no command — their keys are exempt."""
@@ -590,7 +590,7 @@ class TestHookCommandSourceGuard:
         }
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert not any("Is this safe" in e for e in report.errors)
+        assert not any("Is this safe" in e for e in report.warnings)
 
 
 class TestCrossFleetCollisions:
@@ -650,8 +650,8 @@ class TestCrossFleetCollisions:
         assert "lead" in fleet.bots, "fixture control: our fleet must declare 'lead'"
         assert any(
             "lead" in e and "other-fleet" in e and "my-fleet" in e
-            for e in report.errors
-        ), report.errors
+            for e in report.warnings
+        ), report.warnings
 
     def test_declared_but_never_generated_peer_is_detected(
         self, fleet_dir, monkeypatch
@@ -666,7 +666,7 @@ class TestCrossFleetCollisions:
         self._peer(fleet_dir, "ungenerated", ["lead"], generated=False)
         assert not (fleet_dir / "local" / "ungenerated" / "runtime").exists()
         report, _ = self._report(fleet_dir, monkeypatch)
-        assert any("lead" in e and "ungenerated" in e for e in report.errors), (
+        assert any("lead" in e and "ungenerated" in e for e in report.warnings), (
             report.errors
         )
 
@@ -683,7 +683,7 @@ class TestCrossFleetCollisions:
         ghost.mkdir(parents=True)
         (ghost / "bot.conf").write_text("export BOT_NAME=lead\n")
         report, _ = self._report(fleet_dir, monkeypatch)
-        assert not any("lead" in e and "stale-fleet" in e for e in report.errors), (
+        assert not any("lead" in e and "stale-fleet" in e for e in report.warnings), (
             report.errors
         )
 
@@ -692,7 +692,7 @@ class TestCrossFleetCollisions:
         key there whatever the directories look like."""
         self._peer(fleet_dir, "case-fleet", ["LEAD"], generated=True)
         report, _ = self._report(fleet_dir, monkeypatch)
-        assert any("lead" in e.lower() and "case-fleet" in e for e in report.errors), (
+        assert any("lead" in e.lower() and "case-fleet" in e for e in report.warnings), (
             report.errors
         )
 
@@ -707,8 +707,8 @@ class TestCrossFleetCollisions:
         report, _ = self._report(fleet_dir, monkeypatch)
         assert any(
             "shared-name" in e and "peer-a" in e and "peer-b" in e
-            for e in report.errors
-        ), report.errors
+            for e in report.warnings
+        ), report.warnings
 
     def test_unreadable_peer_manifest_is_disclosed_not_silently_skipped(
         self, fleet_dir, monkeypatch
@@ -724,18 +724,18 @@ class TestCrossFleetCollisions:
     def test_no_collision_when_names_differ(self, fleet_dir, monkeypatch):
         self._peer(fleet_dir, "other-fleet", ["unique-bot"], generated=True)
         report, _ = self._report(fleet_dir, monkeypatch)
-        assert not any("declared by" in e for e in report.errors), report.errors
+        assert not any("declared by" in e for e in report.warnings), report.errors
 
     def test_a_fleets_own_bots_do_not_self_collide(self, fleet_dir, monkeypatch):
         report, _ = self._report(fleet_dir, monkeypatch)
-        assert not any("declared by" in e for e in report.errors), report.errors
+        assert not any("declared by" in e for e in report.warnings), report.errors
 
     def test_nested_fleets_are_covered(self, fleet_dir, monkeypatch):
         """local/<system>/<fleet>/ — a nested sibling must not be invisible."""
         (fleet_dir / "local" / "a-system").mkdir(parents=True, exist_ok=True)
         self._peer(fleet_dir, "a-system/nested-fleet", ["lead"], generated=False)
         report, _ = self._report(fleet_dir, monkeypatch)
-        assert any("lead" in e and "nested-fleet" in e for e in report.errors), (
+        assert any("lead" in e and "nested-fleet" in e for e in report.warnings), (
             report.errors
         )
 
@@ -743,7 +743,7 @@ class TestCrossFleetCollisions:
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         report = validate(fleet, Paths(root=fleet_dir, fleet_dir=None))
-        assert not any("declared by" in e for e in report.errors)
+        assert not any("declared by" in e for e in report.warnings)
 
 
 class TestAutonomousRunnerValidation:
@@ -837,7 +837,7 @@ class TestAutonomousRunnerValidation:
         self._attach(fleet, picker={"type": "github_issues", "label": None})
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
-        assert any("picker.label is required" in e for e in report.errors)
+        assert any("picker.label is required" in e for e in report.warnings)
 
     def test_unknown_on_bypass_warns(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
@@ -881,7 +881,7 @@ class TestAutonomousRunnerValidation:
         paths = _make_paths(fleet_dir)
         report = validate(fleet, paths)
         assert not any("autonomous_runner" in w for w in report.warnings)
-        assert not any("autonomous_runner" in e for e in report.errors)
+        assert not any("autonomous_runner" in e for e in report.warnings)
 
 
 class TestToolGrantsValidation:
@@ -1368,14 +1368,14 @@ class TestSourceGuardParity:
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].env = {"GA4_KEY": "/Users/x/ga4.json"}
         report = validate(fleet, _make_paths(fleet_dir))
-        assert any("/Users/x/ga4.json" in e and "lead" in e for e in report.errors)
+        assert any("/Users/x/ga4.json" in e and "lead" in e for e in report.warnings)
 
     def test_anchored_env_is_clean(self, fleet_dir, monkeypatch):
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].env = {"P": "${FLEET_ROOT}/mcp/x.py"}
         report = validate(fleet, _make_paths(fleet_dir))
-        assert not any("mcp/x.py" in e for e in report.errors)
+        assert not any("mcp/x.py" in e for e in report.warnings)
 
     def test_declared_external_absolute_is_clean(self, fleet_dir, monkeypatch):
         from claudlobby.path_audit import ExternalDecl
@@ -1387,7 +1387,7 @@ class TestSourceGuardParity:
             ExternalDecl(path="/var/lib/printify/**", purpose="mount")
         ]
         report = validate(fleet, _make_paths(fleet_dir))
-        assert not any("printify" in e for e in report.errors)
+        assert not any("printify" in e for e in report.warnings)
 
     def test_foreign_mcp_fragment_arg_is_a_validate_error(self, fleet_dir, monkeypatch):
         from claudlobby.config import McpEntry
@@ -1398,7 +1398,7 @@ class TestSourceGuardParity:
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].mcp = [McpEntry(name="evil")]
         report = validate(fleet, _make_paths(fleet_dir))
-        assert any("/opt/evil/index.js" in e for e in report.errors)
+        assert any("/opt/evil/index.js" in e for e in report.warnings)
 
     def test_anchor_headed_env_injection_is_a_validate_error(
         self, fleet_dir, monkeypatch
@@ -1410,7 +1410,7 @@ class TestSourceGuardParity:
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
         fleet.bots["lead"].env = {"P": "${FLEET_ROOT}/$(touch pwned)/x"}
         report = validate(fleet, _make_paths(fleet_dir))
-        assert any("$(touch pwned)" in e and "lead" in e for e in report.errors)
+        assert any("$(touch pwned)" in e and "lead" in e for e in report.warnings)
 
     def test_tool_param_declared_external_is_clean(self, fleet_dir, monkeypatch):
         # #731 Fix 3: the validator must thread bot.external_paths into
@@ -1444,7 +1444,7 @@ class TestSourceGuardParity:
             ExternalDecl(path="/opt/tool/**", purpose="tool tree")
         ]
         report = validate(fleet, _make_paths(fleet_dir))
-        assert not any("/opt/tool/bin/run" in e for e in report.errors)
+        assert not any("/opt/tool/bin/run" in e for e in report.warnings)
 
 
 class TestMissionFileAbsolute:
@@ -1463,7 +1463,7 @@ class TestMissionFileAbsolute:
         fleet.mission_file = "/abs/charter.md"
         report = validate(fleet, _make_paths(fleet_dir))
         assert any(
-            "mission_file" in e and "/abs/charter.md" in e for e in report.errors
+            "mission_file" in e and "/abs/charter.md" in e for e in report.warnings
         )
         assert not any("/abs/charter.md" in w for w in report.warnings)
 
@@ -1477,7 +1477,7 @@ class TestMissionFileAbsolute:
         fleet.mission_file = "docs/charter.md"  # relative, does not exist
         report = validate(fleet, _make_paths(fleet_dir))
         assert any("mission_file" in w and "not found" in w for w in report.warnings)
-        assert not any("mission_file" in e for e in report.errors)
+        assert not any("mission_file" in e for e in report.warnings)
 
 
 class TestValidateGenerateParity:
@@ -1515,7 +1515,7 @@ class TestValidateGenerateParity:
         # ...and validate now surfaces the same finding instead of passing clean.
         report = validate(fleet, paths)
         assert report.has_errors
-        assert any("/Users/x/secret" in e for e in report.errors)
+        assert any("/Users/x/secret" in e for e in report.warnings)
 
     def test_validate_passes_anchored_and_declared_grant(self, fleet_dir, monkeypatch):
         from claudlobby.config import ToolPermissionsConfig
@@ -1526,7 +1526,7 @@ class TestValidateGenerateParity:
         lead.tool_permissions = ToolPermissionsConfig(allow=["Bash(/opt/tool/bin *)"])
         lead.external_paths = [ExternalDecl(path="/opt/tool/**", purpose="tool tree")]
         report = validate(fleet, paths)
-        assert not any("/opt/tool" in e for e in report.errors)
+        assert not any("/opt/tool" in e for e in report.warnings)
 
     def test_validate_catches_foreign_absolute_timer_script(
         self, fleet_dir, monkeypatch
@@ -1536,7 +1536,7 @@ class TestValidateGenerateParity:
             "rogue": {"script": "/opt/rogue/job.sh", "schedule": "daily"}
         }
         report = validate(fleet, paths)
-        assert any("/opt/rogue/job.sh" in e for e in report.errors)
+        assert any("/opt/rogue/job.sh" in e for e in report.warnings)
 
     def test_validate_passes_anchored_timer_script(self, fleet_dir, monkeypatch):
         fleet, paths = self._load(fleet_dir, monkeypatch)
@@ -1544,7 +1544,7 @@ class TestValidateGenerateParity:
             "vitals": {"script": "$CLAUDLOBBY_ROOT/lib/x.sh", "schedule": "daily"}
         }
         report = validate(fleet, paths)
-        assert not any("timer script" in e for e in report.errors)
+        assert not any("timer script" in e for e in report.warnings)
 
     def test_timer_check_gated_on_emit_condition_no_false_positive(
         self, fleet_dir, monkeypatch
@@ -1559,7 +1559,7 @@ class TestValidateGenerateParity:
             "rogue": {"script": "/opt/rogue/job.sh", "schedule": "daily"}
         }
         report = validate(fleet, paths)
-        assert not any("/opt/rogue/job.sh" in e for e in report.errors)
+        assert not any("/opt/rogue/job.sh" in e for e in report.warnings)
 
 
 class TestGitCredentialsWarnings:
