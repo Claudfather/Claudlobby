@@ -811,3 +811,69 @@ class TestMoverDifference:
     def test_identical_arms_straddle_zero(self):
         _, lo, hi = summary.mover_difference(5, 20, 5, 20)
         assert lo < 0 < hi
+
+
+class TestSummaryExitPropagation:
+    """The bash tail must PROPAGATE the summarizer's exit status (#1141).
+
+    `boot-strand-summary.py` refuses a sample it cannot attribute to arms with
+    exit 3 rather than pooling it, and that refusal is the safety property of
+    the whole arm-identity mechanism (#1139). It protects nothing unless a
+    caller notices it: a swallowed exit 3 turns "not attributable, no rate
+    printed" into a silent success — the precise failure the refusal exists to
+    prevent, reintroduced one layer down.
+
+    Reaching the tail through `main` requires every dependency gate plus a real
+    boot loop, so before `emit_summary` was extracted this propagation was
+    unreachable by any test and a mutation of it left the whole suite green.
+    """
+
+    @staticmethod
+    def _run(tmp_path: Path, exit_code: int) -> subprocess.CompletedProcess:
+        """Drive emit_summary against a stub summarizer that exits `exit_code`.
+
+        LIB_DIR is overridden AFTER sourcing so the real python3 still runs the
+        stub — the exit path under test is the shell's, not python's.
+        """
+        (tmp_path / "boot-strand-summary.py").write_text(
+            f"import sys\nprint('stub summary')\nsys.exit({exit_code})\n",
+            encoding="utf-8",
+        )
+        rows = tmp_path / "rows.jsonl"
+        rows.write_text("", encoding="utf-8")
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'. "{SAMPLER}"; LIB_DIR="{tmp_path}"; emit_summary "$1"',
+                "_",
+                str(rows),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def test_refusal_exit_3_reaches_the_caller(self, tmp_path):
+        """The load-bearing case: an unattributable sample must not read clean."""
+        r = self._run(tmp_path, 3)
+        assert r.returncode == 3, (
+            f"summarizer refused with 3 but the tail exited {r.returncode} — "
+            "a swallowed refusal is a silent all-clear"
+        )
+
+    def test_success_exit_0_reaches_the_caller(self, tmp_path):
+        # Positive control: without this, a tail hardcoded to any non-zero
+        # would pass the refusal test while failing every real run.
+        assert self._run(tmp_path, 0).returncode == 0
+
+    def test_measured_nothing_exit_1_is_not_collapsed_into_the_refusal(self, tmp_path):
+        # 1 ("measured nothing") and 3 ("refuses to pool") are different facts:
+        # one means the artifact is empty, the other that it is wrong. A tail
+        # that flattened either to a single non-zero would pass the 3 test.
+        assert self._run(tmp_path, 1).returncode == 1
+
+    def test_summary_stdout_still_reaches_the_caller(self, tmp_path):
+        # Propagating the status while swallowing the summary would leave the
+        # run statusful but productless — the summary IS the product.
+        assert "stub summary" in self._run(tmp_path, 0).stdout
