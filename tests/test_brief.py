@@ -23,8 +23,11 @@ from pathlib import Path
 import pytest
 
 from claudlobby.brief import (
+    BOOT_CHAR_BUDGET,
     SCHEMA_VERSION,
+    boot_provenance,
     build_brief,
+    format_boot_brief,
     cursor_path,
     format_brief,
     load_dispatch_doors,
@@ -778,7 +781,13 @@ def test_ack_refuses_when_the_report_section_was_not_served(paths: Paths, caplog
     assert "alex" in load_fleet(fleet_dir / "fleet.yaml")[0].bots
 
     args = argparse.Namespace(
-        fleet="f1", root=str(paths.root), seed=False, bot="alex", json=False, ack=True
+        fleet="f1",
+        root=str(paths.root),
+        seed=False,
+        bot="alex",
+        json=False,
+        ack=True,
+        boot=False,
     )
     with caplog.at_level(logging.ERROR, logger="claudlobby"):
         assert cmd_brief(args) == 1
@@ -875,3 +884,188 @@ def test_every_degradation_carries_the_count_key(paths: Paths):
     _write_jsonl(_rlog(paths), [])
     for d in build_brief(_fleet(), paths, "alex", NOW)["degraded"]:
         assert "count" in d, d
+# --- #1102 R3 / M1: the boot payload (locked fork R3-F1, O-B+r) ---------------
+
+
+class TestBootProvenance:
+    """boot_provenance() — the door-side facts rule 2 renders. Interim for
+    #1122: computed from the same reads the door already performs; the helper
+    is deleted when the envelope carries these facts."""
+
+    def test_ledger_counts_ever_and_24h(self, paths: Paths):
+        rows = [
+            _dispatch("alex", NOW - 90_000, NOW - 89_000, task_id="t-old"),
+            _dispatch("alex", NOW - 100, NOW + 500, task_id="t-new"),
+        ]
+        _write_jsonl(_dlog(paths), rows)
+        prov = boot_provenance(paths, NOW)
+        assert prov["dispatch_ledger"]["state"] == "ok"
+        assert prov["dispatch_ledger"]["rows_ever"] == 2
+        assert prov["dispatch_ledger"]["rows_24h"] == 1
+
+    def test_ledger_absent_is_state_not_zero(self, paths: Paths):
+        prov = boot_provenance(paths, NOW)
+        assert prov["dispatch_ledger"]["state"] == "absent"
+        assert "rows_ever" not in prov["dispatch_ledger"]
+
+    def test_registry_absent_vs_present(self, paths: Paths):
+        from claudlobby.workstreams import registry_path
+
+        assert boot_provenance(paths, NOW)["registry"]["present"] is False
+        rp = registry_path(paths)
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_text('{"workstreams": []}')
+        prov = boot_provenance(paths, NOW)
+        assert prov["registry"]["present"] is True
+        assert prov["registry"]["entries"] == 0
+
+    def test_corrupt_registry_is_unreadable_never_zero_entries(self, paths: Paths):
+        # load_workstreams flattens corrupt to {} — a false-quiet. The raw
+        # read here must keep corrupt distinguishable (#1122 owns the
+        # envelope-level fix).
+        from claudlobby.workstreams import registry_path
+
+        rp = registry_path(paths)
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_text("{not json")
+        prov = boot_provenance(paths, NOW)
+        assert prov["registry"]["present"] is True
+        assert prov["registry"]["entries"] is None
+
+
+class TestBootRender:
+    """format_boot_brief() — the locked O-B+r payload. The empty-state line is
+    the point (fork R3-F1); mission never renders; caps are token-enforced
+    with disclosed overflow."""
+
+    def _brief(self, paths_: Paths, **ledgers):
+        _write_jsonl(_dlog(paths_), ledgers.get("dispatches", []))
+        if "reports" in ledgers:
+            _write_jsonl(_rlog(paths_), ledgers["reports"])
+        return build_brief(_fleet(), paths_, "alex", NOW)
+
+    def test_all_quiet_renders_provenance_never_bare_zero(self, paths: Paths):
+        brief = self._brief(paths, dispatches=[], reports=[])
+        out = format_boot_brief(brief, boot_provenance(paths, NOW))
+        assert "all quiet" in out
+        assert "0 open" in out
+        assert "rows ever" in out  # ledger provenance present
+        assert "registry: absent" in out
+        assert "claudlobby brief --bot alex" in out  # the door line
+        # never a bare zero: the quiet line must carry its provenance clause
+        for line in out.splitlines():
+            if "0 open" in line:
+                assert "ledger" in line
+
+    def test_busy_case_prioritizes_orphaned_then_overdue_then_open(
+        self, paths: Paths
+    ):
+        rows = [
+            _dispatch("alex", NOW - 5_000, NOW + 5_000, task_id="t-open-a"),
+            _dispatch("alex", NOW - 4_000, NOW + 5_000, task_id="t-open-b"),
+            _dispatch("alex", NOW - 3_000, NOW - 1_000, task_id="t-late"),
+        ]
+        brief = self._brief(paths, dispatches=rows, reports=[])
+        out = format_boot_brief(brief, boot_provenance(paths, NOW))
+        assert "t-late" in out
+        # the door's open list is deadline-blind (a SUPERSET, #904), so the
+        # overdue row counts there too; the boot payload keeps door semantics
+        assert "3 open" in out and "1 overdue" in out
+        assert out.count("t-late") == 1  # but each task renders once
+        assert "full state: claudlobby brief --bot alex" in out
+
+    def test_detail_cap_three_with_disclosed_overflow(self, paths: Paths):
+        rows = [
+            _dispatch("alex", NOW - (i * 100), NOW + 9_000, task_id=f"t-{i:02d}")
+            for i in range(7)
+        ]
+        brief = self._brief(paths, dispatches=rows, reports=[])
+        out = format_boot_brief(brief, boot_provenance(paths, NOW))
+        detail = [ln for ln in out.splitlines() if " — sent " in ln]
+        assert len(detail) == 3
+        assert "+4 more" in out and "door" in out
+
+    def test_token_cap_enforced_with_disclosure_kept(self, paths: Paths):
+        rows = [
+            _dispatch(
+                "alex",
+                NOW - (i * 10),
+                NOW + 9_000,
+                task_id=f"t-{'x' * 60}-{i:03d}",
+            )
+            for i in range(40)
+        ]
+        brief = self._brief(paths, dispatches=rows, reports=[])
+        out = format_boot_brief(brief, boot_provenance(paths, NOW))
+        assert len(out) <= BOOT_CHAR_BUDGET
+        assert "more" in out and "door" in out  # overflow disclosure survived
+        assert "full state: claudlobby brief" in out  # door line survived
+
+    def test_omitted_dispatches_render_unavailable_not_zero(self, paths: Paths):
+        # No report ledger -> the door omits the dispatch section (#526 defence).
+        brief = self._brief(paths, dispatches=[])
+        assert not brief["dispatches"]
+        out = format_boot_brief(brief, boot_provenance(paths, NOW))
+        assert "UNAVAILABLE" in out
+        assert "0 open" not in out
+        assert "all quiet" not in out
+
+    def test_mission_never_renders_in_boot_payload(self, paths: Paths):
+        brief = self._brief(paths, dispatches=[], reports=[])
+        assert brief["mission"]  # the envelope HAS it
+        out = format_boot_brief(brief, boot_provenance(paths, NOW))
+        assert "MISSION" not in out and "mission" not in out
+
+    def test_labeled_degradation_marks_the_dispatch_line(self, paths: Paths):
+        _write_jsonl(_dlog(paths), [])
+        (_dlog(paths)).write_text(_dlog(paths).read_text() + "not json at all\n")
+        _write_jsonl(_rlog(paths), [])
+        brief = build_brief(_fleet(), paths, "alex", NOW)
+        out = format_boot_brief(brief, boot_provenance(paths, NOW))
+        assert "#911" in out
+
+
+class TestBootCLI:
+    def _args(self, root, **kw):
+        import argparse
+
+        base = dict(
+            fleet="f1",
+            root=str(root),
+            seed=False,
+            bot="alex",
+            json=False,
+            ack=False,
+            boot=True,
+        )
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def _fleet_dir(self, paths_: Paths):
+        fleet_dir = paths_.root / "local" / "f1"
+        (fleet_dir / "runtime").mkdir(parents=True)
+        (fleet_dir / "fleet.yaml").write_text(
+            "fleet:\n  name: f1\n  service_prefix: com.test\n"
+            "  bots:\n    alex:\n      expertise: [software-engineering]\n"
+        )
+        return fleet_dir
+
+    def test_boot_flag_renders_quiet_payload_end_to_end(self, paths: Paths, capsys):
+        from claudlobby.commands.core import cmd_brief
+
+        _write_jsonl(_dlog(paths), [])
+        fleet_dir = self._fleet_dir(paths)
+        # per-fleet report ledger present-and-empty -> dispatches served empty
+        _write_jsonl(fleet_dir / "runtime" / "report-back.jsonl", [])
+        assert cmd_brief(self._args(paths.root)) == 0
+        out = capsys.readouterr().out
+        assert "all quiet" in out
+        assert "full state: claudlobby brief --bot alex" in out
+
+    def test_boot_is_mutually_exclusive_with_json_and_ack(self, paths: Paths):
+        from claudlobby.commands.core import cmd_brief
+
+        _write_jsonl(_dlog(paths), [])
+        self._fleet_dir(paths)
+        assert cmd_brief(self._args(paths.root, json=True)) == 1
+        assert cmd_brief(self._args(paths.root, ack=True)) == 1

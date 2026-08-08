@@ -126,6 +126,13 @@ def register_subparsers(sub) -> None:
         help="Advance this bot's report cursor past everything just shown "
         "(the only write this command performs)",
     )
+    pb.add_argument(
+        "--boot",
+        action="store_true",
+        help="Render the SessionStart boot payload (#1102 R3/M1): dispatch "
+        "lines + empty-state provenance + door line, token-capped — the "
+        "composed hook's mode, never the full brief",
+    )
     pb.set_defaults(func=cmd_brief)
 
     pws = sub.add_parser(
