@@ -2109,6 +2109,14 @@ bot_in_fleet() {
     # and any future supervision script share ONE filter — no per-script drift.
     # Empty list (no/unreadable fleet.yaml → root-mode) → 0, i.e. "declared":
     # callers then scan every dir, preserving pre-fleet.yaml behavior.
+    #
+    # THIS LINE INVERTS AN EMPTY ROSTER INTO "EVERYTHING IS MINE" (#1146). That
+    # is the point in root mode, and it is a hazard everywhere else: a manifest
+    # that drifts out of the documented 2/4-space shape yields no bots, so the
+    # caller stops filtering and acts on EVERY bot dir on the host — other
+    # fleets included. Safe when the caller only reads or reports. Before adding
+    # a caller that WRITES, RESTARTS or DELETES behind this predicate, read the
+    # door note above declared_bots_strict and use the loud door instead.
     [ -z "$2" ] && return 0
     printf '%s\n' "$2" | grep -qx "$1"
 }
@@ -2126,13 +2134,31 @@ bot_in_fleet() {
 # THE SECOND DOOR, and why it is not parse_fleet_bots. That helper soft-fails by
 # contract: a missing or unreadable fleet.yaml yields NO output, and bot_in_fleet
 # reads an empty list as "declared", so its callers fall back to scanning every
-# directory. That is CORRECT for an action — a supervision filter must keep
-# working on a host whose manifest is briefly broken — and WRONG for a
-# measurement, which has no degraded mode: a denominator that silently shrinks
-# by a whole fleet turns 6 of 21 into 6 of 19 and the baseline stops being
-# comparable. Same code shape, opposite correct answer; the discriminator is
-# action versus measurement, exactly as selfstart-snapshot.sh argues for why
-# composer.py::_fleet_bot_count() must not be copied either.
+# directory.
+#
+# THE DISCRIMINATOR IS WHAT THE CALLER DOES WITH AN EMPTY RESULT (#1146) — not
+# whether the caller is an "action" or a "measurement". That earlier framing
+# reached the right answer for the wrong reason, and then ENDORSED a destructive
+# defect: a prune is an action, so the rule blessed it, and a CRLF-drifted
+# sibling manifest let one fleet delete another fleet live row at rc 0 (#1143).
+#
+#   empty means DO NOTHING        -> soft is right. The no-op is the safe
+#                                    direction, and a supervision filter must
+#                                    keep working on a briefly broken host.
+#   empty LICENSES A WRITE/DELETE -> soft is WRONG, whatever the caller is
+#                                    called. Absence of evidence is being read
+#                                    as evidence of absence. Use THIS door.
+#
+# Two traps when classifying a caller:
+#   * bot_in_fleet INVERTS the empty. An empty roster makes every directory
+#     "declared", so "do nothing" silently becomes "do it to every bot on the
+#     host, including other fleets". Classify the PREDICATE, not just the parse
+#     — six live callers reach their work through it.
+#   * A measurement is the special case where empty licenses a WRONG NUMBER: a
+#     denominator that silently shrinks by a whole fleet turns 6 of 21 into
+#     6 of 19 and the baseline stops being comparable. Same rule, same verdict
+#     (selfstart-snapshot.sh, and why composer.py::_fleet_bot_count() must not
+#     be copied either).
 #
 # So there are deliberately TWO doors rather than one widened door: four
 # supervision scripts depend on parse_fleet_bots staying soft, and this one
