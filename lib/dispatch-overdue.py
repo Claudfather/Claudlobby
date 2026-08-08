@@ -414,6 +414,8 @@ def open_dispatches(
     # matching the strict-< tie-break open_task_id used when it kept its own min.
     rows.sort(key=lambda r: r[0])
     return rows
+
+
 def unassigned_all(
     dispatch_log: str,
     report_ledger: str,
@@ -612,6 +614,8 @@ def main() -> int:
             return 2
         for da, exp, tid in open_dispatches(argv[2], argv[3], argv[4]):
             print(f"{da} {exp if exp is not None else '-'} {tid}")
+        return 0
+
     # #1024 mirror watchdog. No threshold here: fleet-pulse applies its own per
     # bot, so one scan serves a fleet whose bots are tuned differently.
     if argv[1] == "--unassigned":
