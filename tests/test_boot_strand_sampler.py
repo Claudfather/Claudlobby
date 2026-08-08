@@ -583,7 +583,10 @@ class TestArmRecording:
         # boot-strand-summary.py catches it at read time for rows edited after
         # the fact. This pins the write-time half.
         src = SAMPLER.read_text(encoding="utf-8")
-        assert 'settle_s: ($arm | if . == null then null else .["PANE_SEND_SETTLE_S"].v end)' in src
+        assert (
+            'settle_s: ($arm | if . == null then null else .["PANE_SEND_SETTLE_S"].v end)'
+            in src
+        )
         assert "--arg settle" not in src, "settle_s must not have a second source"
 
     def test_disclosure_and_arm_record_agree_on_every_knob(self):
@@ -629,6 +632,47 @@ def _armed_rows(
     ]
 
 
+def _paired_rows(
+    spec: dict[float, str], ticks: int = 5, burners: int = 0, la: float = 12.0
+) -> list[dict]:
+    """Interleaved blocks: one boot per arm per block, arm order rotating.
+
+    The counterpart to _armed_rows, which lays each arm out end to end — the
+    arm-sequential shape v2 §4 BASELINE forbids by name. Any test asserting a
+    BETWEEN-arm figure has to build its sample this way now, because the
+    summarizer withholds that figure from a sample it cannot see alternating.
+    `spec` maps arm -> outcome string; one character per block, equal lengths.
+    """
+    arms = list(spec)
+    lengths = {len(v) for v in spec.values()}
+    assert len(lengths) == 1, f"one outcome per arm per block, got {lengths}"
+    rows: list[dict] = []
+    i = 1
+    for b in range(lengths.pop()):
+        order = arms[b % len(arms) :] + arms[: b % len(arms)]
+        for pos, arm in enumerate(order):
+            ch = spec[arm][b]
+            rows.append(
+                {
+                    "i": i,
+                    "kind": "sample",
+                    "outcome": {"c": "clean", "s": "strand"}[ch],
+                    "retry_fired": 0,
+                    "t_submit_s": 9 if ch == "c" else None,
+                    "load_burners": burners,
+                    "loadavg_1m": la,
+                    "arm_knobs": _knobs(arm, ticks),
+                    "settle_s": arm,
+                    "block": b,
+                    "pos": pos,
+                    "arm_order": list(order),
+                    "arm_seed": 7,
+                }
+            )
+            i += 1
+    return rows
+
+
 class TestArmGrouping:
     """The other half of the blocker: with no arm grouping, summarize() was
     single-arm only, so no two-arm figure was reachable and a real run could
@@ -659,9 +703,11 @@ class TestArmGrouping:
         assert "strands=0 n=6" in lines[1] and "settle_s=6" in lines[1]
 
     def test_difference_interval_names_its_method_and_says_it_is_unratified(self):
+        # Paired, because a between-arm figure is only reachable from a paired
+        # sample now — the arm-sequential build this test used to pass has its
+        # difference withheld (TestPairing).
         text, _ = summary.summarize(
-            _armed_rows(0.3, "s" * 30 + "c" * 10)
-            + _armed_rows(1.5, "s" * 4 + "c" * 36, start=101)
+            _paired_rows({0.3: "s" * 30 + "c" * 10, 1.5: "s" * 4 + "c" * 36})
         )
         assert "── between-arm (control - treatment)" in text
         assert "MOVER" in text and "Clopper-Pearson" in text
@@ -672,9 +718,7 @@ class TestArmGrouping:
         # The pre-registration's bar is not ratified for the difference, and a
         # summarizer that declared SUPPORTED off an unratified statistic would
         # pre-empt the ratification (ab-recoverability-scorer.py precedent).
-        text, _ = summary.summarize(
-            _armed_rows(0.3, "ssssssssss") + _armed_rows(1.5, "cccccccccc", start=11)
-        )
+        text, _ = summary.summarize(_paired_rows({0.3: "s" * 10, 1.5: "c" * 10}))
         assert "NO VERDICT EMITTED" in text
         assert not [ln for ln in text.splitlines() if ln.startswith("VERDICT")]
 
@@ -686,7 +730,7 @@ class TestArmGrouping:
         assert "strand rate | settle_s=0.3, retry_fired == 0: 1/3" in text
 
     def test_control_arm_is_overridable_and_stated(self):
-        rows = _armed_rows(0.3, "sscc") + _armed_rows(1.5, "sccc", start=11)
+        rows = _paired_rows({0.3: "sscc", 1.5: "sccc"})
         default_text, _ = summary.summarize(rows)
         assert "control arm: settle_s=0.3 (smallest arm" in default_text
         chosen, _ = summary.summarize(rows, control=1.5)
@@ -694,8 +738,11 @@ class TestArmGrouping:
         assert "1.5 - 0.3:" in chosen
 
     def test_absent_control_is_stated_not_silently_substituted(self):
+        # Paired, so the absent control is the ONLY reason the between-arm
+        # block is missing. Built arm-sequential, this test would pass for the
+        # wrong reason — the pairing guard would have withheld it anyway.
         text, rc = summary.summarize(
-            _armed_rows(0.3, "sscc") + _armed_rows(1.5, "sccc", start=11), control=9.9
+            _paired_rows({0.3: "sscc", 1.5: "sccc"}), control=9.9
         )
         assert rc == 0
         assert "control 9.9 is not present in this sample" in text
@@ -790,6 +837,272 @@ class TestArmRefusals:
         rows = _armed_rows(0.3, "sccccc")
         rows[3]["settle_s"] = 6.0
         assert "boot 4" in self._refusal(rows)
+
+
+class TestPairing:
+    """#843 blocker 6: the rows must EVIDENCE that arms alternated.
+
+    `block` and `pos` are written by the same sampler loop that does the
+    interleaving, so a test asserting only on them would check the claim
+    against itself — the cannot-fail check this ladder exists to measure. Every
+    mutation below therefore leaves the LABELS intact and changes the
+    CONDITION, so nothing here can pass by reading a field that describes
+    itself. The precedent is `_covarying_knobs`, which guards the condition
+    rather than the label.
+    """
+
+    def test_paired_sample_earns_the_between_arm_figure(self):
+        # Positive control FIRST, so every refusal below means something: the
+        # instrument can still return a difference when the pairing is real.
+        text, rc = summary.summarize(_paired_rows({0.3: "sscc", 1.5: "cccc"}))
+        assert rc == 0
+        assert "PAIRED: 4 complete block(s) x 2 arms" in text
+        assert "── between-arm (control - treatment)" in text
+
+    def test_sequential_arms_under_interleaved_labels_are_refused(self):
+        # THE bound. Labels stay exactly as an interleaved run wrote them; only
+        # the in-force arms are rewritten into arm-sequential order. A reader
+        # trusting block/pos sees a textbook interleave. The refusal can only
+        # come from the settle_s sequence.
+        rows = _paired_rows({0.3: "cccc", 1.5: "cccc"})
+        rows.sort(key=lambda r: r["i"])
+        for n, r in enumerate(rows):
+            arm = 0.3 if n < len(rows) // 2 else 1.5
+            r["settle_s"] = arm
+            r["arm_knobs"] = _knobs(arm)
+        text, rc = summary.summarize(rows)
+        assert rc == 3
+        assert "UNPAIRED-SAMPLE/block-holds-duplicate-arm" in text
+        # The labels really are still intact — otherwise this passes for the
+        # wrong reason and proves nothing about deriving from the condition.
+        assert all(r["block"] is not None and r["pos"] is not None for r in rows)
+        assert [r["pos"] for r in rows] == [0, 1, 0, 1, 0, 1, 0, 1]
+
+    def test_concatenated_single_arm_runs_get_no_between_arm_figure(self):
+        # The ladder procedure the sampler header used to document: invoke once
+        # per settle value, concatenate the rows files. §4 BASELINE forbids it
+        # by name, and until now the summarizer reported a difference from it.
+        text, rc = summary.summarize(
+            _armed_rows(0.3, "sscc") + _armed_rows(1.5, "cccc", start=11)
+        )
+        assert rc == 0
+        assert "── between-arm" not in text
+        assert "BETWEEN-ARM DIFFERENCE SUPPRESSED" in text
+        assert "arm-sequential" in text
+        assert "no block record" in text
+
+    def test_suppression_is_targeted_and_per_arm_rates_survive(self):
+        # The confound is in the comparison, not the attribution: an
+        # arm-sequential boot is perfectly attributable, so refusing the sample
+        # would discard sound per-arm rates to punish an analysis nobody can
+        # run from it anyway.
+        text, rc = summary.summarize(
+            _armed_rows(0.3, "sscc") + _armed_rows(1.5, "cccc", start=11)
+        )
+        assert rc == 0
+        assert "strand rate: 2/4" in text and "strand rate: 0/4" in text
+        assert "INCONCLUSIVE" in text
+
+    def test_arm_run_count_is_reported_so_a_human_can_check_it_too(self):
+        # The DISCRIMINATION is what must hold, not a magic number: with two
+        # arms a rotating order puts the same arm either side of a block
+        # boundary, so 4 interleaved blocks give 5 runs rather than 8. What
+        # cannot vary is that interleaved sits strictly above the arm count
+        # while arm-sequential sits exactly on it.
+        paired = summary.summarize(_paired_rows({0.3: "cccc", 1.5: "cccc"}))[0]
+        flat = summary.summarize(
+            _armed_rows(0.3, "cccc") + _armed_rows(1.5, "cccc", start=11)
+        )[0]
+
+        def runs(text: str) -> int:
+            line = next(ln for ln in text.splitlines() if "arm-runs observed" in ln)
+            return int(line.split("attributable boots: ")[1].split()[0])
+
+        assert runs(flat) == 2, "arm-sequential must sit exactly on the arm count"
+        assert runs(paired) > 2, "interleaved must sit strictly above it"
+        assert "arm-sequential would be 2" in paired and "would be 2" in flat
+
+    def test_pos_not_a_permutation_is_refused(self):
+        rows = _paired_rows({0.3: "cc", 1.5: "cc"})
+        rows[1]["pos"] = 0  # block 0 now declares positions 0 and 0
+        text, rc = summary.summarize(rows)
+        assert rc == 3
+        assert "UNPAIRED-SAMPLE/pos-not-a-permutation" in text
+
+    def test_block_interleaved_with_another_block_is_refused(self):
+        # A block whose boots are not contiguous in i did not run as one
+        # pairing unit, so its within-block delta spans other blocks' time.
+        rows = _paired_rows({0.3: "cc", 1.5: "cc"})
+        rows[0]["i"], rows[3]["i"] = rows[3]["i"], rows[0]["i"]
+        text, rc = summary.summarize(rows)
+        assert rc == 3
+        assert "UNPAIRED-SAMPLE/block-not-contiguous" in text
+
+    def test_partial_block_is_excluded_and_disclosed_never_silent(self):
+        rows = _paired_rows({0.3: "ccc", 1.5: "ccc"})
+        del rows[-1]  # a run cut mid-block
+        text, rc = summary.summarize(rows)
+        assert rc == 0
+        assert "1 block(s) hold fewer than one boot per arm" in text
+        assert "PAIRED: 2 complete block(s)" in text
+
+    def test_drift_band_discards_a_block_that_straddles_an_excursion(self):
+        rows = _paired_rows({0.3: "cccc", 1.5: "cccc"})
+        for r in rows:
+            if r["block"] == 1:
+                r["loadavg_1m"] = 10.0 if r["pos"] == 0 else 20.0  # ratio 2.0
+        text, rc = summary.summarize(rows)
+        assert rc == 0
+        assert "1 of 4 block(s) discarded" in text
+        assert "discarded blocks: [1]" in text
+
+    def test_block_without_loadavg_is_excluded_not_assumed_to_pass(self):
+        # A missing covariate cannot be SHOWN to sit inside the band. Keeping
+        # it silently would let an unmeasured block pass as a measured one.
+        rows = _paired_rows({0.3: "cccc", 1.5: "cccc"})
+        for r in rows:
+            if r["block"] == 2:
+                r["loadavg_1m"] = None
+        text, rc = summary.summarize(rows)
+        assert rc == 0
+        assert "1 block(s) carry no usable loadavg_1m" in text
+        assert "not assumed to pass: [2]" in text
+
+    def test_heavy_exclusion_is_named_an_inconclusive_condition(self):
+        rows = _paired_rows({0.3: "cccc", 1.5: "cccc"})
+        for r in rows:
+            if r["block"] in (0, 1):
+                r["loadavg_1m"] = 10.0 if r["pos"] == 0 else 20.0
+        text, _ = summary.summarize(rows)
+        assert "OVER 25% OF BLOCKS EXCLUDED" in text
+        assert "INCONCLUSIVE" in text
+
+    def test_estimator_gap_between_sections_4_and_5_is_flagged_not_resolved(self):
+        # §4 BASELINE says aggregate within-block deltas; §5 pins MOVER over the
+        # two marginal intervals. Picking one silently would be the author
+        # choosing the bar, so the summary names the gap and computes the
+        # pinned statistic.
+        text, _ = summary.summarize(_paired_rows({0.3: "sscc", 1.5: "cccc"}))
+        assert "ESTIMATOR GAP" in text
+        assert "does not yet enter the interval" in text
+
+    def test_single_arm_sample_is_untouched_by_any_of_this(self):
+        # Regression guard: pairing is meaningless with one arm, and the
+        # pre-interleave behaviour has to survive byte-for-byte in that mode.
+        text, rc = summary.summarize(_armed_rows(0.3, "sscc"))
+        assert rc == 0
+        assert "pairing" not in text.lower()
+        assert "SUPPRESSED" not in text
+        assert "strand rate: 2/4" in text
+
+
+class TestBootPlan:
+    """The sampler half: --arms builds interleaved blocks in ONE invocation.
+
+    A per-block driver would pay a warm-up boot per invocation (6 boots for 3
+    samples, turning the 123-boot matrix into ~240) and still could not
+    randomize arm order WITHIN a block, because it does not own the boot loop —
+    the same arm-sequential shape it was meant to fix, one level up.
+    """
+
+    @staticmethod
+    def _plan(*args: str) -> list[list[str]]:
+        # Trailing `true` is load-bearing: call_script_fn appends ` "$@"` to
+        # the snippet, which would otherwise land on the printf and emit the
+        # leftover argv as extra plan lines.
+        out = call_script_fn(
+            SAMPLER,
+            '_LCG_STATE="$1"; shift; build_boot_plan "$@"; '
+            'printf "%s\\n" "${_BOOT_PLAN[@]}"; true',
+            *args,
+            env=_sampler_env(),
+        )
+        return [ln.split("\x1f") for ln in out.splitlines()]
+
+    def test_one_boot_per_arm_per_block_plus_one_warmup_for_the_run(self):
+        plan = self._plan("7", "4", "0.3", "1.5", "6")
+        assert len(plan) == 1 + 4 * 3
+        assert plan[0][0] == "warmup"
+        # ONE warm-up, not one per arm — that difference is the cost argument
+        # for interleaving in the sampler rather than driving it per block.
+        assert len([e for e in plan if e[0] == "warmup"]) == 1
+        for block in range(4):
+            rows = [e for e in plan[1:] if e[1] == str(block)]
+            assert sorted(e[3] for e in rows) == ["0.3", "1.5", "6"]
+            assert sorted(e[2] for e in rows) == ["0", "1", "2"]
+
+    def test_same_seed_reproduces_the_arm_order(self):
+        # An arm order nobody can restate is a covariate the artifact cannot
+        # evidence, so the seed is recorded and has to actually replay.
+        first = [e[3] for e in self._plan("11", "5", "0.3", "1.5", "6")]
+        again = [e[3] for e in self._plan("11", "5", "0.3", "1.5", "6")]
+        assert first == again
+        other = [e[3] for e in self._plan("12", "5", "0.3", "1.5", "6")]
+        assert other != first
+
+    def test_blocks_do_not_all_share_one_permutation(self):
+        # The subshell trap: `j=$(_lcg_next)` forks, so the advance would be
+        # discarded and every block would get ONE fixed order while block/pos
+        # still labelled the rows interleaved. Randomizing per block is what
+        # §4 BASELINE asks for, and this is the assertion that would catch it
+        # silently reverting to a single permutation.
+        orders = {
+            tuple(e[3] for e in self._plan("3", "12", "0.3", "1.5", "6")[1:][i : i + 3])
+            for i in range(0, 36, 3)
+        }
+        assert len(orders) > 1, f"every block ran the same arm order: {orders}"
+
+    def test_single_arm_plan_carries_no_arm_and_no_block(self):
+        # Without --arms the caller owns the knob and the loop must not touch
+        # it: an empty value would shadow the lib-common default and reach an
+        # arithmetic test as a non-integer.
+        plan = self._plan("0", "3")
+        assert len(plan) == 4
+        assert [e[0] for e in plan] == ["warmup", "sample", "sample", "sample"]
+        assert all(e[1] == "" and e[2] == "" and e[3] == "" for e in plan)
+
+
+class TestArmsRefusals:
+    """--arms validation. Each refusal names the condition it caught, because a
+    run that silently reinterprets its ladder is the artifact nobody can audit.
+    """
+
+    @staticmethod
+    def _run(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(SAMPLER), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+
+    def test_arms_with_the_knob_also_set_is_refused_as_two_sources(self):
+        r = self._run(["--arms", "0.3 1.5"], env=_sampler_env(PANE_SEND_SETTLE_S="0.9"))
+        assert r.returncode == 1
+        assert "One fact, two sources" in r.stdout + r.stderr
+
+    def test_repeated_arm_is_refused(self):
+        r = self._run(["--arms", "0.3 0.3 1.5"], env=_sampler_env())
+        assert r.returncode == 1
+        assert "repeats 0.3" in r.stdout + r.stderr
+
+    def test_numerically_equal_arms_are_caught_as_a_repeat(self):
+        # "6 6.0" is two arms as strings and one arm to the summarizer, which
+        # would land as a block holding the same arm twice.
+        r = self._run(["--arms", "6 6.0"], env=_sampler_env())
+        assert r.returncode == 1
+        assert "repeats 6" in r.stdout + r.stderr
+
+    def test_single_arm_ladder_is_refused(self):
+        r = self._run(["--arms", "1.5"], env=_sampler_env())
+        assert r.returncode == 1
+        assert "nothing to interleave" in r.stdout + r.stderr
+
+    def test_non_numeric_arm_is_refused(self):
+        r = self._run(["--arms", "0.3 abc"], env=_sampler_env())
+        assert r.returncode == 1
+        assert "bad --arms value: abc" in r.stdout + r.stderr
 
 
 class TestMoverDifference:

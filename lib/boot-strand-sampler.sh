@@ -58,9 +58,28 @@
 # estimated and no sample size makes the fix "proven"; the interval is the
 # result, not a verdict.
 #
-# Usage: boot-strand-sampler.sh [-n BOOTS] [--deadline SECS] [--load N] [--keep]
-#   -n BOOTS         sample size, default 20 (a warm-up boot runs first and is
-#                    reported separately, never counted)
+# Usage: boot-strand-sampler.sh [-n N] [--arms "A B C"] [--seed K]
+#                               [--deadline SECS] [--load N] [--keep]
+#   -n N             sample size, default 20 (a warm-up boot runs first and is
+#                    reported separately, never counted). With --arms this is
+#                    the number of BLOCKS, so the run is N x len(arms) boots
+#                    plus ONE warm-up for the whole run, not one per arm.
+#   --arms "A B C"   INTERLEAVE MODE. Settle values (seconds) to sweep, space-
+#                    or comma-separated. One block = one boot per arm, arm
+#                    order randomized WITHIN each block, blocks run back to
+#                    back. This is what pre-registration v2 §4 BASELINE
+#                    requires and what running one arm to completion and then
+#                    the next cannot give: ambient load on a shared host swings
+#                    ±40% unaided, so an arm-sequential run assigns each arm a
+#                    different hour of ambient conditions and calls the
+#                    difference a treatment effect.
+#                    Refuses if PANE_SEND_SETTLE_S is also set in the caller
+#                    env — two sources for one fact is how a row comes to
+#                    disagree with the condition it ran under.
+#   --seed K         seed for the within-block arm order. Default: chosen per
+#                    run and PRINTED, because an order nobody can restate is a
+#                    covariate the artifact cannot evidence. Recorded in every
+#                    row, so a re-run at the same seed repeats the sequence.
 #   --deadline SECS  per-boot classification deadline, default 120. Healthy
 #                    boots submit in seconds and strands never resolve (#843
 #                    timing evidence), so the gap tolerates a generous value.
@@ -83,9 +102,7 @@
 #      INERT (PANE_READY_TICKS: start-bot arms its own value at the injection
 #      sites), or SCRUBBED (a lib-common pane knob env -i drops).
 #
-# ARM IDENTITY. One invocation samples ONE arm — the ladder is run by invoking
-# the sampler once per settle value and concatenating the rows files. Every
-# emitted row therefore carries `arm_knobs` (each forwarded knob as
+# ARM IDENTITY. Every emitted row carries `arm_knobs` (each forwarded knob as
 # {env, v, src}) plus the hoisted `settle_s`, resolved AT THE BOOT from the
 # live environment rather than from a caller-supplied label. Without it a
 # settle=0.3 row and a settle=6.0 row are byte-identical in shape, arm identity
@@ -93,11 +110,29 @@
 # artifact afterwards — so boot-strand-summary.py refuses a sample it cannot
 # attribute rather than pooling it.
 #
+# PAIRING (--arms). Without --arms one invocation samples ONE arm, and a ladder
+# assembled by concatenating those rows files is arm-sequential — which
+# pre-registration v2 §4 BASELINE forbids by name. --arms runs the whole ladder
+# in one invocation as interleaved blocks instead.
+#
+# THE ROWS MUST EVIDENCE THE ALTERNATION, NOT ASSERT IT. `block`, `pos` and
+# `arm_order` are written by the same loop that does the interleaving, so on
+# their own they are a claim, not a measurement: if the interleave broke, the
+# labels would still read exactly as they do now. What makes them checkable is
+# that `settle_s` is resolved per boot FROM THE LIVE ENVIRONMENT (above), so
+# the observed sequence of in-force arms over `i` is an independent record of
+# what actually alternated. boot-strand-summary.py derives the pairing from
+# that sequence and refuses a block record the in-force arms contradict — the
+# same shape as `_covarying_knobs` guarding the CONDITION rather than the
+# label. A check whose only evidence is the claim it is checking cannot fail,
+# and this ladder exists to measure exactly that defect class.
+#
 # Exit: 0 sample completed (the summary is the product; strands do not fail
 #         the run) · 1 harness failure (setup assertion failed, or zero boots
 #         reached a clean/strand verdict — a sample of others-only must not
 #         read as a measurement) · 2 precondition/dep missing (skip) ·
-#         3 the sample cannot be attributed to arms (summary refused).
+#         3 the sample cannot be attributed to arms, or its block record
+#           contradicts the arms in force (summary refused).
 
 set -euo pipefail
 
@@ -117,6 +152,11 @@ KEEP=""
 POLL_S=2
 LOAD_BURNERS=0
 MEM_FLOOR_MB="${SAMPLER_MEM_FLOOR_MB:-1200}"
+
+# Interleave mode: the ladder's arms, and the seed for within-block order.
+# Empty ARMS keeps the single-arm behaviour (the caller sets the knob).
+ARMS=""
+SEED=""
 
 # PIDs of the synthetic-load burners, so teardown targets what this run started
 # and nothing else. Killing by recorded PID rather than `pkill -f <pattern>` is
@@ -357,6 +397,94 @@ arm_knobs_json() {
         | from_entries'
 }
 
+# ── interleaved blocks (--arms) ───────────────────────────────────────────────
+#
+# Pre-registration v2 §4 BASELINE: "Pairing: interleaved blocks, randomized arm
+# order within block. One block = one boot per arm." What it rules out by name
+# is running every boot of arm A and then every boot of arm B, because ambient
+# load on a shared host swings 9.7 -> 17.7 within minutes unaided, so that
+# design hands each arm a different hour of conditions and reports the
+# difference as a treatment effect.
+
+# _lcg_next — advance the generator IN PLACE.
+#
+# It mutates _LCG_STATE rather than echoing, and that is load-bearing rather
+# than style: command substitution forks a subshell, so `j=$(_lcg_next)` would
+# discard every advance and hand back one fixed value forever. The shuffle
+# would then return a single permutation for every block while block/pos went
+# on labelling the rows interleaved — a broken interleave wearing a correct
+# label, which is the exact defect class this mode exists to make detectable.
+# No caller may wrap it in $( ).
+#
+# A specified LCG rather than bash $RANDOM, also deliberate: bash changed its
+# own PRNG at 5.1, so a recorded seed would replay one order on this host and a
+# different one anywhere else, and an arm order that cannot be restated from
+# the artifact is a covariate the run cannot evidence. Constants are the glibc
+# ones; the modulus keeps every intermediate inside signed 64-bit.
+_LCG_STATE=0
+_lcg_next() {
+    _LCG_STATE=$(( (_LCG_STATE * 1103515245 + 12345) % 2147483648 ))
+    return 0
+}
+
+# shuffle_arms <arm>... — Fisher-Yates over the arguments, driven by _lcg_next.
+# Result lands in _SHUFFLED (space separated) for the same subshell reason.
+_SHUFFLED=""
+shuffle_arms() {
+    local a=("$@")
+    local n=${#a[@]} i j tmp
+    i=$((n - 1))
+    while [ "$i" -gt 0 ]; do
+        _lcg_next
+        j=$(( _LCG_STATE % (i + 1) ))
+        tmp="${a[$i]}"; a[$i]="${a[$j]}"; a[$j]="$tmp"
+        i=$((i - 1))
+    done
+    _SHUFFLED="${a[*]}"
+    return 0
+}
+
+# build_boot_plan <blocks> <arm>... — the whole run as one ordered list, in
+# _BOOT_PLAN. Each entry is kind, block, pos, arm, arm-order, _FS separated;
+# an empty arm means "do not touch the knob", which is what keeps single-arm
+# mode byte-identical to its pre-interleave behaviour.
+#
+# One loop drives both modes rather than two loops that could drift apart: the
+# mode difference is entirely in the plan, so classification, teardown and row
+# emission cannot come to mean two things.
+_BOOT_PLAN=()
+build_boot_plan() {
+    local blocks="$1"; shift
+    local arms=("$@")
+    local b=0 p n=1 a ord
+    _BOOT_PLAN=()
+    if [ "${#arms[@]}" -eq 0 ]; then
+        _BOOT_PLAN+=("warmup$_FS$_FS$_FS$_FS")
+        while [ "$n" -le "$blocks" ]; do
+            _BOOT_PLAN+=("sample$_FS$_FS$_FS$_FS")
+            n=$((n + 1))
+        done
+        return 0
+    fi
+    # ONE warm-up for the whole run. It absorbs first-boot cost (plugin
+    # install, cold caches), which is arm-independent — paying it per
+    # invocation is exactly what makes a per-block driver cost 6 boots for 3
+    # samples and doubles the matrix. It runs at the first arm and is excluded
+    # from the sample, so the choice cannot bias a rate.
+    _BOOT_PLAN+=("warmup$_FS$_FS$_FS${arms[0]}$_FS")
+    while [ "$b" -lt "$blocks" ]; do
+        shuffle_arms "${arms[@]}"
+        ord="$_SHUFFLED"
+        p=0
+        for a in $ord; do
+            _BOOT_PLAN+=("sample$_FS$b$_FS$p$_FS$a$_FS$ord")
+            p=$((p + 1))
+        done
+        b=$((b + 1))
+    done
+    return 0
+}
+
 # knob_disclosure — one line stating the effective fate of every pane knob the
 # child boot could consume, so a run artifact self-documents which knob a
 # ladder actually varied. An override whose fate is knowable only by reading
@@ -465,6 +593,8 @@ main() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -n)         BOOTS="${2:?-n needs a value}"; shift 2 ;;
+            --arms)     ARMS="${2:?--arms needs a value}"; shift 2 ;;
+            --seed)     SEED="${2:?--seed needs a value}"; shift 2 ;;
             --deadline) DEADLINE="${2:?--deadline needs a value}"; shift 2 ;;
             --load)     LOAD_BURNERS="${2:?--load needs a value}"; shift 2 ;;
             --keep)     KEEP=1; shift ;;
@@ -475,6 +605,47 @@ main() {
     case "$BOOTS" in ''|*[!0-9]*) printf 'bad -n: %s\n' "$BOOTS" >&2; exit 1 ;; esac
     case "$DEADLINE" in ''|*[!0-9]*) printf 'bad --deadline: %s\n' "$DEADLINE" >&2; exit 1 ;; esac
     case "$LOAD_BURNERS" in ''|*[!0-9]*) printf 'bad --load: %s\n' "$LOAD_BURNERS" >&2; exit 1 ;; esac
+
+    # ── interleave mode: validate the ladder before anything expensive ────────
+    local arm_list=() a b
+    if [ -n "$ARMS" ]; then
+        # One fact, two sources. In interleave mode the boot loop OWNS
+        # PANE_SEND_SETTLE_S; a caller value would be overwritten on every boot
+        # while knob_disclosure still called it forwarded — a disclosure that
+        # describes a number governing nothing is the #1084 class.
+        if [ -n "${PANE_SEND_SETTLE_S:-}" ]; then
+            printf 'REFUSED: --arms sweeps PANE_SEND_SETTLE_S, but it is also set in the environment (%s).\n' \
+                "$PANE_SEND_SETTLE_S" >&2
+            printf '  One fact, two sources. Unset it, or drop --arms to sample that single arm.\n' >&2
+            exit 1
+        fi
+        for a in $(printf '%s' "$ARMS" | tr ',' ' '); do
+            case "$a" in
+                ''|*[!0-9.]*|*.*.*|.)
+                    printf 'bad --arms value: %s (settle seconds, e.g. "0.3 1.5 6.0")\n' "$a" >&2; exit 1 ;;
+            esac
+            # Normalised through the same numeric reading the summary uses, so
+            # "6 6.0" cannot be two arms here and one arm in the analysis.
+            a="$(awk -v v="$a" 'BEGIN { printf "%g", v + 0 }')"
+            for b in ${arm_list[@]+"${arm_list[@]}"}; do
+                [ "$b" = "$a" ] || continue
+                printf 'REFUSED: --arms repeats %s. One block is one boot per arm, so a repeat makes that unverifiable.\n' "$a" >&2
+                exit 1
+            done
+            arm_list+=("$a")
+        done
+        if [ "${#arm_list[@]}" -lt 2 ]; then
+            printf 'REFUSED: --arms needs at least 2 arms — there is nothing to interleave with one.\n' >&2
+            printf '  Drop --arms and set PANE_SEND_SETTLE_S to sample a single arm.\n' >&2
+            exit 1
+        fi
+        # A seed is always recorded, chosen or not: an arm order nobody can
+        # restate is a covariate the artifact cannot evidence.
+        [ -n "$SEED" ] || SEED=$(( RANDOM * 32768 + RANDOM ))
+        case "$SEED" in ''|*[!0-9]*) printf 'bad --seed: %s\n' "$SEED" >&2; exit 1 ;; esac
+        _LCG_STATE="$SEED"
+    fi
+    build_boot_plan "$BOOTS" ${arm_list[@]+"${arm_list[@]}"}
 
     # Before the gates: an aborted run must still carry its knob state (#1109).
     knob_disclosure
@@ -632,16 +803,29 @@ YAML
     bot_tmux "$SOCKET" kill-server 2>/dev/null || true
 
     printf 'probe composed. %s; %s\n' "$plugins_note" "$pat_note"
-    printf 'sampling: %d boots (+1 warm-up), deadline %ss, poll %ss, socket %s\n' \
-        "$BOOTS" "$DEADLINE" "$POLL_S" "$SOCKET"
+    # Sample size is the plan minus its single warm-up, so the banner cannot
+    # drift from what actually runs.
+    local plan_n=${#_BOOT_PLAN[@]}
+    if [ -n "$ARMS" ]; then
+        printf 'sampling: %d blocks x %d arms = %d boots (+1 warm-up), arms [%s], seed %s\n' \
+            "$BOOTS" "${#arm_list[@]}" "$((plan_n - 1))" "${arm_list[*]}" "$SEED"
+        printf 'pairing: INTERLEAVED blocks, arm order randomized within each block (pre-registration v2 §4 BASELINE)\n'
+    else
+        printf 'sampling: %d boots (+1 warm-up) — SINGLE ARM. A ladder built by concatenating\n' "$((plan_n - 1))"
+        printf '  single-arm runs is arm-sequential, which v2 §4 BASELINE forbids; use --arms.\n'
+    fi
+    printf 'deadline %ss, poll %ss, socket %s\n' "$DEADLINE" "$POLL_S" "$SOCKET"
 
     # ── contended-boot arm ────────────────────────────────────────────────────
     # Started here rather than before compose: compose is not a boot, and loading
     # the host through it would slow the setup without sampling anything. The
     # ceiling is the whole remaining run plus slack, so the backstop can only
     # fire after the sample is over.
+    # Ceiling is derived from the PLAN, not from -n: under --arms the run is
+    # blocks x arms boots, so a -n-based ceiling would expire the burners
+    # partway through a 3-arm ladder and silently move the load arm mid-sample.
     if [ "$LOAD_BURNERS" -gt 0 ]; then
-        start_load_burners "$LOAD_BURNERS" $(( (BOOTS + 2) * (DEADLINE + 120) ))
+        start_load_burners "$LOAD_BURNERS" $(( (plan_n + 2) * (DEADLINE + 120) ))
         sleep 15   # let loadavg climb to steady state before boot 0
         printf 'load arm: %d burners, loadavg now %s (contended boot — see divergence 2)\n' \
             "$LOAD_BURNERS" "$(loadavg_1m)"
@@ -653,9 +837,11 @@ YAML
     local i=0 kind session outcome t_startbot t_submit rc pane pids p
     local events_before events_after="" retry_fired parity boot_art
     local glyph_at_inject t_glyph boot_la
+    local entry blk pos arm ord
     session="$(tmux_session_name "$BOT_DIR")"
-    while [ "$i" -le "$BOOTS" ]; do
-        if [ "$i" -eq 0 ]; then kind="warmup"; else kind="sample"; fi
+    while [ "$i" -lt "$plan_n" ]; do
+        entry="${_BOOT_PLAN[$i]}"
+        IFS="$_FS" read -r kind blk pos arm ord <<<"$entry"
         boot_art="$ART/boot-$(printf '%02d' "$i")"
         mkdir -p "$boot_art"
 
@@ -676,7 +862,17 @@ YAML
         # The arm is resolved per boot, from the live environment — never from
         # a caller-supplied label, and never hoisted out of the loop, so a
         # runner that varies the knob between boots is recorded truthfully
-        # rather than stamped with whatever was set at startup. Set BEFORE the
+        # rather than stamped with whatever was set at startup.
+        #
+        # Interleave mode is now that runner, and it sets the knob HERE rather
+        # than passing the arm into the row alongside it. The row must record
+        # what governed the boot, so the plan sets the variable and the same
+        # in-force resolution every other mode uses reads it back — no second
+        # path by which a label could be written without the condition
+        # changing. An empty arm is single-arm mode and must not touch the
+        # variable at all: an empty value would shadow the lib-common default.
+        [ -z "$arm" ] || PANE_SEND_SETTLE_S="$arm"
+        # Set BEFORE the
         # child runs, so a boot that fails outright still carries its arm, and
         # before SECONDS=0, so its jq fork (measured 66ms on the reference
         # host) stays outside the window t_startbot_s reports: SECONDS is
@@ -758,6 +954,8 @@ YAML
             --arg retry "$retry_fired" --arg parity "${parity:-}" \
             --arg glyph "${glyph_at_inject:-}" --arg t_glyph "${t_glyph:-}" \
             --arg burners "$LOAD_BURNERS" --arg la "${boot_la:-}" \
+            --arg blk "${blk:-}" --arg pos "${pos:-}" \
+            --arg ord "${ord:-}" --arg seed "${SEED:-}" \
             --argjson arm "${_ARM_KNOBS_JSON:-null}" \
             '{i: ($i|tonumber), kind: $kind, outcome: $outcome,
               t_startbot_s: ($t_startbot|tonumber),
@@ -768,8 +966,13 @@ YAML
               load_burners: ($burners|tonumber),
               loadavg_1m: (if $la == "" then null else ($la|tonumber) end),
               arm_knobs: $arm,
-              settle_s: ($arm | if . == null then null else .["PANE_SEND_SETTLE_S"].v end)}' >> "$ROWS"
-        printf 'boot %02d (%s): %s%s%s%s\n' "$i" "$kind" "$outcome" \
+              settle_s: ($arm | if . == null then null else .["PANE_SEND_SETTLE_S"].v end),
+              block: (if $blk == "" then null else ($blk|tonumber) end),
+              pos: (if $pos == "" then null else ($pos|tonumber) end),
+              arm_order: (if $ord == "" then null else ($ord | split(" ") | map(tonumber)) end),
+              arm_seed: (if $seed == "" then null else ($seed|tonumber) end)}' >> "$ROWS"
+        printf 'boot %02d (%s)%s: %s%s%s%s\n' "$i" "$kind" \
+            "${blk:+ block $blk pos $pos settle=$arm}" "$outcome" \
             "${t_submit:+ submit=${t_submit}s}" \
             "${boot_la:+ la=${boot_la}}" \
             "$([ "$retry_fired" -gt 0 ] && printf ' [send_retry fired]' || true)"
