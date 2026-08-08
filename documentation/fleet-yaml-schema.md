@@ -243,6 +243,16 @@ Equippable scheduled briefing (#627). A bot turns briefings on in `fleet.yaml` a
 fleet:
   bots:
     kev:
+      brief:                                # SessionStart boot brief (#904 M1 / #1102 R3) — default OFF
+        on_start: true                      # STRICT bool (a typo string is a parse error, never an arming).
+                                            # Composes a SessionStart hook (matchers: startup, compact) running
+                                            # `claudlobby brief --bot <id> --boot`: own dispatch lines (open/
+                                            # overdue/orphaned, <=3 + disclosed overflow) + an empty-state line
+                                            # with provenance (never a bare zero) + the door line. Token-capped
+                                            # ~250, fail-open one-liner on door failure, explicit 10s timeout.
+                                            # Compose-time gate: generate REFUSES if the installed CLI lacks
+                                            # `brief --boot` (composed settings outlive installs). Rollout is
+                                            # operator-held: single-bot canary until cost numbers are ratified.
       briefing:
         slots:                              # slot name -> systemd OnCalendar (NOT 5-field cron)
           morning: "*-*-* 08:30:00"         # daily 08:30

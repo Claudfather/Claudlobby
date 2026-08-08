@@ -1677,6 +1677,87 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
     return out
 
 
+# --- #904 M1: the SessionStart boot brief (epic #1102 R3, locked fork R3-F1) --
+
+
+# The platform default hook timeout is 600s; an explicit budget keeps a hung
+# door from delaying context assembly for ten minutes. 10s is ~11x the measured
+# warm floor; whether it survives host-reboot load is what the canary's
+# per-boot hook p95 measures (R3-F1 correction: measure-then-gate — if p95
+# approaches this, the held #1123 lazy-import branch lands before arming).
+BRIEF_HOOK_TIMEOUT_S = 10
+
+
+@functools.cache
+def _brief_cli_probe() -> tuple[str | None, str]:
+    """(certified executable, "") — or (None, why) when arming must refuse.
+
+    The compose-time arming gate: a subprocess probe of the PATH-resolved
+    binary, never an import check of THIS package — composed settings outlive
+    installs on this estate (the merged-but-not-installed gap was measured
+    live during R3-F1 ratification, #1102), so probing our own parser would
+    certify the wrong artifact. The returned path is composed into the hook
+    verbatim (the C2 absolute-path contract `_resolve_claudron_executable`
+    states for this same settings file), so the certified artifact and the
+    runtime artifact are one object.
+
+    The ``--boot`` containment check reads argparse's own generated help — the
+    option's self-description, not a source grep. Cached: host-invariant
+    within one compose process, and it runs per armed bot across generate,
+    validate, and freshbox otherwise.
+    """
+    import shutil
+    import subprocess
+
+    exe = shutil.which("claudlobby")
+    if exe is None:
+        return None, "no `claudlobby` on PATH at compose time"
+    try:
+        r = subprocess.run(
+            [exe, "brief", "--help"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"probing `claudlobby brief --help` failed: {e}"
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return None, (
+            tail[-1] if tail else f"`claudlobby brief --help` exited {r.returncode}"
+        )
+    if "--boot" not in r.stdout:
+        return None, "installed `claudlobby brief` predates the --boot mode"
+    return exe, ""
+
+
+def _with_brief_boot_hook(
+    hooks: dict[str, list[dict[str, Any]]], bot_id: str, exe: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a copy of the flat fleet.yaml-shaped hooks with the boot-brief
+    SessionStart entries appended (matchers ``startup`` and ``compact`` only —
+    resume is #986's lane, /clear is deferred with an un-cut condition, and
+    ``fork`` is excluded deliberately; fork R3-F1 rule 9).
+
+    The command is fail-open BY SHAPE: the platform cannot let a SessionStart
+    hook block the session, but a non-zero exit discards stdout — so the door
+    failing must itself exit 0 with one line naming the door, or the boot
+    carries nothing at all. `$?` expands at hook runtime, in the hook's shell.
+    """
+    # The EXECUTED path is the certified absolute exe (C2: hook context is not
+    # a login shell, PATH frequently omits a venv/pipx install — see
+    # _resolve_claudron_executable); the human-facing fallback text keeps the
+    # bare name, since it is an instruction to a reader, not an invocation.
+    fallback = (
+        f'echo "fleet-brief unavailable (rc $?) — claudlobby brief --bot {bot_id}"'
+    )
+    cmd = f"{exe} brief --bot {bot_id} --boot || {fallback}"
+    out = {k: list(v) for k, v in hooks.items()}
+    entries = out.setdefault("SessionStart", [])
+    for matcher in ("startup", "compact"):
+        entries.append(
+            {"command": cmd, "matcher": matcher, "timeout": BRIEF_HOOK_TIMEOUT_S}
+        )
+    return out
+
+
 # ----------------------------------------------------------------------
 # Claudron session loop (L2) — engine hooks + narrow verb grants per vault-wired
 # bot. The hook entries are a RENDERED COPY of a Claudron-owned contract surface
@@ -2169,7 +2250,20 @@ def compose_settings_local(
     # No claim env is composed: F1 is STRUCTURAL — the single capture prompt is
     # claimed by clauDNA's hook detecting the engine's `hook pre-compact` entry,
     # not by any composed CLAUDRON_CAPTURE_OWNER-style variable.
-    hooks = _compose_hooks(bot.hooks)
+    bot_hooks = bot.hooks
+    if bot.brief_on_start:
+        exe, why = _brief_cli_probe()
+        if exe is None:
+            raise ValueError(
+                f"bot {bot.bot_id}: brief.on_start is set but the installed "
+                f"CLI cannot serve the hook ({why}). Composed settings outlive "
+                "installs on this estate — arming now would compose a hook "
+                "whose every boot prints a failure line instead of a brief. "
+                "Pull/install a claudlobby with `brief --boot`, or disarm the "
+                "knob."
+            )
+        bot_hooks = _with_brief_boot_hook(bot_hooks, bot.bot_id, exe)
+    hooks = _compose_hooks(bot_hooks)
     if _session_loop_enabled(bot):
         executable, warning = _resolve_claudron_executable()
         if warning:
