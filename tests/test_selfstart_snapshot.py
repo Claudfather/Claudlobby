@@ -27,9 +27,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 
 # Every case dara named in the dispatch, plus the two denominator traps, the
-# two #1045-review regressions, and the #1043 contamination/typing cases. Raise
-# this when cases are added; never lower it to make a red wrapper green.
-MIN_ASSERTIONS = 119
+# two #1045-review regressions, the #1043 contamination/typing cases, and the
+# #1106 refusal-branch cases (8h-8k). Raise this when cases are added; never
+# lower it to make a red wrapper green.
+MIN_ASSERTIONS = 140
 
 
 @pytest.fixture(scope="module")
@@ -251,6 +252,48 @@ def test_a_reading_taken_after_a_rescue_refuses_to_be_a_result(run):
     assert "PASS: contaminated outranks too-early in the exit code" in run.stdout
     assert "PASS: incomplete outranks contaminated" in run.stdout
     assert "PASS: no receipt: exits 0" in run.stdout
+
+
+def test_a_boundary_that_is_not_one_is_refused_never_guessed(run):
+    """#1106. The three ways a receipt fails to carry a comparable boundary.
+
+    All three land in the same class — boundary suppressed, name list still
+    applied — so the class cannot tell them apart, and asserting on it alone
+    would pass against any arm being wired to any other. The reason string is
+    the discriminator, and it is the operator-facing half too: a field the
+    writer omitted, two the writer emitted, and one emitted in the wrong shape
+    are repaired in three different places.
+
+    These branches shipped with #1103 uncovered. vera confirmed by hand that
+    each already behaves to contract, so this closes a coverage gap rather than
+    a defect — but refuse-rather-than-guess is the load-bearing property of that
+    change, and an untested refusal path is how a gate quietly stops gating.
+
+    Mutation-checked rather than assumed: deleting each guarded line in turn
+    kills at least one assertion below. The ambiguity arm is the sharpest —
+    without it the two candidate stamps survive as a two-line string that
+    iso_utc_shaped still ACCEPTS, since its trailing-Z glob spans the newline,
+    so the run adopts a garbage boundary and stamps it USABLE.
+    """
+    # Absent, ambiguous and uncomparable are reported as three distinct things.
+    assert "PASS: and reports the field as ABSENT" in run.stdout
+    assert "PASS: and names ambiguity as the reason" in run.stdout
+    assert "PASS: and echoes the stamp so it can be repaired" in run.stdout
+    # ...and none of them is conflated with either of the others.
+    assert "PASS: absence is not reported as a present-but-unusable stamp" in run.stdout
+    assert "PASS: ambiguity is not reported as absence" in run.stdout
+    assert "PASS: a present stamp is not reported as absent" in run.stdout
+    # No unusable stamp is ever adopted as the boundary.
+    assert "PASS: and neither of the two candidates is adopted" in run.stdout
+    assert "PASS: and the uncomparable stamp is never adopted" in run.stdout
+    # Positive control on the ambiguity count: it is over DISTINCT values, so a
+    # repeated-but-consistent boundary must still be adopted AND must still
+    # decide. Without this, a helper that refused any repetition at all would
+    # satisfy the assertions above — an over-refusal that throws away a good
+    # boundary and drops every unnamed bot to ADJUDICATE for nothing.
+    assert "PASS: yet the boundary is ADOPTED, not refused as ambiguous" in run.stdout
+    assert "PASS: a payload after the adopted boundary is RESCUED" in run.stdout
+    assert "PASS: a payload before it is still a self-start" in run.stdout
 
 
 def test_the_absence_of_a_receipt_is_not_the_absence_of_a_rescue(run):
