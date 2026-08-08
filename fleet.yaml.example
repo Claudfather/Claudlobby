@@ -94,6 +94,14 @@ fleet:
     # observability:                               # uncomment to override system default values
     #   pulse_interval: 300
     #   reap_days: 7
+    #   # Mirror watchdog (#1024): flag a worker that reported and was then
+    #   # never re-dispatched. OFF by default — it reports that the ASSIGNMENT
+    #   # loop stalled, so arm it only where someone acts on that.
+    #   unassigned_check: false      # default false
+    #   unassigned_threshold: 7200   # seconds idle before flagging (default 7200 = 2h)
+    #   # Past max_age the check stops reporting AND clears its debounce, so a
+    #   # strand outliving the window goes quiet again — set 0 to refuse that.
+    #   unassigned_max_age: 86400    # stop reporting past this age (default 86400 = 24h; <=0 never stops)
 
   teams:
     engineering:

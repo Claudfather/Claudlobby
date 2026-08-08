@@ -292,6 +292,102 @@ or_ev2=$(grep -h '"type":"dispatch_orphaned"' "$OR_DIR"/data/events/fleet-*.json
 harness_check "#835 a second sweep does NOT re-record the same orphan (latch holds)" "$r"
 
 # ===========================================================================
+# #1024 — the MIRROR watchdog: reported, then never re-dispatched.
+#
+# Unit tests prove the join. What only running the real pulse can prove is that
+# the knob actually gates, that the manager exclusion actually excludes, and
+# that a re-dispatched worker actually goes quiet — three places where a check
+# that "works" in isolation still ships useless or noisy.
+#
+# The six-dispatch case below is the one that decides whether this design is
+# right at all. It is a real pattern, not a contrived edge: a manager amending a
+# task re-dispatches repeatedly, the worker answers only the last id, and every
+# earlier row stays open forever. Any check keyed on open-dispatch-exists breaks
+# on it in one of two directions.
+# ===========================================================================
+echo ""
+echo "=== validate #1024: reported-but-never-re-dispatched (mirror watchdog) ==="
+
+UA_LEDGER="$VAL_REPORT_LEDGER"
+UA_DISPATCH="$ROOT/state/dispatch-log.jsonl"
+ua_iso() { python3 -c "import datetime,sys;print(datetime.datetime.fromtimestamp(int(sys.argv[1]),datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1"; }
+
+# ua_bot <name> <check:1|0> <manager_tmux> [trailing_comment]
+# The composer writes the trailing comment on MANAGER bots only, so only the
+# manager fixture gets one — and it must, because bot_conf_get strips quotes but
+# NOT comments. bot_is_manager does its own stripping; putting the comment on a
+# worker here would instead corrupt _manager_target and silently kill the push
+# this section asserts on.
+ua_bot() {
+    local n="$1" chk="$2" mgr="$3" cmt="${4:-}" d="$ROOT/local/$FLEET/runtime/bots/$1"
+    mkdir -p "$d/data/events"
+    cat > "$d/bot.conf" <<CONF
+BOT_NAME="$n"
+BOT_ID="$n"
+BOT_SERVICE=""
+export MANAGER_TMUX=$mgr$cmt
+OBSERVABILITY_UNASSIGNED_CHECK=$chk
+OBSERVABILITY_UNASSIGNED_THRESHOLD=7200
+OBSERVABILITY_UNASSIGNED_MAX_AGE=86400
+CONF
+}
+ua_report()   { printf '{"ts":"%s","bot":"%s","task_id":"%s","status":"%s","summary":"x"}\n' "$(ua_iso "$2")" "$1" "${4:-}" "$3" >> "$UA_LEDGER"; }
+# ua_dispatch <bot> <dispatched_at_epoch> [task_id]
+ua_dispatch() { printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","task":"x","dispatched_at":%s,"expected_by":%s}\n' "$(ua_iso "$2")" "$MGR" "$1" "${3:-t-ua}" "$2" "$(($2 + 600))" >> "$UA_DISPATCH"; }
+
+mkdir -p "$(dirname "$UA_LEDGER")"
+ua_bot valunfire 1 "$MGR"      # armed, stranded  -> MUST fire
+ua_bot valunret  1 "$MGR"      # armed, re-tasked -> must stay quiet
+ua_bot valunoff  0 "$MGR"      # DEFAULT OFF      -> must stay quiet
+ua_bot valunmgr  1 valunmgr "  # this bot is a manager"   # -> must stay quiet
+ua_bot valunold  1 "$MGR"      # stale past cap   -> must stay quiet
+ua_bot valunsix  1 "$MGR"      # the six-dispatch case -> MUST fire
+
+# Stranded: dispatched 4h ago, reported terminal 3h ago, nothing since.
+ua_dispatch valunfire "$((now - 14400))"; ua_report valunfire "$((now - 10800))" completed t-ua-fire
+# Re-tasked AFTER reporting — the loop is intact, so this must NOT alarm. This is
+# the positive control: without it, a check that fires on every terminal report
+# would pass every other assertion here.
+ua_dispatch valunret "$((now - 14400))"; ua_report valunret "$((now - 10800))" completed t-ua-ret
+ua_dispatch valunret "$((now - 3600))"
+# Default-off: identical stranded shape, knob absent.
+ua_dispatch valunoff "$((now - 14400))"; ua_report valunoff "$((now - 10800))" completed t-ua-off
+# Manager: no assigner exists, so this is its resting state, not a strand.
+ua_dispatch valunmgr "$((now - 14400))"; ua_report valunmgr "$((now - 10800))" completed t-ua-mgr
+# Stale past the 24h cap: a known state, not an event.
+ua_dispatch valunold "$((now - 111600))"; ua_report valunold "$((now - 108000))" completed t-ua-old
+# THE SIX-DISPATCH CASE. One logical task, amended six times in 35 minutes. The
+# worker answers only the last id, so five rows stay open forever. It IS stranded
+# and must be reported — while a check keyed on those open rows would either page
+# about a healthy re-dispatching manager or read them as "still busy" and never
+# fire at all, which is #1024 recurring inside its own watchdog.
+ua_i=0
+while [ "$ua_i" -lt 6 ]; do
+    ua_dispatch valunsix "$((now - 14400 + ua_i * 300))" "t-ua-six-$ua_i"
+    ua_i=$((ua_i + 1))
+done
+ua_report valunsix "$((now - 10800))" completed t-ua-six-5
+
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
+ua_fired() { grep -qh '"type":"worker_unassigned"' "$ROOT/local/$FLEET/runtime/bots/$1"/data/events/fleet-*.jsonl 2>/dev/null; }
+
+ua_fired valunfire && r=yes || r=no
+harness_check "#1024 a worker reported-and-never-re-dispatched emits worker_unassigned" "$r"
+ua_fired valunsix && r=yes || r=no
+harness_check "#1024 fires through five stale OPEN dispatches (re-dispatch case, the common one)" "$r"
+ua_fired valunret && r=no || r=yes
+harness_check "#1024 a worker re-tasked after reporting stays quiet (positive control)" "$r"
+ua_fired valunoff && r=no || r=yes
+harness_check "#1024 DEFAULT OFF — no event without the composed knob" "$r"
+ua_fired valunmgr && r=no || r=yes
+harness_check "#1024 a manager is excluded (bot_is_manager, trailing comment and all)" "$r"
+ua_fired valunold && r=no || r=yes
+harness_check "#1024 a strand past max_age stops being reported — and so goes silent, the deliberate half of the trade" "$r"
+mgr_pane2=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
+printf '%s' "$mgr_pane2" | grep -q 'worker_unassigned' && r=yes || r=no
+harness_check "#1024 the manager is actually pushed the strand via [FLEET-PULSE]" "$r"
+
+# ===========================================================================
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.
 # Stubs claude/claudlobby on PATH so this needs no Claude auth or real fleet.
 # ===========================================================================

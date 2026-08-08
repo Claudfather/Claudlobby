@@ -776,6 +776,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             obs.dispatch_deadline,
             obs.bridge_heal,
             obs.bridge_heal_max_attempts,
+            obs.unassigned_check,
+            obs.unassigned_threshold,
+            obs.unassigned_max_age,
         ]
     ):
         lines.append("")
@@ -804,6 +807,21 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if obs.bridge_heal_max_attempts is not None:
             lines.append(
                 f"export BRIDGE_HEAL_MAX_ATTEMPTS={_shq(obs.bridge_heal_max_attempts)}"
+            )
+        if obs.unassigned_check is not None:
+            # Same shell-boolean rule as bridge_heal above: fleet-pulse gates on
+            # the string "1", so _shq(bool) would render "True" and leave the
+            # check silently off.
+            lines.append(
+                f"export OBSERVABILITY_UNASSIGNED_CHECK={'1' if obs.unassigned_check else '0'}"
+            )
+        if obs.unassigned_threshold is not None:
+            lines.append(
+                f"export OBSERVABILITY_UNASSIGNED_THRESHOLD={_shq(obs.unassigned_threshold)}"
+            )
+        if obs.unassigned_max_age is not None:
+            lines.append(
+                f"export OBSERVABILITY_UNASSIGNED_MAX_AGE={_shq(obs.unassigned_max_age)}"
             )
 
     # Project validation tiers (projects.yaml) — the repo -> closure-bar map,

@@ -123,6 +123,21 @@ class ObservabilityConfig:
     bridge_heal: bool | None = None
     # heal bounce cap before the ladder escalates to a human (keepalive default 3)
     bridge_heal_max_attempts: int | None = None
+    # enable the #1024 mirror watchdog: flag a worker that reported terminal and
+    # was never re-dispatched. Structured config rather than fleet-tier .env for
+    # the same reason as bridge_heal, one door over — the composed fleet-pulse
+    # unit carries four fixed Environment= lines and sources no .env, so bot.conf
+    # is the only path that reaches the check.
+    unassigned_check: bool | None = None
+    # seconds since the terminal report before the worker is flagged unassigned
+    unassigned_threshold: int | None = None
+    # seconds past which a strand stops being reported: a long-idle bot is a
+    # known state, not an event, and re-paging it forever is how the alert
+    # becomes wallpaper. The trade is real in both directions — past this age
+    # the check also clears its debounce, so the signal stops being
+    # distinguishable from "resolved" and a strand outliving the window goes
+    # quiet. <= 0 disables the cap and keeps reporting forever.
+    unassigned_max_age: int | None = None
 
 
 @dataclass
@@ -927,6 +942,9 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
     dd = raw.get("dispatch_deadline")
     bh = raw.get("bridge_heal")
     bhma = raw.get("bridge_heal_max_attempts")
+    uc = raw.get("unassigned_check")
+    ut = raw.get("unassigned_threshold")
+    uma = raw.get("unassigned_max_age")
     return ObservabilityConfig(
         pulse_interval=int(pi) if pi is not None else None,
         reap_days=int(rd) if rd is not None else None,
@@ -934,6 +952,9 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
         dispatch_deadline=int(dd) if dd is not None else None,
         bridge_heal=bool(bh) if bh is not None else None,
         bridge_heal_max_attempts=int(bhma) if bhma is not None else None,
+        unassigned_check=bool(uc) if uc is not None else None,
+        unassigned_threshold=int(ut) if ut is not None else None,
+        unassigned_max_age=int(uma) if uma is not None else None,
     )
 
 
@@ -1030,6 +1051,15 @@ def _merge_observability(
         bridge_heal_max_attempts=override.bridge_heal_max_attempts
         if override.bridge_heal_max_attempts is not None
         else default.bridge_heal_max_attempts,
+        unassigned_check=override.unassigned_check
+        if override.unassigned_check is not None
+        else default.unassigned_check,
+        unassigned_threshold=override.unassigned_threshold
+        if override.unassigned_threshold is not None
+        else default.unassigned_threshold,
+        unassigned_max_age=override.unassigned_max_age
+        if override.unassigned_max_age is not None
+        else default.unassigned_max_age,
     )
 
 
