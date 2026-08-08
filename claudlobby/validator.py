@@ -1019,38 +1019,113 @@ def _validate_sweep(fleet: FleetConfig, report: ValidationReport) -> None:
         )
 
 
+def _declared_bots(fleet_yaml: Path) -> set[str] | None:
+    """Bot names DECLARED in a fleet.yaml, or None when it cannot be read.
+
+    Deliberately not ``load_fleet``: this reads a *peer's* manifest, and
+    ``load_fleet`` raises on any config error, which would make validating one
+    fleet fail because an unrelated fleet's file is broken. So it is a minimal
+    structural read — and None, never an empty set, when that read fails, so the
+    caller can disclose the gap instead of scoring the peer as declaring nothing.
+    """
+    import yaml
+
+    try:
+        doc = yaml.safe_load(fleet_yaml.read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    # `bots` nests under `fleet:` (config.load_fleet reads doc["fleet"]["bots"]).
+    # A top-level `bots:` key parses fine and yields nothing, which is exactly
+    # how a hand-written fixture silently declares zero bots.
+    if not isinstance(doc, dict):
+        return None
+    block = doc.get("fleet")
+    if not isinstance(block, dict):
+        return None
+    bots = block.get("bots")
+    if bots is None:
+        return set()
+    if not isinstance(bots, dict):
+        return None
+    return {str(b) for b in bots}
+
+
 def _validate_cross_fleet_collisions(
     fleet: FleetConfig, paths: Paths, report: ValidationReport
 ) -> None:
-    """Warn when bot names collide with bots in other fleets on the same host.
+    """Fail when one bot name is declared by more than one fleet on this host.
 
-    tmux session names are derived from the bot directory basename, so two
-    fleets with a bot named 'alex' would fight over the same tmux session.
-    Fleets are enumerated at both depths (flat ``local/<fleet>/`` and nested
-    ``local/<system>/<fleet>/``), so a nested sibling is not invisible to the
-    scan.
+    Two independent consumers depend on host-wide name uniqueness and neither
+    checks it:
+
+    * **tmux session names** derive from the bot directory basename, so two
+      fleets with an ``alex`` fight over one session.
+    * **The dispatch join** (#526) keys on bare bot name across a *host-global*
+      ``state/dispatch-log.jsonl`` and *per-fleet* report ledgers, with no fleet
+      field anywhere. A collision silently blends two bots' dispatch histories
+      under one key — and because both ledgers are present and readable, the
+      absent/unreadable omission gate in ``brief.py`` does not fire either. No
+      error, no degradation entry: the numbers are just wrong.
+
+    Rosters come from each fleet's **declared** manifest, never from
+    ``runtime/bots/`` on disk. That distinction is the substance of the fix, and
+    the disk-derived predecessor was wrong in both directions: a fleet declaring
+    a colliding name was invisible until it had been generated (i.e. the check
+    missed it at exactly the moment it could still be prevented), while a stale
+    leftover directory produced a collision against a name nobody declares.
+
+    The comparison is case-insensitive because that is what the join it guards
+    does — ``dispatch-overdue.py`` lowercases bot names on both sides, so
+    ``Alex`` and ``alex`` are one key there whatever the directories look like.
+
+    Host-wide, not current-fleet-vs-others: any name in two fleets is reported,
+    so running ``validate`` on any one fleet catches a collision anywhere. A peer
+    manifest that cannot be read is a WARNING naming it — a silently skipped
+    fleet is a silently shrinking denominator, which is the failure this check
+    exists to prevent, one level up.
     """
     local_dir = paths.root / "local"
     if not local_dir.is_dir():
         return
 
     current_fleet = paths.fleet_dir.name if paths.fleet_dir else None
-    bot_names = set(fleet.bots)
+
+    # name (lowercased) -> sorted list of fleets declaring it
+    seen: dict[str, list[str]] = {}
+
+    def _record(fleet_name: str, names) -> None:
+        for bot in names:
+            seen.setdefault(str(bot).lower(), []).append(fleet_name)
+
+    # The fleet under validation comes from the already-parsed config, not from
+    # re-reading its own manifest — it is authoritative and may not be on disk
+    # in the same shape (seed mode, --root overrides).
+    _record(current_fleet or fleet.name, fleet.bots)
 
     for fleet_dir in _iter_fleet_dirs(local_dir):
         if fleet_dir.name == current_fleet:
             continue
-        other_bots_dir = fleet_dir / "runtime" / "bots"
-        if not other_bots_dir.is_dir():
+        manifest = fleet_dir / "fleet.yaml"
+        if not manifest.is_file():
+            continue  # not a fleet — a container dir, or a bare husk
+        declared = _declared_bots(manifest)
+        if declared is None:
+            report.warnings.append(
+                f"could not read declared bots from {manifest} — that fleet is "
+                f"NOT covered by the cross-fleet bot-name uniqueness check"
+            )
             continue
-        for bot_dir in sorted(other_bots_dir.iterdir()):
-            if not bot_dir.is_dir() or not (bot_dir / "bot.conf").is_file():
-                continue
-            if bot_dir.name in bot_names:
-                report.warnings.append(
-                    f"bot '{bot_dir.name}' also exists in fleet '{fleet_dir.name}' "
-                    f"— tmux session names will collide on this host"
-                )
+        _record(fleet_dir.name, declared)
+
+    for bot, fleets in sorted(seen.items()):
+        if len(fleets) > 1:
+            where = ", ".join(f"'{f}'" for f in sorted(fleets))
+            report.errors.append(
+                f"bot name '{bot}' is declared by {len(fleets)} fleets on this "
+                f"host ({where}) — names must be unique host-wide: tmux sessions "
+                f"collide, and the dispatch/report join (#526) keys on bare bot "
+                f"name and would blend their histories"
+            )
 
 
 def _validate_timers(fleet: FleetConfig, report: ValidationReport) -> None:

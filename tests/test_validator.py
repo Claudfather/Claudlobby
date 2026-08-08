@@ -594,71 +594,156 @@ class TestHookCommandSourceGuard:
 
 
 class TestCrossFleetCollisions:
-    """Cross-fleet bot-name collision detection."""
+    """#1125 — host-wide bot-name uniqueness, from DECLARED rosters.
+
+    Two consumers depend on the invariant and neither checks it: tmux session
+    names (derived from the bot dir basename) and the #526 dispatch join, which
+    keys on bare bot name across a host-global dispatch log and per-fleet report
+    ledgers. A collision blends two bots' histories under one key while both
+    ledgers stay present and readable — so brief.py's absent/unreadable omission
+    gate does not fire either, and the numbers are simply wrong.
+
+    The predecessor derived peer rosters from ``runtime/bots/*/bot.conf`` — from
+    DISK — and was wrong in both directions. Both failure modes are measured
+    below, because they are the substance of the change rather than incidental.
+    """
 
     def _env_patch(self, monkeypatch):
         monkeypatch.setenv("GITHUB_PAT", "ghp_test")
         monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
         monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
 
-    def test_collision_detected(self, fleet_dir, monkeypatch):
-        """Bot name existing in another fleet's runtime triggers a warning."""
-        self._env_patch(monkeypatch)
-        # Set up an overlay fleet structure
-        my_fleet = fleet_dir / "local" / "my-fleet"
-        my_fleet.mkdir(parents=True)
-        (my_fleet / "fleet.yaml").write_text((fleet_dir / "fleet.yaml").read_text())
+    def _peer(self, root: Path, name: str, bots: list[str], *, generated=False, body=None):
+        """A peer fleet declaring *bots* in its fleet.yaml.
 
-        # Create another fleet with a colliding bot name ('lead')
-        other_bots = fleet_dir / "local" / "other-fleet" / "runtime" / "bots" / "lead"
-        other_bots.mkdir(parents=True)
-        (other_bots / "bot.conf").write_text("BOT_NAME=lead\n")
-
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
-        report = validate(fleet, paths)
-        assert any(
-            "lead" in w and "other-fleet" in w and "collide" in w
-            for w in report.warnings
+        ``bots:`` nests under ``fleet:`` — a top-level key parses fine and
+        declares NOTHING, which is exactly how a hand-written fixture silently
+        tests an empty roster.
+        """
+        d = root / "local" / name
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "fleet.yaml").write_text(
+            body
+            if body is not None
+            else f"fleet:\n  name: {name}\n  service_prefix: com.{name}\n  bots:\n"
+            + "".join(f"    {b}:\n      expertise: [software-engineering]\n" for b in bots)
         )
+        if generated:
+            for b in bots:
+                bd = d / "runtime" / "bots" / b
+                bd.mkdir(parents=True, exist_ok=True)
+                (bd / "bot.conf").write_text(f"export BOT_NAME={b}\n")
+        return d
+
+    def _report(self, fleet_dir: Path, monkeypatch, my_name="my-fleet"):
+        self._env_patch(monkeypatch)
+        mine = fleet_dir / "local" / my_name
+        mine.mkdir(parents=True, exist_ok=True)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return validate(fleet, Paths(root=fleet_dir, fleet_dir=mine)), fleet
+
+    def test_collision_declared_in_a_peer_manifest_is_an_error(
+        self, fleet_dir, monkeypatch
+    ):
+        self._peer(fleet_dir, "other-fleet", ["lead"], generated=True)
+        report, fleet = self._report(fleet_dir, monkeypatch)
+        assert "lead" in fleet.bots, "fixture control: our fleet must declare 'lead'"
+        assert any(
+            "lead" in e and "other-fleet" in e and "my-fleet" in e
+            for e in report.errors
+        ), report.errors
+
+    def test_declared_but_never_generated_peer_is_detected(
+        self, fleet_dir, monkeypatch
+    ):
+        """THE FALSE NEGATIVE the disk-derived check had.
+
+        A peer that declares a colliding name but has never been generated has no
+        runtime/bots/ at all, so the old scan saw nothing — it missed the
+        collision at exactly the moment it could still be prevented, and only
+        noticed after someone generated the very thing it should have blocked.
+        """
+        self._peer(fleet_dir, "ungenerated", ["lead"], generated=False)
+        assert not (fleet_dir / "local" / "ungenerated" / "runtime").exists()
+        report, _ = self._report(fleet_dir, monkeypatch)
+        assert any("lead" in e and "ungenerated" in e for e in report.errors), (
+            report.errors
+        )
+
+    def test_a_stale_leftover_directory_is_not_a_collision(
+        self, fleet_dir, monkeypatch
+    ):
+        """THE FALSE POSITIVE the disk-derived check had.
+
+        A leftover runtime/bots/lead/ in a fleet whose manifest no longer
+        declares it is residue, not a claim on the name.
+        """
+        peer = self._peer(fleet_dir, "stale-fleet", ["someone-else"], generated=False)
+        ghost = peer / "runtime" / "bots" / "lead"
+        ghost.mkdir(parents=True)
+        (ghost / "bot.conf").write_text("export BOT_NAME=lead\n")
+        report, _ = self._report(fleet_dir, monkeypatch)
+        assert not any("lead" in e and "stale-fleet" in e for e in report.errors), (
+            report.errors
+        )
+
+    def test_comparison_is_case_insensitive(self, fleet_dir, monkeypatch):
+        """The join it guards lowercases both sides, so 'Lead' and 'lead' are one
+        key there whatever the directories look like."""
+        self._peer(fleet_dir, "case-fleet", ["LEAD"], generated=True)
+        report, _ = self._report(fleet_dir, monkeypatch)
+        assert any("lead" in e.lower() and "case-fleet" in e for e in report.errors), (
+            report.errors
+        )
+
+    def test_collision_between_two_OTHER_fleets_is_reported(
+        self, fleet_dir, monkeypatch
+    ):
+        """Host-wide, not current-fleet-vs-others: running validate on any one
+        fleet catches a collision anywhere, which is what makes it one enforced
+        check rather than N hopeful ones."""
+        self._peer(fleet_dir, "peer-a", ["shared-name"], generated=True)
+        self._peer(fleet_dir, "peer-b", ["shared-name"], generated=False)
+        report, _ = self._report(fleet_dir, monkeypatch)
+        assert any(
+            "shared-name" in e and "peer-a" in e and "peer-b" in e
+            for e in report.errors
+        ), report.errors
+
+    def test_unreadable_peer_manifest_is_disclosed_not_silently_skipped(
+        self, fleet_dir, monkeypatch
+    ):
+        """A skipped fleet is a silently shrinking denominator — the failure this
+        check exists to prevent, one level up."""
+        self._peer(fleet_dir, "broken", [], body="fleet: [not: a: mapping\n")
+        report, _ = self._report(fleet_dir, monkeypatch)
+        assert any(
+            "broken" in w and "NOT covered" in w for w in report.warnings
+        ), report.warnings
 
     def test_no_collision_when_names_differ(self, fleet_dir, monkeypatch):
-        """Bot names unique across fleets produce no collision warning."""
-        self._env_patch(monkeypatch)
-        my_fleet = fleet_dir / "local" / "my-fleet"
-        my_fleet.mkdir(parents=True)
+        self._peer(fleet_dir, "other-fleet", ["unique-bot"], generated=True)
+        report, _ = self._report(fleet_dir, monkeypatch)
+        assert not any("declared by" in e for e in report.errors), report.errors
 
-        other_bots = (
-            fleet_dir / "local" / "other-fleet" / "runtime" / "bots" / "unique-bot"
+    def test_a_fleets_own_bots_do_not_self_collide(self, fleet_dir, monkeypatch):
+        report, _ = self._report(fleet_dir, monkeypatch)
+        assert not any("declared by" in e for e in report.errors), report.errors
+
+    def test_nested_fleets_are_covered(self, fleet_dir, monkeypatch):
+        """local/<system>/<fleet>/ — a nested sibling must not be invisible."""
+        (fleet_dir / "local" / "a-system").mkdir(parents=True, exist_ok=True)
+        self._peer(fleet_dir, "a-system/nested-fleet", ["lead"], generated=False)
+        report, _ = self._report(fleet_dir, monkeypatch)
+        assert any("lead" in e and "nested-fleet" in e for e in report.errors), (
+            report.errors
         )
-        other_bots.mkdir(parents=True)
-        (other_bots / "bot.conf").write_text("BOT_NAME=unique-bot\n")
-
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
-        report = validate(fleet, paths)
-        assert not any("collide" in w for w in report.warnings)
-
-    def test_no_collision_with_own_fleet(self, fleet_dir, monkeypatch):
-        """Bots in the current fleet's own runtime dir don't trigger collision."""
-        self._env_patch(monkeypatch)
-        my_fleet = fleet_dir / "local" / "my-fleet"
-        own_bots = my_fleet / "runtime" / "bots" / "lead"
-        own_bots.mkdir(parents=True)
-        (own_bots / "bot.conf").write_text("BOT_NAME=lead\n")
-
-        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=my_fleet)
-        report = validate(fleet, paths)
-        assert not any("collide" in w for w in report.warnings)
 
     def test_no_local_dir_no_crash(self, fleet_dir, monkeypatch):
-        """No local/ directory at all — should not crash."""
         self._env_patch(monkeypatch)
         fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
-        paths = Paths(root=fleet_dir, fleet_dir=None)
-        report = validate(fleet, paths)
-        assert not any("collide" in w for w in report.warnings)
+        report = validate(fleet, Paths(root=fleet_dir, fleet_dir=None))
+        assert not any("declared by" in e for e in report.errors)
 
 
 class TestAutonomousRunnerValidation:
