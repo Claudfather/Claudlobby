@@ -124,11 +124,69 @@ _claudron_query_before() {
     # claudron-less hosts); every failure past here is caught by the
     # 2>/dev/null + return-0 net on the invocations themselves.
     command -v claudron >/dev/null 2>&1 || return 0
-    local raw parsed pointers
-    # The whole task is one quoted query argument (lookup tokenizes
-    # internally; quoting avoids glob expansion of task text).
+    local raw parsed pointers query subject stripped
+    # QUERY IS THE HEAD OF THE TASK, NOT THE WHOLE TASK.
+    #
+    # Passing the entire payload collapses the ranking rather than widening it.
+    # Measured: a short query graded 160/120/80/80 across candidates; the same
+    # lookup with a full dispatch as the query returned a FLAT 200 for four
+    # unrelated notes. Whatever sits at the global ceiling comes back, because a
+    # paragraph resembles nothing in particular. The result is a pointer set that
+    # is topically INERT — the same handful returned across unrelated subjects.
+    #
+    # And a signal that fires on every input carries no information about the
+    # input. Two readers independently reported these pointers becoming chrome
+    # within an hour — including, on the day it applied, the note whose title
+    # names the exact error class both of them then committed. That is the case
+    # for this fix on its own, separate from anything the ranking does.
+    #
+    # A CHARACTER cap, not a line cap: `TASK="$*"` and a dispatch is one line by
+    # construction (the tmux send is single-line), so "first line or two" is the
+    # whole payload and would change nothing.
+    #
+    # The head is only the subject when the CALLER leads with the subject. The
+    # fleet comms protocol asks for that, but this file cannot enforce a
+    # convention about text composed before it ever runs -- and measured traffic
+    # breaks it. A real dispatch whose head is a `[fleet memory: ...]` preamble
+    # caps to 200 characters of pure boilerplate, cut mid-word, with ZERO subject
+    # matter in it. That reproduces the exact defect this wedge exists to fix,
+    # via saturation instead of raw length. So the one known-shape prefix is
+    # stripped before the cap, the same way claudron strings are sanitized to a
+    # known shape below.
+    #
+    # This wedge does not poison its OWN query. The prepend at the foot of this
+    # function runs after the lookup -- verified by execution rather than by line
+    # order: the pointer titles a run injects are absent from the query that same
+    # run sent. Any preamble seen here was carried in by the caller.
+    #
+    # The loop, rather than a single strip: a stacked preamble (a dispatch
+    # composed from an already-rendered one) puts the query straight back at 100%
+    # boilerplate, which is the same defect and not a different one.
+    #
+    # Stripping to the FIRST "] " is deliberate. A note title containing "]"
+    # leaves residue behind; consuming to the LAST one would eat subject matter.
+    # Residue only degrades the query, eating the subject reproduces the bug --
+    # so the ambiguous case fails toward residue.
+    subject="$TASK"
+    while [ "${subject#\[fleet memory: }" != "$subject" ]; do
+        # Guards the malformed no-"] " case: the expansion below is then a no-op
+        # and the loop would never terminate.
+        stripped="${subject#*\] }"
+        [ "$stripped" != "$subject" ] || break
+        subject="$stripped"
+    done
+    # A task that was ONLY a preamble strips to nothing. Querying on empty is
+    # not a degraded lookup, it is the ORIGINAL defect through the opposite
+    # door: with no subject to rank against, whatever sits at the global ceiling
+    # comes back, which is the inert pointer set this wedge exists to stop
+    # emitting. Nothing to search on means no pointers, not arbitrary ones.
+    case "$subject" in
+        *[![:space:]]*) : ;;
+        *) return 0 ;;
+    esac
+    query=$(printf '%s' "$subject" | cut -c1-"${CLAUDRON_QUERY_MAX_CHARS:-200}")
     raw=$(claudron lookup --json \
-        --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$TASK" 2>/dev/null) || return 0
+        --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$query" 2>/dev/null) || return 0
     # Emits "<count>\t<title (abs path); ...>". Claudron-supplied strings are
     # sanitized to printable-by-construction before use: pipes become "/"
     # (the [BOTCOMMAND] envelope is pipe-delimited) and runs of whitespace OR

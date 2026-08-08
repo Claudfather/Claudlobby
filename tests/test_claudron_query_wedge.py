@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import call_lib_fn
 from tests.test_task_id_dispatch import _bash, _fake_lib
 
@@ -279,3 +281,201 @@ def test_clean_output_is_fixed_point_of_tmux_sanitizer(tmp_path):
     assert r.returncode == 0, r.stderr
     assert row["claudron_hits"] == "1"
     assert call_lib_fn("sanitize_tmux_input", row["task"]) == row["task"]
+
+
+# ── query truncation (#claudron-query-collapse) ───────────────────────────────
+#
+# Passing the WHOLE dispatch as the lookup query collapses the ranking: measured,
+# a short query graded 160/120/80/80 while a full dispatch returned a FLAT 200
+# for four unrelated notes. The pointer set then stops varying with the subject —
+# and a signal that fires on every input carries no information about the input.
+#
+# The acceptance criterion is a PAIR, and neither half proves anything alone:
+#   different subjects -> different pointer sets   (else the set is inert)
+#   same query twice   -> the SAME pointer set     (else the variance is NOISE)
+# Variance alone is satisfiable by a nondeterministic lookup, which would pass
+# while grading nothing. These tests assert the pair at the QUERY layer, which is
+# what this repo controls; the pointer-set version needs a real vault and is the
+# gated acceptance run.
+
+
+def _query_sent(tmp_path: Path) -> str:
+    """The query argument the wedge actually handed to `claudron lookup`."""
+    argv = (tmp_path / "claudron-argv.txt").read_text().splitlines()
+    return argv[-1]
+
+
+def _query_for(tmp_path: Path, task: str, sub: str, **extra) -> str:
+    """One dispatch in its OWN directory, returning the query claudron saw.
+    Separate dirs because _fake_lib mkdirs without exist_ok, so two runs cannot
+    share a root — and comparing two runs is the whole point of the pair below."""
+    root = tmp_path / sub
+    root.mkdir()
+    env = {**_wedge_env(root, json.dumps(TWO_HITS)), **extra}
+    _run_dispatch(root, env, task=task)
+    return _query_sent(root)
+
+
+def test_query_is_capped_not_the_whole_task(tmp_path):
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    long_task = "restore the ranking " * 40  # ~800 chars, one line
+    _run_dispatch(tmp_path, env, task=long_task)
+    sent = _query_sent(tmp_path)
+    assert len(sent) == 200, f"expected a 200-char cap, got {len(sent)}"
+    assert sent == long_task[:200]
+
+
+def test_short_task_passes_through_whole(tmp_path):
+    # The cap must not perturb the common case.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    short = "fix the spotify rate limit job"
+    _run_dispatch(tmp_path, env, task=short)
+    assert _query_sent(tmp_path) == short
+
+
+def test_same_task_yields_an_identical_query(tmp_path):
+    # DETERMINISM half. Without it, "different subjects differ" is satisfied by
+    # noise — and a randomly-varying pointer set is worse than a flat one,
+    # because at least a flat set is stable enough to learn to ignore.
+    task = "investigate the boot strand on pranav " * 12
+    assert _query_for(tmp_path, task, "run1") == _query_for(tmp_path, task, "run2")
+
+
+def test_different_subjects_yield_different_queries(tmp_path):
+    # VARIANCE half. Both tasks exceed the cap, so before truncation both were
+    # simply "the whole payload" — long, and topically indistinguishable to a
+    # ranker that returns its global ceiling for any paragraph.
+    a = _query_for(tmp_path, "restore the claudron ranking " * 20, "subjA")
+    b = _query_for(tmp_path, "extend the pane verify budget " * 20, "subjB")
+    assert a != b
+
+
+def test_cap_is_overridable(tmp_path):
+    env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "40"}
+    _run_dispatch(tmp_path, env, task="restore the ranking " * 40)
+    assert len(_query_sent(tmp_path)) == 40
+
+
+# The cap alone assumes the head of a task IS the subject. That is a convention
+# about what CALLERS compose, which this file cannot enforce -- and real traffic
+# breaks it: an envelope dispatch leads with a `[fleet memory: ...]` block, so
+# the 200-char window fills with pure boilerplate and the query is topically
+# inert again. Same defect the cap exists to fix, reached by saturation rather
+# than by length.
+#
+# NOT circular: the wedge does not poison its own query. Its prepend runs after
+# the lookup -- verified by execution, in the first test below, which asserts the
+# titles a run injects are absent from the query that same run sent. A line-number
+# argument would not settle that; these tests are the reason it does not have to.
+
+PREAMBLE = (
+    "[fleet memory: artemis-skills full-system spec extraction "
+    "(/vault/skills-framework-index.md); Correct-then-sweep: a fix applied only "
+    "where it was pointed out leaves the superseded claim alive in the same "
+    "document (/vault/correct-then-sweep.md)] "
+)
+SUBJECT = "restore the claudron ranking for enveloped dispatches"
+
+
+def test_leading_fleet_memory_preamble_is_stripped_before_the_cap(tmp_path):
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=PREAMBLE + SUBJECT)
+    sent = _query_sent(tmp_path)
+    assert sent == SUBJECT, f"expected the subject alone, got {sent!r}"
+    # The failure this closes: without the strip the whole 200-char window is
+    # preamble and none of the subject survives.
+    assert "[fleet memory:" not in sent
+    # ORDERING, asserted rather than argued: the pointers this very run prepends
+    # must not appear in the query it sent. If they did, the prepend preceded the
+    # lookup and the wedge would be feeding on its own output.
+    for hit in TWO_HITS["results"]:
+        assert hit["title"] not in sent
+
+
+def test_stacked_preambles_are_all_stripped(tmp_path):
+    # A dispatch composed from an already-rendered one carries two. Stripping
+    # only the outermost puts the query straight back at 100% boilerplate, which
+    # is the same defect rather than a milder one -- so the strip repeats.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=PREAMBLE + PREAMBLE + SUBJECT)
+    assert _query_sent(tmp_path) == SUBJECT
+
+
+def test_preamble_shaped_text_after_the_head_is_left_alone(tmp_path):
+    # Only a LEADING block is boilerplate. The same shape further in is the
+    # caller talking about a preamble, which is subject matter -- and eating it
+    # would be the very failure being fixed, self-inflicted.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    task = "explain why " + PREAMBLE + "saturates the query"
+    _run_dispatch(tmp_path, env, task=task)
+    assert _query_sent(tmp_path) == task[:200]
+    assert _query_sent(tmp_path).startswith("explain why ")
+
+
+def test_unterminated_preamble_terminates(tmp_path):
+    # A malformed head has no "] " to strip to, so the expansion is a no-op. The
+    # guard is what stops the loop; without it this test does not fail, it HANGS.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    task = "[fleet memory: never closed and then some subject matter"
+    _run_dispatch(tmp_path, env, task=task)
+    assert _query_sent(tmp_path) == task
+
+
+# A strip rule is a pattern match, and pattern matches have edges. Over-matching
+# eats subject matter -- the same defect being fixed, pointing the other way --
+# so the boundary is pinned here rather than left to be rediscovered.
+
+
+def _lookup_ran(tmp_path) -> bool:
+    return (tmp_path / "claudron-argv.txt").exists()
+
+
+def test_preamble_only_task_does_not_query_on_empty(tmp_path):
+    # The over-match case with teeth. A task that was ONLY a preamble strips to
+    # nothing, and an EMPTY query is not a degraded lookup -- it is the original
+    # defect through the opposite door, because with no subject to rank against
+    # whatever sits at the global ceiling comes back. That is precisely the inert
+    # pointer set this wedge exists to stop emitting. So: no subject, no lookup.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=PREAMBLE)
+    assert not _lookup_ran(tmp_path), "queried the vault on an empty string"
+
+
+def test_preamble_plus_whitespace_does_not_query(tmp_path):
+    # Same case, reached via trailing whitespace rather than an exact boundary.
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=PREAMBLE + "   ")
+    assert not _lookup_ran(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "task,expected,why",
+    [
+        (
+            "[fleet memory: note [draft] one (/v/a.md)] real subject here",
+            "one (/v/a.md)] real subject here",
+            "a ] inside a pointer title leaves RESIDUE -- the deliberate "
+            "direction, since consuming to the last ] would eat the subject",
+        ),
+        (
+            "[fleet memory:x] real subject here",
+            "[fleet memory:x] real subject here",
+            "no space after the colon is not our prefix; left whole rather "
+            "than guessed at",
+        ),
+        (
+            "[urgent] fix the ranking collapse",
+            "[urgent] fix the ranking collapse",
+            "an unrelated leading bracket block is subject matter, not ours",
+        ),
+        (
+            "[fleet memory: never closed and then subject",
+            "[fleet memory: never closed and then subject",
+            "no closing bracket: nothing to strip to, so nothing is stripped",
+        ),
+    ],
+)
+def test_strip_boundary(tmp_path, task, expected, why):
+    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    _run_dispatch(tmp_path, env, task=task)
+    assert _query_sent(tmp_path) == expected, why
