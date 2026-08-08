@@ -758,3 +758,67 @@ def test_ack_refuses_when_the_report_section_was_not_served(paths: Paths, tmp_pa
     )
     assert cmd_brief(args) == 1
     assert not cursor_path(Paths(root=paths.root, fleet_dir=fleet_dir), "alex").exists()
+
+
+# --- the omit suppresses true positives too, and must say how many ------------
+
+
+def test_omitted_dispatches_counts_the_rows_it_could_not_adjudicate(paths: Paths):
+    """The omit is honest but lossy: with no ledger, a genuinely overdue
+    dispatch and a finished one are the same bytes. What must not happen is the
+    real one going unmentioned — under-reporting is the worse failure, because a
+    noisy watchdog gets audited and a silent one does not."""
+    _write_jsonl(
+        _dlog(paths),
+        [
+            _dispatch("alex", NOW - 10_000, NOW - 5_000, task_id="t-past-1"),
+            _dispatch("alex", NOW - 9_000, NOW - 4_000, task_id="t-past-2"),
+            _dispatch("alex", NOW - 100, NOW + 5_000, task_id="t-not-yet-due"),
+            _dispatch("ari", NOW - 10_000, NOW - 5_000, task_id="t-other-bot"),
+        ],
+    )
+    assert not _rlog(paths).exists()
+
+    brief = build_brief(_fleet(), paths, "alex", NOW)
+    assert brief["dispatches"] == {}
+
+    entry = _find(brief, "dispatches", "#526")[0]
+    # This bot's past-deadline rows only: not the future one, not the peer's.
+    assert entry["count"] == 2
+    assert "2 dispatch row(s)" in entry["reason"]
+    assert "could not be adjudicated" in entry["reason"]
+
+    # And it reaches the section header, not just the degraded block — where a
+    # bare "unavailable" would read the same as hiding nothing.
+    text = format_brief(brief)
+    assert "2 row(s) past deadline, status undeterminable" in text
+
+
+def test_unadjudicated_count_is_none_when_even_the_denominator_is_unknown(
+    paths: Paths,
+):
+    """The dispatch log is the unreadable side, so the count itself cannot be
+    taken. Stated as None, never rendered as a reassuring 0."""
+    _write_jsonl(_rlog(paths), [])
+    assert not _dlog(paths).exists()
+
+    entry = _find(build_brief(_fleet(), paths, "alex", NOW), "dispatches", "#1014")[0]
+    assert entry["count"] is None
+    assert "could not be adjudicated" not in entry["reason"]
+
+
+def test_no_past_deadline_rows_reports_no_count_rather_than_zero_noise(paths: Paths):
+    _write_jsonl(_dlog(paths), [_dispatch("alex", NOW - 100, NOW + 5_000, task_id="t-1")])
+    assert not _rlog(paths).exists()
+
+    entry = _find(build_brief(_fleet(), paths, "alex", NOW), "dispatches", "#526")[0]
+    assert entry["count"] == 0
+    assert "(unavailable — see DEGRADED)" in format_brief(build_brief(_fleet(), paths, "alex", NOW))
+
+
+def test_every_degradation_carries_the_count_key(paths: Paths):
+    """R4 reads this envelope; an absent key and a null one are different bugs."""
+    _write_jsonl(_dlog(paths), [])
+    _write_jsonl(_rlog(paths), [])
+    for d in build_brief(_fleet(), paths, "alex", NOW)["degraded"]:
+        assert "count" in d, d
