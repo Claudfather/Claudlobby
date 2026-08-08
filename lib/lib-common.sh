@@ -1286,8 +1286,10 @@ pane_await_input_box() {
     # as a default" and the two call sites are the thing to re-check.
     # The other four overridable pane knobs (PANE_READY_POLL_S, PANE_SEND_SETTLE_S,
     # PANE_SEND_VERIFY_TICKS, PANE_RECOVER_TICKS) have NO such defeat site: swept
-    # 2026-08-08, start-bot.sh is the only file in the estate that assigns a PANE_*
-    # knob at all, and it assigns only this one. #1117.
+    # 2026-08-08, start-bot.sh is the only PRODUCTION caller that assigns a PANE_*
+    # knob, and it assigns only this one. Harnesses do set the others
+    # (validate-bot-change.sh:54, tests/) — that is a caller choosing a value,
+    # which is the override convention working rather than being defeated. #1117.
     local ticks="${PANE_READY_TICKS:-0}"
     [ "$ticks" -gt 0 ] || { printf '%s\n' "$_PANE_BOX_UNWAITED"; return 0; }
     while [ "$tick" -lt "$ticks" ]; do
