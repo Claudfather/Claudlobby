@@ -1713,24 +1713,89 @@ marker_age_within() {
 # Both are optional. With neither, this is the original fire-once-per-episode
 # behavior, which is what an *action* debounce with no recipient wants
 # (reload-fleet.sh's npx warm attempt).
+# Rate limit on RE-ARMING after a recipient change (#1088). Not a limit on
+# alerting: the first alert of an episode and the FIRST recipient change both
+# fire unconditionally. Only the second and later changes inside the window are
+# suppressed.
+#
+# Why the rate rather than the signal. The recipient token is
+# `<session_created>-<pane_pid>`, and pane_pid churn is NOT a false signal —
+# start-bot.sh runs CLAUDE_CMD as the pane command, so pane_pid IS the claude
+# process, and a restart inside a surviving session loses the message just as
+# surely as a session restart. Every new pid is genuinely a process that never
+# saw the alert. So the token is right; what was missing is a bound on how often
+# it may re-arm. A crashlooping manager produced 8 pages in 20 minutes.
+#
+# Why "first change is free" rather than a floor on marker age. Flooring the age
+# suppresses the FIRST change too, which is the #831 property: a manager that
+# restarted once must still be told. Measured — the real-tmux #831 rehearsal
+# fails under an age floor ("restarted manager receives the alert": expected 1,
+# got 0) and passes under this, because one restart is one change. The
+# discriminator is how MANY changes, not how much time has passed.
+#
+# WHY 1800, since the number is the part a reader will want to change. Three
+# constraints, and the value is the middle of them rather than a measurement:
+#   - well ABOVE the 300s pulse interval, or a crashloop still pages every tick
+#     — 1800 is six ticks, bounding it at two pages an hour instead of twelve
+#   - well BELOW _RENOTIFY_AFTER_S (fleet-pulse.sh, 6h), or the recipient-change
+#     path becomes less responsive than the time-based leg and the token stops
+#     earning its place
+#   - long enough that a crashloop is damped, short enough that a SECOND genuine
+#     restart in the same episode is not swallowed for long
+# UNRATIFIED: chosen to satisfy those three, never measured against operator
+# tolerance, which is the only thing that could actually settle it. Raise it
+# during a known crashloop via FLEET_PULSE_REARM_WINDOW_S; 0 disables the bound
+# and restores pre-#1088 behaviour exactly.
+#
+# SHARED-FUNCTION CAVEAT: this lives in lib-common's debounce_notify, so it
+# bounds EVERY caller, not only fleet-pulse. notify_currency's documented
+# re-fires-on-situation-change contract is narrowed by the same window. Verified
+# inert at the time of writing — its only callers are daily/weekly jobs, which
+# cannot tick fast enough to reach the bound — but that is a property of the
+# current call pattern, not of the design, and one faster caller makes it real.
+_REARM_WINDOW_S_DEFAULT=1800
+
 debounce_notify() {
     local state_dir="$1" bot_id="$2" suffix="$3" notify_fn="$4" message="$5"
     local recipient="${6:-}" renotify_after="${7:-0}"
     local marker="$state_dir/${bot_id}.${suffix}"
-    local fire=0 seen=""
+    local window="${FLEET_PULSE_REARM_WINDOW_S:-$_REARM_WINDOW_S_DEFAULT}"
+    local fire=0 seen="" raw="" last_rearm=0 new_rearm=0 now
     if [ ! -f "$marker" ]; then
+        # First sighting of the condition always fires, and records NO re-arm —
+        # so the first recipient change afterwards is still free.
         fire=1
+        new_rearm=0
     else
-        seen=$(cat "$marker" 2>/dev/null || true)
+        raw=$(cat "$marker" 2>/dev/null || true)
+        # Marker format is `<recipient>|<last_rearm_epoch>`. A marker written
+        # before #1088 is a bare recipient with no separator; it reads as zero
+        # prior re-arms, so an upgrade never swallows the next change.
+        case "$raw" in
+            *"|"*) seen="${raw%%|*}"; last_rearm="${raw#*|}" ;;
+            *)     seen="$raw"; last_rearm=0 ;;
+        esac
+        case "$last_rearm" in ''|*[!0-9]*) last_rearm=0 ;; esac
+        new_rearm="$last_rearm"
         if [ -n "$recipient" ] && [ "$seen" != "$recipient" ]; then
-            fire=1
+            now=$(date +%s)
+            # Free unless another change already re-armed inside this window.
+            if [ "$window" -le 0 ] || [ "$(( now - last_rearm ))" -gt "$window" ]; then
+                fire=1
+                new_rearm="$now"
+            fi
         elif [ "$renotify_after" -gt 0 ] && ! marker_age_within "$marker" "$renotify_after"; then
+            # The age-out leg is not a re-arm, so it must not consume the budget
+            # a genuine restart is entitled to.
             fire=1
         fi
     fi
     if [ "$fire" -eq 1 ]; then
         "$notify_fn" "$message"
-        printf '%s' "$recipient" > "$marker"
+        # Written only on fire, deliberately: the marker's MTIME is what
+        # marker_age_within reads for the renotify window above, so touching it
+        # on a suppressed tick would silently disable that second leg entirely.
+        printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
     fi
 }
 
@@ -2033,6 +2098,203 @@ bot_in_fleet() {
     # callers then scan every dir, preserving pre-fleet.yaml behavior.
     [ -z "$2" ] && return 0
     printf '%s\n' "$2" | grep -qx "$1"
+}
+
+# declared_bots_strict [bad_manifest_outfile]
+# Emit "<bot><TAB><fleet><TAB><bot_dir>" for every bot DECLARED across every
+# fleet manifest on this host — the union, never a directory walk.
+#
+#   rc 0  every manifest parsed
+#   rc 1  at least one manifest was unusable. Rows for the parseable fleets are
+#         still emitted, and one "<path><TAB><reason>" line per broken manifest
+#         is written to <bad_manifest_outfile> (stderr when no file is given),
+#         so the CALLER decides whether a partial roster is acceptable.
+#
+# THE SECOND DOOR, and why it is not parse_fleet_bots. That helper soft-fails by
+# contract: a missing or unreadable fleet.yaml yields NO output, and bot_in_fleet
+# reads an empty list as "declared", so its callers fall back to scanning every
+# directory. That is CORRECT for an action — a supervision filter must keep
+# working on a host whose manifest is briefly broken — and WRONG for a
+# measurement, which has no degraded mode: a denominator that silently shrinks
+# by a whole fleet turns 6 of 21 into 6 of 19 and the baseline stops being
+# comparable. Same code shape, opposite correct answer; the discriminator is
+# action versus measurement, exactly as selfstart-snapshot.sh argues for why
+# composer.py::_fleet_bot_count() must not be copied either.
+#
+# So there are deliberately TWO doors rather than one widened door: four
+# supervision scripts depend on parse_fleet_bots staying soft, and this one
+# fails loud. Neither is a fixed version of the other. They must agree on the
+# happy path and diverge only on the failure path — gated by a test that runs
+# both over the same manifests.
+declared_bots_strict() {
+    local bad_out="${1:-}" fleet man names b bdir rc=0
+    : "${CLAUDLOBBY_ROOT:?declared_bots_strict needs CLAUDLOBBY_ROOT}"
+    local tmp_bad
+    tmp_bad="$(mktemp "${TMPDIR:-/tmp}/declbots.XXXXXX")" || return 2
+    while IFS="$(printf '\t')" read -r fleet man; do
+        [ -n "$man" ] || continue
+        if [ ! -r "$man" ]; then
+            printf '%s\tunreadable\n' "$man" >> "$tmp_bad"; continue
+        fi
+        if ! grep -qE '^[[:space:]]*bots:[[:space:]]*(#.*)?$' "$man" 2>/dev/null; then
+            printf '%s\tno bots: block\n' "$man" >> "$tmp_bad"; continue
+        fi
+        names="$(_bots_from_manifest "$man")"
+        if [ -z "$names" ]; then
+            printf '%s\tbots: block declares no bots\n' "$man" >> "$tmp_bad"; continue
+        fi
+        bdir="$(dirname "$man")/runtime/bots"
+        while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            printf '%s\t%s\t%s\n' "$b" "$fleet" "$bdir/$b"
+        done <<EOF
+$names
+EOF
+    done <<EOF
+$(discover_fleet_manifests)
+EOF
+    if [ -s "$tmp_bad" ]; then
+        rc=1
+        if [ -n "$bad_out" ]; then cat "$tmp_bad" > "$bad_out"; else cat "$tmp_bad" >&2; fi
+    elif [ -n "$bad_out" ]; then
+        : > "$bad_out"
+    fi
+    rm -f "$tmp_bad"
+    return "$rc"
+}
+
+# _bots_from_manifest <fleet.yaml> — bot keys, i.e. the first nesting level under
+# `bots:`. Comments, blank lines, deeper keys and sibling top-level keys are all
+# excluded, and an anchor on the key (`alex: &base`) is still a bot. Indentation
+# is derived from the file rather than assumed, so a manifest written at a
+# non-standard indent is parsed rather than silently read as empty.
+_bots_from_manifest() {
+    awk '
+        /^[[:space:]]*#/ { next }
+        !inbots && $0 ~ /^[[:space:]]*bots:[[:space:]]*(#.*)?$/ {
+            match($0, /^[ ]*/); ind = RLENGTH; inbots = 1; botind = 0; next
+        }
+        inbots {
+            if ($0 ~ /^[[:space:]]*$/) next
+            match($0, /^[ ]*/); cur = RLENGTH
+            if (cur <= ind) { inbots = 0; next }
+            if (botind == 0) botind = cur
+            if (cur == botind && $0 ~ /^[ ]*[A-Za-z0-9_-]+:[ ]*(&[A-Za-z0-9_-]+)?[ ]*(#.*)?$/) {
+                k = $0; sub(/^[ ]*/, "", k); sub(/:.*$/, "", k); print k
+            }
+        }
+    ' "$1" 2>/dev/null
+}
+
+# boot_start_class <transcript_dir> <boot_cmp_iso> [composed_startup_prompt]
+# Classify HOW a bot's session came to life after a boot, from its transcript
+# alone. Emits "<class><TAB><timestamp>":
+#
+#   payload <ts>   the WHOLE boot injection submitted. <ts> is when the bot's own
+#                  composed prompt landed. Whether the bot did that itself or a
+#                  rescuer did it for them is NOT decidable here: the caller
+#                  settles it by comparing <ts> against an external receipt.
+#   partial <ts>   something startup-shaped submitted at <ts>, but the bot's own
+#                  composed STARTUP_PROMPT never did. See below.
+#   inbound <ts>   the session was woken by an INBOUND CHANNEL MESSAGE. Neither
+#                  self-start nor rescue, and the class that matters: a bot can
+#                  be woken by a human messaging it, then run real work and
+#                  report normally, while never having started on its own. Every
+#                  liveness signal calls that healthy. Liveness is not self-start.
+#   none    -      no post-boot user record at all.
+#
+# WHY `partial` EXISTS. A boot injection is TWO sends (see start-bot.sh): a bare
+# `/claudna:session resume --auto` and then `set +H; $STARTUP_PROMPT`. Asserting
+# that SOMETHING startup-shaped arrived passes a bot whose injection only half
+# landed — measured, one bot's composed prompt was still unsubmitted 39 minutes
+# after boot and another's never arrived at all, and both read as clean
+# self-starters. So the whole injection is asserted, not any part of it.
+#
+# Only the PROSE half is asserted, and that asymmetry is forced rather than
+# chosen: start-bot.sh sends the prose whenever STARTUP_PROMPT is non-empty, so
+# its absence is decidable. The slash half is gated on should_resume_session,
+# which depends on checkpoint freshness AT BOOT and is not recoverable
+# afterwards — so a missing slash command cannot be distinguished from one that
+# was correctly never sent, and claiming otherwise would manufacture defects.
+#
+# The prose is matched as `set +H; <prompt>`, the exact form start-bot.sh emits,
+# against the bot's OWN composed value. That is a property check against the
+# injector, not a guess at what a payload looks like — and it is the opposite
+# discipline from the typing above ON PURPOSE. Typing asks "is this a payload at
+# all", where payloads vary without limit and only the denylist survives.
+# This asks "did THIS bot's known prompt land", which has exactly one right
+# answer per bot and must be compared against the composed artifact. A resend in
+# any other wording therefore reads as `partial`, which is the fail-closed
+# direction: a bot is never promoted to self-starter on weaker evidence.
+#
+# With no prompt supplied the assertion is skipped and `payload` means only that
+# the first record was one — callers that can read bot.conf should pass it.
+#
+# DENYLIST THE INVARIANT, NEVER ALLOWLIST THE VARIANT. This is the whole design
+# and it is the reusable part. Startup payloads are authored per bot and vary
+# without limit — one bot is sent prose, another a bare slash command that lands
+# as <command-message> with no prose at all, and a rescuer types an approximation
+# of neither. Any detector that tries to RECOGNISE a payload is matching the
+# variant, and every one written for this failed. The two shapes that do NOT vary
+# are machine-authored: the channel injection has exactly one form, and so does a
+# tool_result record. So those are matched, and "payload" is simply what is left
+# once they are excluded. Adding a bot, or rewording a prompt, cannot break it.
+#
+# isMeta is deliberately NOT filtered: channel injections ARE isMeta, so dropping
+# meta records to remove system noise silently drops exactly the evidence this
+# function exists to find.
+#
+# Residual ambiguity, stated because it is real: a payload that quotes the
+# channel marker in its own text reads as inbound. That only ever moves a bot OUT
+# of the self-started count, so it cannot inflate the headline — the one
+# direction a measurement must not fail in.
+boot_start_class() {
+    local tdir="$1" boot_cmp="$2" prompt="${3:-}" f first="" prose="" esc=""
+    for f in "$tdir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        first="$(printf '%s\n%s\n' "$first" "$(awk -v boot="$boot_cmp" '
+            index($0, "\"type\":\"user\"") == 0 { next }
+            index($0, "\"type\":\"tool_result\"") { next }
+            {
+                i = index($0, "\"timestamp\":\"")
+                if (i == 0) next
+                rest = substr($0, i + 13)
+                j = index(rest, "\"")
+                if (j == 0) next
+                ts = substr(rest, 1, j - 1)
+                if (ts <= boot) next
+                print ts "\t" (index($0, "<channel source=") ? "inbound" : "payload")
+            }
+        ' "$f" 2>/dev/null)" | grep -v '^$' | sort | head -1)"
+    done
+    if [ -z "$first" ]; then
+        printf 'none\t-\n'
+        return 0
+    fi
+    local cls ts
+    cls="$(printf '%s' "$first" | cut -f2)"
+    ts="$(printf '%s' "$first" | cut -f1)"
+
+    if [ "$cls" = "payload" ] && [ -n "$prompt" ]; then
+        # The record holds the prompt JSON-encoded, so the needle is escaped the
+        # same way before a fixed-string search. Backslash first, or the escaping
+        # of the quotes is itself re-escaped.
+        esc="$(printf '%s' "$prompt" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        for f in "$tdir"/*.jsonl; do
+            [ -f "$f" ] || continue
+            prose="$(printf '%s\n%s\n' "$prose" "$(grep -F "set +H; $esc" "$f" 2>/dev/null \
+                | grep '"type":"user"' \
+                | grep -o '"timestamp":"[^"]*"' | sed 's/.*:"//; s/"$//' \
+                | awk -v boot="$boot_cmp" '$0 > boot')" | grep -v '^$' | sort | head -1)"
+        done
+        if [ -n "$prose" ]; then
+            printf 'payload\t%s\n' "$prose"
+        else
+            printf 'partial\t%s\n' "$ts"
+        fi
+        return 0
+    fi
+    printf '%s\t%s\n' "$cls" "$ts"
 }
 
 # fleet_service_prefix <fleet.yaml-path>

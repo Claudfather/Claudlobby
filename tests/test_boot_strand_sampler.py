@@ -25,11 +25,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
-from tests.conftest import call_script_fn, load_lib_module, realboot_skip_reason
+from tests.conftest import (
+    call_script_fn,
+    constructed_env,
+    load_lib_module,
+    realboot_skip_reason,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SAMPLER = REPO_ROOT / "lib" / "boot-strand-sampler.sh"
@@ -272,3 +278,161 @@ def test_strand_under_load_is_never_reported_as_a_clean_send():
         "pane_send_verified decided the box was empty and returned success on a "
         "payload that is still sitting in it."
     )
+
+
+def _sampler_env(**overrides) -> dict[str, str]:
+    """constructed_env (#846) plus the one variable the sampler needs at
+    SOURCE time: HOST_CREDS interpolates ``${HOME}`` under ``set -u``. PANE_*
+    absence is by construction, so an inherited dev-shell knob can never leak
+    into an assertion."""
+    return constructed_env(HOME="/nonexistent-sampler-home", **overrides)
+
+
+class TestKnobPassthrough:
+    """#843/#1084/#1109: the sampler must be able to VARY its measurement knobs.
+
+    ``run_start_bot`` builds its child env with ``env -i`` and an explicit
+    allowlist (#846) — the right shape, but a knob this harness exists to
+    sweep has to be forwarded or every run is secretly the default, and a
+    ladder prints a refutation the harness manufactured (#1084 the verify
+    budget; #1109 the settle window that bounds repaint). These assert on the
+    child ENVIRONMENT rather than on whether a boot looked different — the
+    boot path is what a knob changes, so it cannot also be the oracle.
+    """
+
+    def _child_env_seen_by_start_bot(
+        self, tmp_path: Path, overrides: dict[str, str]
+    ) -> str:
+        (tmp_path / "lib").mkdir(exist_ok=True)
+        stub = tmp_path / "lib" / "start-bot.sh"
+        stub.write_text("#!/usr/bin/env bash\nenv\n")
+        stub.chmod(0o755)
+        return call_script_fn(
+            SAMPLER,
+            "run_start_bot",
+            "10",
+            str(tmp_path),
+            str(tmp_path / "botdir"),
+            env=_sampler_env(**overrides),
+        )
+
+    def test_every_forwarded_knob_reaches_start_bot(self, tmp_path):
+        # Generic over the list, so forwarding stays true for every knob the
+        # list ever holds: a knob added to _FORWARDED_PANE_KNOBS without
+        # reaching the child env fails here BY NAME — the lying-disclosure
+        # drift (forwarded per the list, scrubbed per the env) cannot land.
+        knobs = call_script_fn(
+            SAMPLER, 'echo "$_FORWARDED_PANE_KNOBS"', env=_sampler_env()
+        ).split()
+        assert knobs, "forwarded-knob list is empty — sampler contract broken"
+        for knob in knobs:
+            out = self._child_env_seen_by_start_bot(tmp_path, {knob: "7"})
+            assert f"{knob}=7" in out, f"{knob} did not reach the child env"
+
+    def test_unset_knobs_do_not_leak_into_the_child_env(self, tmp_path):
+        # Forwarding unconditionally would send EMPTY strings, shadowing the
+        # lib-common defaults and reaching arithmetic tests as non-integers.
+        # Absent is not the same as empty: with nothing set, NO pane knob may
+        # appear in the child env at all.
+        out = self._child_env_seen_by_start_bot(tmp_path, {})
+        assert "PANE_" not in out
+
+
+class TestKnobDisclosure:
+    """#1109's load-bearing half: the output must disclose each pane knob's
+    effective state, so a scrubbed or inert override is visible in the run
+    artifact instead of silently measuring defaults — the #1084
+    manufactured-refutation class, made output-visible.
+    """
+
+    def _disclosure(self, overrides: dict[str, str]) -> str:
+        return call_script_fn(
+            SAMPLER, "knob_disclosure", env=_sampler_env(**overrides)
+        ).strip()
+
+    def test_defaults_disclose_every_forwarded_knob(self):
+        out = self._disclosure({})
+        for knob in (
+            "PANE_SEND_VERIFY_TICKS",
+            "PANE_SEND_SETTLE_S",
+            "PANE_READY_TICKS",
+        ):
+            assert knob in out
+        assert "SCRUBBED" not in out
+
+    def test_set_settle_discloses_value_as_forwarded(self):
+        out = self._disclosure({"PANE_SEND_SETTLE_S": "0.9"})
+        assert "PANE_SEND_SETTLE_S=0.9" in out
+        assert "forwarded" in out
+
+    def test_set_ready_discloses_inert(self):
+        # start-bot.sh arms PANE_READY_TICKS itself at both injection call
+        # sites, so a forwarded override cannot reach the measured path; the
+        # disclosure must say so rather than let a ladder read as if it varied
+        # something.
+        out = self._disclosure({"PANE_READY_TICKS": "200"})
+        assert "PANE_READY_TICKS=200" in out
+        assert "INERT" in out
+
+    def test_set_unforwarded_poll_knob_discloses_scrubbed(self):
+        out = self._disclosure({"PANE_READY_POLL_S": "0.1"})
+        assert "PANE_READY_POLL_S=0.1" in out
+        assert "SCRUBBED" in out
+
+    def test_set_unforwarded_recover_knob_discloses_scrubbed(self):
+        out = self._disclosure({"PANE_RECOVER_TICKS": "99"})
+        assert "PANE_RECOVER_TICKS=99" in out
+        assert "SCRUBBED" in out
+
+    def test_disclosure_prints_before_the_dependency_gates(self, tmp_path):
+        # The line must land in the artifact even when the run aborts — an
+        # aborted sample that silently omits its knob state is the same
+        # silent-null one layer up. CLAUDE_BIN at a nonexistent path forces
+        # the first precondition gate to SKIP (exit 2) hermetically; the
+        # disclosure must already be on stdout by then.
+        env = _sampler_env(
+            PANE_SEND_SETTLE_S="0.9", CLAUDE_BIN=tmp_path / "no-such-claude"
+        )
+        r = subprocess.run(
+            ["bash", str(SAMPLER), "-n", "1"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert r.returncode == 2, (r.stdout, r.stderr)
+        assert "PANE_SEND_SETTLE_S=0.9" in r.stdout
+        assert "forwarded" in r.stdout
+
+    def test_knob_lists_match_lib_common_env_reads(self):
+        # Currency pin: the disclosure lists are constants, so lib-common
+        # growing a sixth pane knob must fail HERE rather than let the new
+        # knob be scrubbed silently. The regex reads `${PANE_X...}` expansion
+        # reads — a bare `$PANE_X` read would escape it, which is accepted as
+        # the floor (lib-common uses braced reads for every current knob).
+        lib_common = (REPO_ROOT / "lib" / "lib-common.sh").read_text(encoding="utf-8")
+        actual = set(re.findall(r"\$\{(PANE_[A-Z0-9_]+)", lib_common))
+        declared = set(
+            call_script_fn(
+                SAMPLER,
+                'echo "$_FORWARDED_PANE_KNOBS $_UNFORWARDED_PANE_KNOBS"',
+                env=_sampler_env(),
+            ).split()
+        )
+        assert declared == actual
+
+    def test_inert_label_matches_start_bot_arming(self):
+        # The disclosure calls a forwarded PANE_READY_TICKS INERT because
+        # start-bot.sh prefix-arms its own value at both pane_send_verified
+        # call sites. If this pin fails, start-bot now honors an inherited
+        # value — update knob_disclosure's INERT branch (and this pin), or the
+        # disclosure starts lying in the safe-but-wrong direction.
+        start_bot = (REPO_ROOT / "lib" / "start-bot.sh").read_text(encoding="utf-8")
+        arming = re.findall(
+            r'PANE_READY_TICKS="\$_PANE_READY_TICKS_BOOT"\s*\\\s*\n\s*pane_send_verified',
+            start_bot,
+        )
+        assert len(arming) == 2, (
+            "start-bot.sh no longer arms PANE_READY_TICKS unconditionally at "
+            "exactly its two injection sites; re-derive the INERT disclosure."
+        )

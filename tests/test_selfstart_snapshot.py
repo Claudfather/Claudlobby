@@ -26,10 +26,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 
-# Every case dara named in the dispatch, plus the two denominator traps and the
-# two #1045-review regressions. Raise this when cases are added; never lower it
-# to make a red wrapper green.
-MIN_ASSERTIONS = 75
+# Every case dara named in the dispatch, plus the two denominator traps, the
+# two #1045-review regressions, the #1043 contamination/typing cases, and the
+# #1106 refusal-branch cases (8h-8k). Raise this when cases are added; never
+# lower it to make a red wrapper green.
+MIN_ASSERTIONS = 140
 
 
 @pytest.fixture(scope="module")
@@ -143,6 +144,171 @@ def test_every_refusal_carries_a_non_zero_exit_code(run):
     # Positive control: the healthy run must still be 0, or a blanket non-zero
     # would satisfy the assertions above.
     assert "PASS: past the window it exits 0" in run.stdout
+
+
+def test_liveness_is_not_self_start(run):
+    """#1043. The class every other signal calls healthy.
+
+    A bot woken by an inbound channel message runs real work, reports normally,
+    and looks alive to session checks, pane checks and the pulse — while never
+    having started on its own. On 2026-08-08 the bot that ran the measurement
+    and repaired twelve others was itself in this class. Presence-of-record
+    cannot see it, so the first post-boot user record is TYPED before any
+    instant is compared.
+
+    The typing is a denylist: the channel injection and the tool_result record
+    are the only shapes that do not vary, so those are matched and "payload" is
+    whatever is left. Detectors that instead tried to recognise a startup
+    payload all failed — payloads are authored per bot, one prose, the next a
+    bare slash command, and a rescuer types an approximation of neither.
+    """
+    assert "PASS: inbound-woken is NOT a self-start" in run.stdout
+    assert "PASS: tool_result records are excluded from the typing" in run.stdout
+    assert "PASS: inbound-woken section says liveness is not self-start" in run.stdout
+    assert (
+        "PASS: assistant records with NO user record are refused, not guessed"
+        in run.stdout
+    )
+
+
+def test_a_half_submitted_boot_is_not_a_self_start(run):
+    """#843/#1043. Asserting "something startup-shaped arrived" is not enough.
+
+    A boot is TWO sends — a bare slash command and the composed prose prompt.
+    Measured on real bots, one composed prompt was still unsubmitted 39 minutes
+    after boot and another never arrived at all; both read as clean self-starters
+    under the weaker contract. A bot running without the instructions it was
+    composed with has not booted, however alive it looks.
+
+    Note the deliberate asymmetry with the typing above: this half compares
+    against the bot's OWN composed value, because "did THIS bot's known prompt
+    land" has exactly one right answer per bot.
+    """
+    assert (
+        "PASS: only the slash half submitted is PARTIAL, not a self-start" in run.stdout
+    )
+    assert "PASS: a half-booted bot is excluded from the headline count" in run.stdout
+    assert (
+        "PASS: a prompt that is not THIS bot composed one does not satisfy it"
+        in run.stdout
+    )
+    # Positive control: a complete injection must still read as a self-start,
+    # or a blanket downgrade would satisfy every assertion above.
+    assert "PASS: both halves submitted is a genuine self-start" in run.stdout
+    # The assertion cannot run without a composed prompt, so that is disclosed
+    # rather than silently credited as a clean boot.
+    assert "PASS: a bot with no composed prompt is disclosed" in run.stdout
+
+
+def test_a_reading_taken_after_a_rescue_refuses_to_be_a_result(run):
+    """#1043, the mirror of the too-early gate — and the one that already bit.
+
+    On 2026-08-08 the same host read 7 of 21 before a rescue and 19-20 of 21
+    three minutes after one, both stamped `result valid: yes`. The defect was
+    never the number; it was the validity claim printed over it. So a run that
+    a rescue receipt covers refuses, with its own exit code, rather than
+    caveating.
+
+    The receipt carries two independent facts and a real one disagreed with
+    itself, so both are used and a contradiction is refused BY NAME rather than
+    resolved toward either side. A receipt that discloses it was written after
+    the event has a TYPED stamp, so the comparison is suppressed — but its name
+    list still stands, because a list of who was touched is not reconstructed by
+    being written down late.
+    """
+    assert "PASS: a contaminated page refuses with its own exit code" in run.stdout
+    assert "PASS: headline stops claiming a result" in run.stdout
+    assert "PASS: payload after the boundary is RESCUED, not self-started" in run.stdout
+    assert (
+        "PASS: named-as-rescued yet predating the boundary is a CONTRADICTION"
+        in run.stdout
+    )
+    assert "PASS: and the contradiction is spelled out" in run.stdout
+    assert "PASS: a retroactive receipt still refuses" in run.stdout
+    assert "PASS: a named bot is still RESCUED without any comparison" in run.stdout
+    # The name list is NON-EXHAUSTIVE: presence means rescued definitively,
+    # absence means UNKNOWN. A second rescue went unrecorded hours after the
+    # receipt was designed, by the person who proposed it — so a list is only as
+    # complete as someone's discipline, and the design must not lean on it.
+    assert (
+        "PASS: absence from a non-exhaustive list is NOT evidence of self-start"
+        in run.stdout
+    )
+    assert (
+        "PASS: an unnamed bot is decided by the boundary, not by the list"
+        in run.stdout
+    )
+    # The boundary is compared, never clustered: a receipt for an earlier boot
+    # must not bleed forward, and a correction row is not a receipt.
+    assert (
+        "PASS: a boundary predating this boot belongs to an earlier one" in run.stdout
+    )
+    assert "PASS: a correction row alone does not contaminate" in run.stdout
+    assert (
+        "PASS: half a second past a fractionless boundary is still RESCUED"
+        in run.stdout
+    )
+    # Precedence, and the positive control that the gate is not unconditional.
+    assert "PASS: contaminated outranks too-early in the exit code" in run.stdout
+    assert "PASS: incomplete outranks contaminated" in run.stdout
+    assert "PASS: no receipt: exits 0" in run.stdout
+
+
+def test_a_boundary_that_is_not_one_is_refused_never_guessed(run):
+    """#1106. The three ways a receipt fails to carry a comparable boundary.
+
+    All three land in the same class — boundary suppressed, name list still
+    applied — so the class cannot tell them apart, and asserting on it alone
+    would pass against any arm being wired to any other. The reason string is
+    the discriminator, and it is the operator-facing half too: a field the
+    writer omitted, two the writer emitted, and one emitted in the wrong shape
+    are repaired in three different places.
+
+    These branches shipped with #1103 uncovered. vera confirmed by hand that
+    each already behaves to contract, so this closes a coverage gap rather than
+    a defect — but refuse-rather-than-guess is the load-bearing property of that
+    change, and an untested refusal path is how a gate quietly stops gating.
+
+    Mutation-checked rather than assumed: deleting each guarded line in turn
+    kills at least one assertion below. The ambiguity arm is the sharpest —
+    without it the two candidate stamps survive as a two-line string that
+    iso_utc_shaped still ACCEPTS, since its trailing-Z glob spans the newline,
+    so the run adopts a garbage boundary and stamps it USABLE.
+    """
+    # Absent, ambiguous and uncomparable are reported as three distinct things.
+    assert "PASS: and reports the field as ABSENT" in run.stdout
+    assert "PASS: and names ambiguity as the reason" in run.stdout
+    assert "PASS: and echoes the stamp so it can be repaired" in run.stdout
+    # ...and none of them is conflated with either of the others.
+    assert "PASS: absence is not reported as a present-but-unusable stamp" in run.stdout
+    assert "PASS: ambiguity is not reported as absence" in run.stdout
+    assert "PASS: a present stamp is not reported as absent" in run.stdout
+    # No unusable stamp is ever adopted as the boundary.
+    assert "PASS: and neither of the two candidates is adopted" in run.stdout
+    assert "PASS: and the uncomparable stamp is never adopted" in run.stdout
+    # Positive control on the ambiguity count: it is over DISTINCT values, so a
+    # repeated-but-consistent boundary must still be adopted AND must still
+    # decide. Without this, a helper that refused any repetition at all would
+    # satisfy the assertions above — an over-refusal that throws away a good
+    # boundary and drops every unnamed bot to ADJUDICATE for nothing.
+    assert "PASS: yet the boundary is ADOPTED, not refused as ambiguous" in run.stdout
+    assert "PASS: a payload after the adopted boundary is RESCUED" in run.stdout
+    assert "PASS: a payload before it is still a self-start" in run.stdout
+
+
+def test_the_absence_of_a_receipt_is_not_the_absence_of_a_rescue(run):
+    """Coverage honesty: with no external boundary, contamination is undecidable.
+
+    Saying nothing there would read as "no rescue happened", which is the one
+    thing it never means.
+    """
+    assert (
+        "PASS: absence of a receipt is disclosed, not read as absence of rescue"
+        in run.stdout
+    )
+    assert "PASS: prior figure is printed" in run.stdout
+    assert "PASS: and is labelled not comparable" in run.stdout
+    assert "PASS: it is NOT offered as a target to beat" in run.stdout
 
 
 def test_the_run_proves_it_covered_every_declared_bot(run):

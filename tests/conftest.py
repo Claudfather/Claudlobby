@@ -172,13 +172,19 @@ def load_lib_module(name: str):
     return mod
 
 
-def call_script_fn(script: Path, fn: str, *args: str) -> str:
+def call_script_fn(script: Path, fn: str, *args: str, env: dict | None = None) -> str:
     """Source a bash script (guarded-main style) and call one of its functions,
     returning stdout. Args travel as positionals so the shell never interprets
-    the values. Generalizes call_lib_fn to scripts beyond lib-common.sh."""
+    the values. Generalizes call_lib_fn to scripts beyond lib-common.sh.
+    env: child environment for the call — pass constructed_env(...) for #846
+    isolation; default inherits os.environ (legacy callers)."""
     argv = ["bash", "-c", f'. "{script}"; {fn} "$@"', "_", *args]
     r = subprocess.run(
-        argv, capture_output=True, text=True, env=dict(os.environ), timeout=30
+        argv,
+        capture_output=True,
+        text=True,
+        env=dict(os.environ) if env is None else env,
+        timeout=30,
     )
     assert r.returncode == 0, r.stderr
     return r.stdout
