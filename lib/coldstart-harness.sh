@@ -44,28 +44,36 @@ say() { printf 'coldstart: %s\n' "$*"; }
 
 # ---------------------------------------------------------------- snapshotting
 
+# ABSENT IS NOT AN ERROR in any of the three samplers below, and `2>/dev/null`
+# alone does not say that: lib-common turns on `pipefail`, so `ls` of a
+# directory that does not exist still fails the whole pipeline, `set -e` aborts
+# the snapshot, and the redirect means it aborts SILENTLY — exit 2, no output
+# on either stream.
+#
+# Every one of these dirs is legitimately missing on a machine that has not run
+# the thing yet: no tmux socket dir before tmux first runs, no user unit dir
+# before anything is enrolled. That is the FRESH HOST this harness exists to
+# measure, so the failure was aimed squarely at its own use case. It survived
+# because a developer machine always has all three. Surfaced by giving the
+# harness its first test wrapper (#1094) and reproduced at rc 2 on CI.
 snap_launch_units() {
-    # One unit label per line, sorted. Empty file on an unsupported platform.
+    # One unit label per line, sorted. Empty on an unsupported platform.
     if [ "$_OS" = "Darwin" ]; then
-        launchctl list 2>/dev/null | awk 'NR>1 {print $3}' | sort -u
+        { launchctl list 2>/dev/null || true; } | awk 'NR>1 {print $3}' | sort -u
     else
-        systemctl --user list-unit-files --no-legend --no-pager 2>/dev/null \
+        { systemctl --user list-unit-files --no-legend --no-pager 2>/dev/null || true; } \
             | awk '{print $1}' | sort -u
     fi
 }
 
 snap_unit_files() {
-    if [ "$_OS" = "Darwin" ]; then
-        ls -1 "$HOME/Library/LaunchAgents" 2>/dev/null | sort -u
-    else
-        ls -1 "$HOME/.config/systemd/user" 2>/dev/null | sort -u
-    fi
+    { ls -1 "$(host_unit_dir)" 2>/dev/null || true; } | sort -u
 }
 
 snap_tmux_sockets() {
     local dir="/tmp/tmux-$(id -u)"
     [ -d "/private/tmp/tmux-$(id -u)" ] && dir="/private/tmp/tmux-$(id -u)"
-    ls -1 "$dir" 2>/dev/null | sort -u
+    { ls -1 "$dir" 2>/dev/null || true; } | sort -u
 }
 
 # host_unit_dir — where this platform keeps the fixed-identity host units.

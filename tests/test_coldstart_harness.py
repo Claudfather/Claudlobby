@@ -103,6 +103,32 @@ class TestHostUnitContentIsSnapshotted:
         )
 
 
+class TestSnapshotSurvivesAFreshHost:
+    """A missing directory is not an error — it is the fresh host, which is the
+    whole point of this harness.
+
+    `2>/dev/null` did not say that: lib-common turns on `pipefail`, so `ls` of
+    a directory that does not exist failed the pipeline, `set -e` aborted the
+    snapshot, and the redirect made it abort SILENTLY at rc 2. It survived
+    because a developer machine always has a tmux socket dir and a user unit
+    dir; CI has neither, and reproduced it exactly.
+    """
+
+    def test_snapshot_succeeds_with_no_user_unit_directory_at_all(self, host):
+        import shutil
+
+        shutil.rmtree(host["units"])
+        r = _call(host, "write_snapshot")
+        assert r.returncode == 0, f"rc={r.returncode} stderr={r.stderr!r}"
+        assert (host["state"] / "snapshot" / "unitfiles.txt").read_text() == ""
+
+    def test_snapshot_succeeds_when_no_host_units_exist(self, host):
+        for f in host["units"].glob("claudlobby-*"):
+            f.unlink()
+        r = _call(host, "write_snapshot")
+        assert r.returncode == 0, f"rc={r.returncode} stderr={r.stderr!r}"
+
+
 class TestReapRestoresCapturedUnits:
     def test_a_unit_the_run_overwrote_is_restored_to_its_original_bytes(self, host):
         _call(host, "write_snapshot")
