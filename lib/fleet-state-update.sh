@@ -74,14 +74,36 @@ if [ "${1:-}" = "prune" ]; then
     # bot<TAB>fleet for every bot declared ANYWHERE on this host, built once.
     # fleet-state.json is host-shared, so a row this fleet does not declare
     # usually belongs to a sibling — naming that sibling is the whole point.
-    ATTR=$(
-        while IFS=$'\t' read -r _fn _fy; do
-            [ -n "$_fn" ] || continue
-            parse_fleet_bots "$_fy" | while read -r _b; do
-                [ -n "$_b" ] && printf '%s\t%s\n' "$_b" "$_fn"
-            done
-        done < <(discover_fleet_manifests)
-    )
+    #
+    # Read through declared_bots_strict, NOT parse_fleet_bots (#892, #1143).
+    # Condition 2 asks "does ANY fleet on this host declare this bot?" and the
+    # wrong answer DELETES A LIVE SIBLING. parse_fleet_bots soft-fails to empty
+    # output at rc 0 on any manifest it cannot parse, so "I could not read that
+    # roster" and "that roster is empty" are the SAME VALUE — and here the second
+    # authorizes the delete. The soft-fail is not merely lossy on this path; its
+    # safe direction and the prune's safe direction point opposite ways.
+    #
+    # This is the same drift class the script already refuses one screen up for
+    # THIS fleet's own manifest (:60-65). Defending one side of a hazard and not
+    # the other is what let it ship. The trigger is broader than any one cause:
+    # parse_fleet_bots matches `bots:` at exactly 2 spaces and bot keys at
+    # exactly 4, so CRLF, a comment, or any other indentation — all still valid
+    # YAML — silently yield zero.
+    #
+    # A hard I/O error was already safe (awk errors, rc 2, nothing written). Only
+    # the SILENT zero was unguarded, which is why a readability check would not
+    # have closed this.
+    _BAD_MANIFESTS=$(safe_mktemp) || exit 2
+    if ! ATTR=$(declared_bots_strict "$_BAD_MANIFESTS" | cut -f1,2); then
+        echo "fleet-state-update: refusing to prune — cannot establish which bots this host declares. No rows touched." >&2
+        sed 's/^/  /' "$_BAD_MANIFESTS" >&2
+        emit_fleet_event "script_error" "fleet-state-update" \
+            "$(printf '{"action":"prune_refused","reason":"unreadable_sibling_manifest","fleet_yaml":"%s"}' \
+                "$(json_escape "$FLEET_YAML")")" "" || true
+        rm -f "$_BAD_MANIFESTS"
+        exit 1
+    fi
+    rm -f "$_BAD_MANIFESTS"
 
     _fleet_of() { printf '%s\n' "$ATTR" | awk -F'\t' -v b="$1" '$1 == b { print $2; exit }'; }
     _count() { printf '%s\n' "$1" | grep -c . || true; }

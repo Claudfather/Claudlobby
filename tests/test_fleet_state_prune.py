@@ -322,3 +322,106 @@ def test_writer_without_fleet_name_leaves_the_row_unattributed(tmp_path: Path) -
     row = json.loads((root / "state" / "fleet-state.json").read_text())["bots"]["operbot"]
     assert "fleet" not in row
 
+
+
+# --- a sibling manifest that parses to zero must not authorise a delete ------
+#
+# mason's fault injection on #1143. Condition 2 ("no fleet on this host declares
+# it") was computed with parse_fleet_bots, which soft-fails to EMPTY OUTPUT at
+# rc 0 on any manifest it cannot parse — so "I could not read that roster" and
+# "that roster is empty" were the same value, and the second licensed the delete.
+#
+# None of the 13 tests that shipped with the scoping guard constructed a
+# malformed sibling manifest, which is why a green suite certified the defect.
+
+
+def _break_sibling(root: Path, how: str) -> Path:
+    """Make f-beta's manifest yield zero bots while staying a real, readable file.
+
+    Both are still valid YAML. The point is that parse_fleet_bots matches
+    `bots:` at exactly 2 spaces and bot keys at exactly 4, so several
+    independent drifts all collapse to the same silent empty.
+    """
+    man = root / "local" / "sys" / "f-beta" / "fleet.yaml"
+    if how == "crlf":
+        man.write_bytes(man.read_text().replace("\n", "\r\n").encode())
+    elif how == "indent":
+        man.write_text("fleet:\n    name: f-beta\n    bots:\n        b1:\n            expertise: [x]\n")
+    else:  # pragma: no cover - guard against a typo in a parametrisation
+        raise AssertionError(f"unknown fault: {how}")
+    return man
+
+
+@pytest.mark.parametrize("how", ["crlf", "indent"])
+def test_a_sibling_manifest_that_parses_to_zero_cannot_authorise_a_delete(
+    tmp_path: Path, how: str
+) -> None:
+    """The row this PR exists to protect is the row the defect deleted.
+
+    `b1` is f-beta's LIVE bot, stamped f-alpha in state (the move-bot window).
+    Condition 2 is the only thing that saves it — so an input that silently
+    turns condition 2 off deletes exactly the row the headline guard is for.
+
+    Asserts the PROPERTY (b1 lives), not the mechanism. The two faults are
+    closed by different halves of the fix and both outcomes are correct:
+    CRLF is unparseable to either helper, so the prune REFUSES; the indent
+    drift is unparseable only to parse_fleet_bots, so the loud door simply
+    READS IT CORRECTLY and the prune proceeds with b1 attributed. Pinning rc
+    would pin the wrong thing and would have failed on a stronger fix.
+    """
+    root = _host(tmp_path)
+    _break_sibling(root, how)
+    state = _seed_state(root, {**SEED_ROWS, "b1": {"status": "working", "fleet": "f-alpha"}})
+
+    _prune(root)
+
+    assert "b1" in json.loads(state.read_text())["bots"], (
+        f"{how} drift on a sibling manifest deleted that sibling's live bot"
+    )
+
+
+def test_an_unparseable_sibling_manifest_refuses_and_names_it(tmp_path: Path) -> None:
+    """CRLF defeats BOTH helpers, so this is the case that genuinely cannot be
+    answered — and an unanswerable condition 2 must refuse, never default to
+    'nobody declares it'. A refusal that does not say WHICH roster failed sends
+    the operator hunting; the hazard is a wrong answer that reads as routine."""
+    root = _host(tmp_path)
+    man = _break_sibling(root, "crlf")
+    state = _seed_state(root)
+    before = json.loads(state.read_text())["bots"]
+
+    r = _prune(root)
+
+    assert r.returncode == 1, f"rc={r.returncode}: {r.stdout}{r.stderr}"
+    assert json.loads(state.read_text())["bots"] == before, "state must be untouched"
+    assert "f-beta" in r.stderr and man.name in r.stderr, r.stderr
+
+
+def test_an_unreadable_sibling_manifest_also_refuses(tmp_path: Path) -> None:
+    """This case already failed closed before the fix (awk error, rc 2). Pinned
+    so the two stay ONE rule: a hard I/O error and a silent parse-to-zero are
+    the same question — 'can I establish who declares this bot?' — and both
+    must refuse rather than one erroring and the other deleting."""
+    root = _host(tmp_path)
+    man = root / "local" / "sys" / "f-beta" / "fleet.yaml"
+    man.chmod(0o000)
+    try:
+        state = _seed_state(root)
+        before = json.loads(state.read_text())["bots"]
+        r = _prune(root)
+        assert r.returncode != 0
+        assert json.loads(state.read_text())["bots"] == before
+    finally:
+        man.chmod(0o644)
+
+
+def test_a_healthy_host_still_prunes_after_the_guard(tmp_path: Path) -> None:
+    """The positive control, pinned. Without it a guard that refused
+    unconditionally would pass every test above."""
+    root = _host(tmp_path)
+    state = _seed_state(root)
+    r = _prune(root)
+    assert r.returncode == 0, r.stderr
+    rows = json.loads(state.read_text())["bots"]
+    assert "a0" not in rows, "a declared-by-nobody row should still be pruned"
+    assert {"a1", "a2", "b1", "g1", "orphan"} <= set(rows)
