@@ -67,6 +67,8 @@ The compositor reads `fleet.yaml` (which declares bots, their expertise, skills,
 
 Bots run as supervised processes: systemd user units on Linux, launchd LaunchAgents on macOS. Each bot lives in its own tmux session on its **own** tmux server (a private `-L <socket>` == `BOT_SERVICE`), so one server's death drops only that bot, never the whole fleet. The manager dispatches work via the socket-aware `lib/dispatch.sh` helper (which resolves the worker's socket); workers report back via `lib/report-back.sh`.
 
+**Changing a running fleet:** a change reaches a bot by one of four carriers — dispatch, composed file, hook script, or this repo's `CLAUDE.md` — and they differ on whether they reach a *running* process and whether they survive a restart. A composed file does not reach a bot until it restarts; a hook script is live on every bot at its next tool call with no canary window. See [`documentation/fleet-update-lifecycle.md`](documentation/fleet-update-lifecycle.md) before assuming a merged change is in force.
+
 Key lifecycle scripts in `lib/`:
 
 | Script | Purpose |

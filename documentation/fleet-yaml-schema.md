@@ -801,7 +801,7 @@ happens to be a real account, which is unbounded (#1019).
 fleet:
   github:
     mention_allowlist:
-      - chrisrogers37
+      - acme-dev
 ```
 
 Optional; **empty by default, and that default is deliberate**: no mention

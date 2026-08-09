@@ -34,6 +34,22 @@ Manager → worker via the socket-aware `lib/dispatch.sh` helper (each bot runs 
 | `workstream:<ws-id>` | Workstream id | Registry entry this task advances |
 | `task:<task-id>` | `t-<epoch>-<hex4>` | **Task identity** — minted by `dispatch-task.sh`, recorded in the dispatch ledger. The worker MUST echo it in every `[BOTREPORT]` for this task (`report-back.sh --task <id>`): the overdue watchdog joins on it, and an id-less report can never close an id'd dispatch. |
 
+### Always zone a timestamp
+
+**Never write a bare `HH:MM` to another bot. Always `10:47 EDT` or `14:47Z`.**
+
+The host clock runs UTC and bots report in local time, so a bare figure is
+ambiguous at the moment it is read and unrecoverable afterwards. It cost us
+twice in twelve hours: a four-hour margin was read as an eighteen-minute
+emergency, and a three-way roster is now permanently unreconcilable because each
+disclosure used a different zone and none of them said which.
+
+The second failure is the one that argues for the rule. A misread margin is
+caught the moment someone checks; a set of bare timestamps from different bots
+cannot be reconciled later at any effort, because the information needed to
+align them was never written down. Zone it at the point of writing or it is
+gone.
+
 ### Examples
 
 **Task dispatch:**
@@ -120,8 +136,25 @@ To audit/repair an entire fleet's supervision state in one shot:
 
 ```bash
 $CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet>          # report only
-$CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll any orphans
+$CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll orphans AND prune fleet-state — see below
 ```
+
+**`--enroll` writes outside your fleet.** Alongside enrolling orphans it applies
+the fleet-state prune, which deletes rows for any bot not in *your* `fleet.yaml`
+from `state/fleet-state.json` — a file shared by every fleet on the host (see
+#892). So running it against one fleet removes other fleets' bots from the shared
+state.
+
+**That is today's behaviour; a scoping fix is in flight (#1143).** Once it lands
+the prune narrows to rows outside your manifest *and* undeclared by any fleet on
+the host *and* stamped as yours — at which point the sentence above stops being
+true. Until then, assume the wide behaviour.
+
+Consequences are bounded: a missing row degrades that bot's STATE to `unknown`,
+never `down`, `fleet-pulse` does not read the file, and rows regenerate on each
+bot's next start or report. It is a defect to be aware of, not an incident. But
+the flag reads like "also fix the orphans" and does considerably more than that,
+so reach for the bare form unless you actually intend to enroll.
 
 `reconcile-fleet.sh` reports five buckets: healthy (tmux + unit), orphan (tmux but no unit — unsupervised), missing (unit but no tmux — down), unsupervised-down (neither — declared but nothing running or supervised; keepalive cannot revive it), unbound (running but not in any fleet.yaml — investigate before killing).
 
