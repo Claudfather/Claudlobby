@@ -141,8 +141,14 @@ $CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll orphans AND p
 
 **`--enroll` writes outside your fleet.** Alongside enrolling orphans it applies
 the fleet-state prune, which deletes rows for any bot not in *your* `fleet.yaml`
-from `state/fleet-state.json` — a file shared by every fleet on the host. So
-running it against one fleet removes other fleets' bots from the shared state.
+from `state/fleet-state.json` — a file shared by every fleet on the host (see
+#892). So running it against one fleet removes other fleets' bots from the shared
+state.
+
+**That is today's behaviour; a scoping fix is in flight (#1143).** Once it lands
+the prune narrows to rows outside your manifest *and* undeclared by any fleet on
+the host *and* stamped as yours — at which point the sentence above stops being
+true. Until then, assume the wide behaviour.
 
 Consequences are bounded: a missing row degrades that bot's STATE to `unknown`,
 never `down`, `fleet-pulse` does not read the file, and rows regenerate on each
