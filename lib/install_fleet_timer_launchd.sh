@@ -28,6 +28,18 @@ install_error_trap ""
 TIMER="${1:?Usage: install_fleet_timer_launchd.sh <timer-name> [<fleet-name>]}"
 shift
 
+# --adopt — see the systemd sibling. Parsed identically on both platforms so a
+# runbook step does not become platform-specific.
+ADOPT=0
+_args=()
+for _a in "$@"; do
+    case "$_a" in
+        --adopt) ADOPT=1 ;;
+        *) _args+=("$_a") ;;
+    esac
+done
+set -- ${_args[@]+"${_args[@]}"}
+
 if [ "$_OS" != "Darwin" ]; then
     echo "install_fleet_timer_launchd.sh: macOS only (launchd). On Linux, use install_fleet_timer.sh." >&2
     exit 1
@@ -46,6 +58,22 @@ if [ ! -f "$SRC_PLIST" ]; then
 fi
 
 mkdir -p "$HOME/Library/LaunchAgents"
+
+# Ownership gate (#1152) — BEFORE the copy, so a refusal changes nothing on
+# disk. Same predicate as the systemd sibling: a host job captured on macOS is
+# the same defect, and a guard on one platform only would leave the other
+# silently capturing.
+ENROLLING_ROOT="$(unit_owner_root "$SRC_PLIST")"
+PREV_OWNER="$(unit_owner_root "$PLIST")"
+if [ "$ADOPT" = 1 ]; then
+    if [ -f "$PLIST" ] && [ "$PREV_OWNER" != "$ENROLLING_ROOT" ]; then
+        printf 'adopting %s: %s -> %s\n' \
+            "$LABEL" "${PREV_OWNER:-<no ownership marker>}" "${ENROLLING_ROOT:-<unknown>}"
+    fi
+else
+    guard_unit_capture "$PLIST" "$ENROLLING_ROOT" "$LABEL" || exit $?
+fi
+
 cp "$SRC_PLIST" "$PLIST"
 
 UID_NUM="$(id -u)"
