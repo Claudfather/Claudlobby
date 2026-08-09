@@ -897,10 +897,26 @@ unit_owner_root() {
 # licenses a write. An unowned unit is refused rather than assumed to be ours:
 # absence of a marker is not evidence that nobody else put it there, and this
 # door overwrites host equipment.
+# The enrolling root and label are NOT mandatory parameters. An indeterminable
+# enrolling root is a real state — a unit that predates the composer's marker,
+# or a minimal hand-written one — and `${2:?}` aborted the whole enrollment on
+# it, which turned a guard against capture into a refusal to install anything.
 guard_unit_capture() {
-    local installed="${1:?}" root="${2:?}" label="${3:?}" owner
+    local installed="${1:?}" root="${2-}" label="${3-$(basename "${1:?}")}" owner
+    # Nothing installed means nothing to capture. This is the ONLY case where
+    # an unresolvable root is uninteresting, so it is answered before asking.
     [ -f "$installed" ] || return 0
     owner="$(unit_owner_root "$installed")"
+    if [ -z "$owner" ] && [ -z "$root" ]; then
+        # Neither side carries a marker, so no ownership judgement is possible
+        # in either direction. Proceeding is the only non-paralysing option —
+        # every composer-emitted unit carries the marker, so this is reachable
+        # only for units this system did not write — but it is said out loud
+        # rather than waved through, because the guard is silently inert here.
+        printf 'NOTE: %s carries no CLAUDLOBBY_ROOT marker and neither does the incoming unit;\n' "$installed" >&2
+        printf '      ownership cannot be checked, proceeding.\n' >&2
+        return 0
+    fi
     [ "$owner" = "$root" ] && return 0
     {
         printf 'REFUSED: %s is already installed and this root does not own it.\n' "$label"

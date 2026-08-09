@@ -206,6 +206,24 @@ class TestEnrollmentRefusesCapture:
         assert "adopt" in out.lower(), "adoption must be announced, not silent"
         assert str(host["trees"]["A"]) in out, "must name the displaced root"
 
+    def test_when_neither_side_carries_a_marker_it_proceeds_but_says_so(self, host):
+        # The one permissive branch, pinned so it cannot widen silently. With
+        # no marker on EITHER side no ownership judgement is possible in any
+        # direction, and refusing would turn a guard against capture into a
+        # refusal to install anything — which is what an earlier version of
+        # this guard did, taking 17 setup-backbone tests down with it.
+        # Reachable only for units this system did not write: every
+        # composer-emitted unit carries the marker.
+        (host["units"] / f"{UNIT}.service").write_text("[Service]\nExecStart=/x/y.sh\n")
+        src = host["trees"]["A"] / "runtime" / "_host" / "timers"
+        (src / f"{UNIT}.service").write_text("[Service]\nExecStart=/p/q.sh\n")
+
+        r = _enroll(host, "A")
+
+        assert r.returncode == 0, r.stderr
+        out = (r.stdout + r.stderr).lower()
+        assert "no claudlobby_root marker" in out, "the guard went inert silently"
+
     def test_an_unowned_unit_is_refused_on_its_own_message(self, host):
         # Pre-existing unit with no ownership marker: the owner cannot be
         # established, so it is refused rather than assumed to be ours.
