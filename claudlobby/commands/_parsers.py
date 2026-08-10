@@ -5,6 +5,7 @@ from __future__ import annotations
 from ._helpers import _add_migration_args
 from .core import (
     cmd_brief,
+    cmd_creds_reconcile,
     cmd_diff,
     cmd_doctor,
     cmd_freshbox,
@@ -40,6 +41,13 @@ def register_subparsers(sub) -> None:
         help="Pre-flight fleet health diagnostic (env, MCP, services, creds)",
     )
     pdr.set_defaults(func=cmd_doctor)
+
+    pcr = sub.add_parser(
+        "creds-reconcile",
+        help="Reconcile declared credentials vs stored values vs equipped bots "
+        "(#1104 shapes 1+2; shape 3 reports UNKNOWN by design)",
+    )
+    pcr.set_defaults(func=cmd_creds_reconcile)
 
     pfb = sub.add_parser(
         "freshbox",

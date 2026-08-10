@@ -39,7 +39,30 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
-ENV_FILE="${CLAUDLOBBY_ENV:-$CLAUDLOBBY_ROOT/.env}"
+# Resolve the .env tier THIS FLEET ACTUALLY READS (#1104).
+#
+# This line used to be `${CLAUDLOBBY_ENV:-$CLAUDLOBBY_ROOT/.env}` — always the
+# ROOT .env, while the script is invoked per-fleet (`creds-check.sh <fleet>`,
+# the composed-timer contract just above). Fleet-tier credentials were therefore
+# invisible to it by construction, and resolution fell through to whatever was
+# ambient. Measured consequence: a VALID Railway token sat in a fleet .env the
+# check never opened while the check FAILed against a stale ambient one, and an
+# operator learned to disbelieve the checker.
+#
+# The tier rule is the Python side's `Paths.env_file`, deliberately mirrored
+# rather than reinvented: the fleet .env when one exists, the root .env
+# otherwise — one or the other, never merged. Matching it is what keeps this
+# check and `claudlobby creds-reconcile` describing the same reality; a private
+# rule here is how the two would drift into disagreeing about which credential
+# is live.
+ENV_FILE="${CLAUDLOBBY_ENV:-}"
+if [ -z "$ENV_FILE" ] && [ -n "$FLEET_ARG" ]; then
+    _cc_fleet_dir="$(resolve_fleet_dir "$FLEET_ARG" 2>/dev/null || true)"
+    if [ -n "$_cc_fleet_dir" ] && [ -f "$_cc_fleet_dir/.env" ]; then
+        ENV_FILE="$_cc_fleet_dir/.env"
+    fi
+fi
+ENV_FILE="${ENV_FILE:-$CLAUDLOBBY_ROOT/.env}"
 LOG="${CLAUDLOBBY_CREDS_LOG:-$CLAUDLOBBY_ROOT/lib/creds-check.log}"
 STATE="${CLAUDLOBBY_CREDS_STATE:-$CLAUDLOBBY_ROOT/state/creds-check-state.json}"
 mkdir -p "$(dirname "$STATE")"
