@@ -693,7 +693,7 @@ harness_check "gate-on alert states keepalive will bounce to recover" "$r"
 
 # ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
-# navi's #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
+# The #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
 # nothing drove keepalive's real dead-session branch to prove it EMITS a line the
 # parser recognizes — so the #577 restart_bot_service extraction left that wording
 # one refactor from silently drifting out of uptime.py's _LOG_LINE_RE. Drive the
@@ -718,7 +718,7 @@ grep -qE 'RESTART.*session dead' "$DDIR/keepalive.log" 2>/dev/null && r=yes || r
 harness_check "keepalive dead-session path emits a RESTART … session dead log line" "$r"
 # Load-bearing assertion: the REAL uptime parser (parse_keepalive_log, backed by
 # _LOG_LINE_RE) must extract a RESTART from that emitted line — the emitter⇄parser
-# coupling navi flagged as guarded only by a hand-written fixture until now.
+# coupling the #577 review flagged as guarded only by a hand-written fixture until now.
 dead_restarts=$(python3 -c "
 import sys; sys.path.insert(0, '$LIB_DIR/..')
 from claudlobby.uptime import parse_keepalive_log
@@ -1094,7 +1094,7 @@ harness_check "update-claude-code.sh still downloads the binary daily" "$r"
 #       to another fleet, leaving its old dir behind) must be SKIPPED: zero pulse
 #       events. RED before #415 — the filesystem-glob loop health-checked every
 #       dir and emitted session_missing/service_down/pane_stuck for orphans
-#       (the craig/greg bug).
+#       (the #415 bug).
 #   (2) pane_stuck must honor the .idle marker like activity_stuck does: a bot
 #       parked at an idle prompt has a stable pane — that is idle, not stuck.
 # ===========================================================================
@@ -1576,7 +1576,7 @@ harness_check "dispatch classifier keeps set +H; on a leading-whitespace slash (
 # verified). A live model honoring the instruction is the P7 human canary; this
 # is the deterministic file-contract gate. NOTE: the prior version re-read a
 # bot.conf var the test itself wrote and never touched SKILL.md, so a gutted
-# skill stayed green — hollow (#640, rajan request-changes).
+# skill stayed green — hollow (#640 request-changes).
 _skill="$LIB_DIR/../library/skills/briefing/SKILL.md"
 _instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null)
 { [ -f "$_skill" ] \
@@ -1624,7 +1624,7 @@ else
 
     # Mirror start-bot.sh: do slow pre-session work (there, plugin install), THEN
     # create the session, THEN exit. The gap between "unit went active" and
-    # "session exists" is the window that stranded rajan for 35-178s.
+    # "session exists" is the window that stranded a bot for 35-178s.
     cat > "$BP_ROOT/spawner.sh" <<BPSPAWN
 #!/bin/bash
 sleep 8
@@ -1670,14 +1670,14 @@ BPCONF
 
     # Pulse HERE, in the activating window. This is the only state where
     # service_is_active reports not-active, so it is the only state that can
-    # reach the service_down branch — the finding-B false positive (saul's
-    # service_down state=activating) lives here and nowhere else. Sampling the
+    # reach the service_down branch — the finding-B false positive
+    # (service_down state=activating) lives here and nowhere else. Sampling the
     # pulse only in the later active/running window would leave finding B
     # entirely unexercised while reading green.
     bp_pulse
 
     # --- State 2: active/running (spawner executing, session not up yet) ---
-    # The state ActiveState alone cannot see, and where all 3 rajan restarts landed.
+    # The state ActiveState alone cannot see, and where all 3 restarts landed.
     sleep 6
     _s2=$(bp_state)
     _sess2=no; command tmux -L "$BP_SVC" has-session -t "$BP_BOT" 2>/dev/null && _sess2=yes
@@ -1817,7 +1817,7 @@ _inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body
 [ -z "$_inv" ] && r=yes || r=no
 harness_check "  ...but a CLOSED fence is respected (GitHub does not linkify it)" "$r"
 
-# --- by-reference content: the bypass vera found ----------------------------
+# --- by-reference content: the bypass #1019 exposed ----------------------------
 # gh can take the body from a FILE, so the hook sees only a filename and the
 # command carries no mention at all. #1019 — the issue filed ABOUT us spamming
 # a stranger — was itself filed this way and re-notified her.
