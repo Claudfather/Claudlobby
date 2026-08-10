@@ -25,7 +25,7 @@ import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
 from . import dotenv, tool_resolve
-from .config import BotConfig, FleetConfig, load_host_jobs
+from .config import BotConfig, FleetConfig, load_fleet, load_host_jobs
 from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
     ExpertisePermissions,
@@ -2742,39 +2742,46 @@ _BOOT_STAGGER_SECONDS = 3  # delay between each bot's startup on fleet boot
 
 
 def _fleet_manager_worker_counts(fleet_yaml: Path) -> tuple[int, int]:
-    """(managers, workers) from a fleet.yaml, read cheaply and without validating.
+    """(managers, workers) from a fleet.yaml, sized for another fleet's rungs.
 
-    A bot is a manager when a team names it, which is the same declaration
-    ``FleetConfig.manager_bots`` reads and the composer turns into
-    ``MANAGER_TMUX``. Only bots the manifest actually lists are counted: a team
-    naming an absent bot would otherwise inflate the manager tier and shift
-    every later fleet off its rung.
+    Manager detection is DELEGATED to ``FleetConfig.manager_bots`` and never
+    restated here. A private copy of that rule is exactly how the ladder came
+    to disagree with the rest of the composer: this helper read only ``teams:``
+    while ``manager_bots`` reads ``teams:`` AND ``bots.<id>.manages:``, so a
+    fleet whose manager is declared solely by ``manages:`` counted ZERO
+    managers and shifted every later fleet off its rung. Its own docstring
+    asserted the two were "the same declaration", which was true when written
+    and stopped being true forty minutes later.
+
+    That is the same shape as #892/#1143 — a predicate fixed centrally while a
+    consumer kept its own copy — which is the second occurrence in this repo
+    and the argument for fixing the seam rather than patching the symptom.
 
     A sibling fleet's manifest is read here only to size its rung blocks, so a
-    manifest that is missing, unparseable, or mid-edit contributes (0, 0) rather
-    than raising: one fleet's broken config must never block another fleet's
-    generate. The cost of the soft failure is a stale offset — which is the
+    manifest that is missing, unparseable, or mid-edit contributes (0, 0)
+    rather than raising: one fleet's broken config must never block another
+    fleet's generate. The cost of the soft failure is a stale offset — the
     un-offset behaviour, not a new failure mode.
+
+    The caught set is NAMED, never a bare ``Exception``, and that is load
+    bearing rather than tidiness. The version of this helper being replaced
+    warned that a blanket catch "would also swallow a NameError in this
+    function and report every fleet as empty" — and while writing the
+    replacement I did exactly that: the import of ``load_fleet`` was dropped as
+    unused between two edits, every call raised NameError, the blanket catch
+    turned it into (0, 0), and every fleet on the host silently lost its
+    stagger. The suite caught it; a narrower catch would have raised on the
+    first call instead. NameError is absent from this tuple deliberately.
     """
     try:
-        data = yaml.safe_load(fleet_yaml.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):  # missing, unreadable, or malformed
+        fleet, _ = load_fleet(fleet_yaml)
+    except (OSError, yaml.YAMLError, ValueError, TypeError, KeyError):
+        # missing, unparseable, or shaped in a way coercion rejects
         return 0, 0
-    # Shape is checked rather than caught: a bare `except Exception` here would
-    # also swallow a NameError in this function and report every fleet as empty,
-    # which is how the sibling host composers silently produced empty output.
-    fleet = data.get("fleet") if isinstance(data, dict) else None
-    if not isinstance(fleet, dict):
-        return 0, 0
-    bots = fleet.get("bots")
-    bots = set(bots) if isinstance(bots, (dict, list)) else set()
-    teams = fleet.get("teams")
-    named = (
-        {t.get("manager") for t in teams.values() if isinstance(t, dict)}
-        if isinstance(teams, dict)
-        else set()
-    )
-    managers = named & bots
+    # Only bots the manifest actually lists: a team naming an absent bot would
+    # otherwise inflate the manager tier and shift every later fleet.
+    bots = set(fleet.bots)
+    managers = fleet.manager_bots() & bots
     return len(managers), len(bots) - len(managers)
 
 

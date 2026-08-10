@@ -2370,6 +2370,105 @@ class TestHostBootOffset:
         rungs = [bot_boot_delay_s(b, fleet, paths) for b in fleet.bots.values()]
         assert rungs == [3, 0, 6]  # b1 manages, so it leads; b0/b2 follow in order
 
+    def _host_manages_only(self, tmp_path):
+        """Two fleets where the FIRST declares its manager only via ``manages:``.
+
+        The ``spec`` helper above can express a ``teams:`` manager and nothing
+        else, which is precisely what hid this: every existing multi-fleet test
+        declares managers the single way the sibling-counting helper happened
+        to read, so the host walk was never exercised against the other
+        declaration. The only test that used ``manages:`` as a real manager
+        designation runs in ROOT mode, which returns before the sibling walk.
+        """
+        root = tmp_path / "claudlobby"
+        local = root / "local"
+        docs = {
+            # No teams: block at all — b0 manages b1 and nothing else says so.
+            "aaa": {
+                "name": "aaa",
+                "bots": {
+                    "b0": {"expertise": ["eng"], "manages": ["b1"]},
+                    "b1": {"expertise": ["eng"]},
+                },
+            },
+            "bbb": {
+                "name": "bbb",
+                "teams": {"t0": {"manager": "b0"}},
+                "bots": {"b0": {"expertise": ["eng"]}, "b1": {"expertise": ["eng"]}},
+            },
+        }
+        for name, fleet in docs.items():
+            d = local / name
+            d.mkdir(parents=True)
+            (d / "fleet.yaml").write_text(
+                yaml.safe_dump({"fleet": fleet}), encoding="utf-8"
+            )
+        return root, local
+
+    def _manages_only_fleets(self):
+        aaa = FleetConfig(
+            name="aaa",
+            service_prefix="p",
+            bots={
+                "b0": BotConfig(
+                    bot_id="b0", name="b0", expertise=["eng"], manages=["b1"]
+                ),
+                "b1": BotConfig(bot_id="b1", name="b1", expertise=["eng"]),
+            },
+        )
+        bbb = FleetConfig(
+            name="bbb",
+            service_prefix="p",
+            bots={
+                "b0": BotConfig(bot_id="b0", name="b0", expertise=["eng"]),
+                "b1": BotConfig(bot_id="b1", name="b1", expertise=["eng"]),
+            },
+            teams={"t0": TeamConfig(name="t0", manager="b0")},
+        )
+        return aaa, bbb
+
+    def test_a_manages_only_manager_in_an_earlier_fleet_is_counted(self, tmp_path):
+        """A sibling's manager counts however it was DECLARED, not however the
+        counting helper happened to look for it.
+
+        ``aaa`` contributes one manager and one worker. Undercounting its
+        manager tier shifts every later fleet's rung base, so this asserts on
+        the later fleet: it is the one that inherits the shortfall.
+        """
+        root, local = self._host_manages_only(tmp_path)
+        bases = _host_boot_rung_bases(Paths(root=root, fleet_dir=local / "bbb"), 1)
+        assert bases == (1, 3), (
+            "bbb's manager must ladder past aaa's; a manages:-only manager that "
+            "the sibling count cannot see collapses that gap"
+        )
+
+    def test_managers_ladder_in_host_walk_order(self, tmp_path):
+        """Asserted through ``bot_boot_delay_s``, the value a unit carries.
+
+        The INVARIANT, not a fitted number: the host walks fleets in a fixed
+        order, so a manager in an earlier fleet boots no later than a manager
+        in a later one. Undercounting the earlier fleet's manager tier inverts
+        that — the later fleet's manager takes rung 0 while the earlier one is
+        pushed into the block reserved for it.
+
+        A same-rung collision is the other face of the same undercount, and is
+        what it looks like on a four-fleet host. Two fleets are the smallest
+        arrangement that exhibits the ordering violation, so this asserts that
+        rather than a shape it cannot produce — an earlier draft asserted the
+        collision here and PASSED on the broken code, which made it decorative.
+        """
+        root, local = self._host_manages_only(tmp_path)
+        aaa, bbb = self._manages_only_fleets()
+        a = bot_boot_delay_s(
+            aaa.bots["b0"], aaa, Paths(root=root, fleet_dir=local / "aaa")
+        )
+        b = bot_boot_delay_s(
+            bbb.bots["b0"], bbb, Paths(root=root, fleet_dir=local / "bbb")
+        )
+        assert a <= b, (
+            f"aaa walks first but its manager boots at {a}s, after bbb's at {b}s"
+        )
+
     def test_unparseable_sibling_does_not_block_generate(self, tmp_path):
         """A broken fleet contributes no rungs; it must never raise here."""
         spec = {"aaa": (3, [0]), "bbb": (2, [0])}
