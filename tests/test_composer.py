@@ -11,6 +11,7 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
+import yaml
 
 from claudlobby.config import (
     BotConfig,
@@ -26,7 +27,7 @@ from tests.conftest import _write_exec, install_real_template
 from claudlobby.composer import (
     _BOOT_STAGGER_SECONDS,
     _compose_hooks,
-    _host_boot_offset_rungs,
+    _host_boot_rung_bases,
     bot_boot_delay_s,
     _reconcile_access_json,
     _write_timer_units,
@@ -2208,74 +2209,313 @@ class TestComposeSystemdUnit:
 
 
 class TestHostBootOffset:
-    """Host-global boot ladder: fleet N starts where fleet N-1 ended (#1002)."""
+    """Host-global boot ladder: managers first, then workers, one per rung (#1002)."""
 
-    def _host(self, tmp_path, fleets: dict[str, int], nested: bool = False):
+    # spec shape, shared by every helper below:
+    #   {fleet_name: (n_bots, [indices of bots a team names as manager])}
+    # Manager indices rather than "the first N", so a fleet whose manager is not
+    # declared first still exercises the tier split.
+
+    @pytest.fixture(autouse=True)
+    def _clear_ladder_cache(self):
+        """The walk is cached per process; tests reuse paths across mutations."""
+        _host_boot_rung_bases.cache_clear()
+        yield
+        _host_boot_rung_bases.cache_clear()
+
+    def _host(self, tmp_path, spec, nested: bool = False):
         """Build local/<fleet>/fleet.yaml (or local/<system>/<fleet>/) trees."""
         root = tmp_path / "claudlobby"
         local = root / "local"
-        for name, n_bots in fleets.items():
+        for name, (n_bots, mgr_idx) in spec.items():
             d = (local / "sys" / name) if nested else (local / name)
             d.mkdir(parents=True)
-            bots = "\n".join(f"    b{i}: {{expertise: [eng]}}" for i in range(n_bots))
-            (d / "fleet.yaml").write_text(
-                f"fleet:\n  name: {name}\n  bots:\n{bots}\n", encoding="utf-8"
-            )
+            doc = {
+                "fleet": {
+                    "name": name,
+                    "teams": {
+                        f"t{i}": {"manager": f"b{m}"} for i, m in enumerate(mgr_idx)
+                    },
+                    "bots": {f"b{i}": {"expertise": ["eng"]} for i in range(n_bots)},
+                }
+            }
+            (d / "fleet.yaml").write_text(yaml.safe_dump(doc), encoding="utf-8")
         return root, local
 
+    def _fleet(self, name, spec):
+        """A FleetConfig matching this fleet's entry in ``spec``."""
+        n_bots, mgr_idx = spec[name]
+        bots = {
+            f"b{i}": BotConfig(bot_id=f"b{i}", name=f"b{i}", expertise=["eng"])
+            for i in range(n_bots)
+        }
+        teams = {
+            f"t{i}": TeamConfig(name=f"t{i}", manager=f"b{m}")
+            for i, m in enumerate(mgr_idx)
+        }
+        return FleetConfig(name=name, service_prefix="p", bots=bots, teams=teams)
+
+    def _bases(self, root, local, spec, name, nested: bool = False):
+        """This fleet's (manager_base, worker_base), via the real door."""
+        d = (local / "sys" / name) if nested else (local / name)
+        own_managers = len(set(spec[name][1]))
+        return _host_boot_rung_bases(Paths(root=root, fleet_dir=d), own_managers)
+
+    def _rungs(self, root, local, spec):
+        """Every bot's delay on the host, keyed <fleet>.<bot>, via the real door."""
+        out = {}
+        for name in spec:
+            fleet = self._fleet(name, spec)
+            paths = Paths(root=root, fleet_dir=local / name)
+            for bot in fleet.bots.values():
+                out[f"{name}.{bot.bot_id}"] = bot_boot_delay_s(bot, fleet, paths)
+        return out
+
     def test_first_fleet_starts_at_zero(self, tmp_path):
-        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2})
-        paths = Paths(root=root, fleet_dir=local / "aaa")
-        assert _host_boot_offset_rungs(paths) == 0
+        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        # 2 managers on the host, so aaa's workers start at rung 2.
+        assert self._bases(root, local, spec, "aaa") == (0, 2)
 
     def test_later_fleet_starts_past_the_earlier_ones(self, tmp_path):
-        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2, "ccc": 4})
-        assert _host_boot_offset_rungs(Paths(root=root, fleet_dir=local / "bbb")) == 3
-        assert _host_boot_offset_rungs(Paths(root=root, fleet_dir=local / "ccc")) == 5
+        """Managers ladder past earlier managers; workers past ALL managers."""
+        spec = {"aaa": (3, [0]), "bbb": (2, [0]), "ccc": (4, [0])}
+        root, local = self._host(tmp_path, spec)
+        # 3 managers on the host, so every worker block starts at rung 3 or past.
+        assert self._bases(root, local, spec, "aaa") == (0, 3)
+        assert self._bases(root, local, spec, "bbb") == (1, 5)
+        assert self._bases(root, local, spec, "ccc") == (2, 6)
 
     def test_no_two_bots_share_a_rung(self, tmp_path):
-        """The property the fix exists for, asserted end to end."""
-        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2, "ccc": 4})
-        rungs = []
-        for name, n_bots in (("aaa", 3), ("bbb", 2), ("ccc", 4)):
-            base = _host_boot_offset_rungs(Paths(root=root, fleet_dir=local / name))
-            rungs += [(base + i) * _BOOT_STAGGER_SECONDS for i in range(n_bots)]
-        assert len(rungs) == len(set(rungs)) == 9
-        assert sorted(rungs) == [i * _BOOT_STAGGER_SECONDS for i in range(9)]
+        """The property the ladder exists for, asserted end to end.
+
+        Manager-first reorders the ladder; it must not perforate or overrun it.
+        """
+        spec = {"aaa": (3, [0]), "bbb": (2, [1]), "ccc": (4, [0, 2])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        assert len(rungs) == 9
+        assert sorted(rungs.values()) == [i * _BOOT_STAGGER_SECONDS for i in range(9)]
+
+    def test_all_managers_precede_all_workers(self, tmp_path):
+        """The change itself: the whole observation layer is up first.
+
+        Not "each fleet's manager leads its own block" — that was already true
+        of the contiguous per-fleet ladder. The property asserted is host-global.
+        """
+        spec = {"aaa": (3, [0]), "bbb": (2, [1]), "ccc": (4, [0, 2])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        mgrs = {"aaa.b0", "bbb.b1", "ccc.b0", "ccc.b2"}
+        assert max(rungs[k] for k in mgrs) < min(
+            v for k, v in rungs.items() if k not in mgrs
+        )
+        # 4 managers → the first four rungs, in fleet order.
+        assert sorted(rungs[k] for k in mgrs) == [0, 3, 6, 9]
+
+    def test_last_fleets_manager_boots_before_first_fleets_worker(self, tmp_path):
+        """The inversion the ordering buys, stated as the case that changed."""
+        spec = {"aaa": (3, [0]), "zzz": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        assert rungs["zzz.b0"] < rungs["aaa.b1"]
+
+    def test_manager_declared_last_still_takes_a_manager_rung(self, tmp_path):
+        """Tier membership comes from teams, not from declaration position."""
+        spec = {"aaa": (3, [2])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        assert rungs["aaa.b2"] == 0
+        assert sorted(rungs.values()) == [0, 3, 6]
+
+    def test_two_teams_one_manager_counts_once(self, tmp_path):
+        """A bot managing two teams occupies one rung, not two."""
+        spec = {"aaa": (3, [0, 0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        assert sorted(rungs.values()) == [i * _BOOT_STAGGER_SECONDS for i in range(5)]
+
+    def test_team_naming_an_absent_bot_does_not_shift_the_ladder(self, tmp_path):
+        """Only bots the manifest lists are counted, or later fleets slide off."""
+        spec = {"aaa": (2, []), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        (local / "aaa" / "fleet.yaml").write_text(
+            "fleet:\n  name: aaa\n  teams:\n    t0: {manager: ghost}\n"
+            "  bots:\n    b0: {expertise: [eng]}\n    b1: {expertise: [eng]}\n",
+            encoding="utf-8",
+        )
+        # aaa contributes 0 managers and 2 workers; bbb's manager still leads.
+        assert self._bases(root, local, spec, "bbb") == (0, 3)
+
+    def test_fleet_with_no_teams_is_all_workers(self, tmp_path):
+        spec = {"aaa": (3, []), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        # Only bbb has a manager, so it owns rung 0 and aaa's bots follow it.
+        assert self._bases(root, local, spec, "aaa") == (0, 1)
+        assert self._bases(root, local, spec, "bbb") == (0, 4)
 
     def test_nested_system_container_fleets_are_ordered_too(self, tmp_path):
         """local/<system>/<fleet>/ resolves like the flat layout."""
-        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2}, nested=True)
-        paths = Paths(root=root, fleet_dir=local / "sys" / "bbb")
-        assert _host_boot_offset_rungs(paths) == 3
+        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec, nested=True)
+        assert self._bases(root, local, spec, "bbb", nested=True) == (1, 4)
 
-    def test_root_mode_has_no_offset(self, tmp_path):
-        root, _ = self._host(tmp_path, {"aaa": 3})
-        assert _host_boot_offset_rungs(Paths(root=root, fleet_dir=None)) == 0
+    def test_unplaceable_fleet_ladders_standalone_managers_first(self, tmp_path):
+        """No host placement is not licence to stack two bots on rung 0."""
+        spec = {"aaa": (3, [1])}
+        root, _ = self._host(tmp_path, spec)
+        paths = Paths(root=root, fleet_dir=None)  # root mode
+        assert _host_boot_rung_bases(paths, 1) == (0, 1)
+        fleet = self._fleet("aaa", spec)
+        rungs = [bot_boot_delay_s(b, fleet, paths) for b in fleet.bots.values()]
+        assert rungs == [3, 0, 6]  # b1 manages, so it leads; b0/b2 follow in order
+
+    def _host_manages_only(self, tmp_path):
+        """Two fleets where the FIRST declares its manager only via ``manages:``.
+
+        The ``spec`` helper above can express a ``teams:`` manager and nothing
+        else, which is precisely what hid this: every existing multi-fleet test
+        declares managers the single way the sibling-counting helper happened
+        to read, so the host walk was never exercised against the other
+        declaration. The only test that used ``manages:`` as a real manager
+        designation runs in ROOT mode, which returns before the sibling walk.
+        """
+        root = tmp_path / "claudlobby"
+        local = root / "local"
+        docs = {
+            # No teams: block at all — b0 manages b1 and nothing else says so.
+            "aaa": {
+                "name": "aaa",
+                "bots": {
+                    "b0": {"expertise": ["eng"], "manages": ["b1"]},
+                    "b1": {"expertise": ["eng"]},
+                },
+            },
+            "bbb": {
+                "name": "bbb",
+                "teams": {"t0": {"manager": "b0"}},
+                "bots": {"b0": {"expertise": ["eng"]}, "b1": {"expertise": ["eng"]}},
+            },
+        }
+        for name, fleet in docs.items():
+            d = local / name
+            d.mkdir(parents=True)
+            (d / "fleet.yaml").write_text(
+                yaml.safe_dump({"fleet": fleet}), encoding="utf-8"
+            )
+        return root, local
+
+    def _manages_only_fleets(self):
+        aaa = FleetConfig(
+            name="aaa",
+            service_prefix="p",
+            bots={
+                "b0": BotConfig(
+                    bot_id="b0", name="b0", expertise=["eng"], manages=["b1"]
+                ),
+                "b1": BotConfig(bot_id="b1", name="b1", expertise=["eng"]),
+            },
+        )
+        bbb = FleetConfig(
+            name="bbb",
+            service_prefix="p",
+            bots={
+                "b0": BotConfig(bot_id="b0", name="b0", expertise=["eng"]),
+                "b1": BotConfig(bot_id="b1", name="b1", expertise=["eng"]),
+            },
+            teams={"t0": TeamConfig(name="t0", manager="b0")},
+        )
+        return aaa, bbb
+
+    def test_a_manages_only_manager_in_an_earlier_fleet_is_counted(self, tmp_path):
+        """A sibling's manager counts however it was DECLARED, not however the
+        counting helper happened to look for it.
+
+        ``aaa`` contributes one manager and one worker. Undercounting its
+        manager tier shifts every later fleet's rung base, so this asserts on
+        the later fleet: it is the one that inherits the shortfall.
+        """
+        root, local = self._host_manages_only(tmp_path)
+        bases = _host_boot_rung_bases(Paths(root=root, fleet_dir=local / "bbb"), 1)
+        assert bases == (1, 3), (
+            "bbb's manager must ladder past aaa's; a manages:-only manager that "
+            "the sibling count cannot see collapses that gap"
+        )
+
+    def test_manages_only_manager_takes_its_own_rung_on_the_host_ladder(self, tmp_path):
+        """The whole ladder, as exact rungs — asserted through
+        ``bot_boot_delay_s``, the value a composed unit actually carries.
+
+        THE INVARIANT IS ONE BOT PER RUNG, COLLISION-FREE, ALWAYS — every
+        manager on the host first, then every worker. Two single-manager
+        fleets therefore have exactly one correct answer, and equality is the
+        only assertion that says so.
+
+        This test has now been tightened twice for one underlying reason, so
+        the reason is recorded rather than the instances. Both loose drafts
+        were written to a docstring that framed the property as an ORDERING —
+        "boots no later than" — which is strictly weaker than what the ladder
+        guarantees. Draft one asserted a collision shape the two-fleet
+        arrangement cannot produce; draft two asserted ``a <= b``, which cannot
+        tell a tie from correct ordering and so passed on a pre-fix tree where
+        the two managers land on the SAME rung. Neither author departed from
+        the docstring; the docstring was wrong, and an inequality is what let
+        it stay wrong. An equality cannot be quietly loosened the same way.
+
+        Rungs below are derived from the invariant, not fitted to output: 2
+        managers then 2 workers, in host-walk order, at the 3s stagger.
+        """
+        root, local = self._host_manages_only(tmp_path)
+        aaa, bbb = self._manages_only_fleets()
+        p_aaa = Paths(root=root, fleet_dir=local / "aaa")
+        p_bbb = Paths(root=root, fleet_dir=local / "bbb")
+        rungs = {
+            "aaa.b0": bot_boot_delay_s(aaa.bots["b0"], aaa, p_aaa),  # manager
+            "bbb.b0": bot_boot_delay_s(bbb.bots["b0"], bbb, p_bbb),  # manager
+            "aaa.b1": bot_boot_delay_s(aaa.bots["b1"], aaa, p_aaa),  # worker
+            "bbb.b1": bot_boot_delay_s(bbb.bots["b1"], bbb, p_bbb),  # worker
+        }
+        assert rungs == {
+            "aaa.b0": 0,
+            "bbb.b0": 3,
+            "aaa.b1": 6,
+            "bbb.b1": 9,
+        }, f"host ladder is not one-bot-per-rung managers-first: {rungs}"
 
     def test_unparseable_sibling_does_not_block_generate(self, tmp_path):
-        """A broken fleet contributes 0 rungs; it must never raise here."""
-        root, local = self._host(tmp_path, {"aaa": 3, "bbb": 2})
+        """A broken fleet contributes no rungs; it must never raise here."""
+        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
         (local / "aaa" / "fleet.yaml").write_text("fleet: [oops\n", encoding="utf-8")
-        assert _host_boot_offset_rungs(Paths(root=root, fleet_dir=local / "bbb")) == 0
+        assert self._bases(root, local, spec, "bbb") == (0, 1)
+
+    def test_manifest_that_is_not_a_mapping_contributes_nothing(self, tmp_path):
+        """Shape is checked, not caught — a list manifest must not raise."""
+        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        (local / "aaa" / "fleet.yaml").write_text("- a\n- b\n", encoding="utf-8")
+        assert self._bases(root, local, spec, "bbb") == (0, 1)
 
     def test_bot_boot_delay_places_each_bot_on_its_own_rung(self, tmp_path):
         """The derivation every compose entry point shares.
 
         Threading the rung from compose_fleet is what let `generate --bot` and
         move-bot write a unit with NO stagger at all (#1002), so the rung is
-        derived from (fleet position, bot position) instead — and this asserts
-        the derivation, not a re-implementation of it in the test body.
+        derived from (tier, fleet position, position within tier) instead — and
+        this asserts the derivation, not a re-implementation of it in the test
+        body.
         """
-        root, local = self._host(tmp_path, {"aaa": 2, "bbb": 3})
+        spec = {"aaa": (2, [0]), "bbb": (3, [0])}
+        root, local = self._host(tmp_path, spec)
         paths = Paths(root=root, fleet_dir=local / "bbb")
-        bots = {
-            f"b{i}": BotConfig(bot_id=f"b{i}", name=f"b{i}", expertise=["eng"])
-            for i in range(3)
-        }
-        fleet = FleetConfig(name="bbb", service_prefix="p", bots=bots)
-        # aaa owns rungs 0-1, so bbb starts at rung 2 → 6s, 9s, 12s.
-        assert [bot_boot_delay_s(b, fleet, paths) for b in bots.values()] == [6, 9, 12]
+        fleet = self._fleet("bbb", spec)
+        # 2 managers (aaa.b0 rung 0, bbb.b0 rung 1); workers start at rung 2,
+        # and aaa's one worker takes it — so bbb's workers are rungs 3-4.
+        assert [bot_boot_delay_s(b, fleet, paths) for b in fleet.bots.values()] == [
+            3,
+            9,
+            12,
+        ]
 
 
 class TestCrossFleetManagerRecognition:

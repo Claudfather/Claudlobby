@@ -83,16 +83,27 @@ _BLESSED_RAW_READS = {
     # No value crosses into a path, a grant, or composed output, so this adds no
     # fleet.yaml-shaped source surface for L1 to miss.
     ("composer.py", "dotenv.read(tier)"),
-    # _fleet_bot_count reads a SIBLING fleet's manifest to size its block of the
-    # host-global boot ladder (#1002). EXEMPT, narrowly, on the dotenv.read(tier)
-    # precedent: the only thing consumed is len(fleet.bots) — an integer. No
-    # value from the parsed document crosses into a path, a grant, or composed
-    # output, so this adds no fleet.yaml-shaped source surface for L1 to miss.
-    # It is deliberately raw and fail-soft rather than routed through the
-    # validating loader: a sibling fleet with a broken manifest must not be able
-    # to fail this fleet's generate.
-    ("composer.py", "fleet_yaml.read_text(encoding='utf-8')"),
-    ("composer.py", "yaml.safe_load(fleet_yaml.read_text(encoding='utf-8'))"),
+    # _fleet_manager_worker_counts reads a SIBLING fleet's manifest to size its
+    # manager and worker blocks of the host-global boot ladder (#1002). EXEMPT,
+    # narrowly, on the dotenv.read(tier) precedent: the only things consumed are
+    # two integers — how many of fleet.bots a fleet.teams entry names as manager,
+    # and how many it does not. The manager names are read, but only to intersect
+    # with the bot keys and be counted; no value from the parsed document crosses
+    # into a path, a grant, or composed output, so this adds no fleet.yaml-shaped
+    # source surface for L1 to miss.
+    # NO LONGER RAW (#1046 review). It read the manifest itself and detected
+    # managers from `teams:` alone, so a fleet declaring its manager only via
+    # `bots.<id>.manages:` counted zero and shifted every later fleet off its
+    # rung. The rule now comes from FleetConfig.manager_bots via load_fleet,
+    # because a private copy of a shared predicate is what produced the defect
+    # (and #892/#1143 before it).
+    #
+    # The fail-soft property this entry was blessed for is PRESERVED, by a
+    # different mechanism rather than by staying raw: the load is wrapped in a
+    # named catch that yields (0, 0), so a sibling with a broken manifest still
+    # cannot fail this fleet's generate. Both tests that pin that behaviour —
+    # unparseable sibling, and a manifest that is not a mapping — still pass.
+    # Two blessed raw-read sites therefore disappear rather than move.
     # compose_host_bot_handles reads every fleet's manifest to build the GitHub
     # mention guard's name list (#1019). EXEMPT on the dotenv.read(tier)
     # precedent: the only thing consumed is the KEYS of fleet.bots, filtered to
