@@ -2070,11 +2070,17 @@ harness_check "  ...and DOES fast-forward once a newer release is cut" "$r"
 echo ""
 echo "=== validate #892: an audit verb with no --enroll must not write ==="
 # state/fleet-state.json is ONE host-shared file, while prune builds its keep-list
-# from a SINGLE fleet manifest — so every bot outside the invoking fleet is
-# undeclared BY CONSTRUCTION and gets deleted on a perfect parse. That fired at
+# from a SINGLE fleet manifest — so every bot outside the invoking fleet WAS
+# undeclared by construction and was deleted on a perfect parse. That fired at
 # least seven times in one day across three managers, on ordinary session-start
 # hygiene, and none of them caught it: the verb is named, documented and flagged
 # as report-only, and the output read as routine housekeeping.
+#
+# Two separate doors were closed. The write moved behind --enroll, so the AUDIT
+# verb no longer writes at all; and prune is now SCOPED, so even the enrolled
+# write removes only rows this fleet declared and still owns. The checks below
+# cover both, because either alone leaves the incident reachable — an audit that
+# cannot write is no help once someone legitimately runs --enroll.
 #
 # FLEET_STATE_PATH is set explicitly below rather than inherited. This harness
 # overrides CLAUDLOBBY_ROOT at every call site but never FLEET_STATE_PATH, which
@@ -2086,7 +2092,10 @@ mkdir -p "$FS_ROOT/local/f-alpha/runtime/bots" "$FS_ROOT/local/f-beta/runtime/bo
 printf 'fleet:\n  name: f-alpha\n  bots:\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/fleet.yaml"
 printf 'fleet:\n  name: f-beta\n  bots:\n    b1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-beta/fleet.yaml"
 FS_STATE="$FS_ROOT/state/fleet-state.json"
-fs_seed() { printf '{"updated":"x","bots":{"a1":{"status":"idle"},"b1":{"status":"working"}},"queue":[]}' > "$FS_STATE"; }
+# a1: declared by f-alpha. a0: f-alpha's DEPARTED bot, still stamped as hers --
+# the only row a f-alpha prune may remove, and the witness that the write still
+# happens. b1: f-beta's live bot, the row that must survive f-alpha entirely.
+fs_seed() { printf '{"updated":"x","bots":{"a1":{"status":"idle","fleet":"f-alpha"},"a0":{"status":"idle","fleet":"f-alpha"},"b1":{"status":"working","fleet":"f-beta"}},"queue":[]}' > "$FS_STATE"; }
 fs_reconcile() { CLAUDLOBBY_ROOT="$FS_ROOT" FLEET_STATE_PATH="$FS_STATE" "$LIB_DIR/reconcile-fleet.sh" "$@" 2>&1 || true; }
 
 # The incident, reproduced: f-alpha audits, and f-beta must survive it.
@@ -2097,16 +2106,24 @@ fs_out="$(fs_reconcile f-alpha)"
 harness_check "AUDIT (no --enroll) writes NOTHING to host-shared fleet-state" "$r"
 [ "$(printf '%s' "$fs_out" | grep -c 'WOULD prune')" -ge 1 ] && r=yes || r=no
 harness_check "  ...but still REPORTS what would go (the audit keeps its signal)" "$r"
-printf '%s' "$fs_out" | grep -q 'f-beta (NOT this fleet' && r=yes || r=no
-harness_check "  ...naming the OTHER fleet whose rows they are" "$r"
+printf '%s' "$fs_out" | grep -q 'b1 — declared by another fleet' && r=yes || r=no
+harness_check "  ...naming the OTHER fleet's row as one it will NOT touch" "$r"
 printf '%s' "$fs_out" | grep -q 'host-declared bots have NO row' && r=yes || r=no
 harness_check "  ...and what is MISSING, not merely what this run would remove" "$r"
 
 # --enroll still applies it: the write moved behind the flag, it did not vanish.
 fs_seed
 fs_reconcile f-alpha --enroll >/dev/null
-[ "$(jq -r '.bots | has("b1")' "$FS_STATE")" = "false" ] && r=yes || r=no
+[ "$(jq -r '.bots | has("a0")' "$FS_STATE")" = "false" ] && r=yes || r=no
 harness_check "--enroll DOES apply the prune (the write moved, it did not vanish)" "$r"
+# This check previously WITNESSED the write by watching b1 -- a SIBLING fleet's
+# row -- disappear. The intent was right and the witness was the harm itself, so
+# a green harness certified the incident. It now witnesses f-alpha's own departed
+# row, and asserts the sibling survives, which is the property that was missing.
+[ "$(jq -r '.bots | has("b1")' "$FS_STATE")" = "true" ] && r=yes || r=no
+harness_check "  ...while the OTHER fleet's live row SURVIVES it (#892 scoping)" "$r"
+[ "$(jq -r '.bots.b1.status' "$FS_STATE")" = "working" ] && r=yes || r=no
+harness_check "  ...unmodified, not merely present" "$r"
 [ "$(jq -r '.updated' "$FS_STATE")" != "x" ] && r=yes || r=no
 harness_check "  ...and stamps .updated, like the delete and update arms" "$r"
 
