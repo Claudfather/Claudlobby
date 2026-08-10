@@ -2442,32 +2442,45 @@ class TestHostBootOffset:
             "the sibling count cannot see collapses that gap"
         )
 
-    def test_managers_ladder_in_host_walk_order(self, tmp_path):
-        """Asserted through ``bot_boot_delay_s``, the value a unit carries.
+    def test_manages_only_manager_takes_its_own_rung_on_the_host_ladder(self, tmp_path):
+        """The whole ladder, as exact rungs — asserted through
+        ``bot_boot_delay_s``, the value a composed unit actually carries.
 
-        The INVARIANT, not a fitted number: the host walks fleets in a fixed
-        order, so a manager in an earlier fleet boots no later than a manager
-        in a later one. Undercounting the earlier fleet's manager tier inverts
-        that — the later fleet's manager takes rung 0 while the earlier one is
-        pushed into the block reserved for it.
+        THE INVARIANT IS ONE BOT PER RUNG, COLLISION-FREE, ALWAYS — every
+        manager on the host first, then every worker. Two single-manager
+        fleets therefore have exactly one correct answer, and equality is the
+        only assertion that says so.
 
-        A same-rung collision is the other face of the same undercount, and is
-        what it looks like on a four-fleet host. Two fleets are the smallest
-        arrangement that exhibits the ordering violation, so this asserts that
-        rather than a shape it cannot produce — an earlier draft asserted the
-        collision here and PASSED on the broken code, which made it decorative.
+        This test has now been tightened twice for one underlying reason, so
+        the reason is recorded rather than the instances. Both loose drafts
+        were written to a docstring that framed the property as an ORDERING —
+        "boots no later than" — which is strictly weaker than what the ladder
+        guarantees. Draft one asserted a collision shape the two-fleet
+        arrangement cannot produce; draft two asserted ``a <= b``, which cannot
+        tell a tie from correct ordering and so passed on a pre-fix tree where
+        the two managers land on the SAME rung. Neither author departed from
+        the docstring; the docstring was wrong, and an inequality is what let
+        it stay wrong. An equality cannot be quietly loosened the same way.
+
+        Rungs below are derived from the invariant, not fitted to output: 2
+        managers then 2 workers, in host-walk order, at the 3s stagger.
         """
         root, local = self._host_manages_only(tmp_path)
         aaa, bbb = self._manages_only_fleets()
-        a = bot_boot_delay_s(
-            aaa.bots["b0"], aaa, Paths(root=root, fleet_dir=local / "aaa")
-        )
-        b = bot_boot_delay_s(
-            bbb.bots["b0"], bbb, Paths(root=root, fleet_dir=local / "bbb")
-        )
-        assert a <= b, (
-            f"aaa walks first but its manager boots at {a}s, after bbb's at {b}s"
-        )
+        p_aaa = Paths(root=root, fleet_dir=local / "aaa")
+        p_bbb = Paths(root=root, fleet_dir=local / "bbb")
+        rungs = {
+            "aaa.b0": bot_boot_delay_s(aaa.bots["b0"], aaa, p_aaa),  # manager
+            "bbb.b0": bot_boot_delay_s(bbb.bots["b0"], bbb, p_bbb),  # manager
+            "aaa.b1": bot_boot_delay_s(aaa.bots["b1"], aaa, p_aaa),  # worker
+            "bbb.b1": bot_boot_delay_s(bbb.bots["b1"], bbb, p_bbb),  # worker
+        }
+        assert rungs == {
+            "aaa.b0": 0,
+            "bbb.b0": 3,
+            "aaa.b1": 6,
+            "bbb.b1": 9,
+        }, f"host ladder is not one-bot-per-rung managers-first: {rungs}"
 
     def test_unparseable_sibling_does_not_block_generate(self, tmp_path):
         """A broken fleet contributes no rungs; it must never raise here."""
