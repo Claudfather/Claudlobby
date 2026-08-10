@@ -693,7 +693,7 @@ harness_check "gate-on alert states keepalive will bounce to recover" "$r"
 
 # ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
-# navi's #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
+# The #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
 # nothing drove keepalive's real dead-session branch to prove it EMITS a line the
 # parser recognizes — so the #577 restart_bot_service extraction left that wording
 # one refactor from silently drifting out of uptime.py's _LOG_LINE_RE. Drive the
@@ -718,7 +718,7 @@ grep -qE 'RESTART.*session dead' "$DDIR/keepalive.log" 2>/dev/null && r=yes || r
 harness_check "keepalive dead-session path emits a RESTART … session dead log line" "$r"
 # Load-bearing assertion: the REAL uptime parser (parse_keepalive_log, backed by
 # _LOG_LINE_RE) must extract a RESTART from that emitted line — the emitter⇄parser
-# coupling navi flagged as guarded only by a hand-written fixture until now.
+# coupling the #577 review flagged as guarded only by a hand-written fixture until now.
 dead_restarts=$(python3 -c "
 import sys; sys.path.insert(0, '$LIB_DIR/..')
 from claudlobby.uptime import parse_keepalive_log
@@ -1094,7 +1094,7 @@ harness_check "update-claude-code.sh still downloads the binary daily" "$r"
 #       to another fleet, leaving its old dir behind) must be SKIPPED: zero pulse
 #       events. RED before #415 — the filesystem-glob loop health-checked every
 #       dir and emitted session_missing/service_down/pane_stuck for orphans
-#       (the craig/greg bug).
+#       (the #415 bug).
 #   (2) pane_stuck must honor the .idle marker like activity_stuck does: a bot
 #       parked at an idle prompt has a stable pane — that is idle, not stuck.
 # ===========================================================================
@@ -1576,7 +1576,7 @@ harness_check "dispatch classifier keeps set +H; on a leading-whitespace slash (
 # verified). A live model honoring the instruction is the P7 human canary; this
 # is the deterministic file-contract gate. NOTE: the prior version re-read a
 # bot.conf var the test itself wrote and never touched SKILL.md, so a gutted
-# skill stayed green — hollow (#640, rajan request-changes).
+# skill stayed green — hollow (#640 request-changes).
 _skill="$LIB_DIR/../library/skills/briefing/SKILL.md"
 _instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null)
 { [ -f "$_skill" ] \
@@ -1624,7 +1624,7 @@ else
 
     # Mirror start-bot.sh: do slow pre-session work (there, plugin install), THEN
     # create the session, THEN exit. The gap between "unit went active" and
-    # "session exists" is the window that stranded rajan for 35-178s.
+    # "session exists" is the window that stranded a bot for 35-178s.
     cat > "$BP_ROOT/spawner.sh" <<BPSPAWN
 #!/bin/bash
 sleep 8
@@ -1670,14 +1670,14 @@ BPCONF
 
     # Pulse HERE, in the activating window. This is the only state where
     # service_is_active reports not-active, so it is the only state that can
-    # reach the service_down branch — the finding-B false positive (saul's
-    # service_down state=activating) lives here and nowhere else. Sampling the
+    # reach the service_down branch — the finding-B false positive
+    # (service_down state=activating) lives here and nowhere else. Sampling the
     # pulse only in the later active/running window would leave finding B
     # entirely unexercised while reading green.
     bp_pulse
 
     # --- State 2: active/running (spawner executing, session not up yet) ---
-    # The state ActiveState alone cannot see, and where all 3 rajan restarts landed.
+    # The state ActiveState alone cannot see, and where all 3 restarts landed.
     sleep 6
     _s2=$(bp_state)
     _sess2=no; command tmux -L "$BP_SVC" has-session -t "$BP_BOT" 2>/dev/null && _sess2=yes
@@ -1738,7 +1738,7 @@ echo "=== validate #1019: GitHub mention guard rewrites, and spares Telegram ===
 
 GM_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-gm.XXXXXX")"
 mkdir -p "$GM_ROOT/runtime/_host"
-printf 'ravi\nvera\ndara\nworker-1\n' > "$GM_ROOT/runtime/_host/bot-handles"
+printf 'worker-1\nworker-2\nworker-3\nworker-4\n' > "$GM_ROOT/runtime/_host/bot-handles"
 
 gm_run() {  # gm_run <payload-json> -> stdout of the hook
     GH_MENTION_HANDLES_FILE="$GM_ROOT/runtime/_host/bot-handles" \
@@ -1746,10 +1746,10 @@ gm_run() {  # gm_run <payload-json> -> stdout of the hook
 }
 
 # --- the exact shape that caused the incident ---
-_gm=$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1018 --body \"thanks @vera\""}}')
+_gm=$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1018 --body \"thanks @worker-2\""}}')
 printf '%s' "$_gm" | grep -q '"updatedInput"' && r=yes || r=no
-harness_check "a real \`gh pr comment\` carrying @vera is rewritten before it runs" "$r"
-printf '%s' "$_gm" | grep -q '@vera' && r=no || r=yes
+harness_check "a real \`gh pr comment\` carrying @worker-2 is rewritten before it runs" "$r"
+printf '%s' "$_gm" | grep -q '@worker-2' && r=no || r=yes
 harness_check "  ...and the @ sigil is gone from the command GitHub would see" "$r"
 
 # The Bash surface must NOT gain backticks: a comment body sits inside a
@@ -1759,16 +1759,16 @@ printf '%s' "$_gm" | grep -q '`' && r=no || r=yes
 harness_check "  ...with NO backticks injected into the shell command (would be command substitution)" "$r"
 
 # --- MCP writers, the half a Bash-only hook would miss entirely ---
-_gm=$(gm_run '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"owner":"o","repo":"r","body":"@vera and @worker-1 found it"}}')
-printf '%s' "$_gm" | grep -q '`vera`' && r=yes || r=no
+_gm=$(gm_run '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"owner":"o","repo":"r","body":"@worker-2 and @worker-1 found it"}}')
+printf '%s' "$_gm" | grep -q '`worker-2`' && r=yes || r=no
 harness_check "an mcp__github__* body is rewritten too (backticks are safe in JSON)" "$r"
-printf '%s' "$_gm" | grep -q '@vera' && r=no || r=yes
+printf '%s' "$_gm" | grep -q '@worker-2' && r=no || r=yes
 harness_check "  ...no @mention survives in the MCP payload" "$r"
 
 # --- what must NOT be touched ---
-[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"tg-post.sh \"done @dara\""}}')" ] && r=yes || r=no
+[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"tg-post.sh \"done @worker-3\""}}')" ] && r=yes || r=no
 harness_check "TELEGRAM is untouched — tagging there is correct and load-bearing" "$r"
-[ -z "$(gm_run '{"tool_name":"mcp__plugin_telegram_telegram__reply","tool_input":{"chat_id":"1","text":"@dara done"}}')" ] && r=yes || r=no
+[ -z "$(gm_run '{"tool_name":"mcp__plugin_telegram_telegram__reply","tool_input":{"chat_id":"1","text":"@worker-3 done"}}')" ] && r=yes || r=no
 harness_check "  ...including the Telegram MCP tool" "$r"
 # POLICY CHANGE, deliberate: the merged denylist guard let any non-bot handle
 # through, so this asserted @chrisrogers37 was untouched. Under the inversion
@@ -1782,7 +1782,7 @@ harness_check "a gh READ is not rewritten (only writes can notify)" "$r"
 
 # --- fails open, loudly, rather than blocking every GitHub write ---
 _gm=$(GH_MENTION_HANDLES_FILE=/nonexistent CLAUDLOBBY_ROOT="$GM_ROOT" \
-    bash "$LIB_DIR/gh-mention-guard.sh" <<<'{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -b \"@vera\""}}' 2>/dev/null; echo "rc=$?")
+    bash "$LIB_DIR/gh-mention-guard.sh" <<<'{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -b \"@worker-2\""}}' 2>/dev/null; echo "rc=$?")
 printf '%s' "$_gm" | grep -q 'rc=0' && r=yes || r=no
 harness_check "a missing handle manifest FAILS OPEN (never blocks the whole fleet from GitHub)" "$r"
 
@@ -1809,20 +1809,20 @@ _inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body
 harness_check "  a DECLARED handle is left alone (the allowlist works)" "$r"
 
 # Fail-toward-rewriting, driven through the composed hook rather than the module.
-_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"a\n```\n@vera after an UNCLOSED fence"}}')
-printf '%s' "$_inv" | grep -q 'vera' && r=yes || r=no
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"a\n```\n@worker-2 after an UNCLOSED fence"}}')
+printf '%s' "$_inv" | grep -q 'worker-2' && r=yes || r=no
 harness_check "  INVARIANT: an unclosed fence does NOT protect a mention" "$r"
 
-_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"x\n```\n@vera in a closed fence\n```\ny"}}')
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"x\n```\n@worker-2 in a closed fence\n```\ny"}}')
 [ -z "$_inv" ] && r=yes || r=no
 harness_check "  ...but a CLOSED fence is respected (GitHub does not linkify it)" "$r"
 
-# --- by-reference content: the bypass vera found ----------------------------
+# --- by-reference content: the bypass #1019 exposed ----------------------------
 # gh can take the body from a FILE, so the hook sees only a filename and the
 # command carries no mention at all. #1019 — the issue filed ABOUT us spamming
 # a stranger — was itself filed this way and re-notified her.
 GM_CLEAN="$GM_ROOT/clean.md"; printf 'an ordinary body\nno mentions\n' > "$GM_CLEAN"
-GM_DIRTY="$GM_ROOT/dirty.md"; printf 'intro\nthanks vera and @latest\n' > "$GM_DIRTY"
+GM_DIRTY="$GM_ROOT/dirty.md"; printf 'intro\nthanks worker-2 and @latest\n' > "$GM_DIRTY"
 # An ALLOW is empty output, not JSON — jq on empty stdin prints nothing, so the
 # empty case must be named here rather than left to a jq default that never runs.
 _dec() {
@@ -1843,7 +1843,7 @@ done
 harness_check "  BY-REF: STDIN is refused — unreadable, so unverifiable" "$r"
 
 # The whole reason this refuses rather than rewrites: the file is the author's.
-grep -q 'vera' "$GM_DIRTY" && r=yes || r=no
+grep -q 'worker-2' "$GM_DIRTY" && r=yes || r=no
 harness_check "  BY-REF: the refused file is NOT modified on disk (it is the author's)" "$r"
 
 rm -rf "$GM_ROOT"
