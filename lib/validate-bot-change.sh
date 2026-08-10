@@ -1738,7 +1738,7 @@ echo "=== validate #1019: GitHub mention guard rewrites, and spares Telegram ===
 
 GM_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-gm.XXXXXX")"
 mkdir -p "$GM_ROOT/runtime/_host"
-printf 'ravi\nvera\ndara\nworker-1\n' > "$GM_ROOT/runtime/_host/bot-handles"
+printf 'worker-1\nworker-2\nworker-3\nworker-4\n' > "$GM_ROOT/runtime/_host/bot-handles"
 
 gm_run() {  # gm_run <payload-json> -> stdout of the hook
     GH_MENTION_HANDLES_FILE="$GM_ROOT/runtime/_host/bot-handles" \
@@ -1746,10 +1746,10 @@ gm_run() {  # gm_run <payload-json> -> stdout of the hook
 }
 
 # --- the exact shape that caused the incident ---
-_gm=$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1018 --body \"thanks @vera\""}}')
+_gm=$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1018 --body \"thanks @worker-2\""}}')
 printf '%s' "$_gm" | grep -q '"updatedInput"' && r=yes || r=no
-harness_check "a real \`gh pr comment\` carrying @vera is rewritten before it runs" "$r"
-printf '%s' "$_gm" | grep -q '@vera' && r=no || r=yes
+harness_check "a real \`gh pr comment\` carrying @worker-2 is rewritten before it runs" "$r"
+printf '%s' "$_gm" | grep -q '@worker-2' && r=no || r=yes
 harness_check "  ...and the @ sigil is gone from the command GitHub would see" "$r"
 
 # The Bash surface must NOT gain backticks: a comment body sits inside a
@@ -1759,16 +1759,16 @@ printf '%s' "$_gm" | grep -q '`' && r=no || r=yes
 harness_check "  ...with NO backticks injected into the shell command (would be command substitution)" "$r"
 
 # --- MCP writers, the half a Bash-only hook would miss entirely ---
-_gm=$(gm_run '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"owner":"o","repo":"r","body":"@vera and @worker-1 found it"}}')
-printf '%s' "$_gm" | grep -q '`vera`' && r=yes || r=no
+_gm=$(gm_run '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"owner":"o","repo":"r","body":"@worker-2 and @worker-1 found it"}}')
+printf '%s' "$_gm" | grep -q '`worker-2`' && r=yes || r=no
 harness_check "an mcp__github__* body is rewritten too (backticks are safe in JSON)" "$r"
-printf '%s' "$_gm" | grep -q '@vera' && r=no || r=yes
+printf '%s' "$_gm" | grep -q '@worker-2' && r=no || r=yes
 harness_check "  ...no @mention survives in the MCP payload" "$r"
 
 # --- what must NOT be touched ---
-[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"tg-post.sh \"done @dara\""}}')" ] && r=yes || r=no
+[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"tg-post.sh \"done @worker-3\""}}')" ] && r=yes || r=no
 harness_check "TELEGRAM is untouched — tagging there is correct and load-bearing" "$r"
-[ -z "$(gm_run '{"tool_name":"mcp__plugin_telegram_telegram__reply","tool_input":{"chat_id":"1","text":"@dara done"}}')" ] && r=yes || r=no
+[ -z "$(gm_run '{"tool_name":"mcp__plugin_telegram_telegram__reply","tool_input":{"chat_id":"1","text":"@worker-3 done"}}')" ] && r=yes || r=no
 harness_check "  ...including the Telegram MCP tool" "$r"
 # POLICY CHANGE, deliberate: the merged denylist guard let any non-bot handle
 # through, so this asserted @chrisrogers37 was untouched. Under the inversion
@@ -1782,7 +1782,7 @@ harness_check "a gh READ is not rewritten (only writes can notify)" "$r"
 
 # --- fails open, loudly, rather than blocking every GitHub write ---
 _gm=$(GH_MENTION_HANDLES_FILE=/nonexistent CLAUDLOBBY_ROOT="$GM_ROOT" \
-    bash "$LIB_DIR/gh-mention-guard.sh" <<<'{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -b \"@vera\""}}' 2>/dev/null; echo "rc=$?")
+    bash "$LIB_DIR/gh-mention-guard.sh" <<<'{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -b \"@worker-2\""}}' 2>/dev/null; echo "rc=$?")
 printf '%s' "$_gm" | grep -q 'rc=0' && r=yes || r=no
 harness_check "a missing handle manifest FAILS OPEN (never blocks the whole fleet from GitHub)" "$r"
 
@@ -1809,11 +1809,11 @@ _inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body
 harness_check "  a DECLARED handle is left alone (the allowlist works)" "$r"
 
 # Fail-toward-rewriting, driven through the composed hook rather than the module.
-_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"a\n```\n@vera after an UNCLOSED fence"}}')
-printf '%s' "$_inv" | grep -q 'vera' && r=yes || r=no
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"a\n```\n@worker-2 after an UNCLOSED fence"}}')
+printf '%s' "$_inv" | grep -q 'worker-2' && r=yes || r=no
 harness_check "  INVARIANT: an unclosed fence does NOT protect a mention" "$r"
 
-_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"x\n```\n@vera in a closed fence\n```\ny"}}')
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"x\n```\n@worker-2 in a closed fence\n```\ny"}}')
 [ -z "$_inv" ] && r=yes || r=no
 harness_check "  ...but a CLOSED fence is respected (GitHub does not linkify it)" "$r"
 
@@ -1822,7 +1822,7 @@ harness_check "  ...but a CLOSED fence is respected (GitHub does not linkify it)
 # command carries no mention at all. #1019 — the issue filed ABOUT us spamming
 # a stranger — was itself filed this way and re-notified her.
 GM_CLEAN="$GM_ROOT/clean.md"; printf 'an ordinary body\nno mentions\n' > "$GM_CLEAN"
-GM_DIRTY="$GM_ROOT/dirty.md"; printf 'intro\nthanks vera and @latest\n' > "$GM_DIRTY"
+GM_DIRTY="$GM_ROOT/dirty.md"; printf 'intro\nthanks worker-2 and @latest\n' > "$GM_DIRTY"
 # An ALLOW is empty output, not JSON — jq on empty stdin prints nothing, so the
 # empty case must be named here rather than left to a jq default that never runs.
 _dec() {
@@ -1843,7 +1843,7 @@ done
 harness_check "  BY-REF: STDIN is refused — unreadable, so unverifiable" "$r"
 
 # The whole reason this refuses rather than rewrites: the file is the author's.
-grep -q 'vera' "$GM_DIRTY" && r=yes || r=no
+grep -q 'worker-2' "$GM_DIRTY" && r=yes || r=no
 harness_check "  BY-REF: the refused file is NOT modified on disk (it is the author's)" "$r"
 
 rm -rf "$GM_ROOT"
