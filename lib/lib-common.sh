@@ -849,6 +849,93 @@ wait_bridge_ready() {
     done
 }
 
+# --- Supervision-unit ownership ----------------------------------------------
+# Host units carry a FIXED, unprefixed identity (claudlobby-disk-monitor, ...)
+# and live in ONE shared directory per host, because host equipment is
+# one-per-host and not one-per-fleet. That is deliberate. What is not
+# deliberate is that enrollment used to be an unconditional copy, so whichever
+# tree enrolled LAST owned them and nothing said so: a second checkout running
+# setup-system silently re-pointed the production host's daily jobs at itself,
+# and when that tree was later deleted the jobs stayed enrolled exec-ing a path
+# that no longer existed (#1152, reproduced on real systemd before this landed).
+
+# unit_owner_root <unit_file> — the CLAUDLOBBY_ROOT recorded INSIDE a composed
+# supervision unit, or nothing when the unit carries no ownership marker.
+#
+# Read as a PROPERTY. The composer emits CLAUDLOBBY_ROOT explicitly into every
+# unit it writes, on both platforms. This deliberately does NOT fall back to
+# parsing a root out of ExecStart or ProgramArguments: that is a pattern match
+# standing in for a property check, and it silently re-scopes who owns what the
+# first time the script layout moves. A unit with no marker reports NOTHING, so
+# the caller refuses loudly instead of acting on a guess.
+unit_owner_root() {
+    local f="${1:-}"
+    [ -n "$f" ] && [ -f "$f" ] || return 0
+    case "$f" in
+        *.plist)
+            # The composer emits <key> and <string> on SEPARATE lines, so this
+            # cannot be line-oriented — a per-line matcher would report every
+            # macOS host unit as unowned and refuse every enrollment there.
+            tr '\n' ' ' < "$f" \
+                | sed -n 's|.*<key>CLAUDLOBBY_ROOT</key>[[:space:]]*<string>\([^<]*\)</string>.*|\1|p' \
+                | head -1
+            ;;
+        *)
+            # Both the bare and the systemd-quoted Environment= forms.
+            sed -n 's/^Environment="\{0,1\}CLAUDLOBBY_ROOT=\([^"]*\)"\{0,1\}$/\1/p' "$f" \
+                | head -1
+            ;;
+    esac
+    return 0
+}
+
+# guard_unit_capture <installed_unit> <enrolling_root> <label>
+#   rc 0  proceed — nothing installed yet, or this root already owns it
+#   rc 3  refuse  — a different root owns it, or ownership cannot be established
+#
+# "Already installed" and "ours" are different questions, and only the second
+# licenses a write. An unowned unit is refused rather than assumed to be ours:
+# absence of a marker is not evidence that nobody else put it there, and this
+# door overwrites host equipment.
+# The enrolling root and label are NOT mandatory parameters. An indeterminable
+# enrolling root is a real state — a unit that predates the composer's marker,
+# or a minimal hand-written one — and `${2:?}` aborted the whole enrollment on
+# it, which turned a guard against capture into a refusal to install anything.
+guard_unit_capture() {
+    local installed="${1:?}" root="${2-}" label="${3-$(basename "${1:?}")}" owner
+    # Nothing installed means nothing to capture. This is the ONLY case where
+    # an unresolvable root is uninteresting, so it is answered before asking.
+    [ -f "$installed" ] || return 0
+    owner="$(unit_owner_root "$installed")"
+    if [ -z "$owner" ] && [ -z "$root" ]; then
+        # Neither side carries a marker, so no ownership judgement is possible
+        # in either direction. Proceeding is the only non-paralysing option —
+        # every composer-emitted unit carries the marker, so this is reachable
+        # only for units this system did not write — but it is said out loud
+        # rather than waved through, because the guard is silently inert here.
+        printf 'NOTE: %s carries no CLAUDLOBBY_ROOT marker and neither does the incoming unit;\n' "$installed" >&2
+        printf '      ownership cannot be checked, proceeding.\n' >&2
+        return 0
+    fi
+    [ "$owner" = "$root" ] && return 0
+    {
+        printf 'REFUSED: %s is already installed and this root does not own it.\n' "$label"
+        if [ -n "$owner" ]; then
+            printf '  owned by:  %s\n' "$owner"
+        else
+            printf '  owned by:  UNKNOWN — %s carries no CLAUDLOBBY_ROOT marker\n' "$installed"
+        fi
+        printf '  enrolling: %s\n' "$root"
+        printf '  unit file: %s\n' "$installed"
+        printf '\n'
+        printf 'Host units are one-per-host under a fixed name, so enrolling from a second\n'
+        printf 'tree would silently re-point this job at %s. If that tree is later\n' "$root"
+        printf 'removed, the job stays enrolled exec-ing a path that no longer exists.\n'
+        printf 'Nothing has been changed. Re-run with --adopt to take ownership deliberately.\n'
+    } >&2
+    return 3
+}
+
 # --- Per-bot tmux socket isolation ------------------------------------------
 # Each bot runs its own tmux server, reached via a private socket name (the
 # `-L` argument), so one server's death can only drop one bot — not the whole

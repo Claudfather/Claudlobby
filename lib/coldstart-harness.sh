@@ -44,36 +44,122 @@ say() { printf 'coldstart: %s\n' "$*"; }
 
 # ---------------------------------------------------------------- snapshotting
 
+# ABSENT IS NOT AN ERROR in any of the three samplers below, and `2>/dev/null`
+# alone does not say that: lib-common turns on `pipefail`, so `ls` of a
+# directory that does not exist still fails the whole pipeline, `set -e` aborts
+# the snapshot, and the redirect means it aborts SILENTLY — exit 2, no output
+# on either stream.
+#
+# Every one of these dirs is legitimately missing on a machine that has not run
+# the thing yet: no tmux socket dir before tmux first runs, no user unit dir
+# before anything is enrolled. That is the FRESH HOST this harness exists to
+# measure, so the failure was aimed squarely at its own use case. It survived
+# because a developer machine always has all three. Surfaced by giving the
+# harness its first test wrapper (#1094) and reproduced at rc 2 on CI.
 snap_launch_units() {
-    # One unit label per line, sorted. Empty file on an unsupported platform.
+    # One unit label per line, sorted. Empty on an unsupported platform.
     if [ "$_OS" = "Darwin" ]; then
-        launchctl list 2>/dev/null | awk 'NR>1 {print $3}' | sort -u
+        { launchctl list 2>/dev/null || true; } | awk 'NR>1 {print $3}' | sort -u
     else
-        systemctl --user list-unit-files --no-legend --no-pager 2>/dev/null \
+        { systemctl --user list-unit-files --no-legend --no-pager 2>/dev/null || true; } \
             | awk '{print $1}' | sort -u
     fi
 }
 
 snap_unit_files() {
-    if [ "$_OS" = "Darwin" ]; then
-        ls -1 "$HOME/Library/LaunchAgents" 2>/dev/null | sort -u
-    else
-        ls -1 "$HOME/.config/systemd/user" 2>/dev/null | sort -u
-    fi
+    { ls -1 "$(host_unit_dir)" 2>/dev/null || true; } | sort -u
 }
 
 snap_tmux_sockets() {
     local dir="/tmp/tmux-$(id -u)"
     [ -d "/private/tmp/tmux-$(id -u)" ] && dir="/private/tmp/tmux-$(id -u)"
-    ls -1 "$dir" 2>/dev/null | sort -u
+    { ls -1 "$dir" 2>/dev/null || true; } | sort -u
+}
+
+# host_unit_dir — where this platform keeps the fixed-identity host units.
+host_unit_dir() {
+    if [ "$_OS" = "Darwin" ]; then
+        printf '%s' "$HOME/Library/LaunchAgents"
+    else
+        printf '%s' "$HOME/.config/systemd/user"
+    fi
+}
+
+# snap_host_units — COPY every pre-existing claudlobby-* host unit into the
+# snapshot (#1152 Layer 2).
+#
+# The rest of the snapshot records identity, which is the right grain for
+# "did this run create it" and therefore for what reap may remove. It is the
+# WRONG grain here. Host units have a fixed unprefixed name and already exist,
+# so a run that overwrites one leaves the name unchanged: reap correctly
+# declines to remove it, and the capture survives. Only content can tell
+# "still ours" from "re-pointed at a tree that is about to be deleted".
+#
+# This belt is needed even with the enrollment guard, because the harness runs
+# an ARBITRARY ref by design and that tree may predate the guard.
+snap_host_units() {
+    local dir f n=0
+    dir="$(host_unit_dir)"
+    mkdir -p "$SNAP/hostunits"
+    [ -d "$dir" ] || return 0
+    for f in "$dir"/claudlobby-*; do
+        [ -f "$f" ] || continue
+        cp "$f" "$SNAP/hostunits/$(basename "$f")"
+        n=$((n + 1))
+    done
+    printf '%s' "$n"
+}
+
+# restore_captured_host_units — put back every snapshotted host unit whose
+# content changed or which vanished, and NAME each one.
+#
+# Deletion is restored as well as modification: a host unit the run removed is
+# equally gone from production, and equally invisible to a reap that only ever
+# removes. Units absent from the snapshot are never touched — creating those is
+# the run's doing and removing them is reap's existing job.
+restore_captured_host_units() {
+    local dir f base restored=0
+    dir="$(host_unit_dir)"
+    [ -d "$SNAP/hostunits" ] || return 0
+    mkdir -p "$dir"
+    for f in "$SNAP/hostunits"/*; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        if [ -f "$dir/$base" ] && cmp -s "$f" "$dir/$base"; then
+            continue
+        fi
+        if [ -f "$dir/$base" ]; then
+            say "RESTORED host unit (the run overwrote it): $base"
+        else
+            say "RESTORED host unit (the run deleted it): $base"
+        fi
+        cp "$f" "$dir/$base"
+        restored=$((restored + 1))
+    done
+    [ "$restored" -gt 0 ] && say "restored $restored captured host unit(s) from the pre-run snapshot"
+    return 0
 }
 
 write_snapshot() {
+    local host_n
     mkdir -p "$SNAP"
     snap_launch_units  > "$SNAP/units.txt"
     snap_unit_files    > "$SNAP/unitfiles.txt"
     snap_tmux_sockets  > "$SNAP/sockets.txt"
+    host_n="$(snap_host_units)"
     say "snapshot: $(wc -l < "$SNAP/units.txt" | tr -d ' ') units, $(wc -l < "$SNAP/unitfiles.txt" | tr -d ' ') unit files, $(wc -l < "$SNAP/sockets.txt" | tr -d ' ') tmux sockets"
+    if [ "${host_n:-0}" -gt 0 ]; then
+        # Loud, and BEFORE the blind arm runs: these are the fixed-identity
+        # units a second tree would capture, and the operator deciding whether
+        # to start a cold run is the person who needs to know which.
+        say "WARNING: $host_n pre-existing claudlobby-* host unit(s) on this machine."
+        say "  A cold arm that enrolls host jobs will re-point them at its own tree."
+        say "  Content is snapshotted and reap will restore any it captures:"
+        local f
+        for f in "$SNAP/hostunits"/*; do
+            [ -f "$f" ] && say "    $(basename "$f")"
+        done
+    fi
 }
 
 # New items = present now, absent in the snapshot.
@@ -263,6 +349,14 @@ cmd_reap() {
     fi
 
     [ "$dry" -eq 1 ] && return 0
+
+    # AFTER the removals and BEFORE daemon-reload: the removal pass works on
+    # names and can never touch a captured unit (its name pre-existed), so the
+    # two do not race; reloading afterwards is what makes the restored content
+    # the one systemd actually holds. This is the only step that undoes a
+    # capture — reap's name-based logic correctly refuses to remove those.
+    restore_captured_host_units
+
     systemctl --user daemon-reload 2>/dev/null || true
     say "reap complete — verify with: $SCRIPT_DIR/coldstart-harness.sh status"
 }
@@ -299,12 +393,22 @@ cmd_transcript() {
 
 # ------------------------------------------------------------------------ main
 
-[ $# -ge 1 ] || die "usage: coldstart-harness.sh {prepare|status|reap|transcript} [options]"
-cmd="$1"; shift
-case "$cmd" in
-    prepare)    cmd_prepare "$@" ;;
-    status)     cmd_status "$@" ;;
-    reap)       cmd_reap "$@" ;;
-    transcript) cmd_transcript "$@" ;;
-    *)          die "unknown command: $cmd" ;;
-esac
+# Guarded, so the file can be SOURCED for unit tests (#1094: this harness had
+# no test wrapper at all, and an unsourceable script is why — every function
+# here was reachable only by running a real cold start, which is the one thing
+# a test must not do). Same pattern as boot-strand-sampler.sh.
+main() {
+    [ $# -ge 1 ] || die "usage: coldstart-harness.sh {prepare|status|reap|transcript} [options]"
+    local cmd="$1"; shift
+    case "$cmd" in
+        prepare)    cmd_prepare "$@" ;;
+        status)     cmd_status "$@" ;;
+        reap)       cmd_reap "$@" ;;
+        transcript) cmd_transcript "$@" ;;
+        *)          die "unknown command: $cmd" ;;
+    esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

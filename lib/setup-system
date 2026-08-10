@@ -12,7 +12,12 @@
 # Usage:
 #   lib/setup-system                 # install prereqs + enroll host jobs
 #   lib/setup-system --dry-run       # report what would change, do nothing
+#   lib/setup-system --adopt         # take over host jobs another tree owns
 #   lib/setup-system --help          # show this usage text
+#
+# Host jobs are one-per-host under a fixed name (claudlobby-disk-monitor, ...).
+# Enrolling from a second tree would silently re-point them at that tree, so it
+# is refused; --adopt takes ownership deliberately and says what it displaced.
 #
 # Supported hosts:
 #   - Raspberry Pi 5 (Debian bookworm arm64)
@@ -33,10 +38,15 @@
 set -euo pipefail
 
 DRY_RUN=0
+# Forwarded to the host-job enroller. Host units are one-per-host under a fixed
+# name, so enrolling from a second tree captures them; that is refused unless
+# the operator says to take ownership (#1152).
+ADOPT=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)    DRY_RUN=1; shift ;;
+        --adopt)      ADOPT=1; shift ;;
         -h|--help)
             sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
@@ -635,7 +645,10 @@ phase_host_jobs() {
         found=1
         base="$(basename "$t" ".$ext")" # claudlobby-<job>
         jobname="${base#claudlobby-}"
-        if TIMER_DIR="$host_timers_dir" UNIT_NAME="$base" "$enroller" "$jobname"; then
+        local adopt_arg=()
+        [ "$ADOPT" = 1 ] && adopt_arg=(--adopt)
+        if TIMER_DIR="$host_timers_dir" UNIT_NAME="$base" "$enroller" "$jobname" \
+            ${adopt_arg[@]+"${adopt_arg[@]}"}; then
             ok "host job enrolled: $base"
             PREREQ_OK+=("host-job-$jobname")
         else
