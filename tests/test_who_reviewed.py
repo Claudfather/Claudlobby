@@ -84,7 +84,15 @@ class TestPrReferenceMatching:
         assert who.row_pr_match(row, q, b) is None
 
     def test_longer_number_does_not_satisfy_shorter(self):
-        """`pull/10461` must not answer a query for 1046 — the \\b trap."""
+        """`pull/10461` must not answer a query for 1046.
+
+        What this protects is the BEHAVIOUR — that some trailing guard exists.
+        It fails if the guard is dropped entirely, which is the regression worth
+        catching. It deliberately claims NOTHING about which guard is used: it
+        passes under both `\\b` and `(?!\\d)`, because on this input the two are
+        equivalent. An earlier docstring called this "the \\b trap", which
+        asserted a discrimination the assertion cannot make.
+        """
         q, b = who.pr_patterns(REPO, 1046)
         row = _report(
             "vera",
@@ -92,6 +100,37 @@ class TestPrReferenceMatching:
             pr_url=f"https://github.com/{REPO}/pull/10461",
         )
         assert who.row_pr_match(row, q, b) is None
+
+    def test_the_two_boundary_forms_are_equivalent_on_pr_shaped_input(self):
+        """Pin the equivalence directly, so nobody re-derives it from prose.
+
+        A mutation run that swaps `(?!\\d)` for `\\b` comes back GREEN, and that
+        is not a test-adequacy failure — it is an INERT MUTANT. The two forms
+        differ on exactly one shape, a trailing non-digit word character, which
+        no GitHub PR URL produces. Asserting that here means the next reader
+        gets the fact from an executable check rather than from a comment that
+        was wrong once already.
+        """
+        import re
+
+        digit_guard = re.compile(r"(?<!\d)pull/1046(?!\d)")
+        word_boundary = re.compile(r"(?<!\d)pull/1046\b")
+        pr_shaped = [
+            "pull/1046",
+            "pull/10461",
+            "pull/1046/files",
+            "pull/1046#issuecomment-1",
+            "https://github.com/o/r/pull/1046",
+            "see pull/1046 please",
+        ]
+        for text in pr_shaped:
+            assert bool(digit_guard.search(text)) == bool(word_boundary.search(text)), (
+                text
+            )
+        # The single divergence, stated rather than implied: the lookahead is the
+        # MORE permissive of the two here, not the stricter one.
+        assert digit_guard.search("pull/1046a")
+        assert not word_boundary.search("pull/1046a")
 
     def test_longer_owner_ending_in_ours_is_not_qualified(self):
         """The case the qualified lookbehind must still block. `(?<!\\w)` allows

@@ -135,10 +135,24 @@ def pr_patterns(repo: str, number: int) -> tuple[re.Pattern, re.Pattern]:
     #1046 cannot match. `bare` accepts any `pull/<N>` — still never a bare
     number, still bounded against `pull/10461`.
 
-    Both use a negative lookahead rather than `\\b`, because `\\b` between the
-    `6` of `1046` and the `1` of `10461` is not a word boundary at all: both are
-    word characters, so `pull/1046\\b` matches inside `pull/10461` and silently
-    attributes the wrong PR.
+    The trailing guard is a negative lookahead. `\\b` would ALSO be correct here,
+    and an earlier version of this comment claimed otherwise — it is worth
+    stating plainly because the claim was backwards and survived into a PR body
+    and two docs before review caught it. Measured, not reasoned:
+
+        pattern             pull/10461   pull/1046a
+        pull/1046\\b          False        False
+        pull/1046(?!\\d)      False        True
+
+    `\\b` between the `6` and the `1` of `10461` is indeed not a boundary — and
+    that is exactly why it REJECTS. A missing boundary makes `\\b` fail to match,
+    which is the outcome we want; it does not silently match the wrong PR.
+
+    The two forms differ on exactly one shape, a trailing non-digit word
+    character (`pull/1046a`), where the lookahead is the MORE permissive of the
+    two. That shape does not occur in a GitHub PR URL, so the choice is a wash;
+    the lookahead stays because it states the actual intent — the thing that
+    must not follow is another DIGIT.
 
     The qualified lookbehind excludes word characters ONLY, deliberately not `/`.
     Excluding `/` looks tighter and is wrong: the owner in a real URL is always
