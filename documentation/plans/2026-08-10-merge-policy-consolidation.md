@@ -4,6 +4,9 @@
 **Status:** plan only. No implementation in this PR.
 **Branch:** `plan/1159-merge-policy-consolidation` off `main` @ `560c3c9`.
 **Scope:** design + phasing + canary contract. Implementation lands as separate reviewed PRs.
+**Rev 2** (2026-08-10) — **scope widened after review.** Rev 1 planned to consolidate *two* files.
+The real surface is **seven**, one of them already contradicting the policy in production. §4A
+carries the finding and the re-phasing; §0 records what changed.
 
 Claudfather/Claudlobby is outside this fleet's merge allowlist, so this plan ships as a
 reviewable PR that a human merges.
@@ -21,10 +24,32 @@ wrong in two places** and I recommend against it as written:
 | Library files get no template context | **CONFIRMED** — §2 |
 | Render *all* library content through Jinja | **REJECT** — §3. Measured blast radius; the library documents dbt, and dbt *is* Jinja |
 | Rewrite shared guardrail to iterate `projects` | **AMEND** — `projects` is manager-only context (`composer.py:1567`); as written, workers and the manager would render *different* merge policies, silently. §4 |
-| Delete both fleet forks | **AGREE, but split** — one fork needs no templating at all and can die first, at near-zero risk. §5 |
+| Delete both fleet forks | **AGREE, but split — and it is not enough.** One fork needs no templating and dies first; but the surface is seven files, not two, and one of them is contradicting the policy in production right now. §4A, §5 |
 
 Two additions #1159 does not raise: the **shared base guardrail is itself the more dangerous
 artifact** (§6), and consolidation without a drift detector re-forks (§9).
+
+### Rev 2 — what review changed
+
+Two reviews landed on PR #1160. They split cleanly, and the second one is right.
+
+**Rev 1's own scope was too narrow, in the same way #1159's was.** I inherited the issue's frame —
+*one guardrail, one protocol, two forks* — and pressure-tested everything inside it without
+checking the frame itself. §6 argued that unconditional merge prose reads as universal permission,
+then applied that argument to exactly one file. It is true of a second guardrail verbatim, and of
+a protocol that is **already granting unscoped `--admin` to two production bots today.**
+
+I verified all three findings independently before amending (§4A). All three hold. One reported
+count does not, and the discrepancy is worth stating precisely rather than quietly absorbing —
+§4A.2.
+
+| what changed | where |
+|---|---|
+| Surface is 5 guardrails + 2 protocols, not 1 + 1 | §4A.1 |
+| A live production contradiction, not a future drift risk → new **Phase 0** | §4A.2 |
+| The prose mutual-exclusion invariant is enforced by nothing → §6 gains a fourth gate, and Phase 3 answers what happens to it | §4A.3, §6 |
+| Rev 1's proposed drift detector was blind to this class by construction | §9 |
+| Re-phased 4 → 6 phases; scope grew and the plan says so rather than absorbing it | §5 |
 
 ---
 
@@ -239,9 +264,137 @@ sections. `claudlobby diff` proves it (§8, canary check 6).
 
 ---
 
-## 5. Phasing — the protocol fork dies first, with no new machinery
+## 4A. The real surface is seven files, and one is already contradicting the policy
 
-#1159 treats both forks as one deletion. They are not. **One needs no templating at all.**
+All three findings below were re-verified independently against `main` @ `560c3c9` and against
+this fleet's composed output. All three hold.
+
+### 5A.1 — `library/guardrails/` ships a FAMILY of five merge-authority guardrails
+
+```
+merge-policy-auto-admin.md         merge-policy-human.md      no-merge-own-pr.md
+merge-policy-auto-after-review.md  no-merge-admin.md
+```
+
+`merge-policy-auto-after-review.md:8-14` states the same policy a **fourth** time — the same three
+conditions, in the same order, differing only in whether `--admin` is passed:
+
+```
+ 8  The manager auto-merges PRs when ALL of:
+ 9
+10  1. **Peer review posted** — a reviewer has posted an `APPROVE` verdict ...
+11  2. **CI green** — all required status checks pass.
+12  3. **No conflicts** — mergeable state is `clean` or `unstable` (not `dirty`).
+13
+14  Merge command: `gh pr merge <n> --squash --delete-branch`
+```
+
+**No allowlist.** §6's argument — *unconditional prose reads as universal permission* — applies to
+this file verbatim. Rewriting `auto-admin` while its unscoped twin sits in the same directory
+does not remove the fork; it **relocates** it. The next fleet needing a scoped policy equips the
+twin and hand-copies an allowlist into it, and we are back where #1159 started.
+
+And §9's proposed drift detector **cannot catch that**, because it compares overlay-versus-shared.
+These are two *shared* files. The detector is blind to this class by construction (§9).
+
+### 5A.2 — LIVE IN PRODUCTION: `review-flow.md:24` grants unscoped `--admin` to both reviewers
+
+Not a future risk. Shipping now.
+
+```
+review-flow.md:24
+- `--admin` merge is allowed: `gh pr merge <n> --squash --admin --delete-branch`.
+  Branch protection's "requires approvals" only counts formal `APPROVE`. Red lines:
+  never `--no-verify`, never force-push main, never `--admin` without an actual peer
+  review on the PR.
+```
+
+Equipped at `fleet.yaml:272` (ramanujan) and `:285` (damodaran). Verified in composed output by
+**content**, not filename:
+
+```
+$ grep -c -- '`--admin` merge is allowed' local/artemis-engineering/runtime/bots/*/CLAUDE.md
+damodaran:1
+ramanujan:1        # every other bot: 0
+```
+
+An unscoped `--admin` grant, with no allowlist and no repo scoping, sitting in the same composed
+document as the six-repo allowlist. **The contradiction §9 treats as a future drift risk is live
+today.**
+
+The sharpest form of it: both bots carrying this grant have the mission
+*"Code reviewer. ... No commits, no merges."* (`fleet.yaml:270-271`, `:283-284`). The fleet hands
+an unscoped merge-bypass grant to precisely the two bots it tells not to merge.
+
+**One correction to the reported count, because the distinction is the whole point.** The review
+reported the instruction appearing *"twice in ramanujan, twice in damodaran, once in mine."*
+Measured, the **unscoped** grant appears **once** in each reviewer and **zero** times in
+takahashi — who does not equip `review-flow` at all. The reported figures are consistent with
+counting the *scoped* allowlisted guardrail's merge command (`Merge command: gh pr merge <n>
+--squash --admin --delete-branch`, present in all 9 bots) alongside the unscoped grant. That
+conflates the scoped instruction with the unscoped one, which is exactly the distinction that
+makes this a defect.
+
+**Total live unscoped grants: 2, both on reviewers.** Smaller than reported, and worse placed.
+The finding stands entirely; only the arithmetic needed correcting, and it needed correcting in
+the direction of *precision*, not of dismissal — a fix that removed 5 occurrences would have
+removed 3 correct ones.
+
+### 5A.3 — the mutual-exclusion invariant is enforced by nothing
+
+```
+merge-policy-auto-admin.md:28
+**This guardrail replaces both `merge-policy-human` and `no-merge-admin`.** Do not stack with either.
+```
+
+An invariant, in prose, about which guardrails may coexist on one bot. Searched `validator.py`,
+`config.py` and `known_values.py`: **no guardrail-conflict check exists.** The only `conflict`
+logic in `validator.py` (`:630-639`) is tools-deny-versus-expertise — unrelated. A fleet may equip
+`merge-policy-auto-admin` and `no-merge-admin` together today and `claudlobby validate` passes.
+
+§6 proposed three new `validate` gates and **the one the library already asks for in prose was not
+among them.** Corrected in §6; what happens to line 28 itself is answered in Phase 3.
+
+---
+
+## 5. Phasing — the live contradiction dies first, then the machinery
+
+#1159 treats both forks as one deletion. They are not — and after §4A, they are not the whole
+job either. **Six phases. Two of them need no new machinery and should ship immediately.**
+
+### Is this now too big to ship safely?
+
+**The plan is bigger; no individual phase is.** The scope grew by one file that must be fixed now
+(Phase 0), one `validate` gate (folded into Phase 3), and one genuine design question about the
+guardrail family (Phase 4). The phase boundaries from Rev 1 survive review unchanged — Phases 1
+and 2 are byte-identical to Rev 1's Phases 1 and 2.
+
+What I will **not** do is widen Phase 3 into "rewrite five guardrails at once." That is where the
+size becomes real, so it gets its own phase and its own ratification (Phase 4), and it lands
+*after* the live defect is gone rather than being blocked behind it.
+
+The honest summary: **Phase 0 is urgent and small. Phase 4 is large and not urgent.** Rev 1
+conflated them by seeing neither.
+
+### Phase 0 — remove the live unscoped `--admin` grant (URGENT, no new machinery)
+
+**Ships first, independently, before anything else in this plan.** §4A.2 is a defect in
+production, not a plan item.
+
+`library/protocols/review-flow.md:24` grants unscoped `--admin` to two bots whose mission says
+*"No commits, no merges."* The fix is deletion, not scoping: a **review-flow** protocol has no
+business granting merge authority at all — same overreach as Phase 1's, in a different file.
+
+**Change:** strike the `--admin` grant from `review-flow.md:24`, leaving the same-identity
+*verdict* mechanics (lines 19-23) intact. Merge authority lives in the merge-policy guardrail,
+full stop.
+
+- No Jinja, no config, no compositor change.
+- Does not depend on Phases 1-5 and must not wait for them.
+- **Reviewers are the correct place to fix first**: they have no merge duty, so removing the grant
+  cannot regress any workflow the fleet actually runs.
+- Carrier caveat (§8): both reviewers keep the grant until they restart. For this phase that is
+  the *argument for* a prompt restart, not a reason to defer.
 
 ### Phase 1 — collapse `same-identity-fallback` (no compositor change)
 
@@ -289,7 +442,70 @@ the extended red lines. **Parameterize the allowlist; port the prose to the shar
 "Delete the forks" must not mean "discard the ratified policy text" — a real risk in a
 mechanical reading of #1159 step 3.
 
-### Phase 4 — drift detection (§9)
+**Also lands the mutual-exclusion gate** (§4A.3, §6): `validate` fails when a bot equips two
+merge-policy guardrails. It ships here rather than earlier because until Phase 3 there is nothing
+new to conflict *with*, and it must exist before Phase 4 can safely be deferred — while the family
+still has five members, the invariant is the only thing standing between a fleet and two
+contradictory merge policies on one bot.
+
+**Scoping note:** Phase 3 rewrites **one** file. It does **not** touch
+`merge-policy-auto-after-review.md`. That is deliberate — see Phase 4 — but it does mean Phase 3
+alone leaves an unscoped twin in the library. Phase 3 must therefore add a one-line pointer in
+`auto-after-review.md` naming the scoped guardrail, so the twin is at minimum *signposted* rather
+than silently equippable, even if Phase 4 never ships.
+
+### Phase 4 — the guardrail family: collapse or scope? (NEEDS RATIFICATION)
+
+The largest phase and the only one with an unresolved design question. **Not urgent** — Phase 0
+removes the live defect and Phase 3's gate contains the rest — so this can be ratified slowly.
+
+**The observation:** the five guardrails are not five policies. They are **two axes**:
+
+| file | axis A — who closes | axis B — is `--admin` needed to physically merge |
+|---|---|---|
+| `merge-policy-auto-admin` | peer review | yes |
+| `merge-policy-auto-after-review` | peer review | no |
+| `merge-policy-human` | human | n/a |
+| `no-merge-admin` | (negates B) | forbidden |
+| `no-merge-own-pr` | role constraint, orthogonal | n/a |
+
+The top two differ **only on axis B** — and axis B is not a policy choice at all. Whether
+`--admin` is required is a **fact about the repo's branch protection** under a shared identity, as
+`auto-admin`'s own §"Why `--admin` is required, not a shortcut" argues at length. A fleet does not
+*decide* to need `--admin`; it discovers it.
+
+**Fork 4a — collapse to one parameterized guardrail (recommended).** Allowlist from `projects`;
+axis B stated as the mechanical fact it is; `merge-policy-human` becomes the *empty-allowlist
+rendering* of the same file; `no-merge-admin` becomes a property of that rendering rather than a
+separate policy; `no-merge-own-pr`'s role constraint is already carried as a red line inside
+`auto-admin` ("never merge a PR the manager itself authored without a separate reviewer") and is
+absorbable. **Five files → one.** This is `consolidate-dont-fork` applied to the surface that
+motivated the principle.
+
+**Fork 4b — keep the family, add scoping to each.** Lower risk per file, but it preserves five
+places for one policy to be stated and five chances for them to drift. It is the shape that
+produced this defect.
+
+**I recommend 4a and am flagging it rather than assuming it**, because collapsing a
+merge-authority family is a bigger call than anything else in this plan and deserves an explicit
+yes rather than arriving inside an implementation PR.
+
+**What happens to `auto-admin.md:28` — the question asked directly.**
+
+Line 28 is a prose invariant that exists *only because five stackable files exist*. Its fate is
+therefore decided by this fork, and it is never left as prose either way:
+
+- **Under 4a:** line 28 is **deleted along with the files it names.** One file cannot conflict with
+  itself, so the invariant stops being needed rather than being enforced — the collapse *is* the
+  enforcement. The Phase 3 gate then becomes dead code and is removed with it.
+- **Under 4b:** line 28 is **deleted as prose and promoted to the Phase 3 `validate` gate**, which
+  becomes permanent. A machine-checked invariant, not a sentence asking to be obeyed.
+
+Either way the rule is executable before Phase 4 closes. What must **not** happen is Phase 3
+rewriting the file and carrying line 28 forward as prose into a rendered guardrail — that would
+preserve an unenforced invariant through the very change meant to make policy authoritative.
+
+### Phase 5 — drift detection (§9)
 
 ---
 
@@ -315,6 +531,13 @@ Already present, and the foundation is better than expected:
 3. **No network validation.** `validate` must not hit GitHub. (`projects.yaml`'s comment records
    a real 301-redirect miss — `artemis-quality-hub` → `artemis-data-hub`. That check belongs in
    a separate opt-in door, not in `validate`.)
+4. **Guardrail mutual exclusion — the gate the library already asks for.** A bot equipping two
+   merge-policy guardrails is a hard `validate` error. This is not a new rule: it is
+   `merge-policy-auto-admin.md:28` (*"replaces both `merge-policy-human` and `no-merge-admin`. Do
+   not stack with either"*), which today is prose enforced by nothing (§4A.3). Rev 1 proposed
+   gates 1-3 and missed the one already written down — which is its own small lesson about
+   inventing validation while an unenforced invariant sits in the file being rewritten. Ships in
+   Phase 3; its fate under the family collapse is settled in Phase 4.
 
 ### A repo in no project
 
@@ -371,6 +594,11 @@ commit**, not two PRs.
 - **Not changing which repos are autonomous.** Output must be the same 6 repos, from config
   instead of prose. Any diff in the *set* is a bug, not an improvement.
 - **Not extending the allowlist.** Chris's decision, per the guardrail's own red line.
+- **Not rewriting five guardrails in Phase 3.** Phase 3 touches one file plus a signpost; the
+  family question is Phase 4 and needs ratification (§5, Phase 4). Widening Phase 3 to cover the
+  family is exactly the "just widen the blast radius" move this revision was asked not to make.
+- **Not deferring Phase 0 behind any of this.** The unscoped `--admin` grant on two reviewers is a
+  live defect and ships on its own timeline (§5, Phase 0; §10 q5).
 
 ---
 
@@ -396,10 +624,18 @@ for a merge-authority change must not be able to exercise merge authority.
 | 9 | **Behavioral read** — dispatch the canary bot: "which repos may you merge autonomously?" | names exactly the 6; names `dbt`/`modal-pipelines` as human-gated |
 | 10 | **Behavioral refusal** — ask it to merge an unlisted repo | refuses, cites human-gating |
 | 11 | Rollback | restore forks, regenerate → **byte-identical to pre-change** composed output |
+| 12 | **Phase 0 — no unscoped `--admin` survives anywhere in composed output** | `grep -rc -- '\`--admin\` merge is allowed'` over every bot's `CLAUDE.md` returns **0**, and the only surviving `--admin` instruction is the allowlist-scoped one |
+| 13 | **Phase 0 behavioural** — ask a restarted reviewer to `--admin` merge a PR | refuses; cites having no merge duty. Run against **both** reviewers, since both carry the grant |
+| 14 | **Stacked guardrails rejected** (§6 gate 4) | a fleet equipping `merge-policy-auto-admin` + `no-merge-admin` **fails** `validate`, naming both |
 
 Checks 9-10 are the ones that matter and the ones unit tests cannot reach: composition proves the
 text landed; only a dispatch proves the bot *reads it as policy*. Cite the observation in each
 PR body — claimed evidence is not evidence.
+
+**Check 12 must grep by content, not by filename.** That is how §4A.2 was found and how Rev 1
+missed it: the unscoped grant lives in `review-flow.md`, a file whose name contains no hint that
+it grants merge authority. A filename-scoped audit of "the merge-policy files" returns clean
+while the contradiction sits in a protocol two directories away.
 
 ### The carrier constraint — the canary must restart before checks 9-10
 
@@ -426,11 +662,36 @@ restart is required if check 6 holds; if it does not, the change is wrong, not t
 fleet with an unexpressible policy will hand-copy prose again, because that path is still open
 and still undetected.
 
-**Proposed Phase 4 (separate issue, not this plan's scope):** `claudlobby doctor` warns when a
+**Proposed Phase 5 (separate issue, not this plan's scope):** `claudlobby doctor` warns when a
 fleet overlay shadows a shared library file whose content has diverged. Cheap, uses existing
 machinery (`conformance.py` already does rename-map drift and boundary invariants), and it makes
 the *class* visible rather than this instance. Without it, the fix's half-life is one ratified
 policy that config cannot express.
+
+### The detector Rev 1 proposed would not have caught §4A — it was blind by construction
+
+Review caught this and it is the sharper version of the risk. An overlay-versus-shared detector
+compares a fleet file against the shared file it shadows. **Both defects in §4A are
+shared-versus-shared:** `merge-policy-auto-after-review` restating `auto-admin`'s policy, and
+`review-flow` granting what `no-merge-admin` forbids. Neither is an overlay. Neither shadows
+anything. The detector returns clean on both, forever.
+
+So the detector needs a **second, differently-shaped** check, and the second one is the harder
+and more valuable of the two:
+
+| check | catches | shape |
+|---|---|---|
+| overlay shadows shared, content diverged | a fleet re-forking a shared file | pairwise, by filename |
+| **one policy asserted in N shared files** | the family in §4A.1, and `review-flow` in §4A.2 | **by content, across the whole library, filename-blind** |
+
+The second cannot key on filenames — `review-flow.md` grants merge authority and its name says
+nothing about merge. A plausible first cut: flag any library file outside
+`guardrails/merge-policy-*` that contains a merge-authority instruction (`gh pr merge`, `--admin`),
+and require an explicit frontmatter acknowledgement to keep it. Crude, but it fails in the safe
+direction and it is the check that would have caught a live defect two reviewers were carrying.
+
+**This is now the most valuable part of Phase 5, not a footnote to it.** Rev 1 had it as a
+nice-to-have; it is the only proposed mechanism that generalizes past the instance.
 
 ---
 
@@ -446,6 +707,15 @@ policy that config cannot express.
    no composed worker output today (`## Projects` stays manager-gated), but it does widen what
    worker-equipped library files *can* express. I read it as mechanism, not policy. Flagging it
    rather than assuming.
+4. **Phase 4 fork 4a vs 4b — collapse the guardrail family to one file, or scope all five?**
+   The one question in this plan I am flagging for an explicit yes rather than deciding. I
+   recommend 4a; it is `consolidate-dont-fork` applied to the surface that motivated the
+   principle, but it is also a five-file merge-authority redesign and should not arrive inside an
+   implementation PR.
+5. **Should Phase 0 ship ahead of this plan's merge entirely?** It is a one-line deletion fixing a
+   live contradiction on two production bots and depends on nothing here. My view: yes — file it
+   as its own issue and fix it today rather than letting it inherit this plan's review latency.
+   The only reason it sits in this document is that this document is where it was found.
 
 ---
 
