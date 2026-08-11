@@ -139,11 +139,23 @@ next_alert_day() {
     local status="$1" sent="$2"
     case "$status" in
         fail)
+            # `sent` counts LADDER re-surfaces only. The ok->fail transition
+            # alert is a separate event and deliberately does NOT consume a
+            # rung, so both entry paths share one accounting.
+            #
+            # Merging 0 and 1 into a single due=1 bucket was a real bug (#1169).
+            # It is invisible on a fresh transition, which hardcoded sent=1 and
+            # so never evaluated 0 at all. But a credential INHERITED already
+            # failing with no history genuinely evaluates sent=0 on day 0, earns
+            # sent=1 by firing on day 1, and then the merged bucket read sent=1
+            # as still-pre-transition and fired AGAIN on day 2 — a ladder of
+            # 1,2,3,7 against a documented 1,3,7. Measured on exactly the
+            # credential this change was written about, which is in that state.
             case "$sent" in
-                0|1) printf '1' ;;
-                2)   printf '3' ;;
-                3)   printf '7' ;;
-                *)   printf '%s' $(( 7 * (sent - 2) )) ;;
+                0) printf '1' ;;
+                1) printf '3' ;;
+                2) printf '7' ;;
+                *) printf '%s' $(( 7 * (sent - 1) )) ;;
             esac ;;
         skip)
             case "$sent" in
@@ -198,9 +210,10 @@ record_and_alert() {
     case "$status" in
         fail)
             if [ "$prev" != "fail" ]; then
-                # Transition alert, unchanged.
+                # Transition alert, unchanged. It does NOT advance `sent`: the
+                # ladder counts re-surfaces, and hardcoding a rung here is what
+                # made the two entry paths disagree (#1169).
                 alert_text="creds-check: $provider FAIL — $detail"
-                sent=1
             else
                 due="$(next_alert_day fail "$sent")"
                 if [ "$days" -ge "$due" ]; then

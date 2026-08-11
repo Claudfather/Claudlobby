@@ -305,3 +305,95 @@ class TestTheseTestsAreHermetic:
             "the fail ladder's vehicle must be constructed by the test, not "
             "borrowed from the host"
         )
+
+
+def _strip_to_legacy(fleet: dict, provider: str) -> None:
+    """Reduce a row to its pre-#1095 shape: status/detail/ts, no history.
+
+    This is not a synthetic edge case — it is the literal on-disk state of every
+    already-failing credential on the day this ships.
+    """
+    state = json.loads(fleet["state"].read_text())
+    state[provider] = {k: state[provider][k] for k in ("status", "detail", "ts")}
+    fleet["state"].write_text(json.dumps(state))
+    fleet["tg_log"].write_text("")  # drop alerts from the seeding tick
+
+
+def _walk(fleet: dict, provider: str, days: int, marker: str) -> list[int]:
+    """Tick day by day, each day building on the PREVIOUS day's real state."""
+    fired: list[int] = []
+    for day in range(days):
+        if day:
+            state = json.loads(fleet["state"].read_text())
+            state[provider]["since_epoch"] -= DAY
+            fleet["state"].write_text(json.dumps(state))
+        before = _posts(fleet)
+        _run(fleet)
+        if marker in _posts(fleet)[len(before):]:
+            fired.append(day)
+    return fired
+
+
+class TestTheLadderFromAnInheritedFailingState:
+    """The gap that let a real double-fire ship green (#1169).
+
+    Every other fail-ladder test starts from `_controlled` then a fresh `_run`,
+    which is always a genuine ok->fail TRANSITION. The transition path never
+    evaluates `sent=0`, so a bug living in that bucket was unreachable from the
+    whole suite.
+
+    A credential inherited ALREADY failing with no history is a different entry
+    path, and it is the one that matters on deploy day: it evaluates `sent=0`
+    for real, earns `sent=1` by firing, and then walks the same ladder. These
+    tests walk it forward day by day rather than re-deriving each day fresh.
+    """
+
+    def test_it_fires_on_exactly_the_documented_days(self, tmp_path):
+        f = _controlled(tmp_path, railway_fails=True)
+        _run(f)
+        _strip_to_legacy(f, "railway_token")
+
+        fired = _walk(f, "railway_token", days=9, marker="STILL FAILING")
+
+        assert fired == [1, 3, 7], (
+            f"documented ladder is 1, 3, 7 — this fired on {fired}.\n"
+            "\n"
+            "If day 2 is in that list, the fail branch of next_alert_day has "
+            "re-merged its sent=0 and sent=1 buckets. That is invisible from a "
+            "fresh transition (which never evaluates sent=0) and fires a "
+            "duplicate alert on the second day for every credential that was "
+            "already failing when this deployed — which is the exact condition "
+            "the motivating credential is in."
+        )
+
+    def test_it_does_not_double_fire_on_day_two(self, tmp_path):
+        """Stated separately so the failure names the symptom, not just a list."""
+        f = _controlled(tmp_path, railway_fails=True)
+        _run(f)
+        _strip_to_legacy(f, "railway_token")
+
+        fired = _walk(f, "railway_token", days=4, marker="STILL FAILING")
+
+        assert 2 not in fired, (
+            "day 2 fired. The ladder is 1, 3, 7: after the day-1 alert the next "
+            "rung is day 3. A day-2 alert means sent=1 was read as though it "
+            "were still the pre-transition sent=0."
+        )
+
+    def test_the_transition_path_is_undisturbed(self, tmp_path):
+        """The contrast, so the two entry paths are legible as a pair.
+
+        A genuine ok->fail alerts immediately AND then walks the same ladder
+        from its own start. The transition alert does not consume a rung.
+        """
+        f = _controlled(tmp_path, railway_fails=True)
+        _run(f)
+        assert "railway_token FAIL" in _posts(f), "transition alert must still fire"
+
+        fired = _walk(f, "railway_token", days=9, marker="STILL FAILING")
+
+        assert fired == [1, 3, 7], (
+            f"fresh-transition ladder should also be 1, 3, 7 — got {fired}. "
+            "Both entry paths share one accounting; if they diverge, one of "
+            "them is counting the transition alert as a ladder rung."
+        )
