@@ -221,3 +221,171 @@ class TestSessionResumeCapability:
             assert (out, rc) == ("provider-absent:claudna", 1), (
                 f"{const} does not gate through the shared predicate"
             )
+
+
+class TestBareVersusPluginAsymmetryIsDeliberate:
+    """The two branches of ``session_command_status`` treat a MISS differently.
+
+    They look inconsistent side by side, and a reviewer nearly filed the bare
+    branch as a bug on exactly that reading. It is not a bug, and these tests
+    exist so that anyone who reaches the same conclusion is stopped by a failing
+    test rather than by whether they happened to read a comment.
+
+    ============================================================
+      command shape        skill/plugin missing   ->  behaviour
+    ------------------------------------------------------------
+      /plugin:verb         plugin not in cache    ->  SUPPRESS (rc 1)
+      /bareword            no file under skills/  ->  INJECT   (rc 0)
+    ============================================================
+
+    The difference is *what a negative means*, not a lapse in consistency:
+
+    - ``/plugin:verb`` names a plugin. A plugin absent from the cache is a
+      POSITIVE finding of absence — we looked in the one place it could be and
+      it was not there.
+    - ``/bareword`` names no plugin, and the bare namespace includes Claude
+      Code's own NATIVE commands (``/compact``, ``/clear`` and friends). Those
+      have no filesystem representation under ``.claude/skills`` at ALL, so a
+      miss is AMBIGUOUS — it cannot distinguish "no such command" from "a
+      native command, which never has a file". Suppressing on it would silently
+      refuse to send every native command a fleet ever configured.
+
+    Hence the lookup is still worth doing (a hit is a real positive and upgrades
+    ``unverifiable`` to ``available``) while a miss falls back to the helper's
+    fail-open rule: only a positive finding of absence suppresses a send.
+    """
+
+    def _status(self, cmd: str, bot_dir: str = "", config_dir: str | None = None):
+        pre = f'export CLAUDE_CONFIG_DIR="{config_dir}"; ' if config_dir else ""
+        return _run(f'{pre}session_command_status "$2" "$3"', cmd, bot_dir)
+
+    def _empty_plugin_cache(self, tmp_path: Path) -> str:
+        home = tmp_path / "cfg"
+        (home / "plugins" / "cache" / "SomeMarketplace").mkdir(parents=True)
+        return str(home)
+
+    # -- the protected branch -------------------------------------------------
+
+    def test_bare_command_missing_from_skills_dir_still_injects(self, tmp_path):
+        """A bare command whose name is absent under ``.claude/skills`` INJECTS.
+
+        This is the case the guarding comment protects and the one no other test
+        reaches: a bot_dir IS supplied (so the lookup actually runs) and the
+        skill is NOT there (so the negative is available to act on). The helper
+        deliberately does not act on it.
+        """
+        cfg = self._empty_plugin_cache(tmp_path)
+        bot = tmp_path / "bot"
+        (bot / ".claude" / "skills").mkdir(parents=True)  # exists, but empty
+
+        out, rc = self._status("/compact", str(bot), config_dir=cfg)
+
+        assert (out, rc) == ("unverifiable", 0), (
+            "\n"
+            "A bare /command that is ABSENT from .claude/skills must still be injected\n"
+            "(status 'unverifiable', rc 0). This test got "
+            f"{(out, rc)!r} instead.\n"
+            "\n"
+            "If you just made this branch suppress on a miss so it matches the\n"
+            "plugin-qualified branch above it: that symmetry is the bug, not the fix.\n"
+            "\n"
+            "  A bare /word does NOT name a plugin, and the bare namespace includes\n"
+            "  Claude Code's own NATIVE commands -- /compact, /clear and friends --\n"
+            "  which have NO filesystem representation under .claude/skills at all.\n"
+            "  So a miss there cannot tell 'no such command' apart from 'a native\n"
+            "  command, which never has a file'. It is an AMBIGUOUS negative, not a\n"
+            "  finding of absence.\n"
+            "\n"
+            "  Suppressing on it would silently stop sending every native command a\n"
+            "  fleet ever configured -- and silence is exactly the failure mode\n"
+            "  #1163 was opened to close. Only a POSITIVE finding of absence may\n"
+            "  suppress a send; 'I could not tell' sends and says so.\n"
+            "\n"
+            "The plugin branch may suppress because a plugin missing from the cache\n"
+            "IS a positive finding. See the contrasting test in this class.\n"
+        )
+
+    def test_the_lookup_is_still_worth_doing_a_hit_upgrades_the_status(self, tmp_path):
+        """The miss is ignored, but a HIT is not — otherwise drop the lookup.
+
+        This is what keeps the branch from collapsing into an unconditional
+        'unverifiable': a present skill is a real positive and must report
+        'available'. If someone deletes the lookup as dead code because the miss
+        is ignored, this fails.
+        """
+        cfg = self._empty_plugin_cache(tmp_path)
+        bot = tmp_path / "bot"
+        (bot / ".claude" / "skills" / "mysession").mkdir(parents=True)
+
+        out, rc = self._status("/mysession", str(bot), config_dir=cfg)
+
+        assert (out, rc) == ("available", 0), (
+            "A bare /command that IS present under .claude/skills must report "
+            "'available', not 'unverifiable'. The skills lookup on this branch is "
+            "not dead code: the miss is ignored, but the HIT is load-bearing. "
+            "Removing the lookup would lose a real positive."
+        )
+
+    # -- the contrasting branch, so the asymmetry reads as a pair -------------
+
+    def test_plugin_command_missing_from_cache_suppresses(self, tmp_path):
+        """The SAME shape of miss on the plugin branch DOES suppress.
+
+        Deliberately adjacent to the bare-command test above: the two are only
+        coherent as a pair. Read alone, either one looks like the other's bug.
+        """
+        cfg = self._empty_plugin_cache(tmp_path)
+        bot = tmp_path / "bot"
+        (bot / ".claude" / "skills").mkdir(parents=True)
+
+        out, rc = self._status("/someplugin:session resume", str(bot), config_dir=cfg)
+
+        assert (out, rc) == ("provider-absent:someplugin", 1), (
+            "\n"
+            "A plugin-qualified command whose plugin is NOT in the cache must be\n"
+            f"suppressed (rc 1) and must name the plugin. Got {(out, rc)!r}.\n"
+            "\n"
+            "If you just made this branch fail open so it matches the bare-command\n"
+            "branch: that symmetry is also wrong, in the opposite direction.\n"
+            "\n"
+            "  A plugin-qualified command NAMES the plugin it needs. The cache is\n"
+            "  the one place that plugin could be, so absent-from-cache is a\n"
+            "  POSITIVE finding of absence -- unlike a bare /word, where a miss is\n"
+            "  ambiguous because native commands have no files at all.\n"
+            "\n"
+            "  Injecting here would fire a keystroke that provably cannot resolve,\n"
+            "  on every boot of every bot, under a SUPPORTED configuration\n"
+            "  (plugins.include_defaults: false). That is #1163.\n"
+        )
+
+    def test_the_two_branches_disagree_on_the_same_input_shape(self, tmp_path):
+        """Pin the asymmetry itself, so symmetrizing EITHER side fails here too.
+
+        The per-branch tests above can each be made to pass by 'fixing' the
+        other branch. This one cannot: it asserts the two branches return
+        DIFFERENT rcs for the same miss, which is the actual invariant.
+        """
+        cfg = self._empty_plugin_cache(tmp_path)
+        bot = tmp_path / "bot"
+        (bot / ".claude" / "skills").mkdir(parents=True)
+
+        _, bare_rc = self._status("/notinstalled", str(bot), config_dir=cfg)
+        _, plugin_rc = self._status("/notinstalled:verb", str(bot), config_dir=cfg)
+
+        assert (bare_rc, plugin_rc) == (0, 1), (
+            "\n"
+            "The two branches of session_command_status MUST disagree here, and "
+            f"got bare={bare_rc} plugin={plugin_rc}.\n"
+            "\n"
+            "Same shape of input -- a name that resolves to nothing on disk -- and\n"
+            "the correct answers are opposite:\n"
+            "\n"
+            "  bare   /notinstalled       -> rc 0, INJECT   (ambiguous negative:\n"
+            "                                native commands have no files)\n"
+            "  plugin /notinstalled:verb  -> rc 1, SUPPRESS (positive finding:\n"
+            "                                the cache is the only place it lives)\n"
+            "\n"
+            "If both are 0 you removed a real guard and re-opened #1163. If both\n"
+            "are 1 you will silently stop sending native commands. The asymmetry\n"
+            "is the design.\n"
+        )
