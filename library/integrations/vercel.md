@@ -5,12 +5,17 @@ type: cli
 
 # Vercel
 
-**Skills (clauDNA):** `/claudna:vercel status` (deployments, domains, env vars), `/claudna:vercel logs` (view/debug logs), `/claudna:vercel deploy` (deploy to production or preview)
+Vercel hosts and deploys frontend projects. You reach it either through a Vercel
+domain skill or agent, or through the `vercel` CLI.
 
-**When to use:**
-- Checking deployment health or domain config → `/claudna:vercel status`
-- Debugging build failures or runtime errors → `/claudna:vercel logs`
-- Deploying or promoting a preview → `/claudna:vercel deploy`
+**What you will need to do with it:**
+- Check deployment health, domains, and env-var config
+- Read and debug logs from build failures and runtime errors
+- Deploy to production, or promote a preview
+
+**How to do it:** use any Vercel domain skill or agent you have available —
+clauDNA ships `/claudna:vercel`, so check your own skill list first. If none is
+installed, use the `vercel` CLI directly; everything above is reachable that way.
 
 **Gotchas:**
 - Vercel CLI logged in as a specific user — check `vercel whoami` if auth issues arise

@@ -1,6 +1,6 @@
 # `structural_vs_mechanical` Risk Classifier — Subagent Prompt
 
-The `autonomous-runner` skill dispatches this subagent before invoking any `--auto` clauDNA skill against a target work item. The subagent classifies the change's risk for headless work and returns one of three labels: `mechanical`, `localized`, `structural`.
+The `autonomous-runner` skill dispatches this subagent before invoking any `--auto` skill against a target work item. The subagent classifies the change's risk for headless work and returns one of three labels: `mechanical`, `localized`, `structural`.
 
 This prompt template is the source of truth. The skill body references it rather than inlining the prompt.
 

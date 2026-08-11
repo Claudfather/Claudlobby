@@ -1,12 +1,12 @@
 # Autonomous Worker — Bot Archetype
 
-A worker bot that picks GitHub issues from a target repo per a cadence, classifies risk, and runs a clauDNA `--auto` skill (typically `/claudna:implement-plan`) to resolve them. Never merges. Reports outcomes to Telegram.
+A worker bot that picks GitHub issues from a target repo per a cadence, classifies risk, and runs a procedural `--auto` skill to resolve them (clauDNA's `/claudna:implement-plan` is the usual choice). Never merges. Reports outcomes to Telegram.
 
 This archetype is the recipe for composing a bot around the `autonomous-runner` skill. If/when other archetypes emerge (Manager Bot, Auditor Bot, Reviewer Bot), promote shared archetype documentation to a top-level `library/archetypes/` category.
 
 ## When to use
 
-- You have a clauDNA-installed bot fleet
+- Your bots have a procedural `--auto` skill available (clauDNA provides these; check what is installed)
 - You have a target repository with a healthy backlog of well-formed issues (each containing an `## Implementation Plan` section, ideally produced by `/claudna:audit tech-debt --auto` or similar)
 - You want overnight or cadence-based PR generation without per-issue human intervention
 - You're OK with PRs awaiting a human review before merge (the contract is hard: this bot never merges)
@@ -38,7 +38,7 @@ See `fleet.yaml.example` for a complete example (the commented `dbt-auto-bot` en
 ## Bypass tuning
 
 - Default (`block_on: [structural]`): conservative. Mechanical and localized changes proceed; structural changes get a `needs-input` label.
-- `block_on: []`: trust the wrapper's tripwires and the clauDNA skill's verification. Useful in tightly tested codebases.
+- `block_on: []`: trust the wrapper's tripwires and the invoked skill's own verification. Useful in tightly tested codebases.
 - `block_on: [structural, localized]`: most conservative — only pure mechanical changes proceed. Useful for early-stage bots, or repos where headless changes need extra caution.
 
 ## On-outcome policy

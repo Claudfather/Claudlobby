@@ -11,17 +11,24 @@ A scheduled maintenance pass over the fleet's repos. Run on a cadence (e.g., wee
 
 ## How it works
 
-The sweep orchestrates clauDNA planning skills. Pick a repo → pick an audit type → dispatch to a subagent so it doesn't pollute your main context.
+The sweep orchestrates whatever code-audit skills the bot has available. Pick a repo → pick an audit type → dispatch to a subagent so it doesn't pollute your main context.
 
-| Audit type | Skill to run | What it finds |
-|-----------|-------------|---------------|
-| tech-debt | `/claudna:audit tech-debt` | Dead code, god modules, deprecated patterns |
-| security | `/claudna:audit security` | Credential leaks, injection vectors, auth gaps |
-| docs | `/claudna:audit docs` | Stale or missing documentation |
-| data-model | `/claudna:audit data-model` | Schema / app mismatches (if applicable) |
-| enhancement | `/claudna:product-enhance` | UX gaps, missing features, inconsistencies |
+| Audit type | What it finds |
+|-----------|---------------|
+| tech-debt | Dead code, god modules, deprecated patterns |
+| security | Credential leaks, injection vectors, auth gaps |
+| docs | Stale or missing documentation |
+| data-model | Schema / app mismatches (if applicable) |
+| enhancement | UX gaps, missing features, inconsistencies |
 
-Each is run with `--auto --output github` so it operates non-interactively and creates GitHub issues directly.
+**Which skill runs each one:** use the audit skills you actually have. clauDNA
+provides these as `/claudna:audit <type>` and `/claudna:product-enhance` for the
+enhancement row — check your own skill list rather than assuming. If no audit
+skill is installed, do the audit directly: read the repo against the "what it
+finds" column and file the same issues.
+
+Run non-interactively and file GitHub issues directly — with clauDNA that is
+`--auto --output github`; with another provider, use its equivalent flags.
 
 ## Operations
 

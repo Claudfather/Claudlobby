@@ -18,15 +18,21 @@ Replace the `<ASSISTANT_TOOLS_DIR>` placeholders with your actual path before in
 
 ## How it works
 
-The sweep orchestrates three existing skills based on the audit type:
+The sweep orchestrates whatever audit skills the bot has available, based on the audit type:
 
-| Type from `rolling-audit.sh` | Skill to run | What it finds |
-|------------------------------|-------------|---------------|
-| `tech-debt` | `/claudna:audit tech-debt` | Dead code, god modules, deprecated patterns, missing abstractions |
-| `security` | `/claudna:audit security` | Credential leaks, injection vectors, auth gaps, TLS issues |
-| `enhancement` | `/claudna:product-enhance` | UX gaps, missing features, performance issues, API inconsistencies |
+| Type from `rolling-audit.sh` | What it finds |
+|------------------------------|---------------|
+| `tech-debt` | Dead code, god modules, deprecated patterns, missing abstractions |
+| `security` | Credential leaks, injection vectors, auth gaps, TLS issues |
+| `enhancement` | UX gaps, missing features, performance issues, API inconsistencies |
 
-Each skill is run with `--auto --github-issues` flags so it operates non-interactively and creates GitHub issues directly.
+**Which skill runs each one:** use the audit skills you actually have. clauDNA
+provides these as `/claudna:audit <type>`, with `/claudna:product-enhance` for
+the enhancement row — check your own skill list rather than assuming. If none is
+installed, do the audit directly against the "what it finds" column.
+
+Run non-interactively and file GitHub issues directly — with clauDNA that is
+`--auto --github-issues`; with another provider, use its equivalent flags.
 
 ## Operations
 
