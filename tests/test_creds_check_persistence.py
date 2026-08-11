@@ -19,6 +19,45 @@ from tests.test_creds_check_telegram import _fleet, _run
 
 DAY = 86400
 
+# Any value at all makes check_railway_token RUN rather than skip; the fixture's
+# curl stub then answers 404, so the outcome is `fail` deterministically. The
+# value is never a real credential and never leaves the stub.
+FORCE_RAILWAY = "not-a-real-token-forces-the-check-to-run"
+
+# Credential vars that decide whether a provider runs or skips. They must be set
+# EXPLICITLY per test, never inherited.
+#
+# This is the defect that shipped a red CI: `_fleet` builds its child env from
+# `_scrubbed_env`, which is an inherit-and-subtract DENYLIST — it strips
+# TELEGRAM*/CLAUDLOBBY*/FLEET*/BOT_* and passes everything else through. A
+# developer machine with a (dead) RAILWAY_API_TOKEN exported made railway_token
+# resolve to `fail`; CI, with no such variable, resolved it to `skip`. The tests
+# passed on both machines a human used and failed only in CI, because they were
+# reading host state instead of their own fixture.
+#
+# `conftest._scrubbed_env`'s own docstring names this: "only as complete as this
+# prefix list (#846) ... new tests should not add call sites here."
+CREDENTIAL_VARS = (
+    "RAILWAY_API_TOKEN",
+    "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_PAT",
+)
+
+
+def _controlled(tmp_path, *, railway_fails: bool):
+    """A fleet whose credential inputs are set by the TEST, not by the host.
+
+    railway_fails=True  -> railway_token resolves `fail` (token present, stub 404)
+    railway_fails=False -> railway_token resolves `skip` (no token at all)
+    """
+    f = _fleet(tmp_path)
+    for var in CREDENTIAL_VARS:
+        f["env"].pop(var, None)
+    if railway_fails:
+        f["env"]["RAILWAY_API_TOKEN"] = FORCE_RAILWAY
+    return f
+
 
 def _age(fleet: dict, provider: str, days: int) -> None:
     """Back-date a provider's run so it reads as `days` old on the next tick."""
@@ -43,7 +82,7 @@ def _a_skipping_provider(state: dict) -> str:
 
 class TestStateCarriesAge:
     def test_new_fields_are_written(self, tmp_path):
-        state = _run(_fleet(tmp_path))
+        state = _run(_controlled(tmp_path, railway_fails=False))
         row = next(iter(state.values()))
         assert "since_epoch" in row and "alerts" in row, (
             "#1095 needs the age of a run, not just its status — the state file "
@@ -53,7 +92,7 @@ class TestStateCarriesAge:
 
     def test_a_pre_1095_state_file_upgrades_without_crashing(self, tmp_path):
         """The live state file predates these fields. It must not need a wipe."""
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=False)
         _run(f)
         legacy = {
             k: {"status": v["status"], "detail": v["detail"], "ts": v["ts"]}
@@ -68,13 +107,19 @@ class TestStateCarriesAge:
 class TestPersistentSkipResurfaces:
     """The case our own fleet was blind to.
 
-    ``github_pat`` has been `skip` forever because the check reads a variable
-    the fleet does not set. It is a SKIP, not a fail — so a fail-only fix would
-    have left the very example that motivated this silent.
+    ``github_pat`` has been `skip` on this estate for as long as anyone looked.
+    NOT because of a name mismatch — ``check_github_pat`` falls back through
+    ``GITHUB_PERSONAL_ACCESS_TOKEN`` then ``GITHUB_TOKEN`` then ``GITHUB_PAT``,
+    so it does read the name the fleet uses. The value is simply EMPTY, and an
+    empty value takes the same ``[ -z ]`` branch as an absent one.
+
+    The point that survives either diagnosis: it is a SKIP, not a fail, and
+    ``skip`` was documented as "recorded but never alerted". A fail-only fix
+    would have left the very example that motivated this change silent.
     """
 
     def test_a_fresh_skip_is_silent(self, tmp_path):
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=False)
         state = _run(f)
         _a_skipping_provider(state)  # assert the fixture really produces one
         assert "SKIPPED" not in _posts(f), (
@@ -84,7 +129,7 @@ class TestPersistentSkipResurfaces:
         )
 
     def test_a_skip_still_there_after_three_days_surfaces(self, tmp_path):
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=False)
         provider = _a_skipping_provider(_run(f))
         _age(f, provider, 3)
         _run(f)
@@ -98,7 +143,7 @@ class TestPersistentSkipResurfaces:
 
     def test_it_does_not_re_alert_the_next_day(self, tmp_path):
         """Decaying, not daily — the noise-control intent survives."""
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=False)
         provider = _a_skipping_provider(_run(f))
         _age(f, provider, 3)
         _run(f)
@@ -112,18 +157,24 @@ class TestPersistentSkipResurfaces:
 
 
 class TestPersistentFailResurfaces:
-    """``railway_token`` fails on every tick in this fixture (404 from the curl
-    stub), which is the same shape as the real estate's dead Railway token —
-    the case #1095 was opened on."""
+    """The fail ladder: 1, 3, 7 days, then weekly.
+
+    ``railway_token`` is used as the vehicle, and the test SETS the token so the
+    check runs and the stub answers 404. It does not rely on the host happening
+    to export one — that dependency is what turned this file red in CI while
+    passing on two developer machines.
+    """
 
     def test_the_first_fail_alerts_as_it_always_did(self, tmp_path):
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=True)
         state = _run(f)
         assert state["railway_token"]["status"] == "fail"
-        assert "railway_token FAIL" in _posts(f), "the transition alert must not regress"
+        assert "railway_token FAIL" in _posts(f), (
+            "the transition alert must not regress"
+        )
 
     def test_a_fail_that_stays_failed_re_alerts_with_its_age(self, tmp_path):
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=True)
         _run(f)
         _age(f, "railway_token", 1)
         _run(f)
@@ -139,7 +190,7 @@ class TestPersistentFailResurfaces:
         )
 
     def test_it_decays_rather_than_alerting_every_tick(self, tmp_path):
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=True)
         _run(f)
         _age(f, "railway_token", 1)
         _run(f)
@@ -152,7 +203,7 @@ class TestPersistentFailResurfaces:
         )
 
     def test_the_seven_day_mark_fires(self, tmp_path):
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=True)
         _run(f)
         for day in (1, 2, 4):  # reaches day 1, then 3, then 7
             _age(f, "railway_token", day)
@@ -167,7 +218,7 @@ class TestPersistentFailResurfaces:
         ``telegram_f_bot1`` genuinely evaluates to ok, so seeding it as fail
         and re-running exercises the real fail to ok edge.
         """
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=True)
         _run(f)
         state = json.loads(f["state"].read_text())
         state["telegram_f_bot1"]["status"] = "fail"
@@ -176,7 +227,7 @@ class TestPersistentFailResurfaces:
         assert "telegram_f_bot1 RECOVERED" in _posts(f)
 
     def test_recovery_clears_the_run_so_a_later_fail_alerts_again(self, tmp_path):
-        f = _fleet(tmp_path)
+        f = _controlled(tmp_path, railway_fails=True)
         _run(f)
         state = json.loads(f["state"].read_text())
         state["telegram_f_bot1"]["status"] = "fail"
@@ -192,7 +243,7 @@ class TestMcpProbeIsGone:
     """#1096 — the probe gated on MCP_PROBE_URL, set nowhere, so it never ran."""
 
     def test_no_mcp_probe_row_is_recorded(self, tmp_path):
-        state = _run(_fleet(tmp_path))
+        state = _run(_controlled(tmp_path, railway_fails=False))
         assert "mcp_probe" not in state, (
             "the MCP probe is deleted, not disabled. It gated on MCP_PROBE_URL "
             "— set in no fleet config, no bot.conf and no .env — so it recorded "
@@ -201,8 +252,56 @@ class TestMcpProbeIsGone:
         )
 
     def test_the_script_still_runs_its_remaining_checks(self, tmp_path):
-        state = _run(_fleet(tmp_path))
+        state = _run(_controlled(tmp_path, railway_fails=False))
         assert state, "deleting one check must not empty the tick"
         assert any(k.startswith("telegram_") for k in state), (
             "the telegram per-bot checks are the ones that actually run here"
+        )
+
+
+class TestTheseTestsAreHermetic:
+    """Guard against the defect that shipped a red CI.
+
+    These tests passed on two developer machines and failed in CI, because
+    `_fleet` inherits its child env through `_scrubbed_env` — a prefix DENYLIST
+    that strips TELEGRAM*/CLAUDLOBBY*/FLEET*/BOT_* and passes everything else.
+    A machine with a dead RAILWAY_API_TOKEN exported resolved railway_token to
+    `fail`; CI, with none, resolved it to `skip`.
+
+    A test whose outcome depends on which credentials happen to exist on the
+    host is not testing the ladder, and it is green wherever it is written.
+    """
+
+    def test_an_ambient_token_cannot_reach_the_script(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RAILWAY_API_TOKEN", "ambient-must-not-leak")
+        monkeypatch.setenv("GITHUB_PAT", "ambient-must-not-leak")
+        f = _controlled(tmp_path, railway_fails=False)
+        for var in CREDENTIAL_VARS:
+            assert var not in f["env"], (
+                f"{var} leaked from the host into the fixture env. Credential "
+                "inputs must be set by the test; inheriting them is what made "
+                "this file pass locally and fail in CI."
+            )
+
+    def test_an_ambient_token_does_not_change_the_verdict(self, tmp_path, monkeypatch):
+        """The exact CI divergence, pinned.
+
+        With a token exported this used to resolve `fail`. It must resolve
+        `skip` regardless, because the TEST said no token.
+        """
+        monkeypatch.setenv("RAILWAY_API_TOKEN", "ambient-must-not-leak")
+        state = _run(_controlled(tmp_path, railway_fails=False))
+        assert state["railway_token"]["status"] == "skip", (
+            "railway_token resolved from the HOST's environment rather than the "
+            "fixture's. This is precisely the CI failure: green on a machine "
+            "with a stale Railway token, red on one without."
+        )
+
+    def test_the_test_can_still_force_a_fail(self, tmp_path, monkeypatch):
+        """The inverse: no ambient token, and the fixture still produces a fail."""
+        monkeypatch.delenv("RAILWAY_API_TOKEN", raising=False)
+        state = _run(_controlled(tmp_path, railway_fails=True))
+        assert state["railway_token"]["status"] == "fail", (
+            "the fail ladder's vehicle must be constructed by the test, not "
+            "borrowed from the host"
         )
