@@ -1993,6 +1993,84 @@ session_md_handoff_epoch() {
     stat_mtime "$file" 2>/dev/null
 }
 
+# --- Session-resume capability (#1163) ---------------------------------------
+# start-bot injects a resume keystroke on EVERY start of EVERY bot. The command
+# it sends is CONFIGURATION, not a literal in the boot path: a fleet running
+# `plugins.include_defaults: false` — a supported configuration — has no clauDNA,
+# and the old hardcode fired an unresolvable slash command into every pane on
+# every boot, including on bots that never equipped `restart`.
+#
+# The rule this restores is the repo's own: consume siblings by contract, never
+# by assertion. The DEFAULT below is the command shipped by the default plugin
+# set (the pinned-sibling floor, `claudron_compat`'s shape); a fleet that ships a
+# different session provider overrides it, and one that wants no resume at all
+# sets it empty.
+_SESSION_RESUME_COMMAND_DEFAULT='/claudna:session resume --auto'
+_SESSION_HANDOFF_COMMAND_DEFAULT='/claudna:session handoff --auto'
+
+# _plugin_installed <plugin> — is a plugin resolvable in this config dir?
+# Both layouts are checked because the cache is keyed by MARKETPLACE and the
+# plugin lives under it (measured: cache/Claudfather/claudna), while the
+# unpacked skills live under marketplaces/.
+_plugin_installed() {
+    local p="${1:?}" base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins" d
+    for d in "$base"/cache/*/"$p" "$base"/marketplaces/*/"$p" "$base"/cache/"$p" ; do
+        [ -d "$d" ] && return 0
+    done
+    return 1
+}
+
+# session_command_status <command> [bot_dir] — echo one status token. Serves
+# every session verb (resume at boot, handoff at shutdown): one predicate, not
+# one per call site.
+#   rc 0 -> INJECT      available | unverifiable
+#   rc 1 -> SKIP        no-command | provider-absent:<plugin>
+#
+# FAIL OPEN when the answer cannot be established, and that asymmetry is
+# deliberate rather than lazy. Injecting a command that does not resolve costs
+# one wasted keystroke and is VISIBLE in the pane. Failing to inject when we
+# should have costs the session its context, SILENTLY — which is the failure
+# #1163 opened with. So only a positive finding of absence suppresses the send;
+# "I could not tell" sends and says so.
+session_command_status() {
+    local cmd="${1-}" bot_dir="${2-}" first plugin skill
+    if [ -z "$cmd" ]; then printf 'no-command'; return 1; fi
+    # Only the FIRST token can carry a plugin qualifier; checking the whole
+    # string would read a colon in a later argument as one.
+    first="${cmd%% *}"
+    case "$first" in
+        /*:*)
+            plugin="${first#/}"; plugin="${plugin%%:*}"
+            if _plugin_installed "$plugin"; then printf 'available'; return 0; fi
+            printf 'provider-absent:%s' "$plugin"; return 1 ;;
+        /*)
+            # A BARE /word. This branch checks the bot's skills dir and then
+            # does NOT suppress on a miss, which looks asymmetric against the
+            # plugin branch above and is deliberate — do not "fix" it by
+            # symmetrizing the two.
+            #
+            # The difference is what a negative MEANS on each path. A
+            # plugin-qualified command names a plugin, and a plugin absent from
+            # the cache is a POSITIVE finding of absence. A bare /word does not
+            # name a plugin, and the namespace includes Claude Code's own
+            # NATIVE commands — /compact, /clear and friends — which have no
+            # filesystem representation anywhere, so a miss here is ambiguous
+            # rather than a finding. Treating it as absence would silently
+            # refuse to send every native command a fleet ever configured.
+            #
+            # So the lookup is worth doing (a hit is a real positive, and
+            # upgrades the status from unverifiable to available) while the
+            # miss stays unverifiable and still sends, per the fail-open rule
+            # above.
+            skill="${first#/}"
+            if [ -n "$bot_dir" ] && [ -e "$bot_dir/.claude/skills/$skill" ]; then
+                printf 'available'; return 0
+            fi
+            printf 'unverifiable'; return 0 ;;
+        *)  printf 'unverifiable'; return 0 ;;
+    esac
+}
+
 should_resume_session() {
     # F6 age gate: decide whether a handoff checkpoint is fresh enough to resume
     # from. Returns 0 (resume) when the handoff timestamp is within

@@ -138,3 +138,86 @@ class TestBotIsManager:
         d = self._bot(tmp_path, "val", 'BOT_ID="valbot"\nMANAGER_TMUX="valmgr"\n')
         _, rc = _run('bot_is_manager "$2"', str(d))
         assert rc == 1
+
+
+class TestSessionResumeCapability:
+    """#1163 — the boot path must not inject a command that cannot resolve.
+
+    ``start-bot.sh`` sent a hardcoded, plugin-qualified resume command on EVERY
+    start of EVERY bot. Under ``plugins.include_defaults: false`` — a supported
+    configuration — that plugin is never installed, so the keystroke was
+    unresolvable on every boot, including on bots that never equipped
+    ``restart``. There is no agent reading anything at that instant, so nothing
+    can exercise judgement; the command resolves or it does not.
+
+    The asymmetry below is the design: only a POSITIVE finding of absence
+    suppresses the send. Injecting a command that does not resolve costs one
+    visible wasted keystroke; failing to inject when we should have costs the
+    session its context silently, which is the failure this closes.
+    """
+
+    def _status(self, cmd: str, bot_dir: str = "", config_dir: str | None = None):
+        pre = f'export CLAUDE_CONFIG_DIR="{config_dir}"; ' if config_dir else ""
+        return _run(f'{pre}session_command_status "$2" "$3"', cmd, bot_dir)
+
+    def _plugin_home(self, tmp_path: Path, plugin: str | None) -> str:
+        home = tmp_path / "cfg"
+        (home / "plugins" / "cache" / "SomeMarketplace").mkdir(parents=True)
+        if plugin:
+            (home / "plugins" / "cache" / "SomeMarketplace" / plugin).mkdir()
+        return str(home)
+
+    def test_installed_provider_injects(self, tmp_path):
+        cfg = self._plugin_home(tmp_path, "someplugin")
+        out, rc = self._status("/someplugin:session resume --auto", config_dir=cfg)
+        assert (out, rc) == ("available", 0)
+
+    def test_absent_provider_skips_and_names_it(self, tmp_path):
+        # The #1163 configuration: the command's plugin is simply not installed.
+        cfg = self._plugin_home(tmp_path, None)
+        out, rc = self._status("/someplugin:session resume --auto", config_dir=cfg)
+        assert rc == 1, "an unresolvable command must not be injected"
+        assert out == "provider-absent:someplugin", "the skip must name the reason"
+
+    def test_empty_command_disables_injection(self, tmp_path):
+        cfg = self._plugin_home(tmp_path, "someplugin")
+        out, rc = self._status("", config_dir=cfg)
+        assert (out, rc) == ("no-command", 1)
+
+    def test_undeterminable_command_still_injects(self, tmp_path):
+        # Fail OPEN: a bare (non-plugin-qualified) command cannot be checked
+        # against a plugin, and a silent non-injection is the worse error.
+        cfg = self._plugin_home(tmp_path, "someplugin")
+        out, rc = self._status("/somebareskill --auto", config_dir=cfg)
+        assert (out, rc) == ("unverifiable", 0)
+
+    def test_a_bot_equipped_skill_resolves_without_a_plugin(self, tmp_path):
+        cfg = self._plugin_home(tmp_path, None)
+        bot = tmp_path / "bot"
+        (bot / ".claude" / "skills" / "mysession").mkdir(parents=True)
+        out, rc = self._status("/mysession", str(bot), config_dir=cfg)
+        assert (out, rc) == ("available", 0)
+
+    def test_a_colon_in_a_later_argument_is_not_read_as_a_plugin(self, tmp_path):
+        # Only the FIRST token can carry a plugin qualifier. Scanning the whole
+        # string would read `note:` here as a plugin and skip a valid command.
+        cfg = self._plugin_home(tmp_path, None)
+        out, rc = self._status("/somebareskill --note foo:bar", config_dir=cfg)
+        assert (out, rc) == ("unverifiable", 0)
+
+    def test_both_session_verbs_route_through_one_predicate(self, tmp_path):
+        """resume (boot) and handoff (shutdown) share the helper, not a copy.
+
+        The shutdown call site matters more than the boot one: it runs on the
+        systemd ExecStop path, so an unresolvable command there is fired at the
+        one moment the handoff is all that stands between a restart and lost
+        context. A second mechanism for the same question is how the two drift.
+        """
+        cfg = self._plugin_home(tmp_path, None)
+        for const in ("_SESSION_RESUME_COMMAND_DEFAULT", "_SESSION_HANDOFF_COMMAND_DEFAULT"):
+            cmd, rc = _run(f'printf "%s" "${const}"')
+            assert rc == 0 and cmd, f"{const} is not defined"
+            out, rc = self._status(cmd, config_dir=cfg)
+            assert (out, rc) == ("provider-absent:claudna", 1), (
+                f"{const} does not gate through the shared predicate"
+            )
