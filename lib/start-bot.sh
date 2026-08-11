@@ -357,19 +357,42 @@ fi
 # command and does not persist afterwards.
 
 # Resume prior context (lossless restart) before STARTUP_PROMPT. Every start —
-# intentional, crash, or weekly bounce — injects /claudna:session resume --auto
-# as a first keystroke so the bot picks up its last handoff. Age-gated: resume
-# only from a checkpoint fresher than RESUME_MAX_AGE_S; a stale one (e.g. a bot
-# that crashed days ago) clean-starts rather than replaying dead state. Sent
-# BARE — no 'set +H;' prefix, unlike the STARTUP_PROMPT prose send below (see
-# pane_send_verified for why a slash command must reach the pane untouched).
-# Sent first so it settles before STARTUP_PROMPT and the two never collide.
+# intentional, crash, or weekly bounce — injects a session-resume command as a
+# first keystroke so the bot picks up its last handoff. Sent BARE — no 'set +H;'
+# prefix, unlike the STARTUP_PROMPT prose send below (see pane_send_verified for
+# why a slash command must reach the pane untouched). Sent first so it settles
+# before STARTUP_PROMPT and the two never collide.
+#
+# TWO independent gates, and they fail in opposite directions on purpose:
+#
+#   AGE       resume only from a checkpoint fresher than RESUME_MAX_AGE_S; a
+#             stale one (a bot that crashed days ago) clean-starts rather than
+#             replaying dead state.
+#   CAPABILITY (#1163) inject only when the configured command can actually
+#             resolve. This used to be a hardcoded plugin-qualified command sent
+#             unconditionally, so a fleet running `plugins.include_defaults:
+#             false` fired an unresolvable keystroke into EVERY pane on EVERY
+#             boot — including bots that never equipped `restart`. There is no
+#             agent at that instant to exercise judgement; the keystroke either
+#             resolves or it does not.
+#
+# A skipped resume is LOUD — a distinct log line naming the reason, plus a fleet
+# event, because the whole defect class here is a degradation nobody sees.
 _SESSION_MD="$BOT_DIR/.claude/session.md"
 _RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
+# `-` not `:-` deliberately: an explicitly EMPTY SESSION_RESUME_COMMAND is a
+# fleet saying "no resume injection", and must not fall back to the default.
+_RESUME_CMD="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
-    echo "$(ts_iso) RESUME — injecting /claudna:session resume --auto (fresh checkpoint)" >> "$LOG"
-    PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
-        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" '/claudna:session resume --auto'
+    if _resume_status="$(session_resume_status "$_RESUME_CMD" "$BOT_DIR")"; then
+        echo "$(ts_iso) RESUME — injecting resume command [$_resume_status]: $_RESUME_CMD" >> "$LOG"
+        PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
+            pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD"
+    else
+        echo "$(ts_iso) RESUME SKIP — fresh checkpoint present but no resume capability [$_resume_status]; starting clean, handoff left at $_SESSION_MD" >> "$LOG"
+        emit_fleet_event "resume_skipped" "startup" \
+            "{\"reason\":\"$_resume_status\",\"handoff\":\"$_SESSION_MD\"}" || true
+    fi
 elif [ -f "$_SESSION_MD" ]; then
     echo "$(ts_iso) RESUME SKIP — checkpoint older than ${_RESUME_MAX_AGE_S}s, clean-starting" >> "$LOG"
 fi

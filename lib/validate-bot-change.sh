@@ -793,6 +793,13 @@ mkdir -p "$RB_DIR/.claude" "$RB_DIR/logs" "$RB_ROOT/bin" "$RB_ROOT/tmp"
 # before the resume injection ever fires. Pinning HOME keeps the scenario hermetic.
 RB_HOME="$RB_ROOT/home"
 mkdir -p "$RB_HOME/.claude"
+# Seed the session-resume CAPABILITY (#1163). start-bot now injects the resume
+# command only when the skill it names can actually resolve, so this hermetic
+# HOME — which has no plugins at all — would otherwise skip the injection and
+# take the age-gate checks below down with it. They are testing the AGE gate;
+# the capability has to be present for that to be what they measure.
+RB_PLUGIN_DIR="$RB_HOME/.claude/plugins/cache/ValMarketplace/claudna"
+mkdir -p "$RB_PLUGIN_DIR"
 printf '{"skipAutoPermissionPrompt":true,"skipDangerousModePermissionPrompt":true}\n' > "$RB_HOME/.claude/settings.json"
 cat > "$RB_ROOT/bin/claude" <<'STUB'
 #!/bin/bash
@@ -839,6 +846,27 @@ printf '%s' "$pane_stale" | grep -q '/claudna:session resume' && r=no || r=yes
 harness_check "stale session.md -> resume injection skipped (clean start)" "$r"
 grep -q 'RESUME SKIP' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
 harness_check "stale skip recorded in startup.log (RESUME SKIP)" "$r"
+
+# --- #1163: no resume CAPABILITY -> skip, and skip LOUDLY -------------------
+# The other half of the gate. A fleet running plugins.include_defaults:false has
+# no session provider, and the old code fired an unresolvable slash command into
+# every pane on every boot. The failure this must never become is the SILENT one
+# — a bot that quietly stops resuming and says nothing — so both the log line
+# and the event are asserted, not just the absence of the keystroke.
+rm -rf "$RB_PLUGIN_DIR"
+rm -f "$RB_DIR/logs/startup.log"
+pane_nocap="$(_run_startbot fresh)"
+printf '%s' "$pane_nocap" | grep -q '/claudna:session resume' && r=no || r=yes
+harness_check "no resume capability -> unresolvable command NOT injected" "$r"
+grep -q 'RESUME SKIP.*no resume capability' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "  ...and the skip is recorded in startup.log with its reason" "$r"
+grep -q 'provider-absent' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "  ...naming WHICH capability was missing (not just that one was)" "$r"
+grep -hq '"type":"resume_skipped"' "$RB_DIR/data/events/"*.jsonl 2>/dev/null && r=yes || r=no
+harness_check "  ...and emits resume_skipped so a silent degradation is visible" "$r"
+printf '%s' "$pane_nocap" | grep -q 'ZZZ_STARTUPMARK' && r=yes || r=no
+harness_check "  ...while STARTUP_PROMPT still reaches the pane (boot not broken)" "$r"
+mkdir -p "$RB_PLUGIN_DIR"
 
 # Surface hermeticity evidence when the lossless checks fail (e.g. a CI runner
 # where this scenario fails but a dev host passes): start-bot.sh's stderr is
