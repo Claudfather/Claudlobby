@@ -1,7 +1,14 @@
 #!/bin/bash
-# Credential keepalive — pings fleet-critical credentials and alerts on
-# state transitions (ok→fail or fail→ok). Run daily by a scheduled service
-# (launchd on macOS, systemd timer on Linux).
+# Credential keepalive — pings fleet-critical credentials and alerts on state
+# transitions (ok→fail, fail→ok) AND on a state that persists (#1095). Run daily
+# by a scheduled service (launchd on macOS, systemd timer on Linux).
+#
+# Transition-only alerting could not express steady state: a credential that
+# failed and STAYED failed alerted once and then went quiet forever, so failure
+# duration and alarm volume ran in opposite directions. A persistent fail now
+# re-surfaces on a decaying ladder (1, 3, 7 days, then weekly) carrying its AGE,
+# and a persistent SKIP re-surfaces from day 3 — a check that can never run is a
+# permanent hole, not a skip.
 #
 # Why: PATs / API tokens / MCP keys silently expire and only fail on
 # next use, so an outage surfaces whenever a bot happens to need that
@@ -11,19 +18,29 @@
 # Adding a new provider: drop in a `check_<name>` function that calls
 # `record_and_alert <provider> <status> <detail>`, then add it to the
 # CHECKS list. Status is "ok" / "fail" / "skip"
-# (skip = required env var missing — recorded but never alerted).
+# (skip = required env var missing — no transition alert, but re-surfaces
+# once it has persisted past day 3; see next_alert_day).
 #
 # Env vars consulted (sourced from $CLAUDLOBBY_ROOT/.env):
 #   GITHUB_PERSONAL_ACCESS_TOKEN  — fleet GitHub PAT
 #   RAILWAY_API_TOKEN             — account-wide Railway token
-#   MCP_PROBE_URL                 — optional: streamable-HTTP MCP endpoint
-#   MCP_PROBE_TOKEN               — optional: bearer for the MCP probe
 #
 # Telegram: every declared bot with a TELEGRAM_BOT_HANDLE gets a per-bot
 # getMe validation — see check_telegram_tokens.
 #
-# To probe additional fleet-specific MCPs, copy `check_streamable_mcp`
-# below into a fleet overlay script and pass per-MCP env var names.
+# There is deliberately NO MCP probe here (#1096). The one that used to live
+# here gated on MCP_PROBE_URL, which was set in no fleet config, no bot.conf
+# and no .env anywhere -- so it had never run, and recorded `skip` forever. It
+# was also structurally near-empty: it probed ONE streamable-HTTP endpoint, and
+# 14 of the 15 MCP fragments in library/mcp are stdio, which has no URL to probe
+# at all. Fully configured it would have covered one server of fifteen.
+#
+# Note this is NOT covered by `claudlobby creds-reconcile`, which is static: it
+# answers whether a credential is declared, has a value, and has an equipped
+# consumer, and never contacts a provider. Nothing here validates that an MCP
+# server's credential actually WORKS. That gap is real and predates this
+# deletion by the whole life of the probe; removing a check that never ran does
+# not widen it, but it should be named rather than left looking covered.
 
 set -euo pipefail
 
@@ -90,13 +107,74 @@ prev_status() {
     "$JQ" -r --arg k "$1" '.[$k].status // ""' "$STATE"
 }
 
+# Epoch when the CURRENT run of this status began, and how many alerts it has
+# already produced. Both default to 0, so a state file written before #1095
+# upgrades cleanly: the first tick after the upgrade starts a fresh run rather
+# than crashing or back-dating one.
+prev_since() {
+    "$JQ" -r --arg k "$1" '.[$k].since_epoch // 0' "$STATE"
+}
+
+prev_alerts() {
+    "$JQ" -r --arg k "$1" '.[$k].alerts // 0' "$STATE"
+}
+
+# Day-mark the current run must reach before its NEXT alert (#1095).
+#
+# Transition-only alerting cannot express steady state: a credential that fails
+# and STAYS failed alerts once and is silent forever, so the longer an outage
+# lasts the quieter the system gets about it. Re-surfacing on a DECAYING ladder
+# keeps the noise-control intent -- a flapping credential still does not spam --
+# while making "dead for a week" impossible to miss.
+#
+# fail: 1, 3, 7 days, then weekly. The first mark is short because a fail that
+#   survives one day is already past "transient".
+# skip: 3, 7 days, then weekly, and no transition alert at all. A skip on the
+#   first tick is usually a provider a fleet has not configured yet, which is
+#   not news. A skip that is STILL there after three days is a check that can
+#   never run -- a permanent hole wearing a skip's clothing -- and that is news
+#   exactly once, then weekly. This is why our own github_pat has been silent:
+#   it is a skip, not a fail, so a fail-only fix would not have surfaced it.
+next_alert_day() {
+    local status="$1" sent="$2"
+    case "$status" in
+        fail)
+            # `sent` counts LADDER re-surfaces only. The ok->fail transition
+            # alert is a separate event and deliberately does NOT consume a
+            # rung, so both entry paths share one accounting.
+            #
+            # Merging 0 and 1 into a single due=1 bucket was a real bug (#1169).
+            # It is invisible on a fresh transition, which hardcoded sent=1 and
+            # so never evaluated 0 at all. But a credential INHERITED already
+            # failing with no history genuinely evaluates sent=0 on day 0, earns
+            # sent=1 by firing on day 1, and then the merged bucket read sent=1
+            # as still-pre-transition and fired AGAIN on day 2 — a ladder of
+            # 1,2,3,7 against a documented 1,3,7. Measured on exactly the
+            # credential this change was written about, which is in that state.
+            case "$sent" in
+                0) printf '1' ;;
+                1) printf '3' ;;
+                2) printf '7' ;;
+                *) printf '%s' $(( 7 * (sent - 1) )) ;;
+            esac ;;
+        skip)
+            case "$sent" in
+                0) printf '3' ;;
+                1) printf '7' ;;
+                *) printf '%s' $(( 7 * sent )) ;;
+            esac ;;
+        *) printf '999999' ;;
+    esac
+}
+
 # Atomically write one provider's entry to the shared state file. This is the
 # critical section run under with_lock, so it must be a command (function), not
 # an inline block — with_lock invokes "$@".
 _write_state() {
-    local provider="$1" status="$2" detail="$3" now="$4"
+    local provider="$1" status="$2" detail="$3" now="$4" since="${5:-0}" alerts="${6:-0}"
     if "$JQ" --arg k "$provider" --arg s "$status" --arg d "$detail" --arg t "$now" \
-        '.[$k] = {status: $s, detail: $d, ts: $t}' "$STATE" > "$STATE.tmp"; then
+        --argjson since "$since" --argjson alerts "$alerts" \
+        '.[$k] = {status: $s, detail: $d, ts: $t, since_epoch: $since, alerts: $alerts}' "$STATE" > "$STATE.tmp"; then
         mv "$STATE.tmp" "$STATE"
     else
         # Silent state corruption is the worst failure mode here — the next tick
@@ -108,38 +186,77 @@ _write_state() {
 
 record_and_alert() {
     local provider="$1" status="$2" detail="$3"
-    local prev now
+    local prev now now_epoch since sent days due alert_text=""
     prev="$(prev_status "$provider")"
     now="$(ts)"
+    # An epoch is stamped at WRITE time rather than parsed back out of `ts`
+    # later: `date -Iseconds` emits an offset form (…-04:00) that iso_to_epoch
+    # only parses on GNU date. Reparsing would work on Linux and silently fail
+    # on macOS, which is a first-class host here.
+    now_epoch="$(date +%s)"
+
+    if [ "$status" = "$prev" ]; then
+        since="$(prev_since "$provider")"
+        sent="$(prev_alerts "$provider")"
+        [ "$since" -gt 0 ] 2>/dev/null || since="$now_epoch"
+    else
+        # Status changed: a new run starts here.
+        since="$now_epoch"
+        sent=0
+    fi
+
+    days=$(( (now_epoch - since) / 86400 ))
+
+    case "$status" in
+        fail)
+            if [ "$prev" != "fail" ]; then
+                # Transition alert, unchanged. It does NOT advance `sent`: the
+                # ladder counts re-surfaces, and hardcoding a rung here is what
+                # made the two entry paths disagree (#1169).
+                alert_text="creds-check: $provider FAIL — $detail"
+            else
+                due="$(next_alert_day fail "$sent")"
+                if [ "$days" -ge "$due" ]; then
+                    # Steady-state re-surface. The AGE is the point: "fail since
+                    # yesterday" and "fail since last month" are different
+                    # operational facts, and only one of them is an emergency.
+                    alert_text="creds-check: $provider STILL FAILING after ${days}d — $detail"
+                    sent=$(( sent + 1 ))
+                fi
+            fi
+            ;;
+        ok)
+            if [ "$prev" = "fail" ]; then
+                alert_text="creds-check: $provider RECOVERED"
+            fi
+            sent=0
+            ;;
+        skip)
+            # No transition alert (unchanged): a skip on the first tick is
+            # usually a provider this fleet has not configured, which is not
+            # news. A skip that PERSISTS is a check that can never run.
+            if [ "$prev" = "skip" ]; then
+                due="$(next_alert_day skip "$sent")"
+                if [ "$days" -ge "$due" ]; then
+                    alert_text="creds-check: $provider has been SKIPPED for ${days}d — $detail. A check that never runs is a permanent hole, not a skip: either configure it or remove the check."
+                    sent=$(( sent + 1 ))
+                fi
+            fi
+            ;;
+    esac
 
     # Serialize state-file writes so concurrent ticks can't corrupt the shared
     # file. Portable mutex — flock where present, mkdir spinlock otherwise. A raw
     # flock is not portable: it's a Linux util-linux binary, absent on stock
     # macOS, where the bare call breaks the scheduled run (#709).
-    with_lock "$STATE.lock" _write_state "$provider" "$status" "$detail" "$now"
+    with_lock "$STATE.lock" _write_state "$provider" "$status" "$detail" "$now" "$since" "$sent"
 
-    log "$provider $status ($detail)"
+    log "$provider $status ($detail)${days:+ [${days}d in state]}"
 
-    case "$status" in
-        fail)
-            # Edge alert: only fire on ok→fail (or first-ever fail).
-            # Repeated fail ticks stay quiet so a long outage doesn't
-            # spam the group; recovery posts again once it heals.
-            if [ "$prev" != "fail" ]; then
-                "$TG_POST" "creds-check: $provider FAIL — $detail" >> "$LOG" 2>&1 || \
-                    log "tg-post failed for $provider FAIL"
-            fi
-            ;;
-        ok)
-            if [ "$prev" = "fail" ]; then
-                "$TG_POST" "creds-check: $provider RECOVERED" >> "$LOG" 2>&1 || \
-                    log "tg-post failed for $provider RECOVERED"
-            fi
-            ;;
-        skip)
-            :
-            ;;
-    esac
+    if [ -n "$alert_text" ]; then
+        "$TG_POST" "$alert_text" >> "$LOG" 2>&1 || \
+            log "tg-post failed for $provider $status"
+    fi
 }
 
 # ---------------------------------------------------------------------
@@ -202,51 +319,6 @@ check_railway_token() {
         return
     fi
     record_and_alert "railway_token" "ok" "HTTP 200"
-}
-
-check_streamable_mcp() {
-    # Generic streamable-HTTP MCP probe. Defaults to MCP_PROBE_URL /
-    # MCP_PROBE_TOKEN env vars; pass an explicit name as $1 to record
-    # results under a different key (useful for fleet-specific overlays).
-    local name="${1:-mcp_probe}"
-    local url="${MCP_PROBE_URL:-}"
-    if [ -z "$url" ]; then
-        record_and_alert "$name" "skip" "no MCP_PROBE_URL"
-        return
-    fi
-    local token="${MCP_PROBE_TOKEN:-}"
-    # Streamable-HTTP MCP requires a JSONRPC POST and Accept covering
-    # both application/json and text/event-stream. ``initialize`` is the
-    # canonical first-call handshake — auth-touching, side-effect-free,
-    # 401 on a bad token. A bare GET returns 406 even when healthy, so
-    # the GET shape would generate constant false positives.
-    #
-    # protocolVersion defaults to 2025-03-26; override via MCP_PROTOCOL_VERSION
-    # env var when the upstream spec bumps. A stale pin returns 4xx — surfaces
-    # as a real FAIL alert pointing here, the right failure mode.
-    local body
-    local proto_version="${MCP_PROTOCOL_VERSION:-2025-03-26}"
-    body="{\"jsonrpc\":\"2.0\",\"id\":\"creds-check\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"${proto_version}\",\"capabilities\":{},\"clientInfo\":{\"name\":\"claudlobby-creds-check\",\"version\":\"1.0\"}}}"
-    local code curl_err_file auth_cfg
-    curl_err_file=$(safe_mktemp)
-    auth_cfg=$(safe_mktemp)
-    printf 'header = "Accept: application/json, text/event-stream"\n' > "$auth_cfg"
-    printf 'header = "Content-Type: application/json"\n' >> "$auth_cfg"
-    if [ -n "$token" ]; then
-        printf 'header = "Authorization: Bearer %s"\n' "$token" >> "$auth_cfg"
-    fi
-    code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
-        -X POST \
-        --config "$auth_cfg" \
-        --max-time 10 \
-        --data "$body" \
-        "$url" 2>"$curl_err_file")" \
-        || code="curl_err($(head -c 120 "$curl_err_file"))"
-    if [ "$code" = "200" ]; then
-        record_and_alert "$name" "ok" "HTTP 200"
-    else
-        record_and_alert "$name" "fail" "HTTP $code on initialize"
-    fi
 }
 
 check_telegram_tokens() {
@@ -423,7 +495,7 @@ resolve_alert_target "$(resolve_bots_dir "$FLEET_ARG")" fleet
 # Run all checks
 # ---------------------------------------------------------------------
 
-CHECKS=(check_github_pat check_railway_token check_streamable_mcp check_telegram_tokens)
+CHECKS=(check_github_pat check_railway_token check_telegram_tokens)
 
 for fn in "${CHECKS[@]}"; do
     "$fn" || log "$fn raised (non-fatal)"
