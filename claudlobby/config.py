@@ -12,6 +12,8 @@ from typing import Any
 
 import yaml
 
+from . import defaults as _defaults
+
 from .known_values import (
     KNOWN_EFFORTS,
     PROJECT_KEYS,
@@ -583,15 +585,16 @@ DEFAULT_PLUGINS: list[str] = [
 
 # Guardrails composed onto every bot unless system_defaults.guardrails is false.
 #
-# Membership test for adding one: a rule whose protective value depends on
-# UNIVERSAL coverage, because the harm it prevents is estate-wide rather than
-# scoped to the bot carrying it. claudlobby-dev-in-projects qualifies — the
-# shared install is CLAUDLOBBY_ROOT for every bot on the host, so one bot
-# branching there swaps supervision and dispatch scripts for all of them. A rule
-# that only protects the fleet holding it does NOT qualify and stays opt-in.
-DEFAULT_GUARDRAILS: list[str] = [
-    "claudlobby-dev-in-projects",
-]
+# DECLARED IN claudlobby/defaults.py, not here (#1168). That module's REGISTRY
+# is the single source for every entity type's compositor-side default, and this
+# is a re-export so existing importers keep working. It is imported rather than
+# restated deliberately: a constant declared in two places drifts, and the test
+# then passes against whichever copy is not the one that composes — the failure
+# behind #1046 and #892/#1143.
+#
+# The membership test this entry had to clear, and the tier it belongs to, live
+# beside it in the registry.
+DEFAULT_GUARDRAILS = _defaults.DEFAULT_GUARDRAILS
 
 
 @dataclass
