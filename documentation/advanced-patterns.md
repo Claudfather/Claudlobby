@@ -107,7 +107,7 @@ A blunt `systemctl restart` (or `launchctl kickstart -k`) kills the bot mid-thou
 
 Which path runs the handoff depends on *who* is restarting the bot:
 
-- **In-session restart (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from an automated caller — the `restart` skill invokes `/claudna:session handoff` **directly** in that session, notifies the channel, then delegates the actual bounce to `lib/spin-up-bot.sh` (which picks systemd vs launchd for you). It deliberately does *not* shell out to `pre-stop-handoff.sh`: that script sends the handoff as a tmux keystroke and waits for it, so from inside the very session being restarted it would queue the handoff *behind* the restart and lose it. See `library/skills/restart/SKILL.md`.
+- **In-session restart (the `restart` skill).** When a bot restarts itself — `/restart`, or `/restart --auto` from an automated caller — the `restart` skill captures the handoff **directly** in that session — it names the requirement (a handoff at `<cwd>/.claude/session.md`) rather than a provider, so a bot with a session-handoff skill uses it and a bot without one writes the file itself, notifies the channel, then delegates the actual bounce to `lib/spin-up-bot.sh` (which picks systemd vs launchd for you). It deliberately does *not* shell out to `pre-stop-handoff.sh`: that script sends the handoff as a tmux keystroke and waits for it, so from inside the very session being restarted it would queue the handoff *behind* the restart and lose it. See `library/skills/restart/SKILL.md`.
 
 - **External restarter (`lib/pre-stop-handoff.sh`).** When something *outside* the session bounces the bot and can't invoke a skill directly, it calls `lib/pre-stop-handoff.sh <bot-dir>` first. The canonical caller is `lib/weekly-worker-restart.sh`, which bounces worker bots weekly to pick up a staged Claude Code binary; it runs the handoff, then `spin-up-bot.sh`.
 
@@ -116,13 +116,13 @@ Which path runs the handoff depends on *who* is restarting the bot:
 Given a bot directory, the script:
 
 1. Loads the bot's config and resolves its tmux session name and **private socket** (`tmux_socket_for_bot`) — the handoff is sent on the bot's own server, not the default one.
-2. Checks `<bot-dir>/.claude/session.md` (where clauDNA's `/claudna:session handoff` writes). If a handoff was written in the last 5 minutes, it's fresh enough — skip and exit.
-3. Otherwise, if the session is live, sends `/claudna:session handoff --auto` and waits up to ~30 seconds for a new `session.md` to land.
+2. Checks `<bot-dir>/.claude/session.md` (the handoff artifact — written by whatever session-handoff capability is installed, or by the `restart` skill itself when none is). If a handoff was written in the last 5 minutes, it's fresh enough — skip and exit.
+3. Otherwise, if the session is live **and a session-handoff capability resolves**, sends the configured handoff command and waits up to ~30 seconds for a new `session.md` to land. If no such capability is installed it skips the send, says so on stderr (the `ExecStop` journal) and emits `handoff_skipped` — a silent skip here would lose the handoff at the one moment it matters.
 4. Always exits 0. The handoff is best-effort and never blocks the restart: a timed-out or unreachable bot just proceeds to the bounce. (It also cleans up the transient `.tmux-env` secrets file on every exit path.)
 
 ### Resume on the next start
 
-You don't configure resume separately. `lib/start-bot.sh` injects `/claudna:session resume --auto` as the new session's first keystroke; resume is age-gated (it only resumes from a checkpoint fresher than ~24h, else clean-starts). This no longer depends on the bot's `STARTUP_PROMPT` carrying a resume instruction.
+Resume needs no separate wiring in the common case. `lib/start-bot.sh` injects the configured session-resume command as the new session's first keystroke, behind two gates: the checkpoint must be fresh (~24h, else clean-start) **and** the command must actually resolve. The command is configuration — `SESSION_RESUME_COMMAND`, set empty to disable — so a fleet running without a session plugin is not fed an unresolvable keystroke on every boot. When either gate closes, `start-bot.sh` logs `RESUME SKIP` with the reason and emits `resume_skipped`. This does not depend on the bot's `STARTUP_PROMPT` carrying a resume instruction.
 
 ### Gotchas
 

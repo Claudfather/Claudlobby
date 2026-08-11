@@ -2044,6 +2044,24 @@ session_command_status() {
             if _plugin_installed "$plugin"; then printf 'available'; return 0; fi
             printf 'provider-absent:%s' "$plugin"; return 1 ;;
         /*)
+            # A BARE /word. This branch checks the bot's skills dir and then
+            # does NOT suppress on a miss, which looks asymmetric against the
+            # plugin branch above and is deliberate — do not "fix" it by
+            # symmetrizing the two.
+            #
+            # The difference is what a negative MEANS on each path. A
+            # plugin-qualified command names a plugin, and a plugin absent from
+            # the cache is a POSITIVE finding of absence. A bare /word does not
+            # name a plugin, and the namespace includes Claude Code's own
+            # NATIVE commands — /compact, /clear and friends — which have no
+            # filesystem representation anywhere, so a miss here is ambiguous
+            # rather than a finding. Treating it as absence would silently
+            # refuse to send every native command a fleet ever configured.
+            #
+            # So the lookup is worth doing (a hit is a real positive, and
+            # upgrades the status from unverifiable to available) while the
+            # miss stays unverifiable and still sends, per the fail-open rule
+            # above.
             skill="${first#/}"
             if [ -n "$bot_dir" ] && [ -e "$bot_dir/.claude/skills/$skill" ]; then
                 printf 'available'; return 0
