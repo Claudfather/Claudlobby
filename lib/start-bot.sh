@@ -384,7 +384,7 @@ _RESUME_MAX_AGE_S="${RESUME_MAX_AGE_S:-86400}"
 # fleet saying "no resume injection", and must not fall back to the default.
 _RESUME_CMD="${SESSION_RESUME_COMMAND-$_SESSION_RESUME_COMMAND_DEFAULT}"
 if should_resume_session "$_SESSION_MD" "$_RESUME_MAX_AGE_S"; then
-    if _resume_status="$(session_resume_status "$_RESUME_CMD" "$BOT_DIR")"; then
+    if _resume_status="$(session_command_status "$_RESUME_CMD" "$BOT_DIR")"; then
         echo "$(ts_iso) RESUME — injecting resume command [$_resume_status]: $_RESUME_CMD" >> "$LOG"
         PANE_READY_TICKS="$_PANE_READY_TICKS_BOOT" \
             pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_RESUME_CMD"

@@ -2006,6 +2006,7 @@ session_md_handoff_epoch() {
 # different session provider overrides it, and one that wants no resume at all
 # sets it empty.
 _SESSION_RESUME_COMMAND_DEFAULT='/claudna:session resume --auto'
+_SESSION_HANDOFF_COMMAND_DEFAULT='/claudna:session handoff --auto'
 
 # _plugin_installed <plugin> — is a plugin resolvable in this config dir?
 # Both layouts are checked because the cache is keyed by MARKETPLACE and the
@@ -2019,7 +2020,9 @@ _plugin_installed() {
     return 1
 }
 
-# session_resume_status <command> [bot_dir] — echo one status token.
+# session_command_status <command> [bot_dir] — echo one status token. Serves
+# every session verb (resume at boot, handoff at shutdown): one predicate, not
+# one per call site.
 #   rc 0 -> INJECT      available | unverifiable
 #   rc 1 -> SKIP        no-command | provider-absent:<plugin>
 #
@@ -2029,7 +2032,7 @@ _plugin_installed() {
 # should have costs the session its context, SILENTLY — which is the failure
 # #1163 opened with. So only a positive finding of absence suppresses the send;
 # "I could not tell" sends and says so.
-session_resume_status() {
+session_command_status() {
     local cmd="${1-}" bot_dir="${2-}" first plugin skill
     if [ -z "$cmd" ]; then printf 'no-command'; return 1; fi
     # Only the FIRST token can carry a plugin qualifier; checking the whole

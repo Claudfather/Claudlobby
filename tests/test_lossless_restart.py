@@ -158,7 +158,7 @@ class TestSessionResumeCapability:
 
     def _status(self, cmd: str, bot_dir: str = "", config_dir: str | None = None):
         pre = f'export CLAUDE_CONFIG_DIR="{config_dir}"; ' if config_dir else ""
-        return _run(f'{pre}session_resume_status "$2" "$3"', cmd, bot_dir)
+        return _run(f'{pre}session_command_status "$2" "$3"', cmd, bot_dir)
 
     def _plugin_home(self, tmp_path: Path, plugin: str | None) -> str:
         home = tmp_path / "cfg"
@@ -204,3 +204,20 @@ class TestSessionResumeCapability:
         cfg = self._plugin_home(tmp_path, None)
         out, rc = self._status("/somebareskill --note foo:bar", config_dir=cfg)
         assert (out, rc) == ("unverifiable", 0)
+
+    def test_both_session_verbs_route_through_one_predicate(self, tmp_path):
+        """resume (boot) and handoff (shutdown) share the helper, not a copy.
+
+        The shutdown call site matters more than the boot one: it runs on the
+        systemd ExecStop path, so an unresolvable command there is fired at the
+        one moment the handoff is all that stands between a restart and lost
+        context. A second mechanism for the same question is how the two drift.
+        """
+        cfg = self._plugin_home(tmp_path, None)
+        for const in ("_SESSION_RESUME_COMMAND_DEFAULT", "_SESSION_HANDOFF_COMMAND_DEFAULT"):
+            cmd, rc = _run(f'printf "%s" "${const}"')
+            assert rc == 0 and cmd, f"{const} is not defined"
+            out, rc = self._status(cmd, config_dir=cfg)
+            assert (out, rc) == ("provider-absent:claudna", 1), (
+                f"{const} does not gate through the shared predicate"
+            )
