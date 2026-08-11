@@ -1,6 +1,6 @@
 ---
 name: code-audit-sweep
-description: "Run one automated code audit on a specific repo, dispatched by the rolling-sweep selector. Pulls latest main, runs the clauDNA audit with --auto --output github, guarantees the auto-audit staleness label, and emits an audit_completed event. Target repo and audit type are passed in — this skill does not pick them."
+description: "Run one automated code audit on a specific repo, dispatched by the rolling-sweep selector. Pulls latest main, runs the audit non-interactively, filing GitHub issues, guarantees the auto-audit staleness label, and emits an audit_completed event. Target repo and audit type are passed in — this skill does not pick them."
 argument-hint: "<org/repo> <audit-type>"
 ---
 
@@ -23,15 +23,20 @@ exists to kill.
 `$ARGUMENTS` is `<org/repo> <audit-type>`, e.g. `my-org/repo-a tech-debt`.
 
 - `<org/repo>` — the single repo to audit. Never cross repo boundaries.
-- `<audit-type>` — one of the clauDNA audit skills below.
+- `<audit-type>` — one of the audit types below.
 
-| audit-type | Skill run | Finds |
-|---|---|---|
-| `tech-debt` | `/claudna:audit tech-debt` | Dead code, god modules, deprecated patterns |
-| `security-audit` | `/claudna:audit security` | Credential leaks, injection, auth gaps |
-| `docs-review` | `/claudna:audit docs` | Stale or missing documentation |
-| `data-model-audit` | `/claudna:audit data-model` | Schema / app mismatches |
-| `product-enhance` | `/claudna:product-enhance` | UX gaps, missing features |
+| audit-type | Finds |
+|---|---|
+| `tech-debt` | Dead code, god modules, deprecated patterns |
+| `security-audit` | Credential leaks, injection, auth gaps |
+| `docs-review` | Stale or missing documentation |
+| `data-model-audit` | Schema / app mismatches |
+| `product-enhance` | UX gaps, missing features |
+
+**Which skill runs each one:** use the audit skills you actually have. clauDNA
+provides them as `/claudna:audit <type>`, with `/claudna:product-enhance` for
+the last row — check your own skill list rather than assuming. If none is
+installed, audit directly against the "finds" column and file the same issues.
 
 ## Steps
 
@@ -48,7 +53,8 @@ fabricate an audit.
 
 **2. Run the audit in a subagent** (keep your main context clean):
 
-> Run `/claudna:<audit-type> --auto --output github`, scoped to the
+> Run the audit for `<audit-type>` using whichever audit skill you have — with
+> clauDNA that is `/claudna:<audit-type> --auto --output github`. Scope it to the
 > highest-impact directory of the repo. Cap at ~10 new issues. Capture every
 > GitHub issue URL and number created.
 

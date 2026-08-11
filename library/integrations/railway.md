@@ -13,12 +13,18 @@ env_contract:
 # Railway
 
 
-**Skills (clauDNA):** `/claudna:railway status` (service overview), `/claudna:railway logs` (view/debug logs), `/claudna:railway deploy` (deploy/update services)
+Railway hosts and deploys services. You reach it either through a Railway domain
+skill or agent, or through the `railway` CLI.
 
-**When to use:**
-- Checking deploy health or service status → `/claudna:railway status`
-- Debugging crashes or errors → `/claudna:railway logs`
-- Deploying or updating a service → `/claudna:railway deploy`
+**What you will need to do with it:**
+- Check deploy health and service status
+- Read and debug logs when a service crashes or errors
+- Deploy or update a service
+
+**How to do it:** use any Railway domain skill or agent you have available —
+clauDNA ships `/claudna:railway`, so check your own skill list first. If none is
+installed, use the `railway` CLI directly; everything above is reachable that
+way.
 
 **Gotchas:**
 - Multiple tokens possible: `RAILWAY_API_TOKEN` (work) and `RAILWAY_PERSONAL_TOKEN` (personal) — use the right one for the target workspace
