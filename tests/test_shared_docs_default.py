@@ -92,8 +92,15 @@ def _compose(
     root_mode: bool = False,
     extra_protocols: dict[str, str] | None = None,
     vault: bool = False,
+    real_template: bool = False,
 ) -> str:
     root = _root(tmp_path, extra_protocols)
+    if real_template:
+        # For the tests that assert against the TEMPLATE's own vault branch
+        # rather than against which protocol reached it. A parameter rather
+        # than a second helper: a second helper is what `_root` warns about,
+        # and the one written here had already dropped the guardrail control.
+        install_real_template(root)
     paths = Paths(root=root, fleet_dir=None if root_mode else root)
     bot = BotConfig(
         bot_id="worker",
@@ -178,16 +185,41 @@ class TestTheVaultFork:
         assert PROTOCOL_SENTINEL in out
         assert VAULT_PROTOCOL_SENTINEL not in out
 
-    def test_exactly_one_form_composes_either_way(self, tmp_path):
-        for vault in (True, False):
-            out = _compose(tmp_path / f"v{vault}", vault=vault)
-            present = [
-                s for s in (PROTOCOL_SENTINEL, VAULT_PROTOCOL_SENTINEL) if s in out
-            ]
-            assert len(present) == 1, f"vault={vault} composed {present}"
+    def test_a_declared_hand_scan_does_not_survive_on_a_vault_wired_bot(self, tmp_path):
+        # THE HOLE THE FIRST VERSION OF THIS FIX LEFT OPEN, and the reason
+        # `EXCLUSIVE_GROUPS` exists rather than availability alone.
+        #
+        # An availability gate filters the DEFAULT injection and never sees
+        # `bot.protocols`. Measured before the fix: this fleet composed the
+        # hand-scan form (declared, so unfiltered), the vault form (gated in),
+        # AND the template's vault section — three `Shared Documentation`
+        # headings carrying opposite instructions, which is #1172 in a strictly
+        # worse form than the original defect.
+        #
+        # `local/home/tl-enterprises/fleet.yaml` declares this protocol today.
+        # It is vault-less, so the defect was latent rather than live.
+        out = _compose(
+            tmp_path, vault=True, declared_protocols=["shared-documentation"]
+        )
+        assert PROTOCOL_SENTINEL not in out, (
+            "a DECLARED hand-scan form survived on a vault-wired bot — the "
+            "exclusion is filtering defaults only"
+        )
+        assert VAULT_PROTOCOL_SENTINEL in out
+
+    def test_a_declared_vault_form_does_not_survive_without_a_vault(self, tmp_path):
+        # The mirror. Neither direction may be the one nobody checked.
+        out = _compose(
+            tmp_path, vault=False, declared_protocols=["shared-documentation-vault"]
+        )
+        assert VAULT_PROTOCOL_SENTINEL not in out
+        assert PROTOCOL_SENTINEL in out
 
     def test_the_opt_out_still_removes_whichever_form_applies(self, tmp_path):
-        # The #1168 opt-out must not have been quietly scoped to one form.
+        # The #1168 opt-out must not have been quietly scoped to one form. Only
+        # the vault arm is new here — the non-vault arm is already covered by
+        # TestTheOptOut — but the pair is what shows the opt-out follows the
+        # fork rather than one side of it.
         for vault in (True, False):
             out = _compose(
                 tmp_path / f"o{vault}",
@@ -209,25 +241,10 @@ class TestTheTemplateAndTheGateAgree:
     agree on the composed FILE holds however either side is spelled.
     """
 
-    def _compose_real_template(self, tmp_path: Path, *, vault: bool) -> str:
-        root = _root(tmp_path)
-        install_real_template(root)
-        paths = Paths(root=root, fleet_dir=root)
-        bot = BotConfig(
-            bot_id="worker",
-            name="worker",
-            expertise=["eng"],
-            claudron_vault_path="/tmp/example-vault" if vault else None,
-        )
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
-        return (
-            compose_bot(bot, fleet, paths, log=lambda _m: None) / "CLAUDE.md"
-        ).read_text()
-
     VAULT_DOOR = "not by reading a raw doc tree"
 
     def test_the_vault_door_never_ships_beside_the_hand_scan(self, tmp_path):
-        out = self._compose_real_template(tmp_path, vault=True)
+        out = _compose(tmp_path, vault=True, real_template=True)
         assert self.VAULT_DOOR in out, (
             "control: the template's vault branch did not compose, so this test "
             "would pass without proving anything"
@@ -238,9 +255,10 @@ class TestTheTemplateAndTheGateAgree:
         assert VAULT_PROTOCOL_SENTINEL in out
 
     def test_without_a_vault_the_hand_scan_ships_and_the_door_does_not(self, tmp_path):
-        out = self._compose_real_template(tmp_path, vault=False)
+        out = _compose(tmp_path, vault=False, real_template=True)
         assert self.VAULT_DOOR not in out
         assert PROTOCOL_SENTINEL in out
+        assert GUARDRAIL_SENTINEL in out, "control: the fleet still composes"
 
 
 class TestTheAvailabilityGate:

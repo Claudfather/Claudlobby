@@ -187,12 +187,22 @@ REGISTRY: dict[str, Disposition] = {
             "fleet's `shared/` tree is `.../local/<system>/<fleet>/shared`, so the "
             "INDEX files the protocol named ARE vault files. Splitting the entry "
             "is what lets the grandfathered half stay defensible (#1172).\n\n"
-            "WHY NOT ONE ENTRY WITH THE CONDITION IN ITS PROSE: library bodies "
-            "get plain `{{KEY}}` substitution, not Jinja, so a library file "
-            "cannot branch on its own. Writing 'if a vault is wired, do X, else "
-            "Y' would also hand the bot a decision the compositor has already "
-            "made — and an instruction a bot must adjudicate is one it can "
-            "quietly decline, which is the harm #1172 recorded."
+            "WHY TWO FILES RATHER THAN ONE THAT STATES BOTH CASES: library "
+            "bodies get plain `{{KEY}}` substitution, not Jinja, so a library "
+            "file cannot branch on its own — the choice is composed branch or "
+            "prose that names both worlds.\n\n"
+            "THE SELECTOR IS DIVERGENCE SIZE, and it is a rule, not a "
+            "preference. Here MOST of the six sections differ under a vault, so "
+            "prose naming both worlds would be two protocols interleaved and a "
+            "bot picking its way through. `library/protocols/dispatch.md` takes "
+            "the OPPOSITE treatment for the opposite reason: ~15 lines of a "
+            "large protocol diverge, so it states the rule and defers the "
+            "mechanism to the bot's composed Shared Documentation section, "
+            "because a near-duplicate twin of a large file drifts the first "
+            "time either copy is edited. Dereferencing a section of your own "
+            "composed file is not adjudicating a contradiction; being handed "
+            "two conflicting instructions a thousand lines apart is, and that "
+            "is the harm #1172 recorded."
         ),
     ),
     "principles": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
@@ -266,6 +276,43 @@ AVAILABILITY_GATES: dict[str, Callable[[Facts], bool]] = {
     "shared-documentation": lambda f: f.shared_docs and not f.vault_wired,
     "shared-documentation-vault": lambda f: f.shared_docs and f.vault_wired,
 }
+
+
+#: Entries that occupy ONE slot: at most one may compose, whatever its source.
+#:
+#: AVAILABILITY IS NOT ENOUGH, and assuming it was is how the first version of
+#: this fix re-created #1172 in a worse form. A gate filters the DEFAULT
+#: injection; it never sees `bot.protocols`. So a vault-wired fleet that
+#: DECLARED `shared-documentation` composed the hand-scan form (declared, hence
+#: unfiltered) AND the vault form (gated in) AND the template's vault section —
+#: three `Shared Documentation` headings with opposite instructions. Measured on
+#: a real compose, not reasoned about.
+#:
+#: `local/home/tl-enterprises/fleet.yaml` declares `shared-documentation`
+#: explicitly today. It is vault-less, so the defect is latent there rather than
+#: live — which is exactly the kind of thing that ships and then wakes up.
+#:
+#: The DECLARATION SELECTS THE SLOT, NOT THE FORM. "Give this bot the
+#: shared-documentation protocol" is a fleet's statement of intent; which form
+#: implements it is a compositor concern, decided by how the fleet is wired. So
+#: the unavailable member is dropped even when named explicitly — the operator
+#: gets the protocol they asked for, in the form their fleet can actually
+#: follow.
+EXCLUSIVE_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"shared-documentation", "shared-documentation-vault"}),
+)
+
+
+def resolve_exclusions(names: list[str], facts: Facts) -> list[str]:
+    """Drop members of an exclusive group that are not available for *facts*.
+
+    Applied to the FINAL list — declared plus defaulted — because the declared
+    half is the one the availability gate cannot reach. Order is preserved; a
+    group with no available member drops all of them, which is correct: no form
+    of the slot fits this fleet.
+    """
+    unavailable = {e for g in EXCLUSIVE_GROUPS for e in g if not available(e, facts)}
+    return [n for n in names if n not in unavailable]
 
 
 def available(entry: str, facts: Facts) -> bool:

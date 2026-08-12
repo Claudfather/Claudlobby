@@ -13,8 +13,8 @@ Your fleet's shared docs live **inside the vault**. Reach them through the Claud
 
 Before starting a task:
 
-1. `claudron recall "<task context>"` (or `/claudna:recall`) — relevance-ranked prior findings, incidents, and conventions, pooled across every tier the vault holds.
-2. `claudron lookup "<title or tag>"` when you already know what you are after.
+1. **Recall first**, with the task context — not a keyword. This is the step that replaces scanning a tree.
+2. **Look up** directly when you already know the title or tag you want.
 3. Read only what the results justify. **Cap: never open more than 5 notes before starting work.**
 
 **Recall covers plans, not just knowledge.** An active plan for the same repo or area surfaces through the same query — you do not need a second, manual pass over `planning/active/`. If a returned plan conflicts with your task, flag it to the manager before proceeding.
@@ -23,9 +23,16 @@ Before starting a task:
 
 ## Writing Convention
 
-- **Capture, don't hand-place.** `claudron capture` (or `/claudna:capture`) types and dedups the note and puts it in the right tier. Hand-creating a file in the tree bypasses both and is how near-duplicate notes accumulate.
+- **Capture, don't hand-place.** The capture verb types and dedups the note and puts it in the right tier. Hand-creating a file in the tree bypasses both and is how near-duplicate notes accumulate.
 - **One note per topic.** If recall surfaces an existing note on the subject, update that note rather than adding a second.
-- **Do not hardcode tier paths.** Which tier a note belongs in is Claudron's contract, not a path you compose yourself — see its `VAULT-STRUCTURE.md` §Consumption.
+- **Do not hardcode tier paths.** Which tier a note belongs in is Claudron's contract, not a path you compose yourself.
+
+## Lifecycle
+
+- **Creating:** `capture` the note. Claudron types and places it; there is no INDEX to regenerate.
+- **Updating:** edit the note in place and let `capture` reconcile it, or edit a working document directly.
+- **Completing:** set the terminal status in frontmatter (`superseded`; plans and audits may close `completed`). The note stays in the vault — recall ranks by relevance, so a closed doc stops surfacing without being moved.
+- **Stale docs:** knowledge defaults to a 90-day `expires:` TTL. Surfacing expired notes is a frontmatter scan until `claudron review --json` is wired, at which point a weekly librarian job takes it over.
 
 ## Working Documents
 

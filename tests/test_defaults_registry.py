@@ -201,19 +201,34 @@ class TestScopeBoundary:
         # has to carry a named observation-gate delta, and the line records
         # where. `shared-documentation-vault` is the worked example.
         allowed = set(NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE)
-        ungrandfathered = {
-            t: tuple(
-                e for e in d.entries if e not in d.grandfathered and e not in allowed
-            )
+        unexplained = {
+            t: tuple(e for e in d.entries if e not in (set(d.grandfathered) | allowed))
             for t, d in REGISTRY.items()
             if d.tier is Tier.INSTRUCT
-            and any(e not in d.grandfathered and e not in allowed for e in d.entries)
         }
+        ungrandfathered = {t: e for t, e in unexplained.items() if e}
         assert not ungrandfathered, (
             "a NEW INSTRUCT default is present. It cannot be justified by unit "
             "test: run lib/naked-bot-observe.py --baseline and name the delta. "
             f"{ungrandfathered}"
         )
+
+    def test_every_new_instruct_allowance_names_a_live_entry_and_its_evidence(self):
+        # The allowlist's hazard runs the OPPOSITE way to `grandfathered`'s. A
+        # stale name there merely exempts nothing; a stale name HERE
+        # pre-authorises a future entry that happens to reuse it — a new
+        # estate-wide instruction landing green, through the door built to make
+        # that impossible.
+        entries = {
+            e for d in REGISTRY.values() if d.tier is Tier.INSTRUCT for e in d.entries
+        }
+        for name, evidence in NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE.items():
+            assert name in entries, (
+                f"{name} is allowed as a new INSTRUCT default but is not an "
+                "INSTRUCT entry — remove it, or it silently pre-authorises the "
+                "next entry to reuse the name"
+            )
+            assert evidence.strip(), f"{name}: allowed with no evidence recorded"
 
     def test_a_grandfathered_name_is_an_entry_that_is_settled_and_argued(self):
         # `grandfathered` is a claim about history, so it must not be reachable
