@@ -54,6 +54,9 @@ SUMMARY="$(sanitize_tmux_input "$SUMMARY")"
 PROGRESS=""
 ARTIFACTS=""
 TASK_ID=""
+# Set when a SUPPLIED --task is not in the bot's open set (#1032). Recorded,
+# never acted on: the report still carries the id the caller gave.
+TASK_ANOMALY=""
 POSITIONAL_EXTRAS=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -95,6 +98,38 @@ case "$STATUS" in
             if [ -f "$_rb_dispatch" ]; then
                 TASK_ID="$(python3 "$LIB_DIR/dispatch-overdue.py" --open-task \
                     "$BOT" "$_rb_dispatch" "$REPORT_LEDGER" 2>/dev/null || true)"
+            fi
+        # A SUPPLIED id is checked but NEVER changed (#1032). The resolver above
+        # runs only when --task is omitted, so a wrong id was accepted verbatim
+        # where an absent one would have been repaired — the auto-resolver was
+        # bypassed by exactly the input it is most needed for. Measured: 18 of 43
+        # mispaired rows carried an id minted BEFORE the dispatch they stranded.
+        #
+        # VISIBLE, NOT CORRECTED, and that boundary is the whole point. Oldest-
+        # open-first would have produced the SAME wrong pairing in the filed
+        # instance, because the mis-pairing is FIFO-shaped — so "resolve it for
+        # them" is not merely risky here, it is measurably no better. Blanket-
+        # closing older rows is #447. A tool that silently picks a row is worse
+        # than one that says it cannot tell: the first sends nobody to look.
+        elif [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
+            _rb_dispatch="$(dispatch_ledger_path)"
+            if [ -f "$_rb_dispatch" ]; then
+                _rb_open="$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
+                    "$BOT" "$_rb_dispatch" "$REPORT_LEDGER" 2>/dev/null \
+                    | awk '{print $3}' || true)"
+                # Only a NON-EMPTY open set can contradict the caller. An empty
+                # one means the bot has nothing open — the ledger is missing, the
+                # row already closed, or this is an unsolicited report — none of
+                # which is evidence the id is wrong. Fail open: absence of
+                # evidence must not become evidence of absence (#1146).
+                if [ -n "$_rb_open" ] && ! printf '%s\n' "$_rb_open" \
+                        | grep -qxF "$TASK_ID"; then
+                    TASK_ANOMALY="supplied-id-not-open"
+                    printf 'report-back: --task %s is not open for %s; reporting it unchanged.\n' \
+                        "$TASK_ID" "$BOT" >&2
+                    printf 'report-back: open now: %s\n' \
+                        "$(printf '%s' "$_rb_open" | tr '\n' ' ')" >&2
+                fi
             fi
         fi
         ;;
@@ -140,8 +175,8 @@ _emit_ledger_event() {
     safe_summary=$(json_escape "$SUMMARY")
 
     _write_and_rotate() {
-        printf '{"ts":"%s","bot":"%s","task_id":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s","progress":"%s","artifact":"%s"}\n' \
-            "$ts" "$BOT" "$(json_escape "$TASK_ID")" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" >> "$ledger"
+        printf '{"ts":"%s","bot":"%s","task_id":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s","progress":"%s","artifact":"%s","task_anomaly":"%s"}\n' \
+            "$ts" "$BOT" "$(json_escape "$TASK_ID")" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" "$TASK_ANOMALY" >> "$ledger"
         rotate_jsonl_by_ts "$ledger"
     }
     with_lock "$ledger.lock" _write_and_rotate
