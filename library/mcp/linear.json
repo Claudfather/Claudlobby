@@ -1,0 +1,41 @@
+{
+  "_env_contract": {
+    "API_KEY": {
+      "description": "Linear API key (Settings > Security & access > API keys). Passed as a Bearer token; selects the workspace, so a second workspace is a second instance rather than a different URL.",
+      "tier": "fleet",
+      "scope": "instance"
+    }
+  },
+  "_permissions_contract": {
+    "tools": [
+      "list_issues",
+      "get_issue",
+      "create_issue",
+      "update_issue",
+      "list_my_issues",
+      "list_comments",
+      "create_comment",
+      "list_projects",
+      "get_project",
+      "create_project",
+      "update_project",
+      "list_teams",
+      "get_team",
+      "list_users",
+      "get_user",
+      "list_issue_statuses",
+      "get_issue_status",
+      "list_issue_labels",
+      "list_documents",
+      "get_document",
+      "search_documentation"
+    ]
+  },
+  "linear": {
+    "type": "http",
+    "url": "https://mcp.linear.app/mcp",
+    "headers": {
+      "Authorization": "Bearer ${API_KEY}"
+    }
+  }
+}
