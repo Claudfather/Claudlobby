@@ -160,18 +160,17 @@ so reach for the bare form unless you actually intend to enroll.
 
 ## Preflight: check shared knowledge before dispatch
 
-Before dispatching to a repo, check shared docs for relevant context:
+Before dispatching to a repo, check what the fleet already knows about it: is there an active plan for the target repo, and are there learnings the worker should start with?
 
-1. Scan `shared/planning/active/INDEX.md` — is there an active plan for the target repo?
-2. Scan `shared/knowledge/<repo>/INDEX.md` — are there existing learnings the worker should know?
+**Use the door your Shared Documentation section names, not a hardcoded path.** A vault-wired fleet queries Claudron (`claudron recall`); a fleet with a raw doc tree scans `shared/planning/active/INDEX.md` and `shared/knowledge/<repo>/INDEX.md`. Both answer the same question, and your composed instructions say which one you have — reaching for the wrong one on a vault-wired fleet means hand-opening files the vault door exists to replace (#1172).
 
 If relevant docs exist, **include the key context in the dispatch prompt** so the engineer doesn't duplicate work, contradict an in-flight plan, or re-discover something the fleet already knows.
 
-Example: if an active plan covers auth refactoring in `backend`, and you're dispatching a login endpoint task to the same repo, reference the plan in the dispatch: "See shared/planning/active/backend-auth-rework.md — your task aligns with phase 2."
+Example: if an active plan covers auth refactoring in `backend`, and you're dispatching a login endpoint task to the same repo, reference the plan in the dispatch: "See the active backend auth-rework plan — your task aligns with phase 2."
 
-## Manager: INDEX.md monitoring
+## Manager: active-plan monitoring
 
-The orchestrator periodically scans `shared/planning/active/INDEX.md` to:
+The orchestrator periodically reviews the fleet's active plans — through the door its Shared Documentation section names, same rule as above — to:
 
 - **Surface stale plans** — status: active but `updated:` older than 7 days. Ping the owner.
 - **Detect conflicts** — two active plans touching the same repo. Flag for human resolution.

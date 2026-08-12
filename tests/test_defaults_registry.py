@@ -24,6 +24,18 @@ from claudlobby.defaults import REGISTRY, TIER_TESTS, Disposition, Tier, resolve
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIBRARY = REPO_ROOT / "library"
 
+#: INSTRUCT entries that are genuinely NEW — not already composing when they
+#: were registered — together with where their observation-gate delta was
+#: recorded. Every line here changes what some bot is told, so a line is the
+#: deliberate act, never a side effect of adding an entry to the registry.
+NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE = {
+    "shared-documentation-vault": (
+        "#1172 — replaces the hand-scan form on vault-wired bots only. "
+        "Vault arm delta named in the PR body; non-vault arm measured "
+        "byte-identical."
+    ),
+}
+
 
 def _library_entity_types() -> set[str]:
     """Entity types as they actually exist on disk.
@@ -182,11 +194,20 @@ class TestScopeBoundary:
         # entry ride in beside a grandfathered one — `entries=("shared-
         # documentation", "something-new")` — adding a genuinely new estate-wide
         # instruction while tripping nothing here.
+        #
+        # A NEW instruction lands by adding a line to
+        # NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE, which is the deliberate act
+        # this test exists to force. It is not an escape hatch: the entry still
+        # has to carry a named observation-gate delta, and the line records
+        # where. `shared-documentation-vault` is the worked example.
+        allowed = set(NEW_INSTRUCT_DEFAULTS_WITH_GATE_EVIDENCE)
         ungrandfathered = {
-            t: tuple(e for e in d.entries if e not in d.grandfathered)
+            t: tuple(
+                e for e in d.entries if e not in d.grandfathered and e not in allowed
+            )
             for t, d in REGISTRY.items()
             if d.tier is Tier.INSTRUCT
-            and any(e not in d.grandfathered for e in d.entries)
+            and any(e not in d.grandfathered and e not in allowed for e in d.entries)
         }
         assert not ungrandfathered, (
             "a NEW INSTRUCT default is present. It cannot be justified by unit "
@@ -225,15 +246,36 @@ class TestScopeBoundary:
     def test_an_ungated_entry_is_available_and_a_gated_one_consults_its_gate(self):
         # The no-gate rule is the one most callers depend on and the one most
         # easily inverted, so it gets a positive AND a negative case.
-        class _NoDocs:
-            shared_docs = None
+        no_docs = defaults.Facts(shared_docs=False, vault_wired=False)
+        raw_tree = defaults.Facts(shared_docs=True, vault_wired=False)
 
-        class _WithDocs:
-            shared_docs = Path("/somewhere/shared")
+        assert defaults.available("not-gated-by-anything", no_docs) is True
+        assert defaults.available("shared-documentation", no_docs) is False
+        assert defaults.available("shared-documentation", raw_tree) is True
 
-        assert defaults.available("not-gated-by-anything", _NoDocs()) is True
-        assert defaults.available("shared-documentation", _NoDocs()) is False
-        assert defaults.available("shared-documentation", _WithDocs()) is True
+    @pytest.mark.parametrize("shared_docs", [True, False])
+    @pytest.mark.parametrize("vault_wired", [True, False])
+    def test_the_two_shared_doc_forms_are_mutually_exclusive(
+        self, shared_docs, vault_wired
+    ):
+        # THE #1172 INVARIANT, over every combination of facts rather than the
+        # two shapes that happen to exist on this estate.
+        #
+        # Both composing is the original defect re-created by its own fix: the
+        # bot is told to hand-scan a tree and never to open it. Neither
+        # composing where a shared-docs tree EXISTS silently drops the protocol
+        # estate-wide — the quiet direction, and the one no bot would report.
+        facts = defaults.Facts(shared_docs=shared_docs, vault_wired=vault_wired)
+        on = [
+            e
+            for e in ("shared-documentation", "shared-documentation-vault")
+            if defaults.available(e, facts)
+        ]
+        expected = 1 if shared_docs else 0
+        assert len(on) == expected, (
+            f"shared_docs={shared_docs} vault_wired={vault_wired} composes {on}; "
+            f"expected exactly {expected}"
+        )
 
     def test_every_registered_entry_resolves_to_a_library_file(self):
         # Asserted for ALL twelve types, not just the one this phase touched: a

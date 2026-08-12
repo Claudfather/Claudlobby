@@ -1562,15 +1562,25 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # no fleet could see and none could switch off (#1168 Phase 3, finding 1).
     #
     # Applied HERE and not in load_fleet's merge — where `guardrails` is applied
-    # — because these entries are availability-gated on `Paths`, which the config
-    # layer never receives. Root mode has no shared docs, so an ungated default
-    # would newly instruct every root-mode bot.
+    # — because these entries are availability-gated on facts the config layer
+    # never receives. Root mode has no shared docs, so an ungated default would
+    # newly instruct every root-mode bot.
+    #
+    # `vault_wired` MUST agree with the branch `claude.md.j2` takes on
+    # `bot.claudron_vault_path`. If they ever disagree, a bot composes the vault
+    # section beside the hand-scan protocol — #1172, the defect this gate exists
+    # to close. `tests/test_shared_docs_default.py` pins the agreement end to end
+    # rather than at the predicate, so it holds however either side is spelled.
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
     if sd.enabled and sd.protocols:
+        facts = defaults.Facts(
+            shared_docs=paths.shared_docs is not None,
+            vault_wired=bot_is_vault_wired(bot),
+        )
         roles = (defaults.ROLE_MANAGER,) if is_manager else ()
         for name in defaults.resolve("protocols", roles):
-            if defaults.available(name, paths) and name not in protocol_names:
+            if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
 
     # Projects table composes for managers only (F6-style context budget:
@@ -1797,6 +1807,25 @@ _CLAUDRON_HOOK_EVENTS = {
     "PreCompact": "pre-compact",
     "SessionEnd": "session-end",
 }
+
+
+def bot_is_vault_wired(bot: BotConfig) -> bool:
+    """Whether this bot reaches knowledge through a Claudron vault.
+
+    Trivial, and it exists because its ABSENCE was the finding (#1172). Three
+    places decide this one fact — `claude.md.j2`'s Shared Documentation branch,
+    the `CLAUDRON_VAULT_PATH` export in `bot.conf`, and the availability gate on
+    the `shared-documentation*` protocol defaults — and they must agree. When
+    they disagree the bot is told to use the vault door AND to hand-scan the
+    tree the door forbids opening, which is the defect this named the fix for.
+
+    NOT `_session_loop_enabled`, which is a different question wearing a similar
+    shape: that one is tri-state and an explicit `claudron_session_loop: false`
+    wins over a wired vault. A bot can legitimately be vault-wired with the
+    session loop off; reusing it here would silently drop the vault protocol on
+    exactly those bots.
+    """
+    return bool(bot.claudron_vault_path)
 
 
 def _session_loop_enabled(bot: BotConfig) -> bool:
@@ -3114,7 +3143,9 @@ def _write_timer_units(
     # production eight weeks later.
     if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
         for var, value in fleet_pulse_env.items():
-            plist_lines.extend([f"    <key>{var}</key>", f"    <string>{value}</string>"])
+            plist_lines.extend(
+                [f"    <key>{var}</key>", f"    <string>{value}</string>"]
+            )
     plist_lines.append("  </dict>")
     plist_lines.extend(
         [
