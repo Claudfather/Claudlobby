@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "ref": "a02964c12bbcfe572971bbc2fbc0770f57efb747",
+  "ref": "74df6727593dcf0d4db426f297a11301b33ff32f",
   "freshbox": {
     "rc": 0,
     "output": "Fresh-box self-containment audit \u2014 naked-probe (1 bots)\n  OK \u2014 every grant traces to an equipped source; Tier-A settings composed per-bot. Self-contained."
