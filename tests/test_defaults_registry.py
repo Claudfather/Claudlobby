@@ -66,11 +66,12 @@ class TestCompleteness:
         # and they must be enumerable rather than discovered one at a time.
         unsettled = sorted(t for t, d in REGISTRY.items() if not d.settled)
         settled = sorted(t for t, d in REGISTRY.items() if d.settled)
-        assert settled == ["guardrails"], (
-            "Phase 1 ships EXISTING constants only — a newly settled type means a "
-            f"default landed early: {settled}"
+        assert settled == ["guardrails", "protocols"], (
+            "the settled set moved. Every entry here changes what a bot composes "
+            "on the default path, so it lands by editing this list deliberately — "
+            f"never by a default arriving unannounced: {settled}"
         )
-        assert len(unsettled) == len(REGISTRY) - 1
+        assert len(unsettled) == len(REGISTRY) - len(settled)
 
 
 class TestRegistryIsTheSource:
@@ -166,15 +167,46 @@ class TestScopeBoundary:
         assert name not in REGISTRY
         assert hasattr(config, f"DEFAULT_{name.upper()}")
 
-    def test_no_instruct_default_ships_before_the_phase_3_gate(self):
-        # Phase 3 GATES Phase 2 rather than following it. An INSTRUCT entry
-        # appearing here before the naked-bot observation exists is the silent
-        # behaviour change the whole tier split was drawn to prevent.
-        instruct = {
+    def test_every_instruct_default_was_already_composing_when_registered(self):
+        # The Phase 3 naked-bot gate exists (#1171), so INSTRUCT entries are now
+        # admissible — but only the one shape that cannot change a bot silently:
+        # a default that was ALREADY composing, registered to make it visible and
+        # disableable, with a byte-identical default path.
+        #
+        # A genuinely NEW instruction — one no bot receives today — changes what
+        # every bot on the estate is told, and no unit test can evidence that. It
+        # needs the observation gate plus a named delta in the PR body, so it
+        # lands by editing this test with that evidence, never by inheriting the
+        # permission this one earned.
+        ungrandfathered = {
             t: d.entries
             for t, d in REGISTRY.items()
-            if d.tier is Tier.INSTRUCT and d.entries
+            if d.tier is Tier.INSTRUCT and d.entries and not d.grandfathered
         }
-        assert not instruct, (
-            f"INSTRUCT defaults present before the Phase 3 observation gate: {instruct}"
+        assert not ungrandfathered, (
+            "a NEW INSTRUCT default is present. It cannot be justified by unit "
+            "test: run lib/naked-bot-observe.py --baseline and name the delta. "
+            f"{ungrandfathered}"
         )
+
+    def test_a_grandfathered_entry_is_settled_and_says_why(self):
+        # `grandfathered` is a claim about history, so it must not be reachable
+        # as a way to skip the argument: the reason still has to be written.
+        for t, d in REGISTRY.items():
+            if d.grandfathered:
+                assert d.settled, f"{t}: grandfathered but not settled"
+                assert d.reason.strip() != defaults._UNARGUED, (
+                    f"{t}: grandfathered but still carries the placeholder reason"
+                )
+
+    def test_every_availability_gate_names_a_real_entry_and_a_real_paths_attr(self):
+        # A gate keyed to an entry that no longer exists would silently stop
+        # gating, and one naming a missing `Paths` attribute would read as falsy
+        # and suppress the default on every bot. Both fail quiet, so both are
+        # asserted.
+        from claudlobby.paths import Paths
+
+        registered = {e for d in REGISTRY.values() for e in d.entries}
+        for entry, attr in defaults.AVAILABILITY_GATES.items():
+            assert entry in registered, f"gate for unregistered entry: {entry}"
+            assert hasattr(Paths, attr), f"gate names no such Paths attribute: {attr}"

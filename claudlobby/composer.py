@@ -24,7 +24,7 @@ import jinja2
 import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
-from . import dotenv, tool_resolve
+from . import defaults, dotenv, tool_resolve  # noqa: F401 — used in compose_claude_md
 from .config import BotConfig, FleetConfig, load_fleet, load_host_jobs
 from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
@@ -1551,15 +1551,30 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
 
     integration_names = resolve_effective_integrations(bot, paths)
 
-    # Auto-include shared-documentation protocol when shared docs are available
-    protocol_names = list(bot.protocols)
-    if paths.shared_docs and "shared-documentation" not in protocol_names:
-        protocol_names.append("shared-documentation")
-
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
 
     is_manager = bot.bot_id in fleet.manager_bots()
+
+    # INSTRUCT-tier protocol defaults, resolved from defaults.REGISTRY rather
+    # than named here. This used to be a literal `append("shared-documentation")`
+    # sitting downstream of the merge the registry feeds, which made it a default
+    # no fleet could see and none could switch off (#1168 Phase 3, finding 1).
+    #
+    # Applied HERE and not in load_fleet's merge — where `guardrails` is applied
+    # — because these entries are availability-gated on `Paths`, which the config
+    # layer never receives. Root mode has no shared docs, so an ungated default
+    # would newly instruct every root-mode bot.
+    protocol_names = list(bot.protocols)
+    sd = fleet.system_defaults
+    if sd.enabled and sd.protocols:
+        roles = (defaults.ROLE_MANAGER,) if is_manager else ()
+        for name in defaults.resolve("protocols", roles):
+            gate = defaults.AVAILABILITY_GATES.get(name)
+            if gate and not getattr(paths, gate, None):
+                continue
+            if name not in protocol_names:
+                protocol_names.append(name)
 
     # Projects table composes for managers only (F6-style context budget:
     # workers resolve tiers from the bot.conf env map, not prose).
@@ -3102,7 +3117,9 @@ def _write_timer_units(
     # production eight weeks later.
     if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
         for var, value in fleet_pulse_env.items():
-            plist_lines.extend([f"    <key>{var}</key>", f"    <string>{value}</string>"])
+            plist_lines.extend(
+                [f"    <key>{var}</key>", f"    <string>{value}</string>"]
+            )
     plist_lines.append("  </dict>")
     plist_lines.extend(
         [

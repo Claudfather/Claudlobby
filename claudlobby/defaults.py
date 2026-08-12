@@ -2,9 +2,15 @@
 
 A hand-rolled fleet should get a working baseline without going to find it. The
 merge pathway for that already exists and is universal — all 12 entity types
-merge fleet defaults in ``_coerce_bot`` — but only ``guardrails`` has a
-compositor-side constant feeding it. This module is where the other eleven
-dispositions get decided, and where the one that exists is now declared.
+merge fleet defaults in ``_coerce_bot``. This module is where each type's
+disposition gets decided.
+
+TWO of the twelve are settled: ``guardrails`` (RESTRICT, declared at Phase 1)
+and ``protocols`` (INSTRUCT, admitted at Phase 3). Both were ALREADY COMPOSING
+before they were registered, and neither changed a composed byte on the default
+path when it was — which is the only shape of entry that may land without an
+A/B on real bots. See ``grandfathered`` on ``Disposition``: an entry that
+predates its own registration is not evidence that the tier test is passable.
 
 THIS REGISTRY IS THE SOURCE, NOT A DESCRIPTION (F4, binding).
 ``DEFAULT_GUARDRAILS`` is DERIVED from ``REGISTRY`` below and re-exported;
@@ -22,8 +28,9 @@ they do not live under ``library/``, they are not merged per-bot by
 ``_coerce_bot``, and they answer "what does the HOST install" rather than "what
 does this BOT compose". Folding them in would conflate two axes and make the
 completeness test below assert over a set that is not a set. (An earlier
-baseline counted them toward "3 of 12 entity types have a constant"; the true
-figure is 1 of 12.)
+baseline counted them toward "3 of 12 entity types have a constant". The true
+figure was 1 of 12 at Phase 1 and is 2 of 12 now that ``protocols`` is admitted;
+neither count includes these two.)
 
 WHY NOT ``library/`` (F5, the part worth keeping): ``library/`` is content the
 compositor consumes, not policy it enforces. Declaring defaults there would let
@@ -104,6 +111,13 @@ class Disposition:
     #: and "empty because nothing clears the bar" are different claims and the
     #: registry must not let them read the same.
     settled: bool = False
+    #: True when the entries were ALREADY COMPOSING before they were registered.
+    #: Registering them makes an existing default visible and disableable; it is
+    #: NOT a finding that they cleared the tier test, and a grandfathered entry
+    #: is never precedent for a new one. The distinction has to be structural
+    #: rather than prose in `reason`: an entry that ships despite failing half
+    #: its bar reads, to the next author, as evidence that the bar is soft.
+    grandfathered: bool = False
 
 
 _UNARGUED = (
@@ -126,10 +140,45 @@ REGISTRY: dict[str, Disposition] = {
     ),
     "permissions": Disposition(tier=Tier.RESTRICT, reason=_UNARGUED),
     # --- INSTRUCT ------------------------------------------------------------
-    # Nothing lands here before the Phase 3 naked-bot observation exists.
+    # The Phase 3 naked-bot observation gate exists as of #1171, so entries are
+    # now admissible here. Each must diff against the recorded baseline.
     "expertise": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
     "skills": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
-    "protocols": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
+    "protocols": Disposition(
+        tier=Tier.INSTRUCT,
+        entries=("shared-documentation",),
+        settled=True,
+        grandfathered=True,
+        reason=(
+            "ALREADY SHIPPING, now admitted. `composer.py` appended this protocol "
+            "directly, downstream of the merge this registry feeds, so every "
+            "overlay-mode bot on every fleet has been carrying six undeclared "
+            "`###` sections with no way to switch them off — not even the "
+            "`system_defaults: false` kill switch (measured, all 16 baseline "
+            "arms). Registering it changes no composed byte on the default path; "
+            "it makes an existing INSTRUCT default visible and disableable.\n\n"
+            "AGAINST THE TIER TEST IT IS HALF PASS, HALF FAIL, and is registered "
+            "as grandfathered for exactly that reason.\n"
+            "  PASSES 'every bot would be worse without it': a fleet whose bots "
+            "write to a shared doc tree and do not share the INDEX/frontmatter/"
+            "single-writer conventions accumulates duplicate docs, which is the "
+            "failure the protocol names first.\n"
+            "  FAILS 'no bot is made to do something surprising': a bot with "
+            "`claudron_vault_path` set composes the template's vault section — "
+            "'reached through the Claudron door, NOT by reading a raw doc tree' — "
+            "and then this protocol telling it to scan `planning/active/INDEX.md` "
+            "by hand. Both land in one file today; the append never checked for a "
+            "vault. That contradiction PRE-DATES this entry and is deliberately "
+            "not fixed here, because fixing it would change composed instructions "
+            "on the default path, which is the silent estate-wide edit this "
+            "registry exists to prevent. It is tracked as its own decision.\n\n"
+            "KNOWN BOUND — the entry is NOT composed on every bot, and the "
+            "registry alone cannot say so: it is gated by AVAILABILITY_GATES "
+            "below on `Paths.shared_docs`, which is falsy in root mode. Measured: "
+            "a root-mode naked bot composes no shared-documentation section at "
+            "all, so an ungated default would newly instruct every root-mode bot."
+        ),
+    ),
     "principles": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
     "post_actions": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
     # --- WIRE ----------------------------------------------------------------
@@ -138,6 +187,24 @@ REGISTRY: dict[str, Disposition] = {
     "integrations": Disposition(tier=Tier.WIRE, reason=_UNARGUED),
     "resources": Disposition(tier=Tier.WIRE, reason=_UNARGUED),
     "lessons": Disposition(tier=Tier.WIRE, reason=_UNARGUED),
+}
+
+
+# --- availability gates ------------------------------------------------------
+# Some defaults are conditional on a fact this module cannot see. `guardrails`
+# needs none: its merge happens in `load_fleet`, which knows nothing but the
+# parsed YAML. `shared-documentation` does, and the gate cannot move down into
+# that merge — `load_fleet` takes a bare path and never learns whether the fleet
+# is overlay- or root-mode, and threading `Paths` into it would widen a config
+# parser into a filesystem consumer.
+#
+# KEYED BY ENTRY NAME, DELIBERATELY NOT BY TYPE. Keying by type would make the
+# gate a property of `protocols`, so the next protocol default added here would
+# silently inherit a shared-docs condition nobody wrote for it — and would then
+# vanish on root-mode fleets with nothing to say why. The value names the
+# `Paths` attribute that must be truthy for the entry to compose.
+AVAILABILITY_GATES: dict[str, str] = {
+    "shared-documentation": "shared_docs",
 }
 
 
