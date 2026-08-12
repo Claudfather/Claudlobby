@@ -181,6 +181,21 @@ land fleet-wide with freshbox green throughout.
 > whose default is conditional on anything filesystem-shaped needs the composer
 > seam, and one whose default is unconditional needs the config seam. Deciding
 > which is part of each type's PR, not a detail of it.
+>
+> **The two seams are not equivalent modulo the condition, and the difference is
+> not visibility to a reader — it is validator coverage.** A `load_fleet`
+> default lands in `bot.<type>`, so `validator.py` checks that every named entry
+> exists in the library, and every `FleetConfig` consumer can see it. A composer
+> default never enters `BotConfig`: **`claudlobby validate` cannot see it**, so a
+> registry entry naming a missing library file passes validation and fails at
+> `generate`, on real fleets, only for the fleets that did not opt out.
+>
+> `tests/test_defaults_registry.py::test_every_registered_entry_resolves_to_a_library_file`
+> covers the shared `library/` for all twelve types, which is the cheap half. It
+> cannot see a **fleet overlay** shadowing `library/protocols/`, and nothing does
+> today. Choose the seam knowing that, and prefer the config seam wherever the
+> default is genuinely unconditional — otherwise the estate ends up split into
+> validated and unvalidated halves for reasons nobody chose.
 
 `config.py` imports the registry and consumes exactly one thing from it:
 

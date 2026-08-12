@@ -178,10 +178,15 @@ class TestScopeBoundary:
         # needs the observation gate plus a named delta in the PR body, so it
         # lands by editing this test with that evidence, never by inheriting the
         # permission this one earned.
+        # PER ENTRY, never per type. A type-level exemption would let a second
+        # entry ride in beside a grandfathered one — `entries=("shared-
+        # documentation", "something-new")` — adding a genuinely new estate-wide
+        # instruction while tripping nothing here.
         ungrandfathered = {
-            t: d.entries
+            t: tuple(e for e in d.entries if e not in d.grandfathered)
             for t, d in REGISTRY.items()
-            if d.tier is Tier.INSTRUCT and d.entries and not d.grandfathered
+            if d.tier is Tier.INSTRUCT
+            and any(e not in d.grandfathered for e in d.entries)
         }
         assert not ungrandfathered, (
             "a NEW INSTRUCT default is present. It cannot be justified by unit "
@@ -189,24 +194,55 @@ class TestScopeBoundary:
             f"{ungrandfathered}"
         )
 
-    def test_a_grandfathered_entry_is_settled_and_says_why(self):
+    def test_a_grandfathered_name_is_an_entry_that_is_settled_and_argued(self):
         # `grandfathered` is a claim about history, so it must not be reachable
         # as a way to skip the argument: the reason still has to be written.
+        # And a name here that is NOT in `entries` would exempt nothing while
+        # reading as though it did — the quiet direction.
         for t, d in REGISTRY.items():
-            if d.grandfathered:
-                assert d.settled, f"{t}: grandfathered but not settled"
-                assert d.reason.strip() != defaults._UNARGUED, (
-                    f"{t}: grandfathered but still carries the placeholder reason"
-                )
+            if not d.grandfathered:
+                continue
+            assert d.settled, f"{t}: grandfathered but not settled"
+            assert d.reason.strip() != defaults._UNARGUED, (
+                f"{t}: grandfathered but still carries the placeholder reason"
+            )
+            unknown = set(d.grandfathered) - set(d.entries)
+            assert not unknown, (
+                f"{t}: grandfathered names that are not entries: {sorted(unknown)}"
+            )
 
-    def test_every_availability_gate_names_a_real_entry_and_a_real_paths_attr(self):
+    def test_every_availability_gate_names_a_real_entry_and_is_callable(self):
         # A gate keyed to an entry that no longer exists would silently stop
-        # gating, and one naming a missing `Paths` attribute would read as falsy
-        # and suppress the default on every bot. Both fail quiet, so both are
-        # asserted.
-        from claudlobby.paths import Paths
-
+        # gating — the quiet direction, so it is asserted. The gate VALUE needs
+        # no such guard: it is a predicate, so a bad `Paths` attribute raises at
+        # compose time instead of reading falsy and suppressing the default on
+        # every bot, which is why it is a predicate rather than an attribute name.
         registered = {e for d in REGISTRY.values() for e in d.entries}
-        for entry, attr in defaults.AVAILABILITY_GATES.items():
+        for entry, gate in defaults.AVAILABILITY_GATES.items():
             assert entry in registered, f"gate for unregistered entry: {entry}"
-            assert hasattr(Paths, attr), f"gate names no such Paths attribute: {attr}"
+            assert callable(gate), f"gate for {entry} is not callable"
+
+    def test_an_ungated_entry_is_available_and_a_gated_one_consults_its_gate(self):
+        # The no-gate rule is the one most callers depend on and the one most
+        # easily inverted, so it gets a positive AND a negative case.
+        class _NoDocs:
+            shared_docs = None
+
+        class _WithDocs:
+            shared_docs = Path("/somewhere/shared")
+
+        assert defaults.available("not-gated-by-anything", _NoDocs()) is True
+        assert defaults.available("shared-documentation", _NoDocs()) is False
+        assert defaults.available("shared-documentation", _WithDocs()) is True
+
+    def test_every_registered_entry_resolves_to_a_library_file(self):
+        # Asserted for ALL twelve types, not just the one this phase touched: a
+        # registry entry naming a file that does not exist fails at compose time
+        # on a real fleet, and only for the fleets that did not opt out.
+        missing = [
+            f"{etype}/{entry}"
+            for etype in REGISTRY
+            for entry in resolve(etype)
+            if not (LIBRARY / etype / f"{entry}.md").is_file()
+        ]
+        assert not missing, f"registered but absent from library/: {missing}"

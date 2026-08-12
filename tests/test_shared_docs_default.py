@@ -20,9 +20,8 @@ composes nothing either — so each opt-out case also asserts that the
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
-
-import pytest
 
 from claudlobby import defaults
 from claudlobby.composer import compose_bot
@@ -36,25 +35,39 @@ PROTOCOL_SENTINEL = "SHARED_DOCS_PROTOCOL_SENTINEL"
 GUARDRAIL_SENTINEL = "GUARDRAIL_CONTROL_SENTINEL"
 
 
-def _root(tmp_path: Path) -> Path:
+def _protocol(name: str, sentinel: str) -> str:
+    return f"---\ntitle: {name}\ndescription: d\n---\n\n# {name}\n\n{sentinel}\n"
+
+
+def _root(tmp_path: Path, extra_protocols: dict[str, str] | None = None) -> Path:
+    # exist_ok throughout: a caller that needs one more library file calls this
+    # again rather than re-deriving Paths/BotConfig/FleetConfig inline. The
+    # inline copy is what drifts — it silently stops matching `_compose`'s fleet
+    # shape and then tests a fleet no other test in this file is describing.
     root = tmp_path / "claudlobby"
-    (root / "library" / "expertise").mkdir(parents=True)
-    (root / "library" / "protocols").mkdir(parents=True)
-    (root / "library" / "guardrails").mkdir(parents=True)
-    (root / "runtime" / "bots").mkdir(parents=True)
-    (root / "lib").mkdir()
-    (root / "voices").mkdir()
-    (root / "templates").mkdir()
+    for sub in (
+        "library/expertise",
+        "library/protocols",
+        "library/guardrails",
+        "runtime/bots",
+        "lib",
+        "voices",
+        "templates",
+    ):
+        (root / sub).mkdir(parents=True, exist_ok=True)
 
     (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
     (root / "library" / "protocols" / "shared-documentation.md").write_text(
-        f"---\ntitle: Shared Documentation\ndescription: d\n---\n\n"
-        f"# Shared Documentation\n\n{PROTOCOL_SENTINEL}\n"
+        _protocol("Shared Documentation", PROTOCOL_SENTINEL)
     )
+    for pname, sentinel in (extra_protocols or {}).items():
+        (root / "library" / "protocols" / f"{pname}.md").write_text(
+            _protocol(pname, sentinel)
+        )
     # The registry's RESTRICT entry, as the positive control for every negative.
     for name in defaults.resolve("guardrails"):
         (root / "library" / "guardrails" / f"{name}.md").write_text(
-            f"---\ntitle: {name}\ndescription: d\n---\n\n# {name}\n\n{GUARDRAIL_SENTINEL}\n"
+            _protocol(name, GUARDRAIL_SENTINEL)
         )
     # Renders the bodies directly rather than calling the real template's
     # `render_section` macro: this file is asserting which items reach the
@@ -72,8 +85,9 @@ def _compose(
     system_defaults: SystemDefaultsConfig | None = None,
     declared_protocols: list[str] | None = None,
     root_mode: bool = False,
+    extra_protocols: dict[str, str] | None = None,
 ) -> str:
-    root = _root(tmp_path)
+    root = _root(tmp_path, extra_protocols)
     paths = Paths(root=root, fleet_dir=None if root_mode else root)
     bot = BotConfig(
         bot_id="worker",
@@ -143,55 +157,42 @@ class TestTheAvailabilityGate:
         assert PROTOCOL_SENTINEL not in out
         assert GUARDRAIL_SENTINEL in out, "control: the fleet stopped composing at all"
 
-    def test_the_gate_is_keyed_by_entry_not_by_type(self, tmp_path):
+    def test_the_gate_is_keyed_by_entry_not_by_type(self, tmp_path, monkeypatch):
         # A second protocols default must NOT inherit the shared-docs condition.
-        # Keyed by type, this test's entry would vanish in root mode along with
+        # Keyed by type, this entry would vanish in root mode alongside
         # shared-documentation, and nothing would say why.
-        root = _root(tmp_path)
-        (root / "library" / "protocols" / "ungated.md").write_text(
-            "---\ntitle: Ungated\ndescription: d\n---\n\n# Ungated\n\nUNGATED_SENTINEL\n"
-        )
+        #
+        # `replace` rather than rebuilding the dataclass field by field: a
+        # hand-listed reconstruction silently drops whatever it forgets, and
+        # this PR added a field that had to be threaded through by hand. The
+        # next one would not be, and nothing would fail.
         entry = defaults.REGISTRY["protocols"]
-        defaults.REGISTRY["protocols"] = type(entry)(
-            tier=entry.tier,
-            reason=entry.reason,
-            entries=entry.entries + ("ungated",),
-            settled=entry.settled,
-            grandfathered=entry.grandfathered,
+        monkeypatch.setitem(
+            defaults.REGISTRY,
+            "protocols",
+            replace(entry, entries=entry.entries + ("ungated",)),
         )
-        try:
-            paths = Paths(root=root, fleet_dir=None)
-            bot = BotConfig(bot_id="w", name="w", expertise=["eng"])
-            fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
-            out = (
-                compose_bot(bot, fleet, paths, log=lambda _m: None) / "CLAUDE.md"
-            ).read_text()
-            assert "UNGATED_SENTINEL" in out, (
-                "an ungated entry was suppressed in root mode — the availability "
-                "gate is keyed by type rather than by entry name"
-            )
-            assert PROTOCOL_SENTINEL not in out
-        finally:
-            defaults.REGISTRY["protocols"] = entry
-
-
-class TestTheRegistryIsTheSource:
-    """No second place names the entry."""
-
-    def test_the_composer_names_no_protocol_literal(self):
-        source = (
-            Path(__file__).resolve().parent.parent / "claudlobby" / "composer.py"
-        ).read_text()
-        # The string may appear in a comment explaining the history; what must
-        # not come back is a literal append into the composed list.
-        assert 'protocol_names.append("shared-documentation")' not in source, (
-            "the hardcoded append is back — the registry is no longer the source"
+        out = _compose(
+            tmp_path,
+            root_mode=True,
+            extra_protocols={"ungated": "UNGATED_SENTINEL"},
         )
+        assert "UNGATED_SENTINEL" in out, (
+            "an ungated entry was suppressed in root mode — the availability "
+            "gate is keyed by type rather than by entry name"
+        )
+        assert PROTOCOL_SENTINEL not in out
 
-    @pytest.mark.parametrize("entry", sorted(defaults.resolve("protocols")))
-    def test_every_registered_protocol_exists_in_the_library(self, entry):
-        # A registry entry naming a file that does not exist would fail at
-        # compose time on a real fleet, not here, and only for fleets that had
-        # not opted out.
-        lib = Path(__file__).resolve().parent.parent / "library" / "protocols"
-        assert (lib / f"{entry}.md").is_file(), f"{entry} is registered but absent"
+
+# NOTE — two tests deliberately do NOT live here.
+#
+# "the composer names no `shared-documentation` literal" was a source-text grep.
+# It was removed rather than moved: measured, re-adding the hardcoded append
+# fails `test_system_defaults_protocols_false_removes_it` and
+# `test_the_kill_switch_removes_it` on their own, so the grep asserted nothing
+# the behavioural tests did not — while breaking on a reformat or a rename of
+# the local `protocol_names`, and passing on any re-add spelled differently.
+#
+# "every registered entry resolves to a library file" belongs to the registry,
+# not to this entry, and lives in `test_defaults_registry.py` where the library
+# path is already bound and it is asserted for all twelve types.

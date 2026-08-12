@@ -1570,10 +1570,7 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     if sd.enabled and sd.protocols:
         roles = (defaults.ROLE_MANAGER,) if is_manager else ()
         for name in defaults.resolve("protocols", roles):
-            gate = defaults.AVAILABILITY_GATES.get(name)
-            if gate and not getattr(paths, gate, None):
-                continue
-            if name not in protocol_names:
+            if defaults.available(name, paths) and name not in protocol_names:
                 protocol_names.append(name)
 
     # Projects table composes for managers only (F6-style context budget:
@@ -3117,9 +3114,7 @@ def _write_timer_units(
     # production eight weeks later.
     if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
         for var, value in fleet_pulse_env.items():
-            plist_lines.extend(
-                [f"    <key>{var}</key>", f"    <string>{value}</string>"]
-            )
+            plist_lines.extend([f"    <key>{var}</key>", f"    <string>{value}</string>"])
     plist_lines.append("  </dict>")
     plist_lines.extend(
         [

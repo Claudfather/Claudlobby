@@ -39,8 +39,10 @@ library content decide what library content ships.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class Tier(Enum):
@@ -111,13 +113,25 @@ class Disposition:
     #: and "empty because nothing clears the bar" are different claims and the
     #: registry must not let them read the same.
     settled: bool = False
-    #: True when the entries were ALREADY COMPOSING before they were registered.
-    #: Registering them makes an existing default visible and disableable; it is
-    #: NOT a finding that they cleared the tier test, and a grandfathered entry
-    #: is never precedent for a new one. The distinction has to be structural
+    #: Entry NAMES that were already composing before they were registered.
+    #: Registering one makes an existing default visible and disableable; it is
+    #: NOT a finding that it cleared the tier test, and a grandfathered entry is
+    #: never precedent for a new one. The distinction has to be structural
     #: rather than prose in `reason`: an entry that ships despite failing half
     #: its bar reads, to the next author, as evidence that the bar is soft.
-    grandfathered: bool = False
+    #:
+    #: NAMES, NOT A BOOL, and the difference is the whole safety property. A
+    #: per-TYPE bool exempts every FUTURE entry of that type: `protocols` would
+    #: be flagged once and `entries=("shared-documentation", "something-new")`
+    #: would then add a genuinely new estate-wide instruction without tripping
+    #: anything. That is the same granularity mistake `AVAILABILITY_GATES`
+    #: is keyed-by-entry to avoid, in the opposite direction.
+    #:
+    #: Scope is the INSTRUCT admission bar specifically. `guardrails` predates
+    #: its own registration too and carries nothing here, because RESTRICT has
+    #: no such gate — the field answers "is this exempt from the Phase 3
+    #: new-instruction gate", not "is this older than the registry".
+    grandfathered: tuple[str, ...] = ()
 
 
 _UNARGUED = (
@@ -148,7 +162,7 @@ REGISTRY: dict[str, Disposition] = {
         tier=Tier.INSTRUCT,
         entries=("shared-documentation",),
         settled=True,
-        grandfathered=True,
+        grandfathered=("shared-documentation",),
         reason=(
             "ALREADY SHIPPING, now admitted. `composer.py` appended this protocol "
             "directly, downstream of the merge this registry feeds, so every "
@@ -201,11 +215,36 @@ REGISTRY: dict[str, Disposition] = {
 # KEYED BY ENTRY NAME, DELIBERATELY NOT BY TYPE. Keying by type would make the
 # gate a property of `protocols`, so the next protocol default added here would
 # silently inherit a shared-docs condition nobody wrote for it — and would then
-# vanish on root-mode fleets with nothing to say why. The value names the
-# `Paths` attribute that must be truthy for the entry to compose.
-AVAILABILITY_GATES: dict[str, str] = {
-    "shared-documentation": "shared_docs",
+# vanish on root-mode fleets with nothing to say why.
+#
+# The value is a PREDICATE over `Paths`, not the NAME of a `Paths` attribute.
+# A name resolved by `getattr(paths, name, None)` has exactly one failure mode
+# and it is the worst available: a renamed or mistyped attribute reads falsy,
+# which SUPPRESSES the default on every bot on the estate, silently, in the
+# INSTRUCT tier. A predicate turns that same mistake into an `AttributeError` at
+# compose time. Loud and instant beats quiet and universal.
+#
+# `paths` is duck-typed on purpose — importing `Paths` here would make the
+# policy module depend on the path resolver it is meant to be independent of.
+#
+# WHEN A SECOND PER-ENTRY FACT APPEARS, do not add a third side table: that is
+# the point at which `entries` should become `tuple[Entry, ...]` and both facts
+# move onto the entry itself. Two tables is a pair; three is a pattern nobody
+# chose.
+AVAILABILITY_GATES: dict[str, Callable[[Any], bool]] = {
+    "shared-documentation": lambda paths: paths.shared_docs is not None,
 }
+
+
+def available(entry: str, paths: Any) -> bool:
+    """Whether ``entry``'s precondition holds for this fleet.
+
+    An entry with no gate is unconditional — the common case, and stated HERE
+    rather than in the composer so a reader of the registry does not have to
+    open another module to learn what an absent gate means.
+    """
+    gate = AVAILABILITY_GATES.get(entry)
+    return True if gate is None else gate(paths)
 
 
 # --- roles -------------------------------------------------------------------

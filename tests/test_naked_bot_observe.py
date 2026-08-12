@@ -387,7 +387,9 @@ def test_inert_flags_a_registry_entry_that_composed_nothing():
 
 
 def test_inert_is_false_when_the_entry_actually_composed():
-    assert nbo.TypeObservation("restrict", ["g"], ["Some Guardrail"], []).inert is False
+    assert (
+        nbo.TypeObservation("restrict", ["g"], ["Some Guardrail"], []).inert is False
+    )
     assert nbo.TypeObservation("wire", ["t"], None, ["tools/t.sh"]).inert is False
 
 
