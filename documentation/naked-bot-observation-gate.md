@@ -10,14 +10,32 @@ shows up as a delta instead of being argued about in a review thread.
 ```bash
 lib/naked-bot-observe.py                                    # human-readable
 lib/naked-bot-observe.py --json                             # the record format
-lib/naked-bot-observe.py --baseline documentation/baselines/naked-bot-2026-08-11.json
+lib/naked-bot-observe.py --baseline documentation/baselines/naked-bot-2026-08-12.json
 ```
 
 The last form is the gate: exit 1 and a per-(arm, entity type) list of what
 moved. **A Phase 2 PR is expected to make it exit 1** — the requirement is that
 the delta is named in the PR body, not that it is absent.
 
-## The baseline
+## The baselines — diff against the newest, cite the anchor
+
+| file | ref | what it is |
+|---|---|---|
+| `naked-bot-2026-08-11.json` | `b196936` | **The anchor.** Phase 1 merged, zero defaults admitted. Frozen; do not overwrite. |
+| `naked-bot-2026-08-12.json` | `5d313a0` | **The current diff target.** Phase 2's first admission (`protocols`). |
+
+Diff a new PR against the **newest**; a PR that diffed against the anchor would
+re-report every previously-argued admission as its own delta, and the reviewer
+would have to subtract history by hand to find the change under review.
+
+**The anchor is kept rather than overwritten** because it is the only recorded
+state in which the estate's pre-registry behaviour is legible as a whole. It is
+reproducible in principle — `--ref b196936` re-derives it — but a claim that has
+to be re-derived to be checked usually is not checked. Add a dated file per
+admission; never edit one in place.
+
+The rest of this section describes the anchor, and holds for both except where
+a finding below is marked resolved.
 
 Recorded at `b196936` (Phase 1 merged, zero new defaults shipped), the last
 commit at which the pre-change baseline is observable at all.
