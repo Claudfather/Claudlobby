@@ -22,7 +22,7 @@ the delta is named in the PR body, not that it is absent.
 | file | ref | what it is |
 |---|---|---|
 | `naked-bot-2026-08-11.json` | `b196936` | **The anchor.** Phase 1 merged, zero defaults admitted. Frozen; do not overwrite. |
-| `naked-bot-2026-08-12.json` | `5d313a0` | **The current diff target.** Phase 2's first admission (`protocols`). |
+| `naked-bot-2026-08-12.json` | `a48e60f` | **The current diff target.** Phase 2's first admission (`protocols`). |
 
 Diff a new PR against the **newest**; a PR that diffed against the anchor would
 re-report every previously-argued admission as its own delta, and the reviewer
