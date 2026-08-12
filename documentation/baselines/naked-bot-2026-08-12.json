@@ -1,0 +1,2349 @@
+{
+  "schema": 2,
+  "ref": "a48e60f2c6eadfab8e30bfd9d9e8f25aef963324",
+  "freshbox": {
+    "rc": 0,
+    "output": "Fresh-box self-containment audit \u2014 naked-probe (1 bots)\n  OK \u2014 every grant traces to an equipped source; Tier-A settings composed per-bot. Self-contained."
+  },
+  "baseline_instructing_types": [
+    "guardrails",
+    "protocols"
+  ],
+  "baseline_inert_defaults": [],
+  "arms": [
+    {
+      "label": "baseline",
+      "system_defaults": null,
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:expertise",
+      "system_defaults": "expertise: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:guardrails",
+      "system_defaults": "guardrails: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:integrations",
+      "system_defaults": "integrations: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:lessons",
+      "system_defaults": "lessons: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:mcp",
+      "system_defaults": "mcp: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:permissions",
+      "system_defaults": "permissions: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:post_actions",
+      "system_defaults": "post_actions: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:principles",
+      "system_defaults": "principles: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:protocols",
+      "system_defaults": "protocols: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:resources",
+      "system_defaults": "resources: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:skills",
+      "system_defaults": "skills: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "optout:tools",
+      "system_defaults": "tools: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "control:kill-switch",
+      "system_defaults": "enabled: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": []
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "control:unknown-key",
+      "system_defaults": "not_a_type: false",
+      "declared": {},
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    },
+    {
+      "label": "declared:guardrails",
+      "system_defaults": null,
+      "declared": {
+        "guardrails": [
+          "no-push-main"
+        ]
+      },
+      "generate_rc": 0,
+      "generate_stderr_tail": "",
+      "sections": {
+        "Shared Documentation": [],
+        "Protocols": [
+          "Shared Documentation",
+          "Pre-Work Checks",
+          "Writing Convention",
+          "INDEX.md Maintenance",
+          "Lifecycle",
+          "Promotion Flow"
+        ],
+        "Guardrails": [
+          "Claudlobby dev work uses projects/ checkout",
+          "Never push to main/master"
+        ]
+      },
+      "dir_entries": [
+        ".claude/",
+        ".claude/settings.local.json",
+        ".claude/skills/",
+        ".mcp.json",
+        "CLAUDE.md",
+        "bot.conf",
+        "com.example.nakedprobe.nakedbot.plist",
+        "com.example.nakedprobe.nakedbot.service",
+        "data/",
+        "data/events/",
+        "logs/",
+        "memory/",
+        "mounts/",
+        "projects/"
+      ],
+      "types": {
+        "expertise": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "guardrails": {
+          "tier": "restrict",
+          "registry_entries": [
+            "claudlobby-dev-in-projects"
+          ],
+          "composed_instructions": [
+            "Claudlobby dev work uses projects/ checkout",
+            "Never push to main/master"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "integrations": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "lessons": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "mcp": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [
+            ".mcp.json"
+          ],
+          "composed_content": []
+        },
+        "permissions": {
+          "tier": "restrict",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [
+            ".claude/settings.local.json"
+          ],
+          "composed_content": [
+            "Glob",
+            "Grep",
+            "Read",
+            "mcp__plugin_telegram_telegram__download_attachment",
+            "mcp__plugin_telegram_telegram__edit_message",
+            "mcp__plugin_telegram_telegram__react",
+            "mcp__plugin_telegram_telegram__reply"
+          ]
+        },
+        "post_actions": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "principles": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "protocols": {
+          "tier": "instruct",
+          "registry_entries": [
+            "shared-documentation"
+          ],
+          "composed_instructions": [
+            "Shared Documentation",
+            "Pre-Work Checks",
+            "Writing Convention",
+            "INDEX.md Maintenance",
+            "Lifecycle",
+            "Promotion Flow"
+          ],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "resources": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": [],
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "skills": {
+          "tier": "instruct",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        },
+        "tools": {
+          "tier": "wire",
+          "registry_entries": [],
+          "composed_instructions": null,
+          "composed_artifacts": [],
+          "composed_content": null
+        }
+      }
+    }
+  ]
+}

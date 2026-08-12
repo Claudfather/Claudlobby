@@ -93,6 +93,12 @@ class SystemDefaultsConfig:
 
     ``system_defaults: false`` in fleet.yaml sets ``enabled=False``,
     disabling all injection.  Per-category bools allow surgical opt-out.
+
+    KNOWN BOUND: the keys below are a fixed set, not "one per entity type".
+    Ten of the twelve library entity types still have no opt-out, and an
+    unrecognised key is silently dropped — so a fleet cannot yet tell a working
+    opt-out from a typo (#1168 Phase 3 finding 2). Adding a key here is what
+    gives a type an opt-out; the check is in the code that consumes the default.
     """
 
     enabled: bool = True
@@ -100,6 +106,10 @@ class SystemDefaultsConfig:
     timers: bool = True
     observability: bool = True
     guardrails: bool = True
+    # Consumed in composer.py, not in the load_fleet merge below, because the
+    # protocols default is availability-gated on a Paths fact this layer cannot
+    # see. See defaults.AVAILABILITY_GATES.
+    protocols: bool = True
 
 
 @dataclass
@@ -1454,6 +1464,7 @@ def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
             timers=bool(raw.get("timers", True)),
             observability=bool(raw.get("observability", True)),
             guardrails=bool(raw.get("guardrails", True)),
+            protocols=bool(raw.get("protocols", True)),
         )
     return SystemDefaultsConfig()
 
