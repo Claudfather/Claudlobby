@@ -118,11 +118,27 @@ catch, and reading `defaults.py` alone would never have shown it.
 > through the Claudron door, NOT by reading a raw doc tree"* — and then this
 > protocol telling it to hand-scan `planning/active/INDEX.md`. Both land in one
 > file; the append never checked for a vault. That is a live contradiction in
-> composed instructions on every vault-wired bot, it pre-dates the registration,
-> and it is deliberately **not** fixed there: the fix changes composed
-> instructions on the default path, which needs its own decision and its own
-> before/after. It is why the entry is `grandfathered` rather than argued as
+> composed instructions on every vault-wired bot, and it pre-dates the
+> registration. It is why the entry is `grandfathered` rather than argued as
 > clearing the INSTRUCT bar — it half-fails it.
+>
+> **FIXED in #1172, which is what keeps the grandfathering defensible.**
+> `protocols` now carries two mutually exclusive entries — `shared-documentation`
+> (hand-scan, byte-for-byte unchanged) and `shared-documentation-vault` — and
+> `defaults.Facts.vault_wired` picks one. Measured: the vault arm's composed
+> `CLAUDE.md` moves (`2801aa9fb25b` → `c6fe12210fcc`) and the no-vault arm does
+> not (`322e074b9a17` unchanged).
+>
+> On this estate the contradiction was **literal, not stylistic**:
+> `CLAUDRON_VAULT_PATH` is `…/local` and the fleet's shared tree is
+> `…/local/<system>/<fleet>/shared`, so the INDEX files the protocol named ARE
+> vault files — confirmed with `is_relative_to`, and `claudron lookup` returns
+> `shared/planning/active/*.md`, so the door covers plans as well as knowledge.
+>
+> `shared-documentation-vault` is the gate's **first non-grandfathered INSTRUCT
+> entry** — a genuinely new instruction, landed through the deliberate act
+> `test_defaults_registry.py` requires rather than by inheriting the permission
+> the grandfathered entry earned.
 
 ### 2. The per-entity-type opt-out surface does not exist for 11 of 12 types
 
