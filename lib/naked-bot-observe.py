@@ -261,6 +261,11 @@ class Arm:
     system_defaults: str | None
     #: Entity types this arm DECLARED (to test that declaring is not opting out).
     declared: dict[str, list[str]] = field(default_factory=dict)
+    #: Wire the probe bot to a Claudron vault. A FLEET-SHAPE axis, not a
+    #: `system_defaults` one: some defaults are conditional on how the fleet is
+    #: wired rather than on what it switched off, and an inventory that only
+    #: varies opt-outs cannot see them (#1172).
+    vault_wired: bool = False
     generate_rc: int = -1
     generate_stderr_tail: str = ""
     sections: dict[str, list[str]] = field(default_factory=dict)
@@ -346,6 +351,11 @@ def write_probe(root: Path, arm: Arm) -> None:
     declared = ""
     for etype, names in sorted(arm.declared.items()):
         declared += f"      {etype}: [{', '.join(names)}]\n"
+    if arm.vault_wired:
+        # A path, not a real vault. The composer branches on the field being
+        # SET; nothing here reads the tree, and pointing at a real vault would
+        # make the observation depend on the host's knowledge corpus.
+        declared += "      claudron_vault_path: /tmp/naked-probe-vault\n"
     (overlay / "fleet.yaml").write_text(
         FLEET_TEMPLATE.format(system_defaults=sd, declared=declared)
     )
@@ -502,6 +512,15 @@ def build_arms(types: list[str]) -> list[Arm]:
             declared={"guardrails": ["no-push-main"]},
         )
     )
+    # A SECOND FLEET SHAPE, not a second opt-out. Every arm above varies what the
+    # fleet switched OFF; this one varies how it is WIRED, which is a different
+    # axis and the one the inventory was blind to. #1172 lived exactly there: a
+    # vault-wired bot composed the template's "never open the tree by hand"
+    # section beside a protocol telling it to hand-scan that tree, and no arm
+    # could see it because all 16 were vault-less. The two `shared-documentation`
+    # forms are mutually exclusive, so this arm is also what would catch a gate
+    # regression that composed both or neither.
+    arms.append(Arm(label="shape:vault-wired", system_defaults=None, vault_wired=True))
     return arms
 
 

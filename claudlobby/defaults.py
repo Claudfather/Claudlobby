@@ -42,7 +42,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 
 class Tier(Enum):
@@ -160,37 +159,81 @@ REGISTRY: dict[str, Disposition] = {
     "skills": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
     "protocols": Disposition(
         tier=Tier.INSTRUCT,
-        entries=("shared-documentation",),
+        entries=("shared-documentation", "shared-documentation-vault"),
         settled=True,
         grandfathered=("shared-documentation",),
         reason=(
-            "ALREADY SHIPPING, now admitted. `composer.py` appended this protocol "
+            "ONE SLOT, TWO MUTUALLY EXCLUSIVE ENTRIES — how a bot reaches fleet "
+            "knowledge, which differs by whether a Claudron vault is wired. "
+            "AVAILABILITY_GATES below picks exactly one; neither is composed in "
+            "root mode, where there is no shared-docs tree to describe.\n\n"
+            "`shared-documentation` (GRANDFATHERED) is the hand-scan form and is "
+            "unchanged since it was admitted: `composer.py` had appended it "
             "directly, downstream of the merge this registry feeds, so every "
-            "overlay-mode bot on every fleet has been carrying six undeclared "
-            "`###` sections with no way to switch them off — not even the "
-            "`system_defaults: false` kill switch (measured, all 16 baseline "
-            "arms). Registering it changes no composed byte on the default path; "
-            "it makes an existing INSTRUCT default visible and disableable.\n\n"
-            "AGAINST THE TIER TEST IT IS HALF PASS, HALF FAIL, and is registered "
-            "as grandfathered for exactly that reason.\n"
-            "  PASSES 'every bot would be worse without it': a fleet whose bots "
-            "write to a shared doc tree and do not share the INDEX/frontmatter/"
-            "single-writer conventions accumulates duplicate docs, which is the "
-            "failure the protocol names first.\n"
-            "  FAILS 'no bot is made to do something surprising': a bot with "
-            "`claudron_vault_path` set composes the template's vault section — "
-            "'reached through the Claudron door, NOT by reading a raw doc tree' — "
-            "and then this protocol telling it to scan `planning/active/INDEX.md` "
-            "by hand. Both land in one file today; the append never checked for a "
-            "vault. That contradiction PRE-DATES this entry and is deliberately "
-            "not fixed here, because fixing it would change composed instructions "
-            "on the default path, which is the silent estate-wide edit this "
-            "registry exists to prevent. It is tracked as its own decision.\n\n"
-            "KNOWN BOUND — the entry is NOT composed on every bot, and the "
-            "registry alone cannot say so: it is gated by AVAILABILITY_GATES "
-            "below on `Paths.shared_docs`, which is falsy in root mode. Measured: "
-            "a root-mode naked bot composes no shared-documentation section at "
-            "all, so an ungated default would newly instruct every root-mode bot."
+            "overlay-mode bot carried six undeclared `###` sections that nothing "
+            "could switch off — not even the `system_defaults: false` kill "
+            "switch. It PASSES 'every bot would be worse without it' for a fleet "
+            "whose bots share a raw doc tree: without the INDEX/frontmatter/"
+            "single-writer conventions they accumulate duplicate docs, the "
+            "failure the protocol names first.\n\n"
+            "`shared-documentation-vault` is NOT grandfathered — it is a new "
+            "instruction and it changes what vault-wired bots are told, which is "
+            "the point. It exists because the hand-scan form FAILED the tier "
+            "test's second half on exactly those bots: they compose the "
+            "template's vault section ('reached through the Claudron door, NOT by "
+            "reading a raw doc tree') and then an instruction to hand-scan that "
+            "same tree. Measured on this estate, the contradiction is literal "
+            "rather than stylistic — `CLAUDRON_VAULT_PATH` is `.../local` and the "
+            "fleet's `shared/` tree is `.../local/<system>/<fleet>/shared`, so the "
+            "INDEX files the protocol named ARE vault files. Splitting the entry "
+            "is what lets the grandfathered half stay defensible (#1172).\n\n"
+            "WHY TWO FILES RATHER THAN ONE THAT STATES BOTH CASES: library "
+            "bodies get plain `{{KEY}}` substitution, not Jinja, so a library "
+            "file cannot branch on its own — the choice is composed branch or "
+            "prose that names both worlds.\n\n"
+            "THE SELECTOR IS DIVERGENCE SIZE, and it is a rule, not a "
+            "preference. Measured with `difflib` per section, the two forms "
+            "here share little text: Pre-Work Checks 0.16, Writing Convention "
+            "0.05, Lifecycle 0.34, Promotion Flow 0.53, and `INDEX.md "
+            "Maintenance` has no vault counterpart at all. Prose naming both "
+            "worlds would be two protocols interleaved and a bot picking its "
+            "way through. `library/protocols/dispatch.md` takes the OPPOSITE "
+            "treatment for the opposite reason: it diverges by 11 lines (5 "
+            "added, 6 deleted — `git diff --numstat`), so it states the rule "
+            "and defers the mechanism to the bot's composed Shared "
+            "Documentation section. Dereferencing a section of your own "
+            "composed file is not adjudicating a contradiction; being handed "
+            "two conflicting instructions a thousand lines apart is, and that "
+            "is the harm #1172 recorded.\n\n"
+            "THE FORK DID NOT ELIMINATE THE NEAR-DUPLICATE HAZARD IT CITES — it "
+            "relocated and shrank it, and pretending otherwise would make this "
+            "rationale the kind of claim it exists to prevent. Two places carry "
+            "the same content across both forms, in the two different shapes "
+            "that hazard takes:\n"
+            "  TEXTUAL — the 'Reusable building blocks' paragraph is 0.898 "
+            "similar across the files. It is shape-invariant (promoting a "
+            "library asset by PR has nothing to do with vaults), so it is a "
+            "true copy and will drift silently.\n"
+            "  SEMANTIC, and the worse of the two — the Lifecycle 'stale docs' "
+            "bullet states one fact in both files at only 0.251 textual "
+            "similarity. It has ALREADY diverged in wording on day one, and no "
+            "text-similarity check will ever flag it, so an edit to one side "
+            "cannot be caught by looking for duplicates.\n"
+            "THE TELL TO ACT ON: the second time someone edits both files in "
+            "one commit, the shared half wants extracting.\n\n"
+            "THE DEFERRING SIDE CARRIES ITS OWN VERSION OF THE SAME RISK, named "
+            "here because the rest of this argument discloses its bounds and "
+            "this is the one that would otherwise pass unstated. `dispatch.md`'s "
+            "prose is not a pure pointer: it RESTATES specifics — the recall "
+            "verb, and both `INDEX.md` paths — that also live in the two "
+            "`shared-documentation*` files. So the fork has three copies of the "
+            "navigation fact, not two, and the third is the one nothing checks: "
+            "`grep -rn 'dispatch\\.md' tests/` returns nothing, so no test ties "
+            "that paraphrase back to the canonical text. It is prose about a "
+            "mechanism rather than the mechanism itself, which is why it is "
+            "accepted rather than gated — but a reader who changes how a fleet "
+            "reaches knowledge must change it in three places, and only two of "
+            "them will fail a test."
         ),
     ),
     "principles": Disposition(tier=Tier.INSTRUCT, reason=_UNARGUED),
@@ -205,6 +248,32 @@ REGISTRY: dict[str, Disposition] = {
 
 
 # --- availability gates ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Facts:
+    """The composition facts an availability gate may consult.
+
+    A NAMED, CLOSED SET — deliberately not ``paths`` and ``bot`` themselves. A
+    gate handed the real objects can reach any attribute on either, so what a
+    default's availability depends on becomes unbounded and undiscoverable: you
+    would have to read every lambda to learn what makes a default appear. Here
+    the answer is this class, and widening it is a visible edit.
+
+    It also keeps this module free of a `Paths`/`BotConfig` import, so policy
+    does not depend on the path resolver or the config parser it exists above.
+
+    RESOLVED BY THE COMPOSER, never derived here — `vault_wired` in particular
+    must be the same predicate `claude.md.j2` branches on, or a bot composes the
+    vault section beside the hand-scan protocol, which is #1172 exactly.
+    """
+
+    #: The fleet has a shared-docs tree at all. False in root mode.
+    shared_docs: bool
+    #: The bot is wired to a Claudron vault (`claudron_vault_path`).
+    vault_wired: bool
+
+
 # Some defaults are conditional on a fact this module cannot see. `guardrails`
 # needs none: its merge happens in `load_fleet`, which knows nothing but the
 # parsed YAML. `shared-documentation` does, and the gate cannot move down into
@@ -224,19 +293,60 @@ REGISTRY: dict[str, Disposition] = {
 # INSTRUCT tier. A predicate turns that same mistake into an `AttributeError` at
 # compose time. Loud and instant beats quiet and universal.
 #
-# `paths` is duck-typed on purpose — importing `Paths` here would make the
-# policy module depend on the path resolver it is meant to be independent of.
-#
 # WHEN A SECOND PER-ENTRY FACT APPEARS, do not add a third side table: that is
 # the point at which `entries` should become `tuple[Entry, ...]` and both facts
 # move onto the entry itself. Two tables is a pair; three is a pattern nobody
 # chose.
-AVAILABILITY_GATES: dict[str, Callable[[Any], bool]] = {
-    "shared-documentation": lambda paths: paths.shared_docs is not None,
+AVAILABILITY_GATES: dict[str, Callable[[Facts], bool]] = {
+    # MUTUALLY EXCLUSIVE, and `test_defaults_registry.py` asserts it over every
+    # combination of facts. These two carry the same six-section slot with
+    # opposite navigation instructions, so a fleet shape that satisfied both
+    # would compose a bot that is told to hand-scan a tree AND never to open it
+    # — which is #1172, re-created by the mechanism built to fix it. A shape
+    # that satisfied neither would silently drop the protocol estate-wide.
+    "shared-documentation": lambda f: f.shared_docs and not f.vault_wired,
+    "shared-documentation-vault": lambda f: f.shared_docs and f.vault_wired,
 }
 
 
-def available(entry: str, paths: Any) -> bool:
+#: Entries that occupy ONE slot: at most one may compose, whatever its source.
+#:
+#: AVAILABILITY IS NOT ENOUGH, and assuming it was is how the first version of
+#: this fix re-created #1172 in a worse form. A gate filters the DEFAULT
+#: injection; it never sees `bot.protocols`. So a vault-wired fleet that
+#: DECLARED `shared-documentation` composed the hand-scan form (declared, hence
+#: unfiltered) AND the vault form (gated in) AND the template's vault section —
+#: three `Shared Documentation` headings with opposite instructions. Measured on
+#: a real compose, not reasoned about.
+#:
+#: `local/home/tl-enterprises/fleet.yaml` declares `shared-documentation`
+#: explicitly today. It is vault-less, so the defect is latent there rather than
+#: live — which is exactly the kind of thing that ships and then wakes up.
+#:
+#: The DECLARATION SELECTS THE SLOT, NOT THE FORM. "Give this bot the
+#: shared-documentation protocol" is a fleet's statement of intent; which form
+#: implements it is a compositor concern, decided by how the fleet is wired. So
+#: the unavailable member is dropped even when named explicitly — the operator
+#: gets the protocol they asked for, in the form their fleet can actually
+#: follow.
+EXCLUSIVE_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"shared-documentation", "shared-documentation-vault"}),
+)
+
+
+def resolve_exclusions(names: list[str], facts: Facts) -> list[str]:
+    """Drop members of an exclusive group that are not available for *facts*.
+
+    Applied to the FINAL list — declared plus defaulted — because the declared
+    half is the one the availability gate cannot reach. Order is preserved; a
+    group with no available member drops all of them, which is correct: no form
+    of the slot fits this fleet.
+    """
+    unavailable = {e for g in EXCLUSIVE_GROUPS for e in g if not available(e, facts)}
+    return [n for n in names if n not in unavailable]
+
+
+def available(entry: str, facts: Facts) -> bool:
     """Whether ``entry``'s precondition holds for this fleet.
 
     An entry with no gate is unconditional — the common case, and stated HERE
@@ -244,7 +354,7 @@ def available(entry: str, paths: Any) -> bool:
     open another module to learn what an absent gate means.
     """
     gate = AVAILABILITY_GATES.get(entry)
-    return True if gate is None else gate(paths)
+    return True if gate is None else gate(facts)
 
 
 # --- roles -------------------------------------------------------------------

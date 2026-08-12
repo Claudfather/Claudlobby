@@ -968,7 +968,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         lines.append("# Ecosystem")
         if bot.claudna_version:
             lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
-        if bot.claudron_vault_path:
+        if bot_is_vault_wired(bot):
             lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
         if bot.claudosseum_tenant_id:
             lines.append(
@@ -1562,16 +1562,43 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # no fleet could see and none could switch off (#1168 Phase 3, finding 1).
     #
     # Applied HERE and not in load_fleet's merge — where `guardrails` is applied
-    # — because these entries are availability-gated on `Paths`, which the config
-    # layer never receives. Root mode has no shared docs, so an ungated default
-    # would newly instruct every root-mode bot.
+    # — because these entries are availability-gated on facts the config layer
+    # never receives. Root mode has no shared docs, so an ungated default would
+    # newly instruct every root-mode bot.
+    #
+    # `vault_wired` reads the same field `claude.md.j2` branches on, and the two
+    # must not diverge on WHICH FORM a bot is told to use: divergence means the
+    # vault section beside the hand-scan protocol, which is #1172. The template
+    # carries the reciprocal note.
+    #
+    # They are NOT the same condition, deliberately. The template is
+    # `vault else shared_docs`; this gate is `shared_docs and vault`. Root mode
+    # plus a vault therefore composes the door section and no protocol — correct,
+    # since root mode has no fleet doc tree, and stated here because a comment
+    # claiming the two predicates are identical would mislead exactly when it
+    # matters. `tests/test_shared_docs_default.py` pins the agreement on the
+    # composed FILE rather than at the predicate, so it holds however either
+    # side is spelled.
+    facts = defaults.Facts(
+        shared_docs=paths.shared_docs is not None,
+        vault_wired=bot_is_vault_wired(bot),
+    )
     protocol_names = list(bot.protocols)
     sd = fleet.system_defaults
     if sd.enabled and sd.protocols:
         roles = (defaults.ROLE_MANAGER,) if is_manager else ()
         for name in defaults.resolve("protocols", roles):
-            if defaults.available(name, paths) and name not in protocol_names:
+            if defaults.available(name, facts) and name not in protocol_names:
                 protocol_names.append(name)
+    # Applied to the FINAL list, and OUTSIDE the opt-out branch above, because
+    # the hazard is the DECLARED half — which the availability gate never sees.
+    # Measured before this line existed: a vault-wired fleet declaring
+    # `shared-documentation` composed the hand-scan form, the vault form, and
+    # the template's vault section — three `Shared Documentation` headings with
+    # opposite instructions, which is #1172 in a worse form than the original.
+    # Outside the branch because opting out of the DEFAULTS must not re-admit a
+    # declared form that does not fit the fleet.
+    protocol_names = defaults.resolve_exclusions(protocol_names, facts)
 
     # Projects table composes for managers only (F6-style context budget:
     # workers resolve tiers from the bot.conf env map, not prose).
@@ -1799,13 +1826,38 @@ _CLAUDRON_HOOK_EVENTS = {
 }
 
 
+def bot_is_vault_wired(bot: BotConfig) -> bool:
+    """Whether this bot reaches knowledge through a Claudron vault.
+
+    Trivial, and it exists because its ABSENCE was the finding (#1172). Three
+    places decide this one fact — `claude.md.j2`'s Shared Documentation branch,
+    the `CLAUDRON_VAULT_PATH` export in `bot.conf`, and the availability gate on
+    the `shared-documentation*` protocol defaults — and they must agree. When
+    they disagree the bot is told to use the vault door AND to hand-scan the
+    tree the door forbids opening, which is the defect this named the fix for.
+
+    NOT `_session_loop_enabled`, which is a different question wearing a similar
+    shape: that one is tri-state and an explicit `claudron_session_loop: false`
+    wins over a wired vault. Gating the protocol on it would give a vault-wired
+    bot with the session loop off `shared_docs and not vault_wired` — the
+    HAND-SCAN form. That does not merely drop the vault protocol; it re-creates
+    #1172 exactly, on the bots least likely to be looked at.
+    """
+    return bool(bot.claudron_vault_path)
+
+
 def _session_loop_enabled(bot: BotConfig) -> bool:
     """Resolve the tri-state ``claudron_session_loop``: an explicit value wins;
-    unset defaults True exactly when the bot is vault-wired (has a
-    ``claudron_vault_path``), False otherwise."""
+    unset defaults True exactly when the bot is vault-wired.
+
+    The fallback goes through ``bot_is_vault_wired`` so "exactly when the bot is
+    vault-wired" is true by construction rather than by two copies of the same
+    expression agreeing today. `validator.py` already resolves a vault a richer
+    way (`detect_vault`); if that ever becomes the definition, this follows.
+    """
     if bot.claudron_session_loop is not None:
         return bot.claudron_session_loop
-    return bool(bot.claudron_vault_path)
+    return bot_is_vault_wired(bot)
 
 
 @functools.cache
