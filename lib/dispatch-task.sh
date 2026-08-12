@@ -11,6 +11,9 @@
 #   --supersedes ID    This dispatch REPLACES an earlier one; the named task id is
 #                      retired rather than left to age out and page. Opt-in, and
 #                      inert when omitted — see the ledger-write comment below.
+#                      When omitted and the bot already has an open row that
+#                      references the same issue, a note names the id to pass
+#                      (#1032). It never blocks and never guesses.
 #   --botcommand       Force the [BOTCOMMAND] envelope with no other fields
 #
 # Envelope sends MINT a task id (mint_task_id, lib-common), record it in the
@@ -20,7 +23,7 @@
 # false-positive overdue, since the worker cannot echo what it never saw.
 #
 # Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by,
-# claudron_hits,supersedes} to state/dispatch-log.jsonl (self-rotated via
+# claudron_hits,supersedes,open_at_dispatch} to state/dispatch-log.jsonl (self-rotated via
 # rotate_jsonl_by_ts) so the fleet-pulse watchdog can flag `overdue_dispatch`
 # if no terminal [BOTREPORT] (completed|failed|blocked) arrives by expected_by.
 # Manager identity is this bot's $BOT_ID; the deadline defaults to
@@ -260,6 +263,37 @@ now_epoch=$(date +%s)
 expected_by=$(( now_epoch + DEADLINE_S ))
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# --- undeclared-supersession visibility (#1032) -------------------------------
+# `--supersedes` retired ZERO rows in a week here because nobody passed it, while
+# 25 of 43 mispaired rows were re-dispatch shaped — exactly its case. A usage gap
+# closed by intending to remember is not closed, so the tool says it at the only
+# moment the intent exists.
+#
+# TWO TIERS, and the split is a measurement not a preference. 51% of id'd
+# dispatches go to a bot that already holds an open row, so speaking on that would
+# fire on half of all traffic — the same dead-signal defect #1032 is about. Only
+# the shared-reference case (11%) is said out loud; the count is recorded.
+#
+# Never blocks and never rewrites intent: queueing two tasks on one bot is
+# legitimate, and the tool cannot tell a queue from a replacement. Skipped
+# entirely when the caller already declared, and fail-open at every step — a
+# dispatch must never fail because a hint helper was unavailable.
+OPEN_AT_DISPATCH=0
+if [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
+    _dt_reports="$(fleet_runtime_dir)/report-back.jsonl"
+    _dt_hint=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" \
+        --bot "$WORKER_SESSION" --dispatch-log "$LEDGER" \
+        --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || true)
+    OPEN_AT_DISPATCH=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" --count-only \
+        --bot "$WORKER_SESSION" --dispatch-log "$LEDGER" \
+        --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || echo 0)
+    case "$OPEN_AT_DISPATCH" in ''|*[!0-9]*) OPEN_AT_DISPATCH=0 ;; esac
+    # Only the loud tier is printed, and only when the caller has NOT declared.
+    if [ -z "$DISPATCH_SUPERSEDES" ] && [ -n "$_dt_hint" ]; then
+        printf '%s\n' "$_dt_hint" >&2
+    fi
+fi
+
 # Escape backslash + double-quote for valid JSON (no jq dependency).
 safe_task=$(json_escape "$TASK")
 
@@ -282,12 +316,22 @@ _append_ledger() {
     # answered 6-7h late. Retiring those would have turned a false-page bug into a
     # silently-dropped-task bug.
     #
-    # Schema-uniform rows: task_id/workstream/claudron_hits/supersedes always emitted
-    # (empty = absent, matching the report ledger's always-emit convention;
-    # every consumer treats "" as falsy). claudron_hits is digits-or-empty by
-    # construction (the preflight parser prints a count), so no escaping.
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s"}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" >> "$LEDGER"
+    # `open_at_dispatch` is the QUIET tier of the #1032 visibility pair: how many
+    # rows this bot already had open when this one was minted. It is recorded
+    # rather than spoken because it is true of 51% of dispatches — see the
+    # two-tier note above. Recording it is what makes the usage gap MEASURABLE:
+    # `open_at_dispatch > 0 AND supersedes == ""` is the population that should
+    # shrink as the declaration habit lands, and without the field there is no
+    # before to compare an after against. Digits by construction (validated to 0
+    # on any non-numeric), so no escaping.
+    #
+    # Schema-uniform rows: task_id/workstream/claudron_hits/supersedes/
+    # open_at_dispatch always emitted (empty = absent, matching the report
+    # ledger's always-emit convention; every consumer treats "" as falsy).
+    # claudron_hits is digits-or-empty by construction (the preflight parser
+    # prints a count), so no escaping.
+    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s}\n' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" >> "$LEDGER"
     rotate_jsonl_by_ts "$LEDGER"
 }
 with_lock "$LEDGER.lock" _append_ledger
