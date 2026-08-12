@@ -19,20 +19,28 @@ the delta is named in the PR body, not that it is absent.
 
 ## The baselines — diff against the newest, cite the anchor
 
-| file | ref | what it is |
-|---|---|---|
-| `naked-bot-2026-08-11.json` | `b196936` | **The anchor.** Phase 1 merged, zero defaults admitted. Frozen; do not overwrite. |
-| `naked-bot-2026-08-12.json` | `a48e60f` | **The current diff target.** Phase 2's first admission (`protocols`). |
+**Two files, and only ever two: an anchor and a rolling current.**
 
-Diff a new PR against the **newest**; a PR that diffed against the anchor would
-re-report every previously-argued admission as its own delta, and the reviewer
-would have to subtract history by hand to find the change under review.
+| file | what it is |
+|---|---|
+| `naked-bot-2026-08-11.json` | **The anchor** (`b196936`). Phase 1 merged, zero defaults admitted. Frozen — never overwritten. |
+| `naked-bot-2026-08-12.json` | **The current diff target.** Replaced in place by each admission; its `ref` field says which commit it describes. |
 
-**The anchor is kept rather than overwritten** because it is the only recorded
-state in which the estate's pre-registry behaviour is legible as a whole. It is
-reproducible in principle — `--ref b196936` re-derives it — but a claim that has
-to be re-derived to be checked usually is not checked. Add a dated file per
-admission; never edit one in place.
+Diff a new PR against the **current** file; a PR that diffed against the anchor
+would re-report every previously-argued admission as its own delta, and the
+reviewer would have to subtract history by hand to find the change under review.
+
+**The anchor is kept** because it is the only recorded state in which the
+estate's pre-registry behaviour is legible as a whole, and a claim that has to
+be re-derived to be checked usually is not checked.
+
+**Intermediates are not kept, and this supersedes the "add a dated file per
+admission; never edit one in place" line written in #1174.** That rule was wrong
+in two ways, both visible one PR later: #1172 landed a second admission on the
+*same day*, so the dated filename does not even disambiguate; and ten entity
+types remain, so the rule grows a file per admission without bound while every
+superseded file is exactly reconstructible with `--ref <sha>`. What has real
+value is the pre-registry anchor and a single unambiguous current target.
 
 The rest of this section describes the anchor, and holds for both except where
 a finding below is marked resolved.
@@ -279,13 +287,20 @@ until the probe was added.
   a repo-root `fleet.yaml`, no `--fleet`) is never composed, so any default whose
   presence differs between the two modes is invisible here. That is not
   hypothetical: `shared-documentation` composes in overlay mode and **not** in
-  root mode, and this gate reported it as unconditional across all 16 arms
-  because all 16 are overlay. A root-mode arm would have shown it. Adding one is
+  root mode, and this gate reported it as unconditional across every arm because
+  every arm is overlay. A root-mode arm would have shown it. Adding one is
   cheap — the probe writes `fleet.yaml` at the export root instead of under
   `local/`, and drops `--fleet` from both subprocess calls.
 - **One bot, one expertise.** Role overlays (`Disposition.roles`, `manager`) are
   unexercised — no arm composes a manager. When Phase 2 populates a role overlay,
   this gate needs a manager arm or it will not see it.
+- **Fleet SHAPE is covered on exactly one axis.** `shape:vault-wired` exists
+  because #1172 lived on an axis every other arm was blind to: the opt-out arms
+  all vary what a fleet switched **off**, and that one varied how it is **wired**.
+  The generalisation is still open — `teams:`, multi-bot fleets, per-bot
+  `accounts`, an overlay `library/` shadowing a shared file are all shapes, and
+  none is composed here. **When a default turns out to depend on a shape, adding
+  the arm is part of the fix**, or the gate keeps certifying a fleet nobody runs.
 - **The composed `CLAUDE.md` is compared by SECTION NAME, not by bytes.** A
   default that changes prose *inside* an existing section moves nothing this gate
   records. The byte-level before/after on the default path is a separate
