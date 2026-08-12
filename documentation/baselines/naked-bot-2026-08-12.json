@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "ref": "5f75bc0dbb9c940ef50eb87005e60a12eb7a174d",
+  "ref": "a02964c12bbcfe572971bbc2fbc0770f57efb747",
   "freshbox": {
     "rc": 0,
     "output": "Fresh-box self-containment audit \u2014 naked-probe (1 bots)\n  OK \u2014 every grant traces to an equipped source; Tier-A settings composed per-bot. Self-contained."
@@ -2390,6 +2390,7 @@
           "Shared Documentation",
           "Pre-Work Checks",
           "Writing Convention",
+          "Lifecycle",
           "Working Documents",
           "Promotion Flow"
         ],
@@ -2500,6 +2501,7 @@
             "Shared Documentation",
             "Pre-Work Checks",
             "Writing Convention",
+            "Lifecycle",
             "Working Documents",
             "Promotion Flow"
           ],
