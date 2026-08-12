@@ -24,7 +24,7 @@ import jinja2
 import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
-from . import defaults, dotenv, tool_resolve  # noqa: F401 — used in compose_claude_md
+from . import defaults, dotenv, tool_resolve
 from .config import BotConfig, FleetConfig, load_fleet, load_host_jobs
 from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (

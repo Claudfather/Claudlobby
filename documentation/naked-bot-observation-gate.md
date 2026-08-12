@@ -33,7 +33,7 @@ that happened to be picked.
 |---|---|---|---|---|
 | expertise | INSTRUCT | — | *(no instruction surface — becomes the title + body)* | — |
 | skills | INSTRUCT | — | *(no instruction surface)* | — (`.claude/skills/` exists, empty) |
-| **protocols** | **INSTRUCT** | **—** | **6 sections, undeclared — see below** | — |
+| **protocols** | **INSTRUCT** | `shared-documentation` *(admitted after this baseline — §1)* | **6 sections** | — |
 | principles | INSTRUCT | — | none | — |
 | post_actions | INSTRUCT | — | none | — |
 | guardrails | RESTRICT | `claudlobby-dev-in-projects` | 1 section | — |
@@ -79,7 +79,40 @@ registry** and false **of the bot**. That gap is exactly what the plan's hard
 requirement — "spun up and what lands OBSERVED, not reasoned about" — exists to
 catch, and reading `defaults.py` alone would never have shown it.
 
+> **RESOLVED — the entry is now registered, and two claims above are corrected.**
+>
+> `shared-documentation` is `REGISTRY["protocols"]`, `grandfathered`, removable
+> with `system_defaults.protocols: false`. The default path composes
+> byte-identically: same `sha256` before and after, and the `[baseline]` arm's
+> only delta is `registry_entries: [] -> ['shared-documentation']`.
+>
+> **"Whenever `paths.shared_docs` is truthy" is not "unconditional".** Measured:
+> a **root-mode** naked bot (no `--fleet`) composes no shared-documentation
+> section at all, because `Paths.shared_docs` is None without a `fleet_dir`. The
+> append fired for every *overlay-mode* fleet — which is every real fleet on this
+> estate, so the effect was estate-wide — but a default moved into `load_fleet`'s
+> merge ungated would have newly instructed every root-mode bot. Hence
+> `defaults.AVAILABILITY_GATES`. **This gate observes overlay mode only**, so it
+> could not have shown that; see *What the gate does NOT cover*.
+>
+> **A second, worse instance found while arguing the tier test.** A bot with
+> `claudron_vault_path` set composes the template's vault section — *"reached
+> through the Claudron door, NOT by reading a raw doc tree"* — and then this
+> protocol telling it to hand-scan `planning/active/INDEX.md`. Both land in one
+> file; the append never checked for a vault. That is a live contradiction in
+> composed instructions on every vault-wired bot, it pre-dates the registration,
+> and it is deliberately **not** fixed there: the fix changes composed
+> instructions on the default path, which needs its own decision and its own
+> before/after. It is why the entry is `grandfathered` rather than argued as
+> clearing the INSTRUCT bar — it half-fails it.
+
 ### 2. The per-entity-type opt-out surface does not exist for 11 of 12 types
+
+> **PARTLY RESOLVED — now 10 of 12.** `system_defaults.protocols` exists and is
+> measured working (`optout:protocols` and `control:kill-switch` are the only two
+> arms whose composed instructions move). Ten types still have no opt-out, and
+> **an unrecognised key is still silently dropped**, so the "cannot tell a
+> working opt-out from a typo" half of this finding stands untouched.
 
 `SystemDefaultsConfig` reads exactly five keys: `enabled`, `hooks`, `timers`,
 `observability`, `guardrails`. Of the twelve entity types, only `guardrails` has
@@ -120,6 +153,16 @@ records its verdict. But it is a floor, not the gate: an INSTRUCT default could
 land fleet-wide with freshbox green throughout.
 
 ### 4. Populating a registry constant would change nothing — the wiring is absent for 11 of 12
+
+> **PARTLY RESOLVED — now 10 of 12, and the second wiring is NOT the first one's
+> shape.** `protocols` resolves through `defaults.resolve()` in `composer.py`,
+> deliberately **not** through `load_fleet`'s `_merge_lists`: its entry is
+> availability-gated on `Paths.shared_docs`, and `load_fleet` takes a bare path
+> and never learns whether the fleet is overlay- or root-mode. So the
+> "compositor-constant pathway" is not one pathway repeated — a Phase 2 type
+> whose default is conditional on anything filesystem-shaped needs the composer
+> seam, and one whose default is unconditional needs the config seam. Deciding
+> which is part of each type's PR, not a detail of it.
 
 `config.py` imports the registry and consumes exactly one thing from it:
 
@@ -183,9 +226,21 @@ until the probe was added.
 
 ## What the gate does NOT cover
 
+- **Overlay mode only — every arm passes `--fleet`.** Root mode (`generate` with
+  a repo-root `fleet.yaml`, no `--fleet`) is never composed, so any default whose
+  presence differs between the two modes is invisible here. That is not
+  hypothetical: `shared-documentation` composes in overlay mode and **not** in
+  root mode, and this gate reported it as unconditional across all 16 arms
+  because all 16 are overlay. A root-mode arm would have shown it. Adding one is
+  cheap — the probe writes `fleet.yaml` at the export root instead of under
+  `local/`, and drops `--fleet` from both subprocess calls.
 - **One bot, one expertise.** Role overlays (`Disposition.roles`, `manager`) are
   unexercised — no arm composes a manager. When Phase 2 populates a role overlay,
   this gate needs a manager arm or it will not see it.
+- **The composed `CLAUDE.md` is compared by SECTION NAME, not by bytes.** A
+  default that changes prose *inside* an existing section moves nothing this gate
+  records. The byte-level before/after on the default path is a separate
+  measurement and has to be run separately.
 - **No bot is spun up.** This observes composition only. A default that changes
   runtime behaviour without changing composed output is invisible here; that is
   `validate-bot-change.sh`'s job.
