@@ -204,38 +204,68 @@ def test_declaring_a_list_does_not_act_as_an_opt_out(etype, monkeypatch):
     assert "fleet-declared" in names
 
 
-def test_the_opt_out_surface_does_not_exist_for_eleven_of_twelve_types():
+#: Entity types that have a `system_defaults.<type>` opt-out key today.
+#: Inverted one at a time as Phase 2 builds them — `guardrails` at Phase 1,
+#: `protocols` when `shared-documentation` was admitted to the registry.
+TYPES_WITH_AN_OPT_OUT = {"guardrails", "protocols"}
+
+
+def test_the_opt_out_surface_does_not_exist_for_ten_of_twelve_types():
     """MEASURED, and this test records a GAP rather than blessing it.
 
-    `SystemDefaultsConfig` reads exactly `enabled`, `hooks`, `timers`,
-    `observability`, `guardrails`. Of the twelve entity types only `guardrails`
-    has an opt-out key at all, so the plan's checklist item — "for each of the
-    12 types, `system_defaults.<type>: false` demonstrably removes the default"
-    — is not satisfiable today for the other eleven.
+    `SystemDefaultsConfig` reads a FIXED set of keys, not one per entity type.
+    Ten of the twelve still have no opt-out, so the plan's checklist item — "for
+    each of the 12 types, `system_defaults.<type>: false` demonstrably removes
+    the default" — remains unsatisfiable for those ten.
 
-    Worse, an unrecognised key is accepted silently: `_coerce_system_defaults`
-    drops it and `generate` exits 0, so a fleet cannot tell a working opt-out
-    from a typo. Both are confirmed on real composes by
-    `lib/naked-bot-observe.py` (`optout:*` and `control:unknown-key` arms).
+    Worse, and UNCHANGED by Phase 2 so far: an unrecognised key is accepted
+    silently. `_coerce_system_defaults` drops it and `generate` exits 0, so a
+    fleet still cannot tell a working opt-out from a typo. Both confirmed on
+    real composes by `lib/naked-bot-observe.py` (`optout:*` and
+    `control:unknown-key` arms).
 
-    This test will FAIL when Phase 2 adds the missing keys. That is the intent:
-    it is the todo, and when it goes red it is telling you to invert it.
+    This test FAILS every time Phase 2 adds a key. That is the intent: it is the
+    todo, and going red is it telling you to move the type into
+    `TYPES_WITH_AN_OPT_OUT` and re-record the baseline.
     """
     sys.path.insert(0, str(REPO_ROOT))
     import claudlobby.config as config
 
     cfg = config._coerce_system_defaults(
-        {t: False for t in nbo.SURFACES if t != "guardrails"}
+        {t: False for t in nbo.SURFACES if t not in TYPES_WITH_AN_OPT_OUT}
     )
     still_on = [
         t
         for t in nbo.SURFACES
-        if t != "guardrails" and getattr(cfg, t, "NO SUCH FIELD") == "NO SUCH FIELD"
+        if t not in TYPES_WITH_AN_OPT_OUT
+        and getattr(cfg, t, "NO SUCH FIELD") == "NO SUCH FIELD"
     ]
-    assert len(still_on) == 11, (
+    assert len(still_on) == len(nbo.SURFACES) - len(TYPES_WITH_AN_OPT_OUT), (
         "the per-entity-type opt-out surface changed — re-run "
         "lib/naked-bot-observe.py and update the baseline record"
     )
+    assert still_on and len(still_on) == 10, (
+        f"expected ten types without an opt-out, got {len(still_on)}: {sorted(still_on)}"
+    )
+
+
+def test_every_declared_opt_out_key_actually_exists_on_the_config():
+    """The other direction, and the one that fails quiet.
+
+    A name in `TYPES_WITH_AN_OPT_OUT` that `SystemDefaultsConfig` does not carry
+    would make the test above assert a smaller gap than really exists — the
+    surface would look built while the key silently no-ops, which is the exact
+    typo-indistinguishable-from-working failure this pair exists to expose.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    import claudlobby.config as config
+
+    cfg = config._coerce_system_defaults({t: False for t in TYPES_WITH_AN_OPT_OUT})
+    for t in sorted(TYPES_WITH_AN_OPT_OUT):
+        assert getattr(cfg, t, "NO SUCH FIELD") is False, (
+            f"{t} is declared to have an opt-out but SystemDefaultsConfig has no "
+            "such field — the key is silently dropped"
+        )
 
 
 def test_the_guardrails_opt_out_does_exist_and_is_the_positive_control():
@@ -357,9 +387,7 @@ def test_inert_flags_a_registry_entry_that_composed_nothing():
 
 
 def test_inert_is_false_when_the_entry_actually_composed():
-    assert (
-        nbo.TypeObservation("restrict", ["g"], ["Some Guardrail"], []).inert is False
-    )
+    assert nbo.TypeObservation("restrict", ["g"], ["Some Guardrail"], []).inert is False
     assert nbo.TypeObservation("wire", ["t"], None, ["tools/t.sh"]).inert is False
 
 
