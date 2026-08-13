@@ -86,14 +86,39 @@ Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the tabl
 
 **Not yet captured via hooks:** several fleet-health signals are not derivable from the Claude Code PreToolUse/PostToolUse hook payload. Managers must use live checks for these until the hook schema exposes them:
 
-- **`rate_limit`** — not present in the payload at all. Use live checks
-  (capture-pane, direct query) for rate-limit status.
+- **`rate_limit`** — not present in the payload, and **no instrument reports it.**
+  `capture-pane` is not one, and this holds whatever the TUI does or does not
+  draw: Claude Code runs in the tmux **alternate screen**, which retains no
+  scrollback, so a capture can only ever describe the present frame. Measured on
+  this host: `history_size` is **0** on every bot pane while `history-limit`
+  reads `2000`, and `capture-pane -S -` returns exactly `pane_height` lines —
+  the current frame, with nothing behind it. There is no durable trace either;
+  `lib/transcript-usage.py` measures spend, not position against a ceiling.
+  **A limit that actually trips announces itself** and needs no instrument —
+  that is the signal to act on. Anything short of it is a *sighting*: label it
+  as one, use it to raise a question, never as a measurement — the frame is
+  gone, so neither you nor anyone else can re-verify it afterwards.
 - **`context_warning`** — not present in the payload, **and not obtainable by
   any other route either.** Capture-pane does not close this gap: no percentage
   is ever rendered, so there is nothing to capture, and a bot cannot
   self-measure it. The supported signal is the worker's own `context-degraded`
   report plus completed-work counts — see the `context-management` protocol.
 - **`mcp_error`** — a failing tool call (including an MCP server returning `isError`) fires the `PostToolUseFailure` hook event rather than `PostToolUse`, and only that event carries an error field. The `bot-vitals.sh` hook is wired to Pre/PostToolUse, so no `mcp_error` event is produced. Detecting dead or erroring MCP servers requires a dedicated mechanism (e.g. a `PostToolUseFailure` hook or an out-of-band liveness probe).
+
+**Never sweep panes to establish absence — for `rate_limit` or `context_warning`.**
+A quiet pane is one instant for one bot, not a history, and "checked all N panes,
+nothing there" reads as authoritative when it is not. **Absence of a rendered
+warning is not evidence of headroom**, and the two fail for *independent* reasons,
+neither of which depends on what the TUI renders:
+
+- `rate_limit` — the frame is momentary. A quiet pane is equally consistent with a
+  warning that was drawn and has already been overwritten.
+- `context_warning` — a threshold warning is absent *below* the threshold too. Quiet
+  means "not over the line", which is also what "nowhere near the line" looks like.
+
+So a clean sweep can never distinguish *fine* from *already past it*, and it is the
+reading that gets acted on, because absence looks like an all-clear. Act on a limit
+that trips; treat everything else as a sighting.
 
 ## Reading Events
 
