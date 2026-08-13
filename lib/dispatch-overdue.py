@@ -38,6 +38,17 @@ resolver would pick, so "open but not yet due" is readable by the read door:
   Prints: "<dispatched_at> <expected_by> <task_id>" per row, oldest first
   (expected_by is "-" when the row carries none). Deadline-blind, so this is a
   strict superset of --all's rows for the same bot; --open-task is its head.
+  Also states its scope on STDERR ("--open: bot=... -> N open ...") on every
+  run, so an empty result names what it filtered on and can never be read as
+  "nothing exists" (#1187). Stdout stays rows-only for machine callers.
+
+BOT-FIRST vs LOGS-FIRST -- the one grammar trap here (#1187). --open and
+--open-task take the BOT first; --all, --orphans, --unassigned and single-bot
+mode take the LOGS first. Passing one the other's order keeps the arity valid,
+so it parses cleanly with a path in the bot slot. --open/--open-task refuse a
+first positional that cannot be a bot id (holds "/", ends ".jsonl", or is
+blank) with rc 2; see _not_a_bot_id. The other modes do NOT yet carry that
+gate -- their bot slot is still unchecked.
 Unassigned mode (#1024) -- the MIRROR of overdue: a worker that reported and was
 never re-tasked. Purely temporal (newest dispatch vs newest report); it never
 reads whether a dispatch is open, because superseded rows stay open forever and
@@ -51,7 +62,9 @@ ledgers: orphan classification reads `.spawn` mtimes, so that mode alone depends
 on ambient filesystem state. Everything else stays a pure function of
 (dispatch log, report ledger, clock).
 
-No output (and exit 0) when nothing is overdue.
+No output (and exit 0) when nothing is overdue. --open is the one exception and
+deliberately so: it exits 0 with no STDOUT rows, but always writes its scope
+line to STDERR (above).
 
 Kept as a standalone, stdlib-only script so it is unit-testable in isolation and
 callable from fleet-pulse.sh.
@@ -586,6 +599,55 @@ def _take_bots_dir(argv: list[str]) -> tuple[list[str], str | None]:
     return argv, None
 
 
+def _not_a_bot_id(value: str) -> str | None:
+    """Why this first positional cannot be a bot id — or None if it might be.
+
+    #1187. `--open`/`--open-task` take the BOT first; `--all`/`--orphans` take
+    the LOGS first. Calling one with the other's grammar keeps the arity valid,
+    so the existing count check passes, a path lands in the bot slot, nothing
+    matches it, and the door prints nothing at rc 0 — byte-identical to a
+    genuine "nothing open". That is how a manager read a full backlog as
+    all-clear while checking whether its closures had worked.
+
+    So the missing check is on SHAPE, not count. Wrong ARITY already fails
+    loudly and is not the hazard: measured, two positionals return rc 2 with the
+    usage line. It is specifically right-count/wrong-order that is silent.
+
+    Lexical only, and deliberately NOT a roster lookup. This module is a pure
+    function of (dispatch log, report ledger, clock) — everything but --orphans
+    reads no ambient state — and a manifest read here would both break that and
+    re-import the #526 host-global-vs-per-fleet mismatch into a validator, where
+    a legitimate cross-fleet name would then be refused outright.
+
+    Rejects only what a bot id can NEVER be, so it cannot refuse a real one: a
+    bot id names a directory under runtime/bots/ and a tmux session, so it holds
+    no "/" and does not end ".jsonl". Both shapes are needed — a ledger passed
+    by bare filename from its own directory carries no separator.
+    """
+    if not value.strip():
+        return "an empty bot id"
+    if "/" in value:
+        return f"a path: {value!r}"
+    if value.endswith(".jsonl"):
+        return f"a ledger file: {value!r}"
+    return None
+
+
+def _reject_bot_slot(mode: str, value: str) -> bool:
+    """Print the #1187 shape refusal for `mode`, or return False to proceed."""
+    why = _not_a_bot_id(value)
+    if why is None:
+        return False
+    print(
+        f"dispatch-overdue.py: {mode} expects <bot_id> first, got {why}\n"
+        f"  usage: dispatch-overdue.py {mode} <bot_id> <dispatch_log> <report_ledger>\n"
+        "  note:  --all/--orphans/--unassigned take the LOGS first; "
+        "--open/--open-task take the BOT first.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def main() -> int:
     argv, bots_dir = _take_bots_dir(sys.argv)
     if len(argv) < 3:
@@ -601,6 +663,14 @@ def main() -> int:
         if len(argv) < 5:
             print(__doc__.strip().splitlines()[0], file=sys.stderr)
             return 2
+        # Shares --open's grammar, so it shares --open's hazard (#1187). Inert
+        # for the only production caller: report-back.sh passes its own $BOT,
+        # and a $BOT shaped like a path already resolved to nothing here. The
+        # refusal is on stderr behind that caller's 2>/dev/null and its rc
+        # behind `|| true`, so the fail-open contract above is untouched — a
+        # report-back still degrades to an id-less report, never an error.
+        if _reject_bot_slot("--open-task", argv[2]):
+            return 2
         tid = open_task_id(argv[2], argv[3], argv[4])
         if tid:
             print(tid)
@@ -612,8 +682,38 @@ def main() -> int:
         if len(argv) < 5:
             print(__doc__.strip().splitlines()[0], file=sys.stderr)
             return 2
-        for da, exp, tid in open_dispatches(argv[2], argv[3], argv[4]):
+        if _reject_bot_slot("--open", argv[2]):
+            return 2
+        rows = open_dispatches(argv[2], argv[3], argv[4])
+        for da, exp, tid in rows:
             print(f"{da} {exp if exp is not None else '-'} {tid}")
+        # State the scope, ALWAYS and on STDERR (#1187). Always, because the
+        # shape gate above cannot reach the rest of the class: a plausible but
+        # wrong bot -- a typo, or a live name belonging to another fleet under
+        # #526 -- still returns zero rows at rc 0, which is coverage honesty's
+        # exact failure. An empty result that names what it filtered on can no
+        # longer be read as "nothing exists".
+        #
+        # STDERR is load-bearing, not convention, and the harm is MEASURED
+        # rather than reasoned. report-back.sh (:117) pipes this stdout through
+        # `awk {print $3}` to decide whether a supplied --task id is open. On
+        # stdout this line is parsed as a row: field 3 is "->", so the open set
+        # becomes non-empty and the "only a NON-EMPTY open set can contradict
+        # the caller" fail-open (#1146) inverts.
+        #
+        # The trigger is narrower than it first looks, which is why it has to be
+        # run rather than argued. A bot that DOES hold an open row still matches
+        # its own id -- the phantom adds an entry, it does not remove the real
+        # one -- so that case stays clean and reads as proof the placement does
+        # not matter. It bites where the bot has NOTHING open: a valid id then
+        # meets an open set of exactly ["->"], and a correct report is flagged
+        # `supplied-id-not-open` with `open now: ->`. Measured on the real
+        # script, both arms. That caller reads stdout and discards stderr, so
+        # this line is inert for it by construction.
+        print(
+            f"--open: bot={argv[2]!r} -> {len(rows)} open id'd dispatch(es)",
+            file=sys.stderr,
+        )
         return 0
 
     # #1024 mirror watchdog. No threshold here: fleet-pulse applies its own per

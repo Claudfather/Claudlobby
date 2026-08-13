@@ -292,6 +292,86 @@ or_ev2=$(grep -h '"type":"dispatch_orphaned"' "$OR_DIR"/data/events/fleet-*.json
 harness_check "#835 a second sweep does NOT re-record the same orphan (latch holds)" "$r"
 
 # ===========================================================================
+# #1187 — a read door whose misuse was indistinguishable from "nothing open".
+#
+# --open/--open-task take the BOT first; --all/--orphans take the LOGS first.
+# Passing one the other order keeps the ARITY valid, so a path lands in the bot
+# slot, nothing matches, and it exits 0 printing nothing -- byte-identical to a
+# real empty result. Wrong COUNT was always loud; only wrong ORDER was silent.
+#
+# Unit tests pin the matcher. What only running the real scripts can prove is
+# the half that has no unit: report-back.sh:117 pipes --open STDOUT through
+# awk to decide whether a supplied --task id is open, so the scope disclosure
+# has to reach a human WITHOUT reaching that pipe. This path had no runtime
+# coverage at all before #1187.
+# ===========================================================================
+echo ""
+echo "=== validate #1187: --open refuses a mis-ordered call and states its scope ==="
+
+T1187_BOT="val1187"
+T1187_DIR="$ROOT/local/$FLEET/runtime/bots/$T1187_BOT"
+mkdir -p "$T1187_DIR/data"
+cat > "$T1187_DIR/bot.conf" <<CONF
+BOT_NAME="$T1187_BOT"
+BOT_ID="$T1187_BOT"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+printf '{"ts":"2026-05-27T10:00:00Z","manager":"%s","bot":"%s","task_id":"t-1187-open","task":"do w","dispatched_at":%s,"expected_by":%s}\n' \
+    "$MGR" "$T1187_BOT" "$((now - 600))" "$((now - 10))" >> "$t835_dispatch"
+
+# THE defect: --all's grammar passed to --open. Three positionals, so the arity
+# check passes and a ledger path is read as the bot name.
+t1187_wrong_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" 2>/dev/null || true)
+t1187_wrong_rc=0
+python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" >/dev/null 2>&1 || t1187_wrong_rc=$?
+[ "$t1187_wrong_rc" -eq 2 ] && [ -z "$t1187_wrong_out" ] && r=yes || r=no
+harness_check "#1187 mis-ordered --open is REFUSED (rc 2), not a silent empty result" "$r"
+
+# The refusal has to name the remedy: the operator error is not knowing the two
+# grammars differ, so "invalid argument" alone would leave them stuck.
+python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" 2>"$ROOT/t1187.err" >/dev/null || true
+grep -q "take the BOT first" "$ROOT/t1187.err" && r=yes || r=no
+harness_check "#1187   ...and names the grammar split, not merely that it refused" "$r"
+
+# Wrong COUNT was already loud before this change. Pinned so the shape gate is
+# never mistaken for the thing that made misuse loud -- measuring THIS shape is
+# what makes the real defect read as unreproducible.
+t1187_arity_rc=0
+python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" >/dev/null 2>&1 || t1187_arity_rc=$?
+[ "$t1187_arity_rc" -eq 2 ] && r=yes || r=no
+harness_check "#1187 wrong ARITY was already loud and stays loud (the gate is about SHAPE)" "$r"
+
+# STDOUT must stay rows-only. This is the assertion that protects report-back.
+t1187_stdout=$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$T1187_BOT" "$t835_dispatch" "$VAL_REPORT_LEDGER" 2>/dev/null || true)
+printf '%s' "$t1187_stdout" | grep -q 't-1187-open' \
+    && ! printf '%s' "$t1187_stdout" | grep -q -- '--open:' && r=yes || r=no
+harness_check "#1187 --open STDOUT is rows only (no scope header for awk to eat)" "$r"
+
+# ...and the scope reaches a human, on stderr, even with ZERO rows -- the case
+# the shape gate cannot reach (a typo, or another fleet's bot under #526).
+python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "nosuchbot-1187" "$t835_dispatch" "$VAL_REPORT_LEDGER" 2>"$ROOT/t1187b.err" >/dev/null || true
+grep -q "nosuchbot-1187" "$ROOT/t1187b.err" && grep -q "0 open" "$ROOT/t1187b.err" && r=yes || r=no
+harness_check "#1187 an EMPTY result names the bot it filtered on (cannot read as nothing-exists)" "$r"
+
+# The regression probe, through the REAL report-back.sh. With nothing open the
+# supplied-id guard must stay fail-open (#1146): only a NON-EMPTY open set may
+# contradict the caller. A scope line on stdout makes that set ["->"] and flags
+# a correct report. Note the shape -- a bot HOLDING a row still matches its own
+# id, so that case reads clean and would pass a placement that is actually broken.
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="$MGR" \
+    "$LIB_DIR/report-back.sh" "nobodyhome1187" completed "nothing open here" \
+    --task "t-1187-not-open" >/dev/null 2>"$ROOT/t1187c.err" || true
+grep -q "is not open for" "$ROOT/t1187c.err" && r=no || r=yes
+harness_check "#1187 report-back with NOTHING open raises no false supplied-id anomaly" "$r"
+
+# ===========================================================================
 # #1024 — the MIRROR watchdog: reported, then never re-dispatched.
 #
 # Unit tests prove the join. What only running the real pulse can prove is that
