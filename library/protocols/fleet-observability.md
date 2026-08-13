@@ -112,8 +112,8 @@ done
 Filter for actionable events:
 
 ```bash
-grep -Eh '"type":"pane_stuck"|"type":"service_down"|"type":"session_missing"' \
-    "$bot_dir/data/events/fleet-${today}.jsonl" 2>/dev/null
+f="$bot_dir/data/events/fleet-${today}.jsonl"
+[ -f "$f" ] && grep -Eh '"type":"pane_stuck"|"type":"service_down"|"type":"session_missing"' "$f"
 ```
 
 ## Cross-Fleet Reads
