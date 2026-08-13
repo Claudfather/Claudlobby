@@ -123,6 +123,12 @@ mk_unit() {  # mk_unit <fleet> <bot> <rung_seconds>
 }
 
 iso_now() { date -u +%Y-%m-%dT%H:%M:%S.000Z; }
+# GNU form first, BSD second — the same two-form fallback epoch_to_iso_utc uses,
+# because the harness runs on both hosts.
+iso_at() {  # iso_at <epoch>
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null \
+        || date -u -r "$1" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null
+}
 
 # Which section a bot printed under.
 # The leading unindented-line rule CLEARS the section before the specific rules
@@ -141,6 +147,7 @@ section_of() {  # section_of "<output>" <bot>
         /^ADJUDICATE /         { s="ADJUDICATE";    next }
         /^RESCUED /            { s="RESCUED";       next }
         /^HALF-BOOTED/         { s="PARTIAL";       next }
+        /^LATE, UNEXPLAINED/   { s="LATE-UNEXPLAINED"; next }
         /^STRANDED ON BOOT/    { s="INBOUND-WOKEN"; next }
         s != "" && $1 == b { print s; exit }
     '
@@ -404,6 +411,11 @@ assert_contains "and it is named" "norung_bot" "$OUT7"
 # this, the test above would pass against a script that gates unconditionally.
 echo "== boot ladder gate, past the window =="
 BOOT=$(( $(date +%s) - 300 ))
+# `early`'s record was stamped at creation time, which is now BOOT+300s — past
+# the lateness bound (ladder 60s + first turn 60s). Re-stamped inside it, because
+# this arm is the positive control for the LADDER gate specifically: a bot that
+# fell foul of the LATENESS bound instead would satisfy nothing it is asked to.
+mk_transcript ladder early fresh "$(iso_at $(( BOOT + 90 )))" 2
 OUT8="$(run_snapshot "$BOOT")"; RC8=$?
 
 assert_eq "past the window it exits 0" "0" "$RC8"
@@ -626,8 +638,14 @@ assert_eq "incomplete outranks contaminated" "4" "$RC17"
 # perfectly good boundary.
 #
 # 8g left the clock 20s past a synthetic boot and a receipt dated today; both
-# are reset here. The 60s rung it composed onto `selfstarter` is left in place
-# and is inert, because BOOT is now days in the past.
+# are reset here. The 60s rung it composed onto `selfstarter` is REMOVED rather
+# than left to be inert: it was inert for the not-yet-due gate, which compares a
+# rung against elapsed time, but it is not inert for the lateness bound, which
+# derives its instant from the ladder END. Leaving it would put the bound at
+# BOOT+120s and make `selfstarter`'s BOOT+300s payload LATE-UNEXPLAINED in every
+# case below — cases about receipt boundaries, decided by something else
+# entirely. The bound has its own case set; these keep testing one thing.
+rm -f "$(bot_dir rescue selfstarter)"/*.service
 BOOT=1786020000
 
 # ---- 8h: the boundary field is ABSENT (row_field rc=1) ---------------------
@@ -796,6 +814,245 @@ add_asst inject slashonly s "$WHOLE_TS" 3
 OUT19="$(run_snapshot "$BOOT")"
 assert_eq "a prompt that is not THIS bot composed one does not satisfy it" \
     "PARTIAL" "$(section_of "$OUT19" slashonly)"
+
+# ── Case 10: the lateness bound on SELF-STARTED (#1203) ────────────────────
+# SELF-STARTED is reached by ELIMINATION — a payload no receipt covers and that
+# is not channel-shaped falls through to it. Compose that with the receipt list
+# being known-incomplete (#1110: a real rescue went unrecorded) and every wake
+# nobody wrote down is reported as good news.
+#
+# Measured, on the 2026-08-13 19:17:18Z boot: ari's payload landed at 19:43:30Z,
+# 26 minutes after boot, predating the only applicable receipt boundary, and was
+# printed "unaided". The ladder runs in seconds. The honest figure was 2 of 21;
+# the script printed 3.
+#
+# So arrival is bounded, and past the bound with nothing to account for it the
+# bot is LATE-UNEXPLAINED — its own answer, deliberately not RESCUED, because
+# nothing evidences a rescue. It reads as a gap, which is what it is.
+echo "== lateness bound on SELF-STARTED =="
+ROOT="$T/root5"; CFG="$T/cfg5"
+BOOT=1786020000                          # 2026-08-06T12:40:00Z
+# Ladder end 60s + first-turn allowance 60s => bound at BOOT+120 = 12:42:00Z.
+IN_TS="2026-08-06T12:41:30.000Z"         # BOOT+90   inside
+AT_TS="2026-08-06T12:42:00.000Z"         # BOOT+120  exactly ON the bound
+PAST_TS="2026-08-06T12:42:01.000Z"       # BOOT+121  one second past
+SUB_TS="2026-08-06T12:42:00.500Z"        # BOOT+120.5  half a second past
+ARI_TS="2026-08-06T13:06:12.000Z"        # BOOT+1572 the live exemplar
+
+declare_fleet bound intime atbound pastbound subsecond ladderend arishape
+for b in intime atbound pastbound subsecond ladderend arishape; do mk_dir bound "$b"; done
+
+# Rungs live in ONE place, and the teardown GLOBS rather than re-listing the
+# bots. Enumerating them twice is how case 10g first shipped: a bot added to the
+# fleet kept its unit through the no-ladder arm, the ladder stayed readable, and
+# the suppression under test never fired.
+bound_units() {  # bound_units <on|off>
+    if [ "$1" = "off" ]; then
+        rm -f "$ROOT"/local/home/bound/runtime/bots/*/*.service
+        return 0
+    fi
+    mk_unit bound intime 12;    mk_unit bound atbound 6
+    mk_unit bound pastbound 6;  mk_unit bound subsecond 6
+    mk_unit bound ladderend 60; mk_unit bound arishape 6
+}
+bound_units on
+
+# `intime` is the otis/ravi shape and the reason the bound is fleet-wide rather
+# than per-bot: a 12s rung with a payload at BOOT+90s is 78s past its OWN rung,
+# so a per-bot bound (own rung + allowance) would flag it. Both real self-starts
+# on the 2026-08-13 boot had exactly this shape — otis rung 15s at boot+97s,
+# ravi rung 12s at boot+96s — so a per-bot bound would have flagged the only two
+# genuine self-starts the estate has ever recorded.
+mk_transcript bound intime    fresh "$IN_TS"   3
+mk_transcript bound atbound   fresh "$AT_TS"   3
+mk_transcript bound pastbound fresh "$PAST_TS" 3
+# Records carry sub-second precision; the derived bound does not. Whole-second
+# fixtures alone leave the padding untested — found by mutation, not by reading:
+# stripping `.000` from the bound left the whole case set green. "." sorts BELOW
+# "Z", so against an unpadded 12:42:00Z a record at 12:42:00.500Z compares as
+# EARLIER and a bot half a second late is silently credited as a self-start.
+mk_transcript bound subsecond fresh "$SUB_TS"  3
+mk_transcript bound ladderend fresh "$IN_TS"   3
+mk_transcript bound arishape  fresh "$ARI_TS"  3
+
+OUT25="$(run_snapshot "$SANE_JOURNAL")"; RC25=$?
+
+# ---- 10a: the bucket exists, is reached, and is not any of the others ------
+assert_eq "a payload past the bound is LATE-UNEXPLAINED" \
+    "LATE-UNEXPLAINED" "$(section_of "$OUT25" arishape)"
+assert_eq "one second past the bound is enough" \
+    "LATE-UNEXPLAINED" "$(section_of "$OUT25" pastbound)"
+# Not folded into RESCUED — nothing here evidences a rescue, and saying one
+# happened would be the same fabrication as saying none did.
+assert_contains "late is NOT folded into RESCUED" \
+    "RESCUED — carried by a rescuer, NOT self-started (0)" "$OUT25"
+assert_contains "the section reads as a gap, not a pass" \
+    "This is a GAP, not a pass" "$OUT25"
+assert_contains "and says nothing recorded the wake" \
+    "something woke these bots and nothing recorded what" "$OUT25"
+# The per-bot line has to carry the instant AND its derivation, or an operator
+# cannot tell a bound that moved from one that was wrong.
+assert_contains "the row names the bound it failed" \
+    "past the self-start bound 2026-08-06T12:42:00Z" "$OUT25"
+assert_contains "and names what the bound was derived from" \
+    "(ladder 60s + first turn 60s)" "$OUT25"
+
+# ---- 10b: POSITIVE CONTROL — the bound must not fire, and lands where claimed
+# Without these the whole case is satisfied by a script that downgrades every
+# self-start, which would read as a fix and measure nothing.
+assert_eq "a payload inside the bound is still a self-start" \
+    "SELF-STARTED" "$(section_of "$OUT25" intime)"
+assert_eq "the bot that SETS the ladder end is still a self-start" \
+    "SELF-STARTED" "$(section_of "$OUT25" ladderend)"
+# Exactly ON the bound is not past it. This is the pair that proves the boundary
+# sits where the page says it does: 12:42:00.000Z passes and 12:42:01.000Z does
+# not, one second apart. "Far away fails" would pass against a bound anywhere.
+assert_eq "a payload exactly ON the bound is not past it" \
+    "SELF-STARTED" "$(section_of "$OUT25" atbound)"
+# ...and half a second past it IS. Together these two pin the boundary to within
+# 500ms, which is the resolution the records actually carry.
+assert_eq "half a second past the bound is late, not rounded down" \
+    "LATE-UNEXPLAINED" "$(section_of "$OUT25" subsecond)"
+# The otis regression, stated as its own assertion: `intime` is 78s past its own
+# rung and must survive anyway.
+assert_contains "a bot far past its OWN rung but inside the ladder bound survives" \
+    "intime" "$(printf '%s\n' "$OUT25" | awk '/^SELF-STARTED \(/,/^$/')"
+
+# ---- 10c: it is a row verdict, not a page refusal -------------------------
+# 4/5/6 say THE PAGE is not a result. A late bot is a per-bot verdict on a page
+# that is otherwise fine, exactly like ADJUDICATE, so it must not invent a code.
+assert_eq "a late bot does not make the page refuse" "0" "$RC25"
+assert_absent "and does not trip the completeness assertion" "INCOMPLETE" "$OUT25"
+assert_contains "the headline excludes late bots from N" \
+    "SELF-START SNAPSHOT:  3 of 6" "$OUT25"
+# Counted OUT of the headline and INTO its upper range: a late payload might
+# still be a very slow self-start, so folding it in would overclaim and dropping
+# it would underclaim.
+assert_contains "but keeps them in the upper range" \
+    "range 3-6 — 0 unresolved (ADJUDICATE), 3 late (LATE-UNEXPLAINED)" "$OUT25"
+assert_contains "the bound is printed with its derivation" \
+    "self-start bound: 2026-08-06T12:42:00Z (ladder 60s + first turn 60s)" "$OUT25"
+
+# ---- 10d: DERIVED, not hardcoded ------------------------------------------
+# The bound must track the composed ladder. Raise the ladder end and the same
+# record stops being late — a hardcoded constant cannot do that, so this is what
+# separates "derived" from "a number that happens to work on this fixture".
+mk_unit bound ladderend 600
+OUT26="$(run_snapshot "$SANE_JOURNAL")"
+assert_eq "raising the composed ladder moves the bound with it" \
+    "SELF-STARTED" "$(section_of "$OUT26" pastbound)"
+assert_contains "and the printed bound moves too" \
+    "self-start bound: 2026-08-06T12:51:00Z (ladder 600s + first turn 60s)" "$OUT26"
+# ...and the exemplar 26 minutes out is STILL late, so the move is a shift
+# rather than the bound being switched off.
+assert_eq "a bot 26 minutes out is late even against the longer ladder" \
+    "LATE-UNEXPLAINED" "$(section_of "$OUT26" arishape)"
+mk_unit bound ladderend 60
+
+# ---- 10e: the first-turn allowance is the stated, overridable half ---------
+# The ladder end is derived; the allowance is a MEASUREMENT (17-34s at load 31)
+# and is therefore a knob. An operator who knows the boot was pathological must
+# be able to widen it rather than argue with the page.
+OUT27="$(run_snapshot "$SANE_JOURNAL" SELFSTART_FIRST_TURN_ALLOWANCE_S=3600)"
+assert_eq "widening the allowance widens the bound" \
+    "SELF-STARTED" "$(section_of "$OUT27" arishape)"
+
+# ---- 10f: a receipt still decides — evidence beats absence of evidence -----
+# THE LIVE CASE. On the real boot ari's payload predated the only receipt
+# boundary, so the receipt did not cover it and it fell through to SELF-STARTED.
+# A receipt that DOES cover a late payload must still win: "a human carried it"
+# is a recorded fact, where late-unexplained is only the absence of one.
+# mk_receipt reads $ROOT at call time, so the definition from case 8 writes into
+# this case's scratch root without redefinition.
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"tester\",\"bots_rescued\":[],\"selfstart_measurement_valid_before\":\"2026-08-06T12:56:40Z\"}}"
+OUT28="$(run_snapshot "$SANE_JOURNAL")"; RC28=$?
+assert_eq "a receipt covering this boot still refuses the page" "6" "$RC28"
+assert_eq "a late payload AFTER the rescue boundary is RESCUED, not late" \
+    "RESCUED" "$(section_of "$OUT28" arishape)"
+# And the half that is the actual #1203 defect: a payload BEFORE the boundary is
+# not covered by the receipt, and must not be laundered into a self-start by
+# that absence. This is ari on 2026-08-13, exactly.
+assert_eq "a late payload the receipt does NOT cover is still late" \
+    "LATE-UNEXPLAINED" "$(section_of "$OUT28" pastbound)"
+assert_contains "and the contaminated headline reports late separately" \
+    "late-unexplained" "$OUT28"
+rm -f "$ROOT"/state/events/*.jsonl
+
+# ---- 10g: no readable ladder — SUPPRESSED and disclosed -------------------
+# MAX_RUNG=0 would ASSERT a zero-length ladder rather than measure one, putting
+# the bound at boot+60s. On a launchd host, where no .service exists at all,
+# that flags the entire fleet. boot_rung_for already draws this distinction by
+# returning -1 rather than 0; the bound has to draw it too.
+#
+# Not firing is a silent pass unless it is said out loud, so the suppression is
+# disclosed twice: in the header, and by NAME for every bot credited under it.
+bound_units off
+OUT29="$(run_snapshot "$SANE_JOURNAL")"; RC29=$?
+assert_eq "with no ladder the bound is not applied" \
+    "SELF-STARTED" "$(section_of "$OUT29" arishape)"
+assert_contains "and the header says so rather than staying silent" \
+    "self-start bound: NOT APPLIED" "$OUT29"
+assert_contains "and says why" "the ladder end is not derived" "$OUT29"
+assert_contains "and warns the count is unbounded above" \
+    "unbounded above" "$OUT29"
+assert_contains "every bot credited under the suppression is NAMED" \
+    "the lateness bound could not be applied" "$OUT29"
+assert_contains "and the exemplar is in that list" \
+    "arishape" "$(printf '%s\n' "$OUT29" | awk '/lateness bound could not be applied/,/^$/')"
+assert_eq "suppression is not a refusal — the page still stands" "0" "$RC29"
+# The no-rung note lists EVERY bot in this arm, and it must not tell them the
+# bound still covers them. A disclosure keyed on the wrong condition is longest
+# and loudest exactly where it is false.
+assert_absent "the no-rung note does not claim the bound still applies" \
+    "The lateness bound still applies to them" "$OUT29"
+assert_contains "it says the opposite, and points at the reason" \
+    "The lateness bound is not applied to them either" "$OUT29"
+bound_units on
+
+# ---- 10i: an unformattable bound instant is REFUSED, never adopted ---------
+# epoch_to_iso_utc yields an empty string when `date` cannot format the epoch,
+# and an EMPTY boundary sorts BEFORE every record — so adopting it flags every
+# self-starter at once, silently, on a page that otherwise reads normally. Same
+# hazard pad_iso_frac names, in a second place, and the same one the padding
+# mutant exposed. `date` is stubbed for THIS epoch only (BOOT+120), in both the
+# GNU `@N` and BSD bare-`N` forms, so the boot instant and every other call still
+# resolve and only the branch under test is driven.
+mkdir -p "$T/bin3"
+cat > "$T/bin3/date" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+    case "$a" in "@1786020120"|"1786020120") exit 1 ;; esac
+done
+exec /usr/bin/date "$@"
+STUB
+chmod +x "$T/bin3/date"
+OUT31="$(run_snapshot "$SANE_JOURNAL" "PATH=$T/bin3:$PATH")"; RC31=$?
+assert_contains "an unformattable bound instant suppresses the bound" \
+    "self-start bound: NOT APPLIED" "$OUT31"
+assert_contains "and says the boundary would have sorted before everything" \
+    "sorts before every record" "$OUT31"
+# The property that matters: NOT every bot flagged.
+assert_eq "no bot is flagged late off an empty boundary" \
+    "0" "$(printf '%s\n' "$OUT31" | sed -n 's/^LATE, UNEXPLAINED.*(\([0-9]*\))$/\1/p')"
+assert_eq "and the genuine self-starters are still credited" \
+    "SELF-STARTED" "$(section_of "$OUT31" intime)"
+assert_eq "the page still stands rather than refusing" "0" "$RC31"
+# Positive control on the stub: without it the same fixtures DO produce late
+# bots, so this arm is testing the guard and not a broken fixture.
+assert_eq "and with a formattable bound the same fixtures still flag" \
+    "LATE-UNEXPLAINED" "$(section_of "$(run_snapshot "$SANE_JOURNAL")" arishape)"
+
+# ---- 10h: clock not SANE — SUPPRESSED and disclosed -----------------------
+# The bound compares record timestamps against a derived instant, which is
+# precisely the comparison a stale boot clock invalidates. Firing it there would
+# manufacture a gap out of a clock fault. Positive control is 10a: the same
+# fixtures under a SANE clock DO produce two late bots.
+OUT30="$(run_snapshot "$STALE_JOURNAL")"
+assert_contains "a stale boot clock suppresses the bound" \
+    "self-start bound: NOT APPLIED" "$OUT30"
+assert_contains "and names the clock as the reason" "the boot clock is STALE" "$OUT30"
+assert_eq "so no bot is called late on an untrusted clock" \
+    "0" "$(printf '%s\n' "$OUT30" | sed -n 's/^LATE, UNEXPLAINED.*(\([0-9]*\))$/\1/p')"
 
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"

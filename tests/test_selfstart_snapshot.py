@@ -27,10 +27,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS = REPO_ROOT / "tests" / "test_selfstart_snapshot.sh"
 
 # Every case dara named in the dispatch, plus the two denominator traps, the
-# two #1045-review regressions, the #1043 contamination/typing cases, and the
-# #1106 refusal-branch cases (8h-8k). Raise this when cases are added; never
-# lower it to make a red wrapper green.
-MIN_ASSERTIONS = 140
+# two #1045-review regressions, the #1043 contamination/typing cases, the #1106
+# refusal-branch cases (8h-8k) and the #1203 lateness bound (case 10). Raise
+# this when cases are added; never lower it to make a red wrapper green.
+MIN_ASSERTIONS = 183
 
 
 @pytest.fixture(scope="module")
@@ -235,8 +235,7 @@ def test_a_reading_taken_after_a_rescue_refuses_to_be_a_result(run):
         in run.stdout
     )
     assert (
-        "PASS: an unnamed bot is decided by the boundary, not by the list"
-        in run.stdout
+        "PASS: an unnamed bot is decided by the boundary, not by the list" in run.stdout
     )
     # The boundary is compared, never clustered: a receipt for an earlier boot
     # must not bleed forward, and a correction row is not a receipt.
@@ -309,6 +308,81 @@ def test_the_absence_of_a_receipt_is_not_the_absence_of_a_rescue(run):
     assert "PASS: prior figure is printed" in run.stdout
     assert "PASS: and is labelled not comparable" in run.stdout
     assert "PASS: it is NOT offered as a target to beat" in run.stdout
+
+
+def test_an_unrecorded_wake_is_a_gap_not_a_self_start(run):
+    """#1203. SELF-STARTED was reached by ELIMINATION, so it absorbed everything.
+
+    A payload no receipt covers and that is not channel-shaped falls through to
+    SELF-STARTED. Compose that with #1110 — the receipt list is known-incomplete,
+    a real rescue went unrecorded — and every wake nobody wrote down was reported
+    as good news. Measured on the 2026-08-13 19:17:18Z boot: ari's payload landed
+    26 minutes after boot, predating the only applicable receipt boundary, and
+    printed as "unaided". The honest figure was 2 of 21; the script said 3.
+
+    The bound is the instant the page ALREADY claims to be a result (ladder end +
+    first-turn allowance). Not a second knob: the too-early gate stops refusing
+    there, which is the script asserting every bot has had its chance, so a later
+    arrival is late by the script's own claim.
+
+    Not the bot's OWN rung, and that is measured rather than argued: otis (rung
+    15s, payload +97s) and ravi (rung 12s, +96s) are the only two confirmed
+    self-starts the estate has, and a per-bot bound flags both.
+    """
+    assert "PASS: a payload past the bound is LATE-UNEXPLAINED" in run.stdout
+    assert "PASS: one second past the bound is enough" in run.stdout
+    # Its own answer. Folding it into RESCUED would assert a rescue nothing
+    # evidences — the same fabrication as asserting none.
+    assert "PASS: late is NOT folded into RESCUED" in run.stdout
+    assert "PASS: the section reads as a gap, not a pass" in run.stdout
+    # Positive controls. Without these the whole case is satisfied by a script
+    # that downgrades every self-start, which reads as a fix and measures nothing.
+    assert "PASS: a payload inside the bound is still a self-start" in run.stdout
+    assert "PASS: a payload exactly ON the bound is not past it" in run.stdout
+    assert "PASS: half a second past the bound is late, not rounded down" in run.stdout
+    assert (
+        "PASS: a bot far past its OWN rung but inside the ladder bound survives"
+        in run.stdout
+    )
+    # Derived, not hardcoded: raising the composed ladder moves the bound.
+    assert "PASS: raising the composed ladder moves the bound with it" in run.stdout
+    assert (
+        "PASS: a bot 26 minutes out is late even against the longer ladder"
+        in run.stdout
+    )
+    assert "PASS: widening the allowance widens the bound" in run.stdout
+    # A row verdict, not a page refusal — 4/5/6 say the PAGE is not a result.
+    assert "PASS: a late bot does not make the page refuse" in run.stdout
+    assert "PASS: and does not trip the completeness assertion" in run.stdout
+    assert "PASS: but keeps them in the upper range" in run.stdout
+    # Evidence still beats absence of evidence, and the live case is the half
+    # where the receipt does NOT reach: that is ari on 2026-08-13, exactly.
+    assert (
+        "PASS: a late payload AFTER the rescue boundary is RESCUED, not late"
+        in run.stdout
+    )
+    assert "PASS: a late payload the receipt does NOT cover is still late" in run.stdout
+    # Suppressed where the bound would be asserted rather than derived — and a
+    # suppression that says nothing is itself a silent pass, so it is disclosed
+    # in the header AND by name for every bot credited under it.
+    assert "PASS: with no ladder the bound is not applied" in run.stdout
+    assert "PASS: every bot credited under the suppression is NAMED" in run.stdout
+    assert "PASS: a stale boot clock suppresses the bound" in run.stdout
+    assert "PASS: so no bot is called late on an untrusted clock" in run.stdout
+    # A disclosure keyed on the wrong condition is longest and loudest exactly
+    # where it is false: with no rung anywhere, the no-rung note lists EVERY bot
+    # and must not tell them the bound still covers them.
+    assert "PASS: the no-rung note does not claim the bound still applies" in run.stdout
+    # An unformattable bound instant yields an EMPTY boundary, which sorts before
+    # every record — adopting it flags every self-starter at once, silently, on a
+    # page that otherwise reads normally. Mutation-confirmed: removing the guard
+    # flags `intime` too, so this is the whole-fleet failure, not a corner.
+    assert "PASS: an unformattable bound instant suppresses the bound" in run.stdout
+    assert "PASS: no bot is flagged late off an empty boundary" in run.stdout
+    assert "PASS: and the genuine self-starters are still credited" in run.stdout
+    assert (
+        "PASS: and with a formattable bound the same fixtures still flag" in run.stdout
+    )
 
 
 def test_the_run_proves_it_covered_every_declared_bot(run):
