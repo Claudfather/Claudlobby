@@ -29,9 +29,19 @@
 # false-positive overdue, since the worker cannot echo what it never saw.
 #
 # NON-`task` ENVELOPE SENDS ARE ALSO ID-LESS (#1187), for the same reason read
-# forward instead of back: a `query` is answered inline BY DEFINITION and can
-# never produce the terminal report an id exists to be joined against, so an id
-# minted for one is unclosable from the moment it is written. The envelope
+# forward instead of back: a `query` is answered inline, so nothing it produces
+# can be JOINED against an id — not that it produces nothing. It DOES file a
+# terminal report, and saying otherwise was false against the protocol the bot
+# actually follows: `worker-lifecycle` routes `query` to "skip to Step 8", and
+# Step 8 IS the terminal `[BOTREPORT]`. `restart` reports terminally too.
+#
+# The distinction is load-bearing, not pedantic (#1190). Believing the report
+# never arrives is what left the receive side unguarded: a terminal report
+# carrying no id falls into report-back.sh's #835 resolver, which stamps the
+# bot's OLDEST open id'd dispatch — so a peer note silently closed unrelated
+# in-progress work as `completed`. The guard now lives in
+# dispatch-overdue.py::open_task_id, which is where the evidence is; an id
+# minted here would still be unclosable from the moment it is written. The envelope
 # format and the tracking used to be the same decision — `--botcommand` alone
 # minted — which meant a manager who wanted the fleet message format for a peer
 # note got a permanently open row as a side effect. They are separate now.

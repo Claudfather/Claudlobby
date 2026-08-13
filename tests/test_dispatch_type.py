@@ -148,12 +148,21 @@ class TestTheDeadlineIsGatedToo:
         empty = tmp_path / "reports.jsonl"
         empty.write_text("")
         out = sp.run(
-            ["python3", str(LIB_DIR / "dispatch-overdue.py"), "--all",
-             str(ledger), str(empty)],
-            capture_output=True, text=True, timeout=20,
+            [
+                "python3",
+                str(LIB_DIR / "dispatch-overdue.py"),
+                "--all",
+                str(ledger),
+                str(empty),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
         )
         assert out.returncode == 0, out.stderr
-        assert out.stdout.strip() == "", f"a peer note paged the manager: {out.stdout!r}"
+        assert out.stdout.strip() == "", (
+            f"a peer note paged the manager: {out.stdout!r}"
+        )
 
 
 class TestNoSilentChangeToExistingCallSites:
@@ -220,7 +229,9 @@ class TestVocabularyMatchesTheProtocols:
             ),
             None,
         )
-        assert line, "no DISPATCH_TYPES= line in dispatch-task.sh — it moved or was renamed"
+        assert line, (
+            "no DISPATCH_TYPES= line in dispatch-task.sh — it moved or was renamed"
+        )
         return set(line.split("=", 1)[1].strip().strip('"').split())
 
     def test_matches_worker_lifecycle(self):
@@ -238,3 +249,196 @@ class TestVocabularyMatchesTheProtocols:
         doc = set(re.findall(r"^\|\s*`([a-z]+)`\s*\|", txt, re.M))
         assert doc, "parser found no table rows — the doc's shape changed"
         assert self._script_types() == doc, (self._script_types(), doc)
+
+
+# --- the round trip ---------------------------------------------------------
+#
+# Everything above stops at the dispatch side: it proves the envelope withholds
+# the id, and nothing more. The property the design actually rests on is what
+# happens NEXT — and it was false. `worker-lifecycle` routes a `query` to Step 8
+# (line 66 -> line 51), so a compliant worker DOES file a terminal report; with
+# no id to echo it falls into report-back.sh's #835 resolver, which stamps the
+# bot's OLDEST open id'd dispatch. A peer note silently closed unrelated
+# in-progress work as `completed`.
+#
+# These tests fail against the tree that shipped ask 1, which is the point.
+
+
+def _roundtrip_lib(tmp_path: Path):
+    """`_fake_lib` plus the receive side. Same harness, one more leg.
+
+    report-back.sh and dispatch-overdue.py are the two the resolver needs;
+    without them report-back's lookup fails open and every arm reads clean —
+    a harness that cannot see the defect it was written for.
+    """
+    libdir, env = _fake_lib(
+        tmp_path, f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n'
+    )
+    for name in ("report-back.sh", "dispatch-overdue.py"):
+        (libdir / name).symlink_to(LIB_DIR / name)
+    env["MANAGER_TMUX"] = "lead"
+    return libdir, env
+
+
+REAL_ID = "t-1786600000-real"
+
+
+def _seed_open_task(tmp_path: Path, bot: str = "w1") -> Path:
+    """One real, in-progress, id'd dispatch this bot is already holding."""
+    ledger = tmp_path / "state" / "dispatch-log.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    # COMPACT separators, deliberately. rotate_jsonl_by_ts splits on the literal
+    # `"ts":"` and drops every line that does not yield a field (`NF>1`), so a
+    # seed written with json.dumps' default `"ts": "..."` is silently REAPED by
+    # the next shell write to the same ledger. The fixture then tests an empty
+    # log and passes for the wrong reason.
+    ledger.write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-13T10:00:00Z",
+                "manager": "dara",
+                "bot": bot,
+                "task_id": REAL_ID,
+                "workstream": "",
+                "task": "implement the thing",
+                "dispatched_at": 1786600000,
+                "expected_by": 1786601800,
+                "claudron_hits": "",
+                "supersedes": "",
+                "open_at_dispatch": 0,
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    return ledger
+
+
+def _still_open(libdir: Path, tmp_path: Path, env: dict, bot: str = "w1") -> set[str]:
+    out = subprocess.run(
+        [
+            "python3",
+            str(libdir / "dispatch-overdue.py"),
+            "--open",
+            bot,
+            str(tmp_path / "state" / "dispatch-log.jsonl"),
+            str(tmp_path / "runtime" / "fleet" / "report-back.jsonl"),
+        ],
+        capture_output=True,
+        text=True,
+        env=_scrubbed_env(**env),
+        timeout=10,
+    ).stdout
+    return set(re.findall(r"t-\d+-[0-9a-z]+", out))
+
+
+class TestANonTaskReportClosesNothingElse:
+    @pytest.mark.parametrize("t", ["query", "cancel", "compact", "restart"])
+    def test_terminal_report_for_a_non_task_leaves_the_real_row_open(self, tmp_path, t):
+        # THE regression, all four types. `restart` and `cancel` route to a
+        # terminal report the same way `query` does; the review measured query
+        # and reasoned the rest, so they are measured here.
+        libdir, env = _roundtrip_lib(tmp_path)
+        _seed_open_task(tmp_path)
+        subprocess.run(
+            ["bash", "-c", f'"{libdir}/dispatch-task.sh" --type {t} w1 "a peer note"'],
+            capture_output=True,
+            text=True,
+            env=_scrubbed_env(**env),
+            timeout=10,
+        )
+        # A COMPLIANT worker: it echoes an id when it was given one, and it was
+        # given none. This is the arm main was safe on, which is what makes it a
+        # regression rather than a pre-existing class.
+        rb = subprocess.run(
+            ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "answered inline"'],
+            capture_output=True,
+            text=True,
+            env=_scrubbed_env(**env),
+            timeout=10,
+        )
+        assert rb.returncode == 0, rb.stderr
+        assert REAL_ID in _still_open(libdir, tmp_path, env), (
+            f"a `{t}` peer note closed unrelated in-progress work as completed"
+        )
+
+    def test_a_raw_text_dispatch_does_not_close_it_either(self, tmp_path):
+        # Not introduced by --type: the same silent close is reachable on main
+        # through a bare raw-text send, which carries no envelope at all. That
+        # is why the guard lives in the resolver and not in the envelope — a
+        # transmit-side marker has nowhere to go on this path.
+        libdir, env = _roundtrip_lib(tmp_path)
+        _seed_open_task(tmp_path)
+        subprocess.run(
+            ["bash", "-c", f'"{libdir}/dispatch-task.sh" w1 "a peer note"'],
+            capture_output=True,
+            text=True,
+            env=_scrubbed_env(**env),
+            timeout=10,
+        )
+        subprocess.run(
+            ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "answered inline"'],
+            capture_output=True,
+            text=True,
+            env=_scrubbed_env(**env),
+            timeout=10,
+        )
+        assert REAL_ID in _still_open(libdir, tmp_path, env)
+
+    def test_an_id_dispatch_still_resolves_without_an_echo(self, tmp_path):
+        # THE POSITIVE CONTROL, and it is what stops the fix being "never
+        # resolve". #835 exists because workers routinely omit the id; a guard
+        # that suppressed unconditionally would pass every test above while
+        # silently reverting it. Here the latest dispatch IS id'd, so the
+        # resolver must still fire and close that row.
+        libdir, env = _roundtrip_lib(tmp_path)
+        _seed_open_task(tmp_path)
+        subprocess.run(
+            ["bash", "-c", f'"{libdir}/dispatch-task.sh" --type task w1 "real work"'],
+            capture_output=True,
+            text=True,
+            env=_scrubbed_env(**env),
+            timeout=10,
+        )
+        subprocess.run(
+            ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "did the work"'],
+            capture_output=True,
+            text=True,
+            env=_scrubbed_env(**env),
+            timeout=10,
+        )
+        # FIFO closes the OLDEST open row — documented #835 behaviour, unchanged.
+        assert REAL_ID not in _still_open(libdir, tmp_path, env), (
+            "the resolver stopped firing for id'd dispatches — #835 reverted"
+        )
+
+    def test_a_later_report_resolves_again_once_the_note_is_discharged(self, tmp_path):
+        # The suppression is scoped to an UNANSWERED note, not to the bot. A
+        # single peer note must not strand every later report for the rest of
+        # the session — that would trade one silent-close bug for a permanent
+        # #835 outage, which is the same defect wearing the other coat.
+        libdir, env = _roundtrip_lib(tmp_path)
+        _seed_open_task(tmp_path)
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'"{libdir}/dispatch-task.sh" --type query w1 "a peer note"',
+            ],
+            capture_output=True,
+            text=True,
+            env=_scrubbed_env(**env),
+            timeout=10,
+        )
+        for _ in range(2):
+            subprocess.run(
+                ["bash", "-c", f'"{libdir}/report-back.sh" w1 completed "r"'],
+                capture_output=True,
+                text=True,
+                env=_scrubbed_env(**env),
+                timeout=10,
+            )
+        assert REAL_ID not in _still_open(libdir, tmp_path, env), (
+            "the note was already answered by the first report; the second "
+            "should resolve normally"
+        )
