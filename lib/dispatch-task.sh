@@ -15,12 +15,23 @@
 #                      references the same issue, a note names the id to pass
 #                      (#1032). It never blocks and never guesses.
 #   --botcommand       Force the [BOTCOMMAND] envelope with no other fields
+#   --type TYPE        Envelope type: task|cancel|compact|restart|query
+#                      (default task). Implies --botcommand. ONLY `task` mints.
 #
-# Envelope sends MINT a task id (mint_task_id, lib-common), record it in the
-# ledger row AND transmit it as `task:<id>` — join semantics live in
+# `task` envelope sends MINT a task id (mint_task_id, lib-common), record it in
+# the ledger row AND transmit it as `task:<id>` — join semantics live in
 # dispatch-overdue.py (overdue_all docstring). Raw-text sends (no flags) stay
 # id-less: an id recorded but never transmitted would guarantee a
 # false-positive overdue, since the worker cannot echo what it never saw.
+#
+# NON-`task` ENVELOPE SENDS ARE ALSO ID-LESS (#1187), for the same reason read
+# forward instead of back: a `query` is answered inline BY DEFINITION and can
+# never produce the terminal report an id exists to be joined against, so an id
+# minted for one is unclosable from the moment it is written. The envelope
+# format and the tracking used to be the same decision — `--botcommand` alone
+# minted — which meant a manager who wanted the fleet message format for a peer
+# note got a permanently open row as a side effect. They are separate now.
+# Every send still writes a ledger row; only `task` writes one with an id.
 #
 # Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by,
 # claudron_hits,supersedes,open_at_dispatch} to state/dispatch-log.jsonl (self-rotated via
@@ -53,6 +64,15 @@ DISPATCH_REF=""
 DISPATCH_WORKSTREAM=""
 DISPATCH_SUPERSEDES=""
 FORCE_ENVELOPE=""
+DISPATCH_TYPE="task"
+
+# The [BOTCOMMAND] type vocabulary. PROSE IS THE SOURCE: this list restates
+# `library/protocols/worker-lifecycle.md` and `library/protocols/dispatch.md`,
+# which are what a bot actually reads, and `tests/test_dispatch_type.py` parses
+# both docs and fails if this copy drifts from either. A second definition of a
+# shared vocabulary that nothing reconciles is how the estate's greps became
+# ambiguous; this one is reconciled.
+DISPATCH_TYPES="task cancel compact restart query"
 
 # _flag_val <flag> <value?> — explicit missing-value guard (NOT ${2:?}: see
 # the arg-guard note below — expansion faults exit 0 through the EXIT trap).
@@ -73,10 +93,23 @@ while [ $# -gt 0 ]; do
         --workstream)   DISPATCH_WORKSTREAM=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --supersedes)   DISPATCH_SUPERSEDES=$(_flag_val "$1" "${2:-}"); shift 2 ;;
         --botcommand)   FORCE_ENVELOPE=1; shift ;;
+        --type)         DISPATCH_TYPE=$(_flag_val "$1" "${2:-}"); FORCE_ENVELOPE=1; shift 2 ;;
         -*)             echo "dispatch-task: unknown flag '$1'" >&2; exit 1 ;;
         *)              break ;;
     esac
 done
+
+# REFUSE an unrecognised type rather than falling back to `task`. A fallback is
+# the defect this flag exists to remove, re-created one layer up: `--type quiery`
+# would mint a tracked row for a message that asks nothing, and the caller who
+# typed it would have no way to tell. Loud and unsent beats sent and untrue.
+case " $DISPATCH_TYPES " in
+    *" $DISPATCH_TYPE "*) ;;
+    *)
+        echo "dispatch-task: unknown --type '$DISPATCH_TYPE' (must be one of: $DISPATCH_TYPES)" >&2
+        exit 1
+        ;;
+esac
 
 # Explicit arg guard — NOT ${1:?}: under macOS bash 3.2 an expansion fault
 # exits 0 through lib-common's EXIT trap (its `|| true` cleanup tail resets
@@ -236,14 +269,38 @@ _claudron_query_before
 TASK_ID=""
 if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] \
    || [ -n "$DISPATCH_REF" ] || [ -n "$DISPATCH_WORKSTREAM" ]; then
-    TASK_ID=$(mint_task_id)
+    # THE ENVELOPE AND THE TRACKING ARE NOW SEPARATE DECISIONS (#1187). They used
+    # to be one: any envelope send minted, so a manager who wanted the fleet
+    # message format for a peer note — a finding, a relay, a retraction — got a
+    # tracked row as a side effect. Nothing was ever asked of the recipient, so
+    # nothing could ever close it. Measured: 68 open rows on this host, 57 of
+    # them to managers, none of them answerable.
+    #
+    # ONLY `task` MINTS, and the reason it is the right axis is that `query` is
+    # not an intent label the sender has to intuit — `worker-lifecycle` DEFINES
+    # it as answered inline, incapable of producing a terminal report. The sender
+    # asserts a checkable property rather than guessing.
+    #
+    # THE INVARIANT, and it is what the axis was chosen to satisfy: a
+    # misclassification must degrade to UNTRACKED, never to UNCLOSABLE. Calling a
+    # real task a `query` costs an id-less row — exactly what every raw-text send
+    # already is, a known and survivable state, and the recipient can still do the
+    # work and report. The reverse, which is what shipped before this, costs a row
+    # that no one can ever close.
+    if [ "$DISPATCH_TYPE" = "task" ]; then
+        TASK_ID=$(mint_task_id)
+    fi
     CALLER="${BOT_NAME:-${MANAGER_TMUX:-unknown}}"
-    DISPATCH_MSG="[BOTCOMMAND] $CALLER | task | $TASK"
+    DISPATCH_MSG="[BOTCOMMAND] $CALLER | $DISPATCH_TYPE | $TASK"
     [ -n "$DISPATCH_REPO" ]       && DISPATCH_MSG="$DISPATCH_MSG | repo:$DISPATCH_REPO"
     [ -n "$DISPATCH_PRIORITY" ]   && DISPATCH_MSG="$DISPATCH_MSG | priority:$DISPATCH_PRIORITY"
     [ -n "$DISPATCH_REF" ]        && DISPATCH_MSG="$DISPATCH_MSG | ref:$DISPATCH_REF"
     [ -n "$DISPATCH_WORKSTREAM" ] && DISPATCH_MSG="$DISPATCH_MSG | workstream:$DISPATCH_WORKSTREAM"
-    DISPATCH_MSG="$DISPATCH_MSG | task:$TASK_ID"
+    # Guarded, because TASK_ID is now legitimately empty for a non-`task` type.
+    # An unguarded append transmits a bare `| task:` — an envelope field with no
+    # value, which a worker would echo back as nothing and which reads like a
+    # truncated message rather than a deliberate absence.
+    [ -n "$TASK_ID" ] && DISPATCH_MSG="$DISPATCH_MSG | task:$TASK_ID"
 else
     DISPATCH_MSG="$TASK"
 fi
