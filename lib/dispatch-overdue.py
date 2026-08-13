@@ -42,19 +42,39 @@ resolver would pick, so "open but not yet due" is readable by the read door:
   run, so an empty result names what it filtered on and can never be read as
   "nothing exists" (#1187). Stdout stays rows-only for machine callers.
 
-BOT-FIRST vs LOGS-FIRST -- the one grammar trap here (#1187). --open and
---open-task take the BOT first; --all, --orphans, --unassigned and single-bot
-mode take the LOGS first. Passing one the other's order keeps the arity valid,
-so it parses cleanly with a path in the bot slot. --open/--open-task refuse a
-first positional that cannot be a bot id (holds "/", ends ".jsonl", or is
-blank) with rc 2; see _not_a_bot_id. The other modes do NOT yet carry that
-gate -- their bot slot is still unchecked.
 Unassigned mode (#1024) -- the MIRROR of overdue: a worker that reported and was
 never re-tasked. Purely temporal (newest dispatch vs newest report); it never
 reads whether a dispatch is open, because superseded rows stay open forever and
 that signal is noise in both directions. See unassigned_all:
   dispatch-overdue.py --unassigned <dispatch_log> <report_ledger> [<now_epoch>]
   Prints: "<bot_id> <reported_at> <idle_seconds> <task_id> <status>"
+
+WHICH MODES HAVE A BOT SLOT -- the grammar trap behind #1187. The split is not
+bot-first vs logs-first; it is whether a mode names ONE bot at all:
+
+  has a bot slot, taken FIRST   --open, --open-task, and SINGLE-BOT MODE
+  no bot slot at all            --all, --orphans, --unassigned (every bot)
+
+Single-bot mode shares --open and --open-task's grammar EXACTLY (main() reads
+`bot, dlog, rlog = argv[1], argv[2], argv[3]`, same as they do) and therefore
+shares the hazard exactly: three positionals parse cleanly with a path in the
+bot slot, nothing matches, rc 0, no output -- indistinguishable from a genuine
+empty result. It reaches that state most easily by FORGETTING a flag, since
+`<dlog> <rlog> <now>` with no mode falls straight through to it.
+
+Only --open/--open-task are gated so far (see _not_a_bot_id). SINGLE-BOT MODE
+IS NOT, and closing it is the same one-line _reject_bot_slot call, not a
+harder dlog/rlog-swap detection -- stated because an earlier version of this
+paragraph filed single-bot mode under "logs-first" and would have sent the
+next reader looking for the harder fix.
+
+The other three need no gate: with no bot slot there is nothing to check, and
+mis-ordering them is already LOUD rather than silent -- a ledger path lands in
+the `now` slot and int() raises, rc 1 (measured, all three). So single-bot
+mode is the only silent shape left in this module. Pinned by
+tests/test_dispatch_overdue.py::TestBotSlotShapeGate, including a tripwire that
+FAILS when single-bot mode is finally gated, so this paragraph cannot go stale
+the way its first version did.
 
 `--bots-dir <dir>` goes last and enables respawn detection; without it no row is
 ever classified as an orphan. It is also the one input that is NOT one of the two
@@ -602,12 +622,16 @@ def _take_bots_dir(argv: list[str]) -> tuple[list[str], str | None]:
 def _not_a_bot_id(value: str) -> str | None:
     """Why this first positional cannot be a bot id — or None if it might be.
 
-    #1187. `--open`/`--open-task` take the BOT first; `--all`/`--orphans` take
-    the LOGS first. Calling one with the other's grammar keeps the arity valid,
-    so the existing count check passes, a path lands in the bot slot, nothing
-    matches it, and the door prints nothing at rc 0 — byte-identical to a
-    genuine "nothing open". That is how a manager read a full backlog as
-    all-clear while checking whether its closures had worked.
+    #1187. `--open`, `--open-task` and single-bot mode each name ONE bot and
+    take it FIRST; `--all`/`--orphans`/`--unassigned` name none. Calling a
+    bot-slot mode with the every-bot grammar keeps the arity valid, so the
+    existing count check passes, a path lands in the bot slot, nothing matches
+    it, and the door prints nothing at rc 0 — byte-identical to a genuine
+    "nothing open". That is how a manager read a full backlog as all-clear
+    while checking whether its closures had worked.
+
+    Callable for single-bot mode too, which has the identical grammar and is
+    NOT yet wired to it; see the module docstring.
 
     So the missing check is on SHAPE, not count. Wrong ARITY already fails
     loudly and is not the hazard: measured, two positionals return rc 2 with the
@@ -641,8 +665,8 @@ def _reject_bot_slot(mode: str, value: str) -> bool:
     print(
         f"dispatch-overdue.py: {mode} expects <bot_id> first, got {why}\n"
         f"  usage: dispatch-overdue.py {mode} <bot_id> <dispatch_log> <report_ledger>\n"
-        "  note:  --all/--orphans/--unassigned take the LOGS first; "
-        "--open/--open-task take the BOT first.",
+        "  note:  --all/--orphans/--unassigned take the LOGS first and name no "
+        "bot at all; --open/--open-task take the BOT first.",
         file=sys.stderr,
     )
     return True

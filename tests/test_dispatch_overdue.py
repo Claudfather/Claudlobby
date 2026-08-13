@@ -781,11 +781,15 @@ class TestOpenList:
 class TestBotSlotShapeGate:
     """#1187 — right count, wrong order was silent; wrong count never was.
 
-    --open/--open-task take the BOT first, --all/--orphans take the LOGS first.
-    Passing one the other's grammar keeps the arity valid, so a path lands in
-    the bot slot, nothing matches, and the door prints nothing at rc 0 — the
-    same output as a genuinely empty result. That is how a manager checking
-    whether its closures had worked read a full backlog as all-clear.
+    --open, --open-task and SINGLE-BOT MODE each name one bot and take it
+    first; --all/--orphans/--unassigned name none. Calling a bot-slot mode with
+    the every-bot grammar keeps the arity valid, so a path lands in the bot
+    slot, nothing matches, and the door prints nothing at rc 0 — the same
+    output as a genuinely empty result. That is how a manager checking whether
+    its closures had worked read a full backlog as all-clear.
+
+    Only the two flagged doors are gated here; single-bot mode is the
+    documented remaining gap and is pinned below.
     """
 
     def _logs(self, tmp_path, dispatches, reports):
@@ -873,6 +877,62 @@ class TestBotSlotShapeGate:
         dlog, rlog = self._rows(tmp_path)
         monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", mode, dlog, rlog])
         assert dispatch_overdue.main() == 2
+        assert capsys.readouterr().out == ""
+
+    # -- which modes have a bot slot, pinned in code rather than prose --------
+
+    def test_single_bot_mode_is_BOT_first_like_the_gated_doors(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Executable because the prose got this backwards once (#1188 review):
+        the docstring filed single-bot mode under "logs first", which would send
+        the next reader hunting a dlog/rlog-swap detector instead of reusing
+        _reject_bot_slot. argv[1] is the BOT — assert it, do not describe it."""
+        # now=2000: past expected_by (1000) but inside the 24h age cap, or the
+        # row expires and the mode looks bot-blind for an unrelated reason.
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "w1", dlog, rlog, "2000"]
+        )
+        assert dispatch_overdue.main() == 0
+        assert "t-a" in capsys.readouterr().out  # argv[1] selected the bot
+
+        # Control: a DIFFERENT name in the same slot returns nothing, so the
+        # assertion above is about argv[1] and not about the row merely existing.
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "other", dlog, rlog, "2000"]
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize("mode", ["--all", "--orphans", "--unassigned"])
+    def test_every_bot_modes_have_no_bot_slot_and_fail_LOUDLY(
+        self, tmp_path, monkeypatch, mode
+    ):
+        """The other half of the same correction. These name no bot, so there is
+        nothing for the gate to check — and mis-ordering them is already loud: a
+        ledger path reaches the `now` slot and int() raises. Pins WHY they are
+        excluded, so "ungated" is never re-read as "silently broken like #1187".
+        """
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", mode, "w1", dlog, rlog])
+        with pytest.raises(ValueError):
+            dispatch_overdue.main()
+
+    def test_single_bot_mode_is_the_ONE_remaining_silent_shape(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A tripwire on a disclosed gap, deliberately asserting today's WRONG
+        behaviour: a path in single-bot mode's bot slot is still silent at rc 0.
+
+        When someone wires _reject_bot_slot into single-bot mode this test FAILS
+        — which is the point. It forces the module docstring, the CLAUDE.md row
+        and this class to move in the same commit, instead of the doc drifting
+        out of date the way it just did. Flip the assertion, do not delete it.
+        """
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", dlog, rlog, "100000"])
+        assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == ""
 
 
