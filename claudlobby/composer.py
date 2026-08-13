@@ -2764,8 +2764,8 @@ _PRISTINE_STUB_RE = re.compile(r"export ([A-Za-z_]\w*)=")
 _COMMENTED_STUB_RE = re.compile(r"^#\s*export ([A-Za-z_]\w*)=", re.MULTILINE)
 
 
-def _upstream_env_names(paths: Paths) -> frozenset[str]:
-    """Vars carrying a NON-EMPTY value in any tier sourced above the bot tier.
+def _upstream_env_names(paths: Paths, *, for_tier: str = "bot") -> frozenset[str]:
+    """Vars carrying a NON-EMPTY value in any tier sourced ABOVE ``for_tier``.
 
     start-bot.sh sources $HOME/.env, then the (deprecated) repo-root .env, then
     the fleet .env, then the bot .env — so all three of the first are upstream of
@@ -2774,9 +2774,29 @@ def _upstream_env_names(paths: Paths) -> frozenset[str]:
     deprecation notice tells operators to put it, and missed the repo-root tier
     entirely in overlay mode (paths.env_file resolves to the fleet file once one
     exists). Names only; values are never retained.
+
+    ``for_tier`` names the tier being SCAFFOLDED, and the fleet case is not
+    cosmetic (#1206). ``paths.env_file`` resolves to the FLEET file in overlay
+    mode, so including it while scaffolding that same file makes a stub count as
+    its own upstream: every name is "already set", the guard finds nothing to
+    protect, and it no-ops silently — the fix would land, the test would pass
+    against a bot-tier fixture, and the destructive behaviour would remain. The
+    fleet tier therefore reads only the two tiers strictly above it.
+
+    An unknown tier raises rather than defaulting: the wrong tier set here is
+    invisible at runtime (it produces a guard that merely does less), so a typo
+    must fail loudly at the call site instead of degrading to no protection.
     """
+    tiers: tuple[Path, ...] = (Path.home() / ".env", paths.root / ".env")
+    if for_tier == "bot":
+        tiers += (paths.env_file,)
+    elif for_tier != "fleet":
+        raise ValueError(
+            f"_upstream_env_names: unknown tier {for_tier!r} (expected 'bot' or 'fleet')"
+        )
+
     names: set[str] = set()
-    for tier in (Path.home() / ".env", paths.root / ".env", paths.env_file):
+    for tier in tiers:
         try:
             if tier.is_file():
                 names |= {n for n, v in dotenv.read(tier).items() if v}
@@ -2799,11 +2819,18 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
     bot_vars = [ev for ev in env_vars if ev.tier == "bot"]
 
     if paths.fleet_dir:
+        # Guarded exactly as the bot tier is (#1206). start-bot.sh sources the
+        # fleet tier AFTER $HOME/.env and the repo-root .env, so an empty fleet
+        # stub is not a neutral placeholder — it is an assignment that blanks a
+        # working credential. Measured live on one fleet: three real tokens
+        # present in both upstream tiers, destroyed by their own fleet stubs.
+        # for_tier="fleet" is load-bearing; see _upstream_env_names.
         _scaffold_env_merge(
             paths.fleet_dir / ".env",
             f"# Fleet environment for: {fleet.name}",
             fleet_vars,
             log=log,
+            provided_upstream=_upstream_env_names(paths, for_tier="fleet"),
         )
 
     if bot_vars:

@@ -4578,6 +4578,225 @@ class TestBotEnvStubDoesNotShadowUpstream:
         )
 
 
+class TestFleetEnvStubDoesNotShadowUpstream:
+    """A FLEET-tier stub must not blank a value an upstream tier already set (#1206).
+
+    The guard existed and was wired to the bot tier only. start-bot.sh sources
+    $HOME/.env, then the repo-root .env, then the fleet .env, then the bot .env,
+    so the fleet tier is downstream of two populated tiers and an empty stub
+    there is an ASSIGNMENT, not a placeholder. Measured live on one fleet:
+    NEON_API_KEY, RAILWAY_API_TOKEN and RAILWAY_PERSONAL_TOKEN all held real
+    values in BOTH upstream tiers and were destroyed by their own fleet stubs.
+
+    Every test here uses a REAL overlay layout (fleet_dir under local/), never
+    `_make_paths`, which sets fleet_dir == root and collapses the two tiers onto
+    one file — the same fixture degeneracy already called out at
+    TestBotEnvStubDoesNotShadowUpstream.test_upstream_spans_home_and_root_tiers.
+    Against that fixture none of this is observable.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_home(self, tmp_path, monkeypatch):
+        """No test here may read the host's real ``~/.env``.
+
+        ``_upstream_env_names`` walks ``Path.home()/".env"``, so without this the
+        computed tier set depends on whichever credentials the developer happens
+        to have on disk. Caught while probing this very class: a differential run
+        returned seven real credential NAMES off the host. That is the
+        green-on-two-machines-red-in-CI shape, and it is silent.
+        """
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    def _setup_overlay_fleet(self, tmp_path: Path) -> tuple[Path, Path, Paths]:
+        root = tmp_path / "claudlobby"
+        (root / "library" / "expertise").mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# Eng\n\nBuild.\n")
+        (root / "library" / "mcp").mkdir(parents=True)
+        (root / "library" / "mcp" / "github.json").write_text(
+            json.dumps(
+                {
+                    "github": {"command": "gh", "args": ["mcp"]},
+                    "_env_contract": {
+                        # Provided upstream — must NOT get a live fleet stub.
+                        "UPSTREAM_TOKEN": {
+                            "description": "set upstream",
+                            "tier": "fleet",
+                        },
+                        # No upstream value anywhere — MUST still get one, or the
+                        # test above passes for the trivial reason that nothing
+                        # is ever stubbed.
+                        "FLEET_ONLY_TOKEN": {"description": "unset", "tier": "fleet"},
+                    },
+                }
+            )
+        )
+        fleet_dir = root / "local" / "test-fleet"
+        fleet_dir.mkdir(parents=True)
+        (fleet_dir / "fleet.yaml").write_text(
+            dedent("""\
+            fleet:
+              name: test-fleet
+              service_prefix: com.test
+              bots:
+                worker:
+                  expertise: [eng]
+                  mcp: [github]
+        """)
+        )
+        for d in (
+            fleet_dir / "runtime" / "bots" / "worker",
+            root / "runtime" / "bots" / "worker",
+        ):
+            d.mkdir(parents=True, exist_ok=True)
+        return root, fleet_dir, Paths(root=root, fleet_dir=fleet_dir)
+
+    def _scaffold(self, root: Path, fleet_dir: Path, paths: Paths) -> str:
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        scaffold_env_files(fleet, paths, log=lambda m: None)
+        return (fleet_dir / ".env").read_text()
+
+    def test_upstream_provided_var_is_not_a_live_fleet_stub(self, tmp_path):
+        """Composition arm, with its own vacuity control in the same run."""
+        root, fleet_dir, paths = self._setup_overlay_fleet(tmp_path)
+        (root / ".env").write_text("UPSTREAM_TOKEN=realvalue123\n")
+
+        text = self._scaffold(root, fleet_dir, paths)
+
+        assert not re.search(r"^export UPSTREAM_TOKEN=", text, re.MULTILINE), (
+            "a live empty fleet stub blanks the upstream value at runtime:\n" + text
+        )
+        # Control: without this the assertion above is satisfied by a scaffold
+        # that simply never writes anything.
+        assert re.search(r"^export FLEET_ONLY_TOKEN=", text, re.MULTILINE), (
+            "a var with no upstream value must still be prompted for:\n" + text
+        )
+
+    def test_existing_blanking_fleet_stub_is_healed_in_place(self, tmp_path):
+        """The live damage is repaired by the next generate, not merely averted.
+
+        Three real credentials were already destroyed on disk when this was
+        found. A fix that only stops NEW stubs leaves those in place forever,
+        because provided_upstream is otherwise consulted only when a key is
+        first scaffolded.
+        """
+        root, fleet_dir, paths = self._setup_overlay_fleet(tmp_path)
+        (root / ".env").write_text("UPSTREAM_TOKEN=realvalue123\n")
+        (fleet_dir / ".env").write_text(
+            "# Fleet environment for: test-fleet\nexport UPSTREAM_TOKEN=\n"
+        )
+
+        text = self._scaffold(root, fleet_dir, paths)
+
+        assert not re.search(r"^export UPSTREAM_TOKEN=", text, re.MULTILINE), (
+            "the pre-existing blanking stub was left live:\n" + text
+        )
+
+    def test_fleet_tier_upstream_excludes_the_fleet_file_itself(self, tmp_path):
+        """`for_tier` selects the tier set, and the two must actually differ.
+
+        `paths.env_file` resolves to the FLEET .env once one exists, so reusing
+        the bot-tier tier list here would let the file being scaffolded count as
+        its own upstream.
+
+        MEASURED, so the next reader does not misdiagnose a green mutation run:
+        swapping the call site to `_upstream_env_names(paths)` leaves this whole
+        class green and produces BYTE-IDENTICAL scaffold output. That is an
+        INERT MUTANT, not weak tests, and the difference is provable rather than
+        lucky — every name the fleet file could add is by definition already a
+        key of the file being written, so it can never be a NEW var needing a
+        stub; and it can never be a pristine `export X=` stub either, because
+        pristine means empty and this helper filters to non-empty values.
+
+        So this test guards the helper's CONTRACT (the sets do differ, asserted
+        below), not the call site — no test can catch that swap today. The call
+        site is written for intent and for robustness if `existing_keys` or
+        `Paths.env_file` semantics ever move.
+        """
+        from claudlobby.composer import _upstream_env_names
+
+        root, fleet_dir, paths = self._setup_overlay_fleet(tmp_path)
+        (root / ".env").write_text("ROOT_TIER_TOKEN=realvalue\n")
+        (fleet_dir / ".env").write_text("FLEET_TIER_TOKEN=realvalue\n")
+        assert paths.env_file == fleet_dir / ".env", (
+            "fixture precondition: env_file must resolve to the fleet file"
+        )
+
+        fleet_view = _upstream_env_names(paths, for_tier="fleet")
+        bot_view = _upstream_env_names(paths, for_tier="bot")
+
+        assert "ROOT_TIER_TOKEN" in fleet_view
+        assert "FLEET_TIER_TOKEN" not in fleet_view, (
+            "the fleet file is not upstream of itself; counting it makes the "
+            f"guard protect nothing. got {sorted(fleet_view)}"
+        )
+        assert "FLEET_TIER_TOKEN" in bot_view, (
+            "the fleet tier IS upstream of a bot stub and must stay so; "
+            f"got {sorted(bot_view)}"
+        )
+
+    def test_unknown_tier_raises_rather_than_silently_guarding_less(self, tmp_path):
+        from claudlobby.composer import _upstream_env_names
+
+        _root, _fleet_dir, paths = self._setup_overlay_fleet(tmp_path)
+        with pytest.raises(ValueError, match="unknown tier"):
+            _upstream_env_names(paths, for_tier="blot")
+
+    def test_upstream_value_survives_real_shell_sourcing_order(self, tmp_path):
+        """Behaviour arm — the property that actually matters, through bash.
+
+        Composition is necessary and not sufficient: what breaks a credential is
+        the shell, so the tier chain is sourced for real in start-bot.sh's order.
+        """
+        root, fleet_dir, paths = self._setup_overlay_fleet(tmp_path)
+        (root / ".env").write_text("UPSTREAM_TOKEN=realvalue123\n")
+        self._scaffold(root, fleet_dir, paths)
+
+        script = (
+            f'set -a; . "{root / ".env"}"; . "{fleet_dir / ".env"}"; '
+            'printf "%s" "${UPSTREAM_TOKEN:-EMPTY}"'
+        )
+        out = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True
+        ).stdout
+        assert out == "realvalue123", (
+            f"fleet-tier scaffold clobbered the upstream value: got {out!r}"
+        )
+
+    def test_an_empty_stub_really_does_blank_upstream(self, tmp_path):
+        """The other arm, so the test above cannot pass for the wrong reason.
+
+        If sourcing an empty assignment were harmless, every assertion in this
+        class would hold no matter what the composer wrote. This pins the
+        premise: absent falls through, empty blanks.
+        """
+        root = tmp_path / "tiers"
+        root.mkdir()
+        upstream = root / "upstream.env"
+        upstream.write_text("UPSTREAM_TOKEN=realvalue123\n")
+
+        absent = root / "absent.env"
+        absent.write_text("# no mention of the key at all\n")
+        empty = root / "empty.env"
+        empty.write_text("export UPSTREAM_TOKEN=\n")
+
+        def resolve(second: Path) -> str:
+            script = (
+                f'set -a; . "{upstream}"; . "{second}"; '
+                'printf "%s" "${UPSTREAM_TOKEN:-EMPTY}"'
+            )
+            return subprocess.run(
+                ["bash", "-c", script], capture_output=True, text=True
+            ).stdout
+
+        assert resolve(absent) == "realvalue123", "an absent key must fall through"
+        assert resolve(empty) == "EMPTY", (
+            "an empty stub must blank the upstream value — if this fails the "
+            "premise of #1206 is wrong and the rest of this class proves nothing"
+        )
+
+
 class TestLaunchdArgvSplitting:
     """A job whose `script` carries flags must still yield a valid plist (#969).
 
