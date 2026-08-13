@@ -35,8 +35,9 @@ Reviewers run hot. Strict discipline:
 
 - **Between every review on the same project**: `/compact`
 - **Switching projects**: `/clear`
-- **Above 60% context**: flag for restart, don't take another review
-- **Above 70% context**: wrap up, report back, expect a restart
+- **After ~3 reviews, or on any degradation symptom** (`context-management`):
+  report `context-degraded` and don't take another review until the manager
+  answers. No tool reports a context percentage to you — never state one.
 
 ## Subagent Discipline
 

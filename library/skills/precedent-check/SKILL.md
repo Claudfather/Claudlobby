@@ -14,10 +14,12 @@ Your job is to check whether the proposed change is consistent with prior decisi
 
 Read the source material. Then check:
 
-- **Decision docs** — scan `shared/decisions/`, `documentation/`, and ADRs for prior decisions relevant to this area.
+- **Decision docs** — prior decisions and ADRs for this area, plus the repo's own `documentation/`.
 - **Git history** — `git log --all --oneline --grep="<keywords>"` for prior attempts, reverts, and related changes.
 - **Existing patterns** — how does the codebase currently handle similar concerns?
-- **Open plans** — scan `shared/planning/active/` for in-flight work that overlaps.
+- **Open plans** — in-flight work that overlaps.
+
+**Reach the fleet's docs through the door your Shared Documentation section names.** A vault-wired fleet queries Claudron; a fleet with a raw doc tree reads `shared/decisions/` and `shared/planning/active/` directly. Hand-opening the tree on a vault-wired fleet reads files the vault door exists to replace, and misses everything in the vault's other tiers (#1172).
 
 ### 2. Apply Precedent Lenses
 

@@ -5,7 +5,7 @@ description: "How the librarian moves knowledge up, down, and out of the promoti
 
 # Knowledge Graduation
 
-Extends the Shared Documentation protocol — the ladder (memory → shared → vault `_shared/` → packs), the writing conventions, and the 90-day `expires:` TTL are defined there. This protocol adds the graduation process on top: who decides a doc's placement, by what criteria, on what cadence.
+Extends the Shared Documentation protocol — the ladder, the writing conventions, and the 90-day `expires:` TTL are defined there. **Read the rungs off your own Shared Documentation section rather than from memory: a vault-wired fleet and a raw-doc-tree fleet compose different ladders**, and the composed one is the one that applies to you. This protocol adds the graduation process on top: who decides a doc's placement, by what criteria, on what cadence.
 
 The librarian role owns this process. Graduation is advisory: the librarian proposes, a ratifier approves, then the librarian executes. No doc moves, renews, or dies without a recorded verdict.
 

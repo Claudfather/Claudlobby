@@ -526,6 +526,55 @@ def audit_bot(
     return findings
 
 
+def _fleet_pulse_env_findings(
+    fleet: FleetConfig, paths: Paths, *, home: Path | None = None
+) -> list[Finding]:
+    """#1120: a fleet-pulse escalation knob sitting in ANY ``.env`` tier.
+
+    ``lib/fleet-pulse.sh`` runs from a composed timer unit that sources no
+    ``.env`` at all — not the bot tier, not the fleet tier, not a host tier — so
+    a ``FLEET_PULSE_*`` key in any of them reaches nothing and the script keeps
+    its own default. The operator sees no change and cannot tell "ignored" from
+    "applied, and the condition is genuinely still firing". That is the shape
+    this rung exists to make audible: without it the only feedback is an audit
+    weeks later.
+
+    FAIL at every tier, deliberately, and not the F5 rung's tier-derived
+    severity — for the same reason ``_env_secret_leak_findings`` departs from
+    it: this is a high-precision signal rather than a heuristic. The key name is
+    unambiguous and the placement is inert *wherever* it sits, so grading it by
+    which file it is in would imply some tier works. None does.
+
+    Keys come from :data:`FLEET_PULSE_ENV_KEYS`, the same mapping the composer
+    emits from, so the guard cannot come to disagree with the emitter about
+    which knobs exist. Values are masked (R4) — a chat id is an identifier.
+    """
+    from . import dotenv
+    from .config import FLEET_PULSE_ENV_KEYS
+
+    watched = set(FLEET_PULSE_ENV_KEYS.values())
+    findings: list[Finding] = []
+    seen: set[tuple[str, str]] = set()
+    for bot in fleet.bots.values():
+        for path, _severity in _env_tier_files(bot, fleet, paths, home=home):
+            for key in dotenv.read(path):
+                if key in watched and (str(path), key) not in seen:
+                    seen.add((str(path), key))
+                    findings.append(
+                        Finding(
+                            bot.bot_id,
+                            "fleet_pulse_env_inert",
+                            FAIL,
+                            f"{path}: {key} is set but reaches nothing — the "
+                            "composed fleet-pulse timer unit sources no .env, so "
+                            "this is silently ignored and the script keeps its "
+                            "default. Move it to the fleet.yaml `fleet_pulse:` "
+                            "block, which composes into the unit's Environment=.",
+                        )
+                    )
+    return findings
+
+
 def audit_fleet(
     fleet: FleetConfig, paths: Paths, *, home: Path | None = None
 ) -> list[Finding]:
@@ -536,6 +585,7 @@ def audit_fleet(
     # Fleet/host-scoped rung — the host-shared .env tiers are the same for every
     # bot, so scan them once (#792), not once per bot.
     findings.extend(_env_secret_leak_findings(fleet, paths, home=home))
+    findings.extend(_fleet_pulse_env_findings(fleet, paths, home=home))
     return findings
 
 

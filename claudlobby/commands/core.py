@@ -74,6 +74,27 @@ def cmd_freshbox(args) -> int:
     return 1 if exits_nonzero(findings, strict=args.strict) else 0
 
 
+def cmd_creds_reconcile(args) -> int:
+    """Reconcile declared credentials against values against equipped bots (#1104).
+
+    Answers shape 1 (declared, no value) and shape 2 (value, no equipped
+    consumer). Shape 3 — a declaration and its consumer naming DIFFERENT keys —
+    is deliberately not attempted and reports UNKNOWN by name, because deciding
+    it means reading a sibling plugin's source, which is assertion rather than
+    contract. UNKNOWN is printed and counted; a silent omission would recreate
+    the very defect this exists to remove.
+    """
+    from ..credentials import exits_nonzero, format_report, reconcile
+
+    paths = _resolve_paths(args)
+    _load_env(paths)
+    fleet, _ = _load_fleet_or_exit(paths)
+
+    findings, scope = reconcile(paths, fleet)
+    print(format_report(findings, scope))
+    return 1 if exits_nonzero(findings) else 0
+
+
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)
@@ -96,7 +117,12 @@ def cmd_validate(args) -> int:
 
 
 def cmd_generate(args) -> int:
-    from ..composer import compose_fleet_timers, compose_host_timers
+    from ..composer import (
+        compose_fleet_timers,
+        compose_host_bot_handles,
+        compose_host_mention_allowlist,
+        compose_host_timers,
+    )
 
     paths = _resolve_paths(args)
     _load_env(paths)
@@ -141,6 +167,15 @@ def cmd_generate(args) -> int:
     if host_timers_dir.is_dir():
         log.info("composed host timers → %s", host_timers_dir)
 
+    # The GitHub mention guard's name list (#1019). Host-wide, so it is written
+    # on every generate regardless of which fleet was named — a bot references
+    # other fleets' bots constantly, and those are the mentions most likely to
+    # be written by someone with no relationship to that bot.
+    handles = compose_host_bot_handles(paths)
+    log.info("composed bot-handle guard list → %s", handles)
+    allowlist = compose_host_mention_allowlist(paths)
+    log.info("composed mention allowlist → %s", allowlist)
+
     return 0
 
 
@@ -151,7 +186,9 @@ def cmd_host_timers(args) -> int:
     before enrollment so a cold host (no fleet composed yet) still gets its
     host units.
     """
-    from ..composer import compose_host_timers
+    from ..composer import (
+        compose_host_timers,
+    )
 
     paths = _resolve_paths(args)
     host_timers_dir = compose_host_timers(paths)
@@ -394,6 +431,83 @@ def cmd_report_back(args) -> int:
         print(f"{ts:<22} {bot:<12} {status:<10} {summary:<50} {pr}")
 
     print(f"\n{len(entries)} event(s)")
+    return 0
+
+
+def cmd_brief(args) -> int:
+    """The fleet's one read door — composed state for one bot.
+
+    Read-only apart from a single write: ``--ack`` advances that viewer's
+    report cursor. Every other artifact it touches (dispatch log, report
+    ledger, workstream registry, event files) is opened for reading only.
+    """
+    from ..brief import (
+        boot_provenance,
+        build_brief,
+        format_boot_brief,
+        format_brief,
+        write_cursor,
+    )
+
+    paths = _resolve_paths(args)
+    _load_env(paths)  # WORKSTREAM_LEASE_DAYS / DISPATCH_* knobs live in .env
+    fleet, _md = _load_fleet_or_exit(paths)
+
+    bot_id = args.bot
+    if bot_id not in fleet.bots:
+        log.error("bot %r not found in fleet %r", bot_id, fleet.name)
+        return 1
+
+    # getattr, not args.boot: argparse always supplies the flag, but three
+    # hand-built test Namespaces across two authors now call cmd_brief
+    # directly — the defensive default is cheaper than coordinating them.
+    boot = getattr(args, "boot", False)
+    if boot and (args.json or args.ack):
+        # The boot payload is a render mode, not a session: it must never ack
+        # (a hook that advances the cursor marks unread work handled on every
+        # boot), and its JSON is the plain envelope --json already serves.
+        log.error("--boot is mutually exclusive with --json and --ack")
+        return 1
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    brief = build_brief(fleet, paths, bot_id, now)
+
+    if boot:
+        print(format_boot_brief(brief, boot_provenance(paths, now)))
+        return 0
+
+    if args.json:
+        print(_json.dumps(brief, indent=2))
+    else:
+        sys.stdout.write(format_brief(brief))
+
+    if args.ack:
+        reports = brief.get("reports") or {}
+        if not reports:
+            # The section was omitted, so the ledger could not be read. Refusing
+            # is the whole point: advancing a cursor past reports nobody could
+            # see would mark unread work as handled, permanently. "Nothing to
+            # ack" would be a claim we are in no position to make.
+            log.error(
+                "refusing to ack for %s — the report section was not served "
+                "(see the degraded block); nothing was read, so nothing can be "
+                "marked seen",
+                bot_id,
+            )
+            return 1
+        # Advance to the newest row the caller was just shown, so the ack covers
+        # exactly what was rendered — never a row that arrived mid-run.
+        unacked = reports.get("unacked", [])
+        if unacked:
+            write_cursor(paths, bot_id, unacked[-1]["ts"])
+            log.info(
+                "acked %d report(s) for %s — cursor at %s",
+                len(unacked),
+                bot_id,
+                unacked[-1]["ts"],
+            )
+        else:
+            log.info("nothing to ack for %s", bot_id)
     return 0
 
 

@@ -47,7 +47,25 @@ if check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
     # presents as the 30s timeout below with the session context silently lost,
     # which is the exact failure the verify-retry exists to catch. Verbatim send
     # (no sanitize, no 'set +H;') because the payload is a slash command.
-    pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" '/claudna:session handoff --auto' || true
+    # Capability gate (#1163), the same predicate start-bot uses for resume —
+    # one helper, not a second mechanism. This call site matters MORE than the
+    # boot one: it runs on the systemd ExecStop path, so under
+    # `plugins.include_defaults: false` the old hardcode fired an unresolvable
+    # command at SHUTDOWN, the one moment the handoff is all that stands between
+    # a restart and lost context.
+    #
+    # Fail OPEN, identically: only a positive finding of absence suppresses the
+    # send. A wasted keystroke into a dying pane is visible and harmless; not
+    # sending when we should have loses the session silently.
+    _HANDOFF_CMD="${SESSION_HANDOFF_COMMAND-$_SESSION_HANDOFF_COMMAND_DEFAULT}"
+    if _handoff_status="$(session_command_status "$_HANDOFF_CMD" "$BOT_DIR")"; then
+        pane_send_verified "$TMUX_SOCKET" "$TMUX_SESSION" "$_HANDOFF_CMD" || true
+    else
+        echo "HANDOFF SKIP — no session-handoff capability [$_handoff_status]; stopping without a fresh handoff, last one (if any) left at $HANDOFF_FILE" >&2
+        emit_fleet_event "handoff_skipped" "pre-stop" \
+            "{\"reason\":\"$_handoff_status\",\"handoff\":\"$HANDOFF_FILE\"}" || true
+        exit 0
+    fi
     # Wait up to 30 seconds for handoff to complete
     for _ in $(seq 1 30); do
         if [ -f "$HANDOFF_FILE" ]; then

@@ -24,7 +24,7 @@ gets collected, and say something a human or a manager can act on.
 
 **Evidence over intuition.** Every claim traces to a row, a file, a command
 output, or a run you can point at. "The fleet feels slow lately" is not a
-finding. "17 of 23 sessions on `crog-eng-team` last week ended with `failed`
+finding. "17 of 23 sessions on `acme-fleet` last week ended with `failed`
 naming the same missing env var" is.
 
 **Cost AND quality — never one axis.** A change that halves tokens and quietly

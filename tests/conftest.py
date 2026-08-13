@@ -10,6 +10,8 @@ from textwrap import dedent
 
 import pytest
 
+from claudlobby.config import DEFAULT_GUARDRAILS
+
 
 @pytest.fixture(autouse=True)
 def _isolate_claudlobby_root(monkeypatch):
@@ -170,13 +172,19 @@ def load_lib_module(name: str):
     return mod
 
 
-def call_script_fn(script: Path, fn: str, *args: str) -> str:
+def call_script_fn(script: Path, fn: str, *args: str, env: dict | None = None) -> str:
     """Source a bash script (guarded-main style) and call one of its functions,
     returning stdout. Args travel as positionals so the shell never interprets
-    the values. Generalizes call_lib_fn to scripts beyond lib-common.sh."""
+    the values. Generalizes call_lib_fn to scripts beyond lib-common.sh.
+    env: child environment for the call — pass constructed_env(...) for #846
+    isolation; default inherits os.environ (legacy callers)."""
     argv = ["bash", "-c", f'. "{script}"; {fn} "$@"', "_", *args]
     r = subprocess.run(
-        argv, capture_output=True, text=True, env=dict(os.environ), timeout=30
+        argv,
+        capture_output=True,
+        text=True,
+        env=dict(os.environ) if env is None else env,
+        timeout=30,
     )
     assert r.returncode == 0, r.stderr
     return r.stdout
@@ -335,6 +343,12 @@ def fleet_dir(tmp_path: Path) -> Path:
     (root / "library" / "guardrails" / "no-push-main.md").write_text(
         "---\ntitle: No push to main\n---\n\nNever push to main.\n"
     )
+    # Every bot composes DEFAULT_GUARDRAILS, so the minimal library must carry
+    # them or the validator warns per bot about a guardrail it cannot resolve.
+    for _default_guardrail in DEFAULT_GUARDRAILS:
+        (root / "library" / "guardrails" / f"{_default_guardrail}.md").write_text(
+            f"---\ntitle: {_default_guardrail}\n---\n\nDefault guardrail.\n"
+        )
     (root / "library" / "protocols" / "report-back.md").write_text(
         "---\ntitle: Report-Back Protocol\n---\n\nReport back when done.\n"
     )

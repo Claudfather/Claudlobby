@@ -20,7 +20,9 @@ echo "Memory: $(ps -o rss= -p $(pgrep -f 'claude' | head -1) 2>/dev/null | awk '
 tmux list-sessions 2>/dev/null
 ```
 
-Also read your own context % from the status line (look for `N%` near the prompt).
+Do NOT report a context percentage — no bot can measure one
+(`context-management`). Report what you can observe: units of work finished this
+session, and any degradation symptom that protocol names.
 
 ### 2. MCP Server Connectivity
 
@@ -76,7 +78,7 @@ Send via `mcp__plugin_telegram_telegram__reply` to chat_id `$TELEGRAM_GROUP_CHAT
 🖥️ *MANAGER STATUS*
 
 *Session*
-• Running 4h 23m | PID 12345 | 487 MB | context 34%
+• Running 4h 23m | PID 12345 | 487 MB | 3 units this session
 
 *MCP Servers*
 ✅ GitHub | Notion | Slack
@@ -94,7 +96,9 @@ Send via `mcp__plugin_telegram_telegram__reply` to chat_id `$TELEGRAM_GROUP_CHAT
 1. Run all checks in parallel for speed.
 2. For MCP tests, use read-only calls — don't modify anything.
 3. Flag issues prominently at the top of the output.
-4. If your own context is > 70%, call it out — you should be restarted soon.
+4. If you notice a degradation symptom (`context-management`), call it out with
+   the token `context-degraded` and say whether a restart is safe right now.
+   Never substitute a guessed percentage for that.
 5. Keep the output under ~20 lines. Don't dump full pane captures — only the single relevant line if you found an error.
 6. Default to "full" if no argument is provided.
 

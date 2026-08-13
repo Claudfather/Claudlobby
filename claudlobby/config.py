@@ -12,6 +12,8 @@ from typing import Any
 
 import yaml
 
+from . import defaults as _defaults
+
 from .known_values import (
     KNOWN_EFFORTS,
     PROJECT_KEYS,
@@ -91,12 +93,23 @@ class SystemDefaultsConfig:
 
     ``system_defaults: false`` in fleet.yaml sets ``enabled=False``,
     disabling all injection.  Per-category bools allow surgical opt-out.
+
+    KNOWN BOUND: the keys below are a fixed set, not "one per entity type".
+    Ten of the twelve library entity types still have no opt-out, and an
+    unrecognised key is silently dropped — so a fleet cannot yet tell a working
+    opt-out from a typo (#1168 Phase 3 finding 2). Adding a key here is what
+    gives a type an opt-out; the check is in the code that consumes the default.
     """
 
     enabled: bool = True
     hooks: bool = True
     timers: bool = True
     observability: bool = True
+    guardrails: bool = True
+    # Consumed in composer.py, not in the load_fleet merge below, because the
+    # protocols default is availability-gated on a Paths fact this layer cannot
+    # see. See defaults.AVAILABILITY_GATES.
+    protocols: bool = True
 
 
 @dataclass
@@ -122,6 +135,69 @@ class ObservabilityConfig:
     bridge_heal: bool | None = None
     # heal bounce cap before the ladder escalates to a human (keepalive default 3)
     bridge_heal_max_attempts: int | None = None
+    # enable the #1024 mirror watchdog: flag a worker that reported terminal and
+    # was never re-dispatched. Structured config rather than fleet-tier .env for
+    # the same reason as bridge_heal, one door over — the composed fleet-pulse
+    # unit carries four fixed Environment= lines and sources no .env, so bot.conf
+    # is the only path that reaches the check.
+    unassigned_check: bool | None = None
+    # seconds since the terminal report before the worker is flagged unassigned
+    unassigned_threshold: int | None = None
+    # seconds past which a strand stops being reported: a long-idle bot is a
+    # known state, not an event, and re-paging it forever is how the alert
+    # becomes wallpaper. The trade is real in both directions — past this age
+    # the check also clears its debounce, so the signal stops being
+    # distinguishable from "resolved" and a strand outliving the window goes
+    # quiet. <= 0 disables the cap and keeps reporting forever.
+    unassigned_max_age: int | None = None
+
+
+# Field -> environment variable, for the fleet-pulse escalation knobs (#1120).
+# ONE definition: the composer emits from it and freshbox's .env rung denies
+# from it, so the emitter and the guard against misplacing them cannot drift
+# into disagreeing about which keys are involved.
+FLEET_PULSE_ENV_KEYS: dict[str, str] = {
+    "escalation_threshold": "FLEET_PULSE_ESCALATION_THRESHOLD",
+    "escalation_window": "FLEET_PULSE_ESCALATION_WINDOW",
+    "escalation_chat_id": "FLEET_PULSE_ESCALATION_CHAT_ID",
+    "renotify_after_s": "FLEET_PULSE_RENOTIFY_AFTER_S",
+    "rearm_window_s": "FLEET_PULSE_REARM_WINDOW_S",
+}
+
+
+@dataclass
+class FleetPulseConfig:
+    """Fleet-pulse escalation knobs — the alert-volume controls (#1120).
+
+    **Fleet-scoped, not per-bot**, and that is what decides the transport.
+    ``lib/fleet-pulse.sh`` resolves these once at top level, outside its per-bot
+    loop, so ``bot.conf`` — the tier ``bridge_heal`` and ``unassigned_check``
+    use, per the note on :class:`ObservabilityConfig` — cannot carry them
+    without electing an arbitrary bot's conf. That is precisely the
+    directory-order fragility ``FLEET_PULSE_ESCALATION_CHAT_ID`` exists to
+    avoid, so reusing that tier would cure the silence and inherit the bug.
+
+    They ride the composed timer unit's ``Environment=`` instead — the same door
+    that already carries ``TELEGRAM_GROUP_CHAT_ID`` into a fleet timer, for the
+    same reason (a scheduler starts with almost no environment). Absent block ⇒
+    ``None`` ⇒ nothing emitted and the script keeps its own defaults.
+    """
+
+    escalation_threshold: int | None = None
+    escalation_window: int | None = None
+    escalation_chat_id: str | None = None
+    renotify_after_s: int | None = None
+    rearm_window_s: int | None = None
+
+    def env(self) -> dict[str, str]:
+        """The subset actually set, as ``VAR: value``. Unset stays unset so the
+        script's own default remains the single definition of each default."""
+        out: dict[str, str] = {}
+        for field_name, var in FLEET_PULSE_ENV_KEYS.items():
+            value = getattr(self, field_name)
+            if value is not None and str(value) != "":
+                out[var] = str(value)
+        return out
 
 
 @dataclass
@@ -478,6 +554,10 @@ class BotConfig:
     claudosseum_tenant_id: str | None = None
     autonomous_runner: AutonomousRunnerConfig | None = None
     briefing: BriefingConfig | None = None  # equippable briefing feature (#627)
+    # #904 M1 (epic #1102 R3, fork R3-F1): SessionStart boot brief. Default off;
+    # arming is additionally gated at compose time on the installed CLI exposing
+    # `brief --boot` (composed settings outlive installs on this estate).
+    brief_on_start: bool = False
 
 
 @dataclass
@@ -513,6 +593,19 @@ DEFAULT_PLUGINS: list[str] = [
     "superpowers@claude-plugins-official",
 ]
 
+# Guardrails composed onto every bot unless system_defaults.guardrails is false.
+#
+# DECLARED IN claudlobby/defaults.py, not here (#1168). That module's REGISTRY
+# is the single source for every entity type's compositor-side default, and this
+# is a re-export so existing importers keep working. It is imported rather than
+# restated deliberately: a constant declared in two places drifts, and the test
+# then passes against whichever copy is not the one that composes — the failure
+# behind #1046 and #892/#1143.
+#
+# The membership test this entry had to clear, and the tier it belongs to, live
+# beside it in the registry.
+DEFAULT_GUARDRAILS = _defaults.DEFAULT_GUARDRAILS
+
 
 @dataclass
 class WorkstreamsConfig:
@@ -545,6 +638,7 @@ class FleetConfig:
     teams: dict[str, TeamConfig] = field(default_factory=dict)
     bots: dict[str, BotConfig] = field(default_factory=dict)
     sweep: SweepConfig | None = None
+    fleet_pulse: FleetPulseConfig | None = None
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
     # Fleet-level mission: `mission` is the one-paragraph anchor EVERY bot
     # receives; `mission_file` points at a fuller charter (fleet-relative)
@@ -566,8 +660,28 @@ class FleetConfig:
         return any(b.briefing and b.briefing.slots for b in self.bots.values())
 
     def manager_bots(self) -> set[str]:
-        """Bot names that manage at least one team."""
-        return {team.manager for team in self.teams.values()}
+        """Bot names that manage anyone — a team in this fleet, or bots anywhere.
+
+        Two declarations, because a manager's reports are not always in the same
+        fleet. ``teams:`` names a within-fleet manager and answers "does a team
+        here name this bot". ``bots.<id>.manages:`` names the reports directly,
+        and is the only one of the two that can express a CROSS-FLEET report — a
+        top-level coordinator whose reports are themselves managers of other
+        fleets is named by no ``teams:`` block anywhere, and so was invisible
+        here despite the fleet declaring exactly who it manages.
+
+        That is not a stretch of the schema: ``_validate_teams`` already warns
+        rather than errors on a ``manages`` target outside ``fleet.bots``,
+        precisely because "bot_ids may reference other fleets".
+
+        Widely consumed, including by guards where a missing bot silently loses
+        a protection rather than merely being mislabelled — so widen it here,
+        once, rather than special-casing whichever consumer notices first.
+        """
+        from_teams = {team.manager for team in self.teams.values()}
+        # An empty or absent `manages:` list is not a claim to manage anyone.
+        from_manages = {name for name, bot in self.bots.items() if bot.manages}
+        return from_teams | from_manages
 
     def teams_for_manager(self, bot_name: str) -> list[TeamConfig]:
         return [team for team in self.teams.values() if team.manager == bot_name]
@@ -894,6 +1008,9 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
     dd = raw.get("dispatch_deadline")
     bh = raw.get("bridge_heal")
     bhma = raw.get("bridge_heal_max_attempts")
+    uc = raw.get("unassigned_check")
+    ut = raw.get("unassigned_threshold")
+    uma = raw.get("unassigned_max_age")
     return ObservabilityConfig(
         pulse_interval=int(pi) if pi is not None else None,
         reap_days=int(rd) if rd is not None else None,
@@ -901,6 +1018,9 @@ def _coerce_observability(raw: dict | None) -> ObservabilityConfig:
         dispatch_deadline=int(dd) if dd is not None else None,
         bridge_heal=bool(bh) if bh is not None else None,
         bridge_heal_max_attempts=int(bhma) if bhma is not None else None,
+        unassigned_check=bool(uc) if uc is not None else None,
+        unassigned_threshold=int(ut) if ut is not None else None,
+        unassigned_max_age=int(uma) if uma is not None else None,
     )
 
 
@@ -917,6 +1037,25 @@ def _coerce_sweep(raw: dict | None) -> SweepConfig | None:
         label=str(raw.get("label", "auto-audit")),
         schedule=str(raw.get("schedule", "*-*-* 03:00:00")),
         audit_types=audit_types,
+    )
+
+
+def _coerce_fleet_pulse(raw: dict | None) -> FleetPulseConfig | None:
+    """Coerce the fleet-level ``fleet_pulse:`` block. None when absent."""
+    if not isinstance(raw, dict):
+        return None
+
+    def _int(key: str) -> int | None:
+        v = raw.get(key)
+        return None if v is None or v == "" else int(v)
+
+    chat = raw.get("escalation_chat_id")
+    return FleetPulseConfig(
+        escalation_threshold=_int("escalation_threshold"),
+        escalation_window=_int("escalation_window"),
+        escalation_chat_id=None if chat is None else str(chat),
+        renotify_after_s=_int("renotify_after_s"),
+        rearm_window_s=_int("rearm_window_s"),
     )
 
 
@@ -997,6 +1136,15 @@ def _merge_observability(
         bridge_heal_max_attempts=override.bridge_heal_max_attempts
         if override.bridge_heal_max_attempts is not None
         else default.bridge_heal_max_attempts,
+        unassigned_check=override.unassigned_check
+        if override.unassigned_check is not None
+        else default.unassigned_check,
+        unassigned_threshold=override.unassigned_threshold
+        if override.unassigned_threshold is not None
+        else default.unassigned_threshold,
+        unassigned_max_age=override.unassigned_max_age
+        if override.unassigned_max_age is not None
+        else default.unassigned_max_age,
     )
 
 
@@ -1097,6 +1245,25 @@ def _coerce_autonomous_runner(
     )
 
 
+def _parse_brief(raw: Any) -> bool:
+    """Parse the bot-level ``brief:`` stanza (#904 M1) to its arming bool.
+
+    STRICT on purpose: this knob arms runtime behavior (a composed SessionStart
+    hook), and the loose ``bool()`` coercion the cosmetic knobs use would arm it
+    on any typo — ``on_start: tue`` is a YAML *string*, truthy under ``bool()``,
+    and a silently armed knob is the no-silent-switches failure exactly. Only a
+    real YAML boolean arms; anything else is a parse error naming the value.
+    """
+    raw = _shaped("brief", raw, dict, "{on_start: true}")
+    on_start = raw.get("on_start", False)
+    if not isinstance(on_start, bool):
+        raise ValueError(
+            f"'brief.on_start' must be a YAML boolean, got {on_start!r} — "
+            "an arming knob must not switch on via a typo"
+        )
+    return on_start
+
+
 def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | None:
     """Validate a string field against a known set. Returns value or raises."""
     if value is None:
@@ -1168,9 +1335,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             **_parse_git_credentials(
                 defaults.get("git_credentials"), where="fleet defaults"
             ),
-            **_parse_git_credentials(
-                raw.get("git_credentials"), where=f"bot '{name}'"
-            ),
+            **_parse_git_credentials(raw.get("git_credentials"), where=f"bot '{name}'"),
         },
         model_strategy=_coerce_model_strategy(
             raw.get("model_strategy") or defaults.get("model_strategy")
@@ -1278,6 +1443,7 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         or defaults.get("claudosseum_tenant_id"),
         autonomous_runner=_coerce_autonomous_runner(raw.get("autonomous_runner"), name),
         briefing=_coerce_briefing(raw.get("briefing")),
+        brief_on_start=_parse_brief(raw.get("brief", defaults.get("brief"))),
     )
 
 
@@ -1297,6 +1463,8 @@ def _coerce_system_defaults(raw: Any) -> SystemDefaultsConfig:
             hooks=bool(raw.get("hooks", True)),
             timers=bool(raw.get("timers", True)),
             observability=bool(raw.get("observability", True)),
+            guardrails=bool(raw.get("guardrails", True)),
+            protocols=bool(raw.get("protocols", True)),
         )
     return SystemDefaultsConfig()
 
@@ -1425,8 +1593,19 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
             # jobs flow through the defaults merge so fleet.yaml can override an
             # individual job by name; compose_fleet_timers reads merged["jobs"].
             effective_system["jobs"] = system_section.get("jobs", {})
-
     merged_defaults = _merge_system_into_defaults(effective_system, defaults)
+
+    if system_defaults_cfg.enabled and system_defaults_cfg.guardrails:
+        # Applied AFTER the system.yaml merge, and unioned rather than assigned.
+        # fleet.yaml.seed ships a `defaults.guardrails` list, so every newly
+        # seeded fleet supplies one — and the merge above replaces a fleet-set
+        # key rather than combining it, which would drop these for exactly the
+        # new fleets the default exists to protect. Opting out is
+        # `system_defaults.guardrails: false`, visible in fleet.yaml; declaring
+        # a guardrail list is not an opt-out and must not act as one.
+        merged_defaults["guardrails"] = _merge_lists(
+            DEFAULT_GUARDRAILS, merged_defaults.get("guardrails")
+        )
 
     bots = {
         bot_name: _coerce_bot(bot_name, bot_def, merged_defaults)
@@ -1446,6 +1625,7 @@ def load_fleet(fleet_yaml: Path) -> tuple[FleetConfig, dict]:
         teams=teams,
         bots=bots,
         sweep=_coerce_sweep(fleet.get("sweep")),
+        fleet_pulse=_coerce_fleet_pulse(fleet.get("fleet_pulse")),
         projects=load_projects(fleet_yaml.parent / "projects.yaml"),
         mission=_shaped(
             "fleet.mission", fleet.get("mission"), str, "mission: one paragraph"

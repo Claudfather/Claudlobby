@@ -117,7 +117,17 @@ cleanup() {
     # still-alive ones so a mid-scenario abort never leaks a poller.
     # shellcheck disable=SC2086
     for _p in ${BH_PIDS:-}; do kill -TERM "$_p" 2>/dev/null || true; done
-    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "$TMUX_TMPDIR"
+    # The #1002 boot probe installs a REAL systemd user unit. Torn down from the
+    # trap and ONLY the trap, so an abort mid-scenario cannot leave an enabled
+    # throwaway unit behind on a production host.
+    if [ -n "${BP_SVC:-}" ]; then
+        systemctl --user stop "$BP_SVC" >/dev/null 2>&1 || true
+        rm -f "$HOME/.config/systemd/user/$BP_SVC.service"
+        systemctl --user daemon-reload >/dev/null 2>&1 || true
+        systemctl --user reset-failed "$BP_SVC" >/dev/null 2>&1 || true
+        command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
+    fi
+    rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -280,6 +290,184 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || tr
 or_ev2=$(grep -h '"type":"dispatch_orphaned"' "$OR_DIR"/data/events/fleet-*.jsonl 2>/dev/null | grep -c 't-835-orphan' || true)
 [ "${or_ev2:-0}" -eq 1 ] && r=yes || r=no
 harness_check "#835 a second sweep does NOT re-record the same orphan (latch holds)" "$r"
+
+# ===========================================================================
+# #1187 — a read door whose misuse was indistinguishable from "nothing open".
+#
+# --open, --open-task and single-bot mode each name ONE bot and take it first;
+# --all/--orphans/--unassigned name none. Calling a bot-slot mode with the
+# every-bot grammar keeps the ARITY valid, so a path lands in the bot slot,
+# nothing matches, and it exits 0 printing nothing -- byte-identical to a real
+# empty result. Wrong COUNT was always loud; only wrong ORDER was silent.
+# Single-bot mode has the same grammar and is NOT gated; see the module docstring.
+#
+# Unit tests pin the matcher. What only running the real scripts can prove is
+# the half that has no unit: report-back.sh:117 pipes --open STDOUT through
+# awk to decide whether a supplied --task id is open, so the scope disclosure
+# has to reach a human WITHOUT reaching that pipe. This path had no runtime
+# coverage at all before #1187.
+# ===========================================================================
+echo ""
+echo "=== validate #1187: --open refuses a mis-ordered call and states its scope ==="
+
+T1187_BOT="val1187"
+T1187_DIR="$ROOT/local/$FLEET/runtime/bots/$T1187_BOT"
+mkdir -p "$T1187_DIR/data"
+cat > "$T1187_DIR/bot.conf" <<CONF
+BOT_NAME="$T1187_BOT"
+BOT_ID="$T1187_BOT"
+BOT_SERVICE=""
+MANAGER_TMUX="$MGR"
+CONF
+printf '{"ts":"2026-05-27T10:00:00Z","manager":"%s","bot":"%s","task_id":"t-1187-open","task":"do w","dispatched_at":%s,"expected_by":%s}\n' \
+    "$MGR" "$T1187_BOT" "$((now - 600))" "$((now - 10))" >> "$t835_dispatch"
+
+# THE defect: --all's grammar passed to --open. Three positionals, so the arity
+# check passes and a ledger path is read as the bot name.
+t1187_wrong_out=$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" 2>/dev/null || true)
+t1187_wrong_rc=0
+python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" >/dev/null 2>&1 || t1187_wrong_rc=$?
+[ "$t1187_wrong_rc" -eq 2 ] && [ -z "$t1187_wrong_out" ] && r=yes || r=no
+harness_check "#1187 mis-ordered --open is REFUSED (rc 2), not a silent empty result" "$r"
+
+# The refusal has to name the remedy: the operator error is not knowing the two
+# grammars differ, so "invalid argument" alone would leave them stuck.
+python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" "$now" 2>"$ROOT/t1187.err" >/dev/null || true
+grep -q "take the BOT first" "$ROOT/t1187.err" && r=yes || r=no
+harness_check "#1187   ...and names the grammar split, not merely that it refused" "$r"
+
+# Wrong COUNT was already loud before this change. Pinned so the shape gate is
+# never mistaken for the thing that made misuse loud -- measuring THIS shape is
+# what makes the real defect read as unreproducible.
+t1187_arity_rc=0
+python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$t835_dispatch" "$VAL_REPORT_LEDGER" >/dev/null 2>&1 || t1187_arity_rc=$?
+[ "$t1187_arity_rc" -eq 2 ] && r=yes || r=no
+harness_check "#1187 wrong ARITY was already loud and stays loud (the gate is about SHAPE)" "$r"
+
+# STDOUT must stay rows-only. This is the assertion that protects report-back.
+t1187_stdout=$(python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "$T1187_BOT" "$t835_dispatch" "$VAL_REPORT_LEDGER" 2>/dev/null || true)
+printf '%s' "$t1187_stdout" | grep -q 't-1187-open' \
+    && ! printf '%s' "$t1187_stdout" | grep -q -- '--open:' && r=yes || r=no
+harness_check "#1187 --open STDOUT is rows only (no scope header for awk to eat)" "$r"
+
+# ...and the scope reaches a human, on stderr, even with ZERO rows -- the case
+# the shape gate cannot reach (a typo, or another fleet's bot under #526).
+python3 "$LIB_DIR/dispatch-overdue.py" --open \
+    "nosuchbot-1187" "$t835_dispatch" "$VAL_REPORT_LEDGER" 2>"$ROOT/t1187b.err" >/dev/null || true
+grep -q "nosuchbot-1187" "$ROOT/t1187b.err" && grep -q "0 open" "$ROOT/t1187b.err" && r=yes || r=no
+harness_check "#1187 an EMPTY result names the bot it filtered on (cannot read as nothing-exists)" "$r"
+
+# The regression probe, through the REAL report-back.sh. With nothing open the
+# supplied-id guard must stay fail-open (#1146): only a NON-EMPTY open set may
+# contradict the caller. A scope line on stdout makes that set ["->"] and flags
+# a correct report. Note the shape -- a bot HOLDING a row still matches its own
+# id, so that case reads clean and would pass a placement that is actually broken.
+CLAUDLOBBY_ROOT="$ROOT" FLEET_NAME="$FLEET" MANAGER_TMUX="$MGR" \
+    "$LIB_DIR/report-back.sh" "nobodyhome1187" completed "nothing open here" \
+    --task "t-1187-not-open" >/dev/null 2>"$ROOT/t1187c.err" || true
+grep -q "is not open for" "$ROOT/t1187c.err" && r=no || r=yes
+harness_check "#1187 report-back with NOTHING open raises no false supplied-id anomaly" "$r"
+
+# ===========================================================================
+# #1024 — the MIRROR watchdog: reported, then never re-dispatched.
+#
+# Unit tests prove the join. What only running the real pulse can prove is that
+# the knob actually gates, that the manager exclusion actually excludes, and
+# that a re-dispatched worker actually goes quiet — three places where a check
+# that "works" in isolation still ships useless or noisy.
+#
+# The six-dispatch case below is the one that decides whether this design is
+# right at all. It is a real pattern, not a contrived edge: a manager amending a
+# task re-dispatches repeatedly, the worker answers only the last id, and every
+# earlier row stays open forever. Any check keyed on open-dispatch-exists breaks
+# on it in one of two directions.
+# ===========================================================================
+echo ""
+echo "=== validate #1024: reported-but-never-re-dispatched (mirror watchdog) ==="
+
+UA_LEDGER="$VAL_REPORT_LEDGER"
+UA_DISPATCH="$ROOT/state/dispatch-log.jsonl"
+ua_iso() { python3 -c "import datetime,sys;print(datetime.datetime.fromtimestamp(int(sys.argv[1]),datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$1"; }
+
+# ua_bot <name> <check:1|0> <manager_tmux> [trailing_comment]
+# The composer writes the trailing comment on MANAGER bots only, so only the
+# manager fixture gets one — and it must, because bot_conf_get strips quotes but
+# NOT comments. bot_is_manager does its own stripping; putting the comment on a
+# worker here would instead corrupt _manager_target and silently kill the push
+# this section asserts on.
+ua_bot() {
+    local n="$1" chk="$2" mgr="$3" cmt="${4:-}" d="$ROOT/local/$FLEET/runtime/bots/$1"
+    mkdir -p "$d/data/events"
+    cat > "$d/bot.conf" <<CONF
+BOT_NAME="$n"
+BOT_ID="$n"
+BOT_SERVICE=""
+export MANAGER_TMUX=$mgr$cmt
+OBSERVABILITY_UNASSIGNED_CHECK=$chk
+OBSERVABILITY_UNASSIGNED_THRESHOLD=7200
+OBSERVABILITY_UNASSIGNED_MAX_AGE=86400
+CONF
+}
+ua_report()   { printf '{"ts":"%s","bot":"%s","task_id":"%s","status":"%s","summary":"x"}\n' "$(ua_iso "$2")" "$1" "${4:-}" "$3" >> "$UA_LEDGER"; }
+# ua_dispatch <bot> <dispatched_at_epoch> [task_id]
+ua_dispatch() { printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","task":"x","dispatched_at":%s,"expected_by":%s}\n' "$(ua_iso "$2")" "$MGR" "$1" "${3:-t-ua}" "$2" "$(($2 + 600))" >> "$UA_DISPATCH"; }
+
+mkdir -p "$(dirname "$UA_LEDGER")"
+ua_bot valunfire 1 "$MGR"      # armed, stranded  -> MUST fire
+ua_bot valunret  1 "$MGR"      # armed, re-tasked -> must stay quiet
+ua_bot valunoff  0 "$MGR"      # DEFAULT OFF      -> must stay quiet
+ua_bot valunmgr  1 valunmgr "  # this bot is a manager"   # -> must stay quiet
+ua_bot valunold  1 "$MGR"      # stale past cap   -> must stay quiet
+ua_bot valunsix  1 "$MGR"      # the six-dispatch case -> MUST fire
+
+# Stranded: dispatched 4h ago, reported terminal 3h ago, nothing since.
+ua_dispatch valunfire "$((now - 14400))"; ua_report valunfire "$((now - 10800))" completed t-ua-fire
+# Re-tasked AFTER reporting — the loop is intact, so this must NOT alarm. This is
+# the positive control: without it, a check that fires on every terminal report
+# would pass every other assertion here.
+ua_dispatch valunret "$((now - 14400))"; ua_report valunret "$((now - 10800))" completed t-ua-ret
+ua_dispatch valunret "$((now - 3600))"
+# Default-off: identical stranded shape, knob absent.
+ua_dispatch valunoff "$((now - 14400))"; ua_report valunoff "$((now - 10800))" completed t-ua-off
+# Manager: no assigner exists, so this is its resting state, not a strand.
+ua_dispatch valunmgr "$((now - 14400))"; ua_report valunmgr "$((now - 10800))" completed t-ua-mgr
+# Stale past the 24h cap: a known state, not an event.
+ua_dispatch valunold "$((now - 111600))"; ua_report valunold "$((now - 108000))" completed t-ua-old
+# THE SIX-DISPATCH CASE. One logical task, amended six times in 35 minutes. The
+# worker answers only the last id, so five rows stay open forever. It IS stranded
+# and must be reported — while a check keyed on those open rows would either page
+# about a healthy re-dispatching manager or read them as "still busy" and never
+# fire at all, which is #1024 recurring inside its own watchdog.
+ua_i=0
+while [ "$ua_i" -lt 6 ]; do
+    ua_dispatch valunsix "$((now - 14400 + ua_i * 300))" "t-ua-six-$ua_i"
+    ua_i=$((ua_i + 1))
+done
+ua_report valunsix "$((now - 10800))" completed t-ua-six-5
+
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/fleet-pulse.sh" "$FLEET" >/dev/null 2>&1 || true
+ua_fired() { grep -qh '"type":"worker_unassigned"' "$ROOT/local/$FLEET/runtime/bots/$1"/data/events/fleet-*.jsonl 2>/dev/null; }
+
+ua_fired valunfire && r=yes || r=no
+harness_check "#1024 a worker reported-and-never-re-dispatched emits worker_unassigned" "$r"
+ua_fired valunsix && r=yes || r=no
+harness_check "#1024 fires through five stale OPEN dispatches (re-dispatch case, the common one)" "$r"
+ua_fired valunret && r=no || r=yes
+harness_check "#1024 a worker re-tasked after reporting stays quiet (positive control)" "$r"
+ua_fired valunoff && r=no || r=yes
+harness_check "#1024 DEFAULT OFF — no event without the composed knob" "$r"
+ua_fired valunmgr && r=no || r=yes
+harness_check "#1024 a manager is excluded (bot_is_manager, trailing comment and all)" "$r"
+ua_fired valunold && r=no || r=yes
+harness_check "#1024 a strand past max_age stops being reported — and so goes silent, the deliberate half of the trade" "$r"
+mgr_pane2=$(tmux capture-pane -t "$MGR" -p 2>/dev/null || true)
+printf '%s' "$mgr_pane2" | grep -q 'worker_unassigned' && r=yes || r=no
+harness_check "#1024 the manager is actually pushed the strand via [FLEET-PULSE]" "$r"
 
 # ===========================================================================
 # Mechanism 1 (fleet update lifecycle) — daily plugin/skill live reload.
@@ -587,7 +775,7 @@ harness_check "gate-on alert states keepalive will bounce to recover" "$r"
 
 # ===========================================================================
 # #579 — the dead-session path must emit a RESTART line the uptime parser reads.
-# navi's #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
+# The #577 review: test_uptime.py only feeds the PARSER a hand-written sample;
 # nothing drove keepalive's real dead-session branch to prove it EMITS a line the
 # parser recognizes — so the #577 restart_bot_service extraction left that wording
 # one refactor from silently drifting out of uptime.py's _LOG_LINE_RE. Drive the
@@ -612,7 +800,7 @@ grep -qE 'RESTART.*session dead' "$DDIR/keepalive.log" 2>/dev/null && r=yes || r
 harness_check "keepalive dead-session path emits a RESTART … session dead log line" "$r"
 # Load-bearing assertion: the REAL uptime parser (parse_keepalive_log, backed by
 # _LOG_LINE_RE) must extract a RESTART from that emitted line — the emitter⇄parser
-# coupling navi flagged as guarded only by a hand-written fixture until now.
+# coupling the #577 review flagged as guarded only by a hand-written fixture until now.
 dead_restarts=$(python3 -c "
 import sys; sys.path.insert(0, '$LIB_DIR/..')
 from claudlobby.uptime import parse_keepalive_log
@@ -687,6 +875,13 @@ mkdir -p "$RB_DIR/.claude" "$RB_DIR/logs" "$RB_ROOT/bin" "$RB_ROOT/tmp"
 # before the resume injection ever fires. Pinning HOME keeps the scenario hermetic.
 RB_HOME="$RB_ROOT/home"
 mkdir -p "$RB_HOME/.claude"
+# Seed the session-resume CAPABILITY (#1163). start-bot now injects the resume
+# command only when the skill it names can actually resolve, so this hermetic
+# HOME — which has no plugins at all — would otherwise skip the injection and
+# take the age-gate checks below down with it. They are testing the AGE gate;
+# the capability has to be present for that to be what they measure.
+RB_PLUGIN_DIR="$RB_HOME/.claude/plugins/cache/ValMarketplace/claudna"
+mkdir -p "$RB_PLUGIN_DIR"
 printf '{"skipAutoPermissionPrompt":true,"skipDangerousModePermissionPrompt":true}\n' > "$RB_HOME/.claude/settings.json"
 cat > "$RB_ROOT/bin/claude" <<'STUB'
 #!/bin/bash
@@ -733,6 +928,27 @@ printf '%s' "$pane_stale" | grep -q '/claudna:session resume' && r=no || r=yes
 harness_check "stale session.md -> resume injection skipped (clean start)" "$r"
 grep -q 'RESUME SKIP' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
 harness_check "stale skip recorded in startup.log (RESUME SKIP)" "$r"
+
+# --- #1163: no resume CAPABILITY -> skip, and skip LOUDLY -------------------
+# The other half of the gate. A fleet running plugins.include_defaults:false has
+# no session provider, and the old code fired an unresolvable slash command into
+# every pane on every boot. The failure this must never become is the SILENT one
+# — a bot that quietly stops resuming and says nothing — so both the log line
+# and the event are asserted, not just the absence of the keystroke.
+rm -rf "$RB_PLUGIN_DIR"
+rm -f "$RB_DIR/logs/startup.log"
+pane_nocap="$(_run_startbot fresh)"
+printf '%s' "$pane_nocap" | grep -q '/claudna:session resume' && r=no || r=yes
+harness_check "no resume capability -> unresolvable command NOT injected" "$r"
+grep -q 'RESUME SKIP.*no resume capability' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "  ...and the skip is recorded in startup.log with its reason" "$r"
+grep -q 'provider-absent' "$RB_DIR/logs/startup.log" 2>/dev/null && r=yes || r=no
+harness_check "  ...naming WHICH capability was missing (not just that one was)" "$r"
+grep -hq '"type":"resume_skipped"' "$RB_DIR/data/events/"*.jsonl 2>/dev/null && r=yes || r=no
+harness_check "  ...and emits resume_skipped so a silent degradation is visible" "$r"
+printf '%s' "$pane_nocap" | grep -q 'ZZZ_STARTUPMARK' && r=yes || r=no
+harness_check "  ...while STARTUP_PROMPT still reaches the pane (boot not broken)" "$r"
+mkdir -p "$RB_PLUGIN_DIR"
 
 # Surface hermeticity evidence when the lossless checks fail (e.g. a CI runner
 # where this scenario fails but a dev host passes): start-bot.sh's stderr is
@@ -988,7 +1204,7 @@ harness_check "update-claude-code.sh still downloads the binary daily" "$r"
 #       to another fleet, leaving its old dir behind) must be SKIPPED: zero pulse
 #       events. RED before #415 — the filesystem-glob loop health-checked every
 #       dir and emitted session_missing/service_down/pane_stuck for orphans
-#       (the craig/greg bug).
+#       (the #415 bug).
 #   (2) pane_stuck must honor the .idle marker like activity_stuck does: a bot
 #       parked at an idle prompt has a stable pane — that is idle, not stuck.
 # ===========================================================================
@@ -1470,13 +1686,568 @@ harness_check "dispatch classifier keeps set +H; on a leading-whitespace slash (
 # verified). A live model honoring the instruction is the P7 human canary; this
 # is the deterministic file-contract gate. NOTE: the prior version re-read a
 # bot.conf var the test itself wrote and never touched SKILL.md, so a gutted
-# skill stayed green — hollow (#640, rajan request-changes).
+# skill stayed green — hollow (#640 request-changes).
 _skill="$LIB_DIR/../library/skills/briefing/SKILL.md"
 _instr=$(awk '/^## Instructions/{f=1; next} /^## /{f=0} f' "$_skill" 2>/dev/null)
 { [ -f "$_skill" ] \
     && printf '%s\n' "$_instr" | grep -q 'BRIEFING_SECTIONS' \
     && printf '%s\n' "$_instr" | grep -qi 'configured section'; } && r=yes || r=no
 harness_check "briefing SKILL.md Instructions consume BRIEFING_SECTIONS_<SLOT> (read the var + render the configured sections)" "$r"
+
+# ===========================================================================
+# #1002 — the boot window. A bot whose unit is mid-start has no tmux session
+# yet, which by state alone is indistinguishable from a dead one: fleet-pulse
+# alarmed on it (service_down carrying state=activating, self-proving false)
+# and keepalive restarted it, killing the very boot that would have produced
+# the session.
+#
+# Only running this proves it. A stubbed systemctl would let the predicate
+# assert whatever it likes about a state machine it never met, so this drives a
+# REAL systemd user unit built to the composed shape (Type=simple +
+# RemainAfterExit=yes + a spawner ExecStart that exits) through all three of its
+# states, and drives the REAL keepalive.sh and fleet-pulse.sh against it.
+#
+# The control at the end is the load-bearing half: a settled unit with a dead
+# session MUST still restart. Without it, a predicate that simply returned
+# "starting" always — permanently disabling the watchdog while every surface
+# reads healthy — would pass every other assertion here.
+# ===========================================================================
+echo ""
+echo "=== validate #1002: the boot window is not down, and not a restart trigger ==="
+
+# Gated: needs a real systemd --user bus. macOS and CI containers without a
+# user manager skip rather than fail — a harness that cannot run the mechanism
+# must not report a verdict about it (coverage honesty).
+if ! systemd_user_bus_available; then
+    echo "  SKIP  #1002 boot-window scenario — no systemd --user bus (needs Linux + linger)"
+    echo "        NOT a pass: the activating / active-running / active-exited"
+    echo "        transitions and both consumers went unexercised on this host."
+else
+    BP_SVC="claudlobby-vbc-bootprobe-$$"
+    BP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-bp.XXXXXX")"
+    BP_FLEET="bpfleet"
+    BP_BOT="bootprobe"
+    BP_DIR="$BP_ROOT/local/$BP_FLEET/runtime/bots/$BP_BOT"
+    BP_UNIT="$HOME/.config/systemd/user/$BP_SVC.service"
+    BP_EVENTS="$BP_DIR/data/events"
+    mkdir -p "$BP_DIR/data" "$BP_ROOT/state" "$HOME/.config/systemd/user"
+
+    # Mirror start-bot.sh: do slow pre-session work (there, plugin install), THEN
+    # create the session, THEN exit. The gap between "unit went active" and
+    # "session exists" is the window that stranded a bot for 35-178s.
+    cat > "$BP_ROOT/spawner.sh" <<BPSPAWN
+#!/bin/bash
+sleep 8
+tmux -L "$BP_SVC" new-session -d -s "$BP_BOT" 'sleep 600'
+BPSPAWN
+    chmod +x "$BP_ROOT/spawner.sh"
+
+    cat > "$BP_UNIT" <<BPUNIT
+[Unit]
+Description=claudlobby validate-bot-change boot-window probe
+[Service]
+Type=simple
+RemainAfterExit=yes
+KillMode=process
+ExecStartPre=/bin/sleep 4
+ExecStart=$BP_ROOT/spawner.sh
+BPUNIT
+
+    cat > "$BP_DIR/bot.conf" <<BPCONF
+BOT_NAME=$BP_BOT
+BOT_SERVICE=$BP_SVC
+TMUX_SESSION=$BP_BOT
+BPCONF
+
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user start --no-block "$BP_SVC" >/dev/null 2>&1 || true
+
+    bp_state() { systemctl --user show -p ActiveState -p SubState --value "$BP_SVC" 2>/dev/null | paste -sd/ -; }
+    bp_starting() { service_is_starting "$BP_SVC"; }
+
+    bp_pulse() {
+        CLAUDLOBBY_ROOT="$BP_ROOT" FLEET_PULSE_ESCALATE_CHAT_ID="" \
+            "$LIB_DIR/fleet-pulse.sh" "$BP_FLEET" >/dev/null 2>&1 || true
+    }
+
+    # --- State 1: activating (ExecStartPre — the boot-stagger sleep) ---
+    sleep 2
+    _s1=$(bp_state)
+    bp_starting && r=yes || r=no
+    harness_check "activating unit reads as mid-start (observed $_s1)" "$r"
+    [ "$_s1" = "activating/start-pre" ] && r=yes || r=no
+    harness_check "  ...and that state really was activating, not assumed" "$r"
+
+    # Pulse HERE, in the activating window. This is the only state where
+    # service_is_active reports not-active, so it is the only state that can
+    # reach the service_down branch — the finding-B false positive
+    # (service_down state=activating) lives here and nowhere else. Sampling the
+    # pulse only in the later active/running window would leave finding B
+    # entirely unexercised while reading green.
+    bp_pulse
+
+    # --- State 2: active/running (spawner executing, session not up yet) ---
+    # The state ActiveState alone cannot see, and where all 3 restarts landed.
+    sleep 6
+    _s2=$(bp_state)
+    _sess2=no; command tmux -L "$BP_SVC" has-session -t "$BP_BOT" 2>/dev/null && _sess2=yes
+    [ "$_s2" = "active/running" ] && [ "$_sess2" = no ] && r=yes || r=no
+    harness_check "mid-boot window reached: unit active/running with NO session (observed $_s2, session=$_sess2)" "$r"
+    bp_starting && r=yes || r=no
+    harness_check "  ...and service_is_starting still reads mid-start there" "$r"
+
+    # Consumer C: the real keepalive must NOT restart this boot.
+    CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
+    _kl="$BP_DIR/keepalive.log"
+    grep -q 'boot in flight' "$_kl" 2>/dev/null && r=yes || r=no
+    harness_check "keepalive SKIPs a boot in flight instead of restarting it" "$r"
+    grep -q 'RESTART' "$_kl" 2>/dev/null && r=no || r=yes
+    harness_check "  ...and emitted no RESTART line for it" "$r"
+
+    # Consumer B: the real fleet-pulse must not alarm anywhere in the boot. The
+    # ledger below accumulates BOTH pulse runs — the activating one above and
+    # this active/running one — so the assertions cover the whole window rather
+    # than whichever state happened to be sampled.
+    bp_pulse
+    _bpev=$(ls "$BP_EVENTS"/fleet-*.jsonl 2>/dev/null | head -1 || true)
+    { [ -z "$_bpev" ] || ! grep -q '"type":"service_down"' "$_bpev"; } && r=yes || r=no
+    harness_check "fleet-pulse emits no service_down across the boot (incl. the activating window, where it is reachable)" "$r"
+    { [ -z "$_bpev" ] || ! grep -q '"type":"session_missing"' "$_bpev"; } && r=yes || r=no
+    harness_check "  ...and no session_missing either (same tick, same non-problem)" "$r"
+
+    # --- State 3: active/exited — settled. The assumption the predicate rests on. ---
+    for _i in $(seq 1 100); do
+        [ "$(bp_state)" = "active/exited" ] && break
+        sleep 0.2
+    done
+    _s3=$(bp_state)
+    [ "$_s3" = "active/exited" ] && r=yes || r=no
+    harness_check "a SETTLED bot unit reads active/exited (observed $_s3) — if this ever reads active/running, SubState stops meaning mid-boot and the watchdog silently dies" "$r"
+    bp_starting && r=no || r=yes
+    harness_check "  ...and service_is_starting stops suppressing once settled" "$r"
+
+    # --- CONTROL: settled unit + dead session MUST still restart. ---
+    # This is what distinguishes the fix from "disable the watchdog".
+    command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
+    : > "$_kl"
+    CLAUDLOBBY_ROOT="$BP_ROOT" "$LIB_DIR/keepalive.sh" "$BP_DIR" >/dev/null 2>&1 || true
+    grep -q 'RESTART' "$_kl" 2>/dev/null && r=yes || r=no
+    harness_check "CONTROL: a genuinely dead session on a settled unit still restarts" "$r"
+
+fi
+
+# ===========================================================================
+# #1019 — the GitHub mention guard. Bots wrote @teammate in PR comments;
+# every fleet bot name is also a real GitHub account, and one of those people
+# asked us to stop. Composition cannot prove this: what matters is whether a
+# real gh invocation is actually rewritten before it runs, and whether Telegram
+# is genuinely left alone.
+# ===========================================================================
+echo ""
+echo "=== validate #1019: GitHub mention guard rewrites, and spares Telegram ==="
+
+GM_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-gm.XXXXXX")"
+mkdir -p "$GM_ROOT/runtime/_host"
+printf 'worker-1\nworker-2\nworker-3\nworker-4\n' > "$GM_ROOT/runtime/_host/bot-handles"
+
+gm_run() {  # gm_run <payload-json> -> stdout of the hook
+    GH_MENTION_HANDLES_FILE="$GM_ROOT/runtime/_host/bot-handles" \
+    CLAUDLOBBY_ROOT="$GM_ROOT" bash "$LIB_DIR/gh-mention-guard.sh" <<<"$1" 2>/dev/null
+}
+
+# --- the exact shape that caused the incident ---
+_gm=$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1018 --body \"thanks @worker-2\""}}')
+printf '%s' "$_gm" | grep -q '"updatedInput"' && r=yes || r=no
+harness_check "a real \`gh pr comment\` carrying @worker-2 is rewritten before it runs" "$r"
+printf '%s' "$_gm" | grep -q '@worker-2' && r=no || r=yes
+harness_check "  ...and the @ sigil is gone from the command GitHub would see" "$r"
+
+# The Bash surface must NOT gain backticks: a comment body sits inside a
+# double-quoted shell string, where a backtick is command substitution. The
+# naive fix would turn a notification bug into arbitrary execution.
+printf '%s' "$_gm" | grep -q '`' && r=no || r=yes
+harness_check "  ...with NO backticks injected into the shell command (would be command substitution)" "$r"
+
+# --- MCP writers, the half a Bash-only hook would miss entirely ---
+_gm=$(gm_run '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"owner":"o","repo":"r","body":"@worker-2 and @worker-1 found it"}}')
+printf '%s' "$_gm" | grep -q '`worker-2`' && r=yes || r=no
+harness_check "an mcp__github__* body is rewritten too (backticks are safe in JSON)" "$r"
+printf '%s' "$_gm" | grep -q '@worker-2' && r=no || r=yes
+harness_check "  ...no @mention survives in the MCP payload" "$r"
+
+# --- what must NOT be touched ---
+[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"tg-post.sh \"done @worker-3\""}}')" ] && r=yes || r=no
+harness_check "TELEGRAM is untouched — tagging there is correct and load-bearing" "$r"
+[ -z "$(gm_run '{"tool_name":"mcp__plugin_telegram_telegram__reply","tool_input":{"chat_id":"1","text":"@worker-3 done"}}')" ] && r=yes || r=no
+harness_check "  ...including the Telegram MCP tool" "$r"
+# POLICY CHANGE, deliberate: the merged denylist guard let any non-bot handle
+# through, so this asserted @chrisrogers37 was untouched. Under the inversion
+# nothing notifies unless DECLARED — which is the whole point, since Botfather,
+# latest and 216 were all non-bot handles that emailed real people. The
+# declared-handle case is asserted below, once an allowlist exists.
+[ -n "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 --body \"cc @chrisrogers37\""}}')" ] && r=yes || r=no
+harness_check "an UNDECLARED handle is rewritten (default-deny; was allowed pre-inversion)" "$r"
+[ -z "$(gm_run '{"tool_name":"Bash","tool_input":{"command":"gh pr view 1018 --json body"}}')" ] && r=yes || r=no
+harness_check "a gh READ is not rewritten (only writes can notify)" "$r"
+
+# --- fails open, loudly, rather than blocking every GitHub write ---
+_gm=$(GH_MENTION_HANDLES_FILE=/nonexistent CLAUDLOBBY_ROOT="$GM_ROOT" \
+    bash "$LIB_DIR/gh-mention-guard.sh" <<<'{"tool_name":"Bash","tool_input":{"command":"gh pr comment 1 -b \"@worker-2\""}}' 2>/dev/null; echo "rc=$?")
+printf '%s' "$_gm" | grep -q 'rc=0' && r=yes || r=no
+harness_check "a missing handle manifest FAILS OPEN (never blocks the whole fleet from GitHub)" "$r"
+
+# --- the inversion: the three real accounts the denylist guard misses --------
+# Botfather, latest and 216 are actual GitHub users we notified. None is a fleet
+# bot, so none would ever appear on the composed bot-handle list.
+printf 'chrisrogers37\n' > "$GM_ROOT/runtime/_host/mention-allowlist"
+gm_inv() {
+    GH_MENTION_HANDLES_FILE="$GM_ROOT/runtime/_host/bot-handles" \
+    GH_MENTION_ALLOWLIST_FILE="$GM_ROOT/runtime/_host/mention-allowlist" \
+    CLAUDLOBBY_ROOT="$GM_ROOT" bash "$LIB_DIR/gh-mention-guard.sh" <<<"$1" 2>/dev/null
+}
+
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"see @Botfather @latest @216"}}')
+for h in Botfather latest 216; do
+    printf '%s' "$_inv" | grep -q "\`$h\`" && r=yes || r=no
+    harness_check "  INVERSION: @$h (a real account, not a bot) is rewritten" "$r"
+done
+printf '%s' "$_inv" | grep -q '@Botfather\|@latest\|@216' && r=no || r=yes
+harness_check "  ...and no @ survives for any of the three" "$r"
+
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"cc @chrisrogers37"}}')
+[ -z "$_inv" ] && r=yes || r=no
+harness_check "  a DECLARED handle is left alone (the allowlist works)" "$r"
+
+# Fail-toward-rewriting, driven through the composed hook rather than the module.
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"a\n```\n@worker-2 after an UNCLOSED fence"}}')
+printf '%s' "$_inv" | grep -q 'worker-2' && r=yes || r=no
+harness_check "  INVARIANT: an unclosed fence does NOT protect a mention" "$r"
+
+_inv=$(gm_inv '{"tool_name":"mcp__github__add_issue_comment","tool_input":{"body":"x\n```\n@worker-2 in a closed fence\n```\ny"}}')
+[ -z "$_inv" ] && r=yes || r=no
+harness_check "  ...but a CLOSED fence is respected (GitHub does not linkify it)" "$r"
+
+# --- by-reference content: the bypass #1019 exposed ----------------------------
+# gh can take the body from a FILE, so the hook sees only a filename and the
+# command carries no mention at all. #1019 — the issue filed ABOUT us spamming
+# a stranger — was itself filed this way and re-notified her.
+GM_CLEAN="$GM_ROOT/clean.md"; printf 'an ordinary body\nno mentions\n' > "$GM_CLEAN"
+GM_DIRTY="$GM_ROOT/dirty.md"; printf 'intro\nthanks worker-2 and @latest\n' > "$GM_DIRTY"
+# An ALLOW is empty output, not JSON — jq on empty stdin prints nothing, so the
+# empty case must be named here rather than left to a jq default that never runs.
+_dec() {
+    local o; o="$(gm_inv "$1")"
+    [ -z "$o" ] && { printf 'none'; return; }
+    printf '%s' "$o" | jq -r '.hookSpecificOutput.permissionDecision // "rewrite"' 2>/dev/null
+}
+
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh issue comment 1 --body-file '"$GM_CLEAN"'"}}')" = none ] && r=yes || r=no
+harness_check "  BY-REF: a body FILE with no mention passes untouched (common path costs nothing)" "$r"
+
+for _shape in "--body-file $GM_DIRTY" "--body-file=$GM_DIRTY" "--notes-file $GM_DIRTY"; do
+    [ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"gh issue comment 1 '"$_shape"'"}}')" = deny ] && r=yes || r=no
+    harness_check "  BY-REF: a body FILE with a mention is REFUSED ($_shape)" "$r"
+done
+
+[ "$(_dec '{"tool_name":"Bash","tool_input":{"command":"cat x | gh issue comment 1 --body-file -"}}')" = deny ] && r=yes || r=no
+harness_check "  BY-REF: STDIN is refused — unreadable, so unverifiable" "$r"
+
+# The whole reason this refuses rather than rewrites: the file is the author's.
+grep -q 'worker-2' "$GM_DIRTY" && r=yes || r=no
+harness_check "  BY-REF: the refused file is NOT modified on disk (it is the author's)" "$r"
+
+rm -rf "$GM_ROOT"
+
+# ===========================================================================
+# #1009 — source currency across the framework, not just claudlobby.
+#
+# Composition cannot prove any of this. A unit test showing the script reads a
+# second repo says nothing about whether the notice actually fires, whether the
+# pull actually moves HEAD, or — the part that matters most — whether the
+# guards actually STOP a pull on a tree somebody is working in. So this drives
+# the REAL notify-behind.sh and update-siblings.sh against REAL git repos, and
+# asserts on HEAD movement and emitted events.
+#
+# Fixture: throwaway repos with controlled remotes, an "org" that matches
+# the fake claudlobby root, and one that does not.
+# ===========================================================================
+echo ""
+echo "=== validate #1009: sibling currency — reports, pulls, and refuses to pull ==="
+
+SC_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-sc.XXXXXX")"
+SC_FLEET="scfleet"
+SC_BOT="scbot"
+SC_DIR="$SC_ROOT/local/$SC_FLEET/runtime/bots/$SC_BOT"
+mkdir -p "$SC_DIR/data" "$SC_ROOT/state" "$SC_ROOT/origins"
+
+# sc_mkrepo <name> <org> — a bare upstream + a clone whose origin URL carries
+# <org>. The URL stays a real forge-shaped string (that is what repo_remote_org
+# parses) while url.<path>.insteadOf points the actual transport at the local
+# bare repo — so discovery sees the org and git can still fetch. Rewriting the
+# URL to the bare path instead would delete the very field under test.
+sc_mkrepo() {
+    local name="$1" org="$2" up="$SC_ROOT/origins/$1.git" work="$SC_ROOT/$1"
+    local url="https://github.com/$org/$name.git"
+    git init --quiet --bare "$up"
+    git init --quiet "$work"
+    git -C "$work" config user.email v@example.com
+    git -C "$work" config user.name validate
+    git -C "$work" config commit.gpgsign false
+    git -C "$work" config "url.$up.insteadOf" "$url"
+    echo v1 > "$work/f.txt"
+    git -C "$work" add f.txt
+    git -C "$work" commit --quiet -m c1
+    git -C "$work" branch -M main
+    git -C "$work" remote add origin "$url"
+    git -C "$work" push --quiet origin main
+    # Point the bare repo's HEAD at main, so a later clone of it checks out a
+    # branch and origin/HEAD resolves — repo_default_branch reads exactly that.
+    git -C "$up" symbolic-ref HEAD refs/heads/main
+    git -C "$work" remote set-head origin -a >/dev/null 2>&1 || true
+    git -C "$work" branch --quiet --set-upstream-to=origin/main main
+    printf '%s' "$work"
+}
+
+# sc_advance <name> — add an upstream commit the clone is now behind by.
+sc_advance() {
+    local work="$SC_ROOT/$1" tmp="$SC_ROOT/.adv-$1"
+    rm -rf "$tmp"
+    git clone --quiet "$SC_ROOT/origins/$1.git" "$tmp" 2>/dev/null
+    git -C "$tmp" config user.email v@example.com
+    git -C "$tmp" config user.name validate
+    git -C "$tmp" config commit.gpgsign false
+    echo v2 >> "$tmp/f.txt"
+    git -C "$tmp" add f.txt
+    git -C "$tmp" commit --quiet -m c2
+    git -C "$tmp" push --quiet origin main
+    rm -rf "$tmp"
+    git -C "$work" fetch --quiet origin 2>/dev/null || true
+}
+
+# The fake claudlobby root defines the org every sibling is matched against.
+SC_HOME=$(sc_mkrepo "claudlobby" "testorg")
+SC_SIB=$(sc_mkrepo "sibling" "testorg")     # framework — must be watched
+SC_PROD=$(sc_mkrepo "productrepo" "otherorg") # product — must NOT be watched
+SC_DIRTY=$(sc_mkrepo "dirtysib" "testorg")  # framework, but someone is mid-work
+
+cat > "$SC_DIR/bot.conf" <<SCCONF
+BOT_NAME=$SC_BOT
+MANAGER_TMUX=
+SCCONF
+
+# ONE invocation path for both scripts. Only the pip layer is stubbed — the org
+# match, the dedupe, the git top-level resolution, the guards and every git
+# operation are the real code. $_SC_LOCS is what pip would have reported.
+sc_run() {  # sc_run <script.sh> [args...]     ($_SC_LOCS = discovered locations)
+    local script="$1"; shift
+    CLAUDLOBBY_ROOT="$SC_HOME" \
+    CLAUDLOBBY_FLEET="$SC_FLEET" \
+    _SC_LOCS="$_SC_LOCS" \
+    _SC_BOTS="$SC_ROOT/local/$SC_FLEET/runtime/bots" \
+        bash -c '
+            . "'"$LIB_DIR"'/lib-common.sh"
+            _editable_project_locations() { printf "%s\n" "$_SC_LOCS"; }
+            resolve_bots_dir() { printf "%s" "$_SC_BOTS"; }
+            s="$1"; shift; . "$s" "$@"
+        ' _ "$LIB_DIR/$script" "$@" >/dev/null 2>&1 || true
+}
+
+sc_discover() {
+    CLAUDLOBBY_ROOT="$SC_HOME" _SC_LOCS="$_SC_LOCS" bash -c '
+        . "'"$LIB_DIR"'/lib-common.sh"
+        _editable_project_locations() { printf "%s\n" "$_SC_LOCS"; }
+        discover_framework_checkouts' 2>/dev/null
+}
+
+# Host jobs run with no bot context, so emit_fleet_event takes its
+# fleet-level branch: $CLAUDLOBBY_ROOT/state/events, not the bot dir.
+SC_EVENTS="$SC_HOME/state/events"
+sc_events() { cat "$SC_EVENTS"/fleet-*.jsonl 2>/dev/null || true; }
+sc_head() { git -C "$1" rev-parse HEAD; }
+
+# --- Discovery: the org test picks framework and drops product ---
+_SC_LOCS="$SC_SIB
+$SC_PROD
+$SC_DIRTY"
+sc_watched=$(sc_discover)
+printf '%s\n' "$sc_watched" | grep -qx "$SC_SIB" && r=yes || r=no
+harness_check "discovery watches a same-org sibling (no path was configured)" "$r"
+printf '%s\n' "$sc_watched" | grep -qx "$SC_PROD" && r=no || r=yes
+harness_check "discovery EXCLUDES an other-org product repo (bots install those too)" "$r"
+[ "$(printf '%s\n' "$sc_watched" | grep -cx "$SC_HOME")" = 1 ] && r=yes || r=no
+harness_check "claudlobby appears exactly once (it is itself an editable install)" "$r"
+
+# --- notify-behind: reports, and still never pulls ---
+sc_advance sibling
+sib_before=$(sc_head "$SC_SIB")
+sc_run notify-behind.sh
+sc_events | grep -q '"type":"source_behind"' && r=yes || r=no
+harness_check "notify-behind emits source_behind for a stale SIBLING" "$r"
+[ "$(sc_head "$SC_SIB")" = "$sib_before" ] && r=yes || r=no
+harness_check "notify-behind moved nothing — the reporter is still notice-only" "$r"
+
+# --- update-siblings: the guards, before the pull ---
+echo "uncommitted" >> "$SC_DIRTY/f.txt"
+sc_advance dirtysib
+dirty_before=$(sc_head "$SC_DIRTY")
+
+# A local unpushed commit is the other "somebody is mid-work" shape.
+SC_AHEAD=$(sc_mkrepo "aheadsib" "testorg")
+sc_advance aheadsib
+git -C "$SC_AHEAD" config user.email v@example.com
+git -C "$SC_AHEAD" config user.name validate
+echo local > "$SC_AHEAD/local.txt"
+git -C "$SC_AHEAD" add local.txt
+git -C "$SC_AHEAD" commit --quiet -m "local work"
+ahead_before=$(sc_head "$SC_AHEAD")
+
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+_SC_LOCS="$SC_SIB
+$SC_PROD
+$SC_DIRTY
+$SC_AHEAD"
+sc_run update-siblings.sh --dry-run
+[ "$(sc_head "$SC_SIB")" = "$sib_before" ] && r=yes || r=no
+harness_check "--dry-run moves nothing" "$r"
+
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+sc_run update-siblings.sh
+
+# HEAD-did-not-move is NOT sufficient here and asserting only that is a trap:
+# `git merge --ff-only` refuses a dirty tree by itself, so those assertions pass
+# with repo_pull_blocker deleted. Verified by neutering it — all 17 stayed
+# green. The discriminator is WHICH event fired: sibling_update_blocked naming
+# the human reason (the guard refused, before touching git) versus
+# sibling_update_failed (git was asked and would not).
+[ "$(sc_head "$SC_DIRTY")" = "$dirty_before" ] && r=yes || r=no
+harness_check "GUARD: a DIRTY working tree is not pulled (somebody is mid-work)" "$r"
+sc_events | grep '"type":"sibling_update_blocked"' | grep -q 'dirty working tree' && r=yes || r=no
+harness_check "  ...refused BY THE GUARD, naming the reason — not merely refused by git" "$r"
+[ "$(sc_head "$SC_AHEAD")" = "$ahead_before" ] && r=yes || r=no
+harness_check "GUARD: a tree with unpushed local commits is not pulled" "$r"
+sc_events | grep '"type":"sibling_update_blocked"' | grep -q 'local commits not pushed' && r=yes || r=no
+harness_check "  ...also refused by the guard, naming the unpushed work" "$r"
+sc_events | grep -q '"type":"sibling_update_failed"' && r=no || r=yes
+harness_check "  ...and no git operation was even attempted on either (no sibling_update_failed)" "$r"
+grep -q "uncommitted" "$SC_DIRTY/f.txt" && r=yes || r=no
+harness_check "  ...and the uncommitted edit is still there, unstashed" "$r"
+
+# --- update-siblings: the pull it IS supposed to do ---
+[ "$(sc_head "$SC_SIB")" != "$sib_before" ] && r=yes || r=no
+harness_check "a CLEAN stale sibling is fast-forwarded (the #1009 fix actually applies)" "$r"
+sc_events | grep -q '"type":"sibling_updated"' && r=yes || r=no
+harness_check "  ...and every movement emits sibling_updated (an invisible auto-update is #1009 inverted)" "$r"
+# Give the product repo something a leak WOULD have pulled — without this its
+# upstream never moves, so "HEAD is unchanged" holds whether or not discovery
+# leaked it, and the assertion cannot fail.
+sc_advance productrepo
+[ "$(git -C "$SC_PROD" rev-list --count HEAD)" = 1 ] && r=yes || r=no
+harness_check "the other-org product repo was never touched (its upstream HAD moved)" "$r"
+
+# --- The release track: the exact shape #1009 was filed from -----------------
+# A TAGGED sibling sitting on its newest release while main has moved on. This
+# is Claudron on this host — v0.4.0 is the newest tag, and the two fixes that
+# started all of this are on main only. The fixtures above are untagged, so
+# without this the release-vs-main rule would ship unexercised.
+SC_TAGGED=$(sc_mkrepo "taggedsib" "testorg")
+git -C "$SC_TAGGED" tag v1.0.0
+git -C "$SC_TAGGED" push --quiet origin v1.0.0
+sc_advance taggedsib                 # main moves ahead of the tag
+tagged_before=$(sc_head "$SC_TAGGED")
+
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+_SC_LOCS="$SC_TAGGED"
+sc_run notify-behind.sh
+sc_events | grep -q '"type":"source_release_gap"' && r=yes || r=no
+harness_check "RELEASE GAP: on the newest tag with main ahead reports source_release_gap, not source_behind" "$r"
+sc_events | grep -q '"type":"source_behind"' && r=no || r=yes
+harness_check "  ...and does NOT tell the operator to pull unreleased code" "$r"
+
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+sc_run update-siblings.sh
+[ "$(sc_head "$SC_TAGGED")" = "$tagged_before" ] && r=yes || r=no
+harness_check "  ...and update-siblings leaves it alone (a dependency tracks releases, not dev)" "$r"
+
+# Cutting a release is what makes it move — the remedy the notice names.
+git -C "$SC_TAGGED" fetch --quiet origin
+git -C "$SC_TAGGED" tag v1.1.0 "$(git -C "$SC_TAGGED" rev-parse origin/main)"
+rm -f "$SC_EVENTS"/fleet-*.jsonl
+sc_run update-siblings.sh
+[ "$(sc_head "$SC_TAGGED")" != "$tagged_before" ] && r=yes || r=no
+harness_check "  ...and DOES fast-forward once a newer release is cut" "$r"
+
+
+echo ""
+echo "=== validate #892: an audit verb with no --enroll must not write ==="
+# state/fleet-state.json is ONE host-shared file, while prune builds its keep-list
+# from a SINGLE fleet manifest — so every bot outside the invoking fleet WAS
+# undeclared by construction and was deleted on a perfect parse. That fired at
+# least seven times in one day across three managers, on ordinary session-start
+# hygiene, and none of them caught it: the verb is named, documented and flagged
+# as report-only, and the output read as routine housekeeping.
+#
+# Two separate doors were closed. The write moved behind --enroll, so the AUDIT
+# verb no longer writes at all; and prune is now SCOPED, so even the enrolled
+# write removes only rows this fleet declared and still owns. The checks below
+# cover both, because either alone leaves the incident reachable — an audit that
+# cannot write is no help once someone legitimately runs --enroll.
+#
+# FLEET_STATE_PATH is set explicitly below rather than inherited. This harness
+# overrides CLAUDLOBBY_ROOT at every call site but never FLEET_STATE_PATH, which
+# fleet-state-update.sh PREFERS — so a bot running the harness writes its fixture
+# rows into REAL host state. That leak is filed separately; this section must not
+# depend on it being fixed, and must not contribute to it.
+FS_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/claudlobby-validate-fs.XXXXXX")"
+mkdir -p "$FS_ROOT/local/f-alpha/runtime/bots" "$FS_ROOT/local/f-beta/runtime/bots" "$FS_ROOT/state"
+printf 'fleet:\n  name: f-alpha\n  bots:\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/fleet.yaml"
+printf 'fleet:\n  name: f-beta\n  bots:\n    b1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-beta/fleet.yaml"
+FS_STATE="$FS_ROOT/state/fleet-state.json"
+# a1: declared by f-alpha. a0: f-alpha's DEPARTED bot, still stamped as hers --
+# the only row a f-alpha prune may remove, and the witness that the write still
+# happens. b1: f-beta's live bot, the row that must survive f-alpha entirely.
+fs_seed() { printf '{"updated":"x","bots":{"a1":{"status":"idle","fleet":"f-alpha"},"a0":{"status":"idle","fleet":"f-alpha"},"b1":{"status":"working","fleet":"f-beta"}},"queue":[]}' > "$FS_STATE"; }
+fs_reconcile() { CLAUDLOBBY_ROOT="$FS_ROOT" FLEET_STATE_PATH="$FS_STATE" "$LIB_DIR/reconcile-fleet.sh" "$@" 2>&1 || true; }
+
+# The incident, reproduced: f-alpha audits, and f-beta must survive it.
+fs_seed
+fs_before="$(cat "$FS_STATE")"
+fs_out="$(fs_reconcile f-alpha)"
+[ "$(cat "$FS_STATE")" = "$fs_before" ] && r=yes || r=no
+harness_check "AUDIT (no --enroll) writes NOTHING to host-shared fleet-state" "$r"
+[ "$(printf '%s' "$fs_out" | grep -c 'WOULD prune')" -ge 1 ] && r=yes || r=no
+harness_check "  ...but still REPORTS what would go (the audit keeps its signal)" "$r"
+printf '%s' "$fs_out" | grep -q 'b1 — declared by another fleet' && r=yes || r=no
+harness_check "  ...naming the OTHER fleet's row as one it will NOT touch" "$r"
+printf '%s' "$fs_out" | grep -q 'host-declared bots have NO row' && r=yes || r=no
+harness_check "  ...and what is MISSING, not merely what this run would remove" "$r"
+
+# --enroll still applies it: the write moved behind the flag, it did not vanish.
+fs_seed
+fs_reconcile f-alpha --enroll >/dev/null
+[ "$(jq -r '.bots | has("a0")' "$FS_STATE")" = "false" ] && r=yes || r=no
+harness_check "--enroll DOES apply the prune (the write moved, it did not vanish)" "$r"
+# This check previously WITNESSED the write by watching b1 -- a SIBLING fleet's
+# row -- disappear. The intent was right and the witness was the harm itself, so
+# a green harness certified the incident. It now witnesses f-alpha's own departed
+# row, and asserts the sibling survives, which is the property that was missing.
+[ "$(jq -r '.bots | has("b1")' "$FS_STATE")" = "true" ] && r=yes || r=no
+harness_check "  ...while the OTHER fleet's live row SURVIVES it (#892 scoping)" "$r"
+[ "$(jq -r '.bots.b1.status' "$FS_STATE")" = "working" ] && r=yes || r=no
+harness_check "  ...unmodified, not merely present" "$r"
+[ "$(jq -r '.updated' "$FS_STATE")" != "x" ] && r=yes || r=no
+harness_check "  ...and stamps .updated, like the delete and update arms" "$r"
+
+# Zero extraction is the guard the wipe needed: an empty keep-set matches no key.
+printf 'fleet:\n  name: f-alpha\n  bots:  # my bots\n    a1:\n      expertise: [x]\n' > "$FS_ROOT/local/f-alpha/drift.yaml"
+fs_seed
+fs_before="$(cat "$FS_STATE")"
+CLAUDLOBBY_ROOT="$FS_ROOT" FLEET_STATE_PATH="$FS_STATE" \
+    "$LIB_DIR/fleet-state-update.sh" prune "$FS_ROOT/local/f-alpha/drift.yaml" >/dev/null 2>&1 && r=no || r=yes
+harness_check "zero-extraction (PyYAML-valid trailing comment) REFUSES, nonzero" "$r"
+[ "$(cat "$FS_STATE")" = "$fs_before" ] && r=yes || r=no
+harness_check "  ...and touched no rows (an empty keep-set would delete every one)" "$r"
+
+rm -rf "$FS_ROOT"
 
 echo ""
 echo "=== $pass passed, $fail failed ==="

@@ -118,9 +118,9 @@ RC_KILLING_ENV_VARS: tuple[str, ...] = (
 )
 
 # ── Projects tier (projects.yaml) ────────────────────────────────
-# Validation tiers — a project's closure bar, weakest to strictest.
+# Validation tiers — alternatives, not levels; each is a complete condition.
 # Semantics live in documentation/projects-yaml-schema.md. Tuple: error
-# messages join them in this stable order.
+# messages join them in this stable order, which is not a ranking.
 VALID_TIERS: tuple[str, ...] = ("auto", "review", "preview", "human")
 
 # The v1 project schema — config.py splits unknown keys into .raw with

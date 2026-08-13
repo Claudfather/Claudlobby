@@ -556,7 +556,7 @@ bot_expects_no_token() {
 
 bridge_state() {
     local bot_dir="${1:?Usage: bridge_state /path/to/bot/dir}"
-    local handle state_dir token pidfile pid comm ppid pcomm environ environ_lines args psline _anc _hop
+    local handle state_dir token pidfile pid comm ppid pcomm environ environ_lines args psline _anc _hop _exe
 
     handle="$(bot_conf_get "$bot_dir" TELEGRAM_BOT_HANDLE "")" || true
     if [ -z "$handle" ]; then printf '%s' "no_handle"; return 1; fi
@@ -587,7 +587,22 @@ bridge_state() {
 
     # Footgun guard: a real bridge is a `bun` process running server.ts — never a
     # shell that merely has "server.ts" on its command line (kills phantom counts).
-    case "$comm" in
+    #
+    # The executable comes from `args`, NOT `comm` (#973). macOS `ps` truncates
+    # any non-final column to 16 chars, and `-ww` widens only the LAST field —
+    # so in this very call (comm,ppid,args) an absolute interpreter path arrives
+    # cut mid-word, e.g. /Users/<name>/.bun/bin/bun -> /Users/<name>/.bu, which
+    # never matches */bun. Note the stored comm is not itself truncated: `ps -o
+    # comm=` alone returns it in full. It is the multi-column format that cuts
+    # it, which is why this survived every existing test — the live-bridge tests
+    # require Linux /proc, and their force_os="Darwin" case only switches the
+    # ownership read, not the host's ps behaviour.
+    #
+    # The guard's intent is preserved: args is untruncated here, and a shell
+    # that merely carries server.ts on its command line still has the shell
+    # itself as the first token.
+    _exe="${args%% *}"
+    case "$_exe" in
         bun | */bun) ;;
         *) printf '%s' "no_bridge"; return 1 ;;
     esac
@@ -832,6 +847,93 @@ wait_bridge_ready() {
         sleep "$step"
         waited=$((waited + step))
     done
+}
+
+# --- Supervision-unit ownership ----------------------------------------------
+# Host units carry a FIXED, unprefixed identity (claudlobby-disk-monitor, ...)
+# and live in ONE shared directory per host, because host equipment is
+# one-per-host and not one-per-fleet. That is deliberate. What is not
+# deliberate is that enrollment used to be an unconditional copy, so whichever
+# tree enrolled LAST owned them and nothing said so: a second checkout running
+# setup-system silently re-pointed the production host's daily jobs at itself,
+# and when that tree was later deleted the jobs stayed enrolled exec-ing a path
+# that no longer existed (#1152, reproduced on real systemd before this landed).
+
+# unit_owner_root <unit_file> — the CLAUDLOBBY_ROOT recorded INSIDE a composed
+# supervision unit, or nothing when the unit carries no ownership marker.
+#
+# Read as a PROPERTY. The composer emits CLAUDLOBBY_ROOT explicitly into every
+# unit it writes, on both platforms. This deliberately does NOT fall back to
+# parsing a root out of ExecStart or ProgramArguments: that is a pattern match
+# standing in for a property check, and it silently re-scopes who owns what the
+# first time the script layout moves. A unit with no marker reports NOTHING, so
+# the caller refuses loudly instead of acting on a guess.
+unit_owner_root() {
+    local f="${1:-}"
+    [ -n "$f" ] && [ -f "$f" ] || return 0
+    case "$f" in
+        *.plist)
+            # The composer emits <key> and <string> on SEPARATE lines, so this
+            # cannot be line-oriented — a per-line matcher would report every
+            # macOS host unit as unowned and refuse every enrollment there.
+            tr '\n' ' ' < "$f" \
+                | sed -n 's|.*<key>CLAUDLOBBY_ROOT</key>[[:space:]]*<string>\([^<]*\)</string>.*|\1|p' \
+                | head -1
+            ;;
+        *)
+            # Both the bare and the systemd-quoted Environment= forms.
+            sed -n 's/^Environment="\{0,1\}CLAUDLOBBY_ROOT=\([^"]*\)"\{0,1\}$/\1/p' "$f" \
+                | head -1
+            ;;
+    esac
+    return 0
+}
+
+# guard_unit_capture <installed_unit> <enrolling_root> <label>
+#   rc 0  proceed — nothing installed yet, or this root already owns it
+#   rc 3  refuse  — a different root owns it, or ownership cannot be established
+#
+# "Already installed" and "ours" are different questions, and only the second
+# licenses a write. An unowned unit is refused rather than assumed to be ours:
+# absence of a marker is not evidence that nobody else put it there, and this
+# door overwrites host equipment.
+# The enrolling root and label are NOT mandatory parameters. An indeterminable
+# enrolling root is a real state — a unit that predates the composer's marker,
+# or a minimal hand-written one — and `${2:?}` aborted the whole enrollment on
+# it, which turned a guard against capture into a refusal to install anything.
+guard_unit_capture() {
+    local installed="${1:?}" root="${2-}" label="${3-$(basename "${1:?}")}" owner
+    # Nothing installed means nothing to capture. This is the ONLY case where
+    # an unresolvable root is uninteresting, so it is answered before asking.
+    [ -f "$installed" ] || return 0
+    owner="$(unit_owner_root "$installed")"
+    if [ -z "$owner" ] && [ -z "$root" ]; then
+        # Neither side carries a marker, so no ownership judgement is possible
+        # in either direction. Proceeding is the only non-paralysing option —
+        # every composer-emitted unit carries the marker, so this is reachable
+        # only for units this system did not write — but it is said out loud
+        # rather than waved through, because the guard is silently inert here.
+        printf 'NOTE: %s carries no CLAUDLOBBY_ROOT marker and neither does the incoming unit;\n' "$installed" >&2
+        printf '      ownership cannot be checked, proceeding.\n' >&2
+        return 0
+    fi
+    [ "$owner" = "$root" ] && return 0
+    {
+        printf 'REFUSED: %s is already installed and this root does not own it.\n' "$label"
+        if [ -n "$owner" ]; then
+            printf '  owned by:  %s\n' "$owner"
+        else
+            printf '  owned by:  UNKNOWN — %s carries no CLAUDLOBBY_ROOT marker\n' "$installed"
+        fi
+        printf '  enrolling: %s\n' "$root"
+        printf '  unit file: %s\n' "$installed"
+        printf '\n'
+        printf 'Host units are one-per-host under a fixed name, so enrolling from a second\n'
+        printf 'tree would silently re-point this job at %s. If that tree is later\n' "$root"
+        printf 'removed, the job stays enrolled exec-ing a path that no longer exists.\n'
+        printf 'Nothing has been changed. Re-run with --adopt to take ownership deliberately.\n'
+    } >&2
+    return 3
 }
 
 # --- Per-bot tmux socket isolation ------------------------------------------
@@ -1113,10 +1215,17 @@ _PANE_SEND_VERIFY_TICKS_DEFAULT=5
 # payload. Matching the placeholder is what lets a stuck dispatch — the failure
 # this helper exists for — be detected at all.
 _PANE_PASTE_COLLAPSE_MARKER='[Pasted text'
-# Longest usable probe. The input box wraps near the pane width, so a probe
-# beyond this straddles a wrap point and cannot match any single rendered line
-# even while the text IS sitting unsubmitted.
-_PANE_PROBE_MAX_CHARS=60
+# RETIRED (#1082). This was a fixed-length prefix meant to dodge the input box's
+# wrapping — "a probe beyond this straddles a wrap point and cannot match any
+# single rendered line". The reasoning was right and the remedy could not work:
+# the box WORD-wraps, so the first rendered line is a variable length that can
+# fall BELOW any constant chosen here. Measured at 55 chars against this 60, on a
+# payload sitting plainly in the box. A constant cannot track a moving wrap point.
+#
+# pane_shows_payload now reverses the containment and takes the FULL payload, so
+# there is nothing left to truncate. Kept as a tombstone rather than deleted
+# silently: the next person to hit a wrap problem should find out that a prefix
+# probe was tried and why it failed, not reinvent it.
 
 # Readiness budget: how long to wait for the TUI to draw its input box before
 # sending into it (#860). Sized off the measured draw, not a guess — a
@@ -1254,7 +1363,20 @@ pane_holds_unsubmitted() {
 # dead pane: the send below is best-effort and owns that outcome.
 pane_await_input_box() {
     local socket="$1" session="$2" pane tick=0
-    # Default 0 (no wait). Boot injectors arm it; see _PANE_READY_TICKS_BOOT.
+    # Default 0 (no wait). Boot injectors arm it UNCONDITIONALLY — an inherited
+    # override is IGNORED on the boot path (start-bot.sh:371,381 assign
+    # PANE_READY_TICKS=$_PANE_READY_TICKS_BOOT rather than `${PANE_READY_TICKS:-...}`,
+    # so the `:-` convention one screen up does NOT hold there). Exporting this
+    # knob and measuring no change means the knob never moved, not that the wait
+    # does not matter — the manufactured-null class (#1084, #1109). #1115 tracks
+    # making the boot sites honour an override; when it lands, this reads "arm it
+    # as a default" and the two call sites are the thing to re-check.
+    # The other four overridable pane knobs (PANE_READY_POLL_S, PANE_SEND_SETTLE_S,
+    # PANE_SEND_VERIFY_TICKS, PANE_RECOVER_TICKS) have NO such defeat site: swept
+    # 2026-08-08, start-bot.sh is the only PRODUCTION caller that assigns a PANE_*
+    # knob, and it assigns only this one. Harnesses do set the others
+    # (validate-bot-change.sh:54, tests/) — that is a caller choosing a value,
+    # which is the override convention working rather than being defeated. #1117.
     local ticks="${PANE_READY_TICKS:-0}"
     [ "$ticks" -gt 0 ] || { printf '%s\n' "$_PANE_BOX_UNWAITED"; return 0; }
     while [ "$tick" -lt "$ticks" ]; do
@@ -1312,8 +1434,89 @@ pane_await_input_box() {
 #
 # One grep, two literals — the alternative runs both patterns on every clear pane,
 # which is the common case.
+# _PANE_MIN_VISIBLE_MATCH — floor on how much rendered text may vouch for a
+# payload. REVERSED containment needs one, and it is load-bearing rather than
+# tidy: the empty string is a substring of every payload, so an EMPTY box would
+# otherwise read as HELD and fire a ghost Enter into an idle pane — the exact
+# failure the positive-evidence-only rule exists to prevent. Floored at the
+# payload length for short sends, so `/reload` still vouches for itself.
+_PANE_MIN_VISIBLE_MATCH=12
+
+# _pane_strip_chrome <rendered_line>
+# The rendered line with the renderer's own decoration removed, so what is left
+# is candidate payload text.
+#
+# The separator the TUI puts after the prompt glyph is U+00A0 NON-BREAKING SPACE,
+# not an ASCII space — and `[[:space:]]` does not match it. That cost a real
+# regression here: reversed containment on an unstripped line kept a leading NBSP
+# and stopped being a substring of the payload, so a plainly-held `/claudna:session
+# resume --auto` read as NOT held. The old forward containment never noticed,
+# because searching WITHIN a line tolerates leading chrome; asking whether the
+# line is part of the payload does not.
+#
+# Parameter expansion rather than sed: bash 3.2 is the shebang target, portable
+# NBSP handling in sed differs across BSD and GNU, and this runs per rendered
+# line on the send-verify hot path.
+_pane_strip_chrome() {
+    local s="$1" nbsp
+    nbsp=$(printf '\302\240')
+    while :; do
+        case "$s" in
+            ' '*|"$(printf '\t')"*) s="${s#?}" ;;
+            "$nbsp"*)               s="${s#"$nbsp"}" ;;
+            '❯'*)                   s="${s#❯}" ;;
+            '>'*)                   s="${s#>}" ;;
+            *) break ;;
+        esac
+    done
+    while :; do
+        case "$s" in
+            *' '|*"$(printf '\t')") s="${s%?}" ;;
+            *"$nbsp")               s="${s%"$nbsp"}" ;;
+            *) break ;;
+        esac
+    done
+    printf '%s' "$s"
+}
+
 pane_shows_payload() {
-    printf '%s\n' "$1" | grep -qF -e "$2" -e "$_PANE_PASTE_COLLAPSE_MARKER"
+    # REVERSED CONTAINMENT (#1082). The old test asked "is the whole probe
+    # visible on some single line" — and `grep -F` matches within ONE line while
+    # the input box WORD-WRAPS, so the first rendered line is a variable length
+    # that can fall below the probe. Measured: a 151-char payload wraps at 55
+    # chars, the 60-char probe straddles the break, and the predicate reports
+    # NOT-HELD for a payload sitting plainly in the box. pane_send_verified then
+    # reads that as a clean send and never retries (a live dispatch was lost this
+    # way). The `_PANE_PROBE_MAX_CHARS` cap was introduced to dodge exactly this
+    # and does not, because it is a constant and the wrap point is not.
+    #
+    # So ask the question the other way round: is what is VISIBLE part of our
+    # payload? Every rendered slice of a held payload — a wrapped line, or an
+    # interior window when the box is taller than the pane — is a CONTIGUOUS
+    # SUBSTRING of it by construction. That property holds no matter where the
+    # renderer breaks, which is why this survives a moving wrap point where a
+    # fixed-length probe cannot.
+    #
+    # Callers pass the FULL payload, not a prefix: a prefix would still fail the
+    # interior-window case, since a window past the opening is a substring of the
+    # payload but not of its first N characters.
+    local pane="$1" payload="$2" floor line stripped
+    # Collapsed paste — the box shows a placeholder INSTEAD of any payload text,
+    # so no containment test of either direction can see it. Checked first.
+    printf '%s\n' "$pane" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER" && return 0
+    [ -n "$payload" ] || return 1
+    floor=$_PANE_MIN_VISIBLE_MATCH
+    [ "${#payload}" -lt "$floor" ] && floor=${#payload}
+    while IFS= read -r line; do
+        stripped=$(_pane_strip_chrome "$line")
+        [ "${#stripped}" -ge "$floor" ] || continue
+        # Quoted inside the pattern so glob metacharacters in the rendering are
+        # literal, not wildcards.
+        case "$payload" in *"$stripped"*) return 0 ;; esac
+    done <<EOF
+$pane
+EOF
+    return 1
 }
 
 # _pane_recover_unconfirmed_send <socket> <session> <text> <probe> <pane>
@@ -1370,7 +1573,11 @@ pane_send_verified() {
     local socket="${1?Usage: pane_send_verified <socket> <session> <text>}"
     local session="${2:?Usage: pane_send_verified <socket> <session> <text>}"
     local text="${3:?Usage: pane_send_verified <socket> <session> <text>}"
-    local probe="${text:0:$_PANE_PROBE_MAX_CHARS}"
+    # The FULL payload, never a prefix (#1082). Reversed containment asks whether
+    # what is rendered is part of what we sent, and a rendered interior window is
+    # a substring of the payload but NOT of its first N characters — so truncating
+    # here would silently reintroduce half the bug.
+    local probe="$text"
 
     # Wait for a box to send into (#860). A pre-draw send is lost outright and
     # the verify below cannot see it: a glyph-less pane reads as "nothing
@@ -1606,24 +1813,89 @@ marker_age_within() {
 # Both are optional. With neither, this is the original fire-once-per-episode
 # behavior, which is what an *action* debounce with no recipient wants
 # (reload-fleet.sh's npx warm attempt).
+# Rate limit on RE-ARMING after a recipient change (#1088). Not a limit on
+# alerting: the first alert of an episode and the FIRST recipient change both
+# fire unconditionally. Only the second and later changes inside the window are
+# suppressed.
+#
+# Why the rate rather than the signal. The recipient token is
+# `<session_created>-<pane_pid>`, and pane_pid churn is NOT a false signal —
+# start-bot.sh runs CLAUDE_CMD as the pane command, so pane_pid IS the claude
+# process, and a restart inside a surviving session loses the message just as
+# surely as a session restart. Every new pid is genuinely a process that never
+# saw the alert. So the token is right; what was missing is a bound on how often
+# it may re-arm. A crashlooping manager produced 8 pages in 20 minutes.
+#
+# Why "first change is free" rather than a floor on marker age. Flooring the age
+# suppresses the FIRST change too, which is the #831 property: a manager that
+# restarted once must still be told. Measured — the real-tmux #831 rehearsal
+# fails under an age floor ("restarted manager receives the alert": expected 1,
+# got 0) and passes under this, because one restart is one change. The
+# discriminator is how MANY changes, not how much time has passed.
+#
+# WHY 1800, since the number is the part a reader will want to change. Three
+# constraints, and the value is the middle of them rather than a measurement:
+#   - well ABOVE the 300s pulse interval, or a crashloop still pages every tick
+#     — 1800 is six ticks, bounding it at two pages an hour instead of twelve
+#   - well BELOW _RENOTIFY_AFTER_S (fleet-pulse.sh, 6h), or the recipient-change
+#     path becomes less responsive than the time-based leg and the token stops
+#     earning its place
+#   - long enough that a crashloop is damped, short enough that a SECOND genuine
+#     restart in the same episode is not swallowed for long
+# UNRATIFIED: chosen to satisfy those three, never measured against operator
+# tolerance, which is the only thing that could actually settle it. Raise it
+# during a known crashloop via FLEET_PULSE_REARM_WINDOW_S; 0 disables the bound
+# and restores pre-#1088 behaviour exactly.
+#
+# SHARED-FUNCTION CAVEAT: this lives in lib-common's debounce_notify, so it
+# bounds EVERY caller, not only fleet-pulse. notify_currency's documented
+# re-fires-on-situation-change contract is narrowed by the same window. Verified
+# inert at the time of writing — its only callers are daily/weekly jobs, which
+# cannot tick fast enough to reach the bound — but that is a property of the
+# current call pattern, not of the design, and one faster caller makes it real.
+_REARM_WINDOW_S_DEFAULT=1800
+
 debounce_notify() {
     local state_dir="$1" bot_id="$2" suffix="$3" notify_fn="$4" message="$5"
     local recipient="${6:-}" renotify_after="${7:-0}"
     local marker="$state_dir/${bot_id}.${suffix}"
-    local fire=0 seen=""
+    local window="${FLEET_PULSE_REARM_WINDOW_S:-$_REARM_WINDOW_S_DEFAULT}"
+    local fire=0 seen="" raw="" last_rearm=0 new_rearm=0 now
     if [ ! -f "$marker" ]; then
+        # First sighting of the condition always fires, and records NO re-arm —
+        # so the first recipient change afterwards is still free.
         fire=1
+        new_rearm=0
     else
-        seen=$(cat "$marker" 2>/dev/null || true)
+        raw=$(cat "$marker" 2>/dev/null || true)
+        # Marker format is `<recipient>|<last_rearm_epoch>`. A marker written
+        # before #1088 is a bare recipient with no separator; it reads as zero
+        # prior re-arms, so an upgrade never swallows the next change.
+        case "$raw" in
+            *"|"*) seen="${raw%%|*}"; last_rearm="${raw#*|}" ;;
+            *)     seen="$raw"; last_rearm=0 ;;
+        esac
+        case "$last_rearm" in ''|*[!0-9]*) last_rearm=0 ;; esac
+        new_rearm="$last_rearm"
         if [ -n "$recipient" ] && [ "$seen" != "$recipient" ]; then
-            fire=1
+            now=$(date +%s)
+            # Free unless another change already re-armed inside this window.
+            if [ "$window" -le 0 ] || [ "$(( now - last_rearm ))" -gt "$window" ]; then
+                fire=1
+                new_rearm="$now"
+            fi
         elif [ "$renotify_after" -gt 0 ] && ! marker_age_within "$marker" "$renotify_after"; then
+            # The age-out leg is not a re-arm, so it must not consume the budget
+            # a genuine restart is entitled to.
             fire=1
         fi
     fi
     if [ "$fire" -eq 1 ]; then
         "$notify_fn" "$message"
-        printf '%s' "$recipient" > "$marker"
+        # Written only on fire, deliberately: the marker's MTIME is what
+        # marker_age_within reads for the renotify window above, so touching it
+        # on a suppressed tick would silently disable that second leg entirely.
+        printf '%s|%s' "$recipient" "$new_rearm" > "$marker"
     fi
 }
 
@@ -1719,6 +1991,84 @@ session_md_handoff_epoch() {
         epoch=$(iso_to_epoch "$iso") && [ -n "$epoch" ] && { printf '%s' "$epoch"; return 0; }
     fi
     stat_mtime "$file" 2>/dev/null
+}
+
+# --- Session-resume capability (#1163) ---------------------------------------
+# start-bot injects a resume keystroke on EVERY start of EVERY bot. The command
+# it sends is CONFIGURATION, not a literal in the boot path: a fleet running
+# `plugins.include_defaults: false` — a supported configuration — has no clauDNA,
+# and the old hardcode fired an unresolvable slash command into every pane on
+# every boot, including on bots that never equipped `restart`.
+#
+# The rule this restores is the repo's own: consume siblings by contract, never
+# by assertion. The DEFAULT below is the command shipped by the default plugin
+# set (the pinned-sibling floor, `claudron_compat`'s shape); a fleet that ships a
+# different session provider overrides it, and one that wants no resume at all
+# sets it empty.
+_SESSION_RESUME_COMMAND_DEFAULT='/claudna:session resume --auto'
+_SESSION_HANDOFF_COMMAND_DEFAULT='/claudna:session handoff --auto'
+
+# _plugin_installed <plugin> — is a plugin resolvable in this config dir?
+# Both layouts are checked because the cache is keyed by MARKETPLACE and the
+# plugin lives under it (measured: cache/Claudfather/claudna), while the
+# unpacked skills live under marketplaces/.
+_plugin_installed() {
+    local p="${1:?}" base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins" d
+    for d in "$base"/cache/*/"$p" "$base"/marketplaces/*/"$p" "$base"/cache/"$p" ; do
+        [ -d "$d" ] && return 0
+    done
+    return 1
+}
+
+# session_command_status <command> [bot_dir] — echo one status token. Serves
+# every session verb (resume at boot, handoff at shutdown): one predicate, not
+# one per call site.
+#   rc 0 -> INJECT      available | unverifiable
+#   rc 1 -> SKIP        no-command | provider-absent:<plugin>
+#
+# FAIL OPEN when the answer cannot be established, and that asymmetry is
+# deliberate rather than lazy. Injecting a command that does not resolve costs
+# one wasted keystroke and is VISIBLE in the pane. Failing to inject when we
+# should have costs the session its context, SILENTLY — which is the failure
+# #1163 opened with. So only a positive finding of absence suppresses the send;
+# "I could not tell" sends and says so.
+session_command_status() {
+    local cmd="${1-}" bot_dir="${2-}" first plugin skill
+    if [ -z "$cmd" ]; then printf 'no-command'; return 1; fi
+    # Only the FIRST token can carry a plugin qualifier; checking the whole
+    # string would read a colon in a later argument as one.
+    first="${cmd%% *}"
+    case "$first" in
+        /*:*)
+            plugin="${first#/}"; plugin="${plugin%%:*}"
+            if _plugin_installed "$plugin"; then printf 'available'; return 0; fi
+            printf 'provider-absent:%s' "$plugin"; return 1 ;;
+        /*)
+            # A BARE /word. This branch checks the bot's skills dir and then
+            # does NOT suppress on a miss, which looks asymmetric against the
+            # plugin branch above and is deliberate — do not "fix" it by
+            # symmetrizing the two.
+            #
+            # The difference is what a negative MEANS on each path. A
+            # plugin-qualified command names a plugin, and a plugin absent from
+            # the cache is a POSITIVE finding of absence. A bare /word does not
+            # name a plugin, and the namespace includes Claude Code's own
+            # NATIVE commands — /compact, /clear and friends — which have no
+            # filesystem representation anywhere, so a miss here is ambiguous
+            # rather than a finding. Treating it as absence would silently
+            # refuse to send every native command a fleet ever configured.
+            #
+            # So the lookup is worth doing (a hit is a real positive, and
+            # upgrades the status from unverifiable to available) while the
+            # miss stays unverifiable and still sends, per the fail-open rule
+            # above.
+            skill="${first#/}"
+            if [ -n "$bot_dir" ] && [ -e "$bot_dir/.claude/skills/$skill" ]; then
+                printf 'available'; return 0
+            fi
+            printf 'unverifiable'; return 0 ;;
+        *)  printf 'unverifiable'; return 0 ;;
+    esac
 }
 
 should_resume_session() {
@@ -1865,6 +2215,39 @@ host_bots_dirs() {
     return 0
 }
 
+discover_fleet_manifests() {
+    # Emit "<fleet-name><TAB><path to its fleet.yaml>" for every fleet overlay on
+    # this host, one per line.
+    #
+    # Bash sibling of claudlobby/paths.py::_iter_fleet_dirs, with ONE deliberate
+    # difference: that helper yields candidate DIRS ungated at depth 1 so its
+    # callers can filter, while every caller here needs to PARSE the manifest, so
+    # this one yields only dirs that actually carry one.
+    #
+    # Enumerates depth 1 (local/<fleet>/) and depth 2 (local/<system>/<fleet>/),
+    # descending only into depth-1 dirs that are CONTAINERS (no fleet.yaml of
+    # their own) — never past two levels. Fleet name is the directory basename.
+    #
+    # Why this exists at all: fleet-state.json is host-shared, so attributing a
+    # row to the fleet that declares it is a HOST-wide question and no bash
+    # helper answered it. Hand-rolling that glob per caller is how two readers
+    # end up disagreeing about which fleets exist (#892).
+    local root="${CLAUDLOBBY_ROOT:?}" d c
+    [ -d "$root/local" ] || return 0
+    for d in "$root"/local/*/; do
+        [ -d "$d" ] || continue
+        if [ -f "${d}fleet.yaml" ]; then
+            printf '%s\t%s\n' "$(basename "$d")" "${d}fleet.yaml"
+            continue
+        fi
+        for c in "$d"*/; do
+            [ -d "$c" ] || continue
+            [ -f "${c}fleet.yaml" ] || continue
+            printf '%s\t%s\n' "$(basename "$c")" "${c}fleet.yaml"
+        done
+    done
+}
+
 parse_fleet_bots() {
     # Emit the bot names declared in a fleet.yaml (one per line) — the single
     # source of truth for "which bots does this fleet own". Supervision scripts
@@ -1891,8 +2274,231 @@ bot_in_fleet() {
     # and any future supervision script share ONE filter — no per-script drift.
     # Empty list (no/unreadable fleet.yaml → root-mode) → 0, i.e. "declared":
     # callers then scan every dir, preserving pre-fleet.yaml behavior.
+    #
+    # THIS LINE INVERTS AN EMPTY ROSTER INTO "EVERYTHING IS MINE" (#1146). That
+    # is the point in root mode, and it is a hazard everywhere else: a manifest
+    # that drifts out of the documented 2/4-space shape yields no bots, so the
+    # caller stops filtering and acts on EVERY bot dir on the host — other
+    # fleets included. Safe when the caller only reads or reports. Before adding
+    # a caller that WRITES, RESTARTS or DELETES behind this predicate, read the
+    # door note above declared_bots_strict and use the loud door instead.
     [ -z "$2" ] && return 0
     printf '%s\n' "$2" | grep -qx "$1"
+}
+
+# declared_bots_strict [bad_manifest_outfile]
+# Emit "<bot><TAB><fleet><TAB><bot_dir>" for every bot DECLARED across every
+# fleet manifest on this host — the union, never a directory walk.
+#
+#   rc 0  every manifest parsed
+#   rc 1  at least one manifest was unusable. Rows for the parseable fleets are
+#         still emitted, and one "<path><TAB><reason>" line per broken manifest
+#         is written to <bad_manifest_outfile> (stderr when no file is given),
+#         so the CALLER decides whether a partial roster is acceptable.
+#
+# THE SECOND DOOR, and why it is not parse_fleet_bots. That helper soft-fails by
+# contract: a missing or unreadable fleet.yaml yields NO output, and bot_in_fleet
+# reads an empty list as "declared", so its callers fall back to scanning every
+# directory.
+#
+# THE DISCRIMINATOR IS WHAT THE CALLER DOES WITH AN EMPTY RESULT (#1146) — not
+# whether the caller is an "action" or a "measurement". That earlier framing
+# reached the right answer for the wrong reason, and then ENDORSED a destructive
+# defect: a prune is an action, so the rule blessed it, and a CRLF-drifted
+# sibling manifest let one fleet delete another fleet live row at rc 0 (#1143).
+#
+#   empty means DO NOTHING        -> soft is right. The no-op is the safe
+#                                    direction, and a supervision filter must
+#                                    keep working on a briefly broken host.
+#   empty LICENSES A WRITE/DELETE -> soft is WRONG, whatever the caller is
+#                                    called. Absence of evidence is being read
+#                                    as evidence of absence. Use THIS door.
+#
+# Two traps when classifying a caller:
+#   * bot_in_fleet INVERTS the empty. An empty roster makes every directory
+#     "declared", so "do nothing" silently becomes "do it to every bot on the
+#     host, including other fleets". Classify the PREDICATE, not just the parse
+#     — six live callers reach their work through it.
+#   * A measurement is the special case where empty licenses a WRONG NUMBER: a
+#     denominator that silently shrinks by a whole fleet turns 6 of 21 into
+#     6 of 19 and the baseline stops being comparable. Same rule, same verdict
+#     (selfstart-snapshot.sh, and why composer.py::_fleet_bot_count() must not
+#     be copied either).
+#
+# So there are deliberately TWO doors rather than one widened door: four
+# supervision scripts depend on parse_fleet_bots staying soft, and this one
+# fails loud. Neither is a fixed version of the other. They must agree on the
+# happy path and diverge only on the failure path — gated by a test that runs
+# both over the same manifests.
+declared_bots_strict() {
+    local bad_out="${1:-}" fleet man names b bdir rc=0
+    : "${CLAUDLOBBY_ROOT:?declared_bots_strict needs CLAUDLOBBY_ROOT}"
+    local tmp_bad
+    tmp_bad="$(mktemp "${TMPDIR:-/tmp}/declbots.XXXXXX")" || return 2
+    while IFS="$(printf '\t')" read -r fleet man; do
+        [ -n "$man" ] || continue
+        if [ ! -r "$man" ]; then
+            printf '%s\tunreadable\n' "$man" >> "$tmp_bad"; continue
+        fi
+        if ! grep -qE '^[[:space:]]*bots:[[:space:]]*(#.*)?$' "$man" 2>/dev/null; then
+            printf '%s\tno bots: block\n' "$man" >> "$tmp_bad"; continue
+        fi
+        names="$(_bots_from_manifest "$man")"
+        if [ -z "$names" ]; then
+            printf '%s\tbots: block declares no bots\n' "$man" >> "$tmp_bad"; continue
+        fi
+        bdir="$(dirname "$man")/runtime/bots"
+        while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            printf '%s\t%s\t%s\n' "$b" "$fleet" "$bdir/$b"
+        done <<EOF
+$names
+EOF
+    done <<EOF
+$(discover_fleet_manifests)
+EOF
+    if [ -s "$tmp_bad" ]; then
+        rc=1
+        if [ -n "$bad_out" ]; then cat "$tmp_bad" > "$bad_out"; else cat "$tmp_bad" >&2; fi
+    elif [ -n "$bad_out" ]; then
+        : > "$bad_out"
+    fi
+    rm -f "$tmp_bad"
+    return "$rc"
+}
+
+# _bots_from_manifest <fleet.yaml> — bot keys, i.e. the first nesting level under
+# `bots:`. Comments, blank lines, deeper keys and sibling top-level keys are all
+# excluded, and an anchor on the key (`alex: &base`) is still a bot. Indentation
+# is derived from the file rather than assumed, so a manifest written at a
+# non-standard indent is parsed rather than silently read as empty.
+_bots_from_manifest() {
+    awk '
+        /^[[:space:]]*#/ { next }
+        !inbots && $0 ~ /^[[:space:]]*bots:[[:space:]]*(#.*)?$/ {
+            match($0, /^[ ]*/); ind = RLENGTH; inbots = 1; botind = 0; next
+        }
+        inbots {
+            if ($0 ~ /^[[:space:]]*$/) next
+            match($0, /^[ ]*/); cur = RLENGTH
+            if (cur <= ind) { inbots = 0; next }
+            if (botind == 0) botind = cur
+            if (cur == botind && $0 ~ /^[ ]*[A-Za-z0-9_-]+:[ ]*(&[A-Za-z0-9_-]+)?[ ]*(#.*)?$/) {
+                k = $0; sub(/^[ ]*/, "", k); sub(/:.*$/, "", k); print k
+            }
+        }
+    ' "$1" 2>/dev/null
+}
+
+# boot_start_class <transcript_dir> <boot_cmp_iso> [composed_startup_prompt]
+# Classify HOW a bot's session came to life after a boot, from its transcript
+# alone. Emits "<class><TAB><timestamp>":
+#
+#   payload <ts>   the WHOLE boot injection submitted. <ts> is when the bot's own
+#                  composed prompt landed. Whether the bot did that itself or a
+#                  rescuer did it for them is NOT decidable here: the caller
+#                  settles it by comparing <ts> against an external receipt.
+#   partial <ts>   something startup-shaped submitted at <ts>, but the bot's own
+#                  composed STARTUP_PROMPT never did. See below.
+#   inbound <ts>   the session was woken by an INBOUND CHANNEL MESSAGE. Neither
+#                  self-start nor rescue, and the class that matters: a bot can
+#                  be woken by a human messaging it, then run real work and
+#                  report normally, while never having started on its own. Every
+#                  liveness signal calls that healthy. Liveness is not self-start.
+#   none    -      no post-boot user record at all.
+#
+# WHY `partial` EXISTS. A boot injection is TWO sends (see start-bot.sh): a bare
+# `/claudna:session resume --auto` and then `set +H; $STARTUP_PROMPT`. Asserting
+# that SOMETHING startup-shaped arrived passes a bot whose injection only half
+# landed — measured, one bot's composed prompt was still unsubmitted 39 minutes
+# after boot and another's never arrived at all, and both read as clean
+# self-starters. So the whole injection is asserted, not any part of it.
+#
+# Only the PROSE half is asserted, and that asymmetry is forced rather than
+# chosen: start-bot.sh sends the prose whenever STARTUP_PROMPT is non-empty, so
+# its absence is decidable. The slash half is gated on should_resume_session,
+# which depends on checkpoint freshness AT BOOT and is not recoverable
+# afterwards — so a missing slash command cannot be distinguished from one that
+# was correctly never sent, and claiming otherwise would manufacture defects.
+#
+# The prose is matched as `set +H; <prompt>`, the exact form start-bot.sh emits,
+# against the bot's OWN composed value. That is a property check against the
+# injector, not a guess at what a payload looks like — and it is the opposite
+# discipline from the typing above ON PURPOSE. Typing asks "is this a payload at
+# all", where payloads vary without limit and only the denylist survives.
+# This asks "did THIS bot's known prompt land", which has exactly one right
+# answer per bot and must be compared against the composed artifact. A resend in
+# any other wording therefore reads as `partial`, which is the fail-closed
+# direction: a bot is never promoted to self-starter on weaker evidence.
+#
+# With no prompt supplied the assertion is skipped and `payload` means only that
+# the first record was one — callers that can read bot.conf should pass it.
+#
+# DENYLIST THE INVARIANT, NEVER ALLOWLIST THE VARIANT. This is the whole design
+# and it is the reusable part. Startup payloads are authored per bot and vary
+# without limit — one bot is sent prose, another a bare slash command that lands
+# as <command-message> with no prose at all, and a rescuer types an approximation
+# of neither. Any detector that tries to RECOGNISE a payload is matching the
+# variant, and every one written for this failed. The two shapes that do NOT vary
+# are machine-authored: the channel injection has exactly one form, and so does a
+# tool_result record. So those are matched, and "payload" is simply what is left
+# once they are excluded. Adding a bot, or rewording a prompt, cannot break it.
+#
+# isMeta is deliberately NOT filtered: channel injections ARE isMeta, so dropping
+# meta records to remove system noise silently drops exactly the evidence this
+# function exists to find.
+#
+# Residual ambiguity, stated because it is real: a payload that quotes the
+# channel marker in its own text reads as inbound. That only ever moves a bot OUT
+# of the self-started count, so it cannot inflate the headline — the one
+# direction a measurement must not fail in.
+boot_start_class() {
+    local tdir="$1" boot_cmp="$2" prompt="${3:-}" f first="" prose="" esc=""
+    for f in "$tdir"/*.jsonl; do
+        [ -f "$f" ] || continue
+        first="$(printf '%s\n%s\n' "$first" "$(awk -v boot="$boot_cmp" '
+            index($0, "\"type\":\"user\"") == 0 { next }
+            index($0, "\"type\":\"tool_result\"") { next }
+            {
+                i = index($0, "\"timestamp\":\"")
+                if (i == 0) next
+                rest = substr($0, i + 13)
+                j = index(rest, "\"")
+                if (j == 0) next
+                ts = substr(rest, 1, j - 1)
+                if (ts <= boot) next
+                print ts "\t" (index($0, "<channel source=") ? "inbound" : "payload")
+            }
+        ' "$f" 2>/dev/null)" | grep -v '^$' | sort | head -1)"
+    done
+    if [ -z "$first" ]; then
+        printf 'none\t-\n'
+        return 0
+    fi
+    local cls ts
+    cls="$(printf '%s' "$first" | cut -f2)"
+    ts="$(printf '%s' "$first" | cut -f1)"
+
+    if [ "$cls" = "payload" ] && [ -n "$prompt" ]; then
+        # The record holds the prompt JSON-encoded, so the needle is escaped the
+        # same way before a fixed-string search. Backslash first, or the escaping
+        # of the quotes is itself re-escaped.
+        esc="$(printf '%s' "$prompt" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        for f in "$tdir"/*.jsonl; do
+            [ -f "$f" ] || continue
+            prose="$(printf '%s\n%s\n' "$prose" "$(grep -F "set +H; $esc" "$f" 2>/dev/null \
+                | grep '"type":"user"' \
+                | grep -o '"timestamp":"[^"]*"' | sed 's/.*:"//; s/"$//' \
+                | awk -v boot="$boot_cmp" '$0 > boot')" | grep -v '^$' | sort | head -1)"
+        done
+        if [ -n "$prose" ]; then
+            printf 'payload\t%s\n' "$prose"
+        else
+            printf 'partial\t%s\n' "$ts"
+        fi
+        return 0
+    fi
+    printf '%s\t%s\n' "$cls" "$ts"
 }
 
 # fleet_service_prefix <fleet.yaml-path>
@@ -1954,6 +2560,395 @@ service_is_active() {
     Darwin) launchctl print "gui/$(id -u)/$svc" >/dev/null 2>&1 ;;
     *) return 0 ;;
     esac
+}
+
+# Upper bound on how long service_is_starting will call a unit mid-boot.
+# The cap exists for the boot that never finishes: without it a wedged spawner
+# would suppress both the restart and the alarm forever — a bot that never comes
+# back and nothing says so, the manufactured all-clear shape (#933), strictly
+# worse than the false positives this predicate exists to remove.
+#
+# Budgeted against ONE PHASE, not the whole boot, which is why the composed boot
+# stagger cannot eat it (see the age read below): the ExecStart phase is bounded
+# by start-bot.sh's own RC_READY_TIMEOUT_S (90s default), so 300s is >3x headroom
+# and stays correct however long the host ladder grows. Matches the 300s default
+# the bridge grace already uses. Override per-bot with KEEPALIVE_BOOT_GRACE_S
+# (documented in documentation/environment-variables.md).
+_BOOT_GRACE_S_DEFAULT=300
+
+# service_is_starting <bot_service>
+# rc 0 iff the unit is provably MID-START: a boot is in flight, so an absent
+# tmux session is expected and means neither "down" (fleet-pulse) nor "restart
+# me" (keepalive). One predicate, two consumers, so detection and healing can
+# never disagree about whether a bot is booting.
+#
+# Linux reads two systemd fields in one show, because the boot spans two states:
+#   activating      → ExecStartPre, i.e. the boot-stagger sleep (3s..N)
+#   active/running  → ExecStart (start-bot.sh) executing; tmux not up yet
+#   active/exited   → steady state; a missing session here is REAL
+#
+# THE ASSUMPTION THIS RESTS ON, stated because violating it is silent:
+# active/running means mid-boot ONLY while the composed unit keeps BOTH of
+#   (a) an ExecStart that spawns and exits (start-bot.sh backgrounds tmux), and
+#   (b) RemainAfterExit=yes, which holds the unit active after (a) exits.
+# Drop either and active/running becomes the STEADY state of a healthy bot —
+# this predicate would then return 0 forever, permanently disabling keepalive's
+# dead-session watchdog and fleet-pulse's service_down alarm while every surface
+# reads green. compose_systemd_unit carries the same warning, and
+# tests/test_composer.py asserts the unit shape so a change breaks a test rather
+# than the watchdog.
+#
+# ActiveState alone is NOT sufficient and was measured so: on the 2026-08-04
+# boot storm all three of rajan's mid-boot restarts landed in active/running
+# (unit active 17:23:41, restarts 17:24:34 / 17:25:32 / 17:26:19), never in
+# activating. The activating window is only as wide as the stagger sleep; the
+# window that actually strands a boot is 35-178s wide. See #1002.
+#
+# Sound in one direction only: rc 0 requires positive proof of a start in
+# flight. macOS (launchctl print exposes no cheap sub-state) and any
+# unrecognized OS return non-zero — the caller keeps its pre-existing behaviour
+# rather than inheriting a suppression this function cannot justify.
+service_is_starting() {
+    local svc="${1:?Usage: service_is_starting <bot_service>}"
+    [ "$_OS" = "Linux" ] || return 1
+
+    local active="" sub="" enter_us="" exec_us="" since_us up_s grace _k _v
+    # ONE show for all four properties: separate calls could straddle a state
+    # change and compose a state pair that never existed.
+    #
+    # Parsed BY NAME (Key=Value), never by position, and deliberately without
+    # --value: systemctl emits properties in ITS OWN order, not the order they
+    # were requested. Positional reads happen to line up for some property sets
+    # and silently transpose for others — adding a fourth -p here reordered the
+    # output to ExecMainStart / ActiveState / SubState / InactiveExit, so the
+    # state test read a timestamp as the ActiveState and the predicate answered
+    # "not starting" for every unit in every state. Name-keyed parsing cannot
+    # drift that way, and an absent property simply leaves its var empty.
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+        ActiveState) active=$_v ;;
+        SubState) sub=$_v ;;
+        InactiveExitTimestampMonotonic) enter_us=$_v ;;
+        ExecMainStartTimestampMonotonic) exec_us=$_v ;;
+        esac
+    done <<EOF
+$(systemctl --user show -p ActiveState -p SubState \
+    -p InactiveExitTimestampMonotonic -p ExecMainStartTimestampMonotonic \
+    "$svc" 2>/dev/null | tr -d '\r')
+EOF
+
+    case "$active/$sub" in
+    activating/*) since_us=$enter_us ;; # ExecStartPre: age from the start attempt
+    active/running) since_us=$exec_us ;; # ExecStart: age from the spawner alone
+    *) return 1 ;;
+    esac
+
+    # Age the CURRENT PHASE, not the whole boot. Both stamps are set by systemd
+    # and reset by every restart, so unlike data/.spawn (touched after session
+    # creation, hence stale through exactly the window this guards) neither can
+    # carry a previous boot's value.
+    #
+    # Two stamps rather than one because InactiveExit fires at inactive->activating
+    # and therefore INCLUDES the composed ExecStartPre stagger, which is host-global
+    # (#1002) and grows with every fleet added. Measured on this host the last rung
+    # is already 60s; billing that to the ExecStart budget would silently shrink it
+    # as the estate grows, and the tail bot — the one the ladder pushed latest — is
+    # exactly the bot that can least afford it. ExecMainStart fires when the spawner
+    # actually starts, so the grace stays a statement about start-bot.sh alone.
+    case "$since_us" in "" | *[!0-9]*) return 0 ;; esac # unreadable age: trust the state
+    grace="${KEEPALIVE_BOOT_GRACE_S:-$_BOOT_GRACE_S_DEFAULT}"
+    case "$grace" in "" | *[!0-9]*) grace=$_BOOT_GRACE_S_DEFAULT ;; esac
+    # Builtin read, no forks; compare in whole seconds so the µs stamp needs no
+    # scaling. Truncating both sides costs at most 1s against a 300s cap.
+    # `10#` pins base 10 — an all-digit string with a leading zero is octal to
+    # $(( )), and "value too great for base" aborts the caller under `set -e`,
+    # at the one moment (just after a boot) this predicate matters most.
+    read -r up_s _ < /proc/uptime || return 0 # unreadable clock: trust the state
+    case "$up_s" in "" | *[!0-9.]*) return 0 ;; esac
+    [ "$((10#${up_s%.*} - since_us / 1000000))" -lt "$grace" ]
+}
+
+# systemd_user_bus_available
+# rc 0 iff a usable `systemctl --user` bus is reachable. The gate for harnesses
+# that install a real user unit: macOS and any container without a user manager
+# must SKIP rather than fail. Lives here because two private copies of a
+# capability probe is how one harness gets fixed and its sibling silently keeps
+# skipping (the seed_claude_auth lesson, below).
+systemd_user_bus_available() {
+    [ "$_OS" = "Linux" ] && systemctl --user show-environment >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# Framework source currency (#1009)
+# ---------------------------------------------------------------------------
+# One discovery predicate shared by the reporter (notify-behind.sh) and the
+# applier (update-siblings.sh). Two private copies is how a watcher and an
+# updater come to disagree about which repos exist — and #1009 is already a
+# case of a currency surface silently not covering what everyone assumed it did.
+
+# repo_remote_org <checkout>
+# Owner segment of a checkout's origin remote, lowercased; empty when absent.
+# Handles both spellings git produces:
+#   https://host/Org/Repo.git   and   git@host:Org/Repo.git
+# Lowercased because a remote's case is cosmetic to the forge but not to `=`,
+# and a mismatch would silently unwatch a sibling.
+#
+# Reads the RAW configured value, not `git remote get-url`, which applies
+# url.<base>.insteadOf rewriting: on a host with a corporate mirror rewrite the
+# rewritten URL carries the MIRROR's owner, so every sibling would be judged
+# against the wrong org. The configured value is the repo's stated identity;
+# the rewrite is a transport detail.
+repo_remote_org() {
+    local url
+    url=$(git -C "${1:?repo_remote_org: <checkout> required}" config --get remote.origin.url 2>/dev/null) || return 0
+    url=${url%.git}
+    url=${url%/}
+    # Branch on the URL FORM. An unconditional strip chain cannot do this: the
+    # scp form is already reduced to Org/Repo once `user@host:` is gone, so the
+    # https form's `host/` strip then eats the ORG — git@github.com:Org/Repo
+    # parsed as "repo", every SSH-remote sibling silently failed the org match,
+    # and #1009 came back. tests/test_source_currency.py pins all three forms.
+    case "$url" in
+    *://*)                # scheme://[user@]host/Org/Repo
+        url=${url#*://}
+        url=${url#*@}
+        url=${url#*/}
+        ;;
+    *@*:*)                # user@host:Org/Repo  (scp-style)
+        url=${url#*@}
+        url=${url#*:}
+        ;;
+    *:*)                  # host:Org/Repo
+        url=${url#*:}
+        ;;
+    esac
+    printf '%s' "${url%%/*}" | tr '[:upper:]' '[:lower:]'
+}
+
+# repo_default_branch <checkout>
+# Remote default branch from origin/HEAD, falling back to main. Resolved per
+# repo rather than assumed: hardcoding main reports "in sync" forever for a
+# sibling on master, and a watcher that cannot see a repo is worse than one
+# that admits it, because silence reads as coverage.
+repo_default_branch() {
+    local ref
+    ref=$(git -C "${1:?repo_default_branch: <checkout> required}" symbolic-ref --quiet \
+        refs/remotes/origin/HEAD 2>/dev/null) || true
+    [ -n "$ref" ] && printf '%s' "${ref##*/}" && return 0
+    printf 'main'
+}
+
+# repo_newest_tag <checkout>
+# Highest RELEASE tag known locally, or empty. Version-sorted, not
+# chronological: a backport tagged after a later release must not read as
+# newest.
+#
+# Constrained to v<num>.<num>[.<num>] and pre-releases excluded, because this
+# feeds an unattended fast-forward on a production fleet: an unfiltered
+# `--sort=-v:refname` ranks v1.1.0-rc1 above v1.0.0, and a stray `nightly` or
+# `backup-2026-08` tag outranks both. A release candidate is not a release.
+#
+# EMPTY IS MEANINGFUL and is the release-track rule both callers share: a repo
+# with no release tags does not ship by cutting versions, so its default branch
+# IS its release track. Measured on this host — claudlobby carries zero tags
+# (it ships by merging to main) and Claudron carries three (it ships by cutting
+# versions). Imposing one track on both would either leave claudlobby
+# permanently un-updatable or auto-pull Claudron to unreleased dev code.
+repo_newest_tag() {
+    # `|| true`: grep exits 1 when a repo has NO release tags — the common,
+    # expected case (claudlobby has none) — and `tag=$(repo_newest_tag ...)`
+    # would propagate that straight into an errexit abort of the caller.
+    git -C "${1:?repo_newest_tag: <checkout> required}" tag --list --sort=-v:refname \
+        'v[0-9]*' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1 || true
+}
+
+# notify_currency <repo-name> <event_type> <distinct-value> <message>
+# A source-currency FLEET NOTICE, debounced per (repo, event_type).
+#
+# Debounced because the loudest of these conditions cannot be cleared by the
+# fleet. `source_release_gap` — on the newest release while main has moved — is
+# the NORMAL state of any actively-developed sibling, and it clears only when a
+# human cuts a release; `sibling_update_blocked` on a dirty framework checkout
+# is the normal state of a dogfooding host. Undebounced, those are a Telegram
+# post a day and one a week, forever, on conditions nobody can resolve today.
+# That trains operators to ignore FLEET NOTICE — which is the failure class
+# #1009 is itself an instance of, so re-arming it here would be self-defeating.
+#
+# <distinct-value> is passed as debounce_notify's recipient, so the notice
+# re-fires when the SITUATION CHANGES (the distance moved, a release was cut, a
+# different commit landed) and otherwise only after the renotify window. A
+# stalled condition stays quiet; a worsening one speaks up.
+#
+# Requires BOTS_DIR and STATE_DIR in the caller's scope.
+notify_currency() {
+    local name="${1:?notify_currency: <repo-name> required}"
+    local etype="${2:?notify_currency: <event_type> required}"
+    local distinct="${3-}" message="${4:?notify_currency: <message> required}"
+    _nc_emit() { emit_fleet_notice "$BOTS_DIR" "$etype" "$1"; }
+    debounce_notify "$STATE_DIR" "$name" "$etype" _nc_emit \
+        "$message" "$distinct" "${CURRENCY_RENOTIFY_S:-604800}"
+}
+
+# currency_clear <repo-name> <event_type>
+# Drop a debounce marker so the condition speaks again next time it appears.
+currency_clear() {
+    debounce_clear "$STATE_DIR" "$1" "$2"
+}
+
+# repo_currency_target <checkout>
+# The ref this repo should be measured against and fast-forwarded to: its
+# newest release tag, or origin/<default branch> when it has none.
+#
+# ONE rule, shared, because the reporter and the applier disagreeing about the
+# target is worse than either being wrong alone — the operator would be told
+# "cut a release" about a repo the machine fast-forwards the same week. This is
+# the same argument discover_framework_checkouts makes about the repo SET,
+# applied to the REF, which the first cut of #1009 forked between two files.
+repo_currency_target() {
+    local repo="${1:?repo_currency_target: <checkout> required}" tag
+    tag=$(repo_newest_tag "$repo")
+    [ -n "$tag" ] && printf '%s' "$tag" && return 0
+    printf 'origin/%s' "$(repo_default_branch "$repo")"
+}
+
+# repo_pull_blocker <checkout>
+# Echo a human-readable reason this checkout must NOT be auto-pulled, or
+# nothing when a fast-forward is safe. rc is always 0 — the ANSWER is the
+# string, so a caller cannot mistake "no blocker" for a failed check.
+#
+# Every blocker here means "a person is mid-something in this tree". #1009's
+# fix pulls a dependency automatically, and the one outcome strictly worse than
+# a stale sibling is an automated pull that eats somebody's uncommitted work.
+# Detached HEAD counts: a bisect or a pinned-version checkout is a deliberate
+# position, and fast-forwarding it silently discards that intent.
+repo_pull_blocker() {
+    local repo="${1:?repo_pull_blocker: <checkout> required}" branch ahead
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || { printf 'not a git checkout'; return 0; }
+    [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ] && { printf 'dirty working tree'; return 0; }
+    branch=$(git -C "$repo" symbolic-ref --quiet --short HEAD 2>/dev/null) \
+        || { printf 'detached HEAD'; return 0; }
+    git -C "$repo" rev-parse --verify --quiet "origin/$branch" >/dev/null 2>&1 \
+        || { printf 'no upstream origin/%s' "$branch"; return 0; }
+    ahead=$(git -C "$repo" rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo 0)
+    [ "${ahead:-0}" -gt 0 ] && { printf 'local commits not pushed (%s ahead)' "$ahead"; return 0; }
+    return 0
+}
+
+# _editable_project_locations
+# Project locations of editable-installed Python distributions, one per line.
+#
+# Reads importlib.metadata IN-PROCESS rather than shelling out to
+# `pip list --editable`. Three reasons, all measured:
+#   * pip need not exist. A `python3 -m venv --without-pip` or a `uv venv` has
+#     no pip, and the pip path then prints nothing and exits 0 — discovery
+#     silently collapsing to claudlobby-only, which is #1009 re-armed and
+#     invisible. importlib.metadata is stdlib and always present.
+#   * ~10x cheaper (101ms vs 1026ms here) because it skips a second interpreter
+#     start and pip's import.
+#   * `direct_url.json` (PEP 610) misses legacy `setup.py develop` egg-links —
+#     one such install exists on this host — so the egg-link fallback below is
+#     load-bearing, not belt-and-braces.
+#
+# EVERY candidate interpreter is queried and the results unioned, not
+# first-one-wins: the environments hold different distributions, and the .venv
+# is exactly where an operator following the documented dev setup would hide
+# the siblings from a root-interpreter-only probe. Deduping is the caller's
+# (discover_framework_checkouts resolves each to a git top-level anyway).
+_editable_project_locations() {
+    local py seen=""
+    for py in "${CLAUDLOBBY_ROOT:-}/.venv/bin/python" python3; do
+        command -v "$py" >/dev/null 2>&1 || continue
+        # Same interpreter reachable by two names — query it once.
+        local real
+        real=$(command -v "$py" 2>/dev/null || printf '%s' "$py")
+        case "$seen" in *"|$real|"*) continue ;; esac
+        seen="$seen|$real|"
+        "$py" - 2>/dev/null <<'PY' || true
+import importlib.metadata as md
+from pathlib import Path
+import json
+
+for dist in md.distributions():
+    loc = None
+    try:
+        raw = dist.read_text("direct_url.json")
+        if raw:
+            info = json.loads(raw)
+            if info.get("dir_info", {}).get("editable") and info.get("url", "").startswith("file://"):
+                loc = info["url"][7:]
+    except Exception:
+        pass
+    if not loc:
+        # setup.py develop / egg-link: the dist-info parent IS the project.
+        try:
+            p = getattr(dist, "_path", None)
+            if p and Path(p).suffix == ".egg-info" and (Path(p).parent / "setup.py").exists():
+                loc = str(Path(p).parent)
+        except Exception:
+            pass
+    if loc:
+        print(loc)
+PY
+    done
+    return 0
+}
+
+# discover_framework_checkouts
+# Absolute git top-levels of the framework this fleet RUNS ON, one per line:
+# $CLAUDLOBBY_ROOT always, plus every editable-installed Python distribution
+# whose git remote sits in the SAME ORG as $CLAUDLOBBY_ROOT's own remote.
+#
+# Discovered rather than listed, because a list is the bug (#1009): notify-behind
+# watched claudlobby, Claudron went 16 commits stale carrying two data-integrity
+# fixes, and nothing said anything — the watched repo was the healthy one.
+# Naming three paths would reproduce that the next time a fourth sibling ships.
+# Deriving the org from the compositor's own remote also means a FORK of the
+# framework watches its own siblings, not this one's.
+#
+# The org test is what keeps PRODUCT repos out. Bots install the repos they work
+# on as editable packages too, from other orgs — measured on this host,
+# `pip list --editable` returns two framework checkouts and two product ones.
+# The fleet RUNS ON the framework and WORKS ON the products; only the former
+# going stale is a fleet-health fact, and pulling the latter would be an
+# automated commit-swap under somebody's active feature branch.
+#
+# NOT covered here, because they already have a currency path: the Claude Code
+# binary (update-claude-code.sh) and Claude Code plugins incl. clauDNA
+# (reload-fleet.sh `claude plugin update`). Measured, not assumed — the clauDNA
+# marketplace clone read behind=0 while Claudron sat 16 behind, which is what
+# isolates the remaining gap to Python CLI installs.
+discover_framework_checkouts() {
+    local root="${CLAUDLOBBY_ROOT:-}" org loc top seen w
+    [ -n "$root" ] || return 0
+    git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+
+    # Seeded with the canonicalized path, not the raw env value: every later
+    # comparison is against `rev-parse --show-toplevel`, so a symlinked
+    # CLAUDLOBBY_ROOT would miss its own duplicate and the root would be
+    # fetched, reported and pulled twice.
+    root=$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$root")
+    local found=("$root")
+    printf '%s\n' "$root"
+
+    org=$(repo_remote_org "$root")
+    [ -n "$org" ] || return 0 # no remote to match siblings against
+
+    while IFS= read -r loc; do
+        [ -n "$loc" ] && [ -d "$loc" ] || continue
+        top=$(git -C "$loc" rev-parse --show-toplevel 2>/dev/null) || continue
+        # claudlobby is itself an editable install, so without this it would be
+        # fetched, reported and pulled twice.
+        seen=0
+        for w in "${found[@]}"; do
+            if [ "$w" = "$top" ]; then seen=1; break; fi
+        done
+        [ "$seen" -eq 1 ] && continue
+        [ "$(repo_remote_org "$top")" = "$org" ] || continue
+        found+=("$top")
+        printf '%s\n' "$top"
+    done <<EOF
+$(_editable_project_locations)
+EOF
 }
 
 # unit_is_dormant <timers-dir> <unit-basename>

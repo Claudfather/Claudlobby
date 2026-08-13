@@ -10,12 +10,18 @@ env_contract:
 # Neon (Postgres)
 
 
-**Skills (clauDNA):** `/claudna:neon info` (overview), `/claudna:neon query` (run SQL), `/claudna:neon branch` (create/list/delete branches)
+Neon is serverless Postgres. You reach it either through a Neon domain skill or
+agent, or through the `neon` CLI (plus `psql` for raw SQL).
 
-**When to use:**
-- Database schema exploration → `/claudna:neon info`
-- Running queries or checking data → `/claudna:neon query`
-- Safe experimentation before migrations → `/claudna:neon branch` (branches are copy-on-write, cents per branch)
+**What you will need to do with it:**
+- Explore database schema
+- Run queries and check data
+- Branch before risky work — branches are copy-on-write and cost cents, so
+  experiment on one rather than on prod
+
+**How to do it:** use any Neon domain skill or agent you have available —
+clauDNA ships `/claudna:neon`, so check your own skill list first. If none is
+installed, use the `neon` CLI directly; everything above is reachable that way.
 
 **Gotchas:**
 - Always branch before destructive migrations — test on the branch, then apply to prod

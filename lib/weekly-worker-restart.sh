@@ -53,6 +53,8 @@ fi
 # spin-up-bot.sh would otherwise re-enroll + restart a bot the fleet no longer
 # declares, resurrecting cross-fleet orphan residue. Empty list (no/unreadable
 # fleet.yaml) → bot_in_fleet treats every dir as declared, preserving prior behavior.
+# #1146: that fallback is over-inclusive, not a no-op — a drifted manifest makes
+# this weekly cron bounce every bot dir on the host, other fleets included.
 _wr_fleet_dir=$(resolve_fleet_dir "$FLEET") || _wr_fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET"
 declared_bots=$(parse_fleet_bots "$_wr_fleet_dir/fleet.yaml")
 

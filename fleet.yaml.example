@@ -94,6 +94,14 @@ fleet:
     # observability:                               # uncomment to override system default values
     #   pulse_interval: 300
     #   reap_days: 7
+    #   # Mirror watchdog (#1024): flag a worker that reported and was then
+    #   # never re-dispatched. OFF by default — it reports that the ASSIGNMENT
+    #   # loop stalled, so arm it only where someone acts on that.
+    #   unassigned_check: false      # default false
+    #   unassigned_threshold: 7200   # seconds idle before flagging (default 7200 = 2h)
+    #   # Past max_age the check stops reporting AND clears its debounce, so a
+    #   # strand outliving the window goes quiet again — set 0 to refuse that.
+    #   unassigned_max_age: 86400    # stop reporting past this age (default 86400 = 24h; <=0 never stops)
 
   teams:
     engineering:
@@ -187,6 +195,18 @@ fleet:
 #     # Setting this explicitly overrides auto-pairing. Omit to let mcp drive it.
 #     integrations: [neon, railway, vercel]
 #
+#     # brief — the SessionStart boot brief (#904 M1, epic #1102 R3). DEFAULT
+#     # OFF. When armed, the composer adds a SessionStart hook (sources:
+#     # startup + compact only) running `claudlobby brief --bot <id> --boot` —
+#     # own dispatch lines + an empty-state line with provenance + the door
+#     # line, token-capped (~250), fail-open, explicit 10s timeout. Arming is
+#     # gated at compose time on the INSTALLED CLI serving `brief --boot`
+#     # (composed settings outlive installs; generate refuses loudly if the
+#     # install predates the verb). Operator-held rollout gate: arm ONE canary
+#     # bot only until the canary's cost/latency numbers are ratified.
+#     brief:
+#       on_start: true
+#
 #     # briefing — equippable scheduled briefing (#627). Each slot becomes a
 #     # composed per-(bot,slot) OnCalendar timer that dispatches /briefing <slot>
 #     # into THIS bot's session via lib/briefing-trigger.sh — never hand-install
@@ -213,7 +233,7 @@ fleet:
 #       base: sonnet                        # default model (also set via top-level `model:`)
 #       escalate_to: opus                   # model to switch to for complex tasks
 #       escalate_when: ">5 files or architecture decisions"
-#       compact_when: ">50% context"        # when to compact/summarize context
+#       compact_when: "after each completed task, or on a context-degraded symptom"        # when to compact/summarize context
 #       explore: haiku                      # subagent model for Explore agents
 #       plan: sonnet                        # subagent model for Plan agents
 #       general: sonnet                     # subagent model for general-purpose agents

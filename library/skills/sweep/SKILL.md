@@ -11,17 +11,24 @@ A scheduled maintenance pass over the fleet's repos. Run on a cadence (e.g., wee
 
 ## How it works
 
-The sweep orchestrates clauDNA planning skills. Pick a repo → pick an audit type → dispatch to a subagent so it doesn't pollute your main context.
+The sweep orchestrates whatever code-audit skills the bot has available. Pick a repo → pick an audit type → dispatch to a subagent so it doesn't pollute your main context.
 
-| Audit type | Skill to run | What it finds |
-|-----------|-------------|---------------|
-| tech-debt | `/claudna:audit tech-debt` | Dead code, god modules, deprecated patterns |
-| security | `/claudna:audit security` | Credential leaks, injection vectors, auth gaps |
-| docs | `/claudna:audit docs` | Stale or missing documentation |
-| data-model | `/claudna:audit data-model` | Schema / app mismatches (if applicable) |
-| enhancement | `/claudna:product-enhance` | UX gaps, missing features, inconsistencies |
+| Audit type | What it finds |
+|-----------|---------------|
+| tech-debt | Dead code, god modules, deprecated patterns |
+| security | Credential leaks, injection vectors, auth gaps |
+| docs | Stale or missing documentation |
+| data-model | Schema / app mismatches (if applicable) |
+| enhancement | UX gaps, missing features, inconsistencies |
 
-Each is run with `--auto --output github` so it operates non-interactively and creates GitHub issues directly.
+**Which skill runs each one:** use the audit skills you actually have. clauDNA
+provides these as `/claudna:audit <type>` and `/claudna:product-enhance` for the
+enhancement row — check your own skill list rather than assuming. If no audit
+skill is installed, do the audit directly: read the repo against the "what it
+finds" column and file the same issues.
+
+Run non-interactively and file GitHub issues directly — with clauDNA that is
+`--auto --output github`; with another provider, use its equivalent flags.
 
 ## Operations
 
@@ -68,7 +75,18 @@ cd <REPOS_ROOT>/<repo> && git checkout main && git pull
 
 Always sweep against the latest main.
 
-**Step 4: Launch the audit subagent**
+**Step 4: Count the in-scope files, then launch the audit subagent**
+
+Count first, in the parent, **before** dispatching:
+
+```bash
+FILES_FOUND=$(find <REPOS_ROOT>/<REPO>/<DIR> -type f <TYPE_FILTER> | wc -l)
+```
+
+This is the only coverage number that does not come from the thing being
+measured, so it is what the subagent's self-reported counts get checked
+against. Match `<TYPE_FILTER>` to what the audit skill treats as in scope — the
+anchor is only as good as that match.
 
 Spawn a **background** Agent (subagent_type: general-purpose) with this prompt structure:
 
@@ -90,7 +108,23 @@ Return a structured summary:
 - TYPE: <TYPE>
 - ISSUES: comma-separated list of issue URLs
 - FINDINGS: brief summary
+- FILES_READ: how many files you actually opened and read
+- FILES_GREPPED: how many you only pattern-matched, never read
+- SKIPPED: each path you did not cover, and why — or the single word `none`
+- CAP_HIT: the limit that stopped you (tool cap, time, context, unreachable
+  source), or the single word `none`
 ```
+
+Do not ask the subagent for `FILES_FOUND` — the parent counted it in Step 4,
+and asking the thing being measured for the denominator would remove the only
+number in the record that is not a self-report.
+
+**These four are still self-reported and unverified.** Nothing counts real tool
+calls, so a subagent can report `FILES_READ: 14` without opening a file, just as
+it could have written a plausible sentence — and specific figures read as *more*
+rigorous to whoever scans the record, which makes them worse in that respect.
+Structuring buys effort and a checkable shape, not a guarantee. One anchored
+field, four self-reported ones.
 
 **IMPORTANT: The subagent needs full permissions.** It will:
 - Read many files (Glob, Grep, Read)
@@ -108,8 +142,35 @@ Update your sweep tracker (whatever you use — a JSON file, a Notion DB, a dedi
 - Timestamp
 - Issue URLs created
 - Count of findings
+- **Coverage bounds**, composed from the subagent's counts:
+  `read <FILES_READ> of <FILES_FOUND> in-scope files; <FILES_GREPPED> pattern-matched only; skipped: <SKIPPED>; cap: <CAP_HIT>`
 
-If you maintain per-repo `last_swept` in fleet-state.json, update it here.
+The bounds field is not optional bookkeeping. A record of "0 findings" without
+it is indistinguishable from a thorough all-clear, and whatever selects the
+next target reads that as "audited, park it". Record what was NOT covered or
+the count means nothing.
+
+`<FILES_FOUND>` is the parent's Step 4 count, never the subagent's. Check the
+self-reported pair against it before recording: `FILES_READ + FILES_GREPPED`
+cannot exceed `FILES_FOUND`. If it does, the report is internally inconsistent
+— record "coverage unreliable" rather than the numbers.
+
+That catches an inconsistent report, not a plausible one, and the difference is
+worth being clear about: a subagent reporting a `FILES_READ` equal to the real
+`FILES_FOUND` passes every check available here and may still have read nothing.
+
+Apply the smell test to the figures as well as the prose: **anything that could
+describe any sweep of any repo, unchanged, is not a coverage statement.** Counts
+that never vary between sweeps, or a `FILES_READ` that always equals
+`FILES_FOUND`, deserve the same doubt as a vague sentence. If your tracker has no bounds field, add one before
+recording; if the sweep died, record that nothing was covered rather than
+omitting the entry — a missing record usually reads as "never audited", which
+is right by accident, but an entry with a timestamp and no bounds reads as
+audited, which is wrong on purpose.
+
+If you maintain per-repo `last_swept` in fleet-state.json, update it here — but
+only for a pass that actually covered something. Stamping `last_swept` after a
+failed sweep parks the repo for a full cycle on work that never happened.
 
 **Step 6: Report**
 
@@ -117,6 +178,8 @@ Post a concise Telegram summary (`parseMode: "Markdown"`) with:
 - Repo swept
 - Audit type
 - Count of findings
+- What the pass did not cover (one line from BOUNDS) — a bare finding count
+  reads as exhaustive to whoever sees it
 - Top 3 GitHub issue URLs (if any)
 
 Or, if this sweep feeds a daily briefing, **don't post** — let the briefing pick up the latest report.
@@ -132,7 +195,7 @@ Show sweep health without running anything:
 ## Failure handling
 
 - Target picker returns nothing → all repos recently audited. Emit "all repos current" and exit.
-- Subagent fails / times out → log the failure and move on. Don't block future sweeps.
+- Subagent fails / times out → log the failure and move on. Don't block future sweeps. Record it as zero coverage ("sweep failed at <step>, nothing in <dir> audited"), not as an entry with no bounds — and do not stamp `last_swept`.
 - Target directory doesn't exist → let the planning skill discover the right paths automatically.
 - Issue creation fails → still log findings locally; flag the permission problem.
 

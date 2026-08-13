@@ -34,6 +34,22 @@ Manager → worker via the socket-aware `lib/dispatch.sh` helper (each bot runs 
 | `workstream:<ws-id>` | Workstream id | Registry entry this task advances |
 | `task:<task-id>` | `t-<epoch>-<hex4>` | **Task identity** — minted by `dispatch-task.sh`, recorded in the dispatch ledger. The worker MUST echo it in every `[BOTREPORT]` for this task (`report-back.sh --task <id>`): the overdue watchdog joins on it, and an id-less report can never close an id'd dispatch. |
 
+### Always zone a timestamp
+
+**Never write a bare `HH:MM` to another bot. Always `10:47 EDT` or `14:47Z`.**
+
+The host clock runs UTC and bots report in local time, so a bare figure is
+ambiguous at the moment it is read and unrecoverable afterwards. It cost us
+twice in twelve hours: a four-hour margin was read as an eighteen-minute
+emergency, and a three-way roster is now permanently unreconcilable because each
+disclosure used a different zone and none of them said which.
+
+The second failure is the one that argues for the rule. A misread margin is
+caught the moment someone checks; a set of bare timestamps from different bots
+cannot be reconciled later at any effort, because the information needed to
+align them was never written down. Zone it at the point of writing or it is
+gone.
+
 ### Examples
 
 **Task dispatch:**
@@ -103,7 +119,25 @@ $CLAUDLOBBY_ROOT/lib/dispatch-task.sh --botcommand <worker> "<task>"
 $CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> <worker> "<task>"
 ```
 
-Envelope sends mint a `task:<id>`, record it (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) to `state/dispatch-log.jsonl`, and transmit it — the overdue watchdog then joins on identity, and the worker's terminal report closes exactly that task. A bare `dispatch-task.sh <worker> <task…>` still works but stays id-less (matched by bot+time, one report closes all open dispatches for that bot) — prefer the id-minting form for anything you want individually tracked. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself.
+### Sending a peer a message that asks nothing
+
+**Use `--type` for anything that is not a task, and the envelope stops minting.**
+
+```bash
+$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query <bot> "<question answered inline>"
+```
+
+`--type task|cancel|compact|restart|query` (default `task`) implies `--botcommand` — which is now exactly `--type task`, kept as an alias — so you still get the `[BOTCOMMAND]` format — a finding, a relay, a retraction, a correction all read correctly as fleet messages. **Only `task` mints an id.**
+
+This exists because the two used to be one decision: `--botcommand` alone minted, so a peer note you sent in the fleet format became a tracked row that nothing had been asked to close, and it stayed open forever. Measured at 68 such rows on this host, 57 of them addressed to managers (#1187).
+
+**Pick the type by what you are asking for, not by how important the message is.** A `query` is answered inline, so nothing it produces can be *joined* against an id — which is not the same as producing nothing. It still files a terminal `[BOTREPORT]`: `worker-lifecycle` routes `query` to "skip to Step 8", and Step 8 *is* the terminal report. `restart` reports terminally too. If you are unsure, `query` is the safe way to be wrong: it costs an untracked message — which is what every raw send already is — where the reverse costs a row nobody can ever close. An unrecognised `--type` is refused rather than defaulted, so a typo will not quietly mint.
+
+**A non-`task` row records no `expected_by` either.** Withholding the id alone would be half a fix: the watchdog matches on the deadline, not on the id, so an id-less row that still carried one would go overdue and push a `[FLEET-PULSE]` alert naming nothing. Both are withheld together.
+
+**You do not have to do anything for the worker's answer to stay harmless.** A terminal report carrying no id normally resolves to the bot's oldest open id'd dispatch (#835), which would silently close unrelated in-progress work as `completed`. That resolution is suppressed automatically while a non-`task` note is the most recent thing you sent the bot — enforced in `dispatch-overdue.py`, not by worker discipline, so it holds for a bot that has not restarted since this landed. It resumes on the bot's next report, so a peer note costs one un-auto-closed row at most, never a false completion.
+
+`task`-type envelope sends mint a `task:<id>`, record it (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) to `state/dispatch-log.jsonl`, and transmit it — the overdue watchdog then joins on identity, and the worker's terminal report closes exactly that task. A bare `dispatch-task.sh <worker> <task…>` still works but stays id-less (matched by bot+time, one report closes all open dispatches for that bot) — prefer the id-minting form for anything you want individually tracked. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself.
 
 When you get an `overdue_dispatch` alert: check the worker (cross-reference `activity_stuck` — it may be hung, see `fleet-observability`). Then recover it, re-dispatch/reassign if it's wedged or mis-scoped, or escalate to the human. The watchdog tells you *something is overdue*; the call on what to do is yours. A worker's terminal report closes the dispatch automatically — no manual bookkeeping.
 
@@ -120,25 +154,41 @@ To audit/repair an entire fleet's supervision state in one shot:
 
 ```bash
 $CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet>          # report only
-$CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll any orphans
+$CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll orphans AND prune fleet-state — see below
 ```
+
+**`--enroll` writes outside your fleet.** Alongside enrolling orphans it applies
+the fleet-state prune, which deletes rows for any bot not in *your* `fleet.yaml`
+from `state/fleet-state.json` — a file shared by every fleet on the host (see
+#892). So running it against one fleet removes other fleets' bots from the shared
+state.
+
+**That is today's behaviour; a scoping fix is in flight (#1143).** Once it lands
+the prune narrows to rows outside your manifest *and* undeclared by any fleet on
+the host *and* stamped as yours — at which point the sentence above stops being
+true. Until then, assume the wide behaviour.
+
+Consequences are bounded: a missing row degrades that bot's STATE to `unknown`,
+never `down`, `fleet-pulse` does not read the file, and rows regenerate on each
+bot's next start or report. It is a defect to be aware of, not an incident. But
+the flag reads like "also fix the orphans" and does considerably more than that,
+so reach for the bare form unless you actually intend to enroll.
 
 `reconcile-fleet.sh` reports five buckets: healthy (tmux + unit), orphan (tmux but no unit — unsupervised), missing (unit but no tmux — down), unsupervised-down (neither — declared but nothing running or supervised; keepalive cannot revive it), unbound (running but not in any fleet.yaml — investigate before killing).
 
 ## Preflight: check shared knowledge before dispatch
 
-Before dispatching to a repo, check shared docs for relevant context:
+Before dispatching to a repo, check what the fleet already knows about it: is there an active plan for the target repo, and are there learnings the worker should start with?
 
-1. Scan `shared/planning/active/INDEX.md` — is there an active plan for the target repo?
-2. Scan `shared/knowledge/<repo>/INDEX.md` — are there existing learnings the worker should know?
+**Use the door your Shared Documentation section names, not a hardcoded path.** A vault-wired fleet queries Claudron (`claudron recall`); a fleet with a raw doc tree scans `shared/planning/active/INDEX.md` and `shared/knowledge/<repo>/INDEX.md`. Both answer the same question, and your composed instructions say which one you have — reaching for the wrong one on a vault-wired fleet means hand-opening files the vault door exists to replace (#1172).
 
 If relevant docs exist, **include the key context in the dispatch prompt** so the engineer doesn't duplicate work, contradict an in-flight plan, or re-discover something the fleet already knows.
 
-Example: if an active plan covers auth refactoring in `backend`, and you're dispatching a login endpoint task to the same repo, reference the plan in the dispatch: "See shared/planning/active/backend-auth-rework.md — your task aligns with phase 2."
+Example: if an active plan covers auth refactoring in `backend`, and you're dispatching a login endpoint task to the same repo, reference the plan in the dispatch: "See the active backend auth-rework plan — your task aligns with phase 2."
 
-## Manager: INDEX.md monitoring
+## Manager: active-plan monitoring
 
-The orchestrator periodically scans `shared/planning/active/INDEX.md` to:
+The orchestrator periodically reviews the fleet's active plans — through the door its Shared Documentation section names, same rule as above — to:
 
 - **Surface stale plans** — status: active but `updated:` older than 7 days. Ping the owner.
 - **Detect conflicts** — two active plans touching the same repo. Flag for human resolution.

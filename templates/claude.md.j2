@@ -102,6 +102,17 @@ Follow the procedure in `library/skills/autonomous-runner/SKILL.md` at each cade
 Operate exclusively within this scope. If a task targets resources outside it, surface to the human before acting.
 {% endif -%}
 
+{#- WHICH SHARED-DOCS SECTION COMPOSES IS DECIDED TWICE: here, and by the
+    availability gate on the `shared-documentation*` protocol defaults
+    (`claudlobby/defaults.py`, `AVAILABILITY_GATES`). If they diverge, a bot is
+    told to use the vault door AND to hand-scan the tree that door forbids
+    opening — #1172. Change one, check the other.
+
+    The two conditions are deliberately NOT identical and it is worth knowing
+    how: this branch is `vault else shared_docs`, so a ROOT-MODE bot with a
+    vault composes the door section while the gate (`shared_docs and ...`)
+    composes no protocol at all. That shape gets the door and no navigation
+    protocol, which is correct — root mode has no fleet doc tree to describe. -#}
 {%- if bot.claudron_vault_path %}
 
 ## Shared Documentation
@@ -180,9 +191,10 @@ When you learn something reusable, write to `knowledge/<repo>/`. When a plan com
 ## Projects
 
 The fleet serves these projects (projects.yaml). A project's validation tier
-is the closure bar for any work in its repos — auto: green CI · review:
-reviewer verdict · preview: preview link + operator ack · human: explicit
-operator approval. Never close work below its project's tier.
+is what closing work in its repos requires — the tiers are alternatives, not
+levels: auto: green CI · human: explicit operator approval · preview: preview
+link + operator ack · review: reviewer verdict. Never close work without
+meeting its project's declared tier.
 
 | Project | Title | Repos | Tier | Mission |
 |---------|-------|-------|------|---------|

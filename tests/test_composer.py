@@ -11,11 +11,13 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
+import yaml
 
 from claudlobby.config import (
     BotConfig,
     FleetConfig,
     McpEntry,
+    TeamConfig,
     TelegramConfig,
     ToolPermissionsConfig,
     load_fleet,
@@ -23,7 +25,10 @@ from claudlobby.config import (
 from claudlobby.path_audit import ExternalDecl
 from tests.conftest import _write_exec, install_real_template
 from claudlobby.composer import (
+    _BOOT_STAGGER_SECONDS,
     _compose_hooks,
+    _host_boot_rung_bases,
+    bot_boot_delay_s,
     _reconcile_access_json,
     _write_timer_units,
     compose_access_json,
@@ -35,6 +40,7 @@ from claudlobby.composer import (
     compose_settings_local,
     compose_systemd_unit,
     scaffold_env_files,
+    telegram_handle,
 )
 from claudlobby.diff import diff_bot
 from claudlobby.paths import Paths
@@ -343,8 +349,9 @@ class TestComposeSettingsLocal:
         )
 
     def test_no_tools_no_siblings(self, tmp_path):
+        # channels=[] — a bot with no Telegram channel; see #1107.
         paths = self._make_paths_with_runtime(tmp_path)
-        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" not in result
@@ -1151,6 +1158,100 @@ class TestHooksMergeAndSettings:
         assert bot.hooks["PostToolUse"][0]["command"] == "fleet-log.sh"
 
 
+class TestTelegramHandleDefault:
+    """The handle defaults to bot_id for a channel bot (#1097, #1107).
+
+    `fleet.yaml` documents "handle defaults to bot_id" and TELEGRAM_STATE_DIR has
+    applied that since #43. The handle VARIABLE did not, so a fleet using the
+    default composed a live bridge with no TELEGRAM_BOT_HANDLE — and every
+    consumer reading it classified a working channel bot as non-channel.
+    """
+
+    def test_explicit_handle_wins(self):
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="custom_handle"),
+        )
+        assert telegram_handle(bot) == "custom_handle"
+
+    def test_defaults_to_bot_id_for_channel_bot(self):
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        assert telegram_handle(bot) == "worker"
+
+    def test_defaults_to_bot_id_not_display_name(self):
+        """bot_id, never name: the state dir keys off bot_id and the two must agree."""
+        bot = BotConfig(bot_id="worker", name="Display Name", expertise=["eng"])
+        assert telegram_handle(bot) == "worker"
+
+    def test_none_for_non_channel_bot(self):
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[])
+        assert telegram_handle(bot) is None
+
+    def test_bare_channel_name_counts_as_telegram(self):
+        bot = BotConfig(
+            bot_id="worker", name="worker", expertise=["eng"], channels=["telegram"]
+        )
+        assert telegram_handle(bot) == "worker"
+
+    def test_non_telegram_channel_is_not_a_telegram_bot(self):
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            channels=["plugin:slack@somewhere"],
+        )
+        assert telegram_handle(bot) is None
+
+    def test_bot_conf_emits_defaulted_handle(self, tmp_path):
+        """The regression that broke bridge_state and creds-check: the emitted line."""
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "export TELEGRAM_BOT_HANDLE=worker" in conf
+
+    def test_bot_conf_omits_handle_for_non_channel_bot(self, tmp_path):
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"], channels=[])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "TELEGRAM_BOT_HANDLE" not in conf
+
+    def test_declared_handle_also_emits_username(self, tmp_path):
+        """A declared handle is a @username too — creds-check's cross-wire input."""
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle="artemis_worker_bot"),
+        )
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "export TELEGRAM_BOT_HANDLE=artemis_worker_bot" in conf
+        assert "export TELEGRAM_BOT_USERNAME=artemis_worker_bot" in conf
+
+    def test_defaulted_handle_emits_no_username(self, tmp_path):
+        """A slug is not a username: comparing them false-fails a correct token."""
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "export TELEGRAM_BOT_HANDLE=worker" in conf
+        assert "TELEGRAM_BOT_USERNAME" not in conf
+
+    def test_state_dir_and_handle_agree(self, tmp_path):
+        """Both sites resolve through one function, so they cannot drift apart again."""
+        paths = _make_paths(tmp_path)
+        bot = BotConfig(bot_id="worker", name="worker", expertise=["eng"])
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        conf = compose_bot_conf(bot, fleet, paths)
+        assert "channels/telegram-worker" in conf
+        assert "export TELEGRAM_BOT_HANDLE=worker" in conf
+
+
 class TestResolveChannelPermissions:
     """_resolve_channel_permissions auto-derives Telegram plugin tools."""
 
@@ -1170,7 +1271,13 @@ class TestResolveChannelPermissions:
         assert "mcp__plugin_telegram_telegram__download_attachment" in result
         assert len(result) == 4
 
-    def test_returns_empty_when_no_handle(self):
+    def test_returns_telegram_tools_when_handle_defaulted(self):
+        """A channel bot relying on the documented handle default still gets its tools.
+
+        Keying off the raw field granted these to zero bots on a fleet that omits
+        `handle` — the #1097/#1107 conflation of "no explicit handle" with "no
+        channel". A bot's own reply tools must not depend on spelling its handle.
+        """
         from claudlobby.composer import _resolve_channel_permissions
 
         bot = BotConfig(
@@ -1180,9 +1287,23 @@ class TestResolveChannelPermissions:
             telegram=TelegramConfig(handle=None),
         )
         result = _resolve_channel_permissions(bot)
-        assert result == []
+        assert len(result) == 4
+        assert "mcp__plugin_telegram_telegram__reply" in result
 
-    def test_returns_empty_when_handle_is_empty_string(self):
+    def test_returns_empty_when_no_telegram_channel(self):
+        """The genuine non-channel class — the invariant #901's gate contract rests on."""
+        from claudlobby.composer import _resolve_channel_permissions
+
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            channels=[],
+            telegram=TelegramConfig(handle=None),
+        )
+        assert _resolve_channel_permissions(bot) == []
+
+    def test_empty_string_handle_falls_back_to_default(self):
         from claudlobby.composer import _resolve_channel_permissions
 
         bot = BotConfig(
@@ -1192,7 +1313,7 @@ class TestResolveChannelPermissions:
             telegram=TelegramConfig(handle=""),
         )
         result = _resolve_channel_permissions(bot)
-        assert result == []
+        assert len(result) == 4
 
 
 class TestResolveSkillPermissions:
@@ -1314,9 +1435,13 @@ class TestChannelSkillInSettingsLocal:
         assert "mcp__plugin_telegram_telegram__reply" in result["permissions"]["allow"]
 
     def test_no_telegram_no_skills_no_permissions(self, tmp_path):
-        """Bot with no telegram, no skills, no explicit tools → no permissions block."""
+        """Bot with no telegram, no skills, no explicit tools → no permissions block.
+
+        `channels=[]` is what "no telegram" means; omitting the handle does not,
+        since `channels` defaults to the Telegram plugin (#1107).
+        """
         paths = self._make_paths_with_runtime(tmp_path)
-        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"])
+        bot = BotConfig(bot_id="solo", name="solo", expertise=["eng"], channels=[])
         fleet = FleetConfig(name="t", service_prefix="p", bots={"solo": bot})
         result = compose_settings_local(bot, fleet, paths)
         assert "permissions" not in result
@@ -2037,22 +2162,470 @@ class TestComposeSystemdUnit:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"w": bot})
         return bot, fleet, paths
 
+    # Anchored to line starts: the unit body documents the boot state machine in
+    # comments, and a comment naming a directive is not that directive.
+    @staticmethod
+    def _stagger(unit: str) -> str | None:
+        m = re.search(r"^ExecStartPre=(.*)$", unit, re.M)
+        return m.group(1) if m else None
+
     def test_no_stagger_when_delay_zero(self, tmp_path):
         bot, fleet, paths = self._make(tmp_path)
         unit = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
-        assert "ExecStartPre" not in unit
+        assert self._stagger(unit) is None
 
     def test_stagger_injected_when_delay_positive(self, tmp_path):
         bot, fleet, paths = self._make(tmp_path)
         unit = compose_systemd_unit(bot, fleet, paths, boot_delay_s=3)
-        assert "ExecStartPre=/bin/sleep 3" in unit
+        assert self._stagger(unit) == "/bin/sleep 3"
 
     def test_stagger_value_varies(self, tmp_path):
         bot, fleet, paths = self._make(tmp_path)
         unit6 = compose_systemd_unit(bot, fleet, paths, boot_delay_s=6)
-        assert "ExecStartPre=/bin/sleep 6" in unit6
+        assert self._stagger(unit6) == "/bin/sleep 6"
         unit0 = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
-        assert "ExecStartPre" not in unit0
+        assert self._stagger(unit0) is None
+
+    def test_unit_shape_keeps_substate_meaningful(self, tmp_path):
+        """The three directives service_is_starting depends on (#1002).
+
+        lib/lib-common.sh service_is_starting reads active/running as "boot in
+        flight". That is only true while ExecStart is a spawner that exits and
+        RemainAfterExit holds the unit active afterwards — together they make
+        active/exited the steady state. Drop either and active/running becomes
+        the steady state, so the predicate returns "starting" forever and
+        BOTH keepalive's dead-session watchdog and fleet-pulse's service_down
+        alarm go permanently quiet while every surface reads healthy.
+
+        This asserts the shape so that change breaks a test instead.
+        """
+        bot, fleet, paths = self._make(tmp_path)
+        unit = compose_systemd_unit(bot, fleet, paths, boot_delay_s=0)
+        assert "Type=simple" in unit
+        assert "RemainAfterExit=yes" in unit
+        # The spawner half: ExecStart runs start-bot.sh, which backgrounds tmux
+        # and returns. A foreground exec here would invert SubState's meaning.
+        assert re.search(r"^ExecStart=\S*start-bot\.sh ", unit, re.M)
+
+
+class TestHostBootOffset:
+    """Host-global boot ladder: managers first, then workers, one per rung (#1002)."""
+
+    # spec shape, shared by every helper below:
+    #   {fleet_name: (n_bots, [indices of bots a team names as manager])}
+    # Manager indices rather than "the first N", so a fleet whose manager is not
+    # declared first still exercises the tier split.
+
+    @pytest.fixture(autouse=True)
+    def _clear_ladder_cache(self):
+        """The walk is cached per process; tests reuse paths across mutations."""
+        _host_boot_rung_bases.cache_clear()
+        yield
+        _host_boot_rung_bases.cache_clear()
+
+    def _host(self, tmp_path, spec, nested: bool = False):
+        """Build local/<fleet>/fleet.yaml (or local/<system>/<fleet>/) trees."""
+        root = tmp_path / "claudlobby"
+        local = root / "local"
+        for name, (n_bots, mgr_idx) in spec.items():
+            d = (local / "sys" / name) if nested else (local / name)
+            d.mkdir(parents=True)
+            doc = {
+                "fleet": {
+                    "name": name,
+                    "teams": {
+                        f"t{i}": {"manager": f"b{m}"} for i, m in enumerate(mgr_idx)
+                    },
+                    "bots": {f"b{i}": {"expertise": ["eng"]} for i in range(n_bots)},
+                }
+            }
+            (d / "fleet.yaml").write_text(yaml.safe_dump(doc), encoding="utf-8")
+        return root, local
+
+    def _fleet(self, name, spec):
+        """A FleetConfig matching this fleet's entry in ``spec``."""
+        n_bots, mgr_idx = spec[name]
+        bots = {
+            f"b{i}": BotConfig(bot_id=f"b{i}", name=f"b{i}", expertise=["eng"])
+            for i in range(n_bots)
+        }
+        teams = {
+            f"t{i}": TeamConfig(name=f"t{i}", manager=f"b{m}")
+            for i, m in enumerate(mgr_idx)
+        }
+        return FleetConfig(name=name, service_prefix="p", bots=bots, teams=teams)
+
+    def _bases(self, root, local, spec, name, nested: bool = False):
+        """This fleet's (manager_base, worker_base), via the real door."""
+        d = (local / "sys" / name) if nested else (local / name)
+        own_managers = len(set(spec[name][1]))
+        return _host_boot_rung_bases(Paths(root=root, fleet_dir=d), own_managers)
+
+    def _rungs(self, root, local, spec):
+        """Every bot's delay on the host, keyed <fleet>.<bot>, via the real door."""
+        out = {}
+        for name in spec:
+            fleet = self._fleet(name, spec)
+            paths = Paths(root=root, fleet_dir=local / name)
+            for bot in fleet.bots.values():
+                out[f"{name}.{bot.bot_id}"] = bot_boot_delay_s(bot, fleet, paths)
+        return out
+
+    def test_first_fleet_starts_at_zero(self, tmp_path):
+        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        # 2 managers on the host, so aaa's workers start at rung 2.
+        assert self._bases(root, local, spec, "aaa") == (0, 2)
+
+    def test_later_fleet_starts_past_the_earlier_ones(self, tmp_path):
+        """Managers ladder past earlier managers; workers past ALL managers."""
+        spec = {"aaa": (3, [0]), "bbb": (2, [0]), "ccc": (4, [0])}
+        root, local = self._host(tmp_path, spec)
+        # 3 managers on the host, so every worker block starts at rung 3 or past.
+        assert self._bases(root, local, spec, "aaa") == (0, 3)
+        assert self._bases(root, local, spec, "bbb") == (1, 5)
+        assert self._bases(root, local, spec, "ccc") == (2, 6)
+
+    def test_no_two_bots_share_a_rung(self, tmp_path):
+        """The property the ladder exists for, asserted end to end.
+
+        Manager-first reorders the ladder; it must not perforate or overrun it.
+        """
+        spec = {"aaa": (3, [0]), "bbb": (2, [1]), "ccc": (4, [0, 2])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        assert len(rungs) == 9
+        assert sorted(rungs.values()) == [i * _BOOT_STAGGER_SECONDS for i in range(9)]
+
+    def test_all_managers_precede_all_workers(self, tmp_path):
+        """The change itself: the whole observation layer is up first.
+
+        Not "each fleet's manager leads its own block" — that was already true
+        of the contiguous per-fleet ladder. The property asserted is host-global.
+        """
+        spec = {"aaa": (3, [0]), "bbb": (2, [1]), "ccc": (4, [0, 2])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        mgrs = {"aaa.b0", "bbb.b1", "ccc.b0", "ccc.b2"}
+        assert max(rungs[k] for k in mgrs) < min(
+            v for k, v in rungs.items() if k not in mgrs
+        )
+        # 4 managers → the first four rungs, in fleet order.
+        assert sorted(rungs[k] for k in mgrs) == [0, 3, 6, 9]
+
+    def test_last_fleets_manager_boots_before_first_fleets_worker(self, tmp_path):
+        """The inversion the ordering buys, stated as the case that changed."""
+        spec = {"aaa": (3, [0]), "zzz": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        assert rungs["zzz.b0"] < rungs["aaa.b1"]
+
+    def test_manager_declared_last_still_takes_a_manager_rung(self, tmp_path):
+        """Tier membership comes from teams, not from declaration position."""
+        spec = {"aaa": (3, [2])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        assert rungs["aaa.b2"] == 0
+        assert sorted(rungs.values()) == [0, 3, 6]
+
+    def test_two_teams_one_manager_counts_once(self, tmp_path):
+        """A bot managing two teams occupies one rung, not two."""
+        spec = {"aaa": (3, [0, 0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        rungs = self._rungs(root, local, spec)
+        assert sorted(rungs.values()) == [i * _BOOT_STAGGER_SECONDS for i in range(5)]
+
+    def test_team_naming_an_absent_bot_does_not_shift_the_ladder(self, tmp_path):
+        """Only bots the manifest lists are counted, or later fleets slide off."""
+        spec = {"aaa": (2, []), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        (local / "aaa" / "fleet.yaml").write_text(
+            "fleet:\n  name: aaa\n  teams:\n    t0: {manager: ghost}\n"
+            "  bots:\n    b0: {expertise: [eng]}\n    b1: {expertise: [eng]}\n",
+            encoding="utf-8",
+        )
+        # aaa contributes 0 managers and 2 workers; bbb's manager still leads.
+        assert self._bases(root, local, spec, "bbb") == (0, 3)
+
+    def test_fleet_with_no_teams_is_all_workers(self, tmp_path):
+        spec = {"aaa": (3, []), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        # Only bbb has a manager, so it owns rung 0 and aaa's bots follow it.
+        assert self._bases(root, local, spec, "aaa") == (0, 1)
+        assert self._bases(root, local, spec, "bbb") == (0, 4)
+
+    def test_nested_system_container_fleets_are_ordered_too(self, tmp_path):
+        """local/<system>/<fleet>/ resolves like the flat layout."""
+        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec, nested=True)
+        assert self._bases(root, local, spec, "bbb", nested=True) == (1, 4)
+
+    def test_unplaceable_fleet_ladders_standalone_managers_first(self, tmp_path):
+        """No host placement is not licence to stack two bots on rung 0."""
+        spec = {"aaa": (3, [1])}
+        root, _ = self._host(tmp_path, spec)
+        paths = Paths(root=root, fleet_dir=None)  # root mode
+        assert _host_boot_rung_bases(paths, 1) == (0, 1)
+        fleet = self._fleet("aaa", spec)
+        rungs = [bot_boot_delay_s(b, fleet, paths) for b in fleet.bots.values()]
+        assert rungs == [3, 0, 6]  # b1 manages, so it leads; b0/b2 follow in order
+
+    def _host_manages_only(self, tmp_path):
+        """Two fleets where the FIRST declares its manager only via ``manages:``.
+
+        The ``spec`` helper above can express a ``teams:`` manager and nothing
+        else, which is precisely what hid this: every existing multi-fleet test
+        declares managers the single way the sibling-counting helper happened
+        to read, so the host walk was never exercised against the other
+        declaration. The only test that used ``manages:`` as a real manager
+        designation runs in ROOT mode, which returns before the sibling walk.
+        """
+        root = tmp_path / "claudlobby"
+        local = root / "local"
+        docs = {
+            # No teams: block at all — b0 manages b1 and nothing else says so.
+            "aaa": {
+                "name": "aaa",
+                "bots": {
+                    "b0": {"expertise": ["eng"], "manages": ["b1"]},
+                    "b1": {"expertise": ["eng"]},
+                },
+            },
+            "bbb": {
+                "name": "bbb",
+                "teams": {"t0": {"manager": "b0"}},
+                "bots": {"b0": {"expertise": ["eng"]}, "b1": {"expertise": ["eng"]}},
+            },
+        }
+        for name, fleet in docs.items():
+            d = local / name
+            d.mkdir(parents=True)
+            (d / "fleet.yaml").write_text(
+                yaml.safe_dump({"fleet": fleet}), encoding="utf-8"
+            )
+        return root, local
+
+    def _manages_only_fleets(self):
+        aaa = FleetConfig(
+            name="aaa",
+            service_prefix="p",
+            bots={
+                "b0": BotConfig(
+                    bot_id="b0", name="b0", expertise=["eng"], manages=["b1"]
+                ),
+                "b1": BotConfig(bot_id="b1", name="b1", expertise=["eng"]),
+            },
+        )
+        bbb = FleetConfig(
+            name="bbb",
+            service_prefix="p",
+            bots={
+                "b0": BotConfig(bot_id="b0", name="b0", expertise=["eng"]),
+                "b1": BotConfig(bot_id="b1", name="b1", expertise=["eng"]),
+            },
+            teams={"t0": TeamConfig(name="t0", manager="b0")},
+        )
+        return aaa, bbb
+
+    def test_a_manages_only_manager_in_an_earlier_fleet_is_counted(self, tmp_path):
+        """A sibling's manager counts however it was DECLARED, not however the
+        counting helper happened to look for it.
+
+        ``aaa`` contributes one manager and one worker. Undercounting its
+        manager tier shifts every later fleet's rung base, so this asserts on
+        the later fleet: it is the one that inherits the shortfall.
+        """
+        root, local = self._host_manages_only(tmp_path)
+        bases = _host_boot_rung_bases(Paths(root=root, fleet_dir=local / "bbb"), 1)
+        assert bases == (1, 3), (
+            "bbb's manager must ladder past aaa's; a manages:-only manager that "
+            "the sibling count cannot see collapses that gap"
+        )
+
+    def test_manages_only_manager_takes_its_own_rung_on_the_host_ladder(self, tmp_path):
+        """The whole ladder, as exact rungs — asserted through
+        ``bot_boot_delay_s``, the value a composed unit actually carries.
+
+        THE INVARIANT IS ONE BOT PER RUNG, COLLISION-FREE, ALWAYS — every
+        manager on the host first, then every worker. Two single-manager
+        fleets therefore have exactly one correct answer, and equality is the
+        only assertion that says so.
+
+        This test has now been tightened twice for one underlying reason, so
+        the reason is recorded rather than the instances. Both loose drafts
+        were written to a docstring that framed the property as an ORDERING —
+        "boots no later than" — which is strictly weaker than what the ladder
+        guarantees. Draft one asserted a collision shape the two-fleet
+        arrangement cannot produce; draft two asserted ``a <= b``, which cannot
+        tell a tie from correct ordering and so passed on a pre-fix tree where
+        the two managers land on the SAME rung. Neither author departed from
+        the docstring; the docstring was wrong, and an inequality is what let
+        it stay wrong. An equality cannot be quietly loosened the same way.
+
+        Rungs below are derived from the invariant, not fitted to output: 2
+        managers then 2 workers, in host-walk order, at the 3s stagger.
+        """
+        root, local = self._host_manages_only(tmp_path)
+        aaa, bbb = self._manages_only_fleets()
+        p_aaa = Paths(root=root, fleet_dir=local / "aaa")
+        p_bbb = Paths(root=root, fleet_dir=local / "bbb")
+        rungs = {
+            "aaa.b0": bot_boot_delay_s(aaa.bots["b0"], aaa, p_aaa),  # manager
+            "bbb.b0": bot_boot_delay_s(bbb.bots["b0"], bbb, p_bbb),  # manager
+            "aaa.b1": bot_boot_delay_s(aaa.bots["b1"], aaa, p_aaa),  # worker
+            "bbb.b1": bot_boot_delay_s(bbb.bots["b1"], bbb, p_bbb),  # worker
+        }
+        assert rungs == {
+            "aaa.b0": 0,
+            "bbb.b0": 3,
+            "aaa.b1": 6,
+            "bbb.b1": 9,
+        }, f"host ladder is not one-bot-per-rung managers-first: {rungs}"
+
+    def test_unparseable_sibling_does_not_block_generate(self, tmp_path):
+        """A broken fleet contributes no rungs; it must never raise here."""
+        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        (local / "aaa" / "fleet.yaml").write_text("fleet: [oops\n", encoding="utf-8")
+        assert self._bases(root, local, spec, "bbb") == (0, 1)
+
+    def test_manifest_that_is_not_a_mapping_contributes_nothing(self, tmp_path):
+        """Shape is checked, not caught — a list manifest must not raise."""
+        spec = {"aaa": (3, [0]), "bbb": (2, [0])}
+        root, local = self._host(tmp_path, spec)
+        (local / "aaa" / "fleet.yaml").write_text("- a\n- b\n", encoding="utf-8")
+        assert self._bases(root, local, spec, "bbb") == (0, 1)
+
+    def test_bot_boot_delay_places_each_bot_on_its_own_rung(self, tmp_path):
+        """The derivation every compose entry point shares.
+
+        Threading the rung from compose_fleet is what let `generate --bot` and
+        move-bot write a unit with NO stagger at all (#1002), so the rung is
+        derived from (tier, fleet position, position within tier) instead — and
+        this asserts the derivation, not a re-implementation of it in the test
+        body.
+        """
+        spec = {"aaa": (2, [0]), "bbb": (3, [0])}
+        root, local = self._host(tmp_path, spec)
+        paths = Paths(root=root, fleet_dir=local / "bbb")
+        fleet = self._fleet("bbb", spec)
+        # 2 managers (aaa.b0 rung 0, bbb.b0 rung 1); workers start at rung 2,
+        # and aaa's one worker takes it — so bbb's workers are rungs 3-4.
+        assert [bot_boot_delay_s(b, fleet, paths) for b in fleet.bots.values()] == [
+            3,
+            9,
+            12,
+        ]
+
+
+class TestCrossFleetManagerRecognition:
+    """manager_bots() must see a manager whose reports live in OTHER fleets.
+
+    `teams:` can only name a manager of a team in its own fleet. A top-level
+    coordinator whose reports are themselves managers of other fleets is named
+    by no `teams:` block anywhere, so the predicate missed it — while the same
+    manifest declared `manages: [...]` all along.
+    """
+
+    LIB_COMMON = Path(__file__).resolve().parents[1] / "lib" / "lib-common.sh"
+
+    def _fleet(self, name="crog", **bots):
+        """bots kwargs: name=(manages_list_or_None); teams built separately."""
+        return FleetConfig(
+            name=name,
+            service_prefix="p",
+            bots={
+                b: BotConfig(bot_id=b, name=b, expertise=["eng"], manages=m)
+                for b, m in bots.items()
+            },
+        )
+
+    def _bash_is_manager(self, bot_dir: Path) -> bool:
+        """The real shipped predicate, not a reimplementation of it."""
+        proc = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; bot_is_manager "$2"',
+                "_",
+                str(self.LIB_COMMON),
+                str(bot_dir),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode == 0
+
+    def _compose_conf(self, tmp_path, fleet, bot_id):
+        root = tmp_path / "claudlobby"
+        (root / "runtime" / "bots" / bot_id).mkdir(parents=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        d = tmp_path / bot_id
+        d.mkdir()
+        (d / "bot.conf").write_text(
+            compose_bot_conf(fleet.bots[bot_id], fleet, paths), encoding="utf-8"
+        )
+        return d
+
+    # -- the predicate itself ------------------------------------------------
+
+    def test_manages_makes_a_manager_with_no_team_at_all(self):
+        """The clog shape: zero teams declared, manages: [...] present."""
+        fleet = self._fleet(clog=["ari", "kev"])
+        assert fleet.manager_bots() == {"clog"}
+
+    def test_manages_targets_outside_this_fleet_still_count(self):
+        """The whole point — the reports are in other fleets.
+
+        _validate_teams warns rather than errors on exactly this, because
+        "bot_ids may reference other fleets". ari/kev are absent from
+        fleet.bots here, and clog is still a manager.
+        """
+        fleet = self._fleet(clog=["ari", "kev"])
+        assert "ari" not in fleet.bots and "kev" not in fleet.bots
+        assert "clog" in fleet.manager_bots()
+
+    def test_a_plain_worker_is_still_not_a_manager(self):
+        """CONTROL. A predicate that answers True for everything is not a fix."""
+        fleet = self._fleet(name="tl", todd=None)
+        assert fleet.manager_bots() == set()
+
+    def test_the_predicate_is_not_unanimous_on_a_mixed_fleet(self):
+        """The unanimity tell, asserted directly rather than hoped for."""
+        fleet = self._fleet(name="mixed", clog=["ari"], todd=None, greg=None)
+        assert fleet.manager_bots() == {"clog"}  # exactly one, not all three
+
+    def test_empty_manages_is_not_a_claim_to_manage_anyone(self):
+        assert self._fleet(z=[]).manager_bots() == set()
+        assert self._fleet(z=None).manager_bots() == set()
+
+    def test_teams_only_managers_are_untouched(self):
+        """No regression for the ordinary within-fleet case."""
+        fleet = self._fleet(name="eng", ari=None, alex=None)
+        fleet.teams = {"personal": TeamConfig(name="personal", manager="ari")}
+        assert fleet.manager_bots() == {"ari"}
+
+    # -- outcome, through real composition and the real bash predicate -------
+
+    def test_bash_bot_is_manager_is_true_for_a_manages_only_manager(self, tmp_path):
+        """End to end: no teams block anywhere, and bot_is_manager still says yes.
+
+        This is the assertion that lets the `teams: estate: manager: clog`
+        workaround be deleted rather than merely tolerated.
+        """
+        fleet = self._fleet(clog=["ari", "kev"])
+        assert fleet.teams == {}  # the workaround block is genuinely absent
+        d = self._compose_conf(tmp_path, fleet, "clog")
+        assert "MANAGER_TMUX" in (d / "bot.conf").read_text()
+        assert self._bash_is_manager(d) is True
+
+    def test_bash_bot_is_manager_is_false_for_a_real_worker(self, tmp_path):
+        """CONTROL, through the same composition path."""
+        fleet = self._fleet(name="tl", kev=["todd"], todd=None)
+        fleet.teams = {"tl": TeamConfig(name="tl", manager="kev", workers=["todd"])}
+        d = self._compose_conf(tmp_path, fleet, "todd")
+        assert self._bash_is_manager(d) is False
 
 
 class TestPluginsBotConf:
@@ -3915,7 +4488,9 @@ class TestBotEnvStubDoesNotShadowUpstream:
         _scaffold_env_merge(
             bot_env, "# Bot environment for: test", [self._env_var("TELEGRAM_TOKEN_X")]
         )
-        assert re.search(r"^export TELEGRAM_TOKEN_X=", bot_env.read_text(), re.MULTILINE)
+        assert re.search(
+            r"^export TELEGRAM_TOKEN_X=", bot_env.read_text(), re.MULTILINE
+        )
 
         # Run 2: operator has since set it at the fleet tier.
         _scaffold_env_merge(
@@ -3935,7 +4510,9 @@ class TestBotEnvStubDoesNotShadowUpstream:
         from claudlobby.composer import _scaffold_env_merge
 
         bot_env = tmp_path / "bot.env"
-        bot_env.write_text("# Bot environment for: test\nexport TELEGRAM_TOKEN_X=perbot\n")
+        bot_env.write_text(
+            "# Bot environment for: test\nexport TELEGRAM_TOKEN_X=perbot\n"
+        )
         _scaffold_env_merge(
             bot_env,
             "# Bot environment for: test",
@@ -3999,3 +4576,125 @@ class TestBotEnvStubDoesNotShadowUpstream:
         assert out == "realvalue123", (
             f"bot-tier scaffold clobbered the fleet-tier value: got {out!r}"
         )
+
+
+class TestLaunchdArgvSplitting:
+    """A job whose `script` carries flags must still yield a valid plist (#969).
+
+    systemd and launchd disagree about what a command string is. `ExecStart=` is
+    a command LINE that systemd splits on whitespace, so
+    `.../data-sweep.sh --purge` works there. launchd's `ProgramArguments[0]` is
+    the executable PATH, so the same string becomes a file that does not exist
+    and the job can never exec — silently, and only on macOS.
+
+    Observed: the composed `data-sweep` plist on a real host had
+    `argv[0] == '<root>/lib/data-sweep.sh --purge'`, `os.path.exists() == False`.
+    It was also the only job of thirteen carrying a flag, which is why it went
+    unnoticed — but the asymmetry is structural, so any future flag-bearing job
+    would break the same way.
+    """
+
+    def _plist(self, tmp_path, script):
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        paths = _make_paths(root)
+        timers_dir = tmp_path / "timers"
+        timers_dir.mkdir(exist_ok=True)
+        _write_timer_units(
+            timers_dir,
+            "com.t.job",
+            "job",
+            {"type": "calendar", "expression": "daily"},
+            script,
+            "oneshot",
+            "t",
+            paths,
+        )
+        return plistlib.loads((timers_dir / "com.t.job.plist").read_bytes())
+
+    def test_flagged_script_splits_into_separate_argv_entries(self, tmp_path):
+        pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge")
+        argv = pl["ProgramArguments"]
+        assert argv[0].endswith("/lib/data-sweep.sh"), (
+            f"argv[0] must be the executable alone, got {argv[0]!r}"
+        )
+        assert " " not in argv[0], f"argv[0] contains a space: {argv[0]!r}"
+        assert "--purge" in argv, f"the flag was dropped: {argv}"
+
+    def test_flag_precedes_fleet_name_as_on_systemd(self, tmp_path):
+        """Order must match the systemd form (`script --purge <fleet>`), or the
+        two platforms would pass arguments differently to the same script."""
+        pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/data-sweep.sh --purge")
+        argv = pl["ProgramArguments"]
+        assert argv.index("--purge") < argv.index("t"), (
+            f"flag must precede the fleet name, got {argv}"
+        )
+
+    def test_unflagged_script_is_unchanged(self, tmp_path):
+        pl = self._plist(tmp_path, "$CLAUDLOBBY_ROOT/lib/plain.sh")
+        argv = pl["ProgramArguments"]
+        assert argv[0].endswith("/lib/plain.sh")
+        assert argv[1] == "t"
+
+
+class TestComposeBotConfTelegramStateDirExported:
+    """TELEGRAM_STATE_DIR must be EXPORTED into bot.conf (#976).
+
+    Most bot.conf lines deliberately lack `export` — lib/ reads them from the
+    file via `bot_conf_get`. This one is different: it has to reach the `claude`
+    CHILD process environment, because the telegram plugin resolves its state
+    directory from `process.env.TELEGRAM_STATE_DIR` and silently falls back to
+    the shared `~/.claude/channels/telegram` when it is unset. That fallback
+    parks every bot's `bot.pid` outside its own state dir, and since the plugin
+    enforces a singleton per state dir, only one bot on a host can ever hold a
+    poller.
+
+    `lib-common.sh` already assumes the export happened — its ownership check
+    greps the poller's environ for this exact `KEY=VALUE`. So the export is a
+    contract between compositor and consumer, not a stylistic choice.
+
+    Observed unexported: ten per-handle channel dirs on one host, spanning bots
+    created over three months, had never contained a `bot.pid`.
+    """
+
+    def _compose(self, tmp_path, handle="w_bot"):
+        bot = BotConfig(
+            bot_id="worker",
+            name="worker",
+            expertise=["eng"],
+            telegram=TelegramConfig(handle=handle),
+        )
+        fleet = FleetConfig(
+            name="test-fleet",
+            service_prefix="com.test",
+            telegram_group_chat_id="-100999",
+        )
+        root = tmp_path / "claudlobby"
+        root.mkdir(exist_ok=True)
+        (root / "runtime" / "bots" / "worker").mkdir(parents=True, exist_ok=True)
+        (root / "lib").mkdir(exist_ok=True)
+        paths = Paths(root=root, fleet_dir=root)
+        return compose_bot_conf(bot, fleet, paths)
+
+    def test_state_dir_is_exported(self, tmp_path):
+        conf = self._compose(tmp_path)
+        assert "export TELEGRAM_STATE_DIR=" in conf, (
+            "TELEGRAM_STATE_DIR is emitted without `export`, so it never reaches "
+            "the claude child process and the telegram plugin falls back to the "
+            "shared channel dir (#976)."
+        )
+
+    def test_state_dir_is_per_handle(self, tmp_path):
+        conf = self._compose(tmp_path, handle="w_bot")
+        assert "telegram-w_bot" in conf
+
+    def test_no_unexported_state_dir_line_remains(self, tmp_path):
+        """Guard against a regression that adds the export while leaving the
+        original bare assignment behind — the later line would win."""
+        conf = self._compose(tmp_path)
+        bare = [
+            ln
+            for ln in conf.splitlines()
+            if ln.strip().startswith("TELEGRAM_STATE_DIR=")
+        ]
+        assert not bare, f"unexported TELEGRAM_STATE_DIR line(s) present: {bare}"

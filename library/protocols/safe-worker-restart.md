@@ -24,15 +24,15 @@ Restarting a worker tmux session **clears its context**. Workers often have real
 
 - All three checks above show idle/clean
 - Bot is visibly stuck (>5 min of unchanged pane output AND no `[BOTREPORT]`)
-- Context is >70% AND the current task is demonstrably complete (PR merged, final report received)
+- The worker has reported `context-degraded` AND the current task is demonstrably complete (PR merged, final report received)
 - The human explicitly requests it
 
 ## Reviewers are an exception
 
-For reviewers (typically Sonnet, lower context budget): **do** restart above 60% context, because review sessions don't carry PR-level WIP — reviews are stateless between PRs and Sonnet degrades faster than Opus. Still send a one-line "restarting <reviewer>" note to Telegram for visibility.
+For reviewers (typically Sonnet, lower context budget): **do** restart on the first `context-degraded` report, or after ~3 completed rows in a 24h `claudlobby report-back` window, because review sessions don't carry PR-level WIP — reviews are stateless between PRs and Sonnet degrades faster than Opus. Still send a one-line "restarting <reviewer>" note to Telegram for visibility.
 
 ## When in doubt, ask the human
 
 The cost of an unneeded wait is low; the cost of nuking a half-finished PR is real. Frame the question concretely:
 
-> "<bot> at 68% context after merging #472. Restart now to free headroom, or hold for any follow-on?"
+> "<bot> reported context-degraded after merging #472 — 3 tasks closed this session. Restart now, or hold for any follow-on?"

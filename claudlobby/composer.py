@@ -21,10 +21,11 @@ from typing import Any
 _log = logging.getLogger(__name__)
 
 import jinja2
+import yaml
 from jinja2.sandbox import SandboxedEnvironment
 
-from . import dotenv, tool_resolve
-from .config import BotConfig, FleetConfig, load_host_jobs
+from . import defaults, dotenv, tool_resolve
+from .config import BotConfig, FleetConfig, load_fleet, load_host_jobs
 from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
     ExpertisePermissions,
@@ -37,7 +38,7 @@ from .loader import (
     parse_expertise_file,
 )
 from .mcp_resolve import iter_operator_contract_vars, resolve_placeholders
-from .paths import Paths
+from .paths import Paths, _iter_fleet_dirs
 
 
 # ----------------------------------------------------------------------
@@ -491,6 +492,46 @@ def _channel_plugins(channels: list[str]) -> list[str]:
     return plugins
 
 
+def _has_telegram_channel(channels: list[str]) -> bool:
+    """True when a bot launches with a Telegram channel.
+
+    A channel entry names the channel either bare (``telegram``) or as a
+    marketplace-pinned plugin ref (``plugin:telegram@claude-plugins-official``);
+    both mean the same channel. ``channels: []`` — the documented way to declare
+    a bot with no channel — yields False.
+    """
+    return any(
+        chan.removeprefix("plugin:").split("@", 1)[0] == "telegram" for chan in channels
+    )
+
+
+def telegram_handle(bot: BotConfig) -> str | None:
+    """This bot's Telegram handle, or None when it is not a channel bot.
+
+    ``handle`` is optional and ``fleet.yaml`` documents the default plainly —
+    "handle defaults to bot_id". TELEGRAM_STATE_DIR has applied that default
+    since #43; the readers of the handle VARIABLE never did. So a fleet using
+    the documented default composed a working state dir, a live bridge, and no
+    TELEGRAM_BOT_HANDLE — and every consumer keyed off that variable concluded
+    the bot had no channel at all: bridge_state returned `no_handle` for a
+    provably live bridge, halting rolling-restart on its first bot (#1107), and
+    creds-check's Telegram probe skipped every bot on the host (#1097). One
+    resolver, so the default cannot drift apart again.
+
+    Returns None for a bot with no Telegram channel AND no declared handle —
+    the genuine non-channel class, which must stay expressible because
+    `bridge_state`'s `no_handle` and the restart gates' non-channel contract
+    (#901) both rest on it. An explicitly declared handle still wins outright,
+    channel or not: it names an existing state dir, and silently re-pointing
+    that path would orphan a live channel.
+    """
+    if bot.telegram.handle:
+        return bot.telegram.handle
+    if _has_telegram_channel(bot.channels):
+        return bot.bot_id
+    return None
+
+
 GITCONFIG_FILENAME = ".gitconfig"
 
 # GitHub ignores the username when the password is a PAT; this is its documented
@@ -616,7 +657,13 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         raise ValueError(f"bot_id {bot.bot_id!r} contains shell-unsafe characters")
     if not _SAFE_NAME_RE.match(bot.name):
         raise ValueError(f"bot name {bot.name!r} contains shell-unsafe characters")
-    tg_handle = (bot.telegram.handle if bot.telegram else None) or bot.bot_id
+    # Resolved once, consumed by both the state-dir path and the handle export
+    # below — a second hand-rolled `handle or bot_id` here is exactly the drift
+    # that produced #1097/#1107. `tg_channel_handle` is None for a bot with no
+    # Telegram channel; `tg_handle` is the slug, which the state-dir path always
+    # needs a value for even then.
+    tg_channel_handle = telegram_handle(bot)
+    tg_handle = tg_channel_handle or bot.bot_id
     if not _TELEGRAM_HANDLE_RE.match(tg_handle):
         raise ValueError(
             f"telegram handle {tg_handle!r} contains shell-unsafe characters"
@@ -648,7 +695,16 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         f"TMUX_SOCKET={_shq(bot_service)}",
         f"BOT_LABEL={_shq(bot.bot_id.upper())}",
         bot_dir_line,
-        f'TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{bot.telegram.handle or bot.bot_id}"',
+        # Exported, unlike the bot.conf vars above: lib/ reads those from the
+        # file via bot_conf_get, but this one must reach the `claude` CHILD
+        # process environment. The telegram plugin resolves its state dir from
+        # process.env.TELEGRAM_STATE_DIR and silently falls back to the shared
+        # ~/.claude/channels/telegram when unset — which parks bot.pid outside
+        # this bot's dir, and the plugin enforces a singleton per state dir, so
+        # only one bot per host can then hold a poller. lib-common.sh's ownership
+        # check greps the poller's environ for this exact KEY=VALUE, so the
+        # export is a contract between compositor and consumer (#976).
+        f'export TELEGRAM_STATE_DIR="$HOME/.claude/channels/telegram-{tg_handle}"',
         "",
         "# Claude Code config dir (multi-account support)",
     ]
@@ -730,8 +786,26 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         lines.append(
             f"export TELEGRAM_REQUIRE_MENTION={_shq(str(bot.telegram.require_mention).lower())}"
         )
+    # Resolved, not raw: a fleet that relies on the documented "handle defaults
+    # to bot_id" otherwise composes no handle at all, and every consumer reading
+    # this variable then classifies a live channel bot as non-channel (#1097,
+    # #1107). A bot with no Telegram channel still emits nothing — that is the
+    # signal `bridge_state`'s `no_handle` and #901's gate contract rest on.
+    if tg_channel_handle:
+        lines.append(f"export TELEGRAM_BOT_HANDLE={_shq(tg_channel_handle)}")
+
+    # The DECLARED BotFather @username — emitted ONLY when the fleet spelled a
+    # handle out, and deliberately a separate variable from TELEGRAM_BOT_HANDLE.
+    # The handle is channel identity (a state-dir slug that now defaults to
+    # bot_id); a slug is not a username. creds-check's cross-wire check compares
+    # getMe's answer against a username, so it must read a value that is absent
+    # when we were never told one — otherwise it compares a slug and declares a
+    # correctly-wired bot cross-wired, edge-alerting once per bot (#1095).
+    # "Was a username declared?" is a fact known here; making bash re-derive it
+    # by comparing the handle against BOT_ID would couple it to this default,
+    # and silently resume false-paging if the default ever moved.
     if bot.telegram.handle:
-        lines.append(f"export TELEGRAM_BOT_HANDLE={_shq(bot.telegram.handle)}")
+        lines.append(f"export TELEGRAM_BOT_USERNAME={_shq(bot.telegram.handle)}")
 
     # Model strategy — config-driven model escalation / compaction / subagent models.
     if bot.model_strategy:
@@ -766,6 +840,9 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             obs.dispatch_deadline,
             obs.bridge_heal,
             obs.bridge_heal_max_attempts,
+            obs.unassigned_check,
+            obs.unassigned_threshold,
+            obs.unassigned_max_age,
         ]
     ):
         lines.append("")
@@ -794,6 +871,21 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         if obs.bridge_heal_max_attempts is not None:
             lines.append(
                 f"export BRIDGE_HEAL_MAX_ATTEMPTS={_shq(obs.bridge_heal_max_attempts)}"
+            )
+        if obs.unassigned_check is not None:
+            # Same shell-boolean rule as bridge_heal above: fleet-pulse gates on
+            # the string "1", so _shq(bool) would render "True" and leave the
+            # check silently off.
+            lines.append(
+                f"export OBSERVABILITY_UNASSIGNED_CHECK={'1' if obs.unassigned_check else '0'}"
+            )
+        if obs.unassigned_threshold is not None:
+            lines.append(
+                f"export OBSERVABILITY_UNASSIGNED_THRESHOLD={_shq(obs.unassigned_threshold)}"
+            )
+        if obs.unassigned_max_age is not None:
+            lines.append(
+                f"export OBSERVABILITY_UNASSIGNED_MAX_AGE={_shq(obs.unassigned_max_age)}"
             )
 
     # Project validation tiers (projects.yaml) — the repo -> closure-bar map,
@@ -876,7 +968,7 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
         lines.append("# Ecosystem")
         if bot.claudna_version:
             lines.append(f"export CLAUDNA_VERSION={_shq(bot.claudna_version)}")
-        if bot.claudron_vault_path:
+        if bot_is_vault_wired(bot):
             lines.append(f"export CLAUDRON_VAULT_PATH={_shq(bot.claudron_vault_path)}")
         if bot.claudosseum_tenant_id:
             lines.append(
@@ -1069,6 +1161,18 @@ Type=simple
 # control-group cleanup kills the tmux server we just started. KillMode=process
 # limits the kill to the main process; RemainAfterExit=yes keeps the unit
 # "active" while tmux runs underneath.
+#
+# LOAD-BEARING BEYOND CLEANUP: Type=simple + a spawner ExecStart that exits +
+# RemainAfterExit=yes is what makes SubState a boot-progress signal, and
+# service_is_starting (lib-common.sh) reads it as one:
+#   activating      ExecStartPre — the boot stagger sleep
+#   active/running  start-bot.sh executing; tmux session not up yet
+#   active/exited   steady state — spawner done, tmux running underneath
+# If ExecStart ever execs into a foreground process, or RemainAfterExit is
+# dropped, active/running becomes the STEADY state and keepalive's dead-session
+# watchdog silently stops restarting anything — a failure shaped exactly like a
+# healthy fleet. tests/test_composer.py asserts this triple; do not relax it
+# without reading service_is_starting first.
 RemainAfterExit=yes
 KillMode=process
 WorkingDirectory={bot_dir}{stagger}
@@ -1351,6 +1455,16 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
     Telegram plugin picks up correct settings on first boot — preventing
     the default-config bug where requireMention defaults to false.
     """
+    # DELIBERATELY the raw handle, not telegram_handle(bot) — do not "fix" this
+    # to match the other three sites without reading #1107 first. Composing
+    # access.json for a fleet that never had one is not additive: the reconcile
+    # path below OVERWRITES groups.<chat_id>.requireMention from fleet config.
+    # Measured on a live 9-bot fleet, applying the default here flipped the
+    # manager's own group from requireMention:false to true — a manager that no
+    # longer sees un-mentioned messages is a dispatch outage. Extending the
+    # default here therefore needs each fleet's require_mention reconciled to
+    # its live access.json FIRST. Tracked separately; the other sites only ever
+    # add capability, which is why they lead and this one does not.
     if not bot.telegram or not bot.telegram.handle:
         return None
 
@@ -1437,15 +1551,54 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
 
     integration_names = resolve_effective_integrations(bot, paths)
 
-    # Auto-include shared-documentation protocol when shared docs are available
-    protocol_names = list(bot.protocols)
-    if paths.shared_docs and "shared-documentation" not in protocol_names:
-        protocol_names.append("shared-documentation")
-
     teams = fleet.teams_for_manager(bot.bot_id)
     org_structure = _compose_org_structure(bot, fleet)
 
     is_manager = bot.bot_id in fleet.manager_bots()
+
+    # INSTRUCT-tier protocol defaults, resolved from defaults.REGISTRY rather
+    # than named here. This used to be a literal `append("shared-documentation")`
+    # sitting downstream of the merge the registry feeds, which made it a default
+    # no fleet could see and none could switch off (#1168 Phase 3, finding 1).
+    #
+    # Applied HERE and not in load_fleet's merge — where `guardrails` is applied
+    # — because these entries are availability-gated on facts the config layer
+    # never receives. Root mode has no shared docs, so an ungated default would
+    # newly instruct every root-mode bot.
+    #
+    # `vault_wired` reads the same field `claude.md.j2` branches on, and the two
+    # must not diverge on WHICH FORM a bot is told to use: divergence means the
+    # vault section beside the hand-scan protocol, which is #1172. The template
+    # carries the reciprocal note.
+    #
+    # They are NOT the same condition, deliberately. The template is
+    # `vault else shared_docs`; this gate is `shared_docs and vault`. Root mode
+    # plus a vault therefore composes the door section and no protocol — correct,
+    # since root mode has no fleet doc tree, and stated here because a comment
+    # claiming the two predicates are identical would mislead exactly when it
+    # matters. `tests/test_shared_docs_default.py` pins the agreement on the
+    # composed FILE rather than at the predicate, so it holds however either
+    # side is spelled.
+    facts = defaults.Facts(
+        shared_docs=paths.shared_docs is not None,
+        vault_wired=bot_is_vault_wired(bot),
+    )
+    protocol_names = list(bot.protocols)
+    sd = fleet.system_defaults
+    if sd.enabled and sd.protocols:
+        roles = (defaults.ROLE_MANAGER,) if is_manager else ()
+        for name in defaults.resolve("protocols", roles):
+            if defaults.available(name, facts) and name not in protocol_names:
+                protocol_names.append(name)
+    # Applied to the FINAL list, and OUTSIDE the opt-out branch above, because
+    # the hazard is the DECLARED half — which the availability gate never sees.
+    # Measured before this line existed: a vault-wired fleet declaring
+    # `shared-documentation` composed the hand-scan form, the vault form, and
+    # the template's vault section — three `Shared Documentation` headings with
+    # opposite instructions, which is #1172 in a worse form than the original.
+    # Outside the branch because opting out of the DEFAULTS must not re-admit a
+    # declared form that does not fit the fleet.
+    protocol_names = defaults.resolve_exclusions(protocol_names, facts)
 
     # Projects table composes for managers only (F6-style context budget:
     # workers resolve tiers from the bot.conf env map, not prose).
@@ -1563,6 +1716,98 @@ def _compose_hooks(hooks: dict[str, list[dict[str, Any]]]) -> dict[str, list]:
     return out
 
 
+# --- #904 M1: the SessionStart boot brief (epic #1102 R3, locked fork R3-F1) --
+
+
+# The platform default hook timeout is 600s; an explicit budget keeps a hung
+# door from delaying context assembly for ten minutes. 10s is ~11x the measured
+# warm floor; whether it survives host-reboot load is what the canary's
+# per-boot hook p95 measures (R3-F1 correction: measure-then-gate — if p95
+# approaches this, the held #1123 lazy-import branch lands before arming).
+BRIEF_HOOK_TIMEOUT_S = 10
+
+
+@functools.cache
+def _brief_cli_probe() -> tuple[str | None, str]:
+    """(certified executable, "") — or (None, why) when arming must refuse.
+
+    The compose-time arming gate: a subprocess probe of the PATH-resolved
+    binary, never an import check of THIS package — composed settings outlive
+    installs on this estate (the merged-but-not-installed gap was measured
+    live during R3-F1 ratification, #1102), so probing our own parser would
+    certify the wrong artifact. The returned path is composed into the hook
+    verbatim (the C2 absolute-path contract `_resolve_claudron_executable`
+    states for this same settings file), so the certified artifact and the
+    runtime artifact are one object.
+
+    The ``--boot`` containment check reads argparse's own generated help — the
+    option's self-description, not a source grep. Cached: host-invariant
+    within one compose process, and it runs per armed bot across generate,
+    validate, and freshbox otherwise.
+    """
+    import shutil
+    import subprocess
+
+    exe = shutil.which("claudlobby")
+    if exe is None:
+        return None, "no `claudlobby` on PATH at compose time"
+    try:
+        r = subprocess.run(
+            [exe, "brief", "--help"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"probing `claudlobby brief --help` failed: {e}"
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        return None, (
+            tail[-1] if tail else f"`claudlobby brief --help` exited {r.returncode}"
+        )
+    if "--boot" not in r.stdout:
+        return None, "installed `claudlobby brief` predates the --boot mode"
+    return exe, ""
+
+
+def _with_brief_boot_hook(
+    hooks: dict[str, list[dict[str, Any]]],
+    bot_id: str,
+    exe: str,
+    fleet: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return a copy of the flat fleet.yaml-shaped hooks with the boot-brief
+    SessionStart entries appended (matchers ``startup`` and ``compact`` only —
+    resume is #986's lane, /clear is deferred with an un-cut condition, and
+    ``fork`` is excluded deliberately; fork R3-F1 rule 9).
+
+    The command is fail-open BY SHAPE: the platform cannot let a SessionStart
+    hook block the session, but a non-zero exit discards stdout — so the door
+    failing must itself exit 0 with one line naming the door, or the boot
+    carries nothing at all. `$?` expands at hook runtime, in the hook's shell.
+
+    ``fleet`` is the overlay name for overlay-mode composes, None in root
+    mode. It must be threaded into the command as the global ``--fleet``
+    flag: fleet selection has no env or cwd fallback (#1197), so a flagless
+    door on an overlay estate resolves root-mode and exits 1 on every boot.
+    """
+    # The EXECUTED path is the certified absolute exe (C2: hook context is not
+    # a login shell, PATH frequently omits a venv/pipx install — see
+    # _resolve_claudron_executable); the human-facing fallback text keeps the
+    # bare name, since it is an instruction to a reader, not an invocation —
+    # but both carry --fleet, or the instruction teaches a broken door (#1197).
+    fleet_arg = f" --fleet {fleet}" if fleet else ""
+    fallback = (
+        f'echo "fleet-brief unavailable (rc $?) — '
+        f'claudlobby{fleet_arg} brief --bot {bot_id}"'
+    )
+    cmd = f"{exe}{fleet_arg} brief --bot {bot_id} --boot || {fallback}"
+    out = {k: list(v) for k, v in hooks.items()}
+    entries = out.setdefault("SessionStart", [])
+    for matcher in ("startup", "compact"):
+        entries.append(
+            {"command": cmd, "matcher": matcher, "timeout": BRIEF_HOOK_TIMEOUT_S}
+        )
+    return out
+
+
 # ----------------------------------------------------------------------
 # Claudron session loop (L2) — engine hooks + narrow verb grants per vault-wired
 # bot. The hook entries are a RENDERED COPY of a Claudron-owned contract surface
@@ -1592,13 +1837,38 @@ _CLAUDRON_HOOK_EVENTS = {
 }
 
 
+def bot_is_vault_wired(bot: BotConfig) -> bool:
+    """Whether this bot reaches knowledge through a Claudron vault.
+
+    Trivial, and it exists because its ABSENCE was the finding (#1172). Three
+    places decide this one fact — `claude.md.j2`'s Shared Documentation branch,
+    the `CLAUDRON_VAULT_PATH` export in `bot.conf`, and the availability gate on
+    the `shared-documentation*` protocol defaults — and they must agree. When
+    they disagree the bot is told to use the vault door AND to hand-scan the
+    tree the door forbids opening, which is the defect this named the fix for.
+
+    NOT `_session_loop_enabled`, which is a different question wearing a similar
+    shape: that one is tri-state and an explicit `claudron_session_loop: false`
+    wins over a wired vault. Gating the protocol on it would give a vault-wired
+    bot with the session loop off `shared_docs and not vault_wired` — the
+    HAND-SCAN form. That does not merely drop the vault protocol; it re-creates
+    #1172 exactly, on the bots least likely to be looked at.
+    """
+    return bool(bot.claudron_vault_path)
+
+
 def _session_loop_enabled(bot: BotConfig) -> bool:
     """Resolve the tri-state ``claudron_session_loop``: an explicit value wins;
-    unset defaults True exactly when the bot is vault-wired (has a
-    ``claudron_vault_path``), False otherwise."""
+    unset defaults True exactly when the bot is vault-wired.
+
+    The fallback goes through ``bot_is_vault_wired`` so "exactly when the bot is
+    vault-wired" is true by construction rather than by two copies of the same
+    expression agreeing today. `validator.py` already resolves a vault a richer
+    way (`detect_vault`); if that ever becomes the definition, this follows.
+    """
     if bot.claudron_session_loop is not None:
         return bot.claudron_session_loop
-    return bool(bot.claudron_vault_path)
+    return bot_is_vault_wired(bot)
 
 
 @functools.cache
@@ -1693,10 +1963,15 @@ _TELEGRAM_PLUGIN_TOOLS = [
 def _resolve_channel_permissions(bot: BotConfig) -> list[str]:
     """Auto-derive tool permissions from configured channels.
 
-    When a bot has a Telegram handle set, include the 4 plugin tools.
+    Keyed off the CHANNEL, not the handle: the precondition for granting the
+    Telegram plugin tools is that the plugin is loaded, which is what `channels`
+    says. Gating on the handle field was wrong in both directions — it granted
+    nothing to a fleet using the documented handle default (these tools reached
+    zero bots, masked only by permission-mode auto), and it would over-grant to
+    a bot that keeps a declared handle while turning its channel off.
     """
     tools: list[str] = []
-    if bot.telegram.handle:
+    if _has_telegram_channel(bot.channels):
         tools.extend(_TELEGRAM_PLUGIN_TOOLS)
     return tools
 
@@ -2050,7 +2325,28 @@ def compose_settings_local(
     # No claim env is composed: F1 is STRUCTURAL — the single capture prompt is
     # claimed by clauDNA's hook detecting the engine's `hook pre-compact` entry,
     # not by any composed CLAUDRON_CAPTURE_OWNER-style variable.
-    hooks = _compose_hooks(bot.hooks)
+    bot_hooks = bot.hooks
+    if bot.brief_on_start:
+        exe, why = _brief_cli_probe()
+        if exe is None:
+            raise ValueError(
+                f"bot {bot.bot_id}: brief.on_start is set but the installed "
+                f"CLI cannot serve the hook ({why}). Composed settings outlive "
+                "installs on this estate — arming now would compose a hook "
+                "whose every boot prints a failure line instead of a brief. "
+                "Pull/install a claudlobby with `brief --boot`, or disarm the "
+                "knob."
+            )
+        # Bare overlay name, not fleet.name: --fleet resolves the DIRECTORY
+        # (F5 global uniqueness is _find_fleet_dir's own contract), and the
+        # two are not guaranteed equal.
+        bot_hooks = _with_brief_boot_hook(
+            bot_hooks,
+            bot.bot_id,
+            exe,
+            fleet=paths.fleet_dir.name if paths.fleet_dir else None,
+        )
+    hooks = _compose_hooks(bot_hooks)
     if _session_loop_enabled(bot):
         executable, warning = _resolve_claudron_executable()
         if warning:
@@ -2141,9 +2437,24 @@ def _reconcile_access_json(
 
 
 def compose_bot(
-    bot: BotConfig, fleet: FleetConfig, paths: Paths, log=None, *, boot_delay_s: int = 0
+    bot: BotConfig,
+    fleet: FleetConfig,
+    paths: Paths,
+    log=None,
+    *,
+    boot_delay_s: int | None = None,
 ) -> Path:
-    """Compose one bot's full runtime dir (CLAUDE.md, bot.conf, .mcp.json, units, skill symlinks); returns bot_dir."""
+    """Compose one bot's full runtime dir (CLAUDE.md, bot.conf, .mcp.json, units, skill symlinks); returns bot_dir.
+
+    ``boot_delay_s`` defaults to this bot's own rung on the host boot ladder,
+    DERIVED rather than threaded: every caller that composes a single bot
+    (``generate --bot``, ``move-bot``, ``new-bot``) would otherwise silently
+    write a unit with no stagger at all, collapsing that bot to rung 0 and
+    re-creating the collision the ladder exists to prevent (#1002). Pass an
+    explicit value only to compose a unit off the host ladder, e.g. in tests.
+    """
+    if boot_delay_s is None:
+        boot_delay_s = bot_boot_delay_s(bot, fleet, paths)
     bot_dir = paths.bot_runtime(bot.bot_id)
     # L1 source guard (#702) — deny an unanchored, undeclared absolute path in any
     # compose source (bot config leaves + loaded MCP fragments) BEFORE the first
@@ -2371,9 +2682,7 @@ def _scaffold_env_merge(
         # commented out is invisible to it and would be appended again on the
         # next run — unbounded growth, once per generate, and reload-fleet.sh
         # runs generate on a daily fleet-wide timer. Count them as present.
-        existing_keys |= set(
-            _COMMENTED_STUB_RE.findall(existing_content)
-        )
+        existing_keys |= set(_COMMENTED_STUB_RE.findall(existing_content))
         # Neutralise a stub that was written live BEFORE its var gained an
         # upstream value. `provided_upstream` is otherwise consulted only when a
         # key is first scaffolded, so the ordinary dev loop — generate while
@@ -2515,6 +2824,140 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
 _BOOT_STAGGER_SECONDS = 3  # delay between each bot's startup on fleet boot
 
 
+def _fleet_manager_worker_counts(fleet_yaml: Path) -> tuple[int, int]:
+    """(managers, workers) from a fleet.yaml, sized for another fleet's rungs.
+
+    Manager detection is DELEGATED to ``FleetConfig.manager_bots`` and never
+    restated here. A private copy of that rule is exactly how the ladder came
+    to disagree with the rest of the composer: this helper read only ``teams:``
+    while ``manager_bots`` reads ``teams:`` AND ``bots.<id>.manages:``, so a
+    fleet whose manager is declared solely by ``manages:`` counted ZERO
+    managers and shifted every later fleet off its rung. Its own docstring
+    asserted the two were "the same declaration", which was true when written
+    and stopped being true forty minutes later.
+
+    That is the same shape as #892/#1143 — a predicate fixed centrally while a
+    consumer kept its own copy — which is the second occurrence in this repo
+    and the argument for fixing the seam rather than patching the symptom.
+
+    A sibling fleet's manifest is read here only to size its rung blocks, so a
+    manifest that is missing, unparseable, or mid-edit contributes (0, 0)
+    rather than raising: one fleet's broken config must never block another
+    fleet's generate. The cost of the soft failure is a stale offset — the
+    un-offset behaviour, not a new failure mode.
+
+    The caught set is NAMED, never a bare ``Exception``, and that is load
+    bearing rather than tidiness. The version of this helper being replaced
+    warned that a blanket catch "would also swallow a NameError in this
+    function and report every fleet as empty" — and while writing the
+    replacement I did exactly that: the import of ``load_fleet`` was dropped as
+    unused between two edits, every call raised NameError, the blanket catch
+    turned it into (0, 0), and every fleet on the host silently lost its
+    stagger. The suite caught it; a narrower catch would have raised on the
+    first call instead. NameError is absent from this tuple deliberately.
+    """
+    try:
+        fleet, _ = load_fleet(fleet_yaml)
+    except (OSError, yaml.YAMLError, ValueError, TypeError, KeyError):
+        # missing, unparseable, or shaped in a way coercion rejects
+        return 0, 0
+    # Only bots the manifest actually lists: a team naming an absent bot would
+    # otherwise inflate the manager tier and shift every later fleet.
+    bots = set(fleet.bots)
+    managers = fleet.manager_bots() & bots
+    return len(managers), len(bots) - len(managers)
+
+
+@functools.cache
+def _host_boot_rung_bases(paths: Paths, own_managers: int) -> tuple[int, int]:
+    """This fleet's first manager rung and first worker rung on the host ladder.
+
+    Each fleet ladders ``ExecStartPre=/bin/sleep`` from zero. On a host running
+    several fleets that puts one bot from *every* fleet on every early rung, so
+    a host reboot fires N simultaneous cold starts. Laddering the fleets into a
+    single host-global sequence fixes that: one bot per rung, ordered.
+
+    Within that sequence the host boots in two tiers — **every manager on the
+    host first, then every worker**. The reason is recovery latency, not boot
+    success: a stranded worker is recoverable because its manager notices, while
+    a stranded manager means nothing is watching that fleet at all. Front-loading
+    the managers puts the whole observation layer up in the first few rungs, so a
+    strand anywhere is noticed sooner. It does **not** make any bot less likely
+    to strand — rung is not predictive of strand (#1002) — and it costs nothing:
+    same one-bot-per-rung property, same total spread.
+
+    The order within each tier is the sorted overlay enumeration shared with the
+    collision scan and move-bot autodetect (``_iter_fleet_dirs``), so the
+    assignment is deterministic and identical no matter which fleet is being
+    generated. Worker rungs start past *every* manager on the host, which is why
+    the walk continues after this fleet is found rather than returning early.
+
+    Bases are computed from the manifests present at generate time, so ADDING,
+    REMOVING or RENAMING a fleet — or promoting a bot to manager — reshuffles the
+    rungs of other fleets, and those fleets keep their old ladder until *they*
+    regenerate. Until then some rungs can collide again, degrading to today's
+    behaviour, never worse. ``lib/setup-fleets`` regenerates every fleet in one
+    pass, which is the sanctioned way to re-converge the ladder.
+
+    A fleet with no place in the host ladder — root mode, or an explicitly-
+    pointed overlay outside ``local/`` — ladders standalone off ``own_managers``,
+    still manager-tier first. That keeps "managers occupy the first block" true
+    in one place rather than leaving the caller to restate it.
+
+    Cached for the process: every bot in a fleet asks the same question, and the
+    walk parses every sibling manifest to answer it. No shipped path mutates a
+    manifest and re-composes without re-exec — ``generate`` is one-shot,
+    ``setup-fleets`` forks per fleet, and ``move-bot`` requires the target stanza
+    to exist before it runs.
+    """
+    standalone = (0, own_managers)
+    if paths.fleet_dir is None:  # root mode: one fleet, nothing to ladder past
+        return standalone
+    here = paths.fleet_dir.resolve()
+    managers_before = workers_before = None
+    managers_total = workers_total = 0
+    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
+        if fleet_dir.resolve() == here:
+            managers_before, workers_before = managers_total, workers_total
+        # A container or non-fleet dir has no manifest and contributes (0, 0) —
+        # the same answer _fleet_manager_worker_counts already gives for an
+        # unreadable file, so what a non-fleet dir is worth is decided in
+        # exactly one place.
+        managers, workers = _fleet_manager_worker_counts(fleet_dir / "fleet.yaml")
+        managers_total += managers
+        workers_total += workers
+    if managers_before is None:
+        return standalone  # not under local/: no placement in the host ladder
+    return managers_before, managers_total + workers_before
+
+
+def bot_boot_delay_s(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> int:
+    """This bot's rung on the host-global boot ladder, in seconds.
+
+    Derived from (manager or worker, fleet position on the host, position among
+    that fleet's same-tier bots), so every compose path lands on the same rung
+    without threading an index through its callers.
+
+    Manager-ness comes from ``FleetConfig.manager_bots`` — the same declaration
+    that decides what ``MANAGER_TMUX`` is composed to. It is deliberately not
+    re-derived from the composed value, which carries a trailing comment that a
+    naive parse gets wrong.
+    """
+    # Intersected with the bot list so this fleet's tier is sized by the same
+    # rule _fleet_manager_worker_counts applies to every sibling: a team naming
+    # an absent bot must not inflate one side of the ladder and not the other.
+    managers = fleet.manager_bots() & set(fleet.bots)
+    is_manager = bot.bot_id in managers
+    tier = [b for b in fleet.bots if (b in managers) == is_manager]
+    try:
+        index = tier.index(bot.bot_id)
+    except ValueError:  # composing a bot the fleet does not list (scaffolding)
+        index = 0
+    manager_base, worker_base = _host_boot_rung_bases(paths, len(managers))
+    base = manager_base if is_manager else worker_base
+    return (base + index) * _BOOT_STAGGER_SECONDS
+
+
 # ---------------------------------------------------------------------------
 # Fleet-level timer generation
 # ---------------------------------------------------------------------------
@@ -2540,6 +2983,10 @@ def _resolve_timer_schedule(timer_cfg: dict, merged_defaults: dict) -> dict:
     return {"type": "interval", "seconds": timer_cfg.get("interval", 300)}
 
 
+# The system.yaml fleet job whose script reads the FLEET_PULSE_* knobs (#1120).
+_FLEET_PULSE_JOB = "fleet-pulse"
+
+
 def _write_timer_units(
     timers_dir: Path,
     service_name: str,
@@ -2554,6 +3001,7 @@ def _write_timer_units(
     randomized_delay: int = 0,
     exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
+    fleet_pulse_env: dict[str, str] | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -2625,6 +3073,15 @@ def _write_timer_units(
         service_lines.append(
             f"Environment=TELEGRAM_GROUP_CHAT_ID={telegram_group_chat_id}"
         )
+    # #1120: the fleet-pulse escalation knobs. Same reasoning as the line above
+    # and the same door — a scheduler starts with almost no environment, and
+    # this unit sources no .env, so an Environment= line is the only thing the
+    # script can actually read. Scoped to the one job whose script reads them
+    # rather than every fleet timer: the vars are FLEET_PULSE_-prefixed and no
+    # other job consumes them, so a wider grant would buy nothing.
+    if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
+        for var, value in fleet_pulse_env.items():
+            service_lines.append(f"Environment={var}={value}")
     service_lines.append(f"ExecStart={exec_start}")
     (timers_dir / f"{service_name}.service").write_text("\n".join(service_lines) + "\n")
 
@@ -2682,8 +3139,17 @@ def _write_timer_units(
         f"  <string>{service_name}</string>",
         "  <key>ProgramArguments</key>",
         "  <array>",
-        f"    <string>{script_expanded}</string>",
     ]
+    # launchd's ProgramArguments[0] is the executable PATH; systemd's ExecStart=
+    # is a command LINE that it splits on whitespace. A job whose `script`
+    # carries flags (data-sweep's `--purge`) is therefore valid on Linux and, if
+    # passed through whole, becomes a file that does not exist on macOS — the
+    # job then silently never execs. Split here so both platforms receive the
+    # same argv, flags before the fleet name exactly as systemd would pass them
+    # (#969).
+    plist_lines.extend(
+        f"    <string>{part}</string>" for part in shlex.split(script_expanded)
+    )
     if fleet_name:
         plist_lines.append(f"    <string>{fleet_name}</string>")
     for arg in exec_args or []:
@@ -2714,6 +3180,14 @@ def _write_timer_units(
                 f"    <string>{telegram_group_chat_id}</string>",
             ]
         )
+    # #1120 — parity with the systemd half above; the env-parity test compares
+    # the two, so emitting on one platform only would fail there rather than in
+    # production eight weeks later.
+    if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
+        for var, value in fleet_pulse_env.items():
+            plist_lines.extend(
+                [f"    <key>{var}</key>", f"    <string>{value}</string>"]
+            )
     plist_lines.append("  </dict>")
     plist_lines.extend(
         [
@@ -2933,6 +3407,9 @@ def compose_fleet_timers(
                 persistent=bool(cfg.get("persistent", False)),
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
+                fleet_pulse_env=(
+                    fleet.fleet_pulse.env() if fleet.fleet_pulse else None
+                ),
             )
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
@@ -3002,6 +3479,110 @@ def compose_fleet_timers(
     return timers_dir
 
 
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def compose_host_mention_allowlist(
+    paths: Paths, *, output_dir: Path | None = None
+) -> Path:
+    """Handles a bot MAY @-mention on GitHub. Everything else is rewritten.
+
+    The inversion (#1019 follow-up). The merged guard matched a denylist of
+    composed bot names, which is correct as far as it goes and provably does not
+    go far enough: of the eleven real accounts we notified, `Botfather`,
+    `latest` and `216` are on no bot-name list and never could be. The harm
+    class is "any @word that happens to be a real handle" — unbounded, and it
+    grows without us doing anything, so it cannot be enumerated.
+
+    So the guard defaults to rewriting and this file is the exception list. It
+    is bounded where a denylist is not: the set of people we intend to notify
+    from a bot is tiny and changes rarely, while the set of strings that happen
+    to be real handles is neither.
+
+    Declared per fleet under ``fleet.github.mention_allowlist`` and unioned
+    across the host, because a handle worth notifying from one fleet is worth
+    notifying from all of them. Empty by default: no mention notifies anyone
+    until someone says so, in writing, in a manifest.
+
+    A composed BOT name always wins over this list — see the deny-override in
+    lib/mention-rewrite.py. Without that, someone eventually allowlists a bot's
+    name meaning our bot and silently re-arms the original bug.
+    """
+    names: set[str] = set()
+    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
+        manifest = fleet_dir / "fleet.yaml"
+        if not manifest.is_file():
+            continue
+        try:
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        if isinstance(data, dict):
+            gh = (data.get("fleet") or {}).get("github") or {}
+            if isinstance(gh, dict):
+                names.update(gh.get("mention_allowlist") or [])
+
+    base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "mention-allowlist"
+    safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
+    target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    return target
+
+
+def compose_host_bot_handles(paths: Paths, *, output_dir: Path | None = None) -> Path:
+    """Write every bot name on the HOST, one per line, for the mention guard.
+
+    Consumed by ``lib/gh-mention-guard.sh`` (#1019), which rewrites ``@<name>``
+    out of GitHub-bound tool calls. Every one of this estate's bot names is also
+    a real GitHub account — all 21 resolve, 19 of them to real people and 2 to
+    organizations — so an unguarded teammate reference emails a stranger. One of
+    them asked us to stop. There is no safe name.
+
+    COMPOSED, never hardcoded: a literal list re-breaks the moment a bot is
+    added, which is #1009's defect class exactly.
+
+    HOST-WIDE, not fleet-scoped, and that is load-bearing rather than tidy.
+    Cross-fleet references are routine — this fleet's issues name bots from
+    three other fleets constantly — so a fleet-scoped list would miss precisely
+    the mentions written by someone with no relationship to that bot. Built by
+    enumerating every fleet under ``local/`` via the same ``_iter_fleet_dirs``
+    the collision scan and move-bot autodetect use.
+
+    A sibling fleet whose manifest is missing or unparseable contributes
+    nothing rather than raising: one fleet's broken config must not stop another
+    fleet's generate. The cost is a narrower guard, which the hook reports.
+    """
+    names: set[str] = set()
+    for fleet_dir in _iter_fleet_dirs(paths.root / "local"):
+        manifest = fleet_dir / "fleet.yaml"
+        if not manifest.is_file():  # a container or a non-fleet dir
+            continue
+        try:
+            data = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            # A sibling fleet's unreadable manifest must not stop this generate.
+            # Narrow ON PURPOSE: the first cut caught bare Exception, so a
+            # missing `import yaml` raised NameError on EVERY fleet and was
+            # swallowed as "all four manifests are broken" — the guard composed
+            # an empty list and would have protected nothing, silently.
+            continue
+        if isinstance(data, dict):
+            names.update((data.get("fleet") or {}).get("bots") or {})
+    base = output_dir if output_dir is not None else paths.root / "runtime" / "_host"
+    base.mkdir(parents=True, exist_ok=True)
+    target = base / "bot-handles"
+    # Only names safe to drop into the hook's regex alternation. Deliberately
+    # NOT SHELL_IDENT_RE, which forbids hyphens — `worker-1` is a real bot name
+    # shape (fleet.yaml.example uses it), and excluding it would leave exactly
+    # those bots unguarded while looking covered. This charset carries no regex
+    # metacharacters, and matches the hook's own `grep -Ex` filter so the two
+    # cannot disagree about which names are admissible.
+    safe = sorted(n for n in names if _HANDLE_RE.match(n or ""))
+    target.write_text("".join(f"{n}\n" for n in safe), encoding="utf-8")
+    return target
+
+
 def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path:
     """Emit host-global singleton units from system.yaml ``host.jobs``.
 
@@ -3059,14 +3640,18 @@ def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]
     # one generate should surface all offenders, so an operator fixes the fleet in
     # a single pass instead of whack-a-mole.
     failures: list[tuple[str, str]] = []
-    for i, (bot_name, bot) in enumerate(fleet.bots.items()):
+    for bot_name, bot in fleet.bots.items():
         _log.info("composing %s...", bot_name)
         if log is not None:
             log(f"composing {bot_name}...")
         try:
-            out[bot_name] = compose_bot(
-                bot, fleet, paths, log=log, boot_delay_s=i * _BOOT_STAGGER_SECONDS
-            )
+            # boot_delay_s is deliberately NOT passed: compose_bot derives every
+            # bot's rung the same way for every entry point, so `generate --bot`
+            # and move-bot cannot compose a unit that disagrees with this one.
+            # The sibling-manifest walk behind that derivation is cached for the
+            # process (see _host_boot_rung_bases), so the re-derivation costs one
+            # walk per fleet rather than one per bot.
+            out[bot_name] = compose_bot(bot, fleet, paths, log=log)
         except ValueError as e:
             failures.append((bot_name, str(e)))
     if failures:

@@ -199,6 +199,25 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         emit_keepalive_event "SKIP" "session reappeared (start-bot.sh likely won the race)"
         exit 0
     fi
+    # A boot in flight has no session YET — restarting it kills the very start
+    # that would have created one, and the replacement boot loses the same race.
+    # The sleep 1 above is no defence: it is a fixed second against a window
+    # measured at 35-178s under load. Evidence (#1002): rajan restarted 3x at
+    # 17:24:34 / 17:25:32 / 17:26:19 on 2026-08-04, each landing on a start-bot.sh
+    # that was still installing plugins, each resetting that work. The loop broke
+    # only when host load fell enough for a boot to finish inside 60s.
+    #
+    # service_is_starting is the unit's own state, so unlike a session-age test
+    # (there is no session to age) or data/.spawn (touched AFTER session creation
+    # at start-bot.sh:273, so stale through exactly this window) it cannot be
+    # fooled by the absence it is guarding. It is bounded by KEEPALIVE_BOOT_GRACE_S
+    # so a wedged start-bot eventually gets restarted rather than suppressing the
+    # watchdog forever.
+    if [ -n "${BOT_SERVICE:-}" ] && service_is_starting "$BOT_SERVICE"; then
+        echo "$(ts_iso) SKIP — boot in flight (unit mid-start), not restarting" >> "$LOG"
+        emit_keepalive_event "SKIP" "boot in flight (unit mid-start), not restarting"
+        exit 0
+    fi
     restart_bot_service "session dead"
     exit 0
 fi

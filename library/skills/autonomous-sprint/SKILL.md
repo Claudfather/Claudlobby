@@ -1,6 +1,6 @@
 ---
 name: autonomous-sprint
-description: "Autonomous development cycle: reads PROJECT_MISSION.md, evaluates backlog, runs /claudna:product-vision if needed, picks highest-impact issues, dispatches /lifecycle, and reports results. The conductor that orchestrates the fleet."
+description: "Autonomous development cycle: reads PROJECT_MISSION.md, evaluates backlog, runs a product-vision pass if needed, picks highest-impact issues, dispatches /lifecycle, and reports results. The conductor that orchestrates the fleet."
 argument-hint: "<repo> [--max-issues N] [--dry-run] [--focus <area>]"
 ---
 
@@ -59,7 +59,10 @@ Categorize:
 **Step 3: Backlog health check**
 
 If fewer than 5 mission-aligned open issues exist:
-- Run `/claudna:product-vision --auto --output github` on the repo to generate new issues
+- Run a product-vision pass on the repo to generate new issues, using whichever
+  such skill you have — with clauDNA that is `/claudna:product-vision --auto
+  --output github`. If none is installed, explore the repo against
+  `PROJECT_MISSION.md` and file the issues directly.
 - Wait for issues to be created, then re-evaluate
 
 If plenty of issues exist, skip to Phase 2.
@@ -123,9 +126,12 @@ For each issue, sequentially:
 
 3. **After merge**: engineer runs `/compact` before next issue
 
-4. **Between issues**: check engineer's context level
-   - If >60%: restart bot before next issue
-   - If OK: dispatch next issue
+4. **Between issues**: check the engineer's reported state — NOT a context
+   percentage, which no bot can measure (`context-management`)
+   - If it reported `context-degraded`, or shows ~3+ completed rows in
+     `claudlobby report-back --bot <b> --status completed --since 24h`:
+     restart the bot before the next issue
+   - Otherwise: dispatch next issue
 
 **Step 8: Sprint summary**
 
@@ -152,7 +158,7 @@ Next sprint candidates:
 
 **Step 9: Post-sprint retro (optional)**
 
-If any issues were merged, dispatch an engineer to run `/claudna:development-retro` on the combined work. Create follow-up issues from findings.
+If any issues were merged, dispatch an engineer to run a development retro on the combined work, using whichever retro skill they have (clauDNA offers `/claudna:development-retro`); otherwise have them write the retro directly. Create follow-up issues from findings.
 
 ## Bot Selection
 

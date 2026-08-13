@@ -17,7 +17,7 @@ Walk the knowledge-graduation ladder for fleet docs. The policy — rung criteri
 3. **Apply the protocol's criteria** for that rung, in both directions — qualifies up, over-placed, stale, or superseded.
 4. **Dedup-check the target rung** before proposing a promote:
    - rung 2 target: scan the fleet `shared/` tree's INDEX.md files first, then Grep titles and tags
-   - rung 3 target: `/claudna:recall` or `/claudna:claudron lookup` on the topic — vault dedup is title-keyed, so search by topic, not exact title
+   - rung 3 target: search the vault on the topic, using whichever vault-search skill you have (clauDNA offers `/claudna:recall` and `/claudna:claudron lookup`) or the `claudron` CLI directly — vault dedup is title-keyed, so search by topic, not exact title
 5. **Emit one proposal block** (format below).
 
 ### 2. Staleness sweep: `/graduate sweep`
@@ -39,7 +39,7 @@ The scheduled pass.
 Run only after a verdict is ratified; name the ratifying reply in the report.
 
 - **memory → shared:** write the doc into the right `shared/` subtree with full frontmatter; the memory copy becomes a pointer.
-- **shared → vault:** strip the file's frontmatter, capture via `/claudna:capture`, then the shared copy becomes a pointer.
+- **shared → vault:** strip the file's frontmatter, capture into the vault through whichever capture skill you have (clauDNA offers `/claudna:capture`) or the `claudron` CLI directly, then the shared copy becomes a pointer.
 - **refresh:** re-verify against reality first (run the commands, check the paths) — a refresh without re-verification is fabrication — then bump `updated:` and extend `expires:`.
 - **retire / demote:** per the protocol's verdict table and the Shared Documentation lifecycle.
 - **Always finish with `/index`** in every touched directory.

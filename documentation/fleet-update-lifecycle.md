@@ -11,6 +11,106 @@ Two update classes, two mechanisms:
 
 The only update that costs a restart is the binary. That restart is made **rare** (weekly, workers only) and **lossless** (resume-on-every-start, below).
 
+## The four delivery carriers
+
+Everything below documents *what runs when*. This section answers the question
+that comes first: **I have a change — how does it reach a bot?** There are four
+carriers, and the mechanisms below are instances of them rather than peers.
+
+| Carrier | Reaches a *running* process | Survives restart | Delivered by |
+|---|---|---|---|
+| **Dispatch** (tmux message) | yes — but with no delivery-time guarantee | no | sending a message |
+| **Composed file** (`CLAUDE.md`, `bot.conf`, `settings`) | **no** — arrives at the next restart | yes | `claudlobby generate` |
+| **Hook script** (`lib/*.sh` wired via `PreToolUse` etc.) | yes — at the next tool call | yes | a `git pull` on the shared install |
+| **Repo `CLAUDE.md`** (project instructions) | no — loads at session start | yes | a `git pull` on the shared install |
+
+The cost of each is what makes this worth reading:
+
+**Dispatch — two failure modes, not one.** It can arrive *too late*, and it can
+be *erased*. There is no record: a bot that restarts mid-task loses the message
+silently. And "queued" is a third state, not a synonym for delivered — a send
+queued behind an erroring turn is discarded (#1048), so delivery is conditional
+on the current turn ending cleanly.
+
+Sender visibility is **manual, instantaneous, and absent by default** — not
+impossible. Polling the recipient's pane at that instant does show it; nothing
+shows it to you afterwards.
+
+The race is a property of **delegated guidance**, not of dispatch itself. A
+sender who is also the actor has no window to lose. So the precondition is
+checkable, and a reader should ask it rather than be told to take care:
+
+> **Am I sending guidance to someone who is about to act, or am I acting myself?**
+
+**Composed file — the one that misleads.** A bot already running does *not* have
+it. "It is composed" reads as "they have it" and is false until each bot
+restarts.
+
+**Hook script — no canary *window*.** One pull and it is live on every bot at its
+next tool call, so staging cannot be applied *around* the change; it has to be
+built *into* it, via a dormant flag. Two precedents exist — cited rather than
+generalised, because copyable beats abstract. `lib/spin-down-bot.sh:22-27` states
+the problem, the solution and the procedure:
+
+> `DEFAULT 0 (dormant): the flags above still parse and the teardown is
+> unchanged, but no ledger row is written. lib/ is a shared install, so this is
+> what keeps a root-pull from making new behavior live on a destructive door
+> without a canary. Arm per fleet in fleet.yaml `env:`, canary on a throwaway
+> first.`
+
+The second is `SESSION_DIGEST_ENABLED` (`lib/transcript-digest.sh:41`). That is
+**two instances, not an established convention** — a grep for `*_ENABLED` across
+`lib/*.sh` and `claudlobby/*.py` returns exactly those two. Whether other
+staging paths exist has not been checked.
+
+A stronger form of this row — "no staging by construction" — was proposed,
+refuted and retracted within the hour (#1078). The surviving claim is about
+*where* staging has to live, not whether it is possible.
+
+**Repo `CLAUDE.md` — coverage is positional, not declared.** Every other carrier
+reaches a *stated* set of bots. This one reaches whoever happens to be standing
+in the right directory, because project instructions load from the cwd upward.
+
+Coverage here is currently **total and currently accidental**: every bot receives
+it only because the fleet overlay lives at `local/<fleet>/` *inside* the
+compositor repo, so walking up from a bot dir reaches it. That is a property of
+the install layout, not of any design decision — and nothing would flag the day
+it stopped being total. **That is worse than partial coverage, because partial
+coverage is visible.**
+
+Whether a fleet installed *outside* the repo tree would receive it is
+**inference, not measurement** — it follows from how project instructions load,
+and it has not been tested by anyone. There is no such fleet on this host to
+test against.
+
+What actually lives only here, in the form that survives re-checking:
+
+> The dormant-flag **rationale** — the shared-install / root-pull argument —
+> appears only in the repo `CLAUDE.md` and in no composition source, so no
+> regenerate can produce it.
+
+That is deliberately narrower than "the concept is absent". `library/` *does*
+document that things are dormant by default (2 files); only the repo `CLAUDE.md`
+documents *why* — that a pull would otherwise make new behaviour live on every
+bot at once (`root-pull` and `silently activating`: 0 files in `library/`, 1 each
+in the repo `CLAUDE.md`).
+
+**If you re-measure this by grep, expect an ambiguous answer**, and this is why:
+`SPINDOWN_RECEIPT_ENABLED` appears in 0 of 21 composed bot `CLAUDE.md` on this
+host, but `SESSION_DIGEST_ENABLED` appears in 1 — carried by a monitoring caveat
+("absence of rows means the instrument is off, not that the fleet is quiet"),
+which is the same string serving an entirely different purpose. So a grep for
+the flag names returns a hit that is *not* the rationale. Search for the
+rationale, not the flag.
+
+**And take the denominator from the manifest, not the filesystem.** 21 is the
+union of bots declared across every `fleet.yaml`; a `find` over `runtime/bots/`
+also returns test fixtures nested inside a checked-out copy of this repo, which
+are not bots this or any carrier reaches. Enumerate from the manifests and look
+each one up — the same rule `lib/selfstart-snapshot.sh` already applies, and for
+the same reason: a denominator drawn from directories silently changes when
+something unrelated appears on disk.
+
 ## Mechanism 1 — daily live reload (plugins + skills)
 
 `lib/reload-fleet.sh`, timer job `reload-fleet` (`claudlobby/system.yaml`, `schedule: "*-*-* 03:30:00"`, `type: oneshot`), enrolled via `lib/install-reload-fleet-systemd.sh`.
@@ -56,12 +156,12 @@ fleet:
 
 Every bot start — intentional (restart skill, weekly bounce), crash (keepalive), or an operator's manual restart — is a potential context loss. `lib/start-bot.sh` closes that gap:
 
-- Before `STARTUP_PROMPT`, it injects `/claudna:session resume --auto` as the first keystroke, gated by `should_resume_session()` (`lib/lib-common.sh`).
+- Before `STARTUP_PROMPT`, it injects the configured session-resume command as the first keystroke, behind **two independent gates** (`lib/lib-common.sh`): `should_resume_session()` for checkpoint age, and `session_command_status()` for whether that command can actually resolve. The command itself is configuration (`SESSION_RESUME_COMMAND`, empty to disable), not a hardcoded provider — under `plugins.include_defaults: false` there is no session plugin, and injecting an unresolvable keystroke into every pane on every boot was #1163.
 - `should_resume_session` reads the handoff's `last_updated:` frontmatter field from `.claude/session.md` (falling back to file mtime for older artifacts) and compares its age against `RESUME_MAX_AGE_S` (env-overridable; default `86400` seconds = 24h).
 - **Fresh** checkpoint (age < threshold) → resume fires, the bot picks up its last handoff.
 - **Stale** checkpoint (age ≥ threshold) or none → resume is skipped and the bot clean-starts rather than replaying dead state (e.g. re-attempting an already-merged PR).
 
-On the intentional-restart paths (`library/skills/restart`, `weekly-worker-restart.sh`), `lib/pre-stop-handoff.sh` writes a fresh handoff (`/claudna:session handoff --auto`) before the restart, non-blocking (always exits 0, even on a 30s timeout) — so the restart never stalls on a slow or failed handoff. Crash-restarts (`keepalive.sh`) skip straight to resume-from-last-checkpoint, since there's no live session left to hand off from.
+On the intentional-restart paths (`library/skills/restart`, `weekly-worker-restart.sh`), `lib/pre-stop-handoff.sh` triggers a fresh handoff before the restart — behind the same capability gate, since this runs on the `ExecStop` path where an unresolvable command costs the handoff at exactly the moment it matters. Non-blocking either way (always exits 0, even on a 30s timeout), so the restart never stalls on a slow or failed handoff; a skip is logged and emits `handoff_skipped`. Crash-restarts (`keepalive.sh`) skip straight to resume-from-last-checkpoint, since there's no live session left to hand off from.
 
 ## Relationship to PR #399
 
@@ -77,7 +177,7 @@ PR #399 added `lib/update-claude-code.sh` with a daily **fleet-wide bounce** —
 | `lib/weekly-worker-restart.sh` | Mechanism 2: weekly worker-only lossless restart |
 | `lib/install-weekly-worker-restart-systemd.sh` | Enrolls the weekly restart timer (dormant by default) |
 | `lib/keepalive.sh` | Consumes `data/.reload-pending` at each idle tick; also the crash-restart entrypoint |
-| `lib/start-bot.sh` | Injects age-gated `/claudna:session resume --auto` before `STARTUP_PROMPT` on every start |
+| `lib/start-bot.sh` | Injects the configured resume command before `STARTUP_PROMPT`, gated on BOTH checkpoint age and resume capability; logs `RESUME SKIP` + `resume_skipped` when either gate closes |
 | `lib/pre-stop-handoff.sh` | Best-effort, non-blocking handoff before an intentional restart |
 
 Full design history, decision forks, and rationale: `documentation/plans/archive/2026-06-14-fleet-skill-plugin-update-lifecycle.md`.

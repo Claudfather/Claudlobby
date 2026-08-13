@@ -56,17 +56,36 @@ confusing, circular, or missing a step.
 
 ## Level 2 — a real cold run (for any onboarding change)
 
+Driven by the **`simulate-cold-start`** skill, which wraps `lib/coldstart-harness.sh`:
+
 ```bash
-git archive <ref> | tar -x -C /tmp/coldstart
-cd /tmp/coldstart
-# now run exactly what the README prints, copy-pasted
+lib/coldstart-harness.sh prepare       # preflight, export, host snapshot, launch command
+# ... run the cold arm in a NEW terminal: cd <tree> && claude, then /setup ...
+lib/coldstart-harness.sh status        # what did the run create?
+lib/coldstart-harness.sh reap          # tear down units, sockets, processes, tree
+lib/coldstart-harness.sh transcript    # harvest the session narrative
 ```
 
 **Export, do not clone.** A `git clone` carries `.git`, and your own commit messages describe the
-defects you are trying to rediscover.
+defects you are trying to rediscover. `prepare` uses `git archive` and refuses a tree that
+carries any of `.git local .venv .env fleet.yaml runtime state`.
+
+**The cold arm cannot be a subagent.** Skill registration is bound at session start, so a
+subagent inherits the parent's registry and can only read the exported `SKILL.md` as a file — it
+can never invoke `/setup`. Since the invocation is what is under test, the arm must be a fresh
+interactive session whose entire input is `/setup`.
+
+**Instrument, do not fence.** You cannot tell a blind run "do not enroll supervision" without
+revealing that supervision exists. So snapshot the host, let the run do whatever it does, and
+diff. `reap` removes only what is *absent from the pre-run snapshot*, which is what makes this
+safe to run on a host carrying a production fleet. Fence only the irreversible: no `sudo`, no
+`--break-system-packages`, no writes outside the tree and the user unit directory.
 
 Stop at the credential gate. Needing real tokens is not a reason to skip the exercise —
-essentially every onboarding defect lives before it.
+essentially every onboarding defect lives before it. Going *past* it exercises generate,
+supervision enrollment and first boot — the richest part of the surface — but requires a
+throwaway BotFather bot: Telegram permits one `getUpdates` consumer per token, so reusing a live
+fleet's token makes two hosts silently steal each other's messages.
 
 ## Level 3 — blind A/B (for a change that claims to *fix* onboarding)
 

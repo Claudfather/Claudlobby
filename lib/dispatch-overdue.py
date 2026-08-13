@@ -32,13 +32,59 @@ omitted, so the common path closes its dispatch by default:
   dispatch-overdue.py --open-task <bot_id> <dispatch_log> <report_ledger>
   Prints one task id, or nothing when the bot has none open.
 
+Open-list mode (#904) -- every still-open id'd row, not just the one the
+resolver would pick, so "open but not yet due" is readable by the read door:
+  dispatch-overdue.py --open <bot_id> <dispatch_log> <report_ledger>
+  Prints: "<dispatched_at> <expected_by> <task_id>" per row, oldest first
+  (expected_by is "-" when the row carries none). Deadline-blind, so this is a
+  strict superset of --all's rows for the same bot; --open-task is its head.
+  Also states its scope on STDERR ("--open: bot=... -> N open ...") on every
+  run, so an empty result names what it filtered on and can never be read as
+  "nothing exists" (#1187). Stdout stays rows-only for machine callers.
+
+Unassigned mode (#1024) -- the MIRROR of overdue: a worker that reported and was
+never re-tasked. Purely temporal (newest dispatch vs newest report); it never
+reads whether a dispatch is open, because superseded rows stay open forever and
+that signal is noise in both directions. See unassigned_all:
+  dispatch-overdue.py --unassigned <dispatch_log> <report_ledger> [<now_epoch>]
+  Prints: "<bot_id> <reported_at> <idle_seconds> <task_id> <status>"
+
+WHICH MODES HAVE A BOT SLOT -- the grammar trap behind #1187. The split is not
+bot-first vs logs-first; it is whether a mode names ONE bot at all:
+
+  has a bot slot, taken FIRST   --open, --open-task, and SINGLE-BOT MODE
+  no bot slot at all            --all, --orphans, --unassigned (every bot)
+
+Single-bot mode shares --open and --open-task's grammar EXACTLY (main() reads
+`bot, dlog, rlog = argv[1], argv[2], argv[3]`, same as they do) and therefore
+shares the hazard exactly: three positionals parse cleanly with a path in the
+bot slot, nothing matches, rc 0, no output -- indistinguishable from a genuine
+empty result. It reaches that state most easily by FORGETTING a flag, since
+`<dlog> <rlog> <now>` with no mode falls straight through to it.
+
+Only --open/--open-task are gated so far (see _not_a_bot_id). SINGLE-BOT MODE
+IS NOT, and closing it is the same one-line _reject_bot_slot call, not a
+harder dlog/rlog-swap detection -- stated because an earlier version of this
+paragraph filed single-bot mode under "logs-first" and would have sent the
+next reader looking for the harder fix.
+
+The other three need no gate: with no bot slot there is nothing to check, and
+mis-ordering them is already LOUD rather than silent -- a ledger path lands in
+the `now` slot and int() raises, rc 1 (measured, all three). So single-bot
+mode is the only silent shape left in this module. Pinned by
+tests/test_dispatch_overdue.py::TestBotSlotShapeGate, including a tripwire that
+FAILS when single-bot mode is finally gated, so this paragraph cannot go stale
+the way its first version did.
+
 `--bots-dir <dir>` goes last and enables respawn detection; without it no row is
 ever classified as an orphan. It is also the one input that is NOT one of the two
 ledgers: orphan classification reads `.spawn` mtimes, so that mode alone depends
 on ambient filesystem state. Everything else stays a pure function of
 (dispatch log, report ledger, clock).
 
-No output (and exit 0) when nothing is overdue.
+No output (and exit 0) when nothing is overdue. --open is the one exception and
+deliberately so: it exits 0 with no STDOUT rows, but always writes its scope
+line to STDERR (above).
 
 Kept as a standalone, stdlib-only script so it is unit-testable in isolation and
 callable from fleet-pulse.sh.
@@ -57,6 +103,34 @@ _TERMINAL = {"completed", "failed", "blocked"}
 # dispatched_at), bounding the watchdog's re-emission. 24h default; override with
 # DISPATCH_OVERDUE_MAX_AGE_S; <= 0 disables the cap.
 DEFAULT_OVERDUE_MAX_AGE_S = 86400
+
+
+# A dispatch whose worker reported progress within this window is treated as ALIVE,
+# not overdue. Measured, not chosen round (2026-08-04, 33 progress reports over 7 days
+# across 5 bots): the gap from a progress report to that bot's next report of any kind
+# clusters at <=30min (29 of 33; median 9, p75 22) and then jumps straight to 60, 76,
+# 357, 616 — an empty band between 30 and 60 separating "still working" from "stopped".
+# 45min sits in that band: 1.5x margin over the worst observed in-work cadence, while
+# still alarming 15min before the shortest gap that looked like a stall.
+#
+# WHY THIS DOES NOT HIDE A DEAD WORKER, which is the property that matters more than
+# the number: a stuck or crashed session emits nothing, so its last progress report
+# ages out of this window and the dispatch alarms exactly as it does today, just later
+# by at most the grace. Only a worker actively reporting can defer, and it can only
+# defer as long as it keeps reporting.
+DEFAULT_PROGRESS_GRACE_S = 2700
+
+
+def _resolve_progress_grace() -> int:
+    """Read the progress grace window from env, falling back to the default.
+
+    Same TypeError/ValueError funnel as _resolve_max_age: an unset var and a malformed
+    one take the same path. <= 0 disables progress-based deferral entirely.
+    """
+    try:
+        return int(os.environ.get("DISPATCH_PROGRESS_GRACE_S"))
+    except (TypeError, ValueError):
+        return DEFAULT_PROGRESS_GRACE_S
 
 
 def _resolve_max_age() -> int:
@@ -128,6 +202,27 @@ def _terminal_reported_ids(reports: list[dict]) -> set[tuple[str, str]]:
     }
 
 
+def _superseded_ids(dispatches: list[dict]) -> set[tuple[str, str]]:
+    """(bot, task_id) pairs a LATER dispatch explicitly declared it replaces.
+
+    The dispatcher records `supersedes` at the moment of re-dispatch, because that is
+    the only moment the intent exists. Two dispatches to one bot are indistinguishable
+    in this ledger — the second may replace the first or queue behind it — so a
+    superseded row can only be recognised if the caller said so. Inferring it from
+    timing was measured and rejected: 14 of 189 closed rows had a later row close
+    first and were still answered afterwards, 3 of them genuine work answered 6-7h
+    late (2026-08-05). Retiring on that signal would drop tasks someone still owed.
+
+    Scoped by bot for the same reason `_terminal_reported_ids` is: one bot's dispatch
+    must not retire another's row, however the id was typed (#518 review).
+    """
+    return {
+        (str(d.get("bot", "")).lower(), str(d["supersedes"]))
+        for d in dispatches
+        if d.get("supersedes")
+    }
+
+
 def _spawn_epoch(bots_dir: str, bot: str) -> int | None:
     """Mtime of <bots_dir>/<bot>/data/.spawn, or None when unreadable.
 
@@ -165,12 +260,24 @@ def _classify_all(
     # watchdog on the real owner's still-open dispatch (#518 review).
     report_index: dict[str, list[int]] = {}
     reported_ids = _terminal_reported_ids(reports)
+    superseded_ids = _superseded_ids(dispatches)
+    # Latest progress report per bot. A progress report closes NOTHING — it is not
+    # terminal and never will be — but it is proof the worker is alive, which is the
+    # question the watchdog is actually asking. See _progress_grace below.
+    last_progress: dict[str, int] = {}
     for r in reports:
-        if r.get("status") not in _TERMINAL:
-            continue
+        status = r.get("status")
         ep = _iso_to_epoch(r.get("ts", ""))
-        if ep is not None:
-            report_index.setdefault(str(r.get("bot", "")).lower(), []).append(ep)
+        if ep is None:
+            continue
+        bot_l = str(r.get("bot", "")).lower()
+        if status == "progress":
+            if ep > last_progress.get(bot_l, 0):
+                last_progress[bot_l] = ep
+            continue
+        if status not in _TERMINAL:
+            continue
+        report_index.setdefault(bot_l, []).append(ep)
 
     out: dict[str, list[tuple[int, int, int, str]]] = {}
     orphans: dict[str, list[tuple[int, int, int, str]]] = {}
@@ -180,6 +287,7 @@ def _classify_all(
     # lru_cache — the memo must not outlive the call, since .spawn moves
     # between sweeps.
     spawn_cache: dict[str, int | None] = {}
+    progress_grace = _resolve_progress_grace()
     for d in dispatches:
         bot_key = str(d.get("bot", "")).lower()
         exp, da = d.get("expected_by"), d.get("dispatched_at")
@@ -191,8 +299,34 @@ def _classify_all(
         if tid:
             if (bot_key, str(tid)) in reported_ids:
                 continue
+            # Retired by declaration: a later dispatch to this bot said it replaces
+            # this row, so nobody will ever report against it. Checked only for id'd
+            # rows — an id-less row already closes on any later terminal report, so it
+            # has nothing to be stranded by.
+            if (bot_key, str(tid)) in superseded_ids:
+                continue
         elif any(e >= da for e in report_index.get(bot_key, [])):
             continue
+        # Liveness gate: the worker reported progress recently, so it is working, not
+        # stuck. Deferral is bounded by the grace window and by the worker's own
+        # silence — stop reporting and this stops suppressing. Checked AFTER the
+        # report gate so a closed dispatch still reads as closed rather than as
+        # deferred, and BEFORE the expiry cap so a deferred row keeps its real age.
+        #
+        # Scoped per BOT rather than per dispatch because progress reports carry no
+        # task id (report-back.sh only resolves one for terminal statuses — resolving
+        # a progress report would stamp an id no consumer reads). A bot working its
+        # queue is alive for every row it holds, which is the honest reading: the
+        # claim being made is "this session is not stuck", not "this task advanced".
+        if progress_grace > 0:
+            lp = last_progress.get(bot_key)
+            # da < lp <= now. The upper bound is load-bearing: a future-dated report
+            # (clock skew, a hand-edited ledger) would otherwise give a NEGATIVE age
+            # that satisfies any grace and suppress the alarm permanently — a silent
+            # mute, which is the one outcome this change must never produce.
+            if lp is not None and da < lp <= now and (now - lp) <= progress_grace:
+                continue
+
         # Expiry cap (#460): once a still-open dispatch is older than max_age, the
         # watchdog stops flagging it so fleet-pulse quits re-emitting every cycle.
         # Checked after the report gate so a closed dispatch reads as closed, not
@@ -268,6 +402,201 @@ def orphaned_all(
     return _classify_all(dispatch_log, report_ledger, now, max_age, bots_dir)[1]
 
 
+def open_dispatches(
+    bot: str,
+    dispatch_log: str,
+    report_ledger: str,
+) -> list[tuple[int, int | None, str]]:
+    """The bot's still-open id'd dispatches, OLDEST FIRST.
+
+    Each entry is (dispatched_at, expected_by, task_id). ``expected_by`` is
+    None when the row carries none (or a non-int one) — deliberately NOT a
+    filter, so this set stays a strict superset of what ``open_task_id``
+    considers. A row that can supply the resolver's id must also be listable
+    here, or the door would hide work the resolver can still close.
+
+    OPEN is deadline-blind, and that is the whole point of this door: a
+    dispatch is open until a terminal report echoing its id closes it, whether
+    or not ``now`` has passed ``expected_by``. That makes it strictly wider
+    than the watchdog's OVERDUE — every overdue row is an open row — so
+    "carrying three tasks, none late yet" becomes readable, which is a state
+    no existing mode could express.
+
+    THE loop behind ``open_task_id``, which is now just this list's head. Two
+    loops would let the resolver hand back an id this list does not contain —
+    the same desync class ``_terminal_reported_ids`` exists to prevent, one
+    level up.
+
+    The join is NOT loosened: only a terminal report carrying the same
+    (bot, task_id) closes a row, exactly as in ``_classify_all``.
+    """
+    bot_key = bot.lower()
+    reported = _terminal_reported_ids(_load_jsonl(report_ledger))
+    rows: list[tuple[int, int | None, str]] = []
+    for d in _load_jsonl(dispatch_log):
+        if str(d.get("bot", "")).lower() != bot_key:
+            continue
+        tid, da = d.get("task_id"), d.get("dispatched_at")
+        if not tid or not isinstance(da, int):
+            continue
+        if (bot_key, str(tid)) in reported:
+            continue
+        exp = d.get("expected_by")
+        rows.append((da, exp if isinstance(exp, int) else None, str(tid)))
+    # Stable sort, so rows dispatched in the same second keep ledger order —
+    # matching the strict-< tie-break open_task_id used when it kept its own min.
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+def unassigned_all(
+    dispatch_log: str,
+    report_ledger: str,
+    now: int,
+    idle_threshold: int = 0,
+) -> dict[str, tuple[int, int, str, str]]:
+    """Workers that reported terminal and were never re-tasked — the #1024 mirror.
+
+    Returns {bot: (reported_at, idle_seconds, task_id, status)}.
+
+    overdue_all answers "work was sent and never came back". This answers the
+    mirror, which had no detector at all: **work came back and nothing was
+    sent.** A worker that finishes cleanly and is then forgotten is
+    indistinguishable from one legitimately idle, and activity_stuck cannot see
+    it — a genuinely idle bot IS idle, so keepalive re-stamps `.idle` and that
+    branch never fires. Correct for its purpose, and precisely why this case was
+    invisible for 16 hours.
+
+    THE PREDICATE IS PURELY TEMPORAL, AND THAT IS THE WHOLE DESIGN. It compares
+    the newest dispatch instant against the newest report instant. It never asks
+    whether any dispatch is OPEN.
+
+    That restraint is the load-bearing part, not an optimisation. A manager
+    amending a task re-dispatches repeatedly, and every superseded row stays open
+    forever because the worker answers only the last id.
+
+    Verified against a real chain rather than a fixture (vera, review of #1121):
+    six dispatches to one worker inside 2143s for a single evolving task, five of
+    the six ids still open afterwards, while that worker was demonstrably working
+    throughout. Replaying this function over the same two ledgers truncated to
+    successive cutoffs — not merely varying `now`, which cannot replay history —
+    it stays silent through the busy stretch, raises at the real 4797s gap that
+    followed, and goes silent again the instant the next dispatch lands. All five
+    stale ids are open the entire time and change nothing.
+
+    So "this bot has an open dispatch" carries no information about whether it is
+    working. Keyed on it, this check fails in BOTH directions — page on every
+    re-dispatching manager (the common case, not an edge one), or read those
+    stale rows as "still busy" and never fire, which is the #1024 incident
+    recurring inside its own watchdog.
+
+    Comparing instants makes supersession irrelevant by construction: stale rows
+    are all older than the report that closed the real task, so they can neither
+    mask a strand nor manufacture one. This is also why nothing here consumes
+    #1027's `supersedes` field, and why its absence costs nothing — there is no
+    ambiguity left for a declaration to resolve.
+
+    A bot whose newest report is `progress` is NOT returned: it is working, or it
+    has stalled mid-task, and the stall is overdue_all's to report. Only a
+    terminal newest report means the worker is done and waiting.
+
+    Threshold filtering defaults OFF (0 = report every match with its idle time).
+    fleet-pulse applies the threshold and the staleness cap PER BOT from
+    bot.conf, the same split activity_stuck uses: this owns the join, the caller
+    owns the policy. One scan therefore serves bots with different thresholds.
+    """
+    reports = _load_jsonl(report_ledger)
+    dispatches = _load_jsonl(dispatch_log)
+
+    # Newest report per bot, whatever its status — taking the newest TERMINAL one
+    # instead would read a bot that reported progress after finishing as idle.
+    newest_report: dict[str, tuple[int, str, str]] = {}
+    for r in reports:
+        bot = str(r.get("bot", "")).lower()
+        ts = _iso_to_epoch(str(r.get("ts", "")))
+        if not bot or ts is None:
+            continue
+        if ts >= newest_report.get(bot, (-1,))[0]:
+            newest_report[bot] = (
+                ts,
+                str(r.get("status", "")),
+                str(r.get("task_id") or "-"),
+            )
+
+    # Newest dispatch per bot. `dispatched_at` is the epoch the manager sent it;
+    # fall back to `ts` for rows that predate that field.
+    newest_dispatch: dict[str, int] = {}
+    for d in dispatches:
+        bot = str(d.get("bot", "")).lower()
+        if not bot:
+            continue
+        da = d.get("dispatched_at")
+        if not isinstance(da, int):
+            da = _iso_to_epoch(str(d.get("ts", "")))
+        if da is None:
+            continue
+        if da > newest_dispatch.get(bot, -1):
+            newest_dispatch[bot] = da
+
+    out: dict[str, tuple[int, int, str, str]] = {}
+    for bot, (rts, status, tid) in newest_report.items():
+        if status not in _TERMINAL:
+            continue
+        last_d = newest_dispatch.get(bot)
+        if last_d is not None and last_d > rts:
+            continue  # re-tasked after reporting — the loop is intact
+        idle = now - rts
+        if idle < 0 or idle < idle_threshold:
+            continue
+        out[bot] = (rts, idle, tid, status)
+    return out
+
+
+def _answering_an_idless_dispatch(
+    bot: str,
+    dispatch_log: str,
+    report_ledger: str,
+) -> bool:
+    """True when this bot's most recent dispatch carries no id and is unanswered.
+
+    The evidence that a terminal report is NOT the missing echo of an id'd row.
+    It is read off the ledgers the fleet already writes — no wire-format field
+    and no worker cooperation, which matters because a composed instruction does
+    not reach a running bot until it restarts, while this file is read fresh on
+    every report.
+
+    UNANSWERED is the second half and it is what keeps #835 intact. Without it a
+    single peer note would suppress the resolver for the rest of the bot's life,
+    stranding every later report. A terminal report landing after the id-less
+    dispatch discharges it; the report after that resolves normally again.
+
+    Ties go to the later ledger line (`>=`), matching arrival order — the same
+    tie-break open_dispatches takes with its stable sort.
+    """
+    bot_key = bot.lower()
+    latest: dict | None = None
+    latest_at: int | None = None
+    for d in _load_jsonl(dispatch_log):
+        if str(d.get("bot", "")).lower() != bot_key:
+            continue
+        da = d.get("dispatched_at")
+        if not isinstance(da, int):
+            continue
+        if latest_at is None or da >= latest_at:
+            latest, latest_at = d, da
+    if latest is None or latest.get("task_id"):
+        return False
+    for r in _load_jsonl(report_ledger):
+        if str(r.get("bot", "")).lower() != bot_key:
+            continue
+        if r.get("status") not in _TERMINAL:
+            continue
+        at = _iso_to_epoch(str(r.get("ts", "")))
+        if at is not None and at >= latest_at:
+            return False
+    return True
+
+
 def open_task_id(
     bot: str,
     dispatch_log: str,
@@ -305,21 +634,36 @@ def open_task_id(
     reuse a bot name would cross-resolve. Pre-existing in the watchdog join; it
     matters more here because this writes the result. Fleet-scoping the join
     needs fleet identity threaded through both readers — tracked separately.
+
+    SUPPRESSED when the bot's most recent dispatch is an unanswered id-less one
+    (#1190). The resolver's whole premise is "the worker finished the id'd row it
+    was given and forgot to echo the id". A peer note breaks that premise: the
+    most recent thing asked of the bot carried no id, so a terminal report now is
+    most plausibly answering THAT, and stamping an older id'd row asserts
+    something the ledger does not support. The result is not a stale row — it is
+    a real, in-progress task silently marked `completed`, which is the one
+    outcome worse than the never-closing row #1187 set out to stop: an open row
+    is visible and legible, a false completion sends nobody to look.
+
+    Measured through the real report-back.sh, worker compliant with Step 2 in
+    both arms: `--type query` to a bot holding one open id'd task closed that
+    task. So did a raw-text dispatch on main — the hole predates the envelope
+    types and is not reachable from the transmit side at all, which is why this
+    guard lives here and not in the envelope.
+
+    Returning None NEVER violates the superset invariant this door shares with
+    open_dispatches: the rule is that it must not hand back an id the list does
+    not contain, and None contains nothing. --open, --all, --orphans and
+    --unassigned are untouched; only the resolver reads this.
+
+    The cost is deliberate and one-directional: a report that WAS the missing
+    echo now leaves its row open until the next report. That is UNTRACKED, the
+    degradation direction #1187 chose, and the watchdog still surfaces it.
     """
-    bot_key = bot.lower()
-    reported = _terminal_reported_ids(_load_jsonl(report_ledger))
-    best: tuple[int, str] | None = None
-    for d in _load_jsonl(dispatch_log):
-        if str(d.get("bot", "")).lower() != bot_key:
-            continue
-        tid, da = d.get("task_id"), d.get("dispatched_at")
-        if not tid or not isinstance(da, int):
-            continue
-        if (bot_key, str(tid)) in reported:
-            continue
-        if best is None or da < best[0]:
-            best = (da, str(tid))
-    return best[1] if best else None
+    if _answering_an_idless_dispatch(bot, dispatch_log, report_ledger):
+        return None
+    rows = open_dispatches(bot, dispatch_log, report_ledger)
+    return rows[0][2] if rows else None
 
 
 def missing_id_count(report_ledger: str) -> int:
@@ -347,6 +691,59 @@ def _take_bots_dir(argv: list[str]) -> tuple[list[str], str | None]:
     return argv, None
 
 
+def _not_a_bot_id(value: str) -> str | None:
+    """Why this first positional cannot be a bot id — or None if it might be.
+
+    #1187. `--open`, `--open-task` and single-bot mode each name ONE bot and
+    take it FIRST; `--all`/`--orphans`/`--unassigned` name none. Calling a
+    bot-slot mode with the every-bot grammar keeps the arity valid, so the
+    existing count check passes, a path lands in the bot slot, nothing matches
+    it, and the door prints nothing at rc 0 — byte-identical to a genuine
+    "nothing open". That is how a manager read a full backlog as all-clear
+    while checking whether its closures had worked.
+
+    Callable for single-bot mode too, which has the identical grammar and is
+    NOT yet wired to it; see the module docstring.
+
+    So the missing check is on SHAPE, not count. Wrong ARITY already fails
+    loudly and is not the hazard: measured, two positionals return rc 2 with the
+    usage line. It is specifically right-count/wrong-order that is silent.
+
+    Lexical only, and deliberately NOT a roster lookup. This module is a pure
+    function of (dispatch log, report ledger, clock) — everything but --orphans
+    reads no ambient state — and a manifest read here would both break that and
+    re-import the #526 host-global-vs-per-fleet mismatch into a validator, where
+    a legitimate cross-fleet name would then be refused outright.
+
+    Rejects only what a bot id can NEVER be, so it cannot refuse a real one: a
+    bot id names a directory under runtime/bots/ and a tmux session, so it holds
+    no "/" and does not end ".jsonl". Both shapes are needed — a ledger passed
+    by bare filename from its own directory carries no separator.
+    """
+    if not value.strip():
+        return "an empty bot id"
+    if "/" in value:
+        return f"a path: {value!r}"
+    if value.endswith(".jsonl"):
+        return f"a ledger file: {value!r}"
+    return None
+
+
+def _reject_bot_slot(mode: str, value: str) -> bool:
+    """Print the #1187 shape refusal for `mode`, or return False to proceed."""
+    why = _not_a_bot_id(value)
+    if why is None:
+        return False
+    print(
+        f"dispatch-overdue.py: {mode} expects <bot_id> first, got {why}\n"
+        f"  usage: dispatch-overdue.py {mode} <bot_id> <dispatch_log> <report_ledger>\n"
+        "  note:  --all/--orphans/--unassigned take the LOGS first and name no "
+        "bot at all; --open/--open-task take the BOT first.",
+        file=sys.stderr,
+    )
+    return True
+
+
 def main() -> int:
     argv, bots_dir = _take_bots_dir(sys.argv)
     if len(argv) < 3:
@@ -362,9 +759,74 @@ def main() -> int:
         if len(argv) < 5:
             print(__doc__.strip().splitlines()[0], file=sys.stderr)
             return 2
+        # Shares --open's grammar, so it shares --open's hazard (#1187). Inert
+        # for the only production caller: report-back.sh passes its own $BOT,
+        # and a $BOT shaped like a path already resolved to nothing here. The
+        # refusal is on stderr behind that caller's 2>/dev/null and its rc
+        # behind `|| true`, so the fail-open contract above is untouched — a
+        # report-back still degrades to an id-less report, never an error.
+        if _reject_bot_slot("--open-task", argv[2]):
+            return 2
         tid = open_task_id(argv[2], argv[3], argv[4])
         if tid:
             print(tid)
+        return 0
+
+    # The read door's list form (#904). Same silence-on-empty contract as
+    # --open-task: no rows means no output and rc 0, never an error.
+    if argv[1] == "--open":
+        if len(argv) < 5:
+            print(__doc__.strip().splitlines()[0], file=sys.stderr)
+            return 2
+        if _reject_bot_slot("--open", argv[2]):
+            return 2
+        rows = open_dispatches(argv[2], argv[3], argv[4])
+        for da, exp, tid in rows:
+            print(f"{da} {exp if exp is not None else '-'} {tid}")
+        # State the scope, ALWAYS and on STDERR (#1187). Always, because the
+        # shape gate above cannot reach the rest of the class: a plausible but
+        # wrong bot -- a typo, or a live name belonging to another fleet under
+        # #526 -- still returns zero rows at rc 0, which is coverage honesty's
+        # exact failure. An empty result that names what it filtered on can no
+        # longer be read as "nothing exists".
+        #
+        # STDERR is load-bearing, not convention, and the harm is MEASURED
+        # rather than reasoned. report-back.sh (:117) pipes this stdout through
+        # `awk {print $3}` to decide whether a supplied --task id is open. On
+        # stdout this line is parsed as a row: field 3 is "->", so the open set
+        # becomes non-empty and the "only a NON-EMPTY open set can contradict
+        # the caller" fail-open (#1146) inverts.
+        #
+        # The trigger is narrower than it first looks, which is why it has to be
+        # run rather than argued. A bot that DOES hold an open row still matches
+        # its own id -- the phantom adds an entry, it does not remove the real
+        # one -- so that case stays clean and reads as proof the placement does
+        # not matter. It bites where the bot has NOTHING open: a valid id then
+        # meets an open set of exactly ["->"], and a correct report is flagged
+        # `supplied-id-not-open` with `open now: ->`. Measured on the real
+        # script, both arms. That caller reads stdout and discards stderr, so
+        # this line is inert for it by construction.
+        print(
+            f"--open: bot={argv[2]!r} -> {len(rows)} open id'd dispatch(es)",
+            file=sys.stderr,
+        )
+        return 0
+
+    # #1024 mirror watchdog. No threshold here: fleet-pulse applies its own per
+    # bot, so one scan serves a fleet whose bots are tuned differently.
+    if argv[1] == "--unassigned":
+        if len(argv) < 4:
+            print(__doc__.strip().splitlines()[0], file=sys.stderr)
+            return 2
+        now = (
+            int(argv[4])
+            if len(argv) > 4
+            else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        )
+        for bot_id, (rts, idle, tid, status) in sorted(
+            unassigned_all(argv[2], argv[3], now).items()
+        ):
+            print(f"{bot_id} {rts} {idle} {tid} {status}")
         return 0
 
     if argv[1] in ("--all", "--orphans"):

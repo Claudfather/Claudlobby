@@ -1,12 +1,12 @@
 ---
 name: autonomous-runner
-description: "Generic continuous-job wrapper for clauDNA procedural skills. Configurable per bot via fleet.yaml. Picks work items per cadence, classifies risk, invokes the configured clauDNA skill with --auto, parses the structured result, and reports back to Telegram."
+description: "Generic continuous-job wrapper for procedural skills. Configurable per bot via fleet.yaml. Picks work items per cadence, classifies risk, invokes the configured skill with --auto, parses the structured result, and reports back to Telegram."
 ---
 
 # Autonomous Runner — Your Continuous Job
 
-The orchestration layer between a claudlobby bot and a clauDNA `--auto` skill. The bot's configuration (per fleet.yaml's `autonomous_runner` block) determines:
-- WHICH clauDNA skill to invoke each cadence tick
+The orchestration layer between a claudlobby bot and a procedural `--auto` skill. The bot's configuration (per fleet.yaml's `autonomous_runner` block) determines:
+- WHICH skill to invoke each cadence tick
 - WHICH work items to pick (for skills like `/claudna:implement-plan` that need a specific issue)
 - WHAT counts as a high-risk change to bypass before invoking
 - WHAT to do with each `outcome` from the skill's structured result
@@ -27,7 +27,7 @@ bots:
       - autonomous-runner
       # ... other skills the bot uses internally
     autonomous_runner:
-      skill: /claudna:implement-plan        # required
+      skill: /claudna:implement-plan        # required (any installed skill name)
       cadence: 1h                            # required
       target_repo: artemis-xyz/dbt           # required
       args: ""                               # optional, appended after --auto
@@ -40,8 +40,8 @@ bots:
         risk_classifier: structural_vs_mechanical
         block_on: [structural]
         on_bypass: comment_and_label
-      pre_hooks: []                          # optional clauDNA skills to run before main
-      post_hooks: []                         # optional clauDNA skills to run after main
+      pre_hooks: []                          # optional skills to run before main
+      post_hooks: []                         # optional skills to run after main
       on_outcome:                            # optional; defaults to "report" for all
         completed: report
         bypassed: report
@@ -52,11 +52,13 @@ bots:
 
 See `library/skills/autonomous-runner/archetype.md` ("Autonomous Worker") for example configurations.
 
-## How clauDNA skills are invoked
+## How the configured skill is invoked
 
-clauDNA is installed as a Claude Code plugin (`Claudfather/claudna` from the Claudfather marketplace). Skills are invoked by name via the Skill tool, **not** by reading a filesystem path. Throughout this procedure, `<skill-name>` refers to a plugin-namespaced clauDNA skill name (e.g., `/claudna:implement-plan`, `/claudna:audit tech-debt`).
+`autonomous_runner.skill` names whatever procedural skill this bot should run each tick. It is invoked **by name via the Skill tool**, never by reading a filesystem path — a plugin's on-disk location is managed by Claude Code and may change between versions.
 
-When dispatching subagents to execute a clauDNA skill, instruct the subagent to invoke the skill via the Skill tool with the constructed argument string. Do **not** pass filesystem paths — the plugin's on-disk location is managed by Claude Code and may change between versions.
+Whichever plugin provides the skill, the name is what you invoke. clauDNA (`Claudfather/claudna` from the Claudfather marketplace) is the usual provider here, and its skills are plugin-namespaced — `/claudna:implement-plan`, `/claudna:audit tech-debt`. Check your own available skills for the configured name rather than assuming a namespace.
+
+When dispatching subagents, instruct them to invoke the skill by name with the constructed argument string.
 
 ## Procedure
 
@@ -156,16 +158,17 @@ If the class is NOT in `bypass.block_on`, proceed.
 For each skill in `autonomous_runner.pre_hooks`, dispatch a `general-purpose` subagent with this prompt:
 
 ```
-Invoke the <hook-name> skill via the Skill tool. clauDNA is installed
-as a Claude Code plugin, so the skill is available as a plugin-namespaced
-slash command (e.g., /claudna:<hook-name>).
+Invoke the <hook-name> skill via the Skill tool, by name. If it is
+provided by a plugin the name is namespaced — clauDNA's would be
+/claudna:<hook-name>. Check your available skills for the name.
 
 Apply the skill in non-interactive mode against the work item.
 Pass the work item context via $ARGUMENTS or the standard mechanism
 for the skill.
 
-Return ONLY the structured-result JSON block per the §10.C contract
-documented in clauDNA's orchestration guide (skills/_shared/orchestration-guide.md).
+Return ONLY the structured-result JSON block. If your skill's provider
+documents a contract for it, follow that — clauDNA's is §10.C in its
+orchestration guide (skills/_shared/orchestration-guide.md).
 ```
 
 Parse each pre-hook's structured result. If any returns `outcome: blocked` or `outcome: needs-input`, abort the main invocation and exit with that outcome via Step 9 (do NOT invoke the main skill).
@@ -185,14 +188,15 @@ For `/claudna:implement-plan` and similar issue-consuming skills, `<issue#>` com
 Dispatch as a `general-purpose` subagent with this prompt:
 
 ```
-Invoke the <skill-name> skill via the Skill tool. clauDNA is installed
-as a Claude Code plugin, so the skill is available as a plugin-namespaced
-slash command (e.g., /claudna:<skill-name>).
+Invoke the <skill-name> skill via the Skill tool, by name. If it is
+provided by a plugin the name is namespaced — clauDNA's would be
+/claudna:<skill-name>. Check your available skills for the name.
 
 Apply the skill with arguments: <constructed argument string>
 
-Return ONLY the structured-result JSON block per the §10.C contract
-documented in clauDNA's orchestration guide (skills/_shared/orchestration-guide.md).
+Return ONLY the structured-result JSON block. If your skill's provider
+documents a contract for it, follow that — clauDNA's is §10.C in its
+orchestration guide (skills/_shared/orchestration-guide.md).
 ```
 
 Capture the subagent's full stdout. The structured result is the LAST fenced ```json block in the output.

@@ -171,6 +171,37 @@ _emit_new_orphans() {
     done < <(grep "^${_o_bot} " "$_orphan_cache" || true)
 }
 
+# --- Check 7 input: the #1024 mirror — reported, never re-tasked ------------
+# Scanned lazily and at most once per sweep, on the first bot that has the check
+# armed. The scan is fleet-wide but the knobs are per-bot, so a fleet with the
+# check off everywhere pays nothing at all, and a fleet whose bots are tuned
+# differently still pays for exactly one scan.
+#
+# The matcher is deliberately asked for NO threshold: it reports every
+# unretasked worker with its idle time, and each bot applies its own policy
+# below. Same split activity_stuck already uses — the helper owns the join, the
+# caller owns the policy.
+_unassigned_cache=""
+_unassigned_scanned=0
+_ensure_unassigned_scan() {
+    [ "$_unassigned_scanned" -eq 0 ] || return 0
+    _unassigned_scanned=1
+    [ -f "$dispatch_log" ] || return 0
+    _unassigned_cache=$(safe_mktemp)
+    python3 "$LIB_DIR/dispatch-overdue.py" --unassigned "$dispatch_log" "$report_ledger" \
+        2>/dev/null > "$_unassigned_cache" || true
+}
+
+# A bot.conf value that must be an integer. A non-numeric (or empty) setting
+# would abort the whole sweep at the `-gt` below under set -e, so it degrades to
+# the default rather than taking the fleet's pulse down with it.
+_int_or() {  # _int_or <value> <default>
+    case "${1:-}" in
+        ''|*[!0-9-]*) printf '%s' "$2" ;;
+        *)            printf '%s' "$1" ;;
+    esac
+}
+
 # --- Iterate all bots ---
 for bot_dir in "$BOTS_DIR"/*/; do
     [ -d "$bot_dir" ] || continue
@@ -199,8 +230,28 @@ for bot_dir in "$BOTS_DIR"/*/; do
         _pane_buf=$(bot_tmux "$_bot_socket" capture-pane -t "$session_name" -p 2>/dev/null || true)
     fi
 
+    # --- Boot gate: is this bot's supervised start still in flight? ---
+    # A bot whose unit is mid-start has no tmux session and no active unit YET,
+    # which is indistinguishable from a dead one by state alone — so Checks 1
+    # and 2 both fire on a perfectly healthy boot. Evidence (#1002): on the
+    # 2026-08-04 boot storm saul emitted session_missing at 17:27:24 and
+    # service_down state=activating at 17:27:26, one tick, one healthy boot, two
+    # pages. A service_down whose own payload says "activating" is self-proving
+    # as a false positive, and it was the only service_down in that day's ledger.
+    #
+    # Computed once, before both checks, so they cannot disagree about whether
+    # this bot is booting. Mid-start is NO VERDICT, not an all-clear: neither
+    # emit nor debounce_clear runs, leaving any genuine pre-existing alert state
+    # intact to re-fire once the unit settles.
+    _svc_starting=0
+    if [ -n "$BOT_SERVICE" ] && service_is_starting "$BOT_SERVICE"; then
+        _svc_starting=1
+    fi
+
     # --- Check 1: tmux session exists ---
-    if [ "$_session_alive" -eq 0 ]; then
+    if [ "$_svc_starting" -eq 1 ]; then
+        : # boot in flight — the session is expected to be absent
+    elif [ "$_session_alive" -eq 0 ]; then
         emit_fleet_event "session_missing" "pulse" '{"session":"'"$session_name"'"}' "$bot_dir" "$bot_id"
         debounce_notify "$state_dir" "$bot_id" "session_alerted" _notify_current_bot \
             "$bot_id session_missing — tmux session '$session_name' is gone" "$_mgr_token" "$_RENOTIFY_AFTER_S"
@@ -212,7 +263,7 @@ for bot_dir in "$BOTS_DIR"/*/; do
     # Liveness via service_is_active (the OS dispatch lives there). The payload
     # state string stays per-OS: systemd exposes ActiveState; launchd print has no
     # cheap sub-state, so a confirmed-down job is labeled not-loaded.
-    if [ -n "$BOT_SERVICE" ]; then
+    if [ -n "$BOT_SERVICE" ] && [ "$_svc_starting" -eq 0 ]; then
         if ! service_is_active "$BOT_SERVICE"; then
             if [ "$_OS" = "Darwin" ]; then
                 state="not-loaded"
@@ -359,6 +410,70 @@ for bot_dir in "$BOTS_DIR"/*/; do
     fi
     _emit_new_orphans "$bot_dir" "$bot_id"
 
+    # --- Check 7: reported, then never re-tasked (#1024) — DEFAULT OFF -------
+    # The mirror of Check 6, and the incident it closes ran 16 hours: a worker
+    # delivered, reported, and was never dispatched again. Nothing could see it.
+    # activity_stuck structurally cannot — a genuinely idle bot IS idle, so
+    # keepalive re-stamps `.idle` and that branch never fires. Correct for its
+    # purpose, and exactly why this case was invisible.
+    #
+    # Off unless a fleet arms it, because it is the first check whose subject is
+    # the ASSIGNMENT loop rather than a process: it reports that the manager
+    # stopped assigning, which a fleet without someone to act on it can only
+    # read as noise.
+    if [ "$(bot_conf_get "$bot_dir" OBSERVABILITY_UNASSIGNED_CHECK 0)" = "1" ]; then
+        # A manager has no assigner, so reported-and-not-re-tasked is its normal
+        # resting state, not a strand. Uses bot_is_manager and never a
+        # hand-rolled MANAGER_TMUX read: the composed line carries a trailing
+        # comment that a naive parse swallows, which once reported three
+        # managers as workers across three fleets.
+        if bot_is_manager "$bot_dir"; then
+            debounce_clear "$state_dir" "$bot_id" "unassigned_alerted"
+        else
+            _ensure_unassigned_scan
+            _ua_thresh=$(_int_or "$(bot_conf_get "$bot_dir" OBSERVABILITY_UNASSIGNED_THRESHOLD 7200)" 7200)
+            _ua_maxage=$(_int_or "$(bot_conf_get "$bot_dir" OBSERVABILITY_UNASSIGNED_MAX_AGE 86400)" 86400)
+            _ua_line=""
+            [ -n "$_unassigned_cache" ] && \
+                _ua_line=$(grep "^${bot_id} " "$_unassigned_cache" 2>/dev/null || true)
+            _ua_fire=0; _ua_rts=0; _ua_idle=0; _ua_tid="-"; _ua_status="-"
+            if [ -n "$_ua_line" ]; then
+                read -r _ _ua_rts _ua_idle _ua_tid _ua_status <<< "$_ua_line"
+                if [ "$_ua_idle" -gt "$_ua_thresh" ]; then
+                    # Past max_age the strand stops being news — it is a known
+                    # state, not an event, and re-paging it on every renotify
+                    # window is how a real alert becomes wallpaper. Measured:
+                    # two bots on this host last reported 66 DAYS ago. <= 0
+                    # disables the cap, matching DISPATCH_OVERDUE_MAX_AGE_S.
+                    #
+                    # AND THE FLIP SIDE, because this check exists to close a
+                    # SILENT gap and the cap reopens one: past max_age it stops
+                    # firing and the else-branch below clears the debounce
+                    # marker, so the emitted signal becomes indistinguishable
+                    # from resolved. A strand outliving 24h goes quiet again.
+                    # Bounded rather than immediate — roughly 3-4 pushes at the
+                    # 6h renotify cadence first — and an exact structural mirror
+                    # of overdue_dispatch's own expiry, so it is a deliberate
+                    # trade and not an oversight. Set <= 0 to refuse the trade
+                    # (found by vera, review of #1121).
+                    if [ "$_ua_maxage" -le 0 ] || [ "$_ua_idle" -le "$_ua_maxage" ]; then
+                        _ua_fire=1
+                    fi
+                fi
+            fi
+            if [ "$_ua_fire" -eq 1 ]; then
+                emit_fleet_event "worker_unassigned" "pulse" \
+                    '{"reported_at":'"$_ua_rts"',"idle_seconds":'"$_ua_idle"',"task_id":"'"$_ua_tid"'","last_status":"'"$_ua_status"'"}' "$bot_dir" "$bot_id"
+                _ua_tail=""
+                [ "$_ua_tid" != "-" ] && _ua_tail=" (last task: $_ua_tid)"
+                debounce_notify "$state_dir" "$bot_id" "unassigned_alerted" _notify_current_bot \
+                    "$bot_id worker_unassigned — reported $_ua_status ${_ua_idle}s ago with no dispatch since${_ua_tail}" "$_mgr_token" "$_RENOTIFY_AFTER_S"
+            else
+                debounce_clear "$state_dir" "$bot_id" "unassigned_alerted"
+            fi
+        fi
+    fi
+
     # Reap old event files for this bot
     reap_events "$bot_dir"
 done
@@ -502,6 +617,16 @@ _summary_tmp=$(safe_mktemp)
         _s_svc_status="ok"
         if [ -n "$_s_svc" ] && ! service_is_active "$_s_svc"; then
             _s_svc_status="DOWN"
+        fi
+        # Same boot gate as the main loop, for the same reason and by the same
+        # predicate. Without it this run reports two verdicts about one bot: the
+        # loop correctly stays silent for a mid-boot bot while this block prints
+        # SESSION DOWN / SERVICE DOWN to the journal and pulse-summary.txt — the
+        # pre-fix answer, from the file that fixed it. "starting" is its own
+        # column value, never folded into "up": a boot is not health.
+        if [ -n "$_s_svc" ] && service_is_starting "$_s_svc"; then
+            [ "$_s_session_status" = "DOWN" ] && _s_session_status="starting"
+            [ "$_s_svc_status" = "DOWN" ] && _s_svc_status="starting"
         fi
 
         _s_alerts=""

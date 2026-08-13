@@ -65,6 +65,8 @@ For `compact`: run `/compact`, ack.
 For `restart`: wrap up, report back, expect session restart.
 For `query`: answer inline without branching or PRs — skip to Step 8 after answering.
 
+**A non-`task` envelope carries no `task:<id>`, and its terminal report must not close one.** You have nothing to echo, so report without `--task` — do NOT reach for an id from earlier work to fill the field. The gap is deliberate: a `cancel`/`compact`/`restart`/`query` was never a tracked row, so there is nothing for your report to close. `report-back.sh` enforces this on its own (it suppresses the #835 auto-resolve while an unanswered non-`task` note is the most recent dispatch), so the rule holds whether or not you remember it — but supplying an unrelated id defeats it, because a *supplied* id is recorded unchanged by design.
+
 ### Step 2: ACK
 
 **Within 5 seconds of receiving the dispatch.** Non-negotiable, even for trivial queries.

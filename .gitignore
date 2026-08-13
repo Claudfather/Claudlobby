@@ -49,6 +49,7 @@ lib/fleet-state.json
 lib/fleet-state.json.lock
 lib/creds-check-state.json
 lib/creds-check-state.json.lock
+lib/host-health-check.state
 
 *.log
 
@@ -60,6 +61,12 @@ library/skills/*/config.json
 
 # Claudron vault pointer (machine-specific)
 .claudron
+
+# Claudron vaults — operator knowledge, never framework code. The documented
+# convention path (fleet-yaml-schema.md cites `vaults/<name>`) was NOT ignored,
+# so a vault created there would be committable to the public repo. Vault notes
+# carry customer names, internal table names and business figures.
+vaults/
 
 # Active fleet config (root mode) — the .example files are the canonical templates
 fleet.yaml
