@@ -1,0 +1,4 @@
+{"webhooks":[
+  {"id":101,"topic":"products/update","address":"https://example.test/hook","created_at":"2026-01-01T00:00:00Z","api_version":"2026-04"},
+  {"id":102,"topic":"collections/update","address":"https://example.test/hook","created_at":"2026-01-01T00:00:00Z","api_version":"2026-04"}
+]}

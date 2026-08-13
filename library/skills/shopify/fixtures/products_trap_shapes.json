@@ -1,0 +1,51 @@
+{
+  "_comment": "Synthetic. Encodes the shapes traps.md 1, 2 and 6 describe. Ids are obviously fake.",
+  "products": [
+    {
+      "id": 1000000000001,
+      "title": "Placeholder Tee",
+      "handle": "placeholder-tee",
+      "status": "active",
+      "product_type": "Tee",
+      "tags": "Cotton, Unisex",
+      "variants": [
+        { "id": 2000000000001, "fulfillment_service": "manual", "inventory_management": null, "inventory_quantity": 9999 },
+        { "id": 2000000000002, "fulfillment_service": "manual", "inventory_management": null, "inventory_quantity": -3 },
+        { "id": 2000000000003, "fulfillment_service": "manual", "inventory_management": "shopify", "inventory_quantity": 12 }
+      ]
+    },
+    {
+      "id": 1000000000002,
+      "title": "Placeholder Unlisted Drop",
+      "handle": "placeholder-unlisted-drop",
+      "status": "active",
+      "product_type": "Hidden",
+      "tags": "hidden, Accessories",
+      "variants": [
+        { "id": 2000000000004, "fulfillment_service": "manual", "inventory_management": null, "inventory_quantity": 0 }
+      ]
+    },
+    {
+      "id": 1000000000003,
+      "title": "Placeholder Half Hidden",
+      "handle": "placeholder-half-hidden",
+      "status": "active",
+      "product_type": "Hidden",
+      "tags": "Accessories",
+      "variants": [
+        { "id": 2000000000005, "fulfillment_service": "manual", "inventory_management": null, "inventory_quantity": 0 }
+      ]
+    },
+    {
+      "id": 1000000000004,
+      "title": "Placeholder Retired",
+      "handle": "placeholder-retired",
+      "status": "draft",
+      "product_type": "Tee",
+      "tags": "Cotton",
+      "variants": [
+        { "id": 2000000000006, "fulfillment_service": "manual", "inventory_management": null, "inventory_quantity": 0 }
+      ]
+    }
+  ]
+}

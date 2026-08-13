@@ -1,0 +1,13 @@
+{
+  "_comment": "Synthetic. traps.md 5 — a handful of nodes carrying a bulk batch of codes.",
+  "data": {
+    "codeDiscountNodes": {
+      "pageInfo": { "hasNextPage": false },
+      "edges": [
+        { "node": { "codeDiscount": { "__typename": "DiscountCodeBasic", "status": "ACTIVE", "codesCount": { "count": 1 } } } },
+        { "node": { "codeDiscount": { "__typename": "DiscountCodeBasic", "status": "ACTIVE", "codesCount": { "count": 4210 } } } },
+        { "node": { "codeDiscount": { "__typename": "DiscountCodeFreeShipping", "status": "EXPIRED", "codesCount": { "count": 1 } } } }
+      ]
+    }
+  }
+}
