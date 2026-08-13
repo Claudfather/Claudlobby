@@ -14,7 +14,11 @@
 #                      When omitted and the bot already has an open row that
 #                      references the same issue, a note names the id to pass
 #                      (#1032). It never blocks and never guesses.
-#   --botcommand       Force the [BOTCOMMAND] envelope with no other fields
+#   --botcommand       Force the [BOTCOMMAND] envelope with no other fields.
+#                      Now exactly equivalent to `--type task` — kept as an
+#                      alias rather than removed because running managers hold
+#                      it in composed context, and a composed file does not
+#                      reach a live session until it restarts.
 #   --type TYPE        Envelope type: task|cancel|compact|restart|query
 #                      (default task). Implies --botcommand. ONLY `task` mints.
 #
@@ -267,6 +271,7 @@ sys.stdout.write("%d\t%s" % (len(pointers), "; ".join(pointers)))
 _claudron_query_before
 
 TASK_ID=""
+EXPECTED_BY_JSON=""
 if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORITY" ] \
    || [ -n "$DISPATCH_REF" ] || [ -n "$DISPATCH_WORKSTREAM" ]; then
     # THE ENVELOPE AND THE TRACKING ARE NOW SEPARATE DECISIONS (#1187). They used
@@ -289,6 +294,26 @@ if [ -n "$FORCE_ENVELOPE" ] || [ -n "$DISPATCH_REPO" ] || [ -n "$DISPATCH_PRIORI
     # that no one can ever close.
     if [ "$DISPATCH_TYPE" = "task" ]; then
         TASK_ID=$(mint_task_id)
+    else
+        # AND NO DEADLINE — withholding the id alone is half a fix, which is
+        # what the first version of this change shipped. `expected_by` is what
+        # the watchdog actually reads: `dispatch-overdue.py --all` matches on
+        # the deadline, not on the id, so an id-less row with a deadline still
+        # goes overdue and still pushes a `[FLEET-PULSE]` alert — and because
+        # `overdue_ids` drops the empty id, that alert says a task is late and
+        # NAMES NOTHING. Measured: `vera <at> <by> 100 -`. Strictly worse to
+        # diagnose than the row this change set out to stop minting.
+        #
+        # `null` rather than 0 or omitted: `_classify_all` skips rows whose
+        # `expected_by` is not an int, and `open_dispatches` documents that it
+        # deliberately does not filter on it — so a null deadline is silent in
+        # both doors with no consumer change. Verified against both.
+        #
+        # RAW-TEXT SENDS KEEP THEIR DEADLINE. They are id-less too, but they are
+        # matched by bot+time on purpose ("one report closes all open dispatches
+        # for that bot"), which is documented behaviour and a live call pattern.
+        # The gate is the TYPE, never the emptiness of the id.
+        EXPECTED_BY_JSON="null"
     fi
     CALLER="${BOT_NAME:-${MANAGER_TMUX:-unknown}}"
     DISPATCH_MSG="[BOTCOMMAND] $CALLER | $DISPATCH_TYPE | $TASK"
@@ -318,6 +343,10 @@ mkdir -p "$(dirname "$LEDGER")"
 
 now_epoch=$(date +%s)
 expected_by=$(( now_epoch + DEADLINE_S ))
+# Empty unless the envelope branch above withheld the deadline for a non-`task`
+# type. Resolved here rather than there because the deadline is not computed
+# until now, and a `null` set earlier must survive this assignment.
+[ -n "$EXPECTED_BY_JSON" ] || EXPECTED_BY_JSON="$expected_by"
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # --- undeclared-supersession visibility (#1032) -------------------------------
@@ -388,7 +417,7 @@ _append_ledger() {
     # claudron_hits is digits-or-empty by construction (the preflight parser
     # prints a count), so no escaping.
     printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$expected_by" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" >> "$LEDGER"
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" >> "$LEDGER"
     rotate_jsonl_by_ts "$LEDGER"
 }
 with_lock "$LEDGER.lock" _append_ledger

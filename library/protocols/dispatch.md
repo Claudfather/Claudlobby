@@ -127,7 +127,7 @@ $CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> <worker
 $CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query <bot> "<question answered inline>"
 ```
 
-`--type task|cancel|compact|restart|query` (default `task`) implies `--botcommand`, so you still get the `[BOTCOMMAND]` format — a finding, a relay, a retraction, a correction all read correctly as fleet messages. **Only `task` mints an id.**
+`--type task|cancel|compact|restart|query` (default `task`) implies `--botcommand` — which is now exactly `--type task`, kept as an alias — so you still get the `[BOTCOMMAND]` format — a finding, a relay, a retraction, a correction all read correctly as fleet messages. **Only `task` mints an id.**
 
 This exists because the two used to be one decision: `--botcommand` alone minted, so a peer note you sent in the fleet format became a tracked row that nothing had been asked to close, and it stayed open forever. Measured at 68 such rows on this host, 57 of them addressed to managers (#1187).
 

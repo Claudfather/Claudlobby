@@ -27,35 +27,22 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import _scrubbed_env
+from tests.test_task_id_dispatch import TASK_ID_RE, _fake_lib
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_DIR = REPO_ROOT / "lib"
-TASK_ID_RE = re.compile(r"^t-[0-9]+-[0-9a-f]{4}$")
-
-
-def _fake_lib(tmp_path: Path) -> tuple[Path, dict]:
-    """Real dispatch-task.sh, stubbed transport — same shape as
-    tests/test_task_id_dispatch.py::_fake_lib, which owns the rationale."""
-    libdir = tmp_path / "lib"
-    libdir.mkdir()
-    for name in ("dispatch-task.sh", "lib-common.sh"):
-        (libdir / name).symlink_to(LIB_DIR / name)
-    stub = libdir / "dispatch.sh"
-    stub.write_text(f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n')
-    stub.chmod(0o755)
-    tmux = tmp_path / "tmux"
-    tmux.write_text("#!/bin/bash\nexit 0\n")
-    tmux.chmod(0o755)
-    return libdir, {
-        "CLAUDLOBBY_ROOT": str(tmp_path),
-        "TMUX_BIN": str(tmux),
-        "OBSERVABILITY_DISPATCH_DEADLINE": "600",
-        "BOT_ID": "lead",
-    }
 
 
 def _run(tmp_path: Path, args: str):
-    libdir, env = _fake_lib(tmp_path)
+    # The sibling's harness, not a third copy of it. It already takes the one
+    # thing that differs — the transport stub — as a parameter, and the copies
+    # have a real cost: none of them symlinks `dispatch-supersede-hint.py`, and
+    # that call site is `2>/dev/null || true`, so a harness missing it is a
+    # silent no-op rather than an error. One more copy is one more place that
+    # stays green while testing less than it appears to.
+    libdir, env = _fake_lib(
+        tmp_path, f'#!/bin/bash\nprintf \'%s\\n\' "$2" > "{tmp_path}/sent.txt"\n'
+    )
     r = subprocess.run(
         ["bash", "-c", f'"{libdir}/dispatch-task.sh" {args}'],
         capture_output=True,
@@ -99,7 +86,6 @@ class TestOnlyTaskMints:
         # and which a worker would echo back as nothing.
         _r, _row, sent = _run(tmp_path, '--type query w1 "ping"')
         assert "task:" not in sent, f"empty task field transmitted: {sent!r}"
-        assert "| query |" in sent, sent
 
     # Parametrized rather than looped: each case gets its own tmp_path and its
     # own name in the failure summary, which is what the regression-diff recipe
@@ -110,6 +96,64 @@ class TestOnlyTaskMints:
         # message a manager sent claimed to be a task whatever it was.
         _r, _row, sent = _run(tmp_path, f'--type {t} w1 "x"')
         assert f"| {t} |" in sent, (t, sent)
+
+
+class TestTheDeadlineIsGatedToo:
+    """Withholding the id alone was half a fix, and the first version shipped it.
+
+    `dispatch-overdue.py` matches on `expected_by`, NOT on the id. So an id-less
+    row with a deadline still goes overdue and still pushes a `[FLEET-PULSE]`
+    alert — and because `overdue_ids` drops the empty id, that alert says a task
+    is late and names nothing. Measured before the second half landed:
+    `vera <at> <by> 100 -`. Harder to diagnose than the row this change set out
+    to stop minting.
+    """
+
+    def test_a_non_task_row_records_no_deadline(self, tmp_path):
+        _r, row, _sent = _run(tmp_path, '--type query w1 "peer note"')
+        assert row["expected_by"] is None, row
+
+    def test_a_task_row_still_records_one(self, tmp_path):
+        _r, row, _sent = _run(tmp_path, '--type task w1 "real work"')
+        assert isinstance(row["expected_by"], int), row
+
+    def test_a_raw_text_send_keeps_its_deadline(self, tmp_path):
+        # The gate is the TYPE, never the emptiness of the id. Raw sends are
+        # id-less too but are matched by bot+time on purpose — documented
+        # behaviour and a live call pattern, so gating on id-lessness would have
+        # silently untracked them.
+        _r, row, _sent = _run(tmp_path, 'w1 "just a note"')
+        assert row["task_id"] == "", row
+        assert isinstance(row["expected_by"], int), row
+
+    def test_the_watchdog_does_not_page_a_non_task_row(self, tmp_path):
+        # End to end through the REAL matcher, because the unit above asserts a
+        # field while the harm is an alert. A null deadline is skipped by
+        # `_classify_all`; this pins that the two agree.
+        import subprocess as sp
+        import time
+
+        _r, _row, _sent = _run(tmp_path, '--type query w1 "peer note"')
+        ledger = tmp_path / "state" / "dispatch-log.jsonl"
+        rows = [json.loads(x) for x in ledger.read_text().splitlines()]
+        for d in rows:
+            # Backdate BOTH. Backdating only `dispatched_at` leaves the deadline
+            # in the future, so the row is not overdue and the assertion passes
+            # whatever the gate does — the test would not operate. Caught by
+            # mutation: removing the gate left this green.
+            d["dispatched_at"] = int(time.time()) - 200
+            if isinstance(d["expected_by"], int):
+                d["expected_by"] = int(time.time()) - 100
+        ledger.write_text("".join(json.dumps(d) + "\n" for d in rows))
+        empty = tmp_path / "reports.jsonl"
+        empty.write_text("")
+        out = sp.run(
+            ["python3", str(LIB_DIR / "dispatch-overdue.py"), "--all",
+             str(ledger), str(empty)],
+            capture_output=True, text=True, timeout=20,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "", f"a peer note paged the manager: {out.stdout!r}"
 
 
 class TestNoSilentChangeToExistingCallSites:
@@ -149,10 +193,13 @@ class TestUnknownTypeFailsLoud:
         assert sent == "", "a refused dispatch must not be transmitted"
 
     def test_missing_type_value_is_a_loud_error(self, tmp_path):
-        r, _row, _sent = _run(tmp_path, '--type w1 "x"')
-        # `--type w1` consumes w1 as the value, leaving an unknown type; either
-        # way it must fail rather than send something unintended.
+        # `--type` with NOTHING after it — the `_flag_val` guard. Deliberately
+        # not `--type w1 "x"`: that consumes w1 as the value and lands on the
+        # unknown-type branch above, so it would restate that test with weaker
+        # assertions while leaving this guard unexercised.
+        r, _row, _sent = _run(tmp_path, "--type")
         assert r.returncode != 0, r.stdout + r.stderr
+        assert "needs a value" in r.stderr, r.stderr
 
 
 class TestVocabularyMatchesTheProtocols:
@@ -166,21 +213,28 @@ class TestVocabularyMatchesTheProtocols:
 
     def _script_types(self) -> set[str]:
         line = next(
-            ln
-            for ln in (LIB_DIR / "dispatch-task.sh").read_text().splitlines()
-            if ln.startswith("DISPATCH_TYPES=")
+            (
+                ln
+                for ln in (LIB_DIR / "dispatch-task.sh").read_text().splitlines()
+                if ln.startswith("DISPATCH_TYPES=")
+            ),
+            None,
         )
+        assert line, "no DISPATCH_TYPES= line in dispatch-task.sh — it moved or was renamed"
         return set(line.split("=", 1)[1].strip().strip('"').split())
 
     def test_matches_worker_lifecycle(self):
         txt = (REPO_ROOT / "library/protocols/worker-lifecycle.md").read_text()
-        line = next(ln for ln in txt.splitlines() if ln.startswith("**Types:**"))
+        line = next(
+            (ln for ln in txt.splitlines() if ln.startswith("**Types:**")), None
+        )
+        assert line, "no '**Types:**' line in worker-lifecycle.md — the anchor moved"
         doc = set(re.findall(r"`([a-z]+)`", line))
         assert doc, "parser found no types — the doc's shape changed, fix the parser"
         assert self._script_types() == doc, (self._script_types(), doc)
 
     def test_matches_dispatch_protocol_table(self):
         txt = (REPO_ROOT / "library/protocols/dispatch.md").read_text()
-        doc = set(re.findall(r"^\| `([a-z]+)` \| ", txt, re.M))
+        doc = set(re.findall(r"^\|\s*`([a-z]+)`\s*\|", txt, re.M))
         assert doc, "parser found no table rows — the doc's shape changed"
         assert self._script_types() == doc, (self._script_types(), doc)
