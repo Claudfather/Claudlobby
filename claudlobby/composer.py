@@ -1768,7 +1768,10 @@ def _brief_cli_probe() -> tuple[str | None, str]:
 
 
 def _with_brief_boot_hook(
-    hooks: dict[str, list[dict[str, Any]]], bot_id: str, exe: str
+    hooks: dict[str, list[dict[str, Any]]],
+    bot_id: str,
+    exe: str,
+    fleet: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return a copy of the flat fleet.yaml-shaped hooks with the boot-brief
     SessionStart entries appended (matchers ``startup`` and ``compact`` only —
@@ -1779,15 +1782,23 @@ def _with_brief_boot_hook(
     hook block the session, but a non-zero exit discards stdout — so the door
     failing must itself exit 0 with one line naming the door, or the boot
     carries nothing at all. `$?` expands at hook runtime, in the hook's shell.
+
+    ``fleet`` is the overlay name for overlay-mode composes, None in root
+    mode. It must be threaded into the command as the global ``--fleet``
+    flag: fleet selection has no env or cwd fallback (#1197), so a flagless
+    door on an overlay estate resolves root-mode and exits 1 on every boot.
     """
     # The EXECUTED path is the certified absolute exe (C2: hook context is not
     # a login shell, PATH frequently omits a venv/pipx install — see
     # _resolve_claudron_executable); the human-facing fallback text keeps the
-    # bare name, since it is an instruction to a reader, not an invocation.
+    # bare name, since it is an instruction to a reader, not an invocation —
+    # but both carry --fleet, or the instruction teaches a broken door (#1197).
+    fleet_arg = f" --fleet {fleet}" if fleet else ""
     fallback = (
-        f'echo "fleet-brief unavailable (rc $?) — claudlobby brief --bot {bot_id}"'
+        f'echo "fleet-brief unavailable (rc $?) — '
+        f'claudlobby{fleet_arg} brief --bot {bot_id}"'
     )
-    cmd = f"{exe} brief --bot {bot_id} --boot || {fallback}"
+    cmd = f"{exe}{fleet_arg} brief --bot {bot_id} --boot || {fallback}"
     out = {k: list(v) for k, v in hooks.items()}
     entries = out.setdefault("SessionStart", [])
     for matcher in ("startup", "compact"):
@@ -2326,7 +2337,15 @@ def compose_settings_local(
                 "Pull/install a claudlobby with `brief --boot`, or disarm the "
                 "knob."
             )
-        bot_hooks = _with_brief_boot_hook(bot_hooks, bot.bot_id, exe)
+        # Bare overlay name, not fleet.name: --fleet resolves the DIRECTORY
+        # (F5 global uniqueness is _find_fleet_dir's own contract), and the
+        # two are not guaranteed equal.
+        bot_hooks = _with_brief_boot_hook(
+            bot_hooks,
+            bot.bot_id,
+            exe,
+            fleet=paths.fleet_dir.name if paths.fleet_dir else None,
+        )
     hooks = _compose_hooks(bot_hooks)
     if _session_loop_enabled(bot):
         executable, warning = _resolve_claudron_executable()
@@ -3166,7 +3185,9 @@ def _write_timer_units(
     # production eight weeks later.
     if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
         for var, value in fleet_pulse_env.items():
-            plist_lines.extend([f"    <key>{var}</key>", f"    <string>{value}</string>"])
+            plist_lines.extend(
+                [f"    <key>{var}</key>", f"    <string>{value}</string>"]
+            )
     plist_lines.append("  </dict>")
     plist_lines.extend(
         [
