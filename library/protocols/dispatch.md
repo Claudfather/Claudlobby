@@ -119,7 +119,25 @@ $CLAUDLOBBY_ROOT/lib/dispatch-task.sh --botcommand <worker> "<task>"
 $CLAUDLOBBY_ROOT/lib/dispatch-task.sh --repo <name> --workstream <ws-id> <worker> "<task>"
 ```
 
-Envelope sends mint a `task:<id>`, record it (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) to `state/dispatch-log.jsonl`, and transmit it — the overdue watchdog then joins on identity, and the worker's terminal report closes exactly that task. A bare `dispatch-task.sh <worker> <task…>` still works but stays id-less (matched by bot+time, one report closes all open dispatches for that bot) — prefer the id-minting form for anything you want individually tracked. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself.
+### Sending a peer a message that asks nothing
+
+**Use `--type` for anything that is not a task, and the envelope stops minting.**
+
+```bash
+$CLAUDLOBBY_ROOT/lib/dispatch-task.sh --type query <bot> "<question answered inline>"
+```
+
+`--type task|cancel|compact|restart|query` (default `task`) implies `--botcommand` — which is now exactly `--type task`, kept as an alias — so you still get the `[BOTCOMMAND]` format — a finding, a relay, a retraction, a correction all read correctly as fleet messages. **Only `task` mints an id.**
+
+This exists because the two used to be one decision: `--botcommand` alone minted, so a peer note you sent in the fleet format became a tracked row that nothing had been asked to close, and it stayed open forever. Measured at 68 such rows on this host, 57 of them addressed to managers (#1187).
+
+**Pick the type by what you are asking for, not by how important the message is.** A `query` is answered inline, so nothing it produces can be *joined* against an id — which is not the same as producing nothing. It still files a terminal `[BOTREPORT]`: `worker-lifecycle` routes `query` to "skip to Step 8", and Step 8 *is* the terminal report. `restart` reports terminally too. If you are unsure, `query` is the safe way to be wrong: it costs an untracked message — which is what every raw send already is — where the reverse costs a row nobody can ever close. An unrecognised `--type` is refused rather than defaulted, so a typo will not quietly mint.
+
+**A non-`task` row records no `expected_by` either.** Withholding the id alone would be half a fix: the watchdog matches on the deadline, not on the id, so an id-less row that still carried one would go overdue and push a `[FLEET-PULSE]` alert naming nothing. Both are withheld together.
+
+**You do not have to do anything for the worker's answer to stay harmless.** A terminal report carrying no id normally resolves to the bot's oldest open id'd dispatch (#835), which would silently close unrelated in-progress work as `completed`. That resolution is suppressed automatically while a non-`task` note is the most recent thing you sent the bot — enforced in `dispatch-overdue.py`, not by worker discipline, so it holds for a bot that has not restarted since this landed. It resumes on the bot's next report, so a peer note costs one un-auto-closed row at most, never a false completion.
+
+`task`-type envelope sends mint a `task:<id>`, record it (with a deadline from `OBSERVABILITY_DISPATCH_DEADLINE`, or `--deadline-min N`) to `state/dispatch-log.jsonl`, and transmit it — the overdue watchdog then joins on identity, and the worker's terminal report closes exactly that task. A bare `dispatch-task.sh <worker> <task…>` still works but stays id-less (matched by bot+time, one report closes all open dispatches for that bot) — prefer the id-minting form for anything you want individually tracked. The fleet pulse then watches it: if the deadline passes with no terminal `[BOTREPORT]` (completed/failed/blocked), it emits `overdue_dispatch` and pushes a debounced `[FLEET-PULSE]` note into **your** session. So you don't have to remember to poll — an unanswered task surfaces itself.
 
 When you get an `overdue_dispatch` alert: check the worker (cross-reference `activity_stuck` — it may be hung, see `fleet-observability`). Then recover it, re-dispatch/reassign if it's wedged or mis-scoped, or escalate to the human. The watchdog tells you *something is overdue*; the call on what to do is yours. A worker's terminal report closes the dispatch automatically — no manual bookkeeping.
 

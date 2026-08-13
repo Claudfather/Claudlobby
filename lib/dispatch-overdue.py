@@ -552,6 +552,51 @@ def unassigned_all(
     return out
 
 
+def _answering_an_idless_dispatch(
+    bot: str,
+    dispatch_log: str,
+    report_ledger: str,
+) -> bool:
+    """True when this bot's most recent dispatch carries no id and is unanswered.
+
+    The evidence that a terminal report is NOT the missing echo of an id'd row.
+    It is read off the ledgers the fleet already writes — no wire-format field
+    and no worker cooperation, which matters because a composed instruction does
+    not reach a running bot until it restarts, while this file is read fresh on
+    every report.
+
+    UNANSWERED is the second half and it is what keeps #835 intact. Without it a
+    single peer note would suppress the resolver for the rest of the bot's life,
+    stranding every later report. A terminal report landing after the id-less
+    dispatch discharges it; the report after that resolves normally again.
+
+    Ties go to the later ledger line (`>=`), matching arrival order — the same
+    tie-break open_dispatches takes with its stable sort.
+    """
+    bot_key = bot.lower()
+    latest: dict | None = None
+    latest_at: int | None = None
+    for d in _load_jsonl(dispatch_log):
+        if str(d.get("bot", "")).lower() != bot_key:
+            continue
+        da = d.get("dispatched_at")
+        if not isinstance(da, int):
+            continue
+        if latest_at is None or da >= latest_at:
+            latest, latest_at = d, da
+    if latest is None or latest.get("task_id"):
+        return False
+    for r in _load_jsonl(report_ledger):
+        if str(r.get("bot", "")).lower() != bot_key:
+            continue
+        if r.get("status") not in _TERMINAL:
+            continue
+        at = _iso_to_epoch(str(r.get("ts", "")))
+        if at is not None and at >= latest_at:
+            return False
+    return True
+
+
 def open_task_id(
     bot: str,
     dispatch_log: str,
@@ -589,7 +634,34 @@ def open_task_id(
     reuse a bot name would cross-resolve. Pre-existing in the watchdog join; it
     matters more here because this writes the result. Fleet-scoping the join
     needs fleet identity threaded through both readers — tracked separately.
+
+    SUPPRESSED when the bot's most recent dispatch is an unanswered id-less one
+    (#1190). The resolver's whole premise is "the worker finished the id'd row it
+    was given and forgot to echo the id". A peer note breaks that premise: the
+    most recent thing asked of the bot carried no id, so a terminal report now is
+    most plausibly answering THAT, and stamping an older id'd row asserts
+    something the ledger does not support. The result is not a stale row — it is
+    a real, in-progress task silently marked `completed`, which is the one
+    outcome worse than the never-closing row #1187 set out to stop: an open row
+    is visible and legible, a false completion sends nobody to look.
+
+    Measured through the real report-back.sh, worker compliant with Step 2 in
+    both arms: `--type query` to a bot holding one open id'd task closed that
+    task. So did a raw-text dispatch on main — the hole predates the envelope
+    types and is not reachable from the transmit side at all, which is why this
+    guard lives here and not in the envelope.
+
+    Returning None NEVER violates the superset invariant this door shares with
+    open_dispatches: the rule is that it must not hand back an id the list does
+    not contain, and None contains nothing. --open, --all, --orphans and
+    --unassigned are untouched; only the resolver reads this.
+
+    The cost is deliberate and one-directional: a report that WAS the missing
+    echo now leaves its row open until the next report. That is UNTRACKED, the
+    degradation direction #1187 chose, and the watchdog still surfaces it.
     """
+    if _answering_an_idless_dispatch(bot, dispatch_log, report_ledger):
+        return None
     rows = open_dispatches(bot, dispatch_log, report_ledger)
     return rows[0][2] if rows else None
 
