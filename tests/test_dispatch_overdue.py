@@ -6,6 +6,8 @@ from __future__ import annotations
 import datetime as _dt
 import os
 
+import pytest
+
 from tests.conftest import (
     dispatch_row as _dispatch,
     load_lib_module,
@@ -588,9 +590,9 @@ class TestOpenList:
         dlog, rlog = self._logs(
             tmp_path, [_dispatch("w1", 100, 9_999_999, task_id="t-early")], []
         )
-        assert [t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)] == [
-            "t-early"
-        ]
+        assert [
+            t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        ] == ["t-early"]
         assert dispatch_overdue.overdue("w1", dlog, rlog, 1000) == []
 
     def test_is_a_superset_of_overdue(self, tmp_path):
@@ -621,9 +623,9 @@ class TestOpenList:
             [_dispatch("w1", 100, 1000, task_id="t-a")],
             [_report("w2", "2026-05-27T10:05:00Z", task_id="t-a")],
         )
-        assert [t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)] == [
-            "t-a"
-        ]
+        assert [
+            t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        ] == ["t-a"]
 
     def test_idless_rows_are_not_listed(self, tmp_path):
         """Same gate as the resolver: only id'd rows are addressable."""
@@ -636,7 +638,9 @@ class TestOpenList:
         row = _dispatch("w1", 100, 1000, task_id="t-a")
         del row["expected_by"]
         dlog, rlog = self._logs(tmp_path, [row], [])
-        assert dispatch_overdue.open_dispatches("w1", dlog, rlog) == [(100, None, "t-a")]
+        assert dispatch_overdue.open_dispatches("w1", dlog, rlog) == [
+            (100, None, "t-a")
+        ]
         assert dispatch_overdue.open_task_id("w1", dlog, rlog) == "t-a"
 
     def test_scoped_to_the_bot(self, tmp_path):
@@ -648,9 +652,9 @@ class TestOpenList:
             ],
             [],
         )
-        assert [t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)] == [
-            "t-mine"
-        ]
+        assert [
+            t for _, _, t in dispatch_overdue.open_dispatches("w1", dlog, rlog)
+        ] == ["t-mine"]
 
     def test_cli_open_mode_prints_rows(self, tmp_path, monkeypatch, capsys):
         row = _dispatch("w1", 100, 1000, task_id="t-a")
@@ -663,7 +667,9 @@ class TestOpenList:
         assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == "100 1000 t-a\n150 - t-b\n"
 
-    def test_cli_open_mode_is_silent_when_nothing_is_open(self, tmp_path, monkeypatch, capsys):
+    def test_cli_open_mode_is_silent_when_nothing_is_open(
+        self, tmp_path, monkeypatch, capsys
+    ):
         dlog, rlog = self._logs(tmp_path, [], [])
         monkeypatch.setattr(
             "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
@@ -704,7 +710,9 @@ class TestOpenList:
         )
         rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
         assert [t for _, _, t in rows] == ["t-old-z", "t-old-a", "t-young"]
-        assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2] == "t-old-z"
+        assert (
+            dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2] == "t-old-z"
+        )
 
     # --- #1124: the identical-dispatched_at tie-break -------------------------
     #
@@ -768,6 +776,250 @@ class TestOpenList:
             rows = dispatch_overdue.open_dispatches("w1", dlog, rlog)
             assert [t for _, _, t in rows] == [first, second]
             assert dispatch_overdue.open_task_id("w1", dlog, rlog) == rows[0][2]
+
+
+class TestBotSlotShapeGate:
+    """#1187 — right count, wrong order was silent; wrong count never was.
+
+    --open, --open-task and SINGLE-BOT MODE each name one bot and take it
+    first; --all/--orphans/--unassigned name none. Calling a bot-slot mode with
+    the every-bot grammar keeps the arity valid, so a path lands in the bot
+    slot, nothing matches, and the door prints nothing at rc 0 — the same
+    output as a genuinely empty result. That is how a manager checking whether
+    its closures had worked read a full backlog as all-clear.
+
+    Only the two flagged doors are gated here; single-bot mode is the
+    documented remaining gap and is pinned below.
+    """
+
+    def _logs(self, tmp_path, dispatches, reports):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, reports)
+        return str(dlog), str(rlog)
+
+    def _rows(self, tmp_path):
+        return self._logs(tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")], [])
+
+    # -- the filed defect: right count, wrong order --------------------------
+
+    @pytest.mark.parametrize("mode", ["--open", "--open-task"])
+    def test_wrong_order_is_refused_loudly_not_silently(
+        self, tmp_path, monkeypatch, capsys, mode
+    ):
+        """THE regression this gate exists for. Both doors share the grammar,
+        so both share the hazard; a fix on one only would leave the other."""
+        dlog, rlog = self._rows(tmp_path)
+        # --all's grammar (logs first), which is exactly 3 positionals — the
+        # arity check passes and main() reaches the join with a path as `bot`.
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", mode, dlog, rlog, "1786700000"]
+        )
+        assert dispatch_overdue.main() == 2
+        out = capsys.readouterr()
+        assert out.out == ""  # never a partial result alongside a refusal
+        assert "expects <bot_id> first" in out.err
+        # The refusal must name the remedy, not merely reject: the operator's
+        # actual error is not knowing the two grammars differ.
+        assert "take the LOGS first" in out.err
+        assert "take the BOT first" in out.err
+
+    @pytest.mark.parametrize(
+        "bad,label",
+        [
+            ("/abs/path/dispatch-log.jsonl", "a path"),
+            ("relative/dir/name", "a path"),
+            ("dispatch-log.jsonl", "a ledger file"),
+            ("   ", "an empty bot id"),
+        ],
+    )
+    def test_every_refused_shape_names_what_it_saw(
+        self, tmp_path, monkeypatch, capsys, bad, label
+    ):
+        """A bare filename carries no separator, so the '/' test alone would
+        miss the commonest form — invoking from the ledger's own directory."""
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open", bad, dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 2
+        assert label in capsys.readouterr().err
+
+    # -- positive control: the gate must not refuse a real bot id ------------
+
+    @pytest.mark.parametrize("bot", ["w1", "gilfoyle", "bot-2", "Worker_3", "a.b"])
+    def test_real_bot_ids_pass_the_gate(self, bot):
+        """Without this, a gate that refused everything would pass the tests
+        above. `a.b` guards the suffix test against becoming a bare dot test."""
+        assert dispatch_overdue._not_a_bot_id(bot) is None
+
+    def test_gate_is_inert_for_the_report_back_call_shape(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """report-back.sh:99 passes its own $BOT first. Same rc, same stdout as
+        before the gate — its fail-open contract is untouched."""
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open-task", "w1", dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out == "t-a\n"
+
+    # -- dara's narrowing, pinned: arity was never the hole ------------------
+
+    @pytest.mark.parametrize("mode", ["--open", "--open-task"])
+    def test_wrong_arity_was_already_loud_and_stays_loud(
+        self, tmp_path, monkeypatch, capsys, mode
+    ):
+        """Two positionals already returned rc 2 before this change. Pinned so
+        the shape gate is never mistaken for the thing that made misuse loud —
+        a reviewer measuring THIS shape reads the defect as unreproducible."""
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", mode, dlog, rlog])
+        assert dispatch_overdue.main() == 2
+        assert capsys.readouterr().out == ""
+
+    # -- which modes have a bot slot, pinned in code rather than prose --------
+
+    def test_single_bot_mode_is_BOT_first_like_the_gated_doors(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Executable because the prose got this backwards once (#1188 review):
+        the docstring filed single-bot mode under "logs first", which would send
+        the next reader hunting a dlog/rlog-swap detector instead of reusing
+        _reject_bot_slot. argv[1] is the BOT — assert it, do not describe it."""
+        # now=2000: past expected_by (1000) but inside the 24h age cap, or the
+        # row expires and the mode looks bot-blind for an unrelated reason.
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "w1", dlog, rlog, "2000"]
+        )
+        assert dispatch_overdue.main() == 0
+        assert "t-a" in capsys.readouterr().out  # argv[1] selected the bot
+
+        # Control: a DIFFERENT name in the same slot returns nothing, so the
+        # assertion above is about argv[1] and not about the row merely existing.
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "other", dlog, rlog, "2000"]
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out == ""
+
+    @pytest.mark.parametrize("mode", ["--all", "--orphans", "--unassigned"])
+    def test_every_bot_modes_have_no_bot_slot_and_fail_LOUDLY(
+        self, tmp_path, monkeypatch, mode
+    ):
+        """The other half of the same correction. These name no bot, so there is
+        nothing for the gate to check — and mis-ordering them is already loud: a
+        ledger path reaches the `now` slot and int() raises. Pins WHY they are
+        excluded, so "ungated" is never re-read as "silently broken like #1187".
+        """
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", mode, "w1", dlog, rlog])
+        with pytest.raises(ValueError):
+            dispatch_overdue.main()
+
+    def test_single_bot_mode_is_the_ONE_remaining_silent_shape(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A tripwire on a disclosed gap, deliberately asserting today's WRONG
+        behaviour: a path in single-bot mode's bot slot is still silent at rc 0.
+
+        When someone wires _reject_bot_slot into single-bot mode this test FAILS
+        — which is the point. It forces the module docstring, the CLAUDE.md row
+        and this class to move in the same commit, instead of the doc drifting
+        out of date the way it just did. Flip the assertion, do not delete it.
+        """
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", dlog, rlog, "100000"])
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out == ""
+
+
+class TestOpenScopeDisclosure:
+    """#1187 — an empty result that names its own scope cannot be misread.
+
+    The shape gate above kills the instance; this kills the class. A plausible
+    but WRONG bot — a typo, or a live name belonging to another fleet under the
+    #526 host-global/per-fleet join — passes every shape test and still returns
+    zero rows at rc 0. Coverage honesty applied to a read door: state the bound.
+    """
+
+    def _logs(self, tmp_path, dispatches, reports):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, reports)
+        return str(dlog), str(rlog)
+
+    def test_empty_result_names_the_bot_it_filtered_on(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        dlog, rlog = self._logs(
+            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")], []
+        )
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open", "typo-bot", dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 0
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert "typo-bot" in out.err and "0 open" in out.err
+
+    def test_scope_is_stated_on_a_NON_empty_result_too(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Always, not only when empty. Under #526 a reader can be looking at
+        another fleet's rows; 'which bot' is part of reading the answer, and a
+        line that appears only on zero makes its own presence the signal."""
+        dlog, rlog = self._logs(
+            tmp_path, [_dispatch("w1", 100, 1000, task_id="t-a")], []
+        )
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 0
+        out = capsys.readouterr()
+        assert out.out == "100 1000 t-a\n"
+        assert "w1" in out.err and "1 open" in out.err
+
+    def test_scope_line_NEVER_reaches_stdout(self, tmp_path, monkeypatch, capsys):
+        """Load-bearing, not stylistic. report-back.sh:117 pipes this stdout
+        through `awk {print $3}` to decide whether a supplied --task id is open,
+        and only a NON-EMPTY open set may contradict the caller (#1146). On
+        stdout the scope line becomes a phantom row whose field 3 is "->".
+
+        NOTE THE SHAPE: the empty log here is not incidental. A bot that holds
+        an open row still matches its own id — the phantom adds an entry rather
+        than displacing the real one — so that case stays clean and would read
+        as proof the placement is free. It bites with NOTHING open, where a
+        valid id meets an open set of exactly ["->"] and a correct report is
+        flagged `supplied-id-not-open`. Verified against the real report-back.sh
+        with the scope line moved to stdout.
+
+        Assert the whole stream, so no header can slip in beside the rows.
+        """
+        dlog, rlog = self._logs(tmp_path, [], [])
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 0
+        out = capsys.readouterr()
+        assert out.out == ""
+        assert out.err != ""  # the disclosure went somewhere — just not stdout
+
+    def test_open_task_stays_silent_on_stdout_and_stderr(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The resolver is machine-consumed and prints one id or nothing. It
+        gets the shape gate but NOT the scope line: narration on every terminal
+        report-back fleet-wide would be noise with no reader."""
+        dlog, rlog = self._logs(tmp_path, [], [])
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open-task", "w1", dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 0
+        out = capsys.readouterr()
+        assert out.out == "" and out.err == ""
 
 
 class TestSupersession:
@@ -835,7 +1087,9 @@ class TestSupersession:
         dropped task. Rows with no `supersedes` key at all must behave as before."""
         rows = [_dispatch("w1", 100, 1000, task_id="t-100-a")]
         assert "supersedes" not in rows[0]
-        assert [r[3] for r in self._overdue(tmp_path, rows).get("w1", [])] == ["t-100-a"]
+        assert [r[3] for r in self._overdue(tmp_path, rows).get("w1", [])] == [
+            "t-100-a"
+        ]
 
     def test_supersedes_is_scoped_by_bot(self, tmp_path):
         """One bot's dispatch must not retire another's row, however the id was typed —
@@ -888,6 +1142,8 @@ class TestSupersession:
             ],
         )
         assert [r[3] for r in out.get("w1", [])] == ["t-5"]
+
+
 class TestUnassigned:
     """#1024 — the MIRROR of overdue: reported, then never re-dispatched.
 
