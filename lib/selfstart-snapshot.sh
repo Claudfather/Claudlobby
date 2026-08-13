@@ -82,6 +82,61 @@
 # but the NAME LIST still stands, because a list of who was touched is not
 # reconstructed by being written down late.
 #
+# ── SELF-STARTED is defined NEGATIVELY, so it needs an upper bound ──────────
+# A payload that no receipt covers and that is not channel-shaped falls through
+# to SELF-STARTED by elimination. Compose that with the fact above — the name
+# list is known-incomplete, because a real rescue went unrecorded — and every
+# wake nobody wrote down is reported as good news. Measured on the 2026-08-13
+# 19:17:18Z boot: ari submitted its payload at 19:43:30Z, TWENTY-SIX MINUTES
+# after boot, predating the only applicable receipt boundary, and was printed as
+# "unaided". The ladder is measured in seconds; +26min is not a self-start under
+# any reading. The honest figure for that boot was 2 of 21, not the 3 printed.
+#
+# So arrival is bounded, and a payload past the bound with nothing to explain it
+# is LATE-UNEXPLAINED — its own answer, deliberately NOT folded into RESCUED,
+# because nothing evidences a rescue. It reads as a gap, which is what it is.
+#
+# THE BOUND IS THE INSTANT THE PAGE ALREADY CLAIMS TO BE A RESULT. It is not a
+# new constant and not a second knob: VALID_AT (ladder end + first-turn
+# allowance) is where the too-early gate stops refusing, i.e. where the script
+# asserts every bot has had its chance to start. A payload arriving after that
+# is, by the script's OWN claim, arriving after it should have. Deriving the two
+# separately would let the script simultaneously say "the window has closed" and
+# "this arrival is still on time", which is incoherent — so they are one value.
+#
+# NOT the bot's own rung. THE REFUTATION IS MEASURED: otis has a composed rung
+# of 15s and produced its payload at boot+97s; ravi's rung is 12s and its payload
+# landed at boot+96s. Both are confirmed genuine self-starts and both are ~83s
+# past their OWN rungs, so a per-bot bound flags BOTH at any allowance under 85s.
+# That alone settles it, and it does not depend on the paragraph below.
+#
+# The EXPLANATION, which is reasoning and is NOT measured — stated separately so
+# it is not mistaken for the evidence: a bot on an early rung boots into a
+# machine where twenty more are still piling on behind it, so it plausibly meets
+# the most contention, while a per-bot bound would give it the least time. We
+# have no late-rung self-start to compare against, so this is a mechanism story
+# for why the measurement came out as it did, not a second finding.
+#
+# TWO STATES SUPPRESS THE BOUND ENTIRELY, and each is disclosed rather than
+# silently skipped:
+#   no readable rung anywhere — the ladder end is not derived, and MAX_RUNG=0
+#     would ASSERT a zero-length ladder rather than measure one. That is the same
+#     distinction boot_rung_for already makes by returning -1 instead of 0. On a
+#     launchd host, where no .service exists at all, taking 0 would put the bound
+#     at boot+60s and flag the whole fleet.
+#   clock not SANE — the bound compares record timestamps against a derived
+#     instant, and a stale boot clock is precisely the condition under which the
+#     script already says those timestamps cannot be trusted.
+# The too-early gate treats a missing ladder end as 0 and this does not, which
+# is a deliberate asymmetry rather than drift: from the same missing fact the
+# two err in opposite directions. There, 0 makes the gate FIRE LESS and risks
+# calling a page a result early; here, 0 would make the bound FIRE MORE and
+# manufacture gaps out of nothing. Each fails toward not inventing something.
+#
+# It sets no exit code, and that is the same page-versus-row line the rest of
+# the script draws: 4/5/6 say THE PAGE is not a result, while LATE-UNEXPLAINED
+# and ADJUDICATE are per-bot verdicts on a page that is otherwise fine.
+#
 # ── What this script depends on, and what it still refuses to depend on ─────
 # It sources lib-common.sh for exactly two doors — the strict roster
 # (declared_bots_strict) and the boot classifier (boot_start_class) — because
@@ -608,23 +663,93 @@ boot_rung_for() {
     printf '%s\n' "-1"
 }
 
-: > "$TMP/rows"
+# ── Rung pre-pass ───────────────────────────────────────────────────────────
+# The ladder END bounds arrival for every bot, so it has to be known BEFORE the
+# sweep that uses it — it cannot be accumulated by the same loop it gates. Rungs
+# are read once here and carried into the sweep as a fourth field rather than
+# boot_rung_for being called twice per bot, so there is still exactly one read
+# of each composed unit and no second place for the two to disagree.
 : > "$TMP/rungs"
 : > "$TMP/norung"
-: > "$TMP/noprompt"
+: > "$TMP/declared_rung"
 while IFS="$(printf '\t')" read -r bot fleet botdir; do
+    [ -n "$bot" ] || continue
+    rung="$(boot_rung_for "$botdir")"
+    if [ "$rung" -ge 0 ]; then
+        printf '%s\n' "$rung" >> "$TMP/rungs"
+    else
+        printf '%s\n' "$bot" >> "$TMP/norung"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$bot" "$fleet" "$botdir" "$rung" >> "$TMP/declared_rung"
+done < "$TMP/declared"
+
+# ── Is this reading a result yet? ───────────────────────────────────────────
+# Two gates, and they are different kinds of claim (#1050).
+#
+# HARD, and derived: a bot whose ExecStartPre rung has not elapsed has not been
+# launched, full stop. That is a fact about systemd, not an estimate, so those
+# bots are NOT-YET-DUE rather than stranded.
+#
+# SOFT, and stated: a bot that HAS launched still needs time to reach a first
+# turn. That latency is a measurement, not a derivation — 17-34s observed at
+# load 31 on 2026-08-06, and longer under worse load, which is exactly when
+# this gets run. The allowance is therefore printed with its provenance rather
+# than applied silently, and it is overridable. On a 21-bot host the two gates
+# together land at boot+120s, matching the operating rule.
+FIRST_TURN_ALLOWANCE_S="${SELFSTART_FIRST_TURN_ALLOWANCE_S:-60}"
+MAX_RUNG=0
+if [ -s "$TMP/rungs" ]; then
+    MAX_RUNG="$(sort -n "$TMP/rungs" | tail -1)"
+fi
+VALID_AT=$(( BOOT_EPOCH + MAX_RUNG + FIRST_TURN_ALLOWANCE_S ))
+TOO_EARLY=0
+[ "$NOW_EPOCH" -lt "$VALID_AT" ] && TOO_EARLY=1
+
+# ── The lateness bound on SELF-STARTED ──────────────────────────────────────
+# Same instant as VALID_AT, deliberately and not by coincidence — see the header
+# note. Past it, a payload nothing accounts for is LATE-UNEXPLAINED rather than
+# a self-start. Suppressed in the two states where the bound would be asserted
+# rather than derived, and disclosed in both.
+SELF_START_BOUND_ISO=""
+SELF_START_BOUND_CMP=""
+BOUND_STATE="APPLIED"
+BOUND_WHY=""
+if [ ! -s "$TMP/rungs" ]; then
+    BOUND_STATE="NO-LADDER"
+    BOUND_WHY="no boot rung readable for any declared bot, so the ladder end is not derived. Taking it as 0 would assert a zero-length ladder rather than measure one"
+elif [ "$CLOCK_VERDICT" != "SANE" ]; then
+    BOUND_STATE="CLOCK-$CLOCK_VERDICT"
+    BOUND_WHY="the boot clock is $CLOCK_VERDICT, and the bound compares record timestamps against a derived instant — the very comparison a bad boot clock invalidates"
+else
+    SELF_START_BOUND_ISO="$(epoch_to_iso_utc "$VALID_AT")"
+    # The formatted instant is CHECKED before it is adopted, through the same
+    # helper the receipt boundary goes through. An unformattable epoch yields an
+    # empty string, and an empty boundary sorts BEFORE every record — so the
+    # comparison below would flag EVERY self-starter at once, silently, on a page
+    # that otherwise reads normally. Exactly the hazard pad_iso_frac names, in a
+    # second place. Refuse rather than adopt.
+    if iso_utc_shaped "${SELF_START_BOUND_ISO}Z"; then
+        # Same fractional padding as BOOT_CMP: records carry sub-second precision
+        # and "." sorts below "Z", so an unpadded boundary flips a bot half a
+        # second the wrong side of it.
+        SELF_START_BOUND_CMP="${SELF_START_BOUND_ISO}.000Z"
+    else
+        SELF_START_BOUND_ISO=""
+        BOUND_STATE="NO-INSTANT"
+        BOUND_WHY="the bound instant could not be formatted from epoch $VALID_AT, and an unshaped boundary sorts before every record — adopting it would flag every self-starter at once"
+    fi
+fi
+
+: > "$TMP/rows"
+: > "$TMP/noprompt"
+: > "$TMP/unbounded"
+while IFS="$(printf '\t')" read -r bot fleet botdir rung; do
     [ -n "$bot" ] || continue
     tdir="$(transcript_dir_for "$botdir")"
     files="$(ls -1t "$tdir"/*.jsonl 2>/dev/null)"
 
-    rung="$(boot_rung_for "$botdir")"
     not_due=0
-    if [ "$rung" -ge 0 ]; then
-        printf '%s\n' "$rung" >> "$TMP/rungs"
-        [ "$rung" -gt "$ELAPSED" ] && not_due=1
-    else
-        printf '%s\n' "$bot" >> "$TMP/norung"
-    fi
+    [ "$rung" -ge 0 ] && [ "$rung" -gt "$ELAPSED" ] && not_due=1
 
     if [ -z "$files" ]; then
         # Declared, but no transcript at all — the third blind spot. A naive
@@ -735,8 +860,30 @@ EOF
                 cls="ADJUDICATE"
                 why="payload submitted $start_ts, but the receipt boundary is unusable and its name list is not exhaustive — nothing here can certify a self-start" ;;
             *)
-                cls="SELF-STARTED"
-                why="payload submitted $start_ts, unaided" ;;
+                # Nothing accounts for this payload. That is only good news if it
+                # arrived when a self-start could still arrive — otherwise
+                # "unaided" is being inferred from a MISSING record, which is the
+                # inversion the bound exists to stop (#1203).
+                if [ -n "$SELF_START_BOUND_CMP" ] && [ "$start_ts" \> "$SELF_START_BOUND_CMP" ]; then
+                    cls="LATE-UNEXPLAINED"
+                    why="payload submitted $start_ts, past the self-start bound ${SELF_START_BOUND_ISO}Z (ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s) — something woke it and nothing recorded what"
+                else
+                    cls="SELF-STARTED"
+                    why="payload submitted $start_ts, unaided"
+                    # A self-start credited without the bound is credited on
+                    # weaker evidence than one that cleared it. Named, not
+                    # silently equated with the bounded kind.
+                    #
+                    # Keyed on the SAME predicate the comparison above uses, not
+                    # on BOUND_STATE. One fact, one variable: if the two could
+                    # disagree, a bot could be unbounded in fact and absent from
+                    # the list that discloses it — silence in the one place the
+                    # suppression is supposed to speak. BOUND_STATE/BOUND_WHY
+                    # carry the operator-facing REASON and nothing else, so a
+                    # drift between them can only ever produce a wrong sentence,
+                    # never a wrong classification.
+                    [ -n "$SELF_START_BOUND_CMP" ] || printf '%s\n' "$bot" >> "$TMP/unbounded"
+                fi ;;
         esac
     elif [ "$start_cls" = "partial" ] && [ "$filtered" -gt 0 ]; then
         # Half a boot. Something startup-shaped submitted, but this bot's own
@@ -784,7 +931,7 @@ EOF
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$bot" "$fleet" "$cls" "$raw" "$filtered" "$(basename "$newest")" "$first_ts" "$why" \
         "$start_cls:$start_ts" >> "$TMP/rows"
-done < "$TMP/declared"
+done < "$TMP/declared_rung"
 
 # ── Undeclared leftovers (reported, never counted) ──────────────────────────
 : > "$TMP/undeclared"
@@ -809,30 +956,14 @@ n_notdue="$(awk -F'\t' '$3=="NOT-YET-DUE"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_rescued="$(awk -F'\t' '$3=="RESCUED"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_inbound="$(awk -F'\t' '$3=="INBOUND-WOKEN"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_partial="$(awk -F'\t' '$3=="PARTIAL"' "$TMP/rows" | wc -l | tr -d ' ')"
+n_late="$(awk -F'\t' '$3=="LATE-UNEXPLAINED"' "$TMP/rows" | wc -l | tr -d ' ')"
 n_disagree="$(awk -F'\t' '($4>0)!=($5>0)' "$TMP/rows" | wc -l | tr -d ' ')"
 n_rows="$(wc -l < "$TMP/rows" | tr -d ' ')"
-
-# ── Is this reading a result yet? ───────────────────────────────────────────
-# Two gates, and they are different kinds of claim (#1050).
-#
-# HARD, and derived: a bot whose ExecStartPre rung has not elapsed has not been
-# launched, full stop. That is a fact about systemd, not an estimate, so those
-# bots are NOT-YET-DUE rather than stranded.
-#
-# SOFT, and stated: a bot that HAS launched still needs time to reach a first
-# turn. That latency is a measurement, not a derivation — 17-34s observed at
-# load 31 on 2026-08-06, and longer under worse load, which is exactly when
-# this gets run. The allowance is therefore printed with its provenance rather
-# than applied silently, and it is overridable. On a 21-bot host the two gates
-# together land at boot+120s, matching the operating rule.
-FIRST_TURN_ALLOWANCE_S="${SELFSTART_FIRST_TURN_ALLOWANCE_S:-60}"
-MAX_RUNG=0
-if [ -s "$TMP/rungs" ]; then
-    MAX_RUNG="$(sort -n "$TMP/rungs" | tail -1)"
-fi
-VALID_AT=$(( BOOT_EPOCH + MAX_RUNG + FIRST_TURN_ALLOWANCE_S ))
-TOO_EARLY=0
-[ "$NOW_EPOCH" -lt "$VALID_AT" ] && TOO_EARLY=1
+# Summed ONCE. The completeness check and the banner that explains it used to
+# carry the same addition written out twice, so adding a bucket and updating
+# only one of them exits 4 on a page that is actually complete — the assertion
+# built to catch a short sweep firing on itself instead.
+n_classified=$(( n_self + n_strand + n_adj + n_notdue + n_rescued + n_inbound + n_partial + n_late ))
 
 # A refusal that exits 0 is a caveat, not a refusal (#1051 review, vera). The
 # banner below is advisory to a human reading the text and invisible to anything
@@ -874,7 +1005,7 @@ fi
 # need not fix it. The operator who gets only one number should get the one that
 # does not resolve on its own.
 INCOMPLETE=0
-if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj + n_notdue + n_rescued + n_inbound + n_partial ))" -ne "$TOTAL" ]; then
+if [ "$n_rows" -ne "$TOTAL" ] || [ "$n_classified" -ne "$TOTAL" ]; then
     INCOMPLETE=1
     EXIT_CODE=4
     echo
@@ -884,9 +1015,9 @@ if [ "$n_rows" -ne "$TOTAL" ] || [ "$(( n_self + n_strand + n_adj + n_notdue + n
     echo "##"
     echo "##  Declared bots      : $TOTAL"
     echo "##  Rows produced      : $n_rows"
-    echo "##  Rows classified    : $(( n_self + n_strand + n_adj + n_notdue + n_rescued + n_inbound + n_partial ))"
+    echo "##  Rows classified    : $n_classified"
     echo "##    self-started $n_self · stranded $n_strand · adjudicate $n_adj · not-yet-due $n_notdue"
-    echo "##    rescued $n_rescued · inbound-woken $n_inbound · partial $n_partial"
+    echo "##    rescued $n_rescued · inbound-woken $n_inbound · partial $n_partial · late-unexplained $n_late"
     echo "##"
     echo "##  Bots are missing from the counts below, so N is short and"
     echo "##  must NOT be compared against the baseline. Exit code 4."
@@ -953,13 +1084,16 @@ fi
 echo "==============================================================="
 if [ "$CONTAMINATED" -eq 1 ]; then
     echo "  SELF-START SNAPSHOT:  NOT A RESULT — a rescue covers this boot"
-    echo "                        (provisional: $n_self of $TOTAL, $n_rescued carried, $n_inbound woken by inbound)"
+    echo "                        (provisional: $n_self of $TOTAL, $n_rescued carried, $n_inbound woken by inbound, $n_late late-unexplained)"
 elif [ "$TOO_EARLY" -eq 1 ]; then
     echo "  SELF-START SNAPSHOT:  NOT A RESULT — only ${ELAPSED}s since boot"
     echo "                        (provisional: $n_self of $TOTAL, $n_notdue not launched yet)"
-elif [ "$n_adj" -gt 0 ]; then
+elif [ "$(( n_adj + n_late ))" -gt 0 ]; then
+    # Both widen the range UPWARD and neither is counted in it. A late payload
+    # might still be a very slow self-start, so folding it into the headline
+    # would overclaim and dropping it from the range would underclaim.
     echo "  SELF-START SNAPSHOT:  $n_self of $TOTAL self-started"
-    echo "                        range $n_self-$(( n_self + n_adj )) — $n_adj unresolved, see ADJUDICATE"
+    echo "                        range $n_self-$(( n_self + n_adj + n_late )) — $n_adj unresolved (ADJUDICATE), $n_late late (LATE-UNEXPLAINED)"
 else
     echo "  SELF-START SNAPSHOT:  $n_self of $TOTAL self-started"
 fi
@@ -987,6 +1121,14 @@ case "$RESCUE_STATE" in
         echo "  rescue receipt: boundary UNUSABLE — $RESCUE_WHY"
         echo "                  $N_RESCUE_NAMED bot(s) named; the name list still applies" ;;
 esac
+if [ "$BOUND_STATE" = "APPLIED" ]; then
+    echo "  self-start bound: ${SELF_START_BOUND_ISO}Z (ladder ${MAX_RUNG}s + first turn ${FIRST_TURN_ALLOWANCE_S}s)"
+    echo "                  a payload after this that no receipt explains is LATE-UNEXPLAINED, not a self-start"
+else
+    echo "  self-start bound: NOT APPLIED — $BOUND_WHY"
+    echo "                  so SELF-STARTED below is unbounded above: an unrecorded"
+    echo "                  wake at any distance from boot still reads as a self-start"
+fi
 echo "  boot instant  : ${BOOT_ISO}Z (epoch $BOOT_EPOCH)"
 echo "  snapshot at   : ${NOW_ISO}Z (${ELAPSED}s after boot)"
 if [ "$CONTAMINATED" -eq 1 ]; then
@@ -1014,6 +1156,7 @@ print_section() {
 }
 
 print_section "SELF-STARTED"  "SELF-STARTED"
+print_section "LATE-UNEXPLAINED" "LATE, UNEXPLAINED — a startup payload landed, but so long after boot that it cannot be a self-start, and no rescue receipt accounts for it. This is a GAP, not a pass: something woke these bots and nothing recorded what. They are counted OUT of the headline and into its upper range"
 print_section "PARTIAL"       "HALF-BOOTED — a startup-shaped record landed but the bot's OWN composed prompt never did. Running without the instructions it was composed with, and NOT a self-start"
 print_section "RESCUED"       "RESCUED — carried by a rescuer, NOT self-started"
 print_section "INBOUND-WOKEN" "STRANDED ON BOOT, WOKEN BY AN INBOUND MESSAGE — these are NOT self-starts. A bot here looks healthy to every liveness signal: session up, pane active, work being done. It never started on its own"
@@ -1031,6 +1174,15 @@ if [ "$RESCUE_STATE" = "NONE" ]; then
     echo
 fi
 
+if [ -s "$TMP/unbounded" ]; then
+    echo "NOTE: the lateness bound could not be applied, so these bots are counted"
+    echo "      as self-starters on the weaker evidence that nothing accounts for"
+    echo "      them. That is exactly the reading an unrecorded rescue produces,"
+    echo "      and here nothing separates the two. Reason: $BOUND_WHY."
+    sort -u "$TMP/unbounded" | sed 's/^/        /'
+    echo
+fi
+
 if [ -s "$TMP/noprompt" ]; then
     echo "NOTE: no composed STARTUP_PROMPT readable for these bots, so the"
     echo "      whole-injection assertion could not be applied. A half-submitted"
@@ -1044,7 +1196,19 @@ if [ -s "$TMP/norung" ]; then
     echo "NOTE: no boot rung readable for these bots, so the not-yet-launched"
     echo "      gate could not be applied to them. They may be misreported as"
     echo "      strands if this ran early (no composed .service unit — a"
-    echo "      launchd host staggers elsewhere):"
+    echo "      launchd host staggers elsewhere)."
+    # Keyed on the bound's OWN state, never on this list. When NO bot has a rung
+    # every bot is in this list AND the bound is suppressed, so a flat "the bound
+    # still applies" would be false in exactly the case where this note is
+    # longest — a disclosure outliving its condition and becoming its own untruth.
+    if [ "$BOUND_STATE" = "APPLIED" ]; then
+        echo "      The lateness bound still applies to them, from the ladder end"
+        echo "      read off the bots that DO have one — the loosest treatment"
+        echo "      available, never a tighter one."
+    else
+        echo "      The lateness bound is not applied to them either — see the"
+        echo "      self-start bound line above for why."
+    fi
     sort -u "$TMP/norung" | sed 's/^/        /'
     echo
 fi
