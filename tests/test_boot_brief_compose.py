@@ -11,6 +11,12 @@ Three properties, each the sole defense for its class:
    a CLI that lacks the verb, and the probe must not run when the knob is off.
 3. **The hook entries are exactly the locked shape**: matchers ``startup`` and
    ``compact`` (never resume/clear/fork), explicit timeout, fail-open command.
+4. **Overlay mode threads ``--fleet``; root mode composes flagless.** Fleet
+   selection has no env or cwd fallback (#1197): a flagless door on an overlay
+   estate resolves root-mode and exits 1 on every boot — the payload never
+   arrives, only the fallback line. The flag value is the overlay DIRECTORY
+   name (the identifier ``_find_fleet_dir`` guarantees globally unique, F5),
+   deliberately distinct from ``fleet.name`` in these fixtures.
 """
 
 from __future__ import annotations
@@ -46,6 +52,17 @@ def _bot(**kw) -> BotConfig:
 def paths(tmp_path) -> Paths:
     (tmp_path / "lib").mkdir()
     return Paths(root=tmp_path, fleet_dir=None)
+
+
+@pytest.fixture
+def overlay_paths(tmp_path) -> Paths:
+    # Nested (local/<system>/<fleet>/) shape, and the dir name deliberately
+    # differs from the FleetConfig fixture's name="test-fleet": the composed
+    # --fleet value must be the DIRECTORY identifier, never fleet.name.
+    (tmp_path / "lib").mkdir()
+    fleet_dir = tmp_path / "local" / "home" / "eng-overlay"
+    fleet_dir.mkdir(parents=True)
+    return Paths(root=tmp_path, fleet_dir=fleet_dir)
 
 
 def _session_start(settings: dict) -> list:
@@ -146,6 +163,42 @@ class TestKnobArmed:
         assert "echo mine" in cmds
         assert any("--boot" in c for c in cmds)
 
+    def test_overlay_mode_threads_the_fleet_flag(self, overlay_paths, monkeypatch):
+        # Fleet selection has no env or cwd fallback (#1197): without --fleet
+        # the door resolves root-mode and exits 1 on every overlay-fleet boot.
+        # The value pinned here is the overlay DIRECTORY name (eng-overlay),
+        # not fleet.name (test-fleet) — a fleet.name-passing mutant must fail.
+        settings = self._armed_settings(overlay_paths, monkeypatch)
+        cmds = [
+            h["command"]
+            for g in _session_start(settings)
+            for h in g.get("hooks", [])
+            if "--boot" in h.get("command", "")
+        ]
+        assert cmds, "no boot-brief hook composed"
+        for cmd in cmds:
+            assert cmd.startswith(
+                "/fake/bin/claudlobby --fleet eng-overlay brief --bot alex --boot"
+            )
+            # the fallback text is a reader instruction — it must teach a
+            # door that resolves, or every failure line points at #1197
+            fallback = cmd.split("||", 1)[1]
+            assert "claudlobby --fleet eng-overlay brief --bot alex" in fallback
+
+    def test_root_mode_composes_no_fleet_flag(self, paths, monkeypatch):
+        # The overlay pin's missing twin: root mode resolves at the root by
+        # default, so the flag must stay absent there.
+        settings = self._armed_settings(paths, monkeypatch)
+        cmds = [
+            h["command"]
+            for g in _session_start(settings)
+            for h in g.get("hooks", [])
+            if "--boot" in h.get("command", "")
+        ]
+        assert cmds, "no boot-brief hook composed"
+        for cmd in cmds:
+            assert "--fleet" not in cmd
+
 
 class TestComposeTimeGate:
     def test_probe_failure_refuses_to_arm(self, paths, monkeypatch):
@@ -211,15 +264,11 @@ class TestRealProbe:
             "exit 0\n"
         )
         fake.chmod(0o755)
-        exe, why = self._probe_with_path(
-            monkeypatch, f"{tmp_path}:/usr/bin:/bin"
-        )
+        exe, why = self._probe_with_path(monkeypatch, f"{tmp_path}:/usr/bin:/bin")
         assert exe is None
         assert "invalid choice" in why
 
-    def test_current_install_certifies_the_resolved_exe(
-        self, monkeypatch, tmp_path
-    ):
+    def test_current_install_certifies_the_resolved_exe(self, monkeypatch, tmp_path):
         fake = tmp_path / "claudlobby"
         fake.write_text(
             "#!/bin/sh\n"
@@ -227,8 +276,6 @@ class TestRealProbe:
             "exit 0\n"
         )
         fake.chmod(0o755)
-        exe, why = self._probe_with_path(
-            monkeypatch, f"{tmp_path}:/usr/bin:/bin"
-        )
+        exe, why = self._probe_with_path(monkeypatch, f"{tmp_path}:/usr/bin:/bin")
         assert exe == str(fake)
         assert why == ""
