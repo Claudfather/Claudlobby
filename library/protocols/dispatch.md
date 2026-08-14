@@ -157,22 +157,34 @@ $CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet>          # report only
 $CLAUDLOBBY_ROOT/lib/reconcile-fleet.sh <fleet> --enroll  # enroll orphans AND prune fleet-state — see below
 ```
 
-**`--enroll` writes outside your fleet.** Alongside enrolling orphans it applies
-the fleet-state prune, which deletes rows for any bot not in *your* `fleet.yaml`
-from `state/fleet-state.json` — a file shared by every fleet on the host (see
-#892). So running it against one fleet removes other fleets' bots from the shared
-state.
+**`--enroll` also prunes the shared fleet-state, and that prune is scoped.**
+Alongside enrolling orphans it applies the fleet-state prune to
+`state/fleet-state.json` — one file shared by every fleet on the host (#892), so
+the scoping is what keeps one fleet from reaping another's rows. A row is yours
+to remove only when **all three** hold:
 
-**That is today's behaviour; a scoping fix is in flight (#1143).** Once it lands
-the prune narrows to rows outside your manifest *and* undeclared by any fleet on
-the host *and* stamped as yours — at which point the sentence above stops being
-true. Until then, assume the wide behaviour.
+1. your `fleet.yaml` no longer declares it — the reason to prune at all;
+2. **no** fleet on this host declares it — so a sibling's live bot is never
+   touched, and a bot that just moved via `claudlobby move-bot` survives even
+   though its stamp still names the old fleet;
+3. it is **stamped as yours** — a sibling's *departed* bot is still theirs.
 
-Consequences are bounded: a missing row degrades that bot's STATE to `unknown`,
-never `down`, `fleet-pulse` does not read the file, and rows regenerate on each
-bot's next start or report. It is a defect to be aware of, not an incident. But
-the flag reads like "also fix the orphans" and does considerably more than that,
-so reach for the bare form unless you actually intend to enroll.
+Anything else is reported and left alone. An unstamped row predates stamping and
+is **kept**, which makes that transition safe by construction rather than by
+migration.
+
+**What is still true of the flag.** It writes to a host-global file, so it is not
+a read-only operation confined to your own fleet. And it refuses rather than
+guesses: if any fleet's manifest cannot be parsed, the prune declines and touches
+nothing — a silently-empty roster would read as "no fleet declares this bot" and
+license exactly the deletion condition 2 exists to prevent (#1146).
+
+Consequences of a missing row are bounded: it degrades that bot's STATE to
+`unknown`, never `down`, `fleet-pulse` does not read the file, and rows
+regenerate on each bot's next start or report. Still reach for the bare form
+unless you actually intend to enroll — the flag reads like "also fix the orphans"
+and does more than that — but the blast radius is now your own fleet's departed
+rows, not the host.
 
 `reconcile-fleet.sh` reports five buckets: healthy (tmux + unit), orphan (tmux but no unit — unsupervised), missing (unit but no tmux — down), unsupervised-down (neither — declared but nothing running or supervised; keepalive cannot revive it), unbound (running but not in any fleet.yaml — investigate before killing).
 
