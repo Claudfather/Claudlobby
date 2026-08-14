@@ -121,8 +121,8 @@ This fleet is wired to a **Claudron knowledge vault** (`$CLAUDRON_VAULT_PATH`). 
 
 **Navigate for config, query for knowledge.** Read your own *configuration* (this file, your overlay) by walking the filesystem; reach *knowledge* by asking Claudron, never by opening vault files by hand:
 
-- **Query before you start** — `claudron recall "<task context>"` (or `/claudna:recall`): relevance-ranked prior findings, incidents, and conventions pooled across the vault's tiers.
-- **Look up a specific note** — `claudron lookup "<title or tag>"`.
+- **Query before you start** — `claudron recall --query "<task context>"` (or `/claudna:recall`): relevance-ranked prior findings, incidents, and conventions pooled across the vault's tiers.
+- **Look up a specific note** — `claudron lookup "<title or tag>"` — a bare positional here, deliberately not `--query`. The two doors differ: `recall` takes the flag, `lookup` takes the positional. Copying one form onto the other exits `2`.
 - **Capture after you learn** — `claudron capture` (or `/claudna:capture`): a typed, deduped write. A finding you'd once have filed as a lesson goes here.
 
 The vault's tier layout (the shared hub, fleet tiers, and any host/system nesting) and the full consumption rules are Claudron's contract — see its `VAULT-STRUCTURE.md` §Consumption. Do **not** hardcode tier paths; let `claudron` resolve them.
