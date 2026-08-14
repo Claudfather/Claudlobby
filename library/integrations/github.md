@@ -48,7 +48,18 @@ Use `${PIPESTATUS[0]}`, or run the call unpiped first. **`${PIPESTATUS[0]}` alon
 
 REST core, search and GraphQL throttle in **independent buckets**, so a REST block is not an outage and rarely blocks the actual work. Verified live under an active secondary block, reads *and* writes: `gh pr list`, `gh issue list`, `gh issue view`, `gh issue create` and `gh api graphql` all kept working while `gh api repos/...` 403'd on the same token in the same second. Reroute to those rather than idling.
 
-The GitHub MCP is REST-backed, so `mcp__github__*` failing while `gh pr` / `gh issue` succeed is **expected, not a broken MCP** — do not go hunting an auth bug. Not every `gh` subcommand is GraphQL-backed either (`gh api` and `gh pr diff` are REST), so test the specific one you need instead of assuming porcelain is safe.
+The GitHub MCP is REST-backed, so `mcp__github__*` failing while `gh pr` / `gh issue` succeed is **expected, not a broken MCP** — *when the code is 403*. Not every `gh` subcommand is GraphQL-backed either (`gh api` and `gh pr diff` are REST), so test the specific one you need instead of assuming porcelain is safe.
+
+**The status code is the discriminator, because that same observable has two unrelated causes.** `gh` and the MCP do not share a credential: `gh` reads `~/.config/gh/hosts.yml`, the MCP reads `${GITHUB_PAT}` from `.env`, and `gh auth login` writes only the first. So one can be healthy while the other is revoked, stale, or absent.
+
+| divergence cause | code | correct response |
+|---|---|---|
+| one token, different throttle bucket | 403 | expected — reroute and keep working |
+| two credentials, one revoked or absent | 401 | a real auth failure — stop and report |
+
+A 401 is **never** the throttle case, so "expected, not a broken MCP" does not apply to it and neither does anything else in this section.
+
+**Rejected is not the same as absent, and a bare 401 cannot tell them apart.** Run the same URL twice, once unauthenticated and once with the credential: `200` then `401` is a credential being **presented and rejected**. Conversely an `mcp__github__*` success proves nothing about authentication — an anonymous read of a public repo returns real data at `200`, so treat it as a public read unless the endpoint required a credential (`gh api user` does).
 
 #### Gotcha: a 401 kills every door — there is nothing to reroute to
 
