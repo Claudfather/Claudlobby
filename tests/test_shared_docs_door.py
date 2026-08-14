@@ -7,6 +7,7 @@ text, byte-identical to before this change.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from claudlobby.composer import compose_claude_md
@@ -80,6 +81,42 @@ class TestVaultWiredDoor:
         assert "$CLAUDRON_VAULT_PATH" in md
         assert "claudron recall" in md
         assert "claudron capture" in md
+
+    def test_recall_is_not_composed_in_the_bare_positional_form(self, tmp_path):
+        """#1218 regression guard — and it is narrower than it looks.
+
+        `claudron recall` takes `--query`; the bare positional form exits 2.
+        This asserts THAT FORM has not come back. It does **not** assert the
+        composed command works, and must not be read as if it did: `claudron`
+        is not a dependency of this project and CI cannot execute it, so no
+        test here can run the door. Proving the command actually returns rc=0
+        requires composing a bot and running what it prints, which is done by
+        hand and cited on the PR.
+
+        The distinction matters because a string check that *looks* like a
+        working-command gate is worse than none — it is exactly the
+        incidentally-correct proxy the merge guardrails now warn about.
+        """
+        md = self._compose(tmp_path)
+
+        assert "claudron recall --query" in md, (
+            "recall must compose with --query; the bare positional exits 2"
+        )
+        assert not re.search(r"claudron recall\s+[\"'<]", md), (
+            "a bare positional argument to `claudron recall` has returned"
+        )
+
+    def test_lookup_keeps_its_positional_and_is_not_flagged(self, tmp_path):
+        """The sibling door, pinned because the obvious "fix" is to make it
+        match `recall`. It genuinely differs: `lookup` takes `query [query ...]`
+        as a positional and is correct as composed (measured rc=0). Adding
+        `--query` here would break a working door while fixing nothing."""
+        md = self._compose(tmp_path)
+
+        assert "claudron lookup --query" not in md
+        assert re.search(r"claudron lookup\s+[\"'<]", md), (
+            "lookup composes with a positional argument"
+        )
 
     def test_raw_tree_replaced(self, tmp_path):
         md = self._compose(tmp_path)
