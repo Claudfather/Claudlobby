@@ -32,13 +32,18 @@ If you see exactly 30 files in the MCP response, assume truncation and re-fetch 
 
 When all bots share one GitHub PAT (single identity), GitHub blocks `--approve` and `--request-changes` on PRs that same identity authored. Use the `same-identity-fallback` protocol: post the verdict as a COMMENT with `**Approve**` or `**Request Changes**` in the body.
 
-#### Gotcha: a failed `gh` call, piped, exits 0
+#### Gotcha: reading a piped `gh` call's exit status
 
-**This governs every `gh` call, whatever went wrong.** `gh api ... | head` reports *head's* exit status, not `gh`'s, so the failure prints as exit `0` and reads as success. 401, 403, 422 and a network timeout all do this — the pipe is the defect and the failure mode is irrelevant.
+**The mechanism is not a `gh` fact and is stated once in the `exit-status-through-pipes` guardrail:** a
+pipeline's `$?` is the *last* stage's status, so `gh api ... | head` reports `head`'s — exit `0` — however
+`gh` failed. Use `${PIPESTATUS[0]}` or run the call unpiped. It has bitten `pytest` and `claudron` here
+too, so do not read it as a GitHub gotcha.
+
+What follows is the part that *is* `gh`-specific.
 
 Verified live under a fleet-wide 401: two bots independently ran `gh api ... | head` while diagnosing it, all three probes returned rc `0` against a body reading `Bad credentials`, and both first offered those rc values as evidence that auth was fine. Both reported correctly only because they read the response *bodies*. A warning filed under the wrong failure mode is nearly as good as absent — which is why this one is not filed under any mode.
 
-Use `${PIPESTATUS[0]}`, or run the call unpiped first. **`${PIPESTATUS[0]}` alone is not sufficient**: `gh api` writes the error body to stdout as well as stderr, so anything already reading the stream is parsing an error that looks like a payload — a `--jq` default (`.field // "none"`) substitutes silently, and even a non-empty `grep -c` can be counting the error text. Read the body, not any single status.
+**`${PIPESTATUS[0]}` alone is not sufficient for `gh`**: `gh api` writes the error body to stdout as well as stderr, so anything already reading the stream is parsing an error that looks like a payload — a `--jq` default (`.field // "none"`) substitutes silently, and even a non-empty `grep -c` can be counting the error text. Read the body, not any single status.
 
 **This warning is not the fix, and prose here is known to be insufficient — see #1066**, which tracks a checked helper. The failure wears the exact shape of the answer you were looking for, so vigilance is the wrong instrument; treat the paragraph above as an interim measure, not a solved problem.
 
