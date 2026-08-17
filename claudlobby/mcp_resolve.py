@@ -99,7 +99,7 @@ class ContractVar(NamedTuple):
     # becoming noise, and being suppressed along with the real alerts.
     #
     # `source` is OPTIONAL. Absent means a human supplies the value, as today
-    # (46 of the 48 declared vars). When present it must be a whole identifier
+    # (47 of the 48 declared vars). When present it must be a whole identifier
     # from `known_values.KNOWN_CREDENTIAL_SOURCES` — never invent one.
     secret: bool = False
     source: str | None = None

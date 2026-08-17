@@ -139,7 +139,7 @@ VALID_TIERS: tuple[str, ...] = ("auto", "review", "preview", "human")
 # in the resolver, deliberately, and never accepting a caller-supplied command.
 #
 # ``source`` is OPTIONAL. Its absence means "a human supplies this value", which
-# is how all 27 declared vars behave today. ``literal`` is the EXPLICIT spelling
+# is how 47 of the 48 declared vars behave today. ``literal`` is the EXPLICIT spelling
 # of that same opt-out, for a fleet or bot that wants to state on the line that
 # this scope declines automatic resolution (fork F6's per-tier opt-out).
 KNOWN_CREDENTIAL_SOURCES: frozenset[str] = frozenset(
