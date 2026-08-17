@@ -5,9 +5,11 @@ env_contract:
   RAILWAY_API_TOKEN:
     description: Railway API token (work workspace)
     tier: fleet
+    secret: true
   RAILWAY_PERSONAL_TOKEN:
     description: Railway API token (personal workspace)
     tier: fleet
+    secret: true
 ---
 
 # Railway

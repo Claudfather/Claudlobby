@@ -5,6 +5,7 @@ env_contract:
   GSC_SA_KEY_PATH:
     description: Absolute path to the Google service-account JSON key granted access to the Search Console property (gitignored). Reuse the google-analytics SA by pointing at the same key file.
     tier: fleet
+    secret: true
 tool_grants:
   - "mcp__google-search-console__list_properties"
   - "mcp__google-search-console__get_site_details"

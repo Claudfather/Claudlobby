@@ -5,6 +5,7 @@ env_contract:
   META_ACCESS_TOKEN:
     description: Long-lived Meta Marketing API access token with the ads_read scope (a non-expiring System User token is strongly preferred). Gitignored — mapped to the server's META_ADS_ACCESS_TOKEN.
     tier: fleet
+    secret: true
 tool_grants:
   - "mcp__meta-ads__meta_ads_list_ad_accounts"
   - "mcp__meta-ads__meta_ads_get_ad_account_details"

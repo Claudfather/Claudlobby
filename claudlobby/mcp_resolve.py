@@ -89,12 +89,18 @@ class ContractVar(NamedTuple):
     instance: str | None  # instance label when instance-scoped, else None (shared)
     description: str  # meta.get("description", "")
     # --- #1214 Phase 1: the two fields that make a value obtainable ---
-    # `secret` is whether an unresolved value is a CREDENTIAL FAILURE worth
-    # alerting on, NOT whether the string is sensitive to print. Roughly 41% of
-    # the declared surface is ports, IDs, URLs and paths; a fail-loud rung that
-    # fires on `PORT` becomes noise, gets suppressed, and takes the real alerts
-    # with it. `source` is a whole identifier from
-    # `known_values.KNOWN_CREDENTIAL_SOURCES`; None means a human supplies it.
+    # THE TEST FOR `secret`: can the integration AUTHENTICATE without this
+    # value? No -> true. Yes -> false. It is not "is this string sensitive to
+    # print". Worked example: PRINTIFY_SHOP_ID is false because without it you
+    # still authenticate fine, you just cannot target a shop — a config failure,
+    # not a credential failure. Stated as a test rather than as a list of
+    # example types, because a list settles only the cases already on it.
+    # The split is what keeps the fail-loud rung from firing on `PORT`,
+    # becoming noise, and being suppressed along with the real alerts.
+    #
+    # `source` is OPTIONAL. Absent means a human supplies the value, as today
+    # (46 of the 48 declared vars). When present it must be a whole identifier
+    # from `known_values.KNOWN_CREDENTIAL_SOURCES` — never invent one.
     secret: bool = False
     source: str | None = None
     # Set by whichever enumerator labelled this var; empty from the bare walk,
@@ -218,22 +224,16 @@ def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
                 continue
             tier = meta.get("tier", "fleet")
             # Integration-doc frontmatter is the OTHER declaration surface for
-            # the same two facts, and Phase 1 backfills MCP fragments ONLY (the
-            # plan's stated scope), so every var here reads secret=False.
+            # the same two facts, and it is backfilled and gated exactly like
+            # the MCP one -- deliberately, because 10 of its 21 vars have NO
+            # paired MCP fragment (`type: cli`: neon, railway, snowflake), so a
+            # gate covering only fragments could never reach RAILWAY_API_TOKEN,
+            # NEON_API_KEY or the Snowflake key vars. Those are the credentials
+            # whose silent blanking started this workstream; exempting them
+            # would have been the #1213 shape relocated one surface over.
             #
-            # That is a KNOWN, MEASURED HOLE, not merely deferred work, and the
-            # difference matters for whoever wires the Phase 3 rung:
-            #   - 11 vars are declared on BOTH surfaces and now DISAGREE (e.g.
-            #     SHOPIFY_ACCESS_TOKEN is secret here and not-secret there);
-            #     required_vars appends both without reconciling.
-            #   - 5 real credentials are unreachable by the MCP-scoped gate
-            #     FOREVER, not until a backfill: NEON_API_KEY, RAILWAY_API_TOKEN,
-            #     RAILWAY_PERSONAL_TOKEN, SNOWFLAKE_PRIVATE_KEY and
-            #     SNOWFLAKE_PRIVATE_KEY_PATH belong to `type: cli` integrations
-            #     that have no library/mcp/*.json to declare them in.
-            # Wiring fail-loud to `secret` before this surface is backfilled
-            # exempts exactly those, which is the #1213 shape relocated. Tracked
-            # on #1214; do not treat the default as an answer.
+            # The default below therefore applies only to a contract the
+            # validator is already rejecting, same as the MCP branch.
             out.append(
                 ContractVar(
                     var_name,
@@ -246,4 +246,36 @@ def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
                 )
             )
 
-    return out
+    return _reconcile_secret(out)
+
+
+def _reconcile_secret(records: list[ContractVar]) -> list[ContractVar]:
+    """Make ``secret`` independent of traversal order for a both-surface var.
+
+    11 real vars are declared on BOTH surfaces (e.g. ``PRINTIFY_API_KEY`` in
+    both ``library/mcp/printify.json`` and ``library/integrations/printify.md``),
+    and this function emits a record per declaration — so without reconciling,
+    the same var arrives twice carrying two different answers to "is this a
+    credential", and which one a consumer sees is decided by walk order. **A
+    required field whose value depends on file traversal order is not a
+    required field.**
+
+    Records are NOT deduped: both origins are real and a caller may want to know
+    a var is declared twice. Only the *value* is unified, so no consumer can
+    observe an order-dependent ``secret``.
+
+    Reconciliation is OR, and the direction is the safe one rather than the
+    tidy one: if either surface calls a var a credential, it is treated as one.
+    Over-alerting is visible and gets corrected; under-alerting is #1213 exactly
+    — a real credential nothing ever fires on. The validator refuses a
+    disagreement outright (``_validate_env_contracts``), so this is the second
+    line: it keeps the value sound for anything that reaches these records
+    without having gone through validate.
+    """
+    secret_by_var: dict[str, bool] = {}
+    for r in records:
+        secret_by_var[r.name] = secret_by_var.get(r.name, False) or r.secret
+    return [
+        r if r.secret == secret_by_var[r.name] else r._replace(secret=True)
+        for r in records
+    ]

@@ -378,6 +378,7 @@ def fleet_dir(tmp_path: Path) -> Path:
           GITHUB_PAT:
             description: GitHub personal access token
             tier: fleet
+            secret: true
         ---
 
         # GitHub MCP

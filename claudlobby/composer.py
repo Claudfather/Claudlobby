@@ -2577,6 +2577,18 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
             # canonical name and the .env description label are this consumer's job.
             for cv in iter_operator_contract_vars(contract, entry):
                 if cv.canonical_name in vars:
+                    # FIRST-write-wins, keyed on canonical name, silently. Safe
+                    # today because EnvVar carries no `secret`: what a skipped
+                    # duplicate loses is a description and a source label.
+                    #
+                    # It stops being safe the moment `secret` is added to
+                    # EnvVar (#1214 Phase 3). 11 vars are declared on BOTH
+                    # surfaces, and which record lands here depends on bot walk
+                    # order — the MCP loop runs before the integration loop
+                    # within a bot, but a bot equipping only the integration is
+                    # walked before one equipping the fragment. Take the value
+                    # from mcp_resolve._reconcile_secret rather than from
+                    # whichever surface happened to arrive first.
                     continue
                 inst_label = (
                     f" ({cv.instance})" if cv.instance not in (None, "default") else ""

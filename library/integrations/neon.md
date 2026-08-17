@@ -5,6 +5,7 @@ env_contract:
   NEON_API_KEY:
     description: Neon API key for neon CLI
     tier: fleet
+    secret: true
 ---
 
 # Neon (Postgres)

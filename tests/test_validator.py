@@ -1624,8 +1624,11 @@ class TestEnvContractShapeGate:
         """The both-directions control: `false` must pass the presence check.
         A gate written as `if not meta.get("secret")` rejects this and would
         make the config half of the contract undeclarable."""
+        # A var of its own: the fixture's integration doc declares GITHUB_PAT
+        # as secret, and flipping only the fragment would trip the
+        # cross-surface agreement check instead of the property under test.
         self._write_contract(
-            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": False}}
+            fleet_dir, {"ACME_PORT": {"tier": "fleet", "secret": False}}
         )
         assert self._errors(fleet_dir, monkeypatch) == []
 
@@ -1747,3 +1750,60 @@ class TestEnvContractShapeGate:
         )
         errors = self._errors(fleet_dir, monkeypatch)
         assert any("did you mean 'cli:gh-token'?" in e for e in errors), errors
+
+    def test_the_two_surfaces_must_agree_on_a_shared_var(
+        self, fleet_dir, monkeypatch
+    ):
+        """11 real vars are declared on both surfaces. If they disagree,
+        `required_vars` yields two records and the fail-loud rung reads
+        whichever it saw first — so disagreement is an error, not a warning."""
+        self._write_contract(
+            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": False}}
+        )
+        # the fixture's integration doc already declares GITHUB_PAT secret: true
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any(
+            "declared on more than one surface" in e and "GITHUB_PAT" in e
+            for e in errors
+        ), errors
+
+    def test_agreeing_surfaces_produce_no_disagreement_error(
+        self, fleet_dir, monkeypatch
+    ):
+        """Positive control for the check above — it must not fire on the
+        agreeing case, or it would flag all 11 shared vars in the real library."""
+        self._write_contract(
+            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": True}}
+        )
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert not any("declared on more than one surface" in e for e in errors), errors
+
+    def test_integration_frontmatter_is_gated_too(self, fleet_dir, monkeypatch):
+        """The surface that matters most: `type: cli` integrations (railway,
+        snowflake, neon) have NO paired MCP fragment, so this is their only
+        declaration surface. An MCP-only gate could never reach them."""
+        (fleet_dir / "library" / "integrations" / "railwayish.md").write_text(
+            "---\ntitle: Railwayish\ntype: cli\nenv_contract:\n"
+            "  RAILWAYISH_API_TOKEN:\n"
+            "    description: token\n"
+            "    tier: fleet\n---\n\n# Railwayish\n\nDeploys.\n"
+        )
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any(
+            "missing required 'secret'" in e
+            and "railwayish.md" in e
+            and "RAILWAYISH_API_TOKEN" in e
+            for e in errors
+        ), errors
+
+    def test_integration_source_registry_is_closed_too(self, fleet_dir, monkeypatch):
+        (fleet_dir / "library" / "integrations" / "railwayish.md").write_text(
+            "---\ntitle: Railwayish\ntype: cli\nenv_contract:\n"
+            "  RAILWAYISH_API_TOKEN:\n"
+            "    description: token\n"
+            "    tier: fleet\n"
+            "    secret: true\n"
+            "    source: cli:not-registered\n---\n\n# Railwayish\n\nDeploys.\n"
+        )
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any("unregistered source" in e and "railwayish.md" in e for e in errors)

@@ -4,9 +4,11 @@ env_contract:
   SHOPIFY_ACCESS_TOKEN:
     description: Shopify Admin API access token
     tier: fleet
+    secret: true
   SHOPIFY_STORE_DOMAIN:
     description: Shopify store domain (e.g. mystore.myshopify.com)
     tier: fleet
+    secret: false
 tool_grants:
   - "mcp__shopify__getAbandonmentReport"
   - "mcp__shopify__getConversionReport"

@@ -333,3 +333,63 @@ class TestSecretAndSourceFields:
         assert req.origin == "mcp/acme"
         assert req.source == "cli:gh-token"
         assert req.origin != req.source
+
+
+class TestSecretIsNotTraversalOrderDependent:
+    """A var declared on BOTH surfaces must not get its `secret` from walk order.
+
+    11 real vars are in this position. The validator refuses a disagreement, so
+    these cover the second line: records that reach a consumer without having
+    gone through validate.
+    """
+
+    def _rec(self, name, secret, origin):
+        from claudlobby.mcp_resolve import ContractVar
+
+        return ContractVar(name, "fleet", None, "", secret, None, origin)
+
+    def test_disagreeing_surfaces_reconcile_to_credential(self):
+        from claudlobby.mcp_resolve import _reconcile_secret
+
+        out = _reconcile_secret(
+            [
+                self._rec("PRINTIFY_API_KEY", True, "mcp/printify"),
+                self._rec("PRINTIFY_API_KEY", False, "integration/printify"),
+            ]
+        )
+        assert [r.secret for r in out] == [True, True]
+        assert [r.origin for r in out] == ["mcp/printify", "integration/printify"], (
+            "records must not be deduped — both origins are real"
+        )
+
+    def test_result_is_identical_under_reversed_walk_order(self):
+        """The actual property under test. Same inputs, opposite order, same
+        answer — which is what 'not traversal-order dependent' means."""
+        from claudlobby.mcp_resolve import _reconcile_secret
+
+        a = self._rec("V", True, "mcp/x")
+        b = self._rec("V", False, "integration/x")
+        assert {r.secret for r in _reconcile_secret([a, b])} == {
+            r.secret for r in _reconcile_secret([b, a])
+        }
+
+    def test_agreeing_false_is_not_promoted(self):
+        """Positive control in the other direction: OR must not turn every
+        config var into a credential, or the rung becomes noise again."""
+        from claudlobby.mcp_resolve import _reconcile_secret
+
+        out = _reconcile_secret(
+            [
+                self._rec("PRINTIFY_SHOP_ID", False, "mcp/printify"),
+                self._rec("PRINTIFY_SHOP_ID", False, "integration/printify"),
+            ]
+        )
+        assert [r.secret for r in out] == [False, False]
+
+    def test_unrelated_vars_do_not_bleed_into_each_other(self):
+        from claudlobby.mcp_resolve import _reconcile_secret
+
+        out = _reconcile_secret(
+            [self._rec("A", True, "mcp/x"), self._rec("B", False, "mcp/x")]
+        )
+        assert {r.name: r.secret for r in out} == {"A": True, "B": False}

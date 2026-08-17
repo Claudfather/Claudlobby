@@ -177,8 +177,8 @@ def _mcp_contract(frag_path: Path) -> dict:
     return frag.get("_permissions_contract") or {}
 
 
-def _env_contract_errors(frag: dict, rel: Path | str) -> list[str]:
-    """Shape errors in one MCP fragment's ``_env_contract`` (#1214 Phase 1).
+def _env_contract_errors(contract: object, where: str) -> list[str]:
+    """Shape errors in one env contract, from EITHER declaration surface.
 
     Two rules, both hard errors:
 
@@ -194,10 +194,13 @@ def _env_contract_errors(frag: dict, rel: Path | str) -> list[str]:
       fixed per-entry ``case`` arm, so an unrecognised value must never reach
       it rather than being passed through as command text.
 
-    Takes the PARSED fragment: this is a property of the file, and the caller
+    Surface-agnostic by design: MCP fragments and integration-doc frontmatter
+    declare the same facts, so one rule serves both and neither can drift.
+    *where* is the caller's label for the declaring file.
+
+    Takes the PARSED contract: this is a property of the file, and the caller
     scans the library once rather than re-reading per equipping bot.
     """
-    contract = frag.get("_env_contract")
     if not isinstance(contract, dict):
         return []
 
@@ -205,13 +208,15 @@ def _env_contract_errors(frag: dict, rel: Path | str) -> list[str]:
     for var_name, meta in contract.items():
         if not isinstance(meta, dict):
             continue
-        where = f"mcp fragment '{rel}' var '{var_name}'"
+        where = f"{where} var '{var_name}'"
         if "secret" not in meta:
             errors.append(
-                f"{where}: _env_contract entry is missing required 'secret' "
-                f"(bool) — set true if an unresolved value means this "
-                f"integration cannot authenticate, false for ports, IDs, URLs "
-                f"and other config."
+                f"{where}: env contract entry is missing required 'secret' "
+                f"(bool). The test: can the integration AUTHENTICATE without "
+                f"this value? No -> true. Yes -> false (e.g. a shop id is "
+                f"false — you still authenticate, you just cannot target a "
+                f"shop). Note 'source' is OPTIONAL and must be omitted unless "
+                f"the value is machine-resolvable; never invent a source."
             )
         elif not isinstance(meta["secret"], bool):
             errors.append(
@@ -230,8 +235,23 @@ def _env_contract_errors(frag: dict, rel: Path | str) -> list[str]:
     return errors
 
 
-def _validate_mcp_contracts(paths: Paths, report: ValidationReport) -> None:
-    """Gate every MCP fragment's ``_env_contract`` — library altitude, not per-bot.
+def _validate_env_contracts(paths: Paths, report: ValidationReport) -> None:
+    """Gate BOTH env-contract surfaces — library altitude, not per-bot.
+
+    The two surfaces are MCP fragments (``_env_contract``) and integration-doc
+    frontmatter (``env_contract:``). They declare the same facts and are held to
+    the same rule, because **gating only one is how the detector ends up not
+    covering the case it was built for**: 10 of the 21 vars on the integration
+    surface have no paired MCP fragment at all (`type: cli` integrations —
+    neon, railway, snowflake), so an MCP-only gate is not merely deferred for
+    them, it is structurally unreachable forever. Among those are
+    ``RAILWAY_API_TOKEN``, ``RAILWAY_PERSONAL_TOKEN``, ``NEON_API_KEY`` and the
+    two Snowflake key vars — the exact credentials whose silent blanking
+    started this workstream.
+
+    A var declared on BOTH surfaces must agree, or ``required_vars`` yields two
+    records disagreeing about whether it is a credential and the fail-loud rung
+    reads whichever it happens to see first.
 
     Deliberately NOT wired into the per-bot equipment loop, and the placement is
     load-bearing in three ways an earlier draft got wrong:
@@ -250,13 +270,23 @@ def _validate_mcp_contracts(paths: Paths, report: ValidationReport) -> None:
 
     Scans base and overlay libraries exactly as
     :func:`_validate_library_frontmatter` does, so a fleet overlay that shadows
-    a library fragment is held to the same rule — which is what makes the
-    registry closed "at any tier" rather than only in this repo.
+    a library file is held to the same rule — which is what makes the registry
+    closed "at any tier" rather than only in this repo.
     """
+    from .loader import parse_frontmatter
+
     seen: set[Path] = set()
+    labels: dict[str, list[tuple[str, bool]]] = {}
+
+    def _record(contract: dict, where: str) -> None:
+        for var, meta in contract.items():
+            if isinstance(meta, dict) and isinstance(meta.get("secret"), bool):
+                labels.setdefault(var, []).append((where, meta["secret"]))
+
     for root in (paths.base_library, paths.overlay_library):
-        if root is None or not (root / "mcp").is_dir():
+        if root is None:
             continue
+
         for frag_path in sorted((root / "mcp").glob("*.json")):
             resolved = frag_path.resolve()
             if resolved in seen:
@@ -269,11 +299,38 @@ def _validate_mcp_contracts(paths: Paths, report: ValidationReport) -> None:
                 # raises on it, but validate exists to say so first.
                 report.errors.append(f"invalid JSON in MCP fragment {frag_path}: {exc}")
                 continue
+            rel = f"mcp fragment '{frag_path.name}'"
+            report.errors.extend(_env_contract_errors(frag.get("_env_contract"), rel))
+            _record(frag.get("_env_contract") or {}, rel)
+
+        for doc in sorted((root / "integrations").glob("*.md")):
+            resolved = doc.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
             try:
-                rel = frag_path.relative_to(root / "mcp")
-            except ValueError:
-                rel = frag_path
-            report.errors.extend(_env_contract_errors(frag, rel))
+                fm, _ = parse_frontmatter(doc.read_text())
+            except (OSError, ValueError, KeyError):
+                # Malformed frontmatter is _validate_library_frontmatter's to
+                # report; saying it twice would read as two unrelated defects.
+                continue
+            if not isinstance(fm, dict):
+                continue
+            rel = f"integration '{doc.name}'"
+            report.errors.extend(_env_contract_errors(fm.get("env_contract"), rel))
+            contract = fm.get("env_contract")
+            _record(contract if isinstance(contract, dict) else {}, rel)
+
+    for var, decls in sorted(labels.items()):
+        values = {secret for _, secret in decls}
+        if len(values) > 1:
+            detail = ", ".join(f"{where} says {str(s).lower()}" for where, s in decls)
+            report.errors.append(
+                f"env var '{var}' is declared on more than one surface with "
+                f"DIFFERENT 'secret' values ({detail}) — required_vars yields "
+                f"both records, so the fail-loud rung would read whichever it "
+                f"saw first. Make them agree."
+            )
 
 
 def _validate_bots(
@@ -1297,7 +1354,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
     _validate_library_frontmatter(paths, report)
-    _validate_mcp_contracts(paths, report)
+    _validate_env_contracts(paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
     if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):
