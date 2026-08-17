@@ -686,9 +686,28 @@ main() {
         if [ -n "$SOCKET" ]; then
             bot_tmux "$SOCKET" kill-server 2>/dev/null || true
         fi
-        # Secrets never outlive the run, --keep included.
-        rm -f "$ROOT/.env" "$CONFIG_DIR/.credentials.json" 2>/dev/null || true
-        if [ -n "$KEEP" ]; then printf 'kept artifacts (secrets scrubbed): %s\n' "$ROOT"; return; fi
+        # Remove the known credential and identity carriers. This is a DENYLIST and so
+        # incomplete by construction: the next file Claude Code writes into
+        # CLAUDE_CONFIG_DIR is not covered until someone adds it here. Inverting it to an
+        # allowlist of what may SURVIVE is the real fix (#1231) and is deliberately out of
+        # scope for this change.
+        #
+        # .claude.json is here because Claude Code writes an oauthAccount object into it
+        # (account uuid, email address, organization uuid) plus a top-level userID. It was
+        # absent from this list, so every --keep run left operator identifiers on disk
+        # while the message below announced that it had not.
+        rm -f "$ROOT/.env" \
+              "$CONFIG_DIR/.credentials.json" \
+              "$CONFIG_DIR/.claude.json" 2>/dev/null || true
+        if [ -n "$KEEP" ]; then
+            # Name what was removed instead of asserting a category. The previous wording
+            # was "secrets scrubbed", a claim a denylist cannot support, and a false
+            # assurance is worse than a visible gap because nobody re-checks it. It is
+            # also the path from host-local to external: a reader who believes the
+            # directory is clean attaches it to an issue or hands it to a colleague.
+            printf 'kept artifacts at %s (removed: .env, .credentials.json, .claude.json; other files NOT audited)\n' "$ROOT"
+            return
+        fi
         rm -rf "$ROOT" 2>/dev/null || true
     }
     trap cleanup EXIT

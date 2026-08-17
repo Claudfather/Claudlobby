@@ -1258,3 +1258,70 @@ class TestSummaryExitPropagation:
         # Propagating the status while swallowing the summary would leave the
         # run statusful but productless — the summary IS the product.
         assert "stub summary" in self._run(tmp_path, 0).stdout
+
+
+class TestKeepScrubHonesty:
+    """#1231 — `--keep` must not assert a category its denylist cannot deliver.
+
+    The bug: the scrub removed `.env` and `.credentials.json`, then printed
+    "kept artifacts (secrets scrubbed)". `.claude.json` was not on the list and
+    carries an `oauthAccount` object (account uuid, email address, organization
+    uuid) plus a top-level `userID`, so every `--keep` run left operator
+    identifiers on disk *while announcing that it had not*.
+
+    Both assertions read the `cleanup()` body specifically, never the whole
+    file. A file-wide grep for `.claude.json` would pass on a comment mentioning
+    it, which is the wrong question: what matters is that the filename sits in
+    the `rm -f` list that actually runs.
+    """
+
+    @staticmethod
+    def _cleanup_body() -> str:
+        text = SAMPLER.read_text(encoding="utf-8")
+        m = re.search(r"\n    cleanup\(\) \{\n(.*?)\n    \}\n", text, re.S)
+        assert m, "cleanup() not found — this test's extraction is stale, not the code"
+        return m.group(1)
+
+    def test_scrub_list_includes_the_identity_carrier(self):
+        body = self._cleanup_body()
+        rm = re.search(r"rm -f\b(.*?)2>/dev/null", body, re.S)
+        assert rm, "no `rm -f ... 2>/dev/null` scrub in cleanup()"
+        scrubbed = rm.group(1)
+        for name in (".env", ".credentials.json", ".claude.json"):
+            assert name in scrubbed, (
+                f"{name} is not in the cleanup scrub list. If it was removed "
+                "deliberately, the --keep message must stop naming it."
+            )
+
+    @classmethod
+    def _keep_message(cls) -> str:
+        """The `--keep` printf, located by content rather than by `if` structure.
+
+        Deliberately not parsed out of the `if [ -n "$KEEP" ]` block: that
+        regex matches the multi-line form and misses the equivalent one-liner,
+        so a reformat would make these tests fail for a reason unrelated to the
+        property under test — and a mutation check would then go red without
+        proving anything. Anchoring on the printf itself survives both layouts.
+        """
+        body = cls._cleanup_body()
+        lines = [
+            ln for ln in body.splitlines() if "printf" in ln and "kept artifacts" in ln
+        ]
+        assert lines, "no `kept artifacts` printf in cleanup() — --keep says nothing"
+        return "\n".join(lines)
+
+    def test_keep_message_does_not_claim_a_category(self):
+        printed = self._keep_message()
+        assert "secrets scrubbed" not in printed, (
+            "the --keep message asserts 'secrets scrubbed' again. The scrub is a "
+            "denylist and cannot support a category claim (#1231); name the files "
+            "removed instead. A false assurance is worse than a visible gap "
+            "because nobody re-checks it."
+        )
+
+    def test_keep_message_names_what_it_removed(self):
+        # The positive half. Without this, deleting the message entirely would
+        # pass the test above while telling the operator nothing at all.
+        printed = self._keep_message()
+        for name in (".env", ".credentials.json", ".claude.json"):
+            assert name in printed, f"--keep message does not name {name} as removed"
