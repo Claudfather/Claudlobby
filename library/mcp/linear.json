@@ -3,7 +3,8 @@
     "API_KEY": {
       "description": "Linear API key (Settings > Security & access > API keys). Passed as a Bearer token; selects the workspace, so a second workspace is a second instance rather than a different URL.",
       "tier": "fleet",
-      "scope": "instance"
+      "scope": "instance",
+      "secret": true
     }
   },
   "_permissions_contract": {

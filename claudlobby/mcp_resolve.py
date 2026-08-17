@@ -65,7 +65,22 @@ def resolve_placeholders(
 
 
 class ContractVar(NamedTuple):
-    """One operator-facing env var enumerated from an MCP ``_env_contract`` entry."""
+    """One operator-facing env var enumerated from an env contract.
+
+    Also what :func:`required_vars` yields — deliberately ONE record rather
+    than a near-duplicate per consumer. An earlier draft had a second type
+    differing only in carrying ``origin``, which meant every new contract field
+    had to be added in three places and re-packed positionally between two
+    records whose slots were permuted; a mis-ordered re-pack was silent,
+    because the permuted slots share types.
+
+    On the ``source`` / ``origin`` split: ``origin`` is the DECLARING SURFACE
+    (``"mcp/github"``, ``"integration/notion"``), which the old bare tuple
+    confusingly called ``source``. #1214 adds a contract field genuinely called
+    ``source`` meaning the RESOLVER (``"cli:gh-token"``). Two unrelated facts
+    under one name is how a reader picks the wrong one, so ``source`` matches
+    the JSON key it carries and provenance is ``origin``.
+    """
 
     canonical_name: (
         str  # instance-renamed when instance-scoped, else the raw contract key
@@ -73,6 +88,28 @@ class ContractVar(NamedTuple):
     tier: str  # "fleet" | "bot"
     instance: str | None  # instance label when instance-scoped, else None (shared)
     description: str  # meta.get("description", "")
+    # --- #1214 Phase 1: the two fields that make a value obtainable ---
+    # `secret` is whether an unresolved value is a CREDENTIAL FAILURE worth
+    # alerting on, NOT whether the string is sensitive to print. Roughly 41% of
+    # the declared surface is ports, IDs, URLs and paths; a fail-loud rung that
+    # fires on `PORT` becomes noise, gets suppressed, and takes the real alerts
+    # with it. `source` is a whole identifier from
+    # `known_values.KNOWN_CREDENTIAL_SOURCES`; None means a human supplies it.
+    secret: bool = False
+    source: str | None = None
+    # Set by whichever enumerator labelled this var; empty from the bare walk,
+    # which does not know which surface asked.
+    origin: str = ""
+
+    @property
+    def name(self) -> str:
+        """Alias for :attr:`canonical_name` — reads better on a required-var."""
+        return self.canonical_name
+
+
+# What `required_vars` yields. Same record; the alias documents the intent at
+# the call site without forking the type.
+RequiredVar = ContractVar
 
 
 def iter_operator_contract_vars(
@@ -98,6 +135,12 @@ def iter_operator_contract_vars(
         tier = meta.get("tier", "fleet")
         scope = meta.get("scope", "shared")
         description = meta.get("description", "")
+        # Defaulting rather than raising keeps read-only callers (doctor, .env
+        # scaffolding) working on a fragment the validator is already rejecting,
+        # and False is the safe direction: it under-alerts on a malformed
+        # fragment rather than firing a credential alert for every var in it.
+        secret = bool(meta.get("secret", False))
+        source = meta.get("source")
         if scope == "instance":
             for inst in entry.instances:
                 yield ContractVar(
@@ -105,22 +148,25 @@ def iter_operator_contract_vars(
                     tier,
                     inst,
                     description,
+                    secret,
+                    source,
                 )
         else:
-            yield ContractVar(var_name, tier, None, description)
+            yield ContractVar(var_name, tier, None, description, secret, source)
 
 
-def required_vars(
-    bot: BotConfig, paths: Paths
-) -> list[tuple[str, str, str, str | None]]:
-    """Return ``[(canonical_var, tier, source, instance)]`` this bot needs.
+def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
+    """Return the :class:`RequiredVar` records this bot needs.
 
     Walks MCP fragments and integration docs, applying instance-scope
     prefixing so callers see the final var names that land in ``.mcp.json``.
+
+    Yields records, not bare tuples — see :class:`RequiredVar` for why the
+    provenance slot is ``origin`` and ``source`` now means the resolver.
     """
     from .loader import parse_frontmatter
 
-    out: list[tuple[str, str, str, str | None]] = []
+    out: list[RequiredVar] = []
 
     # --- MCP fragment contracts ---
     seen_mcp: set[str] = set()
@@ -138,10 +184,12 @@ def required_vars(
             continue
         contract = frag.get("_env_contract", {})
         # Shared operator-facing walk: skips provided_by:composer + applies
-        # instance naming (one home, no drift — #568, was #547). Map to the
-        # validator's (var, tier, source, instance) tuple shape.
+        # instance naming (one home, no drift — #568, was #547). Re-labelled
+        # with this declaring surface; every other field is carried as-is, so
+        # a new contract field is one edit rather than a hand-written re-pack
+        # whose permuted slots would mis-bind silently.
         for cv in iter_operator_contract_vars(contract, entry):
-            out.append((cv.canonical_name, cv.tier, f"mcp/{entry.name}", cv.instance))
+            out.append(cv._replace(origin=f"mcp/{entry.name}"))
 
     # --- Integration doc contracts (auto-pair fallback matches composer) ---
     integration_names = bot.integrations or [
@@ -169,6 +217,33 @@ def required_vars(
             if not isinstance(meta, dict):
                 continue
             tier = meta.get("tier", "fleet")
-            out.append((var_name, tier, f"integration/{int_name}", None))
+            # Integration-doc frontmatter is the OTHER declaration surface for
+            # the same two facts, and Phase 1 backfills MCP fragments ONLY (the
+            # plan's stated scope), so every var here reads secret=False.
+            #
+            # That is a KNOWN, MEASURED HOLE, not merely deferred work, and the
+            # difference matters for whoever wires the Phase 3 rung:
+            #   - 11 vars are declared on BOTH surfaces and now DISAGREE (e.g.
+            #     SHOPIFY_ACCESS_TOKEN is secret here and not-secret there);
+            #     required_vars appends both without reconciling.
+            #   - 5 real credentials are unreachable by the MCP-scoped gate
+            #     FOREVER, not until a backfill: NEON_API_KEY, RAILWAY_API_TOKEN,
+            #     RAILWAY_PERSONAL_TOKEN, SNOWFLAKE_PRIVATE_KEY and
+            #     SNOWFLAKE_PRIVATE_KEY_PATH belong to `type: cli` integrations
+            #     that have no library/mcp/*.json to declare them in.
+            # Wiring fail-loud to `secret` before this surface is backfilled
+            # exempts exactly those, which is the #1213 shape relocated. Tracked
+            # on #1214; do not treat the default as an answer.
+            out.append(
+                ContractVar(
+                    var_name,
+                    tier,
+                    None,
+                    meta.get("description", ""),
+                    bool(meta.get("secret", False)),
+                    meta.get("source"),
+                    f"integration/{int_name}",
+                )
+            )
 
     return out

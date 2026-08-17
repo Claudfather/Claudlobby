@@ -63,6 +63,7 @@ from .dotenv import read as read_env_file
 # than inventing one, and so the other half of #1104 has a target to fill.
 CONSUMER_CONTRACT_KEY = "consumer_contract"
 
+
 @dataclass
 class Declaration:
     """A credential some equipped thing says it needs."""
@@ -159,19 +160,20 @@ def declared_for_fleet(fleet, paths) -> tuple[list[Declaration], set[str]]:
             needed = required_vars(bot, paths)
         except Exception:  # noqa: BLE001 - one bad bot must not void the inventory
             continue
-        for var, _tier, source, _instance in needed:
-            # required_vars labels its sources "integration/<name>" and
+        for req in needed:
+            # required_vars labels its ORIGIN "integration/<name>" and
             # "mcp/<name>". Split on that rather than testing membership in the
             # equipped-integration set, which silently mislabelled every
             # integration var as mcp because the prefixed string never matched
-            # a bare name.
-            kind, _, short = source.partition("/")
+            # a bare name. Read `.origin`, never `.source` — since #1214 the
+            # latter is the resolver descriptor and would partition to garbage.
+            kind, _, short = req.origin.partition("/")
             if kind not in ("integration", "mcp"):
-                kind, short = "mcp", source
-            key = (var, short)
+                kind, short = "mcp", req.origin
+            key = (req.name, short)
             decl = by_var.get(key)
             if decl is None:
-                decl = Declaration(var=var, source=short, kind=kind)
+                decl = Declaration(var=req.name, source=short, kind=kind)
                 by_var[key] = decl
             if bot_name not in decl.equipped_by:
                 decl.equipped_by.append(bot_name)

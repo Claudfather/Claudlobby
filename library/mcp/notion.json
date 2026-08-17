@@ -3,7 +3,8 @@
     "TOKEN": {
       "description": "Notion API integration token",
       "tier": "fleet",
-      "scope": "instance"
+      "scope": "instance",
+      "secret": true
     }
   },
   "_permissions_contract": {

@@ -14,6 +14,7 @@ from textwrap import dedent
 from claudlobby.config import McpEntry, load_fleet
 from claudlobby.mcp_resolve import (
     canonical_var_name,
+    iter_operator_contract_vars,
     required_vars,
     resolve_placeholders,
 )
@@ -215,7 +216,7 @@ class TestRoundTrip:
 
         # --- Validator side: canonical var names ---
         req = required_vars(bot, paths)
-        validator_vars = {(name, inst) for name, _tier, _src, inst in req}
+        validator_vars = {(r.name, r.instance) for r in req}
 
         # --- Composer side: resolve the same fragment ---
         frag = json.loads((root / "library" / "mcp" / "notion.json").read_text())
@@ -235,8 +236,100 @@ class TestRoundTrip:
                     for m in _re.finditer(r"\$\{([A-Z_][A-Z0-9_]*)\}", env_val):
                         composer_names.add(m.group(1))
 
-        # Validator canonical names (the first element of each tuple)
-        validator_names = {name for name, _tier, _src, _inst in req}
+        # Validator canonical names
+        validator_names = {r.name for r in req}
 
         # Both must agree on the full set of canonical var names
         assert composer_names == validator_names
+
+
+class TestSecretAndSourceFields:
+    """#1214 Phase 1 — the two new `_env_contract` fields, carried by the walk.
+
+    Every negative here is paired with a positive control. A test asserting a
+    field is absent passes identically when the walk returns nothing at all, so
+    "found no source" and "enumerated nothing" have to be distinguishable.
+    """
+
+    def _walk(self, contract: dict, *, instances: list[str] | None = None):
+        entry = McpEntry(name="acme", instances=instances or ["default"])
+        return list(iter_operator_contract_vars(contract, entry))
+
+    def test_both_fields_are_carried_through_the_walk(self):
+        got = self._walk(
+            {
+                "ACME_TOKEN": {
+                    "tier": "fleet",
+                    "secret": True,
+                    "source": "cli:gh-token",
+                }
+            }
+        )
+        assert len(got) == 1, "positive control: the walk enumerated nothing"
+        assert (got[0].secret, got[0].source) == (True, "cli:gh-token")
+
+    def test_absent_source_is_none_while_the_var_is_still_enumerated(self):
+        got = self._walk({"ACME_TOKEN": {"tier": "fleet", "secret": True}})
+        assert [v.canonical_name for v in got] == ["ACME_TOKEN"]  # positive control
+        assert got[0].source is None
+        assert got[0].secret is True
+
+    def test_secret_false_is_preserved_not_coerced_to_the_default(self):
+        # The failure this guards: reading `secret` with a truthiness test
+        # rather than an explicit lookup makes false and absent identical, and
+        # the whole point of F4 is that they are different declarations.
+        got = self._walk({"PORT": {"tier": "fleet", "secret": False}})
+        assert got[0].secret is False
+
+    def test_instance_scoped_vars_each_carry_the_fields(self):
+        got = self._walk(
+            {"TOKEN": {"tier": "bot", "scope": "instance", "secret": True}},
+            instances=["work", "personal"],
+        )
+        assert {v.canonical_name for v in got} == {
+            "ACME_WORK_TOKEN",
+            "ACME_PERSONAL_TOKEN",
+        }
+        assert all(v.secret is True for v in got)
+
+    def test_required_vars_exposes_origin_and_source_as_separate_facts(self, tmp_path):
+        """The rename that matters: `origin` is the declaring surface,
+        `source` is the resolver. Conflating them is a silent mis-read, so
+        assert they are simultaneously present AND different."""
+        root = tmp_path / "claudlobby"
+        root.mkdir()
+        (root / "fleet.yaml").write_text(
+            dedent("""\
+            fleet:
+              name: t
+              service_prefix: com.t
+              bots:
+                w:
+                  expertise: [eng]
+                  mcp: [acme]
+                  telegram: {handle: w, token_env: TG_W}
+        """)
+        )
+        for kind in ("expertise", "mcp", "integrations", "guardrails", "skills"):
+            (root / "library" / kind).mkdir(parents=True)
+        (root / "library" / "expertise" / "eng.md").write_text("# E\n\nx.\n")
+        (root / "library" / "mcp" / "acme.json").write_text(
+            json.dumps(
+                {
+                    "_env_contract": {
+                        "ACME_TOKEN": {
+                            "tier": "fleet",
+                            "secret": True,
+                            "source": "cli:gh-token",
+                        }
+                    },
+                    "acme": {"command": "x", "env": {"T": "${ACME_TOKEN}"}},
+                }
+            )
+        )
+        fleet, _ = load_fleet(root / "fleet.yaml")
+        paths = Paths(root=root)
+        (req,) = required_vars(fleet.bots["w"], paths)
+        assert req.origin == "mcp/acme"
+        assert req.source == "cli:gh-token"
+        assert req.origin != req.source

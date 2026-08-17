@@ -2,15 +2,18 @@
   "_env_contract": {
     "POSTHOG_API_KEY": {
       "description": "PostHog Personal API Key created with the 'MCP server' preset and READ-only scopes (format phx_XXXXXXXX). Sent to the server as 'Authorization: Bearer <key>'. Gitignored — never commit; store only in the fleet .env.",
-      "tier": "fleet"
+      "tier": "fleet",
+      "secret": true
     },
     "POSTHOG_HOST": {
       "description": "PostHog MCP endpoint host — 'mcp.posthog.com' for US Cloud (default) or 'mcp-eu.posthog.com' for EU Cloud. This is the MCP proxy host, NOT the app host (us.posthog.com / eu.posthog.com). Self-hosted instances: see library/integrations/posthog.md.",
-      "tier": "fleet"
+      "tier": "fleet",
+      "secret": false
     },
     "POSTHOG_PROJECT_ID": {
       "description": "Numeric PostHog project ID to pin queries to (bare number, e.g. 12345). Required for read-only use: pinning the project supplies query context so the session never needs the write-only switch-project tool.",
-      "tier": "fleet"
+      "tier": "fleet",
+      "secret": false
     }
   },
   "_permissions_contract": {

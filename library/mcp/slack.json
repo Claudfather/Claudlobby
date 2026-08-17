@@ -2,7 +2,8 @@
   "_env_contract": {
     "SLACK_TOKEN": {
       "description": "Slack user OAuth token (xoxp-...)",
-      "tier": "bot"
+      "tier": "bot",
+      "secret": true
     }
   },
   "_permissions_contract": {

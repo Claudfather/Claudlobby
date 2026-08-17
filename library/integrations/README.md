@@ -46,7 +46,7 @@ Every real integration file has YAML frontmatter with a `title:` matching its H1
   ---
   ```
 
-  `composer.py::collect_env_contracts` and `mcp_resolve.py` both read `env_contract:` (same `{description, tier: fleet|bot}` shape as MCP fragments' `_env_contract` — see `library/mcp/README.md`) to fold these vars into the fleet's environment-variable contract, which `claudlobby doctor` checks against `.env`. 5 of 16 files use it today (`neon.md`, `printify.md`, `railway.md`, `shopify.md`, `snowflake.md`) — add it whenever an integration depends on env vars not already declared by a paired MCP fragment.
+  `composer.py::collect_env_contracts` and `mcp_resolve.py` both read `env_contract:` (same `{description, tier: fleet|bot}` shape as MCP fragments' `_env_contract` — see `library/mcp/README.md`; note this surface is **not yet backfilled** with that file's required `secret` field, so every var declared here currently reads as not-a-credential. `type: cli` integrations such as `neon.md`, `railway.md` and `snowflake.md` have no paired MCP fragment, so this is their ONLY declaration surface — tracked on #1214) to fold these vars into the fleet's environment-variable contract, which `claudlobby doctor` checks against `.env`. 5 of 16 files use it today (`neon.md`, `printify.md`, `railway.md`, `shopify.md`, `snowflake.md`) — add it whenever an integration depends on env vars not already declared by a paired MCP fragment.
 
 ## Grant contract (`tool_grants:`)
 

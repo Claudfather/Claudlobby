@@ -3,11 +3,13 @@
   "_env_contract": {
     "INSTAGRAM_ACCESS_TOKEN": {
       "description": "Long-lived Meta Graph API access token for an Instagram Professional (Business or Creator) account. Long-lived tokens expire after ~60 days; refreshing is an operator-side Graph API call — this server has no refresh path. DM tools additionally require the instagram_manage_messages permission, which is Advanced Access and only granted after Meta App Review. Gitignored — never commit; store only in the fleet .env.",
-      "tier": "fleet"
+      "tier": "fleet",
+      "secret": true
     },
     "INSTAGRAM_BUSINESS_ACCOUNT_ID": {
       "description": "Numeric id of the Instagram Professional account this bot acts for. Mapped to the server's own INSTAGRAM_ACCOUNT_ID env var. Not a secret, but fleet-specific — it identifies a real account, so it belongs in the fleet .env rather than a committed file.",
-      "tier": "fleet"
+      "tier": "fleet",
+      "secret": false
     }
   },
   "_permissions_contract": {

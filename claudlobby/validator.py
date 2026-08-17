@@ -23,6 +23,7 @@ from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
     EXPERTISE_CORE_TOOLS,
+    KNOWN_CREDENTIAL_SOURCES,
     KNOWN_HOOK_EVENTS,
     KNOWN_MODELS,
     OUTCOME_ACTIONS,
@@ -176,6 +177,105 @@ def _mcp_contract(frag_path: Path) -> dict:
     return frag.get("_permissions_contract") or {}
 
 
+def _env_contract_errors(frag: dict, rel: Path | str) -> list[str]:
+    """Shape errors in one MCP fragment's ``_env_contract`` (#1214 Phase 1).
+
+    Two rules, both hard errors:
+
+    - every entry declares ``secret`` (bool). Required rather than inferred
+      because a name heuristic re-derives a fact the contract author already
+      knows, and its failures are silent in BOTH directions — a mislabelled
+      secret never fires the credential alert, and a mislabelled config fires
+      forever until someone suppresses the rung and loses the real alerts with
+      it (fork F4).
+    - ``source``, when present, is a whole identifier in the closed registry.
+      Rejecting an unregistered value is what keeps fork F5's injection
+      guarantee true: the resolver dispatches on the entire string through a
+      fixed per-entry ``case`` arm, so an unrecognised value must never reach
+      it rather than being passed through as command text.
+
+    Takes the PARSED fragment: this is a property of the file, and the caller
+    scans the library once rather than re-reading per equipping bot.
+    """
+    contract = frag.get("_env_contract")
+    if not isinstance(contract, dict):
+        return []
+
+    errors: list[str] = []
+    for var_name, meta in contract.items():
+        if not isinstance(meta, dict):
+            continue
+        where = f"mcp fragment '{rel}' var '{var_name}'"
+        if "secret" not in meta:
+            errors.append(
+                f"{where}: _env_contract entry is missing required 'secret' "
+                f"(bool) — set true if an unresolved value means this "
+                f"integration cannot authenticate, false for ports, IDs, URLs "
+                f"and other config."
+            )
+        elif not isinstance(meta["secret"], bool):
+            errors.append(
+                f"{where}: 'secret' must be a JSON boolean, got "
+                f"{type(meta['secret']).__name__}."
+            )
+        source = meta.get("source")
+        if source is not None and source not in KNOWN_CREDENTIAL_SOURCES:
+            known = ", ".join(sorted(KNOWN_CREDENTIAL_SOURCES))
+            errors.append(
+                f"{where}: unregistered source {source!r} — 'source' is a closed "
+                f"framework-owned registry, one of: {known}. Omit it entirely to "
+                f"mean 'a human supplies this value'"
+                f"{hint(source, KNOWN_CREDENTIAL_SOURCES)}"
+            )
+    return errors
+
+
+def _validate_mcp_contracts(paths: Paths, report: ValidationReport) -> None:
+    """Gate every MCP fragment's ``_env_contract`` — library altitude, not per-bot.
+
+    Deliberately NOT wired into the per-bot equipment loop, and the placement is
+    load-bearing in three ways an earlier draft got wrong:
+
+    - **An unequipped fragment must still be checked.** The closed registry's
+      whole purpose is that an unregistered ``source`` never reaches the
+      resolver; a gate that only fires when some bot happens to equip the
+      fragment leaves a malformed one sitting in the library, clean, until the
+      day someone equips it.
+    - **The defect is a property of the FILE, so the message must name the
+      file.** Prefixing it with a bot name sends the reader to `fleet.yaml`
+      when the fix is a one-line library edit.
+    - **One defect, one error.** Per-bot, a single missing ``secret`` on a
+      fragment every bot equips produced one identical error per bot — 21 lines
+      for one typo on a 21-bot fleet.
+
+    Scans base and overlay libraries exactly as
+    :func:`_validate_library_frontmatter` does, so a fleet overlay that shadows
+    a library fragment is held to the same rule — which is what makes the
+    registry closed "at any tier" rather than only in this repo.
+    """
+    seen: set[Path] = set()
+    for root in (paths.base_library, paths.overlay_library):
+        if root is None or not (root / "mcp").is_dir():
+            continue
+        for frag_path in sorted((root / "mcp").glob("*.json")):
+            resolved = frag_path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                frag = json.loads(frag_path.read_text())
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # Malformed JSON is reported here rather than deferred: compose
+                # raises on it, but validate exists to say so first.
+                report.errors.append(f"invalid JSON in MCP fragment {frag_path}: {exc}")
+                continue
+            try:
+                rel = frag_path.relative_to(root / "mcp")
+            except ValueError:
+                rel = frag_path
+            report.errors.extend(_env_contract_errors(frag, rel))
+
+
 def _validate_bots(
     fleet: FleetConfig,
     paths: Paths,
@@ -316,13 +416,27 @@ def _validate_bots(
         # `.mcp.json`), and looks across the full 3-tier env (host →
         # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
         # didn't know about instance scoping or bot-tier .env files.
-        for var, tier, source, instance in _mcp_required_vars(bot, paths):
-            if _env_has_value(effective_env, var):
+        for req in _mcp_required_vars(bot, paths):
+            if _env_has_value(effective_env, req.name):
                 continue
-            inst_note = f" (instance: {instance})" if instance else ""
+            inst_note = f" (instance: {req.instance})" if req.instance else ""
+            # The consequence is stated per what was MEASURED, not per what the
+            # name suggests (#1214 F8). An MCP server with an unresolved var does
+            # NOT fail: the client expands the unset placeholder to the empty
+            # string and the server starts and serves ANONYMOUSLY — verified
+            # across the running estate, 11 live servers holding an empty token
+            # and zero holding the literal placeholder. The old wording promised
+            # a loud failure that never arrives, which is worse than silence
+            # because it talks the reader out of investigating.
+            consequence = (
+                "MCP server will start and serve ANONYMOUSLY (unauthenticated), "
+                "not fail"
+                if req.secret
+                else "MCP server will start with this unset"
+            )
             report.warnings.append(
-                f"bot '{bot_name}': {source}{inst_note} requires {var} but it's not set — "
-                f"add to {tier}-tier .env (MCP server will fail at runtime)"
+                f"bot '{bot_name}': {req.origin}{inst_note} requires {req.name} but "
+                f"it's not set — add to {req.tier}-tier .env ({consequence})"
             )
 
         # Integrations (warn). Accepts `name`, `dir/name`, or `dir/`.
@@ -1183,6 +1297,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
     _validate_library_frontmatter(paths, report)
+    _validate_mcp_contracts(paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
     if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):

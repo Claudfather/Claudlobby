@@ -123,6 +123,42 @@ RC_KILLING_ENV_VARS: tuple[str, ...] = (
 # messages join them in this stable order, which is not a ranking.
 VALID_TIERS: tuple[str, ...] = ("auto", "review", "preview", "human")
 
+# ── Credential sources (#1214 Phase 1) ───────────────────────────
+# The CLOSED, framework-owned registry of values an ``_env_contract`` entry's
+# ``source`` may take. A contract declares WHO needs a var and at WHICH tier;
+# ``source`` is the third fact — where the value comes from — so the system can
+# supply it at boot instead of a human pasting it into a ``.env``.
+#
+# Entries are WHOLE identifiers, not a kind plus a free parameter, and that is a
+# security property rather than a style choice (fork F5). The resolver dispatches
+# on the entire string via a fixed ``case`` arm per entry, so a contract value
+# selects a framework-authored command and can never contribute text to one.
+# Admitting ``cli:<anything>`` would put contract text in command position and
+# turn every fragment — including a fleet-overlay fragment — into an injection
+# surface at boot. Widening the registry therefore means adding an arm here and
+# in the resolver, deliberately, and never accepting a caller-supplied command.
+#
+# ``source`` is OPTIONAL. Its absence means "a human supplies this value", which
+# is how all 27 declared vars behave today. ``literal`` is the EXPLICIT spelling
+# of that same opt-out, for a fleet or bot that wants to state on the line that
+# this scope declines automatic resolution (fork F6's per-tier opt-out).
+KNOWN_CREDENTIAL_SOURCES: frozenset[str] = frozenset(
+    {
+        # No resolution — a human supplies the value. Same effect as omitting
+        # `source`; spelled out when a tier wants to decline resolution visibly.
+        "literal",
+        # `gh auth token` — the host default GitHub identity.
+        "cli:gh-token",
+        # RESERVED, and deliberately unresolvable: no resolver arm reads this.
+        # Fork F1 ships `cli` only and reserves minting, and fork F3 (where a
+        # GitHub App private key lives) is deferred to the #252 sidecar work.
+        # It is registered now so the schema is proven against the harder class
+        # before the shape sets, and so adding minting later is one arm rather
+        # than a migration of every contract entry.
+        "mint:github-app",
+    }
+)
+
 # The v1 project schema — config.py splits unknown keys into .raw with
 # this set; validator.py uses the same set for did-you-mean suggestions.
 PROJECT_KEYS: frozenset[str] = frozenset(
