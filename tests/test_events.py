@@ -1,6 +1,7 @@
 """Tests for the claudlobby events subcommand."""
 
 import json
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -236,3 +237,105 @@ class TestFormatEventTable:
         }
         output = format_event_table([ev])
         assert "..." in output
+
+
+class TestEventCoverageIsStatedNotAssumed:
+    """The events half of the class. ``No events found.`` was the same output
+    whether the fleet was quiet or no instrument had ever written — but unlike
+    #1216 this one is a COVERAGE question, not a refusal: partial data is still
+    worth having, so the read continues and states its floor.
+    """
+
+    def test_full_coverage_says_nothing(self, tmp_path):
+        """Silence on a healthy run is deliberate. A bound printed every time is
+        wallpaper within a week, and a disclosure people have learned to skip is
+        worse than none — it is the same false assurance with an alibi."""
+        from claudlobby.commands.events import collect_events, coverage_line
+
+        ev = tmp_path / "b1" / "data" / "events"
+        ev.mkdir(parents=True)
+        (ev / "fleet-2026-01-01.jsonl").write_text(
+            json.dumps({"ts": "2026-01-01T00:00:00Z", "bot": "b1", "type": "x"}) + "\n"
+        )
+        cov: dict = {}
+        collect_events(tmp_path, coverage=cov)
+        assert cov["sources_read"] == cov["sources_total"]
+        assert coverage_line(cov) == ""
+
+    def test_a_bot_with_no_events_dir_is_counted_as_unread(self, tmp_path):
+        from claudlobby.commands.events import collect_events, coverage_line
+
+        (tmp_path / "b1" / "data" / "events").mkdir(parents=True)
+        (tmp_path / "b2").mkdir()  # never emitted — no data/events
+        cov: dict = {}
+        collect_events(tmp_path, coverage=cov)
+        assert cov["sources_total"] == 2
+        assert cov["sources_read"] == 1
+        line = coverage_line(cov)
+        assert "read 1 of 2" in line
+        assert "no events directory" in line
+
+    def test_zero_readable_sources_is_a_refusal_not_a_quiet_fleet(self, tmp_path):
+        """The one case that must be loud: "No events found." over ZERO reachable
+        sources is a claim about the estate drawn from an instrument that was
+        never wired."""
+        from claudlobby.__main__ import main
+
+        fleet = tmp_path / "local" / "f1"
+        (fleet / "runtime" / "bots" / "b1").mkdir(parents=True)
+        (fleet / "fleet.yaml").write_text("fleet:\n  name: f1\n  bots: {}\n")
+        (tmp_path / "library").mkdir()
+        (tmp_path / "lib").mkdir()
+
+        rc = main(["--root", str(tmp_path), "--fleet", "f1", "events"])
+        assert rc == 1
+
+    def test_partial_coverage_keeps_rc_zero(self, tmp_path):
+        """Partial is not a failure — the rows that WERE read are real, and
+        refusing would throw away good data to protest missing data."""
+        from claudlobby.__main__ import main
+
+        fleet = tmp_path / "local" / "f1"
+        bots = fleet / "runtime" / "bots"
+        ev = bots / "b1" / "data" / "events"
+        ev.mkdir(parents=True)
+        (ev / "fleet-2026-01-01.jsonl").write_text(
+            json.dumps({"ts": "2026-01-01T00:00:00Z", "bot": "b1", "type": "x"}) + "\n"
+        )
+        (bots / "b2").mkdir()
+        (fleet / "fleet.yaml").write_text("fleet:\n  name: f1\n  bots: {}\n")
+        (tmp_path / "library").mkdir()
+        (tmp_path / "lib").mkdir()
+
+        rc = main(["--root", str(tmp_path), "--fleet", "f1", "events"])
+        assert rc == 0
+
+    def test_an_unreadable_file_is_named_rather_than_merely_counted(self, tmp_path):
+        """An absent events dir is normal for a bot that has not emitted yet, so
+        it is counted. An unreadable FILE is a fault someone can fix, so it is
+        named."""
+        from claudlobby.commands.events import collect_events, coverage_line
+
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        ev = tmp_path / "b1" / "data" / "events"
+        ev.mkdir(parents=True)
+        bad = ev / "fleet-2026-01-01.jsonl"
+        bad.write_text("{}\n")
+        bad.chmod(0o000)
+        try:
+            cov: dict = {}
+            collect_events(tmp_path, coverage=cov)
+            assert cov["unreadable"] == [str(bad)]
+            assert "unreadable:" in coverage_line(cov)
+            assert str(bad) in coverage_line(cov)
+        finally:
+            bad.chmod(0o644)
+
+    def test_coverage_is_opt_in_so_existing_callers_are_untouched(self, tmp_path):
+        """brief.py and eleven tests consume the list return. The bound is an
+        out-param precisely so nothing else had to change."""
+        from claudlobby.commands.events import collect_events
+
+        (tmp_path / "b1" / "data" / "events").mkdir(parents=True)
+        assert collect_events(tmp_path) == []

@@ -26,6 +26,16 @@ Orphan mode (#835) -- past-deadline rows whose worker RESPAWNED after dispatch,
 split out of --all so they stop alarming, and listable so they are not simply
 deleted:
   dispatch-overdue.py --orphans <dispatch_log> <report_ledger> [<now_epoch>] --bots-dir <dir>
+  --bots-dir is REQUIRED here and refused when missing or unreadable, at rc 3
+  (#1014): orphan-ness is a comparison against <bots_dir>/<bot>/data/.spawn, so
+  without one the answer is UNKNOWN, and printing an empty set at rc 0 made
+  "cannot look" byte-identical to "nothing was lost to a restart". Measured: all
+  three states returned 0 bytes at rc 0 against a 295-row log. rc 3 rather than
+  the usage code 2, because the flag is optional in the grammar and this is not a
+  malformed call -- it is a question this run cannot answer. The refusal is on
+  STDERR because this mode's stdout is parsed (fleet-pulse.sh reads it into an
+  orphan cache); orphaned_all() itself is UNCHANGED and still returns {} without
+  a bots dir, since brief.py calls it directly and labels the gap its own way.
 
 Open-task mode (#835) -- the id report-back.sh should echo when --task is
 omitted, so the common path closes its dispatch by default:
@@ -729,6 +739,68 @@ def _not_a_bot_id(value: str) -> str | None:
     return None
 
 
+def _refuse_undeterminable_orphans(bots_dir: str | None) -> bool:
+    """True (and says why) when `--orphans` cannot determine orphan-ness at all.
+
+    #1014, and it is the same defect as #1216 on a sibling command. Orphan-ness is
+    decided by comparing a dispatch against `<bots_dir>/<bot>/data/.spawn`, so
+    with no readable bots dir there is nothing to compare and the answer is
+    *unknown* — but the mode printed an empty set at rc 0, which is byte-identical
+    to "no work was lost to a restart". Measured on the reporting host: no
+    `--bots-dir`, a real one with no orphans, and a `--bots-dir` naming a path
+    that does not exist all returned 0 bytes at rc 0 against a 295-row dispatch
+    log. THREE states, one output, and the collapsed one reads as good news.
+
+    WHAT THIS DOES NOT CHANGE, deliberately. `orphaned_all` and `_classify_all`
+    keep their contracts to the byte: `orphaned_all` still returns {} without a
+    bots dir, and its docstring's reasoning still holds — a row that cannot be
+    proven orphaned must stay in the OVERDUE set rather than be silently retired.
+    `brief.py` calls that function directly and already labels the gap itself, so
+    changing the join would have broken a caller that had it right. The refusal
+    lives in the CLI mode, which is the surface a human or a new tool reads.
+
+    Which is also why the disclosure is on **stderr** while #1216's is on stdout.
+    Not a style choice — this mode's stdout is PARSED: `fleet-pulse.sh:142` reads
+    it into an orphan cache consumed by `read -r`, and a prose line there becomes
+    a phantom row. The module already settled this for `--open` (see the comment
+    at the `--open` scope line); rc is what carries the refusal.
+
+    rc **3**, not 2: rc 2 is this module's usage error and means "you called me
+    wrong". A missing `--bots-dir` is not a usage error — the flag is optional by
+    design and every shipped caller passes it — it means "I was asked a question I
+    cannot answer with what I can reach". Distinct codes so a caller can tell a
+    typo from an unreachable instrument, which is the whole rule being applied to
+    the refusal's own reporting.
+
+    Both existing callers pass a real `--bots-dir` and additionally use
+    `|| true`, so **this cannot fire for either of them**. That is the intended
+    blast radius, not a limitation to be worked around: the fix is for the direct
+    reader that #1014 misled, and it is inert for the watchdog by construction.
+    """
+    if bots_dir is None:
+        print(
+            "dispatch-overdue.py: --orphans cannot determine orphans without "
+            "--bots-dir <dir>\n"
+            "  orphan-ness is a comparison against <bots_dir>/<bot>/data/.spawn; "
+            "with no bots dir there is nothing to compare, so the answer is "
+            "UNKNOWN, not 'none'.\n"
+            "  usage: dispatch-overdue.py --orphans <dispatch_log> "
+            "<report_ledger> [<now>] --bots-dir <dir>",
+            file=sys.stderr,
+        )
+        return True
+    if not os.path.isdir(bots_dir):
+        print(
+            f"dispatch-overdue.py: --orphans cannot read the bots dir: "
+            f"{bots_dir!r} is not a directory\n"
+            "  every row would classify as not-an-orphan for want of a .spawn "
+            "marker, which is indistinguishable from a fleet that lost nothing.",
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
 def _reject_bot_slot(mode: str, value: str) -> bool:
     """Print the #1187 shape refusal for `mode`, or return False to proceed."""
     why = _not_a_bot_id(value)
@@ -830,12 +902,24 @@ def main() -> int:
         return 0
 
     if argv[1] in ("--all", "--orphans"):
+        # Arity FIRST. Pre-existing (verified on main): these two modes indexed
+        # argv[3] before any length check, so `--orphans <dlog>` died with an
+        # uncaught IndexError at rc 1 instead of the usage line at rc 2. Found by
+        # the #1014 test that asserts "cannot answer" (rc 3) is distinguishable
+        # from "called wrong" (rc 2) — a distinction that needs rc 2 to actually
+        # be reachable. Loud either way, so this was never the silent class; it is
+        # fixed here because the refusal below depends on the contrast.
+        if len(argv) < 4:
+            print(__doc__.strip().splitlines()[0], file=sys.stderr)
+            return 2
         dlog, rlog = argv[2], argv[3]
         now = (
             int(argv[4])
             if len(argv) > 4
             else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
         )
+        if argv[1] == "--orphans" and _refuse_undeterminable_orphans(bots_dir):
+            return 3
         over, orph = _classify_all(dlog, rlog, now, max_age, bots_dir)
         rows = over if argv[1] == "--all" else orph
         for bot_id, entries in sorted(rows.items()):

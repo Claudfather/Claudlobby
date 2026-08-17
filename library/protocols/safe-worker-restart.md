@@ -29,7 +29,9 @@ Restarting a worker tmux session **clears its context**. Workers often have real
 
 ## Reviewers are an exception
 
-For reviewers (typically Sonnet, lower context budget): **do** restart on the first `context-degraded` report, or after ~3 completed rows in a 24h `claudlobby report-back` window, because review sessions don't carry PR-level WIP — reviews are stateless between PRs and Sonnet degrades faster than Opus. Still send a one-line "restarting <reviewer>" note to Telegram for visibility.
+For reviewers (typically Sonnet, lower context budget): **do** restart on the first `context-degraded` report, or after ~3 completed rows in a 24h `claudlobby --fleet {{FLEET_NAME}} report-back` window, because review sessions don't carry PR-level WIP — reviews are stateless between PRs and Sonnet degrades faster than Opus. Still send a one-line "restarting <reviewer>" note to Telegram for visibility.
+
+**Count the rows, do not count an empty result.** The ledger is per-fleet, so a `report-back` run without `--fleet` resolves the root tier and reports on a file that is not there. Before #1216 that was silent — empty stdout, exit 0 — so "0 completed" and "I could not read the ledger" were the same output, and the failure direction is *do not restart*, which is the one nobody investigates. It now prints `cannot read the report-back ledger` and exits 1. **A zero you have not seen the command succeed on is not a zero.**
 
 ## When in doubt, ask the human
 

@@ -118,6 +118,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .paths import Paths
+from .source_state import (
+    SOURCE_ABSENT,
+    SOURCE_OK,
+    SOURCE_UNREADABLE,
+    probe_source,
+)
 from .workstreams import load_workstreams, registry_path
 
 SCHEMA_VERSION = 1
@@ -209,9 +215,14 @@ class Degradation:
 # --- ledger reading -----------------------------------------------------------
 
 
-LEDGER_OK = "ok"
-LEDGER_ABSENT = "absent"
-LEDGER_UNREADABLE = "unreadable"
+# Re-exported from ``source_state``, which owns the rule now that five other
+# readers need it too (#1216/#1014). Aliases rather than fresh literals so the
+# two can never drift: these strings are emitted verbatim in the schema-1
+# envelope (``provenance.*.state``) and asserted on by tests, so a second
+# definition would be a wire-format fork waiting to happen.
+LEDGER_OK = SOURCE_OK
+LEDGER_ABSENT = SOURCE_ABSENT
+LEDGER_UNREADABLE = SOURCE_UNREADABLE
 
 
 @dataclass(frozen=True)
@@ -251,6 +262,14 @@ def _read_ledger(path: Path) -> LedgerRead:
     dropped, so the brief can state its bound instead of printing a count that
     quietly under-reports.
     """
+    # Classification is delegated so this module and the five CLI readers draw
+    # the same line. The except arms below are KEPT, not vestigial: the probe
+    # opens the file and this reads it, two syscalls with a gap between them, and
+    # a read can fail where an open succeeded. Belt and braces on a read door is
+    # the right trade — the alternative is a traceback out of a read-only command.
+    probe = probe_source(path)
+    if probe.unreachable:
+        return LedgerRead(probe.state, [], 0)
     try:
         text = path.read_text()
     except FileNotFoundError:
@@ -1081,6 +1100,7 @@ def format_brief(brief: dict) -> str:
 
     return "\n".join(out)
 
+
 # --- shared degraded-marker helpers (both renderers) ---------------------------
 
 
@@ -1095,9 +1115,7 @@ def _section_degraded(deg: list[dict], section: str) -> list[dict]:
     silently.
     """
     return [
-        e
-        for e in deg
-        if e["field"] == section or e["field"].startswith(section + ".")
+        e for e in deg if e["field"] == section or e["field"].startswith(section + ".")
     ]
 
 
