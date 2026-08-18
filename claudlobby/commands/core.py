@@ -176,6 +176,8 @@ def cmd_generate(args) -> int:
     allowlist = compose_host_mention_allowlist(paths)
     log.info("composed mention allowlist → %s", allowlist)
 
+    _warn_unresolvable_skill_refs(paths)
+
     return 0
 
 
@@ -646,3 +648,38 @@ def cmd_warm_cache(args) -> int:
     else:
         log.info("cache warm complete")
     return 0
+
+
+# Warn-only rung of the #1253 resolution gate. Deliberately NOT routed through
+# the validator report: --strict escalates those to a hard refusal, and a docs
+# typo blocking `generate` on a running fleet is a worse failure than the one
+# being prevented. This is also the only layer that sees a fleet overlay —
+# `local/*/library/` is gitignored, so CI is blind to it by design.
+_REF_WARN_CAP = 10
+
+
+def _warn_unresolvable_skill_refs(paths) -> None:
+    from ..skill_refs import scan_composable
+
+    try:
+        findings = scan_composable(paths.base_library, paths.overlay_library)
+    except Exception as exc:  # never let the advisory rung break composition
+        log.debug("skill-ref scan skipped: %s", exc)
+        return
+
+    live = [f for f in findings if not f.deferred_to]
+    deferred = len(findings) - len(live)
+    if not live:
+        return
+
+    log.warning(
+        "%d backticked /ref(s) resolve to nothing invocable (#1253) — "
+        "advisory, composition continued",
+        len(live),
+    )
+    for f in live[:_REF_WARN_CAP]:
+        log.warning("  %s:%d: %s", f.path, f.lineno, f.token)
+    if len(live) > _REF_WARN_CAP:
+        log.warning("  ... and %d more not shown", len(live) - _REF_WARN_CAP)
+    if deferred:
+        log.warning("  (%d known-deferred ref(s) suppressed)", deferred)
