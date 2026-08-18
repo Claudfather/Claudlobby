@@ -122,6 +122,7 @@ from .source_state import (
     SOURCE_ABSENT,
     SOURCE_OK,
     SOURCE_UNREADABLE,
+    probe_dir,
     probe_source,
 )
 from .workstreams import load_workstreams, registry_path
@@ -546,7 +547,13 @@ def _dispatch_section(
         )
         return {}
 
-    bots_dir = str(paths.runtime_bots) if paths.runtime_bots.is_dir() else None
+    # probe_dir, not is_dir(): a bots dir that stats fine and raises on listing
+    # makes every .spawn lookup fail, so orphan detection returns empty for a
+    # reason that has nothing to do with the fleet.
+    _bots_probe = probe_dir(paths.runtime_bots)
+    bots_dir = (
+        str(paths.runtime_bots) if _bots_probe.state == SOURCE_OK else None
+    )
 
     # Resolve the expiry cap the way the CLI does. The matcher's Python API
     # takes max_age as a defaulted argument and only its main() consults
@@ -590,9 +597,14 @@ def _dispatch_section(
                 field="dispatches.orphaned",
                 mode="labeled",
                 reason=(
-                    f"no bots directory at {paths.runtime_bots}, so respawn "
-                    "cannot be detected and the orphaned list is empty by "
-                    "construction rather than by measurement"
+                    (
+                        f"no bots directory at {paths.runtime_bots}"
+                        if _bots_probe.state == SOURCE_ABSENT
+                        else f"the bots directory at {paths.runtime_bots} "
+                        "exists but cannot be listed"
+                    )
+                    + ", so respawn cannot be detected and the orphaned list "
+                    "is empty by construction rather than by measurement"
                 ),
                 issue="#1014",
             )
@@ -813,7 +825,23 @@ def _alerts_section(
             )
         )
 
-    if not paths.runtime_bots.is_dir():
+    _alert_probe = probe_dir(paths.runtime_bots)
+    if _alert_probe.state != SOURCE_OK:
+        # Was is_dir(), which let an unlistable dir through to collect_events
+        # and raised PermissionError out of the brief.
+        if _alert_probe.state == SOURCE_UNREADABLE:
+            degraded.append(
+                Degradation(
+                    field="alerts",
+                    mode="omitted",
+                    reason=(
+                        f"the bots directory at {paths.runtime_bots} exists "
+                        "but cannot be listed, so an empty alert list would "
+                        "mean 'could not look', not 'nothing is wrong'"
+                    ),
+                    issue="#1227",
+                )
+            )
         return []
 
     cutoff = (

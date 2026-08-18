@@ -222,6 +222,37 @@ class TestUnreachableIsNotEmpty:
         assert "cannot read the report-back ledger" in out
         assert "--fleet" not in out
 
+    def test_an_unreadable_ledger_is_not_told_to_pass_fleet(self, tmp_path, capsys):
+        """--fleet is the remedy for the wrong TIER, which means an ABSENT file.
+
+        An unreadable ledger was reached; the fix is permissions. Attaching the
+        tier remedy to it is advice for a different fault, in the one state
+        whose entire purpose is being distinguishable (#1227 review).
+        """
+        import os as _os
+
+        from claudlobby.paths import Paths
+
+        if _os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        (tmp_path / "fleet.yaml").write_text("fleet:\n  name: test\n  bots: {}\n")
+        (tmp_path / "library").mkdir()
+        (tmp_path / "lib").mkdir()
+        ledger = Paths(root=tmp_path, fleet_dir=None).fleet_state / "report-back.jsonl"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text("{}\n")
+        ledger.chmod(0o000)
+        try:
+            rc = main(["--root", str(tmp_path), "report-back"])
+            out = capsys.readouterr().out
+            assert rc == 1
+            assert "cannot read the report-back ledger" in out
+            assert "--fleet" not in out, (
+                "the tier remedy was attached to UNREADABLE, where it is wrong"
+            )
+        finally:
+            ledger.chmod(0o644)
+
     def test_a_present_ledger_with_no_matching_rows_stays_rc_zero(self, tmp_path):
         """The line is PRESENCE, not emptiness. A filter that excludes everything
         is a true answer and must not be reported as a broken instrument, or the

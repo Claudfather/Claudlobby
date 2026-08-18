@@ -11,7 +11,12 @@ from pathlib import Path
 
 from ..composer import compose_bot, compose_fleet
 from ..diff import diff_bot, promote_bot
-from ..source_state import UNREACHABLE_REMEDIES, probe_source, unreachable_line
+from ..source_state import (
+    SOURCE_ABSENT,
+    UNREACHABLE_REMEDIES,
+    probe_source,
+    unreachable_line,
+)
 from ..validator import validate
 from ._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
 
@@ -387,8 +392,15 @@ def cmd_report_back(args) -> int:
         # Name the fleet-tier remedy only in root mode, where it is the actual
         # cause. In overlay mode --fleet was already passed, so suggesting it
         # would send the reader to re-run the command they just ran.
+        #
+        # And only for ABSENT. The tier remedy answers "the file is not here",
+        # so on UNREADABLE -- where the file WAS reached and the fix is
+        # permissions -- it is advice for a different fault, in the one state
+        # whose entire purpose is being distinguishable (#1227 review).
         remedy = (
-            "" if getattr(args, "fleet", None) else UNREACHABLE_REMEDIES["fleet_tier"]
+            ""
+            if getattr(args, "fleet", None) or probe.state != SOURCE_ABSENT
+            else UNREACHABLE_REMEDIES["fleet_tier"]
         )
         line = unreachable_line("the report-back ledger", probe, remedy=remedy)
         # --json makes stdout MACHINE-facing, so the disclosure moves to stderr

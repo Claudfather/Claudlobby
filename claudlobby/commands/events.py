@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+from ..source_state import SOURCE_ABSENT, SOURCE_UNREADABLE, probe_dir
+
 # Critical event types — fleet health problems that need attention.
 CRITICAL_TYPES = {
     "session_missing",
@@ -57,15 +59,37 @@ def collect_events(
     # rows in one file — plus events that outlive, or never had, a bot dir
     # (host-job alerts, script_error breadcrumbs, a teardown receipt whose whole
     # purpose is surviving the dir it documents) — so --bot must key on the row.
-    bot_dirs = [bots_dir / bot] if bot else sorted(bots_dir.iterdir())
+    if bot:
+        bot_dirs = [bots_dir / bot]
+    else:
+        # is_dir() passes for a dir with no execute bit, and iterdir() then
+        # raises — a read door that crashed would trade a false all-clear for
+        # an outage, which source_state exists to refuse.
+        _bots = probe_dir(bots_dir)
+        if _bots.state == SOURCE_UNREADABLE:
+            unreadable.append(str(bots_dir))
+            bot_dirs = []
+        elif _bots.state == SOURCE_ABSENT:
+            absent.append(str(bots_dir))
+            bot_dirs = []
+        else:
+            bot_dirs = sorted(bots_dir.iterdir())
     ledgers = [(bd / "data" / "events", None) for bd in bot_dirs]
     if fleet_events_dir is not None:
         ledgers.append((Path(fleet_events_dir), bot))
 
     for events_path, want_bot in ledgers:
         sources_total += 1
-        if not events_path.is_dir():
+        # Path.glob SWALLOWS the OSError from an unlistable dir and yields
+        # nothing, so is_dir() here counted a dropped source as READ and left
+        # coverage silent. Permissions are the cheap repro; the class is any
+        # OSError on listing.
+        _probe = probe_dir(events_path)
+        if _probe.state == SOURCE_ABSENT:
             absent.append(str(events_path))
+            continue
+        if _probe.state == SOURCE_UNREADABLE:
+            unreadable.append(str(events_path))
             continue
         sources_read += 1
         for f in sorted(events_path.glob("*.jsonl")):
@@ -167,8 +191,13 @@ def coverage_line(coverage: dict) -> str:
     if not total or (read == total and not unreadable):
         return ""
     bits = [f"coverage: read {read} of {total} event source(s)"]
-    if read < total:
-        bits.append(f"{total - read} had no events directory")
+    # len(absent), NOT total - read. The derivation was exact only while an
+    # unlistable dir was (wrongly) counted as read; once it stopped being, the
+    # arithmetic started describing unreadable sources as absent — the very
+    # conflation this module exists to prevent, inside its own disclosure.
+    n_absent = len(coverage.get("absent", []))
+    if n_absent:
+        bits.append(f"{n_absent} had no events directory")
     if unreadable:
         shown = ", ".join(unreadable[:3])
         more = f" (+{len(unreadable) - 3} more)" if len(unreadable) > 3 else ""
@@ -183,8 +212,15 @@ def cmd_events(args) -> int:
     paths = _resolve_paths(args)
     bots_dir = paths.runtime_bots
 
-    if not bots_dir.is_dir():
+    _bots_probe = probe_dir(bots_dir)
+    if _bots_probe.state == SOURCE_ABSENT:
         print(f"No bots directory at {bots_dir}")
+        return 1
+    if _bots_probe.state == SOURCE_UNREADABLE:
+        print(
+            f"Cannot read the bots directory at {bots_dir} — it exists but "
+            "cannot be listed, so 'no events' would be a fabrication."
+        )
         return 1
 
     coverage: dict = {}

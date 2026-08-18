@@ -1407,3 +1407,61 @@ class TestOrphansRefusesWhenItCannotLook:
         dlog, rlog = self._logs(tmp_path)
         assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW) == {}
         assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=None) == {}
+
+
+def test_orphans_refuses_on_an_unlistable_bots_dir(tmp_path):
+    """The fourth state #1014 missed (#1227 review).
+
+    --bots-dir present but unlistable is byte-identical to 'no orphans': rc 0,
+    zero stdout, empty stderr. orphan-ness is decided by reaching
+    <bots_dir>/<bot>/data/.spawn, which silently fails for every bot.
+    """
+    import json as _json
+    import os as _os
+    import subprocess
+    import sys
+
+    if _os.geteuid() == 0:
+        pytest.skip("root ignores the mode bits")
+    bots = tmp_path / "bots"
+    (bots / "a" / "data").mkdir(parents=True)
+    (bots / "a" / "data" / ".spawn").write_text("")
+    dlog = tmp_path / "d.jsonl"
+    rlog = tmp_path / "r.jsonl"
+    dlog.write_text(
+        _json.dumps(
+            {
+                "ts": "2026-08-10T00:00:00Z",
+                "bot": "a",
+                "task_id": "t-1",
+                "dispatched_at": 1786000000,
+                "expected_by": 1786000600,
+            }
+        )
+        + "\n"
+    )
+    rlog.write_text("")
+    from pathlib import Path as _P
+
+    script = _P(__file__).resolve().parent.parent / "lib" / "dispatch-overdue.py"
+    bots.chmod(0o000)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--orphans",
+                str(dlog),
+                str(rlog),
+                "1787000000",
+                "--bots-dir",
+                str(bots),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        bots.chmod(0o755)
+    assert proc.returncode == 3, f"expected refusal, got rc={proc.returncode}"
+    assert proc.stdout == "", "stdout is parsed by fleet-pulse.sh; must stay empty"
+    assert "unlistable" in proc.stderr.lower() or "cannot" in proc.stderr.lower()

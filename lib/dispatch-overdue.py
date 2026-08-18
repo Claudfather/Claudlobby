@@ -749,7 +749,9 @@ def _refuse_undeterminable_orphans(bots_dir: str | None) -> bool:
     to "no work was lost to a restart". Measured on the reporting host: no
     `--bots-dir`, a real one with no orphans, and a `--bots-dir` naming a path
     that does not exist all returned 0 bytes at rc 0 against a 295-row dispatch
-    log. THREE states, one output, and the collapsed one reads as good news.
+    log. A FOURTH was found in review (#1227): a bots dir that is present and
+    stats as a directory but raises on listing, which `os.path.isdir` waves
+    through. FOUR states, one output, and the collapsed ones read as good news.
 
     WHAT THIS DOES NOT CHANGE, deliberately. `orphaned_all` and `_classify_all`
     keep their contracts to the byte: `orphaned_all` still returns {} without a
@@ -793,6 +795,23 @@ def _refuse_undeterminable_orphans(bots_dir: str | None) -> bool:
         print(
             f"dispatch-overdue.py: --orphans cannot read the bots dir: "
             f"{bots_dir!r} is not a directory\n"
+            "  every row would classify as not-an-orphan for want of a .spawn "
+            "marker, which is indistinguishable from a fleet that lost nothing.",
+            file=sys.stderr,
+        )
+        return True
+    # The FOURTH state: present, stats as a directory, raises on listing. Same
+    # consequence as the two above -- every .spawn lookup fails, so every row
+    # classifies as not-an-orphan -- but isdir() waves it through. Listability
+    # is tested rather than isdir() for the reason probe_dir tests it in
+    # claudlobby/source_state.py; this module stays stdlib-only and cannot
+    # import that, so it carries the same check locally.
+    try:
+        os.listdir(bots_dir)
+    except OSError as exc:
+        print(
+            f"dispatch-overdue.py: --orphans cannot read the bots dir: "
+            f"{bots_dir!r} exists but cannot be listed ({exc.strerror})\n"
             "  every row would classify as not-an-orphan for want of a .spawn "
             "marker, which is indistinguishable from a fleet that lost nothing.",
             file=sys.stderr,

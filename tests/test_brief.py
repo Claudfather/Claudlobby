@@ -1069,3 +1069,50 @@ class TestBootCLI:
         self._fleet_dir(paths)
         assert cmd_brief(self._args(paths.root, json=True)) == 1
         assert cmd_brief(self._args(paths.root, ack=True)) == 1
+
+
+class TestUnlistableBotsDir:
+    """brief's own contract is that it never serves a number it knows is wrong.
+
+    An unlistable runtime/bots is the dir-source twin of the unreadable ledger
+    this PR already handles: ``is_dir()`` passes, then iteration fails (#1227
+    review follow-on — these two sites are inside the swept set).
+    """
+
+    def test_the_alerts_section_degrades_instead_of_raising(self, paths):
+        import os as _os
+
+        from claudlobby.brief import _alerts_section
+
+        if _os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        bots = paths.runtime_bots
+        (bots / "alex" / "data" / "events").mkdir(parents=True, exist_ok=True)
+        bots.chmod(0o000)
+        try:
+            degraded: list = []
+            out = _alerts_section(paths, "alex", 1787000000, degraded)
+            assert out == []
+            assert degraded, "an unreachable alert source must be disclosed"
+        finally:
+            bots.chmod(0o755)
+
+    def test_orphans_are_omitted_and_disclosed_not_reported_as_none(self, paths):
+        """'no orphans' and 'could not look' have opposite remedies."""
+        import os as _os
+
+        from claudlobby.brief import _dispatch_section, load_dispatch_doors
+
+        if _os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        _dlog(paths).write_text("")
+        _rlog(paths).write_text("")
+        doors = load_dispatch_doors(paths)
+        bots = paths.runtime_bots
+        bots.chmod(0o000)
+        try:
+            degraded: list = []
+            _dispatch_section(doors, paths, "alex", 1787000000, degraded)
+            assert degraded, "an unlistable bots dir must be disclosed, not silent"
+        finally:
+            bots.chmod(0o755)

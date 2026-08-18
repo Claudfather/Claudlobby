@@ -339,3 +339,87 @@ class TestEventCoverageIsStatedNotAssumed:
 
         (tmp_path / "b1" / "data" / "events").mkdir(parents=True)
         assert collect_events(tmp_path) == []
+
+
+class TestUnlistableDirectorySources:
+    """A directory that stats fine and raises on iteration (#1227 review).
+
+    ``is_dir()`` passes for a dir with no execute bit, and ``Path.glob``
+    SWALLOWS the resulting OSError and yields nothing — so the source is
+    counted as read, holding zero rows. Permissions are the cheap repro; the
+    class is any OSError on listing (a bad chmod -R, a partial restore, EIO
+    from failing storage — this host runs on SD).
+    """
+
+    def test_an_unlistable_events_dir_is_named_rather_than_counted_as_read(
+        self, tmp_path
+    ):
+        from claudlobby.commands.events import collect_events, coverage_line
+
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        for b in ("a", "b"):
+            d = tmp_path / b / "data" / "events"
+            d.mkdir(parents=True)
+            (d / "fleet-2026-01-01.jsonl").write_text(
+                json.dumps(
+                    {"ts": "2026-01-01T00:00:00Z", "bot": b, "type": "fleet_alert"}
+                )
+                + "\n"
+            )
+        bad = tmp_path / "b" / "data" / "events"
+        bad.chmod(0o000)
+        try:
+            with pytest.raises(OSError):  # the mutation really did apply
+                list(bad.iterdir())
+            cov: dict = {}
+            collect_events(tmp_path, coverage=cov)
+            assert cov["unreadable"] == [str(bad)]
+            assert cov["sources_read"] == 1, "an unlistable dir must not count as read"
+            assert str(bad) in coverage_line(cov)
+        finally:
+            bad.chmod(0o755)
+
+    def test_an_unlistable_bots_dir_refuses_rather_than_raising(self, tmp_path):
+        """source_state's own rule: a read door that crashed would trade a false
+        all-clear for an outage."""
+        from claudlobby.commands.events import collect_events
+
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        (tmp_path / "a" / "data" / "events").mkdir(parents=True)
+        tmp_path.chmod(0o000)
+        try:
+            cov: dict = {}
+            events = collect_events(tmp_path, coverage=cov)
+            assert events == []
+            assert cov["unreadable"] == [str(tmp_path)]
+        finally:
+            tmp_path.chmod(0o755)
+
+
+    def test_an_unlistable_dir_is_not_described_as_having_no_events_directory(
+        self, tmp_path
+    ):
+        """The absent count was derived as total-read, which was exact only
+        while unreadable dirs were (wrongly) counted as read. Fixing that made
+        the derivation over-count, so the line called an unreadable source
+        absent — this PR's own conflation, inside its own disclosure."""
+        from claudlobby.commands.events import collect_events, coverage_line
+
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        for b in ("a", "b"):
+            (tmp_path / b / "data" / "events").mkdir(parents=True)
+        bad = tmp_path / "b" / "data" / "events"
+        bad.chmod(0o000)
+        try:
+            cov: dict = {}
+            collect_events(tmp_path, coverage=cov)
+            line = coverage_line(cov)
+            assert "unreadable:" in line
+            assert "had no events directory" not in line, (
+                f"an unreadable dir was reported as absent: {line}"
+            )
+        finally:
+            bad.chmod(0o755)
