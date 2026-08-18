@@ -19,6 +19,8 @@ import pytest
 from claudlobby.commands.core import cmd_generate
 from claudlobby.known_values import CLAUDNA_LIVE_SKILLS
 
+from .conftest import load_test_fleet, make_paths
+
 from claudlobby.skill_refs import (
     BUILTIN_COMMANDS,
     EXTERNAL_ALLOWLIST,
@@ -262,35 +264,32 @@ class TestGenerateNeverFails:
             cmd_generate(self._args(fleet_dir))
         assert "/definitely-not-real" in caplog.text
 
-    def test_strict_does_not_escalate_a_ref_warning_into_a_refusal(self, fleet_dir):
-        """The likeliest way to break 'never fails': routing these through the
-        validator report, which --strict already turns into a hard refusal.
+    def test_a_ref_finding_never_enters_the_validator_report(self, fleet_dir):
+        """--strict turns validator warnings into a hard refusal, so a ref
+        finding must never be routed there. That is the real mechanism, and it
+        is what this asserts.
 
-        The baseline assert is load-bearing, not ceremony. The stock fixture
-        emits unrelated validator warnings, so under --strict it refuses either
-        way — and a bare `== 0` on the mutated tree would then be a red that no
-        implementation could turn green, while `== baseline` would be a green
-        true of nothing. Silence those warnings first and assert the clean
-        baseline, so the comparison can actually bite.
+        An earlier version asserted `cmd_generate(strict=True) == 0` instead.
+        It passed locally and failed in CI, because it needed the stock fixture
+        to emit ZERO other validator warnings and which warnings it emits is
+        host-dependent. Asserting on the report is deterministic everywhere;
+        asserting on the exit code was measuring the fixture's ambient noise.
         """
-        (fleet_dir / ".env").write_text(
-            "TELEGRAM_TOKEN_LEAD=x\nTELEGRAM_TOKEN_WORKER1=x\n"
-        )
-        fy = fleet_dir / "fleet.yaml"
-        lines = fy.read_text().splitlines()
-        for i, line in enumerate(lines):
-            if line.strip() == "lead:":
-                pad = len(line) - len(line.lstrip())
-                lines.insert(i + 1, " " * (pad + 2) + "bench: true")
-                break
-        else:  # pragma: no cover - fixture shape changed
-            pytest.fail("fixture no longer declares a 'lead' bot")
-        fy.write_text("\n".join(lines) + "\n")
-        baseline = cmd_generate(self._args(fleet_dir, strict=True))
-        assert baseline == 0, "fixture is not warning-free; the comparison cannot bite"
+        from claudlobby.validator import validate
 
         _tree(fleet_dir / "library", "protocols/bad.md", "Run `/definitely-not-real`.\n")
-        assert cmd_generate(self._args(fleet_dir, strict=True)) == 0
+        paths = make_paths(fleet_dir)
+        fleet = load_test_fleet(fleet_dir)
+        report = validate(fleet, paths)
+        leaked = [
+            w
+            for w in list(report.warnings) + list(report.errors)
+            if "definitely-not-real" in str(w)
+        ]
+        assert not leaked, (
+            "ref findings reached the validator report — --strict will now "
+            f"refuse to generate on a docs typo: {leaked}"
+        )
 
 
 def test_no_deferral_is_also_resolvable_through_a_rung():
