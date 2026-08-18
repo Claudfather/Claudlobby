@@ -2,7 +2,7 @@
   "_env_contract": {
     "META_ACCESS_TOKEN": {
       "description": "Long-lived Meta (Facebook) Marketing API access token with the ads_read scope — a System User token is strongly preferred (it does not expire). The fragment maps it to the server's own META_ADS_ACCESS_TOKEN env var. Gitignored — never commit; store only in the fleet .env. The ad-account id (act_XXXXXXXXX) is NOT an env var: it is passed per call as a tool argument, so one token serves every account it can see.",
-      "tier": "fleet",
+      "default_tier": "fleet",
       "secret": true
     }
   },

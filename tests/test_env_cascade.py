@@ -340,3 +340,217 @@ def test_a_missing_resolver_raises_rather_than_guessing(estate: Path) -> None:
     paths = Paths(root=estate, fleet_dir=estate / "local" / "acme")
     with pytest.raises(ResolverUnavailable, match="will not substitute"):
         read_tiers(paths, bot_name="solo")
+
+
+# --------------------------------------------------------------------------
+# 4. The tier NAME registry, and what it is allowed to mean (#1226 stage 2)
+# --------------------------------------------------------------------------
+
+
+def test_the_tier_registry_matches_the_resolver(estate: Path) -> None:
+    """``ENV_TIERS`` names exactly the tiers the runtime emits, in its order.
+
+    Without this pin ``ENV_TIERS`` is a second copy of the cascade wearing a
+    different hat — the precise failure the resolver exists to end. It is a
+    NAME registry for validating a declaration and nothing more; the order and
+    the paths stay in bash.
+    """
+    from claudlobby.known_values import ENV_TIERS
+
+    rows = _bash('env_tier_rows "$BOT_DIR" "$FLEET_NAME"', _env_for(estate)).stdout
+    emitted = tuple(ln.split("\t")[0] for ln in rows.splitlines() if ln.strip())
+    assert emitted == ENV_TIERS
+
+
+def test_deprecated_tiers_are_a_subset_of_the_registry() -> None:
+    """A deprecation that names a tier the registry does not have is a typo
+    nothing would catch — the warning branch simply never fires."""
+    from claudlobby.known_values import DEPRECATED_ENV_TIERS, ENV_TIERS
+
+    assert DEPRECATED_ENV_TIERS <= set(ENV_TIERS)
+    assert DEPRECATED_ENV_TIERS, "an empty set would make the warn branch dead"
+
+
+@pytest.mark.parametrize("tier", ["host", "root", "fleet", "bot"])
+def test_every_cascade_tier_is_declarable(tier: str) -> None:
+    """All four, not two. ``host`` was the tier the contract could not express
+    at all, despite being FIRST in the runtime chain."""
+    from claudlobby.validator import _env_contract_errors
+
+    errs = _env_contract_errors({"TOK": {"secret": True, "default_tier": tier}}, "f")
+    hard = [e for e in errs if "unknown default_tier" in e]
+    assert not hard, errs
+
+
+def test_an_unknown_tier_is_rejected() -> None:
+    """It used to be accepted silently and bucketed as fleet.
+
+    A typo'd tier is invisible at runtime — the var still resolves, from
+    wherever a value happens to sit — so it must fail at declaration time or
+    never.
+    """
+    from claudlobby.validator import _env_contract_errors
+
+    errs = _env_contract_errors({"TOK": {"secret": True, "default_tier": "flete"}}, "f")
+    assert any("unknown default_tier" in e for e in errs), errs
+    assert any("fleet" in e for e in errs), "should suggest the near miss"
+
+
+def test_the_deprecated_root_tier_is_reported_not_silently_accepted() -> None:
+    from claudlobby.validator import _env_contract_errors
+
+    errs = _env_contract_errors({"TOK": {"secret": True, "default_tier": "root"}}, "f")
+    assert any("wound down" in e for e in errs), errs
+
+
+def test_the_missing_var_warning_no_longer_names_one_tier_as_the_location() -> None:
+    """The message is half the defect.
+
+    "add to fleet-tier .env" sends an operator to one file for a var that would
+    resolve from any of four, and is why a value already sitting at the host or
+    bot tier still read as missing.
+    """
+    import claudlobby.validator as v
+
+    src = Path(v.__file__).read_text()
+    assert "add to {req.default_tier}-tier .env" not in src
+    assert "add it at any tier" in src
+
+
+# --------------------------------------------------------------------------
+# 5. Shadowing must be visible, not merely survivable
+# --------------------------------------------------------------------------
+
+
+def test_an_empty_win_over_a_real_value_names_what_it_blanked(estate: Path) -> None:
+    """The row worth interrupting someone over.
+
+    A presence-only check cannot see this state: the key IS set, so nothing
+    reports it missing, and a value DOES exist, so nothing reports it
+    unconfigured — yet the runtime hands the integration "". It is what this
+    estate enters the moment a host-tier PAT appears under the fleet .env's
+    pristine composer stub.
+    """
+    _write(estate, host="export GITHUB_PAT=realhostvalue\n", fleet="export GITHUB_PAT=\n")
+    res = _python_resolved(estate, "GITHUB_PAT")
+    assert res.empty is True
+    assert res.tier == "fleet"
+    assert res.blanked_upstream == ("host",)
+    assert _shell_resolved(estate, "GITHUB_PAT") == ""
+
+
+def test_blanked_upstream_is_empty_when_nothing_was_lost(estate: Path) -> None:
+    """Positive control's twin: the property must not fire on every empty.
+
+    An empty var that was never set upstream is an unconfigured var — ordinary,
+    and a remedy of "add the secret". Reporting it as blanking would bury the
+    real rows in noise, which is how a true signal gets suppressed.
+    """
+    _write(estate, fleet="export GITHUB_PAT=\n")
+    res = _python_resolved(estate, "GITHUB_PAT")
+    assert res.empty is True
+    assert res.blanked_upstream == ()
+
+
+def test_a_real_value_downstream_reports_no_blanking(estate: Path) -> None:
+    _write(estate, host="export GITHUB_PAT=\n", fleet="export GITHUB_PAT=real\n")
+    res = _python_resolved(estate, "GITHUB_PAT")
+    assert res.blanked_upstream == ()
+    assert res.shadowed == ("host",)
+
+
+def test_assignments_never_carry_the_secret_itself(estate: Path) -> None:
+    """The provenance trail is (tier, has_a_value) booleans by construction.
+
+    This record is printed by the register and passed around; a value that
+    never enters the structure cannot leave it. Presence is the whole question.
+    """
+    _write(estate, host="export GITHUB_PAT=supersecret\n", fleet="export GITHUB_PAT=\n")
+    res = _python_resolved(estate, "GITHUB_PAT")
+    assert res.assignments == (("host", True), ("fleet", False))
+    assert "supersecret" not in repr(res.assignments)
+
+
+# --------------------------------------------------------------------------
+# 6. Per-scope credential source override (#1214 F6c)
+# --------------------------------------------------------------------------
+
+
+def test_a_bot_override_beats_the_fleet_default() -> None:
+    """"(a) should work if configured at bot, fleet, or host level."
+
+    Merged fleet-then-bot with the bot winning — the same direction the .env
+    cascade runs and the same merge git_credentials already uses, so a reader
+    who learns one has learned all three.
+    """
+    from claudlobby.config import _parse_credential_sources
+
+    merged = {
+        **_parse_credential_sources({"GITHUB_PAT": "cli:gh-token"}, where="fleet"),
+        **_parse_credential_sources({"GITHUB_PAT": "literal"}, where="bot"),
+    }
+    assert merged == {"GITHUB_PAT": "literal"}
+
+
+def test_an_override_key_must_be_an_env_var_name() -> None:
+    from claudlobby.config import _parse_credential_sources
+
+    with pytest.raises(ValueError, match="env var NAME"):
+        _parse_credential_sources({"not-a-var": "literal"}, where="t")
+
+
+def test_an_override_source_is_held_to_the_same_closed_registry() -> None:
+    """A laxer door into the same resolver voids the injection guarantee for
+    both doors, not just the new one."""
+    from claudlobby.known_values import KNOWN_CREDENTIAL_SOURCES
+    import claudlobby.validator as v
+
+    src = Path(v.__file__).read_text()
+    assert "credential_sources['{var_name}']" in src
+    assert "KNOWN_CREDENTIAL_SOURCES" in src
+    # And the registry it is checked against is the one the contract uses.
+    assert "cli:gh-token" in KNOWN_CREDENTIAL_SOURCES
+
+
+def test_set_but_empty_and_absent_get_different_remedies() -> None:
+    """Two states a value-based check collapses, with opposite fixes.
+
+    Telling an operator to ADD a var that is already assigned-empty sends them
+    to write it at the very tier whose empty assignment is blanking it.
+    """
+    import claudlobby.validator as v
+
+    src = Path(v.__file__).read_text()
+    assert "SET BUT EMPTY" in src
+    assert "adding it again at the same tier changes nothing" in src
+    assert "no .env tier sets it" in src
+
+
+def test_the_legacy_tier_key_fails_loudly_rather_than_defaulting() -> None:
+    """A renamed schema key silently defaults every unmigrated declaration.
+
+    A fleet overlay carrying the old `tier:` would fall back to 'fleet' and
+    look fine — and unlike most schema drift this one is invisible at runtime,
+    because a mis-tiered var still resolves from wherever a value sits.
+    """
+    from claudlobby.validator import _env_contract_errors
+
+    errs = _env_contract_errors({"TOK": {"secret": True, "tier": "bot"}}, "f")
+    assert any("renamed to 'default_tier'" in e for e in errs), errs
+
+
+def test_one_bad_var_does_not_smear_across_the_others() -> None:
+    """The per-var label must not accumulate.
+
+    It did: the loop rebound the file-level label, so the eighth error on a
+    file read "var 'A' var 'B' ... var 'H'" and pointed the reader at seven
+    vars that were fine. A message naming the wrong location is worse than a
+    terse one.
+    """
+    from claudlobby.validator import _env_contract_errors
+
+    errs = _env_contract_errors({"A": {}, "B": {}, "C": {}}, "integration 'x.md'")
+    assert len(errs) == 3
+    for var, err in zip(("A", "B", "C"), errs):
+        assert err.startswith(f"integration 'x.md' var '{var}':"), err
+        assert err.count("var '") == 1, err

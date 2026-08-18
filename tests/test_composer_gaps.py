@@ -239,7 +239,7 @@ class TestComposeMcpJson:
                         "args": ["-y", "@notionhq/notion-mcp-server"],
                     },
                     "_env_contract": {
-                        "NOTION_TOKEN": {"description": "Notion token", "tier": "bot"},
+                        "NOTION_TOKEN": {"description": "Notion token", "default_tier": "bot"},
                     },
                 }
             )

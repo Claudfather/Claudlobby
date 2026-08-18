@@ -2,7 +2,7 @@
   "_env_contract": {
     "GITHUB_PAT": {
       "description": "GitHub Personal Access Token. Resolves the HOST DEFAULT identity only - not a per-org and not a per-bot credential. Per-bot GitHub App identity is #252; this entry is the seam it plugs into.",
-      "tier": "fleet",
+      "default_tier": "fleet",
       "secret": true,
       "source": "cli:gh-token"
     }

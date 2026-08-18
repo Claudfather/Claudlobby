@@ -2548,7 +2548,9 @@ class EnvVar:
 
     name: str
     description: str
-    tier: str  # "fleet" or "bot"
+    #: Placement DEFAULT, not the resolution location — see ContractVar.
+    #: One of known_values.ENV_TIERS.
+    default_tier: str
     source: str  # e.g. "mcp/github", "integration/neon", "telegram"
 
 
@@ -2596,7 +2598,7 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                 vars[cv.canonical_name] = EnvVar(
                     name=cv.canonical_name,
                     description=f"{cv.description}{inst_label}",
-                    tier=cv.tier,
+                    default_tier=cv.default_tier,
                     source=f"mcp/{entry.name}",
                 )
 
@@ -2611,12 +2613,12 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
             if not contract:
                 continue
             for var_name, meta in contract.items():
-                tier = meta.get("tier", "fleet")
+                default_tier = meta.get("default_tier", "fleet")
                 if var_name not in vars:
                     vars[var_name] = EnvVar(
                         name=var_name,
                         description=meta.get("description", ""),
-                        tier=tier,
+                        default_tier=default_tier,
                         source=f"integration/{int_name}",
                     )
 
@@ -2636,7 +2638,7 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                 vars[var_name] = EnvVar(
                     name=var_name,
                     description="Telegram bot token",
-                    tier="bot",
+                    default_tier="bot",
                     source="telegram",
                 )
 
@@ -2654,7 +2656,7 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                     # that org, and freshbox FAILs a *bot*-tier var found in a
                     # host-shared .env — mislabelling it would false-alarm on the
                     # normal placement.
-                    tier="fleet",
+                    default_tier="fleet",
                     source="git_credentials",
                 )
 
@@ -2827,8 +2829,8 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
     contract vars discovered from MCP fragments and integrations.
     """
     env_vars = collect_env_contracts(fleet, paths)
-    fleet_vars = [ev for ev in env_vars if ev.tier != "bot"]
-    bot_vars = [ev for ev in env_vars if ev.tier == "bot"]
+    fleet_vars = [ev for ev in env_vars if ev.default_tier != "bot"]
+    bot_vars = [ev for ev in env_vars if ev.default_tier == "bot"]
 
     if paths.fleet_dir:
         # Guarded exactly as the bot tier is (#1206). start-bot.sh sources the

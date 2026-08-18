@@ -4,11 +4,11 @@ type: mcp
 env_contract:
   PRINTIFY_API_KEY:
     description: Printify API key
-    tier: fleet
+    default_tier: fleet
     secret: true
   PRINTIFY_SHOP_ID:
     description: Printify shop ID
-    tier: fleet
+    default_tier: fleet
     secret: false
 tool_grants:
   - "mcp__printify__get_blueprint"

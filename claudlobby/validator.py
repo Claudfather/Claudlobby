@@ -22,6 +22,8 @@ from .config import _PROJECT_VALIDATION_KEYS, FleetConfig, is_pos_int
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
+    DEPRECATED_ENV_TIERS,
+    ENV_TIERS,
     EXPERTISE_CORE_TOOLS,
     KNOWN_CREDENTIAL_SOURCES,
     KNOWN_HOOK_EVENTS,
@@ -208,10 +210,15 @@ def _env_contract_errors(contract: object, where: str) -> list[str]:
     for var_name, meta in contract.items():
         if not isinstance(meta, dict):
             continue
-        where = f"{where} var '{var_name}'"
+        # A per-var label, NEVER rebinding the loop-invariant `where`. Rebinding
+        # it made each error append the previous var's name, so the eighth error
+        # on a file read "var 'A' var 'B' ... var 'H'" and pointed a reader at
+        # seven vars that were fine. A message that names the wrong location is
+        # worse than a terse one — it sends someone to edit the wrong line.
+        at = f"{where} var '{var_name}'"
         if "secret" not in meta:
             errors.append(
-                f"{where}: env contract entry is missing required 'secret' "
+                f"{at}: env contract entry is missing required 'secret' "
                 f"(bool). The test: can the integration AUTHENTICATE without "
                 f"this value? No -> true. Yes -> false (e.g. a shop id is "
                 f"false — you still authenticate, you just cannot target a "
@@ -220,14 +227,41 @@ def _env_contract_errors(contract: object, where: str) -> list[str]:
             )
         elif not isinstance(meta["secret"], bool):
             errors.append(
-                f"{where}: 'secret' must be a JSON boolean, got "
+                f"{at}: 'secret' must be a JSON boolean, got "
                 f"{type(meta['secret']).__name__}."
+            )
+        if "tier" in meta:
+            errors.append(
+                f"{at}: 'tier' was renamed to 'default_tier' (#1226). Left as-is "
+                f"it is silently ignored and the var falls back to the 'fleet' "
+                f"default — so this must fail here rather than at runtime, where "
+                f"a mis-tiered var still resolves from wherever a value happens "
+                f"to sit and nothing looks wrong. Rename the key; the meaning "
+                f"also changed, from THE location to a placement DEFAULT"
+            )
+        declared_tier = meta.get("default_tier")
+        if declared_tier is not None and declared_tier not in ENV_TIERS:
+            errors.append(
+                f"{at}: unknown default_tier {declared_tier!r} — one of: "
+                f"{', '.join(ENV_TIERS)}. This is a PLACEMENT DEFAULT, not the "
+                f"resolution location: the runtime cascades all four tiers and "
+                f"the most specific one that sets the var wins"
+                f"{hint(str(declared_tier), ENV_TIERS)}"
+            )
+        elif declared_tier in DEPRECATED_ENV_TIERS:
+            # Warned, not rejected: the tier is real and the register must be
+            # able to report a value found there. Discouraging a NEW declaration
+            # is a different act from refusing to describe the estate as it is.
+            errors.append(
+                f"{at}: default_tier '{declared_tier}' is the host-shared "
+                f"repo-root .env, which is being wound down — declare 'fleet' "
+                f"(or 'host' for a genuinely machine-wide identity) instead"
             )
         source = meta.get("source")
         if source is not None and source not in KNOWN_CREDENTIAL_SOURCES:
             known = ", ".join(sorted(KNOWN_CREDENTIAL_SOURCES))
             errors.append(
-                f"{where}: unregistered source {source!r} — 'source' is a closed "
+                f"{at}: unregistered source {source!r} — 'source' is a closed "
                 f"framework-owned registry, one of: {known}. Omit it entirely to "
                 f"mean 'a human supplies this value'"
                 f"{hint(source, KNOWN_CREDENTIAL_SOURCES)}"
@@ -491,10 +525,63 @@ def _validate_bots(
                 if req.secret
                 else "MCP server will start with this unset"
             )
+            # Names the CONVENTIONAL tier, and says it is one of four. The old
+            # wording — "add to <tier>-tier .env" — read the declared default as
+            # THE location, which is the #1226 defect in one sentence: it sends
+            # an operator to the fleet file for a var that would resolve just as
+            # well from ~/.env, and it is why a value already placed at the host
+            # or bot tier still reads as missing here.
+            # SET-BUT-EMPTY is a different defect from ABSENT and needs the
+            # opposite remedy. `_env_has_value` correctly treats both as "no
+            # value", but telling an operator to ADD a var that is already
+            # assigned-empty sends them to write it at the very tier whose empty
+            # assignment is blanking it. That is not hypothetical: two fleets
+            # carry a pristine `export GITHUB_PAT=` scaffold stub, and under
+            # shell assignment semantics that stub WINS over anything upstream.
+            if req.name in effective_env:
+                remedy = (
+                    f"it is SET BUT EMPTY — some tier assigns it the empty "
+                    f"string, which under shell sourcing WINS over any value at "
+                    f"a less specific tier. Fill it in or delete the assignment; "
+                    f"adding it again at the same tier changes nothing"
+                )
+            else:
+                remedy = (
+                    f"no .env tier sets it — add it at any tier "
+                    f"({', '.join(ENV_TIERS)}); conventionally {req.default_tier}. "
+                    f"The most specific tier that sets it wins"
+                )
             report.warnings.append(
                 f"bot '{bot_name}': {req.origin}{inst_note} requires {req.name} but "
-                f"it's not set — add to {req.tier}-tier .env ({consequence})"
+                f"{remedy} ({consequence})"
             )
+
+        # Per-scope credential source overrides (#1214 F6c). Held to the SAME
+        # closed registry as a contract's own `source`, and that is the point:
+        # fork F5's injection guarantee is that the resolver dispatches on a
+        # whole registered identifier through a fixed `case` arm, so a value
+        # arriving from fleet.yaml must be no more admissible than one arriving
+        # from a library fragment. A second, laxer door into the same resolver
+        # would void the guarantee for both.
+        for var_name, source in sorted(bot.credential_sources.items()):
+            if source not in KNOWN_CREDENTIAL_SOURCES:
+                known = ", ".join(sorted(KNOWN_CREDENTIAL_SOURCES))
+                report.errors.append(
+                    f"bot '{bot_name}': credential_sources['{var_name}'] = "
+                    f"{source!r} is not in the closed source registry, one of: "
+                    f"{known}{hint(source, KNOWN_CREDENTIAL_SOURCES)}"
+                )
+            elif source == "mint:github-app":
+                # Registered but deliberately unresolvable: no resolver arm
+                # reads it (F1 ships `cli` only). Declaring it is legal and
+                # records intent; saying so here is what stops someone waiting
+                # for a value that is never coming.
+                report.warnings.append(
+                    f"bot '{bot_name}': credential_sources['{var_name}'] = "
+                    f"'mint:github-app' is RESERVED and resolves nothing yet — "
+                    f"supply {var_name} in a .env tier until the minting "
+                    f"resolver ships"
+                )
 
         # Integrations (warn). Accepts `name`, `dir/name`, or `dir/`.
         for integ in bot.integrations:

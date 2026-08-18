@@ -192,7 +192,7 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
             # `secret` is required on every entry since #1214 Phase 1.
             "GITHUB_PAT": {
                 "description": "GitHub PAT",
-                "tier": "fleet",
+                "default_tier": "fleet",
                 "secret": True,
             },
         },

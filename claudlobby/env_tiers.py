@@ -83,7 +83,11 @@ class Resolution(NamedTuple):
     value: str
     tier: str  #: winning tier — the most specific one that ASSIGNED the key
     path: Path | None  #: the file that won
-    assigned_by: tuple[str, ...]  #: every tier that assigned it, cascade order
+    #: EVERY assignment, in cascade order, as (tier, has_a_value). The boolean
+    #: rather than the value: this record is printed by the register and passed
+    #: around, and a secret that never enters the structure cannot leak out of
+    #: it. Presence is the whole question anyway.
+    assignments: tuple[tuple[str, bool], ...] = ()
     origin_hint: str = ""  #: filled by the register; not known here
 
     @property
@@ -98,9 +102,34 @@ class Resolution(NamedTuple):
         return self.value == ""
 
     @property
+    def assigned_by(self) -> tuple[str, ...]:
+        """Every tier that assigned this key, cascade order."""
+        return tuple(t for t, _ in self.assignments)
+
+    @property
     def shadowed(self) -> tuple[str, ...]:
         """Tiers whose assignment the winner overrode."""
         return self.assigned_by[:-1]
+
+    @property
+    def blanked_upstream(self) -> tuple[str, ...]:
+        """Tiers that held a REAL value and were overridden by an empty win.
+
+        The one state worth interrupting someone over, and the one a
+        presence-only check cannot see: the key is set, so nothing reports it
+        missing, and a value existed, so nothing reports it unconfigured — yet
+        what the runtime hands the integration is "".
+
+        On this estate that is one host-tier PAT away from being live. The
+        fleet ``.env`` files carry a PRISTINE composer stub (``export
+        GITHUB_PAT=``), and the scaffolder's ``provided_upstream`` guard
+        neutralises such a stub only when it runs — so between an upstream
+        value appearing and the next ``generate``, this property is the only
+        thing that can say so. Empty when nothing was lost.
+        """
+        if not self.empty:
+            return ()
+        return tuple(t for t, has_value in self.assignments[:-1] if has_value)
 
 
 def resolver_path(paths: Paths) -> Path:
@@ -200,7 +229,8 @@ def cascade(tiers: list[EnvTier]) -> dict[str, Resolution]:
                 value=value,
                 tier=tier.tier,
                 path=tier.path,
-                assigned_by=(prior.assigned_by if prior else ()) + (tier.tier,),
+                assignments=(prior.assignments if prior else ())
+                + ((tier.tier, bool(value)),),
             )
     return winner
 

@@ -85,7 +85,14 @@ class ContractVar(NamedTuple):
     canonical_name: (
         str  # instance-renamed when instance-scoped, else the raw contract key
     )
-    tier: str  # "fleet" | "bot"
+    #: Where a value for this var CONVENTIONALLY belongs — a placement
+    #: default, never a constraint on where it may resolve from. The
+    #: runtime cascades four tiers and the most specific ASSIGNMENT wins,
+    #: so a var declared ``fleet`` still resolves from ``~/.env`` if that
+    #: is the only tier holding it. It was called ``tier`` and was read as
+    #: THE location, which is how a credential placed at the host or bot
+    #: tier booted fine and read as missing to every tool (#1226).
+    default_tier: str  # one of known_values.ENV_TIERS
     instance: str | None  # instance label when instance-scoped, else None (shared)
     description: str  # meta.get("description", "")
     # --- #1214 Phase 1: the two fields that make a value obtainable ---
@@ -138,7 +145,7 @@ def iter_operator_contract_vars(
             continue
         if meta.get("provided_by") == "composer":
             continue
-        tier = meta.get("tier", "fleet")
+        default_tier = meta.get("default_tier", "fleet")
         scope = meta.get("scope", "shared")
         description = meta.get("description", "")
         # Defaulting rather than raising keeps read-only callers (doctor, .env
@@ -151,14 +158,16 @@ def iter_operator_contract_vars(
             for inst in entry.instances:
                 yield ContractVar(
                     canonical_var_name(var_name, contract, entry, inst),
-                    tier,
+                    default_tier,
                     inst,
                     description,
                     secret,
                     source,
                 )
         else:
-            yield ContractVar(var_name, tier, None, description, secret, source)
+            yield ContractVar(
+                var_name, default_tier, None, description, secret, source
+            )
 
 
 def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
@@ -222,7 +231,7 @@ def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
         for var_name, meta in contract.items():
             if not isinstance(meta, dict):
                 continue
-            tier = meta.get("tier", "fleet")
+            default_tier = meta.get("default_tier", "fleet")
             # Integration-doc frontmatter is the OTHER declaration surface for
             # the same two facts, and it is backfilled and gated exactly like
             # the MCP one -- deliberately, because 10 of its 21 vars have NO
@@ -237,7 +246,7 @@ def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
             out.append(
                 ContractVar(
                     var_name,
-                    tier,
+                    default_tier,
                     None,
                     meta.get("description", ""),
                     bool(meta.get("secret", False)),

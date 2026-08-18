@@ -2,12 +2,12 @@
   "_env_contract": {
     "HA_URL": {
       "description": "Home Assistant base URL",
-      "tier": "fleet",
+      "default_tier": "fleet",
       "secret": false
     },
     "HA_TOKEN": {
       "description": "Home Assistant long-lived access token",
-      "tier": "fleet",
+      "default_tier": "fleet",
       "secret": true
     }
   },

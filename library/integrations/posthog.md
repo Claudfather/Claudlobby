@@ -4,15 +4,15 @@ type: mcp
 env_contract:
   POSTHOG_API_KEY:
     description: PostHog Personal API Key (MCP server preset, read-only scopes) — gitignored, format phx_XXXXXXXX
-    tier: fleet
+    default_tier: fleet
     secret: true
   POSTHOG_HOST:
     description: PostHog MCP endpoint host (mcp.posthog.com US / mcp-eu.posthog.com EU) — the MCP proxy host, not the app host
-    tier: fleet
+    default_tier: fleet
     secret: false
   POSTHOG_PROJECT_ID:
     description: Numeric PostHog project ID queries are pinned to (bare number, e.g. 12345)
-    tier: fleet
+    default_tier: fleet
     secret: false
 tool_grants:
   - "mcp__posthog__organizations-get"

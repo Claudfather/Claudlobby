@@ -66,7 +66,7 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
                     # `secret` required on every entry since #1214 Phase 1.
                     "GITHUB_PAT": {
                         "description": "GitHub PAT",
-                        "tier": "fleet",
+                        "default_tier": "fleet",
                         "secret": True,
                     },
                 },

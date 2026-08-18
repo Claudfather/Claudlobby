@@ -3,11 +3,11 @@ title: Shopify
 env_contract:
   SHOPIFY_ACCESS_TOKEN:
     description: Shopify Admin API access token
-    tier: fleet
+    default_tier: fleet
     secret: true
   SHOPIFY_STORE_DOMAIN:
     description: Shopify store domain (e.g. mystore.myshopify.com)
-    tier: fleet
+    default_tier: fleet
     secret: false
 tool_grants:
   - "mcp__shopify__getAbandonmentReport"

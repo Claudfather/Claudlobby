@@ -33,7 +33,7 @@ INTEGRATION = dedent("""\
     env_contract:
       ACME_TOKEN:
         description: Acme API token
-        tier: fleet
+        default_tier: fleet
     ---
 
     # Acme
@@ -77,7 +77,7 @@ class TestFrontmatter:
     def test_parses_env_contract(self):
         got = creds.parse_frontmatter_block(INTEGRATION, "env_contract")
         assert "ACME_TOKEN" in got
-        assert got["ACME_TOKEN"]["tier"] == "fleet"
+        assert got["ACME_TOKEN"]["default_tier"] == "fleet"
 
     def test_absent_key_is_empty_not_error(self):
         assert creds.parse_frontmatter_block(INTEGRATION, "consumer_contract") == {}

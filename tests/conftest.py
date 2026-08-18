@@ -362,7 +362,7 @@ def fleet_dir(tmp_path: Path) -> Path:
             # or every test using this fleet fails on a well-formed fragment.
             "GITHUB_PAT": {
                 "description": "GitHub PAT",
-                "tier": "fleet",
+                "default_tier": "fleet",
                 "secret": True,
             },
         },
@@ -377,7 +377,7 @@ def fleet_dir(tmp_path: Path) -> Path:
         env_contract:
           GITHUB_PAT:
             description: GitHub personal access token
-            tier: fleet
+            default_tier: fleet
             secret: true
         ---
 
