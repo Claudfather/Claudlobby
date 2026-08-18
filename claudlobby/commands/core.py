@@ -95,6 +95,55 @@ def cmd_creds_reconcile(args) -> int:
     return 1 if exits_nonzero(findings) else 0
 
 
+def cmd_env_register(args) -> int:
+    """The derived credential register (#1214 F6 / #1226).
+
+    DERIVED rather than written: a hand-kept note of "things that work this way"
+    is stale the first time someone adds an integration and forgets, and its
+    staleness is invisible because it still reads like an answer.
+
+    Reports SHADOWING, not merely resolution. A var resolving to the empty
+    string from a more specific tier while a real value sits upstream is
+    invisible to every other check — the key is set, so nothing calls it
+    missing; a value exists, so nothing calls it unconfigured — and it is the
+    state that motivated the whole workstream.
+    """
+    from ..env_register import ResolverUnavailable, build, exits_nonzero, format_report
+
+    paths = _resolve_paths(args)
+    _load_env(paths)
+    fleet, _ = _load_fleet_or_exit(paths)
+
+    try:
+        reg = build(fleet, paths, bot=getattr(args, "bot", None))
+    except ResolverUnavailable as exc:
+        # Refuse rather than answer from a copy of the tier order. A register
+        # that guessed would be worse than none: its whole claim is that it
+        # reports what a boot would actually find.
+        print(f"cannot derive the register: {exc}")
+        return 2
+
+    if getattr(args, "json", False):
+        import json
+
+        print(
+            json.dumps(
+                {
+                    "bot": reg.bot,
+                    "tiers": [
+                        {"tier": t, "path": p, "state": st} for t, p, st in reg.tiers
+                    ],
+                    "vars": [r._asdict() for r in reg.rows],
+                    "undeclared": list(reg.undeclared),
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(format_report(reg))
+    return 1 if exits_nonzero(reg) else 0
+
+
 def cmd_validate(args) -> int:
     paths = _resolve_paths(args)
     _load_env(paths)

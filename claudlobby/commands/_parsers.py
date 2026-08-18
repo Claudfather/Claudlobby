@@ -6,6 +6,7 @@ from ._helpers import _add_migration_args
 from .core import (
     cmd_brief,
     cmd_creds_reconcile,
+    cmd_env_register,
     cmd_diff,
     cmd_doctor,
     cmd_freshbox,
@@ -48,6 +49,17 @@ def register_subparsers(sub) -> None:
         "(#1104 shapes 1+2; shape 3 reports UNKNOWN by design)",
     )
     pcr.set_defaults(func=cmd_creds_reconcile)
+
+    per = sub.add_parser(
+        "env-register",
+        help="Derived credential register — every declared var, the tier it "
+        "resolves from, and what it shadowed (#1226)",
+    )
+    per.add_argument(
+        "--bot", help="Include this bot's .env tier (the most specific one)"
+    )
+    per.add_argument("--json", action="store_true", help="Machine-readable output")
+    per.set_defaults(func=cmd_env_register)
 
     pfb = sub.add_parser(
         "freshbox",
