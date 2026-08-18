@@ -25,7 +25,7 @@ If an active plan conflicts with your task, flag to the manager before proceedin
 
 ## INDEX.md Maintenance
 
-Each subdirectory has an INDEX.md that lists its contents. `/index` is the **sole writer** of INDEX.md files — bots create or update knowledge docs, then run `/index` to regenerate the index.
+Each subdirectory has an INDEX.md that lists its contents. The indexing skill is the **sole writer** of INDEX.md files — bots create or update knowledge docs, then run it to regenerate the index. Use whichever one you have (clauDNA offers `/claudna:index`).
 
 INDEX.md format (one line per doc, scan-friendly):
 
@@ -35,9 +35,9 @@ INDEX.md format (one line per doc, scan-friendly):
 
 ## Lifecycle
 
-- **Creating:** write the doc with frontmatter → run `/index` to update INDEX.md.
-- **Updating:** edit the doc, bump `updated:` in frontmatter → run `/index`.
-- **Completing:** change `status:` to completed/superseded → move from `active/` to `completed/` if applicable → run `/index` in both directories.
+- **Creating:** write the doc with frontmatter → run the indexing skill to update INDEX.md.
+- **Updating:** edit the doc, bump `updated:` in frontmatter → run the indexing skill.
+- **Completing:** change `status:` to completed/superseded → move from `active/` to `completed/` if applicable → run the indexing skill in both directories.
 - **Stale docs:** knowledge docs default to 90-day TTL via `expires:` field. Surface expired docs by scanning frontmatter directly; when a Claudron release with `claudron review --json` is wired, a weekly librarian job takes this over.
 
 ## Promotion Flow

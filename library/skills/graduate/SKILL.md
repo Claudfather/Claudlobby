@@ -42,7 +42,7 @@ Run only after a verdict is ratified; name the ratifying reply in the report.
 - **shared → vault:** strip the file's frontmatter, capture into the vault through whichever capture skill you have (clauDNA offers `/claudna:capture`) or the `claudron` CLI directly, then the shared copy becomes a pointer.
 - **refresh:** re-verify against reality first (run the commands, check the paths) — a refresh without re-verification is fabrication — then bump `updated:` and extend `expires:`.
 - **retire / demote:** per the protocol's verdict table and the Shared Documentation lifecycle.
-- **Always finish with `/index`** in every touched directory.
+- **Always finish by regenerating INDEX.md** in every touched directory, with whichever indexing skill you have (clauDNA offers `/claudna:index`).
 
 ## Proposal format
 

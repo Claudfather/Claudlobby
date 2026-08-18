@@ -204,4 +204,4 @@ The orchestrator periodically reviews the fleet's active plans — through the d
 
 - **Surface stale plans** — status: active but `updated:` older than 7 days. Ping the owner.
 - **Detect conflicts** — two active plans touching the same repo. Flag for human resolution.
-- **Catch forgotten transitions** — a completed task whose plan still says status: active. Nudge the owner to update status and run `/index`.
+- **Catch forgotten transitions** — a completed task whose plan still says status: active. Nudge the owner to update status and regenerate the directory's INDEX.md with whichever indexing skill they have.
