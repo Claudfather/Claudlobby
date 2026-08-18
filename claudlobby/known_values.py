@@ -165,6 +165,44 @@ CLAUDNA_SKILL_RENAMES: dict[str, str] = {
     "/claudna:product-brainstorm": "/claudna:product-vision",
 }
 
+# Live clauDNA skills that library/ content is permitted to reference by name
+# (#1253). Maintained beside the rename map above, because a clauDNA
+# consolidation is the one event that changes both: a name leaves this set at
+# the same moment it gains a CLAUDNA_SKILL_RENAMES entry.
+#
+# Deliberately a DECLARATION, not a scan of the installed plugin. Reading the
+# plugin tree to learn what it ships is consuming a sibling by assertion —
+# correct today, silently wrong the next time clauDNA moves, and unavailable in
+# CI where no plugin is installed. Every entry below is backed by a real
+# reference in library/; adding a new reference means adding a line here once.
+#
+# NOT validated against a local clauDNA checkout, and that is deliberate. The
+# obvious-looking improvement -- reuse test_rename_map_gate's resolver and
+# assert each name exists as a skills/<name>/ dir -- was measured and rejected:
+# both checkouts on this host lack skills/audit/ and skills/capture/, which are
+# unambiguously live, because one is 130 commits behind and the other's origin
+# is stale. Eight of the fourteen below would have failed against a stale
+# oracle. That gate resolves only narrow paths and SKIPS otherwise for exactly
+# this reason; its CI leg clones fresh, which is the only trustworthy oracle.
+CLAUDNA_LIVE_SKILLS: frozenset[str] = frozenset(
+    {
+        "/claudna:audit",
+        "/claudna:capture",
+        "/claudna:claudron",
+        "/claudna:development-retro",
+        "/claudna:implement-plan",
+        "/claudna:index",
+        "/claudna:modal",
+        "/claudna:neon",
+        "/claudna:product-enhance",
+        "/claudna:product-vision",
+        "/claudna:publish",
+        "/claudna:railway",
+        "/claudna:recall",
+        "/claudna:vercel",
+    }
+)
+
 # ── Autonomous runner ────────────────────────────────────────────
 # The --auto-eligible subset of the renamed skills; the live values (the whole
 # space-form) are what validator.py exact-matches. Selected from the canonical
