@@ -8,7 +8,7 @@ When a worker pauses with multiple viable approaches, **triage first** before bo
 
 **Triage:**
 
-- **Sub-choice resolvable by codebase patterns or weighing** (hook placement, helper extraction) → tell worker to `/weigh-development-paths` and decide. No consensus.
+- **Sub-choice resolvable by codebase patterns or weighing** (hook placement, helper extraction) → tell the worker to weigh the options with whatever path-weighing skill it has, and decide. No consensus.
 - **Architectural fork with multiple defensible picks** (response shape, source-of-truth, state pattern) → run consensus loop.
 - **Product-shape / shared-infra / data-model / external-cost** (cron vs session trigger, Snowflake DDL, Railway deploy) → flag the human.
 
@@ -24,6 +24,6 @@ When a worker pauses with multiple viable approaches, **triage first** before bo
 
 **Expand the panel** for unusually load-bearing forks (schema decisions, cross-surface patterns) — pull a third worker before going to the human.
 
-**Worker offers A/B/C fork to manager:** default to this consensus loop. The worker's choice to escalate rather than `/weigh-development-paths` and decide themselves is itself a signal that the fork is complex enough to warrant a second reader. Solo-weighing on the manager's side replaces "one person weighs" with "a different one person weighs" without adding independent signal. The extra dispatch round is cheap compared to mid-implementation reversals.
+**Worker offers A/B/C fork to manager:** default to this consensus loop. The worker's choice to escalate rather than weigh the paths and decide themselves is itself a signal that the fork is complex enough to warrant a second reader. Solo-weighing on the manager's side replaces "one person weighs" with "a different one person weighs" without adding independent signal. The extra dispatch round is cheap compared to mid-implementation reversals.
 
 For substrate-shaping decisions needing 2-4 independent lenses, use `multi-angle-orchestration` instead.
