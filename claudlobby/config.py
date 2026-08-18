@@ -483,6 +483,13 @@ class BotConfig:
     # and the start-bot.sh resolver is a later phase). Declaring one today
     # records intent and shows up in the register; it does not fetch anything.
     credential_sources: dict[str, str] = field(default_factory=dict)
+    # Equipment names (MCP + integration) this bot declares ITSELF, as opposed
+    # to inheriting from `fleet.defaults`. The merge that builds `mcp` and
+    # `integrations` is flat and first-seen-wins, so it destroys this — and it
+    # is exactly what decides which `.env` a var's stub belongs in (#1214 F3a:
+    # "tier follows the equipment"). A GitHub App given to ONE bot is that
+    # bot's equipment; its var stub belongs in that bot's .env, not the fleet's.
+    bot_attached_equipment: frozenset[str] = field(default_factory=frozenset)
     model_strategy: ModelStrategyConfig | None = None
     account: str = "default"
     model: str | None = None
@@ -1434,6 +1441,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         ),
         integrations=_merge_lists(
             defaults.get("integrations"), raw.get("integrations")
+        ),
+        # Read from `raw` ONLY — `defaults` is the fleet-attached half by
+        # definition, and including it would make every bot claim every piece
+        # of fleet equipment as its own.
+        bot_attached_equipment=frozenset(
+            [e.name for e in _parse_mcp_list(raw.get("mcp"))]
+            + [str(i).split("/")[-1] for i in _as_list(raw.get("integrations"))]
         ),
         guardrails=_merge_lists(defaults.get("guardrails"), raw.get("guardrails")),
         protocols=_merge_lists(defaults.get("protocols"), raw.get("protocols")),
