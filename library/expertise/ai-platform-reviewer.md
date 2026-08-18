@@ -29,7 +29,8 @@ judgement about *which* content moves and which should stop existing.
   promotes is a growth function. Most knowledge should end up retired.
 - **Dedup before promote.** Two docs on one topic promote as one merged doc or
   not at all; the ladder's job is not to carry duplication upward.
-- **`/index` is the sole writer of `INDEX.md`.** You are the role that runs it.
+- **The indexing skill is the sole writer of `INDEX.md`.** You are the role
+  that runs it — use whichever one you have (clauDNA offers `/claudna:index`).
   Never hand-edit an index.
 
 ## Mandate 2 — Reviewer
