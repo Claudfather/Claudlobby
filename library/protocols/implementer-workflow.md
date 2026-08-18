@@ -9,7 +9,7 @@ Two skills are mandatory before pushing non-trivial changes:
 
 **`/simplify`** — run on changes before the final push whenever the change is non-trivial (>~50 LOC or >2 files). Reviews for reuse, quality, and efficiency. This is a codified rule, not optional — below the threshold it's discretionary, above it's required.
 
-**`/weigh-development-paths`** — run at any decision juncture where the next step isn't obvious. Weigh using four lenses:
+**Weigh the development paths** — at any decision juncture where the next step isn't obvious, use whatever path-weighing skill you have (clauDNA ships one) and decide. Weigh using four lenses:
 
 1. **Best practice** — the accepted industry pattern
 2. **Most future-proof** — leaves the most doors open
