@@ -7,6 +7,38 @@ reader that found nothing.** Those two answers have opposite remedies — "wire 
 instrument" versus "there is genuinely no work" — and collapsing them fails
 toward *everything is fine*, which is the direction nobody audits.
 
+A FOURTH STATE WAS CONSIDERED AND DEFERRED, NOT MISSED (#1256)
+--------------------------------------------------------------
+``probe_source`` has exactly three outcomes and no time comparison, so a source
+that is present, readable and **fossilised** rates ``SOURCE_OK``. That is a
+fail-open state inside the module written to close the fail-open class, and it
+is live rather than theoretical: one fleet's ``report-back.jsonl`` holds 63 rows
+last written ``2026-07-07T01:36:31Z`` and is still read today.
+
+Deferred rather than fixed here because "stale" is not a property of the source.
+It is a per-consumer policy — the age at which a dispatch ledger stops being
+evidence is not the age at which a workstream registry does — so it belongs
+above this module, and #1256 owns that general case. Reachability is what this
+answers.
+
+**Retirement condition, which is a measurement and not a merge.** This note is
+dead the moment ``probe_source`` returns a state other than the three above for
+a present-but-old source. Check it with one grep::
+
+    grep -n 'SOURCE_STALE' claudlobby/source_state.py
+
+A hit means the bound no longer holds and this block should go. Deliberately NOT
+keyed on "#1256 lands": that issue may land without touching this predicate, and
+a caveat that expires on somebody else's merge is an expired conditional nobody
+re-reads — the same defect this module exists to prevent, one level up.
+
+Who checks: whoever next edits this module. The note sits against the rule it
+qualifies precisely so that edit cannot miss it.
+
+Three people reached this gap independently on 2026-08-18 — one widening a
+coverage check, one filing #1256, one reproducing it inside ``probe_source`` by
+running it. That is why it is disclosed here rather than shrugged off.
+
 The line is **presence, not emptiness**. A ledger that exists and holds zero rows
 is a legitimate state (a fleet that has not reported yet) and for it "nothing
 matched" is the TRUE answer. Only absence or an IO failure makes the same answer
@@ -126,9 +158,24 @@ def probe_dir(path: Path) -> SourceProbe:
     ``probe_source`` tests openability: a directory with no execute bit stats as
     a directory and then raises on iteration.
     """
-    if not path.is_dir():
-        return SourceProbe(SOURCE_ABSENT, path)
+    # is_dir() is INSIDE the try, and that placement is the whole correctness of
+    # this function. Path.is_dir swallows only pathlib._IGNORED_ERRNOS — exactly
+    # ENOENT, ENOTDIR, EBADF, ELOOP, with EACCES ABSENT — so a stat it cannot
+    # perform propagates, and the guard written to stop a reader crashing on an
+    # unreachable source crashed on an unreadable one.
+    #
+    # The trigger is an unreadable ANCESTOR, not this directory: a mode-000 dir
+    # whose parent is traversable stats fine and always classified correctly,
+    # which is why three review passes went over this line. It is also the shape
+    # the real callers hit — collect_events probes <bots>/<bot>/data/events
+    # while <bots> is the one that is locked.
+    #
+    # Absent still wins over unreadable: a missing path and a non-directory both
+    # make is_dir() return False rather than raise, so they fall through to
+    # ABSENT exactly as before.
     try:
+        if not path.is_dir():
+            return SourceProbe(SOURCE_ABSENT, path)
         next(iter(path.iterdir()), None)
     except OSError:
         return SourceProbe(SOURCE_UNREADABLE, path)

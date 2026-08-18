@@ -170,3 +170,71 @@ class TestTheRuleIsSharedNotCopied:
             "absent",
             "unreadable",
         )
+
+
+class TestProbeDirDoesNotCrashOnAnUnreadableAncestor:
+    """vera's round-3 blocking finding (#1227), one level below where three
+    review passes were looking.
+
+    ``probe_dir``'s ``path.is_dir()`` sat OUTSIDE its ``try``. ``Path.is_dir``
+    swallows only ``pathlib._IGNORED_ERRNOS`` — measured as exactly ENOENT,
+    ENOTDIR, EBADF, ELOOP, with **EACCES absent** — so the stat propagates and
+    the guard written to stop readers crashing on an unreachable source crashed
+    on an unreadable one.
+
+    The trigger is an unreadable ANCESTOR, not the directory itself: a mode-000
+    dir whose parent is traversable stats fine and was always classified
+    correctly. That distinction is why it survived the earlier passes, and it is
+    the shape the real callers hit — collect_events probes
+    ``<bots>/<bot>/data/events`` while ``<bots>`` is the locked one.
+    """
+
+    def test_a_dir_inside_an_unreadable_parent_is_unreadable_not_an_exception(
+        self, tmp_path
+    ):
+        import os
+
+        import pytest
+
+        from claudlobby.source_state import SOURCE_UNREADABLE, probe_dir
+
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        parent = tmp_path / "locked"
+        (parent / "child").mkdir(parents=True)
+        os.chmod(parent, 0o000)
+        try:
+            with pytest.raises(OSError):  # the mutation really applied
+                (parent / "child").is_dir()
+            assert probe_dir(parent / "child").state == SOURCE_UNREADABLE
+        finally:
+            os.chmod(parent, 0o755)
+
+    def test_the_directory_itself_being_unreadable_still_classifies(self, tmp_path):
+        """The case that always worked — kept as the control, so a fix that
+        traded one for the other cannot pass."""
+        import os
+
+        import pytest
+
+        from claudlobby.source_state import SOURCE_UNREADABLE, probe_dir
+
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        d = tmp_path / "selfzero"
+        d.mkdir()
+        os.chmod(d, 0o000)
+        try:
+            assert probe_dir(d).state == SOURCE_UNREADABLE
+        finally:
+            os.chmod(d, 0o755)
+
+    def test_absent_and_not_a_directory_still_classify_absent(self, tmp_path):
+        """Moving is_dir() inside the try must not turn ABSENT into UNREADABLE."""
+        from claudlobby.source_state import SOURCE_ABSENT, probe_dir
+
+        missing = tmp_path / "nope"
+        a_file = tmp_path / "afile"
+        a_file.write_text("x")
+        assert probe_dir(missing).state == SOURCE_ABSENT
+        assert probe_dir(a_file).state == SOURCE_ABSENT
