@@ -156,6 +156,11 @@ MEM_FLOOR_MB="${SAMPLER_MEM_FLOOR_MB:-1200}"
 # Interleave mode: the ladder's arms, and the seed for within-block order.
 # Empty ARMS keeps the single-arm behaviour (the caller sets the knob).
 ARMS=""
+# Which knob --arms values address. "settle" is the original ladder; "trace"
+# (#1236) interleaves instrumentation ON against OFF at a FIXED settle, which is
+# the control for "instrumenting a race can move it". Same shuffle, same
+# blocking, same per-boot in-force recording -- only the knob differs.
+ARM_AXIS="settle"
 SEED=""
 
 # PIDs of the synthetic-load burners, so teardown targets what this run started
@@ -315,7 +320,7 @@ count_send_retries() {
 # Unforwarded — no pre-registered ladder sweeps them. Set in the caller env
 # they are dropped by env -i, and knob_disclosure prints them as SCRUBBED
 # rather than letting the run silently measure defaults.
-_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS"
+_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS PANE_VERIFY_TRACE"
 _UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS"
 
 # Field separator for the fate records below: ASCII unit separator, NOT a tab.
@@ -356,6 +361,16 @@ pane_knob_fate() {
         PANE_READY_TICKS)       inforce="$_PANE_READY_TICKS_BOOT"; src="boot-armed" ;;
         PANE_SEND_SETTLE_S)     default_val="$_PANE_SEND_SETTLE_DEFAULT" ;;
         PANE_SEND_VERIFY_TICKS) default_val="$_PANE_SEND_VERIFY_TICKS_DEFAULT" ;;
+        # #1236. This knob has no default VALUE: unset IS off, and off is the
+        # production condition. Recording it as `default` would assert a
+        # fallback constant lib-common does not have, and
+        # test_default_fate_tracks_the_constant_lib_common_ACTUALLY_READS is
+        # right to reject that -- so it gets its own fate instead of borrowing
+        # one that would be a small lie about where the value came from.
+        PANE_VERIFY_TRACE)
+            if [ -n "$set_val" ]; then inforce="$set_val"; src="forwarded"
+            else inforce=""; src="off"; fi
+            ;;
         # A knob joining _FORWARDED_PANE_KNOBS without a branch here would
         # otherwise be recorded as if it had no fate — the scrubbed-silently
         # class one level up. Loud, and pinned by the test suite.
@@ -594,6 +609,8 @@ main() {
         case "$1" in
             -n)         BOOTS="${2:?-n needs a value}"; shift 2 ;;
             --arms)     ARMS="${2:?--arms needs a value}"; shift 2 ;;
+            --trace-arms)
+                        ARMS="${2:?--trace-arms needs a value}"; ARM_AXIS="trace"; shift 2 ;;
             --seed)     SEED="${2:?--seed needs a value}"; shift 2 ;;
             --deadline) DEADLINE="${2:?--deadline needs a value}"; shift 2 ;;
             --load)     LOAD_BURNERS="${2:?--load needs a value}"; shift 2 ;;
@@ -613,13 +630,29 @@ main() {
         # PANE_SEND_SETTLE_S; a caller value would be overwritten on every boot
         # while knob_disclosure still called it forwarded — a disclosure that
         # describes a number governing nothing is the #1084 class.
-        if [ -n "${PANE_SEND_SETTLE_S:-}" ]; then
+        # The refusal names the knob THIS axis owns. On the trace axis the loop
+        # owns PANE_VERIFY_TRACE and leaves settle alone, so guarding settle
+        # there would refuse a legitimate run and miss the real collision.
+        if [ "$ARM_AXIS" = "trace" ]; then
+            if [ -n "${PANE_VERIFY_TRACE:-}" ]; then
+                printf 'REFUSED: --trace-arms sweeps PANE_VERIFY_TRACE, but it is also set in the environment (%s).\n' \
+                    "$PANE_VERIFY_TRACE" >&2
+                printf '  One fact, two sources. Unset it, or drop --trace-arms.\n' >&2
+                exit 1
+            fi
+        elif [ -n "${PANE_SEND_SETTLE_S:-}" ]; then
             printf 'REFUSED: --arms sweeps PANE_SEND_SETTLE_S, but it is also set in the environment (%s).\n' \
                 "$PANE_SEND_SETTLE_S" >&2
             printf '  One fact, two sources. Unset it, or drop --arms to sample that single arm.\n' >&2
             exit 1
         fi
         for a in $(printf '%s' "$ARMS" | tr ',' ' '); do
+            if [ "$ARM_AXIS" = "trace" ]; then
+                case "$a" in
+                    on|off) ;;
+                    *) printf 'bad --trace-arms value: %s (expected "on off")\n' "$a" >&2; exit 1 ;;
+                esac
+            else
             case "$a" in
                 ''|*[!0-9.]*|*.*.*|.)
                     printf 'bad --arms value: %s (settle seconds, e.g. "0.3 1.5 6.0")\n' "$a" >&2; exit 1 ;;
@@ -627,6 +660,7 @@ main() {
             # Normalised through the same numeric reading the summary uses, so
             # "6 6.0" cannot be two arms here and one arm in the analysis.
             a="$(awk -v v="$a" 'BEGIN { printf "%g", v + 0 }')"
+            fi
             for b in ${arm_list[@]+"${arm_list[@]}"}; do
                 [ "$b" = "$a" ] || continue
                 printf 'REFUSED: --arms repeats %s. One block is one boot per arm, so a repeat makes that unverifiable.\n' "$a" >&2
@@ -890,7 +924,17 @@ YAML
         # path by which a label could be written without the condition
         # changing. An empty arm is single-arm mode and must not touch the
         # variable at all: an empty value would shadow the lib-common default.
-        [ -z "$arm" ] || PANE_SEND_SETTLE_S="$arm"
+        if [ "$ARM_AXIS" = "trace" ]; then
+            # The trace axis leaves settle alone and moves only the
+            # instrumentation, so a difference between arms is attributable to
+            # the instrument and to nothing else.
+            case "$arm" in
+                on)  PANE_VERIFY_TRACE="$ART/trace-boot-$i" ;;
+                off) unset PANE_VERIFY_TRACE ;;
+            esac
+        else
+            [ -z "$arm" ] || PANE_SEND_SETTLE_S="$arm"
+        fi
         # Set BEFORE the
         # child runs, so a boot that fails outright still carries its arm, and
         # before SECONDS=0, so its jq fork (measured 66ms on the reference

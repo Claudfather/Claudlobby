@@ -1325,6 +1325,133 @@ pane_input_region() {
 # still pending" is "is it visible" asked of the box alone. Delegating rather than
 # repeating the match keeps one home for what counts as the payload — the literal
 # text or the collapsed-paste placeholder — so the two can never disagree about it.
+# ── #1236 verify-tick instrumentation ────────────────────────────────────────
+# INSTRUMENT ONLY. Nothing below changes a single decision pane_send_verified
+# makes; it records why the decision came out the way it did.
+#
+# The open question is narrow. The verify loop exits clean on the FIRST tick
+# where pane_holds_unsubmitted returns false, and with box=drawn that returns 0
+# silently. We know that fires -- production had zero send_retry across 19
+# stranded bots, and the sampler reproduces it at ~1-in-3 under load. We do NOT
+# know WHY the predicate returned false. Three candidates, none eliminated:
+# render lag at tick 1, the _PANE_MIN_VISIBLE_MATCH floor, chrome the stripper
+# misses. A fix chosen now would be a guess wearing a remedy.
+#
+# OFF BY DEFAULT AND OFF MEANS OFF. PANE_VERIFY_TRACE unset costs one parameter
+# test per tick: no capture, no fork, no write. This matters more than tidiness
+# because instrumenting a race can MOVE it, and the hot path under suspicion is
+# exactly the one being measured. The tick loop already captures the pane, so
+# the trace reuses that frame rather than adding a capture-pane fork per tick.
+
+# _pane_trace_candidate <pane_text> <payload>
+# Which of the three candidates explains this frame, as one token.
+#
+# Mirrors pane_shows_payload step for step, and tests/test_pane_verify_trace.sh
+# asserts the two never disagree across the whole pane-fixture corpus -- a
+# reconstruction that drifts from the decision it explains is worse than none.
+#
+#   no-region      no prompt glyph at all: the box is not drawn yet
+#   empty-box      glyph present, nothing after it
+#   below-floor    text present, ALL of it under the floor
+#   not-substring  text at or over the floor, none of it part of the payload
+#   held           the predicate sees the payload
+#
+# empty-box is split from below-floor deliberately. The floor candidate is about
+# a PARTIALLY painted box being skipped; a box with nothing in it is not that,
+# it is either render lag or a genuine submit. Folding them together would blur
+# the exact two the instrument exists to separate.
+_pane_trace_candidate() {
+    local pane="$1" payload="$2" region line stripped floor any_at_floor=0 any_text=0
+    region=$(pane_input_region "$pane")
+    [ -n "$region" ] || { printf 'no-region'; return 0; }
+    if printf '%s\n' "$region" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER"; then
+        printf 'held'; return 0
+    fi
+    [ -n "$payload" ] || { printf 'no-payload'; return 0; }
+    floor=$_PANE_MIN_VISIBLE_MATCH
+    [ "${#payload}" -lt "$floor" ] && floor=${#payload}
+    while IFS= read -r line; do
+        stripped=$(_pane_strip_chrome "$line")
+        [ -n "$stripped" ] && any_text=1
+        if [ "${#stripped}" -ge "$floor" ]; then
+            any_at_floor=1
+            case "$payload" in *"$stripped"*) printf 'held'; return 0 ;; esac
+        fi
+    done <<EOF
+$region
+EOF
+    if [ "$any_at_floor" -eq 1 ]; then printf 'not-substring'
+    elif [ "$any_text" -eq 1 ]; then printf 'below-floor'
+    else printf 'empty-box'; fi
+    return 0
+}
+
+# _pane_verify_trace <tick> <box> <pane_text> <payload>
+# Record one verify tick. Always rc 0 -- a tracer that could fail is a tracer
+# that can change an outcome.
+#
+# TWO printf REDIRECTS AND NOTHING ELSE, and that is the entire design. The
+# first version of this did the strip/floor/substring analysis inline and cost
+# **202ms per tick against a 200ms poll interval** -- measured, not feared. It
+# more than doubled the tick period, on the exact hot path whose timing is the
+# thing under suspicion. Running the control with that in place would have shown
+# the strand suppressed and implicated timing, when the instrument caused it.
+#
+# So the tick does the cheapest thing that loses no information: dump the raw
+# frame. Every derived field -- stripped lines, lengths, floor, substring
+# verdicts, the candidate -- is reconstructed afterwards by pane_trace_render,
+# from the same bytes, using the same functions. No forks, no subshells, no
+# command substitution: those are what cost the 202ms.
+_pane_verify_trace() {
+    [ -n "${PANE_VERIFY_TRACE:-}" ] || return 0
+    printf '%s' "$3" > "$PANE_VERIFY_TRACE/tick-$1.pane" 2>/dev/null
+    printf '%s\t%s\n' "$1" "$2" >> "$PANE_VERIFY_TRACE/ticks.tsv" 2>/dev/null
+    return 0
+}
+
+# pane_trace_render <trace_dir>
+# Turn a captured trace into per-tick JSONL on stdout. OFFLINE -- runs after the
+# send has finished, so its cost cannot reach the window it describes.
+#
+# It reuses _pane_trace_candidate and _pane_strip_chrome rather than
+# reimplementing them, so the rendered explanation cannot drift from the
+# predicate it is explaining.
+pane_trace_render() {
+    local dir="$1" payload tick box pane region floor line stripped
+    [ -d "$dir" ] || return 1
+    payload=$(cat "$dir/payload" 2>/dev/null || printf '')
+    [ -f "$dir/ticks.tsv" ] || return 0
+    while IFS=$(printf '\t') read -r tick box; do
+        [ -n "$tick" ] || continue
+        pane=$(cat "$dir/tick-$tick.pane" 2>/dev/null || printf '')
+        local cand held present nlines=0 lines_json="" sep="" ge sub
+        cand=$(_pane_trace_candidate "$pane" "$payload")
+        [ "$cand" = "held" ] && held=true || held=false
+        region=$(pane_input_region "$pane")
+        [ -n "$region" ] && present=true || present=false
+        floor=$_PANE_MIN_VISIBLE_MATCH
+        [ "${#payload}" -lt "$floor" ] && floor=${#payload}
+        if [ -n "$region" ]; then
+            while IFS= read -r line; do
+                nlines=$((nlines + 1))
+                stripped=$(_pane_strip_chrome "$line")
+                [ "${#stripped}" -ge "$floor" ] && ge=true || ge=false
+                sub=false
+                case "$payload" in *"$stripped"*) [ -n "$stripped" ] && sub=true ;; esac
+                lines_json="${lines_json}${sep}{\"stripped\":\"$(json_escape "$stripped")\",\"len\":${#stripped},\"ge_floor\":$ge,\"substr\":$sub}"
+                sep=","
+            done <<EOF
+$region
+EOF
+        fi
+        printf '{"tick":%s,"box":"%s","held":%s,"candidate":"%s","region_present":%s,"region_lines":%s,"payload_len":%s,"floor":%s,"lines":[%s],"pane_b64":"%s"}\n' \
+            "$tick" "$(json_escape "$box")" "$held" "$cand" "$present" "$nlines" \
+            "${#payload}" "$floor" "$lines_json" \
+            "$(printf '%s' "$pane" | base64 | tr -d '\n')"
+    done < "$dir/ticks.tsv"
+    return 0
+}
+
 pane_holds_unsubmitted() {
     local region
     region=$(pane_input_region "$1")
@@ -1594,6 +1721,12 @@ pane_send_verified() {
                 "$(json_escape "$session")" "$box")"
     fi
 
+    # #1236: arm the trace BEFORE the send, so the one mkdir this costs happens
+    # outside the window whose timing is under investigation.
+    if [ -n "${PANE_VERIFY_TRACE:-}" ]; then
+        mkdir -p "$PANE_VERIFY_TRACE" 2>/dev/null || true
+        printf '%s' "$probe" > "$PANE_VERIFY_TRACE/payload" 2>/dev/null || true
+    fi
     bot_tmux "$socket" send-keys -t "$session" "$text" || return 1
     sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"
     bot_tmux "$socket" send-keys -t "$session" Enter || return 1
@@ -1618,7 +1751,14 @@ pane_send_verified() {
         sleep "$_PANE_VERIFY_POLL_S"
         tick=$((tick + 1))
         pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) || return 0
-        pane_holds_unsubmitted "$pane" "$probe" && continue
+        # #1236: record the tick, then decide exactly as before. An `if` rather
+        # than appending to the `&&` chain so the tracer sits outside the
+        # decision entirely and cannot contribute to it.
+        if pane_holds_unsubmitted "$pane" "$probe"; then
+            _pane_verify_trace "$tick" "$box" "$pane" "$probe"
+            continue
+        fi
+        _pane_verify_trace "$tick" "$box" "$pane" "$probe"
         # The payload is not sitting in the box. Whether that means it was
         # SUBMITTED or was never RECEIVED is the #860 ambiguity, and the frame in
         # hand cannot answer it — the latch has to.
