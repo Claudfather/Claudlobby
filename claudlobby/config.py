@@ -6,6 +6,7 @@ flattens lists, and resolves team membership.
 
 from __future__ import annotations
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -474,6 +475,10 @@ class BotConfig:
     scope: ScopeConfig | None = None
     # org -> env var NAME; see _parse_git_credentials
     git_credentials: dict[str, str] = field(default_factory=dict)
+    # GitHub App git-auth routing (App-auth P3 #1273, fork F8: a dedicated
+    # field, never a git_credentials value form — that parser hard-rejects
+    # non-identifier values by design). None = App mode off for this bot.
+    github_app: "GithubAppConfig | None" = None
     # env var NAME -> credential source identifier. The per-scope override the
     # tier ruling requires (#1214 F6c): a contract declares where a value comes
     # from BY DEFAULT, and a fleet or a single bot may say otherwise for itself
@@ -962,6 +967,106 @@ def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
     return out
 
 
+@dataclass
+class GithubAppConfig:
+    """Per-bot GitHub App git-auth routing (App-auth P3 #1273).
+
+    The credential VALUES ride the ``GITHUB_APP_*`` env contract the
+    ``github-app`` MCP fragment declares (fleet tier); this field only decides
+    whether and how the composed per-bot gitconfig routes git auth through the
+    App helper. ``slug`` + ``bot_user_id`` together arm the composed commit
+    identity (F-identity variant a: ``<slug>[bot]`` +
+    ``<id>+<slug>[bot]@users.noreply.github.com``); omitting either keeps the
+    operator identity flowing through the include (variant b) — one field
+    pair, no code fork. ``orgs`` scopes the App helper (and the ssh→https
+    rewrite, and whether the gh fallback is kept) to those orgs; empty means
+    host-generic github.com.
+    """
+
+    enabled: bool = True
+    slug: str | None = None
+    bot_user_id: int | None = None
+    orgs: list[str] = field(default_factory=list)
+
+
+_GITHUB_APP_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _parse_github_app(raw: object, *, where: str) -> dict:
+    """Validate one tier's ``github_app`` block into a plain field dict.
+
+    Returns a DICT (not the dataclass) so the fleet→bot merge is per-field:
+    a bot restating one key must not silently reset the others to defaults.
+    Strict-bool ``enabled`` per the ``_parse_brief`` arming-knob precedent —
+    this knob changes how every git push authenticates, and a typo must not
+    arm it. Org entries reuse the no-``/`` rule from ``_parse_git_credentials``
+    (credential routing is org-scoped; a repo-scoped key silently never
+    matches).
+    """
+    if raw is None:
+        return {}
+    raw = _shaped(f"{where}: github_app", raw, dict, "{slug: my-app, bot_user_id: 123}")
+    out: dict = {}
+    if "enabled" in raw:
+        if not isinstance(raw["enabled"], bool):
+            raise ValueError(
+                f"{where}: github_app.enabled must be a YAML boolean, got "
+                f"{raw['enabled']!r} — an arming knob must not switch on via a typo"
+            )
+        out["enabled"] = raw["enabled"]
+    if "slug" in raw and raw["slug"] is not None:
+        slug = raw["slug"]
+        if not isinstance(slug, str) or not _GITHUB_APP_SLUG_RE.match(slug):
+            raise ValueError(
+                f"{where}: github_app.slug must be the App URL slug "
+                f"(lowercase letters, digits, hyphens), got {slug!r}"
+            )
+        out["slug"] = slug
+    if "bot_user_id" in raw and raw["bot_user_id"] is not None:
+        if not is_pos_int(raw["bot_user_id"]):
+            raise ValueError(
+                f"{where}: github_app.bot_user_id must be a positive integer "
+                f"(the App BOT USER id, not the App id), got {raw['bot_user_id']!r}"
+            )
+        out["bot_user_id"] = raw["bot_user_id"]
+    if "orgs" in raw and raw["orgs"] is not None:
+        orgs = raw["orgs"]
+        if not isinstance(orgs, list) or not all(isinstance(o, str) for o in orgs):
+            raise ValueError(
+                f"{where}: github_app.orgs must be a list of org names, got {orgs!r}"
+            )
+        for org in orgs:
+            if "/" in org or not org:
+                raise ValueError(
+                    f"{where}: github_app.orgs entry {org!r} must be an org name, "
+                    "not 'org/repo' — credential routing is org-scoped and a "
+                    "repo-scoped key would silently never match"
+                )
+        out["orgs"] = list(orgs)
+    unknown = set(raw) - {"enabled", "slug", "bot_user_id", "orgs"}
+    if unknown:
+        raise ValueError(
+            f"{where}: github_app has unknown key(s) {sorted(unknown)!r} — "
+            "known: enabled, slug, bot_user_id, orgs"
+        )
+    return out
+
+
+def _merge_github_app(defaults_raw: object, bot_raw: object, *, bot_name: str):
+    """Fleet-defaults → bot per-field merge; ``enabled: false`` after the
+    merge normalizes to None (a per-bot opt-out of a fleet-wide default)."""
+    merged = {
+        **_parse_github_app(defaults_raw, where="fleet defaults"),
+        **_parse_github_app(bot_raw, where=f"bot '{bot_name}'"),
+    }
+    if not merged:
+        return None
+    if merged.get("enabled") is False:
+        return None
+    merged.pop("enabled", None)
+    return GithubAppConfig(enabled=True, **merged)
+
+
 def is_pos_int(v: object) -> bool:
     """True for a positive int. bool is excluded — it is an int subclass, so
     `True`/`False` would otherwise slip through as 1/0. Shared by the tolerant
@@ -1388,6 +1493,9 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             ),
             **_parse_git_credentials(raw.get("git_credentials"), where=f"bot '{name}'"),
         },
+        github_app=_merge_github_app(
+            defaults.get("github_app"), raw.get("github_app"), bot_name=name
+        ),
         credential_sources={
             **_parse_credential_sources(
                 defaults.get("credential_sources"), where="fleet defaults"
