@@ -194,6 +194,70 @@ _claudron_query_before() {
     # construction (the tmux send is single-line), so "first line or two" is the
     # whole payload and would change nothing.
     #
+    # WHY 30 AND NOT 200 -- the number is DERIVED from the scorer, not chosen,
+    # because 30 looks far too small to a reader who has not done this
+    # arithmetic. The first version of this cap was 200 and reproduced the very
+    # collapse the block above describes, just less often.
+    #
+    # Claudron scores a multi-word query by SUMMING per-token scores with no
+    # normalisation by token count, then clamping
+    # (`claudron/knowledge.py:394-407`, `token_total += term_total` then
+    # `min(token_total, SCORE_CAP)`). Verified in source at that version:
+    #
+    #     SCORE_CAP            = 200
+    #     W_TITLE_EXACT        = 100   (strongest single match)
+    #     W_TITLE_WORD_OVERLAP =  50   (per token, multi-word path)
+    #     W_BODY               =  20   (WEAKEST match that still scores)
+    #
+    # The ceiling is therefore reachable by ACCUMULATION alone: 10 tokens that
+    # merely appear in a note's BODY sum to 10 x 20 = 200 = SCORE_CAP. A note
+    # needs no topical relevance whatsoever, only ten shared common words.
+    #
+    # 200 chars is roughly 30 tokens, so EVERY sufficiently long note ties at
+    # the cap at once. Ties do not rank, so selection falls through to
+    # maturity/tier/insertion order -- a property of the VAULT, not of the
+    # query. Measured estate-wide before this change: 482 dispatch headers
+    # producing only 23 distinct pointer sets, 132 of 140 identical on one day.
+    #
+    # 30 chars is ~5 tokens of realistic prose, whose maximum achievable score
+    # via the BODY path is 5 x 20 = 100 -- strictly below SCORE_CAP. That is the
+    # property being bought: a note can no longer reach the ceiling on
+    # incidental body matches, which needs ten tokens and is what 200 chars
+    # (~30 tokens) handed to every long note at once.
+    #
+    # IT DOES NOT ELIMINATE TIES, and the honest bound is worth stating because
+    # 30 invites the belief that it does. The TITLE-OVERLAP path pays 50 per
+    # token, so FOUR tokens reach 200 -- about 24 characters. 30 chars sits
+    # ABOVE that, so a query whose every word hits titles still saturates.
+    # Measured on the live vault, same subject truncated to each width:
+    #
+    #     cap=200 (14 tok)  200 200 200   <- collapse
+    #     cap=40  ( 6 tok)  200 200 200
+    #     cap=30  ( 5 tok)  200 200 200   <- still flat on THIS query
+    #     cap=24  ( 4 tok)  200 200 200   <- 4 x 50, the title-path threshold
+    #     cap=18  ( 3 tok)  200 200 160   <- spread appears
+    #     cap=12  ( 2 tok)  120 120 120   <- below the ceiling, but too little
+    #                                        signal to rank on either
+    #
+    # So 30 fixes body-accumulation, not title saturation. That is still the
+    # right trade: a note tying at the ceiling because every query word is in
+    # its TITLE is a genuine topical match, which is not the defect -- the
+    # defect was ten common words in a BODY. Going lower buys title-path spread
+    # and starts costing subject matter (12 chars ranks on "restore the").
+    # Anything below ~18 needs its own measurement, not an extrapolation of
+    # this one.
+    #
+    # A/B on real ledger dispatches before the change landed: subject-bearing
+    # heads (80% of traffic) -- 2 of 3 went from three unrelated notes to correct
+    # ones. Attribution-prefixed heads (16%) -- relevance NOT restored, but score
+    # SPREAD was (130/80 against a flat 200). Both outcomes are wanted: spread is
+    # what lets a caller detect a degenerate set and emit nothing at all.
+    #
+    # So the cap is bounded ABOVE by the scorer and below by needing enough
+    # subject to rank on. Raising it back toward 200 re-buys the collapse;
+    # Claudron#143 fixes the scorer, and this ceiling can be revisited then --
+    # but not before, and not without redoing this arithmetic.
+    #
     # The head is only the subject when the CALLER leads with the subject. The
     # fleet comms protocol asks for that, but this file cannot enforce a
     # convention about text composed before it ever runs -- and measured traffic
@@ -234,7 +298,7 @@ _claudron_query_before() {
         *[![:space:]]*) : ;;
         *) return 0 ;;
     esac
-    query=$(printf '%s' "$subject" | cut -c1-"${CLAUDRON_QUERY_MAX_CHARS:-200}")
+    query=$(printf '%s' "$subject" | cut -c1-"${CLAUDRON_QUERY_MAX_CHARS:-30}")
     raw=$(claudron lookup --json \
         --limit "${CLAUDRON_QUERY_LIMIT:-3}" "$query" 2>/dev/null) || return 0
     # Emits "<count>\t<title (abs path); ...>". Claudron-supplied strings are

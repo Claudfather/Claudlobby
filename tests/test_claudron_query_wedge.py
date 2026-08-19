@@ -321,8 +321,11 @@ def test_query_is_capped_not_the_whole_task(tmp_path):
     long_task = "restore the ranking " * 40  # ~800 chars, one line
     _run_dispatch(tmp_path, env, task=long_task)
     sent = _query_sent(tmp_path)
-    assert len(sent) == 200, f"expected a 200-char cap, got {len(sent)}"
-    assert sent == long_task[:200]
+    # THAT a cap applies. WHY it is 30 is derived in
+    # test_the_default_cap_is_30_and_the_number_is_derived; changing the number
+    # here alone would leave that derivation asserting a value nothing uses.
+    assert len(sent) == 30, f"expected a 30-char cap, got {len(sent)}"
+    assert sent == long_task[:30]
 
 
 def test_short_task_passes_through_whole(tmp_path):
@@ -348,6 +351,68 @@ def test_different_subjects_yield_different_queries(tmp_path):
     a = _query_for(tmp_path, "restore the claudron ranking " * 20, "subjA")
     b = _query_for(tmp_path, "extend the pane verify budget " * 20, "subjB")
     assert a != b
+
+
+def test_the_default_cap_is_30_and_the_number_is_derived(tmp_path):
+    """PINS THE MAGNITUDE. 30 looks too small until you do the arithmetic.
+
+    Claudron sums per-token scores with no normalisation, then clamps at
+    SCORE_CAP (`claudron/knowledge.py`, `token_total += term_total` then
+    `min(token_total, SCORE_CAP)`). With SCORE_CAP=200 and W_BODY=20 — the
+    WEAKEST match that still scores — ten tokens that merely appear in a note's
+    body reach the ceiling with no topical relevance at all.
+
+    At 200 chars (~30 tokens) every long note ties at 200 at once; ties do not
+    rank, so selection falls to maturity/tier/insertion order, a property of the
+    VAULT rather than the query. Measured: 482 dispatch headers, 23 distinct
+    pointer sets, 132 of 140 identical in a day.
+
+    At 30 chars (~5 tokens) the weak-path maximum is 5 x 20 = 100, strictly
+    below SCORE_CAP — so the ceiling can no longer be reached by accumulation,
+    and saturation once again requires a real title or tag hit.
+
+    Raising this back toward 200 re-buys the collapse. Claudron#143 fixes the
+    scorer; revisit then, and redo the arithmetic when you do.
+    """
+    task = "restore the claudron ranking behaviour across every fleet " * 8
+    assert len(_query_for(tmp_path, task, "capcheck")) == 30
+
+
+def test_the_cap_keeps_the_weak_path_below_the_score_ceiling(tmp_path):
+    """The derivation as an executable bound, not a comment.
+
+    Guards the direction that matters: a future edit nudging the cap upward is
+    only safe while ~cap/6 tokens times W_BODY stays under SCORE_CAP. Written
+    against the scorer's own constants so a Claudron change that invalidates the
+    reasoning shows up here rather than as pointer sets quietly going inert
+    again.
+    """
+    # claudron/knowledge.py, verified in source at this version.
+    SCORE_CAP, W_BODY, W_TITLE_OVERLAP, CHARS_PER_TOKEN = 200, 20, 50, 6
+    default_cap = 30
+    max_tokens = default_cap // CHARS_PER_TOKEN
+
+    assert max_tokens * W_BODY < SCORE_CAP, (
+        f"a {default_cap}-char query holds ~{max_tokens} tokens, reaching "
+        f"{max_tokens * W_BODY} against a {SCORE_CAP} ceiling — at or above it "
+        f"any note sharing that many common words ties at the cap, and selection "
+        f"becomes a property of the vault rather than the query"
+    )
+    # The distinction: the OLD default fails the same bound. Without this the
+    # assertion above would pass for a cap of 200 too and prove nothing.
+    assert (200 // CHARS_PER_TOKEN) * W_BODY >= SCORE_CAP
+
+    # AND THE LIMIT, asserted so it cannot be forgotten: 30 does NOT clear the
+    # title-overlap path, which pays 50/token and so saturates at FOUR tokens
+    # (~24 chars). Measured on the live vault, 30 chars still returned a flat
+    # 200/200/200 for a subject-bearing query; spread appeared only at 3 tokens.
+    # This is deliberately NOT written as `< SCORE_CAP` — that would assert a
+    # property the shipped cap does not have, and a test asserting a comfortable
+    # falsehood is worse than no test.
+    assert max_tokens * W_TITLE_OVERLAP >= SCORE_CAP, (
+        "if this now passes, the title-overlap path no longer saturates at the "
+        "default cap — re-measure before relaxing anything that cites it"
+    )
 
 
 def test_cap_is_overridable(tmp_path):
@@ -378,7 +443,11 @@ SUBJECT = "restore the claudron ranking for enveloped dispatches"
 
 
 def test_leading_fleet_memory_preamble_is_stripped_before_the_cap(tmp_path):
-    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    # Pins its OWN cap: this test is about WHERE THE STRIP LANDS, and the
+    # default cap (30) would truncate the expectation and make it a cap test
+    # wearing a strip test's name. Two properties in one assertion means a
+    # change to either reddens it and the message names the wrong one.
+    env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
     _run_dispatch(tmp_path, env, task=PREAMBLE + SUBJECT)
     sent = _query_sent(tmp_path)
     assert sent == SUBJECT, f"expected the subject alone, got {sent!r}"
@@ -396,7 +465,11 @@ def test_stacked_preambles_are_all_stripped(tmp_path):
     # A dispatch composed from an already-rendered one carries two. Stripping
     # only the outermost puts the query straight back at 100% boilerplate, which
     # is the same defect rather than a milder one -- so the strip repeats.
-    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    # Pins its OWN cap: this test is about WHERE THE STRIP LANDS, and the
+    # default cap (30) would truncate the expectation and make it a cap test
+    # wearing a strip test's name. Two properties in one assertion means a
+    # change to either reddens it and the message names the wrong one.
+    env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
     _run_dispatch(tmp_path, env, task=PREAMBLE + PREAMBLE + SUBJECT)
     assert _query_sent(tmp_path) == SUBJECT
 
@@ -405,17 +478,25 @@ def test_preamble_shaped_text_after_the_head_is_left_alone(tmp_path):
     # Only a LEADING block is boilerplate. The same shape further in is the
     # caller talking about a preamble, which is subject matter -- and eating it
     # would be the very failure being fixed, self-inflicted.
-    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    # Pins its OWN cap: this test is about WHERE THE STRIP LANDS, and the
+    # default cap (30) would truncate the expectation and make it a cap test
+    # wearing a strip test's name. Two properties in one assertion means a
+    # change to either reddens it and the message names the wrong one.
+    env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
     task = "explain why " + PREAMBLE + "saturates the query"
     _run_dispatch(tmp_path, env, task=task)
-    assert _query_sent(tmp_path) == task[:200]
+    assert _query_sent(tmp_path) == task[:500]
     assert _query_sent(tmp_path).startswith("explain why ")
 
 
 def test_unterminated_preamble_terminates(tmp_path):
     # A malformed head has no "] " to strip to, so the expansion is a no-op. The
     # guard is what stops the loop; without it this test does not fail, it HANGS.
-    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    # Pins its OWN cap: this test is about WHERE THE STRIP LANDS, and the
+    # default cap (30) would truncate the expectation and make it a cap test
+    # wearing a strip test's name. Two properties in one assertion means a
+    # change to either reddens it and the message names the wrong one.
+    env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
     task = "[fleet memory: never closed and then some subject matter"
     _run_dispatch(tmp_path, env, task=task)
     assert _query_sent(tmp_path) == task
@@ -476,6 +557,10 @@ def test_preamble_plus_whitespace_does_not_query(tmp_path):
     ],
 )
 def test_strip_boundary(tmp_path, task, expected, why):
-    env = _wedge_env(tmp_path, json.dumps(TWO_HITS))
+    # Pins its OWN cap: this test is about WHERE THE STRIP LANDS, and the
+    # default cap (30) would truncate the expectation and make it a cap test
+    # wearing a strip test's name. Two properties in one assertion means a
+    # change to either reddens it and the message names the wrong one.
+    env = {**_wedge_env(tmp_path, json.dumps(TWO_HITS)), "CLAUDRON_QUERY_MAX_CHARS": "500"}
     _run_dispatch(tmp_path, env, task=task)
     assert _query_sent(tmp_path) == expected, why
