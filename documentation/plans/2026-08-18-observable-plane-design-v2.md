@@ -35,8 +35,11 @@ The observable plane is first an **organizational flight recorder**. The cockpit
 | F13 | Vault layout | `local/` is the primary vault (Claudron-made, e.g. `<operator>-claudron-vault`) gaining a `fleets/` namespace; N secondary mounts under `vaults/` (gitignore already landed upstream); graduation ladder root-mode → `vault init` → remote |
 | F14 | Terminology | Host = the machine, THE container (Host → Fleet → Bot); "system" = the claudlobby install only; rename PR **off the critical path** |
 | F15 | Sequencing | Substrate before UI; phases §18; vocabulary/layout/teams PRs never block the semantic slice |
+| F16 | Envelope physical form | **Typed tables sharing the envelope + one global `ingest_seq`** — one table per event family, envelope columns embedded, real indexes, per-family retention; uniformity enforced by Pydantic + tests (ruled 2026-08-19) |
+| F17 | `blocked` semantics | **Two events**: `blocked_waiting` (nonterminal — assigned, cannot progress) and `returned_blocked` (terminal — responsibility back to manager). Legacy `blocked` reports map to `returned_blocked`; existing overdue-matching behavior preserved exactly, no silent change (ruled 2026-08-19) |
+| F18 | Backfill posture | **Clean epoch + selective import** — new trustworthy epoch at cutover; dispatch-log + report-back rows (task-id-bearing) imported with `source=legacy`, deterministic import ids, confidence markers; ambiguous history stays read-only legacy; task closure never inferred (ruled 2026-08-19) |
 
-Open Phase-1 lock items (must be ruled before migration 1, recommendations attached): §19.
+Remaining Phase-1 items (technical, owned by the implementation plan — no further operator rulings required): §19.
 
 ## 3. Identity model
 
@@ -187,15 +190,16 @@ Golden path: `claudlobby plane init | start | status | doctor | open`. Clocks: e
 - **Phase 5 — organizational learning:** deliberations, independent contributions, synthesis, preserved dissent, decisions, outcome joins — only then consensus-learning claims.
 - **Phase 6 — broader cockpit:** org/interaction graph, equipment, library, utilization, PWA, management verbs (equip first, through git), terminal breadth.
 
-## 19. Phase-1 lock items (open, with recommendations)
+## 19. Phase-1 items — status after the 2026-08-19 ratification pass
 
-1. **Envelope physical form** — one event table + typed projections **vs** typed tables sharing the envelope. Rec: typed tables + shared `ingest_seq` (simpler indexes, per-family retention), decide after the emit benchmark.
-2. **`blocked` semantics** — rec: two events (`blocked_waiting`, `returned_blocked`); overdue matching keeps current behavior until the cutover is explicit.
-3. **Canonical-bytes spec** — full definition + golden fixtures.
-4. **Ingest implementation** — direct writer vs socket daemon, from Pi benchmarks (§14).
-5. **Backfill posture** — clean epoch + selective import (default) vs broad backfill.
-6. **Exact DDL for every Lane-B family** — after 1–5.
-7. **Claudron confirmations** — `fleets/` namespace tolerance; multi-vault capability (issue on the Claudron repo).
+Operator-ruled (now locked as forks F16–F18): ~~envelope physical form~~ → **typed tables + shared `ingest_seq`** · ~~`blocked` semantics~~ → **two events, legacy maps terminal** · ~~backfill posture~~ → **clean epoch + selective import**.
+
+Remaining — technical, owned by the implementation plan, no operator ruling required:
+
+1. **Canonical-bytes spec** — full definition (encoding, Unicode normalization, numeric representation, null/default inclusion, path normalization, key ordering, serializer version, hash algorithm) + golden fixtures.
+2. **Ingest implementation** — direct writer vs Unix-socket daemon, decided by the §14 Pi benchmarks; CLI contract identical either way.
+3. **Exact DDL for every Lane-B family** — mechanical consequence of F16 + the model sections.
+4. **Claudron confirmations** — `fleets/` namespace tolerance; multi-vault capability. Filed: Claudron#145.
 
 ## 20. References
 
