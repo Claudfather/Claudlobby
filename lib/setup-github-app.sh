@@ -215,4 +215,4 @@ printf '        bot_user_id: %s\n' "$bot_id"
 printf '        # orgs: [YourOrg]   # optional: route only these orgs via the App\n\n'
 printf '  MCP (App-token GitHub server, App-auth P2 #1272): mcp: [github-app]\n'
 printf '  Commit identity when P3 lands: %s <%s>\n\n' "$BOT_USERNAME" "$BOT_EMAIL"
-printf '  Runbook: documentation/runbooks/github-app-setup.md\n'
+printf '  Runbook: documentation/runbooks/github-app-setup.md (ships with App-auth P5, #1275)\n'

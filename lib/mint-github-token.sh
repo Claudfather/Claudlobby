@@ -30,7 +30,7 @@ else
 fi
 
 if [ -z "$token" ]; then
-    printf 'mint-github-token: no token from git-credential-github-app — see its stderr above and documentation/runbooks/github-app-setup.md\n' >&2
+    printf 'mint-github-token: no token from git-credential-github-app — see its stderr above; lib/setup-github-app.sh validates the credentials end to end\n' >&2
     exit 1
 fi
 
