@@ -22,7 +22,10 @@ from .config import _PROJECT_VALIDATION_KEYS, FleetConfig, is_pos_int
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
+    DEPRECATED_ENV_TIERS,
+    ENV_TIERS,
     EXPERTISE_CORE_TOOLS,
+    KNOWN_CREDENTIAL_SOURCES,
     KNOWN_HOOK_EVENTS,
     KNOWN_MODELS,
     OUTCOME_ACTIONS,
@@ -176,6 +179,194 @@ def _mcp_contract(frag_path: Path) -> dict:
     return frag.get("_permissions_contract") or {}
 
 
+def _env_contract_errors(contract: object, where: str) -> list[str]:
+    """Shape errors in one env contract, from EITHER declaration surface.
+
+    Two rules, both hard errors:
+
+    - every entry declares ``secret`` (bool). Required rather than inferred
+      because a name heuristic re-derives a fact the contract author already
+      knows, and its failures are silent in BOTH directions — a mislabelled
+      secret never fires the credential alert, and a mislabelled config fires
+      forever until someone suppresses the rung and loses the real alerts with
+      it (fork F4).
+    - ``source``, when present, is a whole identifier in the closed registry.
+      Rejecting an unregistered value is what keeps fork F5's injection
+      guarantee true: the resolver dispatches on the entire string through a
+      fixed per-entry ``case`` arm, so an unrecognised value must never reach
+      it rather than being passed through as command text.
+
+    Surface-agnostic by design: MCP fragments and integration-doc frontmatter
+    declare the same facts, so one rule serves both and neither can drift.
+    *where* is the caller's label for the declaring file.
+
+    Takes the PARSED contract: this is a property of the file, and the caller
+    scans the library once rather than re-reading per equipping bot.
+    """
+    if not isinstance(contract, dict):
+        return []
+
+    errors: list[str] = []
+    for var_name, meta in contract.items():
+        if not isinstance(meta, dict):
+            continue
+        # A per-var label, NEVER rebinding the loop-invariant `where`. Rebinding
+        # it made each error append the previous var's name, so the eighth error
+        # on a file read "var 'A' var 'B' ... var 'H'" and pointed a reader at
+        # seven vars that were fine. A message that names the wrong location is
+        # worse than a terse one — it sends someone to edit the wrong line.
+        at = f"{where} var '{var_name}'"
+        if "secret" not in meta:
+            errors.append(
+                f"{at}: env contract entry is missing required 'secret' "
+                f"(bool). The test: can the integration AUTHENTICATE without "
+                f"this value? No -> true. Yes -> false (e.g. a shop id is "
+                f"false — you still authenticate, you just cannot target a "
+                f"shop). Note 'source' is OPTIONAL and must be omitted unless "
+                f"the value is machine-resolvable; never invent a source."
+            )
+        elif not isinstance(meta["secret"], bool):
+            errors.append(
+                f"{at}: 'secret' must be a JSON boolean, got "
+                f"{type(meta['secret']).__name__}."
+            )
+        if "tier" in meta:
+            errors.append(
+                f"{at}: 'tier' was renamed to 'default_tier' (#1226). Left as-is "
+                f"it is silently ignored and the var falls back to the 'fleet' "
+                f"default — so this must fail here rather than at runtime, where "
+                f"a mis-tiered var still resolves from wherever a value happens "
+                f"to sit and nothing looks wrong. Rename the key; the meaning "
+                f"also changed, from THE location to a placement DEFAULT"
+            )
+        declared_tier = meta.get("default_tier")
+        if declared_tier is not None and declared_tier not in ENV_TIERS:
+            errors.append(
+                f"{at}: unknown default_tier {declared_tier!r} — one of: "
+                f"{', '.join(ENV_TIERS)}. This is a PLACEMENT DEFAULT, not the "
+                f"resolution location: the runtime cascades all four tiers and "
+                f"the most specific one that sets the var wins"
+                f"{hint(str(declared_tier), ENV_TIERS)}"
+            )
+        elif declared_tier in DEPRECATED_ENV_TIERS:
+            # Warned, not rejected: the tier is real and the register must be
+            # able to report a value found there. Discouraging a NEW declaration
+            # is a different act from refusing to describe the estate as it is.
+            errors.append(
+                f"{at}: default_tier '{declared_tier}' is the host-shared "
+                f"repo-root .env, which is being wound down — declare 'fleet' "
+                f"(or 'host' for a genuinely machine-wide identity) instead"
+            )
+        source = meta.get("source")
+        if source is not None and source not in KNOWN_CREDENTIAL_SOURCES:
+            known = ", ".join(sorted(KNOWN_CREDENTIAL_SOURCES))
+            errors.append(
+                f"{at}: unregistered source {source!r} — 'source' is a closed "
+                f"framework-owned registry, one of: {known}. Omit it entirely to "
+                f"mean 'a human supplies this value'"
+                f"{hint(source, KNOWN_CREDENTIAL_SOURCES)}"
+            )
+    return errors
+
+
+def _validate_env_contracts(paths: Paths, report: ValidationReport) -> None:
+    """Gate BOTH env-contract surfaces — library altitude, not per-bot.
+
+    The two surfaces are MCP fragments (``_env_contract``) and integration-doc
+    frontmatter (``env_contract:``). They declare the same facts and are held to
+    the same rule, because **gating only one is how the detector ends up not
+    covering the case it was built for**: 10 of the 21 vars on the integration
+    surface have no paired MCP fragment at all (`type: cli` integrations —
+    neon, railway, snowflake), so an MCP-only gate is not merely deferred for
+    them, it is structurally unreachable forever. Among those are
+    ``RAILWAY_API_TOKEN``, ``RAILWAY_PERSONAL_TOKEN``, ``NEON_API_KEY`` and the
+    two Snowflake key vars — the exact credentials whose silent blanking
+    started this workstream.
+
+    A var declared on BOTH surfaces must agree, or ``required_vars`` yields two
+    records disagreeing about whether it is a credential and the fail-loud rung
+    reads whichever it happens to see first.
+
+    Deliberately NOT wired into the per-bot equipment loop, and the placement is
+    load-bearing in three ways an earlier draft got wrong:
+
+    - **An unequipped fragment must still be checked.** The closed registry's
+      whole purpose is that an unregistered ``source`` never reaches the
+      resolver; a gate that only fires when some bot happens to equip the
+      fragment leaves a malformed one sitting in the library, clean, until the
+      day someone equips it.
+    - **The defect is a property of the FILE, so the message must name the
+      file.** Prefixing it with a bot name sends the reader to `fleet.yaml`
+      when the fix is a one-line library edit.
+    - **One defect, one error.** Per-bot, a single missing ``secret`` on a
+      fragment every bot equips produced one identical error per bot — 21 lines
+      for one typo on a 21-bot fleet.
+
+    Scans base and overlay libraries exactly as
+    :func:`_validate_library_frontmatter` does, so a fleet overlay that shadows
+    a library file is held to the same rule — which is what makes the registry
+    closed "at any tier" rather than only in this repo.
+    """
+    from .loader import parse_frontmatter
+
+    seen: set[Path] = set()
+    labels: dict[str, list[tuple[str, bool]]] = {}
+
+    def _record(contract: dict, where: str) -> None:
+        for var, meta in contract.items():
+            if isinstance(meta, dict) and isinstance(meta.get("secret"), bool):
+                labels.setdefault(var, []).append((where, meta["secret"]))
+
+    for root in (paths.base_library, paths.overlay_library):
+        if root is None:
+            continue
+
+        for frag_path in sorted((root / "mcp").glob("*.json")):
+            resolved = frag_path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                frag = json.loads(frag_path.read_text())
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # Malformed JSON is reported here rather than deferred: compose
+                # raises on it, but validate exists to say so first.
+                report.errors.append(f"invalid JSON in MCP fragment {frag_path}: {exc}")
+                continue
+            rel = f"mcp fragment '{frag_path.name}'"
+            report.errors.extend(_env_contract_errors(frag.get("_env_contract"), rel))
+            _record(frag.get("_env_contract") or {}, rel)
+
+        for doc in sorted((root / "integrations").glob("*.md")):
+            resolved = doc.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                fm, _ = parse_frontmatter(doc.read_text())
+            except (OSError, ValueError, KeyError):
+                # Malformed frontmatter is _validate_library_frontmatter's to
+                # report; saying it twice would read as two unrelated defects.
+                continue
+            if not isinstance(fm, dict):
+                continue
+            rel = f"integration '{doc.name}'"
+            report.errors.extend(_env_contract_errors(fm.get("env_contract"), rel))
+            contract = fm.get("env_contract")
+            _record(contract if isinstance(contract, dict) else {}, rel)
+
+    for var, decls in sorted(labels.items()):
+        values = {secret for _, secret in decls}
+        if len(values) > 1:
+            detail = ", ".join(f"{where} says {str(s).lower()}" for where, s in decls)
+            report.errors.append(
+                f"env var '{var}' is declared on more than one surface with "
+                f"DIFFERENT 'secret' values ({detail}) — required_vars yields "
+                f"both records, so the fail-loud rung would read whichever it "
+                f"saw first. Make them agree."
+            )
+
+
 def _validate_bots(
     fleet: FleetConfig,
     paths: Paths,
@@ -316,14 +507,81 @@ def _validate_bots(
         # `.mcp.json`), and looks across the full 3-tier env (host →
         # fleet/.env → bot/.env). Replaces a fragile placeholder-scan that
         # didn't know about instance scoping or bot-tier .env files.
-        for var, tier, source, instance in _mcp_required_vars(bot, paths):
-            if _env_has_value(effective_env, var):
+        for req in _mcp_required_vars(bot, paths):
+            if _env_has_value(effective_env, req.name):
                 continue
-            inst_note = f" (instance: {instance})" if instance else ""
-            report.warnings.append(
-                f"bot '{bot_name}': {source}{inst_note} requires {var} but it's not set — "
-                f"add to {tier}-tier .env (MCP server will fail at runtime)"
+            inst_note = f" (instance: {req.instance})" if req.instance else ""
+            # The consequence is stated per what was MEASURED, not per what the
+            # name suggests (#1214 F8). An MCP server with an unresolved var does
+            # NOT fail: the client expands the unset placeholder to the empty
+            # string and the server starts and serves ANONYMOUSLY — verified
+            # across the running estate, 11 live servers holding an empty token
+            # and zero holding the literal placeholder. The old wording promised
+            # a loud failure that never arrives, which is worse than silence
+            # because it talks the reader out of investigating.
+            consequence = (
+                "MCP server will start and serve ANONYMOUSLY (unauthenticated), "
+                "not fail"
+                if req.secret
+                else "MCP server will start with this unset"
             )
+            # Names the CONVENTIONAL tier, and says it is one of four. The old
+            # wording — "add to <tier>-tier .env" — read the declared default as
+            # THE location, which is the #1226 defect in one sentence: it sends
+            # an operator to the fleet file for a var that would resolve just as
+            # well from ~/.env, and it is why a value already placed at the host
+            # or bot tier still reads as missing here.
+            # SET-BUT-EMPTY is a different defect from ABSENT and needs the
+            # opposite remedy. `_env_has_value` correctly treats both as "no
+            # value", but telling an operator to ADD a var that is already
+            # assigned-empty sends them to write it at the very tier whose empty
+            # assignment is blanking it. That is not hypothetical: two fleets
+            # carry a pristine `export GITHUB_PAT=` scaffold stub, and under
+            # shell assignment semantics that stub WINS over anything upstream.
+            if req.name in effective_env:
+                remedy = (
+                    f"it is SET BUT EMPTY — some tier assigns it the empty "
+                    f"string, which under shell sourcing WINS over any value at "
+                    f"a less specific tier. Fill it in or delete the assignment; "
+                    f"adding it again at the same tier changes nothing"
+                )
+            else:
+                remedy = (
+                    f"no .env tier sets it — add it at any tier "
+                    f"({', '.join(ENV_TIERS)}); conventionally {req.default_tier}. "
+                    f"The most specific tier that sets it wins"
+                )
+            report.warnings.append(
+                f"bot '{bot_name}': {req.origin}{inst_note} requires {req.name} but "
+                f"{remedy} ({consequence})"
+            )
+
+        # Per-scope credential source overrides (#1214 F6c). Held to the SAME
+        # closed registry as a contract's own `source`, and that is the point:
+        # fork F5's injection guarantee is that the resolver dispatches on a
+        # whole registered identifier through a fixed `case` arm, so a value
+        # arriving from fleet.yaml must be no more admissible than one arriving
+        # from a library fragment. A second, laxer door into the same resolver
+        # would void the guarantee for both.
+        for var_name, source in sorted(bot.credential_sources.items()):
+            if source not in KNOWN_CREDENTIAL_SOURCES:
+                known = ", ".join(sorted(KNOWN_CREDENTIAL_SOURCES))
+                report.errors.append(
+                    f"bot '{bot_name}': credential_sources['{var_name}'] = "
+                    f"{source!r} is not in the closed source registry, one of: "
+                    f"{known}{hint(source, KNOWN_CREDENTIAL_SOURCES)}"
+                )
+            elif source == "mint:github-app":
+                # Registered but deliberately unresolvable: no resolver arm
+                # reads it (F1 ships `cli` only). Declaring it is legal and
+                # records intent; saying so here is what stops someone waiting
+                # for a value that is never coming.
+                report.warnings.append(
+                    f"bot '{bot_name}': credential_sources['{var_name}'] = "
+                    f"'mint:github-app' is RESERVED and resolves nothing yet — "
+                    f"supply {var_name} in a .env tier until the minting "
+                    f"resolver ships"
+                )
 
         # Integrations (warn). Accepts `name`, `dir/name`, or `dir/`.
         for integ in bot.integrations:
@@ -1183,6 +1441,7 @@ def validate(fleet: FleetConfig, paths: Paths) -> ValidationReport:
     _validate_projects(fleet, paths, report)
     _validate_cross_fleet_collisions(fleet, paths, report)
     _validate_library_frontmatter(paths, report)
+    _validate_env_contracts(paths, report)
 
     # bench marker — multi-bot fleets should designate a bench bot
     if len(fleet.bots) > 1 and not any(b.bench for b in fleet.bots.values()):

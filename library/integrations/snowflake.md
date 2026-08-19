@@ -4,25 +4,32 @@ type: cli
 env_contract:
   SNOWFLAKE_ACCOUNT:
     description: Snowflake account identifier
-    tier: fleet
+    default_tier: fleet
+    secret: false
   SNOWFLAKE_USER:
     description: Snowflake username
-    tier: fleet
+    default_tier: fleet
+    secret: true
   SNOWFLAKE_ROLE:
     description: Snowflake role
-    tier: fleet
+    default_tier: fleet
+    secret: false
   SNOWFLAKE_WAREHOUSE:
     description: Snowflake warehouse name
-    tier: fleet
+    default_tier: fleet
+    secret: false
   SNOWFLAKE_DATABASE:
     description: Snowflake database name
-    tier: fleet
+    default_tier: fleet
+    secret: false
   SNOWFLAKE_PRIVATE_KEY_PATH:
     description: Path to Snowflake RSA private key
-    tier: fleet
+    default_tier: fleet
+    secret: true
   SNOWFLAKE_PRIVATE_KEY:
     description: Snowflake RSA private key (inline)
-    tier: fleet
+    default_tier: fleet
+    secret: true
 ---
 
 # Snowflake

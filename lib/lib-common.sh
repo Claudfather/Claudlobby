@@ -2180,6 +2180,80 @@ fleet_runtime_dir() {
     fi
 }
 
+# --- .env tier cascade — THE resolver (#1214 / #1226) ------------------------
+#
+# The four .env tiers in RUNTIME SOURCING ORDER, least specific first:
+#
+#   host   $HOME/.env
+#   root   $CLAUDLOBBY_ROOT/.env
+#   fleet  <fleet_dir>/.env
+#   bot    <bot_dir>/.env
+#
+# Later wins, so the MOST SPECIFIC tier that assigns a key decides its value.
+# "Assigns", not "supplies a value": sourcing is shell assignment, so an
+# `export FOO=` at the bot tier beats a real secret at the fleet tier and
+# resolves to the empty string. That is not a corner case — it is why
+# GITHUB_PAT is present-but-empty on half the estate and the GitHub MCP has
+# been wired to "" there, invisibly (#1213). A cascade that treats empty as
+# absent would report those fleets as healthy, which is the defect, not the fix.
+#
+# ALL FOUR rows are always emitted, TAB-separated:
+#
+#     <tier>\t<path>\t<present|absent|unresolved>
+#
+# Absent rows are emitted rather than dropped because a consumer that must say
+# "host: nothing there" cannot otherwise tell a tier that held nothing from a
+# tier this function forgot. `unresolved` is distinct again: the tier does not
+# APPLY (no fleet name, no CLAUDLOBBY_ROOT), which is a different fact from a
+# tier that applies and is empty.
+#
+# THIS IS THE SSOT FOR THE ORDER. start-bot.sh builds the session's source list
+# from it; the Python compositor reads it through lib/env-tiers.sh. Neither side
+# keeps a copy — a private copy of a shared predicate is how a fleet-wide fact
+# quietly forks, and it has already done so twice in this repo (#892, #1143).
+#
+# Usage: env_tier_rows [bot_dir] [fleet_name]
+env_tier_rows() {
+    local bot_dir="${1:-${BOT_DIR:-}}" fleet="${2:-${FLEET_NAME:-}}"
+    local root="${CLAUDLOBBY_ROOT:-}" fleet_dir=""
+
+    _env_tier_row host "${HOME:-}" ".env"
+    _env_tier_row root "$root" ".env"
+
+    if [ -n "$fleet" ] && [ -n "$root" ]; then
+        # Flat local/<fleet> byte-identically, or nested local/<system>/<fleet>.
+        # Same fallback start-bot.sh has always used: an unresolvable name still
+        # names the flat path, so a not-yet-created fleet reports absent (the
+        # truth) rather than unresolved (which would read as "does not apply").
+        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$root/local/$fleet"
+    fi
+    _env_tier_row fleet "$fleet_dir" ".env"
+    _env_tier_row bot "$bot_dir" ".env"
+}
+
+# One row of env_tier_rows. Empty dir => `unresolved` with an empty path: the
+# tier does not apply in this context, which no path could honestly stand for.
+_env_tier_row() {
+    local tier="$1" dir="$2" leaf="$3" path=""
+    if [ -z "$dir" ]; then
+        printf '%s\t\tunresolved\n' "$tier"
+        return 0
+    fi
+    path="$dir/$leaf"
+    if [ -f "$path" ]; then
+        printf '%s\t%s\tpresent\n' "$tier" "$path"
+    else
+        printf '%s\t%s\tabsent\n' "$tier" "$path"
+    fi
+}
+
+# The tier paths that actually exist, in sourcing order, one per line. What a
+# consumer wants when it is going to source them; `env_tier_rows` is what a
+# consumer wants when it must report on the ones that are NOT there.
+env_tier_present_files() {
+    env_tier_rows "$@" | awk -F'\t' '$3 == "present" { print $2 }'
+}
+
 # dispatch_ledger_path
 # The manager-written dispatch ledger, on stdout. Host-global (one file per
 # CLAUDLOBBY_ROOT), unlike the per-fleet report ledger fleet_runtime_dir locates.

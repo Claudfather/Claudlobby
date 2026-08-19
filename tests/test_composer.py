@@ -84,7 +84,7 @@ class TestScaffoldEnvMerge:
                 {
                     "github": {"command": "gh", "args": ["mcp"]},
                     "_env_contract": {
-                        "GITHUB_PAT": {"description": "GitHub PAT", "tier": "fleet"},
+                        "GITHUB_PAT": {"description": "GitHub PAT", "default_tier": "fleet"},
                     },
                 }
             )
@@ -99,11 +99,11 @@ class TestScaffoldEnvMerge:
                     "_env_contract": {
                         "SHOPIFY_ACCESS_TOKEN": {
                             "description": "Shopify token",
-                            "tier": "fleet",
+                            "default_tier": "fleet",
                         },
                         "SHOPIFY_STORE_DOMAIN": {
                             "description": "Shopify domain",
-                            "tier": "fleet",
+                            "default_tier": "fleet",
                         },
                     },
                 }
@@ -4413,7 +4413,9 @@ class TestBotEnvStubDoesNotShadowUpstream:
     def _env_var(self, name: str):
         from claudlobby.composer import EnvVar
 
-        return EnvVar(name=name, description="test var", tier="bot", source="test")
+        return EnvVar(
+            name=name, description="test var", default_tier="bot", source="test"
+        )
 
     def test_upstream_provided_var_is_commented_not_live(self, tmp_path):
         from claudlobby.composer import _scaffold_env_merge
@@ -4622,12 +4624,12 @@ class TestFleetEnvStubDoesNotShadowUpstream:
                         # Provided upstream — must NOT get a live fleet stub.
                         "UPSTREAM_TOKEN": {
                             "description": "set upstream",
-                            "tier": "fleet",
+                            "default_tier": "fleet",
                         },
                         # No upstream value anywhere — MUST still get one, or the
                         # test above passes for the trivial reason that nothing
                         # is ever stubbed.
-                        "FLEET_ONLY_TOKEN": {"description": "unset", "tier": "fleet"},
+                        "FLEET_ONLY_TOKEN": {"description": "unset", "default_tier": "fleet"},
                     },
                 }
             )

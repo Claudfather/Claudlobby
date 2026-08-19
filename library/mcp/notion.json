@@ -2,8 +2,9 @@
   "_env_contract": {
     "TOKEN": {
       "description": "Notion API integration token",
-      "tier": "fleet",
-      "scope": "instance"
+      "default_tier": "fleet",
+      "scope": "instance",
+      "secret": true
     }
   },
   "_permissions_contract": {

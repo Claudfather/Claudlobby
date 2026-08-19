@@ -63,7 +63,12 @@ def doctor_fleet(tmp_path: Path) -> tuple[Path, "FleetConfig", Paths]:
             {
                 "github": {"command": "gh", "args": ["mcp"]},
                 "_env_contract": {
-                    "GITHUB_PAT": {"description": "GitHub PAT", "tier": "fleet"},
+                    # `secret` required on every entry since #1214 Phase 1.
+                    "GITHUB_PAT": {
+                        "description": "GitHub PAT",
+                        "default_tier": "fleet",
+                        "secret": True,
+                    },
                 },
             }
         )
@@ -222,8 +227,17 @@ class TestCheckClaudron:
         if git:
             subprocess.run(["git", "init", "-q", str(vault)], check=True)
             subprocess.run(
-                ["git", "-C", str(vault), "commit", "-q", "--allow-empty",
-                 "-m", "seed", "--no-gpg-sign"],
+                [
+                    "git",
+                    "-C",
+                    str(vault),
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "seed",
+                    "--no-gpg-sign",
+                ],
                 check=True,
                 env={
                     **os.environ,

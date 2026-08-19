@@ -35,15 +35,19 @@ exactly the bug it was built to remove, recreated inside its own remedy. The
 summary line therefore always carries an `unknown=` count, and a run where
 every integration is UNKNOWN says so loudly rather than printing a clean bill.
 
-THE VISIBILITY TRAP, which is why shape 1 finds real failures here. `Paths.
-env_file` returns the FLEET `.env` when one exists and the ROOT `.env`
-otherwise — one or the other, never both. So a credential stored only at root
-is invisible to every fleet that has its own `.env`, while still looking
-present to anyone who greps the repo. `lib/creds-check.sh` had the mirror bug
-(it read root while being invoked per-fleet). An inventory that resolved
-tiers its own way would inherit one side or the other, so tier resolution here
-goes through `Paths.env_file` — the shipped predicate — and every finding names
-the tier it was decided on.
+THE VISIBILITY TRAP, which this module used to have and now reports on. It read
+`Paths.env_file` — the FLEET `.env` when one exists, else the ROOT one, never
+both — and called that "the tier this fleet reads". The runtime reads FOUR, so
+a credential in `~/.env` was reported "absent from every tier" while the bot
+resolved it fine at boot. `lib/creds-check.sh` had the mirror bug (it read root
+while being invoked per-fleet).
+
+Resolution now goes through `Paths.env_resolved`, the same door the runtime
+answers from, and every finding names the tier the value actually came from.
+"Shadowed, not missing" is gone as a reported state — read correctly, the value
+simply resolves. What replaces it is strictly worse and previously unreportable:
+BLANKING, an empty assignment at a more specific tier beating a real value
+upstream.
 
 NO VALUE IS EVER EMITTED. Presence, emptiness and tier are facts about a
 credential; the credential itself is not, and this output goes into PR bodies
@@ -62,6 +66,7 @@ from .dotenv import read as read_env_file
 # what UNKNOWN reports. Named here so the reconciler consumes a contract rather
 # than inventing one, and so the other half of #1104 has a target to fill.
 CONSUMER_CONTRACT_KEY = "consumer_contract"
+
 
 @dataclass
 class Declaration:
@@ -159,19 +164,20 @@ def declared_for_fleet(fleet, paths) -> tuple[list[Declaration], set[str]]:
             needed = required_vars(bot, paths)
         except Exception:  # noqa: BLE001 - one bad bot must not void the inventory
             continue
-        for var, _tier, source, _instance in needed:
-            # required_vars labels its sources "integration/<name>" and
+        for req in needed:
+            # required_vars labels its ORIGIN "integration/<name>" and
             # "mcp/<name>". Split on that rather than testing membership in the
             # equipped-integration set, which silently mislabelled every
             # integration var as mcp because the prefixed string never matched
-            # a bare name.
-            kind, _, short = source.partition("/")
+            # a bare name. Read `.origin`, never `.source` — since #1214 the
+            # latter is the resolver descriptor and would partition to garbage.
+            kind, _, short = req.origin.partition("/")
             if kind not in ("integration", "mcp"):
-                kind, short = "mcp", source
-            key = (var, short)
+                kind, short = "mcp", req.origin
+            key = (req.name, short)
             decl = by_var.get(key)
             if decl is None:
-                decl = Declaration(var=var, source=short, kind=kind)
+                decl = Declaration(var=req.name, source=short, kind=kind)
                 by_var[key] = decl
             if bot_name not in decl.equipped_by:
                 decl.equipped_by.append(bot_name)
@@ -187,41 +193,49 @@ def declared_for_fleet(fleet, paths) -> tuple[list[Declaration], set[str]]:
 
 
 def env_tiers(paths) -> list[tuple[str, Path, dict]]:
-    """[(tier label, path, vars)] for every tier that EXISTS, root first.
+    """[(tier label, path, vars)] for every tier that EXISTS, least specific first.
 
-    Both tiers are enumerated even though only one is READ, because the gap
-    between them is the defect: a value present at root and shadowed by a fleet
-    `.env` is invisible in practice while looking present to a grep.
+    All FOUR tiers the runtime sources — host, root, fleet, bot — enumerated
+    through the runtime's own resolver rather than a local rule. It used to
+    enumerate root and fleet only, which is why a credential placed in ``~/.env``
+    was reported "absent from every tier" while the bot resolved it fine at boot
+    (#1226). Enumerating fewer tiers than the runtime is not a smaller answer;
+    it is a wrong one.
     """
     tiers: list[tuple[str, Path, dict]] = []
-    root_env = paths.root / ".env"
-    if root_env.is_file():
-        tiers.append(("root", root_env, read_env_file(root_env)))
-    fleet_dir = getattr(paths, "fleet_dir", None)
-    if fleet_dir:
-        fleet_env = Path(fleet_dir) / ".env"
-        if fleet_env.is_file():
-            tiers.append(
-                (f"fleet:{Path(fleet_dir).name}", fleet_env, read_env_file(fleet_env))
-            )
+    for tier in paths.env_tiers():
+        if not tier.exists or tier.path is None:
+            continue
+        label = tier.tier
+        if label == "fleet" and getattr(paths, "fleet_dir", None):
+            label = f"fleet:{Path(paths.fleet_dir).name}"
+        tiers.append((label, tier.path, read_env_file(tier.path)))
     return tiers
 
 
-def visible_tier(paths) -> tuple[str, dict]:
-    """The ONE tier this fleet actually reads, via the shipped resolver.
+def resolved_view(paths) -> tuple[str, dict, dict]:
+    """(label, {var: value}, {var: Resolution}) — what a BOOT would actually see.
 
-    Deliberately `Paths.env_file` rather than a private rule — a second
-    resolution rule is how the root-versus-fleet split became invisible in the
-    first place.
+    This replaces ``visible_tier``, whose name and docstring had become a
+    description of the defect: it called ``Paths.env_file`` "the ONE tier this
+    fleet actually reads" when the runtime reads FOUR. That reasoning was sound
+    before the cascade existed — a second private resolution rule is how the
+    root-versus-fleet split became invisible — but ``Paths.env_file`` is the
+    WRITE target, and after #1226 defending it as the read path defends the bug.
+
+    Values come from ``Paths.env_resolved`` so this module and the runtime
+    cannot disagree, which is the property the whole workstream exists to
+    establish. NOTE the bot tier is not included: reconciliation is fleet-scoped
+    and there is no single bot to name, so a var overridden only inside one bot
+    is deliberately out of view here and ``claudlobby env-register --bot`` is
+    the door that answers per-bot.
     """
-    chosen = paths.env_file
-    label = "root"
-    fleet_dir = getattr(paths, "fleet_dir", None)
-    if fleet_dir and Path(chosen) == Path(fleet_dir) / ".env":
-        label = f"fleet:{Path(fleet_dir).name}"
-    if not Path(chosen).is_file():
-        return (label, {})
-    return (label, read_env_file(Path(chosen)))
+    resolutions = paths.env_resolved()
+    return (
+        "cascade(host->root->fleet)",
+        {name: r.value for name, r in resolutions.items()},
+        resolutions,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -236,7 +250,7 @@ def reconcile(
     library_dir = Path(library_dir or (paths.root / "library"))
     declarations, integrations = declared_for_fleet(fleet, paths)
 
-    label, visible = visible_tier(paths)
+    label, visible, resolutions = resolved_view(paths)
     tiers = env_tiers(paths)
     all_tier_vars: dict[str, list[str]] = {}
     for tier_label, _path, values in tiers:
@@ -256,28 +270,36 @@ def reconcile(
         sources = ", ".join(
             sorted({f"{d.kind}:{d.source}" for d in declarations if d.var == decl.var})
         )
+        res = resolutions.get(decl.var)
         if value:
             findings.append(
                 Finding(
                     1,
                     "OK",
                     decl.var,
-                    f"declared by {sources}; value present in {label}",
+                    f"declared by {sources}; resolves from the "
+                    f"{res.tier if res else '?'} tier",
                 )
             )
             continue
-        elsewhere = [t for t in all_tier_vars.get(decl.var, []) if t != label]
-        if elsewhere:
-            # The visibility trap, called out by name: present, but not where
-            # this fleet reads. A plain "missing" would send someone to add a
-            # value that already exists.
+        if res is not None and res.blanked_upstream:
+            # "Shadowed, not missing" used to be reported here as a special
+            # case. With the cascade read correctly it stops being a state at
+            # all — the value simply resolves. What remains, and is strictly
+            # worse, is BLANKING: an EMPTY assignment at a more specific tier
+            # beating a real value upstream. Sourcing is assignment, so the
+            # empty one wins and the integration gets "". This is the live
+            # #1213 shape and it has no other reporter.
             findings.append(
                 Finding(
                     1,
                     "FAIL",
                     decl.var,
-                    f"declared by {sources}; NO value in {label}, but a value exists in "
-                    f"{', '.join(elsewhere)} — shadowed, not missing",
+                    f"declared by {sources}; assigned EMPTY at the {res.tier} tier, "
+                    f"which BLANKS the real value at: "
+                    f"{', '.join(res.blanked_upstream)}. Delete the empty "
+                    f"assignment — adding the value again at the same tier "
+                    f"changes nothing",
                 )
             )
         elif decl.var in visible:
@@ -291,7 +313,9 @@ def reconcile(
                     1,
                     "FAIL",
                     decl.var,
-                    f"declared by {sources}; key present in {label} but EMPTY",
+                    f"declared by {sources}; key present but EMPTY at the "
+                    f"{res.tier if res else '?'} tier (nothing upstream to fall "
+                    f"back to)",
                 )
             )
         else:
@@ -300,8 +324,8 @@ def reconcile(
                     1,
                     "FAIL",
                     decl.var,
-                    f"declared by {sources}; absent from every tier ({label} is what this "
-                    "fleet reads)",
+                    f"declared by {sources}; absent from every tier "
+                    f"({label})",
                 )
             )
 

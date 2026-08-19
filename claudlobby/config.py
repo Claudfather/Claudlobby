@@ -474,6 +474,22 @@ class BotConfig:
     scope: ScopeConfig | None = None
     # org -> env var NAME; see _parse_git_credentials
     git_credentials: dict[str, str] = field(default_factory=dict)
+    # env var NAME -> credential source identifier. The per-scope override the
+    # tier ruling requires (#1214 F6c): a contract declares where a value comes
+    # from BY DEFAULT, and a fleet or a single bot may say otherwise for itself
+    # — "(a) should work if configured at bot, fleet, or host level".
+    # Fleet-then-bot merged, bot winning, exactly as git_credentials is.
+    # SCHEMA ONLY in this phase: nothing resolves these yet (F1(a) ships `cli`
+    # and the start-bot.sh resolver is a later phase). Declaring one today
+    # records intent and shows up in the register; it does not fetch anything.
+    credential_sources: dict[str, str] = field(default_factory=dict)
+    # Equipment names (MCP + integration) this bot declares ITSELF, as opposed
+    # to inheriting from `fleet.defaults`. The merge that builds `mcp` and
+    # `integrations` is flat and first-seen-wins, so it destroys this — and it
+    # is exactly what decides which `.env` a var's stub belongs in (#1214 F3a:
+    # "tier follows the equipment"). A GitHub App given to ONE bot is that
+    # bot's equipment; its var stub belongs in that bot's .env, not the fleet's.
+    bot_attached_equipment: frozenset[str] = field(default_factory=frozenset)
     model_strategy: ModelStrategyConfig | None = None
     account: str = "default"
     model: str | None = None
@@ -865,6 +881,41 @@ def _coerce_scope(raw: dict | None) -> ScopeConfig | None:
 # GitHub's documented token prefixes. A token is a valid shell identifier, so
 # this is the only way to tell a pasted secret from an env var name.
 _GITHUB_TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
+
+
+def _parse_credential_sources(raw: object, *, where: str) -> dict[str, str]:
+    """Validate one scope's ``credential_sources`` block (VAR -> source id).
+
+    One scope at a time with a ``where`` label so a mistake in fleet defaults is
+    not reported against a bot; callers dict-merge fleet then bot. The
+    ``_parse_git_credentials`` precedent, deliberately — a second shape for the
+    same job is how two blocks that must merge identically stop doing so.
+
+    Keys are env var NAMES and must satisfy the same ``SHELL_IDENT_RE`` contract
+    as every other composed env-var name. Values are source identifiers; that
+    they are members of the CLOSED registry is checked by the validator, on the
+    same footing as a contract's own ``source``, so both surfaces produce one
+    error shape and neither can be widened without the other.
+    """
+    mapping = _shaped(
+        f"{where}: credential_sources", raw, dict, "{GITHUB_PAT: cli:gh-token}"
+    )
+    out: dict[str, str] = {}
+    for key, source in mapping.items():
+        var = str(key)
+        if not SHELL_IDENT_RE.fullmatch(var):
+            raise ValueError(
+                f"{where}: credential_sources key '{var}' must be an env var NAME "
+                f"(letters, digits, underscore; not starting with a digit)"
+            )
+        if not isinstance(source, str) or not source:
+            raise ValueError(
+                f"{where}: credential_sources['{var}'] must be a source identifier "
+                f"string from the closed registry (e.g. 'cli:gh-token', 'literal'), "
+                f"got {type(source).__name__}"
+            )
+        out[var] = source
+    return out
 
 
 def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
@@ -1337,6 +1388,14 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             ),
             **_parse_git_credentials(raw.get("git_credentials"), where=f"bot '{name}'"),
         },
+        credential_sources={
+            **_parse_credential_sources(
+                defaults.get("credential_sources"), where="fleet defaults"
+            ),
+            **_parse_credential_sources(
+                raw.get("credential_sources"), where=f"bot '{name}'"
+            ),
+        },
         model_strategy=_coerce_model_strategy(
             raw.get("model_strategy") or defaults.get("model_strategy")
         ),
@@ -1382,6 +1441,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         ),
         integrations=_merge_lists(
             defaults.get("integrations"), raw.get("integrations")
+        ),
+        # Read from `raw` ONLY — `defaults` is the fleet-attached half by
+        # definition, and including it would make every bot claim every piece
+        # of fleet equipment as its own.
+        bot_attached_equipment=frozenset(
+            [e.name for e in _parse_mcp_list(raw.get("mcp"))]
+            + [str(i).split("/")[-1] for i in _as_list(raw.get("integrations"))]
         ),
         guardrails=_merge_lists(defaults.get("guardrails"), raw.get("guardrails")),
         protocols=_merge_lists(defaults.get("protocols"), raw.get("protocols")),

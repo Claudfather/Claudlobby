@@ -26,7 +26,7 @@ from jinja2.sandbox import SandboxedEnvironment
 
 from . import defaults, dotenv, tool_resolve
 from .config import BotConfig, FleetConfig, load_fleet, load_host_jobs
-from .known_values import HEADLESS_TRIM_VARS, SHELL_IDENT_RE
+from .known_values import ENV_TIERS, HEADLESS_TRIM_VARS, SHELL_IDENT_RE
 from .loader import (
     ExpertisePermissions,
     LibraryItem,
@@ -2548,8 +2548,75 @@ class EnvVar:
 
     name: str
     description: str
-    tier: str  # "fleet" or "bot"
+    #: Placement DEFAULT, not the resolution location — see ContractVar.
+    #: One of known_values.ENV_TIERS.
+    default_tier: str
     source: str  # e.g. "mcp/github", "integration/neon", "telegram"
+    #: Bots that attach this var's declaring equipment THEMSELVES rather than
+    #: inheriting it from fleet defaults. Empty = fleet-wide equipment.
+    bot_attached: frozenset[str] = frozenset()
+
+    def scaffold_tier(self) -> str:
+        """Which ``.env`` this var's STUB belongs in. Not where it resolves from.
+
+        Two inputs, most-specific-wins — the same rule the runtime cascade uses,
+        so a reader who understands one understands the other:
+
+        * the equipment is attached to a BOT → that bot's ``.env`` (#1214 F3a).
+          A GitHub App given to one bot is that bot's equipment, and its stub
+          belongs where the equipment is, not in a file every bot sources.
+        * otherwise the declared ``default_tier``. A var declared ``bot`` stays
+          per-bot even on fleet-wide equipment — a Telegram token is one
+          BotFather bot per bot no matter who declared the MCP.
+
+        ``host`` and ``root`` come back unchanged and are NOT written: the
+        composer owns the fleet and bot tiers only. That refusal is load-bearing
+        rather than a limitation. Writing a stub for a host-tier var would
+        emit ``export VAR=`` at the fleet tier, and under shell assignment
+        semantics that BLANKS the value in ``~/.env`` the declaration was
+        pointing at — manufacturing the exact #1213 failure out of an attempt
+        to be helpful.
+        """
+        if self.bot_attached:
+            return "bot"
+        return self.default_tier
+
+
+def _attaching_bots(fleet: FleetConfig, equipment: str) -> frozenset[str]:
+    """Bots that declare *equipment* themselves rather than inheriting it.
+
+    Returns the attaching bots only when they are a STRICT SUBSET of the fleet;
+    equipment every bot carries comes back empty, meaning fleet-wide.
+
+    The spec's line is "a bot-level MCP declaration puts its var stub in that
+    bot's .env". Read literally that keys on the SPELLING, and the spelling is
+    not what it is trying to distinguish — most fleets list `mcp: [github]`
+    under every bot rather than in `fleet.defaults`, which has identical scope
+    and identical meaning. Taken literally the rule moves one fleet-tier stub
+    into N per-bot stubs, each landing at the MOST specific tier there is,
+    where a bare `export VAR=` outranks every other assignment of that key on
+    the machine. That multiplies exposure to the very shadowing this phase
+    exists to contain.
+
+    So the test is SCOPE, which is the fact the spec is reaching for: equipment
+    held by some bots and not others is that bot's equipment — a GitHub App you
+    gave to one bot — and its credential belongs with it. Equipment every bot
+    holds is fleet infrastructure however it was spelled. A one-bot fleet is
+    therefore fleet-tier, not bot-tier, which is also the right answer.
+
+    Deliberately the WHOLE fleet rather than the bot being walked: this answer
+    must not depend on which bot happened to reach the var first, or a var
+    shared by a fleet-attached bot and a self-attached one would scaffold
+    differently depending on dict order.
+    """
+    attaching = frozenset(
+        name
+        for name, bot in fleet.bots.items()
+        if equipment in bot.bot_attached_equipment
+    )
+    if not fleet.bots or attaching == set(fleet.bots):
+        return frozenset()
+    return attaching
 
 
 def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
@@ -2577,6 +2644,18 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
             # canonical name and the .env description label are this consumer's job.
             for cv in iter_operator_contract_vars(contract, entry):
                 if cv.canonical_name in vars:
+                    # FIRST-write-wins, keyed on canonical name, silently. Safe
+                    # today because EnvVar carries no `secret`: what a skipped
+                    # duplicate loses is a description and a source label.
+                    #
+                    # It stops being safe the moment `secret` is added to
+                    # EnvVar (#1214 Phase 3). 11 vars are declared on BOTH
+                    # surfaces, and which record lands here depends on bot walk
+                    # order — the MCP loop runs before the integration loop
+                    # within a bot, but a bot equipping only the integration is
+                    # walked before one equipping the fragment. Take the value
+                    # from mcp_resolve._reconcile_secret rather than from
+                    # whichever surface happened to arrive first.
                     continue
                 inst_label = (
                     f" ({cv.instance})" if cv.instance not in (None, "default") else ""
@@ -2584,8 +2663,9 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                 vars[cv.canonical_name] = EnvVar(
                     name=cv.canonical_name,
                     description=f"{cv.description}{inst_label}",
-                    tier=cv.tier,
+                    default_tier=cv.default_tier,
                     source=f"mcp/{entry.name}",
+                    bot_attached=_attaching_bots(fleet, entry.name),
                 )
 
         # Integration doc contracts
@@ -2599,13 +2679,14 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
             if not contract:
                 continue
             for var_name, meta in contract.items():
-                tier = meta.get("tier", "fleet")
+                default_tier = meta.get("default_tier", "fleet")
                 if var_name not in vars:
                     vars[var_name] = EnvVar(
                         name=var_name,
                         description=meta.get("description", ""),
-                        tier=tier,
+                        default_tier=default_tier,
                         source=f"integration/{int_name}",
+                        bot_attached=_attaching_bots(fleet, int_name),
                     )
 
         # Telegram token_env — but never the plugin's OWN read var. A
@@ -2624,7 +2705,7 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                 vars[var_name] = EnvVar(
                     name=var_name,
                     description="Telegram bot token",
-                    tier="bot",
+                    default_tier="bot",
                     source="telegram",
                 )
 
@@ -2642,7 +2723,7 @@ def collect_env_contracts(fleet: FleetConfig, paths: Paths) -> list[EnvVar]:
                     # that org, and freshbox FAILs a *bot*-tier var found in a
                     # host-shared .env — mislabelling it would false-alarm on the
                     # normal placement.
-                    tier="fleet",
+                    default_tier="fleet",
                     source="git_credentials",
                 )
 
@@ -2787,13 +2868,30 @@ def _upstream_env_names(paths: Paths, *, for_tier: str = "bot") -> frozenset[str
     invisible at runtime (it produces a guard that merely does less), so a typo
     must fail loudly at the call site instead of degrading to no protection.
     """
-    tiers: tuple[Path, ...] = (Path.home() / ".env", paths.root / ".env")
-    if for_tier == "bot":
-        tiers += (paths.env_file,)
-    elif for_tier != "fleet":
+    # WHICH tiers are upstream is sliced out of ENV_TIERS, which is pinned by
+    # test against what the runtime resolver emits — so adding a tier to the
+    # cascade cannot leave this guard silently reading a short list.
+    #
+    # The tier -> PATH mapping below is the one place in the compositor that
+    # still restates something the resolver knows, and it is deliberate rather
+    # than overlooked: reading it from lib/env-tiers.sh means a bash subprocess
+    # inside `generate`, and no test fixture root carries a lib/. The order —
+    # the part that actually drifted and caused #1226 — now comes from the
+    # pinned registry; only the leaf names are local. Tracked as the residual.
+    if for_tier not in ENV_TIERS:
         raise ValueError(
-            f"_upstream_env_names: unknown tier {for_tier!r} (expected 'bot' or 'fleet')"
+            f"_upstream_env_names: unknown tier {for_tier!r} "
+            f"(expected one of {', '.join(ENV_TIERS)})"
         )
+    tier_path = {
+        "host": Path.home() / ".env",
+        "root": paths.root / ".env",
+        "fleet": paths.env_file,
+    }
+    above = ENV_TIERS[: ENV_TIERS.index(for_tier)]
+    tiers: tuple[Path, ...] = tuple(
+        tier_path[t] for t in above if t in tier_path
+    )
 
     names: set[str] = set()
     for tier in tiers:
@@ -2815,8 +2913,22 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
     contract vars discovered from MCP fragments and integrations.
     """
     env_vars = collect_env_contracts(fleet, paths)
-    fleet_vars = [ev for ev in env_vars if ev.tier != "bot"]
-    bot_vars = [ev for ev in env_vars if ev.tier == "bot"]
+    fleet_vars = [ev for ev in env_vars if ev.scaffold_tier() == "fleet"]
+    bot_vars = [ev for ev in env_vars if ev.scaffold_tier() == "bot"]
+
+    # host/root-tier vars are NOT scaffolded, and saying so is the point. The
+    # composer owns the fleet and bot .env files; emitting `export VAR=` at the
+    # fleet tier for a var whose home is ~/.env would BLANK the value that
+    # declaration points at, because the more specific empty assignment wins.
+    # That is #1213 manufactured out of helpfulness, so the stub is withheld and
+    # the operator is told where the value goes instead.
+    unscaffolded = [ev for ev in env_vars if ev.scaffold_tier() in ("host", "root")]
+    if unscaffolded and log is not None:
+        for ev in sorted(unscaffolded, key=lambda e: e.name):
+            log(
+                f"  {ev.name}: declared {ev.default_tier}-tier — no stub written "
+                f"(a stub here would blank it); set it in the {ev.default_tier} .env"
+            )
 
     if paths.fleet_dir:
         # Guarded exactly as the bot tier is (#1206). start-bot.sh sources the
@@ -2836,13 +2948,27 @@ def scaffold_env_files(fleet: FleetConfig, paths: Paths, log=None) -> None:
     if bot_vars:
         # Vars already carrying a real value upstream must not be re-stubbed live
         # at the bot tier — start-bot.sh sources the bot tier last, so an empty
-        # export would win over the operator's actual value.
+        # export would win over the operator's actual value. Unchanged, and it
+        # matters MORE now: routing a var to one bot's .env moves its stub to
+        # the most specific tier there is, where a bare stub outranks every
+        # other assignment of that key on the machine.
         upstream = _upstream_env_names(paths)
         for bot_name in fleet.bots:
+            # A var whose equipment this bot attaches ITSELF goes only here. One
+            # with no attaching bot is fleet-wide equipment carrying a per-bot
+            # value (a Telegram token: one BotFather bot per bot) and still goes
+            # to every bot, as before.
+            mine = [
+                ev
+                for ev in bot_vars
+                if not ev.bot_attached or bot_name in ev.bot_attached
+            ]
+            if not mine:
+                continue
             _scaffold_env_merge(
                 paths.bot_runtime(bot_name) / ".env",
                 f"# Bot environment for: {bot_name}",
-                bot_vars,
+                mine,
                 log=log,
                 provided_upstream=upstream,
             )

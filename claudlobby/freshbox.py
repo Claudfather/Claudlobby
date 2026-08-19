@@ -290,7 +290,7 @@ def _env_secret_leak_findings(
     from .composer import collect_env_contracts
 
     bot_tier_vars = {
-        ev.name for ev in collect_env_contracts(fleet, paths) if ev.tier == "bot"
+        ev.name for ev in collect_env_contracts(fleet, paths) if ev.default_tier == "bot"
     }
     # collect_env_contracts drops a Telegram token_env that is self-referential
     # (== the plugin's own read var TELEGRAM_BOT_TOKEN) so generate never scaffolds

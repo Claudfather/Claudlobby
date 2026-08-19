@@ -2,11 +2,13 @@
   "_env_contract": {
     "SPOTIFY_CLIENT_ID": {
       "description": "Spotify OAuth client ID",
-      "tier": "fleet"
+      "default_tier": "fleet",
+      "secret": true
     },
     "SPOTIFY_CLIENT_SECRET": {
       "description": "Spotify OAuth client secret",
-      "tier": "fleet"
+      "default_tier": "fleet",
+      "secret": true
     }
   },
   "_permissions_contract": {

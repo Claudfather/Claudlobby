@@ -321,6 +321,41 @@ Any extra fields are passed through verbatim.
 an org it does not "scope" to (its product org plus the framework repo it contributes back to).
 Credentials are declared separately, below.
 
+### `fleet.defaults.credential_sources` / `bots.<name>.credential_sources`
+
+```yaml
+fleet:
+  defaults:
+    credential_sources:
+      GITHUB_PAT: cli:gh-token      # this fleet takes the host CLI identity
+  bots:
+    ravi:
+      credential_sources:
+        GITHUB_PAT: literal          # ...except ravi, which uses its own .env value
+```
+
+Maps an env var **name** to where its value comes from, overriding the default the
+library contract declares. Fleet-then-bot merged, bot winning — the same merge
+`git_credentials` uses.
+
+Values are members of a **closed, framework-owned registry**
+(`known_values.KNOWN_CREDENTIAL_SOURCES`: `literal`, `cli:gh-token`, and
+`mint:github-app` reserved). An unregistered value is a `validate` **error**, held to
+exactly the same rule as a contract's own `source`: the resolver dispatches on the
+whole identifier through a fixed `case` arm, so a value arriving from `fleet.yaml`
+must be no more admissible than one arriving from a library fragment. A second,
+laxer door into the same resolver would void the injection guarantee for both.
+
+**This is schema only today.** Nothing resolves these yet — declaring one records
+intent and appears in the credential register; it does not fetch anything. Supply
+the value in a `.env` tier as usual. `mint:github-app` additionally warns, because
+it is registered and deliberately unresolvable.
+
+Why per-scope rather than one contract-wide answer: a var is resolvable at **any**
+`.env` tier, so "where does this value come from" is a question each scope can answer
+differently — a fleet equipping its own GitHub App, a single bot declining automatic
+resolution.
+
 ### `fleet.defaults.git_credentials` / `bots.<name>.git_credentials`
 
 Maps a **GitHub org** to the **name of the env var** holding that org's token. Declarable

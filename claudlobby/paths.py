@@ -31,6 +31,10 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .env_tiers import EnvTier, Resolution
 
 try:
     from claudron.vault import detect as _claudron_detect
@@ -490,11 +494,43 @@ class Paths:
 
     @property
     def env_file(self) -> Path:
-        # .env stays at the repo root (shared across fleets) by default.
-        # If a fleet wants its own, it can keep one at fleet_dir/.env.
+        """The tier a NEW operator-supplied value should be WRITTEN to.
+
+        One file, deliberately: a write has to land somewhere, and the fleet
+        tier (falling back to root) is where a fleet-scoped secret belongs.
+
+        **This is not where a value is read from, and reading it as such was
+        the #1226 defect.** The runtime cascades four tiers; this property knows
+        two and picks one, so a credential placed at the host or bot tier
+        resolved fine at boot and read as missing to every tool that came here
+        for the answer. For reads use :meth:`env_resolved` — it asks the runtime
+        rather than guessing, and it can tell you which tier won.
+        """
         if self.fleet_dir and (self.fleet_dir / ".env").is_file():
             return self.fleet_dir / ".env"
         return self.root / ".env"
+
+    def env_tiers(self, bot_name: str | None = None) -> list["EnvTier"]:
+        """The four ``.env`` tiers in runtime sourcing order, least specific first.
+
+        Answered by ``lib/env-tiers.sh`` — the runtime's own resolver — not by a
+        copy of its order kept here. Pass *bot_name* to include that bot's tier;
+        without it the bot tier reports ``unresolved`` rather than guessing.
+        """
+        from .env_tiers import read_tiers
+
+        return read_tiers(self, bot_name=bot_name)
+
+    def env_resolved(self, bot_name: str | None = None) -> dict[str, "Resolution"]:
+        """Every env var the runtime would see, with the tier that decided it.
+
+        The read door :attr:`env_file` was mistaken for. Values are merged the
+        way the shell merges them — most specific ASSIGNMENT wins, including an
+        assignment to the empty string.
+        """
+        from .env_tiers import resolve
+
+        return resolve(self, bot_name=bot_name)
 
     @property
     def runtime(self) -> Path:

@@ -2,7 +2,8 @@
   "_env_contract": {
     "GSC_SA_KEY_PATH": {
       "description": "Absolute path to the Google service-account JSON key granted access to the Search Console property (gitignored — NEVER commit the key; e.g. local/<fleet>/.secrets/gsc-service-account.json). To reuse the google-analytics service account, point this at the SAME key file as GA4_SA_KEY_PATH and add that SA's client_email as a user on the GSC property (GSC authorizes per-property and does not inherit GA4 access).",
-      "tier": "fleet"
+      "default_tier": "fleet",
+      "secret": true
     }
   },
   "_permissions_contract": {

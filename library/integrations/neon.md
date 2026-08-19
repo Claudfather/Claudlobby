@@ -4,7 +4,8 @@ type: cli
 env_contract:
   NEON_API_KEY:
     description: Neon API key for neon CLI
-    tier: fleet
+    default_tier: fleet
+    secret: true
 ---
 
 # Neon (Postgres)
