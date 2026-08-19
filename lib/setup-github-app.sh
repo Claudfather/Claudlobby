@@ -29,7 +29,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-common.sh"
 install_error_trap ""
 
-HELPER="$LIB_DIR/git-credential-github-app"
+MINT="$LIB_DIR/mint-github-token.sh"
 
 usage() {
     cat >&2 <<'EOF'
@@ -60,7 +60,7 @@ INSTALLATION_ID=""
 PRIVATE_KEY=""
 SLUG=""
 WRITE_CONFIG=1
-CONFIG_PATH="${CLAUDLOBBY_GITHUB_APP_CONF:-${HOME:-/nonexistent}/.config/claudlobby/github-app.conf}"
+CONFIG_PATH="$(github_app_conf_path)"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -114,14 +114,14 @@ EOF
 fi
 printf '2/6 private key parses as RSA\n'
 
-# --- 3. live test mint through the real helper (the closed loop) ------------
+# --- 3. live test mint through the real production path (the closed loop) ---
+# Via the mint CLI, which pipes into the real helper — so this validates the
+# exact invocation shape skills and the gh shim will use, not a lookalike.
 mint_err="$(safe_mktemp)"
-mint_out=""
-if mint_out="$(printf 'protocol=https\nhost=github.com\n\n' \
-        | GITHUB_APP_ID="$APP_ID" \
+if token="$(GITHUB_APP_ID="$APP_ID" \
           GITHUB_APP_INSTALLATION_ID="$INSTALLATION_ID" \
           GITHUB_APP_PRIVATE_KEY_PATH="$PRIVATE_KEY" \
-          "$HELPER" get 2> "$mint_err")"; then
+          "$MINT" 2> "$mint_err")"; then
     :
 else
     printf 'setup-github-app: test mint FAILED. Helper said:\n' >&2
@@ -147,7 +147,6 @@ FIXES
     exit 1
 fi
 
-token="$(printf '%s\n' "$mint_out" | awk -F= '/^password=/{print $2; exit}')"
 case "$token" in
     ghs_*) printf '3/6 test mint OK (installation token, ghs_...)\n' ;;
     *)
@@ -158,9 +157,9 @@ esac
 
 # --- 4. bot identity ---------------------------------------------------------
 BOT_USERNAME="${SLUG}[bot]"
-auth_cfg="$(safe_mktemp)"
-printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_cfg"
-printf 'header = "X-GitHub-Api-Version: 2022-11-28"\n' >> "$auth_cfg"
+auth_cfg="$(auth_curl_cfg \
+    "Authorization: Bearer $token" \
+    "X-GitHub-Api-Version: 2022-11-28")"
 bot_id="$(curl -fsS --globoff --max-time 15 --config "$auth_cfg" \
     "https://api.github.com/users/${BOT_USERNAME}" | jq -r '.id // empty')" || bot_id=""
 if [ -z "$bot_id" ]; then
@@ -175,8 +174,10 @@ if [ "$WRITE_CONFIG" -eq 1 ]; then
     config_dir="$(dirname "$CONFIG_PATH")"
     mkdir -p "$config_dir"
     chmod 700 "$config_dir"
-    umask 177
-    cat > "$CONFIG_PATH" <<EOF
+    # Subshell-scoped umask: the script never mutates the operator's umask.
+    (
+        umask 177
+        cat > "$CONFIG_PATH" <<EOF
 # Written by lib/setup-github-app.sh — read by lib/git-credential-github-app
 # when the GITHUB_APP_* env vars are absent (operator shells, cron).
 # Bot sessions get the same values from the fleet .env tier instead.
@@ -184,14 +185,15 @@ GITHUB_APP_ID="$APP_ID"
 GITHUB_APP_INSTALLATION_ID="$INSTALLATION_ID"
 GITHUB_APP_PRIVATE_KEY_PATH="$PRIVATE_KEY"
 EOF
-    umask 022
+    )
     chmod 600 "$CONFIG_PATH"
 
     # Closed loop for the fallback: re-mint with the env deliberately EMPTY so
-    # only the file we just wrote can supply the credentials.
+    # only the file we just wrote can supply the credentials — the exact
+    # operator/cron invocation shape.
     if env -u GITHUB_APP_ID -u GITHUB_APP_INSTALLATION_ID -u GITHUB_APP_PRIVATE_KEY_PATH \
             CLAUDLOBBY_GITHUB_APP_CONF="$CONFIG_PATH" \
-            bash -c 'printf "protocol=https\nhost=github.com\n\n" | "$1" get > /dev/null' _ "$HELPER" 2> /dev/null; then
+            "$MINT" > /dev/null 2>&1; then
         printf '5/6 config written: %s (0600) — config-only re-mint OK\n' "$CONFIG_PATH"
     else
         printf 'setup-github-app: config file written but the config-only re-mint FAILED — check %s\n' "$CONFIG_PATH" >&2

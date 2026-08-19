@@ -16,6 +16,7 @@ The pins that carry the plan's contracts:
 
 import base64
 import json
+import os
 import stat
 import subprocess
 import time
@@ -23,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _write_exec, constructed_env
+from tests.conftest import _write_exec, constructed_env, read_fleet_events
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER = REPO_ROOT / "lib" / "git-credential-github-app"
@@ -51,7 +52,9 @@ def _curl_stub(bindir: Path) -> None:
 
     Logs argv (so tests can prove no secret rides the command line) and the
     --config file content (so tests can decode the JWT production would send).
-    GITHUB_APP_STUB_MODE picks the response: ok | http401 | curlfail.
+    GITHUB_APP_STUB_MODE picks the response: ok | http401. The helper is the
+    only access_tokens caller and always passes -o/-w, so only that shape is
+    emulated for it; the /users lookup (setup) gets its body on stdout.
     """
     _write_exec(
         bindir / "curl",
@@ -70,25 +73,14 @@ for a in "$@"; do
 done
 [ -n "$cfg_file" ] && cat "$cfg_file" >> "$STUB_DIR/cfg.log"
 mode="${GITHUB_APP_STUB_MODE:-ok}"
-if [ "$mode" = curlfail ]; then
-  printf 'stub: connection refused\\n' >&2
-  exit 7
-fi
 case "$url" in
   *access_tokens*)
     if [ "$mode" = http401 ]; then
-      body='{"message":"A JSON web token could not be decoded"}'
-      code=401
+      printf '{"message":"A JSON web token could not be decoded"}' > "$out_file"
+      printf '401'
     else
-      body='{"token":"__TOKEN__"}'
-      code=201
-    fi
-    if [ -n "$out_file" ]; then
-      printf '%s' "$body" > "$out_file"
-      printf '%s' "$code"
-    else
-      printf '%s' "$body"
-      [ "$code" = 401 ] && exit 22
+      printf '{"token":"__TOKEN__"}' > "$out_file"
+      printf '201'
     fi
     ;;
   *users/*)
@@ -109,8 +101,6 @@ def app_env(tmp_path, rsa_key):
     (root / "state").mkdir(parents=True)
     home = tmp_path / "home"
     home.mkdir()
-    import os
-
     env = constructed_env(
         PATH=f"{stub}:{os.environ['PATH']}",
         STUB_DIR=str(stub),
@@ -134,9 +124,17 @@ def _run(script, env, stdin=CTX, args=("get",)):
     )
 
 
-def _events(root: Path) -> str:
-    return "".join(
-        p.read_text() for p in (root / "state" / "events").glob("fleet-*.jsonl")
+def _without_app_vars(env):
+    return {k: v for k, v in env.items() if not k.startswith("GITHUB_APP_")}
+
+
+def _setup_args(key, *extra):
+    return (
+        "--app-id", "999001",
+        "--installation-id", "555002",
+        "--private-key", str(key),
+        "--slug", "test-fleet-bot",
+        *extra,
     )
 
 
@@ -180,16 +178,12 @@ class TestHelperGet:
         assert "quit=1" in r.stdout, "hard failure must stop the helper chain (D11)"
         assert "password=" not in r.stdout
         assert "401" in r.stderr
-        events = _events(app_env["root"])
+        events = read_fleet_events(app_env["root"])
         assert '"type":"auth_mint_failed"' in events
         assert "ghs_" not in events, "event must never carry a token"
 
     def test_missing_config_is_loud(self, app_env):
-        env = {
-            k: v
-            for k, v in app_env["env"].items()
-            if not k.startswith("GITHUB_APP_")
-        }
+        env = _without_app_vars(app_env["env"])
         r = _run(HELPER, env)
         assert r.returncode != 0
         assert "quit=1" in r.stdout
@@ -202,11 +196,7 @@ class TestHelperGet:
             'GITHUB_APP_INSTALLATION_ID="111999"\n'
             f'GITHUB_APP_PRIVATE_KEY_PATH="{rsa_key}"\n'
         )
-        base = {
-            k: v
-            for k, v in app_env["env"].items()
-            if not k.startswith("GITHUB_APP_")
-        }
+        base = _without_app_vars(app_env["env"])
         base["CLAUDLOBBY_GITHUB_APP_CONF"] = str(conf)
 
         # Fallback: no env vars — the config file alone serves the mint, and
@@ -264,26 +254,26 @@ class TestMintCli:
 class TestSetupScript:
     def test_happy_path_writes_config_and_prints_wiring(self, app_env, rsa_key, tmp_path):
         conf = tmp_path / "conf" / "github-app.conf"
+        # Redesign pin, structural: the fork original ran `git config --global`
+        # — a booby-trapped `git` on PATH proves this version never invokes
+        # git at all (same pattern as test_never_shells_to_git_credential).
+        _write_exec(
+            app_env["stub"] / "git",
+            '#!/bin/bash\ntouch "$STUB_DIR/git-was-called"\nexit 1\n',
+        )
         r = _run(
             SETUP,
             app_env["env"],
             stdin="",
-            args=(
-                "--app-id", "999001",
-                "--installation-id", "555002",
-                "--private-key", str(rsa_key),
-                "--slug", "test-fleet-bot",
-                "--config-path", str(conf),
-            ),
+            args=_setup_args(rsa_key, "--config-path", str(conf)),
         )
         assert r.returncode == 0, r.stderr + r.stdout
+        assert not (app_env["stub"] / "git-was-called").exists()
         assert conf.exists()
         assert stat.S_IMODE(conf.stat().st_mode) == 0o600
         assert "bot_user_id: 4242" in r.stdout
         assert "GITHUB_APP_ID=999001" in r.stdout
         assert "4242+test-fleet-bot[bot]@users.noreply.github.com" in r.stdout
-        # Redesign pin: setup never touches git config (the composer owns it).
-        assert "git config" not in conf.read_text()
 
     def test_corrupt_key_gets_the_diagnostic(self, app_env, tmp_path, rsa_key):
         # A truncated PEM fails `openssl rsa -check` on every build (CRLF
@@ -292,35 +282,13 @@ class TestSetupScript:
         # The diagnostic block itself still names CRLF as a common cause.
         bad = tmp_path / "truncated.pem"
         bad.write_bytes(rsa_key.read_bytes()[: len(rsa_key.read_bytes()) // 2])
-        r = _run(
-            SETUP,
-            app_env["env"],
-            stdin="",
-            args=(
-                "--app-id", "999001",
-                "--installation-id", "555002",
-                "--private-key", str(bad),
-                "--slug", "test-fleet-bot",
-                "--no-write-config",
-            ),
-        )
+        r = _run(SETUP, app_env["env"], stdin="", args=_setup_args(bad, "--no-write-config"))
         assert r.returncode != 0
         assert "CRLF" in r.stderr
 
     def test_jwt_401_prints_the_troubleshooting_tree(self, app_env, rsa_key):
         env = dict(app_env["env"], GITHUB_APP_STUB_MODE="http401")
-        r = _run(
-            SETUP,
-            env,
-            stdin="",
-            args=(
-                "--app-id", "999001",
-                "--installation-id", "555002",
-                "--private-key", str(rsa_key),
-                "--slug", "test-fleet-bot",
-                "--no-write-config",
-            ),
-        )
+        r = _run(SETUP, env, stdin="", args=_setup_args(rsa_key, "--no-write-config"))
         assert r.returncode != 0
         assert "Most likely causes" in r.stderr
         assert "fingerprint" in r.stderr
