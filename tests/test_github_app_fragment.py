@@ -110,6 +110,18 @@ class TestFragmentContract:
             == github["_permissions_contract"]["tools"]
         )
 
+    def test_path_audit_accepts_the_referencing_bot(self):
+        # The L1 deny-by-default source guard, run for real against a bot that
+        # EQUIPS the fragment (spec gap flagged on #1283: the /bin/sh + braced-
+        # anchor choices exist to satisfy this gate, so the record must show
+        # the gate passing, not assert it by design).
+        from claudlobby import path_audit
+
+        bot = _bot()
+        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+        findings = path_audit.audit_bot_sources(bot, fleet, paths=_paths())
+        assert findings == [], [str(f) for f in findings]
+
     def test_both_github_fragments_compose_side_by_side(self):
         bot = BotConfig(
             bot_id="worker",

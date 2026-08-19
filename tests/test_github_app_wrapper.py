@@ -63,7 +63,8 @@ def _stub_npx(bindir: Path, behavior: str = "sleep") -> None:
         f"""#!/bin/bash
 printf '%s\\n' "$GITHUB_PERSONAL_ACCESS_TOKEN" >> "$STUB_DIR/spawns.log"
 case "{behavior}" in
-  sleep) exec sleep 300 ;;
+  sleep) printf '%s\\n' "$$" >> "$STUB_DIR/pids.log"; exec sleep 300 ;;
+  exit0) exit 0 ;;
   exit3) exit 3 ;;
 esac
 """,
@@ -227,8 +228,117 @@ class TestRefreshLoop:
         try:
             assert _wait_for(lambda: _spawns(tmp_path) != [], timeout=15)
             assert _spawns(tmp_path) == ["ghp_FALLBACKPAT"]
+            # The bridge is LOUD and typed — a silent identity flip is the
+            # class the #1283 review consensus banned.
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=10)
+            assert "identity=operator-pat" in proc.stderr.read()
         finally:
             _stop(proc)
+
+    def test_failed_refresh_never_downgrades_an_app_child_to_pat(self, tmp_path):
+        # The #1283 three-reviewer consensus finding, measured pre-fix: with
+        # GITHUB_PAT set, a failing refresh returned the PAT truthy and the
+        # healthy App child was KILLED every cycle and respawned as the
+        # operator identity. Rotation may only move toward app.
+        mint = _stub_mint(tmp_path)
+        _stub_npx(tmp_path)
+        env = _env(
+            tmp_path,
+            mint,
+            FAIL_AFTER="1",
+            GITHUB_PAT="ghp_FALLBACKPAT",
+            GITHUB_MCP_REFRESH_SECONDS="0.3",
+            GITHUB_MCP_REFRESH_RETRY_SECONDS="0.2",
+        )
+        proc = _start(env)
+        try:
+            assert _wait_for(lambda: _spawns(tmp_path) != [], timeout=15)
+            assert _wait_for(lambda: _mints(tmp_path) >= 3, timeout=15)
+            assert _spawns(tmp_path) == ["ghs_MINT1"], (
+                "a failed App refresh must never rotate the child onto the PAT"
+            )
+            assert proc.poll() is None
+        finally:
+            _stop(proc)
+
+    def test_pat_bridge_upgrades_to_app_when_minting_heals(self, tmp_path):
+        # Boot inside the Pi clock window with a PAT: serve the bridge NOW,
+        # then rotate up to App identity at the short cadence — not 50min of
+        # wrong attribution.
+        mint = _stub_mint(tmp_path)
+        _stub_npx(tmp_path)
+        env = _env(
+            tmp_path,
+            mint,
+            FAIL_FIRST="1",
+            GITHUB_PAT="ghp_FALLBACKPAT",
+            GITHUB_MCP_REFRESH_SECONDS="600",
+            GITHUB_MCP_REFRESH_RETRY_SECONDS="0.2",
+        )
+        proc = _start(env)
+        try:
+            assert _wait_for(lambda: len(_spawns(tmp_path)) >= 2, timeout=15)
+            assert _spawns(tmp_path) == ["ghp_FALLBACKPAT", "ghs_MINT2"]
+        finally:
+            _stop(proc)
+
+    def test_client_close_exits_instead_of_spawn_looping(self, tmp_path):
+        # Adversarial demo pre-fix: child rc=0 on stdin EOF read as a crash →
+        # 23 spawns in 4s, forever, invisible to the orphan reaper. rc=0
+        # means the client closed the stream: exit with it.
+        mint = _stub_mint(tmp_path)
+        _stub_npx(tmp_path, behavior="exit0")
+        env = _env(tmp_path, mint, GITHUB_MCP_REFRESH_SECONDS="600")
+        proc = _start(env)
+        try:
+            proc.wait(timeout=15)
+            assert proc.returncode == 0
+            assert len(_spawns(tmp_path)) == 1
+        finally:
+            if proc.poll() is None:
+                _stop(proc)
+
+    def test_spawn_failure_retries_until_npx_exists(self, tmp_path):
+        # Fork ENOMEM / missing npx at a boundary must not crash the wrapper
+        # (demonstrated uncaught FileNotFoundError pre-fix). No npx at start;
+        # it appears later; the wrapper must still be alive to use it.
+        # PATH is CONSTRAINED for this test: with the normal tail the REAL
+        # npx resolves and launches the real pinned server (measured), so
+        # "npx absent" would never actually happen.
+        mint = _stub_mint(tmp_path)
+        env = _env(tmp_path, mint, GITHUB_MCP_REFRESH_SECONDS="600")
+        env["PATH"] = f"{tmp_path}:/usr/bin:/bin"
+        proc = _start(env)
+        try:
+            time.sleep(0.6)
+            assert proc.poll() is None, "spawn failure must not kill the wrapper"
+            _stub_npx(tmp_path)
+            assert _wait_for(lambda: _spawns(tmp_path) != [], timeout=15)
+        finally:
+            _stop(proc)
+
+    def test_sigterm_reaps_the_child(self, tmp_path):
+        mint = _stub_mint(tmp_path)
+        _stub_npx(tmp_path)
+        env = _env(tmp_path, mint, GITHUB_MCP_REFRESH_SECONDS="600")
+        proc = _start(env)
+        try:
+            assert _wait_for(lambda: (tmp_path / "pids.log").exists(), timeout=15)
+            child_pid = int((tmp_path / "pids.log").read_text().splitlines()[0])
+            _stop(proc)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                raise AssertionError(f"child {child_pid} survived wrapper SIGTERM")
+        finally:
+            if proc.poll() is None:
+                _stop(proc)
 
     def test_never_shells_to_git(self, tmp_path):
         mint = _stub_mint(tmp_path)

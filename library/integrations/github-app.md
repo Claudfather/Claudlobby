@@ -24,7 +24,7 @@ Skills and shell calls that need the App identity mint per call — never a boot
 export, the token dies in about an hour:
 
 ```bash
-GH_TOKEN=$(lib/mint-github-token.sh) gh pr list
+GH_TOKEN=$("$CLAUDLOBBY_ROOT"/lib/mint-github-token.sh) gh pr list
 ```
 
 #### Everything else
