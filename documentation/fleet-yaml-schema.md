@@ -390,6 +390,41 @@ you do not declare keep the host default helper.
 from the process env at push time, so the composed file carries no secret. See the env-name
 contract in [`environment-variables.md`](environment-variables.md).
 
+### `fleet.defaults.github_app` / `bots.<name>.github_app`
+
+GitHub App git-auth routing (App-auth P3, epic #1270 — dormant by default; declaring nothing
+composes nothing, byte-identical to before the feature existed). Declarable fleet-wide and
+overridable per bot; the merge is per-field, and a bot may opt out of a fleet default with
+`enabled: false`.
+
+```yaml
+fleet:
+  defaults:
+    github_app:
+      slug: my-fleet-app          # App URL slug — with bot_user_id, commits become <slug>[bot]
+      bot_user_id: 1234567        # the App BOT USER id (not the App id); both from setup-github-app.sh
+      # orgs: [MyOrg]             # optional: route only these orgs via the App
+```
+
+**What it composes.** An App section in the per-bot `.gitconfig` (`GIT_CONFIG_GLOBAL`): a
+`cache --timeout=3000` layer, the `lib/git-credential-github-app` helper by absolute path, the
+ssh→https `insteadOf` rewrite (App tokens are HTTPS-only), the `<slug>[bot]` commit identity when
+both identity fields are set, and a composed `tools/gh` shim (on PATH ahead of system `gh`) so
+per-call App minting is mechanical. Credential VALUES ride `GITHUB_APP_ID` /
+`GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` in the fleet `.env` — fleet-tier in
+v1 (all bots on a host share one git credential cache, so a per-bot installation override could
+cross-serve cached tokens; the validator warns).
+
+**Precedence is per-DECLARATION, by section order.** An org with an explicit `git_credentials`
+PAT wins over the App for that org — even when the PAT var is EMPTY (the org helper answers with
+an empty password, git presents it, GitHub 401s; the App helper is never consulted). The gh
+fallback survives only for org-scoped App declarations; a host-generic App suppresses it, because
+its only remaining role would be silently substituting the operator identity after an App-helper
+failure.
+
+**Restart-not-reload applies** — the composed `.gitconfig`, `bot.conf` exports, and `tools/gh`
+reach a running bot only at its next restart.
+
 Keys must be org names — a key containing `/` is rejected, because repo-scoped routing would
 silently never match. A declared var that is unset in every `.env` tier is a `validate` **warning**
 (not an error): a missing token is an operator gap, and generation still succeeds.

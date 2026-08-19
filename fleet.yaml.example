@@ -70,6 +70,12 @@ fleet:
     #   MyOrg: MYORG_GITHUB_PAT                # needed when bots push to >1 org: fine-grained
     #   OtherOrg: OTHERORG_GITHUB_PAT          # PATs are single-owner, so one token can't do both.
     #                                          # Composes <bot_dir>/.gitconfig + GIT_CONFIG_GLOBAL.
+    # github_app:                              # OPTIONAL — GitHub App git auth (App-auth P3 #1273).
+    #   slug: my-fleet-app                     # BOTH slug + bot_user_id -> commits as <slug>[bot];
+    #   bot_user_id: 1234567                   # omit both to keep the operator identity. Values from
+    #   # orgs: [MyOrg]                        # lib/setup-github-app.sh. orgs: scopes the App helper
+    #                                          # (else all of github.com). Restart-not-reload applies.
+    #                                          # Credentials ride GITHUB_APP_* in the fleet .env.
     telegram:                                  # telegram defaults — bot stanza overrides per field
       token_env: TELEGRAM_BOT_TOKEN            # shared token (most fleets use one bot token)
       require_mention: true                    # workers respond to @-mentions only
