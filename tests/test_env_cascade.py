@@ -554,3 +554,100 @@ def test_one_bad_var_does_not_smear_across_the_others() -> None:
     for var, err in zip(("A", "B", "C"), errs):
         assert err.startswith(f"integration 'x.md' var '{var}':"), err
         assert err.count("var '") == 1, err
+
+
+# --------------------------------------------------------------------------
+# 7. Paths.env_resolved — the READ DOOR ITSELF
+# --------------------------------------------------------------------------
+#
+# These exist because the door shipped with ZERO consumers and ZERO tests, and
+# credentials.py now depends on it. "Unwired" is a one-line fix; "unverified" is
+# not, and a read path is most likely to be subtly wrong exactly where the
+# estate has live evidence — empty-at-more-specific.
+
+
+@pytest.fixture
+def wired(tmp_path: Path, monkeypatch) -> Path:
+    """A root carrying the REAL resolver, in real overlay layout."""
+    (tmp_path / "library").mkdir()
+    (tmp_path / "lib").mkdir()
+    for f in ("lib-common.sh", "env-tiers.sh"):
+        (tmp_path / "lib" / f).write_bytes((REPO_ROOT / "lib" / f).read_bytes())
+    fleet_dir = tmp_path / "local" / "acme"
+    (fleet_dir / "runtime" / "bots" / "solo").mkdir(parents=True)
+    (fleet_dir / "fleet.yaml").write_text(FLEET_YAML.format(name="acme"))
+    home = tmp_path / "fakehome"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return tmp_path
+
+
+def _paths(root: Path) -> Paths:
+    return Paths(root=root, fleet_dir=root / "local" / "acme")
+
+
+def test_env_resolved_reads_all_four_tiers(wired: Path) -> None:
+    (wired / "fakehome" / ".env").write_text("export A=host\n")
+    (wired / ".env").write_text("export B=root\n")
+    (wired / "local" / "acme" / ".env").write_text("export C=fleet\n")
+    (wired / "local" / "acme" / "runtime" / "bots" / "solo" / ".env").write_text(
+        "export D=bot\n"
+    )
+    res = _paths(wired).env_resolved("solo")
+    assert {k: (v.value, v.tier) for k, v in res.items() if k in "ABCD"} == {
+        "A": ("host", "host"),
+        "B": ("root", "root"),
+        "C": ("fleet", "fleet"),
+        "D": ("bot", "bot"),
+    }
+
+
+def test_env_resolved_honours_most_specific_wins(wired: Path) -> None:
+    (wired / "fakehome" / ".env").write_text("export TOK=host\n")
+    (wired / ".env").write_text("export TOK=root\n")
+    (wired / "local" / "acme" / ".env").write_text("export TOK=fleet\n")
+    res = _paths(wired).env_resolved("solo")
+    assert res["TOK"].value == "fleet"
+    assert res["TOK"].tier == "fleet"
+    assert res["TOK"].shadowed == ("host", "root")
+
+
+def test_env_resolved_reports_the_empty_win_as_documented(wired: Path) -> None:
+    """The case the estate is live evidence for, and where a read path is most
+    likely to be subtly wrong: an empty assignment at a more specific tier WINS
+    and the docstring says the door reports it as such."""
+    (wired / "fakehome" / ".env").write_text("export GITHUB_PAT=real_host_pat\n")
+    (wired / "local" / "acme" / ".env").write_text("export GITHUB_PAT=\n")
+    res = _paths(wired).env_resolved("solo")
+    got = res["GITHUB_PAT"]
+    assert got.value == ""
+    assert got.empty is True
+    assert got.tier == "fleet"
+    assert got.blanked_upstream == ("host",)
+
+
+def test_env_resolved_without_a_bot_omits_the_bot_tier(wired: Path) -> None:
+    """Not the same as a bot whose .env is empty — the question was narrower."""
+    (wired / "local" / "acme" / "runtime" / "bots" / "solo" / ".env").write_text(
+        "export ONLY_AT_BOT=1\n"
+    )
+    assert "ONLY_AT_BOT" not in _paths(wired).env_resolved()
+    assert "ONLY_AT_BOT" in _paths(wired).env_resolved("solo")
+
+
+def test_env_resolved_is_wired_to_the_shipped_credential_reader() -> None:
+    """A read door with no consumer is a door that certifies nothing.
+
+    This shipped with exactly ONE caller — the #1226 canary itself — which is
+    strictly worse than none: the harness made the new door look verified while
+    `credentials.py` kept reading through the WRITE path, and the canary read
+    clean because it was testing what the same change had just built.
+    """
+    import claudlobby.credentials as creds
+
+    src = Path(creds.__file__).read_text()
+    assert "env_resolved" in src, (
+        "credentials.py must read the cascade, not Paths.env_file — a tool that "
+        "enumerates fewer tiers than the runtime calls a host-tier credential "
+        "missing, which is the #1226 defect surviving inside its own fix"
+    )

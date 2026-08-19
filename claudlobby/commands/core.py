@@ -85,12 +85,21 @@ def cmd_creds_reconcile(args) -> int:
     the very defect this exists to remove.
     """
     from ..credentials import exits_nonzero, format_report, reconcile
+    from ..env_tiers import ResolverUnavailable
 
     paths = _resolve_paths(args)
     _load_env(paths)
     fleet, _ = _load_fleet_or_exit(paths)
 
-    findings, scope = reconcile(paths, fleet)
+    try:
+        findings, scope = reconcile(paths, fleet)
+    except ResolverUnavailable as exc:
+        # Refuse rather than fall back to a narrower reader. Falling back is how
+        # this command came to report a host-tier credential as "absent from
+        # every tier" — a wrong answer is worse than no answer here, because it
+        # sends someone to provision a credential that already exists.
+        print(f"cannot reconcile: {exc}")
+        return 2
     print(format_report(findings, scope))
     return 1 if exits_nonzero(findings) else 0
 

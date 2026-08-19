@@ -7,6 +7,7 @@ credential VALUE ever reaches the output.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from textwrap import dedent
 
@@ -41,7 +42,7 @@ INTEGRATION = dedent("""\
 
 
 @pytest.fixture
-def estate(tmp_path: Path):
+def estate(tmp_path: Path, monkeypatch):
     """A root with a SEPARATE fleet dir, so tier shadowing is expressible.
 
     The shared `make_paths` helper sets root == fleet_dir, which collapses the
@@ -55,6 +56,20 @@ def estate(tmp_path: Path):
     (root / "library" / "integrations").mkdir(parents=True)
     (root / "library" / "mcp").mkdir(parents=True)
     (root / "library" / "integrations" / "acme.md").write_text(INTEGRATION)
+
+    # The REAL runtime resolver, because this module now answers through it.
+    # A stub would let this suite certify a cascade the runtime does not have,
+    # which is the class of defect the whole change is about.
+    repo = Path(__file__).resolve().parent.parent
+    (root / "lib").mkdir(parents=True, exist_ok=True)
+    for f in ("lib-common.sh", "env-tiers.sh"):
+        (root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
+    # An isolated HOST tier. Without this the tests would read the developer's
+    # own ~/.env — non-hermetic, and on a machine that happens to define one of
+    # these vars the suite would go green for the wrong reason.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
 
     fleet_dir = root / "local" / "t"
     fleet_dir.mkdir(parents=True)
@@ -116,18 +131,63 @@ class TestShapeOne:
         assert "EMPTY" in row.detail
         assert "absent from every tier" not in row.detail
 
-    def test_shadowed_by_tier_says_so(self, estate):
-        """THE #1104 CASE. A value at root while the fleet reads its own .env is
-        invisible in practice. Reporting it as plain 'missing' sends someone to
-        add a credential that already exists."""
+    def test_a_value_at_a_less_specific_tier_simply_resolves(self, estate):
+        """INVERTS `test_shadowed_by_tier_says_so`.
+
+        WHY THE OLD ASSERTION WAS WRONG: it asserted FAIL / "shadowed, not
+        missing" for a value at root while the fleet has its own `.env`. That
+        was the best answer available to a reader that consulted ONE tier — it
+        at least stopped someone re-adding a credential that existed. But the
+        runtime sources root AND fleet, and the fleet file here does not assign
+        ACME_TOKEN, so nothing shadows anything: the bot gets the value. The old
+        test therefore certified a FAILURE THAT DOES NOT EXIST, and #1226's
+        deliverable 5 says so in as many words — "shadowed, not missing" stops
+        being a reported state and becomes a resolved one.
+
+        Not a relaxation. The case it used to cover is now covered by
+        `test_an_empty_assignment_that_blanks_a_real_value_fails`, which is the
+        state that genuinely breaks a bot and that the old reader could not
+        express at all.
+        """
         root, fleet_dir, fleet, paths = estate
         _write_env(root / ".env", ACME_TOKEN="the-good-one")
         _write_env(fleet_dir / ".env", UNRELATED="x")
         findings, _ = creds.reconcile(paths, fleet)
         row = next(f for f in _shape(findings, 1) if f.subject == "ACME_TOKEN")
-        assert row.verdict == "FAIL"
-        assert "shadowed, not missing" in row.detail
+        assert row.verdict == "OK"
         assert "root" in row.detail
+
+    def test_an_empty_assignment_that_blanks_a_real_value_fails(self, estate):
+        """What replaces "shadowed, not missing", and it is strictly worse.
+
+        An EMPTY assignment at a more specific tier beats a real value upstream,
+        because sourcing is assignment. The key is set, so nothing calls it
+        missing; a value exists, so nothing calls it unconfigured; and the
+        integration gets "". Live on this estate: two fleets carry a pristine
+        `export GITHUB_PAT=` scaffold stub.
+        """
+        root, fleet_dir, fleet, paths = estate
+        _write_env(root / ".env", ACME_TOKEN="the-good-one")
+        (fleet_dir / ".env").write_text("export ACME_TOKEN=\n")
+        findings, _ = creds.reconcile(paths, fleet)
+        row = next(f for f in _shape(findings, 1) if f.subject == "ACME_TOKEN")
+        assert row.verdict == "FAIL"
+        assert "BLANKS" in row.detail
+        assert "root" in row.detail
+
+    def test_a_host_tier_credential_is_not_called_missing(self, estate):
+        """The defect alex found, as a unit test.
+
+        A value in `~/.env` resolves at boot. The old reader enumerated root and
+        fleet only and reported "absent from every tier" — false, and it sends
+        an operator to provision a credential that is already there.
+        """
+        _root, _fleet_dir, fleet, paths = estate
+        _write_env(Path(os.environ["HOME"]) / ".env", ACME_TOKEN="from-host")
+        findings, _ = creds.reconcile(paths, fleet)
+        row = next(f for f in _shape(findings, 1) if f.subject == "ACME_TOKEN")
+        assert row.verdict == "OK", row.detail
+        assert "host" in row.detail
 
 
 class TestShapeTwo:
@@ -212,20 +272,54 @@ class TestRedaction:
 
 
 class TestTierResolution:
-    def test_visible_tier_follows_the_shipped_resolver(self, estate):
-        """Not a private rule — a second resolution rule is how root-vs-fleet
-        became invisible in the first place."""
-        root, fleet_dir, _fleet, paths = estate
-        _write_env(root / ".env", A="1")
-        label, _values = creds.visible_tier(paths)
-        assert label == "root"
-        _write_env(fleet_dir / ".env", A="2")
-        label, _values = creds.visible_tier(paths)
-        assert label == "fleet:t"
-        assert Path(paths.env_file) == fleet_dir / ".env"
+    def test_resolution_reads_every_tier_the_runtime_reads(self, estate):
+        """INVERTS `test_visible_tier_follows_the_shipped_resolver`.
 
-    def test_both_tiers_enumerated_even_though_one_is_read(self, estate):
+        WHY THE OLD ASSERTION WAS WRONG — the claim a reviewer should check,
+        rather than whether the new one looks right. It asserted that the label
+        is "root" when only root holds a value and "fleet:t" once the fleet does
+        — i.e. that exactly ONE tier is consulted and which one flips. The
+        runtime consults FOUR and merges them, so that assertion certified a
+        narrower reader than the system has. It was not a weak test; it was an
+        accurate description of the defect, which is why the suite stayed green
+        while `~/.env` credentials were reported "absent from every tier".
+
+        The name carried the premise too: "the shipped resolver" meant
+        `Paths.env_file` when it was written, and `Paths.env_file` is the WRITE
+        target. Leaving the name would hand the next reader the old framing as
+        intent.
+        """
         root, fleet_dir, _fleet, paths = estate
+        _write_env(Path(os.environ["HOME"]) / ".env", HOST_ONLY="h")
+        _write_env(root / ".env", ROOT_ONLY="r")
+        _write_env(fleet_dir / ".env", FLEET_ONLY="f")
+        _label, values, resolutions = creds.resolved_view(paths)
+        assert values["HOST_ONLY"] == "h"
+        assert values["ROOT_ONLY"] == "r"
+        assert values["FLEET_ONLY"] == "f"
+        assert resolutions["HOST_ONLY"].tier == "host"
+        assert resolutions["FLEET_ONLY"].tier == "fleet"
+
+    def test_the_most_specific_assignment_decides(self, estate):
+        """The half the old one-tier reader could not express at all."""
+        root, fleet_dir, _fleet, paths = estate
+        _write_env(Path(os.environ["HOME"]) / ".env", A="host")
+        _write_env(root / ".env", A="root")
+        _write_env(fleet_dir / ".env", A="fleet")
+        _label, values, resolutions = creds.resolved_view(paths)
+        assert values["A"] == "fleet"
+        assert resolutions["A"].shadowed == ("host", "root")
+
+    def test_all_four_tiers_enumerated_not_two(self, estate):
+        """INVERTS `test_both_tiers_enumerated_even_though_one_is_read`.
+
+        WHY THE OLD ASSERTION WAS WRONG: it pinned the enumeration to exactly
+        `["root", "fleet:t"]`, so a host-tier credential could not appear in the
+        inventory even in principle. The equality made it a ceiling, not a
+        floor — adding the tier the runtime reads first would have failed it.
+        """
+        root, fleet_dir, _fleet, paths = estate
+        _write_env(Path(os.environ["HOME"]) / ".env", H="0")
         _write_env(root / ".env", A="1")
         _write_env(fleet_dir / ".env", B="2")
-        assert [t[0] for t in creds.env_tiers(paths)] == ["root", "fleet:t"]
+        assert [t[0] for t in creds.env_tiers(paths)] == ["host", "root", "fleet:t"]
