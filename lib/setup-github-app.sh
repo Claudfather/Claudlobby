@@ -1,10 +1,10 @@
 #!/bin/bash
 # setup-github-app — one-time host setup + validation for GitHub App auth.
 #
-# App-auth P1 (#1271; runbook: documentation/runbooks/github-app-setup.md).
-# Validates the App credentials end to end THROUGH THE REAL HELPER (the closed
-# loop: the exact code path production mints with, not a lookalike), writes
-# the operator/cron config file, and prints the fleet wiring values.
+# App-auth P1 (#1271; runbook documentation/runbooks/github-app-setup.md
+# ships with App-auth P5, #1275). Validates the App credentials end to end
+# THROUGH THE REAL production mint path (the closed loop, not a lookalike),
+# writes the operator/cron config file, and prints the fleet wiring values.
 #
 # What the fork version of this script did that this one deliberately does
 # NOT: no `git config --global` writes (the composer owns per-bot git config
@@ -17,11 +17,11 @@
 #   lib/setup-github-app.sh --app-id 1234567 --installation-id 7654321 \
 #       --private-key ~/keys/my-app.private-key.pem --slug my-fleet-bot
 #
-# Steps: dependency check -> PEM validation (with the CRLF diagnostic) ->
-# live test mint via lib/git-credential-github-app -> ghs_ assert -> bot
-# user-id lookup -> noreply email -> config-file write (0600) -> config-only
-# re-mint (proves the cron/operator fallback path) -> print the fleet .env
-# names and the fleet.yaml github_app: snippet.
+# The six numbered steps: 1 dependency check -> 2 PEM validation (with the
+# corrupt-key diagnostic) -> 3 live test mint via the mint CLI + ghs_ assert
+# -> 4 bot user-id lookup + noreply email -> 5 config-file write (0600) +
+# config-only re-mint (proves the cron/operator fallback path) -> 6 print
+# the fleet .env names and the fleet.yaml github_app: snippet.
 set -euo pipefail
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,6 +63,10 @@ WRITE_CONFIG=1
 CONFIG_PATH="$(github_app_conf_path)"
 
 while [ $# -gt 0 ]; do
+    case "$1" in
+        --app-id|--installation-id|--private-key|--slug|--config-path)
+            [ $# -ge 2 ] || { printf 'setup-github-app: %s requires a value\n' "$1" >&2; usage 1; } ;;
+    esac
     case "$1" in
         --app-id)          APP_ID="$2";          shift 2 ;;
         --installation-id) INSTALLATION_ID="$2"; shift 2 ;;
@@ -172,8 +176,13 @@ printf '4/6 bot identity: %s (id %s)\n' "$BOT_USERNAME" "$bot_id"
 # --- 5. config file (operator/cron fallback path) ---------------------------
 if [ "$WRITE_CONFIG" -eq 1 ]; then
     config_dir="$(dirname "$CONFIG_PATH")"
-    mkdir -p "$config_dir"
-    chmod 700 "$config_dir"
+    # Tighten the directory mode only when this script created it — a
+    # pre-existing directory (e.g. a shared --config-path parent) keeps
+    # whatever mode the operator gave it; the file itself is 0600 below.
+    if [ ! -d "$config_dir" ]; then
+        mkdir -p "$config_dir"
+        chmod 700 "$config_dir"
+    fi
     # Subshell-scoped umask: the script never mutates the operator's umask.
     (
         umask 177
@@ -191,12 +200,14 @@ EOF
     # Closed loop for the fallback: re-mint with the env deliberately EMPTY so
     # only the file we just wrote can supply the credentials — the exact
     # operator/cron invocation shape.
+    remint_err="$(safe_mktemp)"
     if env -u GITHUB_APP_ID -u GITHUB_APP_INSTALLATION_ID -u GITHUB_APP_PRIVATE_KEY_PATH \
             CLAUDLOBBY_GITHUB_APP_CONF="$CONFIG_PATH" \
-            "$MINT" > /dev/null 2>&1; then
+            "$MINT" > /dev/null 2> "$remint_err"; then
         printf '5/6 config written: %s (0600) — config-only re-mint OK\n' "$CONFIG_PATH"
     else
-        printf 'setup-github-app: config file written but the config-only re-mint FAILED — check %s\n' "$CONFIG_PATH" >&2
+        printf 'setup-github-app: config file written but the config-only re-mint FAILED. Helper said:\n' >&2
+        sed 's/^/  /' "$remint_err" >&2
         exit 1
     fi
 else

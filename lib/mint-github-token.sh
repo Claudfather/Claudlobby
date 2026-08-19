@@ -24,7 +24,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$LIB_DIR/git-credential-github-app"
 
 if out="$(printf 'protocol=https\nhost=github.com\n\n' | "$HELPER" get)"; then
-    token="$(printf '%s\n' "$out" | awk -F= '/^password=/{print $2; exit}')"
+    token="$(printf '%s\n' "$out" | sed -n 's/^password=//p')"
 else
     token=""
 fi

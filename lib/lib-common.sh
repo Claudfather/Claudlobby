@@ -357,6 +357,12 @@ auth_curl_cfg() {
     local cfg h
     cfg="$(safe_mktemp)"
     for h in "$@"; do
+        # Escape backslash then double-quote: an unescaped quote in a value
+        # silently TRUNCATES the header at the curl config parser, which
+        # surfaces as a baffling 401. Unreachable for JWT/ghs_ values, but
+        # this function is the one owner and P4 feeds it arbitrary secrets.
+        h="${h//\\/\\\\}"
+        h="${h//\"/\\\"}"
         printf 'header = "%s"\n' "$h"
     done > "$cfg"
     printf '%s' "$cfg"

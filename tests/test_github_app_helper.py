@@ -72,12 +72,16 @@ for a in "$@"; do
   prev="$a"
 done
 [ -n "$cfg_file" ] && cat "$cfg_file" >> "$STUB_DIR/cfg.log"
+[ -n "${HTTPS_PROXY:-}${ROGUE_KEY:-}" ] && touch "$STUB_DIR/rogue-env-leaked"
 mode="${GITHUB_APP_STUB_MODE:-ok}"
 case "$url" in
   *access_tokens*)
     if [ "$mode" = http401 ]; then
       printf '{"message":"A JSON web token could not be decoded"}' > "$out_file"
       printf '401'
+    elif [ "$mode" = http404 ]; then
+      printf '{"message":"Not Found"}' > "$out_file"
+      printf '404'
     else
       printf '{"token":"__TOKEN__"}' > "$out_file"
       printf '201'
@@ -142,9 +146,37 @@ class TestHelperGet:
     def test_happy_path_answers_the_credential_protocol(self, app_env):
         r = _run(HELPER, app_env["env"])
         assert r.returncode == 0, r.stderr
-        assert "username=x-access-token" in r.stdout
+        # EXACT equality, not substrings: one stray echo anywhere after the
+        # host gate (including from sourced lib-common) breaks git's protocol
+        # parse while substring asserts stay green. Review finding on #1281.
+        assert r.stdout == f"username=x-access-token\npassword={STUB_TOKEN}\n"
+
+    def test_git_itself_accepts_the_helper_output(self, app_env, tmp_path):
+        # The consumer-side pin: real git drives the helper through
+        # credential fill and must parse the output without complaint.
+        repo = tmp_path / "r"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True, env=app_env["env"])
+        r = subprocess.run(
+            ["git", "-c", f"credential.helper={HELPER}", "credential", "fill"],
+            input="protocol=https\nhost=github.com\n\n",
+            text=True,
+            capture_output=True,
+            cwd=repo,
+            env=app_env["env"],
+            timeout=60,
+        )
+        assert r.returncode == 0, r.stderr
         assert f"password={STUB_TOKEN}" in r.stdout
-        assert "quit=" not in r.stdout
+        assert "invalid credential line" not in r.stderr
+
+    def test_explicit_default_port_still_serves_github(self, app_env):
+        # git sends host=github.com:443 for an explicit-port URL; declining
+        # on exact equality would fall through to the operator helper — the
+        # silent-wrong-identity class through a different door.
+        r = _run(HELPER, app_env["env"], stdin="protocol=https\nhost=github.com:443\n\n")
+        assert r.returncode == 0, r.stderr
+        assert f"password={STUB_TOKEN}" in r.stdout
 
     def test_neither_token_nor_jwt_nor_key_rides_argv(self, app_env):
         _run(HELPER, app_env["env"])
@@ -213,6 +245,34 @@ class TestHelperGet:
         assert r2.returncode == 0, r2.stderr
         argv = (app_env["stub"] / "argv.log").read_text()
         assert "555002" in argv and "111999" not in argv
+
+    def test_rogue_config_keys_never_reach_subprocesses(self, app_env, rsa_key):
+        # parse_env_file exports every key it accepts; the helper contains it
+        # in a subshell and reads back only the three GITHUB_APP_* values, so
+        # a rogue HTTPS_PROXY= or ROGUE_KEY= line dies with the subshell
+        # instead of steering curl. Review finding on #1281.
+        conf = app_env["home"] / "rogue.conf"
+        conf.write_text(
+            'GITHUB_APP_ID="999001"\n'
+            'GITHUB_APP_INSTALLATION_ID="555002"\n'
+            f'GITHUB_APP_PRIVATE_KEY_PATH="{rsa_key}"\n'
+            'HTTPS_PROXY="http://attacker.example:8080"\n'
+            'ROGUE_KEY="x"\n'
+        )
+        env = _without_app_vars(app_env["env"])
+        env["CLAUDLOBBY_GITHUB_APP_CONF"] = str(conf)
+        r = _run(HELPER, env)
+        assert r.returncode == 0, r.stderr
+        assert f"password={STUB_TOKEN}" in r.stdout
+        assert not (app_env["stub"] / "rogue-env-leaked").exists()
+
+    def test_http_404_names_the_installation_id(self, app_env):
+        env = dict(app_env["env"], GITHUB_APP_STUB_MODE="http404")
+        r = _run(HELPER, env)
+        assert r.returncode != 0
+        assert "quit=1" in r.stdout
+        assert "installation id 555002" in r.stderr
+        assert "not installed" in r.stderr
 
     def test_store_and_erase_are_silent_noops(self, app_env):
         for action in ("store", "erase"):
@@ -292,3 +352,9 @@ class TestSetupScript:
         assert r.returncode != 0
         assert "Most likely causes" in r.stderr
         assert "fingerprint" in r.stderr
+
+    def test_flag_without_value_gets_usage_not_unbound(self, app_env):
+        r = _run(SETUP, app_env["env"], stdin="", args=("--app-id",))
+        assert r.returncode == 1, "arg errors follow the script convention usage 1"
+        assert "requires a value" in r.stderr
+        assert "unbound variable" not in r.stderr
