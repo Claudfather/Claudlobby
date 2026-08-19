@@ -203,6 +203,13 @@ class TestHelperGet:
         assert r.returncode == 0
         assert r.stdout == ""
 
+    def test_absent_host_gets_silence_not_a_token(self, app_env):
+        # Serve-only gate: a context with NO host line must not mint. The
+        # decline-if-present-and-wrong shape served a token by default here.
+        r = _run(HELPER, app_env["env"], stdin="protocol=https\n\n")
+        assert r.returncode == 0
+        assert r.stdout == ""
+
     def test_http_401_is_loud_quit_plus_event(self, app_env):
         env = dict(app_env["env"], GITHUB_APP_STUB_MODE="http401")
         r = _run(HELPER, env)
