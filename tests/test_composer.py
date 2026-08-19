@@ -4136,7 +4136,7 @@ class TestPerOrgGitCredentialRouting:
         monkeypatch.setattr(
             comp, "_operator_gitconfig", lambda: tmp_path / "user.gitconfig"
         )
-        return comp.compose_bot_gitconfig(_git_cred_bot(creds))
+        return comp.compose_bot_gitconfig(_git_cred_bot(creds), _make_paths(tmp_path))
 
     # --- the three load-bearing ordering properties -----------------------
 
@@ -4231,7 +4231,7 @@ class TestGitCredentialRoutingResolvesForReal:
         monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: str(gh_stub))
         monkeypatch.setattr(comp, "_operator_gitconfig", lambda: user_cfg)
         cfg = tmp_path / "composed.gitconfig"
-        cfg.write_text(comp.compose_bot_gitconfig(_git_cred_bot(creds)))
+        cfg.write_text(comp.compose_bot_gitconfig(_git_cred_bot(creds), _make_paths(tmp_path)))
         return cfg
 
     @staticmethod
