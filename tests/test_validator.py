@@ -1554,13 +1554,17 @@ class TestGitCredentialsWarnings:
     def test_declared_token_missing_from_env_warns(
         self, fleet_dir, tmp_path, monkeypatch
     ):
-        """A declared org whose token is unset composes valid routing that then
-        presents no credential — git falls through to the host helper and 403s."""
+        """A declared org whose token is unset composes routing that answers
+        with an EMPTY password — git presents it and GitHub 401s; later helpers
+        are never consulted (D2: declaration wins, not value — the old wording
+        claimed a fall-through to the host helper that cannot happen)."""
         operator = tmp_path / "operator.gitconfig"
         operator.write_text("[user]\n\temail = operator@example.com\n")
         monkeypatch.delenv("ORG_A_PAT", raising=False)
         warns = self._token_warnings(self._report(fleet_dir, monkeypatch, operator))
-        assert any("ORG_A_PAT" in w and "403" in w for w in warns), warns
+        assert any(
+            "ORG_A_PAT" in w and "EMPTY password" in w and "401" in w for w in warns
+        ), warns
 
 
 class TestEnvContractShapeGate:

@@ -23,6 +23,7 @@ it to every bot on the host.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -409,9 +410,16 @@ def _externals_report(
     # correctly while user.name/user.email vanish, surfacing only as
     # 'Author identity unknown' at the first commit with nothing pointing back at
     # the composed file. An absent host prerequisite belongs in the fresh-box gate.
-    if bot.git_credentials:
+    if bot.git_credentials or bot.github_app:
         from .composer import _operator_gitconfig, _resolve_gh_executable
 
+        # An App bot with a COMPOSED identity ([user] after the include) does
+        # not depend on the include for user.email, so 'Author identity
+        # unknown' cannot occur for it — a FAIL promising that symptom would
+        # outlive its truth (D7 split). It still WARNs: the include also
+        # carries aliases and the operator's non-identity config.
+        app = bot.github_app
+        app_identity = bool(app and app.slug and app.bot_user_id)
         operator = _operator_gitconfig()
         if operator.is_file():
             findings.append(
@@ -422,20 +430,84 @@ def _externals_report(
                     f"git identity include → {operator}",
                 )
             )
+        elif app_identity:
+            findings.append(
+                Finding(
+                    bot.bot_id,
+                    "missing_external",
+                    WARN,
+                    f"composed .gitconfig includes {operator}, which does not "
+                    "exist — commit identity is safe (the composed App "
+                    "identity supplies user.name/user.email), but any operator "
+                    "aliases/config the include would carry are silently absent",
+                )
+            )
         else:
             findings.append(
                 Finding(
                     bot.bot_id,
                     "missing_external",
                     FAIL,
-                    f"git_credentials composes an [include] of {operator}, which "
-                    "does not exist — git ignores a missing include silently, so "
+                    f"composed .gitconfig includes {operator}, which does not "
+                    "exist — git ignores a missing include silently, so "
                     "credential routing will work while user.name/user.email are "
                     "unset and every commit fails 'Author identity unknown'. Create "
-                    "it (git config --global user.email …) or drop git_credentials",
+                    "it (git config --global user.email …) or drop the declaration",
                 )
             )
-        if gh_bin := _resolve_gh_executable():
+        if app:
+            # The private key is the App's crown jewel and the one file the
+            # composed routing hard-requires at mint time. Missing → FAIL
+            # (every git auth will quit=1); readable by group/other → FAIL
+            # (a shared-host secret at rest, the pii-protection class).
+            # Same tier rule as credentials.py: fleet .env if present, else
+            # root — one or the other, never merged; ambient env as fallback.
+            env_vals = dotenv.read(paths.env_file) if paths.env_file.is_file() else {}
+            key_path = env_vals.get("GITHUB_APP_PRIVATE_KEY_PATH") or os.environ.get(
+                "GITHUB_APP_PRIVATE_KEY_PATH", ""
+            )
+            if not key_path:
+                pass  # absent VALUE is the validator's warn, not a host audit
+            else:
+                kp = Path(key_path).expanduser()
+                if not kp.is_file():
+                    findings.append(
+                        Finding(
+                            bot.bot_id,
+                            "missing_external",
+                            FAIL,
+                            f"GITHUB_APP_PRIVATE_KEY_PATH → {kp}, which does not "
+                            "exist — every git auth on this bot will fail loudly "
+                            "(helper quit=1) at first use",
+                        )
+                    )
+                else:
+                    mode = kp.stat().st_mode & 0o777
+                    if mode & 0o077:
+                        findings.append(
+                            Finding(
+                                bot.bot_id,
+                                "denied_value",
+                                FAIL,
+                                f"App private key {kp} is mode {mode:o} — group/"
+                                "other-readable key material on a shared host; "
+                                "chmod 600 it",
+                            )
+                        )
+                    else:
+                        findings.append(
+                            Finding(
+                                bot.bot_id,
+                                "external_ref",
+                                INFO,
+                                f"App private key → {kp} (0{mode:o})",
+                            )
+                        )
+        # gh fallback: emitted for git_credentials bots and org-scoped App
+        # bots; a host-generic App suppresses it in the composed file, so
+        # reporting it as an external would claim a dependency that is not
+        # wired (coverage honesty).
+        if (gh_bin := _resolve_gh_executable()) and not (app and not app.orgs):
             findings.append(
                 Finding(
                     bot.bot_id,

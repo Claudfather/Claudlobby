@@ -93,6 +93,44 @@ def _operator_git_identity_problem() -> str | None:
     return None
 
 
+def _operator_reverse_insteadof() -> str | None:
+    """An ssh-forcing GitHub rewrite in the operator gitconfig, or None.
+
+    The composed App routing works over https; a
+    ``url."git@github.com:".insteadOf = https://github.com/`` (or
+    ``pushInsteadOf``) in the INCLUDED operator config rewrites https remotes
+    to ssh BEFORE the credential layer runs, bypassing it entirely (D6).
+    Single-pass rewriting means nothing composable can undo it — the only
+    honest handling is naming it at validate time. Same delegation posture as
+    ``_operator_git_identity_problem``: ask git, never hand-parse the file.
+    """
+    from .composer import _operator_gitconfig  # local: composer imports config, not us
+
+    operator = _operator_gitconfig()
+    if not operator.is_file() or not shutil.which("git"):
+        return None
+    probe = subprocess.run(
+        [
+            "git",
+            "config",
+            "--file",
+            str(operator),
+            "--includes",
+            "--get-regexp",
+            r"url\..*\.(push)?insteadof",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return None  # no insteadOf config at all
+    for line in probe.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if "git@github.com" in key.lower() and "https://github.com" in value.lower():
+            return f"{operator} carries '{key} = {value}'"
+    return None
+
+
 @dataclass
 class ValidationReport:
     errors: list[str] = field(default_factory=list)
@@ -386,7 +424,20 @@ def _validate_bots(
     # and only when some bot actually declares git_credentials.
     git_identity_problem = (
         _operator_git_identity_problem()
-        if any(b.git_credentials for b in fleet.bots.values())
+        if any(
+            b.git_credentials or b.github_app for b in fleet.bots.values()
+        )
+        else None
+    )
+    # D6 (App-auth P3): an operator ~/.gitconfig carrying an ssh-FORCING
+    # rewrite (url."git@github.com:".insteadOf/pushInsteadOf = https://...)
+    # defeats the whole composed credential layer — URL rewriting is
+    # single-pass, so the composed git@→https rule cannot chain to undo it.
+    # Nothing composable fixes it; a warning at validate time is the only
+    # place the failure points back to its cause. Probed once per run.
+    reverse_insteadof_problem = (
+        _operator_reverse_insteadof()
+        if any(b.github_app for b in fleet.bots.values())
         else None
     )
     # Vault resolution is a full walk-up + scan per call, and `claudron_vault_path`
@@ -733,8 +784,10 @@ def _validate_bots(
             if not _env_has_value(effective_env, env_name):
                 report.warnings.append(
                     f"bot '{bot_name}': git_credentials['{org}'] names '{env_name}', "
-                    f"not set in any tier of .env — pushes to {org} will fall back to "
-                    f"the host credential helper and may 403"
+                    f"not set in any tier of .env — the org helper answers with an "
+                    f"EMPTY password, which git presents and GitHub 401s; later "
+                    f"helpers (App or host default) are NOT consulted (D2: a "
+                    f"declared org wins by declaration, not by having a value)"
                 )
 
         # The other half of the same declaration: routing composes an [include] of
@@ -748,6 +801,63 @@ def _validate_bots(
                 f"identity, but {git_identity_problem} — credential routing will work "
                 f"while every commit fails 'Author identity unknown'"
             )
+
+        # GitHub App routing (App-auth P3 #1273) — all warn, never fail.
+        app = bot.github_app
+        if app:
+            for var_name in (
+                "GITHUB_APP_ID",
+                "GITHUB_APP_INSTALLATION_ID",
+                "GITHUB_APP_PRIVATE_KEY_PATH",
+            ):
+                if not _env_has_value(effective_env, var_name):
+                    report.warnings.append(
+                        f"bot '{bot_name}': github_app routing requires {var_name}, "
+                        f"not set in any tier of .env — the composed helper will "
+                        f"fail loudly (quit=1) at the first git auth; set it, or "
+                        f"run lib/setup-github-app.sh (its config-file fallback "
+                        f"covers operator/cron shells only, never bot sessions)"
+                    )
+            if bool(app.slug) != bool(app.bot_user_id):
+                have, need = (
+                    ("slug", "bot_user_id") if app.slug else ("bot_user_id", "slug")
+                )
+                report.warnings.append(
+                    f"bot '{bot_name}': github_app declares {have} without {need} — "
+                    f"the App commit identity composes only when BOTH are set, so "
+                    f"commits will carry the operator identity (get both from "
+                    f"lib/setup-github-app.sh output)"
+                )
+            if git_identity_problem and not (app.slug and app.bot_user_id):
+                report.warnings.append(
+                    f"bot '{bot_name}': github_app without a composed App identity "
+                    f"relies on the operator include for user.email, but "
+                    f"{git_identity_problem} — commits will fail 'Author identity "
+                    f"unknown'"
+                )
+            if reverse_insteadof_problem:
+                report.warnings.append(
+                    f"bot '{bot_name}': github_app routing is defeated by the "
+                    f"operator gitconfig: {reverse_insteadof_problem} — an "
+                    f"ssh-forcing rewrite bypasses the credential layer entirely "
+                    f"(URL rewriting is single-pass; the composed git@->https "
+                    f"rule cannot undo it); remove it or scope it away from "
+                    f"github.com"
+                )
+            for var_name in (
+                "GITHUB_APP_ID",
+                "GITHUB_APP_INSTALLATION_ID",
+                "GITHUB_APP_PRIVATE_KEY_PATH",
+            ):
+                if var_name in bot.env:
+                    report.warnings.append(
+                        f"bot '{bot_name}': bot-tier env overrides {var_name} — "
+                        f"all bots on this host share ONE git credential-cache "
+                        f"daemon keyed only by URL, so a per-bot installation "
+                        f"override can cross-serve another installation's cached "
+                        f"token with zero symptoms (D4); App credentials are "
+                        f"fleet-tier in v1"
+                    )
 
         # Observability config (warn). Fields may be None (= use hardcoded default);
         # only validate when explicitly set.
