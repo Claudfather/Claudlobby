@@ -169,11 +169,14 @@ KNOWN_CREDENTIAL_SOURCES: frozenset[str] = frozenset(
         # `gh auth token` — the host default GitHub identity.
         "cli:gh-token",
         # RESERVED, and deliberately unresolvable: no resolver arm reads this.
-        # Fork F1 ships `cli` only and reserves minting, and fork F3 (where a
-        # GitHub App private key lives) is deferred to the #252 sidecar work.
-        # It is registered now so the schema is proven against the harder class
-        # before the shape sets, and so adding minting later is one arm rather
-        # than a migration of every contract entry.
+        # Fleet-scope GitHub App minting SHIPPED as the use-time helper
+        # (lib/git-credential-github-app + lib/mint-github-token.sh, App-auth
+        # P1 #1271) rather than as this boot-time resolver — a resolver would
+        # put ~1h tokens at rest in the launch env, the exact hazard #1214 F5
+        # names. The arm stays reserved for #252's per-bot sidecar, where a
+        # per-bot vending process changes the shape. Registered so the schema
+        # is proven against the harder class and adding that arm later is one
+        # change rather than a migration of every contract entry.
         "mint:github-app",
     }
 )

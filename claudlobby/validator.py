@@ -572,15 +572,20 @@ def _validate_bots(
                     f"{known}{hint(source, KNOWN_CREDENTIAL_SOURCES)}"
                 )
             elif source == "mint:github-app":
-                # Registered but deliberately unresolvable: no resolver arm
-                # reads it (F1 ships `cli` only). Declaring it is legal and
-                # records intent; saying so here is what stops someone waiting
-                # for a value that is never coming.
+                # Registered but deliberately unresolvable: no boot-time
+                # resolver reads it, and that is a design decision, not a gap
+                # (a resolver would put ~1h tokens at rest in the launch env).
+                # Fleet-scope App minting ships as the USE-TIME helper instead.
+                # Declaring it is legal and records intent; saying so here is
+                # what stops someone waiting for a value that is never coming.
                 report.warnings.append(
                     f"bot '{bot_name}': credential_sources['{var_name}'] = "
-                    f"'mint:github-app' is RESERVED and resolves nothing yet — "
-                    f"supply {var_name} in a .env tier until the minting "
-                    f"resolver ships"
+                    f"'mint:github-app' is RESERVED — no boot-time resolver "
+                    f"reads it (deliberate; App-auth mints at use time via "
+                    f"lib/git-credential-github-app, see mcp: [github-app] "
+                    f"and lib/mint-github-token.sh). Supply {var_name} in a "
+                    f".env tier or adopt App mode; the resolver arm belongs "
+                    f"to #252's per-bot sidecar"
                 )
 
         # Integrations (warn). Accepts `name`, `dir/name`, or `dir/`.

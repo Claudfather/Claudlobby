@@ -24,7 +24,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _write_exec, constructed_env, read_fleet_events
+from tests.conftest import (
+    _write_exec,
+    booby_trap_git,
+    constructed_env,
+    read_fleet_events,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER = REPO_ROOT / "lib" / "git-credential-github-app"
@@ -311,11 +316,10 @@ class TestMintCli:
     def test_never_shells_to_git_credential(self, app_env):
         # D1/D10 pin: a booby-trapped `git` on PATH proves the mint path never
         # consults git at all — helper-direct is the program invariant.
-        trap = app_env["stub"] / "git"
-        _write_exec(trap, "#!/bin/bash\ntouch \"$STUB_DIR/git-was-called\"\nexit 1\n")
+        sentinel = booby_trap_git(app_env["stub"])
         r = _run(MINT, app_env["env"], args=())
         assert r.returncode == 0, r.stderr
-        assert not (app_env["stub"] / "git-was-called").exists()
+        assert not sentinel.exists()
 
 
 class TestSetupScript:
@@ -324,10 +328,7 @@ class TestSetupScript:
         # Redesign pin, structural: the fork original ran `git config --global`
         # — a booby-trapped `git` on PATH proves this version never invokes
         # git at all (same pattern as test_never_shells_to_git_credential).
-        _write_exec(
-            app_env["stub"] / "git",
-            '#!/bin/bash\ntouch "$STUB_DIR/git-was-called"\nexit 1\n',
-        )
+        sentinel = booby_trap_git(app_env["stub"])
         r = _run(
             SETUP,
             app_env["env"],
@@ -335,7 +336,7 @@ class TestSetupScript:
             args=_setup_args(rsa_key, "--config-path", str(conf)),
         )
         assert r.returncode == 0, r.stderr + r.stdout
-        assert not (app_env["stub"] / "git-was-called").exists()
+        assert not sentinel.exists()
         assert conf.exists()
         assert stat.S_IMODE(conf.stat().st_mode) == 0o600
         assert "bot_user_id: 4242" in r.stdout
