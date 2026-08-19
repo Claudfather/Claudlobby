@@ -170,6 +170,19 @@ def test_the_transcription_is_faithful() -> None:
     correct until this change lands (after which HEAD holds the new block) and
     ``git log -S`` returns the commit that INTRODUCED a string, which for these
     lines predates the nested-fleet rewrite that gave the block its final shape.
+
+    NEEDS HISTORY, AND "HAS HISTORY" IS NOT THE SAME QUESTION AS "HAS ENOUGH".
+    The first version of this guard skipped on ``rc != 0 or not stdout`` — that
+    is history ABSENT. CI clones at ``depth 1``, where ``git log`` returns ONE
+    commit at rc 0: present but INSUFFICIENT. The guard read healthy, the single
+    revision was HEAD carrying the NEW block, and the test failed on a branch
+    that was correct. A degraded resource passes a presence check.
+
+    So insufficiency is decided on the FAILURE path, not upfront. A shallow
+    clone deep enough to contain the legacy block still proves the point, and
+    skipping before looking would throw that coverage away for no gain. Only
+    when the search comes back empty does it matter whether history could have
+    answered: truncated -> skip (undecidable), complete -> fail (real drift).
     """
     log = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "log", "--format=%H", "-n", str(_HISTORY_SCAN_CAP),
@@ -177,7 +190,7 @@ def test_the_transcription_is_faithful() -> None:
         capture_output=True, text=True, timeout=120,
     )
     if log.returncode != 0 or not log.stdout.strip():
-        pytest.skip("git history unavailable (shallow clone or exported tree)")
+        pytest.skip("git history unavailable (not a repo, or an exported tree)")
     shas = log.stdout.split()
     wanted = (
         '[ -f "$HOME/.env" ]',
@@ -194,10 +207,31 @@ def test_the_transcription_is_faithful() -> None:
         ).stdout
         if all(line in blob for line in wanted):
             return
+    if _history_is_truncated():
+        pytest.skip(
+            f"history is truncated (shallow clone; {len(shas)} revision(s) of "
+            f"lib/start-bot.sh reachable) — cannot distinguish a drifted "
+            f"transcription from a block that predates the clone depth"
+        )
     pytest.fail(
         f"no revision among the last {len(shas)} touching lib/start-bot.sh carried "
         f"the transcribed legacy block — the transcription has drifted"
     )
+
+
+def _history_is_truncated() -> bool:
+    """True when this checkout cannot see all of its own history.
+
+    Asked only after a search has already come back empty, to decide whether
+    that emptiness is evidence. ``--is-shallow-repository`` prints
+    ``true``/``false``; anything else (old git, not a repo) is treated as
+    truncated, which fails toward SKIP rather than toward a false drift alarm.
+    """
+    probe = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "--is-shallow-repository"],
+        capture_output=True, text=True, timeout=60,
+    )
+    return probe.returncode != 0 or probe.stdout.strip() != "false"
 
 
 # --------------------------------------------------------------------------
