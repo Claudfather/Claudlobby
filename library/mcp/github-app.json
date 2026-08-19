@@ -1,0 +1,56 @@
+{
+  "_env_contract": {
+    "GITHUB_APP_ID": {
+      "description": "GitHub App ID (numeric, top of the App settings page). One of the three inputs the use-time helper (lib/git-credential-github-app) mints ~1h installation tokens from. Human-supplied — deliberately no source: the mint:github-app resolver arm stays RESERVED for the #252 per-bot sidecar, because a boot-time resolver would put 1h tokens at rest in the launch env.",
+      "default_tier": "fleet",
+      "secret": true
+    },
+    "GITHUB_APP_INSTALLATION_ID": {
+      "description": "GitHub App installation ID for the org/account this fleet commits to. Without it the JWT exchange has no target, so it is secret under the authenticate-without test even though the value itself is not confidential.",
+      "default_tier": "fleet",
+      "secret": true
+    },
+    "GITHUB_APP_PRIVATE_KEY_PATH": {
+      "description": "Path to the App private-key .pem on this host (the key file itself must be 0600 and is never composed anywhere). lib/setup-github-app.sh validates all three values end to end and prints these lines for the fleet .env.",
+      "default_tier": "fleet",
+      "secret": true
+    }
+  },
+  "_permissions_contract": {
+    "tools": [
+      "search_code",
+      "search_issues",
+      "search_repositories",
+      "search_users",
+      "get_file_contents",
+      "get_issue",
+      "get_pull_request",
+      "get_pull_request_comments",
+      "get_pull_request_files",
+      "get_pull_request_reviews",
+      "get_pull_request_status",
+      "list_commits",
+      "list_issues",
+      "list_pull_requests",
+      "create_branch",
+      "create_issue",
+      "create_or_update_file",
+      "create_pull_request",
+      "create_pull_request_review",
+      "create_repository",
+      "fork_repository",
+      "push_files",
+      "add_issue_comment",
+      "update_issue",
+      "update_pull_request_branch",
+      "merge_pull_request"
+    ]
+  },
+  "github-app": {
+    "command": "/bin/sh",
+    "args": [
+      "-c",
+      "exec \"${CLAUDLOBBY_ROOT}/lib/github-app-mcp-wrapper.py\""
+    ]
+  }
+}
