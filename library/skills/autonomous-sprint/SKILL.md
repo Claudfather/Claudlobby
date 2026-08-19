@@ -129,8 +129,10 @@ For each issue, sequentially:
 4. **Between issues**: check the engineer's reported state — NOT a context
    percentage, which no bot can measure (`context-management`)
    - If it reported `context-degraded`, or shows ~3+ completed rows in
-     `claudlobby report-back --bot <b> --status completed --since 24h`:
-     restart the bot before the next issue
+     `claudlobby --fleet "$FLEET_NAME" report-back --bot <b> --status completed
+     --since 24h`: restart the bot before the next issue. **Keep `--fleet`** —
+     the ledger is per-fleet, and the flagless form resolves the root tier and
+     answers about a file that does not exist (#1216)
    - Otherwise: dispatch next issue
 
 **Step 8: Sprint summary**

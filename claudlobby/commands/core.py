@@ -11,6 +11,12 @@ from pathlib import Path
 
 from ..composer import compose_bot, compose_fleet
 from ..diff import diff_bot, promote_bot
+from ..source_state import (
+    SOURCE_ABSENT,
+    UNREACHABLE_REMEDIES,
+    probe_source,
+    unreachable_line,
+)
 from ..validator import validate
 from ._helpers import _load_env, _load_fleet_or_exit, _resolve_paths
 
@@ -357,16 +363,52 @@ def cmd_status(args) -> int:
 
 
 def cmd_report_back(args) -> int:
-    """Query the report-back ledger — human-readable table of bot work events."""
+    """Query the report-back ledger — human-readable table of bot work events.
+
+    #1216: an unreachable ledger and a ledger with no matching rows must not
+    render alike. They did — both were an ``INFO`` line on *stderr* and rc 0 with
+    **zero bytes on stdout** — and the composed manager guidance told managers to
+    decide worker restarts on this command's output, without ``--fleet``. Run that
+    way it resolves the ROOT tier, finds nothing, and reads as "this worker is
+    fresh". Measured on the reporting host: a manager followed its own
+    instructions for a day and read zero completed while three bots sat at 6, 6
+    and 9; the fleet-tier ledger held 34 rows for the bot in question the whole
+    time.
+
+    The remedy is rc **and** stdout, because they cover different readers: rc is
+    invisible to a human at a terminal, and a stdout line is invisible to a
+    script. Nothing parses this command's stdout (it is a human table; the one
+    documented pipe is into ``grep``), which is what makes stdout safe here and
+    is *not* true of ``dispatch-overdue.py`` — see ``source_state``.
+    """
     paths = _resolve_paths(args)
 
     # Resolve ledger path (fleet_state owns the overlay-vs-root rule; the shell
     # twin is fleet_runtime_dir in lib-common.sh, used by report-back.sh)
     ledger = paths.fleet_state / "report-back.jsonl"
 
-    if not ledger.is_file():
-        log.info("no report-back ledger found at %s", ledger)
-        return 0
+    probe = probe_source(ledger)
+    if probe.unreachable:
+        # Name the fleet-tier remedy only in root mode, where it is the actual
+        # cause. In overlay mode --fleet was already passed, so suggesting it
+        # would send the reader to re-run the command they just ran.
+        #
+        # And only for ABSENT. The tier remedy answers "the file is not here",
+        # so on UNREADABLE -- where the file WAS reached and the fix is
+        # permissions -- it is advice for a different fault, in the one state
+        # whose entire purpose is being distinguishable (#1227 review).
+        remedy = (
+            ""
+            if getattr(args, "fleet", None) or probe.state != SOURCE_ABSENT
+            else UNREACHABLE_REMEDIES["fleet_tier"]
+        )
+        line = unreachable_line("the report-back ledger", probe, remedy=remedy)
+        # --json makes stdout MACHINE-facing, so the disclosure moves to stderr
+        # there: a prose line emitted into a JSONL stream is the phantom-row
+        # defect this fix exists to prevent, re-created by the fix. rc carries it
+        # in both modes; the placement only decides which reader also sees text.
+        print(line, file=sys.stderr if args.json else sys.stdout)
+        return 1
 
     # Parse --since into a cutoff timestamp
     cutoff = None
@@ -391,6 +433,7 @@ def cmd_report_back(args) -> int:
 
     # Read and filter entries
     entries = []
+    total_rows = 0
     for line in ledger.read_text().splitlines():
         line = line.strip()
         if not line:
@@ -399,6 +442,7 @@ def cmd_report_back(args) -> int:
             entry = _json.loads(line)
         except _json.JSONDecodeError:
             continue
+        total_rows += 1
         if args.bot and entry.get("bot") != args.bot:
             continue
         if args.status and entry.get("status") != args.status:
@@ -413,7 +457,15 @@ def cmd_report_back(args) -> int:
         entries.append(entry)
 
     if not entries:
-        log.info("no matching events")
+        # Emptiness is stated POSITIVELY, naming the ledger that was read and how
+        # many rows it holds. "0 matched of 34 rows in <path>" cannot be confused
+        # with "cannot read <path>", which is the whole point: the reader learns
+        # the instrument worked and the filter is what excluded everything. Left
+        # on stderr under --json so an empty JSONL stream stays empty.
+        print(
+            f"0 event(s) matched — read {total_rows} row(s) from {ledger}",
+            file=sys.stderr if args.json else sys.stdout,
+        )
         return 0
 
     if args.json:
@@ -516,9 +568,26 @@ def cmd_brief(args) -> int:
 def cmd_workstreams(args) -> int:
     """Read-only view of the fleet workstream registry. Writes go exclusively
     through lib/workstream-update.sh and the /workstream manager skill."""
-    from ..workstreams import format_list, format_show, load_workstreams
+    from ..workstreams import format_list, format_show, load_workstreams, registry_path
 
     paths = _resolve_paths(args)
+
+    # Same class as #1216: ``load_workstreams`` returns {} for an absent registry
+    # AND for an empty one, so ``format_list`` printed "No workstreams." either
+    # way — a manager reading that cannot tell "this fleet has no open
+    # workstreams" from "this fleet's registry was never created, or I resolved
+    # the wrong tier". Probed here rather than inside load_workstreams because
+    # that function is also imported by brief.py, which has its own remedy
+    # (label the section) and must keep its current contract.
+    registry = registry_path(paths)
+    probe = probe_source(registry)
+    if probe.unreachable:
+        remedy = (
+            "" if getattr(args, "fleet", None) else UNREACHABLE_REMEDIES["fleet_tier"]
+        )
+        print(unreachable_line("the workstream registry", probe, remedy=remedy))
+        return 1
+
     workstreams = load_workstreams(paths)
     if getattr(args, "ws_command", "list") == "show":
         entry = workstreams.get(args.id)

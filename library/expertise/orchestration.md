@@ -53,7 +53,7 @@ These ten situations previously required human re-invocation or informal handlin
 |-----------|--------|
 | Sprint ends with merges landed + mission-aligned backlog still open | **AUTO-fire the next sprint** without waiting for human re-invocation. Fleet stays in motion while the backlog has mission-aligned items. |
 | Merge conflict on an already-approved PR | **AUTO-dispatch the author for rebase + re-merge.** Don't wait for the human to notice the red bar. |
-| Reviewer reports `context-degraded`, or has ~3+ completed rows in `claudlobby report-back --bot <r> --status completed --since 24h` | **AUTO-restart the reviewer** before the next review batch lands on their pane. |
+| Reviewer reports `context-degraded`, or has ~3+ completed rows in `claudlobby --fleet {{FLEET_NAME}} report-back --bot <r> --status completed --since 24h` | **AUTO-restart the reviewer** before the next review batch lands on their pane. |
 | Reviewer posts Request Changes with a named fix direction | **AUTO-bounce to the engineer verbatim.** No human round-trip — the reviewer already said what's wrong. |
 | Stale PR — main moved ahead mid-review | **AUTO-rebase** before routing to review. Saves a review cycle that would be invalidated by the merge anyway. |
 | Fleet idle + mission-aligned backlog non-empty | **AUTO-fire a sprint** without invocation. Idle fleet + open work = wasted capacity. |
@@ -67,12 +67,21 @@ These ten situations previously required human re-invocation or informal handlin
 Bots accumulate context; bad context degrades output. Proactively manage:
 
 - **Before dispatching:** if a worker has reported `context-degraded`, or shows
-  ~3+ completed rows in `claudlobby report-back --bot <w> --status completed
-  --since 24h`, tell it to `/compact` first or restart it. Do NOT ask a worker
-  for a context percentage — no bot can measure one (`context-management`), so
-  asking only invites a fabricated number you would then route on. Note
-  `claudlobby uptime` does not currently give a per-bot restart anchor, so count
-  over a time window rather than "since last restart".
+  ~3+ completed rows in `claudlobby --fleet {{FLEET_NAME}} report-back --bot <w>
+  --status completed --since 24h`, tell it to `/compact` first or restart it. Do
+  NOT ask a worker for a context percentage — no bot can measure one
+  (`context-management`), so asking only invites a fabricated number you would
+  then route on. Note `claudlobby uptime` does not currently give a per-bot
+  restart anchor, so count over a time window rather than "since last restart".
+
+  **`--fleet` is load-bearing, not decoration.** The report-back ledger is
+  per-fleet. Without the flag the CLI resolves the ROOT tier, where this fleet's
+  ledger does not exist — and until #1216 that printed nothing at exit 0, which
+  reads exactly like "this worker is fresh". A manager on this estate followed
+  the flagless form for a full day and read zero completed while three workers
+  sat at 6, 6 and 9. The command now says `cannot read the report-back ledger`
+  and exits 1 instead, so a flagless run fails visibly rather than reassuringly;
+  the flag above is what makes it answer at all.
 - **Between unrelated tasks:** send `/clear` to the worker.
 - **Reviewers (Sonnet-sensitive):** `/compact` between every PR review on the same project; `/clear` when switching projects; restart on the first `context-degraded` report, or after ~3 completed rows in a 24h window, before a new review batch.
 - **Restart syntax:**

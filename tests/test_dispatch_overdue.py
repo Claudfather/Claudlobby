@@ -1276,3 +1276,192 @@ class TestUnassigned:
             )
             == {}
         )
+
+
+class TestOrphansRefusesWhenItCannotLook:
+    """#1014, and the same defect as #1216 on a sibling command.
+
+    Orphan-ness is decided by comparing a dispatch against
+    ``<bots_dir>/<bot>/data/.spawn``. Without a readable bots dir there is nothing
+    to compare, so the honest answer is UNKNOWN — but the mode printed an empty
+    set at rc 0, which is byte-identical to "no work was lost to a restart".
+    Measured on the reporting host before the fix: no ``--bots-dir``, a real one
+    with no orphans, and a ``--bots-dir`` naming a path that does not exist ALL
+    returned 0 bytes at rc 0 against a 295-row dispatch log. Three states, one
+    output, and the collapsed one reads as good news.
+    """
+
+    NOW = 3000
+
+    def _logs(self, tmp_path):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [_dispatch("w1", 100, 1000, task_id="t-1")])
+        _write_jsonl(rlog, [])
+        return str(dlog), str(rlog)
+
+    def _main(self, argv, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py"] + argv)
+        return dispatch_overdue.main()
+
+    def test_no_bots_dir_refuses_at_rc_three(self, tmp_path, monkeypatch, capsys):
+        dlog, rlog = self._logs(tmp_path)
+        rc = self._main(["--orphans", dlog, rlog, str(self.NOW)], monkeypatch)
+        assert rc == 3
+        assert "cannot determine orphans without --bots-dir" in capsys.readouterr().err
+
+    def test_an_unreadable_bots_dir_refuses_too(self, tmp_path, monkeypatch, capsys):
+        """The second silent state, and the one a real caller reaches: a
+        --bots-dir that resolves to nothing (a moved fleet, a wrong root) looked
+        identical to a healthy fleet with no orphans."""
+        dlog, rlog = self._logs(tmp_path)
+        rc = self._main(
+            [
+                "--orphans",
+                dlog,
+                rlog,
+                str(self.NOW),
+                "--bots-dir",
+                str(tmp_path / "no-such-dir"),
+            ],
+            monkeypatch,
+        )
+        assert rc == 3
+        assert "cannot read the bots dir" in capsys.readouterr().err
+
+    def test_a_real_bots_dir_with_no_orphans_still_answers_empty_at_rc_zero(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """THE control that makes the two above mean something. Presence, not
+        emptiness, is the line — a fleet that genuinely lost nothing must still
+        get the true answer, or the fix has traded a false all-clear for a
+        refusal that fires on healthy fleets."""
+        dlog, rlog = self._logs(tmp_path)
+        bots = tmp_path / "bots" / "w1" / "data"
+        bots.mkdir(parents=True)
+        rc = self._main(
+            [
+                "--orphans",
+                dlog,
+                rlog,
+                str(self.NOW),
+                "--bots-dir",
+                str(tmp_path / "bots"),
+            ],
+            monkeypatch,
+        )
+        cap = capsys.readouterr()
+        assert rc == 0
+        assert cap.out == ""
+
+    def test_a_real_orphan_is_still_listed(self, tmp_path, monkeypatch, capsys):
+        """The positive control on the other side: the mode must still find what
+        it exists to find. Without this, every assertion above would hold on a
+        command that had stopped classifying anything at all."""
+        dlog, rlog = self._logs(tmp_path)
+        data = tmp_path / "bots" / "w1" / "data"
+        data.mkdir(parents=True)
+        spawn = data / ".spawn"
+        spawn.write_text("")
+        os.utime(spawn, (500, 500))  # respawned AFTER the dispatch at 100
+        rc = self._main(
+            [
+                "--orphans",
+                dlog,
+                rlog,
+                str(self.NOW),
+                "--bots-dir",
+                str(tmp_path / "bots"),
+            ],
+            monkeypatch,
+        )
+        cap = capsys.readouterr()
+        assert rc == 0
+        assert "t-1" in cap.out
+
+    def test_rc_three_is_distinct_from_the_usage_code(self, tmp_path, monkeypatch):
+        """rc 2 means "you called me wrong"; rc 3 means "I cannot answer that".
+        Collapsing them would re-create this very bug one level up — a caller
+        could no longer tell a typo from an unreachable instrument."""
+        dlog, rlog = self._logs(tmp_path)
+        cannot_answer = self._main(["--orphans", dlog, rlog], monkeypatch)
+        malformed = self._main(["--orphans", dlog], monkeypatch)
+        assert cannot_answer == 3
+        assert malformed == 2
+
+    def test_all_mode_is_untouched_by_the_orphan_refusal(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """--all takes the same positional grammar and legitimately runs without
+        a bots dir (it just cannot split orphans out). Gating it would break the
+        watchdog's primary call."""
+        dlog, rlog = self._logs(tmp_path)
+        rc = self._main(["--all", dlog, rlog, str(self.NOW)], monkeypatch)
+        cap = capsys.readouterr()
+        assert rc == 0
+        assert "t-1" in cap.out
+
+    def test_orphaned_all_keeps_its_contract_exactly(self, tmp_path):
+        """The refusal lives in the CLI mode, NOT the join. brief.py imports
+        orphaned_all directly and labels this gap its own way, so changing the
+        function would have broken a caller that already had it right."""
+        dlog, rlog = self._logs(tmp_path)
+        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW) == {}
+        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=None) == {}
+
+
+def test_orphans_refuses_on_an_unlistable_bots_dir(tmp_path):
+    """The fourth state #1014 missed (#1227 review).
+
+    --bots-dir present but unlistable is byte-identical to 'no orphans': rc 0,
+    zero stdout, empty stderr. orphan-ness is decided by reaching
+    <bots_dir>/<bot>/data/.spawn, which silently fails for every bot.
+    """
+    import json as _json
+    import os as _os
+    import subprocess
+    import sys
+
+    if _os.geteuid() == 0:
+        pytest.skip("root ignores the mode bits")
+    bots = tmp_path / "bots"
+    (bots / "a" / "data").mkdir(parents=True)
+    (bots / "a" / "data" / ".spawn").write_text("")
+    dlog = tmp_path / "d.jsonl"
+    rlog = tmp_path / "r.jsonl"
+    dlog.write_text(
+        _json.dumps(
+            {
+                "ts": "2026-08-10T00:00:00Z",
+                "bot": "a",
+                "task_id": "t-1",
+                "dispatched_at": 1786000000,
+                "expected_by": 1786000600,
+            }
+        )
+        + "\n"
+    )
+    rlog.write_text("")
+    from pathlib import Path as _P
+
+    script = _P(__file__).resolve().parent.parent / "lib" / "dispatch-overdue.py"
+    bots.chmod(0o000)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--orphans",
+                str(dlog),
+                str(rlog),
+                "1787000000",
+                "--bots-dir",
+                str(bots),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        bots.chmod(0o755)
+    assert proc.returncode == 3, f"expected refusal, got rc={proc.returncode}"
+    assert proc.stdout == "", "stdout is parsed by fleet-pulse.sh; must stay empty"
+    assert "unlistable" in proc.stderr.lower() or "cannot" in proc.stderr.lower()

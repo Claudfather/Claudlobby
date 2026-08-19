@@ -1069,3 +1069,98 @@ class TestBootCLI:
         self._fleet_dir(paths)
         assert cmd_brief(self._args(paths.root, json=True)) == 1
         assert cmd_brief(self._args(paths.root, ack=True)) == 1
+
+
+class TestUnlistableBotsDir:
+    """brief's own contract is that it never serves a number it knows is wrong.
+
+    An unlistable runtime/bots is the dir-source twin of the unreadable ledger
+    this PR already handles: ``is_dir()`` passes, then iteration fails (#1227
+    review follow-on — these two sites are inside the swept set).
+    """
+
+    def test_the_alerts_section_degrades_instead_of_raising(self, paths):
+        import os as _os
+
+        from claudlobby.brief import _alerts_section
+
+        if _os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        bots = paths.runtime_bots
+        (bots / "alex" / "data" / "events").mkdir(parents=True, exist_ok=True)
+        bots.chmod(0o000)
+        try:
+            degraded: list = []
+            out = _alerts_section(paths, "alex", 1787000000, degraded)
+            assert out == []
+            assert degraded, "an unreachable alert source must be disclosed"
+        finally:
+            bots.chmod(0o755)
+
+    def test_orphans_are_omitted_and_disclosed_not_reported_as_none(self, paths):
+        """'no orphans' and 'could not look' have opposite remedies."""
+        import os as _os
+
+        from claudlobby.brief import _dispatch_section, load_dispatch_doors
+
+        if _os.geteuid() == 0:
+            pytest.skip("root ignores the mode bits")
+        _dlog(paths).write_text("")
+        _rlog(paths).write_text("")
+        doors = load_dispatch_doors(paths)
+        bots = paths.runtime_bots
+        bots.chmod(0o000)
+        try:
+            degraded: list = []
+            _dispatch_section(doors, paths, "alex", 1787000000, degraded)
+            assert degraded, "an unlistable bots dir must be disclosed, not silent"
+        finally:
+            bots.chmod(0o755)
+
+
+class TestAlertsAbsentBotsDir:
+    """vera's Blocking 2 (#1227 round 2, dropped rather than deferred).
+
+    Round 2 disclosed the UNREADABLE bots dir and left ABSENT returning `[]`
+    with nothing in `degraded[]`. A reader then sees no alerts and no statement
+    that the door could not be opened — a false all-clear in the one module
+    whose stated property is that it never serves a number it knows is wrong.
+
+    The fix follows the shape already in this file: brief labels the orphan list
+    when it is empty by construction without a bots dir (#1014). Same rule, same
+    absent input, same file — it just had not been applied here.
+    """
+
+    def test_an_absent_bots_dir_is_disclosed_and_names_the_path(self, paths):
+        import shutil
+
+        from claudlobby.brief import _alerts_section
+
+        shutil.rmtree(paths.runtime_bots)
+        assert not paths.runtime_bots.exists()
+        degraded: list = []
+        out = _alerts_section(paths, "alex", 1787000000, degraded)
+        assert out == []
+        assert degraded, "an unreachable alert source must be disclosed"
+        assert any(str(paths.runtime_bots) in d.reason for d in degraded), (
+            f"the disclosure must name the path: {[d.reason for d in degraded]}"
+        )
+
+    def test_a_present_but_empty_bots_dir_is_a_real_zero(self, paths):
+        """The positive control, and the line brief draws everywhere else.
+
+        Presence, not emptiness. A bots dir that exists and holds no events is a
+        fleet that has emitted nothing, and for it an empty alert list is the
+        TRUE answer — it must NOT be degraded. If this collapses into the case
+        above, the disclosure has stopped meaning anything.
+        """
+        from claudlobby.brief import _alerts_section
+
+        assert paths.runtime_bots.is_dir()
+        degraded: list = []
+        out = _alerts_section(paths, "alex", 1787000000, degraded)
+        assert out == []
+        assert not [d for d in degraded if "bots directory" in d.reason], (
+            f"a present-but-empty bots dir was wrongly degraded: "
+            f"{[d.reason for d in degraded]}"
+        )

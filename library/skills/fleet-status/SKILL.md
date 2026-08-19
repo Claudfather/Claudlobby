@@ -45,11 +45,21 @@ report one (`context-management`). What IS available is the worker's own
 `context-degraded` report:
 
 ```bash
-claudlobby report-back --since 24h | grep -i context-degraded
+claudlobby --fleet "$FLEET_NAME" report-back --since 24h 2>/dev/null \
+  | grep -i context-degraded
 ```
 
 Any bot listed there is asking to be restarted — pair it with its completed
 count in the same window before deciding.
+
+**Two things about that command that used to make it lie.** The ledger is
+per-fleet, so `--fleet` is what makes it read a real file; without it the root
+tier resolves, nothing is found, and the empty result reads as "nobody is
+degraded" (#1216). And the pipe hides the exit status — `grep`'s rc is what you
+get back, so check the command alone before trusting an empty grep. Since #1216
+a flagless run prints `cannot read the report-back ledger` and exits 1, which
+`grep -i` will filter out of your view: run it unpiped once if the result is
+empty and you are about to act on that.
 
 
 For each discovered bot:
