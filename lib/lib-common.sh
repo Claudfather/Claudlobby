@@ -1361,7 +1361,7 @@ pane_input_region() {
 # it is either render lag or a genuine submit. Folding them together would blur
 # the exact two the instrument exists to separate.
 _pane_trace_candidate() {
-    local pane="$1" payload="$2" region line stripped floor any_at_floor=0 any_text=0
+    local pane="$1" payload="$2" region line stripped floor first="" seen_first=0
     region=$(pane_input_region "$pane")
     [ -n "$region" ] || { printf 'no-region'; return 0; }
     if printf '%s\n' "$region" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER"; then
@@ -1370,19 +1370,31 @@ _pane_trace_candidate() {
     [ -n "$payload" ] || { printf 'no-payload'; return 0; }
     floor=$_PANE_MIN_VISIBLE_MATCH
     [ "${#payload}" -lt "$floor" ] && floor=${#payload}
+    # HELD is decided exactly as pane_shows_payload decides it -- any line at or
+    # over the floor that is part of the payload. That equivalence is asserted
+    # over the whole fixture corpus and must not drift.
     while IFS= read -r line; do
         stripped=$(_pane_strip_chrome "$line")
-        [ -n "$stripped" ] && any_text=1
+        if [ "$seen_first" -eq 0 ]; then first="$stripped"; seen_first=1; fi
         if [ "${#stripped}" -ge "$floor" ]; then
-            any_at_floor=1
             case "$payload" in *"$stripped"*) printf 'held'; return 0 ;; esac
         fi
     done <<EOF
 $region
 EOF
-    if [ "$any_at_floor" -eq 1 ]; then printf 'not-substring'
-    elif [ "$any_text" -eq 1 ]; then printf 'below-floor'
-    else printf 'empty-box'; fi
+    # NOT held. Which candidate is judged on the INPUT LINE, not on the region,
+    # and that is a correction the first real strand forced. The region runs
+    # from the glyph line to the bottom of the pane, so it always also contains
+    # the box border and the mode footer -- measured at 80 and 77 chars on a
+    # real stranded boot. Both clear the 12-char floor and neither is part of
+    # any payload, so judging on the region made `not-substring` fire on every
+    # not-held frame and swallow the empty-box case underneath it. Chrome that
+    # is ALWAYS present cannot discriminate anything; only the line the payload
+    # would occupy can. The full per-line record is still emitted, so a frame
+    # this rule reads wrongly is still recoverable from the trace.
+    if [ -z "$first" ]; then printf 'empty-box'
+    elif [ "${#first}" -lt "$floor" ]; then printf 'below-floor'
+    else printf 'not-substring'; fi
     return 0
 }
 

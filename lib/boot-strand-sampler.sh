@@ -368,8 +368,14 @@ pane_knob_fate() {
         # right to reject that -- so it gets its own fate instead of borrowing
         # one that would be a small lie about where the value came from.
         PANE_VERIFY_TRACE)
-            if [ -n "$set_val" ]; then inforce="$set_val"; src="forwarded"
-            else inforce=""; src="off"; fi
+            # In-force is recorded as 1/0, NOT the path. The experimental
+            # condition is trace-on-ness; the path is an implementation detail
+            # that differs per boot by construction (it is per-boot), so
+            # recording it as the value would make every trace-on boot its own
+            # arm and trip the covarying-knob guard forever. The path is still
+            # carried in `env` for provenance.
+            if [ -n "$set_val" ]; then inforce="1"; src="forwarded"
+            else inforce="0"; src="off"; fi
             ;;
         # A knob joining _FORWARDED_PANE_KNOBS without a branch here would
         # otherwise be recorded as if it had no fate — the scrubbed-silently
@@ -598,7 +604,12 @@ run_start_bot() {
 # abort through the ERR path instead of returning its own verdict.
 emit_summary() {
     local rc=0
-    python3 "$LIB_DIR/boot-strand-summary.py" "$1" || rc=$?
+    # The axis the run varied has to be the axis the analysis groups on, or the
+    # attribution guard reports every boot as one mislabelled arm -- which is
+    # exactly what it did, correctly, on the first #1236 control attempt.
+    local _iv=()
+    [ "$ARM_AXIS" = "trace" ] && _iv=(--iv trace)
+    python3 "$LIB_DIR/boot-strand-summary.py" ${_iv[@]+"${_iv[@]}"} "$1" || rc=$?
     exit "$rc"
 }
 
@@ -930,7 +941,10 @@ YAML
             # the instrument and to nothing else.
             case "$arm" in
                 on)  PANE_VERIFY_TRACE="$ART/trace-boot-$i" ;;
-                off) unset PANE_VERIFY_TRACE ;;
+                # off AND the empty arm (the warm-up) both clear it. Leaving it
+                # set would point the next boot at the previous boot's trace
+                # dir -- the warm-up did exactly that on the first attempt.
+                *)   unset PANE_VERIFY_TRACE ;;
             esac
         else
             [ -z "$arm" ] || PANE_SEND_SETTLE_S="$arm"
@@ -1030,12 +1044,20 @@ YAML
               loadavg_1m: (if $la == "" then null else ($la|tonumber) end),
               arm_knobs: $arm,
               settle_s: ($arm | if . == null then null else .["PANE_SEND_SETTLE_S"].v end),
+              # Hoisted the same way and for the same reason: the summariser
+              # groups on a row field and cross-checks it against the knob
+              # record, so both must come from the one in-force resolution.
+              trace_on: ($arm | if . == null then null else .["PANE_VERIFY_TRACE"].v end),
               block: (if $blk == "" then null else ($blk|tonumber) end),
               pos: (if $pos == "" then null else ($pos|tonumber) end),
-              arm_order: (if $ord == "" then null else ($ord | split(" ") | map(tonumber)) end),
+              # try/catch, not bare tonumber: the settle axis has numeric arms
+              # and the #1236 trace axis has "on"/"off", and a bare coercion
+              # aborts the whole row on the latter -- which is how the first
+              # control run died after its warm-up boot.
+              arm_order: (if $ord == "" then null else ($ord | split(" ") | map(try tonumber catch .)) end),
               arm_seed: (if $seed == "" then null else ($seed|tonumber) end)}' >> "$ROWS"
         printf 'boot %02d (%s)%s: %s%s%s%s\n' "$i" "$kind" \
-            "${blk:+ block $blk pos $pos settle=$arm}" "$outcome" \
+            "${blk:+ block $blk pos $pos $ARM_AXIS=$arm}" "$outcome" \
             "${t_submit:+ submit=${t_submit}s}" \
             "${boot_la:+ la=${boot_la}}" \
             "$([ "$retry_fired" -gt 0 ] && printf ' [send_retry fired]' || true)"

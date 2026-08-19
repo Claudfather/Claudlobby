@@ -62,8 +62,28 @@ BASELINE_N = 4
 # IV_KNOB's arm record in one expression, so a row where the two disagree was
 # edited after the fact — which is exactly the mislabel this module exists to
 # catch, and the only way it can be caught at all.
+# The independent variable, as a (knob, hoisted row field) PAIR. Selectable
+# because the sampler now has two axes: the #843 settle ladder, and the #1236
+# trace axis that holds settle fixed and moves only the instrumentation.
+#
+# Switched as a pair and never independently — the arm value is cross-checked
+# against the knob record in row_arm, and a mismatched pair would make every
+# row report arm-disagrees-with-record.
+IV_CHOICES = {
+    "settle": ("PANE_SEND_SETTLE_S", "settle_s"),
+    "trace": ("PANE_VERIFY_TRACE", "trace_on"),
+}
 IV_KNOB = "PANE_SEND_SETTLE_S"
 IV_FIELD = "settle_s"
+
+
+def set_iv(axis: str) -> None:
+    """Point the module at one axis. Call before any analysis."""
+    global IV_KNOB, IV_FIELD
+    try:
+        IV_KNOB, IV_FIELD = IV_CHOICES[axis]
+    except KeyError:
+        raise SystemExit(f"unknown --iv {axis!r}; expected one of {sorted(IV_CHOICES)}")
 
 # Pairing (pre-registration v2 §4 BASELINE): "interleaved blocks, randomized
 # arm order within block. One block = one boot per arm."
@@ -918,6 +938,19 @@ def main(argv: list[str]) -> int:
     # "precondition/dep missing (skip)". A typo in a flag would report as a
     # skipped run. If this ever moves to argparse, catch SystemExit and remap.
     args = argv[1:]
+    # Same manual style as --control, and for the same reason recorded above:
+    # argparse exits 2, which the sampler documents as "skip".
+    if "--iv" in args:
+        idx = args.index("--iv")
+        if idx + 1 >= len(args):
+            print("--iv needs a value", file=sys.stderr)
+            return 1
+        axis = args[idx + 1]
+        if axis not in IV_CHOICES:
+            print(f"bad --iv: {axis!r} (expected {sorted(IV_CHOICES)})", file=sys.stderr)
+            return 1
+        set_iv(axis)
+        del args[idx : idx + 2]
     control: float | None = None
     if "--control" in args:
         idx = args.index("--control")
@@ -932,7 +965,8 @@ def main(argv: list[str]) -> int:
         del args[idx : idx + 2]
     if len(args) != 1:
         print(
-            "usage: boot-strand-summary.py [--control SETTLE] <rows.jsonl>",
+            "usage: boot-strand-summary.py [--iv settle|trace] "
+            "[--control VALUE] <rows.jsonl>",
             file=sys.stderr,
         )
         return 1
