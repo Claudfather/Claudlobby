@@ -1766,11 +1766,19 @@ pane_send_verified() {
         # #1236: record the tick, then decide exactly as before. An `if` rather
         # than appending to the `&&` chain so the tracer sits outside the
         # decision entirely and cannot contribute to it.
+        # The knob is tested at the CALL SITE, not only inside the tracer, and
+        # that is measured rather than stylistic: bash copies arguments by
+        # value, so calling it with the ~2KB pane costs 57us per tick even when
+        # it returns immediately. Guarding here drops that to a single
+        # parameter test. This primitive is on every dispatch, every boot,
+        # every bot, so a per-tick cost that buys nothing is a fleet-wide tax.
         if pane_holds_unsubmitted "$pane" "$probe"; then
-            _pane_verify_trace "$tick" "$box" "$pane" "$probe"
+            [ -z "${PANE_VERIFY_TRACE:-}" ] ||
+                _pane_verify_trace "$tick" "$box" "$pane" "$probe"
             continue
         fi
-        _pane_verify_trace "$tick" "$box" "$pane" "$probe"
+        [ -z "${PANE_VERIFY_TRACE:-}" ] ||
+            _pane_verify_trace "$tick" "$box" "$pane" "$probe"
         # The payload is not sitting in the box. Whether that means it was
         # SUBMITTED or was never RECEIVED is the #860 ambiguity, and the frame in
         # hand cannot answer it — the latch has to.
