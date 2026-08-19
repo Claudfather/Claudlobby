@@ -825,23 +825,39 @@ def _alerts_section(
             )
         )
 
+    # Was is_dir(), which let an unlistable dir through to collect_events and
+    # raised PermissionError out of the brief.
+    #
+    # BOTH unreachable states disclose, and that pairing is the point. An
+    # earlier round handled only UNREADABLE, so an ABSENT bots dir returned an
+    # empty alert list with nothing in degraded[] -- a reader saw no alerts and
+    # no statement that the door could not be opened. A false all-clear here is
+    # worse than anywhere else in this module, because "never serves a number it
+    # knows is wrong" is the property the whole door is built on.
+    #
+    # Same shape brief already uses for the orphan list under #1014: an empty
+    # list that is empty BY CONSTRUCTION is named as such rather than served as
+    # a measurement. The wording differs by state because the remedies differ --
+    # absent means wire the instrument, unreadable means fix the permissions.
     _alert_probe = probe_dir(paths.runtime_bots)
     if _alert_probe.state != SOURCE_OK:
-        # Was is_dir(), which let an unlistable dir through to collect_events
-        # and raised PermissionError out of the brief.
-        if _alert_probe.state == SOURCE_UNREADABLE:
-            degraded.append(
-                Degradation(
-                    field="alerts",
-                    mode="omitted",
-                    reason=(
-                        f"the bots directory at {paths.runtime_bots} exists "
-                        "but cannot be listed, so an empty alert list would "
-                        "mean 'could not look', not 'nothing is wrong'"
-                    ),
-                    issue="#1227",
-                )
+        degraded.append(
+            Degradation(
+                field="alerts",
+                mode="omitted",
+                reason=(
+                    (
+                        f"no bots directory at {paths.runtime_bots}"
+                        if _alert_probe.state == SOURCE_ABSENT
+                        else f"the bots directory at {paths.runtime_bots} "
+                        "exists but cannot be listed"
+                    )
+                    + ", so no alert source could be read and an empty list "
+                    "would mean 'could not look', not 'nothing is wrong'"
+                ),
+                issue="#1227",
             )
+        )
         return []
 
     cutoff = (

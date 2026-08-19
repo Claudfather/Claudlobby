@@ -1116,3 +1116,51 @@ class TestUnlistableBotsDir:
             assert degraded, "an unlistable bots dir must be disclosed, not silent"
         finally:
             bots.chmod(0o755)
+
+
+class TestAlertsAbsentBotsDir:
+    """vera's Blocking 2 (#1227 round 2, dropped rather than deferred).
+
+    Round 2 disclosed the UNREADABLE bots dir and left ABSENT returning `[]`
+    with nothing in `degraded[]`. A reader then sees no alerts and no statement
+    that the door could not be opened — a false all-clear in the one module
+    whose stated property is that it never serves a number it knows is wrong.
+
+    The fix follows the shape already in this file: brief labels the orphan list
+    when it is empty by construction without a bots dir (#1014). Same rule, same
+    absent input, same file — it just had not been applied here.
+    """
+
+    def test_an_absent_bots_dir_is_disclosed_and_names_the_path(self, paths):
+        import shutil
+
+        from claudlobby.brief import _alerts_section
+
+        shutil.rmtree(paths.runtime_bots)
+        assert not paths.runtime_bots.exists()
+        degraded: list = []
+        out = _alerts_section(paths, "alex", 1787000000, degraded)
+        assert out == []
+        assert degraded, "an unreachable alert source must be disclosed"
+        assert any(str(paths.runtime_bots) in d.reason for d in degraded), (
+            f"the disclosure must name the path: {[d.reason for d in degraded]}"
+        )
+
+    def test_a_present_but_empty_bots_dir_is_a_real_zero(self, paths):
+        """The positive control, and the line brief draws everywhere else.
+
+        Presence, not emptiness. A bots dir that exists and holds no events is a
+        fleet that has emitted nothing, and for it an empty alert list is the
+        TRUE answer — it must NOT be degraded. If this collapses into the case
+        above, the disclosure has stopped meaning anything.
+        """
+        from claudlobby.brief import _alerts_section
+
+        assert paths.runtime_bots.is_dir()
+        degraded: list = []
+        out = _alerts_section(paths, "alex", 1787000000, degraded)
+        assert out == []
+        assert not [d for d in degraded if "bots directory" in d.reason], (
+            f"a present-but-empty bots dir was wrongly degraded: "
+            f"{[d.reason for d in degraded]}"
+        )
