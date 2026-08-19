@@ -1,16 +1,19 @@
 """App-auth P2 (#1272): lib/github-app-mcp-wrapper.py behavioral battery.
 
-Real wrapper under subprocess; the helper and the npx child are stubs on a
-private PATH (Lane-A). The child stub appends one line per spawn — the token
-it received — so respawn behavior is observable as a log, and a sleep keeps
-it alive so wait(timeout=...) exercises the refresh path for real.
+Real wrapper under subprocess; the mint CLI and the npx child are stubs on a
+private PATH (Lane-A). The child stub appends the token it received per
+spawn, so respawn behavior is observable as a log; a sleep keeps it alive so
+the refresh path runs for real. The mint stub counts calls in a file, which
+doubles as the mint-rate observable for the crash-loop pin.
 
 Pins the plan's contracts:
-- D10 helper-direct: a booby-trapped `git` on PATH is never invoked.
+- D10 helper-direct: a booby-trapped `git` on PATH is never invoked (the
+  wrapper consumes the mint CLI, which is helper-direct by construction).
 - D12 first-mint resilience: mint-fails-then-succeeds boots the child LATE,
   never dead; a failed REFRESH keeps the live child serving.
-- Respawn rotates the token (the second child sees a NEW ghs_).
-- GITHUB_PAT fallback when the helper cannot mint.
+- Refresh rotates the token (the second child sees a NEW ghs_).
+- E2: a crash-looping child reuses the young token — no mint-per-crash.
+- The respawn pause throttles a crash loop (observed via elapsed time).
 """
 
 import os
@@ -19,31 +22,38 @@ import subprocess
 import time
 from pathlib import Path
 
-from tests.conftest import _write_exec, constructed_env
+from tests.conftest import _write_exec, booby_trap_git, constructed_env
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = REPO_ROOT / "lib" / "github-app-mcp-wrapper.py"
 
 
-def _stub_helper(bindir: Path) -> Path:
-    """Counting helper stub: token ghs_MINT<n>; fails while <n> <= FAIL_FIRST."""
-    helper = bindir / "helper-stub"
+def _stub_mint(bindir: Path) -> Path:
+    """Counting mint-CLI stub: prints ghs_MINT<n> bare on stdout.
+
+    FAIL_FIRST=<k>: calls 1..k fail (rc 1, empty stdout — the D9 shape).
+    FAIL_AFTER=<k>: every call AFTER the k-th fails.
+    """
+    mint = bindir / "mint-stub"
     _write_exec(
-        helper,
+        mint,
         """#!/bin/bash
 n=0
 [ -f "$STUB_DIR/mint-count" ] && n=$(cat "$STUB_DIR/mint-count")
 n=$((n + 1))
 printf '%s' "$n" > "$STUB_DIR/mint-count"
 if [ "$n" -le "${FAIL_FIRST:-0}" ]; then
-  printf 'helper-stub: simulated mint failure %s\\n' "$n" >&2
-  printf 'quit=1\\n'
+  printf 'mint-stub: simulated failure %s\\n' "$n" >&2
   exit 1
 fi
-printf 'username=x-access-token\\npassword=ghs_MINT%s\\n' "$n"
+if [ "${FAIL_AFTER:-0}" -gt 0 ] && [ "$n" -gt "${FAIL_AFTER}" ]; then
+  printf 'mint-stub: simulated failure %s\\n' "$n" >&2
+  exit 1
+fi
+printf 'ghs_MINT%s' "$n"
 """,
     )
-    return helper
+    return mint
 
 
 def _stub_npx(bindir: Path, behavior: str = "sleep") -> None:
@@ -60,22 +70,29 @@ esac
     )
 
 
-def _env(bindir: Path, helper: Path, **overrides):
-    env = constructed_env(
-        PATH=f"{bindir}:{os.environ['PATH']}",
-        STUB_DIR=str(bindir),
-        GITHUB_APP_HELPER=str(helper),
-        GITHUB_MCP_RETRY_BASE_SECONDS="0.1",
-        GITHUB_MCP_RETRY_MAX_SECONDS="0.2",
-        GITHUB_MCP_RESPAWN_PAUSE_SECONDS="0.1",
+def _env(bindir: Path, mint: Path, **overrides):
+    return constructed_env(
+        **{
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "STUB_DIR": str(bindir),
+            "GITHUB_APP_MINT_CLI": str(mint),
+            "GITHUB_MCP_POLL_SECONDS": "0.05",
+            "GITHUB_MCP_RETRY_BASE_SECONDS": "0.1",
+            "GITHUB_MCP_RETRY_MAX_SECONDS": "0.2",
+            "GITHUB_MCP_RESPAWN_PAUSE_SECONDS": "0.1",
+            **overrides,
+        }
     )
-    env.update({k: str(v) for k, v in overrides.items()})
-    return env
 
 
 def _spawns(bindir: Path):
     log = bindir / "spawns.log"
     return log.read_text().splitlines() if log.exists() else []
+
+
+def _mints(bindir: Path) -> int:
+    f = bindir / "mint-count"
+    return int(f.read_text()) if f.exists() else 0
 
 
 def _wait_for(predicate, timeout=10.0):
@@ -109,9 +126,9 @@ def _stop(proc):
 
 class TestOneShot:
     def test_execs_child_with_minted_token(self, tmp_path):
-        helper = _stub_helper(tmp_path)
+        mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path, behavior="exit3")
-        env = _env(tmp_path, helper, GITHUB_MCP_REFRESH="false")
+        env = _env(tmp_path, mint, GITHUB_MCP_ONE_SHOT="1")
         r = subprocess.run(
             ["python3", str(WRAPPER)], env=env, capture_output=True, text=True, timeout=30
         )
@@ -122,9 +139,9 @@ class TestOneShot:
 
 class TestRefreshLoop:
     def test_refresh_rotates_the_token_and_respawns(self, tmp_path):
-        helper = _stub_helper(tmp_path)
+        mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path)
-        env = _env(tmp_path, helper, GITHUB_MCP_REFRESH_SECONDS="1")
+        env = _env(tmp_path, mint, GITHUB_MCP_REFRESH_SECONDS="0.4")
         proc = _start(env)
         try:
             assert _wait_for(lambda: len(_spawns(tmp_path)) >= 2, timeout=15)
@@ -135,11 +152,9 @@ class TestRefreshLoop:
             _stop(proc)
 
     def test_first_mint_failure_boots_the_child_late_never_dead(self, tmp_path):
-        helper = _stub_helper(tmp_path)
+        mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path)
-        env = _env(
-            tmp_path, helper, FAIL_FIRST="2", GITHUB_MCP_REFRESH_SECONDS="600"
-        )
+        env = _env(tmp_path, mint, FAIL_FIRST="2", GITHUB_MCP_REFRESH_SECONDS="600")
         proc = _start(env)
         try:
             assert _wait_for(lambda: _spawns(tmp_path) != [], timeout=15), (
@@ -153,41 +168,21 @@ class TestRefreshLoop:
             _stop(proc)
 
     def test_failed_refresh_keeps_the_live_child(self, tmp_path):
-        helper = _stub_helper(tmp_path)
+        mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path)
-        # First mint succeeds; every later mint fails (FAIL_FIRST is huge but
-        # the counter is pre-seeded so mint 1 passes).
-        (tmp_path / "mint-count").write_text("0")
+        # Mint 1 succeeds; every later mint fails — several refresh cycles
+        # must all keep the ORIGINAL child serving (D12).
         env = _env(
             tmp_path,
-            helper,
-            GITHUB_MCP_REFRESH_SECONDS="1",
-            GITHUB_MCP_REFRESH_RETRY_SECONDS="1",
-            FAIL_AFTER_FIRST="1",
-        )
-        # Repurpose the stub: fail every call except the first.
-        _write_exec(
-            tmp_path / "helper-stub",
-            """#!/bin/bash
-n=0
-[ -f "$STUB_DIR/mint-count" ] && n=$(cat "$STUB_DIR/mint-count")
-n=$((n + 1))
-printf '%s' "$n" > "$STUB_DIR/mint-count"
-if [ "$n" -gt 1 ]; then
-  printf 'helper-stub: refresh mint down\\n' >&2
-  printf 'quit=1\\n'
-  exit 1
-fi
-printf 'username=x-access-token\\npassword=ghs_MINT%s\\n' "$n"
-""",
+            mint,
+            FAIL_AFTER="1",
+            GITHUB_MCP_REFRESH_SECONDS="0.3",
+            GITHUB_MCP_REFRESH_RETRY_SECONDS="0.2",
         )
         proc = _start(env)
         try:
             assert _wait_for(lambda: _spawns(tmp_path) != [], timeout=15)
-            # Give it several refresh cycles whose mints all fail.
-            assert _wait_for(
-                lambda: int((tmp_path / "mint-count").read_text()) >= 3, timeout=15
-            )
+            assert _wait_for(lambda: _mints(tmp_path) >= 3, timeout=15)
             assert _spawns(tmp_path) == ["ghs_MINT1"], (
                 "a failed refresh must keep the LIVE child, not kill or respawn it"
             )
@@ -195,22 +190,35 @@ printf 'username=x-access-token\\npassword=ghs_MINT%s\\n' "$n"
         finally:
             _stop(proc)
 
-    def test_dead_child_respawns_with_a_pause(self, tmp_path):
-        helper = _stub_helper(tmp_path)
+    def test_crash_loop_is_paced_and_reuses_the_young_token(self, tmp_path):
+        mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path, behavior="exit3")
-        env = _env(tmp_path, helper, GITHUB_MCP_REFRESH_SECONDS="600")
+        env = _env(
+            tmp_path,
+            mint,
+            GITHUB_MCP_REFRESH_SECONDS="600",
+            GITHUB_MCP_RESPAWN_PAUSE_SECONDS="0.3",
+        )
+        t0 = time.monotonic()
         proc = _start(env)
         try:
-            assert _wait_for(lambda: len(_spawns(tmp_path)) >= 2, timeout=15)
+            assert _wait_for(lambda: len(_spawns(tmp_path)) >= 3, timeout=15)
+            elapsed = time.monotonic() - t0
+            # The pause throttles the loop: spawns 2 and 3 each cost >= ~0.3s.
+            assert elapsed >= 0.45, f"crash loop not paced (elapsed {elapsed:.2f}s)"
+            # E2: the token is minutes young — respawns must REUSE it, never
+            # mint per crash (~1800 redundant GitHub mints/hour otherwise).
+            assert _mints(tmp_path) == 1
+            assert set(_spawns(tmp_path)) == {"ghs_MINT1"}
         finally:
             _stop(proc)
 
-    def test_pat_fallback_when_helper_cannot_mint(self, tmp_path):
-        helper = _stub_helper(tmp_path)
+    def test_pat_fallback_when_mint_cannot(self, tmp_path):
+        mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path)
         env = _env(
             tmp_path,
-            helper,
+            mint,
             FAIL_FIRST="999999",
             GITHUB_PAT="ghp_FALLBACKPAT",
             GITHUB_MCP_REFRESH_SECONDS="600",
@@ -223,18 +231,25 @@ printf 'username=x-access-token\\npassword=ghs_MINT%s\\n' "$n"
             _stop(proc)
 
     def test_never_shells_to_git(self, tmp_path):
-        # D10 pin: the wrapper mints helper-direct — a booby-trapped `git` on
-        # PATH proves git is never consulted.
-        helper = _stub_helper(tmp_path)
+        mint = _stub_mint(tmp_path)
         _stub_npx(tmp_path)
-        _write_exec(
-            tmp_path / "git",
-            '#!/bin/bash\ntouch "$STUB_DIR/git-was-called"\nexit 1\n',
-        )
-        env = _env(tmp_path, helper, GITHUB_MCP_REFRESH_SECONDS="600")
+        sentinel = booby_trap_git(tmp_path)
+        env = _env(tmp_path, mint, GITHUB_MCP_REFRESH_SECONDS="600")
         proc = _start(env)
         try:
             assert _wait_for(lambda: _spawns(tmp_path) != [], timeout=15)
-            assert not (tmp_path / "git-was-called").exists()
+            assert not sentinel.exists()
+        finally:
+            _stop(proc)
+
+    def test_malformed_knob_falls_back_instead_of_dying(self, tmp_path):
+        # A3: knob parse errors must not produce the dead server D12 bans.
+        mint = _stub_mint(tmp_path)
+        _stub_npx(tmp_path)
+        env = _env(tmp_path, mint, GITHUB_MCP_REFRESH_SECONDS="fifty-minutes")
+        proc = _start(env)
+        try:
+            assert _wait_for(lambda: _spawns(tmp_path) != [], timeout=15)
+            assert proc.poll() is None
         finally:
             _stop(proc)

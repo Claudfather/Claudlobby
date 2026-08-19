@@ -79,6 +79,24 @@ def _write_exec(path, content):
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def booby_trap_git(bindir):
+    """Plant a `git` that records any invocation; returns the sentinel path.
+
+    The App-auth D10 helper-direct pin: token acquisition must never consult
+    git (a pathless `git credential fill` silently serves whatever identity
+    ambient config answers). Callers put `bindir` first on PATH with
+    STUB_DIR=bindir in the env, run the surface under test, and assert the
+    returned sentinel does not exist. Shared because trap and assert are
+    stringly coupled through the sentinel name — one owner keeps every
+    battery's pin identical.
+    """
+    _write_exec(
+        Path(bindir) / "git",
+        '#!/bin/bash\ntouch "$STUB_DIR/git-was-called"\nexit 1\n',
+    )
+    return Path(bindir) / "git-was-called"
+
+
 SETUP_SYSTEM = Path(__file__).resolve().parent.parent / "lib" / "setup-system"
 
 

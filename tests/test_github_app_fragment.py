@@ -10,7 +10,8 @@ from pathlib import Path
 from claudlobby.composer import compose_mcp_json, compose_settings_local
 from claudlobby.config import BotConfig, FleetConfig, McpEntry
 from claudlobby.mcp_resolve import required_vars
-from claudlobby.paths import Paths
+
+from tests.conftest import make_paths
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FRAGMENT = REPO_ROOT / "library" / "mcp" / "github-app.json"
@@ -32,7 +33,7 @@ def _bot():
 
 
 def _paths():
-    return Paths(root=REPO_ROOT, fleet_dir=REPO_ROOT)
+    return make_paths(REPO_ROOT)
 
 
 class TestFragmentContract:
@@ -42,11 +43,11 @@ class TestFragmentContract:
     def test_contract_is_exactly_the_three_app_vars(self):
         vars_ = list(required_vars(_bot(), _paths()))
         names = {v.canonical_name for v in vars_}
+        # Exactly the three — and therefore NOT GITHUB_PAT: no optional:
+        # field exists in the contract schema, so declaring it here would be
+        # a creds-reconcile shape-1 FAIL for every pure-App fleet;
+        # github.json owns that declaration.
         assert names == APP_VARS
-        # NOT GITHUB_PAT: no optional: field exists in the contract schema, so
-        # declaring it here would make it a creds-reconcile shape-1 FAIL for
-        # every pure-App fleet; github.json owns that declaration.
-        assert "GITHUB_PAT" not in names
 
     def test_merged_1226_schema_fields(self):
         # secret: true on all three (the documented authenticate-without test:
@@ -95,6 +96,19 @@ class TestFragmentContract:
         wrapper_src = (REPO_ROOT / "lib" / "github-app-mcp-wrapper.py").read_text()
         assert len(pinned) == 1
         assert pinned[0] in wrapper_src
+
+    def test_tools_contract_matches_github_json(self):
+        # Same coupling as the package pin, symmetric: same pinned server →
+        # same tool universe. A tool added to github.json's contract alone
+        # would leave App-identity bots without the composed allow-grant —
+        # surfacing as a runtime permission prompt with nothing red at
+        # compose or test time.
+        github = json.loads((REPO_ROOT / "library" / "mcp" / "github.json").read_text())
+        app = json.loads(FRAGMENT.read_text())
+        assert (
+            app["_permissions_contract"]["tools"]
+            == github["_permissions_contract"]["tools"]
+        )
 
     def test_both_github_fragments_compose_side_by_side(self):
         bot = BotConfig(
