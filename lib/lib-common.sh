@@ -335,6 +335,39 @@ safe_mktemp() {
     mktemp "$_LC_TMPDIR/tmp.XXXXXXXXXX"
 }
 
+# github_app_conf_path
+# The ONE owner of the GitHub App helper config-file default. Reader
+# (git-credential-github-app), writer (setup-github-app.sh) and any later
+# presence gate (App-auth P4) all derive it from here — a drifted copy means
+# setup writes a file the helper never reads, each side individually green.
+# CLAUDLOBBY_GITHUB_APP_CONF overrides (tests, nonstandard hosts).
+github_app_conf_path() {
+    printf '%s' "${CLAUDLOBBY_GITHUB_APP_CONF:-${HOME:-/nonexistent}/.config/claudlobby/github-app.conf}"
+}
+
+# auth_curl_cfg <header-line>...
+# Write curl header lines into a private temp config file and print its path.
+# The ONE owner of the tokens-never-ride-argv invariant for authed curl calls:
+# the Authorization header rides --config so no credential ever appears in the
+# process table. Callers keep their own curl flags; only header-file assembly
+# generalizes here. Consumers: git-credential-github-app, setup-github-app.sh;
+# creds-check.sh migrates onto this in App-auth P4 rather than copying a
+# sixth instance of the pattern.
+auth_curl_cfg() {
+    local cfg h
+    cfg="$(safe_mktemp)"
+    for h in "$@"; do
+        # Escape backslash then double-quote: an unescaped quote in a value
+        # silently TRUNCATES the header at the curl config parser, which
+        # surfaces as a baffling 401. Unreachable for JWT/ghs_ values, but
+        # this function is the one owner and P4 feeds it arbitrary secrets.
+        h="${h//\\/\\\\}"
+        h="${h//\"/\\\"}"
+        printf 'header = "%s"\n' "$h"
+    done > "$cfg"
+    printf '%s' "$cfg"
+}
+
 # --- JSON helpers ------------------------------------------------------------
 
 # json_escape <string>
