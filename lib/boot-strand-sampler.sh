@@ -50,9 +50,10 @@
 #      18.7-30.7, and the clean-at-loadavg-~10 row it is usually cited for is
 #      ONE boot at 10.3 — the only row in that table whose payload actually
 #      ran. Its five idle boots at loadavg 1.7 are not a clean baseline
-#      either; #933 identifies that 5/5 as the separate queue-discard defect.
-#      So the low-load evidence is a single boot: it supports "not observed in
-#      one sample", never "does not occur". Per the pass-bar ratified on #1236
+#      either: the payload never ran AND the box never held it, so they are
+#      not valid trials of the send in either direction. So the low-load
+#      evidence is a single boot: it supports "not observed in one sample",
+#      never "does not occur". Per the pass-bar ratified on #1236
 #      (Clopper-Pearson exact, 90% one-sided throughout — every n here moves
 #      if you recompute on another basis, so the basis travels with the
 #      number), a zero-observation bounds the rate at 90% for n=1 and still
