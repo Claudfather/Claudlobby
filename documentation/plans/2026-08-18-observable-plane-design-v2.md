@@ -54,6 +54,7 @@ Minted, immutable uids; every human-readable name is a mutable alias.
 - `bot_instance_uid` — one installed/supervised runtime instance of an actor on a host.
 - `session_uid` — one Claude Code session/incarnation (joins to transcript + OTel `session.id`).
 - `vault_uid` — one mounted vault (primary or secondary); its name and remote are aliases.
+- `project_uid` — one declared project (projects.yaml, grain `(fleet, key)`); the kebab key is its alias.
 - `process_uid` (optional) — one OS process lifetime.
 
 `bot:<fleet>/<name>` survives as the **composed alias** — it is what bash doors stamp and humans read; ingest resolves alias→uid against the registry at write time. Group membership (F5) is registry data on the fleet payload, not identity. Global uniqueness is designed now even while the first db is one-per-host.
@@ -194,6 +195,22 @@ telegram: {group_alias: str}? ⚑                  # raw chat id sensitive-separ
 declared_hash: str;  vault_rev: str?;  schema_version: str
 ```
 
+### ProjectPayload (keyframe — the third config tier, declared in projects.yaml)
+
+```yaml
+project_uid: str;  key: str                      # kebab slug = the PROJECT_TIER_<SLUG> env identity
+fleet_uid: str                                   # the DECLARING fleet — grain is (fleet, key);
+                                                 # same-key/different-tier across fleets is FLAGGED, never resolved
+title: str;  repos: [str]                        # owner/name — "the join key mapping work to this project"
+tier: auto|review|preview|human                  # governance: tier changes are the SCD2 payoff
+validation_hash: str                             # bounded canonical hash of the validation block
+mission_file: {path: str, content_hash: str}?    # same charter-drift pattern as fleets
+declared_hash: str;  vault_rev: str?;  schema_version: str
+# No projects.yaml = legitimately zero projects (empty state, not error).
+# work_items.project_key stays a STRING at ingest; the reg_projects join
+# happens at derivation — undeclared key = warn + trust metric, never reject.
+```
+
 ### BotPayload (keyframe)
 
 ```yaml
@@ -292,7 +309,7 @@ session_usage:            # envelope + — transcript-usage.py's existing axes v
 
 ### Lane C — final derived set (closes the walk)
 
-`reg_hosts / reg_vaults / reg_fleets / reg_bots` (current-state, hash-verified, disposable) · SCD2 `*_history` views (F16 windowing over snapshots) · `registry_changes` field-level diff view · `task_status` view (evidence-based activation, §8) · `workstream_status` view + `workstreams.json` compatibility projection (transitional, F6) · presence rollups (latest-per-metric + windowed aggregates) · trust metrics (emit/committed/spooled/rejected · duplicate ids · oldest spool age · replay failures · dual-write mismatches · raw-by-caller · unacked-delivery age · projection lag · lifecycle-unknown-type count · provisional-actor count) · interaction-density graph (never "observed org") · FTS index (permitted content only, completeness-stated).
+`reg_hosts / reg_vaults / reg_fleets / reg_bots / reg_projects` (current-state, hash-verified, disposable) · SCD2 `*_history` views (F16 windowing over snapshots) · `registry_changes` field-level diff view · `task_status` view (evidence-based activation, §8) · `workstream_status` view + `workstreams.json` compatibility projection (transitional, F6) · presence rollups (latest-per-metric + windowed aggregates) · trust metrics (emit/committed/spooled/rejected · duplicate ids · oldest spool age · replay failures · dual-write mismatches · raw-by-caller · unacked-delivery age · projection lag · lifecycle-unknown-type count · provisional-actor count) · interaction-density graph (never "observed org") · FTS index (permitted content only, completeness-stated).
 
 **With this section, every model in the system is finalized.** Remaining open items are implementation-owned only (§19: canonical-bytes golden fixtures, ingest benchmark, DDL mechanics, Claudron#145 answers).
 
@@ -356,7 +373,7 @@ Golden path: `claudlobby plane init | start | status | doctor | open`. Clocks: e
 - **Phase 0 — reconcile facts:** ✅ mostly done in-session (baseline refreshed to `e3b6347`; capabilities re-verified; landed prerequisites removed). Remaining: callsite/state-store re-inventory against current main.
 - **Phase 1 — lock the semantic kernel:** rule §19's items; ratify identity, envelope, ordering, privacy, vocabulary, comms model, task state machine, spool, schema compatibility, workstream migration. **No UI.**
 - **Phase 2 — headless vertical slice:** `task contract → message intent → transport attempt → acknowledgement → progress → completed/failed/blocked/overdue/orphaned`, exposed via CLI + SQLite + one reader/service layer + doctor/status + projection rebuild. Dual-write canary beside JSONL.
-- **Phase 2b — registry lane (the host/vault/fleet/bot walk made real):** migration 0002 adds `registry_snapshots`, `declaration_observed`, `presence_health_events` (envelope-bearing, F16 pattern; writes ride the same emit spine). Pydantic payload contracts for the four entities — **field lists FINAL in §9b**, reflecting the review deltas: minted uids (F10), volatile fields OUT to presence/health (F12), `FleetPayload.groups` (F5), BotPayload separating actor/instance/session. Emitter moments: `generate` (cause=generate, carries `vault_rev`), the probe loop (cause=probe: hardware + system facet), `declaration_observed` on every newly seen vault revision even when resolved state is unchanged. Scan semantics: `scan_id` + completeness status; tombstones only after a complete authoritative scan. Projection loader rebuilds `reg_hosts/vaults/fleets/bots` idempotently (hash-verified against files); SCD2 + `registry_changes` views. **Closes Phase 1's identity loop:** the generate-time pass confirms provisional actors (`provisional=0`) and mints `bot_instance_uid`s, so lazy-minted identities stop being provisional the first time the registry observes the declared roster. Doctor surfaces: provisional actors, composed-hash drift, reconcile-check failures. Sequenced after Phase 2 (the slice stays narrow) and **before Phase 4, which renders identity context from these projections**; Phase 3 can run in parallel with it.
+- **Phase 2b — registry lane (the host/vault/fleet/bot walk made real):** migration 0002 adds `registry_snapshots`, `declaration_observed`, `presence_health_events` (envelope-bearing, F16 pattern; writes ride the same emit spine). Pydantic payload contracts for the five entities — **field lists FINAL in §9b**, reflecting the review deltas: minted uids (F10), volatile fields OUT to presence/health (F12), `FleetPayload.groups` (F5), BotPayload separating actor/instance/session. Emitter moments: `generate` (cause=generate, carries `vault_rev`), the probe loop (cause=probe: hardware + system facet), `declaration_observed` on every newly seen vault revision even when resolved state is unchanged. Scan semantics: `scan_id` + completeness status; tombstones only after a complete authoritative scan. Projection loader rebuilds `reg_hosts/vaults/fleets/bots/projects` idempotently (hash-verified against files); SCD2 + `registry_changes` views. **Closes Phase 1's identity loop:** the generate-time pass confirms provisional actors (`provisional=0`) and mints `bot_instance_uid`s, so lazy-minted identities stop being provisional the first time the registry observes the declared roster. Doctor surfaces: provisional actors, composed-hash drift, reconcile-check failures. Sequenced after Phase 2 (the slice stays narrow) and **before Phase 4, which renders identity context from these projections**; Phase 3 can run in parallel with it.
 - **Phase 3 — commodity telemetry pilot:** OTel + LangSmith on one canary bot; delete redundant roadmap surfaces on evidence.
 - **Phase 4 — minimal operator plane:** F8's five surfaces over the proven slice.
 - **Phase 5 — organizational learning:** deliberations, independent contributions, synthesis, preserved dissent, decisions, outcome joins — only then consensus-learning claims.
