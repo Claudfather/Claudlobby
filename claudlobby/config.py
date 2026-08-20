@@ -935,6 +935,25 @@ def _coerce_scope(raw: dict | None) -> ScopeConfig | None:
 # this is the only way to tell a pasted secret from an env var name.
 _GITHUB_TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
 
+# GitHub org/user login charset (GitHub's own rule: alphanumerics and single
+# hyphens, no leading/trailing/double hyphen). An org name is interpolated
+# UNESCAPED into composed .gitconfig subsection headers and insteadOf values,
+# so an unvalidated value (a quote, a newline, a `#`) is a config-injection
+# sink — the ceiling is a composed core.sshCommand, i.e. RCE at the next git
+# call. The `/`-only rejection both git-routing parsers had cannot catch it.
+_GITHUB_ORG_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9])*$")
+
+
+def _check_org_name(org: str, *, where: str, field: str) -> None:
+    """Reject an org value that is not a real GitHub login (config-injection
+    guard shared by git_credentials and github_app.orgs)."""
+    if not _GITHUB_ORG_RE.match(org):
+        raise ValueError(
+            f"{where}: {field} value {org!r} is not a valid GitHub org name "
+            "(letters, digits, single hyphens) — it is interpolated into the "
+            "composed .gitconfig and must not carry config-control characters"
+        )
+
 
 def _parse_credential_sources(raw: object, *, where: str) -> dict[str, str]:
     """Validate one scope's ``credential_sources`` block (VAR -> source id).
@@ -996,6 +1015,7 @@ def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
                 f"'org/repo' — credential routing is org-scoped and a repo-scoped "
                 f"key would silently never match"
             )
+        _check_org_name(org, where=where, field="git_credentials key")
         if not isinstance(env_name, str) or not SHELL_IDENT_RE.match(env_name):
             raise ValueError(
                 f"{where}: git_credentials['{org}'] must be an env var NAME "
@@ -1063,7 +1083,10 @@ def _parse_github_app(raw: object, *, where: str) -> dict:
                     "not 'org/repo' — credential routing is org-scoped and a "
                     "repo-scoped key would silently never match"
                 )
-        out["orgs"] = list(orgs)
+            _check_org_name(org, where=where, field="github_app.orgs")
+        # De-dup while preserving order: a repeated org would compose duplicate
+        # credential/insteadOf sections.
+        out["orgs"] = list(dict.fromkeys(orgs))
     unknown = set(raw) - {"enabled", "slug", "bot_user_id", "orgs"}
     if unknown:
         raise ValueError(

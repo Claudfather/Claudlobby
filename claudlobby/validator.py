@@ -751,6 +751,16 @@ def _validate_bots(
                 )
             else:
                 tool_targets[target] = tool_entry.name
+            # Mirror the generate-time gh-shim collision as a validate error so
+            # `validate` ≡ `generate` (the contract this function stands on): an
+            # App bot composes a tools/gh shim, so a declared tool also
+            # rendering 'gh' would only fail at generate otherwise.
+            if target == "gh" and bot.github_app:
+                report.errors.append(
+                    f"bot '{bot_name}': tool '{tool_entry.name}' renders 'gh', "
+                    "but github_app composes a tools/gh shim — rename the tool "
+                    "or disable github_app for this bot"
+                )
             for var in manifest.get("env") or []:
                 if not _env_has_value(effective_env, var):
                     report.warnings.append(
@@ -844,6 +854,16 @@ def _validate_bots(
                     f"{git_identity_problem} — commits will fail 'Author identity "
                     f"unknown'"
                 )
+            for shadow in ("GH_TOKEN", "GITHUB_TOKEN"):
+                if _env_has_value(effective_env, shadow):
+                    report.warnings.append(
+                        f"bot '{bot_name}': {shadow} is set in a .env tier while "
+                        f"github_app is declared — the composed tools/gh shim "
+                        f"mints only when neither GH_TOKEN nor GITHUB_TOKEN is "
+                        f"set, so an ambient value silently makes `gh` run as "
+                        f"THAT identity, not the App (the silent operator-"
+                        f"identity substitution the shim exists to stop)"
+                    )
             if reverse_insteadof_problem:
                 report.warnings.append(
                     f"bot '{bot_name}': github_app routing is defeated by the "

@@ -695,9 +695,12 @@ def compose_bot_gitconfig(bot: BotConfig, paths: Paths) -> str | None:
 """
         for org in scopes:
             prefix = f"{org}/" if org else ""
+            # Both remote spellings bypass the https credential layer: scp-form
+            # (git@github.com:org/) and ssh:// (ssh://git@github.com/org/).
             out += f"""
 [url "https://github.com/{prefix}"]
 \tinsteadOf = git@github.com:{prefix}
+\tinsteadOf = ssh://git@github.com/{prefix}
 """
 
     # Omitted when gh is absent rather than emitting a bare name a non-login git

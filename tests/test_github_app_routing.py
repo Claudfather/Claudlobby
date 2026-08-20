@@ -94,6 +94,19 @@ class TestGithubAppParsing:
     def test_absent_is_none_not_an_error(self):
         assert _merge_github_app(None, None, bot_name="w") is None
 
+    def test_org_with_config_metacharacters_is_rejected(self):
+        # Consensus #1283-review finding: an org value lands UNESCAPED in
+        # gitconfig subsection headers and insteadOf values, so a quote or
+        # newline is a config-injection sink (ceiling: composed core.sshCommand
+        # = RCE). Only a real GitHub login charset may pass.
+        for bad in ('x"', "x\n[core]", "x y", "-lead", "trail-"):
+            with pytest.raises(ValueError, match="valid GitHub org name"):
+                _parse_github_app({"orgs": [bad]}, where="bot 'w'")
+
+    def test_duplicate_orgs_are_deduped(self):
+        merged = _merge_github_app({"orgs": ["OrgA", "OrgA", "OrgB"]}, None, bot_name="w")
+        assert merged.orgs == ["OrgA", "OrgB"]
+
 
 class TestGithubAppComposedText:
     def _render(self, tmp_path, monkeypatch, bot):
@@ -186,6 +199,29 @@ class TestGithubAppComposedText:
             assert token not in out, token
         bare = _bare_bot()
         assert comp.compose_bot_gitconfig(bare, make_paths(tmp_path)) is None
+
+
+class TestPathAudit:
+    def test_composed_gitconfig_passes_the_l2_emitted_path_scan(self, tmp_path, monkeypatch):
+        # S6 regression pin: the App helper is baked as an absolute path into
+        # the composed .gitconfig; audit_bot_paths (the deny-by-default L2
+        # emitted-path guard) must accept it exactly as it accepts the two
+        # pre-existing baked absolutes (operator include, resolved gh). A
+        # fleet-shaped absolute that did NOT resolve inside the fleet root
+        # would FAIL generate.
+        from claudlobby import path_audit
+
+        monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: "/usr/bin/gh")
+        monkeypatch.setattr(comp, "_operator_gitconfig", lambda: tmp_path / "user.gitconfig")
+        bot = _app_bot(orgs=["OrgA"])
+        bot_dir = make_paths(tmp_path).runtime_bots / "worker"
+        bot_dir.mkdir(parents=True)
+        (bot_dir / ".gitconfig").write_text(
+            comp.compose_bot_gitconfig(bot, make_paths(tmp_path))
+        )
+        findings = path_audit.audit_bot_paths(bot, _fleet(bot), make_paths(tmp_path))
+        gitconfig_findings = [f for f in findings if ".gitconfig" in str(f.file)]
+        assert gitconfig_findings == [], [str(f) for f in gitconfig_findings]
 
 
 class TestGhShim:
