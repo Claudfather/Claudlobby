@@ -349,6 +349,22 @@ def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float,
     return "\n".join(out)
 
 
+def load_rows_loadavg(path: Path) -> dict[int, float]:
+    """boot index -> loadavg_1m, for the pre-registered stratification."""
+    out: dict[int, float] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(r.get("i"), int) and isinstance(r.get("loadavg_1m"), (int, float)):
+            out[r["i"]] = float(r["loadavg_1m"])
+    return out
+
+
 def load_loadavg(path: Path) -> list[float]:
     """Every recorded loadavg_1m, for stating the verdict's scope from MEASUREMENT.
 
@@ -464,6 +480,54 @@ def boot_index(trace_dir: Path) -> int | None:
         return int(name[len("trace-boot-"):])
     except ValueError:
         return None
+
+
+def stratify_by_load(pairs: list[tuple[float, str]], cp_interval, conf: float) -> list[str]:
+    """Split scored strands at the MEDIAN recorded loadavg and compare the halves.
+
+    PRE-REGISTERED BLIND, before any stratified result was computed. Amendment
+    part 2 ratified "stratify by recorded loadavg"; this is the split rule, fixed
+    in advance so it cannot be chosen to produce a preferred answer:
+
+      * split point: the MEDIAN of loadavg_1m ACROSS SCORED STRANDS -- not a round
+        number, not the burner count, and not chosen after seeing tokens. A median
+        keeps the halves balanced, which is the only property that matters for a
+        comparison this small.
+      * ties at the median go LOW, stated so the rule is deterministic.
+      * reported per half: n and the per-token share. NO verdict per half and no
+        significance test -- at these n the halves cannot support one, and inventing
+        a bar here would be the pre-registration failure this run already had once.
+
+    WHAT IT CAN AND CANNOT SETTLE. Thermal capping and contention both act through
+    TIMING, and both scale with load. So if a token dominates UNIFORMLY across both
+    halves, the "it is purely a load/thermal artifact" explanation is weakened --
+    the effect did not track the thing that supposedly caused it. If it concentrates
+    in the high half, that explanation is strengthened.
+
+    It cannot ISOLATE thermal from contention: they covary here, and the sampler
+    records no per-boot throttle state, so no split of this data separates them.
+    Saying otherwise would be reading a two-way question off a one-way instrument.
+    """
+    if not pairs:
+        return []
+    loads = sorted(v for v, _ in pairs)
+    mid = len(loads) // 2
+    med = loads[mid] if len(loads) % 2 else (loads[mid - 1] + loads[mid]) / 2
+    lo = [t for v, t in pairs if v <= med]
+    hi = [t for v, t in pairs if v > med]
+    out = ["", f"STRATIFIED by recorded loadavg (pre-registered split: median = {med:.1f}, ties low)"]
+    for name, half in (("low", lo), ("high", hi)):
+        if not half:
+            out.append(f"  {name}: n=0 — empty half, nothing comparable")
+            continue
+        counts = {t: half.count(t) for t in sorted(set(half))}
+        share = "  ".join(f"{t} {c}/{len(half)}={c/len(half):.0%}" for t, c in counts.items())
+        out.append(f"  {name:>4} load (n={len(half)}): {share}")
+    if lo and hi:
+        out.append("  No per-half verdict: n is too small to support one, and a bar invented")
+        out.append("  here would repeat this run's own pre-registration failure.")
+        out.append("  Thermal and contention COVARY — this split cannot separate them.")
+    return out
 
 
 def score_dirs(trace_dirs: list[Path], rows: dict[int, str], lib_common: Path):
@@ -639,6 +703,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--allow-elimination", action="store_true",
                     help="lift the ratified UNAVAILABLE clause on ELIMINATED. Requires "
                          "a blind re-ratification; never set it after seeing the data")
+    ap.add_argument("--stratify", action="store_true",
+                    help="split scored strands at the median recorded loadavg (amendment part 2)")
     ap.add_argument("--throttled-before", help="vcgencmd get_throttled value from BEFORE the run")
     ap.add_argument("--throttled-after", help="vcgencmd get_throttled value from AFTER the run")
     ap.add_argument("--gate", action="store_true",
@@ -702,6 +768,19 @@ def main(argv: list[str]) -> int:
         return 3
 
     tokens, unscored, held = score_dirs(args.trace_dirs, rows, args.lib_common)
+    strat = []
+    if args.rows and args.stratify:
+        loads = load_rows_loadavg(args.rows)
+        pairs = []
+        ti = 0
+        for d in args.trace_dirs:
+            idx = boot_index(d)
+            if idx is None or rows.get(idx) != "strand":
+                continue
+            if ti < len(tokens) and idx in loads:
+                pairs.append((loads[idx], tokens[ti]))
+            ti += 1
+        strat = stratify_by_load(pairs, cp, args.conf)
 
     mix = mixture(tokens, args.conf, cp, allow_elimination=args.allow_elimination)
     if args.json:
@@ -715,7 +794,7 @@ def main(argv: list[str]) -> int:
         las = load_loadavg(args.rows) if args.rows else []
         th = thermal_scope(args.throttled_before, args.throttled_after)
         print(format_report(mix, unscored, args.conf, derived=bool(rows),
-                            loadavgs=las, thermal=th))
+                            loadavgs=las, thermal=th + strat))
     return 0
 
 
