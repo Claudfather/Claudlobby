@@ -89,20 +89,37 @@ class TestFinalVerdict:
 class TestClopperPearson:
     def test_zero_of_twenty_matches_closed_form(self):
         # k=0 upper bound has the closed form 1 - (alpha/2)^(1/n) = 0.1684.
-        lo, hi = summary.cp_interval(0, 20)
+        lo, hi = summary.cp_interval(0, 20, 0.95)
         assert lo == 0.0
         assert abs(hi - (1 - 0.025 ** (1 / 20))) < 1e-6
 
     def test_baseline_two_of_four_spans_the_unit_line(self):
         # The #843 point: the n=4 baseline is known only to (0.068, 0.932).
-        lo, hi = summary.cp_interval(2, 4)
+        lo, hi = summary.cp_interval(2, 4, 0.95)
         assert abs(lo - 0.0676) < 1e-3
         assert abs(hi - 0.9324) < 1e-3
 
     def test_degenerate_bounds(self):
-        assert summary.cp_interval(20, 20)[1] == 1.0
+        # BOTH calls below need an explicit `conf` (#1236 made it required, no
+        # default). If you are reverting, bisecting, or porting this and drop
+        # either one, the failures SURFACE SEQUENTIALLY and the second is the
+        # confusing one:
+        #
+        #   * A bare call on the FIRST line raises TypeError, which aborts this
+        #     function — so the second line never executes and looks fine.
+        #   * Fix only the first, re-run, and the second now raises TypeError
+        #     BEFORE reaching the ValueError it asserts. A test that exists to
+        #     prove input validation works then fails as though the validation
+        #     were broken, and it appears only AFTER a fix, which reads as a
+        #     regression the fix caused.
+        #
+        # Neither is a value change. Errors are fine here; a different NUMBER
+        # would not be. Noted at the test rather than only in the PR, because
+        # whoever meets the second failure is looking at this file, not at a
+        # description they read twenty minutes earlier.
+        assert summary.cp_interval(20, 20, 0.95)[1] == 1.0
         with pytest.raises(ValueError):
-            summary.cp_interval(5, 4)
+            summary.cp_interval(5, 4, 0.95)
 
 
 class TestSummarize:
@@ -1175,9 +1192,9 @@ class TestArmsRefusals:
 
 class TestMoverDifference:
     def test_matches_the_hand_computed_mover_combination(self):
-        d, lo, hi = summary.mover_difference(7, 10, 2, 10)
-        lo1, hi1 = summary.cp_interval(7, 10)
-        lo2, hi2 = summary.cp_interval(2, 10)
+        d, lo, hi = summary.mover_difference(7, 10, 2, 10, 0.95)
+        lo1, hi1 = summary.cp_interval(7, 10, 0.95)
+        lo2, hi2 = summary.cp_interval(2, 10, 0.95)
         assert abs(d - 0.5) < 1e-12
         assert abs(lo - (0.5 - ((0.7 - lo1) ** 2 + (hi2 - 0.2) ** 2) ** 0.5)) < 1e-12
         assert abs(hi - (0.5 + ((hi1 - 0.7) ** 2 + (0.2 - lo2) ** 2) ** 0.5)) < 1e-12
@@ -1186,11 +1203,11 @@ class TestMoverDifference:
         # k=0 and k=n are the arms a ceiling is meant to produce. A Wald
         # interval collapses to zero width there and reports a clean separation
         # that the data does not support; the exact inputs keep width.
-        d, lo, hi = summary.mover_difference(20, 20, 0, 20)
+        d, lo, hi = summary.mover_difference(20, 20, 0, 20, 0.95)
         assert d == 1.0 and lo < 1.0 and hi > 1.0 - 1e-9
 
     def test_identical_arms_straddle_zero(self):
-        _, lo, hi = summary.mover_difference(5, 20, 5, 20)
+        _, lo, hi = summary.mover_difference(5, 20, 5, 20, 0.95)
         assert lo < 0 < hi
 
 
