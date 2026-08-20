@@ -96,19 +96,26 @@ ELIMINATION_MIN_N = 22
 # as empty-box dominance, seen from the other end. We already ratified trusting
 # the first least; the second cannot then be trusted.
 #
-# TWO of the four defects actually DRAIN a specific candidate; the taxonomy matters
-# and an earlier version of this comment got it wrong:
+# THE ARGUMENT DOES NOT REST ON COUNTING DEFECTS, and three passes were needed to
+# get that right -- each narrower, each corrected by someone else, conclusion never
+# moving:
 #
-#   DRAIN (lowers a specific candidate count -- what the argument needs)
-#     * duplicate-tick collision -- into the residual
-#     * no-payload / unarmed trace -- into EXCLUSION. It returns early with its own
-#       token so it never reaches the residual, but the trace is dropped entirely,
-#       and a dropped trace that would have shown below-floor turns a count of 1
-#       into a count of 0. That is the false-elimination path exactly.
-#   INFLATE (raises the residual without lowering any candidate)
-#     * mode C and the bare glob -- clean boots that were never candidates
+#   1. "four defects, all draining the same way"   -- loose
+#   2. "two drain, two inflate"                    -- better, still a tally
+#   3. the fall-through mass                       -- structural, checkable here
 #
-# All four raise empty-box; only the first pair lowers a specific count.
+# Only (3) survives, and it is the strongest form because it does not depend on the
+# tally being right or on anyone having audited each defect. It applies to defects
+# NOBODY HAS FOUND YET, which is the population that matters.
+#
+# ONE DISTINCTION THAT COST TWO WRONG VERSIONS -- UNIFORM LOSS vs DIRECTIONAL DRAIN.
+# `no-payload` does NOT drain. It fires on trace ARMING, which is uncorrelated with
+# whichever candidate the boot would have shown, so it removes traces at random:
+# `n` falls, every count falls proportionally, and the CP interval plus the
+# disclosed unscored list already cover it. Naming it as a token was still right --
+# it must never be SCORED -- but it is not an instance of this mechanism. Only a
+# defect that moves mass BETWEEN candidates biases the mixture, and the fall-through
+# is the mechanism that does.
 #
 # AND THE WITHHOLD IS NOT ABSOLUTE, which was the flaw in its first form: "an
 # observation defect could produce a low count" is true of every measurement ever
