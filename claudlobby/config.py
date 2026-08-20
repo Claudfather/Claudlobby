@@ -464,6 +464,54 @@ class AutonomousRunnerConfig:
 
 
 @dataclass
+class GithubAppConfig:
+    """Per-bot GitHub App git-auth routing (App-auth P3 #1273).
+
+    The credential VALUES ride the ``GITHUB_APP_*`` env contract the
+    ``github-app`` MCP fragment declares (fleet tier); this field only decides
+    whether and how the composed per-bot gitconfig routes git auth through the
+    App helper. ``slug`` + ``bot_user_id`` together arm the composed commit
+    identity (F-identity variant a: ``<slug>[bot]`` +
+    ``<id>+<slug>[bot]@users.noreply.github.com``); omitting either keeps the
+    operator identity flowing through the include (variant b) — one field
+    pair, no code fork. ``orgs`` scopes the App helper (and the ssh→https
+    rewrite, and whether the gh fallback is kept) to those orgs; empty means
+    host-generic github.com.
+    """
+
+    slug: str | None = None
+    bot_user_id: int | None = None
+    orgs: list[str] = field(default_factory=list)
+
+    @property
+    def host_generic(self) -> bool:
+        """No org scoping: the App serves all of github.com. The composer keys
+        the gh-fallback SUPPRESSION on this, and freshbox mirrors the same
+        emission decision — one predicate so the audit and the artifact cannot
+        drift apart."""
+        return not self.orgs
+
+    @property
+    def composes_identity(self) -> bool:
+        """Both identity fields set -> the composed [user] block arms
+        (F-identity variant a). The freshbox D7 split and the validator's
+        include-reliance warn both key on the same condition."""
+        return bool(self.slug and self.bot_user_id)
+
+
+# name -> operator-facing description, the ONE mapping every Python surface
+# spells the App env trio from (composer registry, validator warns, freshbox
+# key audit) — the same emitter-cannot-disagree-with-guard rule
+# FLEET_PULSE_ENV_KEYS states. The fragment (library/mcp/github-app.json)
+# stays the contract-declaration surface; this is the code-side mirror.
+GITHUB_APP_ENV_VARS: dict[str, str] = {
+    "GITHUB_APP_ID": "GitHub App ID (numeric; git-auth routing)",
+    "GITHUB_APP_INSTALLATION_ID": "GitHub App installation ID (git-auth routing)",
+    "GITHUB_APP_PRIVATE_KEY_PATH": "Path to the App private-key .pem (0600; git-auth routing)",
+}
+
+
+@dataclass
 class BotConfig:
     bot_id: str  # dict key — immutable system slug
     name: str  # display name (defaults to bot_id)
@@ -478,7 +526,7 @@ class BotConfig:
     # GitHub App git-auth routing (App-auth P3 #1273, fork F8: a dedicated
     # field, never a git_credentials value form — that parser hard-rejects
     # non-identifier values by design). None = App mode off for this bot.
-    github_app: "GithubAppConfig | None" = None
+    github_app: GithubAppConfig | None = None
     # env var NAME -> credential source identifier. The per-scope override the
     # tier ruling requires (#1214 F6c): a contract declares where a value comes
     # from BY DEFAULT, and a fleet or a single bot may say otherwise for itself
@@ -967,28 +1015,6 @@ def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
     return out
 
 
-@dataclass
-class GithubAppConfig:
-    """Per-bot GitHub App git-auth routing (App-auth P3 #1273).
-
-    The credential VALUES ride the ``GITHUB_APP_*`` env contract the
-    ``github-app`` MCP fragment declares (fleet tier); this field only decides
-    whether and how the composed per-bot gitconfig routes git auth through the
-    App helper. ``slug`` + ``bot_user_id`` together arm the composed commit
-    identity (F-identity variant a: ``<slug>[bot]`` +
-    ``<id>+<slug>[bot]@users.noreply.github.com``); omitting either keeps the
-    operator identity flowing through the include (variant b) — one field
-    pair, no code fork. ``orgs`` scopes the App helper (and the ssh→https
-    rewrite, and whether the gh fallback is kept) to those orgs; empty means
-    host-generic github.com.
-    """
-
-    enabled: bool = True
-    slug: str | None = None
-    bot_user_id: int | None = None
-    orgs: list[str] = field(default_factory=list)
-
-
 _GITHUB_APP_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
@@ -1008,12 +1034,7 @@ def _parse_github_app(raw: object, *, where: str) -> dict:
     raw = _shaped(f"{where}: github_app", raw, dict, "{slug: my-app, bot_user_id: 123}")
     out: dict = {}
     if "enabled" in raw:
-        if not isinstance(raw["enabled"], bool):
-            raise ValueError(
-                f"{where}: github_app.enabled must be a YAML boolean, got "
-                f"{raw['enabled']!r} — an arming knob must not switch on via a typo"
-            )
-        out["enabled"] = raw["enabled"]
+        out["enabled"] = _strict_bool(f"{where}: github_app.enabled", raw["enabled"])
     if "slug" in raw and raw["slug"] is not None:
         slug = raw["slug"]
         if not isinstance(slug, str) or not _GITHUB_APP_SLUG_RE.match(slug):
@@ -1064,7 +1085,7 @@ def _merge_github_app(defaults_raw: object, bot_raw: object, *, bot_name: str):
     if merged.get("enabled") is False:
         return None
     merged.pop("enabled", None)
-    return GithubAppConfig(enabled=True, **merged)
+    return GithubAppConfig(**merged)
 
 
 def is_pos_int(v: object) -> bool:
@@ -1401,6 +1422,20 @@ def _coerce_autonomous_runner(
     )
 
 
+def _strict_bool(label: str, value: object) -> bool:
+    """Arming-knob boolean: only a real YAML bool passes (#904 M1 precedent).
+
+    The loose bool() coercion the cosmetic knobs use would arm on any typo —
+    a YAML string is truthy — and a silently armed knob is the
+    no-silent-switches failure exactly."""
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"{label} must be a YAML boolean, got {value!r} — "
+            "an arming knob must not switch on via a typo"
+        )
+    return value
+
+
 def _parse_brief(raw: Any) -> bool:
     """Parse the bot-level ``brief:`` stanza (#904 M1) to its arming bool.
 
@@ -1411,13 +1446,7 @@ def _parse_brief(raw: Any) -> bool:
     real YAML boolean arms; anything else is a parse error naming the value.
     """
     raw = _shaped("brief", raw, dict, "{on_start: true}")
-    on_start = raw.get("on_start", False)
-    if not isinstance(on_start, bool):
-        raise ValueError(
-            f"'brief.on_start' must be a YAML boolean, got {on_start!r} — "
-            "an arming knob must not switch on via a typo"
-        )
-    return on_start
+    return _strict_bool("'brief.on_start'", raw.get("on_start", False))
 
 
 def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | None:

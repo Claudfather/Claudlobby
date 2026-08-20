@@ -7,6 +7,7 @@ runs through REAL `git credential fill` with an on-disk counting stub helper
 is baked, exactly as a fleet checkout would place it).
 """
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -20,13 +21,25 @@ from claudlobby.config import (
     _merge_github_app,
     _parse_github_app,
 )
-from claudlobby.paths import Paths
-
-from tests.conftest import _write_exec
+from tests.conftest import _write_exec, git_isolation_env, make_paths
 
 
-def _make_paths(root: Path) -> Paths:
-    return Paths(root=root, fleet_dir=root)
+def _fleet(bot):
+    return FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
+
+
+def _bare_bot():
+    return BotConfig(bot_id="b", name="b", expertise=["eng"])
+
+
+def _shim_on_disk(tmp_path):
+    """Compose the shim for an App bot and place it executable on disk."""
+    bot = _app_bot()
+    shim_dir = tmp_path / "tools"
+    shim_dir.mkdir()
+    outputs = comp.compose_tool_outputs(bot, _fleet(bot), make_paths(tmp_path), tmp_path)
+    _write_exec(shim_dir / "gh", outputs["gh"])
+    return shim_dir
 
 
 def _app_bot(creds=None, **app_kwargs):
@@ -88,7 +101,7 @@ class TestGithubAppComposedText:
         monkeypatch.setattr(
             comp, "_operator_gitconfig", lambda: tmp_path / "user.gitconfig"
         )
-        return comp.compose_bot_gitconfig(bot, _make_paths(tmp_path))
+        return comp.compose_bot_gitconfig(bot, make_paths(tmp_path))
 
     def test_pat_org_section_precedes_the_app_block(self, tmp_path, monkeypatch):
         out = self._render(
@@ -149,12 +162,12 @@ class TestGithubAppComposedText:
 
         install_real_template(tmp_path)
         bot = _app_bot()
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
-        conf = comp.compose_bot_conf(bot, fleet, _make_paths(tmp_path))
+        fleet = _fleet(bot)
+        conf = comp.compose_bot_conf(bot, fleet, make_paths(tmp_path))
         assert "GIT_CONFIG_GLOBAL" in conf
         assert 'export PATH="$BOT_DIR/tools:$PATH"' in conf
-        bare = BotConfig(bot_id="b", name="b", expertise=["eng"])
-        conf2 = comp.compose_bot_conf(bare, fleet, _make_paths(tmp_path))
+        bare = _bare_bot()
+        conf2 = comp.compose_bot_conf(bare, fleet, make_paths(tmp_path))
         assert "GIT_CONFIG_GLOBAL" not in conf2
         assert "$BOT_DIR/tools:$PATH" not in conf2
 
@@ -171,30 +184,25 @@ class TestGithubAppComposedText:
         )
         for token in ("github-app", "cache --timeout", "insteadOf", "[user]"):
             assert token not in out, token
-        bare = BotConfig(bot_id="b", name="b", expertise=["eng"])
-        assert comp.compose_bot_gitconfig(bare, _make_paths(tmp_path)) is None
+        bare = _bare_bot()
+        assert comp.compose_bot_gitconfig(bare, make_paths(tmp_path)) is None
 
 
 class TestGhShim:
     def test_shim_composed_for_app_bots_and_absent_otherwise(self, tmp_path):
         bot = _app_bot()
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
-        outputs = comp.compose_tool_outputs(bot, fleet, _make_paths(tmp_path), tmp_path)
+        fleet = _fleet(bot)
+        outputs = comp.compose_tool_outputs(bot, fleet, make_paths(tmp_path), tmp_path)
         assert "gh" in outputs
         assert "mint-github-token.sh" in outputs["gh"]
         assert "exec" in outputs["gh"]
-        bare = BotConfig(bot_id="b", name="b", expertise=["eng"])
-        assert comp.compose_tool_outputs(bare, fleet, _make_paths(tmp_path), tmp_path) == {}
+        bare = _bare_bot()
+        assert comp.compose_tool_outputs(bare, fleet, make_paths(tmp_path), tmp_path) == {}
 
     def test_shim_mints_and_execs_the_real_gh(self, tmp_path):
         # Behavioral: run the composed shim with a stub mint CLI (via
         # CLAUDLOBBY_ROOT) and a fake real-gh further down PATH.
-        bot = _app_bot()
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
-        shim_dir = tmp_path / "tools"
-        shim_dir.mkdir()
-        outputs = comp.compose_tool_outputs(bot, fleet, _make_paths(tmp_path), tmp_path)
-        _write_exec(shim_dir / "gh", outputs["gh"])
+        shim_dir = _shim_on_disk(tmp_path)
         (tmp_path / "lib").mkdir()
         _write_exec(
             tmp_path / "lib" / "mint-github-token.sh",
@@ -206,8 +214,6 @@ class TestGhShim:
             real_dir / "gh",
             '#!/bin/bash\nprintf "%s|%s" "$GH_TOKEN" "$*"\n',
         )
-        import os
-
         r = subprocess.run(
             [str(shim_dir / "gh"), "pr", "list"],
             env={
@@ -222,16 +228,9 @@ class TestGhShim:
         assert r.stdout == "ghs_SHIMMINT|pr list"
 
     def test_shim_is_loud_when_mint_fails(self, tmp_path):
-        bot = _app_bot()
-        fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
-        shim_dir = tmp_path / "tools"
-        shim_dir.mkdir()
-        outputs = comp.compose_tool_outputs(bot, fleet, _make_paths(tmp_path), tmp_path)
-        _write_exec(shim_dir / "gh", outputs["gh"])
+        shim_dir = _shim_on_disk(tmp_path)
         (tmp_path / "lib").mkdir()
         _write_exec(tmp_path / "lib" / "mint-github-token.sh", "#!/bin/bash\nexit 1\n")
-        import os
-
         r = subprocess.run(
             [str(shim_dir / "gh"), "pr", "list"],
             env={
@@ -275,12 +274,10 @@ class TestGithubAppRoutingResolvesForReal:
         monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: str(gh_stub))
         monkeypatch.setattr(comp, "_operator_gitconfig", lambda: user_cfg)
         cfg = tmp_path / "composed.gitconfig"
-        cfg.write_text(comp.compose_bot_gitconfig(bot, _make_paths(tmp_path)))
+        cfg.write_text(comp.compose_bot_gitconfig(bot, make_paths(tmp_path)))
         return cfg
 
     def _env(self, tmp_path, cfg, extra=None):
-        import os
-
         return {
             **os.environ,
             **(extra or {}),

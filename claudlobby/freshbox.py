@@ -23,7 +23,6 @@ it to every bot on the host.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -320,6 +319,63 @@ def _env_secret_leak_findings(
     return findings
 
 
+def _app_key_findings(bot: BotConfig, paths: Paths) -> list[Finding]:
+    """Host audit of the App private key — the one file composed App routing
+    hard-requires at mint time (missing = every git auth quit=1s; readable by
+    group/other = key material at rest on a shared host).
+
+    The VALUE resolves through ``paths.env_resolved()`` — the runtime cascade,
+    host tier included — never ``paths.env_file``: reading that as a value
+    source was the #1226 defect, and a key path set at the host tier would
+    read as absent here while minting fine at runtime (a false FAIL). An
+    unreachable resolver door is DISCLOSED as a WARN, never read as absence
+    (the source_state rule: cannot-look and nothing-there need opposite
+    remedies). An absent VALUE is the validator's warn, not this audit's.
+    """
+    from .env_tiers import ResolverUnavailable
+
+    try:
+        resolutions = paths.env_resolved(bot_name=bot.bot_id)
+    except ResolverUnavailable as e:
+        return [
+            Finding(
+                bot.bot_id,
+                "missing_external",
+                WARN,
+                f"App private-key audit SKIPPED — env cascade door unreachable "
+                f"({e}); this is a gap, not a pass",
+            )
+        ]
+    res = resolutions.get("GITHUB_APP_PRIVATE_KEY_PATH")
+    key_path = res.value if res else ""
+    if not key_path:
+        return []
+    kp = Path(key_path).expanduser()
+    if not kp.is_file():
+        return [
+            Finding(
+                bot.bot_id,
+                "missing_external",
+                FAIL,
+                f"GITHUB_APP_PRIVATE_KEY_PATH → {kp}, which does not exist — "
+                "every git auth on this bot will fail loudly (helper quit=1) "
+                "at first use",
+            )
+        ]
+    mode = kp.stat().st_mode & 0o777
+    if mode & 0o077:
+        return [
+            Finding(
+                bot.bot_id,
+                "denied_value",
+                FAIL,
+                f"App private key {kp} is mode {mode:o} — group/other-readable "
+                "key material on a shared host; chmod 600 it",
+            )
+        ]
+    return [Finding(bot.bot_id, "external_ref", INFO, f"App private key → {kp} (0{mode:o})")]
+
+
 def _externals_report(
     bot: BotConfig, fleet: FleetConfig, paths: Paths
 ) -> list[Finding]:
@@ -419,7 +475,7 @@ def _externals_report(
         # outlive its truth (D7 split). It still WARNs: the include also
         # carries aliases and the operator's non-identity config.
         app = bot.github_app
-        app_identity = bool(app and app.slug and app.bot_user_id)
+        app_identity = bool(app and app.composes_identity)
         operator = _operator_gitconfig()
         if operator.is_file():
             findings.append(
@@ -456,58 +512,12 @@ def _externals_report(
                 )
             )
         if app:
-            # The private key is the App's crown jewel and the one file the
-            # composed routing hard-requires at mint time. Missing → FAIL
-            # (every git auth will quit=1); readable by group/other → FAIL
-            # (a shared-host secret at rest, the pii-protection class).
-            # Same tier rule as credentials.py: fleet .env if present, else
-            # root — one or the other, never merged; ambient env as fallback.
-            env_vals = dotenv.read(paths.env_file) if paths.env_file.is_file() else {}
-            key_path = env_vals.get("GITHUB_APP_PRIVATE_KEY_PATH") or os.environ.get(
-                "GITHUB_APP_PRIVATE_KEY_PATH", ""
-            )
-            if not key_path:
-                pass  # absent VALUE is the validator's warn, not a host audit
-            else:
-                kp = Path(key_path).expanduser()
-                if not kp.is_file():
-                    findings.append(
-                        Finding(
-                            bot.bot_id,
-                            "missing_external",
-                            FAIL,
-                            f"GITHUB_APP_PRIVATE_KEY_PATH → {kp}, which does not "
-                            "exist — every git auth on this bot will fail loudly "
-                            "(helper quit=1) at first use",
-                        )
-                    )
-                else:
-                    mode = kp.stat().st_mode & 0o777
-                    if mode & 0o077:
-                        findings.append(
-                            Finding(
-                                bot.bot_id,
-                                "denied_value",
-                                FAIL,
-                                f"App private key {kp} is mode {mode:o} — group/"
-                                "other-readable key material on a shared host; "
-                                "chmod 600 it",
-                            )
-                        )
-                    else:
-                        findings.append(
-                            Finding(
-                                bot.bot_id,
-                                "external_ref",
-                                INFO,
-                                f"App private key → {kp} (0{mode:o})",
-                            )
-                        )
+            findings.extend(_app_key_findings(bot, paths))
         # gh fallback: emitted for git_credentials bots and org-scoped App
         # bots; a host-generic App suppresses it in the composed file, so
         # reporting it as an external would claim a dependency that is not
         # wired (coverage honesty).
-        if (gh_bin := _resolve_gh_executable()) and not (app and not app.orgs):
+        if (gh_bin := _resolve_gh_executable()) and not (app and app.host_generic):
             findings.append(
                 Finding(
                     bot.bot_id,

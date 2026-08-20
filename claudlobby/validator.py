@@ -18,7 +18,12 @@ log = logging.getLogger(__name__)
 
 from . import dotenv, tool_resolve
 from .claudron_compat import CLAUDRON_INTEGRATION_URL
-from .config import _PROJECT_VALIDATION_KEYS, FleetConfig, is_pos_int
+from .config import (
+    _PROJECT_VALIDATION_KEYS,
+    GITHUB_APP_ENV_VARS,
+    FleetConfig,
+    is_pos_int,
+)
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
@@ -53,9 +58,26 @@ def _env_has_value(effective_env: dict[str, str], var: str) -> bool:
     went permanently silent even if the operator never filled in a real value
     (#755). The single predicate behind all four "requires VAR but it is not
     set" validator warnings — MCP contract vars, tool env vars, telegram
-    token_env, git_credentials — so a fifth site cannot reintroduce the fork.
+    token_env, git_credentials, github_app — so a new site cannot reintroduce
+    the fork.
     """
     return bool(effective_env.get(var))
+
+
+def _git_config_probe(operator: Path, *query: str):
+    """One ``git config --file <operator> --includes <query...>`` run, or None
+    when the file or git is absent. ``--includes`` is NON-OPTIONAL and lives
+    here so no probe can drop it: it is off by default for ``--file`` reads
+    but ON when git reads the same file as global config — which is exactly
+    how the bot will read it — so omitting it silently under-detects anything
+    living one [include] deeper."""
+    if not operator.is_file() or not shutil.which("git"):
+        return None
+    return subprocess.run(
+        ["git", "config", "--file", str(operator), "--includes", *query],
+        capture_output=True,
+        text=True,
+    )
 
 
 def _operator_git_identity_problem() -> str | None:
@@ -81,13 +103,9 @@ def _operator_git_identity_problem() -> str | None:
     operator = _operator_gitconfig()
     if not operator.is_file():
         return f"{operator} does not exist"
-    if not shutil.which("git"):
+    probe = _git_config_probe(operator, "--get", "user.email")
+    if probe is None:
         return None  # cannot check; not the validator's business to guess
-    probe = subprocess.run(
-        ["git", "config", "--file", str(operator), "--includes", "--get", "user.email"],
-        capture_output=True,
-        text=True,
-    )
     if probe.returncode != 0 or not probe.stdout.strip():
         return f"{operator} sets no user.email"
     return None
@@ -107,23 +125,9 @@ def _operator_reverse_insteadof() -> str | None:
     from .composer import _operator_gitconfig  # local: composer imports config, not us
 
     operator = _operator_gitconfig()
-    if not operator.is_file() or not shutil.which("git"):
-        return None
-    probe = subprocess.run(
-        [
-            "git",
-            "config",
-            "--file",
-            str(operator),
-            "--includes",
-            "--get-regexp",
-            r"url\..*\.(push)?insteadof",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if probe.returncode != 0:
-        return None  # no insteadOf config at all
+    probe = _git_config_probe(operator, "--get-regexp", r"url\..*\.(push)?insteadof")
+    if probe is None or probe.returncode != 0:
+        return None  # unprobeable, or no insteadOf config at all
     for line in probe.stdout.splitlines():
         key, _, value = line.partition(" ")
         if "git@github.com" in key.lower() and "https://github.com" in value.lower():
@@ -805,11 +809,7 @@ def _validate_bots(
         # GitHub App routing (App-auth P3 #1273) — all warn, never fail.
         app = bot.github_app
         if app:
-            for var_name in (
-                "GITHUB_APP_ID",
-                "GITHUB_APP_INSTALLATION_ID",
-                "GITHUB_APP_PRIVATE_KEY_PATH",
-            ):
+            for var_name in GITHUB_APP_ENV_VARS:
                 if not _env_has_value(effective_env, var_name):
                     report.warnings.append(
                         f"bot '{bot_name}': github_app routing requires {var_name}, "
@@ -817,6 +817,15 @@ def _validate_bots(
                         f"fail loudly (quit=1) at the first git auth; set it, or "
                         f"run lib/setup-github-app.sh (its config-file fallback "
                         f"covers operator/cron shells only, never bot sessions)"
+                    )
+                if var_name in bot.env:
+                    report.warnings.append(
+                        f"bot '{bot_name}': bot-tier env overrides {var_name} — "
+                        f"all bots on this host share ONE git credential-cache "
+                        f"daemon keyed only by URL, so a per-bot installation "
+                        f"override can cross-serve another installation's cached "
+                        f"token with zero symptoms (D4); App credentials are "
+                        f"fleet-tier in v1"
                     )
             if bool(app.slug) != bool(app.bot_user_id):
                 have, need = (
@@ -828,7 +837,7 @@ def _validate_bots(
                     f"commits will carry the operator identity (get both from "
                     f"lib/setup-github-app.sh output)"
                 )
-            if git_identity_problem and not (app.slug and app.bot_user_id):
+            if git_identity_problem and not app.composes_identity:
                 report.warnings.append(
                     f"bot '{bot_name}': github_app without a composed App identity "
                     f"relies on the operator include for user.email, but "
@@ -844,20 +853,6 @@ def _validate_bots(
                     f"rule cannot undo it); remove it or scope it away from "
                     f"github.com"
                 )
-            for var_name in (
-                "GITHUB_APP_ID",
-                "GITHUB_APP_INSTALLATION_ID",
-                "GITHUB_APP_PRIVATE_KEY_PATH",
-            ):
-                if var_name in bot.env:
-                    report.warnings.append(
-                        f"bot '{bot_name}': bot-tier env overrides {var_name} — "
-                        f"all bots on this host share ONE git credential-cache "
-                        f"daemon keyed only by URL, so a per-bot installation "
-                        f"override can cross-serve another installation's cached "
-                        f"token with zero symptoms (D4); App credentials are "
-                        f"fleet-tier in v1"
-                    )
 
         # Observability config (warn). Fields may be None (= use hardcoded default);
         # only validate when explicitly set.

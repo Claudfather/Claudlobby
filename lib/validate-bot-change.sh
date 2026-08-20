@@ -2274,7 +2274,7 @@ GA_CFG="$GA_ROOT/composed.gitconfig"
 # prefer the checkout venv, fall back to python3 for editable installs.
 GA_PY="$LIB_DIR/../.venv/bin/python"
 [ -x "$GA_PY" ] || GA_PY=python3
-HOME="$GA_ROOT/home" "$GA_PY" - "$GA_ROOT" "$GA_CFG" <<GAPY 2>/dev/null
+HOME="$GA_ROOT/home" "$GA_PY" - "$GA_ROOT" "$GA_CFG" <<GAPY 2>"$GA_ROOT/compose.err" || sed "s/^/  compose: /" "$GA_ROOT/compose.err" >&2
 import sys
 sys.path.insert(0, '$LIB_DIR/..')
 from pathlib import Path
@@ -2287,11 +2287,16 @@ bot = BotConfig(bot_id="ga", name="ga", expertise=["eng"],
 Path(sys.argv[2]).write_text(compose_bot_gitconfig(bot, Paths(root=root, fleet_dir=root)))
 GAPY
 
-ga_env() {
+# The git-isolation contract lives ONCE (ga_env_base); the App-credentialed
+# variant layers on top. A drifted second copy weakens an assertion silently.
+ga_env_base() {
+    local xdg="$1"; shift
     env -i PATH="$GA_BIN:/usr/bin:/bin" HOME="$GA_ROOT/home" \
         GIT_CONFIG_GLOBAL="$GA_CFG" GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
-        XDG_CACHE_HOME="$GA_ROOT/xdg" CLAUDLOBBY_ROOT="$GA_ROOT" \
-        GITHUB_APP_ID=999001 GITHUB_APP_INSTALLATION_ID=555002 \
+        XDG_CACHE_HOME="$GA_ROOT/$xdg" CLAUDLOBBY_ROOT="$GA_ROOT" "$@"
+}
+ga_env() {
+    ga_env_base xdg GITHUB_APP_ID=999001 GITHUB_APP_INSTALLATION_ID=555002 \
         GITHUB_APP_PRIVATE_KEY_PATH="$GA_ROOT/app-key.pem" "$@"
 }
 
@@ -2313,10 +2318,7 @@ harness_check "cache answers after approve with NO curl on the host (mint amorti
 ga_env git credential-cache exit 2>/dev/null || true
 
 # D9/quit=1: unset the app env + config -> the helper must stop the chain loudly.
-ga_fail="$(printf 'protocol=https\nhost=github.com\npath=Other/y.git\n\n' | env -i PATH="$GA_BIN:/usr/bin:/bin" HOME="$GA_ROOT/home" \
-    GIT_CONFIG_GLOBAL="$GA_CFG" GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
-    XDG_CACHE_HOME="$GA_ROOT/xdg2" CLAUDLOBBY_ROOT="$GA_ROOT" \
-    git credential fill 2>&1)" && r=no || r=yes
+ga_fail="$(printf 'protocol=https\nhost=github.com\npath=Other/y.git\n\n' | ga_env_base xdg2 git credential fill 2>&1)" && r=no || r=yes
 harness_check "unconfigured helper stops git LOUDLY (quit=1), no silent fall-through" "$r"
 printf '%s' "$ga_fail" | grep -q 'password=' && r=no || r=yes
 harness_check "  ...and no credential of any identity was served" "$r"

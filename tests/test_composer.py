@@ -23,7 +23,7 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.path_audit import ExternalDecl
-from tests.conftest import _write_exec, install_real_template
+from tests.conftest import _write_exec, git_isolation_env, install_real_template
 from claudlobby.composer import (
     _BOOT_STAGGER_SECONDS,
     _compose_hooks,
@@ -4238,13 +4238,7 @@ class TestGitCredentialRoutingResolvesForReal:
     def _git(cfg, args, extra_env=None):
         return subprocess.run(
             ["git", *args],
-            env={
-                **os.environ,
-                **(extra_env or {}),
-                "GIT_CONFIG_GLOBAL": str(cfg),
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-                "GIT_TERMINAL_PROMPT": "0",
-            },
+            env=git_isolation_env(cfg, **(extra_env or {})),
             capture_output=True,
             text=True,
         )
@@ -4253,13 +4247,7 @@ class TestGitCredentialRoutingResolvesForReal:
         r = subprocess.run(
             ["git", "credential", "fill"],
             input=f"protocol=https\nhost=github.com\npath={path}\n\n",
-            env={
-                **os.environ,
-                **extra_env,
-                "GIT_CONFIG_GLOBAL": str(cfg),
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-                "GIT_TERMINAL_PROMPT": "0",
-            },
+            env=git_isolation_env(cfg, **extra_env),
             capture_output=True,
             text=True,
         )
