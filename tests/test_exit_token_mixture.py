@@ -81,10 +81,29 @@ class TestEliminationIsUnavailable:
         assert row["verdict"] == "NOT-OBSERVED"
         assert round(row["hi"] * 100, 1) == 20.6
 
-    def test_elimination_only_once_n_clears_the_floor(self):
+    def test_registration_withholds_elimination_even_when_reachable(self):
+        # The ratified text says UNAVAILABLE "at any distribution". Its stated
+        # reason -- n=22 out of reach -- was falsified by a measured 0.78 strand
+        # rate, but the clause is still ratified. Default honours it.
         m = etm.mixture(["empty-box"] * etm.ELIMINATION_MIN_N, etm.RATIFIED_CONF, cp)
         row = next(r for r in m["rows"] if r["token"] == "not-substring")
+        assert row["hi"] < etm.ELIMINATED_THRESHOLD, "control: the bound IS met"
+        assert row["verdict"] == "NOT-OBSERVED (elimination withheld: registration)"
+        assert "ELIMINATED" != row["verdict"]
+
+    def test_lifting_it_takes_an_explicit_act(self):
+        m = etm.mixture(["empty-box"] * etm.ELIMINATION_MIN_N, etm.RATIFIED_CONF, cp,
+                        allow_elimination=True)
+        row = next(r for r in m["rows"] if r["token"] == "not-substring")
         assert row["verdict"] == "ELIMINATED"
+
+    def test_withheld_is_distinct_from_bound_not_met(self):
+        # Below the floor the bound genuinely is not met -- a DIFFERENT statement
+        # from withholding one that is, and the output must not conflate them.
+        m = etm.mixture(["empty-box"] * 10, etm.RATIFIED_CONF, cp)
+        row = next(r for r in m["rows"] if r["token"] == "not-substring")
+        assert row["verdict"] == "NOT-OBSERVED"
+        assert "withheld" not in row["verdict"]
 
     def test_report_states_unavailability_at_planned_n(self):
         m = etm.mixture(["empty-box"] * 10, etm.RATIFIED_CONF, cp)

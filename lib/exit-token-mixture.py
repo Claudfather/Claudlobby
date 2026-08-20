@@ -74,6 +74,24 @@ ELIMINATED_THRESHOLD = 0.10
 # checks it at import, and an earlier version of this comment said it did.
 ELIMINATION_MIN_N = 22
 
+# THE REGISTRATION SAYS UNAVAILABLE, AND IT OUTRANKS THE ARITHMETIC HERE.
+# Ratified text: "ELIMINATED: CP upper < 10% -- unreachable below n=22, so
+# UNAVAILABLE in this run at any distribution."
+#
+# That clause was written so a retracted elimination "cannot recur by argument
+# after the fact". Its stated REASON -- that n=22 is out of reach -- rested on a
+# ~1-in-3 strand rate. Measured on this run the rate is ~0.78, so ~24 traced
+# strands land and the floor IS reachable. The premise is falsified; the clause
+# is still ratified.
+#
+# Resolving that in code, silently, at the moment data arrives, is precisely the
+# move the clause exists to forbid -- and it would be indistinguishable from
+# lifting a bar because the result was in reach. So the default HONOURS the
+# registration and withholds the verdict regardless of n. Lifting it takes an
+# explicit act by the people who ratified it, made BLIND, not a flag that trips
+# itself once the number looks good.
+ELIMINATION_RATIFIED_UNAVAILABLE = True
+
 # The five verdicts _pane_trace_candidate can emit (lib-common.sh:1386-1430).
 # Listed so a candidate seen ZERO times still appears in the output with its
 # bounds — an absent row and a zero row are different claims, and only one of
@@ -159,7 +177,8 @@ def exit_token(ticks: list[dict]) -> tuple[str | None, str]:
     return cand, "ok"
 
 
-def mixture(tokens: list[str], conf: float, cp_interval) -> dict:
+def mixture(tokens: list[str], conf: float, cp_interval,
+            allow_elimination: bool = not ELIMINATION_RATIFIED_UNAVAILABLE) -> dict:
     """Per-token share with CP interval. Never pooled, per the ratified bar."""
     n = len(tokens)
     rows = []
@@ -176,8 +195,13 @@ def mixture(tokens: list[str], conf: float, cp_interval) -> dict:
             # NOT OBSERVED and ELIMINATED are different statements and both must
             # be sayable. Elimination is unreachable below ELIMINATION_MIN_N and
             # is refused here rather than being available to a hopeful reader.
-            if n >= ELIMINATION_MIN_N and hi < ELIMINATED_THRESHOLD:
+            reachable = n >= ELIMINATION_MIN_N and hi < ELIMINATED_THRESHOLD
+            if reachable and allow_elimination:
                 verdict = "ELIMINATED"
+            elif reachable:
+                # Withheld BY REGISTRATION, not by arithmetic. Named distinctly so
+                # the output cannot be read as "the bound was not met".
+                verdict = "NOT-OBSERVED (elimination withheld: registration)"
             else:
                 verdict = "NOT-OBSERVED"
         else:
@@ -232,13 +256,15 @@ def scrutiny_block(mix: dict, unscored: list[tuple[str, str]], derived: bool) ->
 
 
 def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float,
-                  derived: bool = True) -> str:
+                  derived: bool = True, loadavgs: list[float] | None = None) -> str:
     n = mix["n"]
     out = []
     out.append("EXIT-TOKEN MIXTURE — #1236 discrimination")
     out.append("")
     out.append(f"statistic: {STAT_LABEL}")
     out.append(f"n (clean-exit strands scored): {n}")
+    # The scope travels WITH the verdict, and it is measured rather than intended.
+    out.append(loadavg_scope(loadavgs or []))
     out.append("")
     if n == 0:
         out.append("NO SCORED STRANDS. The mixture is undefined, not empty —")
@@ -270,6 +296,42 @@ def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float,
         out.append("These are disclosed rather than dropped: a denominator that quietly")
         out.append("excludes what it could not read is the defect this run exists to study.")
     return "\n".join(out)
+
+
+def load_loadavg(path: Path) -> list[float]:
+    """Every recorded loadavg_1m, for stating the verdict's scope from MEASUREMENT.
+
+    The scope must not be quoted from the burner count. `--load N` is an INPUT;
+    `loadavg_1m` is what the host actually experienced, which is why the sampler
+    records it per boot (boot-strand-sampler.sh:264). Pre-registering "loadavg ~25"
+    from the intended target and then publishing that beside a verdict is a stated
+    bound that a reader takes as measured -- worse than no bound. Measured on this
+    run: median 30.2 against a quoted ~25, at the TOP of the #933 19-31 band rather
+    than the middle.
+    """
+    out: list[float] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        v = r.get("loadavg_1m")
+        if isinstance(v, (int, float)):
+            out.append(float(v))
+    return out
+
+
+def loadavg_scope(vals: list[float]) -> str:
+    if not vals:
+        return "observed loadavg: NOT RECORDED — scope cannot be stated from measurement"
+    vals = sorted(vals)
+    mid = len(vals) // 2
+    med = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+    return (f"observed loadavg (recorded per boot, n={len(vals)}): "
+            f"median {med:.1f}, range {vals[0]:.1f}-{vals[-1]:.1f}")
 
 
 def load_rows(path: Path) -> dict[int, str]:
@@ -469,6 +531,9 @@ def main(argv: list[str]) -> int:
                     help="score every given trace dir without consulting rows.jsonl. "
                          "NOT the normal path -- see the refusal text")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--allow-elimination", action="store_true",
+                    help="lift the ratified UNAVAILABLE clause on ELIMINATED. Requires "
+                         "a blind re-ratification; never set it after seeing the data")
     ap.add_argument("--gate", action="store_true",
                     help="run-blocking pre-matrix gate: clean boots must score ZERO")
     ap.add_argument("--self-test", action="store_true",
@@ -531,14 +596,17 @@ def main(argv: list[str]) -> int:
 
     tokens, unscored, held = score_dirs(args.trace_dirs, rows, args.lib_common)
 
-    mix = mixture(tokens, args.conf, cp)
+    mix = mixture(tokens, args.conf, cp, allow_elimination=args.allow_elimination)
     if args.json:
         print(json.dumps({"statistic": STAT_LABEL, "conf": args.conf,
                           "mixture": mix, "unscored": unscored, "held": held,
                           "selection_derived": bool(rows),
+                          "loadavg_observed": load_loadavg(args.rows) if args.rows else [],
+                          "loadavg_scope": loadavg_scope(load_loadavg(args.rows) if args.rows else []),
                           "scrutiny": scrutiny_block(mix, unscored, bool(rows))}, indent=1))
     else:
-        print(format_report(mix, unscored, args.conf, derived=bool(rows)))
+        las = load_loadavg(args.rows) if args.rows else []
+        print(format_report(mix, unscored, args.conf, derived=bool(rows), loadavgs=las))
     return 0
 
 
@@ -573,7 +641,11 @@ def _self_test(cp) -> int:
     # And it only becomes ELIMINATED once n clears the derived floor.
     m = mixture(["empty-box"] * ELIMINATION_MIN_N, RATIFIED_CONF, cp)
     row = next(r for r in m["rows"] if r["token"] == "not-substring")
-    check(f"0-of-{ELIMINATION_MIN_N} verdict", row["verdict"], "ELIMINATED")
+    check(f"0-of-{ELIMINATION_MIN_N} withheld by registration", row["verdict"],
+          "NOT-OBSERVED (elimination withheld: registration)")
+    m2 = mixture(["empty-box"] * ELIMINATION_MIN_N, RATIFIED_CONF, cp, allow_elimination=True)
+    row2 = next(r for r in m2["rows"] if r["token"] == "not-substring")
+    check(f"0-of-{ELIMINATION_MIN_N} reachable when lifted", row2["verdict"], "ELIMINATED")
 
     # Empty input is UNDEFINED, not a clean sweep for anything.
     m = mixture([], RATIFIED_CONF, cp)
