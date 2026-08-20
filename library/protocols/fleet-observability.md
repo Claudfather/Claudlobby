@@ -98,11 +98,23 @@ Treat a `[FLEET-PULSE]` line like a `[BOTREPORT]`: look up the event in the tabl
   that is the signal to act on. Anything short of it is a *sighting*: label it
   as one, use it to raise a question, never as a measurement — the frame is
   gone, so neither you nor anyone else can re-verify it afterwards.
-- **`context_warning`** — not present in the payload, **and not obtainable by
-  any other route either.** Capture-pane does not close this gap: no percentage
-  is ever rendered, so there is nothing to capture, and a bot cannot
-  self-measure it. The supported signal is the worker's own `context-degraded`
-  report plus completed-work counts — see the `context-management` protocol.
+- **`context_warning`** — not present in the payload. It is, however, **sometimes
+  visible in the pane**: above an undocumented threshold a `NN% context used`
+  figure is rendered, and below it the same slot renders empty. Measured across
+  all 21 bots on this host: one rendered `98% context used` while twenty
+  rendered nothing, panes structurally identical. Above the threshold it is a
+  **live gauge, not a one-time alarm** — the same bot read `97%` then `98%`
+  minutes later — and it is **not a latch**: a bot observed at `100%` rendered
+  nothing later in the same session, with no restart *(cause not established;
+  do not assert one)*. **A rendered figure is real and worth acting on. A blank
+  slot means nothing**, and specifically it has **two causes this instrument
+  cannot separate** — never reached the threshold, or reached it and came back
+  down. A bot under no pressure and one that was at `100%` minutes ago present
+  identically. So the pane is a **positive detector only**: it can tell you to
+  act, never that all is well. See the sweep rule two paragraphs down, which
+  already states the general form of this correctly. The standing signal remains
+  the worker's own `context-degraded` report plus completed-work counts — see
+  the `context-management` protocol.
 - **`mcp_error`** — a failing tool call (including an MCP server returning `isError`) fires the `PostToolUseFailure` hook event rather than `PostToolUse`, and only that event carries an error field. The `bot-vitals.sh` hook is wired to Pre/PostToolUse, so no `mcp_error` event is produced. Detecting dead or erroring MCP servers requires a dedicated mechanism (e.g. a `PostToolUseFailure` hook or an out-of-band liveness probe).
 
 **Never sweep panes to establish absence — for `rate_limit` or `context_warning`.**
