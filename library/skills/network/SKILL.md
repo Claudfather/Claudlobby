@@ -54,7 +54,7 @@ For each relevant email (the first two passes above):
    ```
    Tool: mcp__notion__API-create-a-comment
    parent: {"page_id": "<contact-page-id>"}
-   rich_text: [{"text": {"content": "Apr 4 (/network scan): replied on the \"DS5 role\" thread, latest Apr 3, cc <Person>. Last Contact Date -> 2026-04-04."}}]
+   rich_text: [{"text": {"content": "Apr 4 (/network scan): replied on the \"<role>\" thread, latest Apr 3, cc <Person>. Last Contact Date -> 2026-04-04."}}]
    ```
    Also update Last Contact Date if this is a direct correspondence.
 3. **Unknown sender worth tracking** → Suggest adding as new contact
@@ -148,8 +148,8 @@ Batch audit of Notion contacts against email history. Notion-first: starts from 
    → Review manually or archive?
 
    ⚠️ No email on file (2):
-   - <Referrer> (Netflix)
-   - <Contact D> (Netflix)
+   - <Referrer> (<Company>)
+   - <Contact D> (<Company>)
    ```
 
 5. **Conversational execution** — the user decides what to update. Batch updates when approved ("update all 7 stale dates"), individual review for ghosts and missing fields.
@@ -221,7 +221,7 @@ Shape: `<date> (<operation>): <evidence>. <what changed>.` One to three sentence
 NETWORK SCAN — Apr 4
 
 Correspondence logged:
-- <Contact A> (Netflix): replied to your follow-up re: DS5 role
+- <Contact A> (<Company>): replied to your follow-up re: <role> role
 - <Contact E> (<Hedge Fund>): recruiter outreach about quant role
 
 Suggested new contacts:
@@ -232,7 +232,7 @@ Job + Contact matches:
 - <Company> DS Manager: no contacts
 
 Stale contacts (90+ days):
-- <Contact F> (MLP) — last contact Sep 4, 2025
+- <Contact F> (<Company>) — last contact Sep 4, 2025
 - <Contact G> (<Recruiting Firm>) — last contact Sep 30, 2025
 
 Follow-ups overdue: 5 (see /contacts for details)

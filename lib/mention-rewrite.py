@@ -7,10 +7,10 @@ inline-span parser inside a security control needs real unit tests, and `sed`
 cannot carry the invariant below legibly.
 
 WHY ANY OF THIS EXISTS
-    A bot wrote `@vera` in a PR comment. GitHub resolved it to Vera Clemens, a
+    A bot wrote `@vera` in a PR comment. GitHub resolved it to a
     real person with no connection to this project, and emailed her. She asked
     us to stop. Every one of the fleet's bot names is a real account, and the
-    harm is not limited to bot names: `Botfather` is a real user (Tushar), and
+    harm is not limited to bot names: `Botfather` is a real user, and
     it appears in our issues only because we documented Telegram's BotFather.
     The class is "any @word we write that happens to be a real handle", which
     is unbounded and grows without us doing anything.

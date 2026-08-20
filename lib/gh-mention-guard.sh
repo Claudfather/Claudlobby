@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------------------
 # WHY A HOOK AND NOT AN INSTRUCTION
 # ---------------------------------------------------------------------------
-# A bot wrote `@vera` in a PR comment; GitHub resolved it to Vera Clemens, a
+# A bot wrote `@vera` in a PR comment; GitHub resolved it to a
 # real person unconnected to this project, and emailed her. She asked us to
 # stop. Every fleet bot name is a real account, and the class is wider than bot
 # names: `Botfather` is a real user, present in our issues only because we

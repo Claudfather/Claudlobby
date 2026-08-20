@@ -135,7 +135,7 @@ Format results concisely for Telegram:
 
 **Single contact:**
 ```
-John Smith — Recruiter at Netflix
+John Smith — Recruiter at <Company>
 Email: <contact>@example.com | LinkedIn: linkedin.com/in/...
 Last contact: Mar 15 | Follow-up: Apr 10
 ```
@@ -143,8 +143,8 @@ Last contact: Mar 15 | Follow-up: Apr 10
 **Follow-up list:**
 ```
 Follow-ups due:
-- Apr 2: <Contact A> (Netflix, recruiter) — email
-- Apr 3: <Contact C> (Netflix, recruiter) — LinkedIn
+- Apr 2: <Contact A> (<Company>, recruiter) — email
+- Apr 3: <Contact C> (<Company>, recruiter) — LinkedIn
 - Apr 7: <Contact H> (<Recruiting Firm>, headhunter) — LinkedIn
 ```
 
