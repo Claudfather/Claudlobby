@@ -284,8 +284,17 @@ type: str                 # registry-governed (F19): seeded from events.py
                           # CRITICAL_TYPES + the Phase-2b emitter inventory;
                           # unknown types INGEST + trust-counter + doctor listing
 subject_alias: str?       # bot alias where applicable → actor_uid at ingest
-severity: critical|notice|null    # from the registry, not the caller
-data: json                # bounded payload (existing events' data{} carried verbatim)
+severity: critical|notice|null    # REGISTRY-OWNED, point-in-time: ingest stamps it
+                          # from lifecycle_type_registry (type PK, severity,
+                          # description — TABLE seeded by migration, tightened by
+                          # #903); callers cannot set it; unknown type => null
+                          # severity + trust counter + doctor listing
+data: json                # bounded payload (existing events' data{} carried verbatim;
+                          # machine-built => over-cap truncates-with-proof like comms)
+# READING RULE — events are DETECTIONS, never states: overdue_dispatch here
+# records "the watchdog fired at T"; live overdue-ness is only ever the task
+# derivation's overlay flag. session_missing (detection) => lifecycle;
+# session-up (sampled level) => presence. Neither substitutes for the other.
 ```
 
 ### WorkstreamContract + WorkstreamEvent (F6, F21)
@@ -391,7 +400,7 @@ Golden path: `claudlobby plane init | start | status | doctor | open`. Clocks: e
 - **Phase 0 — reconcile facts:** ✅ mostly done in-session (baseline refreshed to `e3b6347`; capabilities re-verified; landed prerequisites removed). Remaining: callsite/state-store re-inventory against current main.
 - **Phase 1 — lock the semantic kernel:** rule §19's items; ratify identity, envelope, ordering, privacy, vocabulary, comms model, task state machine, spool, schema compatibility, workstream migration. **No UI.**
 - **Phase 2 — headless vertical slice:** `task contract → message intent → transport attempt → acknowledgement → progress → completed/failed/blocked/overdue/orphaned`, exposed via CLI + SQLite + one reader/service layer + doctor/status + projection rebuild. Dual-write canary beside JSONL.
-- **Phase 2b — registry lane (the host/vault/fleet/bot walk made real):** migration 0002 adds `registry_snapshots`, `declaration_observed`, `presence_health_events` (envelope-bearing, F16 pattern; writes ride the same emit spine). Pydantic payload contracts for the six entities — **field lists FINAL in §9b**, reflecting the review deltas: minted uids (F10), volatile fields OUT to presence/health (F12), `FleetPayload.groups` (F5), BotPayload separating actor/instance/session. Emitter moments: `generate` (cause=generate, carries `vault_rev`), the probe loop (cause=probe: hardware + system facet), `declaration_observed` on every newly seen vault revision even when resolved state is unchanged. Scan semantics: `scan_id` + completeness status; tombstones only after a complete authoritative scan. Projection loader rebuilds `reg_hosts/vaults/fleets/bots/projects/library_items` idempotently (hash-verified against files); SCD2 + `registry_changes` views. **Closes Phase 1's identity loop:** the generate-time pass confirms provisional actors (`provisional=0`) and mints `bot_instance_uid`s, so lazy-minted identities stop being provisional the first time the registry observes the declared roster. Doctor surfaces: provisional actors, composed-hash drift, reconcile-check failures. Sequenced after Phase 2 (the slice stays narrow) and **before Phase 4, which renders identity context from these projections**; Phase 3 can run in parallel with it.
+- **Phase 2b — registry lane (the host/vault/fleet/bot walk made real):** migration 0002 adds `registry_snapshots`, `declaration_observed`, `presence_health_events`, `lifecycle_events` + `lifecycle_type_registry`, and `workstream_contracts`/`workstream_events` (envelope-bearing, F16 pattern; writes ride the same emit spine). Pydantic payload contracts for the six entities — **field lists FINAL in §9b**, reflecting the review deltas: minted uids (F10), volatile fields OUT to presence/health (F12), `FleetPayload.groups` (F5), BotPayload separating actor/instance/session. Emitter moments: `generate` (cause=generate, carries `vault_rev`), the probe loop (cause=probe: hardware + system facet), `declaration_observed` on every newly seen vault revision even when resolved state is unchanged. Scan semantics: `scan_id` + completeness status; tombstones only after a complete authoritative scan. Projection loader rebuilds `reg_hosts/vaults/fleets/bots/projects/library_items` idempotently (hash-verified against files); SCD2 + `registry_changes` views. **Closes Phase 1's identity loop:** the generate-time pass confirms provisional actors (`provisional=0`) and mints `bot_instance_uid`s, so lazy-minted identities stop being provisional the first time the registry observes the declared roster. Doctor surfaces: provisional actors, composed-hash drift, reconcile-check failures. Sequenced after Phase 2 (the slice stays narrow) and **before Phase 4, which renders identity context from these projections**; Phase 3 can run in parallel with it.
 - **Phase 3 — commodity telemetry pilot:** OTel + LangSmith on one canary bot; delete redundant roadmap surfaces on evidence.
 - **Phase 4 — minimal operator plane:** F8's five surfaces over the proven slice.
 - **Phase 5 — organizational learning:** deliberations, independent contributions, synthesis, preserved dissent, decisions, outcome joins — only then consensus-learning claims.
@@ -405,7 +414,7 @@ Remaining — technical, owned by the implementation plan, no operator ruling re
 
 1. **Canonical-bytes spec** — full definition (encoding, Unicode normalization, numeric representation, null/default inclusion, path normalization, key ordering, serializer version, hash algorithm) + golden fixtures.
 2. **Ingest implementation** — direct writer vs Unix-socket daemon, decided by the §14 Pi benchmarks; CLI contract identical either way.
-3. **Exact DDL for every Lane-B family** — mechanical consequence of F16 + the model sections. Split by phase: kernel families (ingest ledger, identity, intents, attempts, work items, task attempts/events) = **migration 0001**, owned by the Phase-1 plan; registry families (`registry_snapshots`, `declaration_observed`, `presence_health_events`) = **migration 0002**, owned by the Phase-2b plan (§18) — entity payload FIELDS are final in §9b.
+3. **Exact DDL for every Lane-B family** — mechanical consequence of F16 + the model sections. Split by phase: kernel families (ingest ledger, identity, intents, attempts, work items, task attempts/events) = **migration 0001**, owned by the Phase-1 plan; all remaining observed families (`registry_snapshots`, `declaration_observed`, `presence_health_events`, `lifecycle_events` + its type registry, `workstream_contracts`/`workstream_events`) = **migration 0002**, owned by the Phase-2b plan (§18) — entity payload FIELDS are final in §9b.
 4. **Claudron confirmations** — `fleets/` namespace tolerance; multi-vault capability. Filed: Claudron#145.
 
 ## 20. References
