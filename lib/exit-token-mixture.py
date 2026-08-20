@@ -68,8 +68,10 @@ STAT_LABEL = (
 DOMINANT_THRESHOLD = 0.50
 ELIMINATED_THRESHOLD = 0.10
 # Smallest n at which a zero-count candidate's CP upper bound falls below
-# ELIMINATED_THRESHOLD at RATIFIED_CONF. Derived, asserted at import by
-# --self-test, never hardcoded as folklore: n=21 gives 10.4%, n=22 gives 9.9%.
+# ELIMINATED_THRESHOLD at RATIFIED_CONF: n=21 gives 10.4%, n=22 gives 9.9%.
+# The DERIVATION is asserted -- not this constant taken on trust -- but only when
+# something runs it: `--self-test`, or tests/test_exit_token_mixture.py. Nothing
+# checks it at import, and an earlier version of this comment said it did.
 ELIMINATION_MIN_N = 22
 
 # The five verdicts _pane_trace_candidate can emit (lib-common.sh:1386-1430).
@@ -77,6 +79,16 @@ ELIMINATION_MIN_N = 22
 # bounds — an absent row and a zero row are different claims, and only one of
 # them is true when nobody looked.
 ALL_TOKENS = ("empty-box", "below-floor", "not-substring", "no-region", "held")
+
+# A SIXTH token the predicate can emit, absent from the pre-registration's table
+# of five. Derived from the source rather than from that table (lib-common.sh
+# `_pane_trace_candidate`, the `[ -n "$payload" ] || { printf 'no-payload'; }`
+# rung). It does not mean "this candidate fired" — it means the TRACE WAS NOT
+# ARMED: `pane_send_verified` writes $PANE_VERIFY_TRACE/payload with `|| true`,
+# so a failed write leaves an empty payload and every frame then classifies as
+# not-substring. Scoring it would manufacture a unanimous verdict out of an
+# instrument failure, so it is named, never scored, and always disclosed.
+INSTRUMENT_FAILURE_TOKENS = ("no-payload",)
 
 # What each token indicates, per the pre-registration's table.
 TOKEN_MEANING = {
@@ -121,8 +133,23 @@ def exit_token(ticks: list[dict]) -> tuple[str | None, str]:
     """
     if not ticks:
         return None, "no-ticks"
+    # TWO SENDS INTO ONE TRACE DIR. `pane_send_verified` restarts `tick` at 0 and
+    # OVERWRITES $PANE_VERIFY_TRACE/payload on every call, while ticks.tsv is
+    # APPENDED — so a boot that sends twice (start-bot.sh has two call sites,
+    # :391 resume and :406 STARTUP_PROMPT) collides tick ids, overwrites the
+    # tick-N.pane files, and renders the FIRST send's frames against the SECOND
+    # send's payload. Measured, before any real run: six such traces scored
+    # 100% empty-box DOMINANT at 68.1% — a unanimous verdict for the leading
+    # hypothesis, entirely artifact. Refuse rather than pick one, because the
+    # wrong answer here is the one nobody would question.
+    ids = [t.get("tick") for t in ticks]
+    if len(set(ids)) != len(ids):
+        dupes = sorted({i for i in ids if ids.count(i) > 1})
+        return None, f"duplicate-tick-ids:{dupes} — trace dir holds more than one send"
     last = max(ticks, key=lambda t: t.get("tick", -1))
     cand = last.get("candidate")
+    if isinstance(cand, str) and cand in INSTRUMENT_FAILURE_TOKENS:
+        return None, f"{cand} — trace not armed (empty payload); NOT a candidate observation"
     if not isinstance(cand, str) or cand not in ALL_TOKENS:
         return None, f"unknown-candidate:{cand!r}"
     if cand == "held":

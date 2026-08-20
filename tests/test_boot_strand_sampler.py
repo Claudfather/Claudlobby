@@ -1342,3 +1342,24 @@ class TestKeepScrubHonesty:
         printed = self._keep_message()
         for name in (".env", ".credentials.json", ".claude.json"):
             assert name in printed, f"--keep message does not name {name} as removed"
+
+
+class TestPublishedValuesDoNotMove:
+    """#1236. The change's hard constraint, pinned as a standing gate rather than a one-off check.
+
+    Errors are fine; different NUMBERS are not. :903 publishes the #843 pre-fix
+    baseline beside real results, so its value is load-bearing for comparability.
+    """
+
+    def test_pre_fix_baseline_is_byte_identical(self):
+        lo, hi = summary.cp_interval(summary.BASELINE_STRANDS, summary.BASELINE_N, 0.95)
+        assert (summary.BASELINE_STRANDS, summary.BASELINE_N) == (2, 4)
+        assert f"{lo:.3f}, {hi:.3f}" == "0.068, 0.932"
+
+    @pytest.mark.parametrize(
+        "k,n,want",
+        [(0, 20, "0.000, 0.168"), (7, 10, "0.348, 0.933"), (2, 10, "0.025, 0.556")],
+    )
+    def test_strand_rate_values_unchanged(self, k, n, want):
+        lo, hi = summary.cp_interval(k, n, 0.95)
+        assert f"{lo:.3f}, {hi:.3f}" == want

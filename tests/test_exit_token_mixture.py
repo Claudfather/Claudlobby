@@ -8,6 +8,7 @@ real shipped renderer over it.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -44,27 +45,6 @@ class TestConfIsRequired:
     def test_explicit_095_is_still_reachable(self):
         lo, hi = cp(2, 4, 0.95)
         assert (round(lo, 4), round(hi, 4)) == (0.0676, 0.9324)
-
-
-class TestPublishedValuesDoNotMove:
-    """The change's hard constraint, pinned as a standing gate rather than a one-off check.
-
-    Errors are fine; different NUMBERS are not. :903 publishes the #843 pre-fix
-    baseline beside real results, so its value is load-bearing for comparability.
-    """
-
-    def test_pre_fix_baseline_is_byte_identical(self):
-        lo, hi = cp(summary.BASELINE_STRANDS, summary.BASELINE_N, 0.95)
-        assert (summary.BASELINE_STRANDS, summary.BASELINE_N) == (2, 4)
-        assert f"{lo:.3f}, {hi:.3f}" == "0.068, 0.932"
-
-    @pytest.mark.parametrize(
-        "k,n,want",
-        [(0, 20, "0.000, 0.168"), (7, 10, "0.348, 0.933"), (2, 10, "0.025, 0.556")],
-    )
-    def test_strand_rate_values_unchanged(self, k, n, want):
-        lo, hi = cp(k, n, 0.95)
-        assert f"{lo:.3f}, {hi:.3f}" == want
 
 
 class TestRatifiedStatistic:
@@ -131,6 +111,54 @@ class TestExitTickRule:
     def test_held_at_exit_is_separated_from_the_mixture(self):
         tok, why = etm.exit_token([{"tick": 2, "candidate": "held"}])
         assert tok == "held" and why == "held-at-exit"
+
+
+class TestPlausibleButWrongOutputs:
+    """Signatures pre-registered BEFORE the first real run, per the #1236 gate.
+
+    The first real run exercises the instrument and the phenomenon at once, so a
+    strange result leaves the analyzer a suspect alongside the data. These are the
+    two ways it could produce a CONFIDENT WRONG answer, both measured on synthetic
+    input while there was no result to be attached to.
+    """
+
+    def test_two_sends_in_one_dir_are_refused_not_scored(self):
+        # THE DANGEROUS ONE. pane_send_verified restarts tick at 0 and overwrites
+        # payload per call while ticks.tsv is appended, so a boot that sends twice
+        # collides ids. Measured before guarding: six such traces reported
+        # 100% empty-box DOMINANT at 68.1% -- unanimous support for the leading
+        # hypothesis, entirely artifact.
+        ticks = [{"tick": 0, "candidate": "held"}, {"tick": 1, "candidate": "empty-box"},
+                 {"tick": 0, "candidate": "held"}, {"tick": 1, "candidate": "empty-box"}]
+        tok, why = etm.exit_token(ticks)
+        assert tok is None
+        assert "duplicate-tick-ids" in why
+
+    def test_unarmed_trace_is_named_not_scored(self):
+        # no-payload is a SIXTH token, absent from the pre-registration's table of
+        # five. It means the trace was never armed -- with an empty payload every
+        # frame classifies as not-substring, so scoring it manufactures a
+        # unanimous verdict out of an instrument failure.
+        tok, why = etm.exit_token([{"tick": 0, "candidate": "no-payload"}])
+        assert tok is None
+        assert why.startswith("no-payload")
+        assert "NOT a candidate observation" in why
+
+    def test_no_payload_is_not_in_the_scoreable_set(self):
+        assert "no-payload" in etm.INSTRUMENT_FAILURE_TOKENS
+        assert "no-payload" not in etm.ALL_TOKENS
+
+    def test_every_token_the_predicate_emits_is_accounted_for(self):
+        # Derived from lib-common.sh rather than from the pre-registration table,
+        # which lists five and misses no-payload.
+        src = (REPO / "lib" / "lib-common.sh").read_text()
+        body = src.split("_pane_trace_candidate()", 1)[1].split("\n}", 1)[0]
+        emitted = set(re.findall(r"printf '([a-z-]+)'", body))
+        assert emitted, "failed to parse the predicate's emissions"
+        assert emitted <= set(etm.ALL_TOKENS) | set(etm.INSTRUMENT_FAILURE_TOKENS), (
+            f"predicate emits tokens this module does not handle: "
+            f"{emitted - set(etm.ALL_TOKENS) - set(etm.INSTRUMENT_FAILURE_TOKENS)}"
+        )
 
 
 class TestCoverageHonesty:
