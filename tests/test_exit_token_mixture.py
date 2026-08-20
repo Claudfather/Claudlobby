@@ -211,6 +211,104 @@ class TestEndToEndOverARealTrace:
         assert etm.exit_token(etm.render_trace(tmp_path / "nope", LIB / "lib-common.sh"))[0] is None
 
 
+class TestStrandSelectionIsDerivedNotTyped:
+    """#1236 mode C, found by the two-boot smoke run — the worst-PLACED of the three.
+
+    A and B need an unusual condition. This one needs only that someone points the
+    tool at the artifacts directory, which is the obvious thing to do. A trace is
+    written for EVERY boot, and a clean boot exits on `empty-box` because the
+    payload was genuinely submitted -- so scoring clean boots measures successful
+    sends and reports them as render lag. Measured on two real clean boots:
+    `empty-box 2/2 = 100%`, well-formed and confident.
+    """
+
+    def _run(self, *args):
+        return subprocess.run([sys.executable, str(LIB / "exit-token-mixture.py"), *args],
+                              capture_output=True, text=True, timeout=180)
+
+    def test_bare_glob_refuses(self, tmp_path):
+        d = tmp_path / "trace-boot-0"; d.mkdir()
+        r = self._run(str(d))
+        assert r.returncode == 3
+        assert "strand selection cannot be derived" in r.stderr
+
+    def test_missing_rows_file_refuses_rather_than_crashing(self, tmp_path):
+        d = tmp_path / "trace-boot-0"; d.mkdir()
+        r = self._run("--rows", str(tmp_path / "nope.jsonl"), str(d))
+        assert r.returncode == 3
+        assert "not a readable file" in r.stderr
+
+    def test_clean_boots_are_excluded_by_name_with_their_outcome(self, tmp_path):
+        rows = tmp_path / "rows.jsonl"
+        rows.write_text('{"i": 0, "outcome": "clean"}\n{"i": 1, "outcome": "strand"}\n')
+        for i in (0, 1):
+            d = tmp_path / f"trace-boot-{i}"; d.mkdir()
+            (d / "payload").write_text("set +H; probe payload long enough to match")
+            (d / "tick-1.pane").write_text("> ")
+            (d / "ticks.tsv").write_text("1\tdrawn\n")
+        r = self._run("--rows", str(rows), str(tmp_path / "trace-boot-0"), str(tmp_path / "trace-boot-1"))
+        assert r.returncode == 0
+        assert "scored): 1" in r.stdout          # only the strand counted
+        assert "outcome='clean'" in r.stdout      # and the clean one named
+
+    def test_boot_index_parsing(self):
+        assert etm.boot_index(Path("/x/trace-boot-12")) == 12
+        assert etm.boot_index(Path("/x/not-a-trace")) is None
+        assert etm.boot_index(Path("/x/trace-boot-abc")) is None
+
+    def test_a_dir_with_no_matching_row_is_disclosed(self, tmp_path):
+        rows = tmp_path / "rows.jsonl"; rows.write_text('{"i": 0, "outcome": "strand"}\n')
+        d = tmp_path / "trace-boot-9"; d.mkdir()
+        r = self._run("--rows", str(rows), str(d))
+        assert r.returncode == 0
+        assert "no row for boot 9" in r.stdout
+
+
+class TestManufacturedVerdictScrutiny:
+    """empty-box DOMINANT is what BOTH known defects emit, by unrelated mechanisms.
+
+    So its prior moves DOWN, not up: it is the result to trust least, because it is
+    what a broken instrument produces. Registered as a named scrutiny condition
+    rather than left to whoever reads the output.
+    """
+
+    def _mix(self, k, n_):
+        return etm.mixture(["empty-box"] * k + ["below-floor"] * (n_ - k), etm.RATIFIED_CONF, cp)
+
+    def test_fires_on_empty_box_dominant(self):
+        text = etm.format_report(self._mix(10, 10), [], etm.RATIFIED_CONF, derived=True)
+        assert "SCRUTINY CONDITION" in text
+        assert "MANUFACTURED verdict" in text
+
+    def test_silent_when_empty_box_is_not_dominant(self):
+        text = etm.format_report(self._mix(6, 10), [], etm.RATIFIED_CONF, derived=True)
+        assert "SCRUTINY CONDITION" not in text
+
+    def test_silent_when_a_DIFFERENT_token_dominates(self):
+        mix = etm.mixture(["below-floor"] * 10, etm.RATIFIED_CONF, cp)
+        text = etm.format_report(mix, [], etm.RATIFIED_CONF, derived=True)
+        assert "DOMINANT" in text
+        assert "SCRUTINY CONDITION" not in text, "only the manufactured token gets scrutiny"
+
+    def test_undervied_selection_is_reported_as_FAIL(self):
+        text = etm.format_report(self._mix(10, 10), [], etm.RATIFIED_CONF, derived=False)
+        assert "[FAIL] strand selection DERIVED" in text
+        assert "artifact, not a finding" in text
+
+    def test_derived_selection_passes_that_check(self):
+        text = etm.format_report(self._mix(10, 10), [], etm.RATIFIED_CONF, derived=True)
+        assert "[OK ] strand selection DERIVED" in text
+
+    def test_counts_the_artifacts_it_actually_refused(self):
+        unscored = [("a", "duplicate-tick-ids:[0, 1] — trace dir holds more than one send"),
+                    ("b", "no-payload — trace not armed (empty payload); NOT a candidate observation"),
+                    ("c", "outcome='clean' — only 'strand' is scoreable")]
+        text = etm.format_report(self._mix(10, 10), unscored, etm.RATIFIED_CONF, derived=True)
+        assert "duplicate tick ids: 1" in text
+        assert "unarmed (no-payload): 1" in text
+        assert "excluded by classification: 1" in text
+
+
 class TestSelfTestEntryPoint:
     def test_self_test_passes(self):
         r = subprocess.run([sys.executable, str(LIB / "exit-token-mixture.py"), "--self-test"],

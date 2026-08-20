@@ -187,7 +187,52 @@ def mixture(tokens: list[str], conf: float, cp_interval) -> dict:
     return {"n": n, "rows": rows}
 
 
-def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float) -> str:
+# THE MANUFACTURED VERDICT. Both known artifacts produce the SAME output --
+# `empty-box` dominance -- by unrelated mechanisms:
+#
+#   * duplicate-tick collision renders one send's frames against another's payload
+#   * scoring CLEAN boots, whose exit tick is empty-box because the send SUCCEEDED
+#
+# And empty-box points at RENDER LAG, which is already the favoured candidate. So
+# the prior on that specific result moves DOWN, not up: if the run returns
+# empty-box DOMINANT it is the outcome to trust LEAST, because it is what a broken
+# instrument emits. Every other result is comparatively unmanufactured.
+#
+# This is a claim about how to READ the result, so it is registered rather than
+# left to the analysis -- and it is stated with EVIDENCE (was selection derived?
+# were artifacts seen?) rather than as a standing caveat a reader learns to skip.
+MANUFACTURED_TOKEN = "empty-box"
+
+
+def scrutiny_block(mix: dict, unscored: list[tuple[str, str]], derived: bool) -> list[str]:
+    row = next((r for r in mix["rows"] if r["token"] == MANUFACTURED_TOKEN), None)
+    if not row or row["verdict"] != "DOMINANT":
+        return []
+    dup = sum(1 for _, why in unscored if "duplicate-tick-ids" in why)
+    unarmed = sum(1 for _, why in unscored if why.startswith("no-payload"))
+    nonstrand = sum(1 for _, why in unscored if "only 'strand' is scoreable" in why)
+    out = [
+        "",
+        "!! SCRUTINY CONDITION — empty-box DOMINANT is the MANUFACTURED verdict",
+        "",
+        "   Two unrelated instrument defects both produce empty-box dominance, and",
+        "   empty-box indicates render lag, the already-favoured candidate. This is",
+        "   therefore the result to trust LEAST. Do not report it without confirming",
+        "   both artifacts are dead:",
+        "",
+        f"   [{'OK ' if derived else 'FAIL'}] strand selection DERIVED from rows.jsonl "
+        f"({'yes' if derived else 'NO — clean boots may be in the mixture'})",
+        f"   [{'OK ' if dup == 0 else '!! '}] traces refused for duplicate tick ids: {dup}",
+        f"   [OK ] traces refused as unarmed (no-payload): {unarmed}",
+        f"   [OK ] non-strand traces excluded by classification: {nonstrand}",
+        "",
+        "   A FAIL above means this verdict is an artifact, not a finding.",
+    ]
+    return out
+
+
+def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float,
+                  derived: bool = True) -> str:
     n = mix["n"]
     out = []
     out.append("EXIT-TOKEN MIXTURE — #1236 discrimination")
@@ -216,6 +261,7 @@ def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float) -> st
             "A token not observed is reported as NOT-OBSERVED with its upper bound, "
             "which is a bound and not an elimination."
         )
+    out.extend(scrutiny_block(mix, unscored, derived))
     if unscored:
         out.append("")
         out.append(f"UNSCORED: {len(unscored)} trace(s) contributed nothing to the mixture —")
@@ -226,12 +272,45 @@ def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float) -> st
     return "\n".join(out)
 
 
+def load_rows(path: Path) -> dict[int, str]:
+    """boot index -> outcome, from the sampler's own rows.jsonl."""
+    out: dict[int, str] = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(r.get("i"), int):
+            out[r["i"]] = r.get("outcome", "")
+    return out
+
+
+def boot_index(trace_dir: Path) -> int | None:
+    """trace-boot-<i> -> i. The sampler names the dir that way (sampler:943)."""
+    name = trace_dir.name
+    if not name.startswith("trace-boot-"):
+        return None
+    try:
+        return int(name[len("trace-boot-"):])
+    except ValueError:
+        return None
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Exit-token mixture over #1236 verify traces")
     ap.add_argument("trace_dirs", nargs="*", type=Path)
     ap.add_argument("--lib-common", type=Path, default=_HERE / "lib-common.sh")
     ap.add_argument("--conf", type=float, default=RATIFIED_CONF,
                     help="two-sided CP conf; default is the RATIFIED 0.80")
+    ap.add_argument("--rows", type=Path,
+                    help="the sampler's rows.jsonl; ONLY boots it classifies as "
+                         "'strand' are scored")
+    ap.add_argument("--allow-unclassified", action="store_true",
+                    help="score every given trace dir without consulting rows.jsonl. "
+                         "NOT the normal path -- see the refusal text")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--self-test", action="store_true",
                     help="verify the derived constants and the scoring logic, 0 boots")
@@ -246,6 +325,45 @@ def main(argv: list[str]) -> int:
         print("no trace dirs given; nothing to score", file=sys.stderr)
         return 2
 
+    # SELECTION IS DERIVED, NOT TYPED (#1236). A trace is written for EVERY boot,
+    # clean ones included, and a clean boot's exit tick is `empty-box` because the
+    # payload was genuinely submitted. Scoring those measures successful sends and
+    # calls the result render lag. Measured on the smoke run: two ordinary clean
+    # boots produced `empty-box 2/2 = 100%`, well-formed and confident; at n=10 the
+    # same input reads DOMINANT.
+    #
+    # The failure needs no unusual condition -- only that someone points the tool at
+    # the artifacts directory, which is the obvious thing to do and is exactly what
+    # produced the finding. The pre-registration rests on strand classification
+    # being ground truth INDEPENDENT of pane geometry (no user-role record in the
+    # transcript); consulting the pane alone throws that away. So the classification
+    # is read from the sampler's own rows.jsonl, and absent it this refuses.
+    rows: dict[int, str] = {}
+    if args.rows:
+        # An unreadable classification is a question this run cannot answer, not a
+        # crash and not an empty result -- the #1216 unreachable-vs-empty rule.
+        if not args.rows.is_file():
+            print(f"refusing: --rows {args.rows} is not a readable file", file=sys.stderr)
+            return 3
+        try:
+            rows = load_rows(args.rows)
+        except OSError as exc:
+            print(f"refusing: cannot read --rows {args.rows}: {exc}", file=sys.stderr)
+            return 3
+        if not rows:
+            print(f"refusing: {args.rows} yielded no classified boots", file=sys.stderr)
+            return 3
+    elif not args.allow_unclassified:
+        print(
+            "refusing: no --rows given, so strand selection cannot be derived.\n"
+            "A trace is written for EVERY boot. A CLEAN boot exits on `empty-box`\n"
+            "because the payload was submitted -- scoring it measures successful\n"
+            "sends and reports them as render lag. Pass --rows <artifacts/rows.jsonl>,\n"
+            "or --allow-unclassified if you have selected strands by other means.",
+            file=sys.stderr,
+        )
+        return 3
+
     tokens: list[str] = []
     unscored: list[tuple[str, str]] = []
     held: list[str] = []
@@ -253,6 +371,18 @@ def main(argv: list[str]) -> int:
         if not d.is_dir():
             unscored.append((str(d), "not a directory"))
             continue
+        if rows:
+            idx = boot_index(d)
+            if idx is None:
+                unscored.append((d.name, "dir name is not trace-boot-<i>; cannot match a row"))
+                continue
+            outcome = rows.get(idx)
+            if outcome is None:
+                unscored.append((d.name, f"no row for boot {idx} in --rows"))
+                continue
+            if outcome != "strand":
+                unscored.append((d.name, f"outcome={outcome!r} — only 'strand' is scoreable"))
+                continue
         tok, status = exit_token(render_trace(d, args.lib_common))
         if tok is None:
             unscored.append((d.name, status))
@@ -265,9 +395,11 @@ def main(argv: list[str]) -> int:
     mix = mixture(tokens, args.conf, cp)
     if args.json:
         print(json.dumps({"statistic": STAT_LABEL, "conf": args.conf,
-                          "mixture": mix, "unscored": unscored, "held": held}, indent=1))
+                          "mixture": mix, "unscored": unscored, "held": held,
+                          "selection_derived": bool(rows),
+                          "scrutiny": scrutiny_block(mix, unscored, bool(rows))}, indent=1))
     else:
-        print(format_report(mix, unscored, args.conf))
+        print(format_report(mix, unscored, args.conf, derived=bool(rows)))
     return 0
 
 
