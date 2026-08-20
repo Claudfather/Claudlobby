@@ -946,6 +946,35 @@ def test_ingest_ledger_seq_monotonic(conn):
     assert seqs == sorted(seqs) and len(seqs) == 3
 
 
+def test_ddl_vocabularies_match_contracts():
+    """The same enum is enforced twice — Literal at validation, CHECK at
+    insert. This pins the two copies together: retiring or adding a value
+    must touch both, or this test names the disagreement."""
+    import re
+    from importlib import resources
+
+    from claudlobby.plane import contracts
+
+    sql = (
+        resources.files("claudlobby.plane") / "migrations" / "0001_kernel.sql"
+    ).read_text()
+
+    def check_set(column: str, table: str) -> set[str]:
+        block = sql.split(f"CREATE TABLE {table}")[1].split(";")[0]
+        m = re.search(
+            column + r"\s+TEXT[^,]*CHECK \(" + column + r" IN\s*\(([^)]*)\)",
+            block, re.S,
+        )
+        assert m, f"no CHECK for {column} in {table}"
+        return {v.strip().strip("'") for v in m.group(1).split(",") if v.strip()}
+
+    assert check_set("message_class", "communication_intents") == set(contracts.MESSAGE_CLASSES)
+    assert check_set("command_type", "communication_intents") == set(contracts.COMMAND_TYPES)
+    assert check_set("state", "transport_attempts") == set(contracts.ATTEMPT_STATES)
+    assert check_set("carrier", "transport_attempts") == set(contracts.CARRIERS)
+    assert check_set("event", "task_events") == set(contracts.TASK_EVENTS)
+
+
 def test_duplicate_event_id_rejected_by_ledger(conn):
     conn.execute(
         "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
