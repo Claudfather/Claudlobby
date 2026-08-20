@@ -36,7 +36,11 @@ if ! bash "$LIB_DIR/boot-strand-sampler.sh" -n 1 --trace-arms "on off" \
     printf 'preflight sampler FAILED; see %s\n' "$pre_log" >&2
     exit 5
 fi
-pre_art="$(sed -n 's/^kept artifacts at \(.*\)$/\1/p' "$pre_log" | tail -1)/artifacts"
+# The sampler appends a parenthetical to this line -- "kept artifacts at PATH
+# (removed: .env, ...)" -- so a greedy \(.*\) captures the suffix too and yields
+# a path that does not exist. Match up to the first space instead. Cost the first
+# preflight; it failed loudly at rc 5 rather than proceeding, which is the design.
+pre_art="$(sed -n 's/^kept artifacts at \([^ ]*\).*$/\1/p' "$pre_log" | tail -1)/artifacts"
 if [ ! -f "$pre_art/rows.jsonl" ]; then
     printf 'preflight produced no rows.jsonl at %s -- cannot gate\n' "$pre_art" >&2
     exit 5
@@ -59,7 +63,7 @@ mat_log="$OUT/matrix.log"
 bash "$LIB_DIR/boot-strand-sampler.sh" -n "$BLOCKS" --trace-arms "on off" \
     --load "$LOAD" --deadline "$DEADLINE" --keep > "$mat_log" 2>&1
 mat_rc=$?
-mat_art="$(sed -n 's/^kept artifacts at \(.*\)$/\1/p' "$mat_log" | tail -1)/artifacts"
+mat_art="$(sed -n 's/^kept artifacts at \([^ ]*\).*$/\1/p' "$mat_log" | tail -1)/artifacts"
 printf 'sampler rc=%s, artifacts: %s\n' "$mat_rc" "$mat_art"
 
 say "MIXTURE"
