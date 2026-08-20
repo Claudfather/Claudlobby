@@ -418,7 +418,10 @@ per-call App minting is mechanical.
 git ≥ 2.36); every other repo keeps the operator identity from the include. So a bot that
 commits to *both* the App's org and other orgs authors as `<slug>[bot]` on the App's repos and
 as the operator elsewhere — and the App never needs access to those other orgs (their pushes use
-the host default helper). A host-generic App (no `orgs:`) sets the identity globally instead. Credential VALUES ride `GITHUB_APP_ID` /
+the host default helper). A host-generic App (no `orgs:`) sets the identity globally instead.
+The match is on the raw remote URL across all three spellings (https, `git@github.com:`,
+`ssh://`) and is **case-sensitive** on the org segment — a remote cloned with non-canonical
+casing (`orga` for a declared `OrgA`) authors as the operator, same as the `insteadOf` rewrite. Credential VALUES ride `GITHUB_APP_ID` /
 `GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` in the fleet `.env` — fleet-tier in
 v1 (all bots on a host share one git credential cache, so a per-bot installation override could
 cross-serve cached tokens; the validator warns).

@@ -174,11 +174,15 @@ class TestGithubAppComposedText:
             _app_bot(slug="my-app", bot_user_id=42, orgs=["OrgA", "OrgB"]),
         )
         assert "[user]" not in out, "org-scoped identity must not emit a global [user]"
+        # All three remote spellings per org (https + scp-ssh + ssh-url), since
+        # hasconfig matches the raw remote url, not the insteadOf rewrite.
         for org in ("OrgA", "OrgB"):
-            assert (
-                f'includeIf "hasconfig:remote.*.url:https://github.com/{org}/**"'
-                in out
-            ), org
+            for url in (
+                f"https://github.com/{org}/**",
+                f"git@github.com:{org}/**",
+                f"ssh://git@github.com/{org}/**",
+            ):
+                assert f'includeIf "hasconfig:remote.*.url:{url}"' in out, url
         assert f"path = ./{comp.GH_APP_IDENTITY_FILENAME}" in out
 
     def test_identity_fragment_written_only_for_org_scoped_identity(self, tmp_path):
@@ -435,22 +439,35 @@ class TestGithubAppRoutingResolvesForReal:
         (cfg.parent / GH_APP_IDENTITY_FILENAME).write_text(
             compose_bot_gitconfig_app_identity(bot)
         )
-        results = {}
-        for org in ("OrgA", "OtherOrg"):
-            repo = tmp_path / f"repo-{org}"
+        # Every remote spelling of an App-org repo must author as the bot —
+        # hasconfig matches the RAW remote url, so ssh-form (which the composed
+        # insteadOf rewrites for TRANSPORT but not for hasconfig) must be matched
+        # explicitly or it silently authors as the operator (#1302 review).
+        cases = {
+            "https": ("OrgA", "https://github.com/OrgA/x.git", "bot"),
+            "scp-ssh": ("OrgA", "git@github.com:OrgA/x.git", "bot"),
+            "ssh-url": ("OrgA", "ssh://git@github.com/OrgA/x.git", "bot"),
+            "other": ("OtherOrg", "https://github.com/OtherOrg/x.git", "operator"),
+            "prefix-bleed": ("OrgABar", "https://github.com/OrgABar/x.git", "operator"),
+        }
+        for name, (org, url, who) in cases.items():
+            repo = tmp_path / f"repo-{name}"
             repo.mkdir()
             subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True, env=self._env(tmp_path, cfg))
             subprocess.run(
-                ["git", "remote", "add", "origin", f"https://github.com/{org}/x.git"],
+                ["git", "remote", "add", "origin", url],
                 cwd=repo, check=True, env=self._env(tmp_path, cfg),
             )
-            r = subprocess.run(
+            email = subprocess.run(
                 ["git", "config", "user.email"],
                 cwd=repo, capture_output=True, text=True, env=self._env(tmp_path, cfg),
+            ).stdout.strip()
+            expected = (
+                "42+my-app[bot]@users.noreply.github.com"
+                if who == "bot"
+                else "operator@example.com"
             )
-            results[org] = r.stdout.strip()
-        assert results["OrgA"] == "42+my-app[bot]@users.noreply.github.com"
-        assert results["OtherOrg"] == "operator@example.com"
+            assert email == expected, f"{name} ({url}) -> {email}, expected {who}"
 
     def test_insteadof_rewrites_ssh_remotes(self, tmp_path, monkeypatch):
         cfg = self._composed(tmp_path, monkeypatch, _app_bot(orgs=["OrgB"]))
