@@ -305,7 +305,8 @@ def scrutiny_block(mix: dict, unscored: list[tuple[str, str]], derived: bool) ->
 
 
 def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float,
-                  derived: bool = True, loadavgs: list[float] | None = None) -> str:
+                  derived: bool = True, loadavgs: list[float] | None = None,
+                  thermal: list[str] | None = None) -> str:
     n = mix["n"]
     out = []
     out.append("EXIT-TOKEN MIXTURE — #1236 discrimination")
@@ -336,6 +337,7 @@ def format_report(mix: dict, unscored: list[tuple[str, str]], conf: float,
             "A token not observed is reported as NOT-OBSERVED with its upper bound, "
             "which is a bound and not an elimination."
         )
+    out.extend(thermal or [])
     out.extend(scrutiny_block(mix, unscored, derived))
     if unscored:
         out.append("")
@@ -381,6 +383,54 @@ def loadavg_scope(vals: list[float]) -> str:
     med = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
     return (f"observed loadavg (recorded per boot, n={len(vals)}): "
             f"median {med:.1f}, range {vals[0]:.1f}-{vals[-1]:.1f}")
+
+
+_THROTTLE_BITS = {
+    0: "under-voltage NOW", 1: "ARM frequency capped NOW", 2: "throttled NOW",
+    3: "soft-temp limit NOW", 16: "under-voltage HAS occurred",
+    17: "ARM frequency capping HAS occurred", 18: "throttling HAS occurred",
+    19: "soft-temp limit HAS occurred",
+}
+
+
+def thermal_scope(before_hex: str | None, after_hex: str | None) -> list[str]:
+    """Which throttle bits SET during the run, and the limit on reading them.
+
+    Same argument as the loadavg scope one layer over: `--load N` is an input and
+    loadavg is what the host experienced; likewise a thermal budget is an intent
+    and the throttle register is what happened. It belongs with the verdict.
+
+    THE LIMIT, and it is the finding rather than a footnote: these are STICKY
+    has-occurred bits, so they are RUN-level, not BOOT-level. They say the CPU was
+    capped at some point across the sample; they cannot say WHICH boots. The
+    sampler records `loadavg_1m` per boot and records no throttle state at all, so
+    a thermal confound can be neither attributed nor excluded per boot. Capping
+    changes timing and render lag IS a timing candidate, so this is a possible
+    confound on candidate 1 specifically -- and the instrument cannot currently
+    resolve it. Live sampling does not close the gap either: twelve samples across
+    the capping window all read 2400 MHz and bits 1/2 clear, while the sticky bits
+    recorded capping the whole time. The has-occurred bits caught what live
+    sampling missed.
+    """
+    if not before_hex or not after_hex:
+        return []
+    try:
+        before, after = int(before_hex, 16), int(after_hex, 16)
+    except ValueError:
+        return []
+    new = [(b, name) for b, name in sorted(_THROTTLE_BITS.items())
+           if (after >> b & 1) and not (before >> b & 1)]
+    out = ["", f"thermal: throttled {before_hex} -> {after_hex}"]
+    if new:
+        out.append("  bits that SET DURING this run:")
+        for b, name in new:
+            out.append(f"    bit{b}: {name}")
+        out.append("  These are STICKY run-level flags. They cannot say WHICH boots were")
+        out.append("  capped, and the sampler records no per-boot throttle state — so a")
+        out.append("  thermal confound on render lag can be neither attributed nor excluded.")
+    else:
+        out.append("  no new throttle bits set during this run")
+    return out
 
 
 def load_rows(path: Path) -> dict[int, str]:
@@ -583,6 +633,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--allow-elimination", action="store_true",
                     help="lift the ratified UNAVAILABLE clause on ELIMINATED. Requires "
                          "a blind re-ratification; never set it after seeing the data")
+    ap.add_argument("--throttled-before", help="vcgencmd get_throttled value from BEFORE the run")
+    ap.add_argument("--throttled-after", help="vcgencmd get_throttled value from AFTER the run")
     ap.add_argument("--gate", action="store_true",
                     help="run-blocking pre-matrix gate: clean boots must score ZERO")
     ap.add_argument("--self-test", action="store_true",
@@ -655,7 +707,9 @@ def main(argv: list[str]) -> int:
                           "scrutiny": scrutiny_block(mix, unscored, bool(rows))}, indent=1))
     else:
         las = load_loadavg(args.rows) if args.rows else []
-        print(format_report(mix, unscored, args.conf, derived=bool(rows), loadavgs=las))
+        th = thermal_scope(args.throttled_before, args.throttled_after)
+        print(format_report(mix, unscored, args.conf, derived=bool(rows),
+                            loadavgs=las, thermal=th))
     return 0
 
 
