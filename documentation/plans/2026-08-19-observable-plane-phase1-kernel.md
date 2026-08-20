@@ -1090,7 +1090,7 @@ CREATE TABLE communication_intents (
     causation_id      TEXT,
     trace_id          TEXT,
     span_id           TEXT,
-    msg_id            TEXT NOT NULL UNIQUE,
+    msg_id            TEXT PRIMARY KEY NOT NULL,   -- the communication id
     sender_uid        TEXT NOT NULL,
     sender_alias      TEXT NOT NULL,
     recipient_uid     TEXT,

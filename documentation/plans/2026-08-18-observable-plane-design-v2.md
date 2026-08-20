@@ -109,6 +109,8 @@ Performance gates before the implementation locks (§14): the repo has already m
 
 **Carriers in v1.0:** tmux doors, `tg-post` shim, **bridge outbound and inbound** (the operator appears in their own stream).
 
+**Separation & keying (2026-08-20 walk ruling).** ALL communications route to `communication_intents`; it records communication facts only — outcomes live in `transport_attempts`, task semantics in the task tables, with exactly two nullable link ids on the intent. The write order is fixed and sequential in concept: task machinery first (contract rows exist before anything references them), intent second, transport third; whether contract+intent share one SQLite transaction is a storage detail — separation lives in tables and writer modules, never in transaction boundaries. `msg_id` is the communication id and the table's PRIMARY KEY. Party keying: aliases are namespaced text (`bot:<fleet>/<name>` · `operator` · `system:<job>` · `telegram:<alias>` · future `slack:<team>/<channel>` · `broadcast:<fleet>`) resolved at ingest to `sender_uid`/`recipient_uid`; the carrier-native raw address rides `recipient_raw` (sensitive). Extensibility asymmetry: a new recipient NAMESPACE costs nothing (alias string + registry row); a new CARRIER is a code+migration event, because a carrier exists only when a door can move bytes and emit attempt evidence. Task closure never rides comms: tool-call doors emit `completed/failed/returned_blocked`; hooks and sweeps emit what no tool call sends (`orphaned_by_session_loss`, `expired`).
+
 ## 8. Task model
 
 Three-level split: **`work_item_id`** (durable objective) → **`task_attempt_id`** (one assignment to one actor/instance; reassignment and retry mint new attempts) → **`msg_id`** (one communication carrying it).
