@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Answer WHO on this estate authored a review, when GitHub structurally cannot.
 
-The fleet shares one GitHub PAT, so every review, comment and verdict on every
-PR reads `chrisrogers37`. That is not a display quirk to be worked around — the
-identity genuinely is not recorded on GitHub's side, so no amount of querying
-GitHub harder will ever recover it. The information exists in exactly one place:
-the per-fleet report-back ledgers, where the bot that posted the verdict wrote a
-row naming itself.
+The fleet shares one GitHub identity, so every review, comment and verdict on
+every PR reads as that one account — the shared PAT's user, or (under fleet-scope
+App-auth #1270) the single `<slug>[bot]`. Either way the per-bot author is not
+recorded on GitHub's side, so no amount of querying GitHub harder will ever
+recover it: fleet-scope App narrows the identity from a human to a bot but does
+not make it per-bot (that is #252). This join stays load-bearing until then. The
+information exists in exactly one place: the per-fleet report-back ledgers, where
+the bot that posted the verdict wrote a row naming itself.
 
 Recovering it is a JOIN, and until now every reader hand-rolled that join. Two
 people did it independently on the same PR the same evening and one of them got

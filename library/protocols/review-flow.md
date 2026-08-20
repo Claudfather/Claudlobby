@@ -21,7 +21,7 @@ For every PR:
 - GitHub blocks `--approve` and `--request-changes` on same-account PRs.
 - Try `APPROVE` first; on failure fall back to `gh pr review --comment` with the verdict marker as the first line: `**Verdict: Ship it** (comment-only — same-identity blocks Approve)`. Manager greps the marker.
 - Auto-merge on COMMENT-with-ship-it is valid. The COMMENT *is* the review under same-identity constraint.
-- Goes away when fleet graduates to per-bot GitHub Apps.
+- Goes away when the fleet graduates to **per-bot** GitHub Apps (#252). A fleet-scope App (App-auth #1270) does not lift it — every bot still commits as one shared `<slug>[bot]`.
 
 **MCP gotcha — `get_pull_request_files` truncates at 30 files.** Returns only the first GitHub API page. PRs with > 30 files silently lose the rest.
 
