@@ -2121,6 +2121,19 @@ date_relative() {
     # Accepts GNU-style offsets: "-7 days", "7 days ago", "+1 month"
     local offset="${1:?Usage: date_relative '<offset>' [format]}"
     local fmt="${2:-%Y-%m-%d}"
+    # A literal Z in the format is the ISO-8601 UTC designator, so a caller
+    # asking for it must GET UTC. Computing in local time and stamping Z is a
+    # lie no call-site review can catch, because the call site looks correct
+    # (#918): rotate_jsonl_by_ts compared a local-time cutoff against UTC ts
+    # values, skewing retention by the host offset -- reaped early east of UTC,
+    # retained late west of it -- and eventually broke CI on main outright.
+    # %Z is the zone-NAME directive and is NOT a UTC request, so every %X
+    # directive is stripped before looking for a bare Z.
+    local _bare_fmt _utc=""
+    _bare_fmt=$(printf '%s' "$fmt" | sed 's/%.//g')
+    case "$_bare_fmt" in
+    *Z*) _utc="yes" ;;
+    esac
     if [ "$_OS" = "Darwin" ]; then
         local sign num unit bsd_unit
         # Normalize "N unit ago" -> "-N unit"
@@ -2140,9 +2153,17 @@ date_relative() {
             week|weeks)     bsd_unit="w" ;;
             *) echo "date_relative: unknown unit '$unit'" >&2; return 1 ;;
         esac
-        date -v"${sign}${num}${bsd_unit}" +"$fmt"
+        if [ -n "$_utc" ]; then
+            date -u -v"${sign}${num}${bsd_unit}" +"$fmt"
+        else
+            date -v"${sign}${num}${bsd_unit}" +"$fmt"
+        fi
     else
-        date -d "$offset" +"$fmt"
+        if [ -n "$_utc" ]; then
+            date -u -d "$offset" +"$fmt"
+        else
+            date -d "$offset" +"$fmt"
+        fi
     fi
 }
 
