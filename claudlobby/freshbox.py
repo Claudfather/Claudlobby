@@ -475,7 +475,12 @@ def _externals_report(
         # outlive its truth (D7 split). It still WARNs: the include also
         # carries aliases and the operator's non-identity config.
         app = bot.github_app
-        app_identity = bool(app and app.composes_identity)
+        # The missing-include FAIL softens to WARN only when the App identity
+        # covers EVERY repo — i.e. a host-generic (global) identity. A per-org
+        # identity (#1300) covers only the App's org repos; non-App repos still
+        # rely on the operator include for user.email, so a missing include
+        # there is a real 'Author identity unknown' FAIL, not a WARN.
+        app_identity = bool(app and app.composes_identity and not app.orgs)
         operator = _operator_gitconfig()
         if operator.is_file():
             findings.append(

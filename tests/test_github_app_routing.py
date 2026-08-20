@@ -151,17 +151,46 @@ class TestGithubAppComposedText:
         out = self._render(tmp_path, monkeypatch, _app_bot(orgs=["OrgA"]))
         assert "auth git-credential" in out
 
-    def test_app_identity_composes_iff_both_fields(self, tmp_path, monkeypatch):
+    def test_host_generic_app_identity_is_global(self, tmp_path, monkeypatch):
+        # No orgs → the whole host is the App → identity is a global [user],
+        # AFTER the include (later-wins).
         both = self._render(
             tmp_path, monkeypatch, _app_bot(slug="my-app", bot_user_id=42)
         )
         assert "name = my-app[bot]" in both
         assert "email = 42+my-app[bot]@users.noreply.github.com" in both
-        # AFTER the include, so these keys win (later-wins).
         assert both.index("[include]") < both.index("[user]")
         for partial in (dict(slug="my-app"), dict(bot_user_id=42)):
             out = self._render(tmp_path, monkeypatch, _app_bot(**partial))
             assert "[user]" not in out, partial
+
+    def test_org_scoped_app_identity_is_per_org_includeif(self, tmp_path, monkeypatch):
+        # #1300: orgs + identity → the [user] block is NOT global; it is pulled
+        # in by a per-org includeIf keyed on the repo remote, so a multi-org bot
+        # keeps the operator identity on non-App repos.
+        out = self._render(
+            tmp_path,
+            monkeypatch,
+            _app_bot(slug="my-app", bot_user_id=42, orgs=["OrgA", "OrgB"]),
+        )
+        assert "[user]" not in out, "org-scoped identity must not emit a global [user]"
+        for org in ("OrgA", "OrgB"):
+            assert (
+                f'includeIf "hasconfig:remote.*.url:https://github.com/{org}/**"'
+                in out
+            ), org
+        assert f"path = ./{comp.GH_APP_IDENTITY_FILENAME}" in out
+
+    def test_identity_fragment_written_only_for_org_scoped_identity(self, tmp_path):
+        from claudlobby.composer import compose_bot_gitconfig_app_identity as frag
+
+        # org-scoped identity → fragment with the [user] block
+        f = frag(_app_bot(slug="my-app", bot_user_id=42, orgs=["OrgA"]))
+        assert f and "name = my-app[bot]" in f
+        # host-generic identity → None (identity is inline/global, no fragment)
+        assert frag(_app_bot(slug="my-app", bot_user_id=42)) is None
+        # no identity → None
+        assert frag(_app_bot(orgs=["OrgA"])) is None
 
     def test_ssh_rewrite_scoping(self, tmp_path, monkeypatch):
         scoped = self._render(tmp_path, monkeypatch, _app_bot(orgs=["OrgA"]))
@@ -388,6 +417,40 @@ class TestGithubAppRoutingResolvesForReal:
             text=True,
         )
         assert r.stdout.strip() == "operator@example.com"
+
+    def test_per_org_identity_resolves_by_remote(self, tmp_path, monkeypatch):
+        # #1300 killer test: with orgs:[OrgA] + identity, a repo whose remote is
+        # OrgA authors as <slug>[bot]; a repo on any other remote authors as the
+        # operator — the multi-org bot's exact requirement, proven through real
+        # git config resolution (mirrors the mini feasibility check).
+        bot = _app_bot(slug="my-app", bot_user_id=42, orgs=["OrgA"])
+        cfg = self._composed(tmp_path, monkeypatch, bot)
+        # The fragment must sit beside the composed gitconfig for the relative
+        # includeIf to resolve — write it exactly as compose_bot would.
+        from claudlobby.composer import (
+            GH_APP_IDENTITY_FILENAME,
+            compose_bot_gitconfig_app_identity,
+        )
+
+        (cfg.parent / GH_APP_IDENTITY_FILENAME).write_text(
+            compose_bot_gitconfig_app_identity(bot)
+        )
+        results = {}
+        for org in ("OrgA", "OtherOrg"):
+            repo = tmp_path / f"repo-{org}"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True, env=self._env(tmp_path, cfg))
+            subprocess.run(
+                ["git", "remote", "add", "origin", f"https://github.com/{org}/x.git"],
+                cwd=repo, check=True, env=self._env(tmp_path, cfg),
+            )
+            r = subprocess.run(
+                ["git", "config", "user.email"],
+                cwd=repo, capture_output=True, text=True, env=self._env(tmp_path, cfg),
+            )
+            results[org] = r.stdout.strip()
+        assert results["OrgA"] == "42+my-app[bot]@users.noreply.github.com"
+        assert results["OtherOrg"] == "operator@example.com"
 
     def test_insteadof_rewrites_ssh_remotes(self, tmp_path, monkeypatch):
         cfg = self._composed(tmp_path, monkeypatch, _app_bot(orgs=["OrgB"]))

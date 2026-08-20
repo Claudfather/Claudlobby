@@ -410,7 +410,15 @@ fleet:
 `cache --timeout=3000` layer, the `lib/git-credential-github-app` helper by absolute path, the
 ssh→https `insteadOf` rewrite (App tokens are HTTPS-only), the `<slug>[bot]` commit identity when
 both identity fields are set, and a composed `tools/gh` shim (on PATH ahead of system `gh`) so
-per-call App minting is mechanical. Credential VALUES ride `GITHUB_APP_ID` /
+per-call App minting is mechanical.
+
+**Commit identity is PER-ORG when `orgs:` is scoped** (#1300). With `orgs:` declared, the
+`<slug>[bot]` identity applies only in repos whose **remote** is one of those orgs (via a
+`includeIf "hasconfig:remote.*.url:…"` pulling in a sibling `.gitconfig-github-app-id` fragment,
+git ≥ 2.36); every other repo keeps the operator identity from the include. So a bot that
+commits to *both* the App's org and other orgs authors as `<slug>[bot]` on the App's repos and
+as the operator elsewhere — and the App never needs access to those other orgs (their pushes use
+the host default helper). A host-generic App (no `orgs:`) sets the identity globally instead. Credential VALUES ride `GITHUB_APP_ID` /
 `GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` in the fleet `.env` — fleet-tier in
 v1 (all bots on a host share one git credential cache, so a per-bot installation override could
 cross-serve cached tokens; the validator warns).
