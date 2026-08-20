@@ -72,6 +72,22 @@ def constructed_env(**overrides):
     return env
 
 
+def git_isolation_env(cfg, **extra):
+    """Subprocess env for driving real git against a COMPOSED gitconfig only.
+
+    One owner of the isolation contract (GIT_CONFIG_GLOBAL + system config off
+    + no terminal prompts) — it exists in several batteries and a drifted copy
+    weakens an assertion silently (dropping GIT_TERMINAL_PROMPT would hang a
+    harness rather than fail a check)."""
+    return {
+        **os.environ,
+        **extra,
+        "GIT_CONFIG_GLOBAL": str(cfg),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 def _write_exec(path, content):
     """Write a stub script and set its exec bits (shared shell-test harness helper)."""
     with open(path, "w") as f:

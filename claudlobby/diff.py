@@ -96,7 +96,7 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
     # session writes HERE rather than to ~/.gitconfig. That edit is silently
     # lost on the next generate, so drift detection is the only thing that
     # surfaces it — omitting it would make the loss undetectable.
-    expected_gitconfig = compose_bot_gitconfig(bot) or ""
+    expected_gitconfig = compose_bot_gitconfig(bot, paths) or ""
     actual_gitconfig_path = bot_dir / GITCONFIG_FILENAME
     actual_gitconfig = (
         actual_gitconfig_path.read_text() if actual_gitconfig_path.is_file() else ""

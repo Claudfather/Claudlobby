@@ -319,6 +319,63 @@ def _env_secret_leak_findings(
     return findings
 
 
+def _app_key_findings(bot: BotConfig, paths: Paths) -> list[Finding]:
+    """Host audit of the App private key — the one file composed App routing
+    hard-requires at mint time (missing = every git auth quit=1s; readable by
+    group/other = key material at rest on a shared host).
+
+    The VALUE resolves through ``paths.env_resolved()`` — the runtime cascade,
+    host tier included — never ``paths.env_file``: reading that as a value
+    source was the #1226 defect, and a key path set at the host tier would
+    read as absent here while minting fine at runtime (a false FAIL). An
+    unreachable resolver door is DISCLOSED as a WARN, never read as absence
+    (the source_state rule: cannot-look and nothing-there need opposite
+    remedies). An absent VALUE is the validator's warn, not this audit's.
+    """
+    from .env_tiers import ResolverUnavailable
+
+    try:
+        resolutions = paths.env_resolved(bot_name=bot.bot_id)
+    except ResolverUnavailable as e:
+        return [
+            Finding(
+                bot.bot_id,
+                "missing_external",
+                WARN,
+                f"App private-key audit SKIPPED — env cascade door unreachable "
+                f"({e}); this is a gap, not a pass",
+            )
+        ]
+    res = resolutions.get("GITHUB_APP_PRIVATE_KEY_PATH")
+    key_path = res.value if res else ""
+    if not key_path:
+        return []
+    kp = Path(key_path).expanduser()
+    if not kp.is_file():
+        return [
+            Finding(
+                bot.bot_id,
+                "missing_external",
+                FAIL,
+                f"GITHUB_APP_PRIVATE_KEY_PATH → {kp}, which does not exist — "
+                "every git auth on this bot will fail loudly (helper quit=1) "
+                "at first use",
+            )
+        ]
+    mode = kp.stat().st_mode & 0o777
+    if mode & 0o077:
+        return [
+            Finding(
+                bot.bot_id,
+                "denied_value",
+                FAIL,
+                f"App private key {kp} is mode {mode:o} — group/other-readable "
+                "key material on a shared host; chmod 600 it",
+            )
+        ]
+    return [Finding(bot.bot_id, "external_ref", INFO, f"App private key → {kp} (0{mode:o})")]
+
+
 def _externals_report(
     bot: BotConfig, fleet: FleetConfig, paths: Paths
 ) -> list[Finding]:
@@ -409,9 +466,16 @@ def _externals_report(
     # correctly while user.name/user.email vanish, surfacing only as
     # 'Author identity unknown' at the first commit with nothing pointing back at
     # the composed file. An absent host prerequisite belongs in the fresh-box gate.
-    if bot.git_credentials:
+    if bot.git_credentials or bot.github_app:
         from .composer import _operator_gitconfig, _resolve_gh_executable
 
+        # An App bot with a COMPOSED identity ([user] after the include) does
+        # not depend on the include for user.email, so 'Author identity
+        # unknown' cannot occur for it — a FAIL promising that symptom would
+        # outlive its truth (D7 split). It still WARNs: the include also
+        # carries aliases and the operator's non-identity config.
+        app = bot.github_app
+        app_identity = bool(app and app.composes_identity)
         operator = _operator_gitconfig()
         if operator.is_file():
             findings.append(
@@ -422,20 +486,38 @@ def _externals_report(
                     f"git identity include → {operator}",
                 )
             )
+        elif app_identity:
+            findings.append(
+                Finding(
+                    bot.bot_id,
+                    "missing_external",
+                    WARN,
+                    f"composed .gitconfig includes {operator}, which does not "
+                    "exist — commit identity is safe (the composed App "
+                    "identity supplies user.name/user.email), but any operator "
+                    "aliases/config the include would carry are silently absent",
+                )
+            )
         else:
             findings.append(
                 Finding(
                     bot.bot_id,
                     "missing_external",
                     FAIL,
-                    f"git_credentials composes an [include] of {operator}, which "
-                    "does not exist — git ignores a missing include silently, so "
+                    f"composed .gitconfig includes {operator}, which does not "
+                    "exist — git ignores a missing include silently, so "
                     "credential routing will work while user.name/user.email are "
                     "unset and every commit fails 'Author identity unknown'. Create "
-                    "it (git config --global user.email …) or drop git_credentials",
+                    "it (git config --global user.email …) or drop the declaration",
                 )
             )
-        if gh_bin := _resolve_gh_executable():
+        if app:
+            findings.extend(_app_key_findings(bot, paths))
+        # gh fallback: emitted for git_credentials bots and org-scoped App
+        # bots; a host-generic App suppresses it in the composed file, so
+        # reporting it as an external would claim a dependency that is not
+        # wired (coverage honesty).
+        if (gh_bin := _resolve_gh_executable()) and not (app and app.host_generic):
             findings.append(
                 Finding(
                     bot.bot_id,

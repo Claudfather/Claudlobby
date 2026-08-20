@@ -2249,6 +2249,82 @@ harness_check "  ...and touched no rows (an empty keep-set would delete every on
 
 rm -rf "$FS_ROOT"
 
+# === Scenario 12: GitHub App git routing — real helper through the composed gitconfig (#1273 S9) ===
+# The pytest battery stubs the helper; THIS is where the real one runs: a real
+# openssl-signed JWT through the real composed routing, only curl faked. Seeds
+# a throwaway export root, composes a github_app bot with the REAL compositor,
+# and drives real git credential fill against the real lib/ helper.
+GA_ROOT="$(mktemp -d /tmp/ga-harness.XXXXXX)"
+GA_BIN="$GA_ROOT/bin"; mkdir -p "$GA_BIN" "$GA_ROOT/lib" "$GA_ROOT/home"
+cp "$LIB_DIR/git-credential-github-app" "$LIB_DIR/mint-github-token.sh" "$LIB_DIR/lib-common.sh" "$GA_ROOT/lib/"
+openssl genrsa -out "$GA_ROOT/app-key.pem" 2048 2>/dev/null
+cat > "$GA_BIN/curl" <<'GACURL'
+#!/bin/bash
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+printf '{"token":"ghs_HARNESSMINT"}' > "$out"
+printf '201'
+GACURL
+chmod 755 "$GA_BIN/curl"
+printf '[user]\n\temail = operator@example.com\n' > "$GA_ROOT/home/.gitconfig"
+
+# Compose the gitconfig with the REAL compositor against this root.
+GA_CFG="$GA_ROOT/composed.gitconfig"
+# The composer needs the venv deps (jinja2); the CLI-resolver convention:
+# prefer the checkout venv, fall back to python3 for editable installs.
+GA_PY="$LIB_DIR/../.venv/bin/python"
+[ -x "$GA_PY" ] || GA_PY=python3
+HOME="$GA_ROOT/home" "$GA_PY" - "$GA_ROOT" "$GA_CFG" <<GAPY 2>"$GA_ROOT/compose.err" || sed "s/^/  compose: /" "$GA_ROOT/compose.err" >&2
+import sys
+sys.path.insert(0, '$LIB_DIR/..')
+from pathlib import Path
+from claudlobby.composer import compose_bot_gitconfig
+from claudlobby.config import BotConfig, GithubAppConfig
+from claudlobby.paths import Paths
+root = Path(sys.argv[1])
+bot = BotConfig(bot_id="ga", name="ga", expertise=["eng"],
+                github_app=GithubAppConfig(slug="harness-app", bot_user_id=77))
+Path(sys.argv[2]).write_text(compose_bot_gitconfig(bot, Paths(root=root, fleet_dir=root)))
+GAPY
+
+# The git-isolation contract lives ONCE (ga_env_base); the App-credentialed
+# variant layers on top. A drifted second copy weakens an assertion silently.
+ga_env_base() {
+    local xdg="$1"; shift
+    env -i PATH="$GA_BIN:/usr/bin:/bin" HOME="$GA_ROOT/home" \
+        GIT_CONFIG_GLOBAL="$GA_CFG" GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
+        XDG_CACHE_HOME="$GA_ROOT/$xdg" CLAUDLOBBY_ROOT="$GA_ROOT" "$@"
+}
+ga_env() {
+    ga_env_base xdg GITHUB_APP_ID=999001 GITHUB_APP_INSTALLATION_ID=555002 \
+        GITHUB_APP_PRIVATE_KEY_PATH="$GA_ROOT/app-key.pem" "$@"
+}
+
+grep -q "harness-app\[bot\]" "$GA_CFG" && r=yes || r=no
+harness_check "app gitconfig composes with the App identity" "$r"
+
+ga_fill="$(printf 'protocol=https\nhost=github.com\npath=AnyOrg/x.git\n\n' | ga_env git credential fill 2>/dev/null | grep '^password=')"
+[ "$ga_fill" = "password=ghs_HARNESSMINT" ] && r=yes || r=no
+harness_check "real git fill mints a real openssl-signed token via the REAL helper" "$r"
+
+grep -q 'ghs_' "$GA_ROOT/composed.gitconfig" && r=no || r=yes
+harness_check "  ...and the composed file itself carries no token" "$r"
+
+printf 'protocol=https\nhost=github.com\npath=AnyOrg/x.git\nusername=x-access-token\npassword=ghs_HARNESSMINT\n\n' | ga_env git credential approve 2>/dev/null
+rm -f "$GA_BIN/curl"
+ga_fill2="$(printf 'protocol=https\nhost=github.com\npath=AnyOrg/x.git\n\n' | ga_env git credential fill 2>/dev/null | grep '^password=')"
+[ "$ga_fill2" = "password=ghs_HARNESSMINT" ] && r=yes || r=no
+harness_check "cache answers after approve with NO curl on the host (mint amortized)" "$r"
+ga_env git credential-cache exit 2>/dev/null || true
+
+# D9/quit=1: unset the app env + config -> the helper must stop the chain loudly.
+ga_fail="$(printf 'protocol=https\nhost=github.com\npath=Other/y.git\n\n' | ga_env_base xdg2 git credential fill 2>&1)" && r=no || r=yes
+harness_check "unconfigured helper stops git LOUDLY (quit=1), no silent fall-through" "$r"
+printf '%s' "$ga_fail" | grep -q 'password=' && r=no || r=yes
+harness_check "  ...and no credential of any identity was served" "$r"
+
+rm -rf "$GA_ROOT"
+
 echo ""
 echo "=== $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]

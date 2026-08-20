@@ -1554,13 +1554,17 @@ class TestGitCredentialsWarnings:
     def test_declared_token_missing_from_env_warns(
         self, fleet_dir, tmp_path, monkeypatch
     ):
-        """A declared org whose token is unset composes valid routing that then
-        presents no credential — git falls through to the host helper and 403s."""
+        """A declared org whose token is unset composes routing that answers
+        with an EMPTY password — git presents it and GitHub 401s; later helpers
+        are never consulted (D2: declaration wins, not value — the old wording
+        claimed a fall-through to the host helper that cannot happen)."""
         operator = tmp_path / "operator.gitconfig"
         operator.write_text("[user]\n\temail = operator@example.com\n")
         monkeypatch.delenv("ORG_A_PAT", raising=False)
         warns = self._token_warnings(self._report(fleet_dir, monkeypatch, operator))
-        assert any("ORG_A_PAT" in w and "403" in w for w in warns), warns
+        assert any(
+            "ORG_A_PAT" in w and "EMPTY password" in w and "401" in w for w in warns
+        ), warns
 
 
 class TestEnvContractShapeGate:
@@ -1807,3 +1811,89 @@ class TestEnvContractShapeGate:
         )
         errors = self._errors(fleet_dir, monkeypatch)
         assert any("unregistered source" in e and "railwayish.md" in e for e in errors)
+
+
+class TestGithubAppWarnings:
+    """App-mode routing (App-auth P3 #1273) — every operator-side gap warns,
+    never fails (composition is valid; the gap bites at runtime)."""
+
+    def _report(self, fleet_dir, monkeypatch, app, operator=None, env=None, bot_env=None):
+        import claudlobby.composer as comp
+
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test123")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "123:abc")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "456:def")
+        for k, v in (env or {}).items():
+            monkeypatch.setenv(k, v)
+        if operator is not None:
+            monkeypatch.setattr(comp, "_operator_gitconfig", lambda: operator)
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        fleet.bots["lead"].github_app = app
+        if bot_env:
+            fleet.bots["lead"].env.update(bot_env)
+        return validate(fleet, _make_paths(fleet_dir))
+
+    def _app_warns(self, report):
+        return [
+            w
+            for w in report.warnings
+            if "github_app" in w or "shim exists to stop" in w or "cross-serve" in w
+        ]
+
+    def test_unset_app_vars_warn_never_fail(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.config import GithubAppConfig
+
+        op = tmp_path / "op.gitconfig"
+        op.write_text("[user]\n\temail = o@example.com\n")
+        report = self._report(fleet_dir, monkeypatch, GithubAppConfig(), operator=op)
+        warns = self._app_warns(report)
+        for var in ("GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_PATH"):
+            assert any(var in w and "quit=1" in w for w in warns), var
+        assert not report.errors
+
+    def test_slug_without_bot_user_id_warns(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.config import GithubAppConfig
+
+        op = tmp_path / "op.gitconfig"
+        op.write_text("[user]\n\temail = o@example.com\n")
+        report = self._report(
+            fleet_dir, monkeypatch, GithubAppConfig(slug="my-app"), operator=op
+        )
+        assert any("only when BOTH" in w for w in self._app_warns(report))
+
+    def test_reverse_insteadof_in_operator_config_warns(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.config import GithubAppConfig
+
+        op = tmp_path / "op.gitconfig"
+        op.write_text(
+            "[user]\n\temail = o@example.com\n"
+            '[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n'
+        )
+        report = self._report(fleet_dir, monkeypatch, GithubAppConfig(), operator=op)
+        assert any("ssh-forcing rewrite bypasses" in w for w in self._app_warns(report))
+
+    def test_bot_tier_app_var_override_warns(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.config import GithubAppConfig
+
+        op = tmp_path / "op.gitconfig"
+        op.write_text("[user]\n\temail = o@example.com\n")
+        report = self._report(
+            fleet_dir, monkeypatch, GithubAppConfig(),
+            operator=op, bot_env={"GITHUB_APP_INSTALLATION_ID": "9"},
+        )
+        assert any("cross-serve" in w for w in self._app_warns(report))
+
+    def test_ambient_gh_token_shadow_warns(self, fleet_dir, tmp_path, monkeypatch):
+        from claudlobby.config import GithubAppConfig
+
+        op = tmp_path / "op.gitconfig"
+        op.write_text("[user]\n\temail = o@example.com\n")
+        report = self._report(
+            fleet_dir, monkeypatch, GithubAppConfig(),
+            operator=op, env={"GH_TOKEN": "ghp_operatorpat"},
+        )
+        assert any("shim exists to stop" in w for w in report.warnings)
+
+    def test_no_app_declaration_means_no_app_warnings(self, fleet_dir, tmp_path, monkeypatch):
+        report = self._report(fleet_dir, monkeypatch, None)
+        assert self._app_warns(report) == []

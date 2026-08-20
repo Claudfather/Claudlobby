@@ -18,7 +18,12 @@ log = logging.getLogger(__name__)
 
 from . import dotenv, tool_resolve
 from .claudron_compat import CLAUDRON_INTEGRATION_URL
-from .config import _PROJECT_VALIDATION_KEYS, FleetConfig, is_pos_int
+from .config import (
+    _PROJECT_VALIDATION_KEYS,
+    GITHUB_APP_ENV_VARS,
+    FleetConfig,
+    is_pos_int,
+)
 from .known_values import (
     AUTO_ELIGIBLE_SKILLS,
     BYPASS_ACTIONS,
@@ -53,9 +58,26 @@ def _env_has_value(effective_env: dict[str, str], var: str) -> bool:
     went permanently silent even if the operator never filled in a real value
     (#755). The single predicate behind all four "requires VAR but it is not
     set" validator warnings — MCP contract vars, tool env vars, telegram
-    token_env, git_credentials — so a fifth site cannot reintroduce the fork.
+    token_env, git_credentials, github_app — so a new site cannot reintroduce
+    the fork.
     """
     return bool(effective_env.get(var))
+
+
+def _git_config_probe(operator: Path, *query: str):
+    """One ``git config --file <operator> --includes <query...>`` run, or None
+    when the file or git is absent. ``--includes`` is NON-OPTIONAL and lives
+    here so no probe can drop it: it is off by default for ``--file`` reads
+    but ON when git reads the same file as global config — which is exactly
+    how the bot will read it — so omitting it silently under-detects anything
+    living one [include] deeper."""
+    if not operator.is_file() or not shutil.which("git"):
+        return None
+    return subprocess.run(
+        ["git", "config", "--file", str(operator), "--includes", *query],
+        capture_output=True,
+        text=True,
+    )
 
 
 def _operator_git_identity_problem() -> str | None:
@@ -81,15 +103,35 @@ def _operator_git_identity_problem() -> str | None:
     operator = _operator_gitconfig()
     if not operator.is_file():
         return f"{operator} does not exist"
-    if not shutil.which("git"):
+    probe = _git_config_probe(operator, "--get", "user.email")
+    if probe is None:
         return None  # cannot check; not the validator's business to guess
-    probe = subprocess.run(
-        ["git", "config", "--file", str(operator), "--includes", "--get", "user.email"],
-        capture_output=True,
-        text=True,
-    )
     if probe.returncode != 0 or not probe.stdout.strip():
         return f"{operator} sets no user.email"
+    return None
+
+
+def _operator_reverse_insteadof() -> str | None:
+    """An ssh-forcing GitHub rewrite in the operator gitconfig, or None.
+
+    The composed App routing works over https; a
+    ``url."git@github.com:".insteadOf = https://github.com/`` (or
+    ``pushInsteadOf``) in the INCLUDED operator config rewrites https remotes
+    to ssh BEFORE the credential layer runs, bypassing it entirely (D6).
+    Single-pass rewriting means nothing composable can undo it — the only
+    honest handling is naming it at validate time. Same delegation posture as
+    ``_operator_git_identity_problem``: ask git, never hand-parse the file.
+    """
+    from .composer import _operator_gitconfig  # local: composer imports config, not us
+
+    operator = _operator_gitconfig()
+    probe = _git_config_probe(operator, "--get-regexp", r"url\..*\.(push)?insteadof")
+    if probe is None or probe.returncode != 0:
+        return None  # unprobeable, or no insteadOf config at all
+    for line in probe.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if "git@github.com" in key.lower() and "https://github.com" in value.lower():
+            return f"{operator} carries '{key} = {value}'"
     return None
 
 
@@ -386,7 +428,20 @@ def _validate_bots(
     # and only when some bot actually declares git_credentials.
     git_identity_problem = (
         _operator_git_identity_problem()
-        if any(b.git_credentials for b in fleet.bots.values())
+        if any(
+            b.git_credentials or b.github_app for b in fleet.bots.values()
+        )
+        else None
+    )
+    # D6 (App-auth P3): an operator ~/.gitconfig carrying an ssh-FORCING
+    # rewrite (url."git@github.com:".insteadOf/pushInsteadOf = https://...)
+    # defeats the whole composed credential layer — URL rewriting is
+    # single-pass, so the composed git@→https rule cannot chain to undo it.
+    # Nothing composable fixes it; a warning at validate time is the only
+    # place the failure points back to its cause. Probed once per run.
+    reverse_insteadof_problem = (
+        _operator_reverse_insteadof()
+        if any(b.github_app for b in fleet.bots.values())
         else None
     )
     # Vault resolution is a full walk-up + scan per call, and `claudron_vault_path`
@@ -696,6 +751,16 @@ def _validate_bots(
                 )
             else:
                 tool_targets[target] = tool_entry.name
+            # Mirror the generate-time gh-shim collision as a validate error so
+            # `validate` ≡ `generate` (the contract this function stands on): an
+            # App bot composes a tools/gh shim, so a declared tool also
+            # rendering 'gh' would only fail at generate otherwise.
+            if target == "gh" and bot.github_app:
+                report.errors.append(
+                    f"bot '{bot_name}': tool '{tool_entry.name}' renders 'gh', "
+                    "but github_app composes a tools/gh shim — rename the tool "
+                    "or disable github_app for this bot"
+                )
             for var in manifest.get("env") or []:
                 if not _env_has_value(effective_env, var):
                     report.warnings.append(
@@ -733,8 +798,10 @@ def _validate_bots(
             if not _env_has_value(effective_env, env_name):
                 report.warnings.append(
                     f"bot '{bot_name}': git_credentials['{org}'] names '{env_name}', "
-                    f"not set in any tier of .env — pushes to {org} will fall back to "
-                    f"the host credential helper and may 403"
+                    f"not set in any tier of .env — the org helper answers with an "
+                    f"EMPTY password, which git presents and GitHub 401s; later "
+                    f"helpers (App or host default) are NOT consulted (D2: a "
+                    f"declared org wins by declaration, not by having a value)"
                 )
 
         # The other half of the same declaration: routing composes an [include] of
@@ -748,6 +815,64 @@ def _validate_bots(
                 f"identity, but {git_identity_problem} — credential routing will work "
                 f"while every commit fails 'Author identity unknown'"
             )
+
+        # GitHub App routing (App-auth P3 #1273) — all warn, never fail.
+        app = bot.github_app
+        if app:
+            for var_name in GITHUB_APP_ENV_VARS:
+                if not _env_has_value(effective_env, var_name):
+                    report.warnings.append(
+                        f"bot '{bot_name}': github_app routing requires {var_name}, "
+                        f"not set in any tier of .env — the composed helper will "
+                        f"fail loudly (quit=1) at the first git auth; set it, or "
+                        f"run lib/setup-github-app.sh (its config-file fallback "
+                        f"covers operator/cron shells only, never bot sessions)"
+                    )
+                if var_name in bot.env:
+                    report.warnings.append(
+                        f"bot '{bot_name}': bot-tier env overrides {var_name} — "
+                        f"all bots on this host share ONE git credential-cache "
+                        f"daemon keyed only by URL, so a per-bot installation "
+                        f"override can cross-serve another installation's cached "
+                        f"token with zero symptoms (D4); App credentials are "
+                        f"fleet-tier in v1"
+                    )
+            if bool(app.slug) != bool(app.bot_user_id):
+                have, need = (
+                    ("slug", "bot_user_id") if app.slug else ("bot_user_id", "slug")
+                )
+                report.warnings.append(
+                    f"bot '{bot_name}': github_app declares {have} without {need} — "
+                    f"the App commit identity composes only when BOTH are set, so "
+                    f"commits will carry the operator identity (get both from "
+                    f"lib/setup-github-app.sh output)"
+                )
+            if git_identity_problem and not app.composes_identity:
+                report.warnings.append(
+                    f"bot '{bot_name}': github_app without a composed App identity "
+                    f"relies on the operator include for user.email, but "
+                    f"{git_identity_problem} — commits will fail 'Author identity "
+                    f"unknown'"
+                )
+            for shadow in ("GH_TOKEN", "GITHUB_TOKEN"):
+                if _env_has_value(effective_env, shadow):
+                    report.warnings.append(
+                        f"bot '{bot_name}': {shadow} is set in a .env tier while "
+                        f"github_app is declared — the composed tools/gh shim "
+                        f"mints only when neither GH_TOKEN nor GITHUB_TOKEN is "
+                        f"set, so an ambient value silently makes `gh` run as "
+                        f"THAT identity, not the App (the silent operator-"
+                        f"identity substitution the shim exists to stop)"
+                    )
+            if reverse_insteadof_problem:
+                report.warnings.append(
+                    f"bot '{bot_name}': github_app routing is defeated by the "
+                    f"operator gitconfig: {reverse_insteadof_problem} — an "
+                    f"ssh-forcing rewrite bypasses the credential layer entirely "
+                    f"(URL rewriting is single-pass; the composed git@->https "
+                    f"rule cannot undo it); remove it or scope it away from "
+                    f"github.com"
+                )
 
         # Observability config (warn). Fields may be None (= use hardcoded default);
         # only validate when explicitly set.
