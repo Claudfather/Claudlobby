@@ -782,7 +782,9 @@ class WorkItem(_Strict):
     title: str = Field(min_length=1)
     created_by: str                             # alias
     workstream_id: Optional[str] = None
-    body: Optional[str] = None
+    # Authored, not relayed: oversized bodies REJECT (contract violation),
+    # never truncate-with-proof — the comms rule is for relayed content.
+    body: Optional[str] = Field(None, max_length=16_384)
 
 
 class TaskAttempt(_Strict):
@@ -799,11 +801,12 @@ class TaskEvent(_Strict):
     task_attempt_id: Optional[str] = Field(None, pattern=ID_PATTERNS["task_attempt"])
     event: Literal[TASK_EVENTS]
     actor: Optional[str] = None                 # alias: who reported it
+    session_uid: Optional[str] = Field(None, pattern=ID_PATTERNS["session"])
     progress: Optional[int] = Field(None, ge=0, le=100)
     summary: Optional[str] = None
     pr_url: Optional[str] = None
     deadline: Optional[AwareDatetime] = None
-    superseded_by: Optional[str] = None
+    successor_id: Optional[str] = None  # reassigned/retry_created -> task_attempt_id; superseded -> superseding id
 
 
 FAMILIES: dict[str, type[BaseModel]] = {
@@ -1257,11 +1260,12 @@ CREATE TABLE task_events (
          'retry_created','orphaned_by_session_loss','recovered_after_restart',
          'expired')),
     actor_uid       TEXT,
-    progress        INTEGER,
+    session_uid     TEXT,
+    progress        INTEGER CHECK (progress IS NULL OR (progress >= 0 AND progress <= 100)),
     summary         TEXT,
     pr_url          TEXT,
     deadline        TEXT,
-    superseded_by   TEXT,
+    successor_id    TEXT,
     FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
 );
 CREATE INDEX idx_task_events_item ON task_events (work_item_id, ingest_seq);
@@ -1707,14 +1711,15 @@ def _insert_family(conn, env, payload, base, now):
         actor = resolve_party(conn, payload.actor, now) if payload.actor else None
         conn.execute(
             f"INSERT INTO task_events ({_ENVELOPE_COLS},"
-            " work_item_id, task_attempt_id, event, actor_uid, progress,"
-            " summary, pr_url, deadline, superseded_by)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 9) + ")",
+            " work_item_id, task_attempt_id, event, actor_uid, session_uid,"
+            " progress, summary, pr_url, deadline, successor_id)"
+            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 10) + ")",
             base + (
                 payload.work_item_id, payload.task_attempt_id, payload.event,
-                actor, payload.progress, payload.summary, payload.pr_url,
+                actor, payload.session_uid, payload.progress, payload.summary,
+                payload.pr_url,
                 payload.deadline.isoformat() if payload.deadline else None,
-                payload.superseded_by,
+                payload.successor_id,
             ),
         )
     else:  # pragma: no cover — FAMILIES and this dispatch move together
