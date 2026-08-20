@@ -16,7 +16,9 @@ import json
 from pathlib import Path
 
 from .composer import (
+    GH_APP_IDENTITY_FILENAME,
     GITCONFIG_FILENAME,
+    compose_bot_gitconfig_app_identity,
     compose_bot_conf,
     compose_bot_gitconfig,
     compose_claude_md,
@@ -109,6 +111,25 @@ def diff_bot(bot_name: str, fleet: FleetConfig, paths: Paths) -> str:
                 actual_gitconfig.splitlines(),
                 fromfile="library-composed (would be regenerated)",
                 tofile=f"runtime/bots/{bot_name}/{GITCONFIG_FILENAME} (current)",
+                lineterm="",
+            )
+        )
+
+    # .gitconfig-github-app-id — the per-org App identity fragment (#1300),
+    # compositor-owned like the .gitconfig it is included from.
+    expected_appid = compose_bot_gitconfig_app_identity(bot) or ""
+    actual_appid_path = bot_dir / GH_APP_IDENTITY_FILENAME
+    actual_appid = (
+        actual_appid_path.read_text() if actual_appid_path.is_file() else ""
+    )
+    if expected_appid != actual_appid:
+        parts.append(f"\n=== {GH_APP_IDENTITY_FILENAME} drift in {bot_name} ===")
+        parts.extend(
+            difflib.unified_diff(
+                expected_appid.splitlines(),
+                actual_appid.splitlines(),
+                fromfile="library-composed (would be regenerated)",
+                tofile=f"runtime/bots/{bot_name}/{GH_APP_IDENTITY_FILENAME} (current)",
                 lineterm="",
             )
         )

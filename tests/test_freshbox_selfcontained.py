@@ -984,13 +984,23 @@ class TestGithubAppFreshbox:
         finds = self._audit(tmp_path, self._bot(tmp_path), monkeypatch, key_exists=False)
         assert any(f.severity == "fail" and "does not exist" in f.detail for f in finds)
 
-    def test_missing_include_with_app_identity_softens_to_warn(self, tmp_path, monkeypatch):
-        # D7: a composed App identity supplies user.email, so the missing
-        # include cannot cause 'Author identity unknown' — WARN, not FAIL.
+    def test_missing_include_with_host_generic_identity_softens_to_warn(self, tmp_path, monkeypatch):
+        # D7: a host-generic (global) App identity supplies user.email for every
+        # repo, so the missing include cannot cause 'Author identity unknown' —
+        # WARN, not FAIL.
         bot = self._bot(tmp_path, slug="my-app", bot_user_id=7)
         finds = self._audit(tmp_path, bot, monkeypatch, key_mode=0o600, operator=False)
         include = [f for f in finds if "does not exist" in f.detail and "include" in f.detail]
         assert include and all(f.severity == "warn" for f in include), finds
+
+    def test_missing_include_with_per_org_identity_stays_fail(self, tmp_path, monkeypatch):
+        # #1300: a per-org identity covers ONLY the App's org repos; non-App
+        # repos still rely on the operator include, so a missing include is a
+        # real FAIL even though an App identity is declared.
+        bot = self._bot(tmp_path, slug="my-app", bot_user_id=7, orgs=["OrgA"])
+        finds = self._audit(tmp_path, bot, monkeypatch, key_mode=0o600, operator=False)
+        include = [f for f in finds if "does not exist" in f.detail and "include" in f.detail]
+        assert include and all(f.severity == "fail" for f in include), finds
 
     def test_missing_include_without_identity_is_fail(self, tmp_path, monkeypatch):
         bot = self._bot(tmp_path, key_exists=True) if False else self._bot(tmp_path)
