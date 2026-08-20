@@ -27,10 +27,51 @@ export, the token dies in about an hour:
 GH_TOKEN=$("$CLAUDLOBBY_ROOT"/lib/mint-github-token.sh) gh pr list
 ```
 
+The composed `tools/gh` shim makes this mechanical inside a bot session: `gh` on an
+App bot already mints and runs as the App, so a bare `gh pr list` is enough there. The
+explicit mint above is for skills that build their own env, and for your own shell.
+
+#### Identity — why the App, not a PAT
+
+Fleet-scope GitHub operations authenticate as the **App bot identity** the fleet commits
+as (`<slug>[bot]`), never a developer's personal PAT. A personal PAT scopes to that
+person's repo access — it misses org repos they are not on and rotates when they do — and
+attributes every bot action to a human. The App installs on the orgs it needs, its
+installation tokens are stable across team changes and short-lived, and branch protection
+can bind the bot specifically (the operator's admin bypass does not extend to it).
+
+**Failure signal — `Could not resolve to a Repository` on a known org repo.** The token's
+identity does not have access. **Do not rotate a personal PAT** — wire the App token. The
+tell: `gh repo list <org>` under a personal PAT returns only that developer's visible
+subset, while the App sees the org's full install.
+
+#### Threat framing — honest
+
+The App private key mints tokens indefinitely and never expires, so if a bot host is
+compromised the blast radius is **not smaller** than a shared PAT. The real wins are:
+decoupling bot actions from a human account, suspend/rotate ergonomics (overlapping keys,
+no human-account churn), short-lived tokens in transit, and branch protection that
+actually binds the bot. Freshbox FAILs a private key that is group/other-readable; keep it
+`0600`. Rotation: [`../../documentation/runbooks/github-app-setup.md`](../../documentation/runbooks/github-app-setup.md).
+
+#### Token lifetime caveat (cache)
+
+The composed gitconfig layers `cache --timeout=3000` in front of the helper, and git
+re-stores the token with a fresh TTL on every successful auth — so under continuous pushing
+a cached token can outlive its ~1h `ghs_` lifetime. This is self-healing: the next 401
+erases the cache and re-mints, at the cost of one failed round trip. Nothing to configure.
+
+#### MCP respawn caveat
+
+`lib/github-app-mcp-wrapper.py` respawns the MCP server every ~50 minutes to rotate the
+token; in-flight MCP requests fail for ~2s per respawn (retry on transient MCP errors).
+Respawn transparency is validated against the pinned server package only — a server swap
+re-validates post-respawn tool calls.
+
 #### Everything else
 
-Ops guidance, failure modes (401 vs 403), pagination gotchas, and the piped-`gh`
-exit-status trap are identity-independent and live in the paired
-[`github.md`](github.md) integration — read that alongside this file. A fleet can
-equip both `github` and `github-app` during a migration window; the two servers
-compose side by side with distinct tool prefixes.
+Ops guidance identity-independent of App-vs-PAT — 401 vs 403 reroute rungs, pagination
+gotchas, the piped-`gh` exit-status trap — lives in the paired [`github.md`](github.md)
+integration; read it alongside this file. A fleet can equip both `github` and `github-app`
+during a migration window; the two servers compose side by side with distinct tool
+prefixes.
