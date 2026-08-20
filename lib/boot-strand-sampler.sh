@@ -45,19 +45,24 @@
 #      (BOOT_LOCK held by peers) is not sampled. --load N closes the CPU half
 #      of that gap and stays pinned — as a RATE AMPLIFIER, which is what makes
 #      a 30-45 min run yield any traced strands at all, NOT because the strand
-#      fails to occur at low load. The #933 measurement stranded 5 of 6 at
-#      loadavg 19-31 and was clean at loadavg ~10, but that clean half was ONE
-#      boot: it supports "not observed in one sample", never "does not occur".
-#      Per the pass-bar ratified on #1236 (Clopper-Pearson exact, 90%
-#      one-sided throughout — every n here moves if you recompute on another
-#      basis, so the basis travels with the number), a zero-observation bounds
-#      the rate at 90% for n=1 and still 31.9% at n=6, and ELIMINATION — an
-#      upper bound under 10% — is unreachable below n=22. The strand has since
-#      been seen at low load twice: a restart stranded at loadavg ~10, and a
-#      production strand lower still. So the LOW-LOAD STRATUM IS UNSAMPLED,
-#      NOT EMPTY. A sample taken without --load still says little about the
-#      contended boot; a strand-free one bounds the low-load rate loosely
-#      rather than showing it is zero.
+#      fails to occur at low load. Read #933's boot-shape table by its strand
+#      signature (box still holding at +25s): it stranded 5 of 5 at loadavg
+#      18.7-30.7, and the clean-at-loadavg-~10 row it is usually cited for is
+#      ONE boot at 10.3 — the only row in that table whose payload actually
+#      ran. Its five idle boots at loadavg 1.7 are not a clean baseline
+#      either; #933 identifies that 5/5 as the separate queue-discard defect.
+#      So the low-load evidence is a single boot: it supports "not observed in
+#      one sample", never "does not occur". Per the pass-bar ratified on #1236
+#      (Clopper-Pearson exact, 90% one-sided throughout — every n here moves
+#      if you recompute on another basis, so the basis travels with the
+#      number), a zero-observation bounds the rate at 90% for n=1 and still
+#      31.9% at n=6, and ELIMINATION — an upper bound under 10% — is
+#      unreachable below n=22. The strand has since been seen at low load
+#      twice: a restart stranded at loadavg ~10, and a production strand lower
+#      still. So the LOW-LOAD STRATUM IS UNSAMPLED, NOT EMPTY. A sample taken
+#      without --load still says little about the contended boot; a
+#      strand-free one bounds the low-load rate loosely rather than showing
+#      it is zero.
 #   3. The per-boot process ledger (parity_procs: every descendant of the pane)
 #      is recorded so parity is EVIDENCED per boot, not asserted — the summary
 #      prints the tree histogram.
