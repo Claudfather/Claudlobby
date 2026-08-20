@@ -428,6 +428,12 @@ def thermal_scope(before_hex: str | None, after_hex: str | None) -> list[str]:
         out.append("  These are STICKY run-level flags. They cannot say WHICH boots were")
         out.append("  capped, and the sampler records no per-boot throttle state — so a")
         out.append("  thermal confound on render lag can be neither attributed nor excluded.")
+        out.append("")
+        out.append("  DIRECTION, which is the part a reader needs: capping slows render, so")
+        out.append(f"  it biases TOWARD {MANUFACTURED_TOKEN}. It is a FOURTH mechanism pushing that")
+        out.append("  way and the first that is PHYSICAL — no analyzer fix removes it.")
+        out.append(f"  CONSEQUENCE: a {MANUFACTURED_TOKEN} verdict is further WEAKENED by this; any")
+        out.append("  other candidate dominating survived a headwind and is STRENGTHENED.")
     else:
         out.append("  no new throttle bits set during this run")
     return out
