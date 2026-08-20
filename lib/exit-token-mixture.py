@@ -96,8 +96,34 @@ ELIMINATION_MIN_N = 22
 # as empty-box dominance, seen from the other end. We already ratified trusting
 # the first least; the second cannot then be trusted.
 #
-# Four such defects were found in one evening, with no reason to believe the last
-# one has been found. That argument holds at n=24 and at n=240.
+# TWO of the four defects actually DRAIN a specific candidate; the taxonomy matters
+# and an earlier version of this comment got it wrong:
+#
+#   DRAIN (lowers a specific candidate count -- what the argument needs)
+#     * duplicate-tick collision -- into the residual
+#     * no-payload / unarmed trace -- into EXCLUSION. It returns early with its own
+#       token so it never reaches the residual, but the trace is dropped entirely,
+#       and a dropped trace that would have shown below-floor turns a count of 1
+#       into a count of 0. That is the false-elimination path exactly.
+#   INFLATE (raises the residual without lowering any candidate)
+#     * mode C and the bare glob -- clean boots that were never candidates
+#
+# All four raise empty-box; only the first pair lowers a specific count.
+#
+# AND THE WITHHOLD IS NOT ABSOLUTE, which was the flaw in its first form: "an
+# observation defect could produce a low count" is true of every measurement ever
+# taken, so as stated it forbade elimination forever, on any instrument, at any n.
+# That is a policy of never concluding, dressed as rigour.
+#
+# THE EXIT CONDITION: a PER-CANDIDATE POSITIVE CONTROL -- a fixture where that
+# candidate is KNOWN PRESENT and the analyzer detects it. With one, a zero count
+# means "the detector works and saw nothing". Without one, zero and "the detector
+# is blind to this candidate" are the same observable, which is the whole argument.
+#
+# The existing corpus does NOT supply this: tests/test_pane_verify_trace.sh asserts
+# the reconstruction AGREES with the live predicate, which is a CONSISTENCY check.
+# A detector only ever seen returning NEGATIVE is not yet a detector. Those are
+# different properties and only the positive control licenses an elimination.
 #
 # WHAT IS NOT WITHHELD: every candidate still gets its CP interval, zero-count
 # ones included, labelled as bounds. "Not observed, consistent with up to X%" is
