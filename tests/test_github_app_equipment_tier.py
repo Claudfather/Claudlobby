@@ -20,6 +20,24 @@ Boundary, stated because it is invisible from a green run: this proves
 PLACEMENT and COLLECTION only. It does not prove a real App authenticates —
 that needs credentials only the operator holds. The helper chain itself was
 already proven end to end against a throwaway RSA key (App-auth P1).
+
+WHICH MUTANT REACHES WHICH ASSERTION — recorded because two assertions here
+were UNREACHED by the obvious mutants, and an unreached assertion is
+indistinguishable from a passing one at the summary line:
+
+    M1  scaffold_tier ignores bot_attached          -> 2 failures
+    M2  _attaching_bots returns every bot           -> 3 failures
+    M3  collection scans library/mcp/*.json
+        instead of declared equipment               -> 6 failures
+    M4  declared_for_fleet credits every bot
+        instead of the equipping one                -> 1 failure
+
+Dormancy is reached ONLY by M3 and creds-reconcile ONLY by M4. Both sat green
+under the mutants that came first, not because they are robust but because
+those mutants never touched the code they depend on — dormancy is enforced by
+walking DECLARED equipment (above _attaching_bots), and attribution lives in
+credentials.py (outside composer entirely). Adding an assertion here without
+a mutant that reaches it buys nothing; check before claiming coverage.
 """
 
 from __future__ import annotations
