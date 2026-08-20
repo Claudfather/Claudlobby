@@ -365,7 +365,7 @@ def test_event_id_shape():
 def test_uid_kinds():
     for kind, prefix in [("host", "host_"), ("fleet", "fleet_"),
                          ("actor", "actor_"), ("bot_instance", "boti_"),
-                         ("session", "sess_")]:
+                         ("session", "sess_"), ("vault", "vault_")]:
         uid = mint_uid(kind)
         assert uid.startswith(prefix) and len(uid) == len(prefix) + 32
 
@@ -425,6 +425,7 @@ _UID_PREFIX = {
     "actor": "actor_",
     "bot_instance": "boti_",
     "session": "sess_",
+    "vault": "vault_",
 }
 
 ID_PATTERNS: dict[str, str] = {
@@ -1065,7 +1066,7 @@ CREATE TABLE ingest_ledger (
 CREATE TABLE identity_registry (
     uid         TEXT PRIMARY KEY,
     kind        TEXT NOT NULL CHECK (kind IN
-                  ('host','fleet','actor','bot_instance','session')),
+                  ('host','fleet','actor','bot_instance','session','vault')),
     alias       TEXT NOT NULL,
     parent_uid  TEXT,
     provisional INTEGER NOT NULL DEFAULT 1,
