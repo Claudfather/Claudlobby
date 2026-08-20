@@ -40,6 +40,14 @@ attributes every bot action to a human. The App installs on the orgs it needs, i
 installation tokens are stable across team changes and short-lived, and branch protection
 can bind the bot specifically (the operator's admin bypass does not extend to it).
 
+This is the **MCP server's** identity — one App token, for the `mcp__github-app__*` tools. The
+**git commit** identity is a separate axis: whether the bot commits as `<slug>[bot]` or as the
+operator, and whether that is scoped per org (bot on the App's org, you on your company's org —
+the App needing no access to the latter), is configured in `github_app:` — see the runbook's
+"Choosing the identity"
+([`../../documentation/runbooks/github-app-setup.md`](../../documentation/runbooks/github-app-setup.md))
+and [`fleet-yaml-schema.md`](../../documentation/fleet-yaml-schema.md#fleetdefaultsgithub_app--botsnamegithub_app).
+
 **Failure signal — `Could not resolve to a Repository` on a known org repo.** The token's
 identity does not have access. **Do not rotate a personal PAT** — wire the App token. The
 tell: `gh repo list <org>` under a personal PAT returns only that developer's visible

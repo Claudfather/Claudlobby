@@ -115,7 +115,7 @@ revoked key vs clock skew) with a key-fingerprint recipe.
        github_app:
          slug: my-fleet-bot
          bot_user_id: 12345678      # the App's BOT USER id, printed by the setup script
-         # orgs: [MyOrg]            # optional: route only these orgs via the App
+         # orgs: [MyOrg]            # scope the bot identity per org — see "Choosing the identity" below
    ```
 
 3. **MCP** — the App-token GitHub server: add `github-app` to a bot's `mcp:` list
@@ -123,6 +123,61 @@ revoked key vs clock skew) with a key-fingerprint recipe.
 
 4. `claudlobby --fleet <fleet> generate`, then restart the bots (composed `.gitconfig`,
    `bot.conf`, and the `tools/gh` shim reach a running bot only at its next restart).
+
+## Choosing the identity: App, operator, or both
+
+`github_app:` is the whole switch, and `orgs:` decides **where** the App identity applies.
+Three shapes, from the schema reference
+([`fleet-yaml-schema.md`](../fleet-yaml-schema.md#fleetdefaultsgithub_app--botsnamegithub_app)):
+
+- **Operator only — the default.** No `github_app:` block. The bot commits and pushes as the
+  operator (the existing `git_credentials` / PAT path). App-auth is dormant: declaring nothing
+  composes nothing.
+- **App everywhere.** `github_app:` with `slug` + `bot_user_id` and **no** `orgs:`. Every
+  github.com repo the bot touches commits as `<slug>[bot]` and authenticates via the App. Use
+  this only when the fleet works solely in orgs the App is installed on — a helper failure has
+  nowhere to silently fall back to, which is the point.
+- **App on some orgs, operator on the rest — the mixed case.** `github_app:` with
+  `orgs: [AppOrg]`. Repos whose **remote** is `github.com/AppOrg/*` commit as `<slug>[bot]` via
+  the App; **every other repo keeps the operator identity and never touches the App.** This is
+  the important one: a fleet can commit to the App's org as the bot and to *your company's* org
+  as you, and **the App needs zero permissions on the company org** — those pushes route through
+  the host's default git helper, entirely outside the App.
+
+Worked example — a fleet that works in both `AcmeBot`'s repos (as the bot) and your company
+`AcmeCorp`'s repos (as you):
+
+```yaml
+fleet:
+  defaults:
+    github_app:
+      slug: acme-bot
+      bot_user_id: 12345678
+      orgs: [AcmeBot]          # bot identity ONLY on AcmeBot repos
+```
+
+A commit in an `AcmeBot/*` checkout is authored `acme-bot[bot]`; a commit in an `AcmeCorp/*`
+checkout is authored by the operator (your `.env` PAT / host `gh`). Register the App on
+`AcmeBot` only — `AcmeCorp` grants it nothing. Matching is on the repo's remote URL (all three
+spellings: `https`, `git@github.com:`, `ssh://`) and is **case-sensitive** on the org segment,
+so a non-canonically-cased clone (`acmebot` for `AcmeBot`) falls back to the operator.
+
+### Altitude — one App for a whole fleet, or per bot
+
+`github_app:` sits at two altitudes and merges **per field**:
+
+- **`fleet.defaults.github_app`** — disseminates to every bot in the fleet. The usual case:
+  one App identity fleet-wide.
+- **`bots.<name>.github_app`** — overrides or adds fields for one bot (e.g. a narrower `orgs:`).
+- **`github_app: { enabled: false }`** on a bot — opts that bot out of a fleet-wide App default,
+  back to the operator identity.
+
+The credential **values** (`GITHUB_APP_*`, Step 4) live in the fleet `.env`. They *can* sit at
+the host tier (`~/.env`) so several fleets on one box reuse one App's key — but keep the
+**installation id at fleet tier**: every bot on a host shares one git credential cache, and a
+per-bot installation-id override can cross-serve another bot's cached token (the validator
+warns). There is **no single host-level `github_app:`** that flips every fleet on — each
+`fleet.yaml` declares its own.
 
 ## Step 5 — verify (the proofs that matter)
 
