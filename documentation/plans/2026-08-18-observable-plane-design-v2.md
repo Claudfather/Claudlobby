@@ -113,6 +113,8 @@ Performance gates before the implementation locks (§14): the repo has already m
 
 ## 8. Task model
 
+Work items carry two nullable WHERE-axis fields pointing at existing Lane-A vocabulary (2026-08-20 walk): `repo` (owner/name) and `project_key` (the projects.yaml slug — the tier map the sprint path already joins repo→project through). On work_items ONLY: attempts inherit the objective's target, events reference the item, comms stays communication-facts, workstreams span repos (coverage derives). Enables derived tier-vs-closure and scope-misroute flags.
+
 Three-level split: **`work_item_id`** (durable objective) → **`task_attempt_id`** (one assignment to one actor/instance; reassignment and retry mint new attempts) → **`msg_id`** (one communication carrying it).
 
 Event vocabulary (append-only `task_events`): `contract_created, dispatch_intended, transmission_failed, dispatch_submitted, receiver_acknowledged, accepted, rejected, progress, blocked(§19), resumed, completed, failed, cancelled, deadline_changed, superseded, reassigned, retry_created, orphaned_by_session_loss, recovered_after_restart, expired`.

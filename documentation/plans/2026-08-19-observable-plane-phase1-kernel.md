@@ -781,7 +781,9 @@ class WorkItem(_Strict):
     work_item_id: str = Field(pattern=ID_PATTERNS["work_item"])
     title: str = Field(min_length=1)
     created_by: str                             # alias
-    workstream_id: Optional[str] = None
+    workstream_id: Optional[str] = None         # the WHY axis
+    repo: Optional[str] = Field(None, pattern=r"[^/\s]+/[^/\s]+")  # WHERE: owner/name
+    project_key: Optional[str] = Field(None, pattern=r"[a-z][a-z0-9-]*")  # projects.yaml slug
     # Authored, not relayed: oversized bodies REJECT (contract violation),
     # never truncate-with-proof — the comms rule is for relayed content.
     body: Optional[str] = Field(None, max_length=16_384)
@@ -1205,6 +1207,8 @@ CREATE TABLE work_items (
     title           TEXT NOT NULL,
     created_by_uid  TEXT NOT NULL,
     workstream_id   TEXT,
+    repo            TEXT,
+    project_key     TEXT,
     body            TEXT,
     FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
 );
@@ -1685,11 +1689,13 @@ def _insert_family(conn, env, payload, base, now):
         created_by = resolve_party(conn, payload.created_by, now)
         conn.execute(
             f"INSERT INTO work_items ({_ENVELOPE_COLS},"
-            " work_item_id, title, created_by_uid, workstream_id, body)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 5) + ")",
+            " work_item_id, title, created_by_uid, workstream_id, repo,"
+            " project_key, body)"
+            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 7) + ")",
             base + (
                 payload.work_item_id, payload.title, created_by,
-                payload.workstream_id, payload.body,
+                payload.workstream_id, payload.repo, payload.project_key,
+                payload.body,
             ),
         )
     elif isinstance(payload, TaskAttempt):
