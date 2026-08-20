@@ -177,12 +177,13 @@ defaults:
     #
     # The intended fix is suppress-while-provably-working -- never alarm while
     # the bot is demonstrably active AND the alerted id is its oldest open row
-    # -- tracked in #946, and deliberately not a threshold change: of the
-    # directions #946 weighs, it is the only one that buys silence on a working
-    # bot without buying blindness on a stalled one. For work known to run
-    # long there is already a per-dispatch door,
-    # `dispatch-task.sh --deadline-min <n>`, which widens the window for the
-    # one task that needs it and trades away no stall detection anywhere else.
+    # -- tracked in #946, and deliberately not a threshold change: it buys
+    # silence on a working bot without buying blindness on a stalled one, and
+    # keys on the liveness predicate #935 is building rather than adding a
+    # second one. For work known to run long there is already a per-dispatch
+    # door, `dispatch-task.sh --deadline-min <n>`, which widens the window for
+    # the one task that needs it and trades away no stall detection anywhere
+    # else.
     dispatch_deadline: 1800
 
   jobs:
