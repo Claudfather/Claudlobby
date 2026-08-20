@@ -297,7 +297,7 @@ _check_github_app() {
     case "$code" in
         200) record_and_alert "github_pat" "ok" "App installation token OK (HTTP 200 on /installation/repositories)" ;;
         401) record_and_alert "github_pat" "fail" "App token HTTP 401 — JWT/mint rejected (wrong key, revoked, or clock skew)" ;;
-        403) record_and_alert "github_pat" "fail" "App token HTTP 403 — installation lacks repository scope" ;;
+        403) record_and_alert "github_pat" "fail" "App token HTTP 403 — installation lacks repository scope, or a secondary rate-limit" ;;
         *)   record_and_alert "github_pat" "fail" "App token probe: HTTP $code on /installation/repositories" ;;
     esac
 }
@@ -311,6 +311,11 @@ check_github_pat() {
         # App-less fleet attempt a doomed mint. This is the App half of #1213's
         # 'a declared integration is a fail, not a skip' — the fleet declared
         # App auth, so absence of a working token is a fail, not a skip.
+        # Boundary: reads only the .env tier (the vars are exported by
+        # parse_env_file above), so a manual setup that put GITHUB_APP_* ONLY
+        # in the helper's ~/.config/claudlobby/github-app.conf fallback reads
+        # as skip here — composed fleets always wire .env, so this bites only
+        # hand-configured operator/cron installs.
         if [ -n "${GITHUB_APP_ID:-}" ] && [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] \
                 && [ -n "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; then
             _check_github_app
