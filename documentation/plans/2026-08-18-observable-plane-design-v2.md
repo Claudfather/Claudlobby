@@ -94,7 +94,7 @@ Performance gates before the implementation locks (§14): the repo has already m
 
 **Communication is the base class; task is a decorator** (unchanged). One universal door (`comms-send`) is the only serializer; task machinery is an optional module it invokes.
 
-**Intent** (immutable): `msg_id` · `sender_id` · `intended_recipient_id` · `message_class` · `command_type?` · links (`work_item_id`/`task_attempt_id`/`workstream_id`/`deliberation_id?`) · `reply_to_msg_id?` · `supersedes_msg_id?` · cancellation target? · body or redacted-body reference (per F7 classification) · `body_bytes`/`body_sha256`/`truncated` · created time · correlation/causation · idempotency key.
+**Intent** (immutable): `msg_id` · `sender_id` (+ `sender_session_uid?` — the transcript/OTel join, populated when the door knows its session) · `intended_recipient_id` · `message_class` · `command_type?` · links (`work_item_id`/`task_attempt_id`/`workstream_id`/`deliberation_id?`) · `reply_to_msg_id?` · `supersedes_msg_id?` · cancellation target? · body or redacted-body reference (per F7 classification) · `body_bytes`/`body_sha256`/`truncated` · created time · correlation/causation · idempotency key.
 
 **Transport attempts** (append-only): `attempt_id` · `msg_id` · attempt number · carrier (`tmux` | `telegram-tgpost` | `telegram-bridge`) · destination (+ `to_chat_id` stored, alias-rendered) · state: `send_attempted → carrier_accepted | pane_submitted | failed | unknown`, plus `recipient_acknowledged`, `duplicate_suppressed` · `carrier_ref?` (e.g. Telegram message_id) · error details · timestamps. Telegram API acceptance = carrier accepted, nothing more; `pane_send_verified` establishes submitted, never receipt.
 

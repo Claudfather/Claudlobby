@@ -734,6 +734,7 @@ def cap_body(text: str) -> BodyFields:
 class CommIntent(_Strict):
     msg_id: str = Field(pattern=ID_PATTERNS["msg"])
     sender: str = Field(min_length=1)          # alias; resolved to uid at ingest
+    sender_session_uid: Optional[str] = Field(None, pattern=ID_PATTERNS["session"])
     recipient: Optional[str] = None            # alias; None = broadcast-shaped
     recipient_raw: Optional[str] = None        # carrier-native address (chat id)
     message_class: Literal[MESSAGE_CLASSES]
@@ -741,6 +742,7 @@ class CommIntent(_Strict):
     work_item_id: Optional[str] = Field(None, pattern=ID_PATTERNS["work_item"])
     task_attempt_id: Optional[str] = Field(None, pattern=ID_PATTERNS["task_attempt"])
     workstream_id: Optional[str] = None
+    deliberation_id: Optional[str] = None      # Phase-5 seam, reserved
     reply_to_msg_id: Optional[str] = Field(None, pattern=ID_PATTERNS["msg"])
     supersedes_msg_id: Optional[str] = Field(None, pattern=ID_PATTERNS["msg"])
     body: Optional[str] = None
@@ -1093,6 +1095,7 @@ CREATE TABLE communication_intents (
     msg_id            TEXT PRIMARY KEY NOT NULL,   -- the communication id
     sender_uid        TEXT NOT NULL,
     sender_alias      TEXT NOT NULL,
+    sender_session_uid TEXT,
     recipient_uid     TEXT,
     recipient_alias   TEXT,
     recipient_raw     TEXT,
@@ -1105,6 +1108,7 @@ CREATE TABLE communication_intents (
     work_item_id      TEXT,
     task_attempt_id   TEXT,
     workstream_id     TEXT,
+    deliberation_id   TEXT,
     reply_to_msg_id   TEXT,
     supersedes_msg_id TEXT,
     body              TEXT,
@@ -1613,17 +1617,20 @@ def _insert_family(conn, env, payload, base, now):
         )
         conn.execute(
             f"INSERT INTO communication_intents ({_ENVELOPE_COLS},"
-            " msg_id, sender_uid, sender_alias, recipient_uid, recipient_alias,"
+            " msg_id, sender_uid, sender_alias, sender_session_uid,"
+            " recipient_uid, recipient_alias,"
             " recipient_raw, message_class, command_type, work_item_id,"
-            " task_attempt_id, workstream_id, reply_to_msg_id,"
+            " task_attempt_id, workstream_id, deliberation_id, reply_to_msg_id,"
             " supersedes_msg_id, body, body_bytes, body_sha256, truncated,"
             " privacy, idempotency_key)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 19) + ")",
+            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 21) + ")",
             base + (
-                payload.msg_id, sender_uid, payload.sender, recipient_uid,
+                payload.msg_id, sender_uid, payload.sender,
+                payload.sender_session_uid, recipient_uid,
                 payload.recipient, payload.recipient_raw, payload.message_class,
                 payload.command_type, payload.work_item_id,
                 payload.task_attempt_id, payload.workstream_id,
+                payload.deliberation_id,
                 payload.reply_to_msg_id, payload.supersedes_msg_id,
                 payload.body, payload.body_bytes, payload.body_sha256,
                 int(payload.truncated), payload.privacy, payload.idempotency_key,
