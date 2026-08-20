@@ -74,22 +74,38 @@ ELIMINATED_THRESHOLD = 0.10
 # checks it at import, and an earlier version of this comment said it did.
 ELIMINATION_MIN_N = 22
 
-# THE REGISTRATION SAYS UNAVAILABLE, AND IT OUTRANKS THE ARITHMETIC HERE.
-# Ratified text: "ELIMINATED: CP upper < 10% -- unreachable below n=22, so
-# UNAVAILABLE in this run at any distribution."
+# ELIMINATION IS WITHHELD, AND THE GROUNDS ARE STRUCTURAL RATHER THAN POWER.
 #
-# That clause was written so a retracted elimination "cannot recur by argument
-# after the fact". Its stated REASON -- that n=22 is out of reach -- rested on a
-# ~1-in-3 strand rate. Measured on this run the rate is ~0.78, so ~24 traced
-# strands land and the floor IS reachable. The premise is falsified; the clause
-# is still ratified.
+# The original clause said "unreachable below n=22, THEREFORE unavailable here",
+# deriving unavailability from power. That premise is FALSIFIED: measured strand
+# rate on this run is ~0.8, not the ~1-in-3 it was sized against, so ~24 traced
+# strands land and the floor is reachable. Leaning on the clause now would mean
+# relying on a sentence justified by a calculation that turned out wrong.
 #
-# Resolving that in code, silently, at the moment data arrives, is precisely the
-# move the clause exists to forbid -- and it would be indistinguishable from
-# lifting a bar because the result was in reach. So the default HONOURS the
-# registration and withholds the verdict regardless of n. Lifting it takes an
-# explicit act by the people who ratified it, made BLIND, not a flag that trips
-# itself once the number looks good.
+# THE REASON THAT SURVIVES -- and it does not depend on n at all:
+#
+# `_pane_trace_candidate` RETURNS EARLY on every self-identifying outcome --
+# `no-region` (box never drawn), `held` (payload seen), `no-payload` (trace not
+# armed). Only THREE tokens fall through: empty-box, below-floor, not-substring,
+# split by whether the first stripped line is empty. That fall-through is one
+# mass divided three ways, and every failure-to-OBSERVE lands in the empty arm.
+#
+# So an observation defect inflates empty-box and DEFLATES below-floor and
+# not-substring -- which are exactly the candidates an elimination would be
+# claimed about. A near-zero count for one of them is therefore the same artifact
+# as empty-box dominance, seen from the other end. We already ratified trusting
+# the first least; the second cannot then be trusted.
+#
+# Four such defects were found in one evening, with no reason to believe the last
+# one has been found. That argument holds at n=24 and at n=240.
+#
+# WHAT IS NOT WITHHELD: every candidate still gets its CP interval, zero-count
+# ones included, labelled as bounds. "Not observed, consistent with up to X%" is
+# true and survives. What is withheld is the VERDICT WORD, which asserts more
+# than the bound and is the part that gets quoted.
+#
+# TWO RATIFIERS SET THE BAR AND TWO LIFT IT. One is on record; the default stays
+# WITHHOLD until the second, so silence keeps the safe direction.
 ELIMINATION_RATIFIED_UNAVAILABLE = True
 
 # The five verdicts _pane_trace_candidate can emit (lib-common.sh:1386-1430).
