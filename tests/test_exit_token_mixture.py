@@ -309,6 +309,67 @@ class TestManufacturedVerdictScrutiny:
         assert "excluded by classification: 1" in text
 
 
+class TestPreMatrixGate:
+    """The gate is run-blocking because an instruction to run it is not a gate.
+
+    It must also refuse a FIXTURE-ONLY pass: mode C passed every fixture test in
+    #1293 and was found by two real boots, so a gate that can go green without
+    real traces reproduces exactly the state that merged.
+    """
+
+    def _boots(self, tmp_path, outcomes, frame="> "):
+        rows = tmp_path / "rows.jsonl"
+        rows.write_text("".join(
+            '{"i": %d, "outcome": "%s"}\n' % (i, o) for i, o in enumerate(outcomes)))
+        dirs = []
+        for i, _ in enumerate(outcomes):
+            d = tmp_path / f"trace-boot-{i}"; d.mkdir()
+            (d / "payload").write_text("set +H; a probe payload long enough to clear the floor")
+            (d / "tick-1.pane").write_text(frame)
+            (d / "ticks.tsv").write_text("1\tdrawn\n")
+            dirs.append(d)
+        return rows, dirs
+
+    def _gate(self, *args):
+        return subprocess.run(
+            [sys.executable, str(LIB / "exit-token-mixture.py"), "--gate", *args],
+            capture_output=True, text=True, timeout=300)
+
+    def test_refuses_a_fixture_only_pass(self):
+        # No --rows at all: the real half never ran, and that must not read green.
+        r = self._gate()
+        assert r.returncode == 4
+        assert "no REAL clean boots supplied" in r.stdout
+
+    def test_passes_on_real_shaped_clean_boots(self, tmp_path):
+        rows, dirs = self._boots(tmp_path, ["clean", "clean"])
+        r = self._gate("--rows", str(rows), *[str(d) for d in dirs])
+        assert r.returncode == 0, r.stdout
+        assert "GATE PASSED" in r.stdout
+
+    def test_blocks_when_a_clean_boot_would_be_scored(self, tmp_path):
+        # Mislabel the clean boots as strands: the production path would score
+        # them, which is precisely mode C, and the gate must block.
+        rows, dirs = self._boots(tmp_path, ["clean", "clean"])
+        rows.write_text('{"i": 0, "outcome": "clean"}\n{"i": 1, "outcome": "clean"}\n')
+        r = self._gate("--rows", str(rows), *[str(d) for d in dirs])
+        assert r.returncode == 0  # correctly labelled -> excluded
+        # Now break the labelling the way a real desync would.
+        rows.write_text('{"i": 0, "outcome": "strand"}\n{"i": 1, "outcome": "strand"}\n')
+        r2 = subprocess.run(
+            [sys.executable, str(LIB / "exit-token-mixture.py"), "--rows", str(rows),
+             *[str(d) for d in dirs]], capture_output=True, text=True, timeout=300)
+        assert "scored): 2" in r2.stdout, "control: mislabelled boots DO get scored"
+
+    def test_dead_positive_control_is_a_failure_not_a_pass(self, tmp_path):
+        # A frame that does NOT look like a cleared box: the defect this gate
+        # exercises is not live, so a pass would prove nothing and it must fail.
+        rows, dirs = self._boots(tmp_path, ["clean"], frame="> set +H; a probe payload long enough to clear the floor")
+        r = self._gate("--rows", str(rows), *[str(d) for d in dirs])
+        assert r.returncode == 4
+        assert "POSITIVE CONTROL DEAD on real boots" in r.stdout
+
+
 class TestSelfTestEntryPoint:
     def test_self_test_passes(self):
         r = subprocess.run([sys.executable, str(LIB / "exit-token-mixture.py"), "--self-test"],

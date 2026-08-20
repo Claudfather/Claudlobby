@@ -299,6 +299,163 @@ def boot_index(trace_dir: Path) -> int | None:
         return None
 
 
+def score_dirs(trace_dirs: list[Path], rows: dict[int, str], lib_common: Path):
+    """(tokens, unscored, held) — THE selection+scoring path.
+
+    Extracted so the gate exercises exactly what production runs. A gate that
+    reaches past this into `exit_token` would certify a path nothing uses: it
+    would see the RAW token (`empty-box` for a clean boot, correctly) and read
+    that as the pipeline failing, which is how the first version of this gate
+    blocked the matrix on a false alarm.
+    """
+    tokens: list[str] = []
+    unscored: list[tuple[str, str]] = []
+    held: list[str] = []
+    for d in trace_dirs:
+        if not d.is_dir():
+            unscored.append((str(d), "not a directory"))
+            continue
+        if rows:
+            idx = boot_index(d)
+            if idx is None:
+                unscored.append((d.name, "dir name is not trace-boot-<i>; cannot match a row"))
+                continue
+            outcome = rows.get(idx)
+            if outcome is None:
+                unscored.append((d.name, f"no row for boot {idx} in --rows"))
+                continue
+            if outcome != "strand":
+                unscored.append((d.name, f"outcome={outcome!r} — only 'strand' is scoreable"))
+                continue
+        tok, status = exit_token(render_trace(d, lib_common))
+        if tok is None:
+            unscored.append((d.name, status))
+        elif tok == "held":
+            held.append(d.name)
+            unscored.append((d.name, "exit tick is 'held' — not a clean exit, so not a false-clean"))
+        else:
+            tokens.append(tok)
+    return tokens, unscored, held
+
+
+# ── the run-blocking gate ────────────────────────────────────────────────────
+#
+# WHY THIS IS A GATE AND NOT A NOTE. `_pane_trace_candidate` returns EARLY on a
+# positive finding -- `held` at the paste marker (lib-common.sh:1396 region) and
+# `held` on the substring match -- and classifies the RESIDUAL on fall-through.
+# So "payload observed" exits early and everything else lands in the residual,
+# subdivided by what the frame contained: nothing at all -> `empty-box`, short
+# text -> `below-floor`, wrong text -> `not-substring`.
+#
+# That makes `empty-box` the NOTHING-OBSERVED bucket, and it cannot distinguish
+# "the phenomenon produced nothing" from "the instrument failed to look." Both
+# land there. And here the coincidence is worse than generic: `empty-box` is ALSO
+# the genuine render-lag signature, so the favoured hypothesis and the
+# instrument-failure bucket are THE SAME TOKEN.
+#
+# A category like that needs a higher evidentiary bar BY CONSTRUCTION, not because
+# of which defects happen to be known today -- the next one lands there too.
+#
+# And a bar that must be REMEMBERED is not a bar. Three instructions failed on this
+# issue alone (a conf that had to be passed, a deadline default, #1032's whole
+# thesis that a usage gap closed by intending to remember is not closed). So this
+# is the exact check that caught mode C -- clean boots must score ZERO -- run as a
+# precondition that BLOCKS, not as a caution someone reads an hour later.
+def run_gate(cp, lib_common: Path, real: list[tuple[Path, Path]] | None = None) -> int:
+    failures: list[str] = []
+    checks = 0
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        payload = "set +H; Boot probe GATE: a payload long enough to clear the floor"
+        # A CLEAN boot: the box drew, the payload submitted, the frame is empty.
+        # This is byte-for-byte the shape that scored empty-box 2/2 in the smoke run.
+        for i in range(2):
+            d = root / f"trace-boot-{i}"
+            d.mkdir()
+            (d / "payload").write_text(payload)
+            (d / "tick-1.pane").write_text("> ")
+            (d / "ticks.tsv").write_text("1\tdrawn\n")
+        rows = {0: "clean", 1: "clean"}
+
+        # 1. The positive control: WITHOUT classification these DO score empty-box.
+        #    If this stops being true the gate has stopped testing anything.
+        toks = []
+        for i in range(2):
+            tok, _ = exit_token(render_trace(root / f"trace-boot-{i}", lib_common))
+            if tok:
+                toks.append(tok)
+        checks += 1
+        if toks != ["empty-box", "empty-box"]:
+            failures.append(
+                f"POSITIVE CONTROL DEAD: clean boots no longer score empty-box "
+                f"unclassified (got {toks!r}). The gate is not exercising the defect."
+            )
+
+        # 2. The gate proper: WITH classification they must contribute NOTHING.
+        checks += 1
+        scored = [i for i in range(2) if rows.get(i) == "strand"]
+        if scored:
+            failures.append(f"clean boots selected for scoring: {scored}")
+
+    # 3. REAL BOOTS. Fixtures cannot surprise you about the shape of real output --
+    #    mode C passed every fixture test in #1293 and was found by two real boots.
+    #    So this half only means anything on traces a real sampler wrote.
+    clean_dirs: list[Path] = []
+    r: dict[int, str] = {}
+    if real:
+        r = load_rows(real[0][0])
+        clean_dirs = [d for _, d in real
+                      if boot_index(d) is not None and r.get(boot_index(d)) == "clean"]
+    # OUTSIDE the `if real` guard, deliberately. An earlier version put this
+    # inside it, so invoking --gate with no traces at all skipped the real half
+    # entirely and printed GATE PASSED -- a fixture-only pass, which is the exact
+    # state #1293 merged green in and the thing this gate exists to refuse. Caught
+    # by its own test, after the claim had already been made out loud.
+    if not clean_dirs:
+        failures.append(
+            "no REAL clean boots supplied — the real half of this gate did not run, "
+            "and a fixture-only pass is the state #1293 merged green in"
+        )
+    else:
+        # 3a. POSITIVE CONTROL on real data: raw-scored, a clean boot lands in
+        #     the residual. If it does not, the defect is not live here and a
+        #     pass proves nothing.
+        checks += 1
+        raw = [exit_token(render_trace(d, lib_common))[0] for d in clean_dirs]
+        if not any(t == MANUFACTURED_TOKEN for t in raw):
+            failures.append(
+                f"POSITIVE CONTROL DEAD on real boots: raw scores {raw!r} contain no "
+                f"{MANUFACTURED_TOKEN!r}, so this gate is not exercising the defect"
+            )
+        # 3b. THE GATE: through the production path, they contribute NOTHING.
+        checks += 1
+        toks, unsc, _ = score_dirs(clean_dirs, r, lib_common)
+        if toks:
+            failures.append(
+                f"REAL clean boots scored {toks!r} through the production path — "
+                "selection is not holding"
+            )
+        elif len(unsc) != len(clean_dirs):
+            failures.append("real clean boots were neither scored nor disclosed")
+
+    print("PRE-MATRIX GATE — clean boots must score ZERO")
+    print(f"  checks run: {checks}")
+    if failures:
+        for f in failures:
+            print(f"  FAIL: {f}")
+        print("\nGATE FAILED — the matrix must not run. On ~61 boots roughly 51 are")
+        print("clean, so this defect would not bias the result, it would DETERMINE it:")
+        print("empty-box dominant, far past the bar, on a correctly pre-registered")
+        print("statistic computed correctly. Every rung green except this one.")
+        return 4
+    print("  GATE PASSED — clean boots score empty-box unclassified (control live),")
+    print("  and contribute nothing once classification is applied.")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Exit-token mixture over #1236 verify traces")
     ap.add_argument("trace_dirs", nargs="*", type=Path)
@@ -312,11 +469,19 @@ def main(argv: list[str]) -> int:
                     help="score every given trace dir without consulting rows.jsonl. "
                          "NOT the normal path -- see the refusal text")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--gate", action="store_true",
+                    help="run-blocking pre-matrix gate: clean boots must score ZERO")
     ap.add_argument("--self-test", action="store_true",
                     help="verify the derived constants and the scoring logic, 0 boots")
     args = ap.parse_args(argv)
     summary = _load_summary()
     cp = summary.cp_interval
+
+    if args.gate:
+        real = []
+        if args.rows:
+            real = [(args.rows, d) for d in args.trace_dirs]
+        return run_gate(cp, args.lib_common, real)
 
     if args.self_test:
         return _self_test(cp)
@@ -364,33 +529,7 @@ def main(argv: list[str]) -> int:
         )
         return 3
 
-    tokens: list[str] = []
-    unscored: list[tuple[str, str]] = []
-    held: list[str] = []
-    for d in args.trace_dirs:
-        if not d.is_dir():
-            unscored.append((str(d), "not a directory"))
-            continue
-        if rows:
-            idx = boot_index(d)
-            if idx is None:
-                unscored.append((d.name, "dir name is not trace-boot-<i>; cannot match a row"))
-                continue
-            outcome = rows.get(idx)
-            if outcome is None:
-                unscored.append((d.name, f"no row for boot {idx} in --rows"))
-                continue
-            if outcome != "strand":
-                unscored.append((d.name, f"outcome={outcome!r} — only 'strand' is scoreable"))
-                continue
-        tok, status = exit_token(render_trace(d, args.lib_common))
-        if tok is None:
-            unscored.append((d.name, status))
-        elif tok == "held":
-            held.append(d.name)
-            unscored.append((d.name, "exit tick is 'held' — not a clean exit, so not a false-clean"))
-        else:
-            tokens.append(tok)
+    tokens, unscored, held = score_dirs(args.trace_dirs, rows, args.lib_common)
 
     mix = mixture(tokens, args.conf, cp)
     if args.json:
