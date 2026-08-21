@@ -37,7 +37,7 @@ The observable plane is first an **organizational flight recorder**. The cockpit
 | F15 | Sequencing | Substrate before UI; phases §18; vocabulary/layout/teams PRs never block the semantic slice |
 | F16 | Envelope physical form | **Typed tables sharing the envelope + one global `ingest_seq`** — one table per event family, envelope columns embedded, real indexes, per-family retention; uniformity enforced by Pydantic + tests (ruled 2026-08-19) |
 | F19 | System-event vocabulary | **Warn-on-unknown registry** (ruled 2026-08-20): known set seeded from observed emitters + `events.py` CRITICAL_TYPES; unknown types still INGEST, counted in trust metrics, surfaced by doctor; #903's SSOT tightens the registry later. Deliberately asymmetric with communications — communications callers are our doors (bugs loud), system-event emitters are the whole estate (never lose a machinery event to a new script) |
-| F20 | Presence/health shape | **Generic samples table** (ruled 2026-08-20): subject uid + registry-governed metric name + JSON value + status flag; new probes need no migration; hot metrics promote to indexed generated columns on evidence; the aggressive-retention lane |
+| F20 | Metric-sample shape | **Generic samples table** (ruled 2026-08-20): subject uid + registry-governed metric name + JSON value + status flag; new probes need no migration; hot metrics promote to indexed generated columns on evidence; the aggressive-retention lane |
 | F21 | Workstream vocabulary | **Mirror the task model** (ruled 2026-08-20): contract row IS "opened" (one fact, one row — same mapping as `contract_created`); events = `progressed, renewed, blocked, unblocked, closed, archived`; status always derived, never stored; `workstream-update.sh` verbs map 1:1 in the door shim |
 | F17 | `blocked` semantics | **Two events**: `blocked_waiting` (nonterminal — assigned, cannot progress) and `returned_blocked` (terminal — responsibility back to manager). Legacy `blocked` reports map to `returned_blocked`; existing overdue-matching behavior preserved exactly, no silent change (ruled 2026-08-19) |
 | F18 | Backfill posture | **Clean epoch + selective import** — new trustworthy epoch at cutover; dispatch-log + report-back rows (task-id-bearing) imported with `source=legacy`, deterministic import ids, confidence markers; ambiguous history stays read-only legacy; task closure never inferred (ruled 2026-08-19) |
@@ -87,7 +87,7 @@ Performance gates before the implementation locks (§14): the repo has already m
 | `work_items` / `task_attempts` / `task_events` | durable objective / one assignment / lifecycle events (§8) |
 | `workstream_contracts` / `workstream_events` | operational commitments (F6) |
 | `system_events` | machinery events (restart/heal/stuck/teardown; vocabulary defers to #903) |
-| `presence_health_events` | volatile samples: load, disk, thermal, vault freshness, RC state, pane activity, heartbeat (§9) |
+| `metric_samples` | volatile samples: load, disk, thermal, vault freshness, RC state, pane activity, heartbeat (§9) |
 | `session_digests` · `session_usage`* | existing schemas; *usage lane pending the OTel pilot (§12) |
 
 **Lane C — derived (rebuildable, never authoritative):** current-registry projections (hash-verified against files) · SCD2 views · task-status view (evidence-based activation, §8) · workstreams.json compatibility projection (transitional) · presence rollups · trust metrics (§15) · interaction-density graph (§16 — explicitly **not** "observed org": message volume shows interaction, not authority; rendered as time-windowed density beside declared topology, never overriding it).
@@ -171,7 +171,7 @@ carries_fleets: bool
 gitignore_safe: bool                             # doctor rung: runtime/ledger/.env covered
 schema_version: str
 # OUT to presence: behind/ahead/last_fetch freshness (a failed fetch must
-# never render as "up to date" — presence status carries fetch_failed).
+# never render as "up to date" — sample status carries fetch_failed).
 ```
 
 ### FleetPayload (keyframe)
@@ -262,18 +262,34 @@ declared_hash: str;  vault_rev: str?;  schema_version: str
 # OUT to presence: session up, bridge up, RC live, pane activity, RSS.
 ```
 
-### PresenceHealthEvent (F20 — the volume lane)
+### MetricSample (F20 — the volume lane; table `metric_samples`, walked 2026-08-20)
+
+*(Renamed from `metric_samples`: rows are neither presence nor events — they are **samples of levels**. "Presence" now names the Lane C LIVE derivation — is-it-up-right-now, in-memory, poller-fed, never a table — and "events" stays reserved for detections per the system_events reading rule.)*
 
 ```yaml
 # envelope +
-subject_kind: host|vault|fleet|actor|bot_instance|session
-subject_uid: str
-metric: str               # registry-governed name (warn-on-unknown, F19 discipline)
-value: json               # number | string | object (e.g. load triplet)
-status: ok|warn|alert|null
+subject_kind: host|vault|fleet|actor|bot_instance|session   # shared vocabulary with system_events
+subject_uid: str          # NO subject_alias — deliberate asymmetry vs
+                          # communications/system_events: volume lane, rows are
+                          # aggregated into charts and never read singly; display
+                          # joins the registry once, not per row
+metric: str               # registry-governed (METRIC_NAMES seed carries
+                          # {name, unit, description} — unit lives in the
+                          # registry, never on rows)
+value: json               # number | bool | string | object (load triplet); hot
+                          # numeric metrics promote to indexed generated columns
+                          # on evidence
+status: ok|warn|alert|null  # THE EMITTER'S JUDGMENT, recorded as a claim with
+                          # attribution — thresholds live in per-emitter,
+                          # fleet-overridable config, so the registry CANNOT
+                          # honestly own this mapping (contrast
+                          # system_events.severity, which it can); null = plain
+                          # sample, no judgment made
 ```
 
-Seed metric registry: `host.load` `host.mem_available_mb` `host.disk_free_gb` `host.thermal_flags` `host.undervoltage` `host.boot_time` · `vault.behind` `vault.ahead` `vault.last_fetch_age_s` `vault.fetch_failed` · `bot.session_up` `bot.bridge_up` `bot.rc_ok` `bot.pane_last_change_age_s` `bot.heartbeat` `bot.rss_mb` · `env.key_state` (emitted by creds-check runs: `{tier, key, state: present|empty|absent}` — names never values; the #1213 present-but-empty class as observation). Retention: per-family and aggressive here (raw samples age out on a short window; windowed rollups are Lane C and survive) — the concrete windows are a §11 retention-policy line item, ratified with the privacy policy, before first canary.
+Emitters (all existing machinery, pointed at emit): bot-vitals, keepalive heartbeats, fleet-memory-check, host-health-check, disk-monitor, the vault-freshness probe, creds-check. Seed metric registry: `host.load` `host.mem_available_mb` `host.disk_free_gb` `host.thermal_flags` `host.undervoltage` `host.boot_time` · `vault.behind` `vault.ahead` `vault.last_fetch_age_s` `vault.fetch_failed` · `bot.session_up` `bot.bridge_up` `bot.rc_ok` `bot.pane_last_change_age_s` `bot.heartbeat` `bot.rss_mb` · `env.key_state` (emitted by creds-check runs: `{tier, key, state: present|empty|absent}` — names never values; the #1213 present-but-empty class as observation).
+
+Sizing: ~21 bots + host at roughly per-minute cadence ≈ 30–45k rows/day ≈ a few MB/day — SQLite-trivial with the `(subject_uid, metric, ingest_seq)` index. **Retention ruled (2026-08-20): raw samples 30 days — the incident-join window; NO rollup family in v1.** Invariant correction (supersedes the earlier "rollups are Lane C and survive" line, which was self-contradictory): a rollup that outlives its aged-out raws is not rebuildable and would silently become authoritative — so if long-horizon trends ever earn persistence, rollups enter as a **Lane B fact family through emit**, never as a Lane C view. Within the 30-day window, latest-per-metric and windowed aggregates remain ordinary Lane C derivations.
 
 ### SystemEvent (F19) — walked 2026-08-20 under earns-its-place
 
@@ -344,11 +360,11 @@ session_usage:            # envelope + — transcript-usage.py's existing axes v
 
 ### Lane C — final derived set (closes the walk)
 
-`reg_hosts / reg_vaults / reg_fleets / reg_bots / reg_projects / reg_library_items` (current-state, hash-verified, disposable) · SCD2 `*_history` views (F16 windowing over snapshots) · `registry_changes` field-level diff view · `task_status` view (evidence-based activation, §8) · `workstream_status` view + `workstreams.json` compatibility projection (transitional, F6) · presence rollups (latest-per-metric + windowed aggregates) · trust metrics (emit/committed/spooled/rejected · duplicate ids · oldest spool age · replay failures · dual-write mismatches · raw-by-caller · unacked-delivery age · projection lag · system-event-unknown-type count · provisional-actor count) · interaction-density graph (never "observed org") · FTS index (permitted content only, completeness-stated).
+`reg_hosts / reg_vaults / reg_fleets / reg_bots / reg_projects / reg_library_items` (current-state, hash-verified, disposable) · SCD2 `*_history` views (F16 windowing over snapshots) · `registry_changes` field-level diff view · `task_status` view (evidence-based activation, §8) · `workstream_status` view + `workstreams.json` compatibility projection (transitional, F6) · presence (live, in-memory — pollers + latest samples) · in-window sample aggregates (never outliving raws) · trust metrics (emit/committed/spooled/rejected · duplicate ids · oldest spool age · replay failures · dual-write mismatches · raw-by-caller · unacked-delivery age · projection lag · system-event-unknown-type count · provisional-actor count) · interaction-density graph (never "observed org") · FTS index (permitted content only, completeness-stated).
 
 ### Vocabulary governance census (2026-08-20 walk)
 
-Three mechanisms, counted: **13 closed vocabularies** — code-governed enums (Pydantic `Literal` + DDL `CHECK`, pinned by the parity test): message_class · command_type · attempt state · carrier · task event · workstream event · privacy level · snapshot cause · snapshot operation · entity type · identity kind · subject kind (shared: presence + system events) · presence status; changing one = code + migration, on purpose. **2 open registries** — system-event types (with severity) and presence metric names, both seeded from ONE package-owned module (`plane/registries.py`), warn-on-unknown at ingest, additions by PR; **no vocabulary registry tables in v1** — a table plus its management door arrive together with #903 if runtime mutation is ever needed (a table without its door is a constant with a sync-bug surface). **1 identity table** — `identity_registry` is not a vocabulary: runtime-minted alias→uid mappings, never seeded. Lane A vocabularies (project tier, fleet.yaml fields) keep their existing `known_values.py` + validator governance; the plane adds nothing there.
+Three mechanisms, counted: **13 closed vocabularies** — code-governed enums (Pydantic `Literal` + DDL `CHECK`, pinned by the parity test): message_class · command_type · attempt state · carrier · task event · workstream event · privacy level · snapshot cause · snapshot operation · entity type · identity kind · subject kind (shared: metric_samples + system_events) · sample status; changing one = code + migration, on purpose. **2 open registries** — system-event types (with severity) and metric names, both seeded from ONE package-owned module (`plane/registries.py`), warn-on-unknown at ingest, additions by PR; **no vocabulary registry tables in v1** — a table plus its management door arrive together with #903 if runtime mutation is ever needed (a table without its door is a constant with a sync-bug surface). **1 identity table** — `identity_registry` is not a vocabulary: runtime-minted alias→uid mappings, never seeded. Lane A vocabularies (project tier, fleet.yaml fields) keep their existing `known_values.py` + validator governance; the plane adds nothing there.
 
 **With this section, every model in the system is finalized.** Remaining open items are implementation-owned only (§19: canonical-bytes golden fixtures, ingest benchmark, DDL mechanics, Claudron#145 answers).
 
@@ -412,7 +428,7 @@ Golden path: `claudlobby plane init | start | status | doctor | open`. Clocks: e
 - **Phase 0 — reconcile facts:** ✅ mostly done in-session (baseline refreshed to `e3b6347`; capabilities re-verified; landed prerequisites removed). Remaining: callsite/state-store re-inventory against current main.
 - **Phase 1 — lock the semantic kernel:** rule §19's items; ratify identity, envelope, ordering, privacy, vocabulary, communications model, task state machine, spool, schema compatibility, workstream migration. **No UI.**
 - **Phase 2 — headless vertical slice:** `task contract → message intent → transport attempt → acknowledgement → progress → completed/failed/blocked/overdue/orphaned`, exposed via CLI + SQLite + one reader/service layer + doctor/status + projection rebuild. Dual-write canary beside JSONL.
-- **Phase 2b — registry lane (the host/vault/fleet/bot walk made real):** migration 0002 adds `registry_snapshots`, `declaration_observed`, `presence_health_events`, `system_events`, and `workstream_contracts`/`workstream_events` (envelope-bearing, F16 pattern; writes ride the same emit spine). Pydantic payload contracts for the six entities — **field lists FINAL in §9b**, reflecting the review deltas: minted uids (F10), volatile fields OUT to presence/health (F12), `FleetPayload.groups` (F5), BotPayload separating actor/instance/session. Emitter moments: `generate` (cause=generate, carries `vault_rev`), the probe loop (cause=probe: hardware + system facet), `declaration_observed` on every newly seen vault revision even when resolved state is unchanged. Scan semantics: `scan_id` + completeness status; tombstones only after a complete authoritative scan. Projection loader rebuilds `reg_hosts/vaults/fleets/bots/projects/library_items` idempotently (hash-verified against files); SCD2 + `registry_changes` views. **Closes Phase 1's identity loop:** the generate-time pass confirms provisional actors (`provisional=0`) and mints `bot_instance_uid`s, so lazy-minted identities stop being provisional the first time the registry observes the declared roster. Doctor surfaces: provisional actors, composed-hash drift, reconcile-check failures. Sequenced after Phase 2 (the slice stays narrow) and **before Phase 4, which renders identity context from these projections**; Phase 3 can run in parallel with it.
+- **Phase 2b — registry lane (the host/vault/fleet/bot walk made real):** migration 0002 adds `registry_snapshots`, `declaration_observed`, `metric_samples`, `system_events`, and `workstream_contracts`/`workstream_events` (envelope-bearing, F16 pattern; writes ride the same emit spine). Pydantic payload contracts for the six entities — **field lists FINAL in §9b**, reflecting the review deltas: minted uids (F10), volatile fields OUT to presence/health (F12), `FleetPayload.groups` (F5), BotPayload separating actor/instance/session. Emitter moments: `generate` (cause=generate, carries `vault_rev`), the probe loop (cause=probe: hardware + system facet), `declaration_observed` on every newly seen vault revision even when resolved state is unchanged. Scan semantics: `scan_id` + completeness status; tombstones only after a complete authoritative scan. Projection loader rebuilds `reg_hosts/vaults/fleets/bots/projects/library_items` idempotently (hash-verified against files); SCD2 + `registry_changes` views. **Closes Phase 1's identity loop:** the generate-time pass confirms provisional actors (`provisional=0`) and mints `bot_instance_uid`s, so lazy-minted identities stop being provisional the first time the registry observes the declared roster. Doctor surfaces: provisional actors, composed-hash drift, reconcile-check failures. Sequenced after Phase 2 (the slice stays narrow) and **before Phase 4, which renders identity context from these projections**; Phase 3 can run in parallel with it.
 - **Phase 3 — commodity telemetry pilot:** OTel + LangSmith on one canary bot; delete redundant roadmap surfaces on evidence.
 - **Phase 4 — minimal operator plane:** F8's five surfaces over the proven slice.
 - **Phase 5 — organizational learning:** deliberations, independent contributions, synthesis, preserved dissent, decisions, outcome joins — only then consensus-learning claims.
@@ -426,7 +442,7 @@ Remaining — technical, owned by the implementation plan, no operator ruling re
 
 1. **Canonical-bytes spec** — full definition (encoding, Unicode normalization, numeric representation, null/default inclusion, path normalization, key ordering, serializer version, hash algorithm) + golden fixtures.
 2. **Ingest implementation** — direct writer vs Unix-socket daemon, decided by the §14 Pi benchmarks; CLI contract identical either way.
-3. **Exact DDL for every Lane-B family** — mechanical consequence of F16 + the model sections. *Schema-change regime — **disposable-until-cutover** (2026-08-20 walk, follows from F18):* pre-cutover the db is throwaway — JSONL remains the record (dual-write), rows are validation exhaust, and a schema change is DELETE-AND-RECREATE with schema files edited freely; no migration ceremony, no compatibility obligations. **Cutover (the F18 epoch start, per fleet) is the explicit event where discipline activates**: applied files freeze, changes become new numbered files, downgrade-refusal arms, and §15's migration-test obligations begin. What exists from day one is only the version stamp + ~30-line runner — the same code in both regimes (fresh db: replay files in order = create the schema), kept so cutover has a hook instead of a retrofit. No autogen, no down-migrations, no data transforms, ever. Split by phase: kernel families (ingest ledger, identity, intents, attempts, work items, task attempts/events) = **migration 0001**, owned by the Phase-1 plan; all remaining observed families (`registry_snapshots`, `declaration_observed`, `presence_health_events`, `system_events`, `workstream_contracts`/`workstream_events`) = **migration 0002**, owned by the Phase-2b plan (§18) — entity payload FIELDS are final in §9b.
+3. **Exact DDL for every Lane-B family** — mechanical consequence of F16 + the model sections. *Schema-change regime — **disposable-until-cutover** (2026-08-20 walk, follows from F18):* pre-cutover the db is throwaway — JSONL remains the record (dual-write), rows are validation exhaust, and a schema change is DELETE-AND-RECREATE with schema files edited freely; no migration ceremony, no compatibility obligations. **Cutover (the F18 epoch start, per fleet) is the explicit event where discipline activates**: applied files freeze, changes become new numbered files, downgrade-refusal arms, and §15's migration-test obligations begin. What exists from day one is only the version stamp + ~30-line runner — the same code in both regimes (fresh db: replay files in order = create the schema), kept so cutover has a hook instead of a retrofit. No autogen, no down-migrations, no data transforms, ever. Split by phase: kernel families (ingest ledger, identity, intents, attempts, work items, task attempts/events) = **migration 0001**, owned by the Phase-1 plan; all remaining observed families (`registry_snapshots`, `declaration_observed`, `metric_samples`, `system_events`, `workstream_contracts`/`workstream_events`) = **migration 0002**, owned by the Phase-2b plan (§18) — entity payload FIELDS are final in §9b.
 4. **Claudron confirmations** — `fleets/` namespace tolerance; multi-vault capability. Filed: Claudron#145.
 
 ## 20. References
