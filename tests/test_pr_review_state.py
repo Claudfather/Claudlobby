@@ -119,33 +119,48 @@ class TestShaAnchorRegex:
         assert prs.parse_anchor("reviewed against `ee29406`") == "ee29406"
         assert prs.parse_anchor(REAL_ANCHOR_LINE) == "b27ffc2"
 
-    # Multi-hex verdict bodies from the crog-eng-team corpus, reported by `ari`
-    # (2026-08-21). Excerpts, attributed rather than independently verified — those
-    # PRs are on another fleet's repos. What IS verified here is what this matcher
-    # does with them, asserted below.
-    ARI_MULTI_HEX = [
-        ("storydump#966", "Merging at `bcaf7a7`. rajan Request Changes is superseded "
-                          "by the rebase onto d4f21ab and 9ce0012 and bcaf7a7."),
-        ("storydump#976", "Rebased onto post-#972 main — `a7fe504`, was 3ab19cc, "
-                          "now b71e220 after e5f0011."),
-        ("storydump#972", "Fix pushed — `92a92e6` -> `d80f927`. Fast-forward only."),
+    #: Real multi-hex verdict bodies from THIS repo — Claudlobby #1160 and #1311.
+    #: Verbatim excerpts. Sourced from our own corpus deliberately: an earlier
+    #: version quoted another fleet's repos, which are outside this fleet's
+    #: declared scope. Ours are also the better fixtures — they show the decoy
+    #: arising two different ways, and neither hex is a commit anyone reviewed.
+    MULTI_HEX = [
+        ("#1160 two base-refs",
+         "of the claims I was asked to check, against `main` @ `560c3c9` (the "
+         "plan's own pin — note my local `claudlobby` checkout's `main` ref was "
+         "stale at `242dfcb`; had to `git fetch`)"),
+        ("#1311 process IDs",
+         "timestamps in the doc: otis's own `claude` process (PID 1028295) "
+         "started `Wed Aug 19 23:08:07 2026`; its MCP child (PID 1029579) "
+         "started `23:08:11`"),
     ]
+
+    #: The opposite case, also real (#1306): multi-hex AND correctly anchored. A
+    #: matcher that refused everything multi-hex would be safe and useless; this
+    #: pins that the anchor is still found when a verdict names one.
+    MULTI_HEX_ANCHORED = (
+        "Verified at 8c3c0aa (tip; branch also carries 5719b6c, the main sweep)",
+        "8c3c0aa",
+    )
 
     def test_a_decoy_hex_in_prose_is_not_an_anchor(self):
         """LOAD-BEARING, not a defensive edge case — the house style manufactures it.
 
-        This started as a careful guard found on one PR. `ari` then measured the
-        fleet that has the actual use case: **8 of 27 verdict-shaped comments carry
-        multiple distinct hex strings** (crog-eng-team, 2026-08-21). Roughly 30% is
-        the COMMON CASE, not an edge.
+        This started as a careful guard found on one PR. Measured across this
+        repo's own recent corpus (10 PRs, 14 verdict-shaped comments): **a
+        hex-first matcher would anchor 10 of them, and 6 of those to the WRONG
+        hex.** Not an edge case — the majority of what it would anchor.
 
-        The reason is a CONVENTION, which is why it will not go away on its own:
-        house style is to cite the TRANSITION — old SHA then new SHA
-        (`Fix pushed — 92a92e6 -> d80f927`) — so a correct, well-formed verdict
-        routinely contains a superseded commit **before** the reviewed one. A
-        hex-first matcher takes `92a92e6`, the OLD one, and reports the verdict
-        stale against a commit that was already superseded: confident, wrong, and
-        in the direction nobody re-checks.
+        The decoys are not sloppiness and will not go away on their own — a
+        rigorous verdict CITES things, and every citation is a hex: the base it was
+        reviewed against (`against \`main\` @ \`560c3c9\``), the commit a fix
+        landed on, and in one real case a **SHA-256 checksum** that is not a commit
+        at all. A hex-first matcher takes the first of those and reports the verdict
+        stale against something nobody reviewed: confident, wrong, and in the
+        direction nobody re-checks.
+
+        Note the `#1160` fixture contains the word "against" — the near-miss is not
+        hypothetical, it is one word away from the real anchor phrasing.
 
         **A future reader who assumes multi-hex is rare will be tempted to simplify
         this matcher back to bare hex.** It is not rare, it is the convention, and
@@ -159,11 +174,11 @@ class TestShaAnchorRegex:
         assert prs.parse_anchor(REAL_DECOY_LINE) is None
         assert prs.parse_anchor(REAL_APPROVE_BODY) == "b27ffc2"
 
-        # ari's corpus: a hex-first matcher would take the FIRST hex from each of
-        # these. Verb-anchoring returns None — it refuses rather than guessing.
+        # A hex-first matcher takes the FIRST hex from each of these. Verb-anchoring
+        # returns None — it refuses rather than guessing.
         import re as _re
 
-        for label, body in self.ARI_MULTI_HEX:
+        for label, body in self.MULTI_HEX:
             hexes = _re.findall(r"\b[0-9a-f]{7,40}\b", body)
             assert len(hexes) >= 2, f"{label}: fixture should be multi-hex"
             assert prs.parse_anchor(body) is None, (
@@ -173,13 +188,13 @@ class TestShaAnchorRegex:
     def test_multi_hex_notes_do_not_parse_as_verdicts_either(self):
         """The two bounds hold TOGETHER, which is what makes the refusal safe.
 
-        `storydump#966` contains the words "Request Changes" in prose. If the header
-        bound leaked, that merge note would parse as a live blocking verdict AND
-        carry four candidate hexes — a fabricated block anchored to an arbitrary
-        commit. Measured: neither bound leaks, with the hex bolded into the lead
-        span for good measure.
+        A merge note containing the words "Request Changes" in prose would, if the
+        header bound leaked, parse as a live blocking verdict AND carry several
+        candidate hexes — a fabricated block anchored to an arbitrary commit.
+        Measured: neither bound leaks, with the hex bolded into the lead span for
+        good measure.
         """
-        for label, body in self.ARI_MULTI_HEX:
+        for label, body in self.MULTI_HEX:
             assert prs.parse_verdict(body) is None, label
         assert prs.parse_verdict(
             "**Merging at bcaf7a7**\n\nrajan Request Changes is superseded."
@@ -527,33 +542,48 @@ class TestAnchorStemWidth:
     """#1322 review round 1, virgil (use-case lens) — a matcher gap wearing a bound.
 
     Bound (b) says staleness is detectable only where the reviewer WROTE the SHA.
-    Two `storydump#966` verdicts wrote it and were still missed, so the bound did
-    not cover them: the stems were too narrow, not the convention too loose.
+    Verdicts that wrote it were still missed, so the bound did not cover them: the
+    stems were too narrow, not the convention too loose. **A matcher gap wearing a
+    bound is the worst place for one**, because the disclosure makes the miss look
+    accounted for.
 
-    Measured on the 11-PR corpus that motivated the tool (storydump 964/966/967/
-    968/971/972/976, really-personal-finance 164/167/169/172): the original
-    `reviewed at|against` stem reached **9 of 16** verdict-shaped comments (56%);
-    widened it reaches **14 of 16** (88%).
+    Measured on THIS repo's own recent corpus (10 PRs, 14 verdict-shaped comments):
+    the original `reviewed at|against` stem found **2 (14%)**; widened it finds
+    **4 (29%)**. Both recovered anchors are our own house phrasing — `Verified at
+    <sha>` — which the narrow stem could not see.
 
-    The inversion is the part worth keeping: every miss was HOUSE PHRASING, not
+    The inversion is the part worth keeping: the misses were PHRASING, not
     sloppiness. A disciplined fleet phrases things consistently, so a narrow
     matcher misses all of them at once rather than a scattered few — and a
     systematic miss hides better than a random one, because the output stays
     plausible.
     """
 
-    #: Verbatim from the corpus.
-    REAL_HOUSE_PHRASINGS = [
-        ("storydump#966", "**[astrid]** Verification review at `bc47cbcb`", "bc47cbcb"),
-        ("storydump#966", "**[astrid]** Re-verification at **`bcaf7a71`**", "bcaf7a71"),
-        ("storydump#972", "**[astrid]** Verification review at **`d80f927`**", "d80f927"),
-        ("storydump#972", "**[astrid]** Re-verification at **`57dbb25`**", "57dbb25"),
-        ("storydump#976", "Re-verified at **`adadf05`**", "adadf05"),
+    #: Verbatim from this repo. #1306 and #1314 are the two anchors the widening
+    #: recovered on our own corpus.
+    REAL_RECOVERED = [
+        ("#1306", "every claim rather than trusting the report. Verified at 8c3c0aa (tip;", "8c3c0aa"),
+        ("#1314", "**Approve**\n\nVerified at 7605097, again", "7605097"),
     ]
 
-    @pytest.mark.parametrize("label,body,want", REAL_HOUSE_PHRASINGS)
-    def test_house_phrasings_that_the_narrow_stem_missed(self, label, body, want):
+    #: Additional examination phrasings the widened stems cover. Observed on
+    #: another fleet during review of this PR; that fleet's repos are outside this
+    #: fleet's declared scope, so they are carried here as PHRASING FORMS and the
+    #: source is deliberately not cited. The forms are what the matcher must
+    #: handle; which repo they were seen in is not evidence this PR needs.
+    OTHER_EXAMINATION_FORMS = [
+        ("Verification review at `bc47cbcb`", "bc47cbcb"),
+        ("Re-verification at **`bcaf7a71`**", "bcaf7a71"),
+        ("Re-verified at **`adadf05`**", "adadf05"),
+    ]
+
+    @pytest.mark.parametrize("label,body,want", REAL_RECOVERED)
+    def test_our_own_house_phrasing_that_the_narrow_stem_missed(self, label, body, want):
         assert prs.parse_anchor(body) == want, label
+
+    @pytest.mark.parametrize("body,want", OTHER_EXAMINATION_FORMS)
+    def test_other_observed_examination_phrasings(self, body, want):
+        assert prs.parse_anchor(body) == want
 
     @pytest.mark.parametrize(
         "body",
@@ -568,11 +598,14 @@ class TestAnchorStemWidth:
         """A SEMANTIC line, not a coverage one — and the reason the rate is not higher.
 
         `Merging at`, `Fixed at` and `Rebased onto` name a commit somebody
-        PRODUCED, not one a reviewer READ. Admitting them would lift the corpus
-        hit-rate from 88% to 94% and anchor verdicts to the wrong commit — the
-        decoy failure with extra steps. `Merging at 7721ab0` is the single
-        remaining unanchored-but-hex-bearing comment in the corpus, and it is
-        excluded on purpose rather than missed.
+        PRODUCED, not one a reviewer READ. Anchoring a verdict to one is the decoy
+        failure with extra steps.
+
+        Measured on this repo's corpus, admitting them would recover **zero**
+        additional anchors — so the exclusion costs nothing here and is kept on
+        the SEMANTIC line rather than a coverage one. That matters: a rule that
+        happens to be free today would otherwise be the first thing dropped when
+        someone wants the hit-rate up.
         """
         assert prs.parse_anchor(body) is None
 
@@ -588,5 +621,18 @@ class TestAnchorStemWidth:
         """The load-bearing guarantee: more stems must not mean hex-first behaviour."""
         assert prs.parse_anchor(REAL_DECOY_LINE) is None
         assert prs.parse_anchor(REAL_APPROVE_BODY) == "b27ffc2"
-        for label, body in TestShaAnchorRegex.ARI_MULTI_HEX:
+        for label, body in TestShaAnchorRegex.MULTI_HEX:
             assert prs.parse_anchor(body) is None, label
+
+
+def test_a_multi_hex_verdict_that_names_its_anchor_is_still_anchored():
+    """The refusal must be targeted, not blanket.
+
+    Real Claudlobby#1306 text: `Verified at 8c3c0aa (tip; branch also carries
+    5719b6c ...)`. Two hexes, and the FIRST one is the genuine anchor. A matcher
+    that refused anything multi-hex would be safe and useless — it would report
+    NO-SHA-ANCHOR on a verdict that anchored perfectly, which is the exact
+    under-claiming defect the `at` alternative was added to fix.
+    """
+    body, want = TestShaAnchorRegex.MULTI_HEX_ANCHORED
+    assert prs.parse_anchor(body) == want

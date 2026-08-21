@@ -146,14 +146,14 @@ VERDICT_HEADER = re.compile(
 #: that comes back green.
 #:
 #: STEM WIDTH IS THE DIFFERENCE BETWEEN WORKING ON A DISCIPLINED FLEET AND NOT.
-#: The first stem set was ``reviewed at|against`` alone, and on the fleet with the
-#: real use case that reached 9 of 16 verdict-shaped comments (56%). The misses
-#: were not sloppy verdicts — they were HOUSE PHRASING: "Verification review at",
-#: "Re-verification at", "Re-verified at". That inverts the usual intuition: the
-#: better disciplined a fleet, the more consistently it phrases things, so a
-#: narrow matcher misses ALL of them at once rather than a scattered few. A
-#: systematic miss also hides better than a random one, because the output stays
-#: plausible.
+#: The first stem set was ``reviewed at|against`` alone. Measured on this repo's
+#: own recent corpus (10 PRs, 14 verdict-shaped comments) it found 2 (14%);
+#: widened it finds 4 (29%). Both recoveries are our own house phrasing —
+#: ``Verified at <sha>`` — which the narrow stem could not see. That inverts the
+#: usual intuition: the better disciplined a fleet, the more consistently it
+#: phrases things, so a narrow matcher misses ALL of them at once rather than a
+#: scattered few. A systematic miss also hides better than a random one, because
+#: the output stays plausible.
 #:
 #: WHAT IS DELIBERATELY EXCLUDED, and it is a semantic line rather than a
 #: coverage one: ``Merging at <sha>``, ``Fixed at <sha>``, ``Rebased onto <sha>``
