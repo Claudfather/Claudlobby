@@ -128,8 +128,24 @@ VERDICT_HEADER = re.compile(
 #:   "Re-reviewed at b27ffc2"     — Claudlobby#1311, which the older pattern MISSED
 #: The miss under-claimed (NO-SHA-ANCHOR on a perfectly anchored verdict), which
 #: is the safe direction and is exactly why it survived unnoticed for a day.
+#:
+#: The LEADING ``\b`` is load-bearing and its absence was an inert mutant: dropping
+#: ``(?:re-?)?`` passed every test, because "reviewed at" already matches inside
+#: "Re-reviewed at". But with no leading boundary the verb also fired MID-WORD —
+#: measured, ``"unreviewed at 3a4f5b6"`` yielded an anchor, so a NEGATION was read
+#: as an AFFIRMATION and a verdict explicitly saying it had not reviewed a commit
+#: would be scored as having reviewed it. Found by clog reviewing #1322.
+#:
+#: ``\b`` is the fix. The ``(?:re-?)?`` prefix stays INERT on every observed
+#: phrasing even now, and that is measured rather than assumed: the hyphen in
+#: "Re-reviewed" is already a word boundary, so ``\breviewed`` matches inside it.
+#: The prefix earns its place on exactly one shape — unhyphenated "Rereviewed" —
+#: which nobody has written. Kept because it names the intent, and pinned by
+#: ``test_the_re_prefix_is_inert_on_observed_phrasings`` so the next reader gets
+#: that from an executable check rather than re-deriving it from a mutation run
+#: that comes back green.
 SHA_ANCHOR = re.compile(
-    r"(?:re-?)?reviewed\s+(?:against|at)[^0-9a-f]{0,4}([0-9a-f]{7,40})\b",
+    r"\b(?:re-?)?reviewed\s+(?:against|at)[^0-9a-f]{0,4}([0-9a-f]{7,40})\b",
     re.I,
 )
 
@@ -398,7 +414,38 @@ def summary_line(results: list[dict]) -> str:
 # GitHub side — the only impure functions
 # --------------------------------------------------------------------------
 
+#: The fields ``fetch_payload`` requests, and therefore the exact shape
+#: ``--payload-json`` must be handed. Split into a tuple so the validator and the
+#: tests derive from ONE list rather than restating it — a second copy is how the
+#: fixture drifts away from production again.
 PR_FIELDS = "number,title,reviews,comments,headRefOid"
+PR_FIELD_LIST = tuple(PR_FIELDS.split(","))
+
+#: The command a user must run to produce a valid ``--payload-json`` file. Printed
+#: on refusal, because naming the missing field without naming the fix sends
+#: someone to guess a second time.
+PAYLOAD_COMMAND = (
+    "gh pr view <N> --repo <owner/repo> --json " + PR_FIELDS + " > payload.json"
+)
+
+
+def missing_payload_fields(payload: dict) -> list[str]:
+    """Documented fields absent from a payload.
+
+    Exists because a hand-built payload is the realistic input and it is EASY to
+    build a slightly short one: ``gh pr view <N> --json reviews,comments,headRefOid``
+    is the obvious command — it names every field the tool visibly reads — and it
+    omits ``number``, which only the renderer touches. That produced an uncaught
+    ``TypeError`` from an f-string, i.e. a traceback rather than a refusal.
+
+    The tests could not catch it: their fixture supplied ``number`` by DEFAULT, so
+    every test fed a payload strictly MORE COMPLETE than a user's. A fixture kinder
+    than production hides exactly the bugs a user hits first, and a green run says
+    nothing about it. ``test_fixture_is_not_kinder_than_the_documented_command``
+    now pins the fixture's key set to ``PR_FIELD_LIST`` so it cannot drift kind
+    again.
+    """
+    return [f for f in PR_FIELD_LIST if f not in payload]
 
 
 def _gh(args: list[str]) -> dict | list:
@@ -549,7 +596,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pr", type=int, help="one PR; default is every open PR")
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--json", action="store_true", dest="as_json")
-    parser.add_argument("--payload-json", help="read payload(s) from a file; no network")
+    parser.add_argument(
+        "--payload-json",
+        help="read payload(s) from a file instead of calling gh; produce it with: "
+        + PAYLOAD_COMMAND,
+    )
     parser.add_argument("--canonical", action="store_true",
                         help="flag verdicts landing on .comments[]")
     parser.add_argument("--attribute", action="store_true",
@@ -567,6 +618,19 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.payload_json) as handle:
                 loaded = json.load(handle)
             payloads = loaded if isinstance(loaded, list) else [loaded]
+            for index, payload in enumerate(payloads):
+                if not isinstance(payload, dict):
+                    print(f"payload[{index}] is not an object", file=sys.stderr)
+                    return RC_USAGE
+                gaps = missing_payload_fields(payload)
+                if gaps:
+                    print(
+                        f"payload[{index}] is missing required field(s): "
+                        f"{', '.join(gaps)}\n  produce a valid one with:\n    "
+                        f"{PAYLOAD_COMMAND}",
+                        file=sys.stderr,
+                    )
+                    return RC_USAGE
         elif args.pr:
             payloads = [fetch_payload(args.repo, args.pr)]
         else:

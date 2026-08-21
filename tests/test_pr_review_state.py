@@ -119,16 +119,71 @@ class TestShaAnchorRegex:
         assert prs.parse_anchor("reviewed against `ee29406`") == "ee29406"
         assert prs.parse_anchor(REAL_ANCHOR_LINE) == "b27ffc2"
 
-    def test_a_decoy_hex_in_prose_is_not_an_anchor(self):
-        """The anchor matcher is verb-anchored, and this is why.
+    # Multi-hex verdict bodies from the crog-eng-team corpus, reported by `ari`
+    # (2026-08-21). Excerpts, attributed rather than independently verified — those
+    # PRs are on another fleet's repos. What IS verified here is what this matcher
+    # does with them, asserted below.
+    ARI_MULTI_HEX = [
+        ("storydump#966", "Merging at `bcaf7a7`. rajan Request Changes is superseded "
+                          "by the rebase onto d4f21ab and 9ce0012 and bcaf7a7."),
+        ("storydump#976", "Rebased onto post-#972 main — `a7fe504`, was 3ab19cc, "
+                          "now b71e220 after e5f0011."),
+        ("storydump#972", "Fix pushed — `92a92e6` -> `d80f927`. Fast-forward only."),
+    ]
 
-        Claudlobby#1311's real approve body carries a genuine anchor AND a hex in
-        ordinary prose. A bare-hex matcher is not merely imprecise here — it takes
-        whichever comes first and would report the verdict stale against a commit
-        nobody reviewed.
+    def test_a_decoy_hex_in_prose_is_not_an_anchor(self):
+        """LOAD-BEARING, not a defensive edge case — the house style manufactures it.
+
+        This started as a careful guard found on one PR. `ari` then measured the
+        fleet that has the actual use case: **8 of 27 verdict-shaped comments carry
+        multiple distinct hex strings** (crog-eng-team, 2026-08-21). Roughly 30% is
+        the COMMON CASE, not an edge.
+
+        The reason is a CONVENTION, which is why it will not go away on its own:
+        house style is to cite the TRANSITION — old SHA then new SHA
+        (`Fix pushed — 92a92e6 -> d80f927`) — so a correct, well-formed verdict
+        routinely contains a superseded commit **before** the reviewed one. A
+        hex-first matcher takes `92a92e6`, the OLD one, and reports the verdict
+        stale against a commit that was already superseded: confident, wrong, and
+        in the direction nobody re-checks.
+
+        **A future reader who assumes multi-hex is rare will be tempted to simplify
+        this matcher back to bare hex.** It is not rare, it is the convention, and
+        the convention is the thing generating the decoys.
+
+        The measured behaviour: verb-anchoring never takes the wrong hex. It either
+        finds the anchored SHA or returns None, and None is UNKNOWABLE rather than
+        clean — the safe direction.
         """
+        # Claudlobby#1311's real body: a genuine anchor plus a decoy in prose.
         assert prs.parse_anchor(REAL_DECOY_LINE) is None
         assert prs.parse_anchor(REAL_APPROVE_BODY) == "b27ffc2"
+
+        # ari's corpus: a hex-first matcher would take the FIRST hex from each of
+        # these. Verb-anchoring returns None — it refuses rather than guessing.
+        import re as _re
+
+        for label, body in self.ARI_MULTI_HEX:
+            hexes = _re.findall(r"\b[0-9a-f]{7,40}\b", body)
+            assert len(hexes) >= 2, f"{label}: fixture should be multi-hex"
+            assert prs.parse_anchor(body) is None, (
+                f"{label}: verb-anchoring must refuse, never take {hexes[0]}"
+            )
+
+    def test_multi_hex_notes_do_not_parse_as_verdicts_either(self):
+        """The two bounds hold TOGETHER, which is what makes the refusal safe.
+
+        `storydump#966` contains the words "Request Changes" in prose. If the header
+        bound leaked, that merge note would parse as a live blocking verdict AND
+        carry four candidate hexes — a fabricated block anchored to an arbitrary
+        commit. Measured: neither bound leaks, with the hex bolded into the lead
+        span for good measure.
+        """
+        for label, body in self.ARI_MULTI_HEX:
+            assert prs.parse_verdict(body) is None, label
+        assert prs.parse_verdict(
+            "**Merging at bcaf7a7**\n\nrajan Request Changes is superseded."
+        ) is None
 
     def test_an_unanchored_verdict_is_unknowable_never_clean(self):
         """Bound (b), the one that decides what a clean run is worth."""
@@ -346,3 +401,123 @@ class TestDriftSignalIsNarrow:
         assert result["unparsed_headers"] == [header]
         assert prs.UNPARSED in result["flags"]
         assert prs.exit_code_for([result]) == prs.RC_INCOMPLETE
+
+
+class TestPayloadContract:
+    """The fixture must not be kinder than what a user actually produces.
+
+    #1322 review, clog: `--payload-json` crashed with an uncaught `TypeError` on a
+    payload built the obvious way — `gh pr view N --json reviews,comments,headRefOid`,
+    which names every field the tool visibly reads and omits `number`, touched only
+    by the renderer.
+
+    33 green tests could not catch it, and the reason is the interesting part:
+    `_payload()` supplied `number` BY DEFAULT, so every test fed a payload strictly
+    MORE COMPLETE than a user's. A fixture kinder than production hides exactly the
+    bugs a user hits first, and nothing in a green run says so. Patching the one
+    field would have left the shape, so the fixture's key set is now pinned to the
+    tool's own documented field list.
+    """
+
+    def test_fixture_is_not_kinder_than_the_documented_command(self):
+        """The pin. If PR_FIELDS grows a field, this fails until the fixture has it."""
+        assert set(_payload([]).keys()) == set(prs.PR_FIELD_LIST)
+
+    def test_the_documented_command_names_every_required_field(self):
+        """The help text a user follows must produce a payload that validates."""
+        for field in prs.PR_FIELD_LIST:
+            assert field in prs.PAYLOAD_COMMAND
+        assert prs.missing_payload_fields(_payload([])) == []
+
+    @pytest.mark.parametrize("dropped", list(prs.PR_FIELD_LIST))
+    def test_every_single_missing_field_refuses_rather_than_crashes(
+        self, dropped, tmp_path, capsys
+    ):
+        """Each field individually, not just `number`.
+
+        `number` is the one that bit; testing only `number` would re-create the
+        original defect one field over. `head` was already guarded (`r["head"] or ""`)
+        — the defensive instinct was there and stopped one field short, which is
+        precisely why the module read as finished.
+        """
+        payload = _payload([("reviews", "t1", REAL_APPROVE_HEADER)])
+        payload.pop(dropped)
+        path = tmp_path / "p.json"
+        path.write_text(json.dumps(payload))
+        rc = prs.main(["o/r", "--payload-json", str(path)])
+        err = capsys.readouterr().err
+        assert rc == prs.RC_USAGE, f"missing {dropped} must refuse, not crash"
+        assert dropped in err and prs.PAYLOAD_COMMAND in err
+
+    def test_the_exact_obvious_short_command_is_refused_by_name(self, tmp_path, capsys):
+        """The literal shape from the review: reviews,comments,headRefOid."""
+        obvious = {"reviews": [], "comments": [], "headRefOid": REAL_HEAD}
+        path = tmp_path / "p.json"
+        path.write_text(json.dumps(obvious))
+        rc = prs.main(["o/r", "--payload-json", str(path)])
+        err = capsys.readouterr().err
+        assert rc == prs.RC_USAGE
+        assert "number" in err and "title" in err
+
+    def test_a_non_object_payload_is_refused(self, tmp_path):
+        path = tmp_path / "p.json"
+        path.write_text(json.dumps(["not", "an", "object"]))
+        assert prs.main(["o/r", "--payload-json", str(path)]) == prs.RC_USAGE
+
+
+class TestAnchorVerbBoundary:
+    """MINOR 1 from the #1322 review — an inert mutant hiding a real bug.
+
+    Dropping `(?:re-?)?` passed all 33 tests, because "reviewed at" already matches
+    inside "Re-reviewed at". clog verified that was an INERT MUTANT rather than a
+    weak test — and then found what the missing LEADING boundary allowed.
+    """
+
+    @pytest.mark.parametrize(
+        "text", ["unreviewed at 3a4f5b6", "Unreviewed at 3a4f5b6",
+                 "prereviewed against 3a4f5b6", "notreviewed at 3a4f5b6"]
+    )
+    def test_the_verb_does_not_fire_mid_word(self, text):
+        """A NEGATION READ AS AN AFFIRMATION.
+
+        Without `\\b`, "unreviewed at 3a4f5b6" yielded an anchor — a verdict saying
+        explicitly that it had NOT reviewed a commit would be scored as having
+        reviewed it, and then compared against head as though it were evidence.
+        """
+        assert prs.parse_anchor(text) is None
+
+    @pytest.mark.parametrize(
+        "text,want",
+        [("reviewed at 3a4f5b6", "3a4f5b6"), ("Re-reviewed at 3a4f5b6", "3a4f5b6"),
+         ("Reviewed against 3a4f5b6", "3a4f5b6"), ("re-reviewed against 3a4f5b6", "3a4f5b6")],
+    )
+    def test_the_real_verbs_still_match(self, text, want):
+        """The boundary must not cost the signal it guards."""
+        assert prs.parse_anchor(text) == want
+
+    def test_the_re_prefix_is_inert_on_observed_phrasings(self):
+        """Pin the inertness directly — the `who-reviewed.py` precedent.
+
+        Dropping `(?:re-?)?` comes back GREEN, and that is an INERT MUTANT rather
+        than a weak test: the hyphen in "Re-reviewed" is itself a word boundary, so
+        `\\breviewed` already matches inside it. The prefix differs on exactly one
+        shape, unhyphenated "Rereviewed", which no observed verdict produces.
+
+        Asserting it here means the next reader learns it from a check instead of
+        re-running the mutation, seeing green, and concluding the tests are weak.
+        The thing that actually fixed the live bug was the LEADING `\\b`, which
+        `test_the_verb_does_not_fire_mid_word` covers and which does fail when
+        removed.
+        """
+        import re
+
+        with_prefix = re.compile(
+            r"\b(?:re-?)?reviewed\s+(?:against|at)[^0-9a-f]{0,4}([0-9a-f]{7,40})\b", re.I)
+        without = re.compile(
+            r"\breviewed\s+(?:against|at)[^0-9a-f]{0,4}([0-9a-f]{7,40})\b", re.I)
+        for text in ("Re-reviewed at abc1234", "reviewed at abc1234",
+                     "Reviewed against abc1234", "unreviewed at abc1234"):
+            assert bool(with_prefix.search(text)) == bool(without.search(text)), text
+        # The single divergence, stated so it is not rediscovered as a surprise.
+        assert with_prefix.search("Rereviewed at abc1234")
+        assert not without.search("Rereviewed at abc1234")
