@@ -275,30 +275,33 @@ status: ok|warn|alert|null
 
 Seed metric registry: `host.load` `host.mem_available_mb` `host.disk_free_gb` `host.thermal_flags` `host.undervoltage` `host.boot_time` · `vault.behind` `vault.ahead` `vault.last_fetch_age_s` `vault.fetch_failed` · `bot.session_up` `bot.bridge_up` `bot.rc_ok` `bot.pane_last_change_age_s` `bot.heartbeat` `bot.rss_mb` · `env.key_state` (emitted by creds-check runs: `{tier, key, state: present|empty|absent}` — names never values; the #1213 present-but-empty class as observation). Retention: per-family and aggressive here (raw samples age out on a short window; windowed rollups are Lane C and survive) — the concrete windows are a §11 retention-policy line item, ratified with the privacy policy, before first canary.
 
-### LifecycleEvent (F19)
+### LifecycleEvent (F19) — walked 2026-08-20 under earns-its-place
 
 ```yaml
-# envelope +
-source: str               # emitting script, e.g. "keepalive.sh"
+# envelope +                (emitting script IS the envelope's `emitter` —
+#                            the old `source` column was redundant and is KILLED;
+#                            legacy import maps JSONL source -> emitter)
+subject_kind: host|vault|fleet|actor|bot_instance|session|null
+subject_uid: str?;  subject_alias: str?    # nullable as a TRIPLE; host events
+                                           # (under-voltage, disk) name the host,
+                                           # not a bot — the kind field is what
+                                           # makes that expressible
 type: str                 # registry-governed (F19): seeded from events.py
                           # CRITICAL_TYPES + the Phase-2b emitter inventory;
                           # unknown types INGEST + trust-counter + doctor listing
-subject_alias: str?       # bot alias where applicable → actor_uid at ingest
 severity: critical|notice|null    # REGISTRY-OWNED, point-in-time: ingest stamps it
-                          # from the package-owned seed module (plane/registries.py,
-                          # LIFECYCLE_TYPES: type->severity — versioned with the
-                          # software like system.yaml defaults); callers cannot set
-                          # it; unknown type => null severity + trust counter +
-                          # doctor listing. NO registry table in v1 — #903 adds a
-                          # table + management door together if vocabulary ever
-                          # needs runtime mutation
-data: json                # bounded payload (existing events' data{} carried verbatim;
-                          # machine-built => over-cap truncates-with-proof like comms)
-# READING RULE — events are DETECTIONS, never states: overdue_dispatch here
-# records "the watchdog fired at T"; live overdue-ness is only ever the task
-# derivation's overlay flag. session_missing (detection) => lifecycle;
-# session-up (sampled level) => presence. Neither substitutes for the other.
+                          # from the package-owned seed module (plane/registries.py);
+                          # callers cannot set it; unknown type => null
+data: json                # bounded diagnostic payload (existing events' data{}
+                          # verbatim); over-cap => data_truncated flag ONLY — the
+                          # comms sha-proof triple is deliberately NOT earned here:
+                          # comms bodies are the record of what was said, lifecycle
+                          # data is pointer-grade diagnostics whose full text lives
+                          # in the emitting script's own logs
+data_truncated: bool
 ```
+
+Reading rules (all three load-bearing): **events are DETECTIONS, never states** (overdue_dispatch here records "the watchdog fired at T"; live overdue-ness is only the task derivation's flag; session_missing = detection => lifecycle, session-up = level => presence). **Repeated detections are repeated rows** — debounce is the emitter's policy (fleet-pulse's existing debounce preserved), grouping is the derivation's job; a dedup column would smuggle state into a fact table. **Pairing is derivation** — bridge_down→bridge_heal matches by subject + type-family over time; a resolved_by column would let one row claim knowledge of a later row. Cross-table demo of `causation_id`: a FLEET ALERT is TWO rows — the lifecycle detection + the alert-class comms intent whose `causation_id` = the detection's `event_id` — so "why did this alert exist" is a click-through, not a grep.
 
 ### WorkstreamContract + WorkstreamEvent (F6, F21)
 
@@ -343,7 +346,7 @@ session_usage:            # envelope + — transcript-usage.py's existing axes v
 
 ### Vocabulary governance census (2026-08-20 walk)
 
-Three mechanisms, counted: **13 closed vocabularies** — code-governed enums (Pydantic `Literal` + DDL `CHECK`, pinned by the parity test): message_class · command_type · attempt state · carrier · task event · workstream event · privacy level · snapshot cause · snapshot operation · entity type · identity kind · presence subject_kind · presence status; changing one = code + migration, on purpose. **2 open registries** — lifecycle types (with severity) and presence metric names, both seeded from ONE package-owned module (`plane/registries.py`), warn-on-unknown at ingest, additions by PR; **no vocabulary registry tables in v1** — a table plus its management door arrive together with #903 if runtime mutation is ever needed (a table without its door is a constant with a sync-bug surface). **1 identity table** — `identity_registry` is not a vocabulary: runtime-minted alias→uid mappings, never seeded. Lane A vocabularies (project tier, fleet.yaml fields) keep their existing `known_values.py` + validator governance; the plane adds nothing there.
+Three mechanisms, counted: **13 closed vocabularies** — code-governed enums (Pydantic `Literal` + DDL `CHECK`, pinned by the parity test): message_class · command_type · attempt state · carrier · task event · workstream event · privacy level · snapshot cause · snapshot operation · entity type · identity kind · subject kind (shared: presence + lifecycle) · presence status; changing one = code + migration, on purpose. **2 open registries** — lifecycle types (with severity) and presence metric names, both seeded from ONE package-owned module (`plane/registries.py`), warn-on-unknown at ingest, additions by PR; **no vocabulary registry tables in v1** — a table plus its management door arrive together with #903 if runtime mutation is ever needed (a table without its door is a constant with a sync-bug surface). **1 identity table** — `identity_registry` is not a vocabulary: runtime-minted alias→uid mappings, never seeded. Lane A vocabularies (project tier, fleet.yaml fields) keep their existing `known_values.py` + validator governance; the plane adds nothing there.
 
 **With this section, every model in the system is finalized.** Remaining open items are implementation-owned only (§19: canonical-bytes golden fixtures, ingest benchmark, DDL mechanics, Claudron#145 answers).
 
