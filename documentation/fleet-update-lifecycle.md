@@ -97,9 +97,28 @@ checkable, and a reader should ask it rather than be told to take care:
 
 > **Am I sending guidance to someone who is about to act, or am I acting myself?**
 
-**Composed file — the one that misleads.** A bot already running does *not* have
-it. "It is composed" reads as "they have it" and is false until each bot
-restarts.
+**Composed artifacts — where the misleading part actually is.** *"It is composed"*
+does not mean *"they have it"*, and it does not uniformly mean *"they will have
+it after a restart"* either. Which of the two it means depends on **when the
+artifact is read**, so this splits three ways:
+
+- **Composed instructions** (`CLAUDE.md`, `bot.conf` env) — read once at session
+  start. A bot already running does *not* have it, and will not until it
+  restarts. This is the one people mean when they say "composed".
+- **Composed MCP config** (`.mcp.json`) — same, and for a concrete reason:
+  servers are spawned as children at session start and are not respawned when
+  the file changes. Measured — a live session's MCP child started 4 s after the
+  session and was still the original process 24 h after `.mcp.json` was
+  rewritten.
+- **Composed skills** (`.claude/skills/` symlinks) — read **on demand, per use**.
+  These are live **the instant `generate` writes the symlink**, on every running
+  bot, with **no restart and no canary window**. Confirmed on three bots
+  mid-session.
+
+**The trap is the middle case being read onto the third.** A composed skill is a
+composed file, so the undifferentiated version of this paragraph promised it a
+restart-shaped safety gap it does not have — and that reading was used to justify
+running `generate` across a live estate without a canary (#1310).
 
 **Hook script — no canary *window*.** One pull and it is live on every bot at its
 next tool call, so staging cannot be applied *around* the change; it has to be
@@ -174,7 +193,11 @@ something unrelated appears on disk.
 2. Runs `claudlobby generate` to completion — re-links composed skill symlinks.
 3. Drops `data/.reload-pending` on every **running** bot. It does not send any keystroke itself.
 
-Activation is consolidated in `lib/keepalive.sh`: on its next idle-classification tick (each watchdog pass), if `data/.reload-pending` exists, keepalive sends `/reload-plugins` then `/reload-skills` and clears the marker. This is a single, idle-gated activation path — a bot mid-task is never interrupted, and there's no separate broadcaster racing the idle check. Convergence lag is bounded by the keepalive tick interval (on the order of a minute), which is immaterial for a daily reload.
+Activation is consolidated in `lib/keepalive.sh`: on its next idle-classification tick (each watchdog pass), if `data/.reload-pending` exists, keepalive sends `/reload-plugins` then `/reload-skills` and clears the marker. A bot mid-task is never interrupted by *this* path, and there's no separate broadcaster racing the idle check. Convergence lag is bounded by the keepalive tick interval (on the order of a minute), which is immaterial for a daily reload.
+
+> **This idle gate does NOT cover composed skill symlinks, and reading it as though it does is the #1310 defect in its most dangerous form** — here the doc appears to *promise* a deferral that does not exist. Step 2's `generate` re-links symlinks, and a composed skill is live from that moment on every running bot, busy or idle, with no marker and no keystroke. Measured: `data/.reload-pending` is written only by `reload-fleet.sh` (zero hits in `claudlobby/*.py`), and **zero** RELOAD entries appear in any of 21 bots' `keepalive.log` — yet a newly composed skill entered the live skill registry of three bots mid-session. So the marker was never set, keepalive never reached its reload block, and the skills activated anyway.
+>
+> What the idle gate genuinely covers is the **plugin-cache** half — step 1's `claude plugin update`, where `/reload-plugins` is doing real work. **Whether `/reload-skills` is required for anything is not established here**; it was simply never observed to be the thing that made a composed skill live.
 
 Runnable **on-demand** (not just on the timer) to push a release immediately — activation still lands at each bot's next idle keepalive tick.
 
