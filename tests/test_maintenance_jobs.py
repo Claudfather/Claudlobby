@@ -366,7 +366,7 @@ class TestClaudlobbyCli:
 
 
 class TestReloadFailureReasonIsTheRealError:
-    """#805: the alert said `claude plugin update failed: artemis-skills@...`,
+    """#805: the alert said `claude plugin update failed: example-skills@...`,
     which reads as a broken plugin. The plugin was fine — `claude` was not on
     the PATH. The reason must carry what actually failed, not the last command
     name; that misdirection is what cost the triage."""

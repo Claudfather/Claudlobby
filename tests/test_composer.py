@@ -1226,12 +1226,12 @@ class TestTelegramHandleDefault:
             bot_id="worker",
             name="worker",
             expertise=["eng"],
-            telegram=TelegramConfig(handle="artemis_worker_bot"),
+            telegram=TelegramConfig(handle="example_worker_bot"),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         conf = compose_bot_conf(bot, fleet, paths)
-        assert "export TELEGRAM_BOT_HANDLE=artemis_worker_bot" in conf
-        assert "export TELEGRAM_BOT_USERNAME=artemis_worker_bot" in conf
+        assert "export TELEGRAM_BOT_HANDLE=example_worker_bot" in conf
+        assert "export TELEGRAM_BOT_USERNAME=example_worker_bot" in conf
 
     def test_defaulted_handle_emits_no_username(self, tmp_path):
         """A slug is not a username: comparing them false-fails a correct token."""
@@ -3313,7 +3313,7 @@ class TestComposeAutonomousRunner:
             autonomous_runner=AutonomousRunnerConfig(
                 skill="/claudna:implement-plan",
                 cadence="2h",
-                target_repo="artemis-xyz/dbt",
+                target_repo="example-org/dbt",
                 args="--source github",
                 picker=AutonomousRunnerPicker(
                     type="github_issues",
@@ -3336,7 +3336,7 @@ class TestComposeAutonomousRunner:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"dbt-bot": bot})
         result = compose_claude_md(bot, fleet, paths)
         assert "/claudna:implement-plan" in result
-        assert "artemis-xyz/dbt" in result
+        assert "example-org/dbt" in result
         assert "--source github" in result
         assert "claudna-eligible" in result
         assert "mission_alignment" in result

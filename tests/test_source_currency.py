@@ -113,7 +113,7 @@ class TestRepoRemoteOrg:
             ("ssh://git@github.com/Claudfather/clauDNA.git", "claudfather"),
             ("https://github.com/Claudfather/Claudlobby", "claudfather"),
             ("https://gitlab.com/SomeOrg/thing.git", "someorg"),
-            ("https://github.com/Artemis-xyz/huntress.git", "artemis-xyz"),
+            ("https://github.com/Example-Org/huntress.git", "example-org"),
         ],
     )
     def test_parses_both_url_spellings_and_lowercases(self, tmp_path, url, expected):
