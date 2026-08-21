@@ -12,6 +12,7 @@ from claudlobby.loader import (
     _parse_expertise_permissions,
     _strip_leading_title_heading,
     integration_tool_grants,
+    iter_expertise_permissions,
     iter_integration_grants,
     load_library_item,
     load_library_items_overlay,
@@ -632,3 +633,65 @@ class TestGuardrailPermissions:
 
     def test_missing_file_returns_none(self, tmp_path):
         assert parse_guardrail_permissions(tmp_path / "nope.md") is None
+
+
+class TestIterExpertisePermissions:
+    """The expertise sibling of ``iter_guardrail_permissions`` (#913).
+
+    Its two deliberate divergences from that sibling are pinned here, because both
+    make it AGREE with what actually composes and a future reader tidying the two
+    into one shape would silently change the composed answer.
+    """
+
+    def _lib(self, tmp_path: Path, **files: str) -> Path:
+        d = tmp_path / "library" / "expertise"
+        d.mkdir(parents=True)
+        for stem, text in files.items():
+            (d / f"{stem}.md").write_text(text)
+        return tmp_path
+
+    def _paths(self, root: Path):
+        from claudlobby.paths import Paths
+
+        return Paths(root)
+
+    def test_reads_permissions_per_area(self, tmp_path):
+        root = self._lib(
+            tmp_path,
+            alpha="---\npermissions:\n  allow: [Bash]\n---\n\n# Alpha\n",
+            beta='---\npermissions:\n  allow: ["Bash(git *)"]\n  allow_all: true\n---\n\n# Beta\n',
+        )
+        out = dict(iter_expertise_permissions(self._paths(root), ["alpha", "beta"]))
+        assert out["alpha"].allow == ["Bash"]
+        assert out["alpha"].allow_all is False
+        assert out["beta"].allow == ["Bash(git *)"]
+        assert out["beta"].allow_all is True
+
+    def test_missing_area_is_skipped_not_yielded_as_none(self, tmp_path):
+        """Divergence 1 from ``iter_guardrail_permissions``, which yields ``(name, None)``.
+
+        Skipping matches ``composer._resolve_expertise_permissions``; a missing
+        expertise file is already a hard validate error raised elsewhere, so
+        yielding it here would produce a second, softer report of the same fact.
+        """
+        root = self._lib(tmp_path, alpha="---\npermissions:\n  allow: [Read]\n---\n\n# A\n")
+        out = iter_expertise_permissions(self._paths(root), ["alpha", "nope"])
+        assert [name for name, _ in out] == ["alpha"]
+
+    def test_folder_entries_are_not_expanded(self, tmp_path):
+        """Divergence 2: expertise has no ``dir/`` folder expansion.
+
+        ``iter_guardrail_permissions`` expands a trailing-slash entry; both shipped
+        expertise resolvers use a bare ``find_library_file``. Expanding here would
+        make the validator warn about files the composer never reads.
+        """
+        root = tmp_path
+        nested = root / "library" / "expertise" / "team"
+        nested.mkdir(parents=True)
+        (nested / "inner.md").write_text("---\npermissions:\n  allow: [Bash]\n---\n\n# I\n")
+        assert iter_expertise_permissions(self._paths(root), ["team/"]) == []
+
+    def test_expertise_without_frontmatter_yields_none_permissions(self, tmp_path):
+        root = self._lib(tmp_path, plain="# Plain\n\nNo frontmatter.\n")
+        out = dict(iter_expertise_permissions(self._paths(root), ["plain"]))
+        assert out["plain"] is None

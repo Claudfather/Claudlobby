@@ -1897,3 +1897,135 @@ class TestGithubAppWarnings:
     def test_no_app_declaration_means_no_app_warnings(self, fleet_dir, tmp_path, monkeypatch):
         report = self._report(fleet_dir, monkeypatch, None)
         assert self._app_warns(report) == []
+
+
+class TestExpertiseGrantValidation:
+    """Expertise declares deny-capable ``permissions:`` exactly as guardrails do, and
+    was the one grant-declaring source ``_grant_shape_warnings`` never ran on (#913).
+
+    The shipped library grants bare ``Bash`` from expertise in 14 of its 19 expertise
+    files, so the validator forbade from three doors what the library does through a
+    fourth, unpoliced one."""
+
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_PAT", "ghp_test")
+        monkeypatch.setenv("TELEGRAM_TOKEN_LEAD", "1:a")
+        monkeypatch.setenv("TELEGRAM_TOKEN_WORKER1", "2:b")
+
+    def _write_expertise(self, fleet_dir, name, perms_yaml):
+        (fleet_dir / "library" / "expertise" / f"{name}.md").write_text(
+            f"---\n{perms_yaml}---\n\n# {name}\n\nBody.\n"
+        )
+
+    def _report(self, fleet_dir):
+        fleet, _md = load_fleet(fleet_dir / "fleet.yaml")
+        return validate(fleet, _make_paths(fleet_dir))
+
+    def test_bare_bash_in_expertise_allow_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._write_expertise(
+            fleet_dir,
+            "software-engineering",
+            "permissions:\n  allow: [Bash, Read]\n",
+        )
+        report = self._report(fleet_dir)
+        assert any(
+            "expertise 'software-engineering'" in w and "grants bare 'Bash'" in w
+            for w in report.warnings
+        ), report.warnings
+
+    def test_allow_all_warns_with_no_bash_anywhere_in_allow(
+        self, fleet_dir, monkeypatch
+    ):
+        """The discriminator between the two warning paths.
+
+        ``allow_all`` is kept as a separate flag by the parser and is never expanded
+        into ``.allow`` (``loader._parse_expertise_permissions``) — the expansion to
+        ALL_TOOLS, bare ``Bash`` included, happens later in the composer. So a check
+        that only read ``.allow`` would miss every ``allow_all`` file, which is 5 of
+        the 14 in the shipped library. This fixture deliberately puts NO ``Bash``
+        anywhere in ``allow``: if this test can only be made to pass by adding one,
+        the second warning path has been lost.
+        """
+        self._write_expertise(
+            fleet_dir,
+            "software-engineering",
+            "permissions:\n  allow_all: true\n  allow: [Read]\n",
+        )
+        self._env(monkeypatch)
+        report = self._report(fleet_dir)
+        assert any(
+            "expertise 'software-engineering'" in w and "allow_all" in w
+            for w in report.warnings
+        ), report.warnings
+        # "grants bare 'Bash'" and not merely "bare 'Bash'": the allow_all message
+        # also contains that phrase ("...including bare 'Bash'"), so the looser
+        # substring matches BOTH messages and this assertion could never fail. The
+        # first version of this test asserted the loose form and failed against
+        # correct code — a discriminator that does not discriminate.
+        assert not any(
+            "expertise 'software-engineering'" in w and "grants bare 'Bash'" in w
+            for w in report.warnings
+        ), "allow_all must not be reported through the bare-Bash path"
+
+    def test_scoped_expertise_grants_do_not_warn(self, fleet_dir, monkeypatch):
+        """Negative case carrying its own positive control.
+
+        The manager's expertise is made deliberately bad in the same run, so an
+        empty result for the worker cannot be produced by the expertise pass having
+        silently not run at all.
+        """
+        self._env(monkeypatch)
+        self._write_expertise(
+            fleet_dir,
+            "software-engineering",
+            'permissions:\n  allow: ["Bash(git *)", Read]\n',
+        )
+        self._write_expertise(
+            fleet_dir, "orchestration", "permissions:\n  allow: [Bash]\n"
+        )
+        report = self._report(fleet_dir)
+        assert any(
+            "expertise 'orchestration'" in w and "grants bare 'Bash'" in w
+            for w in report.warnings
+        ), "positive control did not fire — the expertise pass did not run"
+        assert not any(
+            "expertise 'software-engineering'" in w for w in report.warnings
+        ), report.warnings
+
+    def test_deny_bare_bash_is_not_flagged(self, fleet_dir, monkeypatch):
+        """Denying bare ``Bash`` is a legitimate deny-all-shell rule, not over-grant.
+
+        Paired with a positive control for the same reason as above.
+        """
+        self._env(monkeypatch)
+        self._write_expertise(
+            fleet_dir, "software-engineering", "permissions:\n  deny: [Bash]\n"
+        )
+        self._write_expertise(
+            fleet_dir, "orchestration", "permissions:\n  allow: [Bash]\n"
+        )
+        report = self._report(fleet_dir)
+        assert any("expertise 'orchestration'" in w for w in report.warnings)
+        assert not any(
+            "expertise 'software-engineering'" in w for w in report.warnings
+        ), report.warnings
+
+    def test_malformed_expertise_grant_warns(self, fleet_dir, monkeypatch):
+        self._env(monkeypatch)
+        self._write_expertise(
+            fleet_dir, "software-engineering", 'permissions:\n  allow: ["rm -rf /"]\n'
+        )
+        report = self._report(fleet_dir)
+        assert any(
+            "expertise 'software-engineering'" in w and "malformed" in w
+            for w in report.warnings
+        ), report.warnings
+
+    def test_expertise_without_permissions_block_is_silent(
+        self, fleet_dir, monkeypatch
+    ):
+        """The fixture default: no frontmatter at all -> permissions is None."""
+        self._env(monkeypatch)
+        report = self._report(fleet_dir)
+        assert not any("expertise '" in w for w in report.warnings), report.warnings
