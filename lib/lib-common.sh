@@ -3336,7 +3336,10 @@ _emit_fleet_signal() {
     local bots_dir="$1" event_type="$2" reason="$3" ev_source="$4" word="$5"
     local tmux_prefix="[FLEET-${word}]" tg_prefix="FLEET ${word}"
 
-    local data
+    local data _sig_tmux_ok=0
+    # Set for the caller, not for us: gates debounce markers so a FAILED send
+    # cannot buy itself silence for the whole debounce window.
+    _ALERT_DELIVERED=0
     data=$(printf '{"reason":"%s"}' "$(json_escape "$reason")")
     emit_fleet_event "$event_type" "$ev_source" "$data" "" fleet
 
@@ -3352,7 +3355,9 @@ _emit_fleet_signal() {
     if [ -n "$mgr" ]; then
         mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$mgr_bot" MANAGER_TMUX_SOCKET "")" "$mgr" "$(dirname "$mgr_bot")")
         if check_tmux_session "$mgr" "$mgr_socket"; then
-            bot_tmux_send "$mgr_socket" "$mgr" "$tmux_prefix $event_type: $reason" || true
+            if bot_tmux_send "$mgr_socket" "$mgr" "$tmux_prefix $event_type: $reason"; then
+                _sig_tmux_ok=1
+            fi
         fi
     fi
 
@@ -3362,10 +3367,49 @@ _emit_fleet_signal() {
     resolve_alert_target "$bots_dir"
     # shellcheck disable=SC2154  # _alert_* are set by resolve_alert_target above
     chat_id="$_alert_chat_id"; state_dir="$_alert_state_dir"
+    local _tg_rc=0 _tg_err=""
     if [ -n "$chat_id" ]; then
-        TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
-            "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" >/dev/null 2>&1 || true
+        # Capture stderr rather than discarding it: tg-post distinguishes no-token
+        # (1), no-chat (2) and API-rejected (3), and the body is where a rejected
+        # send explains itself. A >/dev/null 2>&1 here threw away the whole
+        # diagnosis of an alert that never arrived.
+        _tg_err=$(TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
+            "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" 2>&1) || _tg_rc=$?
+    else
+        # No resolvable target was ALSO silent: no attempt, no record, nothing to
+        # find later. An alert with nowhere to go is a delivery failure, not a
+        # no-op, and three of four fleets are currently in exactly this state.
+        _tg_rc=2
+        _tg_err="no alert chat-id resolved for this fleet"
     fi
+
+    if [ "$_tg_rc" -eq 0 ]; then
+        _ALERT_DELIVERED=1
+    else
+        _ALERT_DELIVERED=0
+        # 1. Durable record. emit_fleet_event only appends JSONL, so there is no
+        #    recursion back into this function.
+        emit_fleet_event "alert_delivery_failed" "$ev_source" \
+            "$(printf '{"for_event":"%s","channel":"telegram","exit":%s,"tmux_reached":%s,"detail":"%s"}' \
+                "$(json_escape "$event_type")" "$_tg_rc" "${_sig_tmux_ok:-0}" \
+                "$(json_escape "$(printf '%s' "$_tg_err" | tr '\n' ' ' | cut -c1-300)")")" \
+            "" fleet
+        # 2. Journal. These callers are systemd/launchd timer jobs, so stderr is
+        #    retained by the journal -- the surface an operator actually reads
+        #    during an incident, and the only one that needs nobody to go looking
+        #    in a ledger for a message that was supposed to come to them.
+        printf '%s ALERT-DELIVERY-FAILED %s: tg-post exit %s (%s); tmux_reached=%s\n' \
+            "$(ts_iso)" "$event_type" "$_tg_rc" "$_tg_err" "${_sig_tmux_ok:-0}" >&2
+    fi
+
+    # ALWAYS return 0. Measured before choosing: five of five callers
+    # (disk-monitor, fleet-memory-check, keepalive, reload-fleet,
+    # orphan-browser-reaper) run `set -euo pipefail` and call this UNGUARDED, so
+    # propagating a delivery failure would abort the watchdog that detected the
+    # condition -- on every fleet that has no token, which is most of them. That
+    # trades a silent alert for a dead detector, which is worse. Callers that
+    # need to branch read _ALERT_DELIVERED instead.
+    return 0
 }
 
 # emit_failure_alert <bots_dir> <event_type> <reason>
