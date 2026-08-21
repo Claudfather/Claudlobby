@@ -297,7 +297,7 @@ severity: critical|notice|null    # REGISTRY-OWNED, point-in-time: ingest stamps
 data: json                # bounded diagnostic payload (existing events' data{}
                           # verbatim); over-cap => data_truncated flag ONLY — the
                           # comms sha-proof triple is deliberately NOT earned here:
-                          # comms bodies are the record of what was said, lifecycle
+                          # comms bodies are the record of what was said, system-event
                           # data is pointer-grade diagnostics whose full text lives
                           # in the emitting script's own logs
 data_truncated: bool
@@ -383,7 +383,7 @@ Ratified **before** the first canary stores anything searchable (tailnet admissi
 
 ## 14. Performance & dependency gates
 
-Before locking implementation: cold/warm emit p50/p95 on the Pi · 20–25-bot burst · concurrent lifecycle+comms writers · `busy_timeout`, transaction mode, retry budget, WAL checkpoint policy, `synchronous` mode specified · disk-full behavior · startup/import time. Dependency/capability matrix for FastAPI/Pydantic/ttyd/Tailscale/frontend: optional UI features degrade without disabling the core ledger. Thumbnail capture: one bounded backend sampler per pane, cached — never multiplied by browser count.
+Before locking implementation: cold/warm emit p50/p95 on the Pi · 20–25-bot burst · concurrent system-event + comms writers · `busy_timeout`, transaction mode, retry budget, WAL checkpoint policy, `synchronous` mode specified · disk-full behavior · startup/import time. Dependency/capability matrix for FastAPI/Pydantic/ttyd/Tailscale/frontend: optional UI features degrade without disabling the core ledger. Thumbnail capture: one bounded backend sampler per pane, cached — never multiplied by browser count.
 
 ## 15. Schema compatibility, testing, trust metrics
 
