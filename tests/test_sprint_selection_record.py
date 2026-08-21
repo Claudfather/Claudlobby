@@ -256,3 +256,80 @@ def test_the_real_project_mission_doc_parses_without_a_false_defect():
         f"PROJECT_MISSION.md sprint focus cites CLOSED work as current: {stale}. "
         "The picker would source its goal from completed items."
     )
+
+
+# --- #1317: three states, not two -------------------------------------------
+# The staleness rung resolved a ref by asking "is it CLOSED?", so ABSENT and
+# UNRECOGNISED both fell through to a silent pass -- making a coverage gap
+# indistinguishable from a confirmed-open ref. It was the one rung in this module
+# that exempted itself from the module's own standard, and it failed toward
+# "fine", the direction nobody re-checks.
+
+def test_a_ref_absent_from_the_map_is_UNKNOWN_not_a_silent_pass():
+    """Reviewer's repro 1: refs=['9999'], states={'1271':'OPEN'}."""
+    verdict, findings = ssr.verify(
+        _record(mission_focus_refs=["9999"]), issue_states={"1271": "OPEN"}
+    )
+    assert any(f.startswith("UNKNOWN") for f in findings), findings
+    assert any("absent from the map" in f for f in findings)
+
+
+def test_an_unrecognised_state_is_UNKNOWN_not_a_silent_pass():
+    """Reviewer's repro 2: states={'1271':'MERGED'} -- neither OPEN nor CLOSED."""
+    verdict, findings = ssr.verify(
+        _record(mission_focus_refs=["1271"]), issue_states={"1271": "MERGED"}
+    )
+    assert any(f.startswith("UNKNOWN") for f in findings), findings
+    assert any("MERGED" in f for f in findings)
+
+
+def test_UNKNOWN_is_disclosed_but_never_scored_as_a_failure():
+    """A gap must be VISIBLE without being a DEFECT.
+
+    Scoring it as a failure would train a caller to suppress the check and lose
+    the CLOSED detection with it -- the `credentials.py` shape-3 posture.
+    """
+    verdict, findings = ssr.verify(
+        _record(mission_focus_refs=["9999"]), issue_states={"1271": "OPEN"}
+    )
+    assert verdict == ssr.OK          # not scored as a failure
+    assert findings                    # but never silent
+
+
+def test_UNKNOWN_alongside_CLOSED_still_reports_the_DEFECT_and_both():
+    """A gap must not mask a real defect, nor be dropped by one."""
+    verdict, findings = ssr.verify(
+        _record(mission_focus_refs=["1271", "9999"]),
+        issue_states={"1271": "CLOSED"},
+    )
+    assert verdict == ssr.DEFECT
+    assert any("CLOSED work" in f for f in findings)
+    assert any(f.startswith("UNKNOWN") for f in findings)
+
+
+def test_OPEN_and_CLOSED_still_behave_after_the_three_state_change():
+    """Do not fix the absent case and break the present one."""
+    v_open, f_open = ssr.verify(
+        _record(mission_focus_refs=["1271"]), issue_states={"1271": "OPEN"}
+    )
+    assert (v_open, f_open) == (ssr.OK, [])
+
+    v_closed, f_closed = ssr.verify(
+        _record(mission_focus_refs=["1271"]), issue_states={"1271": "CLOSED"}
+    )
+    assert v_closed == ssr.DEFECT
+    assert any("CLOSED work" in f for f in f_closed)
+
+
+def test_an_EMPTY_map_resolves_every_ref_to_UNKNOWN_but_None_stays_silent():
+    """`None` means the check was not requested; `{}` means it was and nothing is known.
+
+    Collapsing those would either make the offline seam mandatory or re-open the
+    silent pass, so they are deliberately different.
+    """
+    v_empty, f_empty = ssr.verify(_record(mission_focus_refs=["1271"]), issue_states={})
+    assert v_empty == ssr.OK
+    assert any(f.startswith("UNKNOWN") for f in f_empty), f_empty
+
+    v_none, f_none = ssr.verify(_record(mission_focus_refs=["1271"]), issue_states=None)
+    assert (v_none, f_none) == (ssr.OK, [])
