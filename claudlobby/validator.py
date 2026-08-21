@@ -452,6 +452,7 @@ def _validate_bots(
     # Grant-contract readers (folder-aware; shared with the P2 composer resolvers).
     from .loader import (
         integration_tool_grants,
+        iter_expertise_permissions,
         iter_guardrail_permissions,
         iter_integration_grants,
         iter_skill_grants,
@@ -656,12 +657,43 @@ def _validate_bots(
                     f"bot '{bot_name}': integration '{integ}' not in any library/integrations/ — skipped"
                 )
 
-        # Grant contracts on equipped sources — integrations (additive tool_grants),
-        # skills (additive tool_grants), guardrails (deny-capable permissions:) — all
-        # validated against the single F3(a) grammar via _grant_shape_warnings.
+        # Grant contracts on equipped sources — expertise (deny-capable
+        # permissions:), integrations (additive tool_grants), skills (additive
+        # tool_grants), guardrails (deny-capable permissions:) — all validated
+        # against the single F3(a) grammar via _grant_shape_warnings.
         # iter_integration_grants folder-expands dir/ equips so a contract nested in
         # an expanded folder is not silently skipped (same guarantee as skills).
+        #
+        # Expertise is checked here because it was the ONE grant-declaring source
+        # the shape check never ran on, and it is the source the shipped library
+        # actually uses to grant bare 'Bash' (#913). Three doors were policed and
+        # the fourth, unpoliced one is where the library does the thing the other
+        # three forbid. allow_all gets its own warning rather than riding the
+        # bare-'Bash' one: the parse keeps it as a separate flag and never expands
+        # it into .allow (loader._parse_expertise_permissions), so the expansion to
+        # ALL_TOOLS — bare 'Bash' included — happens later in the composer and is
+        # invisible to a check that only reads .allow.
         from .composer import resolve_effective_integrations
+
+        for area, xperms in iter_expertise_permissions(paths, bot.expertise):
+            if xperms is None:
+                continue
+            report.warnings.extend(
+                _grant_shape_warnings(
+                    bot_name, "expertise", area, xperms.allow, allow_side=True
+                )
+            )
+            report.warnings.extend(
+                _grant_shape_warnings(
+                    bot_name, "expertise", area, xperms.deny, allow_side=False
+                )
+            )
+            if xperms.allow_all:
+                report.warnings.append(
+                    f"bot '{bot_name}': expertise '{area}' declares allow_all — expands "
+                    "to ALL_TOOLS including bare 'Bash', which subsumes every "
+                    "Bash(<cmd> *) grant composed beside it"
+                )
 
         for name, grants in iter_integration_grants(
             paths, resolve_effective_integrations(bot, paths)

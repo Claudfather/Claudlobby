@@ -379,6 +379,32 @@ def iter_skill_grants(paths, equipped: list[str]) -> list[tuple[str, list[str]]]
     return out
 
 
+def iter_expertise_permissions(
+    paths, equipped: list[str]
+) -> list[tuple[str, ExpertisePermissions | None]]:
+    """Resolve equipped expertise areas to ``(area, permissions)`` pairs.
+
+    The expertise sibling of :func:`iter_guardrail_permissions`, and deliberately
+    NOT a copy of it: expertise entries are **not** folder-expanded. The two
+    shipped expertise resolvers — ``composer._resolve_expertise_permissions`` and
+    the validator's own existence check — both resolve an area with a bare
+    ``find_library_file``, so expanding ``dir/`` here would make this reader
+    disagree with what actually composes. A missing file is skipped rather than
+    yielded as ``None`` for the same reason: that is what the composer does, and
+    validate already raises a hard error for it elsewhere.
+    """
+    out: list[tuple[str, ExpertisePermissions | None]] = []
+    for area in equipped:
+        path = paths.find_library_file("expertise", area, ".md")
+        if path is None:
+            continue
+        item = parse_expertise_file(path)
+        if item is None:
+            continue
+        out.append((area, item.permissions))
+    return out
+
+
 def iter_guardrail_permissions(
     paths, equipped: list[str]
 ) -> list[tuple[str, ExpertisePermissions | None]]:
