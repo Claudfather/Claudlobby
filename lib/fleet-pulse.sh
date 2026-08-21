@@ -578,10 +578,25 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                 fi
                 if [ "$_should_fire" -eq 1 ]; then
                     _msg="FLEET ALERT: $_crit_type on ${_affected_count} bots (${_affected_bots# }). Check fleet health immediately."
-                    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
+                    _esc_rc=0
+                    _esc_err=$(TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" \
                     TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
-                        "$LIB_DIR/tg-post.sh" "$_msg" 2>/dev/null || true
-                    touch "$_esc_marker"
+                        "$LIB_DIR/tg-post.sh" "$_msg" 2>&1) || _esc_rc=$?
+                    if [ "$_esc_rc" -eq 0 ]; then
+                        touch "$_esc_marker"
+                    else
+                        # DO NOT touch the marker. It is what suppresses re-firing
+                        # for the whole debounce window, so touching it on failure
+                        # means a send that reached nobody buys itself silence --
+                        # and the condition is never raised again while it lasts.
+                        # Leaving it absent makes the next pass retry, which is the
+                        # only rung here that repairs itself once a token is fixed.
+                        printf '%s ALERT-DELIVERY-FAILED escalation %s: tg-post exit %s (%s) -- debounce marker NOT set, will retry next pass\n' \
+                            "$(ts_iso)" "$_crit_type" "$_esc_rc" "$(printf '%s' "$_esc_err" | tr '\n' ' ' | cut -c1-200)" >&2
+                        emit_fleet_event "alert_delivery_failed" "pulse" \
+                            "$(printf '{"for_event":"%s","channel":"telegram","exit":%s,"debounced":false}' \
+                                "$(json_escape "$_crit_type")" "$_esc_rc")" "" fleet
+                    fi
                 fi
             else
                 # Condition cleared — remove debounce marker

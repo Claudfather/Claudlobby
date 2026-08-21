@@ -155,6 +155,18 @@ else
     case "$FINDING" in *power*|*under-voltage*) KEY="undervoltage" ;; esac
     case "$FINDING" in *storage*) KEY="storage_stall" ;; esac
     emit_failure_alert "$(resolve_bots_dir "$FLEET")" "$KEY" "$MSG" || true
-    printf '%s\n' "$SIG" >"$STATE"
+    # Gate the fingerprint on delivery. This file is the de-dup state: once SIG
+    # is written, every later run takes the REPEAT branch above and NEVER
+    # ATTEMPTS DELIVERY AGAIN. Writing it after a failed send is what turned one
+    # undelivered hardware alarm into permanent silence -- the log filled with
+    # REPEAT lines while nobody had ever been told once. Same class as the
+    # fleet-pulse debounce marker, in a second file.
+    if [ "${_ALERT_DELIVERED:-0}" -eq 1 ]; then
+        printf '%s\n' "$SIG" >"$STATE"
+    else
+        echo "$TS DELIVERY-FAILED -- $MSG (fp $SIG; state NOT written, will retry next run)" >>"$LOG"
+        printf '%s ALERT-DELIVERY-FAILED %s: not delivered, fingerprint withheld so the next run retries\n' \
+            "$TS" "$KEY" >&2
+    fi
 fi
 exit 0

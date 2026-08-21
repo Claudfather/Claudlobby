@@ -30,17 +30,40 @@ chmod +x "$T/bin/vcgencmd" "$T/bin/journalctl" "$T/bin/tmux"
 
 ROOT="$T/root"; LOG="$ROOT/lib/host-health-check.log"
 
+# Stub tg-post at the path lib-common actually invokes ($CLAUDLOBBY_ROOT/lib/tg-post.sh),
+# exiting $TGPOST_RC. Before #977 this file was simply ABSENT, so every delivery
+# failed by accident and nothing depended on it. It does now: the de-dup
+# fingerprint is written only on a DELIVERED alert, so "does the alert go out"
+# is a variable these tests must control rather than inherit. Default 0 keeps
+# the de-dup contract below testing what it always tested.
+printf '#!/bin/bash\nexit "${TGPOST_RC:-0}"\n' > "$ROOT/lib/tg-post.sh"
+chmod +x "$ROOT/lib/tg-post.sh"
+
 # run_check THROTTLED JOURNAL BOOT_ID → one check in an isolated env; the
 # ALERT/REPEAT/OK verdict lands in $LOG. The alert-delivery leg is neutered:
 # scratch CLAUDLOBBY_ROOT has no lib/tg-post.sh, env -i drops any real token, and
 # tmux is a no-op — so nothing escapes to the real fleet.
 run_check() {
     env -i PATH="$T/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$T" \
-        CLAUDLOBBY_ROOT="$ROOT" \
+        CLAUDLOBBY_ROOT="$ROOT" TGPOST_RC="${TGPOST_RC:-0}" \
+        TELEGRAM_GROUP_CHAT_ID="-1001234567890" \
         THROTTLED="$1" JOURNAL="$2" HOST_HEALTH_BOOT_ID="$3" \
         bash "$LIB_DIR/host-health-check.sh" >/dev/null 2>&1 || true
 }
-last_verdict() { tail -1 "$LOG" 2>/dev/null | grep -oE 'ALERT|REPEAT|OK' | head -1; }
+# Read the verdict by ANCHOR, never by line position. Every log line is
+# `<ts> <TOKEN> -- <msg>`, so the verdict is field 2 followed by " -- "; this
+# takes the LAST line matching that grammar and ignores any other line type.
+#
+# It used to be `tail -1`, which broke the moment #977 appended a DELIVERY-FAILED
+# line after the verdict. `tail -2` would have been the same defect with a new
+# constant -- it re-breaks on the next line anyone adds. Anchoring on the line's
+# own grammar is what makes it stable, and DELIVERY-FAILED is correctly excluded
+# because it is not a verdict.
+last_verdict() {
+    grep -oE '^[^ ]+ (OK|ALERT|REPEAT) --' "$LOG" 2>/dev/null | tail -1 | awk '{print $2}'
+}
+log_has() { grep -qE "$1" "$LOG" 2>/dev/null; }
+state_file() { printf '%s' "$ROOT/lib/host-health-check.state"; }
 reset() { rm -f "$ROOT/lib/host-health-check.state" "$LOG"; }
 
 echo "=== host-health-check detection + de-dup contract ==="
@@ -123,5 +146,40 @@ run_check "0x0" "Jul 24 10:05:00 host kernel: mmcblk0: error -84 sending status 
 assert_eq "same device mmcblk0, volatile error code -> REPEAT (one ongoing incident)" "REPEAT" "$(last_verdict)"
 
 echo ""
+
+# --- #977: a FAILED delivery must be loud and must not buy silence -----------
+# The bug: the fingerprint was written unconditionally, so an alert that reached
+# nobody put the check into REPEAT forever. Measured on the live Pi: the hardware
+# alarm fired 2026-08-17 and has been logging REPEAT hourly ever since, having
+# never been delivered once.
+
+reset
+TGPOST_RC=3 run_check "0x50005" "" "bootA"      # 3 = API rejected the send
+assert_eq "#977 failed delivery still records the ALERT verdict" "ALERT" "$(last_verdict)"
+log_has 'DELIVERY-FAILED --' && r=yes || r=no
+assert_eq "#977 failed delivery is LOUD in the log" "yes" "$r"
+[ -s "$(state_file)" ] && r=yes || r=no
+assert_eq "#977 fingerprint WITHHELD on a failed delivery" "no" "$r"
+
+TGPOST_RC=3 run_check "0x50005" "" "bootA"      # same condition, second run
+assert_eq "#977 it RETRIES instead of going REPEAT-forever" "ALERT" "$(last_verdict)"
+
+# ...and the moment delivery works, de-dup resumes. Both directions, because a
+# fix that only ever retries would alert on every single pass forever.
+TGPOST_RC=0 run_check "0x50005" "" "bootA"
+assert_eq "#977 delivery succeeds -> ALERT (the retry lands)" "ALERT" "$(last_verdict)"
+[ -s "$(state_file)" ] && r=yes || r=no
+assert_eq "#977 fingerprint written once delivered" "yes" "$r"
+TGPOST_RC=0 run_check "0x50005" "" "bootA"
+assert_eq "#977 de-dup resumes after a delivered alert" "REPEAT" "$(last_verdict)"
+
+# The verdict reader must survive a new trailing line type. This is the exact
+# fragility that broke this file: tail -1 read the DELIVERY-FAILED line instead
+# of the verdict, and tail -2 would break on the next line anyone appends.
+reset
+TGPOST_RC=3 run_check "0x50005" "" "bootA"
+printf '%s SOMETHING-NEW -- a line type that does not exist yet\n' "2026-01-01T00:00:00Z" >> "$LOG"
+assert_eq "#977 verdict is read by anchor, not position (survives trailing lines)" "ALERT" "$(last_verdict)"
+
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ] || exit 1
