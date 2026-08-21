@@ -60,11 +60,40 @@ The GitHub MCP is REST-backed, so `mcp__github__*` failing while `gh pr` / `gh i
 | divergence cause | code | correct response |
 |---|---|---|
 | one token, different throttle bucket | 403 | expected — reroute and keep working |
+| the token may not touch that resource | 403 | not throttling — see the rung below; rerouting cannot help |
 | two credentials, one revoked or absent | 401 | a real auth failure — stop and report |
 
 A 401 is **never** the throttle case, so "expected, not a broken MCP" does not apply to it and neither does anything else in this section.
 
 **Rejected is not the same as absent, and a bare 401 cannot tell them apart.** Run the same URL twice, once unauthenticated and once with the credential: `200` then `401` is a credential being **presented and rejected**. Conversely an `mcp__github__*` success proves nothing about authentication — an anonymous read of a public repo returns real data at `200`, so treat it as a public read unless the endpoint required a credential (`gh api user` does).
+
+#### Gotcha: `permissions` describes the ACCOUNT, not the credential you are holding
+
+A 403 has a third cause the section above does not cover, and the reroute reflex is wrong for
+it: the token simply may not touch that resource. Rerouting to GraphQL or `gh` porcelain finds
+the same wall, because nothing is throttled.
+
+**The trap is that GitHub will tell you the permission is there.** `gh api repos/<owner>/<repo>`
+returns a `permissions` block, and it describes **the account's role on the repo** — not what the
+credential you presented is scoped to do. A fine-grained PAT can report `admin: true` and still
+403 on that repo's **secrets**. Measured twice in one night, two different tokens, same repo.
+
+This is the same lie as `permissions.push=true`, which has now been wrong in three distinct
+mechanisms on this estate: a credential-helper chain answering with a different identity, two
+same-login tokens with different reach, and now a fine-grained scope. One field, three ways to
+be wrong, and the field looks authoritative every time.
+
+**So never conclude access from `permissions`. Attempt the operation.** It is one call and it is
+definitive, where the field is only ever a guess:
+
+```bash
+# secrets: list is the cheap read that actually exercises the scope
+gh api repos/<owner>/<repo>/actions/secrets --jq '.total_count'
+```
+
+**The general rule, which is why this is filed here rather than under any one API:** a field
+describing a *role* is not a measurement of a *credential*. When the two can disagree, the only
+honest check is the operation you actually want to perform.
 
 #### Gotcha: a 401 kills every door — there is nothing to reroute to
 
@@ -91,5 +120,6 @@ What to do:
 
 - `401 Bad credentials` → credential revoked or expired server-side. **Every door is dead and there is nothing to reroute to** — see "Gotcha: a 401 kills every door". Commit locally, report blocked, and do NOT try to re-authenticate; regenerating the token is the human's call.
 - `403 rate limit` → **reroute, do not wait.** Two different limits return this. **Primary** (5,000/hr) is visible in `gh api rate_limit` and publishes a reset. **Secondary** (abuse) is invisible there — the meter reads a full quota while every REST call 403s — and publishes **no reset**, so "wait" has no defined end. Do not read the meter to decide whether you are throttled; test the door: `gh api repos/<org>/<repo>`. Then see "Gotcha: a 403 blocks REST, not GitHub" — much of the work is still reachable.
+- `403` on a resource you believe you may touch (repo **secrets** is the case that bit us) → **not throttling.** The `permissions` block describes the account's role, not your credential's scope, so `admin: true` can sit beside a 403 — see "Gotcha: `permissions` describes the ACCOUNT". Rerouting cannot help; attempt the operation to learn the truth, then report blocked.
 - `422 Validation Failed` → usually a missing required field or invalid label name.
 - Context deadline exceeded → proxy/network issue. Retry once, then report blocked.
