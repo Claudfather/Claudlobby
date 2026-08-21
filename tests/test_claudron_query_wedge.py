@@ -434,7 +434,7 @@ def test_cap_is_overridable(tmp_path):
 # argument would not settle that; these tests are the reason it does not have to.
 
 PREAMBLE = (
-    "[fleet memory: artemis-skills full-system spec extraction "
+    "[fleet memory: example-skills full-system spec extraction "
     "(/vault/skills-framework-index.md); Correct-then-sweep: a fix applied only "
     "where it was pointed out leaves the superseded claim alive in the same "
     "document (/vault/correct-then-sweep.md)] "

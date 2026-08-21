@@ -444,7 +444,7 @@ check_telegram_tokens() {
         # Compare against the DECLARED @username, never TELEGRAM_BOT_HANDLE. The
         # handle is channel identity — a state-dir slug that defaults to bot_id —
         # and a slug is not a username. Measured on a live 9-bot fleet: every bot
-        # held a CORRECT, distinct token whose getMe answered @artemis_*_bot while
+        # held a CORRECT, distinct token whose getMe answered @example_*_bot while
         # the slug read @<bot_id>, so comparing those declares all nine cross-wired
         # and edge-alerts once per bot, on the channel that must stay trustworthy
         # (#1095). TELEGRAM_BOT_USERNAME is emitted only when a fleet spells the

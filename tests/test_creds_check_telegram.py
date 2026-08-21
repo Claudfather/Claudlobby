@@ -227,7 +227,7 @@ def test_undeclared_username_does_not_false_fail_as_cross_wired(tmp_path):
     The composer defaults TELEGRAM_BOT_HANDLE to bot_id (#1097/#1107) and emits
     TELEGRAM_BOT_USERNAME only when a fleet spells the handle out. Measured on a
     live 9-bot fleet, every bot held a CORRECT distinct token whose getMe
-    answered @artemis_*_bot while the slug read @<bot_id> — comparing those
+    answered @example_*_bot while the slug read @<bot_id> — comparing those
     declares all nine cross-wired and edge-alerts once per bot (#1095). getMe
     still proves the token; only the comparison is skipped.
     """

@@ -547,7 +547,7 @@ class TestAutonomousRunnerConfig:
         cfg = AutonomousRunnerConfig(
             skill="/claudna:implement-plan",
             cadence="2h",
-            target_repo="artemis-xyz/dbt",
+            target_repo="example-org/dbt",
             args="--source github",
             picker=AutonomousRunnerPicker(
                 type="github_issues",
@@ -591,7 +591,7 @@ class TestAutonomousRunnerConfig:
             "autonomous_runner": {
                 "skill": "/claudna:implement-plan",
                 "cadence": "2h",
-                "target_repo": "artemis-xyz/dbt",
+                "target_repo": "example-org/dbt",
                 "args": "--source github",
                 "picker": {
                     "type": "github_issues",
