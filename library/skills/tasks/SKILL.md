@@ -22,7 +22,7 @@ Manage personal tasks and reminders stored in Notion.
 | Priority | select | High, Medium, Low |
 | Due date | date | |
 | Effort level | select | Small, Medium, Large |
-| Tags | multi_select | Finances, Taxes, Music |
+| Tags | multi_select | <your tag values> |
 | Description | rich_text | |
 | Related Contact | relation | Links to Contacts database (bidirectional) |
 | Assignee | people | |
@@ -184,7 +184,7 @@ In progress:
 - <example task D>
 
 Due this week:
-- File quarterly taxes (Apr 8) — High, Small
+- <example task E> (due <date>) — High, Small
 ```
 
 **Single task:**

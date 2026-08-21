@@ -27,9 +27,9 @@ When processing inbox for briefings or general review, categorize emails:
 | Category | What to show | Gmail query hint |
 |----------|-------------|-----------------|
 | **Actionable** | Emails requiring a response or action | `is:unread -category:promotions -category:social` then filter manually |
-| **Dev/Deployment** | CI/CD failures, build notifications | From: GitHub notifications, Vercel, Railway, Sentry |
+| **Dev/Deployment** | CI/CD failures, build notifications | From: your CI/CD, hosting, and error-tracking providers |
 | **Newsletters** | One-liner summaries only | From: substack, newsletters |
-| **LinkedIn Jobs** | Job title + company only | From: `jobalerts-noreply@linkedin.com` |
+| **Job alerts** | Job title + company only | From: your job-alert sender |
 | **Noise** | Skip entirely | Amazon reviews, promotions, social |
 
 ## Operations
@@ -61,8 +61,8 @@ Newsletters:
 - Industry Weekly: top stories digest
 
 Jobs:
-- BigCo Data Scientist 5
-- AcmeCorp DS Manager
+- <Company> <Job Title>
+- <Company> <Job Title>
 ```
 
 ### 2. Search Emails

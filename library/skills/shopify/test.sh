@@ -291,8 +291,13 @@ ok "every new door is wired into dispatch"
 
 # --- public-repo hygiene: no real store identifiers ------------------------
 
-if grep -rEiq 'myshopify\.com' "$DIR" --include='*.sh' --include='*.md' --include='*.json' \
-   | grep -v 'example\.myshopify\.com' | grep -v 'myshop\.myshopify\.com'; then
+# NOTE: never `grep -q` upstream of a pipe. -q suppresses stdout, so the
+# downstream `grep -v` reads empty input and always exits 1 — the branch below
+# could never be taken and this guard silently passed a real store domain.
+# Capture the filtered output and test it directly instead.
+_store_leak=$(grep -rEi 'myshopify\.com' "$DIR" --include='*.sh' --include='*.md' --include='*.json' \
+   | grep -v 'example\.myshopify\.com' | grep -v 'myshop\.myshopify\.com' || true)
+if [ -n "$_store_leak" ]; then
   no "a non-placeholder myshopify domain is present"
 else ok "no real store domain committed"; fi
 

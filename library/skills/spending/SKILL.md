@@ -60,8 +60,8 @@ Total recurring: ~$XXX/mo
 
 Group transactions by merchant type (best effort from merchant names):
 - Food & Dining
-- Transportation (Uber, gas)
-- Shopping (Amazon, retail)
+- Transportation (rideshare, gas)
+- Shopping (online retail)
 - Subscriptions
 - Bills & Utilities
 - Other
@@ -93,12 +93,12 @@ The summary header must always include:
 3. **All three totals** — gross spend, refunds, income, and net (income - spend + refunds)
 
 ```
-SPENDING — Mar 30 \- Apr 5 \(7\-day lookback, as of 4:00 PM\)
+SPENDING — <start date> \- <end date> \(7\-day lookback, as of <time>\)
 
-Gross spend: \$2,134 \| Refunds: \$1,351
-Net spend: \$783 \(\$112/day\)
-Income: \$8,483
-Net: \+\$7,700
+Gross spend: \$<gross> \| Refunds: \$<refunds>
+Net spend: \$<net> \(\$<per\-day>/day\)
+Income: \$<income>
+Net: \+\$<net total>
 
 By category:
 \.\.\. \(spend breakdown\)
@@ -118,6 +118,6 @@ Income:
 4. When comparing periods, note if snapshots are missing for some days
 5. Round dollar amounts to 2 decimal places
 6. Default to "this week" if no period specified
-7. **Separate income from refunds.** Positive transactions are not all the same. Use merchant name and context to distinguish actual income (payroll, dividends, Zelle from people) from refunds/credits (returned charges, Amex statement credits, merchant refunds). Present them as separate sections — a $299 refund is not income, it's a return of spend. Show both the original charge and the refund transparently so the user can see what happened, rather than netting them into a single number.
+7. **Separate income from refunds.** Positive transactions are not all the same. Use merchant name and context to distinguish actual income (payroll, dividends, peer\-to\-peer transfers) from refunds/credits (returned charges, card statement credits, merchant refunds). Present them as separate sections — a refund is not income, it's a return of spend. Show both the original charge and the refund transparently so the user can see what happened, rather than netting them into a single number.
 
 $ARGUMENTS
