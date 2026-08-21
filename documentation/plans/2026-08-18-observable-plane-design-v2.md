@@ -31,7 +31,7 @@ The observable plane is first an **organizational flight recorder**. The cockpit
 | F9 | Communications truth | Intent/attempt/ack split (§7); **no `delivered` for tmux, ever** — `pane_submitted` + acknowledgement; at-least-once with idempotent handling; explicit `unknown` |
 | F10 | Identity | Minted uids; names are aliases (§4) |
 | F11 | Vocabulary | Two axes: `message_class` × `command_type` (§7), reconciled with landed `--type` semantics |
-| F12 | Snapshots | Keyframes for slow-changing resolved state only; volatile telemetry to presence/health events (§9) |
+| F12 | Snapshots | Keyframes for slow-changing resolved state only; volatile telemetry to metric_samples (§9) |
 | F13 | Vault layout | `local/` is the primary vault (Claudron-made, e.g. `<operator>-claudron-vault`) gaining a `fleets/` namespace; N secondary mounts under `vaults/` (gitignore already landed upstream); graduation ladder root-mode → `vault init` → remote |
 | F14 | Terminology | Host = the machine, THE container (Host → Fleet → Bot); "system" = the claudlobby install only; rename PR **off the critical path** |
 | F15 | Sequencing | Substrate before UI; phases §18; vocabulary/layout/teams PRs never block the semantic slice |
@@ -125,7 +125,7 @@ Event vocabulary (append-only `task_events`): `contract_created, dispatch_intend
 
 `blocked` semantics: current runtime treats blocked as terminal (`dispatch-overdue.py` `_TERMINAL`); the operator model may need open-but-waiting — §19 lock item, recommendation `blocked_waiting` vs `returned_blocked` as two events, **no silent behavior change during migration**.
 
-## 9. Registry snapshots v2 + presence/health split
+## 9. Registry snapshots v2 + metric-sample split
 
 **Keyframes keep:** identity, declared topology (incl. optional groups), resolved configuration, equipment, permission posture, versioned hashes, vault binding, software versions. **Presence/health events take:** CPU/load, disk, thermal/under-voltage, boot/session state, vault ahead/behind freshness, RC state, pane activity, heartbeats. (Volatile data inside keyframes would invalidate the tens-of-rows/week envelope.)
 
@@ -139,7 +139,7 @@ Event vocabulary (append-only `task_events`): `contract_created, dispatch_intend
 
 This section supersedes the "v1 §10 normative for fields" pointer: the payloads below ARE the final field lists. Fields marked ⚑ carry privacy classification `sensitive` (§11: alias-first rendering, reveal is an explicit act, alias-only exports).
 
-### HostPayload (keyframe; volatile → presence per F12/F20)
+### HostPayload (keyframe; volatile → metric_samples per F12/F20)
 
 ```yaml
 host_uid: str            # minted (F10); aliases: hostname, magicdns, operator_label?
@@ -155,7 +155,7 @@ system:                                          # the claudlobby install (F14)
   defaults_tier_hash: str                        # canonical hash of system.yaml defaults
 declared_fleets: [str]   # fleet aliases from manifests — NEVER process inference
 schema_version: str
-# OUT to presence: load, mem_available, disk_free, thermal/undervoltage flags,
+# OUT to metric_samples: load, mem_available, disk_free, thermal/undervoltage flags,
 # boot_time, tailscale up/ip.
 ```
 
@@ -170,7 +170,7 @@ compat: {floor: str, cli_version: str?, ok: bool}   # claudron_compat
 carries_fleets: bool
 gitignore_safe: bool                             # doctor rung: runtime/ledger/.env covered
 schema_version: str
-# OUT to presence: behind/ahead/last_fetch freshness (a failed fetch must
+# OUT to metric_samples: behind/ahead/last_fetch freshness (a failed fetch must
 # never render as "up to date" — sample status carries fetch_failed).
 ```
 
@@ -259,12 +259,12 @@ schedule: {briefings: [str], sprint: str?}
 vault_binding: {vault_uid: str?, path: str}?     # bot-tier override else fleet
 composed_hashes: {claude_md: str, bot_conf: str, mcp_json: str, settings_local: str}
 declared_hash: str;  vault_rev: str?;  schema_version: str
-# OUT to presence: session up, bridge up, RC live, pane activity, RSS.
+# OUT to metric_samples: session up, bridge up, RC live, pane activity, RSS.
 ```
 
 ### MetricSample (F20 — the volume lane; table `metric_samples`, walked 2026-08-20)
 
-*(Renamed from `metric_samples`: rows are neither presence nor events — they are **samples of levels**. "Presence" now names the Lane C LIVE derivation — is-it-up-right-now, in-memory, poller-fed, never a table — and "events" stays reserved for detections per the system_events reading rule.)*
+*(Renamed from `presence_health_events`: rows are neither presence nor events — they are **samples of levels**. "Presence" now names the Lane C LIVE derivation — is-it-up-right-now, in-memory, poller-fed, never a table — and "events" stays reserved for detections per the system_events reading rule.)*
 
 ```yaml
 # envelope +
