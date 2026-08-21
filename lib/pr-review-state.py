@@ -144,8 +144,25 @@ VERDICT_HEADER = re.compile(
 #: ``test_the_re_prefix_is_inert_on_observed_phrasings`` so the next reader gets
 #: that from an executable check rather than re-deriving it from a mutation run
 #: that comes back green.
+#:
+#: STEM WIDTH IS THE DIFFERENCE BETWEEN WORKING ON A DISCIPLINED FLEET AND NOT.
+#: The first stem set was ``reviewed at|against`` alone, and on the fleet with the
+#: real use case that reached 9 of 16 verdict-shaped comments (56%). The misses
+#: were not sloppy verdicts — they were HOUSE PHRASING: "Verification review at",
+#: "Re-verification at", "Re-verified at". That inverts the usual intuition: the
+#: better disciplined a fleet, the more consistently it phrases things, so a
+#: narrow matcher misses ALL of them at once rather than a scattered few. A
+#: systematic miss also hides better than a random one, because the output stays
+#: plausible.
+#:
+#: WHAT IS DELIBERATELY EXCLUDED, and it is a semantic line rather than a
+#: coverage one: ``Merging at <sha>``, ``Fixed at <sha>``, ``Rebased onto <sha>``
+#: all name a commit somebody PRODUCED, not one a reviewer READ. Admitting them
+#: would raise the hit rate and anchor verdicts to the wrong commit — the decoy
+#: failure with extra steps. The stems are verbs of reviewer EXAMINATION only.
 SHA_ANCHOR = re.compile(
-    r"\b(?:re-?)?reviewed\s+(?:against|at)[^0-9a-f]{0,4}([0-9a-f]{7,40})\b",
+    r"\b(?:re-?)?(?:verification\s+)?(?:review(?:ed)?|verif(?:ied|ication))"
+    r"\s+(?:against|at)[^0-9a-f]{0,6}([0-9a-f]{7,40})\b",
     re.I,
 )
 

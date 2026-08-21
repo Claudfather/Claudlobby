@@ -521,3 +521,72 @@ class TestAnchorVerbBoundary:
         # The single divergence, stated so it is not rediscovered as a surprise.
         assert with_prefix.search("Rereviewed at abc1234")
         assert not without.search("Rereviewed at abc1234")
+
+
+class TestAnchorStemWidth:
+    """#1322 review round 1, virgil (use-case lens) — a matcher gap wearing a bound.
+
+    Bound (b) says staleness is detectable only where the reviewer WROTE the SHA.
+    Two `storydump#966` verdicts wrote it and were still missed, so the bound did
+    not cover them: the stems were too narrow, not the convention too loose.
+
+    Measured on the 11-PR corpus that motivated the tool (storydump 964/966/967/
+    968/971/972/976, really-personal-finance 164/167/169/172): the original
+    `reviewed at|against` stem reached **9 of 16** verdict-shaped comments (56%);
+    widened it reaches **14 of 16** (88%).
+
+    The inversion is the part worth keeping: every miss was HOUSE PHRASING, not
+    sloppiness. A disciplined fleet phrases things consistently, so a narrow
+    matcher misses all of them at once rather than a scattered few — and a
+    systematic miss hides better than a random one, because the output stays
+    plausible.
+    """
+
+    #: Verbatim from the corpus.
+    REAL_HOUSE_PHRASINGS = [
+        ("storydump#966", "**[astrid]** Verification review at `bc47cbcb`", "bc47cbcb"),
+        ("storydump#966", "**[astrid]** Re-verification at **`bcaf7a71`**", "bcaf7a71"),
+        ("storydump#972", "**[astrid]** Verification review at **`d80f927`**", "d80f927"),
+        ("storydump#972", "**[astrid]** Re-verification at **`57dbb25`**", "57dbb25"),
+        ("storydump#976", "Re-verified at **`adadf05`**", "adadf05"),
+    ]
+
+    @pytest.mark.parametrize("label,body,want", REAL_HOUSE_PHRASINGS)
+    def test_house_phrasings_that_the_narrow_stem_missed(self, label, body, want):
+        assert prs.parse_anchor(body) == want, label
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "**Merging at `7721ab0`**",
+            "Fix pushed — `92a92e6` -> `d80f927`. Fast-forward only.",
+            "Rebased onto post-#972 main — `a7fe504`.",
+            "Fixed at abc1234",
+        ],
+    )
+    def test_producer_actions_are_deliberately_excluded(self, body):
+        """A SEMANTIC line, not a coverage one — and the reason the rate is not higher.
+
+        `Merging at`, `Fixed at` and `Rebased onto` name a commit somebody
+        PRODUCED, not one a reviewer READ. Admitting them would lift the corpus
+        hit-rate from 88% to 94% and anchor verdicts to the wrong commit — the
+        decoy failure with extra steps. `Merging at 7721ab0` is the single
+        remaining unanchored-but-hex-bearing comment in the corpus, and it is
+        excluded on purpose rather than missed.
+        """
+        assert prs.parse_anchor(body) is None
+
+    @pytest.mark.parametrize(
+        "body", ["unreviewed at abc1234", "unverified at abc1234",
+                 "prereviewed against abc1234"]
+    )
+    def test_widening_did_not_reopen_the_mid_word_hole(self, body):
+        """Widening the stems must not cost the boundary that MINOR 1 added."""
+        assert prs.parse_anchor(body) is None
+
+    def test_widening_did_not_reopen_the_decoy_hole(self):
+        """The load-bearing guarantee: more stems must not mean hex-first behaviour."""
+        assert prs.parse_anchor(REAL_DECOY_LINE) is None
+        assert prs.parse_anchor(REAL_APPROVE_BODY) == "b27ffc2"
+        for label, body in TestShaAnchorRegex.ARI_MULTI_HEX:
+            assert prs.parse_anchor(body) is None, label
