@@ -514,7 +514,7 @@ git commit -m "feat(plane): id minting + persisted host uid"
 **Interfaces:**
 - Produces (consumed by ingest.py, emit_api.py, commands/plane.py):
   - `class EmitRequest(BaseModel)` — the wire contract doors/tests submit: `event_type: str`, `occurred_at: AwareDatetime | None`, `emitter: str`, `source_ref: str | None`, `fleet: str | None` (alias), `payload: dict`.
-  - `FAMILIES: dict[str, type[BaseModel]]` mapping event_type → payload model: `"comm_intent" → CommIntent`, `"transport_attempt" → TransportAttempt`, `"work_item" → WorkItem`, `"task_attempt" → TaskAttempt`, `"task_event" → TaskEvent`.
+  - `FAMILIES: dict[str, type[BaseModel]]` mapping event_type → payload model: `"communication_intent" → CommunicationIntent`, `"transport_attempt" → TransportAttempt`, `"work_item" → WorkItem`, `"task_attempt" → TaskAttempt`, `"task_event" → TaskEvent`.
   - Enums as `Literal` sets: `MESSAGE_CLASSES`, `COMMAND_TYPES`, `ATTEMPT_STATES`, `TASK_EVENTS` (exact values below).
   - `validate_request(raw: dict) -> tuple[EmitRequest, BaseModel]` — parses envelope then family payload; raises `ContractViolation` (carries `.errors`).
   - `export_schemas() -> dict` — JSON Schema per family + envelope (feeds F2's TS codegen later).
@@ -571,13 +571,13 @@ def _intent_payload(**over) -> dict:
 
 def test_families_registered():
     assert set(FAMILIES) == {
-        "comm_intent", "transport_attempt", "work_item", "task_attempt", "task_event"
+        "communication_intent", "transport_attempt", "work_item", "task_attempt", "task_event"
     }
 
 
 def test_valid_intent_parses():
-    env, payload = validate_request(_req("comm_intent", _intent_payload()))
-    assert env.event_type == "comm_intent"
+    env, payload = validate_request(_req("communication_intent", _intent_payload()))
+    assert env.event_type == "communication_intent"
     assert payload.message_class == "task_request"
     assert payload.body_bytes == len(b"review PR 42")
     assert payload.truncated is False
@@ -590,12 +590,12 @@ def test_unknown_event_type_is_violation():
 
 def test_unknown_message_class_is_violation_not_coercion():
     with pytest.raises(ContractViolation):
-        validate_request(_req("comm_intent", _intent_payload(message_class="shout")))
+        validate_request(_req("communication_intent", _intent_payload(message_class="shout")))
 
 
 def test_extra_fields_rejected():
     with pytest.raises(ContractViolation):
-        validate_request(_req("comm_intent", _intent_payload(surprise=1)))
+        validate_request(_req("communication_intent", _intent_payload(surprise=1)))
 
 
 def test_body_cap_truncates_and_hashes():
@@ -639,8 +639,8 @@ def test_transport_attempt_states():
 
 def test_schemas_export():
     schemas = export_schemas()
-    assert "envelope" in schemas and "comm_intent" in schemas
-    assert schemas["comm_intent"]["title"] == "CommIntent"
+    assert "envelope" in schemas and "communication_intent" in schemas
+    assert schemas["communication_intent"]["title"] == "CommunicationIntent"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -733,7 +733,7 @@ def cap_body(text: str) -> BodyFields:
     )
 
 
-class CommIntent(_Strict):
+class CommunicationIntent(_Strict):
     msg_id: str = Field(pattern=ID_PATTERNS["msg"])
     sender: str = Field(min_length=1)          # alias; resolved to uid at ingest
     sender_session_uid: Optional[str] = Field(None, pattern=ID_PATTERNS["session"])
@@ -787,7 +787,7 @@ class WorkItem(_Strict):
     repo: Optional[str] = Field(None, pattern=r"[^/\s]+/[^/\s]+")  # WHERE: owner/name
     project_key: Optional[str] = Field(None, pattern=r"[a-z][a-z0-9-]*")  # projects.yaml slug
     # Authored, not relayed: oversized bodies REJECT (contract violation),
-    # never truncate-with-proof — the comms rule is for relayed content.
+    # never truncate-with-proof — the communications rule is for relayed content.
     body: Optional[str] = Field(None, max_length=16_384)
 
 
@@ -814,7 +814,7 @@ class TaskEvent(_Strict):
 
 
 FAMILIES: dict[str, type[BaseModel]] = {
-    "comm_intent": CommIntent,
+    "communication_intent": CommunicationIntent,
     "transport_attempt": TransportAttempt,
     "work_item": WorkItem,
     "task_attempt": TaskAttempt,
@@ -1503,7 +1503,7 @@ def env(tmp_path: Path):
 
 def _intent_req(event_id=None) -> dict:
     return {
-        "event_type": "comm_intent",
+        "event_type": "communication_intent",
         "emitter": "test-suite",
         "fleet": "example-fleet",
         "event_id": event_id,
@@ -1531,7 +1531,7 @@ def test_ingest_writes_ledger_and_family(env):
     assert row["sender_uid"].startswith("actor_")
     assert row["fleet_uid"].startswith("fleet_")
     ledger = conn.execute("SELECT family FROM ingest_ledger").fetchone()
-    assert ledger["family"] == "comm_intent"
+    assert ledger["family"] == "communication_intent"
 
 
 def test_duplicate_event_id_is_success_and_writes_nothing(env):
@@ -1607,7 +1607,7 @@ from pydantic import BaseModel
 
 from . import PLANE_SCHEMA_VERSION
 from .contracts import (
-    CommIntent,
+    CommunicationIntent,
     EmitRequest,
     TaskAttempt,
     TaskEvent,
@@ -1649,7 +1649,7 @@ def _envelope_values(seq, event_id, env: EmitRequest, payload, *, host_uid, flee
 
 
 def _insert_family(conn, env, payload, base, now):
-    if isinstance(payload, CommIntent):
+    if isinstance(payload, CommunicationIntent):
         sender_uid = resolve_party(conn, payload.sender, now)
         recipient_uid = (
             resolve_party(conn, payload.recipient, now) if payload.recipient else None
@@ -1819,7 +1819,7 @@ from claudlobby.plane.spool import (
 
 def _req(msg_suffix="2") -> dict:
     return {
-        "event_type": "comm_intent",
+        "event_type": "communication_intent",
         "emitter": "test-suite",
         "fleet": "example-fleet",
         "payload": {
@@ -2087,7 +2087,7 @@ def _run(args: list[str], stdin: str | None = None, cwd: Path | None = None):
 
 def _intent_json() -> str:
     return json.dumps({
-        "event_type": "comm_intent",
+        "event_type": "communication_intent",
         "emitter": "cli-test",
         "fleet": "example-fleet",
         "payload": {
@@ -2101,7 +2101,7 @@ def _intent_json() -> str:
 
 
 def test_emit_commits_and_prints_event_id(tmp_path: Path):
-    r = _run(["--root", str(tmp_path), "emit", "comm_intent", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "emit", "communication_intent", "--json", "-"],
              stdin=_intent_json())
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip().startswith("ev_")
@@ -2113,7 +2113,7 @@ def test_emit_commits_and_prints_event_id(tmp_path: Path):
 def test_emit_contract_violation_exits_2(tmp_path: Path):
     bad = json.loads(_intent_json())
     bad["payload"]["message_class"] = "yell"
-    r = _run(["--root", str(tmp_path), "emit", "comm_intent", "--json", "-"],
+    r = _run(["--root", str(tmp_path), "emit", "communication_intent", "--json", "-"],
              stdin=json.dumps(bad))
     assert r.returncode == 2
     assert "message_class" in r.stderr
@@ -2124,11 +2124,11 @@ def test_emit_contract_violation_exits_2(tmp_path: Path):
 
 
 def test_plane_status_reports(tmp_path: Path):
-    _run(["--root", str(tmp_path), "emit", "comm_intent", "--json", "-"],
+    _run(["--root", str(tmp_path), "emit", "communication_intent", "--json", "-"],
          stdin=_intent_json())
     r = _run(["--root", str(tmp_path), "plane", "status"])
     assert r.returncode == 0
-    assert "comm_intent" in r.stdout and "spool" in r.stdout
+    assert "communication_intent" in r.stdout and "spool" in r.stdout
 
 
 def test_plane_schema_exports_json(tmp_path: Path):
@@ -2232,7 +2232,7 @@ from ..plane.migrations import migrate
 from ..plane.spool import drain, quarantine_dir, spool_dir, spool_entries
 
 _FAMILY_TABLES = {
-    "comm_intent": "communication_intents",
+    "communication_intent": "communication_intents",
     "transport_attempt": "transport_attempts",
     "work_item": "work_items",
     "task_attempt": "task_attempts",
@@ -2342,7 +2342,7 @@ Register in `_parsers.py` (append inside `register_subparsers`, mirroring neighb
 ```python
     # --- observable plane (Phase 1 kernel) ---
     pe = sub.add_parser("emit", help="Validated event ingest into the plane db")
-    pe.add_argument("event_type", help="comm_intent | transport_attempt | work_item | task_attempt | task_event")
+    pe.add_argument("event_type", help="communication_intent | transport_attempt | work_item | task_attempt | task_event")
     pe.add_argument("--json", required=True, help="Request JSON path, or '-' for stdin")
     pe.set_defaults(func=cmd_emit)
 
