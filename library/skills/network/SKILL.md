@@ -221,7 +221,7 @@ Shape: `<date> (<operation>): <evidence>. <what changed>.` One to three sentence
 NETWORK SCAN — Apr 4
 
 Correspondence logged:
-- <Contact A> (<Company>): replied to your follow-up re: <role> role
+- <Contact A> (<Company>): replied to your follow-up re: the <role> role
 - <Contact E> (<Hedge Fund>): recruiter outreach about quant role
 
 Suggested new contacts:
@@ -232,7 +232,7 @@ Job + Contact matches:
 - <Company> DS Manager: no contacts
 
 Stale contacts (90+ days):
-- <Contact F> (<Company>) — last contact Sep 4, 2025
+- <Contact F> (<Company B>) — last contact Sep 4, 2025
 - <Contact G> (<Recruiting Firm>) — last contact Sep 30, 2025
 
 Follow-ups overdue: 5 (see /contacts for details)
