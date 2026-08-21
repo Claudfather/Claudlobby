@@ -50,12 +50,31 @@ Trivial to run a fleet of distinct, cooperating bots on cheap hardware — and t
 - Telegram formatting helpers and channel reliability improvements
 
 **Current sprint focus:**
-1. Migrate from shared GitHub PAT to per-bot GitHub Apps, with token-vending sidecar for installation token refresh
-2. Replace the manual "GitHub PAT in env vars" pattern in bot config with App-based auth
-3. Integrate clauDNA marketplace plugin install into the bootstrap workflow
-4. ~~Add Claudron MCP server config to bot bootstrap~~ and document the query-before / write-after pattern — **superseded by decision C** (2026-07-18, `documentation/decisions/2026-07-18-claudron-consumption-door.md`; boundary spec §10.5.6). There is no Claudron MCP server to add to the bootstrap — it is parked as a demand-gated option. Fleet consumption goes through the **CLI door** (clauDNA's `/claudron` · `/recall` · `/capture` skills wrapping the `claudron` CLI), wired per bot by the L2 session loop: set `claudron_vault_path`, and the compositor emits `CLAUDRON_VAULT_PATH` plus the session-loop hooks. The query-before / write-after pattern is documented in a vault-wired bot's door-stamped §Shared Documentation.
-5. Optional telemetry emitter: bots write structured signal to Claudosseum if configured
-6. Extend `bot.conf` with ecosystem-aware fields (clauDNA version pin, Claudron vault path, Claudosseum tenant ID)
+
+> **Freshness is mechanically checkable, and each item must carry its tracking
+> issue for that to work.** `lib/sprint-selection-record.py focus-refs
+> PROJECT_MISSION.md` lists the refs in this section, and the selection record's
+> verify step flags any that are CLOSED. This matters because the autonomous
+> sprint sources its goal from here: a picker scoring *mission alignment* against
+> completed work is confidently wrong, and **no selection metric can detect it** —
+> the error is in the yardstick, so alignment is measured against the same stale
+> document that caused it (#974 W6). An item with no ref cannot be checked; add
+> one when you add an item.
+>
+> **Recently shipped, removed from the list below:** per-bot GitHub App auth
+> replacing the shared PAT, including the env-var pattern in bot config
+> (#1271, #1272, #1273, #1274 — all closed 2026-08). They were still listed here
+> as current focus after landing, which is the staleness this note exists to
+> prevent.
+
+1. Integrate clauDNA marketplace plugin install into the bootstrap workflow
+2. ~~Add Claudron MCP server config to bot bootstrap~~ and document the query-before / write-after pattern — **superseded by decision C** (2026-07-18, `documentation/decisions/2026-07-18-claudron-consumption-door.md`; boundary spec §10.5.6). There is no Claudron MCP server to add to the bootstrap — it is parked as a demand-gated option. Fleet consumption goes through the **CLI door** (clauDNA's `/claudron` · `/recall` · `/capture` skills wrapping the `claudron` CLI), wired per bot by the L2 session loop: set `claudron_vault_path`, and the compositor emits `CLAUDRON_VAULT_PATH` plus the session-loop hooks. The query-before / write-after pattern is documented in a vault-wired bot's door-stamped §Shared Documentation.
+3. Optional telemetry emitter: bots write structured signal to Claudosseum if configured
+4. Extend `bot.conf` with ecosystem-aware fields (clauDNA version pin, Claudron vault path, Claudosseum tenant ID)
+
+*Items 1, 3 and 4 carry no tracking issue, so they are **not** staleness-checkable
+today. Their status was not verified as part of the #1271–#1274 correction — only
+that the two App-auth items had shipped. Add refs when their owners next touch them.*
 
 ## Requires approval
 
