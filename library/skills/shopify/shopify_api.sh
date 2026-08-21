@@ -552,7 +552,7 @@ door_copy() {
         size_table:   (body | test("(?i)<table|size chart|size guide")),
         em_dash:      (body | test("—")),
         # Case-SENSITIVE, and that is the measured form: the literal "GPSR" scored
-        # 9/9 recall with zero false positives across 188 bodies, checked against
+        # 9/9 recall with zero false positives across the full description corpus, checked against
         # independent ground truth. Lower-casing it would widen a match that was
         # measured exact, so the number would no longer describe this check.
         gpsr:         (body | test("GPSR"))
