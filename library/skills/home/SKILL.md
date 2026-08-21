@@ -89,7 +89,7 @@ action: turn_on
 **Color:**
 ```
 Tool: mcp__homeassistant__entity_action
-entity_id: light.nanoleaf_panels
+entity_id: light.<color_panels>
 action: turn_on
 data: {"rgb_color": [255, 100, 50], "brightness": 200}
 ```
@@ -171,7 +171,7 @@ Tool: mcp__homeassistant__get_version
 | "set living room to warm" | Set color temp to warm white (~3000K) |
 | "movie mode" | Dim living room, off other rooms |
 | "goodnight" | Turn off everything |
-| "is the TV on?" | Check Samsung TV media_player state |
+| "is the TV on?" | Check the TV media_player state |
 
 ## Output Formatting
 
@@ -182,9 +182,9 @@ When sending results via Telegram, use `format: "markdownv2"`. See [_telegram-fo
 HOME
 
 Bedroom: all off
-Living Room: Hue strip on (45%), TV off, Plug 1 on
+Living Room: light strip on (45%), TV off, Plug 1 on
 Kitchen: ceiling light on (100%)
-Office: Nanoleaf on (rainbow), desk lamp off
+Office: accent panels on (rainbow), desk lamp off
 Bathroom: all off
 
 Automations: 3 active, 0 triggered today

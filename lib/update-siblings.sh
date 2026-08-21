@@ -40,7 +40,7 @@
 # ---------------------------------------------------------------------------
 # WHY THIS CLOCK
 # ---------------------------------------------------------------------------
-# Editable installs make the swap immediate: /home/crog/claudron resolves the
+# Editable installs make the swap immediate: /home/user/claudron resolves the
 # `claudron` import straight to the checkout, so a pull changes the CLI for the
 # NEXT subprocess call — no reinstall, no restart, no warning. A running session
 # keeps the module it imported at start, but every fresh `claudron` invocation

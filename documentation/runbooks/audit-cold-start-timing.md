@@ -25,19 +25,19 @@ At steady state with 8 fleet-a bots + 2 fleet-b bots running:
 
 ### Single bot (warm cache, no contention)
 
-Test subject: Navi (1 MCP server, 18 KB CLAUDE.md, Sonnet model).
+Test subject: bot-4 (1 MCP server, 18 KB CLAUDE.md, Sonnet model).
 
 | Run | remote-control active | start-bot.sh complete |
 |-----|----------------------|----------------------|
-| Navi #1 | 5.1s | ~16s (incl 5s sleep + startup prompt) |
-| Virgil #1 | 4.1s | ~14s |
+| bot-4 #1 | 5.1s | ~16s (incl 5s sleep + startup prompt) |
+| bot-6 #1 | 4.1s | ~14s |
 
 ### Parallel 2-bot start (warm cache)
 
 | Bot | remote-control active |
 |-----|----------------------|
-| Virgil | 6.3s |
-| Navi | 7.3s |
+| bot-6 | 6.3s |
+| bot-4 | 7.3s |
 
 ~40% slower than single-bot due to CPU contention on 4 cores.
 
@@ -47,18 +47,18 @@ systemd dispatched all 8 units over a 7-second window (17:36:47–17:36:54). sta
 
 | Bot | systemd start | start-bot.sh done | Wall clock |
 |-----|--------------|-------------------|------------|
-| greg | 17:36:47 | 17:37:03 | 16s |
-| branden | 17:36:48 | 17:37:07 | 19s |
-| craig | 17:36:47 | 17:37:09 | 22s |
-| navi | 17:36:50 | 17:37:11 | 21s |
-| rajan | 17:36:49 | 17:37:13 | 24s |
-| virgil | 17:36:51 | 17:37:19 | 28s |
-| mason | 17:36:52 | 17:37:19 | 27s |
-| ari | 17:36:54 | 17:37:23 | 29s |
+| bot-1 | 17:36:47 | 17:37:03 | 16s |
+| bot-2 | 17:36:48 | 17:37:07 | 19s |
+| bot-3 | 17:36:47 | 17:37:09 | 22s |
+| bot-4 | 17:36:50 | 17:37:11 | 21s |
+| bot-5 | 17:36:49 | 17:37:13 | 24s |
+| bot-6 | 17:36:51 | 17:37:19 | 28s |
+| bot-7 | 17:36:52 | 17:37:19 | 27s |
+| bot-8 | 17:36:54 | 17:37:23 | 29s |
 
 **Total fleet cold start: 36 seconds** (first unit dispatched to last start-bot.sh complete).
 
-Ari is slowest: 2 MCP servers (github + notion), largest CLAUDE.md (38 KB, 642 lines), Opus model.
+bot-8 is slowest: 2 MCP servers (github + notion), largest CLAUDE.md (38 KB, 642 lines), Opus model.
 
 ## Component Breakdown
 
@@ -101,7 +101,7 @@ If `~/.npm/_npx/` is cleared (npm cache clean, disk cleanup, etc.), all 8 bots w
 
 ### Systemd ordering
 
-All bot units declare only `After=network-online.target`. No inter-bot dependencies. When started via `systemctl --user start ari greg craig...` or at boot via `WantedBy=default.target`, **systemd starts them in parallel**.
+All bot units declare only `After=network-online.target`. No inter-bot dependencies. When started via `systemctl --user start bot-8 bot-1 bot-3...` or at boot via `WantedBy=default.target`, **systemd starts them in parallel**.
 
 The journal shows units dispatched ~1s apart (17:36:47–17:36:54), which is systemd's scheduling jitter, not serialization.
 
@@ -134,7 +134,7 @@ systemctl → env load → tmux → claude binary → [MCP + channel init] → R
 
 **With `sleep 5` removed**, the dominant cost is now the Claude init phase (MCP + channel handshake, ~3-4s). Total single-bot start drops from ~10-11s to ~5-6s wall clock (excluding startup prompt).
 
-For full fleet startup, the critical path is the **last bot to finish** (ari, 29s). The dominant cost is CPU contention across 8 parallel Claude CLI startups on 4 cores.
+For full fleet startup, the critical path is the **last bot to finish** (bot-8, 29s). The dominant cost is CPU contention across 8 parallel Claude CLI startups on 4 cores.
 
 ## CPU Contention Is the Bottleneck — Not IO
 
@@ -157,7 +157,7 @@ The `sleep 5` on line 101 of `start-bot.sh` was a fixed cost after remote-contro
 
 ### Lever 2: Stagger fleet startup to reduce CPU contention (TODO)
 
-**Impact: estimated ~10s reduction in tail latency (ari's 29s → ~19s).**
+**Impact: estimated ~10s reduction in tail latency (bot-8's 29s → ~19s).**
 
 Currently all 8 units start within 7 seconds. With 4 cores, that's 2:1 oversubscription during the CPU-heavy binary load phase. Options:
 
@@ -194,7 +194,7 @@ Create a systemd unit that runs before bot units:
 ```ini
 [Unit]
 Description=Pre-warm NPX cache for MCP servers
-Before=ari.service greg.service craig.service ...
+Before=bot-8.service bot-1.service bot-3.service ...
 
 [Service]
 Type=oneshot

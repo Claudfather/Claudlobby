@@ -52,7 +52,7 @@ SLASH_BARE = ["/briefing morning", "/autonomous-sprint", "/claudna:ironclad x"]
 # Prose, file-path text, and leading-whitespace → must KEEP the set +H; guard.
 PROSE_PREFIXED = [
     "deploy failed !!",
-    "/home/crog/x is broken",
+    "/home/user/x is broken",
     "/etc/hosts",
     " /leading-space",
 ]

@@ -70,7 +70,7 @@ Claudron's ratified vocabulary absorbs the table above and extends it:
 Generate from title: lowercase, replace spaces and special characters with hyphens, collapse multiple hyphens, truncate at 40 characters on a word boundary.
 
 Examples:
-- "Shuffify Auth Rework Plan" → `shuffify-auth-rework-plan`
+- "Widget Auth Rework Plan" → `widget-auth-rework-plan`
 - "Spotify API Rate Limits & Quirks" → `spotify-api-rate-limits-quirks`
 
 Non-ASCII characters are transliterated. Leading numbers are allowed. Collisions get a suffix: `-2`, `-3`.
@@ -79,15 +79,15 @@ Non-ASCII characters are transliterated. Leading numbers are allowed. Collisions
 
 ```yaml
 ---
-title: Shuffify Auth Rework Plan
-slug: shuffify-auth-rework-plan
+title: Widget Auth Rework Plan
+slug: widget-auth-rework-plan
 type: plan
 status: active
-owner: greg
+owner: <owner>
 created: 2026-05-10
 expires: 2026-08-10
-repos: [shuffify]
+repos: [widget]
 tags: [auth, oauth, spotify]
-links: ["#142", "knowledge/shuffify/spotify-api-quirks.md"]
+links: ["#142", "knowledge/widget/spotify-api-quirks.md"]
 ---
 ```

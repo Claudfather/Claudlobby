@@ -1,0 +1,29 @@
+{
+  "id": "LEGACY_STICKER_FIXTURE",
+  "title": "Fixture Kiss-Cut Sticker",
+  "description": "Hermetic fixture: a PROVIDER_A (provider 1) blueprint-400 sticker with the full 8-variant surface (4 White + 4 Transparent) used to assert migrate coverage without a live fetch.",
+  "tags": ["sticker", "fixture"],
+  "blueprint_id": 400,
+  "print_provider_id": 1,
+  "variants": [
+    {"id": 45748, "price": 100, "is_enabled": true, "is_default": true, "title": "White / 2\" × 2\""},
+    {"id": 45750, "price": 200, "is_enabled": true, "title": "White / 3\" × 3\""},
+    {"id": 45752, "price": 300, "is_enabled": true, "title": "White / 4\" × 4\""},
+    {"id": 45754, "price": 400, "is_enabled": true, "title": "White / 6\" × 6\""},
+    {"id": 45747, "price": 100, "is_enabled": true, "title": "Transparent / 2\" × 2\""},
+    {"id": 45749, "price": 200, "is_enabled": true, "title": "Transparent / 3\" × 3\""},
+    {"id": 45751, "price": 300, "is_enabled": true, "title": "Transparent / 4\" × 4\""},
+    {"id": 45753, "price": 400, "is_enabled": true, "title": "Transparent / 6\" × 6\""}
+  ],
+  "print_areas": [
+    {
+      "variant_ids": [45748, 45750, 45752, 45754, 45747, 45749, 45751, 45753],
+      "placeholders": [
+        {"position": "front", "images": [{"id": "FIXTURE_IMAGE_ID", "name": "art.png", "x": 0.5, "y": 0.5, "scale": 1, "angle": 0}]}
+      ]
+    }
+  ],
+  "images": [
+    {"src": "https://images-api.printify.example/fixture-mockup-white-3in.png", "variant_ids": [45750], "position": "front", "is_default": true}
+  ]
+}

@@ -1639,7 +1639,7 @@ CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/briefing-trigger.sh" "$FLEET" "$BRIEFBUSY" mor
 # Prose + classifier-edge payloads straight through dispatch.sh: prose with a
 # bang, file-path prose, and a leading-whitespace slash must ALL keep set +H;.
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" "deploy failed alert !!" >/dev/null 2>&1 || true
-CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" "/home/crog/x is broken" >/dev/null 2>&1 || true
+CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" "/home/user/x is broken" >/dev/null 2>&1 || true
 CLAUDLOBBY_ROOT="$ROOT" "$LIB_DIR/dispatch.sh" "$SINK" " /leading-space-prose" >/dev/null 2>&1 || true
 sleep 1  # let the sends render into the panes
 
@@ -1671,7 +1671,7 @@ printf '%s' "$sink_pane" | grep -qE 'set \+H; deploy failed alert' && r=yes || r
 harness_check "dispatch classifier keeps set +H; on prose (deploy failed !!)" "$r"
 
 # (e) classifier edges — file-path prose + leading-whitespace slash keep the guard
-printf '%s' "$sink_pane" | grep -qE 'set \+H; /home/crog/x is broken' && r=yes || r=no
+printf '%s' "$sink_pane" | grep -qE 'set \+H; /home/user/x is broken' && r=yes || r=no
 harness_check "dispatch classifier keeps set +H; on file-path prose (/home/... not a slash cmd)" "$r"
 printf '%s' "$sink_pane" | grep -qE 'set \+H; +/leading-space-prose' && r=yes || r=no
 harness_check "dispatch classifier keeps set +H; on a leading-whitespace slash (not anchored ^/)" "$r"

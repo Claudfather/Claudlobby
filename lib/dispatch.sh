@@ -28,7 +28,7 @@ WORKER_SOCKET="$(tmux_socket_for_session "$WORKER_SESSION" 2>/dev/null || true)"
 # swallow it (the live briefing-cron bug; cf. keepalive.sh send_reload_command,
 # start-bot.sh STARTUP_PROMPT). Match a real command token — an alpha-led word
 # terminated by whitespace-or-end — NOT any leading slash, so file-path prose
-# (/home/crog, /etc/hosts) and leading-whitespace keep the guard. POSIX
+# (/home/user, /etc/hosts) and leading-whitespace keep the guard. POSIX
 # [[:space:]] class (not the GNU escape) for bash 3.2 / macOS /bin/bash.
 # Also keep the guard when the payload contains a bang: prose that starts with a
 # slash-word yet carries a bang (/reports is missing) matches the token but still

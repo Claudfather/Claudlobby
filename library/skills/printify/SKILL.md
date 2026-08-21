@@ -80,7 +80,7 @@ S="$BOT_DIR/.claude/skills/printify/printify_api.sh"
 
 # writes — always dry-run first (prints the exact request, sends nothing)
 "$S" create --png ./art.png --title "New Sticker" --blueprint 400 --provider 99 --price 500 --dry-run
-"$S" migrate --product <spoke_sticker_id> --to-provider 99 --dry-run   # coverage report: White retained, Transparent dropped
+"$S" migrate --product <legacy_sticker_id> --to-provider 99 --dry-run   # coverage report: White retained, Transparent dropped
 
 # live write leaves a DRAFT + prints the Printify edit URL and mockup URLs
 "$S" create --png ./art.png --title "New Sticker" --blueprint 400 --provider 99 --price 500

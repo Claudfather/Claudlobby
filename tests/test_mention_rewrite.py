@@ -6,7 +6,7 @@ names. That is right as far as it goes and provably does not go far enough.
 THE FIXTURES ARE REAL. Of the eleven accounts we actually notified, three appear
 below because no bot-name list would ever have contained them:
 
-    Botfather  — a real user (Tushar). In our issues only because we documented
+    Botfather  — a real user. In our issues only because we documented
                  Telegram's BotFather.
     latest     — a real account. Reads like a version string.
     216        — a real account. Reads like a number.

@@ -866,7 +866,7 @@ class TestComposeBotConfSecretFiles:
         from claudlobby.composer import compose_bot_conf
 
         bot = self._bot(
-            secret_files={"GA4_SA_KEY_PATH": "/home/crog/local/tl/.secrets/ga4.json"}
+            secret_files={"GA4_SA_KEY_PATH": "/home/user/local/tl/.secrets/ga4.json"}
         )
         with pytest.raises(ValueError, match="fleet-relative"):
             compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
