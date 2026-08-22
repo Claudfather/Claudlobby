@@ -374,6 +374,16 @@ def test_mint_is_unique():
     assert len({mint_event_id() for _ in range(1000)}) == 1000
 
 
+def test_session_uid_is_derived_and_stable():
+    from claudlobby.plane.ids import derive_session_uid
+
+    a = derive_session_uid("8ad2aa7e-bade-4c55-b3c3-000000000000")
+    b = derive_session_uid("8ad2aa7e-bade-4c55-b3c3-000000000000")
+    c = derive_session_uid("different-session")
+    assert a == b and a != c
+    assert re.fullmatch(r"sess_[0-9a-f]{32}", a)
+
+
 def test_ensure_host_uid_mints_once(tmp_path: Path):
     first = ensure_host_uid(tmp_path)
     second = ensure_host_uid(tmp_path)
@@ -433,7 +443,6 @@ _UID_PREFIX = {
 ID_PATTERNS: dict[str, str] = {
     "event": r"ev_[0-9a-f]{32}",
     "msg": r"msg_[0-9a-f]{32}",
-    "transmission": r"trx_[0-9a-f]{32}",
     "work_item": r"wi_[0-9a-f]{32}",
     "assignment": r"asg_[0-9a-f]{32}",
     **{kind: prefix + r"[0-9a-f]{32}" for kind, prefix in _UID_PREFIX.items()},
@@ -454,16 +463,24 @@ def mint_msg_id() -> str:
     return mint("msg_")
 
 
-def mint_transmission_id() -> str:
-    return mint("trx_")
-
-
 def mint_work_item_id() -> str:
     return mint("wi_")
 
 
 def mint_assignment_id() -> str:
     return mint("asg_")
+
+
+def derive_session_uid(platform_session_id: str) -> str:
+    """sess_ uid DERIVED from the platform session id (sha256, first 32 hex).
+
+    Deliberately deterministic, not random (§9d): any emitter — bash included,
+    via shasum — computes the same uid for the same session with no registry
+    lookup, and the transcript/OTel join needs exactly that stability."""
+    import hashlib
+
+    digest = hashlib.sha256(platform_session_id.encode("utf-8")).hexdigest()
+    return "sess_" + digest[:32]
 
 
 def mint_uid(kind: str) -> str:
@@ -622,8 +639,7 @@ def test_task_event_vocabulary_enforced():
 
 def test_transmission_states():
     good = {
-        "attempt_id": "trx_" + "0" * 32,
-        "msg_id": "msg_" + "0" * 32,
+                "msg_id": "msg_" + "0" * 32,
         "attempt_no": 1,
         "carrier": "tmux",
         "destination": "bot:example-fleet/beta",
@@ -773,7 +789,6 @@ class Communication(_Strict):
 
 
 class Transmission(_Strict):
-    transmission_id: str = Field(pattern=ID_PATTERNS["transmission"])
     msg_id: str = Field(pattern=ID_PATTERNS["msg"])
     attempt_no: int = Field(ge=1)
     carrier: Literal[CARRIERS]

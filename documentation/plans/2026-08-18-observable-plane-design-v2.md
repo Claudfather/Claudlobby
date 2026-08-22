@@ -35,7 +35,7 @@ The observable plane is first an **organizational flight recorder**. The cockpit
 | F13 | Vault layout | `local/` is the primary vault (Claudron-made, e.g. `<operator>-claudron-vault`) gaining a `fleets/` namespace; N secondary mounts under `vaults/` (gitignore already landed upstream); graduation ladder root-mode → `vault init` → remote |
 | F14 | Terminology | Host = the machine, THE container (Host → Fleet → Bot); "system" = the claudlobby install only; rename PR **off the critical path** |
 | F15 | Sequencing | Substrate before UI; phases §18; vocabulary/layout/teams PRs never block the semantic slice |
-| F16 | Physical shape (v2 — first-principles re-ruling 2026-08-23, supersedes the 2026-08-19 typed-per-family ruling) | **Constructs + one events log.** Typed tables for the constructs the system works with — `communications`, `work_items`, `assignments` (né assignments), `workstreams` (né workstreams — the contract row IS the workstream), `registry_snapshots`, `metric_samples`, `identity_registry`, `ingest_ledger` — plus **ONE `events` stream** logging what happens to them: kinds `transmission` (né transmissions) · `task` · `workstream` · `system` · `declaration`. Shared typed ref columns, per-kind conditional vocabulary CHECKs, per-kind JSON `detail` tails, partial indexes per hot kind. 13→9 physical tables; five concepts unchanged; every walk ruling preserved (crash-correctness: the communication construct is written before its first transmission event; registry-stamped severity: sparse column on kind=system; samples retention: own table). Renames dissolve the "attempts" double-duty defect (an assignment is a contract; a transmission is a log row). Decided by 7-dimension matrix (plan file, session record); flip conditions: Pi bench pathologies on partial indexes/conditional CHECKs, or the per-kind parity test proving untestable |
+| F16 | Physical shape (v2 — first-principles re-ruling 2026-08-23, supersedes the 2026-08-19 typed-per-family ruling) | **Constructs + one events log.** Typed tables for the constructs the system works with — `communications`, `work_items`, `assignments` (né task_attempts), `workstreams` (né workstream_contracts — the contract row IS the workstream), `registry_snapshots`, `metric_samples`, `identity_registry`, `ingest_ledger` — plus **ONE `events` stream** logging what happens to them: kinds `transmission` (né communication_attempts) · `task` · `workstream` · `system` · `declaration`. Shared typed ref columns, per-kind conditional vocabulary CHECKs, per-kind JSON `detail` tails, partial indexes per hot kind. 13→9 physical tables; five concepts unchanged; every walk ruling preserved (crash-correctness: the communication construct is written before its first transmission event; registry-stamped severity: sparse column on kind=system; samples retention: own table). Renames dissolve the "attempts" double-duty defect (an assignment is a contract; a transmission is a log row). Decided by 7-dimension matrix (plan file, session record); flip conditions: Pi bench pathologies on partial indexes/conditional CHECKs, or the per-kind parity test proving untestable |
 | F19 | System-event vocabulary | **Warn-on-unknown registry** (ruled 2026-08-20): known set seeded from observed emitters + `events.py` CRITICAL_TYPES; unknown types still INGEST, counted in trust metrics, surfaced by doctor; #903's SSOT tightens the registry later. Deliberately asymmetric with communications — communications callers are our doors (bugs loud), system-event emitters are the whole estate (never lose a machinery event to a new script) |
 | F20 | Metric-sample shape | **Generic samples table** (ruled 2026-08-20): subject uid + registry-governed metric name + JSON value + status flag; new probes need no migration; hot metrics promote to indexed generated columns on evidence; the aggressive-retention lane |
 | F21 | Workstream vocabulary | **Mirror the task model** (ruled 2026-08-20): contract row IS "opened" (one fact, one row — same mapping as `contract_created`); events = `progressed, renewed, blocked, unblocked, closed, archived, plan_linked, plan_unlinked`; status always derived, never stored; `workstream-update.sh` verbs map 1:1 in the door shim |
@@ -52,7 +52,7 @@ Minted, immutable uids; every human-readable name is a mutable alias.
 - `fleet_uid` — stable logical fleet identity (survives rename/move).
 - `actor_uid` — the logical specialist (survives sessions, restarts, host moves).
 - `bot_instance_uid` — one installed/supervised runtime instance of an actor on a host.
-- `session_uid` — one Claude Code session/incarnation (joins to transcript + OTel `session.id`).
+- `session_uid` — one Claude Code session/incarnation (joins to transcript + OTel `session.id`). **Minting is DERIVED, not random** (2026-08-24): `sess_` + first 32 hex of sha256(platform session id) — any emitter (bash included) computes it without a registry lookup, the mapping is stable, and no registry row is required (Phase 2b may register sessions for first/last-seen).
 - `vault_uid` — one mounted vault (primary or secondary); its name and remote are aliases.
 - `project_uid` — one declared project (projects.yaml, grain `(fleet, key)`); the kebab key is its alias.
 - `library_item_uid` — one library item at grain `(category, name, source_tier)`; equipment lists resolve to these.
@@ -64,7 +64,7 @@ Minted, immutable uids; every human-readable name is a mutable alias.
 
 Every authoritative observed fact carries: `event_id` (globally unique, **minted before any insert attempt**) · `event_type` · `schema_version` · `occurred_at` (producer time) · `observed_at` (**non-null exactly when the emitter reports another system's past fact** — bridge-inbound carrier timestamps, log-derived detections like dmesg SD stalls, legacy import, the OTel adapter; null asserts first-handedness; stamped by the emitter at emit time — **reads never write**, and spool lag deliberately does NOT use it, being visible as ingested_at − occurred_at) · `ingested_at` · `ingest_seq` (explicit local ordering authority — `rowid` is never the public cursor; API cursors are opaque) · `host_uid` · `fleet_uid?` · `actor_uid?` · `bot_instance_uid?` · `session_uid?` · `msg_id?` · `work_item_id?` · `assignment_id?` · `workstream_id?` · `deliberation_id?` (reserved seam; entity is Phase 5) · `correlation_id` · `causation_id` · `trace_id?`/`span_id?` · `source`/`emitter` · `source_ref` · payload · privacy classification.
 
-Physical form (one event table with typed projections vs typed tables sharing the envelope + one ingest sequence) is a §19 lock item. Column naming avoids reserved-looking SQL (`sender_id`/`recipient_id`, never `from`/`to`).
+Physical form: RULED (F16-v2 — constructs + one events log). The optional ids above are the LOGICAL envelope; physically, the 14 shared columns sit on every Lane-B table and the optional ids are family/kind columns where meaningful — the complete physical inventory is §9d. Column naming avoids reserved-looking SQL (`sender_id`/`recipient_id`, never `from`/`to`).
 
 ## 5. Write spine
 
@@ -85,9 +85,9 @@ Performance gates before the implementation locks (§14): the repo has already m
 | `communications` | own table (msg_id PK, body, FTS) | one semantic message (§7) |
 | transmissions | `events` kind=`transmission` | one carrier try per row: send_attempted → pane_submitted/carrier_accepted/failed → recipient_acknowledged (§7) |
 | `work_items` | own table | durable objective (§8) |
-| `assignments` | own table (né assignments) | one actor's assignment of an objective (§8) |
+| `assignments` | own table (né task_attempts) | one actor's assignment of an objective (§8) |
 | task events | `events` kind=`task` | work lifecycle happenings (§8) |
-| `workstreams` | own table (né workstreams; the contract row IS the workstream) | one campaign (F6) |
+| `workstreams` | own table (né workstream_contracts; the contract row IS the workstream) | one campaign (F6) |
 | workstream events | `events` kind=`workstream` | campaign happenings incl. plan_linked/unlinked (F21) |
 | system events | `events` kind=`system` | machinery detections (F19; registry-stamped severity) |
 | declaration observed | `events` kind=`declaration` | vault revision seen (§9) |
@@ -103,7 +103,7 @@ Performance gates before the implementation locks (§14): the repo has already m
 
 **Intent** (immutable): `msg_id` · `sender_id` (+ `sender_session_uid?` — the transcript/OTel join, populated when the door knows its session) · `intended_recipient_id` · `message_class` · `command_type?` · links (`work_item_id`/`assignment_id`/`workstream_id`/`deliberation_id?`) · `reply_to_msg_id?` · `supersedes_msg_id?` · cancellation target? · body or redacted-body reference (per F7 classification) · `body_bytes`/`body_sha256`/`truncated` · created time · correlation/causation · idempotency key.
 
-**Transport attempts** (append-only): `attempt_id` · `msg_id` · attempt number · carrier (`tmux` | `telegram-tgpost` | `telegram-bridge`) · destination (+ `to_chat_id` stored, alias-rendered) · state: `send_attempted → carrier_accepted | pane_submitted | failed | unknown`, plus `recipient_acknowledged`, `duplicate_suppressed` · `carrier_ref?` (e.g. Telegram message_id) · error details · timestamps. Telegram API acceptance = carrier accepted, nothing more; `pane_send_verified` establishes submitted, never receipt.
+**Transmissions** (events kind=`transmission`, append-only): `msg_id` (ref) · `attempt_no` · `carrier` (`tmux` | `telegram-tgpost` | `telegram-bridge`; typed column, CHECK'd) · state in the stream's `event` column: `send_attempted → carrier_accepted | pane_submitted | failed | unknown`, plus `recipient_acknowledged`, `duplicate_suppressed` · detail JSON carries `destination`, `carrier_ref` (e.g. Telegram message_id), `error`. **No transmission id** — a log row's identity is its `event_id` (the old trx id was an entity-era relic, killed in the 2026-08-24 column review). Telegram API acceptance = carrier accepted, nothing more; `pane_send_verified` establishes submitted, never receipt.
 
 **Delivery contract:** at-least-once intent/attempt recording, idempotent `msg_id` handling, explicit `unknown`, recipient acknowledgement required for task activation. Intent + task contract are created atomically in SQLite **before** transmission.
 
@@ -116,7 +116,7 @@ Performance gates before the implementation locks (§14): the repo has already m
 
 **Carriers in v1.0:** tmux doors, `tg-post` shim, **bridge outbound and inbound** (the operator appears in their own stream).
 
-**Separation & keying (2026-08-20 walk ruling).** ALL communications route to `communications`; it records communication facts only — outcomes live in `transmissions`, task semantics in the task tables, with exactly two nullable link ids on the intent. The write order is fixed and sequential in concept: task machinery first (contract rows exist before anything references them), intent second, transport third; whether contract+intent share one SQLite transaction is a storage detail — separation lives in tables and writer modules, never in transaction boundaries. `msg_id` is the communication id and the table's PRIMARY KEY. Party keying: aliases are namespaced text (`bot:<fleet>/<name>` · `operator` · `system:<job>` · `telegram:<alias>` · future `slack:<team>/<channel>` · `broadcast:<fleet>`) resolved at ingest to `sender_uid`/`recipient_uid`; the carrier-native raw address rides `recipient_raw` (sensitive). Extensibility asymmetry: a new recipient NAMESPACE costs nothing (alias string + registry row); a new CARRIER is a code+migration event, because a carrier exists only when a door can move bytes and emit attempt evidence. Task closure never rides communications: tool-call doors emit `completed/failed/returned_blocked`; hooks and sweeps emit what no tool call sends (`orphaned_by_session_loss`, `expired`).
+**Separation & keying (2026-08-20 walk ruling).** ALL communications route to `communications`; it records communication facts only — outcomes live in the events stream (kind=`transmission`), task semantics in the task tables, with exactly two nullable link ids on the intent. The write order is fixed and sequential in concept: task machinery first (contract rows exist before anything references them), intent second, transport third; whether contract+intent share one SQLite transaction is a storage detail — separation lives in tables and writer modules, never in transaction boundaries. `msg_id` is the communication id and the table's PRIMARY KEY. Party keying: aliases are namespaced text (`bot:<fleet>/<name>` · `operator` · `system:<job>` · `telegram:<alias>` · future `slack:<team>/<channel>` · `broadcast:<fleet>`) resolved at ingest to `sender_uid`/`recipient_uid`; the carrier-native raw address rides `recipient_raw` (sensitive). Extensibility asymmetry: a new recipient NAMESPACE costs nothing (alias string + registry row); a new CARRIER is a code+migration event, because a carrier exists only when a door can move bytes and emit attempt evidence. Task closure never rides communications: tool-call doors emit `completed/failed/returned_blocked`; hooks and sweeps emit what no tool call sends (`orphaned_by_session_loss`, `expired`).
 
 ## 8. Task model
 
@@ -124,19 +124,19 @@ Work items carry two nullable WHERE-axis fields pointing at existing Lane-A voca
 
 Three-level split: **`work_item_id`** (durable objective) → **`assignment_id`** (one assignment to one actor/instance; reassignment and retry mint new attempts) → **`msg_id`** (one communication carrying it).
 
-Event vocabulary (append-only `task_events`): `contract_created, dispatch_intended, transmission_failed, dispatch_submitted, receiver_acknowledged, accepted, rejected, progress, blocked(§19), resumed, completed, failed, cancelled, deadline_changed, superseded, reassigned, retry_created, orphaned_by_session_loss, recovered_after_restart, expired`.
+Event vocabulary (events kind=`task`, final — 19): `dispatch_intended, transmission_failed, dispatch_submitted, receiver_acknowledged, accepted, rejected, progress, blocked_waiting, returned_blocked, resumed, completed, failed, cancelled, deadline_changed, superseded, reassigned, retry_created, orphaned_by_session_loss, recovered_after_restart, expired`. (`contract_created` deliberately absent — the work_item/assignment row IS the creation; `blocked` split per F17.)
 
 **The tracker boundary (2026-08-24 walk ruling — the "are we rebuilding Linear?" question, answered).** The task model is shape-isomorphic to a tracker (workstream≈epic, work_item≈issue, assignment≈assignee-made-first-class) because the domain is the same — but its ROLE is the flight recorder of execution, never a planning surface: rows are append-only observations with derived statuses (no grooming is possible because no UPDATE exists), it records what no tracker can see (pane delivery, acks, session-loss orphaning, misroutes), and it links outward to the human trackers (repo/project_key, plan refs, pr_url, #NNN) rather than absorbing them. **Rebuilding-Linear tripwires** for the management-verbs phase: grooming verbs, priority/estimate fields, board UI, human backlog workflows — if wanted, integrate with a tracker; never grow one. (The trace-layer twin of this rule is §12's "don't rebuild LangSmith.")
 
 **Activation is evidence-based** (derived, never stored): contract exists ≠ active. Derivation is two-level — attempt status (created-not-sent → dispatch-failed / pending-unacknowledged → open[-blocked] → closed(reason)) and item status over all attempts (done / active / stalled) — with **overdue and orphaned as overlay flags, never states**. `task_events.successor_id` links reassigned/retry_created to the successor attempt (and superseded to its superseding id); `task_events.session_uid` names the session the event concerns (reporter's for reports, the lost one for orphaned/recovered). Authored bodies (work items) REJECT over-cap as contract violations; only relayed content (communications) truncates-with-proof. `created-not-sent → submitted-unacknowledged → accepted/open → …closed`, with `dispatch failure` and `overdue`/`orphaned` distinguished. Supersession is a landed runtime fact (`a3644ca`/`36eb7a4`) and is first-class here.
 
-`blocked` semantics: current runtime treats blocked as terminal (`dispatch-overdue.py` `_TERMINAL`); the operator model may need open-but-waiting — §19 lock item, recommendation `blocked_waiting` vs `returned_blocked` as two events, **no silent behavior change during migration**.
+`blocked` semantics: RULED (F17) — `blocked_waiting` (nonterminal) vs `returned_blocked` (terminal); legacy `blocked` reports map to `returned_blocked`, existing overdue-matching preserved exactly.
 
 ## 9. Registry snapshots v2 + metric-sample split
 
 **Keyframes keep:** identity, declared topology (incl. optional groups), resolved configuration, equipment, permission posture, versioned hashes, vault binding, software versions. **Presence/health events take:** CPU/load, disk, thermal/under-voltage, boot/session state, vault ahead/behind freshness, RC state, pane activity, heartbeats. (Volatile data inside keyframes would invalidate the tens-of-rows/week envelope.)
 
-**Walked columns (2026-08-22)** — `registry_snapshots` = envelope + `entity_type` (closed 6-enum) · `entity_uid` · `entity_alias` (name-as-it-was — tiny volume, human-listed; the cost argument that excluded aliases from metric_samples does not apply) · `tombstone: bool` (the ONLY stored operation — create-vs-update is derivable first-row-in-partition, and storing derivable state violates status-is-always-derived; `payload`/`payload_hash` are null iff tombstone) · `payload` (canonical JSON) · `payload_hash` (the write gate) · `cause` (generate|probe|equip|migration — the emitter's context, underivable) · `scan_id` · `vault_rev?` (null on probe rows). `declaration_observed` = envelope + `vault_uid` + `vault_rev` — two family columns, complete.
+**Walked columns (2026-08-22)** — `registry_snapshots` = envelope + `entity_type` (closed 6-enum) · `entity_uid` · `entity_alias` (name-as-it-was — tiny volume, human-listed; the cost argument that excluded aliases from metric_samples does not apply) · `tombstone: bool` (the ONLY stored operation — create-vs-update is derivable first-row-in-partition, and storing derivable state violates status-is-always-derived; `payload`/`payload_hash` are null iff tombstone) · `payload` (canonical JSON) · `payload_hash` (the write gate) · `cause` (generate|probe|equip|migration — the emitter's context, underivable) · `scan_id` · `vault_rev?` (null on probe rows). Declaration rows = events kind=`declaration`: the subject triple names the vault (`subject_kind='vault'`, `subject_uid`, `subject_alias`), `detail={vault_rev}`, `event` NULL — provenance joins run json_extract, acceptable at tens of rows/week. **Bot keyframes key on `bot_instance_uid`** (entity_type=`bot` → entity_uid is the INSTANCE — keyframes are per-host resolved state, and the SCD partition already includes host_uid; the logical actor's history is reachable through the instance's payload).
 
 - SCD2 view: `PARTITION BY host_uid, entity_type, entity_uid ORDER BY occurred_at, ingest_seq` (**occurred_at, not observed_at** — first-hand snapshots carry null observed_at per §4; the earlier observed_at ordering was a consistency casualty of that ruling) — never bare `ts`; no dependence on timestamp uniqueness; indexes match the view.
 - **Tombstones + scan completeness:** deletion is the only underivable operation, so only deletion gets a marker (`tombstone`). Tombstones are emitted only after a COMPLETE enumeration — the rule lives in the emitter, and **no completeness table exists** because partial scans are self-healing by construction: a crashed scan emits no tombstones (rule held) and leaves some entities un-snapshotted, which the next run's hash gate catches up. `scan_id` groups one scan's rows for audit.
@@ -302,6 +302,8 @@ Sizing: ~21 bots + host at roughly per-minute cadence ≈ 30–45k rows/day ≈ 
 
 ### SystemEvent (F19) — walked 2026-08-20 under earns-its-place
 
+*(Physical home: `events` kind=`system`; the `type` token below is stored in the stream's `event` column.)*
+
 *(Renamed from `lifecycle_events` during the walk: the emitters are the `system:<job>` actors — table name and actor grammar now agree — and "lifecycle" is freed to mean only task/message lifecycles, dissolving the F8 "lifecycle timeline" collision.)*
 
 ```yaml
@@ -333,7 +335,10 @@ Reading rules (all three load-bearing): **events are DETECTIONS, never states** 
 ### WorkstreamContract + WorkstreamEvent (F6, F21) — walked 2026-08-22
 
 ```yaml
-workstream_contract:      # envelope + — the contract row IS "opened" (F21)
+workstream_contract:      # PHYSICAL: the `workstreams` construct table (envelope +).
+                          # Storage is uid-only (owner_uid, opened_by_uid) — aliases
+                          # resolved at ingest, rendered via registry join (§9d rule).
+                          # The contract row IS "opened" (F21)
   workstream_id: str      # existing id scheme preserved, deliberately pattern-free
                           # (the single-writer mints; format is foreign vocabulary,
                           # same stance as project_key)
@@ -356,7 +361,7 @@ workstream_contract:      # envelope + — the contract row IS "opened" (F21)
   # initial horizon (staleness = age-since-last-event vs fleet-policy window,
   # overridden by latest renewed_until — a stored deadline would duplicate it)
 
-workstream_event:         # envelope +
+workstream_event:         # PHYSICAL: `events` kind=`workstream` (envelope +)
   workstream_id: str
   event: progressed|renewed|blocked|unblocked|closed|archived|plan_linked|plan_unlinked
   actor: str?             # alias -> actor_uid
@@ -414,6 +419,84 @@ session_usage:            # envelope + — transcript-usage.py's existing axes v
 Three mechanisms, counted: **12 closed vocabularies** — code-governed enums (Pydantic `Literal` + DDL `CHECK`, pinned by the parity test): message_class · command_type · transmission state · carrier · task event · workstream event · stream kind · privacy level · snapshot cause · entity type · identity kind · subject kind (shared: metric_samples + system_events) · sample status; changing one = code + migration, on purpose. **2 open registries** — system-event types (with severity) and metric names, both seeded from ONE package-owned module (`plane/registries.py`), warn-on-unknown at ingest, additions by PR; **no vocabulary registry tables in v1** — a table plus its management door arrive together with #903 if runtime mutation is ever needed (a table without its door is a constant with a sync-bug surface). QoL surfaces for the seed, in order of cheapness: `claudlobby plane registry` prints it; the `plane schema` export carries it to the UI; and if ad-hoc SQL wants it joinable, a **Lane C projection** synced from the seed at plane start (rebuildable, never written by anything else) is the census-compatible "printed to a table" form. **1 identity table** — `identity_registry` is not a vocabulary: runtime-minted alias→uid mappings, never seeded. Lane A vocabularies (project tier, fleet.yaml fields) keep their existing `known_values.py` + validator governance; the plane adds nothing there.
 
 **With this section, every model in the system is finalized.** Remaining open items are implementation-owned only (§19: canonical-bytes golden fixtures, ingest benchmark, DDL mechanics, Claudron#145 answers).
+
+## 9d. Column-level reference — the complete physical model (top-down review 2026-08-24)
+
+The authoritative physical inventory: **9 tables + the spool directory.** Everything below was cross-checked against the Phase-1 plan's DDL in the same pass; defects found are listed at the end.
+
+### Cross-cutting rules (each stated once, here)
+
+- **The physical envelope is 14 columns on every Lane-B table**: `ingest_seq` (NOT NULL UNIQUE — the ONLY enforced foreign key, → ingest_ledger) · `event_id` (NOT NULL UNIQUE) · `schema_version` (NOT NULL) · `occurred_at` (NOT NULL) · `observed_at` (NULL — first-handedness assertion, §4) · `ingested_at` (NOT NULL) · `host_uid` (NOT NULL) · `fleet_uid` (NULL — host-scoped rows have none; Pydantic REQUIRES it for communication/work_item/assignment/workstream and kinds transmission/task/workstream) · `emitter` (NOT NULL) · `source_ref` (NULL) · `correlation_id` (NULL) · `causation_id` (NULL) · `trace_id`/`span_id` (NULL).
+- **Requiredness split**: DDL CHECKs guard *vocabularies* and kind-scoped NOT-NULL refs (the events CHECK); *per-family requiredness beyond that* (e.g. fleet_uid on workstreams) is Pydantic-enforced — one place per rule, never duplicated approximately.
+- **Alias denormalization rule**: aliases are stored ONLY where rows are read singly by humans — `communications.sender_alias/recipient_alias`, `events.subject_alias`, `registry_snapshots.entity_alias`. Every other reference is uid-only, rendered via `identity_registry` join. (This is why assignments/workstreams carry no alias columns.)
+- **Soft references everywhere**: no domain FK is enforced (only `ingest_seq`→ledger). Deliberate: append-only tables reference across time, legacy import lands rows whose targets never existed, and a missing target is a *finding* (trust metric), never a write failure.
+- **The complete mutation surface** — everything else is INSERT-only forever: `identity_registry.last_seen/provisional` (the one sanctioned UPDATE) · spool files' `attempts` counter (mutable until deleted-after-ingest) · **retention DELETE, family-scoped and policy-driven** (metric_samples 30d in v1; other windows per §11 at cutover — deletion for retention is not mutation of history, and no other DELETE exists) · Lane C rebuilds (disposable by definition).
+- **Wire naming rule**: the emit `event_type` selects the Pydantic model, which maps to (table, kind). Construct types: `communication, work_item, assignment, workstream, registry_snapshot, metric_sample, session_digest, session_usage`. Stream types: `transmission, task, system, declaration` — and **`workstream_event`** for kind=workstream, the ONE suffixed name, forced by the collision with the construct type (documented asymmetry, not drift). `ingest_ledger.family` stores the wire type.
+
+### Table-by-table (family columns; envelope omitted)
+
+**`communications`** — 21: `msg_id` TEXT **PK** · `sender_uid` NOT NULL · `sender_alias` NOT NULL · `sender_session_uid` NULL · `recipient_uid`/`recipient_alias` NULL (null ONLY when genuinely unresolvable — trust-counted; never for tmux sends) · `recipient_raw` NULL ⚑ · `message_class` NOT NULL CHECK(12) · `command_type` NULL CHECK(5) · `work_item_id` NULL · `assignment_id` NULL · `workstream_id` NULL · `deliberation_id` NULL (Phase-5 seam) · `reply_to_msg_id` NULL (self-ref) · `supersedes_msg_id` NULL (self-ref) · `body` NULL (per privacy) · `body_bytes` NOT NULL df 0 · `body_sha256` NULL · `truncated` NOT NULL df 0 · `privacy` NOT NULL CHECK(3) · `idempotency_key` NULL.
+
+**`work_items`** — 7: `work_item_id` NOT NULL UNIQUE · `title` NOT NULL · `created_by_uid` NOT NULL · `workstream_id` NULL · `repo` NULL · `project_key` NULL · `body` NULL (authored — over-cap REJECTS).
+
+**`assignments`** — 6: `assignment_id` NOT NULL UNIQUE · `work_item_id` NOT NULL · `assignee_uid` NOT NULL · `assigned_by_uid` NOT NULL · `expected_by` NULL · `dispatch_msg_id` NULL.
+
+**`workstreams`** — 6: `workstream_id` NOT NULL UNIQUE (foreign scheme, pattern-free) · `title` NOT NULL · `goal` NULL · `owner_uid` NULL · `opened_by_uid` NOT NULL · `project_key` NULL.
+
+**`events`** — 15: `kind` NOT NULL CHECK(5) · `event` NULL (the token; per-kind CHECK; NULL legal only kind=declaration) · `carrier` NULL CHECK(3) (transmission only) · `msg_id` NULL (CHECK: NOT NULL when kind=transmission) · `work_item_id` NULL (NOT NULL when kind=task) · `assignment_id` NULL · `workstream_id` NULL (NOT NULL when kind=workstream) · `subject_kind` NULL CHECK(6) · `subject_uid` NULL · `subject_alias` NULL · `actor_uid` NULL · `session_uid` NULL · `severity` NULL CHECK(2) (kind=system, registry-stamped) · `detail` NULL (per-kind JSON tail: transmission = attempt_no/destination/carrier_ref/error; task = progress/summary/pr_url/deadline/successor_id; workstream = note/renewed_until/plan_ref; system = data{}; declaration = vault_rev) · `detail_truncated` NOT NULL df 0. Per-kind meaningful-column map: transmission uses msg_id+carrier; task uses work_item_id+assignment_id+actor+session; workstream uses workstream_id+actor; system uses subject triple+severity; declaration uses subject triple (the vault) only.
+
+**`registry_snapshots`** — 9: `entity_type` NOT NULL CHECK(6) · `entity_uid` NOT NULL (**bot → bot_instance_uid**) · `entity_alias` NOT NULL · `tombstone` NOT NULL df 0 · `payload` NULL (null iff tombstone) · `payload_hash` NULL (ditto) · `cause` NOT NULL CHECK(4) · `scan_id` NOT NULL · `vault_rev` NULL (null on probe rows).
+
+**`metric_samples`** — 5: `subject_kind` NOT NULL CHECK(6) · `subject_uid` NOT NULL · `metric` NOT NULL (registry, warn-on-unknown) · `value` NOT NULL (JSON) · `status` NULL CHECK(3) (the emitter's claim).
+
+**`identity_registry`** (registry, not observed lane) — 7: `uid` TEXT **PK** · `kind` NOT NULL CHECK(8) · `alias` NOT NULL, UNIQUE(kind, alias) · `parent_uid` NULL (self-ref: actor→fleet) · `provisional` NOT NULL df 1 · `first_seen`/`last_seen` NOT NULL.
+
+**`ingest_ledger`** — 4: `ingest_seq` INTEGER **PK AUTOINCREMENT** · `event_id` NOT NULL UNIQUE · `family` NOT NULL (the wire type) · `ingested_at` NOT NULL.
+
+**`session_digests` / `session_usage`** (migration 0002+) — envelope + `session_uid` NOT NULL · `actor_uid` NOT NULL · digest: `status` CHECK(ok|skipped) + five NULL text fields; usage: four token INTs NOT NULL + two axis INTs NOT NULL + `comms_share_est` NULL. 0..N usage rows per session (re-runs); latest-wins is a derivation.
+
+**Spool** (files, not a table): `{event_id, spooled_at, error, attempts, request}` per file; quarantine/ + `.reason` sidecars.
+
+### Relationship map (cardinalities; all soft refs)
+
+| From | To | Cardinality | Via |
+|---|---|---|---|
+| any `*_uid` column | identity_registry | N : 1 | uid |
+| identity_registry.parent_uid | identity_registry | N : 0..1 | actor→fleet |
+| events kind=transmission | communications | N : 1 | msg_id (a communication has 0..N transmissions) |
+| communications.reply_to / supersedes | communications | N : 0..1 | self-refs, chains |
+| communications | work_items / assignments / workstreams | N : 0..1 each | the decorator links |
+| assignments | work_items | N : 1 | a work item has 0..N assignments (retry/reassign) |
+| assignments.dispatch_msg_id ↔ communications.assignment_id | — | 0..1 : 0..1 | the dispatch pair — 1:1 when both set, written in one door call |
+| events kind=task | work_items | N : 1 | + N : 0..1 to assignments |
+| events kind=workstream | workstreams | N : 1 | plan set = derived from plan_linked − plan_unlinked |
+| work_items | workstreams | N : 0..1 | ad-hoc tasks have none |
+| work_items / workstreams | project | N : 0..1 | project_key STRING → reg_projects at derivation (warn, never reject) |
+| registry_snapshots | (host, entity_type, entity_uid) | 0..N per partition | the SCD chain; consecutive rows = the diff view |
+| events kind=declaration / metric_samples | any entity | N : 1 | subject triple |
+| workstream plan set | plan docs (outside DB) | 0..N | plan_ref strings, never validated |
+| session_digest / session_usage | session | 1 / 0..N : 1 | session_uid (derived minting, §3) |
+
+### Canonical write orders (the door choreography)
+
+- **Dispatch** (one door call, task module + communication + transport in fixed order): `work_items` → `assignments` → `communications` (dispatch pair set both ways) → events `transmission(send_attempted)` → `transmission(pane_submitted)` → on ack: `transmission(recipient_acknowledged)` then `task(receiver_acknowledged)` with `causation_id` = the ack transmission's `event_id` — the dual ack is two facts (message arrived; work activated), causation-linked, never merged.
+- **Report**: `communications` (report-class) → `task(completed|failed|returned_blocked)` with `causation_id` = the report's `event_id`.
+- **Alert**: events `system(<detection>)` → `communications` (alert-class) with `causation_id` = the detection's `event_id`.
+- **Campaign kickoff**: `workstreams` → `workstream_event(plan_linked)` per anchor doc.
+- **Registry scan**: 0..N `registry_snapshots` (hash-gated) + 0..N tombstones (only on complete enumeration) + `declaration` events per newly seen rev — one `scan_id` across all.
+
+### Defects found and fixed by this review
+
+1. Three "né" strings self-referenced after the rename sweep (F16 row, §6 mapping) — restored to the real former names.
+2. §8's task vocabulary still listed `contract_created` and bare `blocked` — both overruled (one-fact-one-row; F17); §8's blocked paragraph still called it an open §19 item — it is RULED.
+3. §4 and §19 still called the physical form an open lock item / typed-per-family — both now cite F16-v2.
+4. §7's transmission block still described the entity-era shape (`attempt_id`, destination-as-column) — and the review killed **`transmission_id` outright**: a log row's identity is its `event_id`; the trx id was a relic of when attempts were an entity table.
+5. Declaration rows had no stated physical shape post-F16-v2 — now: subject triple names the vault, `detail={vault_rev}`, `event` NULL.
+6. `entity_type=bot` snapshots never said WHICH uid — ruled: `bot_instance_uid`.
+7. Session uids had no minting story — ruled: deterministic sha256 derivation, bash-computable, no registry row required.
+8. The wire-type collision (workstream construct vs workstream event kind) was latent — ruled: `workstream_event` as the one suffixed wire name.
+9. The mutation surface (retention DELETE, spool attempts, identity updates) was implicit across sections — now enumerated once.
+10. Alias denormalization and soft-ref rules were scattered — now stated once with their reasons.
 
 ## 10. Spool contract
 
@@ -483,7 +566,7 @@ Golden path: `claudlobby plane init | start | status | doctor | open`. Clocks: e
 
 ## 19. Phase-1 items — status after the 2026-08-19 ratification pass
 
-Operator-ruled (now locked as forks F16–F18): ~~envelope physical form~~ → **typed tables + shared `ingest_seq`** · ~~`blocked` semantics~~ → **two events, legacy maps terminal** · ~~backfill posture~~ → **clean epoch + selective import**.
+Operator-ruled (locked as forks F16–F18; F16 later superseded by **F16-v2**, constructs + one events log, 2026-08-23): ~~envelope physical form~~ · ~~`blocked` semantics~~ → **two events, legacy maps terminal** · ~~backfill posture~~ → **clean epoch + selective import**.
 
 Remaining — technical, owned by the implementation plan, no operator ruling required:
 
