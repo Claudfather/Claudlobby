@@ -3634,6 +3634,73 @@ seed_claude_auth() {
     chmod 600 "$cfg/.credentials.json"
 }
 
+# seed_workspace_trust <project_cwd> [config_dir]
+# Mark ONE workspace trusted in an EXISTING Claude Code config, without
+# clobbering it (#970).
+#
+# Claude Code ignores a project's `.claude/settings.local.json` until the
+# workspace is trusted, recording trust as
+# `projects["<abs-path>"].hasTrustDialogAccepted`. Bots share the operator's
+# `~/.claude`, and nothing on the boot path ever set that key: measured on this
+# host, 21 of 21 production bot dirs had NO project entry at all.
+#
+# WHY THIS IS NOT seed_claude_auth_and_trust. That helper WRITES THE WHOLE FILE
+# and is correct only for a throwaway config dir in a harness. Pointed at the
+# operator's real `~/.claude.json` it would destroy every other project entry,
+# their history and their settings. This one merges a single key and is safe to
+# run on every boot of every bot.
+#
+# SCOPE OF WHAT THIS FIXES, stated because it was measured and is narrower than
+# #970 claims: composed DENY rules were verified to fire in an untrusted
+# workspace (fresh dir, no project entry before or after the run, deny still
+# blocked). So this is not what makes sibling isolation work. What remains
+# untested is whether ALLOW entries are dropped when untrusted — the documented
+# advisory names `permissions.allow` specifically, and that half of #970 is
+# unresolved. The advisory string itself no longer prints on the current binary
+# (positive control on a known-untrusted dir produced nothing), so it cannot be
+# used to measure trust state either.
+#
+# Idempotent, locked, and never fatal: a bot that cannot be marked trusted still
+# boots.
+seed_workspace_trust() {
+    local cwd="${1:?seed_workspace_trust: <project_cwd> required}"
+    local cfg="${2:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}"
+    local json="$cfg/.claude.json"
+    command -v jq >/dev/null 2>&1 || return 0
+    # BEFORE the lock, not inside it: with_lock creates "$json.lock", which needs
+    # "$cfg" to exist. On a fresh install it does not, so the lock failed, the
+    # helper returned its non-fatal 0, and the seed silently did nothing — the
+    # exact never-trusted state this exists to fix, on the one path where nobody
+    # would have an existing config to notice it against. Caught by the
+    # no-config-yet test, not by review.
+    mkdir -p "$cfg" 2>/dev/null || return 0
+    # Already trusted -> nothing to do, and no lock taken.
+    if [ -f "$json" ] && jq -e --arg c "$cwd" \
+        '.projects[$c].hasTrustDialogAccepted == true' "$json" >/dev/null 2>&1; then
+        return 0
+    fi
+    _do_trust_seed() {
+        local tmp
+        tmp=$(safe_mktemp) || return 1
+        if [ -f "$json" ] && jq -e '.' "$json" >/dev/null 2>&1; then
+            jq --arg c "$cwd" '.projects //= {}
+                | .projects[$c] //= {}
+                | .projects[$c].hasTrustDialogAccepted = true
+                | .projects[$c].hasCompletedProjectOnboarding = true' \
+                "$json" > "$tmp" && mv "$tmp" "$json"
+        else
+            # No config yet (or unparseable): create the minimum rather than
+            # overwrite a file we could not read. An unparseable config is not
+            # ours to repair here.
+            [ -f "$json" ] && { rm -f "$tmp"; return 0; }
+            jq -n --arg c "$cwd" '{projects: {($c): {
+                hasTrustDialogAccepted: true,
+                hasCompletedProjectOnboarding: true}}}' > "$tmp" && mv "$tmp" "$json"
+        fi
+    }
+    with_lock "${json}.lock" _do_trust_seed || return 0
+}
+
 # seed_claude_auth_and_trust <config_dir> <project_cwd> <claude_bin> <host_creds>
 # Auth seed plus onboarding/trust: without projects[cwd].hasTrustDialogAccepted
 # the composed settings.local.json allows are silently ignored, and a fresh dir

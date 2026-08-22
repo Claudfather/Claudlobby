@@ -178,6 +178,56 @@ def _grant_wellformed(grant: object) -> bool:
     )
 
 
+#: A permission rule carrying a path argument, e.g. ``Read(/a/b/**)``.
+_PATH_RULE = re.compile(r"^(Read|Edit|Write|MultiEdit|Glob|Grep)\((/[^/].*)\)$")
+
+
+def _inert_path_errors(
+    bot_name: str, source_kind: str, source_name: str, grants: list[str]
+) -> list[str]:
+    """Hard errors for path rules that can never match (#1312).
+
+    A permission-rule path with a SINGLE leading slash anchors at the SETTINGS
+    SOURCE, not the filesystem root, so an absolute path names a directory that
+    never exists and the rule silently permits exactly what it names. Measured in
+    a scratch project, with a no-rule control and the mechanism shown directly:
+    ``Read(/target/**)`` BLOCKS ``<project>/target/inside.txt``, while
+    ``Read(/abs/target/**)`` does not block ``/abs/target/secret.txt`` and
+    ``Read(//abs/target/**)`` does.
+
+    This is an ERROR rather than a warning, and both halves of that are deliberate.
+
+    **Error, because the class is always a no-op.** There is no bare-absolute path
+    rule that works, so there is nothing to weigh — unlike an over-broad grant,
+    which is a judgement call. A rule that looks like a constraint and enforces
+    nothing is worse than no rule, because it is counted as coverage.
+
+    **And because a warning would not be seen.** ``validate`` now emits a warning
+    per bare-``Bash`` expertise grant (#1315), 19 of them on this host. A new
+    warning class would arrive inside that wall. The failure this guards is
+    silent by construction; its report must not be.
+
+    Blast radius measured before choosing ERROR: **zero** declared bare-absolute
+    path rules exist in ``library/``, in any fleet overlay, or in any
+    ``fleet.yaml`` on this host. The composer was the only producer, and it no
+    longer is. So this cannot fail an existing fleet — it exists to stop the class
+    being reintroduced by hand.
+    """
+    out: list[str] = []
+    for grant in grants:
+        if not isinstance(grant, str):
+            continue
+        match = _PATH_RULE.match(grant.strip())
+        if match:
+            out.append(
+                f"bot '{bot_name}': {source_kind} '{source_name}' rule '{grant}' can "
+                "never match — a single leading slash anchors at the settings "
+                "source, not the filesystem root. Use "
+                f"'{match.group(1)}(/{match.group(2)})' for an absolute path."
+            )
+    return out
+
+
 def _grant_shape_warnings(
     bot_name: str,
     source_kind: str,
@@ -683,6 +733,10 @@ def _validate_bots(
                     bot_name, "expertise", area, xperms.allow, allow_side=True
                 )
             )
+            report.errors.extend(
+                _inert_path_errors(bot_name, "expertise", area, xperms.allow)
+                + _inert_path_errors(bot_name, "expertise", area, xperms.deny)
+            )
             report.warnings.extend(
                 _grant_shape_warnings(
                     bot_name, "expertise", area, xperms.deny, allow_side=False
@@ -703,10 +757,14 @@ def _validate_bots(
                     bot_name, "integration", name, grants, allow_side=True
                 )
             )
+            report.errors.extend(
+                _inert_path_errors(bot_name, "integration", name, grants)
+            )
         for name, grants in iter_skill_grants(paths, bot.skills):
             report.warnings.extend(
                 _grant_shape_warnings(bot_name, "skill", name, grants, allow_side=True)
             )
+            report.errors.extend(_inert_path_errors(bot_name, "skill", name, grants))
         for name, gperms in iter_guardrail_permissions(paths, bot.guardrails):
             if gperms is None:
                 continue
@@ -719,6 +777,10 @@ def _validate_bots(
                 _grant_shape_warnings(
                     bot_name, "guardrail", name, gperms.deny, allow_side=False
                 )
+            )
+            report.errors.extend(
+                _inert_path_errors(bot_name, "guardrail", name, gperms.allow)
+                + _inert_path_errors(bot_name, "guardrail", name, gperms.deny)
             )
 
         # Briefing source coverage (warn). A briefing-equipped bot with no
@@ -1059,6 +1121,17 @@ def _validate_bots(
                         f"bot '{bot_name}': tools.deny includes {sorted(conflict)} "
                         f"but expertise '{area}' typically requires them"
                     )
+            # The one source a human hand-writes, so the one most likely to
+            # acquire a bare-absolute path rule now the composer cannot emit one.
+            report.errors.extend(
+                _inert_path_errors(
+                    bot_name, "fleet.yaml", "tools.allow", bot.tool_permissions.allow
+                )
+                + _inert_path_errors(
+                    bot_name, "fleet.yaml", "tools.deny", bot.tool_permissions.deny
+                )
+            )
+
             # Also warn if same tool appears in both allow and deny
             if bot.tool_permissions.allow:
                 overlap = denied & set(bot.tool_permissions.allow)

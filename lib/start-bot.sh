@@ -95,6 +95,18 @@ if command -v jq >/dev/null 2>&1; then
 fi
 # --- end headless consent ----------------------------------------------------
 
+# --- Workspace trust for the bot's own dir (#970) ----------------------------
+# Without projects["<bot dir>"].hasTrustDialogAccepted, Claude Code ignores the
+# composed .claude/settings.local.json. Measured on this host: 21 of 21
+# production bot dirs had no project entry at all, while the throwaway bots the
+# validation harnesses create DID — because those harnesses seed trust and the
+# production boot path never did. The test environment differed from production
+# in exactly the variable under test, which is why this survived.
+#
+# Merges one key into the existing config; never rewrites it. Non-fatal.
+seed_workspace_trust "$BOT_DIR" || true
+# --- end workspace trust -----------------------------------------------------
+
 # --- Pre-trust MCP servers in this bot dev checkouts -------------------------
 # Seed each projects/ checkout with this bot composed MCP allowlist so a `claude`
 # session rooted there boots clean instead of stalling on the MCP-server-trust

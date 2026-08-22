@@ -464,15 +464,24 @@ class TestComposeSettingsLocal:
         assert "--dangerously-skip-permissions" in conf
 
     def test_sibling_isolation_only(self, tmp_path):
+        """R9 cross-bot isolation: TWO //-absolute rules per sibling (#1312, #873).
+
+        Was Read/Write/Edit with bare-absolute paths, and all three were inert or
+        useless: a single leading slash anchors at the SETTINGS SOURCE, so the
+        path named a directory that never existed, and Claude Code accepts a
+        Write(path) rule without ever consulting it.
+        """
         paths = self._make_paths_with_runtime(tmp_path)
         fleet = self._make_fleet_with_bots("bot-a", "bot-b")
         result = compose_settings_local(fleet.bots["bot-a"], fleet, paths)
         assert "permissions" in result
         deny = result["permissions"]["deny"]
-        # R9: one sibling → Read/Write/Edit denies over that sibling's runtime dir.
-        assert len(deny) == 3
-        assert {d.split("(")[0] for d in deny} == {"Read", "Write", "Edit"}
+        assert len(deny) == 2
+        assert {d.split("(")[0] for d in deny} == {"Read", "Edit"}
         assert all("bot-b" in d for d in deny)
+        # The prefix is the whole fix, so assert it on EVERY rule rather than
+        # trusting that one correct rule implies the rest.
+        assert all(d.split("(", 1)[1].startswith("//") for d in deny), deny
 
     def test_tool_deny_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)

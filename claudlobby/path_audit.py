@@ -149,6 +149,32 @@ def _traverses_fleet_layout(path: str, needles: list[str]) -> bool:
     return any(n in hay for n in needles)
 
 
+def _normalize_rule_path(path: str) -> str:
+    """``os.path.normpath`` plus the permission-rule ``//`` prefix (#1312).
+
+    POSIX mandates that a path beginning with EXACTLY two slashes is
+    implementation-defined, and ``os.path.normpath`` therefore preserves it —
+    ``//tmp/x`` stays ``//tmp/x`` while ``///tmp/x`` collapses to ``/tmp/x``.
+    Measured, not assumed.
+
+    That matters here because Claude Code's permission grammar uses a leading
+    ``//`` to mean "this path is absolute" (a single slash anchors at the settings
+    source). The composer now emits ``Read(//<bot-dir>/**)``, so this auditor sees
+    a token whose filesystem meaning is ``/<bot-dir>`` but whose spelling does not
+    compare equal to the fleet root — and it flagged the composer's own correct
+    output as a foreign-rooted leak.
+
+    Collapsing is the safe direction and that is worth stating rather than
+    assuming: it makes ``//<fleet-root>/x`` recognised as inside the fleet
+    (correctly unflagged) and leaves ``//<foreign>/x`` flagged exactly as
+    ``/<foreign>/x`` already was. No path escapes the audit that did not escape it
+    before; one class stops being falsely accused.
+    """
+    if path.startswith("//") and not path.startswith("///"):
+        path = path[1:]
+    return os.path.normpath(path)
+
+
 def improper_fleet_paths(
     text: str, bot: BotConfig, paths: Paths
 ) -> list[tuple[str, str]]:
@@ -190,7 +216,7 @@ def improper_fleet_paths(
         )
         if not (under_content_root or _traverses_fleet_layout(p, layout_needles)):
             continue  # not fleet-owned (system path, $HOME, /tmp, package token, …)
-        norm = os.path.normpath(p)
+        norm = _normalize_rule_path(p)
         if norm == fleet_root or norm.startswith(fleet_root + os.sep):
             continue  # resolves inside the fleet's real overlay root — correct
         if norm in vault_roots:
