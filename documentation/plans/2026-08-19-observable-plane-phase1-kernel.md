@@ -333,7 +333,7 @@ git commit -m "feat(plane): CANON_V1 canonical bytes + golden fixtures"
 - Test: `tests/test_plane_ids.py`
 
 **Interfaces:**
-- Produces: `mint(prefix: str) -> str` and the typed wrappers `mint_event_id()`, `mint_msg_id()`, `mint_transmission_id()`, `mint_work_item_id()`, `mint_assignment_id()`, `mint_uid(kind: str) -> str`; `ensure_host_uid(state_dir: Path) -> str`; `ID_PATTERNS: dict[str, str]` (regex per prefix, consumed by contracts.py validation).
+- Produces: `mint(prefix: str) -> str` and the typed wrappers `mint_event_id()`, `mint_msg_id()`, `mint_work_item_id()`, `mint_assignment_id()`, `derive_session_uid(platform_session_id)`, `mint_uid(kind: str) -> str`; `ensure_host_uid(state_dir: Path) -> str`; `ID_PATTERNS: dict[str, str]` (regex per prefix, consumed by contracts.py validation).
 
 Prefixes (fixed): `ev_` events, `msg_` messages, `att_` transport attempts, `wi_` work items, `ta_` task attempts, and uids `host_`, `fleet_`, `actor_`, `boti_`, `sess_` — each followed by 32 lowercase hex chars (uuid4). Ordering never comes from ids (that is `ingest_seq`'s job), so uuid4 suffices and stays stdlib.
 
