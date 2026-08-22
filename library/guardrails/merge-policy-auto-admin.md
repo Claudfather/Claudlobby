@@ -38,7 +38,7 @@ Merge command: `gh pr merge <n> --squash --admin --delete-branch`
 | ruleset present but `enforcement: disabled` | **2** | covers nothing in practice |
 | **no ruleset possible at all** — private repo on a plan returning `403 Upgrade to GitHub Pro or make the repository public` | **3** | nothing to configure, nothing to bypass |
 
-**So five of the nine have no protection currently enforced** — and those five are not one bucket. The two `disabled` repos are one flag flip from live; the three plan-403 repos **cannot be protected at any configuration** without a paid upgrade. Same headline, opposite remediation cost: reserve "unenforceable" for the plan-403 three, where it is literally true.
+**So five of the nine have no ruleset enforcing anything at all** — and those five are not one bucket. The two `disabled` repos are one flag flip from live; the three plan-403 repos **cannot be protected at any configuration** without a paid upgrade. Same headline, opposite remediation cost: reserve "unenforceable" for the plan-403 three, where it is literally true.
 
 Of the six that carry a ruleset, **four DECLARE an approval requirement and only three ENFORCE one** — declared and enforced are separate counts, which is what *A present ruleset proves nothing until you read its `enforcement` field* (below) is about. Read the rule, not its presence: one active repo carries a `pull_request` rule with **`required_approving_review_count: 0`**, which declares the *absence* of an approval requirement rather than one; and one of the disabled pair carries no `pull_request` rule at all.
 
@@ -46,7 +46,7 @@ Of the six that carry a ruleset, **four DECLARE an approval requirement and only
 
 **Do not read the plan-403 state as an edge case.** It is a *third* of this estate, and a repo in it cannot be protected at any configuration — so on those repos an auto-merge clause does not "fail closed against a server-side control"; it simply merges. A prior revision of this paragraph surveyed six repos and reported the disabled and plan-403 states as one repo each, which invited exactly that misreading.
 
-So GitHub enforces *review* and *force-push* on this estate, and enforces **nothing** about whether the tests ran. That is precisely and only the gap these rungs address — they are not a belt beside braces, they are the sole control over exactly the failure mode described above them.
+**Be precise about what that leaves enforced, because it is less than it looks.** Counting the whole nine, not the six with rulesets: force-push and branch-deletion are enforced on **4 of 9**; an approving review on **3 of 9**; and whether the tests ran on **0 of 9**. So GitHub enforces force-push protection on under half this estate, an approving review on a third of it, and **nothing anywhere** about test status. That is precisely and only the gap these rungs address — they are not a belt beside braces, they are the sole control over exactly the failure mode described above them.
 
 **Check the right surface, or you will confidently conclude the opposite.** That measurement is from the rulesets API, **not** `/branches/main/protection`. The legacy endpoint returns `404 Branch not protected` for a repo that is fully protected by a ruleset — asserting a negative in plain English that it has no standing to assert. This is the same guaranteed-versus-incidental distinction as the rollup above, one layer out: a surface that answers is not the same as a surface that answers *completely*.
 
