@@ -331,6 +331,18 @@ workstream_contract:      # envelope + — the contract row IS "opened" (F21)
   title: str;  goal: str?
   owner: str?             # alias -> actor_uid; unowned workstreams exist
   opened_by: str          # alias -> actor_uid
+  plan_ref: str?          # link to the AUTHORED plan artifact this campaign
+                          # executes (repo-doc path or issue URL) — singular by
+                          # the anchor-doc convention (the anchor's own links
+                          # carry phase plans; an array would duplicate them,
+                          # the same reason communications refs[] died);
+                          # pattern-free foreign vocabulary, never validated.
+                          # PLANS ARE NOT A TABLE: authored intent lives in
+                          # git/GitHub (clauDNA workflow territory) — the
+                          # workstream is a plan's operational shadow, and the
+                          # link is the whole construct
+  # Project association DERIVES via member work items' repo/project_key —
+  # a campaign spanning three projects needs no special case.
   # No mission link (fleet_uid reaches it in one hop) · no repo/project
   # (campaigns span repos; coverage derives from member work items) · no
   # initial horizon (staleness = age-since-last-event vs fleet-policy window,
