@@ -184,7 +184,8 @@ def verify(record: dict, issue_states: dict | None = None) -> tuple[str, list[st
     reader must be able to tell "the instrument is broken" from "the instrument
     worked and the news is bad".
     """
-    findings: list[str] = []
+    findings: list[str] = []      # escalate the verdict to DEFECT
+    disclosures: list[str] = []   # visible, counted, never a failure (#1317)
 
     if record.get("schema") != SCHEMA:
         return INVALID, [f"unknown schema {record.get('schema')!r} (expected {SCHEMA})"]
@@ -254,21 +255,59 @@ def verify(record: dict, issue_states: dict | None = None) -> tuple[str, list[st
     # CLOSED work is confidently wrong, and NO selection metric can detect it --
     # the error is in the yardstick, so alignment is measured against the same
     # stale document that caused it.
-    if issue_states:
-        stale = [
-            str(ref)
-            for ref in record.get("mission_focus_refs", [])
-            if str(issue_states.get(str(ref), "")).upper() == "CLOSED"
-        ]
+    #
+    # THREE STATES, NOT TWO (#1317). This rung used to resolve a ref by asking
+    # "is it CLOSED?", so everything that was not literally CLOSED -- a ref
+    # ABSENT from the map, or one carrying an unrecognised value like MERGED --
+    # fell through to a silent pass. That made a coverage gap indistinguishable
+    # from a confirmed-open ref, which is precisely the failure this module
+    # refuses everywhere else (an unchecked rc, a missing unfiltered count, an
+    # unscored loser). It was the one rung that exempted itself from its own
+    # standard, and it fails toward "fine" -- the direction nobody re-checks.
+    #
+    # UNKNOWN is NOT a failure and is never scored as one. It is a coverage gap
+    # that has to be VISIBLE -- the treatment `credentials.py` gives its shape-3
+    # case: printed, counted, and explicitly "a gap, not a pass". Scoring it as a
+    # defect would train a caller to suppress the check and lose the CLOSED
+    # detection with it.
+    #
+    # `issue_states is None` means the caller did not ask for this check at all,
+    # which stays silent. An EMPTY map is a different statement -- the check was
+    # requested and nothing is known -- so it resolves every ref to UNKNOWN.
+    if issue_states is not None:
+        stale, unknown = [], []
+        for ref in record.get("mission_focus_refs", []):
+            raw = issue_states.get(str(ref))
+            state = str(raw).upper() if raw is not None else None
+            if state == "CLOSED":
+                stale.append(str(ref))
+            elif state == "OPEN":
+                continue
+            elif raw is None:
+                unknown.append(f"{ref} (absent from the map)")
+            else:
+                unknown.append(f"{ref} (unrecognised state {raw!r})")
         if stale:
             findings.append(
                 f"DEFECT: mission focus references CLOSED work: {stale}. The picker "
                 "sourced its goal from completed items; no selection metric can see this."
             )
+        if unknown:
+            disclosures.append(
+                f"UNKNOWN — mission focus staleness could not be resolved for "
+                f"{len(unknown)} ref(s): {unknown}. This is a GAP, NOT A PASS: these "
+                "refs were neither confirmed open nor confirmed closed, so a stale "
+                "focus could be hiding among them."
+            )
 
-    if not findings:
-        return OK, []
-    return DEFECT, findings
+    # UNKNOWN never escalates the verdict, but it is always returned so a caller
+    # cannot mistake a partial answer for a clean one. A disclosed gap is not a
+    # defect; silently folding it into OK is.
+    if findings:
+        return DEFECT, findings + disclosures
+    if disclosures:
+        return OK, disclosures
+    return OK, []
 
 
 def parse_focus_refs(mission_text: str) -> list[str]:
@@ -331,9 +370,15 @@ def main(argv: list[str] | None = None) -> int:
 
     states = json.loads(Path(args.issue_states).read_text()) if args.issue_states else None
     verdict, findings = verify(record, states)
-    print(verdict)
+    unknown_n = sum(1 for f in findings if f.startswith("UNKNOWN"))
+    print(f"{verdict}  (unknown={unknown_n})")
     for finding in findings:
         print(f"  - {finding}")
+    if unknown_n:
+        # Said on every run that has one, like creds-reconcile: a validator that
+        # silently omitted its gaps would be indistinguishable from one that
+        # checked and found nothing.
+        print("  NOTE: unknown items are a GAP, not a pass. They do not fail the run.")
     return {OK: 0, DEFECT: 1, INVALID: 2}[verdict]
 
 
