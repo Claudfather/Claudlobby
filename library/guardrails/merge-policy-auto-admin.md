@@ -30,13 +30,27 @@ Merge command: `gh pr merge <n> --squash --admin --delete-branch`
 
 **Why --admin:** Same-identity fleets share one GitHub PAT. Branch protection's "required approvals" check counts only formal `APPROVE` state, which GitHub blocks for same-identity. `--admin` bypasses the branch protection gate — but the **real gate is the peer review verdict**, not GitHub's checkbox.
 
-**Why the rungs above carry the whole weight.** There *is* a server-side backstop — it simply does not cover this. Measured across six repos of one estate via the repository **rulesets** API: five carry a ruleset covering branch deletion, non-fast-forward and pull-request rules — though only four are `enforcement: active`, the fifth being `disabled` and so covering nothing in practice; the sixth is on a plan returning `403 Upgrade to GitHub Pro or make the repository public` and so cannot have one. **Four of the five DECLARE an approval requirement and only three ENFORCE one**, the difference being that same disabled ruleset. Declared and enforced are separate counts, which is the whole point of the paragraph two below. **Not one of the five declares `required_status_checks`. Zero of five.**
+**Why the rungs above carry the whole weight.** There *is* a server-side backstop — it simply does not cover this, and it covers far less than a first look suggests. Measured across **nine** repos of one estate via the repository **rulesets** API (re-measured 2026-08-22):
+
+| state | count | repos |
+|---|---|---|
+| ruleset `enforcement: active` | **4** | branch deletion, non-fast-forward, pull-request rules |
+| ruleset present but `enforcement: disabled` | **2** | covers nothing in practice |
+| **no ruleset possible at all** — private repo on a plan returning `403 Upgrade to GitHub Pro or make the repository public` | **3** | nothing to configure, nothing to bypass |
+
+**So five of the nine have no protection currently enforced** — and those five are not one bucket. The two `disabled` repos are one flag flip from live; the three plan-403 repos **cannot be protected at any configuration** without a paid upgrade. Same headline, opposite remediation cost: reserve "unenforceable" for the plan-403 three, where it is literally true.
+
+Of the six that carry a ruleset, **four DECLARE an approval requirement and only three ENFORCE one** — declared and enforced are separate counts, which is what *A present ruleset proves nothing until you read its `enforcement` field* (below) is about. Read the rule, not its presence: one active repo carries a `pull_request` rule with **`required_approving_review_count: 0`**, which declares the *absence* of an approval requirement rather than one; and one of the disabled pair carries no `pull_request` rule at all.
+
+**Not one of the nine declares `required_status_checks`. Zero of nine** — verified rule-by-rule on all six rulesets, not inferred.
+
+**Do not read the plan-403 state as an edge case.** It is a *third* of this estate, and a repo in it cannot be protected at any configuration — so on those repos an auto-merge clause does not "fail closed against a server-side control"; it simply merges. A prior revision of this paragraph surveyed six repos and reported the disabled and plan-403 states as one repo each, which invited exactly that misreading.
 
 So GitHub enforces *review* and *force-push* on this estate, and enforces **nothing** about whether the tests ran. That is precisely and only the gap these rungs address — they are not a belt beside braces, they are the sole control over exactly the failure mode described above them.
 
 **Check the right surface, or you will confidently conclude the opposite.** That measurement is from the rulesets API, **not** `/branches/main/protection`. The legacy endpoint returns `404 Branch not protected` for a repo that is fully protected by a ruleset — asserting a negative in plain English that it has no standing to assert. This is the same guaranteed-versus-incidental distinction as the rollup above, one layer out: a surface that answers is not the same as a surface that answers *completely*.
 
-**A present ruleset proves nothing until you read its `enforcement` field.** A ruleset can exist and enforce nothing (`enforcement: disabled`), and one repo in that survey is in exactly that state. The two obvious checks then fail in **opposite** directions: the legacy endpoint reports "not protected" about a repo that is, while a ruleset *listing* reports "protected" about a repo that is not. Two confident wrong answers pointing opposite ways — only the `enforcement` field settles it, and neither reviewer who checked this had that third state in hand.
+**A present ruleset proves nothing until you read its `enforcement` field.** A ruleset can exist and enforce nothing (`enforcement: disabled`), and **two** repos in that survey are in exactly that state. The two obvious checks then fail in **opposite** directions: the legacy endpoint reports "not protected" about a repo that is, while a ruleset *listing* reports "protected" about a repo that is not. Two confident wrong answers pointing opposite ways — only the `enforcement` field settles it, and neither reviewer who checked this had that third state in hand.
 
 **Red lines (even with --admin):**
 - Never `--admin` merge without an actual peer review on the PR.
