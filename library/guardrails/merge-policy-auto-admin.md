@@ -30,7 +30,19 @@ Merge command: `gh pr merge <n> --squash --admin --delete-branch`
 
 **Why --admin:** Same-identity fleets share one GitHub PAT. Branch protection's "required approvals" check counts only formal `APPROVE` state, which GitHub blocks for same-identity. `--admin` bypasses the branch protection gate — but the **real gate is the peer review verdict**, not GitHub's checkbox.
 
-**Why the rungs above carry the whole weight.** There *is* a server-side backstop — it simply does not cover this. Measured across six repos of one estate via the repository **rulesets** API: five carry a ruleset covering branch deletion, non-fast-forward and pull-request rules — though only four are `enforcement: active`, the fifth being `disabled` and so covering nothing in practice; the sixth is on a plan returning `403 Upgrade to GitHub Pro or make the repository public` and so cannot have one. **Four of the five DECLARE an approval requirement and only three ENFORCE one**, the difference being that same disabled ruleset. Declared and enforced are separate counts, which is the whole point of the paragraph two below. **Not one of the five declares `required_status_checks`. Zero of five.**
+**Why the rungs above carry the whole weight.** There *is* a server-side backstop — it simply does not cover this, and it covers far less than a first look suggests. Measured across **nine** repos of one estate via the repository **rulesets** API (re-measured 2026-08-22):
+
+| state | count | repos |
+|---|---|---|
+| ruleset `enforcement: active` | **4** | branch deletion, non-fast-forward, pull-request rules |
+| ruleset present but `enforcement: disabled` | **2** | covers nothing in practice |
+| **no ruleset possible at all** — private repo on a plan returning `403 Upgrade to GitHub Pro or make the repository public` | **3** | nothing to configure, nothing to bypass |
+
+**So five of the nine have no enforceable protection.** Of the six that carry a ruleset, five DECLARE an approval requirement and only **four** ENFORCE one — declared and enforced are separate counts, which is the whole point of the paragraph two below. One of the disabled pair does not even declare a pull-request rule.
+
+**Not one of the nine declares `required_status_checks`. Zero of nine** — verified rule-by-rule on all six rulesets, not inferred.
+
+**Do not read the plan-403 state as an edge case.** It is a *third* of this estate, and a repo in it cannot be protected at any configuration — so on those repos an auto-merge clause does not "fail closed against a server-side control"; it simply merges. A prior revision of this paragraph surveyed six repos and reported the disabled and plan-403 states as one repo each, which invited exactly that misreading.
 
 So GitHub enforces *review* and *force-push* on this estate, and enforces **nothing** about whether the tests ran. That is precisely and only the gap these rungs address — they are not a belt beside braces, they are the sole control over exactly the failure mode described above them.
 
