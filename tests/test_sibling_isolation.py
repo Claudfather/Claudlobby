@@ -84,6 +84,17 @@ class TestRulePathNormalisation:
             path_audit._normalize_rule_path("/other/fleet/x")
 
 
+def _seed_script(cwd: str, config_json: str | None = None) -> str:
+    """The exact bash the harness runs. Factored out so a test can pin its SHAPE.
+
+    Without this the "production shape" claim is unverifiable: a test that builds
+    its own one-arg script proves a one-arg call works, not that the harness makes
+    one. The first version of this file did exactly that.
+    """
+    arg = f' "{config_json}"' if config_json else ""
+    return f'. "{LIB}/lib-common.sh"; set +e; seed_workspace_trust "{cwd}"{arg}'
+
+
 def _run_seed(cwd: str, *, config_json: str | None = None,
               home: str | None = None, config_dir: str | None = None):
     """Invoke seed_workspace_trust.
@@ -92,7 +103,6 @@ def _run_seed(cwd: str, *, config_json: str | None = None,
     ``home`` / ``config_dir`` leave it OFF and drive the resolution the way
     ``start-bot.sh`` does — which is the shape that mattered.
     """
-    arg = f' "{config_json}"' if config_json else ""
     env = dict(os.environ)
     env.pop("CLAUDE_CONFIG_DIR", None)
     if home:
@@ -100,7 +110,7 @@ def _run_seed(cwd: str, *, config_json: str | None = None,
     if config_dir:
         env["CLAUDE_CONFIG_DIR"] = config_dir
     return subprocess.run(
-        ["bash", "-c", f'. "{LIB}/lib-common.sh"; set +e; seed_workspace_trust "{cwd}"{arg}'],
+        ["bash", "-c", _seed_script(cwd, config_json)],
         capture_output=True, text=True, env=env,
     )
 
@@ -237,3 +247,97 @@ class TestWorkspaceTrustSeed:
         _run_seed("/bots/alpha", config_json=str(cfg / ".claude.json"))
         data = json.loads((cfg / ".claude.json").read_text())
         assert data["projects"]["/bots/alpha"]["hasTrustDialogAccepted"] is True
+
+
+class TestTheHarnessItselfTakesProductionShape:
+    """A test of the test — because "it passes the right path explicitly" is the
+    same defect wearing a correct value (#1325 review, dara).
+
+    The original bug survived because every test supplied an explicit second
+    argument. Fixing the resolution and then asserting it with an explicit
+    argument would leave that hole exactly where it was, just harder to see. So
+    the harness's own call shape is OBSERVED at runtime here, not read.
+    """
+
+    def test_the_production_helper_really_passes_one_argument(self, tmp_path):
+        """Shadow the function and capture what it actually receives.
+
+        Asserts on `$#` as bash sees it, so a helper that quietly grew a second
+        argument fails here rather than passing with a correct-looking value.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        env = dict(os.environ)
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        env["HOME"] = str(home)
+        # Take the harness's OWN script and shadow the function inside it, so
+        # what is observed is what _run_seed actually executes — not a
+        # look-alike built here, which would prove nothing about the harness.
+        base = _seed_script("/bots/alpha")
+        assert base.endswith('seed_workspace_trust "/bots/alpha"'), base
+        script = base.replace(
+            'seed_workspace_trust "/bots/alpha"',
+            'seed_workspace_trust() { echo "ARGC=$#"; echo "ARG2=${2:-UNSET}"; '
+            'echo "CCD=${CLAUDE_CONFIG_DIR:-UNSET}"; echo "RESOLVED=$(claude_config_json)"; }; '
+            'seed_workspace_trust "/bots/alpha"',
+        )
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env).stdout
+        assert "ARGC=1" in out, out
+        assert "ARG2=UNSET" in out, out
+        assert "CCD=UNSET" in out, out
+        assert f"RESOLVED={home}/.claude/.config.json" in out, out
+
+    def test_the_harness_script_carries_exactly_one_argument(self):
+        """Pin the constructed command, not its effect.
+
+        `_run_seed(cwd)` — the production-shape call — must emit a script whose
+        invocation has one quoted argument. A helper that regained a default
+        second argument fails HERE, loudly, rather than passing with a
+        correct-looking path.
+        """
+        script = _seed_script("/bots/alpha")
+        invocation = script.split("seed_workspace_trust", 1)[1]
+        assert invocation.strip() == '"/bots/alpha"', invocation
+        assert _seed_script("/bots/alpha", "/x/y.json").strip().endswith(
+            'seed_workspace_trust "/bots/alpha" "/x/y.json"'
+        )
+
+    def test_the_call_site_and_the_harness_agree(self):
+        """Both must be one-arg. Either alone can be right while the pair is not."""
+        call = [l for l in (LIB / "start-bot.sh").read_text().splitlines()
+                if "seed_workspace_trust" in l and not l.strip().startswith("#")]
+        assert len(call) == 1, call
+        body = call[0].split("seed_workspace_trust", 1)[1].split("||")[0].strip()
+        assert body.count('"') == 2 and body == '"$BOT_DIR"', body
+
+
+class TestLivePathWasDeterminedByLiveness:
+    """HOW the live config path was determined, pinned — because the dead file
+    wins every other heuristic.
+
+    Three candidates existed; two look right:
+
+      $HOME/.claude.json          102KB, 29 projects, 13 bot dirs — mtime 2026-08-05
+      $HOME/.claude/.config.json   70KB, 14 projects,  4 bot dirs — mtime 2026-08-21
+      $HOME/.claude/.claude.json  ABSENT
+
+    The STALE one is bigger, has more projects, and has more bot-dir entries. A
+    reader reasoning "the authoritative config is the fuller one" lands on the
+    dead file — which is what happened twice before this landed. **Only recency
+    discriminates, and only if you look at it.**
+    """
+
+    def test_the_resolver_returns_neither_decoy(self, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        env = dict(os.environ)
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        env["HOME"] = str(home)
+        out = subprocess.run(
+            ["bash", "-c", f'. "{LIB}/lib-common.sh"; claude_config_json'],
+            capture_output=True, text=True, env=env,
+        ).stdout.strip()
+        assert out == f"{home}/.claude/.config.json"
+        # The two that look right and are read by nothing.
+        assert out != f"{home}/.claude.json"
+        assert out != f"{home}/.claude/.claude.json"
