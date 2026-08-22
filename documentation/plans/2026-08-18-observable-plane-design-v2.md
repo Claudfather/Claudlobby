@@ -74,7 +74,7 @@ Performance gates before the implementation locks (§14): the repo has already m
 
 ## 6. Model catalog (lanes)
 
-**Lane A — declared (files, git):** fleet.yaml (per fleet; groups optional per F5) · system.yaml (per host; follow-on: vault `hosts/<host_uid>/`) · `.env` (never in git; `${VAR}` names only) · templates (OSS git = schema history).
+**Lane A — declared (files, git):** fleet.yaml (per fleet; groups optional per F5) · projects.yaml (per fleet) · **system.yaml — PACKAGE tier, not the operator's** (verified 2026-08-23: the live file is `claudlobby/system.yaml`, tracked, resolved from the package dir; header says "package-owned and pristine"; operator edits dirty the checkout and `repo_pull_blocker` then BLOCKS updates — a loud fence, not a silent clobber; operator intent rides fleet.yaml overrides; package-tier movement is exactly snapshot situation-1: changed payload hash, unchanged vault_rev) · `.env` (never in git; `${VAR}` names only) · templates (OSS git = schema history). **NAMED DESIGN ITEM — the missing host construct: `vault hosts/<host_uid>/system.yaml`** (promoted from follow-on 2026-08-23; two walks have hit this wall). Today host-scoped operator intent is fragmented: package tier (immutable), host `.env` (secrets only), and fleet.yaml awkwardly arming HOST jobs (update-siblings — which of four fleets speaks for the host?). The hosts/ construct gives per-host operator declarations a versioned vault home: fresh machine = clone vault → setup-system reads declared host config; the Host card's system facet gains real declared-vs-package provenance.
 
 **Lane B — observed (append-only, envelope-bearing):**
 
