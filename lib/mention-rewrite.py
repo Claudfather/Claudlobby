@@ -63,20 +63,41 @@ import sys
 # `user@example.com` must not read as mentions.
 _HANDLE = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 
-# A mention only notifies when the `@` starts a token: the string start, or
-# after whitespace, an opening bracket/paren, or a QUOTE. This is what excludes
-# `-F body=@-` and `user@example.com`, where an alphanumeric precedes.
+# MATCH UNLESS CLEARLY INSIDE A WORD — a denylist, deliberately not an allowlist.
 #
-# The quotes are not cosmetic — omitting them was a live false negative. A
-# comment that OPENS by addressing someone is a natural shape:
+# This was an ALLOWLIST (`(?<![^\s(\[{"'])`): the `@` matched only after
+# whitespace, a bracket, a paren or a quote. It therefore covered the RARE
+# positions and missed the UNIVERSAL ones. Measured against the shipped
+# rewriter, these all escaped: `**` `*` `_` `__` `~~` `>` `-` `#` `|` `` ` ``
+# `/` `:` — i.e. bold, italic, strikethrough, blockquote, bullet, heading,
+# table cell. House style opens every verdict with `**`, every bullet with `-`
+# and every table cell with `|`, so the guard missed nearly everything it was
+# written for. It emailed a real GitHub user twice (#1019, #1329); the second
+# replied on the PR to say we had the wrong person.
 #
-#     gh pr comment 1 --body "vera thanks for the catch"
+# The fix is an INVERSION, not a longer allowlist. Adding the markdown
+# characters one at a time is the same defect with more entries, and it fails
+# again on the next character nobody enumerated. The safe direction is to match
+# unless an alphanumeric precedes, which preserves the real intent —
+# `user@example.com` and `-F body=@-` stay untouched.
 #
-# and with `"` excluded the `@` there never matched, so the mention sailed
-# through and would have notified. Found while documenting the probe traps for
-# #1019: the batched-probe repro printed `-b "vera"` back UNCHANGED, which
-# looked like the guard under-firing and was.
-_MENTION = re.compile(rf"(?<![^\s(\[{{\"'])@({_HANDLE})\b")
+# THE DENYLIST IS ALPHANUMERIC ONLY, and `_`/`-` are excluded on evidence:
+# including them re-broke `_@bot_` (markdown italic) and `-@bot`, while buying
+# nothing, because `my-email@bot` and `snake_case@bot` are already blocked by
+# the alphanumeric immediately before the `@`.
+#
+# THE TRAILING ANCHOR IS A SECOND, INDEPENDENT DEFECT. It was `\b`, which fails
+# when the handle is followed by `_` — there is no word boundary between `a` and
+# `_`, so `_@bot_` stayed unmatched even after the lookbehind was fixed. A
+# lookahead for handle-continuation characters says "the handle ends here"
+# without depending on what counts as a word character.
+#
+# BACKTICK IS NOT THIS PATTERN'S JOB. A `` ` `` before a mention is decided by
+# the fence/span parser below, on whether the span actually CLOSES — a character
+# test cannot see the closing tick. Under this pattern a lone backtick that
+# never closes now correctly REWRITES, and a closed span is correctly left
+# alone; that behaviour moved here from the lookbehind, where it never belonged.
+_MENTION = re.compile(rf"(?<![A-Za-z0-9])@({_HANDLE})(?![A-Za-z0-9-])")
 
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 # A URL run — never rewrite inside one; an @ there is userinfo, not a mention.
