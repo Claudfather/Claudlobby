@@ -159,17 +159,54 @@ class TestResolveGuardrailPermissions:
 
 
 class TestComposeWiresNewLayers:
-    def test_sibling_isolation_denies_read_write_edit(self, tmp_path):
-        # R9: cross-bot isolation must cover Write/Edit, not just Read.
+    def _sibling_deny(self, tmp_path):
         root, paths = _setup(tmp_path)
         bots = {b: _bot(b) for b in ("bot-a", "bot-b")}
         fleet = FleetConfig(name="t", service_prefix="p", bots=bots)
         deny = compose_settings_local(bots["bot-a"], fleet, paths)["permissions"][
             "deny"
         ]
-        assert any(d.startswith("Read(") and "bot-b" in d for d in deny)
-        assert any(d.startswith("Write(") and "bot-b" in d for d in deny)
-        assert any(d.startswith("Edit(") and "bot-b" in d for d in deny)
+        return [d for d in deny if "bot-b" in d]
+
+    def test_sibling_isolation_covers_read_and_edit(self, tmp_path):
+        """R9 cross-bot isolation, now as two rules rather than three.
+
+        Edit covers every file-editing tool, Write included — which is what the
+        boot warning this used to provoke says in so many words.
+        """
+        sibling = self._sibling_deny(tmp_path)
+        assert any(d.startswith("Read(") for d in sibling)
+        assert any(d.startswith("Edit(") for d in sibling)
+
+    def test_sibling_isolation_emits_no_write_rule(self, tmp_path):
+        """#873: Claude Code ACCEPTS a Write(path) rule and never consults it.
+
+        It warns about it once per sibling on every boot, so the rule bought
+        nothing and cost N-1 warnings per bot per boot. Asserting its ABSENCE
+        rather than deleting the old assertion, so a well-meaning re-add fails
+        here instead of quietly restoring the noise.
+        """
+        assert not any(d.startswith("Write(") for d in self._sibling_deny(tmp_path))
+
+    def test_sibling_rules_are_double_slash_absolute(self, tmp_path):
+        """#1312: the whole control was inert without this.
+
+        A single leading slash anchors at the SETTINGS SOURCE, not the filesystem
+        root, so `Read(/abs/**)` names a directory that never exists and permits
+        exactly what it claims to deny. Measured in a scratch project, with a
+        no-rule control and the mechanism shown directly: `Read(/target/**)`
+        BLOCKS `<project>/target/inside.txt`.
+
+        This asserts the SHAPE of every emitted rule, not just that some rule
+        exists — a rule with the wrong prefix is indistinguishable from a correct
+        one at a glance, and that is exactly how 372 inert rules shipped.
+        """
+        sibling = self._sibling_deny(tmp_path)
+        assert sibling, "fixture produced no sibling rules"
+        for rule in sibling:
+            body = rule[rule.index("(") + 1 : rule.rindex(")")]
+            assert body.startswith("//"), f"{rule} is not absolute-anchored"
+            assert not body.startswith("///"), rule
 
     def test_skill_grants_land_in_allow(self, tmp_path):
         root, paths = _setup(tmp_path)

@@ -2355,16 +2355,39 @@ def compose_settings_local(
     deny_patterns: list[str] = []
 
     # Layer 0: Sibling isolation — deny reading OR mutating another bot's runtime
-    # dir. Read alone left a cross-bot Write/Edit gap (R9); all three are denied so
-    # a bot cannot touch a sibling's files.
+    # dir. Two rules, both DOUBLE-slash, and every part of that shape is a fix
+    # for a measured defect (#1312, #873).
+    #
+    # WHY `//` (#1312). A permission-rule path with a SINGLE leading slash anchors
+    # at the SETTINGS SOURCE, not the filesystem root — so an absolute path names
+    # a directory that never exists and the rule is inert. Measured directly in a
+    # scratch project with a trust seed and a no-rule control:
+    #
+    #   Read(/target/**)      vs  <project>/target/inside.txt  -> BLOCKED
+    #       ^ the mechanism: a bare /path really is project-relative
+    #   Read(/abs/target/**)  vs  /abs/target/secret.txt       -> NOT blocked
+    #   Read(//abs/target/**) vs  /abs/target/secret.txt       -> BLOCKED
+    #   Read(//abs/target/**) vs  /abs/target/nested/deep.txt  -> BLOCKED
+    #
+    # WHY NO `Write(...)` (#873). Claude Code accepts a Write(path) rule and never
+    # consults it — file permission checks read Read and Edit only, and it says so
+    # in a warning on every boot, once per sibling. Dropping it removes N-1
+    # warnings per bot per boot and loses no enforcement: Edit rules cover every
+    # file-editing tool, Write included.
+    #
+    # WHAT #873's "isolation is intact" GOT HALF RIGHT, measured: bare-absolute
+    # EDIT is NOT inert — it blocks (twice, with a no-rule control proving the rule
+    # caused it, not a workspace boundary). So on a trusted workspace the integrity
+    # half held all along via the Edit rule; it was the confidentiality half that
+    # was missing, because bare-absolute Read is inert. Read and Edit do not
+    # resolve a bare-absolute path the same way.
     siblings = [bid for bid in fleet.bots if bid != bot.bot_id]
     for sibling in siblings:
         sibling_dir = str(paths.bot_runtime(sibling))
         deny_patterns.extend(
             (
-                f"Read({sibling_dir}/**)",
-                f"Write({sibling_dir}/**)",
-                f"Edit({sibling_dir}/**)",
+                f"Read(/{sibling_dir}/**)",
+                f"Edit(/{sibling_dir}/**)",
             )
         )
 
