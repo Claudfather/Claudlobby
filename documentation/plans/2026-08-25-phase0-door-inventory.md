@@ -1,6 +1,6 @@
 # Phase-0 door & callsite inventory — DRAFT (started 2026-08-25)
 
-**Status:** DRAFT — the mandatory pre-Phase-2 inventory (spec §13; made mandatory by the round-2 review). Measured against `origin/main`-derived worktree at the plane design branch. Each section names the caller set (grep-measured, not assumed), its classification, and what the shim design must handle. The five disproof targets each carry their evidence state.
+**Status:** COMPLETE for the callsite matrix (2026-08-25) — verified against CURRENT `origin/main` via `git grep`/`git cat-file` on the ref itself, not a stale checkout. Remaining sub-items are listed at the end and are Phase-2-design work, not inventory work. The five disproof targets each carry their evidence state.
 
 ## Caller inventory (measured)
 
@@ -26,5 +26,24 @@ Note: the net must live at `bot_tmux_send` level or cover both — `pane_send_ve
 4. **Report/dispatch write-order inversions** — CONFIRMED (round-2 review, re-verified): dispatch-task ledgers BEFORE send; report-back sends BEFORE ledger. Shim consequence: communication-intent-first ordering CHANGES report-back's crash exposure (send-then-crash currently loses the ledger row; intent-first records it) — behavior change to canary explicitly, not silently.
 5. **Loss of next/terminal disposition** — CLOSED at the model (round-3 F10: open-time `progressed(next_step)`; `closed.disposition`); remaining work is the shim's verb-mapping table proving every `workstream-update.sh` flag lands somewhere.
 
-## Remaining for the full inventory (Phase-0 completion)
-Per-door matrix rows (ID minting · authoritative sink · write/send order · return semantics · retry behavior · legacy readers) for: dispatch-task, dispatch, report-back, tg-post, bridge (in+out, version floor), workstream-update, fleet-pulse, keepalive, start-bot, sprint/briefing/sweep triggers, telegram-instant-ack. Plus: exact ambiguous-success branch list from `pane_send_verified`; the harness-exemption mechanism; evening-audit ruling.
+## Per-door matrix (complete — measured on origin/main 2026-08-25)
+
+| Door | ID minting | Authoritative sink | Write/send order | Return semantics | Retry | Legacy readers |
+|---|---|---|---|---|---|---|
+| `dispatch-task.sh` | task_id for `--type task` only (mint_task_id); other types + freeform: none | `state/dispatch-log.jsonl` (flock) | **LEDGER then send** (header: "record the task to the dispatch ledger, then send" — confirmed on main) | nonzero on missing session/empty task; send failures via dispatch.sh | none | dispatch-overdue.py (watchdog + open doors), brief.py, supersede-hint |
+| `dispatch.sh` (transport) | none | none (ledger-less by design) | send only | `bot_tmux_send` semantics; send_miss logged on miss | one verify-retry inside pane_send_verified path | none |
+| `report-back.sh` | resolves open task_id via dispatch-overdue `--open-task` when omitted | `<fleet>/report-back.jsonl` (flock) | **SEND then ledger** (:152 send → :157 emit — confirmed on main; inverse of dispatch-task) | `\|\| true` on BOTH legs — caller never sees failure | none | dispatch-overdue join, brief.py, who-reviewed.py |
+| `tg-post.sh` | none | none (stateless) | send only | exit 0 even on REJECTED sends for env-less callers (header-documented) | none | none |
+| Telegram bridge (external plugin) | carrier msg ids per part | plugin-internal | chunks one message → MULTIPLE API sends; can partially fail | plugin-internal | plugin-internal | none |
+| `workstream-update.sh` | ws-slug ids (single-writer) | `workstreams.json` (in-place mutate, lock) | mutate only (no send) | nonzero on unknown id/verb | none | brief.py, fleet-pulse stall checks, sprint selection |
+| `fleet-pulse.sh` | none | per-bot `data/events/*.jsonl` + debounce state | detect → emit event → inject alert (bot_tmux_send) + tg-post, independently | sweep-level; per-check `\|\| true` | debounce, not retry | fleet-pulse decision table (self), events CLI |
+| `keepalive.sh` | none | keepalive.log + events JSONL | detect → restart → event; reload nudges via pane_send_verified | watchdog loop | 60s cycle IS the retry | uptime.py (log), events CLI |
+| `start-bot.sh` | none | startup events; rc markers | boot → inject STARTUP_PROMPT (pane_send_verified ×5 sites incl. never-drawn repair) | rc_timeout burst-detected once | verify-retry + never-drawn resend | selfstart-snapshot, boot samplers |
+| `sprint-trigger.sh` / `bot-sweep-cron.sh` | none | none | inject nudge (bot_tmux_send) | cron-level | none | none |
+| `briefing-trigger.sh` | none | none | `dispatch.sh <bot> "/briefing SLOT"` — ID-less BY DESIGN (slash command must be first chars in pane) | exit of dispatch.sh | none | none |
+| `telegram-instant-ack.sh` | none | none | tg send only | ack-level | none | none |
+
+**Shim classification that falls out:** semantic communications = dispatch-task (all types), report-back, tg-post bodies, bridge both directions · control-plane raw = keepalive/start-bot/pre-stop injections, sprint/sweep nudges · **judgment row:** briefing-trigger is a *scheduled command delivery* — semantically a `briefing`-class communication carried as a raw slash injection; the shim should mint it a communication (class=briefing, command payload in body) rather than leave it in the raw net. Harness callers (validate-bot-change, ab-comms-eval, boot samplers) are net-exempt via their existing stub/throwaway conventions; `personal/evening-audit.sh` is operator-local → exempt, documented.
+
+## Remaining (Phase-2 design work, not inventory)
+Exact ambiguous-success branch list from `pane_send_verified`; the harness-exemption mechanism; evening-audit ruling.

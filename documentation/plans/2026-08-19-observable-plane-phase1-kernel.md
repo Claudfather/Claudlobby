@@ -1,6 +1,6 @@
 # Observable Plane — Phase 1: Semantic Kernel Implementation Plan
 
-> **REVISION v2.1 (2026-08-24):** round-2 external review reconciled — ten implementation-blocking findings. Every INSERT derives its placeholders from column dicts (hand-counted arithmetic banned); ingest is the sole transaction owner; migrations own their transactions in-script; the events CHECK is NULL-safe require-AND-forbid, tested by an executed INSERT matrix from `KIND_MANIFEST`; EmitRequest carries the full envelope (+origin/import_batch/confidence); `emit-batch` provides the atomic dispatch unit; the ack is single (task `receiver_acknowledged` deleted); spool fsyncs and classifies failures by SQLite error class; capture policy is config-resolved with metadata-mode body drop; files 0600/dirs 0700; id patterns anchored; NFC collisions rejected; quarantine names validated; bench is spawn-safe and gains read queries + EXPLAIN.
+> **REVISION v2.1 (2026-08-24):** round-2 external review reconciled — ten implementation-blocking findings. Every variable-shape family INSERT derives its placeholders from column dicts (hand-counted arithmetic banned; fixed-shape INSERTs stay fixed); ingest is the sole transaction owner; migrations own their transactions in-script; the events CHECK is NULL-safe require-AND-forbid, tested by an executed INSERT matrix from `KIND_MANIFEST`; EmitRequest carries the full envelope (+origin/import_batch/confidence); `emit-batch` provides the atomic dispatch unit; the ack is single (task `receiver_acknowledged` deleted); spool fsyncs and classifies failures by SQLite error class; capture policy is config-resolved with metadata-mode body drop; files 0600/dirs 0700; id patterns anchored; NFC collisions rejected; quarantine names validated; bench is spawn-safe and gains read queries + EXPLAIN.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -416,6 +416,29 @@ def test_ensure_host_uid_survives_trailing_newline(tmp_path: Path):
     assert ensure_host_uid(tmp_path) == "host_" + "a" * 32
 
 
+def test_fast_path_fsyncs_directory_before_return(tmp_path: Path, monkeypatch):
+    """Round-3 F2: the read path must make the dirent durable itself — the
+    winner's own fsync may not have happened yet when a loser returns."""
+    import os as _os
+
+    (tmp_path / "host-uid").write_text("host_" + "a" * 32 + "\n")
+    synced_dirs = []
+    real_fsync = _os.fsync
+
+    def spy(fd):
+        try:
+            import stat as _stat
+            if _stat.S_ISDIR(_os.fstat(fd).st_mode):
+                synced_dirs.append(fd)
+        except OSError:
+            pass
+        return real_fsync(fd)
+
+    monkeypatch.setattr(_os, "fsync", spy)
+    assert ensure_host_uid(tmp_path) == "host_" + "a" * 32
+    assert synced_dirs, "fast path returned without fsyncing the directory"
+
+
 def test_publish_is_create_if_absent(tmp_path: Path):
     """Round-3 F2: a pre-existing final file always wins; minting never
     overwrites it (the link-publish loser path)."""
@@ -535,6 +558,17 @@ def ensure_host_uid(state_dir: Path) -> str:
                 f"corrupt host-uid at {path}: {value!r} — refusing to re-mint; "
                 "restore from backup or delete deliberately"
             )
+        # Round-3 F2 (verifier's window): a loser can reach this fast path
+        # after the winner's os.link but BEFORE the winner's directory fsync —
+        # returning a uid whose dirent a power loss could still erase, while
+        # the caller starts recording events under it. Fsync the directory
+        # before EVERY return, so the published name is durable no matter
+        # which racer syncs it first.
+        dfd = os.open(state_dir, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
         return value
     state_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(state_dir, 0o700)
@@ -709,7 +743,7 @@ def test_work_item_body_cap_is_bytes():
 
 def test_receiver_acknowledged_is_gone():
     from claudlobby.plane.contracts import TASK_EVENTS
-    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 18
+    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 19
 
 
 def test_task_event_vocabulary_enforced():
@@ -785,7 +819,9 @@ ATTEMPT_STATES = (
     "unknown", "recipient_acknowledged", "duplicate_suppressed",
 )
 TASK_EVENTS = (
-    # 18 — receiver_acknowledged DELETED (F9 v2.1): the transmission ack row is
+    # 19 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
+    # pre-deletion tuple was 20, mis-stated as 19 — the count error predated the
+    # deletion): the transmission ack row is
     # the single acknowledgement fact; activation derives through the join.
     "dispatch_intended", "transmission_failed", "dispatch_submitted",
     "accepted", "rejected", "progress",
@@ -851,14 +887,24 @@ def kind_forbidden(kind: str) -> tuple[str, ...]:
 
 FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission", "task"}
 
-# The field-policy registry's code form (§11/F23; round-3 F8): CONTENT fields
-# drop at the door outside full-capture mode — for EVERY content-bearing
-# family, not communications alone.
-CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
-    "communication": ("body",),
-    "work_item": ("body",),
-    "task": ("summary",),
+# THE field-policy registry (§11/F23; round-3 F8): every content-bearing
+# field, classified, with its byte cap. Classes: CONTENT (policy-gated,
+# dropped outside full mode) · SENSITIVE (stored raw, alias-rendered,
+# reveal-gated) · DIAGNOSTIC (bounded, flag-on-truncate) · METADATA
+# (everything unlisted). CONTENT_FIELDS derives; nothing lists twice.
+FIELD_POLICY: dict[tuple[str, str], dict] = {
+    ("communication", "body"): {"class": "CONTENT", "cap": 16_384, "proof": True},
+    ("communication", "recipient_raw"): {"class": "SENSITIVE"},
+    ("work_item", "body"): {"class": "CONTENT", "cap": 16_384},
+    ("task", "summary"): {"class": "CONTENT", "cap": 4_096},
+    ("transmission", "destination"): {"class": "SENSITIVE"},   # in detail
+    ("system", "data"): {"class": "DIAGNOSTIC", "cap": 16_384},
 }
+CONTENT_FIELDS: dict[str, tuple[str, ...]] = {}
+for (_family, _field), _pol in FIELD_POLICY.items():
+    if _pol["class"] == "CONTENT":
+        CONTENT_FIELDS.setdefault(_family, ())
+        CONTENT_FIELDS[_family] = CONTENT_FIELDS[_family] + (_field,)
 
 BODY_CAP_BYTES = 16_384
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
@@ -983,6 +1029,14 @@ class TaskEvent(_Strict):
     session_uid: Optional[str] = Field(None, pattern=ID_PATTERNS["session"])
     progress: Optional[int] = Field(None, ge=0, le=100)
     summary: Optional[str] = None
+
+    @field_validator("summary")
+    @classmethod
+    def _summary_byte_cap(cls, v):
+        # CONTENT-classified (FIELD_POLICY); authored — over-cap REJECTS.
+        if v is not None and len(v.encode("utf-8")) > 4_096:
+            raise ValueError("task summary exceeds 4KiB (bytes)")
+        return v
     pr_url: Optional[str] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
@@ -1200,21 +1254,33 @@ def test_kind_matrix_executed_against_installed_schema():
              "subject_alias": "bot:f/x", "actor_uid": "actor_" + "2" * 32,
              "session_uid": "sess_" + "1" * 32, "severity": "notice",
              "deadline": "t", "successor_id": "x", "renewed_until": "t"}
-    seq = [100]
+    eid = [100]
 
     def attempt(row: dict):
-        seq[0] += 1
-        conn.execute(
-            "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
-            " VALUES (?, 'probe', 't')", (f"ev_{seq[0]:032x}",))
-        cols = {"ingest_seq": seq[0], "event_id": f"ev_{seq[0]:032x}",
-                "schema_version": "1", "occurred_at": "t", "ingested_at": "t",
-                "host_uid": "h", "emitter": "e", **row}
-        names = tuple(cols)
-        conn.execute(
-            f"INSERT INTO events ({','.join(names)})"
-            f" VALUES ({','.join('?' * len(names))})",
-            tuple(cols.values()))
+        # Round-4 F3: the ledger's AUTOINCREMENT assigns ingest_seq — use the
+        # cursor's lastrowid (a synthetic counter breaks the FK, which the
+        # real connection enforces: foreign_keys=ON). Savepoint per attempt so
+        # expected failures leave no ledger residue.
+        eid[0] += 1
+        conn.execute("SAVEPOINT probe")
+        try:
+            cur = conn.execute(
+                "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
+                " VALUES (?, 'probe', 't')", (f"ev_{eid[0]:032x}",))
+            seq = cur.lastrowid
+            cols = {"ingest_seq": seq, "event_id": f"ev_{eid[0]:032x}",
+                    "schema_version": "1", "occurred_at": "t",
+                    "ingested_at": "t", "host_uid": "h", "emitter": "e", **row}
+            names = tuple(cols)
+            conn.execute(
+                f"INSERT INTO events ({','.join(names)})"
+                f" VALUES ({','.join('?' * len(names))})",
+                tuple(cols.values()))
+        except BaseException:
+            conn.execute("ROLLBACK TO probe")
+            conn.execute("RELEASE probe")
+            raise
+        conn.execute("RELEASE probe")
 
     for kind, manifest in c.KIND_MANIFEST.items():
         base = {"kind": kind, "event": FIRST_TOKEN[kind], **VALID[kind]}
@@ -2375,6 +2441,39 @@ def test_operational_errors_retry_then_quarantine(env, monkeypatch):
     assert len(list(quarantine_dir(root).glob("*.json"))) == 1
 
 
+def test_quarantine_artifacts_are_0600(env):
+    """Round-4 F6: reason sidecars and MOVED files both end 0600, whatever
+    mode the malformed file arrived with."""
+    import os as _os, stat as _stat
+
+    root, conn, host = env
+    bad = spool_dir(root) / "garbage.json"
+    bad.write_text("{not json")          # arrives 0644 by umask — the trap
+    drain(root, conn, host)
+    q = quarantine_dir(root)
+    moved = q / "garbage.json"
+    sidecar = q / "garbage.json.reason"
+    assert _stat.S_IMODE(_os.stat(moved).st_mode) == 0o600
+    assert _stat.S_IMODE(_os.stat(sidecar).st_mode) == 0o600
+
+
+def test_sql_bug_operational_errors_quarantine_not_retry(env, monkeypatch):
+    """Round-4 F6: missing table is OperationalError but NOT retryable."""
+    import sqlite3 as sq
+
+    root, conn, host = env
+    spool_write(root, [_fin(_req(), mint_event_id())], "x")
+    import claudlobby.plane.spool as mod
+
+    def missing_table(*a, **k):
+        raise sq.OperationalError("no such table: events")
+
+    monkeypatch.setattr(mod, "ingest_many", missing_table)
+    report = drain(root, conn, host)
+    # code-aware path quarantines immediately; 3.10 degradation would retry
+    assert report.quarantined == 1 or report.remaining == 1
+
+
 def test_retry_rewrite_preserves_0600(env, monkeypatch):
     """Round-3 F6: the executed probe caught retry rewrites at 0644."""
     import os as _os, stat as _stat, sqlite3 as sq
@@ -2454,15 +2553,14 @@ def quarantine_dir(root: Path) -> Path:
     return p
 
 
-def _write_entry_file(directory: Path, name: str, entry: dict) -> Path:
-    """THE one spool writer (round-3 F6): atomic tmp+rename, 0600, fsync file
-    AND directory — the retry path's bare write_text regressed files to 0644
-    (probe-confirmed) and synced nothing."""
+def _write_bytes_secure(directory: Path, name: str, data: bytes) -> Path:
+    """THE one spool byte-writer (round-3/4 F6): 0600, atomic tmp+rename,
+    fsync file AND directory — entries and reason sidecars alike."""
     target = directory / name
     tmp = directory / (name + ".tmp")
     fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, (json.dumps(entry, ensure_ascii=False) + "\n").encode())
+        os.write(fd, data)
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -2473,6 +2571,33 @@ def _write_entry_file(directory: Path, name: str, entry: dict) -> Path:
     finally:
         os.close(dfd)
     return target
+
+
+RETRYABLE_SQLITE_CODES = frozenset({
+    5,   # SQLITE_BUSY
+    6,   # SQLITE_LOCKED
+    8,   # SQLITE_READONLY  (transient perms; also the e2e test's class)
+    10,  # SQLITE_IOERR
+    13,  # SQLITE_FULL
+    14,  # SQLITE_CANTOPEN
+})
+
+
+def is_retryable(exc: sqlite3.OperationalError) -> bool:
+    """Round-4 F6: OperationalError is overbroad — a missing table and an SQL
+    typo are ALSO OperationalError and are bugs, not infrastructure. Whitelist
+    by primary error code; on Python 3.10 (no sqlite_errorcode) degrade to
+    retryable-with-a-warning rather than losing machinery events."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is None:
+        return True   # 3.10 degradation, documented
+    return (code & 0xFF) in RETRYABLE_SQLITE_CODES
+
+
+def _write_entry_file(directory: Path, name: str, entry: dict) -> Path:
+    return _write_bytes_secure(
+        directory, name, (json.dumps(entry, ensure_ascii=False) + "\n").encode()
+    )
 
 
 def spool_write(root: Path, finalized_requests: list[dict], error: str) -> Path:
@@ -2507,13 +2632,15 @@ def spool_entries(root: Path) -> list[dict]:
 
 
 def _quarantine(root: Path, f: Path, reason: str) -> None:
-    meta = quarantine_dir(root) / (f.name + ".reason")
-    fd = os.open(meta, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    q = quarantine_dir(root)
+    _write_bytes_secure(q, f.name + ".reason", (reason + "\n").encode())
+    os.chmod(f, 0o600)          # a malformed file arrived at ITS creator's mode
+    os.replace(f, q / f.name)
+    dfd = os.open(q, os.O_RDONLY)
     try:
-        os.write(fd, (reason + "\n").encode())
+        os.fsync(dfd)
     finally:
-        os.close(fd)
-    os.replace(f, quarantine_dir(root) / f.name)
+        os.close(dfd)
 
 
 @dataclass(frozen=True)
@@ -2550,8 +2677,12 @@ def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
         try:
             results = ingest_many(conn, items, host_uid=host_uid)
         except sqlite3.OperationalError as exc:
-            # Retryable infrastructure (busy/locked/full) — round-2 F6: ONLY
-            # this class retries; everything else is quarantined loudly.
+            if not is_retryable(exc):
+                # Missing table / SQL typo are OperationalError too — bugs,
+                # not infrastructure (round-4 F6).
+                _quarantine(root, f, f"non-retryable operational: {exc}")
+                quarantined += 1
+                continue
             entry["attempts"] = int(entry.get("attempts", 0)) + 1
             entry["error"] = str(exc)
             if entry["attempts"] >= MAX_ATTEMPTS:
@@ -2673,6 +2804,49 @@ def test_emit_contract_violation_exits_2(tmp_path: Path):
     )
 
 
+def test_capture_modes_per_family(tmp_path: Path):
+    """Round-3 F8: metadata/full behavior for EVERY content family."""
+    import json as _json
+
+    cap = tmp_path / "state" / "plane"
+    cap.mkdir(parents=True)
+    (cap / "capture.json").write_text('{"*": "metadata"}')
+    # communication: body dropped, proof triple kept
+    r = _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+             stdin=_intent_json())
+    assert r.returncode == 0, r.stderr
+    from claudlobby.plane.db import connect, db_path
+    conn = connect(db_path(tmp_path))
+    row = conn.execute("SELECT body, body_sha256, privacy FROM communications").fetchone()
+    assert row["body"] is None and row["body_sha256"] and row["privacy"] == "metadata"
+    # work_item: body dropped silently
+    wi = {"event_type": "work_item", "emitter": "t", "fleet": "example-fleet",
+          "payload": {"work_item_id": "wi_" + "5" * 32, "title": "x",
+                       "created_by": "bot:example-fleet/alpha", "body": "secret"}}
+    r = _run(["--root", str(tmp_path), "emit", "work_item", "--json", "-"],
+             stdin=_json.dumps(wi))
+    assert r.returncode == 0, r.stderr
+    assert conn.execute("SELECT body FROM work_items").fetchone()["body"] is None
+    # task: summary dropped in metadata mode
+    te = {"event_type": "task", "emitter": "t", "fleet": "example-fleet",
+          "payload": {"work_item_id": "wi_" + "5" * 32, "event": "progress",
+                       "summary": "secret detail"}}
+    r = _run(["--root", str(tmp_path), "emit", "task", "--json", "-"],
+             stdin=_json.dumps(te))
+    assert r.returncode == 0, r.stderr
+    detail = conn.execute("SELECT detail FROM events WHERE kind='task'").fetchone()["detail"]
+    assert detail is None or "secret" not in detail
+    # full mode: everything survives
+    (cap / "capture.json").write_text('{"*": "full"}')
+    te2 = {**te, "payload": {**te["payload"], "summary": "kept"}}
+    _run(["--root", str(tmp_path), "emit", "task", "--json", "-"], stdin=_json.dumps(te2))
+    kept = conn.execute(
+        "SELECT detail FROM events WHERE kind='task' ORDER BY ingest_seq DESC"
+    ).fetchone()["detail"]
+    conn.close()
+    assert kept and "kept" in kept
+
+
 def test_plane_status_reports(tmp_path: Path):
     _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
          stdin=_intent_json())
@@ -2730,7 +2904,7 @@ from .db import connect, db_path
 from .ids import ensure_host_uid, mint_event_id
 from .ingest import ingest_many
 from .migrations import DowngradeError, migrate
-from .spool import SpoolWriteError, spool_write
+from .spool import SpoolWriteError, is_retryable, spool_write
 
 
 @dataclass(frozen=True)
@@ -2804,9 +2978,11 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     except (DowngradeError, ContractViolation):
         raise
     except sqlite3.OperationalError as exc:
-        # ONLY OperationalError spools (round-3 F6): IntegrityError inherits
-        # DatabaseError but signals a BUG (constraint violation) — propagate
-        # loudly; retrying a bug forever helps no one.
+        # Spool ONLY whitelisted-retryable codes (round-4 F6): IntegrityError
+        # never lands here (a bug, propagates), and a missing table / SQL typo
+        # — OperationalError but equally bugs — propagate loudly too.
+        if not is_retryable(exc):
+            raise
         path = spool_write(root, finalized, str(exc))   # raises SpoolWriteError
         return [
             EmitOutcome(r["event_id"], "spooled", detail=str(path))
@@ -2986,7 +3162,10 @@ def cmd_plane_spool(args, root: Path) -> int:
             return 1
         import os
 
-        (quarantine_dir(root) / (args.name + ".reason")).write_text("operator\n")
+        from ..plane.spool import _write_bytes_secure
+
+        _write_bytes_secure(quarantine_dir(root), args.name + ".reason", b"operator\n")
+        os.chmod(src, 0o600)
         os.replace(src, quarantine_dir(root) / args.name)
         print(f"quarantined {args.name}")
         return 0
@@ -3166,6 +3345,95 @@ def test_disk_full_spools(tmp_path: Path):
             )
         clamped.commit()
     clamped.close()
+
+
+def test_derivation_fixtures(tmp_path: Path):
+    """Round-4 F7: the reviewer's reassignment counterexample, as a fixture.
+    asg1 acked+reassigned (terminal, successor asg2); asg2 acked and OVERDUE.
+    Attention must return asg2 and never asg1; task-status must be terminal-
+    dominant (late progress after completed does not reopen)."""
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.emit_api import emit_batch
+    from claudlobby.plane.ids import (
+        mint_assignment_id, mint_msg_id, mint_work_item_id,
+    )
+    from claudlobby.plane.migrations import migrate
+
+    conn = connect(db_path(tmp_path)); migrate(conn); conn.close()
+    ensure_host_uid(tmp_path / "state")
+    wi, a1, a2 = mint_work_item_id(), mint_assignment_id(), mint_assignment_id()
+    m1, m2 = mint_msg_id(), mint_msg_id()
+
+    def tx(msg, state):
+        return {"event_type": "transmission", "emitter": "fx",
+                "fleet": "fx-fleet",
+                "payload": {"msg_id": msg, "attempt_no": 1, "carrier": "tmux",
+                             "state": state}}
+
+    emit_batch(tmp_path, [
+        {"event_type": "work_item", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"work_item_id": wi, "title": "t",
+                      "created_by": "bot:fx-fleet/mgr"}},
+        {"event_type": "assignment", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"assignment_id": a1, "work_item_id": wi,
+                      "assignee": "bot:fx-fleet/w1",
+                      "assigned_by": "bot:fx-fleet/mgr",
+                      "expected_by": "2026-01-01T00:00:00+00:00",
+                      "dispatch_msg_id": m1}},
+        {"event_type": "communication", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"msg_id": m1, "sender": "bot:fx-fleet/mgr",
+                      "recipient": "bot:fx-fleet/w1",
+                      "message_class": "task_request", "command_type": "task",
+                      "work_item_id": wi, "assignment_id": a1,
+                      "privacy": "full"}},
+        tx(m1, "pane_submitted"), tx(m1, "recipient_acknowledged"),
+        {"event_type": "task", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"work_item_id": wi, "assignment_id": a1,
+                      "event": "reassigned", "successor_id": a2}},
+        {"event_type": "assignment", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"assignment_id": a2, "work_item_id": wi,
+                      "assignee": "bot:fx-fleet/w2",
+                      "assigned_by": "bot:fx-fleet/mgr",
+                      "expected_by": "2026-01-01T00:00:00+00:00",
+                      "dispatch_msg_id": m2}},
+        {"event_type": "communication", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"msg_id": m2, "sender": "bot:fx-fleet/mgr",
+                      "recipient": "bot:fx-fleet/w2",
+                      "message_class": "task_request", "command_type": "task",
+                      "work_item_id": wi, "assignment_id": a2,
+                      "privacy": "full"}},
+        tx(m2, "pane_submitted"), tx(m2, "recipient_acknowledged"),
+    ])
+    conn = connect(db_path(tmp_path))
+    TERMINAL = ("'completed','failed','cancelled','returned_blocked',"
+                "'superseded','reassigned','expired'")
+    attention = [r[0] for r in conn.execute(
+        "SELECT a.assignment_id FROM assignments a"
+        " WHERE NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+        f"  AND t.assignment_id = a.assignment_id AND t.event IN ({TERMINAL}))"
+        " AND (NOT EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+        "  AND e.msg_id = a.dispatch_msg_id"
+        "  AND e.event='recipient_acknowledged')"
+        "  OR a.expected_by < '2026-06-01')")]
+    assert attention == [a2], f"attention must surface ONLY the successor: {attention}"
+    # terminal dominance: complete a2, then a late progress must not reopen
+    emit_batch(tmp_path, [
+        {"event_type": "task", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"work_item_id": wi, "assignment_id": a2,
+                      "event": "completed"}},
+        {"event_type": "task", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"work_item_id": wi, "assignment_id": a2,
+                      "event": "progress", "progress": 10}},
+    ])
+    status = conn.execute(
+        "SELECT COALESCE((SELECT t.event FROM events t WHERE t.kind='task'"
+        f" AND t.assignment_id = ? AND t.event IN ({TERMINAL})"
+        " ORDER BY t.ingest_seq LIMIT 1),"
+        " (SELECT t.event FROM events t WHERE t.kind='task'"
+        "  AND t.assignment_id = ? ORDER BY t.ingest_seq DESC LIMIT 1),"
+        " 'open')", (a2, a2)).fetchone()[0]
+    conn.close()
+    assert status == "completed", f"terminal must dominate late progress: {status}"
 
 
 def test_readonly_db_emit_spools_end_to_end(tmp_path: Path):
@@ -3403,24 +3671,44 @@ def bench_reads(root: Path) -> None:
     conn = connect(db_path(root))
     TERMINAL = ("'completed','failed','cancelled','returned_blocked',"
                 "'superseded','reassigned','expired'")
+    # Round-4 F7: these ARE the derivation reducers (Lane C task_status /
+    # workstream_status in SQL form), not sketches — terminal closure
+    # correlates by ASSIGNMENT_ID (the reassignment counterexample: a
+    # work_item-level correlation suppressed the acknowledged overdue
+    # replacement), terminal states DOMINATE (first terminal wins forever),
+    # and workstream status is contract × events × clock × policy window.
     QUERIES = {
-        "attention: unacked or overdue open assignments":
+        "attention: unacked or overdue OPEN assignments":
             "SELECT a.assignment_id FROM assignments a"
-            " JOIN communications c ON c.msg_id = a.dispatch_msg_id"
-            " WHERE NOT EXISTS (SELECT 1 FROM events e WHERE"
-            "   e.kind='transmission' AND e.msg_id = c.msg_id"
+            " WHERE NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+            f"   AND t.assignment_id = a.assignment_id AND t.event IN ({TERMINAL}))"
+            " AND (NOT EXISTS (SELECT 1 FROM events e WHERE"
+            "   e.kind='transmission' AND e.msg_id = a.dispatch_msg_id"
             "   AND e.event='recipient_acknowledged')"
-            " OR (a.expected_by < '2026-06-01' AND NOT EXISTS"
-            "   (SELECT 1 FROM events t WHERE t.kind='task'"
-            f"    AND t.work_item_id = a.work_item_id AND t.event IN ({TERMINAL})))",
-        "task-status: latest event per work item":
-            "SELECT work_item_id, event FROM events WHERE kind='task'"
-            " AND ingest_seq IN (SELECT MAX(ingest_seq) FROM events"
-            " WHERE kind='task' GROUP BY work_item_id)",
-        "workstream-status: latest event per workstream":
-            "SELECT workstream_id, event FROM events WHERE kind='workstream'"
-            " AND ingest_seq IN (SELECT MAX(ingest_seq) FROM events"
-            " WHERE kind='workstream' GROUP BY workstream_id)",
+            "  OR a.expected_by < '2026-06-01')",
+        "task-status: per-assignment, terminal-dominant":
+            "SELECT a.assignment_id, COALESCE("
+            " (SELECT t.event FROM events t WHERE t.kind='task'"
+            f"  AND t.assignment_id = a.assignment_id AND t.event IN ({TERMINAL})"
+            "  ORDER BY t.ingest_seq LIMIT 1),"
+            " (SELECT t.event FROM events t WHERE t.kind='task'"
+            "  AND t.assignment_id = a.assignment_id"
+            "  ORDER BY t.ingest_seq DESC LIMIT 1),"
+            " 'open') AS status FROM assignments a",
+        "workstream-status: contract x events x clock x policy":
+            "SELECT w.workstream_id, CASE"
+            " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
+            "   AND c.workstream_id = w.workstream_id"
+            "   AND c.event IN ('closed','archived')) THEN 'closed'"
+            " WHEN (SELECT e.event FROM events e WHERE e.kind='workstream'"
+            "   AND e.workstream_id = w.workstream_id"
+            "   AND e.event IN ('blocked','unblocked')"
+            "   ORDER BY e.ingest_seq DESC LIMIT 1) = 'blocked' THEN 'blocked'"
+            " WHEN COALESCE((SELECT MAX(e.occurred_at) FROM events e"
+            "   WHERE e.kind='workstream'"
+            "   AND e.workstream_id = w.workstream_id), w.occurred_at)"
+            "   < '2026-06-01' THEN 'stale'"
+            " ELSE 'active' END AS status FROM workstreams w",
         "reconciliation: submitted-not-acked transmissions":
             "SELECT COUNT(*) FROM events s WHERE s.kind='transmission'"
             " AND s.event='pane_submitted' AND NOT EXISTS"
@@ -3494,6 +3782,12 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 ```
+
+- [ ] **Step 1b: Result fixtures BEFORE timing (round-4 F7)**
+
+The battery gains `test_derivation_fixtures` (below) — the reassignment and
+terminal-dominance scenarios must return the RIGHT rows before their speed
+means anything. Run: `./.venv/bin/pytest tests/test_plane_crash_battery.py::test_derivation_fixtures -v`
 
 - [ ] **Step 2: Run on this machine and record**
 
