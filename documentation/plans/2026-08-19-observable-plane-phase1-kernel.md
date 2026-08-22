@@ -333,7 +333,7 @@ git commit -m "feat(plane): CANON_V1 canonical bytes + golden fixtures"
 - Test: `tests/test_plane_ids.py`
 
 **Interfaces:**
-- Produces: `mint(prefix: str) -> str` and the typed wrappers `mint_event_id()`, `mint_msg_id()`, `mint_attempt_id()`, `mint_work_item_id()`, `mint_task_attempt_id()`, `mint_uid(kind: str) -> str`; `ensure_host_uid(state_dir: Path) -> str`; `ID_PATTERNS: dict[str, str]` (regex per prefix, consumed by contracts.py validation).
+- Produces: `mint(prefix: str) -> str` and the typed wrappers `mint_event_id()`, `mint_msg_id()`, `mint_transmission_id()`, `mint_work_item_id()`, `mint_assignment_id()`, `mint_uid(kind: str) -> str`; `ensure_host_uid(state_dir: Path) -> str`; `ID_PATTERNS: dict[str, str]` (regex per prefix, consumed by contracts.py validation).
 
 Prefixes (fixed): `ev_` events, `msg_` messages, `att_` transport attempts, `wi_` work items, `ta_` task attempts, and uids `host_`, `fleet_`, `actor_`, `boti_`, `sess_` — each followed by 32 lowercase hex chars (uuid4). Ordering never comes from ids (that is `ingest_seq`'s job), so uuid4 suffices and stays stdlib.
 
@@ -433,9 +433,9 @@ _UID_PREFIX = {
 ID_PATTERNS: dict[str, str] = {
     "event": r"ev_[0-9a-f]{32}",
     "msg": r"msg_[0-9a-f]{32}",
-    "attempt": r"att_[0-9a-f]{32}",
+    "transmission": r"trx_[0-9a-f]{32}",
     "work_item": r"wi_[0-9a-f]{32}",
-    "task_attempt": r"ta_[0-9a-f]{32}",
+    "assignment": r"asg_[0-9a-f]{32}",
     **{kind: prefix + r"[0-9a-f]{32}" for kind, prefix in _UID_PREFIX.items()},
 }
 
@@ -454,16 +454,16 @@ def mint_msg_id() -> str:
     return mint("msg_")
 
 
-def mint_attempt_id() -> str:
-    return mint("att_")
+def mint_transmission_id() -> str:
+    return mint("trx_")
 
 
 def mint_work_item_id() -> str:
     return mint("wi_")
 
 
-def mint_task_attempt_id() -> str:
-    return mint("ta_")
+def mint_assignment_id() -> str:
+    return mint("asg_")
 
 
 def mint_uid(kind: str) -> str:
@@ -514,7 +514,7 @@ git commit -m "feat(plane): id minting + persisted host uid"
 **Interfaces:**
 - Produces (consumed by ingest.py, emit_api.py, commands/plane.py):
   - `class EmitRequest(BaseModel)` — the wire contract doors/tests submit: `event_type: str`, `occurred_at: AwareDatetime | None`, `emitter: str`, `source_ref: str | None`, `fleet: str | None` (alias), `payload: dict`.
-  - `FAMILIES: dict[str, type[BaseModel]]` mapping event_type → payload model: `"communication" → Communication`, `"communication_attempt" → CommunicationAttempt`, `"work_item" → WorkItem`, `"task_attempt" → TaskAttempt`, `"task_event" → TaskEvent`.
+  - `FAMILIES: dict[str, type[BaseModel]]` mapping event_type → payload model: `"communication" → Communication`, `"transmission" → Transmission`, `"work_item" → WorkItem`, `"assignment" → Assignment`, `"task" → TaskEvent`.
   - Enums as `Literal` sets: `MESSAGE_CLASSES`, `COMMAND_TYPES`, `ATTEMPT_STATES`, `TASK_EVENTS` (exact values below).
   - `validate_request(raw: dict) -> tuple[EmitRequest, BaseModel]` — parses envelope then family payload; raises `ContractViolation` (carries `.errors`).
   - `export_schemas() -> dict` — JSON Schema per family + envelope (feeds F2's TS codegen later).
@@ -525,7 +525,7 @@ Vocabulary (spec §7, F11, F17 — exact):
 - `COMMAND_TYPES = task, cancel, compact, restart, query`
 - `ATTEMPT_STATES = send_attempted, carrier_accepted, pane_submitted, failed, unknown, recipient_acknowledged, duplicate_suppressed`
 - `TASK_EVENTS = dispatch_intended, transmission_failed, dispatch_submitted, receiver_acknowledged, accepted, rejected, progress, blocked_waiting, returned_blocked, resumed, completed, failed, cancelled, deadline_changed, superseded, reassigned, retry_created, orphaned_by_session_loss, recovered_after_restart, expired`
-- `contract_created` is NOT a task_event: the `work_item`/`task_attempt` row IS that event (one fact, one row — spec §8 mapping note).
+- `contract_created` is NOT a task-kind event: the `work_item`/`assignment` row IS that event (one fact, one row — spec §8 mapping note).
 - `CARRIERS = tmux, telegram-tgpost, telegram-bridge`
 
 - [ ] **Step 1: Write the failing tests**
@@ -571,7 +571,7 @@ def _intent_payload(**over) -> dict:
 
 def test_families_registered():
     assert set(FAMILIES) == {
-        "communication", "communication_attempt", "work_item", "task_attempt", "task_event"
+        "communication", "transmission", "work_item", "assignment", "task"
     }
 
 
@@ -614,26 +614,26 @@ def test_body_ansi_stripped():
 
 def test_task_event_vocabulary_enforced():
     good = {"work_item_id": "wi_" + "0" * 32, "event": "blocked_waiting"}
-    env, payload = validate_request(_req("task_event", good))
+    env, payload = validate_request(_req("task", good))
     assert payload.event == "blocked_waiting"
     with pytest.raises(ContractViolation):
-        validate_request(_req("task_event", {**good, "event": "blocked"}))
+        validate_request(_req("task", {**good, "event": "blocked"}))
 
 
-def test_communication_attempt_states():
+def test_transmission_states():
     good = {
-        "attempt_id": "att_" + "0" * 32,
+        "attempt_id": "trx_" + "0" * 32,
         "msg_id": "msg_" + "0" * 32,
         "attempt_no": 1,
         "carrier": "tmux",
         "destination": "bot:example-fleet/beta",
         "state": "pane_submitted",
     }
-    _, payload = validate_request(_req("communication_attempt", good))
+    _, payload = validate_request(_req("transmission", good))
     assert payload.state == "pane_submitted"
     with pytest.raises(ContractViolation):
         validate_request(
-            _req("communication_attempt", {**good, "state": "delivered"})  # banned word
+            _req("transmission", {**good, "state": "delivered"})  # banned word
         )
 
 
@@ -692,6 +692,10 @@ TASK_EVENTS = (
     "retry_created", "orphaned_by_session_loss", "recovered_after_restart",
     "expired",
 )
+WORKSTREAM_EVENTS = (
+    "progressed", "renewed", "blocked", "unblocked", "closed", "archived",
+    "plan_linked", "plan_unlinked",
+)
 CARRIERS = ("tmux", "telegram-tgpost", "telegram-bridge")
 
 BODY_CAP_BYTES = 16_384
@@ -742,7 +746,7 @@ class Communication(_Strict):
     message_class: Literal[MESSAGE_CLASSES]
     command_type: Optional[Literal[COMMAND_TYPES]] = None
     work_item_id: Optional[str] = Field(None, pattern=ID_PATTERNS["work_item"])
-    task_attempt_id: Optional[str] = Field(None, pattern=ID_PATTERNS["task_attempt"])
+    assignment_id: Optional[str] = Field(None, pattern=ID_PATTERNS["assignment"])
     workstream_id: Optional[str] = None
     deliberation_id: Optional[str] = None      # Phase-5 seam, reserved
     reply_to_msg_id: Optional[str] = Field(None, pattern=ID_PATTERNS["msg"])
@@ -768,8 +772,8 @@ class Communication(_Strict):
             object.__setattr__(self, "truncated", fields.truncated)
 
 
-class CommunicationAttempt(_Strict):
-    attempt_id: str = Field(pattern=ID_PATTERNS["attempt"])
+class Transmission(_Strict):
+    transmission_id: str = Field(pattern=ID_PATTERNS["transmission"])
     msg_id: str = Field(pattern=ID_PATTERNS["msg"])
     attempt_no: int = Field(ge=1)
     carrier: Literal[CARRIERS]
@@ -791,8 +795,8 @@ class WorkItem(_Strict):
     body: Optional[str] = Field(None, max_length=16_384)
 
 
-class TaskAttempt(_Strict):
-    task_attempt_id: str = Field(pattern=ID_PATTERNS["task_attempt"])
+class Assignment(_Strict):
+    assignment_id: str = Field(pattern=ID_PATTERNS["assignment"])
     work_item_id: str = Field(pattern=ID_PATTERNS["work_item"])
     assignee: str                               # alias
     assigned_by: str                            # alias
@@ -802,7 +806,7 @@ class TaskAttempt(_Strict):
 
 class TaskEvent(_Strict):
     work_item_id: str = Field(pattern=ID_PATTERNS["work_item"])
-    task_attempt_id: Optional[str] = Field(None, pattern=ID_PATTERNS["task_attempt"])
+    assignment_id: Optional[str] = Field(None, pattern=ID_PATTERNS["assignment"])
     event: Literal[TASK_EVENTS]
     actor: Optional[str] = None                 # alias: who reported it
     session_uid: Optional[str] = Field(None, pattern=ID_PATTERNS["session"])
@@ -810,15 +814,15 @@ class TaskEvent(_Strict):
     summary: Optional[str] = None
     pr_url: Optional[str] = None
     deadline: Optional[AwareDatetime] = None
-    successor_id: Optional[str] = None  # reassigned/retry_created -> task_attempt_id; superseded -> superseding id
+    successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
 
 
 FAMILIES: dict[str, type[BaseModel]] = {
     "communication": Communication,
-    "communication_attempt": CommunicationAttempt,
+    "transmission": Transmission,
     "work_item": WorkItem,
-    "task_attempt": TaskAttempt,
-    "task_event": TaskEvent,
+    "assignment": Assignment,
+    "task": TaskEvent,
 }
 
 
@@ -931,7 +935,7 @@ def test_expected_tables(conn):
     }
     assert {
         "ingest_ledger", "identity_registry", "communications",
-        "communication_attempts", "work_items", "task_attempts", "task_events",
+        "work_items", "assignments", "events",
     } <= names
 
 
@@ -954,9 +958,10 @@ def test_ingest_ledger_seq_monotonic(conn):
 
 
 def test_ddl_vocabularies_match_contracts():
-    """The same enum is enforced twice — Literal at validation, CHECK at
-    insert. This pins the two copies together: retiring or adding a value
-    must touch both, or this test names the disagreement."""
+    """Twin enforcement (F16-v2): closed vocabularies live in Pydantic Literals
+    AND in DDL CHECKs — construct columns directly, stream kinds via the events
+    table's per-kind conditional CHECK. Registry-governed kinds are asserted
+    UNchecked on purpose (F19)."""
     import re
     from importlib import resources
 
@@ -966,20 +971,28 @@ def test_ddl_vocabularies_match_contracts():
         resources.files("claudlobby.plane") / "migrations" / "0001_kernel.sql"
     ).read_text()
 
-    def check_set(column: str, table: str) -> set[str]:
-        block = sql.split(f"CREATE TABLE {table}")[1].split(";")[0]
+    def comm_set(column: str) -> set[str]:
+        block = sql.split("CREATE TABLE communications")[1].split(";")[0]
         m = re.search(
             column + r"\s+TEXT[^,]*CHECK \(" + column + r" IN\s*\(([^)]*)\)",
             block, re.S,
         )
-        assert m, f"no CHECK for {column} in {table}"
+        assert m, f"no CHECK for {column} in communications"
         return {v.strip().strip("'") for v in m.group(1).split(",") if v.strip()}
 
-    assert check_set("message_class", "communications") == set(contracts.MESSAGE_CLASSES)
-    assert check_set("command_type", "communications") == set(contracts.COMMAND_TYPES)
-    assert check_set("state", "communication_attempts") == set(contracts.ATTEMPT_STATES)
-    assert check_set("carrier", "communication_attempts") == set(contracts.CARRIERS)
-    assert check_set("event", "task_events") == set(contracts.TASK_EVENTS)
+    def kind_set(kind: str) -> set[str]:
+        m = re.search(r"kind = '" + kind + r"'[^)]*?event IN\s*\(([^)]*)\)", sql, re.S)
+        assert m, f"no per-kind CHECK for {kind}"
+        return {v.strip().strip("'") for v in m.group(1).split(",") if v.strip()}
+
+    assert comm_set("message_class") == set(contracts.MESSAGE_CLASSES)
+    assert comm_set("command_type") == set(contracts.COMMAND_TYPES)
+    assert kind_set("transmission") == set(contracts.ATTEMPT_STATES)
+    assert kind_set("task") == set(contracts.TASK_EVENTS)
+    assert kind_set("workstream") == set(contracts.WORKSTREAM_EVENTS)
+    m2 = re.search(r"carrier IN\s*\(([^)]*)\)", sql)
+    assert m2 and {v.strip().strip("'") for v in m2.group(1).split(",")} == set(contracts.CARRIERS)
+    assert "kind = 'system' AND event IS NOT NULL" in sql  # deliberately unchecked
 
 
 def test_duplicate_event_id_rejected_by_ledger(conn):
@@ -1142,7 +1155,7 @@ CREATE TABLE communications (
     command_type      TEXT CHECK (command_type IN
         ('task','cancel','compact','restart','query')),
     work_item_id      TEXT,
-    task_attempt_id   TEXT,
+    assignment_id   TEXT,
     workstream_id     TEXT,
     deliberation_id   TEXT,
     reply_to_msg_id   TEXT,
@@ -1160,35 +1173,6 @@ CREATE INDEX idx_intents_sender    ON communications (sender_uid, ingest_seq);
 CREATE INDEX idx_intents_work_item ON communications (work_item_id)
     WHERE work_item_id IS NOT NULL;
 
-CREATE TABLE communication_attempts (
-    ingest_seq      INTEGER NOT NULL UNIQUE,
-    event_id        TEXT NOT NULL UNIQUE,
-    schema_version  TEXT NOT NULL,
-    occurred_at     TEXT NOT NULL,
-    observed_at     TEXT,
-    ingested_at     TEXT NOT NULL,
-    host_uid        TEXT NOT NULL,
-    fleet_uid       TEXT,
-    emitter         TEXT NOT NULL,
-    source_ref      TEXT,
-    correlation_id  TEXT,
-    causation_id    TEXT,
-    trace_id        TEXT,
-    span_id         TEXT,
-    attempt_id      TEXT NOT NULL,
-    msg_id          TEXT NOT NULL,
-    attempt_no      INTEGER NOT NULL,
-    carrier         TEXT NOT NULL CHECK (carrier IN
-                      ('tmux','telegram-tgpost','telegram-bridge')),
-    destination     TEXT NOT NULL,
-    state           TEXT NOT NULL CHECK (state IN
-        ('send_attempted','carrier_accepted','pane_submitted','failed',
-         'unknown','recipient_acknowledged','duplicate_suppressed')),
-    carrier_ref     TEXT,
-    error           TEXT,
-    FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
-);
-CREATE INDEX idx_attempts_msg ON communication_attempts (msg_id, attempt_no);
 
 CREATE TABLE work_items (
     ingest_seq      INTEGER NOT NULL UNIQUE,
@@ -1215,7 +1199,7 @@ CREATE TABLE work_items (
     FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
 );
 
-CREATE TABLE task_attempts (
+CREATE TABLE assignments (
     ingest_seq      INTEGER NOT NULL UNIQUE,
     event_id        TEXT NOT NULL UNIQUE,
     schema_version  TEXT NOT NULL,
@@ -1230,7 +1214,7 @@ CREATE TABLE task_attempts (
     causation_id    TEXT,
     trace_id        TEXT,
     span_id         TEXT,
-    task_attempt_id TEXT NOT NULL UNIQUE,
+    assignment_id TEXT NOT NULL UNIQUE,
     work_item_id    TEXT NOT NULL,
     assignee_uid    TEXT NOT NULL,
     assigned_by_uid TEXT NOT NULL,
@@ -1238,10 +1222,14 @@ CREATE TABLE task_attempts (
     dispatch_msg_id TEXT,
     FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
 );
-CREATE INDEX idx_task_attempts_item ON task_attempts (work_item_id);
-CREATE INDEX idx_task_attempts_assignee ON task_attempts (assignee_uid, ingest_seq);
+CREATE INDEX idx_assignments_item ON assignments (work_item_id);
+CREATE INDEX idx_assignments_assignee ON assignments (assignee_uid, ingest_seq);
 
-CREATE TABLE task_events (
+-- The ONE events stream (F16-v2): everything that HAPPENS to a construct.
+-- All five kinds are declared now even though Phase-1 emitters cover only
+-- transmission + task: pre-cutover DDL is disposable, and declaring the full
+-- kind vocabulary means migration 0002 adds construct tables only.
+CREATE TABLE events (
     ingest_seq      INTEGER NOT NULL UNIQUE,
     event_id        TEXT NOT NULL UNIQUE,
     schema_version  TEXT NOT NULL,
@@ -1256,27 +1244,48 @@ CREATE TABLE task_events (
     causation_id    TEXT,
     trace_id        TEXT,
     span_id         TEXT,
-    work_item_id    TEXT NOT NULL,
-    task_attempt_id TEXT,
-    event           TEXT NOT NULL CHECK (event IN
-        ('dispatch_intended','transmission_failed','dispatch_submitted',
-         'receiver_acknowledged','accepted','rejected','progress',
-         'blocked_waiting','returned_blocked','resumed','completed','failed',
-         'cancelled','deadline_changed','superseded','reassigned',
-         'retry_created','orphaned_by_session_loss','recovered_after_restart',
-         'expired')),
+    kind            TEXT NOT NULL CHECK (kind IN
+                      ('transmission','task','workstream','system','declaration')),
+    event           TEXT,           -- the per-kind token (state / event / type)
+    carrier         TEXT CHECK (carrier IS NULL OR carrier IN
+                      ('tmux','telegram-tgpost','telegram-bridge')),
+    msg_id          TEXT,
+    work_item_id    TEXT,
+    assignment_id   TEXT,
+    workstream_id   TEXT,
+    subject_kind    TEXT CHECK (subject_kind IS NULL OR subject_kind IN
+                      ('host','vault','fleet','actor','bot_instance','session')),
+    subject_uid     TEXT,
+    subject_alias   TEXT,
     actor_uid       TEXT,
     session_uid     TEXT,
-    progress        INTEGER CHECK (progress IS NULL OR (progress >= 0 AND progress <= 100)),
-    summary         TEXT,
-    pr_url          TEXT,
-    deadline        TEXT,
-    successor_id    TEXT,
+    severity        TEXT CHECK (severity IS NULL OR severity IN ('critical','notice')),
+    detail          TEXT,           -- per-kind JSON tail
+    detail_truncated INTEGER NOT NULL DEFAULT 0,
+    CHECK (
+        (kind = 'transmission' AND msg_id IS NOT NULL AND event IN
+            ('send_attempted','carrier_accepted','pane_submitted','failed',
+             'unknown','recipient_acknowledged','duplicate_suppressed'))
+     OR (kind = 'task' AND work_item_id IS NOT NULL AND event IN
+            ('dispatch_intended','transmission_failed','dispatch_submitted',
+             'receiver_acknowledged','accepted','rejected','progress',
+             'blocked_waiting','returned_blocked','resumed','completed','failed',
+             'cancelled','deadline_changed','superseded','reassigned',
+             'retry_created','orphaned_by_session_loss','recovered_after_restart',
+             'expired'))
+     OR (kind = 'workstream' AND workstream_id IS NOT NULL AND event IN
+            ('progressed','renewed','blocked','unblocked','closed','archived',
+             'plan_linked','plan_unlinked'))
+     OR (kind = 'system' AND event IS NOT NULL)   -- registry-governed: no vocab CHECK (F19)
+     OR (kind = 'declaration')
+    ),
     FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
 );
-CREATE INDEX idx_task_events_item ON task_events (work_item_id, ingest_seq);
-CREATE INDEX idx_task_events_attempt ON task_events (task_attempt_id)
-    WHERE task_attempt_id IS NOT NULL;
+CREATE INDEX idx_events_kind_seq ON events (kind, ingest_seq);
+CREATE INDEX idx_events_msg ON events (msg_id, ingest_seq) WHERE kind = 'transmission';
+CREATE INDEX idx_events_item ON events (work_item_id, ingest_seq) WHERE kind = 'task';
+CREATE INDEX idx_events_assignment ON events (assignment_id) WHERE assignment_id IS NOT NULL;
+
 ```
 
 - [ ] **Step 6: Run tests to verify they pass**
@@ -1599,6 +1608,7 @@ uids while doors keep speaking aliases.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1609,9 +1619,9 @@ from . import PLANE_SCHEMA_VERSION
 from .contracts import (
     Communication,
     EmitRequest,
-    TaskAttempt,
+    Assignment,
     TaskEvent,
-    CommunicationAttempt,
+    Transmission,
     WorkItem,
 )
 from .identity import resolve_fleet, resolve_party
@@ -1659,7 +1669,7 @@ def _insert_family(conn, env, payload, base, now):
             " msg_id, sender_uid, sender_alias, sender_session_uid,"
             " recipient_uid, recipient_alias,"
             " recipient_raw, message_class, command_type, work_item_id,"
-            " task_attempt_id, workstream_id, deliberation_id, reply_to_msg_id,"
+            " assignment_id, workstream_id, deliberation_id, reply_to_msg_id,"
             " supersedes_msg_id, body, body_bytes, body_sha256, truncated,"
             " privacy, idempotency_key)"
             " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 21) + ")",
@@ -1668,23 +1678,11 @@ def _insert_family(conn, env, payload, base, now):
                 payload.sender_session_uid, recipient_uid,
                 payload.recipient, payload.recipient_raw, payload.message_class,
                 payload.command_type, payload.work_item_id,
-                payload.task_attempt_id, payload.workstream_id,
+                payload.assignment_id, payload.workstream_id,
                 payload.deliberation_id,
                 payload.reply_to_msg_id, payload.supersedes_msg_id,
                 payload.body, payload.body_bytes, payload.body_sha256,
                 int(payload.truncated), payload.privacy, payload.idempotency_key,
-            ),
-        )
-    elif isinstance(payload, CommunicationAttempt):
-        conn.execute(
-            f"INSERT INTO communication_attempts ({_ENVELOPE_COLS},"
-            " attempt_id, msg_id, attempt_no, carrier, destination, state,"
-            " carrier_ref, error)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 8) + ")",
-            base + (
-                payload.attempt_id, payload.msg_id, payload.attempt_no,
-                payload.carrier, payload.destination, payload.state,
-                payload.carrier_ref, payload.error,
             ),
         )
     elif isinstance(payload, WorkItem):
@@ -1700,35 +1698,49 @@ def _insert_family(conn, env, payload, base, now):
                 payload.body,
             ),
         )
-    elif isinstance(payload, TaskAttempt):
+    elif isinstance(payload, Assignment):
         assignee = resolve_party(conn, payload.assignee, now)
         assigned_by = resolve_party(conn, payload.assigned_by, now)
         conn.execute(
-            f"INSERT INTO task_attempts ({_ENVELOPE_COLS},"
-            " task_attempt_id, work_item_id, assignee_uid, assigned_by_uid,"
+            f"INSERT INTO assignments ({_ENVELOPE_COLS},"
+            " assignment_id, work_item_id, assignee_uid, assigned_by_uid,"
             " expected_by, dispatch_msg_id)"
             " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 6) + ")",
             base + (
-                payload.task_attempt_id, payload.work_item_id, assignee,
+                payload.assignment_id, payload.work_item_id, assignee,
                 assigned_by,
                 payload.expected_by.isoformat() if payload.expected_by else None,
                 payload.dispatch_msg_id,
             ),
         )
-    elif isinstance(payload, TaskEvent):
-        actor = resolve_party(conn, payload.actor, now) if payload.actor else None
+    elif isinstance(payload, (Transmission, TaskEvent)):
+        # F16-v2: stream kinds share one insert — the events table.
+        if isinstance(payload, Transmission):
+            kind, token, carrier = "transmission", payload.state, payload.carrier
+            refs = (payload.msg_id, None, None, None)
+            actor = session = None
+            detail = payload.model_dump(
+                exclude={"msg_id", "state", "carrier"}, exclude_none=True
+            )
+        else:
+            kind, token, carrier = "task", payload.event, None
+            refs = (None, payload.work_item_id, payload.assignment_id, None)
+            actor = resolve_party(conn, payload.actor, now) if payload.actor else None
+            session = payload.session_uid
+            detail = payload.model_dump(
+                exclude={"work_item_id", "assignment_id", "event", "actor",
+                         "session_uid"},
+                exclude_none=True, mode="json",
+            )
         conn.execute(
-            f"INSERT INTO task_events ({_ENVELOPE_COLS},"
-            " work_item_id, task_attempt_id, event, actor_uid, session_uid,"
-            " progress, summary, pr_url, deadline, successor_id)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 10) + ")",
-            base + (
-                payload.work_item_id, payload.task_attempt_id, payload.event,
-                actor, payload.session_uid, payload.progress, payload.summary,
-                payload.pr_url,
-                payload.deadline.isoformat() if payload.deadline else None,
-                payload.successor_id,
-            ),
+            f"INSERT INTO events ({_ENVELOPE_COLS},"
+            " kind, event, carrier, msg_id, work_item_id, assignment_id,"
+            " workstream_id, subject_kind, subject_uid, subject_alias,"
+            " actor_uid, session_uid, severity, detail, detail_truncated)"
+            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 16) + ")",
+            base + (kind, token, carrier, *refs, None, None, None, actor,
+                    session, None,
+                    json.dumps(detail, ensure_ascii=False) if detail else None, 0),
         )
     else:  # pragma: no cover — FAMILIES and this dispatch move together
         raise TypeError(f"no insert path for {type(payload).__name__}")
@@ -2135,7 +2147,7 @@ def test_plane_schema_exports_json(tmp_path: Path):
     r = _run(["--root", str(tmp_path), "plane", "schema"])
     assert r.returncode == 0
     data = json.loads(r.stdout)
-    assert "envelope" in data and "task_event" in data
+    assert "envelope" in data and "task" in data
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2231,12 +2243,12 @@ from ..plane.ids import ensure_host_uid
 from ..plane.migrations import migrate
 from ..plane.spool import drain, quarantine_dir, spool_dir, spool_entries
 
-_FAMILY_TABLES = {
-    "communication": "communications",
-    "communication_attempt": "communication_attempts",
-    "work_item": "work_items",
-    "task_attempt": "task_attempts",
-    "task_event": "task_events",
+_FAMILY_COUNTS = {
+    "communication": ("communications", None),
+    "transmission": ("events", "transmission"),
+    "work_item": ("work_items", None),
+    "assignment": ("assignments", None),
+    "task": ("events", "task"),
 }
 
 
@@ -2281,8 +2293,13 @@ def cmd_plane_status(args, root: Path) -> int:
                 "SELECT COALESCE(MAX(ingest_seq), 0) FROM ingest_ledger"
             ).fetchone()[0]
             print(f"ingest_seq high-water: {top}")
-            for family, table in _FAMILY_TABLES.items():
-                n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for family, (table, kind) in _FAMILY_COUNTS.items():
+                if kind is None:
+                    n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                else:
+                    n = conn.execute(
+                        "SELECT COUNT(*) FROM events WHERE kind = ?", (kind,)
+                    ).fetchone()[0]
                 print(f"  {family}: {n}")
             prov = provisional_actors(conn)
             print(f"provisional actors: {len(prov)}")
@@ -2342,7 +2359,7 @@ Register in `_parsers.py` (append inside `register_subparsers`, mirroring neighb
 ```python
     # --- observable plane (Phase 1 kernel) ---
     pe = sub.add_parser("emit", help="Validated event ingest into the plane db")
-    pe.add_argument("event_type", help="communication | communication_attempt | work_item | task_attempt | task_event")
+    pe.add_argument("event_type", help="communication | transmission | work_item | assignment | task")
     pe.add_argument("--json", required=True, help="Request JSON path, or '-' for stdin")
     pe.set_defaults(func=cmd_emit)
 
@@ -2410,7 +2427,7 @@ from claudlobby.plane.migrations import migrate
 
 def _mk_request(i: int) -> dict:
     return {
-        "event_type": "task_event",
+        "event_type": "task",
         "emitter": f"writer-{i}",
         "fleet": "example-fleet",
         "payload": {
@@ -2447,7 +2464,7 @@ def test_25_writer_burst_loses_nothing(tmp_path: Path):
     statuses = {s for _, s in results}
     assert statuses <= {"committed", "spooled"}, results
     conn = connect(db_path(tmp_path))
-    committed = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+    committed = conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'task'").fetchone()[0]
     spooled = len(list((tmp_path / "state" / "plane" / "spool").glob("*.json")))
     conn.close()
     assert committed + spooled == 25  # nothing lost
@@ -2567,7 +2584,7 @@ sys.path.insert(0, str(REPO))
 
 def _request(i: int) -> dict:
     return {
-        "event_type": "task_event",
+        "event_type": "task",
         "emitter": "bench",
         "fleet": "bench-fleet",
         "payload": {
@@ -2591,7 +2608,7 @@ def bench_cold(root: Path, n: int) -> list[float]:
         t0 = time.perf_counter()
         r = subprocess.run(
             [sys.executable, "-m", "claudlobby", "--root", str(root),
-             "emit", "task_event", "--json", "-"],
+             "emit", "task", "--json", "-"],
             input=payload, capture_output=True, text=True, cwd=REPO,
         )
         dt = time.perf_counter() - t0
