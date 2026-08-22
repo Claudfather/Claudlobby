@@ -321,23 +321,36 @@ data_truncated: bool
 
 Reading rules (all three load-bearing): **events are DETECTIONS, never states** (overdue_dispatch here records "the watchdog fired at T"; live overdue-ness is only the task derivation's flag; session_missing = detection => lifecycle, session-up = level => presence). **Repeated detections are repeated rows** — debounce is the emitter's policy (fleet-pulse's existing debounce preserved), grouping is the derivation's job; a dedup column would smuggle state into a fact table. **Pairing is derivation** — bridge_down→bridge_heal matches by subject + type-family over time; a resolved_by column would let one row claim knowledge of a later row. Cross-table demo of `causation_id`: a FLEET ALERT is TWO rows — the lifecycle detection + the alert-class communications intent whose `causation_id` = the detection's `event_id` — so "why did this alert exist" is a click-through, not a grep.
 
-### WorkstreamContract + WorkstreamEvent (F6, F21)
+### WorkstreamContract + WorkstreamEvent (F6, F21) — walked 2026-08-22
 
 ```yaml
-workstream_contract:      # envelope + — the contract row IS "opened"
-  workstream_id: str      # existing id scheme preserved (single-writer already mints)
+workstream_contract:      # envelope + — the contract row IS "opened" (F21)
+  workstream_id: str      # existing id scheme preserved, deliberately pattern-free
+                          # (the single-writer mints; format is foreign vocabulary,
+                          # same stance as project_key)
   title: str;  goal: str?
-  owner: str?             # alias → actor_uid
-  opened_by: str          # alias → actor_uid
+  owner: str?             # alias -> actor_uid; unowned workstreams exist
+  opened_by: str          # alias -> actor_uid
+  # No mission link (fleet_uid reaches it in one hop) · no repo/project
+  # (campaigns span repos; coverage derives from member work items) · no
+  # initial horizon (staleness = age-since-last-event vs fleet-policy window,
+  # overridden by latest renewed_until — a stored deadline would duplicate it)
 
 workstream_event:         # envelope +
   workstream_id: str
   event: progressed|renewed|blocked|unblocked|closed|archived
-  actor: str?             # alias → actor_uid
-  note: str?;  renewed_until: ts?;  blocked_reason: str?
+  actor: str?             # alias -> actor_uid
+  note: str?              # authored, small cap, REJECTS over-cap; carries the
+                          # blocked reason and the closed disposition — the old
+                          # blocked_reason column is KILLED as pure duplication
+  renewed_until: ts?      # meaningful on renewed
+  # No session_uid — workstreams are not session-bound, no orphan class
+  # (contrast task_events, where it earned its place for orphan tracking)
 ```
 
-One correction against the ratification option's loose wording: `opened` is NOT an event row — the contract row is the opening, exactly as `contract_created` maps in the task model (one fact, one row). Status (`active|stale|blocked|closed|archived`) is always a derivation over contract × events × clock.
+Vocabulary notes (deliberate, not drift): **no blocked split** — F17's waiting/returned distinction exists because a task has an assignee to hand responsibility back to; a campaign has no such party. **`unblocked` is an expansion** — today's verbs have block and no unblock; the shim maps nothing to it until the door gains the verb. **`closed` carries no outcome enum** — goal-achievement disposition is Phase 5's outcome-labelled-learning seam; `note` carries prose until a structured `outcome` field earns ratification there.
+
+Verb mapping 1:1 (`open`→contract · `progress`→`progressed` · `renew`→`renewed` · `block`→`blocked` · `close`→`closed` · `prune`→`archived`). Status (`active|stale|blocked|closed|archived`) is always derived — contract × events × clock × policy window, never stored. **Transition mechanics:** the `workstream-update.sh` shim writes the db through emit AND regenerates `workstreams.json` as a Lane C projection, so `brief.py`, the fleet-pulse stall checks, and sprint selection keep reading the file unchanged until each is repointed; the file's authority ends when the shim lands, its existence when its last reader moves.
 
 ### SessionDigest / SessionUsage (adopted as-is, usage pilot-pending)
 
