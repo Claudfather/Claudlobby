@@ -38,7 +38,7 @@ The observable plane is first an **organizational flight recorder**. The cockpit
 | F16 | Envelope physical form | **Typed tables sharing the envelope + one global `ingest_seq`** — one table per event family, envelope columns embedded, real indexes, per-family retention; uniformity enforced by Pydantic + tests (ruled 2026-08-19) |
 | F19 | System-event vocabulary | **Warn-on-unknown registry** (ruled 2026-08-20): known set seeded from observed emitters + `events.py` CRITICAL_TYPES; unknown types still INGEST, counted in trust metrics, surfaced by doctor; #903's SSOT tightens the registry later. Deliberately asymmetric with communications — communications callers are our doors (bugs loud), system-event emitters are the whole estate (never lose a machinery event to a new script) |
 | F20 | Metric-sample shape | **Generic samples table** (ruled 2026-08-20): subject uid + registry-governed metric name + JSON value + status flag; new probes need no migration; hot metrics promote to indexed generated columns on evidence; the aggressive-retention lane |
-| F21 | Workstream vocabulary | **Mirror the task model** (ruled 2026-08-20): contract row IS "opened" (one fact, one row — same mapping as `contract_created`); events = `progressed, renewed, blocked, unblocked, closed, archived`; status always derived, never stored; `workstream-update.sh` verbs map 1:1 in the door shim |
+| F21 | Workstream vocabulary | **Mirror the task model** (ruled 2026-08-20): contract row IS "opened" (one fact, one row — same mapping as `contract_created`); events = `progressed, renewed, blocked, unblocked, closed, archived, plan_linked, plan_unlinked`; status always derived, never stored; `workstream-update.sh` verbs map 1:1 in the door shim |
 | F17 | `blocked` semantics | **Two events**: `blocked_waiting` (nonterminal — assigned, cannot progress) and `returned_blocked` (terminal — responsibility back to manager). Legacy `blocked` reports map to `returned_blocked`; existing overdue-matching behavior preserved exactly, no silent change (ruled 2026-08-19) |
 | F18 | Backfill posture | **Clean epoch + selective import** — new trustworthy epoch at cutover; dispatch-log + report-back rows (task-id-bearing) imported with `source=legacy`, deterministic import ids, confidence markers; ambiguous history stays read-only legacy; task closure never inferred (ruled 2026-08-19) |
 
@@ -331,16 +331,6 @@ workstream_contract:      # envelope + — the contract row IS "opened" (F21)
   title: str;  goal: str?
   owner: str?             # alias -> actor_uid; unowned workstreams exist
   opened_by: str          # alias -> actor_uid
-  plan_ref: str?          # link to the AUTHORED plan artifact this campaign
-                          # executes (repo-doc path or issue URL) — singular by
-                          # the anchor-doc convention (the anchor's own links
-                          # carry phase plans; an array would duplicate them,
-                          # the same reason communications refs[] died);
-                          # pattern-free foreign vocabulary, never validated.
-                          # PLANS ARE NOT A TABLE: authored intent lives in
-                          # git/GitHub (clauDNA workflow territory) — the
-                          # workstream is a plan's operational shadow, and the
-                          # link is the whole construct
   # Project association DERIVES via member work items' repo/project_key —
   # a campaign spanning three projects needs no special case.
   # No mission link (fleet_uid reaches it in one hop) · no repo/project
@@ -350,8 +340,17 @@ workstream_contract:      # envelope + — the contract row IS "opened" (F21)
 
 workstream_event:         # envelope +
   workstream_id: str
-  event: progressed|renewed|blocked|unblocked|closed|archived
+  event: progressed|renewed|blocked|unblocked|closed|archived|plan_linked|plan_unlinked
   actor: str?             # alias -> actor_uid
+  plan_ref: str?          # meaningful on plan_linked/plan_unlinked: the AUTHORED
+                          # plan artifact (repo-doc path or issue URL), pattern-free
+                          # foreign vocabulary. Linkage lives on EVENTS because the
+                          # contract is immutable — plans accrue after kickoff (this
+                          # very program: spec v1, v2, phase plans across days), so
+                          # a contract column (singular OR array) freezes the set;
+                          # the current plan set is a DERIVATION (linked - unlinked),
+                          # and "when did this plan join" is free history. Kickoff
+                          # door emits contract + plan_linked in sequence
   note: str?              # authored, small cap, REJECTS over-cap; carries the
                           # blocked reason and the closed disposition — the old
                           # blocked_reason column is KILLED as pure duplication
@@ -360,7 +359,7 @@ workstream_event:         # envelope +
   # (contrast task_events, where it earned its place for orphan tracking)
 ```
 
-Vocabulary notes (deliberate, not drift): **no blocked split** — F17's waiting/returned distinction exists because a task has an assignee to hand responsibility back to; a campaign has no such party. **`unblocked` is an expansion** — today's verbs have block and no unblock; the shim maps nothing to it until the door gains the verb. **`closed` carries no outcome enum** — goal-achievement disposition is Phase 5's outcome-labelled-learning seam; `note` carries prose until a structured `outcome` field earns ratification there.
+Vocabulary notes (deliberate, not drift): **no blocked split** — F17's waiting/returned distinction exists because a task has an assignee to hand responsibility back to; a campaign has no such party. **`unblocked` is an expansion** — today's verbs have block and no unblock; the shim maps nothing to it until the door gains the verb. **`plan_linked`/`plan_unlinked` are likewise expansions** (unlink exists because a typo'd ref must be correctable append-only). **Plan STATUS is never stored**: its SSOT is the doc itself (phase markers + archive convention, already consumed by implement-plan/session-resume); the observed lane structurally cannot hold it (status change = UPDATE or a foreign event family); campaign motion is answered by the plane's OWN events. Plan-status-in-UI, if ever wanted, is a render-time read of the anchor doc — displayed live, stored never. Doc-side `workstream:` frontmatter is the doc ecosystem's complementary convention (clauDNA/index territory); the plane's authoritative graph is the event trail, and a frontmatter mismatch is a discoverable inconsistency, not something the plane resolves. **`closed` carries no outcome enum** — goal-achievement disposition is Phase 5's outcome-labelled-learning seam; `note` carries prose until a structured `outcome` field earns ratification there.
 
 Verb mapping 1:1 (`open`→contract · `progress`→`progressed` · `renew`→`renewed` · `block`→`blocked` · `close`→`closed` · `prune`→`archived`). Status (`active|stale|blocked|closed|archived`) is always derived — contract × events × clock × policy window, never stored. **Transition mechanics:** the `workstream-update.sh` shim writes the db through emit AND regenerates `workstreams.json` as a Lane C projection, so `brief.py`, the fleet-pulse stall checks, and sprint selection keep reading the file unchanged until each is repointed; the file's authority ends when the shim lands, its existence when its last reader moves.
 
