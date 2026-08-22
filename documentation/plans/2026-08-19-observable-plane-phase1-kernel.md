@@ -1,5 +1,7 @@
 # Observable Plane — Phase 1: Semantic Kernel Implementation Plan
 
+> **REVISION v2.1 (2026-08-24):** round-2 external review reconciled — ten implementation-blocking findings. Every INSERT is built from column lists (no placeholder arithmetic); ingest is the sole transaction owner; migrations own their transactions in-script; the events CHECK is NULL-safe require-AND-forbid, tested by an executed INSERT matrix from `KIND_MANIFEST`; EmitRequest carries the full envelope (+origin/import_batch/confidence); `emit-batch` provides the atomic dispatch unit; the ack is single (task `receiver_acknowledged` deleted); spool fsyncs and classifies failures by SQLite error class; capture policy is config-resolved with metadata-mode body drop; files 0600/dirs 0700; id patterns anchored; NFC collisions rejected; quarantine names validated; bench is spawn-safe and gains read queries + EXPLAIN.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the observable plane's write substrate — canonical serialization, minted identity, the common event envelope, SQLite storage with a global ingest sequence, the `claudlobby emit` spine with spool fallback, and the benchmark that gates Phase 2's ingest choice — headless, no UI, no door migration yet.
@@ -196,6 +198,12 @@ def test_unsupported_type_rejected():
         canonical_bytes({"a": {1, 2}})
 
 
+def test_nfc_key_collision_rejected():
+    nfd, nfc = "e\u0301", "\u00e9"   # both normalize to é
+    with pytest.raises(CanonicalizationError):
+        canonical_bytes({nfd: 1, nfc: 2})
+
+
 def test_hash_format():
     h = canonical_hash({"a": 1})
     assert h.startswith("sha256:") and len(h) == 7 + 64
@@ -264,7 +272,12 @@ def _normalize(obj: object) -> object:
         for k, v in obj.items():
             if not isinstance(k, str):
                 raise CanonicalizationError(f"non-string key: {k!r}")
-            out[unicodedata.normalize("NFC", k)] = _normalize(v)
+            nk = unicodedata.normalize("NFC", k)
+            if nk in out:
+                # Two distinct input keys normalizing to one NFC key would
+                # silently drop a value — round-2 F9 input hardening.
+                raise CanonicalizationError(f"NFC key collision: {k!r}")
+            out[nk] = _normalize(v)
         return out
     if isinstance(obj, list):
         return [_normalize(v) for v in obj]
@@ -377,6 +390,9 @@ def test_mint_is_unique():
 def test_session_uid_is_derived_and_stable():
     from claudlobby.plane.ids import derive_session_uid
 
+    import pytest
+    with pytest.raises(ValueError):
+        derive_session_uid("")
     a = derive_session_uid("8ad2aa7e-bade-4c55-b3c3-000000000000")
     b = derive_session_uid("8ad2aa7e-bade-4c55-b3c3-000000000000")
     c = derive_session_uid("different-session")
@@ -440,12 +456,14 @@ _UID_PREFIX = {
     "library_item": "lib_",
 }
 
+# Anchored (round-2 F9): pydantic's pattern is a SEARCH — unanchored patterns
+# accept embedded garbage. ^...$ anchors work in both Rust-regex and re.
 ID_PATTERNS: dict[str, str] = {
-    "event": r"ev_[0-9a-f]{32}",
-    "msg": r"msg_[0-9a-f]{32}",
-    "work_item": r"wi_[0-9a-f]{32}",
-    "assignment": r"asg_[0-9a-f]{32}",
-    **{kind: prefix + r"[0-9a-f]{32}" for kind, prefix in _UID_PREFIX.items()},
+    "event": r"^ev_[0-9a-f]{32}$",
+    "msg": r"^msg_[0-9a-f]{32}$",
+    "work_item": r"^wi_[0-9a-f]{32}$",
+    "assignment": r"^asg_[0-9a-f]{32}$",
+    **{kind: "^" + prefix + r"[0-9a-f]{32}$" for kind, prefix in _UID_PREFIX.items()},
 }
 
 _HOST_UID_RE = re.compile(r"^host_[0-9a-f]{32}$")
@@ -479,6 +497,8 @@ def derive_session_uid(platform_session_id: str) -> str:
     lookup, and the transcript/OTel join needs exactly that stability."""
     import hashlib
 
+    if not platform_session_id or not platform_session_id.strip():
+        raise ValueError("empty platform session id — refusing to derive")
     digest = hashlib.sha256(platform_session_id.encode("utf-8")).hexdigest()
     return "sess_" + digest[:32]
 
@@ -500,11 +520,20 @@ def ensure_host_uid(state_dir: Path) -> str:
             )
         return value
     state_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(state_dir, 0o700)
     value = mint_uid("host")
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(value + "\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    # O_EXCL: concurrent first emitters race to CREATE; exactly one wins and
+    # the losers reread the winner's value (round-2 F2 — the shared .tmp path
+    # let a slow loser overwrite the winner after others had read it).
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return ensure_host_uid(state_dir)
+    try:
+        os.write(fd, (value + "\n").encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
     return value
 ```
 
@@ -629,6 +658,18 @@ def test_body_ansi_stripped():
     assert fields.body == "red plain"
 
 
+def test_fleet_required_for_scoped_types():
+    req = _req("comm_intent", _intent_payload()) if False else _req("communication", _intent_payload())
+    req.pop("fleet")
+    with pytest.raises(ContractViolation):
+        validate_request(req)
+
+
+def test_receiver_acknowledged_is_gone():
+    from claudlobby.plane.contracts import TASK_EVENTS
+    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 18
+
+
 def test_task_event_vocabulary_enforced():
     good = {"work_item_id": "wi_" + "0" * 32, "event": "blocked_waiting"}
     env, payload = validate_request(_req("task", good))
@@ -701,18 +742,69 @@ ATTEMPT_STATES = (
     "unknown", "recipient_acknowledged", "duplicate_suppressed",
 )
 TASK_EVENTS = (
+    # 18 — receiver_acknowledged DELETED (F9 v2.1): the transmission ack row is
+    # the single acknowledgement fact; activation derives through the join.
     "dispatch_intended", "transmission_failed", "dispatch_submitted",
-    "receiver_acknowledged", "accepted", "rejected", "progress",
+    "accepted", "rejected", "progress",
     "blocked_waiting", "returned_blocked", "resumed", "completed", "failed",
     "cancelled", "deadline_changed", "superseded", "reassigned",
     "retry_created", "orphaned_by_session_loss", "recovered_after_restart",
     "expired",
 )
+DECLARATION_EVENTS = ("revision_seen", "scan_completed")
 WORKSTREAM_EVENTS = (
     "progressed", "renewed", "blocked", "unblocked", "closed", "archived",
     "plan_linked", "plan_unlinked",
 )
 CARRIERS = ("tmux", "telegram-tgpost", "telegram-bridge")
+
+# THE kind manifest (F16 v2.1) — the SSOT the DDL CHECK and the INSERT-matrix
+# test both derive from. require = NOT NULL for the kind; forbid = must be
+# NULL; vocab None = registry-governed (F19: system tokens never CHECK).
+_STREAM_COLS = ("event", "carrier", "attempt_no", "carrier_ref", "msg_id",
+                "work_item_id", "assignment_id", "workstream_id",
+                "subject_kind", "subject_uid", "subject_alias", "actor_uid",
+                "session_uid", "severity", "deadline", "successor_id",
+                "renewed_until")
+KIND_MANIFEST: dict[str, dict] = {
+    "transmission": {
+        "vocab": ATTEMPT_STATES,
+        "require": ("event", "msg_id", "carrier", "attempt_no"),
+        "forbid": ("work_item_id", "assignment_id", "workstream_id",
+                    "subject_kind", "subject_uid", "subject_alias",
+                    "severity", "deadline", "successor_id", "renewed_until"),
+    },
+    "task": {
+        "vocab": TASK_EVENTS,
+        "require": ("event", "work_item_id"),
+        "forbid": ("msg_id", "carrier", "attempt_no", "carrier_ref",
+                    "workstream_id", "subject_kind", "subject_uid",
+                    "subject_alias", "severity", "renewed_until"),
+    },
+    "workstream": {
+        "vocab": WORKSTREAM_EVENTS,
+        "require": ("event", "workstream_id"),
+        "forbid": ("msg_id", "carrier", "attempt_no", "carrier_ref",
+                    "work_item_id", "assignment_id", "subject_kind",
+                    "subject_uid", "subject_alias", "severity", "deadline",
+                    "successor_id"),
+    },
+    "system": {
+        "vocab": None,   # registry-governed (F19) — event required, never enumerated
+        "require": ("event",),
+        "forbid": ("msg_id", "carrier", "attempt_no", "carrier_ref",
+                    "work_item_id", "assignment_id", "workstream_id",
+                    "deadline", "successor_id", "renewed_until"),
+    },
+    "declaration": {
+        "vocab": DECLARATION_EVENTS,
+        "require": ("event", "subject_kind", "subject_uid"),
+        "forbid": ("msg_id", "carrier", "attempt_no", "carrier_ref",
+                    "work_item_id", "assignment_id", "workstream_id",
+                    "severity", "deadline", "successor_id", "renewed_until"),
+    },
+}
+FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission", "task"}
 
 BODY_CAP_BYTES = 16_384
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
@@ -774,7 +866,9 @@ class Communication(_Strict):
     causation_id: Optional[str] = None
     trace_id: Optional[str] = None
     span_id: Optional[str] = None
-    # Derived at validation from `body` (never caller-supplied):
+    # Derived at validation from `body`; caller-supplied ONLY by the door's
+    # capture policy when the body is withheld (metadata mode keeps the proof
+    # triple while dropping content — F23):
     body_bytes: int = 0
     body_sha256: Optional[str] = None
     truncated: bool = False
@@ -796,6 +890,8 @@ class Transmission(_Strict):
     state: Literal[ATTEMPT_STATES]
     carrier_ref: Optional[str] = None
     error: Optional[str] = None
+    part_no: Optional[int] = Field(None, ge=1)     # bridge chunking (round-2 F10)
+    part_count: Optional[int] = Field(None, ge=1)
 
 
 class WorkItem(_Strict):
@@ -843,11 +939,19 @@ FAMILIES: dict[str, type[BaseModel]] = {
 
 class EmitRequest(_Strict):
     event_type: str
-    occurred_at: Optional[AwareDatetime] = None   # None → ingest stamps now()
+    occurred_at: Optional[AwareDatetime] = None   # None → emit stamps BEFORE first attempt (F6)
+    observed_at: Optional[AwareDatetime] = None   # §4: reporter-of-another-system's-fact only
     emitter: str = Field(min_length=1)
     source_ref: Optional[str] = None
-    fleet: Optional[str] = None                   # alias, e.g. "example-fleet"
+    fleet: Optional[str] = None                   # alias; REQUIRED for FLEET_REQUIRED types
     event_id: Optional[str] = Field(None, pattern=ID_PATTERNS["event"])
+    correlation_id: Optional[str] = None          # round-2 F4: the envelope rides the wire
+    causation_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    span_id: Optional[str] = None
+    origin: Literal["live", "legacy"] = "live"    # F18 representability
+    import_batch: Optional[str] = None
+    confidence: Optional[str] = None
     payload: dict
 
 
@@ -860,6 +964,10 @@ def validate_request(raw: dict) -> tuple[EmitRequest, BaseModel]:
     if model is None:
         raise ContractViolation(
             [{"loc": ("event_type",), "msg": f"unknown event type {env.event_type!r}"}]
+        )
+    if env.event_type in FLEET_REQUIRED and not env.fleet:
+        raise ContractViolation(
+            [{"loc": ("fleet",), "msg": f"{env.event_type} is fleet-scoped"}]
         )
     try:
         payload = model.model_validate(env.payload)
@@ -937,6 +1045,30 @@ def test_pragmas(conn):
     assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # NORMAL
 
 
+def test_file_modes_hardened(tmp_path):
+    import os as _os, stat as _stat
+    p = db_path(tmp_path)
+    connect(p).close()
+    assert _stat.S_IMODE(_os.stat(p).st_mode) == 0o600
+    assert _stat.S_IMODE(_os.stat(p.parent).st_mode) == 0o700
+
+
+def test_migration_failure_is_atomic(tmp_path, monkeypatch):
+    """Round-2 F2: a failing script must leave NO tables and version 0 —
+    the script owns BEGIN IMMEDIATE...COMMIT, so partial DDL cannot commit."""
+    import claudlobby.plane.migrations as mig
+    monkeypatch.setattr(mig, "_migration_files",
+        lambda: [(1, "BEGIN IMMEDIATE; CREATE TABLE t1 (x); THIS IS NOT SQL; COMMIT;")])
+    c = connect(db_path(tmp_path))
+    import pytest as _pytest, sqlite3 as _sq
+    with _pytest.raises(_sq.OperationalError):
+        mig.migrate(c)
+    assert c.execute("PRAGMA user_version").fetchone()[0] == 0
+    names = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    assert names == []
+    c.close()
+
+
 def test_migrate_sets_user_version_and_is_idempotent(conn):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_USER_VERSION
     assert migrate(conn) == SCHEMA_USER_VERSION  # second run: no-op
@@ -972,42 +1104,90 @@ def test_ingest_ledger_seq_monotonic(conn):
     assert seqs == sorted(seqs) and len(seqs) == 3
 
 
-def test_ddl_vocabularies_match_contracts():
-    """Twin enforcement (F16-v2): closed vocabularies live in Pydantic Literals
-    AND in DDL CHECKs — construct columns directly, stream kinds via the events
-    table's per-kind conditional CHECK. Registry-governed kinds are asserted
-    UNchecked on purpose (F19)."""
-    import re
-    from importlib import resources
+def test_kind_matrix_executed_against_installed_schema():
+    """Round-2 F3: parity is EXECUTED, never regexed — the regex version
+    passed while the CHECK accepted invalid rows (probe-confirmed). This
+    matrix derives from KIND_MANIFEST (the SSOT) and runs real INSERTs
+    against the migrated schema."""
+    import sqlite3 as sq
 
-    from claudlobby.plane import contracts
+    from claudlobby.plane import contracts as c
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.migrations import migrate
 
-    sql = (
-        resources.files("claudlobby.plane") / "migrations" / "0001_kernel.sql"
-    ).read_text()
+    conn = connect(":memory:")
+    migrate(conn)
 
-    def comm_set(column: str) -> set[str]:
-        block = sql.split("CREATE TABLE communications")[1].split(";")[0]
-        m = re.search(
-            column + r"\s+TEXT[^,]*CHECK \(" + column + r" IN\s*\(([^)]*)\)",
-            block, re.S,
-        )
-        assert m, f"no CHECK for {column} in communications"
-        return {v.strip().strip("'") for v in m.group(1).split(",") if v.strip()}
+    VALID = {
+        "transmission": {"event": "send_attempted", "msg_id": "msg_" + "0" * 32,
+                          "carrier": "tmux", "attempt_no": 1},
+        "task": {"event": "progress", "work_item_id": "wi_" + "0" * 32},
+        "workstream": {"event": "progressed", "workstream_id": "ws-x"},
+        "system": {"event": "restart"},
+        "declaration": {"event": "revision_seen", "subject_kind": "vault",
+                         "subject_uid": "vault_" + "0" * 32},
+    }
+    FORBID_VALUES = {
+        "msg_id": "msg_" + "1" * 32, "carrier": "tmux", "attempt_no": 2,
+        "carrier_ref": "x", "work_item_id": "wi_" + "1" * 32,
+        "assignment_id": "asg_" + "1" * 32, "workstream_id": "ws-y",
+        "subject_kind": "actor", "subject_uid": "actor_" + "1" * 32,
+        "subject_alias": "bot:f/x", "severity": "notice", "deadline": "t",
+        "successor_id": "x", "renewed_until": "t",
+    }
+    seq = [100]
 
-    def kind_set(kind: str) -> set[str]:
-        m = re.search(r"kind = '" + kind + r"'[^)]*?event IN\s*\(([^)]*)\)", sql, re.S)
-        assert m, f"no per-kind CHECK for {kind}"
-        return {v.strip().strip("'") for v in m.group(1).split(",") if v.strip()}
+    def attempt(row: dict):
+        seq[0] += 1
+        conn.execute(
+            "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
+            " VALUES (?, 'probe', 't')", (f"ev_{seq[0]:032x}",))
+        cols = {"ingest_seq": seq[0], "event_id": f"ev_{seq[0]:032x}",
+                "schema_version": "1", "occurred_at": "t", "ingested_at": "t",
+                "host_uid": "h", "emitter": "e", **row}
+        names = tuple(cols)
+        conn.execute(
+            f"INSERT INTO events ({','.join(names)})"
+            f" VALUES ({','.join('?' * len(names))})",
+            tuple(cols.values()))
 
-    assert comm_set("message_class") == set(contracts.MESSAGE_CLASSES)
-    assert comm_set("command_type") == set(contracts.COMMAND_TYPES)
-    assert kind_set("transmission") == set(contracts.ATTEMPT_STATES)
-    assert kind_set("task") == set(contracts.TASK_EVENTS)
-    assert kind_set("workstream") == set(contracts.WORKSTREAM_EVENTS)
-    m2 = re.search(r"carrier IN\s*\(([^)]*)\)", sql)
-    assert m2 and {v.strip().strip("'") for v in m2.group(1).split(",")} == set(contracts.CARRIERS)
-    assert "kind = 'system' AND event IS NOT NULL" in sql  # deliberately unchecked
+    for kind, manifest in c.KIND_MANIFEST.items():
+        base = {"kind": kind, **VALID[kind]}
+        attempt(dict(base))                                   # valid → accepted
+        import pytest as _pytest
+        with _pytest.raises(sq.IntegrityError):               # token NULL → rejected
+            attempt({**base, "event": None})
+        if manifest["vocab"] is not None:
+            with _pytest.raises(sq.IntegrityError):           # bad token → rejected
+                attempt({**base, "event": "no-such-token"})
+        else:
+            attempt({**base, "event": "brand-new-machinery-type"})  # F19: accepted
+        for col in manifest["forbid"]:                        # each forbidden col → rejected
+            with _pytest.raises(sq.IntegrityError):
+                attempt({**base, col: FORBID_VALUES[col]})
+
+    # receiver_acknowledged is dead vocabulary (F9 v2.1) — DDL agrees:
+    import pytest as _pytest
+    with _pytest.raises(sq.IntegrityError):
+        attempt({"kind": "task", "work_item_id": "wi_" + "2" * 32,
+                 "event": "receiver_acknowledged"})
+    conn.close()
+
+
+def test_envelope_is_17_columns_on_every_lane_b_table():
+    from claudlobby.plane.db import connect
+    from claudlobby.plane.migrations import migrate
+
+    conn = connect(":memory:")
+    migrate(conn)
+    ENVELOPE = ["ingest_seq", "event_id", "schema_version", "occurred_at",
+                "observed_at", "ingested_at", "host_uid", "fleet_uid",
+                "emitter", "source_ref", "correlation_id", "causation_id",
+                "trace_id", "span_id", "origin", "import_batch", "confidence"]
+    for table in ("communications", "work_items", "assignments", "events"):
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+        assert cols[:17] == ENVELOPE, f"{table} envelope drift: {cols[:17]}"
+    conn.close()
 
 
 def test_duplicate_event_id_rejected_by_ledger(conn):
@@ -1038,6 +1218,7 @@ working tree so message bodies can never ride a vault sync (spec §5).
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -1045,27 +1226,37 @@ from pathlib import Path
 def db_path(root: Path) -> Path:
     p = Path(root) / "state" / "plane" / "plane.db"
     p.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(p.parent, 0o700)            # round-2 F8: dirs 0700
     return p
 
 
 def connect(path: Path) -> sqlite3.Connection:
+    # sqlite creates 0644 by default (probe-confirmed) — pre-create 0600 and
+    # re-tighten the WAL/SHM siblings, which are created at their own time.
+    if str(path) != ":memory:" and not Path(path).exists():
+        os.close(os.open(path, os.O_CREAT | os.O_WRONLY, 0o600))
     conn = sqlite3.connect(path, timeout=5.0)
+    conn.isolation_level = None           # autocommit — ingest/migrate own txns
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 5000")
+    if str(path) != ":memory:":
+        for suffix in ("", "-wal", "-shm"):
+            f = str(path) + suffix
+            if os.path.exists(f):
+                os.chmod(f, 0o600)
     return conn
 ```
 
 - [ ] **Step 4: Implement migrations.py**
 
 ```python
-"""user_version-gated migration runner (design v2 F2: versioned .sql files).
+"""user_version-gated migration runner (F2 + round-2 F2/F6).
 
-Forward-only: a db whose user_version exceeds this code's ceiling is from a
-NEWER checkout — refuse loudly rather than write rows an older schema
-understands differently (spec §15 downgrade refusal).
+Forward-only; scripts own their transactions; downgrade raises DowngradeError
+(refused loudly at the CLI, never spooled).
 """
 
 from __future__ import annotations
@@ -1089,27 +1280,54 @@ def _migration_files() -> list[tuple[int, str]]:
     return sorted(out)
 
 
+class DowngradeError(RuntimeError):
+    """db user_version newer than this code — refuse loudly, NEVER spool (F6)."""
+
+
+def _user_version(conn: sqlite3.Connection) -> int:
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
 def migrate(conn: sqlite3.Connection) -> int:
-    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    # Scripts own their transactions (BEGIN IMMEDIATE ... PRAGMA user_version;
+    # COMMIT) — round-2 F2: executescript's implicit commit made an outer
+    # `with conn` a no-op, committing a partial schema stamped version 0.
+    conn.isolation_level = None   # autocommit; the SCRIPT is the transaction
+    current = _user_version(conn)
     if current > SCHEMA_USER_VERSION:
-        raise RuntimeError(
+        raise DowngradeError(
             f"plane.db user_version={current} is newer than this code"
-            f" (supports ≤{SCHEMA_USER_VERSION}) — refusing downgrade"
+            f" (supports <={SCHEMA_USER_VERSION}) — refusing downgrade"
         )
     for number, sql in _migration_files():
         if number <= current:
             continue
-        with conn:
+        try:
             conn.executescript(sql)
-            conn.execute(f"PRAGMA user_version = {number}")
-        current = number
+        except sqlite3.Error:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raced = _user_version(conn)
+            if raced >= number:   # concurrent first emitter applied it — benign
+                current = raced
+                continue
+            raise
+        current = _user_version(conn)
+        if current != number:
+            raise RuntimeError(
+                f"migration {number} did not stamp user_version (got {current})"
+            )
     return current
 ```
 
 - [ ] **Step 5: Write migrations/0001_kernel.sql**
 
 ```sql
--- 0001_kernel: ingest ledger, identity registry, five event families.
+-- 0001_kernel -- the script OWNS its transaction (round-2 F2): executescript
+-- runs in autocommit; BEGIN IMMEDIATE serializes concurrent first emitters,
+-- and the version stamp commits WITH the DDL or not at all.
+BEGIN IMMEDIATE;
+-- 0001_kernel: ingest ledger, identity registry, constructs + events stream.
 -- Envelope columns are identical on every family table by design (F16):
 --   ingest_seq, event_id, schema_version, occurred_at, observed_at,
 --   ingested_at, host_uid, fleet_uid, emitter, source_ref,
@@ -1156,6 +1374,9 @@ CREATE TABLE communications (
     causation_id      TEXT,
     trace_id          TEXT,
     span_id           TEXT,
+    origin          TEXT NOT NULL DEFAULT 'live' CHECK (origin IN ('live','legacy')),
+    import_batch    TEXT,
+    confidence      TEXT,
     msg_id            TEXT PRIMARY KEY NOT NULL,   -- the communication id
     sender_uid        TEXT NOT NULL,
     sender_alias      TEXT NOT NULL,
@@ -1204,6 +1425,9 @@ CREATE TABLE work_items (
     causation_id    TEXT,
     trace_id        TEXT,
     span_id         TEXT,
+    origin          TEXT NOT NULL DEFAULT 'live' CHECK (origin IN ('live','legacy')),
+    import_batch    TEXT,
+    confidence      TEXT,
     work_item_id    TEXT NOT NULL UNIQUE,
     title           TEXT NOT NULL,
     created_by_uid  TEXT NOT NULL,
@@ -1229,6 +1453,9 @@ CREATE TABLE assignments (
     causation_id    TEXT,
     trace_id        TEXT,
     span_id         TEXT,
+    origin          TEXT NOT NULL DEFAULT 'live' CHECK (origin IN ('live','legacy')),
+    import_batch    TEXT,
+    confidence      TEXT,
     assignment_id TEXT NOT NULL UNIQUE,
     work_item_id    TEXT NOT NULL,
     assignee_uid    TEXT NOT NULL,
@@ -1238,12 +1465,15 @@ CREATE TABLE assignments (
     FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
 );
 CREATE INDEX idx_assignments_item ON assignments (work_item_id);
+CREATE UNIQUE INDEX idx_assignments_dispatch ON assignments (dispatch_msg_id)
+    WHERE dispatch_msg_id IS NOT NULL;
 CREATE INDEX idx_assignments_assignee ON assignments (assignee_uid, ingest_seq);
 
--- The ONE events stream (F16-v2): everything that HAPPENS to a construct.
--- All five kinds are declared now even though Phase-1 emitters cover only
--- transmission + task: pre-cutover DDL is disposable, and declaring the full
--- kind vocabulary means migration 0002 adds construct tables only.
+-- The ONE events stream (F16-v2.1): everything that HAPPENS to a construct.
+-- The CHECK is NULL-safe require-AND-forbid per kind (round-2 F3: SQLite
+-- passes NULL CHECK results, so every branch requires its columns NOT NULL
+-- and forbids off-kind columns IS NULL). Kinds/vocabularies mirror
+-- contracts.KIND_MANIFEST — the INSERT-matrix test executes both sides.
 CREATE TABLE events (
     ingest_seq      INTEGER NOT NULL UNIQUE,
     event_id        TEXT NOT NULL UNIQUE,
@@ -1259,47 +1489,100 @@ CREATE TABLE events (
     causation_id    TEXT,
     trace_id        TEXT,
     span_id         TEXT,
+    origin          TEXT NOT NULL DEFAULT 'live' CHECK (origin IN ('live','legacy')),
+    import_batch    TEXT,
+    confidence      TEXT,
     kind            TEXT NOT NULL CHECK (kind IN
                       ('transmission','task','workstream','system','declaration')),
-    event           TEXT,           -- the per-kind token (state / event / type)
-    carrier         TEXT CHECK (carrier IS NULL OR carrier IN
-                      ('tmux','telegram-tgpost','telegram-bridge')),
+    event           TEXT,
+    carrier         TEXT,
+    attempt_no      INTEGER,
+    carrier_ref     TEXT,
     msg_id          TEXT,
     work_item_id    TEXT,
     assignment_id   TEXT,
     workstream_id   TEXT,
-    subject_kind    TEXT CHECK (subject_kind IS NULL OR subject_kind IN
-                      ('host','vault','fleet','actor','bot_instance','session')),
+    subject_kind    TEXT,
     subject_uid     TEXT,
     subject_alias   TEXT,
     actor_uid       TEXT,
     session_uid     TEXT,
-    severity        TEXT CHECK (severity IS NULL OR severity IN ('critical','notice')),
-    detail          TEXT,           -- per-kind JSON tail
+    severity        TEXT,
+    deadline        TEXT,
+    successor_id    TEXT,
+    renewed_until   TEXT,
+    detail          TEXT,
     detail_truncated INTEGER NOT NULL DEFAULT 0,
     CHECK (
-        (kind = 'transmission' AND msg_id IS NOT NULL AND event IN
-            ('send_attempted','carrier_accepted','pane_submitted','failed',
-             'unknown','recipient_acknowledged','duplicate_suppressed'))
-     OR (kind = 'task' AND work_item_id IS NOT NULL AND event IN
-            ('dispatch_intended','transmission_failed','dispatch_submitted',
-             'receiver_acknowledged','accepted','rejected','progress',
-             'blocked_waiting','returned_blocked','resumed','completed','failed',
-             'cancelled','deadline_changed','superseded','reassigned',
-             'retry_created','orphaned_by_session_loss','recovered_after_restart',
-             'expired'))
-     OR (kind = 'workstream' AND workstream_id IS NOT NULL AND event IN
-            ('progressed','renewed','blocked','unblocked','closed','archived',
-             'plan_linked','plan_unlinked'))
-     OR (kind = 'system' AND event IS NOT NULL)   -- registry-governed: no vocab CHECK (F19)
-     OR (kind = 'declaration')
+        (kind = 'transmission'
+            AND event IS NOT NULL AND event IN ('send_attempted','carrier_accepted','pane_submitted',
+                          'failed','unknown','recipient_acknowledged',
+                          'duplicate_suppressed')
+            AND msg_id IS NOT NULL AND carrier IS NOT NULL
+            AND carrier IN ('tmux','telegram-tgpost','telegram-bridge')
+            AND attempt_no IS NOT NULL
+            AND work_item_id IS NULL AND assignment_id IS NULL
+            AND workstream_id IS NULL AND subject_kind IS NULL
+            AND subject_uid IS NULL AND subject_alias IS NULL
+            AND severity IS NULL AND deadline IS NULL
+            AND successor_id IS NULL AND renewed_until IS NULL)
+     OR (kind = 'task'
+            AND event IS NOT NULL AND event IN ('dispatch_intended','transmission_failed',
+                          'dispatch_submitted','accepted','rejected','progress',
+                          'blocked_waiting','returned_blocked','resumed',
+                          'completed','failed','cancelled','deadline_changed',
+                          'superseded','reassigned','retry_created',
+                          'orphaned_by_session_loss','recovered_after_restart',
+                          'expired')
+            AND work_item_id IS NOT NULL
+            AND msg_id IS NULL AND carrier IS NULL AND attempt_no IS NULL
+            AND carrier_ref IS NULL AND workstream_id IS NULL
+            AND subject_kind IS NULL AND subject_uid IS NULL
+            AND subject_alias IS NULL AND severity IS NULL
+            AND renewed_until IS NULL)
+     OR (kind = 'workstream'
+            AND event IS NOT NULL AND event IN ('progressed','renewed','blocked','unblocked','closed',
+                          'archived','plan_linked','plan_unlinked')
+            AND workstream_id IS NOT NULL
+            AND msg_id IS NULL AND carrier IS NULL AND attempt_no IS NULL
+            AND carrier_ref IS NULL AND work_item_id IS NULL
+            AND assignment_id IS NULL AND subject_kind IS NULL
+            AND subject_uid IS NULL AND subject_alias IS NULL
+            AND severity IS NULL AND deadline IS NULL AND successor_id IS NULL)
+     OR (kind = 'system'
+            AND event IS NOT NULL
+            AND msg_id IS NULL AND carrier IS NULL AND attempt_no IS NULL
+            AND carrier_ref IS NULL AND work_item_id IS NULL
+            AND assignment_id IS NULL AND workstream_id IS NULL
+            AND deadline IS NULL AND successor_id IS NULL
+            AND renewed_until IS NULL
+            AND (severity IS NULL OR severity IN ('critical','notice'))
+            AND ((subject_uid IS NULL AND subject_kind IS NULL
+                  AND subject_alias IS NULL)
+                 OR (subject_uid IS NOT NULL AND subject_kind IS NOT NULL
+                     AND subject_kind IN ('host','vault','fleet','actor',
+                                          'bot_instance','session'))))
+     OR (kind = 'declaration'
+            AND event IS NOT NULL AND event IN ('revision_seen','scan_completed')
+            AND subject_kind IN ('vault','host') AND subject_uid IS NOT NULL
+            AND msg_id IS NULL AND carrier IS NULL AND attempt_no IS NULL
+            AND carrier_ref IS NULL AND work_item_id IS NULL
+            AND assignment_id IS NULL AND workstream_id IS NULL
+            AND severity IS NULL AND deadline IS NULL
+            AND successor_id IS NULL AND renewed_until IS NULL)
     ),
     FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
 );
 CREATE INDEX idx_events_kind_seq ON events (kind, ingest_seq);
 CREATE INDEX idx_events_msg ON events (msg_id, ingest_seq) WHERE kind = 'transmission';
 CREATE INDEX idx_events_item ON events (work_item_id, ingest_seq) WHERE kind = 'task';
+CREATE INDEX idx_events_ws ON events (workstream_id, ingest_seq) WHERE kind = 'workstream';
+CREATE INDEX idx_events_subject ON events (subject_uid, ingest_seq) WHERE kind = 'system';
+CREATE INDEX idx_events_carrier_ref ON events (carrier_ref) WHERE carrier_ref IS NOT NULL;
 CREATE INDEX idx_events_assignment ON events (assignment_id) WHERE assignment_id IS NOT NULL;
+
+PRAGMA user_version = 1;
+COMMIT;
 
 ```
 
@@ -1435,22 +1718,26 @@ def resolve(
     now: str,
     parent_uid: str | None = None,
 ) -> str:
+    # NO transaction management here (round-2 F1): ingest() is the sole
+    # transaction owner — a nested `with conn` COMMITTED the outer ledger
+    # insert early (probe-confirmed), creating the ledger-without-family
+    # sequence that made replay delete a never-stored event. Standalone
+    # callers run in autocommit; inside ingest these ride its transaction.
     candidate = mint_uid(kind)
-    with conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO identity_registry"
-            " (uid, kind, alias, parent_uid, provisional, first_seen, last_seen)"
-            " VALUES (?, ?, ?, ?, 1, ?, ?)",
-            (candidate, kind, alias, parent_uid, now, now),
-        )
-        row = conn.execute(
-            "SELECT uid FROM identity_registry WHERE kind = ? AND alias = ?",
-            (kind, alias),
-        ).fetchone()
-        conn.execute(
-            "UPDATE identity_registry SET last_seen = ? WHERE uid = ?",
-            (now, row["uid"]),
-        )
+    conn.execute(
+        "INSERT OR IGNORE INTO identity_registry"
+        " (uid, kind, alias, parent_uid, provisional, first_seen, last_seen)"
+        " VALUES (?, ?, ?, ?, 1, ?, ?)",
+        (candidate, kind, alias, parent_uid, now, now),
+    )
+    row = conn.execute(
+        "SELECT uid FROM identity_registry WHERE kind = ? AND alias = ?",
+        (kind, alias),
+    ).fetchone()
+    conn.execute(
+        "UPDATE identity_registry SET last_seen = ? WHERE uid = ?",
+        (now, row["uid"]),
+    )
     return row["uid"]
 
 
@@ -1579,16 +1866,28 @@ def test_family_failure_rolls_back_ledger(env, monkeypatch):
     e, p = validate_request(_intent_req())
     import claudlobby.plane.ingest as mod
 
-    real = mod._insert_family
-
     def boom(*a, **k):
         raise RuntimeError("family insert failed")
 
-    monkeypatch.setattr(mod, "_insert_family", boom)
+    monkeypatch.setattr(mod, "_family_values", boom)
     with pytest.raises(RuntimeError):
         ingest(conn, e, p, host_uid=host)
-    monkeypatch.setattr(mod, "_insert_family", real)
     assert conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0] == 0
+    assert not conn.in_transaction   # rollback left no open transaction
+
+
+def test_duplicate_with_missing_family_row_raises(env):
+    """Round-2 F1: a ledger row whose family row is gone is CORRUPTION —
+    replay must refuse duplicate classification, never absorb it."""
+    conn, host = env
+    from claudlobby.plane.ids import mint_event_id as _mint
+    eid = _mint()
+    e, p = validate_request(_intent_req(event_id=eid))
+    ingest(conn, e, p, host_uid=host)
+    conn.execute("DELETE FROM communications WHERE event_id = ?", (eid,))
+    again = validate_request(_intent_req(event_id=eid))
+    with pytest.raises(RuntimeError, match="divergence"):
+        ingest(conn, again[0], again[1], host_uid=host)
 
 
 def test_occurred_at_defaults_to_now(env):
@@ -1613,12 +1912,15 @@ Expected: FAIL — module not found
 - [ ] **Step 3: Implement ingest.py**
 
 ```python
-"""The one transactional write path (design v2 §5).
+"""The one transactional write path (design v2 §5; round-2 F1 rewrite).
 
-Ledger row + family row commit or roll back together. Duplicate event_id is
-SUCCESS (idempotent replay — spool drains and door retries depend on it).
-Alias resolution happens here, at write time, so every stored row carries
-uids while doors keep speaking aliases.
+ingest_many() is the SOLE transaction owner: BEGIN IMMEDIATE, ledger+family
+inserts for every item, COMMIT — helpers never manage transactions (the
+nested-`with` early commit is the probe-confirmed lost-event class). Every
+INSERT is built from a column dict, so the placeholder count is right by
+construction — hand arithmetic is banned. Duplicate event_id replay is
+SUCCESS only after verifying ledger AND family rows both exist; a ledger row
+without its family row is corruption and RAISES, never absorbs.
 """
 
 from __future__ import annotations
@@ -1628,13 +1930,10 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from pydantic import BaseModel
-
 from . import PLANE_SCHEMA_VERSION
 from .contracts import (
-    Communication,
-    EmitRequest,
     Assignment,
+    Communication,
     TaskEvent,
     Transmission,
     WorkItem,
@@ -1654,124 +1953,149 @@ class IngestResult:
     duplicate: bool
 
 
-_ENVELOPE_COLS = (
-    "ingest_seq, event_id, schema_version, occurred_at, observed_at,"
-    " ingested_at, host_uid, fleet_uid, emitter, source_ref,"
-    " correlation_id, causation_id, trace_id, span_id"
-)
+_CONSTRUCT_TABLE = {
+    "communication": "communications",
+    "work_item": "work_items",
+    "assignment": "assignments",
+}
 
 
-def _envelope_values(seq, event_id, env: EmitRequest, payload, *, host_uid, fleet_uid, now):
-    occurred = env.occurred_at.isoformat() if env.occurred_at else now
-    return (
-        seq, event_id, PLANE_SCHEMA_VERSION, occurred, None, now,
-        host_uid, fleet_uid, env.emitter, env.source_ref,
-        getattr(payload, "correlation_id", None),
-        getattr(payload, "causation_id", None),
-        getattr(payload, "trace_id", None),
-        getattr(payload, "span_id", None),
+def _insert(conn: sqlite3.Connection, table: str, values: dict) -> None:
+    cols = tuple(values)
+    conn.execute(
+        f"INSERT INTO {table} ({', '.join(cols)})"
+        f" VALUES ({', '.join('?' * len(cols))})",
+        tuple(values.values()),
     )
 
 
-def _insert_family(conn, env, payload, base, now):
+def _envelope(seq, event_id, env, *, host_uid, fleet_uid, now) -> dict:
+    return {
+        "ingest_seq": seq,
+        "event_id": event_id,
+        "schema_version": PLANE_SCHEMA_VERSION,
+        "occurred_at": env.occurred_at.isoformat() if env.occurred_at else now,
+        "observed_at": env.observed_at.isoformat() if env.observed_at else None,
+        "ingested_at": now,
+        "host_uid": host_uid,
+        "fleet_uid": fleet_uid,
+        "emitter": env.emitter,
+        "source_ref": env.source_ref,
+        "correlation_id": env.correlation_id,
+        "causation_id": env.causation_id,
+        "trace_id": env.trace_id,
+        "span_id": env.span_id,
+        "origin": env.origin,
+        "import_batch": env.import_batch,
+        "confidence": env.confidence,
+    }
+
+
+def _family_values(conn, payload, now) -> tuple[str, dict]:
+    """(table, family-column dict) — no SQL here; _insert builds it."""
     if isinstance(payload, Communication):
-        sender_uid = resolve_party(conn, payload.sender, now)
-        recipient_uid = (
-            resolve_party(conn, payload.recipient, now) if payload.recipient else None
-        )
-        conn.execute(
-            f"INSERT INTO communications ({_ENVELOPE_COLS},"
-            " msg_id, sender_uid, sender_alias, sender_session_uid,"
-            " recipient_uid, recipient_alias,"
-            " recipient_raw, message_class, command_type, work_item_id,"
-            " assignment_id, workstream_id, deliberation_id, reply_to_msg_id,"
-            " supersedes_msg_id, body, body_bytes, body_sha256, truncated,"
-            " privacy, idempotency_key)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 21) + ")",
-            base + (
-                payload.msg_id, sender_uid, payload.sender,
-                payload.sender_session_uid, recipient_uid,
-                payload.recipient, payload.recipient_raw, payload.message_class,
-                payload.command_type, payload.work_item_id,
-                payload.assignment_id, payload.workstream_id,
-                payload.deliberation_id,
-                payload.reply_to_msg_id, payload.supersedes_msg_id,
-                payload.body, payload.body_bytes, payload.body_sha256,
-                int(payload.truncated), payload.privacy, payload.idempotency_key,
+        return "communications", {
+            "msg_id": payload.msg_id,
+            "sender_uid": resolve_party(conn, payload.sender, now),
+            "sender_alias": payload.sender,
+            "sender_session_uid": payload.sender_session_uid,
+            "recipient_uid": (
+                resolve_party(conn, payload.recipient, now)
+                if payload.recipient else None
             ),
-        )
-    elif isinstance(payload, WorkItem):
-        created_by = resolve_party(conn, payload.created_by, now)
-        conn.execute(
-            f"INSERT INTO work_items ({_ENVELOPE_COLS},"
-            " work_item_id, title, created_by_uid, workstream_id, repo,"
-            " project_key, body)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 7) + ")",
-            base + (
-                payload.work_item_id, payload.title, created_by,
-                payload.workstream_id, payload.repo, payload.project_key,
-                payload.body,
+            "recipient_alias": payload.recipient,
+            "recipient_raw": payload.recipient_raw,
+            "message_class": payload.message_class,
+            "command_type": payload.command_type,
+            "work_item_id": payload.work_item_id,
+            "assignment_id": payload.assignment_id,
+            "workstream_id": payload.workstream_id,
+            "deliberation_id": payload.deliberation_id,
+            "reply_to_msg_id": payload.reply_to_msg_id,
+            "supersedes_msg_id": payload.supersedes_msg_id,
+            "body": payload.body,
+            "body_bytes": payload.body_bytes,
+            "body_sha256": payload.body_sha256,
+            "truncated": int(payload.truncated),
+            "privacy": payload.privacy,
+            "idempotency_key": payload.idempotency_key,
+        }
+    if isinstance(payload, WorkItem):
+        return "work_items", {
+            "work_item_id": payload.work_item_id,
+            "title": payload.title,
+            "created_by_uid": resolve_party(conn, payload.created_by, now),
+            "workstream_id": payload.workstream_id,
+            "repo": payload.repo,
+            "project_key": payload.project_key,
+            "body": payload.body,
+        }
+    if isinstance(payload, Assignment):
+        return "assignments", {
+            "assignment_id": payload.assignment_id,
+            "work_item_id": payload.work_item_id,
+            "assignee_uid": resolve_party(conn, payload.assignee, now),
+            "assigned_by_uid": resolve_party(conn, payload.assigned_by, now),
+            "expected_by": (
+                payload.expected_by.isoformat() if payload.expected_by else None
             ),
-        )
-    elif isinstance(payload, Assignment):
-        assignee = resolve_party(conn, payload.assignee, now)
-        assigned_by = resolve_party(conn, payload.assigned_by, now)
-        conn.execute(
-            f"INSERT INTO assignments ({_ENVELOPE_COLS},"
-            " assignment_id, work_item_id, assignee_uid, assigned_by_uid,"
-            " expected_by, dispatch_msg_id)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 6) + ")",
-            base + (
-                payload.assignment_id, payload.work_item_id, assignee,
-                assigned_by,
-                payload.expected_by.isoformat() if payload.expected_by else None,
-                payload.dispatch_msg_id,
+            "dispatch_msg_id": payload.dispatch_msg_id,
+        }
+    if isinstance(payload, Transmission):
+        detail = {
+            k: v for k, v in {
+                "destination": payload.destination,
+                "error": payload.error,
+                "part_no": payload.part_no,
+                "part_count": payload.part_count,
+            }.items() if v is not None
+        }
+        return "events", {
+            "kind": "transmission",
+            "event": payload.state,
+            "carrier": payload.carrier,
+            "attempt_no": payload.attempt_no,
+            "carrier_ref": payload.carrier_ref,
+            "msg_id": payload.msg_id,
+            "detail": json.dumps(detail, ensure_ascii=False) if detail else None,
+            "detail_truncated": 0,
+        }
+    if isinstance(payload, TaskEvent):
+        detail = {
+            k: v for k, v in {
+                "progress": payload.progress,
+                "summary": payload.summary,
+                "pr_url": payload.pr_url,
+            }.items() if v is not None
+        }
+        return "events", {
+            "kind": "task",
+            "event": payload.event,
+            "work_item_id": payload.work_item_id,
+            "assignment_id": payload.assignment_id,
+            "actor_uid": (
+                resolve_party(conn, payload.actor, now) if payload.actor else None
             ),
-        )
-    elif isinstance(payload, (Transmission, TaskEvent)):
-        # F16-v2: stream kinds share one insert — the events table.
-        if isinstance(payload, Transmission):
-            kind, token, carrier = "transmission", payload.state, payload.carrier
-            refs = (payload.msg_id, None, None, None)
-            actor = session = None
-            detail = payload.model_dump(
-                exclude={"msg_id", "state", "carrier"}, exclude_none=True
-            )
-        else:
-            kind, token, carrier = "task", payload.event, None
-            refs = (None, payload.work_item_id, payload.assignment_id, None)
-            actor = resolve_party(conn, payload.actor, now) if payload.actor else None
-            session = payload.session_uid
-            detail = payload.model_dump(
-                exclude={"work_item_id", "assignment_id", "event", "actor",
-                         "session_uid"},
-                exclude_none=True, mode="json",
-            )
-        conn.execute(
-            f"INSERT INTO events ({_ENVELOPE_COLS},"
-            " kind, event, carrier, msg_id, work_item_id, assignment_id,"
-            " workstream_id, subject_kind, subject_uid, subject_alias,"
-            " actor_uid, session_uid, severity, detail, detail_truncated)"
-            " VALUES (" + ",".join("?" * 14) + "," + ",".join("?" * 16) + ")",
-            base + (kind, token, carrier, *refs, None, None, None, actor,
-                    session, None,
-                    json.dumps(detail, ensure_ascii=False) if detail else None, 0),
-        )
-    else:  # pragma: no cover — FAMILIES and this dispatch move together
-        raise TypeError(f"no insert path for {type(payload).__name__}")
+            "session_uid": payload.session_uid,
+            "deadline": payload.deadline.isoformat() if payload.deadline else None,
+            "successor_id": payload.successor_id,
+            "detail": json.dumps(detail, ensure_ascii=False) if detail else None,
+            "detail_truncated": 0,
+        }
+    raise TypeError(f"no insert mapping for {type(payload).__name__}")
 
 
-def ingest(
-    conn: sqlite3.Connection,
-    env: EmitRequest,
-    payload: BaseModel,
-    *,
-    host_uid: str,
-) -> IngestResult:
-    event_id = env.event_id or mint_event_id()
+def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
+    """items: [(EmitRequest, payload)] — ONE transaction, all-or-nothing."""
     now = now_iso()
+    prepared = [
+        (env.event_id or mint_event_id(), env, payload)
+        for env, payload in items
+    ]
     try:
-        with conn:  # one transaction: ledger + family commit together
+        conn.execute("BEGIN IMMEDIATE")
+        results = []
+        for event_id, env, payload in prepared:
             cur = conn.execute(
                 "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
                 " VALUES (?, ?, ?)",
@@ -1779,24 +2103,64 @@ def ingest(
             )
             seq = cur.lastrowid
             fleet_uid = resolve_fleet(conn, env.fleet, now) if env.fleet else None
-            base = _envelope_values(
-                seq, event_id, env, payload,
+            base = _envelope(
+                seq, event_id, env,
                 host_uid=host_uid, fleet_uid=fleet_uid, now=now,
             )
-            _insert_family(conn, env, payload, base, now)
+            table, fam = _family_values(conn, payload, now)
+            _insert(conn, table, {**base, **fam})
+            results.append(IngestResult(event_id, seq, False))
+        conn.execute("COMMIT")
+        return results
     except sqlite3.IntegrityError as exc:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         if "ingest_ledger.event_id" in str(exc):
-            return IngestResult(event_id=event_id, ingest_seq=None, duplicate=True)
+            return _verify_duplicates(conn, prepared)
         raise
-    return IngestResult(event_id=event_id, ingest_seq=seq, duplicate=False)
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+def _verify_duplicates(conn, prepared) -> list[IngestResult]:
+    """Duplicate replay = success ONLY if every event landed FULLY before:
+    ledger row present AND family row present (round-2 F1 — never report
+    duplicate success for an event that was never fully stored)."""
+    results = []
+    for event_id, env, payload in prepared:
+        ledger = conn.execute(
+            "SELECT family FROM ingest_ledger WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if ledger is None:
+            raise RuntimeError(
+                f"duplicate-classification refused: {event_id} missing from"
+                " ledger while the batch collided — mixed state"
+            )
+        family = ledger["family"]
+        table = _CONSTRUCT_TABLE.get(family, "events")
+        fam = conn.execute(
+            f"SELECT 1 FROM {table} WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if fam is None:
+            raise RuntimeError(
+                f"ledger/family divergence for {event_id} — refusing"
+                " duplicate classification (integrity, not idempotency)"
+            )
+        results.append(IngestResult(event_id, None, True))
+    return results
+
+
+def ingest(conn, env, payload, *, host_uid) -> IngestResult:
+    return ingest_many(conn, [(env, payload)], host_uid=host_uid)[0]
 ```
 
-Note: `identity.resolve` opens its own `with conn` inside the outer transaction — SQLite connections nest `with` as savepoint-free no-ops when a transaction is already open via the same connection, so resolution participates in the ingest transaction. The rollback test (family failure → no ledger row) is what proves this holds; if it fails, inline the resolve calls' SQL into the ingest transaction instead.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `./.venv/bin/pytest tests/test_plane_ingest.py -v 2>&1 | tail -3`
-Expected: all PASS. If `test_family_failure_rolls_back_ledger` fails on the nested-`with` behavior, apply the note above (move resolve SQL inline) and re-run.
+Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -1815,7 +2179,7 @@ git commit -m "feat(plane): transactional ingest — ledger + family, duplicate 
 
 **Interfaces:**
 - Consumes: contracts (Task 3), ingest (Task 6).
-- Produces: `spool_dir(root) -> Path` (`<root>/state/plane/spool/`, quarantine subdir); `spool_write(root, raw_request: dict, event_id: str, error: str) -> Path` (atomic tmp+rename, JSON: `{event_id, spooled_at, error, attempts, request}`); `drain(root, conn, host_uid) -> DrainReport` dataclass `{ingested: int, duplicates: int, quarantined: int, remaining: int}`; `spool_entries(root) -> list[dict]` (listing with age); `quarantine(root, name) -> Path`; `MAX_ATTEMPTS = 5`.
+- Produces: `spool_dir(root) -> Path` (`<root>/state/plane/spool/`, quarantine subdir); `spool_write(root, finalized_requests: list[dict], error: str) -> Path` (fsynced file+dir, 0600; JSON: `{event_ids, spooled_at, error, attempts, requests}` — event ids and occurred_at are finalized by emit BEFORE the first db attempt); `drain(root, conn, host_uid) -> DrainReport` dataclass `{ingested: int, duplicates: int, quarantined: int, remaining: int}`; `spool_entries(root) -> list[dict]` (listing with age); `quarantine(root, name) -> Path`; `MAX_ATTEMPTS = 5`.
 
 Rules (spec §10): mint before spool (event_id arrives as an argument — already minted by emit_api); duplicate on drain = success + delete; `ContractViolation` on drain (schema moved underneath) or attempts exhausted → quarantine, never silent discard, never infinite retry; file deleted only AFTER committed ingest.
 
@@ -1859,6 +2223,10 @@ def _req(msg_suffix="2") -> dict:
     }
 
 
+def _fin(req: dict, eid: str) -> dict:
+    return {**req, "event_id": eid, "occurred_at": "2026-08-24T00:00:00+00:00"}
+
+
 @pytest.fixture()
 def env(tmp_path: Path):
     conn = connect(db_path(tmp_path))
@@ -1868,19 +2236,22 @@ def env(tmp_path: Path):
     conn.close()
 
 
-def test_spool_write_is_atomic_json(env):
+def test_spool_write_is_fsynced_0600_json(env):
     root, conn, host = env
     eid = mint_event_id()
-    p = spool_write(root, _req(), eid, "db locked")
+    p = spool_write(root, [_fin(_req(), eid)], "db locked")
+    import os as _os, stat as _stat
     assert p.parent == spool_dir(root)
+    assert _stat.S_IMODE(_os.stat(p).st_mode) == 0o600
     data = json.loads(p.read_text())
-    assert data["event_id"] == eid and data["attempts"] == 0
+    assert data["event_ids"] == [eid] and data["attempts"] == 0
+    assert data["requests"][0]["occurred_at"]  # F6: event time survives the spool
     assert not list(spool_dir(root).glob("*.tmp"))
 
 
 def test_drain_ingests_and_deletes(env):
     root, conn, host = env
-    spool_write(root, _req(), mint_event_id(), "db locked")
+    spool_write(root, [_fin(_req(), mint_event_id())], "db locked")
     report = drain(root, conn, host)
     assert report.ingested == 1 and report.remaining == 0
     assert conn.execute("SELECT COUNT(*) FROM communications").fetchone()[0] == 1
@@ -1890,10 +2261,9 @@ def test_drain_ingests_and_deletes(env):
 def test_drain_duplicate_is_success(env):
     root, conn, host = env
     eid = mint_event_id()
-    spool_write(root, _req(), eid, "x")
+    spool_write(root, [_fin(_req(), eid)], "x")
     drain(root, conn, host)
-    # Same event spooled again (door retried after crash) — drains as duplicate.
-    spool_write(root, _req(), eid, "x")
+    spool_write(root, [_fin(_req(), eid)], "x")
     report = drain(root, conn, host)
     assert report.duplicates == 1 and report.remaining == 0
     assert conn.execute("SELECT COUNT(*) FROM communications").fetchone()[0] == 1
@@ -1901,8 +2271,7 @@ def test_drain_duplicate_is_success(env):
 
 def test_malformed_spool_file_quarantined(env):
     root, conn, host = env
-    bad = spool_dir(root) / "garbage.json"
-    bad.write_text("{not json")
+    (spool_dir(root) / "garbage.json").write_text("{not json")
     report = drain(root, conn, host)
     assert report.quarantined == 1
     assert list(quarantine_dir(root).iterdir())
@@ -1912,24 +2281,40 @@ def test_contract_violation_quarantined_not_retried(env):
     root, conn, host = env
     req = _req()
     req["payload"]["message_class"] = "no-such-class"
-    spool_write(root, req, mint_event_id(), "x")
+    spool_write(root, [_fin(req, mint_event_id())], "x")
     report = drain(root, conn, host)
     assert report.quarantined == 1 and report.remaining == 0
 
 
-def test_attempts_capped(env, monkeypatch):
+def test_operational_errors_retry_then_quarantine(env, monkeypatch):
+    """Only sqlite3.OperationalError is retryable (round-2 F6)."""
+    import sqlite3 as sq
+
     root, conn, host = env
-    spool_write(root, _req(), mint_event_id(), "x")
+    spool_write(root, [_fin(_req(), mint_event_id())], "x")
     import claudlobby.plane.spool as mod
 
-    def always_fail(*a, **k):
-        raise RuntimeError("db still down")
+    def busy(*a, **k):
+        raise sq.OperationalError("database is locked")
 
-    monkeypatch.setattr(mod, "ingest", always_fail)
+    monkeypatch.setattr(mod, "ingest_many", busy)
     for _ in range(MAX_ATTEMPTS):
         drain(root, conn, host)
-    assert spool_entries(root) == []  # exhausted → quarantined
-    assert len(list(quarantine_dir(root).iterdir())) == 1
+    assert spool_entries(root) == []
+    assert len(list(quarantine_dir(root).glob("*.json"))) == 1
+
+
+def test_non_retryable_quarantines_immediately(env, monkeypatch):
+    root, conn, host = env
+    spool_write(root, [_fin(_req(), mint_event_id())], "x")
+    import claudlobby.plane.spool as mod
+
+    def poison(*a, **k):
+        raise RuntimeError("ledger/family divergence")
+
+    monkeypatch.setattr(mod, "ingest_many", poison)
+    report = drain(root, conn, host)
+    assert report.quarantined == 1 and report.remaining == 0
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1957,35 +2342,60 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .contracts import ContractViolation, validate_request
-from .ingest import ingest  # patched in tests; keep module-level name
+from .ingest import ingest_many  # patched in tests; keep module-level name
 
 MAX_ATTEMPTS = 5
+
+
+class SpoolWriteError(RuntimeError):
+    """db failed AND the spool write failed — total emit failure (exit 3)."""
 
 
 def spool_dir(root: Path) -> Path:
     p = Path(root) / "state" / "plane" / "spool"
     p.mkdir(parents=True, exist_ok=True)
+    os.chmod(p, 0o700)
     return p
 
 
 def quarantine_dir(root: Path) -> Path:
     p = spool_dir(root) / "quarantine"
     p.mkdir(parents=True, exist_ok=True)
+    os.chmod(p, 0o700)
     return p
 
 
-def spool_write(root: Path, raw_request: dict, event_id: str, error: str) -> Path:
+def spool_write(root: Path, finalized_requests: list[dict], error: str) -> Path:
+    """Persist an already-finalized batch (event_ids + occurred_at set by emit
+    BEFORE the first db attempt — F6). fsync file AND directory before
+    returning: a spool 'success' that evaporates on power loss is a lost
+    event wearing a receipt (round-2 F6)."""
+    lead = finalized_requests[0]["event_id"]
     entry = {
-        "event_id": event_id,
+        "event_ids": [r["event_id"] for r in finalized_requests],
         "spooled_at": datetime.now(timezone.utc).isoformat(),
         "error": error,
         "attempts": 0,
-        "request": raw_request,
+        "requests": finalized_requests,
     }
-    target = spool_dir(root) / f"{event_id}.json"
-    tmp = target.with_suffix(".tmp")
-    tmp.write_text(json.dumps(entry, ensure_ascii=False) + "\n")
-    os.replace(tmp, target)
+    d = spool_dir(root)
+    target = d / f"{lead}.json"
+    tmp = d / f"{lead}.tmp"
+    try:
+        fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, (json.dumps(entry, ensure_ascii=False) + "\n").encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, target)
+        dfd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError as exc:
+        raise SpoolWriteError(f"db failed ({error}) AND spool failed ({exc})") from exc
     return target
 
 
@@ -1995,7 +2405,7 @@ def spool_entries(root: Path) -> list[dict]:
         try:
             data = json.loads(f.read_text())
         except json.JSONDecodeError:
-            data = {"event_id": None, "spooled_at": None, "attempts": None}
+            data = {"event_ids": None, "spooled_at": None, "attempts": None}
         data["_file"] = f.name
         out.append(data)
     return out
@@ -2017,42 +2427,60 @@ class DrainReport:
 
 def drain(root: Path, conn: sqlite3.Connection, host_uid: str) -> DrainReport:
     ingested = duplicates = quarantined = 0
-    for f in sorted(spool_dir(root).glob("*.json")):
+    entries = []
+    for f in spool_dir(root).glob("*.json"):
         try:
-            entry = json.loads(f.read_text())
-            raw = entry["request"]
-            raw = {**raw, "event_id": entry["event_id"]}
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            data = json.loads(f.read_text())
+            entries.append((data.get("spooled_at") or "", f, data))
+        except (json.JSONDecodeError, OSError) as exc:
             _quarantine(root, f, f"malformed spool file: {exc}")
+            quarantined += 1
+    for _, f, entry in sorted(entries, key=lambda e: (e[0], e[1].name)):
+        try:
+            raws = entry["requests"]
+        except (KeyError, TypeError) as exc:
+            _quarantine(root, f, f"malformed spool entry: {exc}")
             quarantined += 1
             continue
         try:
-            env, payload = validate_request(raw)
+            items = [validate_request(r) for r in raws]
         except ContractViolation as exc:
             _quarantine(root, f, f"contract violation on drain: {exc}")
             quarantined += 1
             continue
         try:
-            result = ingest(conn, env, payload, host_uid=host_uid)
-        except Exception as exc:  # noqa: BLE001 — infra failure: retry or quarantine
+            results = ingest_many(conn, items, host_uid=host_uid)
+        except sqlite3.OperationalError as exc:
+            # Retryable infrastructure (busy/locked/full) — round-2 F6: ONLY
+            # this class retries; everything else is quarantined loudly.
             entry["attempts"] = int(entry.get("attempts", 0)) + 1
             entry["error"] = str(exc)
             if entry["attempts"] >= MAX_ATTEMPTS:
-                f.write_text(json.dumps(entry, ensure_ascii=False) + "\n")
-                _quarantine(root, f, f"retries exhausted: {exc}")
+                _quarantine_with(root, f, entry, f"retries exhausted: {exc}")
                 quarantined += 1
             else:
                 tmp = f.with_suffix(".tmp")
                 tmp.write_text(json.dumps(entry, ensure_ascii=False) + "\n")
                 os.replace(tmp, f)
             continue
-        if result.duplicate:
+        except Exception as exc:  # noqa: BLE001 — integrity/programming: poison
+            _quarantine(root, f, f"non-retryable on drain: {exc}")
+            quarantined += 1
+            continue
+        if all(r.duplicate for r in results):
             duplicates += 1
         else:
             ingested += 1
-        f.unlink()  # only after committed ingest
+        f.unlink()  # only after committed ingestion
     remaining = len(list(spool_dir(root).glob("*.json")))
     return DrainReport(ingested, duplicates, quarantined, remaining)
+
+
+def _quarantine_with(root: Path, f: Path, entry: dict, reason: str) -> None:
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entry, ensure_ascii=False) + "\n")
+    os.replace(tmp, f)
+    _quarantine(root, f, reason)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -2080,7 +2508,7 @@ git commit -m "feat(plane): filesystem spool — atomic, capped retries, quarant
 **Interfaces:**
 - Consumes: everything above.
 - Produces:
-  - `emit_api.emit(root: Path, raw_request: dict) -> EmitOutcome` — dataclass `{event_id, status: Literal["committed","duplicate","spooled"], detail: str | None}`. Flow: validate (ContractViolation propagates — NEVER spooled) → connect+migrate → ingest; on `sqlite3.OperationalError`/`sqlite3.DatabaseError` → `spool_write` → `spooled`.
+  - `emit_api.emit(root, raw) -> EmitOutcome` and `emit_batch(root, raws) -> list[EmitOutcome]` (the atomic unit of work, F4) — dataclass `{event_id, status: Literal["committed","duplicate","spooled"], detail: str | None}`. Flow: validate (ContractViolation propagates — NEVER spooled) → connect+migrate → ingest; on `sqlite3.OperationalError`/`sqlite3.DatabaseError` → `spool_write` → `spooled`.
   - CLI `claudlobby emit <event_type> --json -` (stdin) or `--json <path>`: prints `event_id` on stdout; exit 0 committed/duplicate/spooled (spooled adds one stderr line `plane: db unavailable — spooled <file>`); exit 2 on ContractViolation (stderr: first error); exit 3 if spool write itself failed.
   - CLI `claudlobby plane status`: db path + exists, `user_version`, per-family row counts, ledger max seq, spool depth + oldest entry age, provisional actor count. Exit 0.
   - CLI `claudlobby plane spool list|retry|quarantine <file>`: `list` prints entries (name, event_id, attempts, age); `retry` runs `drain`; `quarantine <name>` force-moves one entry.
@@ -2173,31 +2601,36 @@ Expected: FAIL — argparse error (unknown command `emit`)
 - [ ] **Step 3: Implement emit_api.py**
 
 ```python
-"""emit(): the programmatic spine every writer uses (design v2 §5).
+"""emit(): the programmatic spine every writer uses (design v2 §5; round-2 v2.1).
 
 Failure taxonomy is the contract:
-  ContractViolation  → caller bug, propagate, write NOTHING (not even spool)
-  db unavailable     → spool + report spooled (the caller's own job proceeds)
-  spool also failed  → propagate SpoolWriteError (exit 3 at the CLI)
+  ContractViolation  -> caller bug: propagate, write NOTHING (not even spool)
+  DowngradeError     -> db newer than code: propagate LOUDLY, never spooled
+  sqlite Operational/Database errors -> spool + report spooled
+  spool also failed  -> SpoolWriteError (CLI exit 3)
+
+occurred_at is finalized BEFORE the first db attempt (round-2 F6) so a
+spooled replay preserves event time and spool lag stays measurable as
+ingested_at - occurred_at. Capture policy is resolved from plane config
+keyed by fleet — NEVER from the caller's request (F23): in metadata mode
+the body is dropped at the door with its proof triple retained.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from .contracts import validate_request
+from .contracts import ContractViolation, cap_body, validate_request
 from .db import connect, db_path
 from .ids import ensure_host_uid, mint_event_id
-from .ingest import ingest
-from .migrations import migrate
-from .spool import spool_write
-
-
-class SpoolWriteError(RuntimeError):
-    pass
+from .ingest import ingest_many
+from .migrations import DowngradeError, migrate
+from .spool import SpoolWriteError, spool_write
 
 
 @dataclass(frozen=True)
@@ -2207,33 +2640,77 @@ class EmitOutcome:
     detail: Optional[str] = None
 
 
-def emit(root: Path, raw_request: dict) -> EmitOutcome:
-    env, payload = validate_request(raw_request)  # ContractViolation propagates
-    event_id = env.event_id or mint_event_id()
-    raw_request = {**raw_request, "event_id": event_id}
+def _capture_mode(root: Path, fleet: str | None) -> str:
+    """Fleet-keyed capture mode from plane config; default 'metadata' (F7/F23).
+    The caller's request never decides this."""
+    cfg = Path(root) / "state" / "plane" / "capture.json"
+    try:
+        modes = json.loads(cfg.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "metadata"
+    mode = modes.get(fleet or "", modes.get("*", "metadata"))
+    return mode if mode in ("full", "metadata") else "metadata"
+
+
+def _apply_capture(root: Path, raw: dict) -> dict:
+    if raw.get("event_type") != "communication":
+        return raw
+    payload = dict(raw.get("payload") or {})
+    mode = _capture_mode(root, raw.get("fleet"))
+    if mode == "full":
+        payload["privacy"] = "full"
+    else:
+        body = payload.get("body")
+        if body is not None:
+            proof = cap_body(body)
+            payload["body"] = None          # dropped AT THE DOOR (F23)
+            payload["privacy"] = "metadata"
+            payload["body_bytes"] = proof.body_bytes
+            payload["body_sha256"] = proof.body_sha256
+            payload["truncated"] = proof.truncated
+        else:
+            payload["privacy"] = "metadata"
+    return {**raw, "payload": payload}
+
+
+def _finalize(raw: dict) -> dict:
+    out = dict(raw)
+    if not out.get("event_id"):
+        out["event_id"] = mint_event_id()
+    if not out.get("occurred_at"):
+        out["occurred_at"] = datetime.now(timezone.utc).isoformat()
+    return out
+
+
+def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
+    """One atomic unit of work: validate ALL, then ONE transaction (F4).
+    The dispatch door commits work_item + assignment + communication here."""
+    finalized = [_finalize(_apply_capture(root, r)) for r in raw_requests]
+    items = [validate_request(r) for r in finalized]   # ContractViolation propagates
     try:
         conn = connect(db_path(root))
         try:
-            migrate(conn)
+            migrate(conn)                               # DowngradeError propagates
             host = ensure_host_uid(Path(root) / "state")
-            result = ingest(
-                conn,
-                env.model_copy(update={"event_id": event_id}),
-                payload,
-                host_uid=host,
-            )
+            results = ingest_many(conn, items, host_uid=host)
         finally:
             conn.close()
-    except (sqlite3.OperationalError, sqlite3.DatabaseError, RuntimeError) as exc:
-        try:
-            path = spool_write(root, raw_request, event_id, str(exc))
-        except OSError as spool_exc:
-            raise SpoolWriteError(
-                f"db failed ({exc}) AND spool failed ({spool_exc})"
-            ) from spool_exc
-        return EmitOutcome(event_id, "spooled", detail=str(path))
-    status = "duplicate" if result.duplicate else "committed"
-    return EmitOutcome(event_id, status)
+    except (DowngradeError, ContractViolation):
+        raise
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as exc:
+        path = spool_write(root, finalized, str(exc))   # raises SpoolWriteError
+        return [
+            EmitOutcome(r["event_id"], "spooled", detail=str(path))
+            for r in finalized
+        ]
+    return [
+        EmitOutcome(res.event_id, "duplicate" if res.duplicate else "committed")
+        for res in results
+    ]
+
+
+def emit(root: Path, raw_request: dict) -> EmitOutcome:
+    return emit_batch(root, [raw_request])[0]
 ```
 
 - [ ] **Step 4: Implement commands/plane.py and register**
@@ -2252,11 +2729,13 @@ from pathlib import Path
 
 from ..plane.contracts import ContractViolation, export_schemas
 from ..plane.db import connect, db_path
-from ..plane.emit_api import SpoolWriteError, emit
+from ..plane.emit_api import emit, emit_batch
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
-from ..plane.migrations import migrate
-from ..plane.spool import drain, quarantine_dir, spool_dir, spool_entries
+from ..plane.migrations import DowngradeError, migrate
+from ..plane.spool import (
+    SpoolWriteError, drain, quarantine_dir, spool_dir, spool_entries,
+)
 
 _FAMILY_COUNTS = {
     "communication": ("communications", None),
@@ -2289,9 +2768,43 @@ def cmd_emit(args, root: Path) -> int:
     except SpoolWriteError as exc:
         print(f"emit: TOTAL FAILURE — {exc}", file=sys.stderr)
         return 3
+    except DowngradeError as exc:
+        # Never spooled (round-2 F6): a newer db is an operator condition,
+        # not transient infrastructure — retrying it forever helps no one.
+        print(f"emit: REFUSED — {exc}", file=sys.stderr)
+        return 4
     print(outcome.event_id)
     if outcome.status == "spooled":
         print(f"plane: db unavailable — spooled {outcome.detail}", file=sys.stderr)
+    return 0
+
+
+def cmd_emit_batch(args, root: Path) -> int:
+    """One atomic unit of work: {"events": [...]} or a bare JSON array (F4)."""
+    try:
+        raw = sys.stdin.read() if args.json == "-" else Path(args.json).read_text()
+        parsed = json.loads(raw)
+        requests = parsed["events"] if isinstance(parsed, dict) else parsed
+        assert isinstance(requests, list) and requests
+    except (OSError, json.JSONDecodeError, KeyError, AssertionError) as exc:
+        print(f"emit-batch: unreadable request: {exc}", file=sys.stderr)
+        return 2
+    try:
+        outcomes = emit_batch(root, requests)
+    except ContractViolation as exc:
+        first = exc.errors[0] if exc.errors else {}
+        print(f"emit-batch: contract violation: {first}", file=sys.stderr)
+        return 2
+    except SpoolWriteError as exc:
+        print(f"emit-batch: TOTAL FAILURE — {exc}", file=sys.stderr)
+        return 3
+    except DowngradeError as exc:
+        print(f"emit-batch: REFUSED — {exc}", file=sys.stderr)
+        return 4
+    for o in outcomes:
+        print(o.event_id)
+    if outcomes and outcomes[0].status == "spooled":
+        print(f"plane: db unavailable — spooled {outcomes[0].detail}", file=sys.stderr)
     return 0
 
 
@@ -2335,7 +2848,7 @@ def cmd_plane_status(args, root: Path) -> int:
 def cmd_plane_spool(args, root: Path) -> int:
     if args.spool_action == "list":
         for e in spool_entries(root):
-            print(f"{e['_file']}  event={e.get('event_id')}  attempts={e.get('attempts')}")
+            print(f"{e['_file']}  events={e.get('event_ids')}  attempts={e.get('attempts')}")
         return 0
     if args.spool_action == "retry":
         conn = connect(db_path(root))
@@ -2351,6 +2864,13 @@ def cmd_plane_spool(args, root: Path) -> int:
         )
         return 0
     if args.spool_action == "quarantine":
+        import re as _re
+
+        if not _re.fullmatch(r"ev_[0-9a-f]{32}\.json", args.name or ""):
+            # Round-2 F9: the name is a filesystem operand — only validated
+            # spool basenames, never path components.
+            print(f"invalid spool entry name: {args.name!r}", file=sys.stderr)
+            return 1
         src = spool_dir(root) / args.name
         if not src.exists():
             print(f"no such spool entry: {args.name}", file=sys.stderr)
@@ -2377,6 +2897,10 @@ Register in `_parsers.py` (append inside `register_subparsers`, mirroring neighb
     pe.add_argument("event_type", help="communication | transmission | work_item | assignment | task")
     pe.add_argument("--json", required=True, help="Request JSON path, or '-' for stdin")
     pe.set_defaults(func=cmd_emit)
+
+    peb = sub.add_parser("emit-batch", help="Atomic multi-event unit of work (F4)")
+    peb.add_argument("--json", required=True, help='{"events": [...]} path, or "-"')
+    peb.set_defaults(func=cmd_emit_batch)
 
     pp = sub.add_parser("plane", help="Observable-plane operations")
     psub = pp.add_subparsers(dest="plane_action", required=True)
@@ -2486,8 +3010,13 @@ def test_25_writer_burst_loses_nothing(tmp_path: Path):
     # Ordering authority: seqs are gapless 1..N for committed rows
     conn = connect(db_path(tmp_path))
     seqs = [r[0] for r in conn.execute("SELECT ingest_seq FROM ingest_ledger ORDER BY 1")]
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM ingest_ledger l WHERE NOT EXISTS"
+        " (SELECT 1 FROM events e WHERE e.event_id = l.event_id)"
+    ).fetchone()[0]
     conn.close()
     assert seqs == list(range(1, committed + 1))
+    assert orphans == 0   # round-2 F1: ledger↔family 1:1 holds under load
 
 
 def test_busy_lock_leads_to_spool_not_loss(tmp_path: Path):
@@ -2645,20 +3174,60 @@ def bench_warm(root: Path, n: int) -> list[float]:
     return out
 
 
-def bench_burst(root: Path, n: int) -> dict:
-    import multiprocessing as mp
+def _burst_worker(root_str: str, i: int, q) -> None:
+    # Module-level: multiprocessing spawn (macOS default) must pickle the
+    # worker — a nested closure is not spawn-safe (round-2 F7).
     from claudlobby.plane.emit_api import emit as _emit
 
-    def worker(i: int, q):
-        try:
-            o = _emit(root, _request(200_000 + i))
-            q.put(o.status)
-        except Exception as exc:  # noqa: BLE001
-            q.put(f"error:{exc}")
+    try:
+        o = _emit(Path(root_str), _request(200_000 + i))
+        q.put(o.status)
+    except Exception as exc:  # noqa: BLE001
+        q.put(f"error:{exc}")
+
+
+def bench_reads(root: Path, n_events: int = 20_000) -> None:
+    """Round-2 F7: the F16-v2 flip condition is judged on READS too. Seeds a
+    realistic mix, times the derivation-shaped queries, prints EXPLAIN."""
+    import sqlite3 as sq
+
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.emit_api import emit_batch
+
+    for base in range(0, n_events, 500):
+        emit_batch(root, [_request(300_000 + base + i) for i in range(500)])
+    conn = connect(db_path(root))
+    QUERIES = {
+        "attention: latest task event per item":
+            "SELECT work_item_id, MAX(ingest_seq) FROM events"
+            " WHERE kind='task' GROUP BY work_item_id LIMIT 200",
+        "channel: merged tail":
+            "SELECT kind, event, ingest_seq FROM events"
+            " ORDER BY ingest_seq DESC LIMIT 500",
+        "carrier_ref reconciliation":
+            "SELECT event_id FROM events WHERE carrier_ref = 'tg-12345'",
+        "detail JSON probe (progress>50)":
+            "SELECT COUNT(*) FROM events WHERE kind='task'"
+            " AND CAST(json_extract(detail,'$.progress') AS INT) > 50",
+    }
+    print("\n### read benchmarks")
+    for name, sql in QUERIES.items():
+        t0 = time.perf_counter()
+        conn.execute(sql).fetchall()
+        dt = (time.perf_counter() - t0) * 1000
+        plan_rows = conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+        print(f"- {name}: {dt:.1f}ms")
+        for r in plan_rows:
+            print(f"    EQP: {r[-1]}")
+    conn.close()
+
+
+def bench_burst(root: Path, n: int) -> dict:
+    import multiprocessing as mp
 
     q: mp.Queue = mp.Queue()
     t0 = time.perf_counter()
-    procs = [mp.Process(target=worker, args=(i, q)) for i in range(n)]
+    procs = [mp.Process(target=_burst_worker, args=(str(root), i, q)) for i in range(n)]
     for p in procs:
         p.start()
     for p in procs:
@@ -2685,6 +3254,7 @@ def main() -> int:
     cold = bench_cold(root, args.cold)
     warm = bench_warm(root, args.warm)
     burst = bench_burst(root, args.burst)
+    bench_reads(root)
 
     print("## plane-bench results\n")
     print(f"- host: `{__import__('platform').node()}` "
