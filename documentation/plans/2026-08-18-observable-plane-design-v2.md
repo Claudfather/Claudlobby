@@ -351,17 +351,19 @@ workstream_event:         # envelope +
   workstream_id: str
   event: progressed|renewed|blocked|unblocked|closed|archived|plan_linked|plan_unlinked
   actor: str?             # alias -> actor_uid
-  plan_ref: str?          # meaningful on plan_linked/plan_unlinked: the AUTHORED
+  plan_ref: str?          # meaningful on plan_linked/plan_unlinked: an AUTHORED
                           # plan artifact (repo-doc path or issue URL), pattern-free
-                          # foreign vocabulary. Semantics: ANCHOR-WITH-REPLACEMENT —
-                          # a campaign has ONE plan at a time (1:1 at any moment);
-                          # plan_linked means "this is now the campaign's plan" and
-                          # the LATEST link wins (spec v1 -> v2 supersession is why
-                          # an immutable contract column cannot hold it); the
-                          # replacement trail is free history; plan_unlinked exists
-                          # only for the "no plan anymore" edge. Kickoff door emits
-                          # contract + the first plan_linked in sequence.
-                          # Chain: plan -> workstream -> project (transitively
+                          # foreign vocabulary. SET SEMANTICS (settled 2026-08-22 on
+                          # operator usage: epics carry ~10 live planning docs at
+                          # once): plan_linked adds to the campaign's plan set,
+                          # plan_unlinked removes; current set = linked - unlinked,
+                          # plural whenever reality is. Supersession is the pair
+                          # unlink(v1)+link(v2) — no special case. No role/anchor
+                          # column: which doc is spec vs phase plan is the docs'
+                          # own business (the epic links its phases); `note` labels
+                          # a link when wanted. The plane lists, never ranks.
+                          # Kickoff door emits contract + first plan_linked.
+                          # Chain: plans -> workstream -> project (transitively
                           # attached, no plans table, no frozen columns)
   note: str?              # authored, small cap, REJECTS over-cap; carries the
                           # blocked reason and the closed disposition — the old
