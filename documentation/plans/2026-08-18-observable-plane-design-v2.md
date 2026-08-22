@@ -331,8 +331,17 @@ workstream_contract:      # envelope + — the contract row IS "opened" (F21)
   title: str;  goal: str?
   owner: str?             # alias -> actor_uid; unowned workstreams exist
   opened_by: str          # alias -> actor_uid
-  # Project association DERIVES via member work items' repo/project_key —
-  # a campaign spanning three projects needs no special case.
+  project_key: str?       # kickoff-declared association ("this campaign is for
+                          # acme-shop") — a kickoff-time fact, which is what an
+                          # immutable row is FOR; nullable so cross-project
+                          # campaigns stay expressible. The work-item derivation
+                          # survives as the observed complement; declared-vs-
+                          # observed mismatch is a flag (org-overlay pattern).
+                          # Concedes the earlier derivation-only ruling, which
+                          # failed exactly when wanted most: a fresh campaign has
+                          # no work items, and tagging is optional
+  # Observed project coverage still derives via member work items'
+  # repo/project_key — spanning campaigns need no special case.
   # No mission link (fleet_uid reaches it in one hop) · no repo/project
   # (campaigns span repos; coverage derives from member work items) · no
   # initial horizon (staleness = age-since-last-event vs fleet-policy window,
@@ -344,13 +353,16 @@ workstream_event:         # envelope +
   actor: str?             # alias -> actor_uid
   plan_ref: str?          # meaningful on plan_linked/plan_unlinked: the AUTHORED
                           # plan artifact (repo-doc path or issue URL), pattern-free
-                          # foreign vocabulary. Linkage lives on EVENTS because the
-                          # contract is immutable — plans accrue after kickoff (this
-                          # very program: spec v1, v2, phase plans across days), so
-                          # a contract column (singular OR array) freezes the set;
-                          # the current plan set is a DERIVATION (linked - unlinked),
-                          # and "when did this plan join" is free history. Kickoff
-                          # door emits contract + plan_linked in sequence
+                          # foreign vocabulary. Semantics: ANCHOR-WITH-REPLACEMENT —
+                          # a campaign has ONE plan at a time (1:1 at any moment);
+                          # plan_linked means "this is now the campaign's plan" and
+                          # the LATEST link wins (spec v1 -> v2 supersession is why
+                          # an immutable contract column cannot hold it); the
+                          # replacement trail is free history; plan_unlinked exists
+                          # only for the "no plan anymore" edge. Kickoff door emits
+                          # contract + the first plan_linked in sequence.
+                          # Chain: plan -> workstream -> project (transitively
+                          # attached, no plans table, no frozen columns)
   note: str?              # authored, small cap, REJECTS over-cap; carries the
                           # blocked reason and the closed disposition — the old
                           # blocked_reason column is KILLED as pure duplication
