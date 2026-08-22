@@ -3662,10 +3662,43 @@ seed_claude_auth() {
 #
 # Idempotent, locked, and never fatal: a bot that cannot be marked trusted still
 # boots.
+# claude_config_json — the file Claude Code actually keeps `projects[]` in.
+#
+# The layout is ASYMMETRIC, and both halves are measured on this host rather than
+# inferred from the other:
+#
+#   CLAUDE_CONFIG_DIR set   -> "$CLAUDE_CONFIG_DIR/.claude.json"
+#       An isolated config dir with NO seed, after one real session: claude
+#       created backups/, projects/, sessions/ and `.claude.json` (0 projects).
+#       It did not create `.config.json`.
+#
+#   CLAUDE_CONFIG_DIR unset -> "$HOME/.claude/.config.json"
+#       That file carries 14 trust-flagged projects INCLUDING six scratch dirs
+#       from other bots' live sessions today — i.e. claude is writing trust there
+#       right now. `$HOME/.claude.json` also exists with 29 trust-flagged
+#       projects, but is frozen at 2026-08-05, the same date as the installed
+#       binary: a pre-migration legacy file that nothing has written in 16 days.
+#
+# Getting this wrong is silent in BOTH directions, which is why it is resolved in
+# one named function with the evidence attached rather than inline at the call
+# site: `$HOME/.claude/.claude.json` (the first version of this) does not exist
+# and nothing reads it, and `$HOME/.claude.json` (the obvious correction) is read
+# by nothing either. A seed written to either returns success and changes nothing.
+claude_config_json() {
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        printf '%s\n' "$CLAUDE_CONFIG_DIR/.claude.json"
+    else
+        printf '%s\n' "$HOME/.claude/.config.json"
+    fi
+}
+
 seed_workspace_trust() {
     local cwd="${1:?seed_workspace_trust: <project_cwd> required}"
-    local cfg="${2:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}"
-    local json="$cfg/.claude.json"
+    # Second arg is the config JSON FILE, not a directory — tests pass one; the
+    # production call in start-bot.sh passes ONE argument and must resolve the
+    # real file through claude_config_json.
+    local json="${2:-$(claude_config_json)}"
+    local cfg; cfg="$(dirname "$json")"
     command -v jq >/dev/null 2>&1 || return 0
     # BEFORE the lock, not inside it: with_lock creates "$json.lock", which needs
     # "$cfg" to exist. On a fresh install it does not, so the lock failed, the

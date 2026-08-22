@@ -84,11 +84,87 @@ class TestRulePathNormalisation:
             path_audit._normalize_rule_path("/other/fleet/x")
 
 
-def _run_seed(cwd: str, cfg: str) -> subprocess.CompletedProcess:
+def _run_seed(cwd: str, *, config_json: str | None = None,
+              home: str | None = None, config_dir: str | None = None):
+    """Invoke seed_workspace_trust.
+
+    ``config_json`` passes the optional second argument (what tests do).
+    ``home`` / ``config_dir`` leave it OFF and drive the resolution the way
+    ``start-bot.sh`` does — which is the shape that mattered.
+    """
+    arg = f' "{config_json}"' if config_json else ""
+    env = dict(os.environ)
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    if home:
+        env["HOME"] = home
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
     return subprocess.run(
-        ["bash", "-c", f'. "{LIB}/lib-common.sh"; set +e; seed_workspace_trust "{cwd}" "{cfg}"'],
-        capture_output=True, text=True,
+        ["bash", "-c", f'. "{LIB}/lib-common.sh"; set +e; seed_workspace_trust "{cwd}"{arg}'],
+        capture_output=True, text=True, env=env,
     )
+
+
+class TestProductionCallShape:
+    """The call shape `start-bot.sh` actually makes: ONE argument (#1325 review).
+
+    THE DEFECT THIS EXISTS TO PREVENT, and it shipped once: every test passed an
+    explicit second argument, so every test exercised a path production never
+    takes. The fixture was strictly more complete than reality — the direction
+    that hides the bug — and the suite stayed green while the one-arg call
+    resolved to `$HOME/.claude/.claude.json`, a file that does not exist and that
+    nothing reads.
+
+    That is the third instance of one shape in 24 hours (a payload fixture
+    defaulting a field the documented command omits; an alert harness with no
+    sender in it). **The test was easier than production.** So this class calls
+    it the production way and asserts on the RESOLVED PATH, not just the effect.
+    """
+
+    def test_one_arg_with_no_config_dir_writes_the_live_config(self, tmp_path):
+        """Default population: every shared-account bot.
+
+        `$HOME/.claude/.config.json` is where Claude Code keeps `projects[]` when
+        `CLAUDE_CONFIG_DIR` is unset — measured: it carries trust entries for
+        scratch dirs from other bots' live sessions today, while
+        `$HOME/.claude.json` holds 29 trust-flagged projects frozen at the
+        installed binary's own date and has not been written in 16 days.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        _run_seed("/bots/alpha", home=str(home))
+        live = home / ".claude" / ".config.json"
+        assert live.is_file(), f"nothing written; tree was {list(home.rglob('*'))}"
+        data = json.loads(live.read_text())
+        assert data["projects"]["/bots/alpha"]["hasTrustDialogAccepted"] is True
+        # The two paths that LOOK right and are read by nothing.
+        assert not (home / ".claude" / ".claude.json").exists()
+        assert not (home / ".claude.json").exists()
+
+    def test_one_arg_with_config_dir_set_writes_that_dir(self, tmp_path):
+        """The other branch, also measured: an isolated config dir gets
+        `.claude.json` — claude creates exactly that filename there, unseeded."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        _run_seed("/bots/beta", config_dir=str(cfg))
+        data = json.loads((cfg / ".claude.json").read_text())
+        assert data["projects"]["/bots/beta"]["hasTrustDialogAccepted"] is True
+        assert not (cfg / ".config.json").exists()
+
+    def test_start_bot_calls_it_with_exactly_one_argument(self):
+        """Pin the call site itself.
+
+        Without this the resolution can be correct and the caller still wrong —
+        which is precisely what happened. Reading the shipped script rather than
+        trusting that it matches the tests.
+        """
+        text = (LIB / "start-bot.sh").read_text()
+        calls = [l.strip() for l in text.splitlines() if "seed_workspace_trust" in l
+                 and not l.strip().startswith("#")]
+        assert calls, "start-bot.sh no longer seeds workspace trust"
+        for call in calls:
+            body = call.split("seed_workspace_trust", 1)[1].split("||")[0].strip()
+            assert body.count('"') == 2, f"expected one quoted arg, got: {call}"
 
 
 class TestWorkspaceTrustSeed:
@@ -117,7 +193,7 @@ class TestWorkspaceTrustSeed:
 
     def test_it_trusts_the_named_workspace(self, tmp_path):
         cfg = self._cfg(tmp_path)
-        _run_seed("/bots/alpha", str(cfg))
+        _run_seed("/bots/alpha", config_json=str(cfg / ".claude.json"))
         data = json.loads((cfg / ".claude.json").read_text())
         assert data["projects"]["/bots/alpha"]["hasTrustDialogAccepted"] is True
 
@@ -131,7 +207,7 @@ class TestWorkspaceTrustSeed:
         that a merge is a merge.
         """
         cfg = self._cfg(tmp_path)
-        _run_seed("/bots/alpha", str(cfg))
+        _run_seed("/bots/alpha", config_json=str(cfg / ".claude.json"))
         data = json.loads((cfg / ".claude.json").read_text())
         assert data["projects"]["/existing/one"] == {
             "hasTrustDialogAccepted": True, "history": ["a"]
@@ -143,9 +219,9 @@ class TestWorkspaceTrustSeed:
 
     def test_it_is_idempotent_and_byte_stable(self, tmp_path):
         cfg = self._cfg(tmp_path)
-        _run_seed("/bots/alpha", str(cfg))
+        _run_seed("/bots/alpha", config_json=str(cfg / ".claude.json"))
         first = (cfg / ".claude.json").read_bytes()
-        _run_seed("/bots/alpha", str(cfg))
+        _run_seed("/bots/alpha", config_json=str(cfg / ".claude.json"))
         assert (cfg / ".claude.json").read_bytes() == first
 
     def test_an_unparseable_config_is_left_alone(self, tmp_path):
@@ -153,11 +229,11 @@ class TestWorkspaceTrustSeed:
         cfg = tmp_path / "cfg"
         cfg.mkdir()
         (cfg / ".claude.json").write_text("{ this is not json")
-        _run_seed("/bots/alpha", str(cfg))
+        _run_seed("/bots/alpha", config_json=str(cfg / ".claude.json"))
         assert (cfg / ".claude.json").read_text() == "{ this is not json"
 
     def test_it_creates_a_config_when_none_exists(self, tmp_path):
         cfg = tmp_path / "cfg"
-        _run_seed("/bots/alpha", str(cfg))
+        _run_seed("/bots/alpha", config_json=str(cfg / ".claude.json"))
         data = json.loads((cfg / ".claude.json").read_text())
         assert data["projects"]["/bots/alpha"]["hasTrustDialogAccepted"] is True
