@@ -584,6 +584,24 @@ works perfectly still leaves the larger share of that 78% untouched.
   indistinguishable, to a reader, from one that never needed them. That is a worse shape than a
   plain breakage, and it is enough to abandon the approach even where `gh` happens to resolve.
 
+  The omission is **deliberate and documented**, which is what makes it a designed silent
+  degradation rather than an oversight. `_resolve_gh_executable` returns `None` rather than a
+  bare `gh` because *"this lands in a gitconfig consulted by a non-login git process, where an
+  unresolvable helper is a silent auth failure — omitting the fallback line entirely is the
+  honest degradation."* Honest in the composer's terms, and invisible in the artifact's: the
+  file records neither the choice nor the condition that triggered it.
+
+  **How this was nearly recorded backwards.** Two reviewers independently concluded the reset
+  strips the helper outright — that composing this file would cost 21 bots authenticated git.
+  One reached it by reading the composer source and stopping ~80 lines before the fallback; the
+  other by building a synthetic gitconfig that reconstructed the include and the reset but not
+  the stanza the real composer emits later. The synthetic had both probe controls and they did
+  not help: **a positive and a negative control validate the probe, not the fidelity of what was
+  fed to it — neither can detect a missing input.** What settled it was rendering the real
+  `compose_bot_gitconfig` with the gate bypassed. When the claim is about what a generator
+  produces, render the generator: its source and a hand-reconstruction are both models of the
+  artifact, and only the rendered output is the artifact.
+
   **`git config --get-all` cannot answer this class of question**, and anyone re-checking the
   above will reach for exactly that command. It prints raw values in list order and does **not**
   apply reset semantics, so it reports the discarded helper as present — a reassuring wrong
