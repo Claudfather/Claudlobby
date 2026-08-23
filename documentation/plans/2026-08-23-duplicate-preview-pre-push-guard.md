@@ -263,6 +263,26 @@ bots**, where it would pass every test it has because there is no bot on which i
 The file's existence must be **decoupled**: compose it when credential routing *or* App auth
 *or* the guard is enabled. That is fork **F1**, resolved to (a) in §7.
 
+**Decoupling touches TWO sites, and widening only one re-creates the same failure.** Both were
+added by `c618e6e4` and both must move together:
+
+| site | gates | if left unwidened |
+|---|---|---|
+| `composer.py:679` | whether the `.gitconfig` is **composed at all** | no file; `core.hooksPath` has nowhere to live |
+| `composer.py:1196` | whether `GIT_CONFIG_GLOBAL` is **exported in `bot.conf`** | the file is composed and **git never reads it** |
+
+The second is the dangerous one. Widen `679` alone and the `.gitconfig` lands on disk,
+byte-correct, inspectable, obviously present — and nothing points git at it, so the hook never
+runs. That is the §2.4 class one level down: a guard that composes onto a file no process reads
+also passes every test it has. The composed artifact being *present and correct* is what makes
+it convincing.
+
+The comment above `:1196` will also need rewriting, not just its condition — it currently reads
+*"Only when the bot declares credentials, so fleets that declare none compose byte-identically
+to before,"* which stops being true the moment a fleet enables the guard without declaring
+credentials. A mechanism change orphans its own self-description, and the printed surface is
+the one that gets missed.
+
 **Second-order effect, flagged because it is fleet-wide and greenfield.** A global
 `core.hooksPath` **replaces** `.git/hooks` for every repo without a local override. Husky is
 safe — it sets `core.hooksPath` at repo level, and local config wins over global (verified by
@@ -426,7 +446,9 @@ works perfectly still leaves the larger share of that 78% untouched.
   carrier that survives §2.2.
   **Resolved by:** the consumer fleet's platform reviewer, on the estate measurement above.
   **Remaining for this repo:** the shape of the third condition in (a) — what enables "the push
-  guard" as a declaration, which is a `fleet.yaml` surface this repo owns.
+  guard" as a declaration, which is a `fleet.yaml` surface this repo owns. Note that landing it
+  means widening **both** gate sites (`composer.py:679` and `:1196`) and rewriting the comment
+  at the second; §4/Q1 has the table and why widening one alone fails silently.
 
 - **F2 — enforcement ladder.**
   Options: (a) record → warn → per-class block, gated on the recorded rate;
