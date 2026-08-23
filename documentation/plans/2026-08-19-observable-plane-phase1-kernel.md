@@ -33,6 +33,7 @@ claudlobby/plane/
   __init__.py          — package marker, version constant PLANE_SCHEMA_VERSION
   canonical.py         — CANON_V1 canonical-bytes serializer + sha256 helper
   ids.py               — uid/id minting + host_uid persistence
+  registries.py        — FIELD_POLICY classification registry (enforcement SSOT); Phase-2b seeds join here
   contracts.py         — Pydantic v2: envelope, family payloads, EmitRequest; JSON-Schema export
   db.py                — connection factory (pragmas), db path resolution
   migrations.py        — user_version-based migration runner
@@ -558,6 +559,9 @@ def ensure_host_uid(state_dir: Path) -> str:
                 f"corrupt host-uid at {path}: {value!r} — refusing to re-mint; "
                 "restore from backup or delete deliberately"
             )
+        os.chmod(path, 0o600)   # round-4 note: a pre-existing valid file may
+                                 # carry its creator's mode; the uid is joined
+                                 # against every row — owner-only, always
         # Round-3 F2 (verifier's window): a loser can reach this fast path
         # after the winner's os.link but BEFORE the winner's directory fsync —
         # returning a uid whose dirent a power loss could still erase, while
@@ -732,6 +736,22 @@ def test_payload_envelope_duplicates_rejected():
         validate_request(_req("communication", _intent_payload(correlation_id="x")))
 
 
+def test_caps_enforce_from_field_policy(monkeypatch):
+    """Round-5 F8: FIELD_POLICY is the SSOT — shrinking a cap there changes
+    enforcement with no other edit."""
+    from claudlobby.plane import registries
+
+    monkeypatch.setitem(
+        registries.FIELD_POLICY, ("task", "summary"),
+        {"class": "CONTENT", "cap": 8},
+    )
+    with pytest.raises(ContractViolation):
+        validate_request(_req("task", {
+            "work_item_id": "wi_" + "0" * 32, "event": "progress",
+            "summary": "longer than eight bytes",
+        }))
+
+
 def test_work_item_body_cap_is_bytes():
     fat = "\u00e9" * 10_000        # 10k chars, 20k bytes
     with pytest.raises(ContractViolation):
@@ -780,6 +800,40 @@ def test_schemas_export():
 
 Run: `./.venv/bin/pytest tests/test_plane_contracts.py -v 2>&1 | tail -3`
 Expected: FAIL — module not found
+
+- [ ] **Step 3a: Implement registries.py — the policy/registry seeds**
+
+```python
+"""Package-owned registries (design §9b census + §11 field policy).
+
+Phase 1 ships FIELD_POLICY (the classification registry — the ENFORCEMENT
+source of truth: contracts read caps from here, the capture door reads
+CONTENT membership from here; editing a cap HERE changes behavior).
+SYSTEM_EVENT_TYPES and METRIC_NAMES join in Phase 2b.
+"""
+
+from __future__ import annotations
+
+# (family, field) -> {class: CONTENT|SENSITIVE|DIAGNOSTIC|METADATA,
+#                     cap: bytes, proof: keep sha/bytes triple on drop}
+FIELD_POLICY: dict[tuple[str, str], dict] = {
+    ("communication", "body"): {"class": "CONTENT", "cap": 16_384, "proof": True},
+    ("communication", "recipient_raw"): {"class": "SENSITIVE"},
+    ("work_item", "body"): {"class": "CONTENT", "cap": 16_384},
+    ("task", "summary"): {"class": "CONTENT", "cap": 4_096},
+    ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail
+    ("system", "data"): {"class": "DIAGNOSTIC", "cap": 16_384},
+}
+
+CONTENT_FIELDS: dict[str, tuple[str, ...]] = {}
+for (_family, _field), _pol in FIELD_POLICY.items():
+    if _pol["class"] == "CONTENT":
+        CONTENT_FIELDS[_family] = CONTENT_FIELDS.get(_family, ()) + (_field,)
+
+
+def cap_for(family: str, field: str) -> int:
+    return FIELD_POLICY[(family, field)]["cap"]
+```
 
 - [ ] **Step 3: Implement contracts.py**
 
@@ -869,7 +923,11 @@ KIND_MANIFEST: dict[str, dict] = {
     "system": {
         "vocab": None,   # registry-governed (F19)
         "require": ("event",),
-        "allowed": ("subject_kind", "subject_uid", "subject_alias", "severity"),
+        "allowed": ("severity",),
+        # The subject triple is optional AS A UNIT (DDL: all NULL, or
+        # kind+uid together) — round-5: listing unit-coupled columns as
+        # individually optional was caught by the allowed-columns matrix loop.
+        "allowed_groups": (("subject_kind", "subject_uid", "subject_alias"),),
     },
     "declaration": {
         "vocab": DECLARATION_EVENTS,
@@ -882,31 +940,19 @@ KIND_MANIFEST: dict[str, dict] = {
 def kind_forbidden(kind: str) -> tuple[str, ...]:
     manifest = KIND_MANIFEST[kind]
     keep = set(manifest["require"]) | set(manifest["allowed"])
+    for group in manifest.get("allowed_groups", ()):
+        keep |= set(group)
     return tuple(c for c in _STREAM_COLS if c not in keep)
 
 
 FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission", "task"}
 
-# THE field-policy registry (§11/F23; round-3 F8): every content-bearing
-# field, classified, with its byte cap. Classes: CONTENT (policy-gated,
-# dropped outside full mode) · SENSITIVE (stored raw, alias-rendered,
-# reveal-gated) · DIAGNOSTIC (bounded, flag-on-truncate) · METADATA
-# (everything unlisted). CONTENT_FIELDS derives; nothing lists twice.
-FIELD_POLICY: dict[tuple[str, str], dict] = {
-    ("communication", "body"): {"class": "CONTENT", "cap": 16_384, "proof": True},
-    ("communication", "recipient_raw"): {"class": "SENSITIVE"},
-    ("work_item", "body"): {"class": "CONTENT", "cap": 16_384},
-    ("task", "summary"): {"class": "CONTENT", "cap": 4_096},
-    ("transmission", "destination"): {"class": "SENSITIVE"},   # in detail
-    ("system", "data"): {"class": "DIAGNOSTIC", "cap": 16_384},
-}
-CONTENT_FIELDS: dict[str, tuple[str, ...]] = {}
-for (_family, _field), _pol in FIELD_POLICY.items():
-    if _pol["class"] == "CONTENT":
-        CONTENT_FIELDS.setdefault(_family, ())
-        CONTENT_FIELDS[_family] = CONTENT_FIELDS[_family] + (_field,)
+# Field policy lives in plane/registries.py (the design's stated home) and is
+# imported here so validators ENFORCE from it — one SSOT, no duplicated caps
+# (round-5 F8: descriptive-only policy meant editing a cap changed nothing).
+from .registries import CONTENT_FIELDS, FIELD_POLICY  # noqa: E402  (re-export)
 
-BODY_CAP_BYTES = 16_384
+BODY_CAP_BYTES = FIELD_POLICY[("communication", "body")]["cap"]
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -1007,8 +1053,9 @@ class WorkItem(_Strict):
     @field_validator("body")
     @classmethod
     def _body_byte_cap(cls, v):
-        if v is not None and len(v.encode("utf-8")) > 16_384:
-            raise ValueError("work_item.body exceeds 16KiB (bytes)")
+        cap = FIELD_POLICY[("work_item", "body")]["cap"]
+        if v is not None and len(v.encode("utf-8")) > cap:
+            raise ValueError(f"work_item.body exceeds {cap} bytes")
         return v
 
 
@@ -1034,8 +1081,9 @@ class TaskEvent(_Strict):
     @classmethod
     def _summary_byte_cap(cls, v):
         # CONTENT-classified (FIELD_POLICY); authored — over-cap REJECTS.
-        if v is not None and len(v.encode("utf-8")) > 4_096:
-            raise ValueError("task summary exceeds 4KiB (bytes)")
+        cap = FIELD_POLICY[("task", "summary")]["cap"]
+        if v is not None and len(v.encode("utf-8")) > cap:
+            raise ValueError(f"task summary exceeds {cap} bytes")
         return v
     pr_url: Optional[str] = None
     deadline: Optional[AwareDatetime] = None
@@ -1196,7 +1244,7 @@ def test_expected_tables(conn):
     }
     assert {
         "ingest_ledger", "identity_registry", "communications",
-        "work_items", "assignments", "events",
+        "work_items", "assignments", "workstreams", "events",
     } <= names
 
 
@@ -1299,6 +1347,19 @@ def test_kind_matrix_executed_against_installed_schema():
         for col in c.kind_forbidden(kind):
             with _pytest.raises(sq.IntegrityError):
                 attempt({**base, col: FVALS[col]})
+        # 4) EVERY allowed (optional) column is individually ACCEPTED
+        #    (round-4 note: parity claimed exhaustive without proving this half):
+        for col in manifest["allowed"]:
+            attempt({**base, col: FVALS[col]})
+        # 5) allowed GROUPS: accepted as a unit; PARTIAL group rejected
+        #    (unit-coupling is an invariant, not an accident):
+        GROUP_VALS = {"subject_kind": "actor",
+                      "subject_uid": "actor_" + "3" * 32,
+                      "subject_alias": "bot:f/g"}
+        for group in manifest.get("allowed_groups", ()):
+            attempt({**base, **{g: GROUP_VALS[g] for g in group}})
+            with _pytest.raises(sq.IntegrityError):
+                attempt({**base, group[0]: GROUP_VALS[group[0]]})
 
     with _pytest.raises(sq.IntegrityError):     # dead vocabulary stays dead
         attempt({"kind": "task", "work_item_id": "wi_" + "2" * 32,
@@ -1599,6 +1660,38 @@ CREATE TABLE assignments (
 CREATE INDEX idx_assignments_item ON assignments (work_item_id);
 CREATE UNIQUE INDEX idx_assignments_dispatch ON assignments (dispatch_msg_id)
     WHERE dispatch_msg_id IS NOT NULL;
+
+-- workstreams construct pulled into 0001 (round-5 F7): the events stream
+-- already declares the workstream KIND here, and the workstream-status
+-- reducer (a required §14 bench query) needs the construct to exist. The
+-- DOOR and Pydantic contract remain Phase 2b — Phase 1 rows arrive only
+-- from the bench seed and tests, via direct SQL.
+CREATE TABLE workstreams (
+    ingest_seq      INTEGER NOT NULL UNIQUE,
+    event_id        TEXT NOT NULL UNIQUE,
+    schema_version  TEXT NOT NULL,
+    occurred_at     TEXT NOT NULL,
+    observed_at     TEXT,
+    ingested_at     TEXT NOT NULL,
+    host_uid        TEXT NOT NULL,
+    fleet_uid       TEXT,
+    emitter         TEXT NOT NULL,
+    source_ref      TEXT,
+    correlation_id  TEXT,
+    causation_id    TEXT,
+    trace_id        TEXT,
+    span_id         TEXT,
+    origin          TEXT NOT NULL DEFAULT 'live' CHECK (origin IN ('live','legacy')),
+    import_batch    TEXT,
+    confidence      TEXT,
+    workstream_id   TEXT NOT NULL UNIQUE,
+    title           TEXT NOT NULL,
+    goal            TEXT,
+    owner_uid       TEXT,
+    opened_by_uid   TEXT NOT NULL,
+    project_key     TEXT,
+    FOREIGN KEY (ingest_seq) REFERENCES ingest_ledger (ingest_seq)
+);
 CREATE INDEX idx_assignments_assignee ON assignments (assignee_uid, ingest_seq);
 
 -- The ONE events stream (F16-v2.1): everything that HAPPENS to a construct.
@@ -2458,7 +2551,9 @@ def test_quarantine_artifacts_are_0600(env):
 
 
 def test_sql_bug_operational_errors_quarantine_not_retry(env, monkeypatch):
-    """Round-4 F6: missing table is OperationalError but NOT retryable."""
+    """Round-5 F6: EXACT assertion — a code-less 'no such table' (the
+    synthetic/3.10 form) quarantines immediately, never retries. The round-4
+    either/or blessed the wrong path."""
     import sqlite3 as sq
 
     root, conn, host = env
@@ -2466,12 +2561,28 @@ def test_sql_bug_operational_errors_quarantine_not_retry(env, monkeypatch):
     import claudlobby.plane.spool as mod
 
     def missing_table(*a, **k):
-        raise sq.OperationalError("no such table: events")
+        raise sq.OperationalError("no such table: events")   # code=None
 
     monkeypatch.setattr(mod, "ingest_many", missing_table)
     report = drain(root, conn, host)
-    # code-aware path quarantines immediately; 3.10 degradation would retry
-    assert report.quarantined == 1 or report.remaining == 1
+    assert report.quarantined == 1 and report.remaining == 0
+
+
+def test_codeless_infra_message_still_retries(env, monkeypatch):
+    """The fallback's other half: a code-less LOCKED message retries."""
+    import sqlite3 as sq
+
+    root, conn, host = env
+    spool_write(root, [_fin(_req(), mint_event_id())], "x")
+    import claudlobby.plane.spool as mod
+
+    def locked(*a, **k):
+        raise sq.OperationalError("database is locked")      # code=None
+
+    monkeypatch.setattr(mod, "ingest_many", locked)
+    report = drain(root, conn, host)
+    assert report.remaining == 1 and report.quarantined == 0
+    assert json.loads(next(spool_dir(root).glob("*.json")).read_text())["attempts"] == 1
 
 
 def test_retry_rewrite_preserves_0600(env, monkeypatch):
@@ -2583,15 +2694,28 @@ RETRYABLE_SQLITE_CODES = frozenset({
 })
 
 
+_RETRYABLE_MESSAGES = (
+    # The code-less fallback (Python 3.10, synthetic exceptions): match the
+    # KNOWN infrastructure classes; anything else is presumed a bug and
+    # quarantines loudly (round-5 F6 — retry-everything blessed SQL bugs).
+    "database is locked",
+    "database table is locked",
+    "database or disk is full",
+    "disk i/o error",
+    "unable to open database",
+    "attempt to write a readonly database",
+)
+
+
 def is_retryable(exc: sqlite3.OperationalError) -> bool:
-    """Round-4 F6: OperationalError is overbroad — a missing table and an SQL
-    typo are ALSO OperationalError and are bugs, not infrastructure. Whitelist
-    by primary error code; on Python 3.10 (no sqlite_errorcode) degrade to
-    retryable-with-a-warning rather than losing machinery events."""
+    """Whitelist by SQLite primary error code; when no code exists (3.10 or a
+    synthetic exception), fall back to message-matching the known infra
+    classes — never retry-by-default."""
     code = getattr(exc, "sqlite_errorcode", None)
-    if code is None:
-        return True   # 3.10 degradation, documented
-    return (code & 0xFF) in RETRYABLE_SQLITE_CODES
+    if code is not None:
+        return (code & 0xFF) in RETRYABLE_SQLITE_CODES
+    msg = str(exc).lower()
+    return any(m in msg for m in _RETRYABLE_MESSAGES)
 
 
 def _write_entry_file(directory: Path, name: str, entry: dict) -> Path:
@@ -2631,16 +2755,29 @@ def spool_entries(root: Path) -> list[dict]:
     return out
 
 
-def _quarantine(root: Path, f: Path, reason: str) -> None:
+def _fsync_dir(d: Path) -> None:
+    fd = os.open(d, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def quarantine_entry(root: Path, f: Path, reason: str) -> None:
+    """THE quarantine door — drain and the operator CLI both use it.
+    Round-5 F6: a cross-directory rename dirties BOTH directories; fsync
+    source AND destination, or a crash can resurrect the entry in spool
+    (double-processing) or lose it from quarantine."""
     q = quarantine_dir(root)
     _write_bytes_secure(q, f.name + ".reason", (reason + "\n").encode())
     os.chmod(f, 0o600)          # a malformed file arrived at ITS creator's mode
     os.replace(f, q / f.name)
-    dfd = os.open(q, os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+    _fsync_dir(q)
+    _fsync_dir(f.parent)
+
+
+def _quarantine(root: Path, f: Path, reason: str) -> None:
+    quarantine_entry(root, f, reason)
 
 
 @dataclass(frozen=True)
@@ -2836,8 +2973,25 @@ def test_capture_modes_per_family(tmp_path: Path):
     assert r.returncode == 0, r.stderr
     detail = conn.execute("SELECT detail FROM events WHERE kind='task'").fetchone()["detail"]
     assert detail is None or "secret" not in detail
-    # full mode: everything survives
+    # full mode: EVERY content family survives (round-5 F8 — task alone
+    # was tested; communication body and work_item body now asserted too)
     (cap / "capture.json").write_text('{"*": "full"}')
+    comm2 = _json.loads(_intent_json())
+    comm2["payload"]["msg_id"] = "msg_" + "6" * 32
+    comm2["payload"]["body"] = "full-mode communication body"
+    _run(["--root", str(tmp_path), "emit", "communication", "--json", "-"],
+         stdin=_json.dumps(comm2))
+    row2 = conn.execute(
+        "SELECT body, privacy FROM communications ORDER BY ingest_seq DESC"
+    ).fetchone()
+    assert row2["body"] == "full-mode communication body" and row2["privacy"] == "full"
+    wi2 = {**wi, "payload": {**wi["payload"], "work_item_id": "wi_" + "6" * 32,
+                              "body": "full-mode objective body"}}
+    _run(["--root", str(tmp_path), "emit", "work_item", "--json", "-"],
+         stdin=_json.dumps(wi2))
+    assert conn.execute(
+        "SELECT body FROM work_items ORDER BY ingest_seq DESC"
+    ).fetchone()["body"] == "full-mode objective body"
     te2 = {**te, "payload": {**te["payload"], "summary": "kept"}}
     _run(["--root", str(tmp_path), "emit", "task", "--json", "-"], stdin=_json.dumps(te2))
     kept = conn.execute(
@@ -3162,11 +3316,9 @@ def cmd_plane_spool(args, root: Path) -> int:
             return 1
         import os
 
-        from ..plane.spool import _write_bytes_secure
+        from ..plane.spool import quarantine_entry
 
-        _write_bytes_secure(quarantine_dir(root), args.name + ".reason", b"operator\n")
-        os.chmod(src, 0o600)
-        os.replace(src, quarantine_dir(root) / args.name)
+        quarantine_entry(root, src, "operator")
         print(f"quarantined {args.name}")
         return 0
     return 1
@@ -3368,7 +3520,7 @@ def test_derivation_fixtures(tmp_path: Path):
         return {"event_type": "transmission", "emitter": "fx",
                 "fleet": "fx-fleet",
                 "payload": {"msg_id": msg, "attempt_no": 1, "carrier": "tmux",
-                             "state": state}}
+                             "destination": "sock", "state": state}}
 
     emit_batch(tmp_path, [
         {"event_type": "work_item", "emitter": "fx", "fleet": "fx-fleet",
@@ -3643,19 +3795,31 @@ def _seed_realistic(root: Path, n_items: int = 400) -> None:
         emit_batch(root, batch)
     conn = connect(db_path(root))
     conn.execute("BEGIN IMMEDIATE")
-    for j in range(1000):
+    for w in range(40):   # the workstream CONSTRUCTS (door is Phase 2b; direct SQL)
+        cur = conn.execute(
+            "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
+            " VALUES (?, 'workstream', 't')", (f"ev_wc{w:030x}",))
         conn.execute(
+            "INSERT INTO workstreams (ingest_seq, event_id, schema_version,"
+            " occurred_at, ingested_at, host_uid, emitter, workstream_id,"
+            " title, opened_by_uid) VALUES (?, ?, '1',"
+            " '2026-01-01T00:00:00+00:00', 't', 'h', 'bench', ?, ?, 'actor_b')",
+            (cur.lastrowid, f"ev_wc{w:030x}", f"ws-{w}", f"campaign {w}"))
+    for j in range(1000):
+        cur = conn.execute(
             "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
             " VALUES (?, 'workstream_event', 't')", (f"ev_ws{j:030x}",))
         conn.execute(
             "INSERT INTO events (ingest_seq, event_id, schema_version,"
             " occurred_at, ingested_at, host_uid, emitter, kind, event,"
-            " workstream_id, detail) VALUES ((SELECT MAX(ingest_seq) FROM"
-            " ingest_ledger), ?, '1', 't', 't', 'h', 'bench', 'workstream',"
-            " ?, ?, ?)",
-            (f"ev_ws{j:030x}",
-             "progressed" if j % 7 else "renewed",
-             f"ws-{j % 40}", '{"note": "' + "n" * 120 + '"}'))
+            " workstream_id, renewed_until, detail) VALUES (?, ?, '1',"
+            " '2026-05-01T00:00:00+00:00', 't', 'h', 'bench', 'workstream',"
+            " ?, ?, ?, ?)",
+            (cur.lastrowid, f"ev_ws{j:030x}",
+             "renewed" if j % 11 == 0 else ("progressed" if j % 7 else "blocked"),
+             f"ws-{j % 40}",
+             "2099-01-01T00:00:00+00:00" if j % 11 == 0 else None,
+             '{"note": "' + "n" * 120 + '"}'))
     conn.execute("COMMIT")
     conn.close()
 
@@ -3698,16 +3862,22 @@ def bench_reads(root: Path) -> None:
         "workstream-status: contract x events x clock x policy":
             "SELECT w.workstream_id, CASE"
             " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
-            "   AND c.workstream_id = w.workstream_id"
-            "   AND c.event IN ('closed','archived')) THEN 'closed'"
+            "   AND c.workstream_id = w.workstream_id AND c.event='archived')"
+            "   THEN 'archived'"
+            " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
+            "   AND c.workstream_id = w.workstream_id AND c.event='closed')"
+            "   THEN 'closed'"
             " WHEN (SELECT e.event FROM events e WHERE e.kind='workstream'"
             "   AND e.workstream_id = w.workstream_id"
             "   AND e.event IN ('blocked','unblocked')"
             "   ORDER BY e.ingest_seq DESC LIMIT 1) = 'blocked' THEN 'blocked'"
-            " WHEN COALESCE((SELECT MAX(e.occurred_at) FROM events e"
+            " WHEN COALESCE((SELECT MAX(e.renewed_until) FROM events e"
             "   WHERE e.kind='workstream'"
-            "   AND e.workstream_id = w.workstream_id), w.occurred_at)"
-            "   < '2026-06-01' THEN 'stale'"
+            "   AND e.workstream_id = w.workstream_id), '') < ?"
+            "  AND COALESCE((SELECT MAX(e.occurred_at) FROM events e"
+            "   WHERE e.kind='workstream'"
+            "   AND e.workstream_id = w.workstream_id), w.occurred_at) < ?"
+            "   THEN 'stale'"
             " ELSE 'active' END AS status FROM workstreams w",
         "reconciliation: submitted-not-acked transmissions":
             "SELECT COUNT(*) FROM events s WHERE s.kind='transmission'"
@@ -3715,17 +3885,24 @@ def bench_reads(root: Path) -> None:
             " (SELECT 1 FROM events a WHERE a.kind='transmission'"
             "  AND a.msg_id = s.msg_id AND a.event='recipient_acknowledged')",
     }
+    # The staleness cutoff is CLOCK x POLICY (round-5 F7): now minus the
+    # fleet policy window, computed here and bound as a parameter — never a
+    # constant in the SQL.
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
     print("\n### read benchmarks (gate: p50 <= 50ms each; EQP must show an"
           " events index, never a bare SCAN events)")
     for name, sql in QUERIES.items():
+        params = (cutoff, cutoff) if "?" in sql else ()
         times = []
         for _ in range(5):
             t0 = time.perf_counter()
-            conn.execute(sql).fetchall()
+            conn.execute(sql, params).fetchall()
             times.append((time.perf_counter() - t0) * 1000)
         times.sort()
         print(f"- {name}: p50={times[2]:.1f}ms max={times[-1]:.1f}ms")
-        for r in conn.execute("EXPLAIN QUERY PLAN " + sql):
+        for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params):
             print(f"    EQP: {r[-1]}")
     conn.close()
 
