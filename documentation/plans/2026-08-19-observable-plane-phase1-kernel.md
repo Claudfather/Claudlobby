@@ -442,9 +442,15 @@ def test_fast_path_fsyncs_directory_before_return(tmp_path: Path, monkeypatch):
 
 def test_publish_is_create_if_absent(tmp_path: Path):
     """Round-3 F2: a pre-existing final file always wins; minting never
-    overwrites it (the link-publish loser path)."""
-    (tmp_path / "host-uid").write_text("host_" + "b" * 32 + "\n")
+    overwrites it (the link-publish loser path). Round-6 note: the fast path
+    also REPAIRS a lax pre-existing mode to 0600."""
+    import os as _os, stat as _stat
+
+    f = tmp_path / "host-uid"
+    f.write_text("host_" + "b" * 32 + "\n")     # write_text => typically 0644
+    _os.chmod(f, 0o644)                          # deterministic, not umask-luck
     assert ensure_host_uid(tmp_path) == "host_" + "b" * 32
+    assert _stat.S_IMODE(_os.stat(f).st_mode) == 0o600
 
 
 def test_crash_litter_does_not_break_minting(tmp_path: Path):
@@ -737,8 +743,8 @@ def test_payload_envelope_duplicates_rejected():
 
 
 def test_caps_enforce_from_field_policy(monkeypatch):
-    """Round-5 F8: FIELD_POLICY is the SSOT — shrinking a cap there changes
-    enforcement with no other edit."""
+    """Round-5/6 F8: FIELD_POLICY is the SSOT for EVERY content family —
+    shrinking any cap changes enforcement with no other edit."""
     from claudlobby.plane import registries
 
     monkeypatch.setitem(
@@ -750,6 +756,23 @@ def test_caps_enforce_from_field_policy(monkeypatch):
             "work_item_id": "wi_" + "0" * 32, "event": "progress",
             "summary": "longer than eight bytes",
         }))
+    monkeypatch.setitem(
+        registries.FIELD_POLICY, ("work_item", "body"),
+        {"class": "CONTENT", "cap": 8},
+    )
+    with pytest.raises(ContractViolation):
+        validate_request(_req("work_item", {
+            "work_item_id": "wi_" + "0" * 32, "title": "t",
+            "created_by": "bot:example-fleet/alpha",
+            "body": "longer than eight bytes",
+        }))
+    monkeypatch.setitem(
+        registries.FIELD_POLICY, ("communication", "body"),
+        {"class": "CONTENT", "cap": 8, "proof": True},
+    )
+    _, payload = validate_request(_req("communication", _intent_payload(
+        body="longer than eight bytes")))
+    assert payload.truncated is True and payload.body_bytes > 8
 
 
 def test_work_item_body_cap_is_bytes():
@@ -924,10 +947,16 @@ KIND_MANIFEST: dict[str, dict] = {
         "vocab": None,   # registry-governed (F19)
         "require": ("event",),
         "allowed": ("severity",),
-        # The subject triple is optional AS A UNIT (DDL: all NULL, or
-        # kind+uid together) — round-5: listing unit-coupled columns as
-        # individually optional was caught by the allowed-columns matrix loop.
-        "allowed_groups": (("subject_kind", "subject_uid", "subject_alias"),),
+        # Round-6 (reviewer's exhaustive-subset probe): the DDL's real
+        # semantics are a required PAIR with a conditionally-optional alias —
+        # kind+uid must appear together; alias is legal only WITH the pair.
+        # (kind+uid, alias NULL) is ACCEPTED; any subset missing part of the
+        # anchor is rejected. The round-5 "all-three-as-a-unit" model was
+        # wrong about the DDL, which was right.
+        "allowed_groups": (
+            {"anchor": ("subject_kind", "subject_uid"),
+             "dependent": ("subject_alias",)},
+        ),
     },
     "declaration": {
         "vocab": DECLARATION_EVENTS,
@@ -941,7 +970,7 @@ def kind_forbidden(kind: str) -> tuple[str, ...]:
     manifest = KIND_MANIFEST[kind]
     keep = set(manifest["require"]) | set(manifest["allowed"])
     for group in manifest.get("allowed_groups", ()):
-        keep |= set(group)
+        keep |= set(group["anchor"]) | set(group["dependent"])
     return tuple(c for c in _STREAM_COLS if c not in keep)
 
 
@@ -952,7 +981,7 @@ FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission", "t
 # (round-5 F8: descriptive-only policy meant editing a cap changed nothing).
 from .registries import CONTENT_FIELDS, FIELD_POLICY  # noqa: E402  (re-export)
 
-BODY_CAP_BYTES = FIELD_POLICY[("communication", "body")]["cap"]
+# BODY_CAP_BYTES retired (round-6): caps are read from FIELD_POLICY at call time.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -981,11 +1010,14 @@ def cap_body(text: str) -> BodyFields:
     stripped = _ANSI_RE.sub("", text)
     raw = stripped.encode("utf-8")
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
-    if len(raw) <= BODY_CAP_BYTES:
+    # Read the cap from the registry AT CALL TIME (round-6): an import-time
+    # constant snapshot made FIELD_POLICY descriptive for communications.
+    cap = FIELD_POLICY[("communication", "body")]["cap"]
+    if len(raw) <= cap:
         return BodyFields(
             body=stripped, body_bytes=len(raw), body_sha256=digest, truncated=False
         )
-    cut = raw[:BODY_CAP_BYTES].decode("utf-8", errors="ignore")
+    cut = raw[:cap].decode("utf-8", errors="ignore")
     return BodyFields(
         body=cut, body_bytes=len(raw), body_sha256=digest, truncated=True
     )
@@ -1153,8 +1185,8 @@ Expected: all PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add claudlobby/plane/contracts.py tests/test_plane_contracts.py
-git commit -m "feat(plane): wire contracts — envelope, five families, closed vocabularies"
+git add claudlobby/plane/registries.py claudlobby/plane/contracts.py tests/test_plane_contracts.py
+git commit -m "feat(plane): field-policy registry + wire contracts — envelope, five families, closed vocabularies"
 ```
 
 ---
@@ -1351,15 +1383,28 @@ def test_kind_matrix_executed_against_installed_schema():
         #    (round-4 note: parity claimed exhaustive without proving this half):
         for col in manifest["allowed"]:
             attempt({**base, col: FVALS[col]})
-        # 5) allowed GROUPS: accepted as a unit; PARTIAL group rejected
-        #    (unit-coupling is an invariant, not an accident):
+        # 5) allowed GROUPS — EVERY nonempty subset enumerated (round-6):
+        #    valid iff the subset contains the full anchor; dependents are
+        #    legal only alongside it. For system's 2-anchor+1-dependent
+        #    group: 7 subsets → 2 accepted ({kind,uid}, {kind,uid,alias}),
+        #    5 rejected. Expected totals: 50 accepted / 82 rejected / 0.
+        from itertools import chain, combinations
+
         GROUP_VALS = {"subject_kind": "actor",
                       "subject_uid": "actor_" + "3" * 32,
                       "subject_alias": "bot:f/g"}
         for group in manifest.get("allowed_groups", ()):
-            attempt({**base, **{g: GROUP_VALS[g] for g in group}})
-            with _pytest.raises(sq.IntegrityError):
-                attempt({**base, group[0]: GROUP_VALS[group[0]]})
+            members = tuple(group["anchor"]) + tuple(group["dependent"])
+            anchor = set(group["anchor"])
+            for subset in chain.from_iterable(
+                combinations(members, n) for n in range(1, len(members) + 1)
+            ):
+                row = {**base, **{g: GROUP_VALS[g] for g in subset}}
+                if anchor <= set(subset):
+                    attempt(row)
+                else:
+                    with _pytest.raises(sq.IntegrityError):
+                        attempt(row)
 
     with _pytest.raises(sq.IntegrityError):     # dead vocabulary stays dead
         attempt({"kind": "task", "work_item_id": "wi_" + "2" * 32,
@@ -1377,7 +1422,8 @@ def test_envelope_is_17_columns_on_every_lane_b_table():
                 "observed_at", "ingested_at", "host_uid", "fleet_uid",
                 "emitter", "source_ref", "correlation_id", "causation_id",
                 "trace_id", "span_id", "origin", "import_batch", "confidence"]
-    for table in ("communications", "work_items", "assignments", "events"):
+    for table in ("communications", "work_items", "assignments",
+                  "workstreams", "events"):
         cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
         assert cols[:17] == ENVELOPE, f"{table} envelope drift: {cols[:17]}"
     conn.close()
@@ -2871,7 +2917,7 @@ git commit -m "feat(plane): filesystem spool — atomic, capped retries, quarant
 **Interfaces:**
 - Consumes: everything above.
 - Produces:
-  - `emit_api.emit(root, raw) -> EmitOutcome` and `emit_batch(root, raws) -> list[EmitOutcome]` (the atomic unit of work, F4) — dataclass `{event_id, status: Literal["committed","duplicate","spooled"], detail: str | None}`. Flow: validate (ContractViolation propagates — NEVER spooled) → connect+migrate → ingest; on `sqlite3.OperationalError`/`sqlite3.DatabaseError` → `spool_write` → `spooled`.
+  - `emit_api.emit(root, raw) -> EmitOutcome` and `emit_batch(root, raws) -> list[EmitOutcome]` (the atomic unit of work, F4) — dataclass `{event_id, status: Literal["committed","duplicate","spooled"], detail: str | None}`. Flow: validate (ContractViolation propagates — NEVER spooled) → connect+migrate → ingest; ONLY an `sqlite3.OperationalError` that `is_retryable()` accepts spools — other database errors propagate (emit) or quarantine (drain).
   - CLI `claudlobby emit <event_type> --json -` (stdin) or `--json <path>`: prints `event_id` on stdout; exit 0 committed/duplicate/spooled (spooled adds one stderr line `plane: db unavailable — spooled <file>`); exit 2 on ContractViolation (stderr: first error); exit 3 if spool write itself failed.
   - CLI `claudlobby plane status`: db path + exists, `user_version`, per-family row counts, ledger max seq, spool depth + oldest entry age, provisional actor count. Exit 0.
   - CLI `claudlobby plane spool list|retry|quarantine <file>`: `list` prints entries (name, event_id, attempts, age); `retry` runs `drain`; `quarantine <name>` force-moves one entry.
@@ -3588,6 +3634,94 @@ def test_derivation_fixtures(tmp_path: Path):
     assert status == "completed", f"terminal must dominate late progress: {status}"
 
 
+WORKSTREAM_REDUCER_SQL = (
+    "SELECT w.workstream_id, CASE"
+    " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
+    "   AND c.workstream_id = w.workstream_id AND c.event='archived')"
+    "   THEN 'archived'"
+    " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
+    "   AND c.workstream_id = w.workstream_id AND c.event='closed')"
+    "   THEN 'closed'"
+    " WHEN (SELECT e.event FROM events e WHERE e.kind='workstream'"
+    "   AND e.workstream_id = w.workstream_id"
+    "   AND e.event IN ('blocked','unblocked')"
+    "   ORDER BY e.ingest_seq DESC LIMIT 1) = 'blocked' THEN 'blocked'"
+    " WHEN COALESCE((SELECT e.renewed_until FROM events e"
+    "   WHERE e.kind='workstream' AND e.event='renewed'"
+    "   AND e.workstream_id = w.workstream_id"
+    "   ORDER BY e.ingest_seq DESC LIMIT 1), '') < ?"
+    "  AND COALESCE((SELECT e.occurred_at FROM events e"
+    "   WHERE e.kind='workstream'"
+    "   AND e.workstream_id = w.workstream_id"
+    "   ORDER BY e.ingest_seq DESC LIMIT 1), w.occurred_at) < ?"
+    "   THEN 'stale'"
+    " ELSE 'active' END AS status FROM workstreams w"
+)
+
+
+def test_workstream_reducer_fixtures(tmp_path: Path):
+    """Round-6 F7: the reducer's semantics gate its timing. Seven cases,
+    incl. the reviewer's later-shorter-renewal counterexample and
+    out-of-order timestamps — LEDGER ORDER is authoritative. (The workstream
+    door is Phase 2b; rows seed via direct SQL, same as the bench.)"""
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.migrations import migrate
+
+    conn = connect(db_path(tmp_path))
+    migrate(conn)
+    eid = [0]
+
+    def seed_ws(wsid):
+        eid[0] += 1
+        cur = conn.execute(
+            "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
+            " VALUES (?, 'workstream', 't')", (f"ev_c{eid[0]:031x}",))
+        conn.execute(
+            "INSERT INTO workstreams (ingest_seq, event_id, schema_version,"
+            " occurred_at, ingested_at, host_uid, emitter, workstream_id,"
+            " title, opened_by_uid) VALUES (?, ?, '1',"
+            " '2026-01-01T00:00:00+00:00', 't', 'h', 'fx', ?, 't', 'actor_x')",
+            (cur.lastrowid, f"ev_c{eid[0]:031x}", wsid))
+
+    def ev(wsid, event, occurred="2026-05-01T00:00:00+00:00", renewed=None):
+        eid[0] += 1
+        cur = conn.execute(
+            "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
+            " VALUES (?, 'workstream_event', 't')", (f"ev_e{eid[0]:031x}",))
+        conn.execute(
+            "INSERT INTO events (ingest_seq, event_id, schema_version,"
+            " occurred_at, ingested_at, host_uid, emitter, kind, event,"
+            " workstream_id, renewed_until) VALUES (?, ?, '1', ?, 't', 'h',"
+            " 'fx', 'workstream', ?, ?, ?)",
+            (cur.lastrowid, f"ev_e{eid[0]:031x}", occurred, event, wsid, renewed))
+
+    cutoff = "2026-08-09T00:00:00+00:00"
+    seed_ws("ws-arch");   ev("ws-arch", "archived")
+    seed_ws("ws-closed"); ev("ws-closed", "closed")
+    seed_ws("ws-unblk");  ev("ws-unblk", "blocked"); ev("ws-unblk", "unblocked",
+                             occurred="2026-08-20T00:00:00+00:00")
+    seed_ws("ws-renew");  ev("ws-renew", "renewed",
+                             renewed="2099-01-01T00:00:00+00:00")
+    seed_ws("ws-stale");  ev("ws-stale", "progressed")
+    # The counterexample: OLD long renewal, then LATER shortening — latest
+    # (by ledger order) governs, so this is STALE:
+    seed_ws("ws-short");  ev("ws-short", "renewed",
+                             renewed="2099-01-01T00:00:00+00:00")
+    ev("ws-short", "renewed", renewed="2026-06-01T00:00:00+00:00")
+    # Out-of-order timestamps: ledger-later event carries an OLDER
+    # occurred_at; ledger order still decides activity — stale:
+    seed_ws("ws-ooo");    ev("ws-ooo", "progressed",
+                             occurred="2026-08-20T00:00:00+00:00")
+    ev("ws-ooo", "progressed", occurred="2026-04-01T00:00:00+00:00")
+
+    res = dict(conn.execute(WORKSTREAM_REDUCER_SQL, (cutoff, cutoff)).fetchall())
+    conn.close()
+    assert res == {"ws-arch": "archived", "ws-closed": "closed",
+                   "ws-unblk": "active", "ws-renew": "active",
+                   "ws-stale": "stale", "ws-short": "stale",
+                   "ws-ooo": "stale"}
+
+
 def test_readonly_db_emit_spools_end_to_end(tmp_path: Path):
     """Round-3 F6: the disk-full raw demo never exercised emit. This does,
     via the same error CLASS (OperationalError at write — readonly here,
@@ -3835,6 +3969,11 @@ def bench_reads(root: Path) -> None:
     conn = connect(db_path(root))
     TERMINAL = ("'completed','failed','cancelled','returned_blocked',"
                 "'superseded','reassigned','expired'")
+    # Round-6 F7: the LATEST renewal governs, selected by ledger order
+    # (ingest_seq DESC LIMIT 1) — MAX(renewed_until) let an old long renewal
+    # override a later shortening (reviewer counterexample); activity recency
+    # likewise reads the ledger-latest event's occurred_at, because
+    # producer timestamps can arrive out of order.
     # Round-4 F7: these ARE the derivation reducers (Lane C task_status /
     # workstream_status in SQL form), not sketches — terminal closure
     # correlates by ASSIGNMENT_ID (the reassignment counterexample: a
@@ -3871,12 +4010,14 @@ def bench_reads(root: Path) -> None:
             "   AND e.workstream_id = w.workstream_id"
             "   AND e.event IN ('blocked','unblocked')"
             "   ORDER BY e.ingest_seq DESC LIMIT 1) = 'blocked' THEN 'blocked'"
-            " WHEN COALESCE((SELECT MAX(e.renewed_until) FROM events e"
+            " WHEN COALESCE((SELECT e.renewed_until FROM events e"
+            "   WHERE e.kind='workstream' AND e.event='renewed'"
+            "   AND e.workstream_id = w.workstream_id"
+            "   ORDER BY e.ingest_seq DESC LIMIT 1), '') < ?"
+            "  AND COALESCE((SELECT e.occurred_at FROM events e"
             "   WHERE e.kind='workstream'"
-            "   AND e.workstream_id = w.workstream_id), '') < ?"
-            "  AND COALESCE((SELECT MAX(e.occurred_at) FROM events e"
-            "   WHERE e.kind='workstream'"
-            "   AND e.workstream_id = w.workstream_id), w.occurred_at) < ?"
+            "   AND e.workstream_id = w.workstream_id"
+            "   ORDER BY e.ingest_seq DESC LIMIT 1), w.occurred_at) < ?"
             "   THEN 'stale'"
             " ELSE 'active' END AS status FROM workstreams w",
         "reconciliation: submitted-not-acked transmissions":
