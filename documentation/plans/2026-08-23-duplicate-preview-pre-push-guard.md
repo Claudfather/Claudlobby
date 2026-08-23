@@ -263,13 +263,25 @@ bots**, where it would pass every test it has because there is no bot on which i
 The file's existence must be **decoupled**: compose it when credential routing *or* App auth
 *or* the guard is enabled. That is fork **F1**, resolved to (a) in §7.
 
-**Decoupling touches TWO sites, and widening only one re-creates the same failure.** Both were
-added by `c618e6e4` and both must move together:
+**Decoupling touches FOUR sites, not two.** An earlier revision of this document said two. That
+was measured with a grep scoped to `composer.py` and then stated as a property of the tree —
+the bound was never measured at the scope it was asserted at. Re-measured tree-wide:
 
 | site | gates | if left unwidened |
 |---|---|---|
 | `composer.py:679` | whether the `.gitconfig` is **composed at all** | no file; `core.hooksPath` has nowhere to live |
 | `composer.py:1196` | whether `GIT_CONFIG_GLOBAL` is **exported in `bot.conf`** | the file is composed and **git never reads it** |
+| `freshbox.py:469` | whether the fresh-box gate **asserts the `[include]` target exists** | the include risk is uncovered exactly where it was newly created |
+| `validator.py:482` | whether `validate` **warns** on the same host prerequisite | same, at validate time |
+
+All four gate on `git_credentials or github_app`. The last two are the assertions the
+`compose_bot_gitconfig` docstring promises — *"asserted by freshbox (fail) and by the validator
+(warn)"* — so a fix that moves only the first two silently drops the guarantee the first two
+depend on. §7/F4 is the fork that follows from it.
+
+(`validator.py:61` and `config.py:949` also name the pair but are prose, not gates. And the
+validator site is at **482**, not 432 — worth stating because a doc that sends a reader to the
+wrong line is the same defect class as the wrong bound.)
 
 The second is the dangerous one. Widen `679` alone and the `.gitconfig` lands on disk,
 byte-correct, inspectable, obviously present — and nothing points git at it, so the hook never
@@ -492,18 +504,67 @@ works perfectly still leaves the larger share of that 78% untouched.
   carrier that survives §2.2.
   **Resolved by:** the consumer fleet's platform reviewer, on the estate measurement above.
   **Remaining for this repo:** the shape of the third condition in (a) — what enables "the push
-  guard" as a declaration, which is a `fleet.yaml` surface this repo owns. Note that landing it
-  means widening **both** gate sites (`composer.py:679` and `:1196`) and rewriting the comment
-  at the second; §4/Q1 has the measured table and §4.1 why widening one alone fails silently —
-  including that it flips the §2.4 dormancy metric to 21 of 21 with the guard executing
-  nowhere. F1's acceptance gate is therefore an execution assertion on a real bot, not a
-  composition test.
+  guard" as a declaration, which is a `fleet.yaml` surface this repo owns. Landing it means
+  widening **four** gate sites, not two (§4/Q1), and rewriting the comment at `:1196`; §4.1 has
+  why widening a subset fails silently, including that it flips the §2.4 dormancy metric to 21
+  of 21 with the guard executing nowhere. F1's acceptance gate is therefore an execution
+  assertion on a real bot, never a composition test.
+
+  **But F1 may not be this spec's prerequisite at all — see F4.** It was taken as one because
+  `GIT_CONFIG_GLOBAL` looked like the only carrier for `core.hooksPath`. It is not. F1 remains
+  a live question for credential routing and App auth on their own merits, with their own
+  owners; it should be decided there rather than by a preview guard.
 
 - **F2 — enforcement ladder.**
   Options: (a) record → warn → per-class block, gated on the recorded rate;
   (b) warn-only permanently; (c) block from the start.
   **Lean: (a)** — §4/Q2. (c) is a bet on an unmeasured false-positive rate.
   **Ratifier:** the consumer fleet's manager, who owns the workers it would stop.
+
+- **F4 — the coupled assertions, and whether this spec needs the gitconfig carrier at all.**
+  Raised by the consumer fleet's manager after re-measuring the F1 bound and finding four sites
+  where this document claimed two.
+
+  The problem with a partial decouple: widen `composer.py:679` and `:1196` only, and
+  `freshbox.py:469` / `validator.py:482` stay gated on the undeclared pair. Every bot then
+  carries a composed `.gitconfig` whose `[include]` of the operator's `~/.gitconfig` is the
+  thing that breaks quietly — and **the assertion that the include exists covers none of them**.
+  Credential routing keeps working while `user.name`/`user.email` vanish; the first symptom is
+  `Author identity unknown`, with nothing pointing back at the composed file. The guard the
+  docstring promises would be absent exactly where the new risk was created.
+
+  Measured, so the risk is not assumed: with `GIT_CONFIG_GLOBAL` pointing at an include-less
+  composed file, `git config --get user.email` returns **empty** — identity is displaced,
+  because `GIT_CONFIG_GLOBAL` *replaces* the global config rather than adding to it. That
+  displacement is the entire reason the composed file carries the include.
+
+  Options as posed: **(a)** decouple all four — protection covers the 21, but a fresh box FAILs
+  21 times before anyone commits, since `app_identity` requires `bot.github_app` and 0 of 4
+  fleets declare it. **(b)** decouple two — no fresh-box FAIL, but 21 bots carry an unasserted
+  silent-identity risk. (a) is loud and early; (b) is quiet and late.
+
+  **(c) — recommended, and it makes the choice unnecessary *for this spec*.** The premise both
+  options share is that `core.hooksPath` must ride in a composed gitconfig. It does not. Git's
+  `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` env triple sets a config value
+  **additively**, displacing no file. Measured in both modes, each with a real `git push`:
+
+  | mode | `user.email` | composed routing | `core.hooksPath` | hook fired | composed file needed |
+  |---|---|---|---|---|---|
+  | credential-less bot, injection only | **survives** | n/a | set | **YES** | **none** |
+  | credential bot, injection **on top of** an existing `GIT_CONFIG_GLOBAL` | survives via the include | intact | set | **YES** | unchanged |
+
+  So the guard needs **one new `bot.conf` export gated on its own declaration, and zero of the
+  four sites move.** No composed gitconfig for a credential-less bot means no `[include]`, means
+  no new silent-identity risk, means `freshbox:469` and `validator:482` staying coupled is
+  *correct* rather than a coverage gap — they have nothing new to assert. `bot.conf` is already
+  the per-bot composer-owned carrier that `:1196` itself uses, so this is the same mechanism
+  rather than a new one.
+
+  **The cost of (c), stated:** `GIT_CONFIG_COUNT` is a numbered, positional namespace. A second
+  feature injecting config the same way collides on indices with no error. If this is adopted,
+  the count and index assembly must live in exactly one composer helper — never hand-written per
+  feature — or the next injector silently overwrites this one.
+  **Ratifier:** this package's maintainers, jointly with whoever owns F1.
 
 - **F3 — scope key.**
   Options: (a) `.vercel/project.json` presence; (b) a configured repo allowlist;
