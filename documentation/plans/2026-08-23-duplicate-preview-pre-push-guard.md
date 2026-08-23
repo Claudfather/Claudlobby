@@ -283,6 +283,45 @@ to before,"* which stops being true the moment a fleet enables the guard without
 credentials. A mechanism change orphans its own self-description, and the printed surface is
 the one that gets missed.
 
+**Measured, not argued.** Both arms run locally against a real `git push` to a local bare
+remote, with a composed gitconfig setting `core.hooksPath` at a hook that writes a marker:
+
+| arm | gitconfig file present | `core.hooksPath` resolves to | hook fired |
+|---|---|---|---|
+| A — file composed, `GIT_CONFIG_GLOBAL` **not** exported (a 679-only fix) | **YES** | *empty* | **NO** |
+| B — same file, `GIT_CONFIG_GLOBAL` exported (679 + 1196) | YES | the hooks dir | **YES** |
+
+### 4.1 The 679-only fix would blind the instrument that found the problem
+
+Read arm A's first and last columns together. **The file is present and the hook does not
+run** — and "a gitconfig-shaped file is present" is exactly the metric §2.4 uses to establish
+dormancy.
+
+So after a 679-only fix that dormancy metric goes from **0 of 21** to **21 of 21** while
+nothing functionally changes. It does not merely go blind; it **inverts**, reporting the
+maximum available success at the precise moment the fix is half-landed. Anyone re-running the
+§2.4 measurement to confirm the fix would read total success from a fleet on which the guard
+executes nowhere.
+
+The general form, worth stating because it outlives this fork: **a presence-of-artifact metric
+measures the property only while nothing else can produce the artifact.** The fix is the thing
+that produces the artifact. So a dormancy detector built on artifact presence is destroyed by
+its own remedy — it starts measuring the remedy's *output* instead of the remedy's *effect*.
+This package already carries the pattern in two places: `naked-bot-observe.py::_assert_compositor`
+refuses to run against a stale install because such a run "comes back green having tested
+nothing, a failure mode that is a PASS", and `freshbox` reports `OK — Self-contained` on a bot
+carrying six undeclared protocol sections because it audits grants and never opens `CLAUDE.md`.
+
+**So F1's acceptance gate must assert that the guard EXECUTES on a real bot, never that the
+file exists.** Minimum: with `bot.conf` sourced, `git config --get core.hooksPath` is non-empty
+*and* a real push fires the hook. That is a `rehearse-*` harness in this repo's existing family
+(`rehearse-env-cascade.sh`, `rehearse-keepalive-swap.sh`, `rehearse-briefing-timer.sh`) — a
+throwaway bot driven through the real lifecycle — not a unit test over the composer, which
+passes in arm A.
+
+*Credit: the inversion was named by the consumer fleet's manager; the two-site split it applies
+to came out of an error he made and corrected in the same message.*
+
 **Second-order effect, flagged because it is fleet-wide and greenfield.** A global
 `core.hooksPath` **replaces** `.git/hooks` for every repo without a local override. Husky is
 safe — it sets `core.hooksPath` at repo level, and local config wins over global (verified by
@@ -366,6 +405,13 @@ Two doors, and the honest answer is that **the check has to be its own instrumen
   broken out per class and per repo. This is the only client-side instrument that can exist,
   which is why Phase 0 ships before Phase 1.
 
+**Before either door reads as evidence, the guard has to be executing at all.** §4.1 shows a
+half-landed F1 in which every composition-side signal reports success and the hook runs
+nowhere — and in which the dormancy metric inverts from 0/21 to 21/21. A ledger with no rows
+would then be read as *"no collisions occurred"* when it means *"nothing ever evaluated"*. That
+is the §2.4 class reaching the measurement layer, so §4.1's execution assertion gates this
+section too.
+
 **What must not be claimed.** The ledger counts *pushes held*, not *deployments prevented*.
 Converting one into the other assumes every held push would have produced a preview — the
 unverifiable step. Per the dispatch's constraint, no reduction figure is offered here, before
@@ -448,7 +494,10 @@ works perfectly still leaves the larger share of that 78% untouched.
   **Remaining for this repo:** the shape of the third condition in (a) — what enables "the push
   guard" as a declaration, which is a `fleet.yaml` surface this repo owns. Note that landing it
   means widening **both** gate sites (`composer.py:679` and `:1196`) and rewriting the comment
-  at the second; §4/Q1 has the table and why widening one alone fails silently.
+  at the second; §4/Q1 has the measured table and §4.1 why widening one alone fails silently —
+  including that it flips the §2.4 dormancy metric to 21 of 21 with the guard executing
+  nowhere. F1's acceptance gate is therefore an execution assertion on a real bot, not a
+  composition test.
 
 - **F2 — enforcement ladder.**
   Options: (a) record → warn → per-class block, gated on the recorded rate;
