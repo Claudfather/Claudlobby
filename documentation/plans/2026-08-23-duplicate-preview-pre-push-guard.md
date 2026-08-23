@@ -521,6 +521,14 @@ works perfectly still leaves the larger share of that 78% untouched.
   **Lean: (a)** — §4/Q2. (c) is a bet on an unmeasured false-positive rate.
   **Ratifier:** the consumer fleet's manager, who owns the workers it would stop.
 
+- **F3 — scope key.**
+  Options: (a) `.vercel/project.json` presence; (b) a configured repo allowlist;
+  (c) every repo.
+  **Lean: (a)** — self-maintaining, and does not re-break on the next Vercel project
+  (`gh-mention-guard.sh`'s documented failure class). (c) makes a global hook do a network
+  round trip on every push in every repo.
+  **Ratifier:** this package's maintainers.
+
 - **F4 — the coupled assertions, and whether this spec needs the gitconfig carrier at all.**
   Raised by the consumer fleet's manager after re-measuring the F1 bound and finding four sites
   where this document claimed two.
@@ -565,14 +573,6 @@ works perfectly still leaves the larger share of that 78% untouched.
   the count and index assembly must live in exactly one composer helper — never hand-written per
   feature — or the next injector silently overwrites this one.
   **Ratifier:** this package's maintainers, jointly with whoever owns F1.
-
-- **F3 — scope key.**
-  Options: (a) `.vercel/project.json` presence; (b) a configured repo allowlist;
-  (c) every repo.
-  **Lean: (a)** — self-maintaining, and does not re-break on the next Vercel project
-  (`gh-mention-guard.sh`'s documented failure class). (c) makes a global hook do a network
-  round trip on every push in every repo.
-  **Ratifier:** this package's maintainers.
 
 ---
 
