@@ -136,7 +136,10 @@ def test_malformed_and_empty_requests_are_bad_request(running):
         client.settimeout(10)
         client.connect(str(sock))
         client.sendall(payload)
-        client.shutdown(socket.SHUT_WR)
+        try:
+            client.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass  # daemon already replied+closed — the race send_batch guards too
         buf = b""
         while b"\n" not in buf:
             chunk = client.recv(65536)

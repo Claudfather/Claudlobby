@@ -75,7 +75,11 @@ def main() -> int:
         client.settimeout(args.timeout)
         client.connect(args.socket)
         client.sendall(payload.encode() + b"\n")
-        client.shutdown(socket.SHUT_WR)
+        try:
+            client.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass  # daemon may have replied+closed already — benign, it reads
+            # to the newline regardless
         buf = b""
         while b"\n" not in buf:
             chunk = client.recv(65536)

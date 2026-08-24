@@ -327,7 +327,11 @@ def send_batch(sock_path: Path, events: list[dict], *, timeout: float = 30.0) ->
     try:
         client.connect(str(sock_path))
         client.sendall(json.dumps({"events": events}, ensure_ascii=False).encode() + b"\n")
-        client.shutdown(socket.SHUT_WR)
+        try:
+            client.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass  # daemon may have replied+closed already (fast verdicts) —
+            # ENOTCONN here is benign, it reads to the newline regardless
         buf = b""
         while True:
             chunk = client.recv(65536)
