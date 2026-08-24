@@ -259,10 +259,33 @@ class PlaneDaemon:
                     f"a plane daemon is already serving {self.sock_path}"
                 )
             self.sock_path.unlink()   # stale socket from a dead daemon
+        # Bind on a hidden name and rename into place only AFTER listen():
+        # between bind() and listen() the file exists but connect() gets
+        # ECONNREFUSED, so exposing the public path first hands every prober
+        # (fixtures, keepalive, the shim) a refused-connection window. A unix
+        # socket is its inode — the rename is atomic and preserves the
+        # listener.
+        tmp = self.sock_path.with_name(
+            f".{self.sock_path.name}.{os.getpid()}.tmp"
+        )
+        _check_sun_path(tmp)
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(self.sock_path))
-        os.chmod(self.sock_path, 0o600)
-        listener.listen(64)
+        try:
+            listener.bind(str(tmp))
+            os.chmod(tmp, 0o600)
+            listener.listen(64)
+            os.replace(tmp, self.sock_path)
+        except BaseException:
+            listener.close()
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
         listener.settimeout(1.0)      # poll granularity for stop/drain
         return listener
 
