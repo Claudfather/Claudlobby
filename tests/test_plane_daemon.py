@@ -324,6 +324,29 @@ def test_socket_file_mode_is_0600(running):
     assert stat.S_IMODE(os.stat(sock).st_mode) == 0o600
 
 
+def test_shim_end_to_end_through_real_daemon(running):
+    """lib/plane-emit.sh -> lib/plane-socket-client.py -> daemon -> row: the
+    whole rung-1 chain, cross-language, on a real db."""
+    import subprocess
+
+    root, sock, _ = running
+    shim = Path(__file__).resolve().parent.parent / "lib" / "plane-emit.sh"
+    batch = json.dumps({"events": [_comm("f", body="via the shim")]})
+    r = subprocess.run(
+        ["bash", str(shim)], input=batch, capture_output=True, text=True,
+        env={**os.environ, "CLAUDLOBBY_ROOT": str(root),
+             "PLANE_SOCKET": str(sock)},
+    )
+    assert r.returncode == 0, r.stderr
+    eid = r.stdout.strip().splitlines()[0]
+    conn = connect(db_path(root))
+    row = conn.execute(
+        "SELECT body FROM communications WHERE event_id = ?", (eid,)
+    ).fetchone()
+    conn.close()
+    assert row is not None and row["body"] == "via the shim"
+
+
 def test_send_batch_raises_oserror_when_no_daemon(tmp_path: Path):
     sdir = _short_sock_dir()
     try:
