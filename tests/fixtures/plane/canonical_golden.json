@@ -1,0 +1,64 @@
+[
+  {
+    "name": "flat-sort",
+    "input": {
+      "b": 1,
+      "a": 2
+    },
+    "canonical": "{\"a\":2,\"b\":1}",
+    "hash": "sha256:d3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772"
+  },
+  {
+    "name": "nfd-unicode",
+    "input": {
+      "café": "résumé"
+    },
+    "canonical": "{\"café\":\"résumé\"}",
+    "hash": "sha256:0603fbb4a9cb335c0605ac978b179931265a90026fb1102ac97d4106daa29c95"
+  },
+  {
+    "name": "null-kept",
+    "input": {
+      "present": null,
+      "n": 0
+    },
+    "canonical": "{\"n\":0,\"present\":null}",
+    "hash": "sha256:acfad2046dab5e31b3d35e18f4799b16084d3ea4c3a3ea0b93f97672ba7d0401"
+  },
+  {
+    "name": "nested",
+    "input": {
+      "z": [
+        {
+          "b": 1,
+          "a": [
+            true,
+            false,
+            null
+          ]
+        }
+      ],
+      "a": "x"
+    },
+    "canonical": "{\"a\":\"x\",\"z\":[{\"a\":[true,false,null],\"b\":1}]}",
+    "hash": "sha256:ba7fb4122157f3d69ada11d1c0b573cce19fe727448cb8015e1524d25e007602"
+  },
+  {
+    "name": "emoji",
+    "input": {
+      "msg": "fleet 🐋 alive",
+      "count": 21
+    },
+    "canonical": "{\"count\":21,\"msg\":\"fleet 🐋 alive\"}",
+    "hash": "sha256:d918f0561bb07623a698ec9f6bd67eba262b536a5074cacb6d484e0bb1acb838"
+  },
+  {
+    "name": "empty-containers",
+    "input": {
+      "d": {},
+      "l": []
+    },
+    "canonical": "{\"d\":{},\"l\":[]}",
+    "hash": "sha256:906acf646e0ddef447504f34c9683de16e12ed159cc1df3f1e3ba674b2ed3621"
+  }
+]
