@@ -26,6 +26,17 @@ ATTENTION_SQL = (
     "  OR a.expected_by < ?)"
 )
 
+# Attempt-status ladder below the task-event tiers (§8: activation is
+# evidence-based, derived through assignments.dispatch_msg_id -> transmission
+# rows — a contract with no acknowledged dispatch is NOT open). Submission
+# evidence (pane_submitted / carrier_accepted) reads pending_unacknowledged;
+# so does an OUTSTANDING attempt — a send_attempted/unknown/
+# duplicate_suppressed row whose attempt_no has no 'failed' verdict — because
+# a retry in flight after a failed first attempt must not report
+# dispatch_failed, while an attempt whose own verdict IS 'failed' must.
+_TX_SUBMITTED = "'pane_submitted','carrier_accepted'"
+_TX_UNRESOLVED = "'send_attempted','unknown','duplicate_suppressed'"
+
 TASK_STATUS_SQL = (
     "SELECT a.assignment_id, COALESCE("
     " (SELECT t.event FROM events t WHERE t.kind='task'"
@@ -34,7 +45,25 @@ TASK_STATUS_SQL = (
     " (SELECT t.event FROM events t WHERE t.kind='task'"
     "  AND t.assignment_id = a.assignment_id"
     "  ORDER BY t.ingest_seq DESC LIMIT 1),"
-    " 'open') AS status FROM assignments a"
+    " CASE"
+    "  WHEN a.dispatch_msg_id IS NULL THEN 'created_not_sent'"
+    "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
+    "    AND x.msg_id = a.dispatch_msg_id"
+    "    AND x.event='recipient_acknowledged') THEN 'open'"
+    "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
+    "    AND x.msg_id = a.dispatch_msg_id"
+    f"    AND x.event IN ({_TX_SUBMITTED})) THEN 'pending_unacknowledged'"
+    "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
+    "    AND x.msg_id = a.dispatch_msg_id"
+    f"    AND x.event IN ({_TX_UNRESOLVED})"
+    "    AND NOT EXISTS (SELECT 1 FROM events y WHERE y.kind='transmission'"
+    "      AND y.msg_id = x.msg_id AND y.attempt_no = x.attempt_no"
+    "      AND y.event='failed')) THEN 'pending_unacknowledged'"
+    "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
+    "    AND x.msg_id = a.dispatch_msg_id"
+    "    AND x.event='failed') THEN 'dispatch_failed'"
+    "  ELSE 'created_not_sent'"
+    " END) AS status FROM assignments a"
 )
 
 WORKSTREAM_STATUS_SQL = (

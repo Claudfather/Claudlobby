@@ -20,6 +20,7 @@ from . import PLANE_SCHEMA_VERSION
 from .contracts import (
     Assignment,
     Communication,
+    ContractViolation,
     TaskEvent,
     Transmission,
     WorkItem,
@@ -59,7 +60,10 @@ def _envelope(seq, event_id, env, *, host_uid, fleet_uid, now) -> dict:
     return {
         "ingest_seq": seq,
         "event_id": event_id,
-        "schema_version": PLANE_SCHEMA_VERSION,
+        # Preserve the wire's version verbatim (§10) — a drained N-1 envelope
+        # must not be restamped as current; None only for direct ingest_many
+        # callers that never crossed emit's finalize.
+        "schema_version": env.schema_version or PLANE_SCHEMA_VERSION,
         "occurred_at": env.occurred_at.isoformat() if env.occurred_at else now,
         "observed_at": env.observed_at.isoformat() if env.observed_at else None,
         "ingested_at": now,
@@ -211,13 +215,17 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
 
 
 def _verify_duplicates(conn, prepared) -> list[IngestResult]:
-    """Duplicate replay = success ONLY if every event landed FULLY before:
-    ledger row present AND family row present (round-2 F1 — never report
-    duplicate success for an event that was never fully stored)."""
+    """Duplicate replay = success ONLY if every event landed FULLY before AND
+    AS THE SAME THING: ledger row present, family row present (round-2 F1),
+    the incoming event_type EQUAL to the stored family, and the stored row's
+    ingest_seq matching the ledger's. Without the family comparison, replaying
+    a task under a communication's event_id reported "duplicate" while zero
+    task rows existed — an idempotency conflict wearing a success."""
     results = []
     for event_id, env, payload in prepared:
         ledger = conn.execute(
-            "SELECT family FROM ingest_ledger WHERE event_id = ?", (event_id,)
+            "SELECT rowid AS seq, family FROM ingest_ledger WHERE event_id = ?",
+            (event_id,),
         ).fetchone()
         if ledger is None:
             raise RuntimeError(
@@ -225,14 +233,32 @@ def _verify_duplicates(conn, prepared) -> list[IngestResult]:
                 " ledger while the batch collided — mixed state"
             )
         family = ledger["family"]
+        if env.event_type != family:
+            raise ContractViolation(
+                [{"loc": ("event_id",),
+                  "msg": f"idempotency conflict: {event_id} already stored as"
+                         f" {family!r}, replayed as {env.event_type!r}"}]
+            )
         table = _CONSTRUCT_TABLE.get(family, "events")
-        fam = conn.execute(
-            f"SELECT 1 FROM {table} WHERE event_id = ?", (event_id,)
-        ).fetchone()
+        if table == "events":
+            fam = conn.execute(
+                "SELECT ingest_seq FROM events WHERE event_id = ? AND kind = ?",
+                (event_id, family),
+            ).fetchone()
+        else:
+            fam = conn.execute(
+                f"SELECT ingest_seq FROM {table} WHERE event_id = ?", (event_id,)
+            ).fetchone()
         if fam is None:
             raise RuntimeError(
                 f"ledger/family divergence for {event_id} — refusing"
                 " duplicate classification (integrity, not idempotency)"
+            )
+        if fam["ingest_seq"] != ledger["seq"]:
+            raise RuntimeError(
+                f"ledger/family ingest_seq divergence for {event_id}"
+                f" (ledger {ledger['seq']}, family {fam['ingest_seq']})"
+                " — refusing duplicate classification"
             )
         results.append(IngestResult(event_id, None, True))
     return results

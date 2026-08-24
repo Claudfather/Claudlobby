@@ -10,7 +10,7 @@ import re
 import sqlite3
 from importlib import resources
 
-SCHEMA_USER_VERSION = 1
+SCHEMA_USER_VERSION = 2
 
 _MIGRATION_RE = re.compile(r"^(\d{4})_.+\.sql$")
 
@@ -53,6 +53,15 @@ def migrate(conn: sqlite3.Connection) -> int:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
             raced = _user_version(conn)
+            if raced > SCHEMA_USER_VERSION:
+                # The concurrent migrator was a NEWER binary — accepting its
+                # result here would bypass the downgrade guard that only ran
+                # at entry.
+                raise DowngradeError(
+                    f"plane.db user_version={raced} (concurrent migration) is"
+                    f" newer than this code (supports <={SCHEMA_USER_VERSION})"
+                    " — refusing downgrade"
+                )
             if raced >= number:   # concurrent first emitter applied it — benign
                 current = raced
                 continue

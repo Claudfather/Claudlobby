@@ -20,6 +20,7 @@ from pydantic import (
     field_validator,
 )
 
+from . import SUPPORTED_SCHEMA_VERSIONS
 from .ids import ID_PATTERNS
 
 MESSAGE_CLASSES = (
@@ -271,6 +272,11 @@ FAMILIES: dict[str, type[BaseModel]] = {
 
 class EmitRequest(_Strict):
     event_type: str
+    # None → emit stamps the current version at finalize; an explicit value
+    # rides the wire and the spool VERBATIM (§10: versioned envelope), so a
+    # drained N-1 entry is ingestable and a future one quarantines instead of
+    # being reinterpreted as current.
+    schema_version: Optional[str] = None
     occurred_at: Optional[AwareDatetime] = None   # None → emit stamps BEFORE first attempt (F6)
     observed_at: Optional[AwareDatetime] = None   # §4: reporter-of-another-system's-fact only
     emitter: str = Field(min_length=1)
@@ -292,6 +298,12 @@ def validate_request(raw: dict) -> tuple[EmitRequest, BaseModel]:
         env = EmitRequest.model_validate(raw)
     except ValidationError as exc:
         raise ContractViolation(exc.errors()) from exc
+    if env.schema_version is not None and env.schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ContractViolation(
+            [{"loc": ("schema_version",),
+              "msg": f"unsupported schema_version {env.schema_version!r}"
+                     f" (supported: {sorted(SUPPORTED_SCHEMA_VERSIONS)})"}]
+        )
     model = FAMILIES.get(env.event_type)
     if model is None:
         raise ContractViolation(

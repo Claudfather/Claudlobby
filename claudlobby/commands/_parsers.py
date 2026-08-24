@@ -29,6 +29,7 @@ from .move_bot import cmd_move_bot
 from .plane import (
     cmd_emit,
     cmd_emit_batch,
+    cmd_plane_doctor,
     cmd_plane_schema,
     cmd_plane_spool,
     cmd_plane_status,
@@ -433,9 +434,11 @@ def register_subparsers(sub) -> None:
     psub = pp.add_subparsers(dest="plane_action", required=True)
     ps = psub.add_parser("status", help="Kernel health: db, counts, spool")
     ps.set_defaults(func=cmd_plane_status)
+    pd = psub.add_parser("doctor", help="Kernel health rungs (exit 1 on attention)")
+    pd.set_defaults(func=cmd_plane_doctor)
     psc = psub.add_parser("schema", help="Export JSON Schemas (envelope + families)")
     psc.set_defaults(func=cmd_plane_schema)
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
-    psp.add_argument("spool_action", choices=["list", "retry", "quarantine"])
-    psp.add_argument("name", nargs="?", help="Spool file name (quarantine)")
+    psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])
+    psp.add_argument("name", nargs="?", help="Spool file name (inspect/quarantine)")
     psp.set_defaults(func=cmd_plane_spool)

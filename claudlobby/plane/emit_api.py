@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
+from . import PLANE_SCHEMA_VERSION
 from .contracts import (
     CONTENT_FIELDS,
     ContractViolation,
@@ -43,16 +44,48 @@ class EmitOutcome:
     detail: Optional[str] = None
 
 
+class CaptureConfigError(ContractViolation):
+    """state/plane/capture.json exists but cannot be trusted — unreadable,
+    invalid JSON, or an unknown mode value. An ABSENT file is the documented
+    default ('metadata'); a BROKEN file must fail visibly, because silently
+    falling back to metadata strips content an operator opted into keeping
+    (F23 + the no-silent-switch rule). Routes like ContractViolation: loud,
+    never spooled, CLI exit 2."""
+
+
+def _load_capture_config(root: Path) -> dict:
+    cfg = Path(root) / "state" / "plane" / "capture.json"
+    try:
+        text = cfg.read_text()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise CaptureConfigError(
+            [{"loc": ("capture.json",), "msg": f"unreadable: {exc}"}]
+        ) from exc
+    try:
+        modes = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CaptureConfigError(
+            [{"loc": ("capture.json",), "msg": f"invalid JSON: {exc}"}]
+        ) from exc
+    # The WHOLE file must be valid, not just the looked-up key: a typo'd mode
+    # on any fleet is a policy error someone believes is in force.
+    if not isinstance(modes, dict) or not all(
+        isinstance(k, str) and v in ("full", "metadata") for k, v in modes.items()
+    ):
+        raise CaptureConfigError(
+            [{"loc": ("capture.json",),
+              "msg": "must map fleet (or '*') to 'full' | 'metadata'"}]
+        )
+    return modes
+
+
 def _capture_mode(root: Path, fleet: str | None) -> str:
     """Fleet-keyed capture mode from plane config; default 'metadata' (F7/F23).
     The caller's request never decides this."""
-    cfg = Path(root) / "state" / "plane" / "capture.json"
-    try:
-        modes = json.loads(cfg.read_text())
-    except (OSError, json.JSONDecodeError):
-        return "metadata"
-    mode = modes.get(fleet or "", modes.get("*", "metadata"))
-    return mode if mode in ("full", "metadata") else "metadata"
+    modes = _load_capture_config(root)
+    return modes.get(fleet or "", modes.get("*", "metadata"))
 
 
 def _apply_capture(root: Path, raw: dict) -> dict:
@@ -88,14 +121,26 @@ def _finalize(raw: dict) -> dict:
         out["event_id"] = mint_event_id()
     if not out.get("occurred_at"):
         out["occurred_at"] = datetime.now(timezone.utc).isoformat()
+    if not out.get("schema_version"):
+        out["schema_version"] = PLANE_SCHEMA_VERSION
     return out
 
 
 def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
-    The dispatch door commits work_item + assignment + communication here."""
-    finalized = [_finalize(_apply_capture(root, r)) for r in raw_requests]
-    items = [validate_request(r) for r in finalized]   # ContractViolation propagates
+    The dispatch door commits work_item + assignment + communication here.
+
+    Order is a contract: RAW requests validate BEFORE capture transforms
+    them, or an over-cap authored body (work_item.body, task summary — REJECT
+    per §8/§11) is stripped by metadata mode first and sails through as
+    accepted. Then the TRANSFORMED request validates again, because the
+    policy-applied form is what gets stored and spooled (§11)."""
+    finalized = [_finalize(dict(r)) if isinstance(r, dict) else r
+                 for r in raw_requests]
+    for r in finalized:
+        validate_request(r)                            # ContractViolation propagates
+    captured = [_apply_capture(root, r) for r in finalized]
+    items = [validate_request(r) for r in captured]
     try:
         conn = connect(db_path(root))
         try:
@@ -120,10 +165,11 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
         # — OperationalError but equally bugs — propagate loudly too.
         if not is_retryable(exc):
             raise
-        path = spool_write(root, finalized, str(exc))   # raises SpoolWriteError
+        # The spool stores the policy-applied envelope, never a fuller body (§11).
+        path = spool_write(root, captured, str(exc))    # raises SpoolWriteError
         return [
             EmitOutcome(r["event_id"], "spooled", detail=str(path))
-            for r in finalized
+            for r in captured
         ]
     return [
         EmitOutcome(res.event_id, "duplicate" if res.duplicate else "committed")
