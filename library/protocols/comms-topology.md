@@ -34,6 +34,17 @@ Disk is the medium that survives a restart, a compaction and a fleet reorganisat
 
 **Messages carry pointers; the pointed-at thing is rich.** Decision breadth is preserved by the *target*, not by the message body.
 
+**The target must be reachable by the receiver, not just well-formed for you.** A PR, an issue, a
+shared doc or a vault note resolve the same way for anyone. **A path under your own `data/` does
+not**, and it fails in two different ways — neither of which looks like a failure when you send it:
+
+- **Absolute** — a sibling bot's directory is **denied by composed permission**, not merely
+  inconvenient. Every bot carries `Read(<other-bot>/**)` deny rules.
+- **Relative** — `data/notes.md` resolves against the **receiver's own** working directory. It does
+  not error; it opens a **different file**, and the receiver has no way to know.
+
+So point bot-to-bot only at genuinely shared addresses.
+
 This is the ratified shape, and it has one dependency the fleet has not yet earned — stated here rather than discovered later.
 
 > ### ⚠ This half depends on a mechanism measured as not working
@@ -44,7 +55,12 @@ This is the ratified shape, and it has one dependency the fleet has not yet earn
 
 **Interim rules, which do not fix it and are not pretending to:**
 
-- **Send what makes the pointer decidable.** Not a summary of the target — the one fact the receiver needs to know whether they must open it. *"Scope doc, three options, F2 is yours"* beats *"see the scope doc"*.
+- **Send what makes the pointer decidable.** Not a summary of the target — the one fact the
+  receiver needs to know whether they must open it. *"Scope doc, three options, F2 is yours"* beats
+  *"see the scope doc"*.
+  **The recognition form, because the rule above is a judgement call and judgement calls do not
+  fire:** if your message is `see <link>` and nothing else, that shape **is** the failure mode. The
+  words are on your screen as you type them; that is the whole trigger.
 - **Hand over the command, not the verdict.** A conclusion cannot be re-run; a path, a query or a command can. This is what makes a pointer useful to someone who does not already agree with you.
 - **If the receiver must act on the content, do not point — carry it.** A pointer is a citation, not a delivery mechanism. Where reading it is a precondition of doing the work correctly, the work is what fails when nobody reads it.
 
