@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **The observable plane's Phase-1 semantic kernel (`claudlobby/plane/`) — the fleet's append-only flight-recorder substrate, headless.** Design: `documentation/plans/2026-08-18-observable-plane-design-v2.md` (nine-round externally reviewed; forks F1–F23); implementation: `documentation/plans/2026-08-19-observable-plane-phase1-kernel.md`, executed task-by-task under TDD.
+  - **What ships:** CANON_V1 canonical bytes with golden fixtures · minted identifiers (anchored patterns; crash-safe host-uid publish via O_EXCL + fsync + link) · the field-policy registry (`plane/registries.py` — classification + byte caps, the enforcement SSOT) · Pydantic v2 wire contracts with the kind manifest (require/allowed/anchor-dependent groups) · migration 0001 (WAL, script-owned transactions, constructs + the one `events` stream with NULL-safe require-AND-forbid per-kind CHECKs) · alias→uid identity resolution (provisional lazy minting) · `ingest_many` as the sole transaction owner (duplicate replay = success only after ledger↔family verification) · the fsynced 0600 spool with error-code-whitelisted retry and quarantine · `claudlobby emit` / `emit-batch` / `plane status|spool|schema` with capture-policy enforcement at the door · the shared derivation queries module · a crash/concurrency battery and a machine-gated benchmark harness.
+  - **Evidence:** 84 plane tests green including the full battery on first contact with real code (25-writer burst loses nothing; both derivation fixture suites; EQP mutation test). The bench's read gate produced its first finding by design: `task-status` p50 misses the 50ms bar via a structural per-assignment index walk — a named Phase-2 optimization; the binding Pi run is pending and its failure formally reopens the F16-v2 physical-shape evaluation.
+  - **Behavioral footprint: none.** No door, hook, or bot-runtime path is touched; the db is disposable-until-cutover (F18). Doors migrate in Phase 2 behind a dual-write canary.
+
 ### Fixed
 
 - **The composed boot-brief hook now threads `--fleet`, so the door can resolve the fleet it was composed for (#1197).** `_with_brief_boot_hook` composed `<exe> brief --bot <id> --boot` with no fleet selector, and fleet selection has no env or cwd fallback (`_resolve_paths` reads only `args.fleet`) — so on an overlay estate (every fleet on this one) the door exited 1 on every boot, and each armed bot would have booted with the fallback line where its payload should be. Caught by the #1102 R3 canary's pre-arming replication; nothing was ever armed against it.
