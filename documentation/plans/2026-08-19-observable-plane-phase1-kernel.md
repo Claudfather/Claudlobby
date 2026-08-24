@@ -1005,8 +1005,9 @@ class BodyFields(_Strict):
 
 
 def cap_body(text: str) -> BodyFields:
-    """ANSI-strip, then cap at BODY_CAP_BYTES (UTF-8 safe), hashing the FULL
-    stripped content so a truncated row still proves what it truncated."""
+    """ANSI-strip, then cap at FIELD_POLICY's communication-body byte cap
+    (UTF-8 safe), hashing the FULL stripped content so a truncated row still
+    proves what it truncated."""
     stripped = _ANSI_RE.sub("", text)
     raw = stripped.encode("utf-8")
     digest = "sha256:" + hashlib.sha256(raw).hexdigest()
@@ -3075,7 +3076,8 @@ Expected: FAIL — argparse error (unknown command `emit`)
 Failure taxonomy is the contract:
   ContractViolation  -> caller bug: propagate, write NOTHING (not even spool)
   DowngradeError     -> db newer than code: propagate LOUDLY, never spooled
-  sqlite Operational/Database errors -> spool + report spooled
+  OperationalError accepted by is_retryable() -> spool + report spooled;
+  all other database errors -> propagate loudly
   spool also failed  -> SpoolWriteError (CLI exit 3)
 
 occurred_at is finalized BEFORE the first db attempt (round-2 F6) so a
@@ -3418,6 +3420,97 @@ git commit -m "feat(plane): claudlobby emit + plane status/spool/schema CLI"
 
 ---
 
+### Task 8b: Derivation queries module — ONE reducer definition
+
+**Files:**
+- Create: `claudlobby/plane/queries.py`
+
+**Interfaces:**
+- Produces: `TERMINAL_TASK_EVENTS`, `ATTENTION_SQL`, `TASK_STATUS_SQL`, `WORKSTREAM_STATUS_SQL`, `RECONCILIATION_SQL` — consumed by BOTH the battery fixtures (Task 9) and the benchmark (Task 10), so the tested SQL and the timed SQL are the same string by construction (round-6 F7: duplication let them drift apart in principle). This module is also the seed of Phase 2/4's reader layer.
+
+- [ ] **Step 1: Implement queries.py**
+
+```python
+"""The Lane C derivation queries — ONE definition (round-6 F7).
+
+Parameter contract, fixed: WORKSTREAM_STATUS_SQL binds (now, cutoff) —
+renewal horizons compare against NOW ("renewed UNTIL" means until: an
+expired renewal protects nothing — round-6 counterexample), while activity
+recency compares against CUTOFF = now − policy_window. Both latest-by-
+ingest_seq: ledger order is authoritative, producer timestamps may arrive
+out of order. ATTENTION_SQL binds (overdue_cutoff,).
+"""
+
+from __future__ import annotations
+
+TERMINAL_TASK_EVENTS = (
+    "completed", "failed", "cancelled", "returned_blocked",
+    "superseded", "reassigned", "expired",
+)
+_TERMINAL = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
+
+ATTENTION_SQL = (
+    "SELECT a.assignment_id FROM assignments a"
+    " WHERE NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))"
+    " AND (NOT EXISTS (SELECT 1 FROM events e WHERE"
+    "   e.kind='transmission' AND e.msg_id = a.dispatch_msg_id"
+    "   AND e.event='recipient_acknowledged')"
+    "  OR a.expected_by < ?)"
+)
+
+TASK_STATUS_SQL = (
+    "SELECT a.assignment_id, COALESCE("
+    " (SELECT t.event FROM events t WHERE t.kind='task'"
+    f"  AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL})"
+    "  ORDER BY t.ingest_seq LIMIT 1),"
+    " (SELECT t.event FROM events t WHERE t.kind='task'"
+    "  AND t.assignment_id = a.assignment_id"
+    "  ORDER BY t.ingest_seq DESC LIMIT 1),"
+    " 'open') AS status FROM assignments a"
+)
+
+WORKSTREAM_STATUS_SQL = (
+    "SELECT w.workstream_id, CASE"
+    " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
+    "   AND c.workstream_id = w.workstream_id AND c.event='archived')"
+    "   THEN 'archived'"
+    " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
+    "   AND c.workstream_id = w.workstream_id AND c.event='closed')"
+    "   THEN 'closed'"
+    " WHEN (SELECT e.event FROM events e WHERE e.kind='workstream'"
+    "   AND e.workstream_id = w.workstream_id"
+    "   AND e.event IN ('blocked','unblocked')"
+    "   ORDER BY e.ingest_seq DESC LIMIT 1) = 'blocked' THEN 'blocked'"
+    " WHEN COALESCE((SELECT e.renewed_until FROM events e"
+    "   WHERE e.kind='workstream' AND e.event='renewed'"
+    "   AND e.workstream_id = w.workstream_id"
+    "   ORDER BY e.ingest_seq DESC LIMIT 1), '') < ?"
+    "  AND COALESCE((SELECT e.occurred_at FROM events e"
+    "   WHERE e.kind='workstream'"
+    "   AND e.workstream_id = w.workstream_id"
+    "   ORDER BY e.ingest_seq DESC LIMIT 1), w.occurred_at) < ?"
+    "   THEN 'stale'"
+    " ELSE 'active' END AS status FROM workstreams w"
+)
+
+RECONCILIATION_SQL = (
+    "SELECT COUNT(*) FROM events s WHERE s.kind='transmission'"
+    " AND s.event='pane_submitted' AND NOT EXISTS"
+    " (SELECT 1 FROM events a WHERE a.kind='transmission'"
+    "  AND a.msg_id = s.msg_id AND a.event='recipient_acknowledged')"
+)
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add claudlobby/plane/queries.py
+git commit -m "feat(plane): one shared definition of the derivation queries"
+```
+
+---
+
 ### Task 9: Crash and concurrency battery
 
 **Files:**
@@ -3603,16 +3696,9 @@ def test_derivation_fixtures(tmp_path: Path):
         tx(m2, "pane_submitted"), tx(m2, "recipient_acknowledged"),
     ])
     conn = connect(db_path(tmp_path))
-    TERMINAL = ("'completed','failed','cancelled','returned_blocked',"
-                "'superseded','reassigned','expired'")
-    attention = [r[0] for r in conn.execute(
-        "SELECT a.assignment_id FROM assignments a"
-        " WHERE NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-        f"  AND t.assignment_id = a.assignment_id AND t.event IN ({TERMINAL}))"
-        " AND (NOT EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
-        "  AND e.msg_id = a.dispatch_msg_id"
-        "  AND e.event='recipient_acknowledged')"
-        "  OR a.expected_by < '2026-06-01')")]
+    from claudlobby.plane.queries import ATTENTION_SQL
+
+    attention = [r[0] for r in conn.execute(ATTENTION_SQL, ("2026-06-01",))]
     assert attention == [a2], f"attention must surface ONLY the successor: {attention}"
     # terminal dominance: complete a2, then a late progress must not reopen
     emit_batch(tmp_path, [
@@ -3634,36 +3720,15 @@ def test_derivation_fixtures(tmp_path: Path):
     assert status == "completed", f"terminal must dominate late progress: {status}"
 
 
-WORKSTREAM_REDUCER_SQL = (
-    "SELECT w.workstream_id, CASE"
-    " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
-    "   AND c.workstream_id = w.workstream_id AND c.event='archived')"
-    "   THEN 'archived'"
-    " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
-    "   AND c.workstream_id = w.workstream_id AND c.event='closed')"
-    "   THEN 'closed'"
-    " WHEN (SELECT e.event FROM events e WHERE e.kind='workstream'"
-    "   AND e.workstream_id = w.workstream_id"
-    "   AND e.event IN ('blocked','unblocked')"
-    "   ORDER BY e.ingest_seq DESC LIMIT 1) = 'blocked' THEN 'blocked'"
-    " WHEN COALESCE((SELECT e.renewed_until FROM events e"
-    "   WHERE e.kind='workstream' AND e.event='renewed'"
-    "   AND e.workstream_id = w.workstream_id"
-    "   ORDER BY e.ingest_seq DESC LIMIT 1), '') < ?"
-    "  AND COALESCE((SELECT e.occurred_at FROM events e"
-    "   WHERE e.kind='workstream'"
-    "   AND e.workstream_id = w.workstream_id"
-    "   ORDER BY e.ingest_seq DESC LIMIT 1), w.occurred_at) < ?"
-    "   THEN 'stale'"
-    " ELSE 'active' END AS status FROM workstreams w"
-)
-
-
 def test_workstream_reducer_fixtures(tmp_path: Path):
-    """Round-6 F7: the reducer's semantics gate its timing. Seven cases,
-    incl. the reviewer's later-shorter-renewal counterexample and
-    out-of-order timestamps — LEDGER ORDER is authoritative. (The workstream
-    door is Phase 2b; rows seed via direct SQL, same as the bench.)"""
+    """Round-6/7 F7: the reducer's semantics gate its timing. NINE cases —
+    the reviewer's three counterexamples (later-shorter renewal,
+    out-of-order timestamps, RECENTLY-EXPIRED renewal) plus a currently-
+    blocked case their mutation probe proved uncovered. Ledger order is
+    authoritative; renewal horizons compare against NOW, activity against
+    CUTOFF. SQL comes from claudlobby.plane.queries — the SAME string the
+    benchmark times."""
+    from claudlobby.plane.queries import WORKSTREAM_STATUS_SQL
     from claudlobby.plane.db import connect, db_path
     from claudlobby.plane.migrations import migrate
 
@@ -3695,7 +3760,8 @@ def test_workstream_reducer_fixtures(tmp_path: Path):
             " 'fx', 'workstream', ?, ?, ?)",
             (cur.lastrowid, f"ev_e{eid[0]:031x}", occurred, event, wsid, renewed))
 
-    cutoff = "2026-08-09T00:00:00+00:00"
+    now = "2026-08-23T00:00:00+00:00"
+    cutoff = "2026-08-09T00:00:00+00:00"   # now − 14d policy window
     seed_ws("ws-arch");   ev("ws-arch", "archived")
     seed_ws("ws-closed"); ev("ws-closed", "closed")
     seed_ws("ws-unblk");  ev("ws-unblk", "blocked"); ev("ws-unblk", "unblocked",
@@ -3713,13 +3779,23 @@ def test_workstream_reducer_fixtures(tmp_path: Path):
     seed_ws("ws-ooo");    ev("ws-ooo", "progressed",
                              occurred="2026-08-20T00:00:00+00:00")
     ev("ws-ooo", "progressed", occurred="2026-04-01T00:00:00+00:00")
+    # Round-7: RECENTLY-EXPIRED renewal — horizon (08-15) is past cutoff
+    # (08-09) but BEFORE now (08-23): "until" means until, so with old
+    # activity this is STALE (the cutoff comparison granted an unratified
+    # post-expiry grace window):
+    seed_ws("ws-expired"); ev("ws-expired", "renewed",
+                              renewed="2026-08-15T00:00:00+00:00")
+    # Round-7: currently blocked — the mutation probe proved no fixture
+    # exercised the blocked branch:
+    seed_ws("ws-blocked"); ev("ws-blocked", "blocked")
 
-    res = dict(conn.execute(WORKSTREAM_REDUCER_SQL, (cutoff, cutoff)).fetchall())
+    res = dict(conn.execute(WORKSTREAM_STATUS_SQL, (now, cutoff)).fetchall())
     conn.close()
     assert res == {"ws-arch": "archived", "ws-closed": "closed",
                    "ws-unblk": "active", "ws-renew": "active",
                    "ws-stale": "stale", "ws-short": "stale",
-                   "ws-ooo": "stale"}
+                   "ws-ooo": "stale", "ws-expired": "stale",
+                   "ws-blocked": "blocked"}
 
 
 def test_readonly_db_emit_spools_end_to_end(tmp_path: Path):
@@ -3967,85 +4043,57 @@ def bench_reads(root: Path) -> None:
 
     _seed_realistic(root)
     conn = connect(db_path(root))
-    TERMINAL = ("'completed','failed','cancelled','returned_blocked',"
-                "'superseded','reassigned','expired'")
-    # Round-6 F7: the LATEST renewal governs, selected by ledger order
-    # (ingest_seq DESC LIMIT 1) — MAX(renewed_until) let an old long renewal
-    # override a later shortening (reviewer counterexample); activity recency
-    # likewise reads the ledger-latest event's occurred_at, because
-    # producer timestamps can arrive out of order.
-    # Round-4 F7: these ARE the derivation reducers (Lane C task_status /
-    # workstream_status in SQL form), not sketches — terminal closure
-    # correlates by ASSIGNMENT_ID (the reassignment counterexample: a
-    # work_item-level correlation suppressed the acknowledged overdue
-    # replacement), terminal states DOMINATE (first terminal wins forever),
-    # and workstream status is contract × events × clock × policy window.
+    # ONE definition (round-6 F7): the timed SQL is the fixture-tested SQL.
+    from claudlobby.plane.queries import (
+        ATTENTION_SQL,
+        RECONCILIATION_SQL,
+        TASK_STATUS_SQL,
+        WORKSTREAM_STATUS_SQL,
+    )
+
     QUERIES = {
-        "attention: unacked or overdue OPEN assignments":
-            "SELECT a.assignment_id FROM assignments a"
-            " WHERE NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-            f"   AND t.assignment_id = a.assignment_id AND t.event IN ({TERMINAL}))"
-            " AND (NOT EXISTS (SELECT 1 FROM events e WHERE"
-            "   e.kind='transmission' AND e.msg_id = a.dispatch_msg_id"
-            "   AND e.event='recipient_acknowledged')"
-            "  OR a.expected_by < '2026-06-01')",
-        "task-status: per-assignment, terminal-dominant":
-            "SELECT a.assignment_id, COALESCE("
-            " (SELECT t.event FROM events t WHERE t.kind='task'"
-            f"  AND t.assignment_id = a.assignment_id AND t.event IN ({TERMINAL})"
-            "  ORDER BY t.ingest_seq LIMIT 1),"
-            " (SELECT t.event FROM events t WHERE t.kind='task'"
-            "  AND t.assignment_id = a.assignment_id"
-            "  ORDER BY t.ingest_seq DESC LIMIT 1),"
-            " 'open') AS status FROM assignments a",
-        "workstream-status: contract x events x clock x policy":
-            "SELECT w.workstream_id, CASE"
-            " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
-            "   AND c.workstream_id = w.workstream_id AND c.event='archived')"
-            "   THEN 'archived'"
-            " WHEN EXISTS (SELECT 1 FROM events c WHERE c.kind='workstream'"
-            "   AND c.workstream_id = w.workstream_id AND c.event='closed')"
-            "   THEN 'closed'"
-            " WHEN (SELECT e.event FROM events e WHERE e.kind='workstream'"
-            "   AND e.workstream_id = w.workstream_id"
-            "   AND e.event IN ('blocked','unblocked')"
-            "   ORDER BY e.ingest_seq DESC LIMIT 1) = 'blocked' THEN 'blocked'"
-            " WHEN COALESCE((SELECT e.renewed_until FROM events e"
-            "   WHERE e.kind='workstream' AND e.event='renewed'"
-            "   AND e.workstream_id = w.workstream_id"
-            "   ORDER BY e.ingest_seq DESC LIMIT 1), '') < ?"
-            "  AND COALESCE((SELECT e.occurred_at FROM events e"
-            "   WHERE e.kind='workstream'"
-            "   AND e.workstream_id = w.workstream_id"
-            "   ORDER BY e.ingest_seq DESC LIMIT 1), w.occurred_at) < ?"
-            "   THEN 'stale'"
-            " ELSE 'active' END AS status FROM workstreams w",
-        "reconciliation: submitted-not-acked transmissions":
-            "SELECT COUNT(*) FROM events s WHERE s.kind='transmission'"
-            " AND s.event='pane_submitted' AND NOT EXISTS"
-            " (SELECT 1 FROM events a WHERE a.kind='transmission'"
-            "  AND a.msg_id = s.msg_id AND a.event='recipient_acknowledged')",
+        "attention: unacked or overdue OPEN assignments": ATTENTION_SQL,
+        "task-status: per-assignment, terminal-dominant": TASK_STATUS_SQL,
+        "workstream-status: contract x events x clock x policy": WORKSTREAM_STATUS_SQL,
+        "reconciliation: submitted-not-acked transmissions": RECONCILIATION_SQL,
     }
-    # The staleness cutoff is CLOCK x POLICY (round-5 F7): now minus the
-    # fleet policy window, computed here and bound as a parameter — never a
-    # constant in the SQL.
+    # Binds are CLOCK x POLICY (round-6 F7): renewal horizons vs NOW,
+    # activity vs CUTOFF = now − policy_window; attention overdue vs NOW.
     from datetime import datetime, timedelta, timezone
 
+    now = datetime.now(timezone.utc).isoformat()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
-    print("\n### read benchmarks (gate: p50 <= 50ms each; EQP must show an"
-          " events index, never a bare SCAN events)")
+    PARAMS = {
+        "attention: unacked or overdue OPEN assignments": (now,),
+        "workstream-status: contract x events x clock x policy": (now, cutoff),
+    }
+    failures = []
+    print("\n### read benchmarks (GATE, machine-checked: p50 <= 50ms each;"
+          " EQP must never show a bare 'SCAN events')")
     for name, sql in QUERIES.items():
-        params = (cutoff, cutoff) if "?" in sql else ()
+        params = PARAMS.get(name, ())
         times = []
         for _ in range(5):
             t0 = time.perf_counter()
             conn.execute(sql, params).fetchall()
             times.append((time.perf_counter() - t0) * 1000)
         times.sort()
-        print(f"- {name}: p50={times[2]:.1f}ms max={times[-1]:.1f}ms")
-        for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params):
-            print(f"    EQP: {r[-1]}")
+        p50 = times[2]
+        plans = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params)]
+        bare_scan = any(d.strip().startswith("SCAN events") for d in plans)
+        verdict = "PASS" if (p50 <= 50.0 and not bare_scan) else "FAIL"
+        if verdict == "FAIL":
+            failures.append(name)
+        print(f"- [{verdict}] {name}: p50={p50:.1f}ms max={times[-1]:.1f}ms")
+        for d in plans:
+            print(f"    EQP: {d}")
     conn.close()
+    if failures:
+        print(f"\nGATE FAILED ({len(failures)}): " + "; ".join(failures))
+        print("On the Pi this formally reopens the F16-v2 flip condition.")
+        return 1
+    print("\nGATE PASSED")
+    return 0
 
 
 def bench_burst(root: Path, n: int) -> dict:
@@ -4080,7 +4128,7 @@ def main() -> int:
     cold = bench_cold(root, args.cold)
     warm = bench_warm(root, args.warm)
     burst = bench_burst(root, args.burst)
-    bench_reads(root)
+    read_gate = bench_reads(root)
 
     print("## plane-bench results\n")
     print(f"- host: `{__import__('platform').node()}` "
@@ -4094,7 +4142,7 @@ def main() -> int:
           f"committed={burst['committed']} spooled={burst['spooled']} "
           f"errors={len(burst['errors'])}")
     print("\nGate (Phase-2 ingest choice): Pi cold p95 ≤ 300ms AND burst errors == 0 → direct writer; else socket daemon.")
-    return 0
+    return read_gate
 
 
 if __name__ == "__main__":
@@ -4103,9 +4151,10 @@ if __name__ == "__main__":
 
 - [ ] **Step 1b: Result fixtures BEFORE timing (round-4 F7)**
 
-The battery gains `test_derivation_fixtures` (below) — the reassignment and
-terminal-dominance scenarios must return the RIGHT rows before their speed
-means anything. Run: `./.venv/bin/pytest tests/test_plane_crash_battery.py::test_derivation_fixtures -v`
+BOTH fixture suites must pass before any timing run means anything —
+the reassignment/terminal-dominance scenarios AND the nine workstream
+reducer cases (blocked, expired-renewal, out-of-order included). Run:
+`./.venv/bin/pytest tests/test_plane_crash_battery.py::test_derivation_fixtures tests/test_plane_crash_battery.py::test_workstream_reducer_fixtures -v`
 
 - [ ] **Step 2: Run on this machine and record**
 
