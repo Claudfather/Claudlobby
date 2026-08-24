@@ -38,8 +38,12 @@ Disk is the medium that survives a restart, a compaction and a fleet reorganisat
 shared doc or a vault note resolve the same way for anyone. **A path under your own `data/` does
 not**, and it fails in two different ways — neither of which looks like a failure when you send it:
 
-- **Absolute** — a sibling bot's directory is **denied by composed permission**, not merely
-  inconvenient. Every bot carries `Read(<other-bot>/**)` deny rules.
+- **Absolute** — a sibling bot's directory carries a composed `Read(<other-bot>/**)` deny rule,
+  **and that deny does not currently block.** Measured: a live Read-tool call against a
+  Read-denied sibling path succeeded outright, no prompt and no error. The root cause is #970 —
+  the bot workspace is never trusted, so the composed `settings.local.json` is ignored wholesale.
+  So an absolute path is **not a safe failure**: a bot ignoring this rule succeeds at reading a
+  file the isolation was meant to protect.
 - **Relative** — `data/notes.md` resolves against the **receiver's own** working directory. It does
   not error; it opens a **different file**, and the receiver has no way to know.
 
