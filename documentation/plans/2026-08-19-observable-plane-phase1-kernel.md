@@ -2564,7 +2564,7 @@ def test_contract_violation_quarantined_not_retried(env):
 
 
 def test_operational_errors_retry_then_quarantine(env, monkeypatch):
-    """Only sqlite3.OperationalError is retryable (round-2 F6)."""
+    """Only OperationalErrors accepted by is_retryable() are retryable."""
     import sqlite3 as sq
 
     root, conn, host = env
@@ -3500,6 +3500,31 @@ RECONCILIATION_SQL = (
     " (SELECT 1 FROM events a WHERE a.kind='transmission'"
     "  AND a.msg_id = s.msg_id AND a.event='recipient_acknowledged')"
 )
+
+
+import re as _re
+
+def events_aliases(sql: str) -> frozenset[str]:
+    """Every name the `events` table can appear under in this query —
+    round-7: SQLite's EXPLAIN QUERY PLAN prints "SCAN e" for an aliased
+    table, so a detector matching only "SCAN events" waves through the
+    exact unindexed scan it exists to catch."""
+    names = {"events"}
+    for m in _re.finditer(r"\b(?:FROM|JOIN)\s+events\s+(?:AS\s+)?([A-Za-z_]\w*)",
+                          sql, _re.I):
+        alias = m.group(1)
+        if alias.upper() not in {"WHERE", "ON", "GROUP", "ORDER", "LEFT",
+                                  "JOIN", "AS", "SET"}:
+            names.add(alias)
+    return frozenset(names)
+
+
+def is_bare_events_scan(plan_detail: str, aliases: frozenset[str]) -> bool:
+    """True for an UNindexed full scan of events (under any alias). An
+    index-assisted "SCAN x USING ... INDEX ..." is not bare."""
+    tokens = plan_detail.split()
+    return (len(tokens) >= 2 and tokens[0] == "SCAN"
+            and tokens[1] in aliases and "USING" not in plan_detail)
 ```
 
 - [ ] **Step 2: Commit**
@@ -3709,15 +3734,24 @@ def test_derivation_fixtures(tmp_path: Path):
          "payload": {"work_item_id": wi, "assignment_id": a2,
                       "event": "progress", "progress": 10}},
     ])
-    status = conn.execute(
-        "SELECT COALESCE((SELECT t.event FROM events t WHERE t.kind='task'"
-        f" AND t.assignment_id = ? AND t.event IN ({TERMINAL})"
-        " ORDER BY t.ingest_seq LIMIT 1),"
-        " (SELECT t.event FROM events t WHERE t.kind='task'"
-        "  AND t.assignment_id = ? ORDER BY t.ingest_seq DESC LIMIT 1),"
-        " 'open')", (a2, a2)).fetchone()[0]
+    from claudlobby.plane.queries import RECONCILIATION_SQL, TASK_STATUS_SQL
+
+    statuses = dict(conn.execute(TASK_STATUS_SQL).fetchall())
+    assert statuses[a2] == "completed", (
+        f"terminal must dominate late progress: {statuses[a2]}")
+    assert statuses[a1] == "reassigned"
+    # Reconciliation fixture (round-7): one submitted-never-acked transmission
+    # must count exactly 1 (m1 and m2 are both acked above).
+    m3 = mint_msg_id()
+    emit_batch(tmp_path, [
+        {"event_type": "communication", "emitter": "fx", "fleet": "fx-fleet",
+         "payload": {"msg_id": m3, "sender": "bot:fx-fleet/mgr",
+                      "recipient": "bot:fx-fleet/w2",
+                      "message_class": "nudge", "privacy": "full"}},
+        tx(m3, "pane_submitted"),
+    ])
+    assert conn.execute(RECONCILIATION_SQL).fetchone()[0] == 1
     conn.close()
-    assert status == "completed", f"terminal must dominate late progress: {status}"
 
 
 def test_workstream_reducer_fixtures(tmp_path: Path):
@@ -3796,6 +3830,29 @@ def test_workstream_reducer_fixtures(tmp_path: Path):
                    "ws-stale": "stale", "ws-short": "stale",
                    "ws-ooo": "stale", "ws-expired": "stale",
                    "ws-blocked": "blocked"}
+
+
+def test_eqp_detector_catches_aliased_bare_scan(tmp_path: Path):
+    """Round-7 F7: a forced unindexed query plans as "SCAN e" (aliased) —
+    the detector must flag it, and must NOT flag an index-assisted scan."""
+    from claudlobby.plane.db import connect, db_path
+    from claudlobby.plane.migrations import migrate
+    from claudlobby.plane.queries import events_aliases, is_bare_events_scan
+
+    conn = connect(db_path(tmp_path))
+    migrate(conn)
+    forced = ("SELECT COUNT(*) FROM events e"
+              " WHERE json_extract(e.detail, '$.x') = 1")
+    plans = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + forced)]
+    aliases = events_aliases(forced)
+    assert "e" in aliases
+    assert any(is_bare_events_scan(d.strip(), aliases) for d in plans), plans
+    indexed = ("SELECT COUNT(*) FROM events e WHERE e.kind = 'task'")
+    plans2 = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + indexed)]
+    assert not any(
+        is_bare_events_scan(d.strip(), events_aliases(indexed)) for d in plans2
+    ), plans2
+    conn.close()
 
 
 def test_readonly_db_emit_spools_end_to_end(tmp_path: Path):
@@ -4049,6 +4106,8 @@ def bench_reads(root: Path) -> None:
         RECONCILIATION_SQL,
         TASK_STATUS_SQL,
         WORKSTREAM_STATUS_SQL,
+        events_aliases,
+        is_bare_events_scan,
     )
 
     QUERIES = {
@@ -4080,7 +4139,8 @@ def bench_reads(root: Path) -> None:
         times.sort()
         p50 = times[2]
         plans = [r[-1] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, params)]
-        bare_scan = any(d.strip().startswith("SCAN events") for d in plans)
+        aliases = events_aliases(sql)
+        bare_scan = any(is_bare_events_scan(d.strip(), aliases) for d in plans)
         verdict = "PASS" if (p50 <= 50.0 and not bare_scan) else "FAIL"
         if verdict == "FAIL":
             failures.append(name)
@@ -4158,8 +4218,9 @@ reducer cases (blocked, expired-renewal, out-of-order included). Run:
 
 - [ ] **Step 2: Run on this machine and record**
 
-Run: `./.venv/bin/python bin/plane-bench.py 2>&1 | tail -8`
-Expected: results block prints; zero burst errors. Paste the block into the commit message body.
+Run: `./.venv/bin/python bin/plane-bench.py; echo "bench exit=$?"`
+(No pipe — a `| tail` would report tail's status and mask a GATE FAILED nonzero exit, the same PIPESTATUS trap the repo documents for `gh api | head`.)
+Expected: results block prints, `bench exit=0`, zero burst errors. Paste the block into the commit message body.
 
 - [ ] **Step 3: The Pi gate (operator step — do not skip silently)**
 
