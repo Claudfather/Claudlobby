@@ -46,6 +46,7 @@ TASK_EVENTS = (
     "expired",
 )
 DECLARATION_EVENTS = ("revision_seen", "scan_completed")
+SYSTEM_SUBJECT_KINDS = ("host", "vault", "fleet", "actor", "bot_instance", "session")
 WORKSTREAM_EVENTS = (
     "progressed", "renewed", "blocked", "unblocked", "closed", "archived",
     "plan_linked", "plan_unlinked",
@@ -261,12 +262,52 @@ class TaskEvent(_Strict):
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
 
 
+class SystemEvent(_Strict):
+    """kind=system — machinery detections and lifecycle (F19: the token
+    vocabulary is REGISTRY-governed, never a closed Literal: system-event
+    emitters are the whole estate, and an unknown token must ingest rather
+    than vanish. Only the token's SHAPE is enforced here; the known-set
+    registry and warn-on-unknown accounting are Phase 2b)."""
+
+    event: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    severity: Optional[Literal["critical", "notice"]] = None
+    # Anchor pair (DDL rule, mirrored): kind+uid together or neither; alias
+    # only WITH the pair.
+    subject_kind: Optional[Literal[SYSTEM_SUBJECT_KINDS]] = None
+    subject_uid: Optional[str] = Field(None, min_length=1)
+    subject_alias: Optional[str] = None
+    # DIAGNOSTIC payload (FIELD_POLICY ("system","data")): bounded, authored
+    # by machinery — over-cap REJECTS like every authored body.
+    data: Optional[dict] = None
+
+    @field_validator("data")
+    @classmethod
+    def _data_byte_cap(cls, v):
+        cap = FIELD_POLICY[("system", "data")]["cap"]
+        if v is not None:
+            import json as _json
+
+            size = len(_json.dumps(v, ensure_ascii=False).encode("utf-8"))
+            if size > cap:
+                raise ValueError(f"system data exceeds {cap} bytes ({size})")
+        return v
+
+    def model_post_init(self, __context) -> None:
+        if (self.subject_uid is None) != (self.subject_kind is None):
+            raise ValueError(
+                "subject_kind and subject_uid are an anchor pair — both or neither"
+            )
+        if self.subject_alias is not None and self.subject_uid is None:
+            raise ValueError("subject_alias is legal only WITH the anchor pair")
+
+
 FAMILIES: dict[str, type[BaseModel]] = {
     "communication": Communication,
     "transmission": Transmission,
     "work_item": WorkItem,
     "assignment": Assignment,
     "task": TaskEvent,
+    "system": SystemEvent,
 }
 
 

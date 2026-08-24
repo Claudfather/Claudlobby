@@ -21,6 +21,7 @@ from .contracts import (
     Assignment,
     Communication,
     ContractViolation,
+    SystemEvent,
     TaskEvent,
     Transmission,
     WorkItem,
@@ -170,6 +171,20 @@ def _family_values(conn, payload, now) -> tuple[str, dict]:
             "deadline": payload.deadline.isoformat() if payload.deadline else None,
             "successor_id": payload.successor_id,
             "detail": json.dumps(detail, ensure_ascii=False) if detail else None,
+            "detail_truncated": 0,
+        }
+    if isinstance(payload, SystemEvent):
+        return "events", {
+            "kind": "system",
+            "event": payload.event,
+            "severity": payload.severity,
+            "subject_kind": payload.subject_kind,
+            "subject_uid": payload.subject_uid,
+            "subject_alias": payload.subject_alias,
+            "detail": (
+                json.dumps(payload.data, ensure_ascii=False)
+                if payload.data else None
+            ),
             "detail_truncated": 0,
         }
     raise TypeError(f"no insert mapping for {type(payload).__name__}")
