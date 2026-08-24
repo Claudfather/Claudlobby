@@ -55,10 +55,11 @@ esac
 
 printf 'plane-emit: daemon unavailable (rc=%s) — falling back to cold CLI\n' "$rc" >&2
 if [ -s "$finalized" ]; then
+    # --root is global: before the subcommand.
     if [ -n "${PLANE_EMIT_CLI:-}" ]; then
-        $PLANE_EMIT_CLI emit-batch --root "$ROOT" --json "$finalized"
+        $PLANE_EMIT_CLI --root "$ROOT" emit-batch --json "$finalized"
     else
-        claudlobby_cli emit-batch --root "$ROOT" --json "$finalized"
+        claudlobby_cli --root "$ROOT" emit-batch --json "$finalized"
     fi
     rc=$?
     [ "$rc" -ne 0 ] && printf 'plane-emit: cold CLI rung failed rc=%s\n' "$rc" >&2

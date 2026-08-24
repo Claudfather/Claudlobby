@@ -111,7 +111,9 @@ def test_launcher_execs_resolved_cli_with_serve_args(tmp_path):
              "PLANE_SOCKET": "/tmp/x.sock"},
     )
     assert r.returncode == 0, r.stderr
-    assert f"CLI-ARGS:plane serve --root {root} --socket /tmp/x.sock" in r.stdout
+    # --root is GLOBAL (precedes the subcommand) — the smoke run caught the
+    # inverted order as a real argparse error where this stub accepted it.
+    assert f"CLI-ARGS:--root {root} plane serve --socket /tmp/x.sock" in r.stdout
 
 
 def test_launcher_prefers_the_root_venv(tmp_path):

@@ -14,7 +14,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 export CLAUDLOBBY_ROOT="$ROOT"
 
-ARGS=(plane serve --root "$ROOT")
+# --root is a GLOBAL flag: it precedes the subcommand (the smoke run caught
+# the inverted order as an argparse usage error — stubs accept any argv, the
+# real CLI does not).
+ARGS=(--root "$ROOT" plane serve)
 [ -n "${PLANE_SOCKET:-}" ] && ARGS+=(--socket "$PLANE_SOCKET")
 [ -n "${PLANE_DRAIN_INTERVAL:-}" ] && ARGS+=(--drain-interval "$PLANE_DRAIN_INTERVAL")
 
