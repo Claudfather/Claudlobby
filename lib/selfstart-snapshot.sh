@@ -443,8 +443,8 @@ ledger_files_for_boot() {
 # bounds the measurement. rc 1 absent, rc 2 ambiguous.
 row_field() {
     local row="$1" key="$2" vals n
-    vals="$(printf '%s\n' "$row" | grep -o "\"$key\":\"[^\"]*\"" \
-            | sed "s/^\"$key\":\"//; s/\"\$//" | sort -u)"
+    vals="$(printf '%s\n' "$row" | grep -oE "\"$key\": ?\"[^\"]*\"" \
+            | sed -E "s/^\"$key\": ?\"//; s/\"\$//" | sort -u)"
     [ -n "$vals" ] || return 1
     n="$(printf '%s\n' "$vals" | wc -l | tr -d ' ')"
     [ "$n" = "1" ] || return 2
@@ -455,7 +455,7 @@ row_field() {
 # segment, so it is dropped BY NAME rather than by position.
 row_rescued_names() {
     printf '%s\n' "$1" \
-        | grep -o '"bots_rescued":\[[^]]*\]' | head -1 \
+        | grep -oE '"bots_rescued": ?\[[^]]*\]' | head -1 \
         | grep -o '"[^"]*"' | sed 's/^"//; s/"$//' \
         | grep -v '^bots_rescued$'
 }
@@ -472,7 +472,25 @@ while IFS= read -r lf; do
     # fleet_rescue_correction rows, which are metadata ABOUT a receipt and carry
     # none of its fields. A prefix match here would read a correction as a
     # receipt with no stamp and refuse the whole page for it.
-    if grep '"type":"fleet_rescue"' "$lf" >> "$TMP/receipt_rows" 2>/dev/null; then
+    #
+    # The optional space is load-bearing too, and for the opposite reason (#1202
+    # in a READER rather than a writer). A rescuer writing via python
+    # `json.dumps` emits `"type": "fleet_rescue"`; one writing with printf emits
+    # it compact. Both are valid JSON and both occur — measured on the
+    # 2026-08-24 boot, where two rescuers wrote one of each and a compact-only
+    # match read ONE of them, dropping a 17-name receipt whose boundary was also
+    # the EARLIER of the two. Seven bots the dropped receipt named explicitly
+    # printed as LATE-UNEXPLAINED: "something woke these bots and nothing
+    # recorded what."
+    #
+    # THIS PATTERN CANNOT BE WIDENED ALONE. `row_field` and `row_rescued_names`
+    # parse the admitted row and were compact-only for the same reason, so
+    # widening only here admits a row that then fails to parse — which flips the
+    # boundary to UNUSABLE for EVERY receipt, including well-formed compact
+    # ones. Verified on the live ledger: reader-only took SELF-STARTED 3 -> 0 and
+    # ADJUDICATE 7 -> 11, strictly worse than the bug. All three move together
+    # or none do; tests/test_selfstart_snapshot.sh section 11 pins that.
+    if grep -E '"type": ?"fleet_rescue"' "$lf" >> "$TMP/receipt_rows" 2>/dev/null; then
         basename "$lf" >> "$TMP/receipt_files"
     fi
 done <<EOF
