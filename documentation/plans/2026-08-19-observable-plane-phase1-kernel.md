@@ -4218,8 +4218,8 @@ reducer cases (blocked, expired-renewal, out-of-order included). Run:
 
 - [ ] **Step 2: Run on this machine and record**
 
-Run: `./.venv/bin/python bin/plane-bench.py; echo "bench exit=$?"`
-(No pipe — a `| tail` would report tail's status and mask a GATE FAILED nonzero exit, the same PIPESTATUS trap the repo documents for `gh api | head`.)
+Run: `./.venv/bin/python bin/plane-bench.py; rc=$?; echo "bench exit=$rc"; test "$rc" -eq 0`
+(Round-8: the earlier `; echo "bench exit=$?"` PRINTED the failure but RETURNED echo's 0 to the caller — the same masking class as the `| tail` it replaced. The `test` at the end makes the compound command's status the benchmark's own.)
 Expected: results block prints, `bench exit=0`, zero burst errors. Paste the block into the commit message body.
 
 - [ ] **Step 3: The Pi gate (operator step — do not skip silently)**
