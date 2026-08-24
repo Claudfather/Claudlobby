@@ -35,8 +35,12 @@ def _request(i: int) -> dict:
 
 
 def _pctl(xs: list[float], p: float) -> float:
+    # Nearest-rank: ceil(p% of n) as a 1-based rank. The round() form read
+    # one sample high (post-review fix; informational metrics only — the
+    # gated reads compute their median inline).
     xs = sorted(xs)
-    return xs[min(len(xs) - 1, int(round(p / 100 * len(xs))) )]
+    rank = -(-int(p) * len(xs) // 100)          # ceil without math import
+    return xs[max(0, rank - 1)]
 
 
 def bench_cold(root: Path, n: int) -> list[float]:

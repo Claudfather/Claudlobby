@@ -307,6 +307,77 @@ def test_eqp_detector_catches_aliased_bare_scan(tmp_path: Path):
     conn.close()
 
 
+def test_eqp_detector_handles_old_sqlite_table_form():
+    """Post-review fix 2: SQLite < 3.36 prints "SCAN TABLE events [AS e]" —
+    the detector must flag both eras' formats and stay quiet on USING."""
+    from claudlobby.plane.queries import is_bare_events_scan
+
+    aliases = frozenset({"events", "e"})
+    assert is_bare_events_scan("SCAN TABLE events", aliases)
+    assert is_bare_events_scan("SCAN TABLE events AS e", aliases)
+    assert is_bare_events_scan("SCAN e", aliases)
+    assert not is_bare_events_scan("SCAN TABLE events USING INDEX idx_x", aliases)
+    assert not is_bare_events_scan("SEARCH e USING COVERING INDEX idx_x", aliases)
+    assert not is_bare_events_scan("SCAN TABLE other", aliases)
+
+
+def test_spool_serializes_datetime_payloads(tmp_path: Path):
+    """Post-review fix 1: an in-process caller may pass datetimes (EmitRequest
+    accepts them); a spool on db-failure must serialize them, not die with a
+    TypeError outside the taxonomy."""
+    from datetime import datetime, timezone
+
+    import os as _os
+
+    conn = connect(db_path(tmp_path))
+    migrate(conn)
+    conn.close()
+    ensure_host_uid(tmp_path / "state")
+    _os.chmod(db_path(tmp_path), 0o400)          # retryable OperationalError
+    req = _mk_request(31)
+    req["occurred_at"] = datetime.now(timezone.utc)   # datetime, not string
+    out = emit(tmp_path, req)
+    assert out.status == "spooled"
+    spooled = list((tmp_path / "state" / "plane" / "spool").glob("*.json"))
+    assert len(spooled) == 1
+    _os.chmod(db_path(tmp_path), 0o600)
+    conn = connect(db_path(tmp_path))
+    from claudlobby.plane.spool import drain
+    report = drain(tmp_path, conn, ensure_host_uid(tmp_path / "state"))
+    conn.close()
+    assert report.ingested == 1 and report.quarantined == 0
+
+
+def test_close_failure_after_commit_reports_committed(tmp_path: Path, monkeypatch):
+    """Post-review fix 4: a retryable close() failure AFTER commit must not
+    reclassify a committed batch as spooled."""
+    import sqlite3 as sq
+
+    import claudlobby.plane.emit_api as mod
+
+    conn0 = connect(db_path(tmp_path))
+    migrate(conn0)
+    conn0.close()
+    ensure_host_uid(tmp_path / "state")
+    real_connect = mod.connect
+
+    class _CloseBomb:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            self._inner.close()
+            raise sq.OperationalError("disk I/O error")   # retryable class
+
+    monkeypatch.setattr(mod, "connect", lambda p: _CloseBomb(real_connect(p)))
+    out = emit(tmp_path, _mk_request(32))
+    assert out.status == "committed"          # not "spooled"
+    assert not list((tmp_path / "state" / "plane" / "spool").glob("*.json"))
+
+
 def test_readonly_db_emit_spools_end_to_end(tmp_path: Path):
     """Round-3 F6: the disk-full raw demo never exercised emit. This does,
     via the same error CLASS (OperationalError at write — readonly here,

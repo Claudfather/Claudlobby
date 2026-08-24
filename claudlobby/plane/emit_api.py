@@ -103,7 +103,15 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
             host = ensure_host_uid(Path(root) / "state")
             results = ingest_many(conn, items, host_uid=host)
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except sqlite3.Error:
+                # Post-review fix: a WAL-flush failure on close, AFTER a
+                # successful commit, must not fall into the spool path —
+                # that reported committed events as "spooled" and queued a
+                # redundant replay. A close failure after a FAILED ingest
+                # changes nothing (that exception already routed).
+                pass
     except (DowngradeError, ContractViolation):
         raise
     except sqlite3.OperationalError as exc:

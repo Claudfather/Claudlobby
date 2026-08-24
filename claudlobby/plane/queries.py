@@ -90,5 +90,11 @@ def is_bare_events_scan(plan_detail: str, aliases: frozenset[str]) -> bool:
     """True for an UNindexed full scan of events (under any alias). An
     index-assisted "SCAN x USING ... INDEX ..." is not bare."""
     tokens = plan_detail.split()
-    return (len(tokens) >= 2 and tokens[0] == "SCAN"
-            and tokens[1] in aliases and "USING" not in plan_detail)
+    if len(tokens) < 2 or tokens[0] != "SCAN":
+        return False
+    # SQLite < 3.36 prints "SCAN TABLE events [AS e]"; newer prints
+    # "SCAN events" / "SCAN e" — post-review fix: the old form made the
+    # detector silently pass on exactly the older-sqlite hosts (Pi class)
+    # the bench gate targets.
+    name = tokens[2] if tokens[1] == "TABLE" and len(tokens) >= 3 else tokens[1]
+    return name in aliases and "USING" not in plan_detail

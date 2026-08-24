@@ -94,7 +94,7 @@ def is_retryable(exc: sqlite3.OperationalError) -> bool:
 
 def _write_entry_file(directory: Path, name: str, entry: dict) -> Path:
     return _write_bytes_secure(
-        directory, name, (json.dumps(entry, ensure_ascii=False) + "\n").encode()
+        directory, name, (json.dumps(entry, ensure_ascii=False, default=str) + "\n").encode()
     )
 
 
