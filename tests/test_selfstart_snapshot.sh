@@ -1107,6 +1107,24 @@ assert_eq "corrections alone are not receipts, so the page is a result again" "0
 assert_contains "and contamination is reported as unruled-out, not as covered" \
     "contamination CANNOT be ruled out" "$OUT41"
 
+# The exclusion has to hold for EVERY form the matcher now admits, not just the
+# two it originally hardened against — otherwise widening for whitespace could
+# turn this into a prefix match in exactly the forms nothing tests. vera caught
+# that the control covered 2 of 5 while the code was safe in all 5: safe and
+# PINNED are different, and only the second survives the next edit.
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+mkdir -p "$ROOT/state/events"
+for _cf in '"type":"fleet_rescue_correction"' '"type": "fleet_rescue_correction"' \
+           '"type":  "fleet_rescue_correction"' '"type" : "fleet_rescue_correction"' \
+           '"type":\t"fleet_rescue_correction"'; do
+    printf '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet",%b,"source":"manual","data":{"note":"c"}}\n' \
+        "$_cf" >> "$ROOT/state/events/fleet-2026-08-06.jsonl"
+done
+OUT41b="$(run_snapshot "$BOOT")"; RC41b=$?
+assert_eq "corrections in ALL FIVE whitespace forms are still excluded" "0" "$RC41b"
+assert_contains "and none of the five is mistaken for a receipt" \
+    "contamination CANNOT be ruled out" "$OUT41b"
+
 # ---- 11b2: THREE MORE writer conventions, because there is no canonical writer
 # Every one of these receipts is hand-typed at rescue time — there is no shared
 # writer function anywhere in the tree — so a third spacing convention is the
