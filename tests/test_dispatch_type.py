@@ -19,9 +19,11 @@ trip; this file owns only what the type gates.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -280,7 +282,24 @@ def _roundtrip_lib(tmp_path: Path):
     return libdir, env
 
 
-REAL_ID = "t-1786600000-real"
+# RELATIVE TO NOW, never an absolute instant. An epoch pinned in a fixture is a
+# time bomb by construction, and this one went off: the row was stamped
+# 2026-08-13T10:00:00Z and silently aged past rotate_jsonl_by_ts's 7-day
+# retention at 2026-08-20T10:00:00Z, reaping itself out of the ledger it seeds.
+# The five tests below then asserted membership in an EMPTY set and went red on
+# every branch in the repo at once, including main (#918).
+#
+# Bumping the number only sets a new fuse. The age is COMPUTED, so the row is
+# an hour old on every run forever. It is also stamped ONCE here rather than
+# per-call, so ts / dispatched_at / expected_by cannot disagree the way the
+# hardcoded set did (its ts said 10:00:00Z while its dispatched_at said
+# 05:46:40Z, four hours apart in the same row).
+_SEED_AGE_S = 3600
+_SEED_DISPATCHED_AT = int(time.time()) - _SEED_AGE_S
+_SEED_TS = dt.datetime.fromtimestamp(_SEED_DISPATCHED_AT, dt.timezone.utc).strftime(
+    "%Y-%m-%dT%H:%M:%SZ"
+)
+REAL_ID = f"t-{_SEED_DISPATCHED_AT}-real"
 
 
 def _seed_open_task(tmp_path: Path, bot: str = "w1") -> Path:
@@ -295,14 +314,14 @@ def _seed_open_task(tmp_path: Path, bot: str = "w1") -> Path:
     ledger.write_text(
         json.dumps(
             {
-                "ts": "2026-08-13T10:00:00Z",
+                "ts": _SEED_TS,
                 "manager": "dara",
                 "bot": bot,
                 "task_id": REAL_ID,
                 "workstream": "",
                 "task": "implement the thing",
-                "dispatched_at": 1786600000,
-                "expected_by": 1786601800,
+                "dispatched_at": _SEED_DISPATCHED_AT,
+                "expected_by": _SEED_DISPATCHED_AT + 1800,
                 "claudron_hits": "",
                 "supersedes": "",
                 "open_at_dispatch": 0,
