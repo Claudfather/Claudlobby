@@ -3,7 +3,7 @@
 **Status:** SUPERSEDED PENDING v2 (2026-08-18) — an external implementation-grade review (reconciled in-session, all factual claims verified) reopened §3–§12 and §14. Verified corrections: this draft was written against a checkout 56 commits behind origin/main (`claudlobby brief` #904 landed; dispatch `--type` gating landed; supersession landed; `vaults/` already gitignored); §12's LangSmith/OTel claims are stale (official LangSmith Claude Code plugin exists; OTel now carries agent/workflow ids + beta distributed tracing, with interactive sessions ignoring inbound TRACEPARENT — the surviving, narrower build case); the comms `outcome`-on-immutable-row contract is not crash-correct and is replaced by intent + transport-attempt events + acknowledgement. Do not implement from this document. v2 lands after the reopened forks are ruled.
 
 Original status: WORKING DRAFT — sections marked **RATIFIED** / **PROPOSED** / **OPEN**. Uncommitted; lands on a branch when the walk completes.
-**Session:** `8ad2aa7e-bade-4c55-b3c3-8af5869b7693` ("OBSERVABLE PLANE DESIGN"), 2026-08-08 → present.
+**Session:** `8ad2aa7e…` ("OBSERVABLE PLANE DESIGN"), 2026-08-08 → present (id truncated — public repo, house identifier rule).
 **Companion research:** the 2026-08-08 landscape memo (orca deep-dive, 25-product survey, web-terminal feasibility) — published artifact "The Observable Plane"; verdicts summarized in §1.
 **Lineage:** #974 (mission epic), #264 (observability compound play), #886 (central logging epic), #904 (bot-facing read door — the plane is its human-facing sibling), 2026-07-30 system review (write-rich/read-starved diagnosis, PR #928 system map).
 

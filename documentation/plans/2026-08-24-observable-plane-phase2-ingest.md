@@ -140,6 +140,61 @@ unmeasured — measure first, adapt second. Nothing in Phase 2 touches the plugi
 | T9 | `validate-bot-change.sh` plane leg + doctor rungs | §4.3, §5 | harness run cited in PR |
 | T10 | Shim-level Pi bench + budget verdict | §5 budget | machine-checked exit, both hosts recorded |
 
+## 6b. Domain-fit intake (fleet review of #1341, 2026-08-25 — Task B, measured on real ledgers)
+
+Seven findings from the fleet's read-only classification of live traffic (2,344 dispatch rows,
+324 reports, 55k events; review body on PR #1341). All non-blocking for Phase 1; each is now an
+OBLIGATION of this phase, dispositioned here so PR-B executes against the document, not memory.
+
+1. **Acknowledgement has no producer — the headline.** `recipient_acknowledged` has three
+   consumers (`TASK_STATUS_SQL` `open` rung, `ATTENTION_SQL`, `RECONCILIATION_SQL`) and zero
+   producers, and the runtime holds no such fact: tmux has no ack channel, `pane_send_verified`
+   proves SUBMISSION. Inferring the ack from report text measurably fails the `open` rung — 69
+   of 137 id'd dispatches have no progress row (first report is terminal), so the inference
+   arrives at/after the terminal event; where explicit `Acked:` rows exist, 0 of 46 met the
+   protocol's 5s (median 29s). **Disposition — activation derives from carrier-appropriate
+   evidence:** for `tmux`, `pane_submitted` occupies the activation rung (submission is the
+   strongest fact the carrier can ever yield); a true `recipient_acknowledged` row — produced
+   ONLY when a door observes an explicit worker ack, recorded as inference-free fact — TIGHTENS
+   the derivation where present. The recorder measures the ack protocol; it must never assume
+   it (the flight-recorder thesis applied to itself). The worker-lifecycle 5s mandate and the
+   unexecuted manager escalation rung are an OPERATOR decision, deliberately out of this plan's
+   scope — this design works unchanged under either ruling. T-numbering: this revises the
+   `TASK_STATUS_SQL`/`ATTENTION_SQL` ladders in this phase, with fixtures per carrier.
+2. **Missing-producer queries must fail toward EMPTY.** `ATTENTION_SQL` currently inverts to
+   all-alarm (every non-terminal assignment, `expected_by` dead) and `RECONCILIATION_SQL` pins
+   at 100% when the ack fact is absent — the all-alarm inversion this estate keeps re-finding.
+   Disposition: the rewrite in (1) removes the structural inversion; additionally each
+   derivation gains a fixture asserting its zero-producer behavior reads empty/quiet, never
+   everything.
+3. **Coalescence — many messages, one pane submission (the weld).** Measured 2026-08-24: three
+   payloads (boot resume + STARTUP_PROMPT + dispatch) submitted as ONE run-on message; each
+   msg_id would read as a clean independent `pane_submitted`. Disposition: the tmux door
+   records coalescence when `pane_holds_unsubmitted` was true at send — reusing the
+   `part_no`/`part_count` seam inversely (n msg_ids sharing one submission group) per the
+   reviewer's suggestion; exact shape decided in the door task, pre-cutover so cheap.
+4. **`EmitRequest.fleet` is a scalar; 44.6% of dispatch traffic is cross-fleet.** Ruling
+   needed before any door emits. **Disposition — `fleet` is the SENDER'S fleet** (the emitting
+   door runs in the sender's context and knows it authoritatively; the recipient's fleet is
+   derivable from the recipient alias `bot:<fleet>/<name>`), stated in §9b/§7 at execution.
+   Legacy import must scope the host-global dispatch log per fleet BEFORE joining per-fleet
+   report ledgers (the #526 shape).
+5. **`command_type` provenance.** The ledger records payload text, never the `--type` flag, and
+   the two provably disagree (1 of 227 measured). Disposition: `command_type` is DOOR-FLAG
+   provenance only — populated from the flag at emit time, never parsed from text; for
+   `origin="legacy"` import it is NULL (unrecoverable), stated in §9b.
+6. **Vocabulary intake:** `supplied-id-not-open` (4 real rows — a join fact our tooling already
+   records deliberately) joins TASK_EVENTS as a first-class token at the door task; legacy
+   `blocked`→`returned_blocked` confirmed 6/6; `failed`/`blocked_waiting`/`resumed` noted as
+   empty-by-protocol on this estate (metrics keyed on them read clean by construction — doctor
+   discloses, not deletes); the retraction shape (a STOP sent as a fresh task) is recorded as a
+   known gap riding `supersedes_msg_id`, whose emptiness in practice (#1032) is already tracked.
+7. **`pane_submitted` means TUI-ACCEPTED, not turn-consumed.** A send queued behind a busy
+   turn verifies clean and waits invisibly (93/129-min stuck turns measured same day).
+   Disposition: the door emits `carrier_queued` (new ATTEMPT_STATES token) when the busy/queued
+   branch is detectable at send time, and `pane_submitted`'s §7 definition gains its honest
+   bound; the overdue overlay stays evidence-based rather than pretending to know arrival.
+
 ## 7. Explicitly out of scope
 
 Reader cutover off JSONL · registry lane / migration of `registry_snapshots`+`metric_samples`

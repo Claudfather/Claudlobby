@@ -2,7 +2,7 @@
 
 **Status:** WORKING SPEC — v2.1 (2026-08-24: second external review reconciled — 10 implementation-blocking findings amended; see §2 round-2 note, §9d defect appendix, and the review closure table in the session record).
 Prior status: WORKING SPEC — v2, supersedes `2026-08-17-observable-plane-design.md` (kept as audit trail). Produced by reconciling an external implementation-grade review (2026-08-18) into the design walk; every factual claim in that review was independently verified before adoption (repo drift, landed commits, LangSmith plugin, Deep Agents capabilities, all five OTel trace-context specifics). Baseline: `origin/main` @ `e3b6347` — **not** the 56-commit-stale checkout v1 was written against.
-**Session:** `8ad2aa7e-bade-4c55-b3c3-8af5869b7693` ("OBSERVABLE PLANE DESIGN").
+**Session:** `8ad2aa7e…` ("OBSERVABLE PLANE DESIGN"; id truncated — the repo is public and full session UUIDs are scrubbed per the house identifier rule).
 **Lineage:** #974 (mission epic) · #264 (observability play) · #886 (central logging epic) · #904 (`claudlobby brief` — **landed**, `0cbca28`; the plane consumes it, never duplicates its joins) · dispatch `--type` gating (`d9c40b7`) · supersession (`a3644ca`, `36eb7a4`) · 2026-07-30 system review (write-rich/read-starved).
 
 ---
