@@ -277,6 +277,34 @@ if command -v "$CLAUDE" >/dev/null 2>&1 && [ -n "${FLEET_PLUGINS_REQUIRED:-}" ];
     done
 fi
 
+# Clear provably-false "needs authentication" verdicts before launch.
+#
+# `~/.claude/mcp-needs-auth-cache.json` is HOST-GLOBAL and Claude Code does not
+# spawn a server listed in it. The verdict outlives the session that wrote it, so
+# it is restart-immune: this is the one repair that must happen BEFORE the session
+# starts, because once it is running there is nothing left to re-read the file.
+#
+# Measured 2026-08-25: an unclean host restart put 22 bots into a concurrent boot;
+# one telegram plugin MCP child failed to come up in the storm and Claude Code
+# recorded `plugin:telegram:telegram` as needing auth. Every session started after
+# that instant — three fleets, repeated restarts — silently skipped spawning it, so
+# five bots sat with no inbound Telegram and a plain restart could never fix them.
+#
+# claudlobby is what creates that boot storm, so claudlobby is what defends against
+# it. The evictor only ever clears entries whose declaration is LOCAL STDIO, which
+# has no authentication surface to fail; a real OAuth verdict is left alone. See
+# lib/mcp-needs-auth-evict.py for the discriminator and why it is keyed on the
+# declaration rather than the name.
+#
+# Never blocks boot: a stale verdict is a degraded bridge, which is strictly better
+# than a bot that does not start.
+# LOG is only assigned inside the plugin block above, so it is unset here whenever
+# that block was skipped; under `set -u` the bare name would abort the boot.
+if command -v python3 >/dev/null 2>&1 && [ -f "$LIB_DIR/mcp-needs-auth-evict.py" ]; then
+    with_timeout 10 python3 "$LIB_DIR/mcp-needs-auth-evict.py" \
+        >> "${LOG:-$BOT_DIR/logs/startup.log}" 2>&1 || true
+fi
+
 bot_tmux "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" "$CLAUDE_CMD"
 
 # Spawn marker — its mtime is this bot's last session (re)start. fleet-pulse
