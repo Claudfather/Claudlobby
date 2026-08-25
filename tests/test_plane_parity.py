@@ -68,7 +68,7 @@ def test_missing_in_plane_rc1_named(tmp_path):
     ])
     r = _run(ledger, db_path(tmp_path))
     assert r.returncode == 1
-    assert "missing in plane:  1" in r.stdout and "tsk_lost" in r.stdout
+    assert "missing in plane: 1" in r.stdout and "tsk_lost" in r.stdout
 
 
 def test_missing_in_legacy_rc1_named(tmp_path):
@@ -138,12 +138,96 @@ def test_malformed_and_unjoinable_rows_disclosed_not_dropped(tmp_path):
     assert "could not be joined" in r.stdout
 
 
-def test_since_window_filters_both_sides(tmp_path):
-    _emit_with_ref(tmp_path, "tsk_old", "8")   # occurred_at = now (inside window)
+def test_since_boundary_skew_is_disclosed_not_a_mismatch(tmp_path):
+    """PR-#1345 review F10 (the reviewer's exact probe): one fact stamped
+    11:59:59 in the ledger and 12:00:01 in the plane across a 12:00:00
+    cutoff must not read as missing-in-legacy — the twin exists, just below
+    the window."""
+    _emit_with_ref(tmp_path, "tsk_old", "8")   # occurred_at = now (in window)
     ledger = _ledger(tmp_path, [
         {"task_id": "tsk_old", "ts": "2020-01-01T00:00:00+00:00"},
     ])
     r = _run(ledger, db_path(tmp_path), "--since", "2025-01-01T00:00:00+00:00")
-    # the ledger row is windowed OUT; the plane row (fresh occurred_at) stays
+    assert r.returncode == 0, r.stdout
+    assert "missing in legacy: 0" in r.stdout
+    assert "window-skew" in r.stdout and "tsk_old" in r.stdout
+
+
+def test_plane_only_id_with_no_ledger_twin_still_fails_under_since(tmp_path):
+    """The skew bucket must not swallow REAL losses: a plane row with no
+    ledger twin anywhere (windowed or not) stays missing-in-legacy."""
+    _emit_with_ref(tmp_path, "tsk_truly_lost", "9")
+    ledger = _ledger(tmp_path, [])
+    r = _run(ledger, db_path(tmp_path), "--since", "2025-01-01T00:00:00+00:00")
     assert r.returncode == 1
-    assert "missing in legacy: 1" in r.stdout
+    assert "missing in legacy: 1" in r.stdout and "tsk_truly_lost" in r.stdout
+
+
+def test_like_metacharacters_in_ledger_name_do_not_leak(tmp_path):
+    """PR-#1345 review F8 (+ own pre-probe): '%'/'_' in a ledger name are
+    text, not wildcards — 'dispatch_log' must not match 'dispatchXlog'."""
+    emit(tmp_path, {
+        "event_type": "communication", "emitter": "parity-test",
+        "fleet": "example-fleet", "source_ref": "dispatchXlog:tsk_other",
+        "payload": {"msg_id": "msg_" + "e" * 32,
+                    "sender": "bot:example-fleet/mgr",
+                    "message_class": "notice", "privacy": "full"},
+    })
+    ledger = _ledger(tmp_path, [{"task_id": "tsk_other", "ts": "t"}])
+    r = subprocess.run(
+        [sys.executable, str(PARITY), "--legacy", str(ledger),
+         "--ledger-name", "dispatch_log", "--id-field", "task_id",
+         "--db", str(db_path(tmp_path))],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1, "a wildcard match would have read parity-clean"
+    assert "missing in plane: 1" in r.stdout
+
+
+def test_per_table_duplicate_rows_are_flagged(tmp_path):
+    """PR-#1345 review F4 (multiplicity): two rows for one fact in ONE table
+    is a door double-writing — set-collapse hid it."""
+    _emit_with_ref(tmp_path, "tsk_dup", "a")
+    _emit_with_ref(tmp_path, "tsk_dup", "b")   # same source_ref, second comm row
+    ledger = _ledger(tmp_path, [{"task_id": "tsk_dup", "ts": "t"}])
+    r = _run(ledger, db_path(tmp_path))
+    assert r.returncode == 1
+    assert "2 rows in communications" in r.stdout
+
+
+def test_field_mismatch_is_flagged_and_match_is_clean(tmp_path):
+    """PR-#1345 review F4 (fields): same id, different content must fail."""
+    emit(tmp_path, {
+        "event_type": "work_item", "emitter": "parity-test",
+        "fleet": "example-fleet", "source_ref": "dispatch-log:tsk_f1",
+        "payload": {"work_item_id": "wi_" + "1" * 32, "title": "build the thing",
+                    "created_by": "bot:example-fleet/mgr"},
+    })
+    ledger = _ledger(tmp_path, [
+        {"task_id": "tsk_f1", "ts": "t", "task": "build the thing"},
+    ])
+    clean = _run(ledger, db_path(tmp_path), "--field", "task=work_items.title")
+    assert clean.returncode == 0, clean.stdout
+    assert "field mismatches: 0" in clean.stdout
+    drifted = _ledger(tmp_path, [
+        {"task_id": "tsk_f1", "ts": "t", "task": "build a DIFFERENT thing"},
+    ])
+    r = _run(drifted, db_path(tmp_path), "--field", "task=work_items.title")
+    assert r.returncode == 1
+    assert "ledger 'build a DIFFERENT thing' != plane title=" in r.stdout
+
+
+def test_absent_field_flag_is_disclosed(tmp_path):
+    _emit_with_ref(tmp_path, "tsk_nf", "c")
+    ledger = _ledger(tmp_path, [{"task_id": "tsk_nf", "ts": "t"}])
+    r = _run(ledger, db_path(tmp_path))
+    assert r.returncode == 0
+    assert "field comparison: none requested" in r.stdout
+
+
+def test_bad_field_spec_refuses(tmp_path):
+    _emit_with_ref(tmp_path, "tsk_bs", "d")
+    ledger = _ledger(tmp_path, [{"task_id": "tsk_bs", "ts": "t"}])
+    r = _run(ledger, db_path(tmp_path), "--field", "task=nosuchtable.title")
+    assert r.returncode == 2, "a malformed call is rc 2, never clean or broken"
+    assert "unknown table" in r.stderr

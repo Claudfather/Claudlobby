@@ -28,6 +28,7 @@ from .contracts import (
 )
 from .identity import resolve_fleet, resolve_party
 from .ids import mint_event_id
+from .registries import FIELD_POLICY, SYSTEM_EVENT_SEVERITY
 
 
 def now_iso() -> str:
@@ -174,18 +175,31 @@ def _family_values(conn, payload, now) -> tuple[str, dict]:
             "detail_truncated": 0,
         }
     if isinstance(payload, SystemEvent):
+        # severity: registry-stamped, never caller-supplied (§9b — the wire
+        # model has no severity field at all); unknown token => NULL.
+        detail = (
+            json.dumps(payload.data, ensure_ascii=False)
+            if payload.data else None
+        )
+        truncated = 0
+        if detail is not None:
+            # DIAGNOSTIC over-cap TRUNCATES with the flag (§9b) — never
+            # rejects. A flagged detail is a raw UTF-8 prefix, not JSON;
+            # detail_truncated=1 IS the reader's parse guard.
+            cap = FIELD_POLICY[("system", "data")]["cap"]
+            raw = detail.encode("utf-8")
+            if len(raw) > cap:
+                detail = raw[:cap].decode("utf-8", errors="ignore")
+                truncated = 1
         return "events", {
             "kind": "system",
             "event": payload.event,
-            "severity": payload.severity,
+            "severity": SYSTEM_EVENT_SEVERITY.get(payload.event),
             "subject_kind": payload.subject_kind,
             "subject_uid": payload.subject_uid,
             "subject_alias": payload.subject_alias,
-            "detail": (
-                json.dumps(payload.data, ensure_ascii=False)
-                if payload.data else None
-            ),
-            "detail_truncated": 0,
+            "detail": detail,
+            "detail_truncated": truncated,
         }
     raise TypeError(f"no insert mapping for {type(payload).__name__}")
 

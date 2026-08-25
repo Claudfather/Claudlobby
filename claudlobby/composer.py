@@ -3732,12 +3732,27 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             # enrolls every claudlobby-*.plist it finds, so a composed-but-
             # dormant service plist would be started by the next setup run —
             # a root pull silently activating a new resident process, the
-            # exact no-silent-switches violation. Unarmed = no files at all.
+            # exact no-silent-switches violation. Unarmed = no files at all,
+            # INCLUDING leftovers: an armed→unarmed transition must PRUNE the
+            # previously composed units, or the next setup run re-enrolls the
+            # supposedly dormant service from the stale files (measured).
+            # Pruning stops future (re)enrollment only — an already-INSTALLED
+            # unit keeps running until disabled; the disarm recipe is printed
+            # beside the knob in system.yaml.
             if cfg.get("enroll") is True:
                 _write_service_units(
                     timers_dir, f"claudlobby-{name}", name,
                     cfg.get("script", ""), paths,
                 )
+            else:
+                for ext in ("service", "plist"):
+                    leftover = timers_dir / f"claudlobby-{name}.{ext}"
+                    if leftover.exists():
+                        leftover.unlink()
+                        _log.info(
+                            "pruned dormant service unit %s (armed→unarmed)",
+                            leftover.name,
+                        )
             continue
         sched = _resolve_timer_schedule(cfg, {})
         _write_timer_units(

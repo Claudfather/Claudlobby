@@ -89,6 +89,12 @@ host:
     # this one), then re-run generate + lib/setup-system. Doors degrade
     # cleanly while unarmed (lib/plane-emit.sh falls back to the cold CLI,
     # disclosed on stderr).
+    # DISARMING an armed daemon: flip enroll back to false and re-run
+    # generate (this PRUNES the composed units, so no future setup run can
+    # re-enroll it) — then stop the installed unit yourself, since pruning
+    # cannot reach what is already enrolled:
+    #   linux:  systemctl --user disable --now claudlobby-plane-daemon.service
+    #   macos:  launchctl bootout gui/$UID/claudlobby-plane-daemon
     plane-daemon:
       enroll: false
       unit: service

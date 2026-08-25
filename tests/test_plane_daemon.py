@@ -327,6 +327,128 @@ def test_socket_file_mode_is_0600(running):
     assert stat.S_IMODE(os.stat(sock).st_mode) == 0o600
 
 
+def test_two_daemons_racing_one_socket_yield_exactly_one_server(tmp_path: Path):
+    """PR-#1345 review F2 (+ own pre-probe): the old probe→unlink→bind was a
+    TOCTOU window — two racers both bound, last rename owned the path, the
+    loser's shutdown deleted the winner's socket. The lifetime flock makes
+    the race deterministic: one serves, one refuses."""
+    sdir = _short_sock_dir()
+    sock = sdir / "s"
+    r2 = tmp_path / "other-root"
+    r2.mkdir()
+    d1 = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
+    d2 = PlaneDaemon(r2, socket_override=sock, drain_interval=9999)
+    outcomes: dict[str, str] = {}
+
+    def run(name, d):
+        try:
+            d.serve(install_signals=False)
+            outcomes[name] = "served"
+        except DaemonAlreadyRunning:
+            outcomes[name] = "refused"
+
+    t1 = threading.Thread(target=run, args=("d1", d1), daemon=True)
+    t2 = threading.Thread(target=run, args=("d2", d2), daemon=True)
+    t1.start(); t2.start()
+    try:
+        deadline = time.time() + 10
+        while time.time() < deadline and len(outcomes) < 1:
+            time.sleep(0.05)
+        assert list(outcomes.values()) == ["refused"], (
+            f"exactly one racer must refuse immediately: {outcomes}")
+        # the winner serves — and its socket answers
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                if send_batch(sock, [_comm("b")])["ok"] is not None:
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            raise AssertionError("the surviving daemon never answered")
+    finally:
+        d1.stop(); d2.stop()
+        t1.join(timeout=10); t2.join(timeout=10)
+        shutil.rmtree(sdir, ignore_errors=True)
+    assert sorted(outcomes.values()) == ["refused", "served"]
+
+
+def test_shutdown_never_unlinks_a_replaced_socket(running):
+    """F2's nastier half: if the public path is no longer OUR inode, leaving
+    is someone else's file — shutdown must not delete it."""
+    root, sock, daemon = running
+    os.unlink(sock)
+    sock.write_text("imposter")           # somebody else's file at our path
+    daemon.stop()
+    for _ in range(200):                   # lock release marks the finally done
+        if daemon._lock_fd is None:
+            break
+        time.sleep(0.05)
+    assert daemon._lock_fd is None, "daemon never finished shutting down"
+    assert sock.exists() and sock.read_text() == "imposter", (
+        "shutdown deleted a file it does not own")
+
+
+def test_override_parent_is_never_chmodded(tmp_path: Path):
+    """PR-#1345 review F7: --socket must not mutate an operator directory."""
+    sdir = _short_sock_dir()
+    os.chmod(sdir, 0o755)
+    sock = sdir / "s"
+    daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
+    t = threading.Thread(
+        target=lambda: daemon.serve(install_signals=False), daemon=True
+    )
+    t.start()
+    try:
+        for _ in range(200):
+            if sock.exists():
+                break
+            time.sleep(0.02)
+        import stat as _stat
+
+        assert _stat.S_IMODE(os.stat(sdir).st_mode) == 0o755, (
+            "the daemon chmodded a directory it does not own")
+    finally:
+        daemon.stop()
+        t.join(timeout=10)
+        shutil.rmtree(sdir, ignore_errors=True)
+
+
+def test_missing_override_parent_refuses(tmp_path: Path):
+    from claudlobby.plane.daemon import SocketOverrideInvalid
+
+    daemon = PlaneDaemon(
+        tmp_path, socket_override=Path("/tmp/claude/nope-nope/s"),
+        drain_interval=9999,
+    )
+    with pytest.raises(SocketOverrideInvalid):
+        daemon.serve(install_signals=False)
+
+
+def test_failed_drain_advances_the_deadline(tmp_path: Path, monkeypatch):
+    """PR-#1345 review F9: a broken db retried once per accept tick (~1s)
+    forever; the deadline now advances at ATTEMPT."""
+    from claudlobby.plane import daemon as daemon_mod
+
+    calls = []
+
+    def broken_drain(root, conn, host_uid):
+        calls.append(1)
+        raise RuntimeError("db is broken")
+
+    monkeypatch.setattr(daemon_mod, "drain", broken_drain)
+    d = PlaneDaemon(tmp_path, drain_interval=600)
+    assert d._last_drain == 0.0
+    d._drain_spool(reason="probe")
+    assert len(calls) == 1
+    assert d._last_drain > 0.0, "a FAILED attempt must still stamp the deadline"
+    stamped = d._last_drain
+    if time.monotonic() - stamped < 600:
+        pass  # within interval: the serve loop's guard would not re-fire
+    d._drain_spool(reason="probe2")   # direct call still runs (loop guards)
+    assert len(calls) == 2
+
+
 def test_shim_end_to_end_through_real_daemon(running):
     """lib/plane-emit.sh -> lib/plane-socket-client.py -> daemon -> row: the
     whole rung-1 chain, cross-language, on a real db."""

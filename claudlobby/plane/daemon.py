@@ -33,6 +33,7 @@ elsewhere, honestly.
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
 import signal
@@ -60,11 +61,18 @@ DEFAULT_DRAIN_INTERVAL = 600.0
 
 
 class DaemonAlreadyRunning(RuntimeError):
-    """A live daemon answered on the socket — exactly one instance per root."""
+    """Another daemon owns this socket (holds its lifetime lock, or a live
+    listener answered on the path) — exactly one instance per socket."""
 
 
 class SocketPathTooLong(RuntimeError):
     pass
+
+
+class SocketOverrideInvalid(RuntimeError):
+    """--socket names a parent the daemon will not create or chmod: it only
+    provisions its OWN default dir (state/plane) — mutating an arbitrary
+    supplied directory to 0700 is not the daemon's to do."""
 
 
 def socket_path(root: Path) -> Path:
@@ -137,12 +145,15 @@ class PlaneDaemon:
         drain_interval: float = DEFAULT_DRAIN_INTERVAL,
     ):
         self.root = Path(root)
+        self._is_default_socket = socket_override is None
         self.sock_path = Path(socket_override) if socket_override else socket_path(self.root)
         self.drain_interval = drain_interval
         self._stop = False
         self._listener: Optional[socket.socket] = None
         self._last_drain = 0.0
         self._own_uid = os.geteuid()
+        self._lock_fd: Optional[int] = None
+        self._sock_stat: Optional[tuple[int, int]] = None
 
     # -- lifecycle events (best-effort: the recorder's own heartbeat must
     #    never kill the recorder) ------------------------------------------
@@ -164,6 +175,10 @@ class PlaneDaemon:
                   file=sys.stderr)
 
     def _drain_spool(self, *, reason: str) -> None:
+        # Deadline advances at ATTEMPT, not success: stamping only on success
+        # made a broken db retry once per accept-timeout tick (~1s) forever,
+        # ignoring the configured interval.
+        self._last_drain = time.monotonic()
         try:
             conn = connect(db_path(self.root))
             try:
@@ -177,7 +192,6 @@ class PlaneDaemon:
             print(f"plane-daemon: spool drain failed ({reason}): {exc}",
                   file=sys.stderr)
             return
-        self._last_drain = time.monotonic()
         if report.ingested or report.duplicates or report.quarantined:
             self._emit_system("spool_drain_completed", {
                 "reason": reason,
@@ -249,45 +263,99 @@ class PlaneDaemon:
             pass  # client went away; the commit (if any) stands — replay is idempotent
 
     # -- serve loop -----------------------------------------------------------
-    def _bind(self) -> socket.socket:
-        _check_sun_path(self.sock_path)
-        self.sock_path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.sock_path.parent, 0o700)
-        if self.sock_path.exists():
-            if _probe_live(self.sock_path):
-                raise DaemonAlreadyRunning(
-                    f"a plane daemon is already serving {self.sock_path}"
-                )
-            self.sock_path.unlink()   # stale socket from a dead daemon
-        # Bind on a hidden name and rename into place only AFTER listen():
-        # between bind() and listen() the file exists but connect() gets
-        # ECONNREFUSED, so exposing the public path first hands every prober
-        # (fixtures, keepalive, the shim) a refused-connection window. A unix
-        # socket is its inode — the rename is atomic and preserves the
-        # listener.
-        tmp = self.sock_path.with_name(
-            f".{self.sock_path.name}.{os.getpid()}.tmp"
-        )
-        _check_sun_path(tmp)
+    def _acquire_lock(self) -> None:
+        """Lifetime flock beside the socket — THE single-instance mechanism.
+        The old probe→unlink→bind sequence was a TOCTOU window: two daemons
+        racing it both bound hidden sockets, last rename owned the path, the
+        loser served an orphaned inode, and the loser's shutdown unlink
+        DELETED the winner's socket (a reachable-looking daemon nobody can
+        reach). The lock is held (fd open) for the daemon's life and released
+        by the kernel on any death, so a crashed holder never wedges the
+        next start."""
+        lock_path = self.sock_path.with_name(self.sock_path.name + ".lock")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            listener.bind(str(tmp))
-            os.chmod(tmp, 0o600)
-            listener.listen(64)
-            os.replace(tmp, self.sock_path)
-        except BaseException:
-            listener.close()
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise DaemonAlreadyRunning(
+                f"another plane daemon holds {lock_path}"
+            ) from None
+        self._lock_fd = fd
+
+    def _release_lock(self) -> None:
+        if self._lock_fd is not None:
             try:
-                tmp.unlink()
+                os.close(self._lock_fd)
             except OSError:
                 pass
+            self._lock_fd = None
+
+    def _bind(self) -> socket.socket:
+        _check_sun_path(self.sock_path)
+        if self._is_default_socket:
+            # db_path() has already provisioned state/plane at 0700; this is
+            # the one directory the daemon owns.
+            self.sock_path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.sock_path.parent, 0o700)
+        elif not self.sock_path.parent.is_dir():
+            # An override parent is the OPERATOR'S directory: never created,
+            # never chmodded (a 0755 dir silently became 0700 before this).
+            raise SocketOverrideInvalid(
+                f"--socket parent does not exist: {self.sock_path.parent}"
+            )
+        self._acquire_lock()
+        try:
+            if self.sock_path.exists():
+                if _probe_live(self.sock_path):
+                    # We hold the lock, so no daemon owns this path — a live
+                    # listener here is a foreign squatter, not ours to unlink.
+                    raise DaemonAlreadyRunning(
+                        f"a live listener is squatting {self.sock_path}"
+                        " (it does not hold the daemon lock)"
+                    )
+                self.sock_path.unlink()   # stale socket from a dead daemon
+            # Bind on a hidden name and rename into place only AFTER
+            # listen(): between bind() and listen() the file exists but
+            # connect() gets ECONNREFUSED, so exposing the public path first
+            # hands every prober a refused-connection window. A unix socket
+            # is its inode — the rename preserves the listener.
+            tmp = self.sock_path.with_name(
+                f".{self.sock_path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+            )
+            _check_sun_path(tmp)
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(tmp))
+                os.chmod(tmp, 0o600)
+                listener.listen(64)
+                os.replace(tmp, self.sock_path)
+                st = os.stat(self.sock_path)
+                self._sock_stat = (st.st_dev, st.st_ino)
+            except BaseException:
+                listener.close()
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                raise
+        except BaseException:
+            self._release_lock()
             raise
         listener.settimeout(1.0)      # poll granularity for stop/drain
         return listener
+
+    def _unlink_owned_socket(self) -> None:
+        """Remove the public socket ONLY if it is still the inode we renamed
+        in — a replacement (however it got there) is someone else's file."""
+        if self._sock_stat is None:
+            return
+        try:
+            st = os.stat(self.sock_path)
+            if (st.st_dev, st.st_ino) == self._sock_stat:
+                self.sock_path.unlink()
+        except OSError:
+            pass
 
     def stop(self, *_args) -> None:
         self._stop = True
@@ -316,7 +384,10 @@ class PlaneDaemon:
                         break
                     raise
                 try:
-                    conn.settimeout(30.0)
+                    # 5s, not 30: the loop is serial, so one stalled client
+                    # holds every healthy one for the whole read deadline —
+                    # a partial-sender costs the fleet 5s of ingest, not 30.
+                    conn.settimeout(5.0)
                     self._handle(conn)
                 except OSError as exc:
                     # A slow/vanished/hostile CLIENT (read timeout, reset) is
@@ -335,10 +406,8 @@ class PlaneDaemon:
                 self._listener.close()
             except OSError:
                 pass
-            try:
-                self.sock_path.unlink()
-            except OSError:
-                pass
+            self._unlink_owned_socket()
+            self._release_lock()
 
 
 def send_batch(sock_path: Path, events: list[dict], *, timeout: float = 30.0) -> dict:

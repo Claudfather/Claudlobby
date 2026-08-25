@@ -266,31 +266,27 @@ class SystemEvent(_Strict):
     """kind=system — machinery detections and lifecycle (F19: the token
     vocabulary is REGISTRY-governed, never a closed Literal: system-event
     emitters are the whole estate, and an unknown token must ingest rather
-    than vanish. Only the token's SHAPE is enforced here; the known-set
-    registry and warn-on-unknown accounting are Phase 2b)."""
+    than vanish. The token SHAPE pattern is WIRE-TIER hardening only — the
+    DDL deliberately accepts any non-null token, because the manifest rules
+    it registry-governed and a direct-SQL writer bypasses pydantic by
+    design; the two layers intentionally differ here and nowhere else).
+
+    severity is REGISTRY-OWNED (§9b): ingest stamps it from
+    registries.SYSTEM_EVENT_SEVERITY — it is deliberately NOT a wire field,
+    so a caller supplying one is a ContractViolation (extra=forbid).
+
+    data is DIAGNOSTIC (FIELD_POLICY): machinery-relayed, so over-cap
+    TRUNCATES with the detail_truncated flag at ingest (§9b: "over-cap =>
+    data_truncated flag ONLY") — never rejects; a diagnostic too big to
+    store whole must not cost the event that carried it."""
 
     event: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
-    severity: Optional[Literal["critical", "notice"]] = None
     # Anchor pair (DDL rule, mirrored): kind+uid together or neither; alias
     # only WITH the pair.
     subject_kind: Optional[Literal[SYSTEM_SUBJECT_KINDS]] = None
     subject_uid: Optional[str] = Field(None, min_length=1)
     subject_alias: Optional[str] = None
-    # DIAGNOSTIC payload (FIELD_POLICY ("system","data")): bounded, authored
-    # by machinery — over-cap REJECTS like every authored body.
     data: Optional[dict] = None
-
-    @field_validator("data")
-    @classmethod
-    def _data_byte_cap(cls, v):
-        cap = FIELD_POLICY[("system", "data")]["cap"]
-        if v is not None:
-            import json as _json
-
-            size = len(_json.dumps(v, ensure_ascii=False).encode("utf-8"))
-            if size > cap:
-                raise ValueError(f"system data exceeds {cap} bytes ({size})")
-        return v
 
     def model_post_init(self, __context) -> None:
         if (self.subject_uid is None) != (self.subject_kind is None):

@@ -292,7 +292,8 @@ def cmd_plane_serve(args) -> int:
 
     def run() -> int:
         from ..plane.daemon import (
-            DaemonAlreadyRunning, PlaneDaemon, SocketPathTooLong,
+            DaemonAlreadyRunning, PlaneDaemon, SocketOverrideInvalid,
+            SocketPathTooLong,
         )
 
         try:
@@ -301,10 +302,8 @@ def cmd_plane_serve(args) -> int:
                 socket_override=Path(args.socket) if args.socket else None,
                 drain_interval=float(args.drain_interval),
             ).serve()
-        except DaemonAlreadyRunning as exc:
-            print(f"plane serve: REFUSED — {exc}", file=sys.stderr)
-            return 1
-        except SocketPathTooLong as exc:
+        except (DaemonAlreadyRunning, SocketOverrideInvalid,
+                SocketPathTooLong) as exc:
             print(f"plane serve: REFUSED — {exc}", file=sys.stderr)
             return 1
         return 0

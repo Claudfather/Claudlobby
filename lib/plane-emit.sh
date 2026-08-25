@@ -27,7 +27,11 @@
 #   PLANE_EMIT_DISABLED  =1 -> no-op exit 0 (the ruled harness exemption:
 #                        byte-identical legacy behavior, nothing spawned)
 #   PLANE_EMIT_CLI       fallback command override (tests stub it; default
-#                        resolves through lib-common's claudlobby_cli)
+#                        resolves through lib-common's claudlobby_cli).
+#                        CONTRACT: a command LINE, whitespace-split — the
+#                        systemd ExecStart convention (#969). An executable
+#                        whose PATH contains spaces is not expressible;
+#                        wrap it in a script.
 
 set -euo pipefail
 

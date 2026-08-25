@@ -670,8 +670,11 @@ phase_host_jobs() {
             [ -e "$host_timers_dir/$sbase.timer" ] && continue  # timer-shaped: handled above
             found=1
             sjob="${sbase#claudlobby-}"
+            local svc_adopt_arg=()
+            [ "$ADOPT" = 1 ] && svc_adopt_arg=(--adopt)
             if TIMER_DIR="$host_timers_dir" UNIT_NAME="$sbase" \
-                "$SCRIPT_DIR/install-host-service-systemd.sh" "$sjob"; then
+                "$SCRIPT_DIR/install-host-service-systemd.sh" "$sjob" \
+                ${svc_adopt_arg[@]+"${svc_adopt_arg[@]}"}; then
                 ok "host service enrolled: $sbase"
                 PREREQ_OK+=("host-service-$sjob")
             else

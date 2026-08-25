@@ -27,7 +27,13 @@ fi
 if command -v claudlobby >/dev/null 2>&1; then
     exec claudlobby "${ARGS[@]}"
 fi
-if command -v python3 >/dev/null 2>&1; then
+# python3 existing is not python3 being USABLE: on a bare host (GitHub Linux,
+# a fresh box) /bin/python3 exists and cannot import claudlobby, and
+# `python3 -m claudlobby` then exits 1 — indistinguishable from a daemon
+# failure. Probe the import first; an unusable interpreter falls through to
+# the honest 127. One extra spawn at daemon START only, never per event.
+if command -v python3 >/dev/null 2>&1 \
+    && (cd "$ROOT" && python3 -c "import claudlobby" >/dev/null 2>&1); then
     cd "$ROOT"
     exec python3 -m claudlobby "${ARGS[@]}"
 fi
