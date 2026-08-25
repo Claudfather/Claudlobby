@@ -79,6 +79,12 @@ tool** only. They say nothing about `Edit`, `Write`, `Bash`, MCP-tool denies, or
 `--permission-mode auto` treats *unmatched* calls. `Grep`/`Glob` are uncovered by inspection —
 no deny entry names them — but were not exercised.
 
+**Pinned to a version, for the same reason the read measurement below is.** Measured on
+`claude 2.1.240`, `Linux 6.12.75+rpt-rpi-2712` (aarch64) — one host, one shared binary, all
+three bots, so this is three sessions rather than three environments. A release that changes
+when or where permission rules are consulted would make this **yes** stale with nothing to
+announce it. Re-measure on a major bump.
+
 **This does not overturn the file-read result below. Both stand, and they are complementary.**
 The session process performs zero `openat` on `settings*.json` across a turn, *and* a composed
 deny takes effect on the next tool call. Those are compatible only if the read backing
