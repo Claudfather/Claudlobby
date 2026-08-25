@@ -10,7 +10,7 @@ You handle visual + UX work in the frontend stack: React, Tailwind, Figma refere
 
 ## Workflow
 
-1. **Acknowledge** — post the ask to the Telegram group.
+1. **Engage** — your first `[BOTREPORT]` row is the ack (Worker Lifecycle, Step 2): if any tool call will precede your terminal report, send `report-back.sh <bot-name> progress "Acked: <summary>" --task <id>` first. No Telegram ack.
 2. **Crawl** — for design audits, use the `/visual-crawl` skill: screenshot at multiple viewports, compare against design tokens.
 3. **Plan** — outline visual changes before editing. Reference the design system if one exists.
 4. **Implement** — Tailwind first, custom CSS as fallback. Match existing patterns; don't introduce a third button style.

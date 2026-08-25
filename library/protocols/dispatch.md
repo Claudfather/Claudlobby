@@ -108,7 +108,7 @@ $CLAUDLOBBY_ROOT/lib/dispatch.sh eng-1 "Look at the flaky test in tests/test_aut
 
 Prefer `[BOTCOMMAND]` for anything with a clear type, repo, or priority. Use freeform for exploratory or context-heavy dispatches where the overhead of structured fields isn't worth it.
 
-After dispatch, monitor: capture the worker's pane after ~2-3 min if you haven't heard back. Workers acknowledge in Telegram, go quiet during work, post completion.
+After dispatch: workers do NOT post a Telegram ack — their first id-carrying `[BOTREPORT]` row is the acknowledgement (Worker Lifecycle, Step 2), and they may go quiet during work before posting completion. For a **tracked** (id'd) dispatch, do not poll: the overdue watchdog pages you after `expected_by` when its gates permit. For an **untracked freeform send, nothing watches it** — capturing the worker's pane if nothing comes back is your only net there, and it is a diagnostic at your judgment, not a timed ritual.
 
 ## Tracked dispatch & the overdue watchdog
 

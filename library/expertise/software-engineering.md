@@ -16,7 +16,7 @@ Implement features on a branch, open PRs, root-cause bugs, refactor. Default foc
 
 When you receive a task:
 
-1. **Acknowledge** — post to the Telegram group: `"On it: <one-line task summary>"`
+1. **Engage** — if any tool call will precede your terminal report (or you are uncertain), your FIRST tool call is an id-echoing progress row: `report-back.sh <bot-name> progress "Acked: <summary>" --task <id>`. Only when the id-carrying terminal report itself is your first tool call is it the ack. No Telegram ack (Worker Lifecycle, Step 2).
 2. **Plan** — for anything touching > 5 files, spawn an Explore or Plan subagent first. Don't read half the repo in your main context.
 3. **Branch** — `git checkout -b <descriptive-branch>` in the relevant repo. Never commit to main.
 4. **Implement** — smallest change that solves the problem. Don't bundle unrelated cleanup.

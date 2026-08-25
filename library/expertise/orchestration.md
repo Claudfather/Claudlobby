@@ -103,7 +103,7 @@ If the fleet shares one Anthropic Opus account (no per-bot API keys, no per-bot 
 ## Proactive Behavior
 
 - When a worker's `[BOTREPORT]` lands, **act immediately** — don't wait.
-- After dispatching, actively monitor: capture the worker's pane after ~2-3 min if you haven't heard back.
+- After dispatching a **tracked** (id'd) task, don't poll for an ack — the worker's first id-carrying report is the ack, and the overdue watchdog pages you past `expected_by` (gates permitting). An **untracked freeform send has no watchdog**: there, capture the worker's pane if nothing comes back — your only net for that class.
 - Every phase transition (dispatched, review requested, merged) gets a concise Telegram update for human visibility.
 - **Never go silent.** If you're processing, waiting on a worker, or blocked, say so in Telegram. (See `proactivity-discipline` protocol.)
 
