@@ -1107,6 +1107,24 @@ assert_eq "corrections alone are not receipts, so the page is a result again" "0
 assert_contains "and contamination is reported as unruled-out, not as covered" \
     "contamination CANNOT be ruled out" "$OUT41"
 
+# ---- 11b2: THREE MORE writer conventions, because there is no canonical writer
+# Every one of these receipts is hand-typed at rescue time — there is no shared
+# writer function anywhere in the tree — so a third spacing convention is the
+# same failure class recurring, not a hypothetical. `": ?"` hardened against the
+# two conventions we had OBSERVED and would have silently dropped these three.
+# Closing the class (`[[:space:]]*` on both sides of the colon) rather than the
+# instances is the point. Credit: rajan, reviewing #1347.
+for _sp in 'two-spaces:"type":  "fleet_rescue"' 'pre-colon:"type" : "fleet_rescue"' 'tab:"type":\t"fleet_rescue"'; do
+    _label="${_sp%%:*}"; _form="${_sp#*:}"
+    rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+    mkdir -p "$ROOT/state/events"
+    printf '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet",%b,"source":"manual","data":{"actor":"t","bots_rescued":["arishape"],"selfstart_measurement_valid_before":"%s"}}\n' \
+        "$_form" "$BOUNDARY" > "$ROOT/state/events/fleet-2026-08-06.jsonl"
+    _out="$(run_snapshot "$BOOT")"
+    assert_eq "writer convention '$_label' is read, not silently dropped" \
+        "RESCUED" "$(section_of "$_out" arishape)"
+done
+
 # ---- 11c: two rescuers, mixed spacing — EARLIEST boundary wins -------------
 # Multiple rescuers per boot is the normal case, not the exception: the
 # 2026-08-24 boot had two within 35 seconds. The loop already handles it
