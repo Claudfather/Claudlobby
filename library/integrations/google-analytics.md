@@ -4,10 +4,12 @@ type: mcp
 env_contract:
   GA4_SA_KEY_PATH:
     description: Absolute path to the GA4 service-account JSON key file (gitignored)
-    tier: fleet
+    default_tier: fleet
+    secret: true
   GA4_PROPERTY_ID:
     description: Numeric GA4 property ID of the store property (not the G-XXXX measurement ID)
-    tier: fleet
+    default_tier: fleet
+    secret: false
 tool_grants:
   - "mcp__google-analytics__get_ga4_data"
   - "mcp__google-analytics__search_schema"

@@ -1054,6 +1054,112 @@ assert_contains "and names the clock as the reason" "the boot clock is STALE" "$
 assert_eq "so no bot is called late on an untrusted clock" \
     "0" "$(printf '%s\n' "$OUT30" | sed -n 's/^LATE, UNEXPLAINED.*(\([0-9]*\))$/\1/p')"
 
+# ---- 11: a receipt written with json.dumps SPACING is still read -----------
+# The #1202 class in a READER. `lib/selfstart-snapshot.sh` matched receipts with
+# a compact-only pattern, while a rescuer writing via python `json.dumps` emits
+# `"type": "fleet_rescue"` with a space. Measured live on the 2026-08-24 boot:
+# two rescuers, one spaced and one compact, and the reader saw ONE of them —
+# dropping a 17-name receipt whose boundary was also the EARLIER of the two. The
+# page then printed 7 bots as LATE-UNEXPLAINED ("something woke these bots and
+# nothing recorded what") about bots a receipt named explicitly.
+#
+# Three patterns had to move together, and this is the load-bearing part: the
+# reader alone is NOT a fix. With only the reader widened, the row is admitted
+# and then `row_field` / `row_rescued_names` — both compact-only — fail to parse
+# it, so the boundary flips to UNUSABLE for EVERY receipt including the
+# well-formed compact one. Verified on the live ledger: reader-only took
+# SELF-STARTED from 3 to 0 and ADJUDICATE from 7 to 11. A partial fix here is
+# worse than none, which is why all three are pinned in one test.
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+# CONTROL FIRST — with no receipt, `arishape` is LATE-UNEXPLAINED. Without this
+# the arm below could pass by the fixture simply not being late, which is the
+# way a spacing test most easily certifies nothing.
+LATE_BEFORE="$(printf '%s\n' "$(run_snapshot "$BOOT")" | sed -n 's/^LATE, UNEXPLAINED.*(\([0-9]*\))$/\1/p')"
+assert_eq "control: with no receipt the exemplar is an unexplained gap" \
+    "LATE-UNEXPLAINED" "$(section_of "$(run_snapshot "$BOOT")" arishape)"
+
+SPACED_BASE='"ts": "2026-08-06T08:50:00-04:00", "bot": "fleet", "type": "fleet_rescue", "source": "manual"'
+mk_receipt 2026-08-06 "{$SPACED_BASE, \"data\": {\"actor\": \"tester\", \"bots_rescued\": [\"arishape\"], \"selfstart_measurement_valid_before\": \"$BOUNDARY\"}}"
+OUT40="$(run_snapshot "$BOOT")"; RC40=$?
+
+assert_eq "a spaced receipt is READ, so the page still refuses" "6" "$RC40"
+assert_contains "and its boundary is usable, not UNUSABLE" "Rescue boundary   : $BOUNDARY" "$OUT40"
+assert_contains "and its name list is parsed, not silently empty" \
+    "Named as rescued  : 1 bot(s)" "$OUT40"
+# The whole point of the bug, reproduced: a bot a receipt names EXPLICITLY was
+# printed as "something woke these bots and nothing recorded what".
+assert_eq "a receipt-named bot is RESCUED, not an unexplained gap" \
+    "RESCUED" "$(section_of "$OUT40" arishape)"
+assert_eq "so the unexplained-gap count drops by exactly that bot" \
+    "$((LATE_BEFORE - 1))" "$(printf '%s\n' "$OUT40" | sed -n 's/^LATE, UNEXPLAINED.*(\([0-9]*\))$/\1/p')"
+
+# ---- 11b: POSITIVE CONTROL — the correction exclusion survives both spacings
+# The closing quote is what keeps `fleet_rescue_correction` rows out, and it is
+# load-bearing: a correction carries none of a receipt's fields, so admitting
+# one would refuse the whole page. Widening for an optional space must not
+# widen into a prefix match. Both spellings are checked, because fixing the
+# spacing is exactly the edit that could reintroduce this.
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+mk_receipt 2026-08-06 '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet","type":"fleet_rescue_correction","source":"manual","data":{"note":"compact correction"}}'
+mk_receipt 2026-08-06 '{"ts": "2026-08-06T08:50:00-04:00", "bot": "fleet", "type": "fleet_rescue_correction", "source": "manual", "data": {"note": "spaced correction"}}'
+OUT41="$(run_snapshot "$BOOT")"; RC41=$?
+assert_eq "corrections alone are not receipts, so the page is a result again" "0" "$RC41"
+assert_contains "and contamination is reported as unruled-out, not as covered" \
+    "contamination CANNOT be ruled out" "$OUT41"
+
+# The exclusion has to hold for EVERY form the matcher now admits, not just the
+# two it originally hardened against — otherwise widening for whitespace could
+# turn this into a prefix match in exactly the forms nothing tests. vera caught
+# that the control covered 2 of 5 while the code was safe in all 5: safe and
+# PINNED are different, and only the second survives the next edit.
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+mkdir -p "$ROOT/state/events"
+for _cf in '"type":"fleet_rescue_correction"' '"type": "fleet_rescue_correction"' \
+           '"type":  "fleet_rescue_correction"' '"type" : "fleet_rescue_correction"' \
+           '"type":\t"fleet_rescue_correction"'; do
+    printf '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet",%b,"source":"manual","data":{"note":"c"}}\n' \
+        "$_cf" >> "$ROOT/state/events/fleet-2026-08-06.jsonl"
+done
+OUT41b="$(run_snapshot "$BOOT")"; RC41b=$?
+assert_eq "corrections in ALL FIVE whitespace forms are still excluded" "0" "$RC41b"
+assert_contains "and none of the five is mistaken for a receipt" \
+    "contamination CANNOT be ruled out" "$OUT41b"
+
+# ---- 11b2: THREE MORE writer conventions, because there is no canonical writer
+# Every one of these receipts is hand-typed at rescue time — there is no shared
+# writer function anywhere in the tree — so a third spacing convention is the
+# same failure class recurring, not a hypothetical. `": ?"` hardened against the
+# two conventions we had OBSERVED and would have silently dropped these three.
+# Closing the class (`[[:space:]]*` on both sides of the colon) rather than the
+# instances is the point. Credit: rajan, reviewing #1347.
+for _sp in 'two-spaces:"type":  "fleet_rescue"' 'pre-colon:"type" : "fleet_rescue"' 'tab:"type":\t"fleet_rescue"'; do
+    _label="${_sp%%:*}"; _form="${_sp#*:}"
+    rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+    mkdir -p "$ROOT/state/events"
+    printf '{"ts":"2026-08-06T08:50:00-04:00","bot":"fleet",%b,"source":"manual","data":{"actor":"t","bots_rescued":["arishape"],"selfstart_measurement_valid_before":"%s"}}\n' \
+        "$_form" "$BOUNDARY" > "$ROOT/state/events/fleet-2026-08-06.jsonl"
+    _out="$(run_snapshot "$BOOT")"
+    assert_eq "writer convention '$_label' is read, not silently dropped" \
+        "RESCUED" "$(section_of "$_out" arishape)"
+done
+
+# ---- 11c: two rescuers, mixed spacing — EARLIEST boundary wins -------------
+# Multiple rescuers per boot is the normal case, not the exception: the
+# 2026-08-24 boot had two within 35 seconds. The loop already handles it
+# (earliest wins, because a later rescue cannot un-suspect a bot an earlier one
+# already covers) and that behaviour is pinned here so the spacing fix is not
+# mistaken for a one-rescuer assumption. `row_field`'s rc=2 ambiguity is a
+# WITHIN-ROW check — two rows with two boundaries is not ambiguous.
+rm -f "$ROOT/state/events/fleet-2026-08-06.jsonl"
+EARLIER="2026-08-06T12:45:00.000Z"
+mk_receipt 2026-08-06 "{$SPACED_BASE, \"data\": {\"actor\": \"early\", \"bots_rescued\": [\"rescuedbot\"], \"selfstart_measurement_valid_before\": \"$EARLIER\"}}"
+mk_receipt 2026-08-06 "{$RECEIPT_BASE,\"data\":{\"actor\":\"late\",\"bots_rescued\":[\"contradictor\"],\"selfstart_measurement_valid_before\":\"$BOUNDARY\"}}"
+OUT42="$(run_snapshot "$BOOT")"
+assert_contains "with two rescuers the EARLIEST boundary is adopted" \
+    "Rescue boundary   : $EARLIER" "$OUT42"
+assert_contains "and both name lists are unioned, not replaced" \
+    "Named as rescued  : 2 bot(s)" "$OUT42"
+
 echo
 echo "  ---- $PASS/$TOTAL passed, $FAIL failed ----"
 [ "$FAIL" -eq 0 ] || exit 1

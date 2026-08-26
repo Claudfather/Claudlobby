@@ -321,6 +321,41 @@ Any extra fields are passed through verbatim.
 an org it does not "scope" to (its product org plus the framework repo it contributes back to).
 Credentials are declared separately, below.
 
+### `fleet.defaults.credential_sources` / `bots.<name>.credential_sources`
+
+```yaml
+fleet:
+  defaults:
+    credential_sources:
+      GITHUB_PAT: cli:gh-token      # this fleet takes the host CLI identity
+  bots:
+    ravi:
+      credential_sources:
+        GITHUB_PAT: literal          # ...except ravi, which uses its own .env value
+```
+
+Maps an env var **name** to where its value comes from, overriding the default the
+library contract declares. Fleet-then-bot merged, bot winning — the same merge
+`git_credentials` uses.
+
+Values are members of a **closed, framework-owned registry**
+(`known_values.KNOWN_CREDENTIAL_SOURCES`: `literal`, `cli:gh-token`, and
+`mint:github-app` reserved). An unregistered value is a `validate` **error**, held to
+exactly the same rule as a contract's own `source`: the resolver dispatches on the
+whole identifier through a fixed `case` arm, so a value arriving from `fleet.yaml`
+must be no more admissible than one arriving from a library fragment. A second,
+laxer door into the same resolver would void the injection guarantee for both.
+
+**This is schema only today.** Nothing resolves these yet — declaring one records
+intent and appears in the credential register; it does not fetch anything. Supply
+the value in a `.env` tier as usual. `mint:github-app` additionally warns, because
+it is registered and deliberately unresolvable.
+
+Why per-scope rather than one contract-wide answer: a var is resolvable at **any**
+`.env` tier, so "where does this value come from" is a question each scope can answer
+differently — a fleet equipping its own GitHub App, a single bot declining automatic
+resolution.
+
 ### `fleet.defaults.git_credentials` / `bots.<name>.git_credentials`
 
 Maps a **GitHub org** to the **name of the env var** holding that org's token. Declarable
@@ -354,6 +389,52 @@ you do not declare keep the host default helper.
 **Values are never composed.** The generated helper references `$YOUR_VAR`; git reads the value
 from the process env at push time, so the composed file carries no secret. See the env-name
 contract in [`environment-variables.md`](environment-variables.md).
+
+### `fleet.defaults.github_app` / `bots.<name>.github_app`
+
+GitHub App git-auth routing (App-auth P3, epic #1270 — dormant by default; declaring nothing
+composes nothing, byte-identical to before the feature existed). Declarable fleet-wide and
+overridable per bot; the merge is per-field, and a bot may opt out of a fleet default with
+`enabled: false`.
+
+```yaml
+fleet:
+  defaults:
+    github_app:
+      slug: my-fleet-app          # App URL slug — with bot_user_id, commits become <slug>[bot]
+      bot_user_id: 1234567        # the App BOT USER id (not the App id); both from setup-github-app.sh
+      # orgs: [MyOrg]             # optional: route only these orgs via the App
+```
+
+**What it composes.** An App section in the per-bot `.gitconfig` (`GIT_CONFIG_GLOBAL`): a
+`cache --timeout=3000` layer, the `lib/git-credential-github-app` helper by absolute path, the
+ssh→https `insteadOf` rewrite (App tokens are HTTPS-only), the `<slug>[bot]` commit identity when
+both identity fields are set, and a composed `tools/gh` shim (on PATH ahead of system `gh`) so
+per-call App minting is mechanical.
+
+**Commit identity is PER-ORG when `orgs:` is scoped** (#1300). With `orgs:` declared, the
+`<slug>[bot]` identity applies only in repos whose **remote** is one of those orgs (via a
+`includeIf "hasconfig:remote.*.url:…"` pulling in a sibling `.gitconfig-github-app-id` fragment,
+git ≥ 2.36); every other repo keeps the operator identity from the include. So a bot that
+commits to *both* the App's org and other orgs authors as `<slug>[bot]` on the App's repos and
+as the operator elsewhere — and the App never needs access to those other orgs (their pushes use
+the host default helper). A host-generic App (no `orgs:`) sets the identity globally instead.
+The match is on the raw remote URL across all three spellings (https, `git@github.com:`,
+`ssh://`) and is **case-sensitive** on the org segment — a remote cloned with non-canonical
+casing (`orga` for a declared `OrgA`) authors as the operator, same as the `insteadOf` rewrite. Credential VALUES ride `GITHUB_APP_ID` /
+`GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` in the fleet `.env` — fleet-tier in
+v1 (all bots on a host share one git credential cache, so a per-bot installation override could
+cross-serve cached tokens; the validator warns).
+
+**Precedence is per-DECLARATION, by section order.** An org with an explicit `git_credentials`
+PAT wins over the App for that org — even when the PAT var is EMPTY (the org helper answers with
+an empty password, git presents it, GitHub 401s; the App helper is never consulted). The gh
+fallback survives only for org-scoped App declarations; a host-generic App suppresses it, because
+its only remaining role would be silently substituting the operator identity after an App-helper
+failure.
+
+**Restart-not-reload applies** — the composed `.gitconfig`, `bot.conf` exports, and `tools/gh`
+reach a running bot only at its next restart.
 
 Keys must be org names — a key containing `/` is rejected, because repo-scoped routing would
 silently never match. A declared var that is unset in every `.env` tier is a `validate` **warning**

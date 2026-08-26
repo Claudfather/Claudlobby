@@ -65,14 +65,64 @@ def resolve_placeholders(
 
 
 class ContractVar(NamedTuple):
-    """One operator-facing env var enumerated from an MCP ``_env_contract`` entry."""
+    """One operator-facing env var enumerated from an env contract.
+
+    Also what :func:`required_vars` yields — deliberately ONE record rather
+    than a near-duplicate per consumer. An earlier draft had a second type
+    differing only in carrying ``origin``, which meant every new contract field
+    had to be added in three places and re-packed positionally between two
+    records whose slots were permuted; a mis-ordered re-pack was silent,
+    because the permuted slots share types.
+
+    On the ``source`` / ``origin`` split: ``origin`` is the DECLARING SURFACE
+    (``"mcp/github"``, ``"integration/notion"``), which the old bare tuple
+    confusingly called ``source``. #1214 adds a contract field genuinely called
+    ``source`` meaning the RESOLVER (``"cli:gh-token"``). Two unrelated facts
+    under one name is how a reader picks the wrong one, so ``source`` matches
+    the JSON key it carries and provenance is ``origin``.
+    """
 
     canonical_name: (
         str  # instance-renamed when instance-scoped, else the raw contract key
     )
-    tier: str  # "fleet" | "bot"
+    #: Where a value for this var CONVENTIONALLY belongs — a placement
+    #: default, never a constraint on where it may resolve from. The
+    #: runtime cascades four tiers and the most specific ASSIGNMENT wins,
+    #: so a var declared ``fleet`` still resolves from ``~/.env`` if that
+    #: is the only tier holding it. It was called ``tier`` and was read as
+    #: THE location, which is how a credential placed at the host or bot
+    #: tier booted fine and read as missing to every tool (#1226).
+    default_tier: str  # one of known_values.ENV_TIERS
     instance: str | None  # instance label when instance-scoped, else None (shared)
     description: str  # meta.get("description", "")
+    # --- #1214 Phase 1: the two fields that make a value obtainable ---
+    # THE TEST FOR `secret`: can the integration AUTHENTICATE without this
+    # value? No -> true. Yes -> false. It is not "is this string sensitive to
+    # print". Worked example: PRINTIFY_SHOP_ID is false because without it you
+    # still authenticate fine, you just cannot target a shop — a config failure,
+    # not a credential failure. Stated as a test rather than as a list of
+    # example types, because a list settles only the cases already on it.
+    # The split is what keeps the fail-loud rung from firing on `PORT`,
+    # becoming noise, and being suppressed along with the real alerts.
+    #
+    # `source` is OPTIONAL. Absent means a human supplies the value, as today
+    # (47 of the 48 declared vars). When present it must be a whole identifier
+    # from `known_values.KNOWN_CREDENTIAL_SOURCES` — never invent one.
+    secret: bool = False
+    source: str | None = None
+    # Set by whichever enumerator labelled this var; empty from the bare walk,
+    # which does not know which surface asked.
+    origin: str = ""
+
+    @property
+    def name(self) -> str:
+        """Alias for :attr:`canonical_name` — reads better on a required-var."""
+        return self.canonical_name
+
+
+# What `required_vars` yields. Same record; the alias documents the intent at
+# the call site without forking the type.
+RequiredVar = ContractVar
 
 
 def iter_operator_contract_vars(
@@ -95,32 +145,43 @@ def iter_operator_contract_vars(
             continue
         if meta.get("provided_by") == "composer":
             continue
-        tier = meta.get("tier", "fleet")
+        default_tier = meta.get("default_tier", "fleet")
         scope = meta.get("scope", "shared")
         description = meta.get("description", "")
+        # Defaulting rather than raising keeps read-only callers (doctor, .env
+        # scaffolding) working on a fragment the validator is already rejecting,
+        # and False is the safe direction: it under-alerts on a malformed
+        # fragment rather than firing a credential alert for every var in it.
+        secret = bool(meta.get("secret", False))
+        source = meta.get("source")
         if scope == "instance":
             for inst in entry.instances:
                 yield ContractVar(
                     canonical_var_name(var_name, contract, entry, inst),
-                    tier,
+                    default_tier,
                     inst,
                     description,
+                    secret,
+                    source,
                 )
         else:
-            yield ContractVar(var_name, tier, None, description)
+            yield ContractVar(
+                var_name, default_tier, None, description, secret, source
+            )
 
 
-def required_vars(
-    bot: BotConfig, paths: Paths
-) -> list[tuple[str, str, str, str | None]]:
-    """Return ``[(canonical_var, tier, source, instance)]`` this bot needs.
+def required_vars(bot: BotConfig, paths: Paths) -> list[RequiredVar]:
+    """Return the :class:`RequiredVar` records this bot needs.
 
     Walks MCP fragments and integration docs, applying instance-scope
     prefixing so callers see the final var names that land in ``.mcp.json``.
+
+    Yields records, not bare tuples — see :class:`RequiredVar` for why the
+    provenance slot is ``origin`` and ``source`` now means the resolver.
     """
     from .loader import parse_frontmatter
 
-    out: list[tuple[str, str, str, str | None]] = []
+    out: list[RequiredVar] = []
 
     # --- MCP fragment contracts ---
     seen_mcp: set[str] = set()
@@ -138,10 +199,12 @@ def required_vars(
             continue
         contract = frag.get("_env_contract", {})
         # Shared operator-facing walk: skips provided_by:composer + applies
-        # instance naming (one home, no drift — #568, was #547). Map to the
-        # validator's (var, tier, source, instance) tuple shape.
+        # instance naming (one home, no drift — #568, was #547). Re-labelled
+        # with this declaring surface; every other field is carried as-is, so
+        # a new contract field is one edit rather than a hand-written re-pack
+        # whose permuted slots would mis-bind silently.
         for cv in iter_operator_contract_vars(contract, entry):
-            out.append((cv.canonical_name, cv.tier, f"mcp/{entry.name}", cv.instance))
+            out.append(cv._replace(origin=f"mcp/{entry.name}"))
 
     # --- Integration doc contracts (auto-pair fallback matches composer) ---
     integration_names = bot.integrations or [
@@ -168,7 +231,60 @@ def required_vars(
         for var_name, meta in contract.items():
             if not isinstance(meta, dict):
                 continue
-            tier = meta.get("tier", "fleet")
-            out.append((var_name, tier, f"integration/{int_name}", None))
+            default_tier = meta.get("default_tier", "fleet")
+            # Integration-doc frontmatter is the OTHER declaration surface for
+            # the same two facts, and it is backfilled and gated exactly like
+            # the MCP one -- deliberately, because 10 of its 21 vars have NO
+            # paired MCP fragment (`type: cli`: neon, railway, snowflake), so a
+            # gate covering only fragments could never reach RAILWAY_API_TOKEN,
+            # NEON_API_KEY or the Snowflake key vars. Those are the credentials
+            # whose silent blanking started this workstream; exempting them
+            # would have been the #1213 shape relocated one surface over.
+            #
+            # The default below therefore applies only to a contract the
+            # validator is already rejecting, same as the MCP branch.
+            out.append(
+                ContractVar(
+                    var_name,
+                    default_tier,
+                    None,
+                    meta.get("description", ""),
+                    bool(meta.get("secret", False)),
+                    meta.get("source"),
+                    f"integration/{int_name}",
+                )
+            )
 
-    return out
+    return _reconcile_secret(out)
+
+
+def _reconcile_secret(records: list[ContractVar]) -> list[ContractVar]:
+    """Make ``secret`` independent of traversal order for a both-surface var.
+
+    11 real vars are declared on BOTH surfaces (e.g. ``PRINTIFY_API_KEY`` in
+    both ``library/mcp/printify.json`` and ``library/integrations/printify.md``),
+    and this function emits a record per declaration — so without reconciling,
+    the same var arrives twice carrying two different answers to "is this a
+    credential", and which one a consumer sees is decided by walk order. **A
+    required field whose value depends on file traversal order is not a
+    required field.**
+
+    Records are NOT deduped: both origins are real and a caller may want to know
+    a var is declared twice. Only the *value* is unified, so no consumer can
+    observe an order-dependent ``secret``.
+
+    Reconciliation is OR, and the direction is the safe one rather than the
+    tidy one: if either surface calls a var a credential, it is treated as one.
+    Over-alerting is visible and gets corrected; under-alerting is #1213 exactly
+    — a real credential nothing ever fires on. The validator refuses a
+    disagreement outright (``_validate_env_contracts``), so this is the second
+    line: it keeps the value sound for anything that reaches these records
+    without having gone through validate.
+    """
+    secret_by_var: dict[str, bool] = {}
+    for r in records:
+        secret_by_var[r.name] = secret_by_var.get(r.name, False) or r.secret
+    return [
+        r if r.secret == secret_by_var[r.name] else r._replace(secret=True)
+        for r in records
+    ]

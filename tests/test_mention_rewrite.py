@@ -6,7 +6,7 @@ names. That is right as far as it goes and provably does not go far enough.
 THE FIXTURES ARE REAL. Of the eleven accounts we actually notified, three appear
 below because no bot-name list would ever have contained them:
 
-    Botfather  — a real user (Tushar). In our issues only because we documented
+    Botfather  — a real user. In our issues only because we documented
                  Telegram's BotFather.
     latest     — a real account. Reads like a version string.
     216        — a real account. Reads like a number.
@@ -218,3 +218,99 @@ class TestReportMode:
         disagree about what counts, or a file gets refused for a mention that
         would never have notified."""
         assert mr.report("```\n" + AT + "vera\n```\n", BOTS, ALLOW) == []
+
+
+# --- #1329: the lookbehind was an allowlist, so markdown escaped it ----------
+# A verdict comment reading `**@<bot>s line about this PR is exact**` was
+# linkified by GitHub and notified a REAL user, who replied on the PR to say we
+# had the wrong person. Second real person hit by this class after #1019.
+#
+# The guard RAN and did not match. Its lookbehind admitted only whitespace,
+# bracket, paren or quote — so it covered the rare positions and missed the
+# universal ones. House style opens every verdict with `**`, every bullet with
+# `-`, every table cell with `|`.
+#
+# TABLE, NOT A REPRESENTATIVE CASE. The defect is a SET of characters, and a
+# single-case test goes green while the other members still escape — which is
+# exactly how this survived 39 existing tests in this file.
+
+_ESCAPED_PREFIXES = [
+    ("bold", "**@vera** ships it"),
+    ("italic-star", "*@vera*"),
+    ("italic-underscore", "_@vera_"),
+    ("bold-underscore", "__@vera__"),
+    ("strikethrough", "~~@vera~~"),
+    ("blockquote", "> @vera take a look"),
+    ("bullet-spaced", "- @vera please review"),
+    ("bullet-tight", "-@vera"),
+    ("heading", "# @vera"),
+    ("table-cell", "|@vera|"),
+    ("slash", "cc/@vera"),
+    ("colon", "cc:@vera"),
+    ("underscore-suffix", "snake_@vera"),
+]
+
+
+@pytest.mark.parametrize("label,text", _ESCAPED_PREFIXES, ids=[p[0] for p in _ESCAPED_PREFIXES])
+def test_every_markdown_position_is_rewritten(label, text):
+    """Each prefix is its own case so one member cannot hide behind another."""
+    out = mr.rewrite(text, {"vera"}, set(), style="backtick")
+    assert out != text, f"{label}: mention escaped the guard in {text!r}"
+    assert "@vera" not in out, f"{label}: an @-mention survived in {out!r}"
+
+
+_MUST_STAY_QUIET = [
+    ("email", "email@vera"),
+    ("real-email", "someone@vera.com"),
+    ("alnum-before", "a1@vera"),
+    ("hyphen-email", "my-email@vera"),
+    ("curl-stdin", "-F body=@-"),
+]
+
+
+@pytest.mark.parametrize("label,text", _MUST_STAY_QUIET, ids=[p[0] for p in _MUST_STAY_QUIET])
+def test_mid_token_at_signs_are_left_alone(label, text):
+    """The inversion must not turn into "rewrite every @".
+
+    The real intent is *do not match mid-token*, which is what keeps
+    `user@example.com` and curl's `body=@-` intact.
+    """
+    assert mr.rewrite(text, {"vera"}, set(), style="backtick") == text
+
+
+def test_underscore_and_hyphen_are_absent_from_the_denylist_on_purpose():
+    """The obvious denylist `[A-Za-z0-9_-]` still misses three enumerated cases.
+
+    Measured before choosing it: with `_` and `-` included, `_@vera_`, `__@vera__`
+    and `-@vera` all still escape. They buy nothing, because `my-email@vera` and
+    `snake_case@vera` are already blocked by the ALPHANUMERIC immediately before
+    the `@`. This pins the narrower denylist against a well-intentioned widening.
+    """
+    for text in ("_@vera_", "__@vera__", "-@vera"):
+        assert mr.rewrite(text, {"vera"}, set(), style="backtick") != text
+    assert mr.rewrite("my-email@vera", {"vera"}, set(), style="backtick") == "my-email@vera"
+
+
+def test_the_trailing_anchor_is_not_a_word_boundary():
+    """A second, independent defect: `\\b` fails when a handle is followed by `_`.
+
+    There is no word boundary between `a` and `_`, so `_@vera_` stayed unmatched
+    even with the lookbehind fixed. Fixing only the lookbehind — the obvious
+    reading of the bug — leaves markdown italic and bold still escaping.
+    """
+    assert "\\b" not in mr._MENTION.pattern
+    assert mr.rewrite("_@vera_", {"vera"}, set(), style="backtick") != "_@vera_"
+
+
+def test_backtick_is_decided_by_the_span_parser_not_the_lookbehind():
+    """Backtick was on the escape list only because the lookbehind excluded it.
+
+    It belongs to the fence/span parser, which can see whether the span CLOSES —
+    a character test cannot. Both directions asserted, because moving the
+    decision is only correct if the closed case still holds.
+    """
+    unclosed = "see `@vera for detail"
+    assert mr.rewrite(unclosed, {"vera"}, set(), style="backtick") != unclosed
+
+    closed = "`@vera` is code"
+    assert mr.rewrite(closed, {"vera"}, set(), style="backtick") == closed

@@ -189,7 +189,12 @@ def _setup_seed_tree(tmp_path: Path) -> Path:
     mcp_frag = {
         "github": {"command": "gh", "args": ["mcp"]},
         "_env_contract": {
-            "GITHUB_PAT": {"description": "GitHub PAT", "tier": "fleet"},
+            # `secret` is required on every entry since #1214 Phase 1.
+            "GITHUB_PAT": {
+                "description": "GitHub PAT",
+                "default_tier": "fleet",
+                "secret": True,
+            },
         },
     }
     (root / "library" / "mcp" / "github.json").write_text(json.dumps(mcp_frag))

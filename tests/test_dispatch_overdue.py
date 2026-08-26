@@ -1046,6 +1046,22 @@ class TestSupersession:
         _write_jsonl(rlog, [])
         return dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW)
 
+    def _both_open_doors(self, tmp_path, dispatches, bot="w1", reports=None):
+        """(open list ids, resolver id) — the PRODUCT the class never asserted.
+
+        Every case above routes through `_overdue`, so supersession was pinned on
+        the deadline-bound path only. A helper returning one door would let the
+        same hole reopen shifted by one; this returns both because the defect was
+        the DISAGREEMENT between them, not either door's own behaviour.
+        """
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, reports or [])
+        return (
+            [r[2] for r in dispatch_overdue.open_dispatches(bot, str(dlog), str(rlog))],
+            dispatch_overdue.open_task_id(bot, str(dlog), str(rlog)),
+        )
+
     def test_an_explicitly_superseded_row_is_retired(self, tmp_path):
         """The stranded row goes quiet; the replacement stays accountable."""
         out = self._overdue(
@@ -1142,6 +1158,138 @@ class TestSupersession:
             ],
         )
         assert [r[3] for r in out.get("w1", [])] == ["t-5"]
+
+    # ------------------------------------------------------------------
+    # #1357 — the open doors honour the same retirement the overdue path does.
+    #
+    # These are the cases whose ABSENCE let a live defect sit under a green
+    # suite. Supersession was tested (every case above) and `open_dispatches`
+    # was tested (TestOpenDispatches, ~90 lines) — never together, so the
+    # product went unasserted and the two doors disagreed about OPEN.
+    #
+    # A fix that merely wires `_superseded_ids` into `open_dispatches` passes
+    # the suite that also passed BEFORE the fix, so these were run against
+    # UNFIXED main (git archive of origin/main, this file grafted on) to check
+    # they are not the same certificate. Result — 3 failed, 8 passed:
+    #
+    #   FAILS on main   test_a_retired_row_is_gone_from_BOTH_open_doors
+    #                   test_the_two_doors_agree_on_what_retirement_means
+    #                   test_a_chain_leaves_no_phantom_at_the_head
+    #   PASSES on main  test_an_undeclared_queue_is_NOT_retired_from_the_open_doors
+    #                   test_supersedes_is_scoped_by_bot_on_the_open_doors_too
+    #
+    # Those last two are CONTROLS, not detectors, and passing in both arms is
+    # what makes them controls: they pin the boundary the fix must not cross
+    # (retire only on an explicit same-bot declaration). A control that failed
+    # on main would be testing the change instead of bounding it.
+    # ------------------------------------------------------------------
+
+    def test_a_retired_row_is_gone_from_BOTH_open_doors(self, tmp_path):
+        """The core regression, stated as the product rather than as one door.
+
+        A retired row was simultaneously invisible to alerting (filtered by
+        `_classify_all`) and the PREFERRED close target (head of this list, which
+        is what `report-back.sh` resolves an id-less report to). So the next
+        id-less terminal report closed the row declared dead while the live
+        successor stranded — measured on four supersede pairs across three fleets.
+        """
+        ids, head = self._both_open_doors(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-old"),
+                _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+            ],
+        )
+        assert ids == ["t-200-new"], f"the retired row is still listed open: {ids}"
+        assert head == "t-200-new", (
+            f"the resolver hands back the RETIRED row ({head}) — an id-less report "
+            "would close the row we declared dead and strand the live one"
+        )
+
+    def test_the_two_doors_agree_on_what_retirement_means(self, tmp_path):
+        """The desync assertion — neither door alone can express this.
+
+        `dispatch-overdue.py` argues `--open-task` was made literally the head of
+        `--open`'s list because a resolver that could hand back an id the list
+        does not contain is a desync class. This is that class one level out:
+        OVERDUE and OPEN disagreeing about retirement, with the resolver
+        inheriting the wrong answer. Assert the agreement, not either side.
+        """
+        dispatches = [
+            _dispatch("w1", 100, 1000, task_id="t-100-old"),
+            _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+        ]
+        overdue_ids = {r[3] for r in self._overdue(tmp_path, dispatches).get("w1", [])}
+        open_ids, head = self._both_open_doors(tmp_path, dispatches)
+        assert "t-100-old" not in overdue_ids, (
+            "positive control failed: the overdue path stopped retiring the row, "
+            "so a green agreement assertion below would prove nothing"
+        )
+        assert "t-100-old" not in set(open_ids), (
+            "OVERDUE retired the row and OPEN did not — the doors disagree"
+        )
+        assert head != "t-100-old", "the resolver inherited the wrong answer"
+        assert set(overdue_ids) <= set(open_ids), (
+            "open must stay a strict superset of overdue while sharing its "
+            f"retirement rule: open={open_ids} overdue={sorted(overdue_ids)}"
+        )
+
+    def test_an_undeclared_queue_is_NOT_retired_from_the_open_doors(self, tmp_path):
+        """The boundary, restated for the door that just gained the gate.
+
+        Retiring too eagerly turns a false-page bug into a dropped-task bug, and
+        on THIS door it would be worse than on the overdue one: the resolver
+        writes its answer into the ledger, so an over-broad gate silently marks
+        live work `completed`. Two dispatches, no declaration — both stay open,
+        oldest still first.
+        """
+        ids, head = self._both_open_doors(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-a"),
+                _dispatch("w1", 200, 1100, task_id="t-200-b"),
+            ],
+        )
+        assert ids == ["t-100-a", "t-200-b"], f"a queued dispatch was retired: {ids}"
+        assert head == "t-100-a", "FIFO resolution broke"
+
+    def test_supersedes_is_scoped_by_bot_on_the_open_doors_too(self, tmp_path):
+        """One bot's declaration must not retire another's row — the #518 scoping,
+        which is carried by `_superseded_ids` itself and so must survive being
+        consumed from a second call site."""
+        ids, head = self._both_open_doors(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-old"),
+                _dispatch("w2", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+            ],
+        )
+        assert ids == ["t-100-old"], f"w2's declaration silenced w1's row: {ids}"
+        assert head == "t-100-old"
+
+    def test_a_chain_leaves_no_phantom_at_the_head(self, tmp_path):
+        """The sharpest live reproduction: nothing went wrong operationally.
+
+        The manager superseded correctly at every hop and the worker reported
+        both live rows with explicit ids, so both closed. The first row was
+        retired two hops back, will never be reported against, and was still the
+        head of the open list — so the bot's next id-less report closed a row
+        from three hours earlier. A longer chain left a longer phantom tail.
+        """
+        ids, head = self._both_open_doors(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 200, task_id="t-1"),
+                _dispatch("w1", 300, 400, task_id="t-2", supersedes="t-1"),
+                _dispatch("w1", 500, 600, task_id="t-3", supersedes="t-2"),
+            ],
+            reports=[
+                _report("w1", "2026-05-27T11:00:00Z", "completed", task_id="t-3"),
+                _report("w1", "2026-05-27T11:01:00Z", "completed", task_id="t-2"),
+            ],
+        )
+        assert ids == [], f"phantom rows survived a fully-answered chain: {ids}"
+        assert head is None, f"the resolver still offers a retired row: {head}"
 
 
 class TestUnassigned:
@@ -1276,3 +1424,192 @@ class TestUnassigned:
             )
             == {}
         )
+
+
+class TestOrphansRefusesWhenItCannotLook:
+    """#1014, and the same defect as #1216 on a sibling command.
+
+    Orphan-ness is decided by comparing a dispatch against
+    ``<bots_dir>/<bot>/data/.spawn``. Without a readable bots dir there is nothing
+    to compare, so the honest answer is UNKNOWN — but the mode printed an empty
+    set at rc 0, which is byte-identical to "no work was lost to a restart".
+    Measured on the reporting host before the fix: no ``--bots-dir``, a real one
+    with no orphans, and a ``--bots-dir`` naming a path that does not exist ALL
+    returned 0 bytes at rc 0 against a 295-row dispatch log. Three states, one
+    output, and the collapsed one reads as good news.
+    """
+
+    NOW = 3000
+
+    def _logs(self, tmp_path):
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, [_dispatch("w1", 100, 1000, task_id="t-1")])
+        _write_jsonl(rlog, [])
+        return str(dlog), str(rlog)
+
+    def _main(self, argv, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py"] + argv)
+        return dispatch_overdue.main()
+
+    def test_no_bots_dir_refuses_at_rc_three(self, tmp_path, monkeypatch, capsys):
+        dlog, rlog = self._logs(tmp_path)
+        rc = self._main(["--orphans", dlog, rlog, str(self.NOW)], monkeypatch)
+        assert rc == 3
+        assert "cannot determine orphans without --bots-dir" in capsys.readouterr().err
+
+    def test_an_unreadable_bots_dir_refuses_too(self, tmp_path, monkeypatch, capsys):
+        """The second silent state, and the one a real caller reaches: a
+        --bots-dir that resolves to nothing (a moved fleet, a wrong root) looked
+        identical to a healthy fleet with no orphans."""
+        dlog, rlog = self._logs(tmp_path)
+        rc = self._main(
+            [
+                "--orphans",
+                dlog,
+                rlog,
+                str(self.NOW),
+                "--bots-dir",
+                str(tmp_path / "no-such-dir"),
+            ],
+            monkeypatch,
+        )
+        assert rc == 3
+        assert "cannot read the bots dir" in capsys.readouterr().err
+
+    def test_a_real_bots_dir_with_no_orphans_still_answers_empty_at_rc_zero(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """THE control that makes the two above mean something. Presence, not
+        emptiness, is the line — a fleet that genuinely lost nothing must still
+        get the true answer, or the fix has traded a false all-clear for a
+        refusal that fires on healthy fleets."""
+        dlog, rlog = self._logs(tmp_path)
+        bots = tmp_path / "bots" / "w1" / "data"
+        bots.mkdir(parents=True)
+        rc = self._main(
+            [
+                "--orphans",
+                dlog,
+                rlog,
+                str(self.NOW),
+                "--bots-dir",
+                str(tmp_path / "bots"),
+            ],
+            monkeypatch,
+        )
+        cap = capsys.readouterr()
+        assert rc == 0
+        assert cap.out == ""
+
+    def test_a_real_orphan_is_still_listed(self, tmp_path, monkeypatch, capsys):
+        """The positive control on the other side: the mode must still find what
+        it exists to find. Without this, every assertion above would hold on a
+        command that had stopped classifying anything at all."""
+        dlog, rlog = self._logs(tmp_path)
+        data = tmp_path / "bots" / "w1" / "data"
+        data.mkdir(parents=True)
+        spawn = data / ".spawn"
+        spawn.write_text("")
+        os.utime(spawn, (500, 500))  # respawned AFTER the dispatch at 100
+        rc = self._main(
+            [
+                "--orphans",
+                dlog,
+                rlog,
+                str(self.NOW),
+                "--bots-dir",
+                str(tmp_path / "bots"),
+            ],
+            monkeypatch,
+        )
+        cap = capsys.readouterr()
+        assert rc == 0
+        assert "t-1" in cap.out
+
+    def test_rc_three_is_distinct_from_the_usage_code(self, tmp_path, monkeypatch):
+        """rc 2 means "you called me wrong"; rc 3 means "I cannot answer that".
+        Collapsing them would re-create this very bug one level up — a caller
+        could no longer tell a typo from an unreachable instrument."""
+        dlog, rlog = self._logs(tmp_path)
+        cannot_answer = self._main(["--orphans", dlog, rlog], monkeypatch)
+        malformed = self._main(["--orphans", dlog], monkeypatch)
+        assert cannot_answer == 3
+        assert malformed == 2
+
+    def test_all_mode_is_untouched_by_the_orphan_refusal(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """--all takes the same positional grammar and legitimately runs without
+        a bots dir (it just cannot split orphans out). Gating it would break the
+        watchdog's primary call."""
+        dlog, rlog = self._logs(tmp_path)
+        rc = self._main(["--all", dlog, rlog, str(self.NOW)], monkeypatch)
+        cap = capsys.readouterr()
+        assert rc == 0
+        assert "t-1" in cap.out
+
+    def test_orphaned_all_keeps_its_contract_exactly(self, tmp_path):
+        """The refusal lives in the CLI mode, NOT the join. brief.py imports
+        orphaned_all directly and labels this gap its own way, so changing the
+        function would have broken a caller that already had it right."""
+        dlog, rlog = self._logs(tmp_path)
+        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW) == {}
+        assert dispatch_overdue.orphaned_all(dlog, rlog, self.NOW, bots_dir=None) == {}
+
+
+def test_orphans_refuses_on_an_unlistable_bots_dir(tmp_path):
+    """The fourth state #1014 missed (#1227 review).
+
+    --bots-dir present but unlistable is byte-identical to 'no orphans': rc 0,
+    zero stdout, empty stderr. orphan-ness is decided by reaching
+    <bots_dir>/<bot>/data/.spawn, which silently fails for every bot.
+    """
+    import json as _json
+    import os as _os
+    import subprocess
+    import sys
+
+    if _os.geteuid() == 0:
+        pytest.skip("root ignores the mode bits")
+    bots = tmp_path / "bots"
+    (bots / "a" / "data").mkdir(parents=True)
+    (bots / "a" / "data" / ".spawn").write_text("")
+    dlog = tmp_path / "d.jsonl"
+    rlog = tmp_path / "r.jsonl"
+    dlog.write_text(
+        _json.dumps(
+            {
+                "ts": "2026-08-10T00:00:00Z",
+                "bot": "a",
+                "task_id": "t-1",
+                "dispatched_at": 1786000000,
+                "expected_by": 1786000600,
+            }
+        )
+        + "\n"
+    )
+    rlog.write_text("")
+    from pathlib import Path as _P
+
+    script = _P(__file__).resolve().parent.parent / "lib" / "dispatch-overdue.py"
+    bots.chmod(0o000)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--orphans",
+                str(dlog),
+                str(rlog),
+                "1787000000",
+                "--bots-dir",
+                str(bots),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        bots.chmod(0o755)
+    assert proc.returncode == 3, f"expected refusal, got rc={proc.returncode}"
+    assert proc.stdout == "", "stdout is parsed by fleet-pulse.sh; must stay empty"
+    assert "unlistable" in proc.stderr.lower() or "cannot" in proc.stderr.lower()

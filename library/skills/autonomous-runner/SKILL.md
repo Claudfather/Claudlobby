@@ -29,7 +29,7 @@ bots:
     autonomous_runner:
       skill: /claudna:implement-plan        # required (any installed skill name)
       cadence: 1h                            # required
-      target_repo: artemis-xyz/dbt           # required
+      target_repo: <org>/<repo>              # required
       args: ""                               # optional, appended after --auto
       picker:                                # required when skill needs a work item
         type: github_issues

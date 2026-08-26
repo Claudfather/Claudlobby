@@ -925,3 +925,85 @@ def test_no_git_credentials_reports_no_git_externals(tmp_path, monkeypatch):
     findings = audit_bot(bot, fleet, paths)
     assert not [f for f in findings if f.kind == "missing_external"]
     assert not [f for f in findings if "git " in f.detail]
+
+
+class TestGithubAppFreshbox:
+    """App-mode host audit (App-auth P3 #1273): the D7 include-FAIL/WARN split
+    and the _app_key_findings branches. Each is a ratified deliverable; a
+    WARN->FAIL flip must not merge green."""
+
+    def _bot(self, tmp_path, **app_kwargs):
+        from claudlobby.config import GithubAppConfig
+
+        return BotConfig(
+            bot_id="ga",
+            name="ga",
+            expertise=["eng"],
+            github_app=GithubAppConfig(**app_kwargs),
+        )
+
+    def _audit(self, tmp_path, bot, monkeypatch, key_mode=None, key_exists=True, operator=True):
+        import claudlobby.composer as comp
+
+        root = tmp_path / "claudlobby"
+        _build_library(root)
+        paths = Paths(root=root, fleet_dir=root)
+        op = tmp_path / "op.gitconfig"
+        if operator:
+            op.write_text("[user]\n\temail = o@example.com\n")
+        monkeypatch.setattr(comp, "_operator_gitconfig", lambda: op)
+        # env_resolved is the read door — stub it to a fixed key path.
+        key = tmp_path / "app-key.pem"
+        if key_exists:
+            key.write_text("KEY")
+            if key_mode is not None:
+                key.chmod(key_mode)
+
+        from claudlobby.env_tiers import Resolution
+
+        def _resolved(bot_name=None):
+            return {
+                "GITHUB_APP_PRIVATE_KEY_PATH": Resolution(
+                    "GITHUB_APP_PRIVATE_KEY_PATH", str(key), "fleet", None, ()
+                )
+            }
+
+        monkeypatch.setattr(type(paths), "env_resolved", lambda self, bot_name=None: _resolved(bot_name))
+        return audit_bot(bot, _fleet({"ga": bot}), paths)
+
+    def test_key_0600_is_info(self, tmp_path, monkeypatch):
+        finds = self._audit(tmp_path, self._bot(tmp_path), monkeypatch, key_mode=0o600)
+        assert any(f.kind == "external_ref" and "App private key" in f.detail for f in finds)
+        assert not any(f.severity == "fail" and "private key" in f.detail for f in finds)
+
+    def test_key_group_readable_is_fail(self, tmp_path, monkeypatch):
+        finds = self._audit(tmp_path, self._bot(tmp_path), monkeypatch, key_mode=0o640)
+        assert any(f.severity == "fail" and "group/other-readable" in f.detail for f in finds)
+
+    def test_missing_key_is_fail(self, tmp_path, monkeypatch):
+        finds = self._audit(tmp_path, self._bot(tmp_path), monkeypatch, key_exists=False)
+        assert any(f.severity == "fail" and "does not exist" in f.detail for f in finds)
+
+    def test_missing_include_with_host_generic_identity_softens_to_warn(self, tmp_path, monkeypatch):
+        # D7: a host-generic (global) App identity supplies user.email for every
+        # repo, so the missing include cannot cause 'Author identity unknown' —
+        # WARN, not FAIL.
+        bot = self._bot(tmp_path, slug="my-app", bot_user_id=7)
+        finds = self._audit(tmp_path, bot, monkeypatch, key_mode=0o600, operator=False)
+        include = [f for f in finds if "does not exist" in f.detail and "include" in f.detail]
+        assert include and all(f.severity == "warn" for f in include), finds
+
+    def test_missing_include_with_per_org_identity_stays_fail(self, tmp_path, monkeypatch):
+        # #1300: a per-org identity covers ONLY the App's org repos; non-App
+        # repos still rely on the operator include, so a missing include is a
+        # real FAIL even though an App identity is declared.
+        bot = self._bot(tmp_path, slug="my-app", bot_user_id=7, orgs=["OrgA"])
+        finds = self._audit(tmp_path, bot, monkeypatch, key_mode=0o600, operator=False)
+        include = [f for f in finds if "does not exist" in f.detail and "include" in f.detail]
+        assert include and all(f.severity == "fail" for f in include), finds
+
+    def test_missing_include_without_identity_is_fail(self, tmp_path, monkeypatch):
+        bot = self._bot(tmp_path, key_exists=True) if False else self._bot(tmp_path)
+        finds = self._audit(tmp_path, bot, monkeypatch, key_mode=0o600, operator=False)
+        include = [f for f in finds if "does not exist" in f.detail and "include" in f.detail]
+        assert include and all(f.severity == "fail" for f in include), finds

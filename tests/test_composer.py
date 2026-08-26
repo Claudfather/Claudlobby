@@ -23,7 +23,7 @@ from claudlobby.config import (
     load_fleet,
 )
 from claudlobby.path_audit import ExternalDecl
-from tests.conftest import _write_exec, install_real_template
+from tests.conftest import _write_exec, git_isolation_env, install_real_template
 from claudlobby.composer import (
     _BOOT_STAGGER_SECONDS,
     _compose_hooks,
@@ -84,7 +84,7 @@ class TestScaffoldEnvMerge:
                 {
                     "github": {"command": "gh", "args": ["mcp"]},
                     "_env_contract": {
-                        "GITHUB_PAT": {"description": "GitHub PAT", "tier": "fleet"},
+                        "GITHUB_PAT": {"description": "GitHub PAT", "default_tier": "fleet"},
                     },
                 }
             )
@@ -99,11 +99,11 @@ class TestScaffoldEnvMerge:
                     "_env_contract": {
                         "SHOPIFY_ACCESS_TOKEN": {
                             "description": "Shopify token",
-                            "tier": "fleet",
+                            "default_tier": "fleet",
                         },
                         "SHOPIFY_STORE_DOMAIN": {
                             "description": "Shopify domain",
-                            "tier": "fleet",
+                            "default_tier": "fleet",
                         },
                     },
                 }
@@ -464,15 +464,24 @@ class TestComposeSettingsLocal:
         assert "--dangerously-skip-permissions" in conf
 
     def test_sibling_isolation_only(self, tmp_path):
+        """R9 cross-bot isolation: TWO //-absolute rules per sibling (#1312, #873).
+
+        Was Read/Write/Edit with bare-absolute paths, and all three were inert or
+        useless: a single leading slash anchors at the SETTINGS SOURCE, so the
+        path named a directory that never existed, and Claude Code accepts a
+        Write(path) rule without ever consulting it.
+        """
         paths = self._make_paths_with_runtime(tmp_path)
         fleet = self._make_fleet_with_bots("bot-a", "bot-b")
         result = compose_settings_local(fleet.bots["bot-a"], fleet, paths)
         assert "permissions" in result
         deny = result["permissions"]["deny"]
-        # R9: one sibling → Read/Write/Edit denies over that sibling's runtime dir.
-        assert len(deny) == 3
-        assert {d.split("(")[0] for d in deny} == {"Read", "Write", "Edit"}
+        assert len(deny) == 2
+        assert {d.split("(")[0] for d in deny} == {"Read", "Edit"}
         assert all("bot-b" in d for d in deny)
+        # The prefix is the whole fix, so assert it on EVERY rule rather than
+        # trusting that one correct rule implies the rest.
+        assert all(d.split("(", 1)[1].startswith("//") for d in deny), deny
 
     def test_tool_deny_generates_patterns(self, tmp_path):
         paths = self._make_paths_with_runtime(tmp_path)
@@ -866,7 +875,7 @@ class TestComposeBotConfSecretFiles:
         from claudlobby.composer import compose_bot_conf
 
         bot = self._bot(
-            secret_files={"GA4_SA_KEY_PATH": "/home/crog/local/tl/.secrets/ga4.json"}
+            secret_files={"GA4_SA_KEY_PATH": "/home/user/local/tl/.secrets/ga4.json"}
         )
         with pytest.raises(ValueError, match="fleet-relative"):
             compose_bot_conf(bot, self._fleet(), self._paths(tmp_path))
@@ -1226,12 +1235,12 @@ class TestTelegramHandleDefault:
             bot_id="worker",
             name="worker",
             expertise=["eng"],
-            telegram=TelegramConfig(handle="artemis_worker_bot"),
+            telegram=TelegramConfig(handle="example_worker_bot"),
         )
         fleet = FleetConfig(name="t", service_prefix="p", bots={"worker": bot})
         conf = compose_bot_conf(bot, fleet, paths)
-        assert "export TELEGRAM_BOT_HANDLE=artemis_worker_bot" in conf
-        assert "export TELEGRAM_BOT_USERNAME=artemis_worker_bot" in conf
+        assert "export TELEGRAM_BOT_HANDLE=example_worker_bot" in conf
+        assert "export TELEGRAM_BOT_USERNAME=example_worker_bot" in conf
 
     def test_defaulted_handle_emits_no_username(self, tmp_path):
         """A slug is not a username: comparing them false-fails a correct token."""
@@ -3313,7 +3322,7 @@ class TestComposeAutonomousRunner:
             autonomous_runner=AutonomousRunnerConfig(
                 skill="/claudna:implement-plan",
                 cadence="2h",
-                target_repo="artemis-xyz/dbt",
+                target_repo="example-org/dbt",
                 args="--source github",
                 picker=AutonomousRunnerPicker(
                     type="github_issues",
@@ -3336,7 +3345,7 @@ class TestComposeAutonomousRunner:
         fleet = FleetConfig(name="t", service_prefix="p", bots={"dbt-bot": bot})
         result = compose_claude_md(bot, fleet, paths)
         assert "/claudna:implement-plan" in result
-        assert "artemis-xyz/dbt" in result
+        assert "example-org/dbt" in result
         assert "--source github" in result
         assert "claudna-eligible" in result
         assert "mission_alignment" in result
@@ -4136,7 +4145,7 @@ class TestPerOrgGitCredentialRouting:
         monkeypatch.setattr(
             comp, "_operator_gitconfig", lambda: tmp_path / "user.gitconfig"
         )
-        return comp.compose_bot_gitconfig(_git_cred_bot(creds))
+        return comp.compose_bot_gitconfig(_git_cred_bot(creds), _make_paths(tmp_path))
 
     # --- the three load-bearing ordering properties -----------------------
 
@@ -4231,20 +4240,14 @@ class TestGitCredentialRoutingResolvesForReal:
         monkeypatch.setattr(comp, "_resolve_gh_executable", lambda: str(gh_stub))
         monkeypatch.setattr(comp, "_operator_gitconfig", lambda: user_cfg)
         cfg = tmp_path / "composed.gitconfig"
-        cfg.write_text(comp.compose_bot_gitconfig(_git_cred_bot(creds)))
+        cfg.write_text(comp.compose_bot_gitconfig(_git_cred_bot(creds), _make_paths(tmp_path)))
         return cfg
 
     @staticmethod
     def _git(cfg, args, extra_env=None):
         return subprocess.run(
             ["git", *args],
-            env={
-                **os.environ,
-                **(extra_env or {}),
-                "GIT_CONFIG_GLOBAL": str(cfg),
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-                "GIT_TERMINAL_PROMPT": "0",
-            },
+            env=git_isolation_env(cfg, **(extra_env or {})),
             capture_output=True,
             text=True,
         )
@@ -4253,13 +4256,7 @@ class TestGitCredentialRoutingResolvesForReal:
         r = subprocess.run(
             ["git", "credential", "fill"],
             input=f"protocol=https\nhost=github.com\npath={path}\n\n",
-            env={
-                **os.environ,
-                **extra_env,
-                "GIT_CONFIG_GLOBAL": str(cfg),
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-                "GIT_TERMINAL_PROMPT": "0",
-            },
+            env=git_isolation_env(cfg, **extra_env),
             capture_output=True,
             text=True,
         )
@@ -4413,7 +4410,9 @@ class TestBotEnvStubDoesNotShadowUpstream:
     def _env_var(self, name: str):
         from claudlobby.composer import EnvVar
 
-        return EnvVar(name=name, description="test var", tier="bot", source="test")
+        return EnvVar(
+            name=name, description="test var", default_tier="bot", source="test"
+        )
 
     def test_upstream_provided_var_is_commented_not_live(self, tmp_path):
         from claudlobby.composer import _scaffold_env_merge
@@ -4622,12 +4621,12 @@ class TestFleetEnvStubDoesNotShadowUpstream:
                         # Provided upstream — must NOT get a live fleet stub.
                         "UPSTREAM_TOKEN": {
                             "description": "set upstream",
-                            "tier": "fleet",
+                            "default_tier": "fleet",
                         },
                         # No upstream value anywhere — MUST still get one, or the
                         # test above passes for the trivial reason that nothing
                         # is ever stubbed.
-                        "FLEET_ONLY_TOKEN": {"description": "unset", "tier": "fleet"},
+                        "FLEET_ONLY_TOKEN": {"description": "unset", "default_tier": "fleet"},
                     },
                 }
             )

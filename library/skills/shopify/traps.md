@@ -14,9 +14,9 @@ The API calls in this skill are trivial. This file is the reason it exists.
 **The belief:** print-on-demand variants are marked with their fulfiller, so you can
 filter on `fulfillment_service` to find POD products.
 
-**Measured:** across **4,804 variants** on a store where the large majority are
+**Measured:** across **every variant** on a store where the large majority are
 fulfilled by an external POD provider, `fulfillment_service` was `"manual"` on
-**4,804 of 4,804** — 100%, no exceptions.
+**all of them** — 100%, no exceptions.
 
 The field records who Shopify thinks *ships* the line, and an app-created product that
 syncs stock in over the API is still "manual" as far as Shopify is concerned. It carries
@@ -31,30 +31,30 @@ no supplier information at all.
 **The folklore:** "POD variants are all set to 9999, so any quantity you see is a
 placeholder."
 
-**Measured, and it does not hold.** On the same 4,804 variants:
+**Measured, and it does not hold.** On the same variant set:
 
-| value | variants |
+| value | share of variants |
 |---|---|
-| `0` | 2,158 |
-| `1` | 930 |
-| `-1` | 488 |
-| `9999` | **341** |
-| `-2` | 231 |
-| `-3` | 130 |
+| `0` | 45% |
+| `1` | 19% |
+| `-1` | 10% |
+| `9999` | **7%** |
+| `-2` | 5% |
+| `-3` | 3% |
 
 `9999` is **7%** of variants, not the rule — and not every `9999` variant is even
 untracked. Filtering on `9999` finds almost nothing.
 
 **The real discriminator is `inventory_management`:**
 
-| | variants | of which the quantity is misleading |
+| | share of variants | of which the quantity is misleading |
 |---|---|---|
-| `null` (Shopify tracks nothing) | **4,111** | 2,273 carry a non-zero quantity anyway |
-| `"shopify"` (genuinely tracked) | 693 | only 7 are negative |
+| `null` (Shopify tracks nothing) | **86%** | over half carry a non-zero quantity anyway |
+| `"shopify"` (genuinely tracked) | 14% | ~1% are negative |
 
 When `inventory_management` is `null`, Shopify is not tracking that variant, the
 `inventory_quantity` integer is **not authoritative**, and it is frequently non-zero
-regardless. 1,350 variants store a negative number; almost all are untracked, which is
+regardless. Roughly a quarter of variants store a negative number; almost all are untracked, which is
 why negatives are a red herring rather than a bug to chase.
 
 **Do instead:** purchasability is `availableForSale` (Storefront) — never a quantity
@@ -72,9 +72,9 @@ calls it `external.id`). So:
 > **unfulfillable ≈ ACTIVE on Shopify AND its product id absent from the fulfiller's
 > external-id set**
 
-**Measured:** 107 ACTIVE products, 97 present in the fulfiller's set, **10 absent** —
-a real, actionable list. `fulfillment_service` would have answered `"manual"` for all
-107 and told you nothing.
+**Measured:** of the ACTIVE products, roughly **one in ten was absent** from the
+fulfiller's set — a real, actionable list. `fulfillment_service` would have answered
+`"manual"` for every one of them and told you nothing.
 
 Caveats worth stating rather than hiding: a product can be legitimately absent
 (hand-fulfilled, digital, a service), and a linked product can still be unfulfillable if
@@ -88,7 +88,7 @@ Storefront `collection.products(first: N)` is Relay-paginated. `first:` is a pag
 never "all", and there is no error when the collection has more — you simply receive N
 and a `pageInfo.hasNextPage` you did not read.
 
-A hard-coded `first: 50` on a catch-all collection page hid **100+ products** for months.
+A hard-coded `first: 50` on a catch-all collection page hid **most of the collection** for months.
 Nothing failed. The page rendered, ranked by `BEST_SELLING`, and everything below the cut
 was invisible — including newly-added products, which have no sales and therefore sort
 last, so *new products are exactly what a truncated best-seller page hides*.
@@ -103,8 +103,8 @@ last, so *new products are exactly what a truncated best-seller page hides*.
 `codeDiscountNodes` returns **discount objects**, not codes. One node can carry a bulk
 batch of thousands of individual codes.
 
-**Measured:** **250 nodes** carrying **24,115 codes**. The largest single node held
-**10,928**. 142 of the 250 held more than one.
+**Measured:** a few hundred nodes carrying **tens of thousands of codes**. The largest
+single node held **nearly half of them**. A majority of nodes held more than one.
 
 Reporting the node count as "active discount codes" understates the real exposure by two
 orders of magnitude — which matters, because that number is the answer to "how much
@@ -186,7 +186,7 @@ orders: every consumer reports a clean zero, every dashboard renders an honest-l
 state, and nothing anywhere raises a flag.
 
 **Measured on a live store, 2026-08-04:** no orders webhook had ever fired. Not "was failing"
-— had never existed. The visible symptom was that 0 of 25 real, paid orders were attributable
+— had never existed. The visible symptom was that **none** of the real, paid orders were attributable
 to any session or channel, which read for weeks as an attribution-modelling problem rather
 than a missing subscription.
 
@@ -289,8 +289,8 @@ Page one of a fifteen-thousand-customer store is a well-formed `200` containing 
 looks *exactly* like a complete answer. The body carries no marker that more exists — the
 only signal is a header most clients discard.
 
-**Measured 2026-08-04:** a marketing-consent rate was computed from 3,000 of 15,704 customers
-and reported as the store rate. Nothing in the response indicated the shortfall.
+**Measured 2026-08-04:** a marketing-consent rate was computed from a single page of
+customers — a fraction of the total — and reported as the store rate. Nothing in the response indicated the shortfall.
 
 **Do instead:** follow `Link: <…>; rel="next"` to exhaustion, and match on the **rel**, not
 just the URL — the header commonly also carries `rel="previous"`, and advancing on that walks

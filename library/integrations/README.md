@@ -39,14 +39,24 @@ Every real integration file has YAML frontmatter with a `title:` matching its H1
   env_contract:
     SNOWFLAKE_ACCOUNT:
       description: Snowflake account identifier
-      tier: fleet
+      default_tier: fleet
     SNOWFLAKE_PRIVATE_KEY_PATH:
       description: Path to Snowflake RSA private key
-      tier: fleet
+      default_tier: fleet
   ---
   ```
 
-  `composer.py::collect_env_contracts` and `mcp_resolve.py` both read `env_contract:` (same `{description, tier: fleet|bot}` shape as MCP fragments' `_env_contract` — see `library/mcp/README.md`) to fold these vars into the fleet's environment-variable contract, which `claudlobby doctor` checks against `.env`. 5 of 16 files use it today (`neon.md`, `printify.md`, `railway.md`, `shopify.md`, `snowflake.md`) — add it whenever an integration depends on env vars not already declared by a paired MCP fragment.
+  `composer.py::collect_env_contracts` and `mcp_resolve.py` both read `env_contract:` (same `{description, default_tier: host|root|fleet|bot, secret, source}` shape as MCP fragments' `_env_contract` — see `library/mcp/README.md` for the full field reference and the `secret` test. **`secret` is required here too**: `type: cli` integrations such as `neon.md`, `railway.md` and `snowflake.md` have no paired MCP fragment, so this is their ONLY declaration surface, and a gate that skipped it could never reach `RAILWAY_API_TOKEN` or `SNOWFLAKE_PRIVATE_KEY`. A var declared on BOTH surfaces must carry the SAME `secret` value — the validator rejects a disagreement, because `required_vars` yields both records and the fail-loud rung would read whichever it saw first) to fold these vars into the fleet's environment-variable contract, which `claudlobby doctor` checks against `.env`. 10 of 25 files use it today — add it whenever an integration depends on env vars not already declared by a paired MCP fragment. (The figure read `5 of 16` and had been stale for some time independently of any one change; a count in prose is a fact with a shelf life, so treat it as indicative and re-derive before citing it. **Anchor the pattern** — `grep -rl '^env_contract:' library/integrations/*.md`: the unanchored form over-counts by matching prose ABOUT the field, including this file, and `meta-business.md`'s frontmatter comment explaining why it deliberately declares none. A file is counted for declining to have the thing, which is how the `11` this sentence used to read got there.)
+
+**A `type: cli` integration with NO `env_contract:` at all is invisible to the credential machinery**, and that is a third class distinct from "entry exists but lacks `secret`" — adding a field to an entry cannot help a var that has no entry. `collect_env_contracts` never sees it, so it is never scaffolded into a `.env`, never checked by `doctor`, and can never fail loud. A prose mention in a skill is **not** a declaration.
+
+Estate audit (#1226): `vercel.md` and `digitalocean.md` declare no contract. Exactly one real credential is affected — `VERCEL_TOKEN`, present in a fleet `.env` and used as `vercel ls --token=$VERCEL_TOKEN` by `library/skills/deploy-status/`.
+
+**It is deliberately still undeclared, because declaring it would probably be wrong.** This file says the Vercel CLI is "logged in as a specific user", so there are two auth paths — CLI session and env token — and 8 bots across 3 fleets equip `vercel` while only one fleet holds a token. Declaring `VERCEL_TOKEN` required would fire on the other 6, which is the noise failure the `secret` split exists to prevent. It is the same divergence as `gh` (own credential store) versus `GITHUB_PAT`. What settles it is testing whether the CLI session alone serves the skill's calls; until then the honest state is undeclared-and-recorded rather than declared-and-guessed. `digitalocean.md` has no evidence of its var names anywhere on the estate, so creating entries for it would still mean inventing contract keys.
+
+**`modal.md` NOW DECLARES ITS CONTRACT, and how that unblocked is the point.** This paragraph used to name it alongside `digitalocean.md` as un-declarable for want of evidence. The blocker was never the design — it was that nobody had gone and looked. The names were recoverable from two independent places on this host: an estate checkout exporting `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`, and the installed `modal` package's own config schema, which declares `token_id` and `token_secret`. Both are `secret: true` on the `SNOWFLAKE_USER` precedent above — Modal authenticates on the PAIR, so neither half authenticates anything alone.
+
+The lesson generalises to the remaining entry: **"no evidence on the estate" is a statement about a search that was performed, not a property of the integration.** Before citing it as a reason to leave a contract undeclared, check the tool's own client library — a CLI that reads env vars almost always names them in code.
 
 ## Grant contract (`tool_grants:`)
 

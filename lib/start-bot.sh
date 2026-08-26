@@ -95,6 +95,18 @@ if command -v jq >/dev/null 2>&1; then
 fi
 # --- end headless consent ----------------------------------------------------
 
+# --- Workspace trust for the bot's own dir (#970) ----------------------------
+# Without projects["<bot dir>"].hasTrustDialogAccepted, Claude Code ignores the
+# composed .claude/settings.local.json. Measured on this host: 21 of 21
+# production bot dirs had no project entry at all, while the throwaway bots the
+# validation harnesses create DID — because those harnesses seed trust and the
+# production boot path never did. The test environment differed from production
+# in exactly the variable under test, which is why this survived.
+#
+# Merges one key into the existing config; never rewrites it. Non-fatal.
+seed_workspace_trust "$BOT_DIR" || true
+# --- end workspace trust -----------------------------------------------------
+
 # --- Pre-trust MCP servers in this bot dev checkouts -------------------------
 # Seed each projects/ checkout with this bot composed MCP allowlist so a `claude`
 # session rooted there boots clean instead of stalling on the MCP-server-trust
@@ -146,20 +158,21 @@ BOT_ENV_FILE="$BOT_DIR/.tmux-env"
 (umask 177; : > "$BOT_ENV_FILE")
 chmod 600 "$BOT_ENV_FILE"
 
-# 3-tier env sourcing inside the tmux session so Claude Code (and its MCP
-# servers) inherit all env vars. Later tiers override earlier ones.
+# Four-tier env sourcing inside the tmux session so Claude Code (and its MCP
+# servers) inherit all env vars. Later tiers override earlier ones, so the most
+# specific tier that ASSIGNS a key decides its value — including assigning it
+# empty, which blanks an upstream secret rather than falling through to it.
 # These source commands run inside the tmux shell, NOT the parent start-bot.sh.
-[ -f "$HOME/.env" ]                                && printf '. %q\n' "$HOME/.env" >> "$BOT_ENV_FILE"
-if [ -n "${CLAUDLOBBY_ROOT:-}" ] && [ -f "$CLAUDLOBBY_ROOT/.env" ]; then
-    printf '. %q\n' "$CLAUDLOBBY_ROOT/.env" >> "$BOT_ENV_FILE"
-fi
-if [ -n "${FLEET_NAME:-}" ] && [ -n "${CLAUDLOBBY_ROOT:-}" ]; then
-    # Flat local/<fleet> byte-identically, or nested local/<system>/<fleet>.
-    _sb_fleet_dir=$(resolve_fleet_dir "$FLEET_NAME") || _sb_fleet_dir="$CLAUDLOBBY_ROOT/local/$FLEET_NAME"
-    local_fleet_env="$_sb_fleet_dir/.env"
-    [ -f "$local_fleet_env" ] && printf '. %q\n' "$local_fleet_env" >> "$BOT_ENV_FILE"
-fi
-[ -f "$BOT_DIR/.env" ]                             && printf '. %q\n' "$BOT_DIR/.env" >> "$BOT_ENV_FILE"
+#
+# The order is NOT restated here. It comes from `env_tier_rows` in lib-common.sh,
+# the same door the Python compositor reads through lib/env-tiers.sh, so the
+# tooling cannot come to disagree with the runtime about where a credential
+# resolves from (#1214 / #1226). This block is now a consumer, not a second
+# copy of the answer.
+while IFS= read -r _sb_env_tier; do
+    [ -n "$_sb_env_tier" ] || continue
+    printf '. %q\n' "$_sb_env_tier" >> "$BOT_ENV_FILE"
+done < <(env_tier_present_files "$BOT_DIR" "${FLEET_NAME:-}")
 
 # Source bot.conf — the SSOT for all compositor-generated config.
 # set -a auto-exports every assignment so vars reach `exec claude`.

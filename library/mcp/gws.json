@@ -2,28 +2,33 @@
   "_env_contract": {
     "GOOGLE_OAUTH_CLIENT_ID": {
       "description": "Google OAuth client ID",
-      "tier": "fleet",
-      "scope": "shared"
+      "default_tier": "fleet",
+      "scope": "shared",
+      "secret": true
     },
     "GOOGLE_OAUTH_CLIENT_SECRET": {
       "description": "Google OAuth client secret",
-      "tier": "fleet",
-      "scope": "shared"
+      "default_tier": "fleet",
+      "scope": "shared",
+      "secret": true
     },
     "CREDENTIALS_DIR": {
       "description": "OAuth credentials directory",
-      "tier": "fleet",
-      "scope": "instance"
+      "default_tier": "fleet",
+      "scope": "instance",
+      "secret": false
     },
     "EMAIL": {
       "description": "Google email address",
-      "tier": "fleet",
-      "scope": "instance"
+      "default_tier": "fleet",
+      "scope": "instance",
+      "secret": false
     },
     "PORT": {
       "description": "MCP server port",
-      "tier": "fleet",
-      "scope": "instance"
+      "default_tier": "fleet",
+      "scope": "instance",
+      "secret": false
     }
   },
   "_permissions_contract": {

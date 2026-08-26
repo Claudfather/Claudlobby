@@ -169,6 +169,12 @@ Foundation for the future ML layer: when claudlobby has embeddings + a knowledge
 | Linux (Raspberry Pi 5, Debian, Ubuntu) | systemd user services via `<bot>.service`. Set `CLAUDLOBBY_ROOT=$HOME/claudlobby` in the unit's Environment. |
 | Linux (root systemd) | Same as user systemd; install to `/etc/systemd/system/` instead of `~/.config/systemd/user/`. |
 
+**GitHub identity.** By default bots use a shared `GITHUB_PAT`. To give a fleet its own
+**GitHub App identity** (short-lived installation tokens, branch protection that binds the
+bot, commits as `<slug>[bot]`), see
+[`documentation/runbooks/github-app-setup.md`](documentation/runbooks/github-app-setup.md).
+Opt-in and dormant — a fleet that declares no `github_app:` is unaffected.
+
 ## Status
 
 This repo is in active migration from the older "one-dir-per-bot" template model to the compositor. The current layout is: `library/` (sources), `lib/` (lifecycle scripts), `runtime/` (output), `voices/` (overlays).

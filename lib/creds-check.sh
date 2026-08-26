@@ -263,18 +263,75 @@ record_and_alert() {
 # Provider checks
 # ---------------------------------------------------------------------
 
+# App-auth P4 (#1274): probe a fleet that mints App installation tokens at
+# use time instead of holding a static PAT. Reached only when GITHUB_APP_*
+# config is present (the gate is in check_github_pat), so an App-less fleet
+# never lands here even though the helper ships estate-wide in lib/.
+_check_github_app() {
+    # Mint helper-DIRECT via the P1 mint CLI (D1: never `git credential fill`,
+    # whose pathless context would serve whatever ambient config answers). A
+    # mint failure has already emitted an auth_mint_failed event from the
+    # helper, so this records the fleet-level verdict without re-alerting it.
+    local token
+    if ! token="$("$LIB_DIR/mint-github-token.sh" 2>/dev/null)" || [ -z "$token" ]; then
+        record_and_alert "github_pat" "fail" \
+            "GITHUB_APP_* configured but installation-token mint failed (see auth_mint_failed events)"
+        return
+    fi
+    # Probe an authenticated INSTALLATION endpoint. /user 403s a ghs_ token
+    # ('Resource not accessible by integration'), so it cannot be reused here
+    # (D13); /installation/repositories requires the token and returns 200 on
+    # a healthy install. 401 (bad JWT/mint) and 403 (scope) are distinguished
+    # because their remedies differ.
+    local code curl_err_file auth_cfg
+    curl_err_file=$(safe_mktemp)
+    auth_cfg="$(auth_curl_cfg \
+        "Authorization: Bearer $token" \
+        "Accept: application/vnd.github+json" \
+        "X-GitHub-Api-Version: 2022-11-28")"
+    code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
+        --config "$auth_cfg" \
+        --max-time 10 \
+        https://api.github.com/installation/repositories 2>"$curl_err_file")" \
+        || code="curl_err($(head -c 120 "$curl_err_file"))"
+    case "$code" in
+        200) record_and_alert "github_pat" "ok" "App installation token OK (HTTP 200 on /installation/repositories)" ;;
+        401) record_and_alert "github_pat" "fail" "App token HTTP 401 — JWT/mint rejected (wrong key, revoked, or clock skew)" ;;
+        403) record_and_alert "github_pat" "fail" "App token HTTP 403 — installation lacks repository scope, or a secondary rate-limit" ;;
+        *)   record_and_alert "github_pat" "fail" "App token probe: HTTP $code on /installation/repositories" ;;
+    esac
+}
+
 check_github_pat() {
     local token="${GITHUB_PERSONAL_ACCESS_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}"
     if [ -z "$token" ]; then
-        record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN"
+        # No static token — but an App-mode fleet mints one at use time. Gate
+        # on CONFIG presence (all three vars), never on the helper file: the
+        # helper is a shared-lib/ install, so file-existence would make every
+        # App-less fleet attempt a doomed mint. This is the App half of #1213's
+        # 'a declared integration is a fail, not a skip' — the fleet declared
+        # App auth, so absence of a working token is a fail, not a skip.
+        # Boundary: reads only the .env tier (the vars are exported by
+        # parse_env_file above), so a manual setup that put GITHUB_APP_* ONLY
+        # in the helper's ~/.config/claudlobby/github-app.conf fallback reads
+        # as skip here — composed fleets always wire .env, so this bites only
+        # hand-configured operator/cron installs.
+        if [ -n "${GITHUB_APP_ID:-}" ] && [ -n "${GITHUB_APP_INSTALLATION_ID:-}" ] \
+                && [ -n "${GITHUB_APP_PRIVATE_KEY_PATH:-}" ]; then
+            _check_github_app
+            return
+        fi
+        record_and_alert "github_pat" "skip" "no GITHUB_PERSONAL_ACCESS_TOKEN and no GITHUB_APP_* config"
         return
     fi
     local code
     local curl_err_file auth_cfg
     curl_err_file=$(safe_mktemp)
-    auth_cfg=$(safe_mktemp)
-    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_cfg"
-    printf 'header = "Accept: application/vnd.github+json"\n' >> "$auth_cfg"
+    # auth_curl_cfg (lib-common, App-auth P1): the one owner of the
+    # tokens-never-ride-argv invariant, escaping included.
+    auth_cfg="$(auth_curl_cfg \
+        "Authorization: Bearer $token" \
+        "Accept: application/vnd.github+json")"
     code="$("$CURL" -sS -o /dev/null -w '%{http_code}' \
         --config "$auth_cfg" \
         --max-time 10 \
@@ -387,7 +444,7 @@ check_telegram_tokens() {
         # Compare against the DECLARED @username, never TELEGRAM_BOT_HANDLE. The
         # handle is channel identity — a state-dir slug that defaults to bot_id —
         # and a slug is not a username. Measured on a live 9-bot fleet: every bot
-        # held a CORRECT, distinct token whose getMe answered @artemis_*_bot while
+        # held a CORRECT, distinct token whose getMe answered @example_*_bot while
         # the slug read @<bot_id>, so comparing those declares all nine cross-wired
         # and edge-alerts once per bot, on the channel that must stay trustworthy
         # (#1095). TELEGRAM_BOT_USERNAME is emitted only when a fleet spells the

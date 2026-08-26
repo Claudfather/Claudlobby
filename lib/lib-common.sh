@@ -335,6 +335,39 @@ safe_mktemp() {
     mktemp "$_LC_TMPDIR/tmp.XXXXXXXXXX"
 }
 
+# github_app_conf_path
+# The ONE owner of the GitHub App helper config-file default. Reader
+# (git-credential-github-app), writer (setup-github-app.sh) and any later
+# presence gate (App-auth P4) all derive it from here — a drifted copy means
+# setup writes a file the helper never reads, each side individually green.
+# CLAUDLOBBY_GITHUB_APP_CONF overrides (tests, nonstandard hosts).
+github_app_conf_path() {
+    printf '%s' "${CLAUDLOBBY_GITHUB_APP_CONF:-${HOME:-/nonexistent}/.config/claudlobby/github-app.conf}"
+}
+
+# auth_curl_cfg <header-line>...
+# Write curl header lines into a private temp config file and print its path.
+# The ONE owner of the tokens-never-ride-argv invariant for authed curl calls:
+# the Authorization header rides --config so no credential ever appears in the
+# process table. Callers keep their own curl flags; only header-file assembly
+# generalizes here. Consumers: git-credential-github-app, setup-github-app.sh;
+# creds-check.sh migrates onto this in App-auth P4 rather than copying a
+# sixth instance of the pattern.
+auth_curl_cfg() {
+    local cfg h
+    cfg="$(safe_mktemp)"
+    for h in "$@"; do
+        # Escape backslash then double-quote: an unescaped quote in a value
+        # silently TRUNCATES the header at the curl config parser, which
+        # surfaces as a baffling 401. Unreachable for JWT/ghs_ values, but
+        # this function is the one owner and P4 feeds it arbitrary secrets.
+        h="${h//\\/\\\\}"
+        h="${h//\"/\\\"}"
+        printf 'header = "%s"\n' "$h"
+    done > "$cfg"
+    printf '%s' "$cfg"
+}
+
 # --- JSON helpers ------------------------------------------------------------
 
 # json_escape <string>
@@ -1325,6 +1358,145 @@ pane_input_region() {
 # still pending" is "is it visible" asked of the box alone. Delegating rather than
 # repeating the match keeps one home for what counts as the payload — the literal
 # text or the collapsed-paste placeholder — so the two can never disagree about it.
+# ── #1236 verify-tick instrumentation ────────────────────────────────────────
+# INSTRUMENT ONLY. Nothing below changes a single decision pane_send_verified
+# makes; it records why the decision came out the way it did.
+#
+# The open question is narrow. The verify loop exits clean on the FIRST tick
+# where pane_holds_unsubmitted returns false, and with box=drawn that returns 0
+# silently. We know that fires -- production had zero send_retry across 19
+# stranded bots, and the sampler reproduces it at ~1-in-3 under load. We do NOT
+# know WHY the predicate returned false. Three candidates, none eliminated:
+# render lag at tick 1, the _PANE_MIN_VISIBLE_MATCH floor, chrome the stripper
+# misses. A fix chosen now would be a guess wearing a remedy.
+#
+# OFF BY DEFAULT AND OFF MEANS OFF. PANE_VERIFY_TRACE unset costs one parameter
+# test per tick: no capture, no fork, no write. This matters more than tidiness
+# because instrumenting a race can MOVE it, and the hot path under suspicion is
+# exactly the one being measured. The tick loop already captures the pane, so
+# the trace reuses that frame rather than adding a capture-pane fork per tick.
+
+# _pane_trace_candidate <pane_text> <payload>
+# Which of the three candidates explains this frame, as one token.
+#
+# Mirrors pane_shows_payload step for step, and tests/test_pane_verify_trace.sh
+# asserts the two never disagree across the whole pane-fixture corpus -- a
+# reconstruction that drifts from the decision it explains is worse than none.
+#
+#   no-region      no prompt glyph at all: the box is not drawn yet
+#   empty-box      glyph present, nothing after it
+#   below-floor    text present, ALL of it under the floor
+#   not-substring  text at or over the floor, none of it part of the payload
+#   held           the predicate sees the payload
+#
+# empty-box is split from below-floor deliberately. The floor candidate is about
+# a PARTIALLY painted box being skipped; a box with nothing in it is not that,
+# it is either render lag or a genuine submit. Folding them together would blur
+# the exact two the instrument exists to separate.
+_pane_trace_candidate() {
+    local pane="$1" payload="$2" region line stripped floor first="" seen_first=0
+    region=$(pane_input_region "$pane")
+    [ -n "$region" ] || { printf 'no-region'; return 0; }
+    if printf '%s\n' "$region" | grep -qF -e "$_PANE_PASTE_COLLAPSE_MARKER"; then
+        printf 'held'; return 0
+    fi
+    [ -n "$payload" ] || { printf 'no-payload'; return 0; }
+    floor=$_PANE_MIN_VISIBLE_MATCH
+    [ "${#payload}" -lt "$floor" ] && floor=${#payload}
+    # HELD is decided exactly as pane_shows_payload decides it -- any line at or
+    # over the floor that is part of the payload. That equivalence is asserted
+    # over the whole fixture corpus and must not drift.
+    while IFS= read -r line; do
+        stripped=$(_pane_strip_chrome "$line")
+        if [ "$seen_first" -eq 0 ]; then first="$stripped"; seen_first=1; fi
+        if [ "${#stripped}" -ge "$floor" ]; then
+            case "$payload" in *"$stripped"*) printf 'held'; return 0 ;; esac
+        fi
+    done <<EOF
+$region
+EOF
+    # NOT held. Which candidate is judged on the INPUT LINE, not on the region,
+    # and that is a correction the first real strand forced. The region runs
+    # from the glyph line to the bottom of the pane, so it always also contains
+    # the box border and the mode footer -- measured at 80 and 77 chars on a
+    # real stranded boot. Both clear the 12-char floor and neither is part of
+    # any payload, so judging on the region made `not-substring` fire on every
+    # not-held frame and swallow the empty-box case underneath it. Chrome that
+    # is ALWAYS present cannot discriminate anything; only the line the payload
+    # would occupy can. The full per-line record is still emitted, so a frame
+    # this rule reads wrongly is still recoverable from the trace.
+    if [ -z "$first" ]; then printf 'empty-box'
+    elif [ "${#first}" -lt "$floor" ]; then printf 'below-floor'
+    else printf 'not-substring'; fi
+    return 0
+}
+
+# _pane_verify_trace <tick> <box> <pane_text> <payload>
+# Record one verify tick. Always rc 0 -- a tracer that could fail is a tracer
+# that can change an outcome.
+#
+# TWO printf REDIRECTS AND NOTHING ELSE, and that is the entire design. The
+# first version of this did the strip/floor/substring analysis inline and cost
+# **202ms per tick against a 200ms poll interval** -- measured, not feared. It
+# more than doubled the tick period, on the exact hot path whose timing is the
+# thing under suspicion. Running the control with that in place would have shown
+# the strand suppressed and implicated timing, when the instrument caused it.
+#
+# So the tick does the cheapest thing that loses no information: dump the raw
+# frame. Every derived field -- stripped lines, lengths, floor, substring
+# verdicts, the candidate -- is reconstructed afterwards by pane_trace_render,
+# from the same bytes, using the same functions. No forks, no subshells, no
+# command substitution: those are what cost the 202ms.
+_pane_verify_trace() {
+    [ -n "${PANE_VERIFY_TRACE:-}" ] || return 0
+    printf '%s' "$3" > "$PANE_VERIFY_TRACE/tick-$1.pane" 2>/dev/null
+    printf '%s\t%s\n' "$1" "$2" >> "$PANE_VERIFY_TRACE/ticks.tsv" 2>/dev/null
+    return 0
+}
+
+# pane_trace_render <trace_dir>
+# Turn a captured trace into per-tick JSONL on stdout. OFFLINE -- runs after the
+# send has finished, so its cost cannot reach the window it describes.
+#
+# It reuses _pane_trace_candidate and _pane_strip_chrome rather than
+# reimplementing them, so the rendered explanation cannot drift from the
+# predicate it is explaining.
+pane_trace_render() {
+    local dir="$1" payload tick box pane region floor line stripped
+    [ -d "$dir" ] || return 1
+    payload=$(cat "$dir/payload" 2>/dev/null || printf '')
+    [ -f "$dir/ticks.tsv" ] || return 0
+    while IFS=$(printf '\t') read -r tick box; do
+        [ -n "$tick" ] || continue
+        pane=$(cat "$dir/tick-$tick.pane" 2>/dev/null || printf '')
+        local cand held present nlines=0 lines_json="" sep="" ge sub
+        cand=$(_pane_trace_candidate "$pane" "$payload")
+        [ "$cand" = "held" ] && held=true || held=false
+        region=$(pane_input_region "$pane")
+        [ -n "$region" ] && present=true || present=false
+        floor=$_PANE_MIN_VISIBLE_MATCH
+        [ "${#payload}" -lt "$floor" ] && floor=${#payload}
+        if [ -n "$region" ]; then
+            while IFS= read -r line; do
+                nlines=$((nlines + 1))
+                stripped=$(_pane_strip_chrome "$line")
+                [ "${#stripped}" -ge "$floor" ] && ge=true || ge=false
+                sub=false
+                case "$payload" in *"$stripped"*) [ -n "$stripped" ] && sub=true ;; esac
+                lines_json="${lines_json}${sep}{\"stripped\":\"$(json_escape "$stripped")\",\"len\":${#stripped},\"ge_floor\":$ge,\"substr\":$sub}"
+                sep=","
+            done <<EOF
+$region
+EOF
+        fi
+        printf '{"tick":%s,"box":"%s","held":%s,"candidate":"%s","region_present":%s,"region_lines":%s,"payload_len":%s,"floor":%s,"lines":[%s],"pane_b64":"%s"}\n' \
+            "$tick" "$(json_escape "$box")" "$held" "$cand" "$present" "$nlines" \
+            "${#payload}" "$floor" "$lines_json" \
+            "$(printf '%s' "$pane" | base64 | tr -d '\n')"
+    done < "$dir/ticks.tsv"
+    return 0
+}
+
 pane_holds_unsubmitted() {
     local region
     region=$(pane_input_region "$1")
@@ -1594,6 +1766,12 @@ pane_send_verified() {
                 "$(json_escape "$session")" "$box")"
     fi
 
+    # #1236: arm the trace BEFORE the send, so the one mkdir this costs happens
+    # outside the window whose timing is under investigation.
+    if [ -n "${PANE_VERIFY_TRACE:-}" ]; then
+        mkdir -p "$PANE_VERIFY_TRACE" 2>/dev/null || true
+        printf '%s' "$probe" > "$PANE_VERIFY_TRACE/payload" 2>/dev/null || true
+    fi
     bot_tmux "$socket" send-keys -t "$session" "$text" || return 1
     sleep "${PANE_SEND_SETTLE_S:-$_PANE_SEND_SETTLE_DEFAULT}"
     bot_tmux "$socket" send-keys -t "$session" Enter || return 1
@@ -1618,7 +1796,22 @@ pane_send_verified() {
         sleep "$_PANE_VERIFY_POLL_S"
         tick=$((tick + 1))
         pane=$(bot_tmux "$socket" capture-pane -t "$session" -p 2>/dev/null) || return 0
-        pane_holds_unsubmitted "$pane" "$probe" && continue
+        # #1236: record the tick, then decide exactly as before. An `if` rather
+        # than appending to the `&&` chain so the tracer sits outside the
+        # decision entirely and cannot contribute to it.
+        # The knob is tested at the CALL SITE, not only inside the tracer, and
+        # that is measured rather than stylistic: bash copies arguments by
+        # value, so calling it with the ~2KB pane costs 57us per tick even when
+        # it returns immediately. Guarding here drops that to a single
+        # parameter test. This primitive is on every dispatch, every boot,
+        # every bot, so a per-tick cost that buys nothing is a fleet-wide tax.
+        if pane_holds_unsubmitted "$pane" "$probe"; then
+            [ -z "${PANE_VERIFY_TRACE:-}" ] ||
+                _pane_verify_trace "$tick" "$box" "$pane" "$probe"
+            continue
+        fi
+        [ -z "${PANE_VERIFY_TRACE:-}" ] ||
+            _pane_verify_trace "$tick" "$box" "$pane" "$probe"
         # The payload is not sitting in the box. Whether that means it was
         # SUBMITTED or was never RECEIVED is the #860 ambiguity, and the frame in
         # hand cannot answer it — the latch has to.
@@ -1928,6 +2121,19 @@ date_relative() {
     # Accepts GNU-style offsets: "-7 days", "7 days ago", "+1 month"
     local offset="${1:?Usage: date_relative '<offset>' [format]}"
     local fmt="${2:-%Y-%m-%d}"
+    # A literal Z in the format is the ISO-8601 UTC designator, so a caller
+    # asking for it must GET UTC. Computing in local time and stamping Z is a
+    # lie no call-site review can catch, because the call site looks correct
+    # (#918): rotate_jsonl_by_ts compared a local-time cutoff against UTC ts
+    # values, skewing retention by the host offset -- reaped early east of UTC,
+    # retained late west of it -- and eventually broke CI on main outright.
+    # %Z is the zone-NAME directive and is NOT a UTC request, so every %X
+    # directive is stripped before looking for a bare Z.
+    local _bare_fmt _utc=""
+    _bare_fmt=$(printf '%s' "$fmt" | sed 's/%.//g')
+    case "$_bare_fmt" in
+    *Z*) _utc="yes" ;;
+    esac
     if [ "$_OS" = "Darwin" ]; then
         local sign num unit bsd_unit
         # Normalize "N unit ago" -> "-N unit"
@@ -1947,9 +2153,17 @@ date_relative() {
             week|weeks)     bsd_unit="w" ;;
             *) echo "date_relative: unknown unit '$unit'" >&2; return 1 ;;
         esac
-        date -v"${sign}${num}${bsd_unit}" +"$fmt"
+        if [ -n "$_utc" ]; then
+            date -u -v"${sign}${num}${bsd_unit}" +"$fmt"
+        else
+            date -v"${sign}${num}${bsd_unit}" +"$fmt"
+        fi
     else
-        date -d "$offset" +"$fmt"
+        if [ -n "$_utc" ]; then
+            date -u -d "$offset" +"$fmt"
+        else
+            date -d "$offset" +"$fmt"
+        fi
     fi
 }
 
@@ -2178,6 +2392,80 @@ fleet_runtime_dir() {
     else
         printf '%s' "$CLAUDLOBBY_ROOT/runtime/fleet"
     fi
+}
+
+# --- .env tier cascade — THE resolver (#1214 / #1226) ------------------------
+#
+# The four .env tiers in RUNTIME SOURCING ORDER, least specific first:
+#
+#   host   $HOME/.env
+#   root   $CLAUDLOBBY_ROOT/.env
+#   fleet  <fleet_dir>/.env
+#   bot    <bot_dir>/.env
+#
+# Later wins, so the MOST SPECIFIC tier that assigns a key decides its value.
+# "Assigns", not "supplies a value": sourcing is shell assignment, so an
+# `export FOO=` at the bot tier beats a real secret at the fleet tier and
+# resolves to the empty string. That is not a corner case — it is why
+# GITHUB_PAT is present-but-empty on half the estate and the GitHub MCP has
+# been wired to "" there, invisibly (#1213). A cascade that treats empty as
+# absent would report those fleets as healthy, which is the defect, not the fix.
+#
+# ALL FOUR rows are always emitted, TAB-separated:
+#
+#     <tier>\t<path>\t<present|absent|unresolved>
+#
+# Absent rows are emitted rather than dropped because a consumer that must say
+# "host: nothing there" cannot otherwise tell a tier that held nothing from a
+# tier this function forgot. `unresolved` is distinct again: the tier does not
+# APPLY (no fleet name, no CLAUDLOBBY_ROOT), which is a different fact from a
+# tier that applies and is empty.
+#
+# THIS IS THE SSOT FOR THE ORDER. start-bot.sh builds the session's source list
+# from it; the Python compositor reads it through lib/env-tiers.sh. Neither side
+# keeps a copy — a private copy of a shared predicate is how a fleet-wide fact
+# quietly forks, and it has already done so twice in this repo (#892, #1143).
+#
+# Usage: env_tier_rows [bot_dir] [fleet_name]
+env_tier_rows() {
+    local bot_dir="${1:-${BOT_DIR:-}}" fleet="${2:-${FLEET_NAME:-}}"
+    local root="${CLAUDLOBBY_ROOT:-}" fleet_dir=""
+
+    _env_tier_row host "${HOME:-}" ".env"
+    _env_tier_row root "$root" ".env"
+
+    if [ -n "$fleet" ] && [ -n "$root" ]; then
+        # Flat local/<fleet> byte-identically, or nested local/<system>/<fleet>.
+        # Same fallback start-bot.sh has always used: an unresolvable name still
+        # names the flat path, so a not-yet-created fleet reports absent (the
+        # truth) rather than unresolved (which would read as "does not apply").
+        fleet_dir=$(resolve_fleet_dir "$fleet") || fleet_dir="$root/local/$fleet"
+    fi
+    _env_tier_row fleet "$fleet_dir" ".env"
+    _env_tier_row bot "$bot_dir" ".env"
+}
+
+# One row of env_tier_rows. Empty dir => `unresolved` with an empty path: the
+# tier does not apply in this context, which no path could honestly stand for.
+_env_tier_row() {
+    local tier="$1" dir="$2" leaf="$3" path=""
+    if [ -z "$dir" ]; then
+        printf '%s\t\tunresolved\n' "$tier"
+        return 0
+    fi
+    path="$dir/$leaf"
+    if [ -f "$path" ]; then
+        printf '%s\t%s\tpresent\n' "$tier" "$path"
+    else
+        printf '%s\t%s\tabsent\n' "$tier" "$path"
+    fi
+}
+
+# The tier paths that actually exist, in sourcing order, one per line. What a
+# consumer wants when it is going to source them; `env_tier_rows` is what a
+# consumer wants when it must report on the ones that are NOT there.
+env_tier_present_files() {
+    env_tier_rows "$@" | awk -F'\t' '$3 == "present" { print $2 }'
 }
 
 # dispatch_ledger_path
@@ -3048,7 +3336,10 @@ _emit_fleet_signal() {
     local bots_dir="$1" event_type="$2" reason="$3" ev_source="$4" word="$5"
     local tmux_prefix="[FLEET-${word}]" tg_prefix="FLEET ${word}"
 
-    local data
+    local data _sig_tmux_ok=0
+    # Set for the caller, not for us: gates debounce markers so a FAILED send
+    # cannot buy itself silence for the whole debounce window.
+    _ALERT_DELIVERED=0
     data=$(printf '{"reason":"%s"}' "$(json_escape "$reason")")
     emit_fleet_event "$event_type" "$ev_source" "$data" "" fleet
 
@@ -3064,7 +3355,9 @@ _emit_fleet_signal() {
     if [ -n "$mgr" ]; then
         mgr_socket=$(resolve_peer_socket "$(bot_conf_get "$mgr_bot" MANAGER_TMUX_SOCKET "")" "$mgr" "$(dirname "$mgr_bot")")
         if check_tmux_session "$mgr" "$mgr_socket"; then
-            bot_tmux_send "$mgr_socket" "$mgr" "$tmux_prefix $event_type: $reason" || true
+            if bot_tmux_send "$mgr_socket" "$mgr" "$tmux_prefix $event_type: $reason"; then
+                _sig_tmux_ok=1
+            fi
         fi
     fi
 
@@ -3074,10 +3367,49 @@ _emit_fleet_signal() {
     resolve_alert_target "$bots_dir"
     # shellcheck disable=SC2154  # _alert_* are set by resolve_alert_target above
     chat_id="$_alert_chat_id"; state_dir="$_alert_state_dir"
+    local _tg_rc=0 _tg_err=""
     if [ -n "$chat_id" ]; then
-        TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
-            "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" >/dev/null 2>&1 || true
+        # Capture stderr rather than discarding it: tg-post distinguishes no-token
+        # (1), no-chat (2) and API-rejected (3), and the body is where a rejected
+        # send explains itself. A >/dev/null 2>&1 here threw away the whole
+        # diagnosis of an alert that never arrived.
+        _tg_err=$(TELEGRAM_GROUP_CHAT_ID="$chat_id" TELEGRAM_STATE_DIR="${state_dir:-}" \
+            "${CLAUDLOBBY_ROOT}/lib/tg-post.sh" "$tg_prefix [$event_type]: $reason" 2>&1) || _tg_rc=$?
+    else
+        # No resolvable target was ALSO silent: no attempt, no record, nothing to
+        # find later. An alert with nowhere to go is a delivery failure, not a
+        # no-op, and three of four fleets are currently in exactly this state.
+        _tg_rc=2
+        _tg_err="no alert chat-id resolved for this fleet"
     fi
+
+    if [ "$_tg_rc" -eq 0 ]; then
+        _ALERT_DELIVERED=1
+    else
+        _ALERT_DELIVERED=0
+        # 1. Durable record. emit_fleet_event only appends JSONL, so there is no
+        #    recursion back into this function.
+        emit_fleet_event "alert_delivery_failed" "$ev_source" \
+            "$(printf '{"for_event":"%s","channel":"telegram","exit":%s,"tmux_reached":%s,"detail":"%s"}' \
+                "$(json_escape "$event_type")" "$_tg_rc" "${_sig_tmux_ok:-0}" \
+                "$(json_escape "$(printf '%s' "$_tg_err" | tr '\n' ' ' | cut -c1-300)")")" \
+            "" fleet
+        # 2. Journal. These callers are systemd/launchd timer jobs, so stderr is
+        #    retained by the journal -- the surface an operator actually reads
+        #    during an incident, and the only one that needs nobody to go looking
+        #    in a ledger for a message that was supposed to come to them.
+        printf '%s ALERT-DELIVERY-FAILED %s: tg-post exit %s (%s); tmux_reached=%s\n' \
+            "$(ts_iso)" "$event_type" "$_tg_rc" "$_tg_err" "${_sig_tmux_ok:-0}" >&2
+    fi
+
+    # ALWAYS return 0. Measured before choosing: five of five callers
+    # (disk-monitor, fleet-memory-check, keepalive, reload-fleet,
+    # orphan-browser-reaper) run `set -euo pipefail` and call this UNGUARDED, so
+    # propagating a delivery failure would abort the watchdog that detected the
+    # condition -- on every fleet that has no token, which is most of them. That
+    # trades a silent alert for a dead detector, which is worse. Callers that
+    # need to branch read _ALERT_DELIVERED instead.
+    return 0
 }
 
 # emit_failure_alert <bots_dir> <event_type> <reason>
@@ -3300,6 +3632,106 @@ seed_claude_auth() {
     local creds="${2:?seed_claude_auth: <host_creds> required}"
     cp "$creds" "$cfg/.credentials.json"
     chmod 600 "$cfg/.credentials.json"
+}
+
+# seed_workspace_trust <project_cwd> [config_dir]
+# Mark ONE workspace trusted in an EXISTING Claude Code config, without
+# clobbering it (#970).
+#
+# Claude Code ignores a project's `.claude/settings.local.json` until the
+# workspace is trusted, recording trust as
+# `projects["<abs-path>"].hasTrustDialogAccepted`. Bots share the operator's
+# `~/.claude`, and nothing on the boot path ever set that key: measured on this
+# host, 21 of 21 production bot dirs had NO project entry at all.
+#
+# WHY THIS IS NOT seed_claude_auth_and_trust. That helper WRITES THE WHOLE FILE
+# and is correct only for a throwaway config dir in a harness. Pointed at the
+# operator's real `~/.claude.json` it would destroy every other project entry,
+# their history and their settings. This one merges a single key and is safe to
+# run on every boot of every bot.
+#
+# SCOPE OF WHAT THIS FIXES, stated because it was measured and is narrower than
+# #970 claims: composed DENY rules were verified to fire in an untrusted
+# workspace (fresh dir, no project entry before or after the run, deny still
+# blocked). So this is not what makes sibling isolation work. What remains
+# untested is whether ALLOW entries are dropped when untrusted — the documented
+# advisory names `permissions.allow` specifically, and that half of #970 is
+# unresolved. The advisory string itself no longer prints on the current binary
+# (positive control on a known-untrusted dir produced nothing), so it cannot be
+# used to measure trust state either.
+#
+# Idempotent, locked, and never fatal: a bot that cannot be marked trusted still
+# boots.
+# claude_config_json — the file Claude Code actually keeps `projects[]` in.
+#
+# The layout is ASYMMETRIC, and both halves are measured on this host rather than
+# inferred from the other:
+#
+#   CLAUDE_CONFIG_DIR set   -> "$CLAUDE_CONFIG_DIR/.claude.json"
+#       An isolated config dir with NO seed, after one real session: claude
+#       created backups/, projects/, sessions/ and `.claude.json` (0 projects).
+#       It did not create `.config.json`.
+#
+#   CLAUDE_CONFIG_DIR unset -> "$HOME/.claude/.config.json"
+#       That file carries 14 trust-flagged projects INCLUDING six scratch dirs
+#       from other bots' live sessions today — i.e. claude is writing trust there
+#       right now. `$HOME/.claude.json` also exists with 29 trust-flagged
+#       projects, but is frozen at 2026-08-05, the same date as the installed
+#       binary: a pre-migration legacy file that nothing has written in 16 days.
+#
+# Getting this wrong is silent in BOTH directions, which is why it is resolved in
+# one named function with the evidence attached rather than inline at the call
+# site: `$HOME/.claude/.claude.json` (the first version of this) does not exist
+# and nothing reads it, and `$HOME/.claude.json` (the obvious correction) is read
+# by nothing either. A seed written to either returns success and changes nothing.
+claude_config_json() {
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+        printf '%s\n' "$CLAUDE_CONFIG_DIR/.claude.json"
+    else
+        printf '%s\n' "$HOME/.claude/.config.json"
+    fi
+}
+
+seed_workspace_trust() {
+    local cwd="${1:?seed_workspace_trust: <project_cwd> required}"
+    # Second arg is the config JSON FILE, not a directory — tests pass one; the
+    # production call in start-bot.sh passes ONE argument and must resolve the
+    # real file through claude_config_json.
+    local json="${2:-$(claude_config_json)}"
+    local cfg; cfg="$(dirname "$json")"
+    command -v jq >/dev/null 2>&1 || return 0
+    # BEFORE the lock, not inside it: with_lock creates "$json.lock", which needs
+    # "$cfg" to exist. On a fresh install it does not, so the lock failed, the
+    # helper returned its non-fatal 0, and the seed silently did nothing — the
+    # exact never-trusted state this exists to fix, on the one path where nobody
+    # would have an existing config to notice it against. Caught by the
+    # no-config-yet test, not by review.
+    mkdir -p "$cfg" 2>/dev/null || return 0
+    # Already trusted -> nothing to do, and no lock taken.
+    if [ -f "$json" ] && jq -e --arg c "$cwd" \
+        '.projects[$c].hasTrustDialogAccepted == true' "$json" >/dev/null 2>&1; then
+        return 0
+    fi
+    _do_trust_seed() {
+        local tmp
+        tmp=$(safe_mktemp) || return 1
+        if [ -f "$json" ] && jq -e '.' "$json" >/dev/null 2>&1; then
+            jq --arg c "$cwd" '.projects //= {}
+                | .projects[$c] //= {}
+                | .projects[$c].hasTrustDialogAccepted = true
+                | .projects[$c].hasCompletedProjectOnboarding = true' \
+                "$json" > "$tmp" && mv "$tmp" "$json"
+        else
+            # No config yet (or unparseable): create the minimum rather than
+            # overwrite a file we could not read. An unparseable config is not
+            # ours to repair here.
+            [ -f "$json" ] && { rm -f "$tmp"; return 0; }
+            jq -n --arg c "$cwd" '{projects: {($c): {
+                hasTrustDialogAccepted: true,
+                hasCompletedProjectOnboarding: true}}}' > "$tmp" && mv "$tmp" "$json"
+        fi
+    }
+    with_lock "${json}.lock" _do_trust_seed || return 0
 }
 
 # seed_claude_auth_and_trust <config_dir> <project_cwd> <claude_bin> <host_creds>

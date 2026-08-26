@@ -62,8 +62,28 @@ BASELINE_N = 4
 # IV_KNOB's arm record in one expression, so a row where the two disagree was
 # edited after the fact — which is exactly the mislabel this module exists to
 # catch, and the only way it can be caught at all.
+# The independent variable, as a (knob, hoisted row field) PAIR. Selectable
+# because the sampler now has two axes: the #843 settle ladder, and the #1236
+# trace axis that holds settle fixed and moves only the instrumentation.
+#
+# Switched as a pair and never independently — the arm value is cross-checked
+# against the knob record in row_arm, and a mismatched pair would make every
+# row report arm-disagrees-with-record.
+IV_CHOICES = {
+    "settle": ("PANE_SEND_SETTLE_S", "settle_s"),
+    "trace": ("PANE_VERIFY_TRACE", "trace_on"),
+}
 IV_KNOB = "PANE_SEND_SETTLE_S"
 IV_FIELD = "settle_s"
+
+
+def set_iv(axis: str) -> None:
+    """Point the module at one axis. Call before any analysis."""
+    global IV_KNOB, IV_FIELD
+    try:
+        IV_KNOB, IV_FIELD = IV_CHOICES[axis]
+    except KeyError:
+        raise SystemExit(f"unknown --iv {axis!r}; expected one of {sorted(IV_CHOICES)}")
 
 # Pairing (pre-registration v2 §4 BASELINE): "interleaved blocks, randomized
 # arm order within block. One block = one boot per arm."
@@ -101,8 +121,24 @@ def _bisect(f, lo: float, hi: float, iters: int = 60) -> float:
     return (lo + hi) / 2.0
 
 
-def cp_interval(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
-    """Exact Clopper-Pearson two-sided interval for k successes in n trials."""
+def cp_interval(k: int, n: int, conf: float) -> tuple[float, float]:
+    """Exact Clopper-Pearson two-sided interval for k successes in n trials.
+
+    `conf` is REQUIRED and deliberately has no default (#1236). A default is a
+    decision made silently by whoever wrote the signature, on behalf of every
+    caller who did not know a decision was being made — and this function had
+    one, at 0.95, while the pre-registration pinned a 90% ONE-SIDED bound. The
+    two are different statistics: 0.95 two-sided is a 97.5% one-sided limit, and
+    it returned 47.3% where the ratified bar gives 59.4% for 7-of-8. Nothing was
+    unsafe — the default is STRICTER in both directions, so it could only ever
+    have made a run under-claim — but it would have spent a 45-minute run to
+    return INCONCLUSIVE against a bar it had actually met.
+
+    An instruction to remember to pass the flag is not a fix; that is the same
+    shape as every un-passed optional argument in this repo. Required means the
+    invocation always names it, which is what a pre-registration is supposed to
+    guarantee. Callers wanting the historical two-sided 95% pass 0.95 EXPLICITLY,
+    which is identical behaviour now stated rather than assumed."""
     if not 0 <= k <= n or n <= 0:
         raise ValueError(f"bad k/n: {k}/{n}")
     alpha = 1.0 - conf
@@ -126,7 +162,7 @@ MOVER_METHOD = "MOVER (Zou-Donner) over the two exact Clopper-Pearson intervals"
 
 
 def mover_difference(
-    k1: int, n1: int, k2: int, n2: int, conf: float = 0.95
+    k1: int, n1: int, k2: int, n2: int, conf: float
 ) -> tuple[float, float, float]:
     """(point, lo, hi) for p1 - p2, combining the two per-arm CP intervals.
 
@@ -551,7 +587,9 @@ def arm_block(rows: list[dict], arm: float | None) -> tuple[list[str], str, int,
         out.append("NO VALID BOOTS in this arm — it measured nothing; see artifacts.")
         return (out, "", k, valid)
 
-    lo, hi = cp_interval(k, valid)
+    # 0.95 EXPLICIT, not a default (#1236): this is the published strand-rate
+    # figure and its value must not move. Stated, not assumed.
+    lo, hi = cp_interval(k, valid, 0.95)
     submits = [r.get("t_submit_s") for r in clean if r.get("t_submit_s") is not None]
     out.append(
         f"strand rate: {k}/{valid} = {k / valid:.3f}   95% CI [{lo:.3f}, {hi:.3f}] (Clopper-Pearson exact)"
@@ -662,7 +700,7 @@ def comparison_block(
     for arm, k, n in sorted(usable):
         if arm == ctl:
             continue
-        d, lo, hi = mover_difference(ck, cn, k, n)
+        d, lo, hi = mover_difference(ck, cn, k, n, 0.95)
         out.append(
             f"{_fmt_arm(ctl)} - {_fmt_arm(arm)}: {ck}/{cn} - {k}/{n} = {d:+.3f}   "
             f"95% CI [{lo:+.3f}, {hi:+.3f}]"
@@ -880,7 +918,10 @@ def summarize(rows: list[dict], control: float | None = None) -> tuple[str, int]
             f"{IV_FIELD} alone."
         )
 
-    lo, hi = cp_interval(BASELINE_STRANDS, BASELINE_N)
+    # 0.95 EXPLICIT (#1236). This prints the #843 pre-fix baseline that is
+    # published beside every result, so its value is load-bearing for
+    # comparability and must stay byte-identical.
+    lo, hi = cp_interval(BASELINE_STRANDS, BASELINE_N, 0.95)
     out.append("")
     out.append(
         f"pre-fix baseline (#843): {BASELINE_STRANDS}/{BASELINE_N} = {BASELINE_STRANDS / BASELINE_N:.2f}   95% CI [{lo:.3f}, {hi:.3f}]"
@@ -918,6 +959,19 @@ def main(argv: list[str]) -> int:
     # "precondition/dep missing (skip)". A typo in a flag would report as a
     # skipped run. If this ever moves to argparse, catch SystemExit and remap.
     args = argv[1:]
+    # Same manual style as --control, and for the same reason recorded above:
+    # argparse exits 2, which the sampler documents as "skip".
+    if "--iv" in args:
+        idx = args.index("--iv")
+        if idx + 1 >= len(args):
+            print("--iv needs a value", file=sys.stderr)
+            return 1
+        axis = args[idx + 1]
+        if axis not in IV_CHOICES:
+            print(f"bad --iv: {axis!r} (expected {sorted(IV_CHOICES)})", file=sys.stderr)
+            return 1
+        set_iv(axis)
+        del args[idx : idx + 2]
     control: float | None = None
     if "--control" in args:
         idx = args.index("--control")
@@ -932,7 +986,8 @@ def main(argv: list[str]) -> int:
         del args[idx : idx + 2]
     if len(args) != 1:
         print(
-            "usage: boot-strand-summary.py [--control SETTLE] <rows.jsonl>",
+            "usage: boot-strand-summary.py [--iv settle|trace] "
+            "[--control VALUE] <rows.jsonl>",
             file=sys.stderr,
         )
         return 1

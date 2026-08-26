@@ -140,7 +140,8 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| `GIT_CONFIG_GLOBAL` | `git_credentials` (fleet or bot) | Path to the composed `<bot_dir>/.gitconfig` that routes git credentials per GitHub org. Emitted **only** when the bot declares `git_credentials`. The composed file `include`s the operator's `~/.gitconfig` first, so identity and aliases are preserved. See [`fleet-yaml-schema.md`](fleet-yaml-schema.md#fleetdefaultsgit_credentials--botsnamegit_credentials) |
+| `GIT_CONFIG_GLOBAL` | `git_credentials` or `github_app` (fleet or bot) | Path to the composed `<bot_dir>/.gitconfig` that routes git credentials per GitHub org and/or through the GitHub App helper. Emitted when the bot declares either surface. The composed file `include`s the operator's `~/.gitconfig` first; App mode with `slug`+`bot_user_id` overrides the commit identity AFTER the include. See [`fleet-yaml-schema.md`](fleet-yaml-schema.md#fleetdefaultsgit_credentials--botsnamegit_credentials) |
+| `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` | `github_app` or `mcp: [github-app]` | The three App-auth inputs (fleet tier; values from `lib/setup-github-app.sh`). Consumed at USE time by `lib/git-credential-github-app` — never resolved into the boot env (F9). Note the composed `cache --timeout=3000` layer: git `approve` re-stores a token with a fresh TTL on every successful auth, so a cached token can outlive the ~1h `ghs_` lifetime under continuous pushing — self-healing (the next 401 erases and re-mints) at the cost of one failed round trip (D5) |
 
 Two operational notes:
 

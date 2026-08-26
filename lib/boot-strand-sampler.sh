@@ -43,11 +43,27 @@
 #   2. SERIAL BOOTS. Production strands were observed on one-at-a-time
 #      restarts, which this reproduces; the mass-restart contention path
 #      (BOOT_LOCK held by peers) is not sampled. --load N closes the CPU half
-#      of that gap, and it is not an optional refinement: on an idle host this
-#      sampler measures a condition under which the strand does not occur (#933
-#      measurement — clean at loadavg ~10, stranded 5 of 6 at loadavg 19-31).
-#      A strand-free sample taken WITHOUT --load says nothing about the
-#      contended boot, which is the one that produced every observed incident.
+#      of that gap and stays pinned — as a RATE AMPLIFIER, which is what makes
+#      a 30-45 min run yield any traced strands at all, NOT because the strand
+#      fails to occur at low load. Read #933's boot-shape table by its strand
+#      signature (box still holding at +25s): it stranded 5 of 5 at loadavg
+#      18.7-30.7, and the clean-at-loadavg-~10 row it is usually cited for is
+#      ONE boot at 10.3 — the only row in that table whose payload actually
+#      ran. Its five idle boots at loadavg 1.7 are not a clean baseline
+#      either: the payload never ran AND the box never held it, so they are
+#      not valid trials of the send in either direction. So the low-load
+#      evidence is a single boot: it supports "not observed in one sample",
+#      never "does not occur". Per the pass-bar ratified on #1236
+#      (Clopper-Pearson exact, 90% one-sided throughout — every n here moves
+#      if you recompute on another basis, so the basis travels with the
+#      number), a zero-observation bounds the rate at 90% for n=1 and still
+#      31.9% at n=6, and ELIMINATION — an upper bound under 10% — is
+#      unreachable below n=22. The strand has since been seen at low load
+#      twice: a restart stranded at loadavg ~10, and a production strand lower
+#      still. So the LOW-LOAD STRATUM IS UNSAMPLED, NOT EMPTY. A sample taken
+#      without --load still says little about the contended boot; a
+#      strand-free one bounds the low-load rate loosely rather than showing
+#      it is zero.
 #   3. The per-boot process ledger (parity_procs: every descendant of the pane)
 #      is recorded so parity is EVIDENCED per boot, not asserted — the summary
 #      prints the tree histogram.
@@ -156,6 +172,11 @@ MEM_FLOOR_MB="${SAMPLER_MEM_FLOOR_MB:-1200}"
 # Interleave mode: the ladder's arms, and the seed for within-block order.
 # Empty ARMS keeps the single-arm behaviour (the caller sets the knob).
 ARMS=""
+# Which knob --arms values address. "settle" is the original ladder; "trace"
+# (#1236) interleaves instrumentation ON against OFF at a FIXED settle, which is
+# the control for "instrumenting a race can move it". Same shuffle, same
+# blocking, same per-boot in-force recording -- only the knob differs.
+ARM_AXIS="settle"
 SEED=""
 
 # PIDs of the synthetic-load burners, so teardown targets what this run started
@@ -315,7 +336,7 @@ count_send_retries() {
 # Unforwarded — no pre-registered ladder sweeps them. Set in the caller env
 # they are dropped by env -i, and knob_disclosure prints them as SCRUBBED
 # rather than letting the run silently measure defaults.
-_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS"
+_FORWARDED_PANE_KNOBS="PANE_SEND_VERIFY_TICKS PANE_SEND_SETTLE_S PANE_READY_TICKS PANE_VERIFY_TRACE"
 _UNFORWARDED_PANE_KNOBS="PANE_READY_POLL_S PANE_RECOVER_TICKS"
 
 # Field separator for the fate records below: ASCII unit separator, NOT a tab.
@@ -356,6 +377,22 @@ pane_knob_fate() {
         PANE_READY_TICKS)       inforce="$_PANE_READY_TICKS_BOOT"; src="boot-armed" ;;
         PANE_SEND_SETTLE_S)     default_val="$_PANE_SEND_SETTLE_DEFAULT" ;;
         PANE_SEND_VERIFY_TICKS) default_val="$_PANE_SEND_VERIFY_TICKS_DEFAULT" ;;
+        # #1236. This knob has no default VALUE: unset IS off, and off is the
+        # production condition. Recording it as `default` would assert a
+        # fallback constant lib-common does not have, and
+        # test_default_fate_tracks_the_constant_lib_common_ACTUALLY_READS is
+        # right to reject that -- so it gets its own fate instead of borrowing
+        # one that would be a small lie about where the value came from.
+        PANE_VERIFY_TRACE)
+            # In-force is recorded as 1/0, NOT the path. The experimental
+            # condition is trace-on-ness; the path is an implementation detail
+            # that differs per boot by construction (it is per-boot), so
+            # recording it as the value would make every trace-on boot its own
+            # arm and trip the covarying-knob guard forever. The path is still
+            # carried in `env` for provenance.
+            if [ -n "$set_val" ]; then inforce="1"; src="forwarded"
+            else inforce="0"; src="off"; fi
+            ;;
         # A knob joining _FORWARDED_PANE_KNOBS without a branch here would
         # otherwise be recorded as if it had no fate — the scrubbed-silently
         # class one level up. Loud, and pinned by the test suite.
@@ -583,7 +620,12 @@ run_start_bot() {
 # abort through the ERR path instead of returning its own verdict.
 emit_summary() {
     local rc=0
-    python3 "$LIB_DIR/boot-strand-summary.py" "$1" || rc=$?
+    # The axis the run varied has to be the axis the analysis groups on, or the
+    # attribution guard reports every boot as one mislabelled arm -- which is
+    # exactly what it did, correctly, on the first #1236 control attempt.
+    local _iv=()
+    [ "$ARM_AXIS" = "trace" ] && _iv=(--iv trace)
+    python3 "$LIB_DIR/boot-strand-summary.py" ${_iv[@]+"${_iv[@]}"} "$1" || rc=$?
     exit "$rc"
 }
 
@@ -594,6 +636,8 @@ main() {
         case "$1" in
             -n)         BOOTS="${2:?-n needs a value}"; shift 2 ;;
             --arms)     ARMS="${2:?--arms needs a value}"; shift 2 ;;
+            --trace-arms)
+                        ARMS="${2:?--trace-arms needs a value}"; ARM_AXIS="trace"; shift 2 ;;
             --seed)     SEED="${2:?--seed needs a value}"; shift 2 ;;
             --deadline) DEADLINE="${2:?--deadline needs a value}"; shift 2 ;;
             --load)     LOAD_BURNERS="${2:?--load needs a value}"; shift 2 ;;
@@ -613,13 +657,29 @@ main() {
         # PANE_SEND_SETTLE_S; a caller value would be overwritten on every boot
         # while knob_disclosure still called it forwarded — a disclosure that
         # describes a number governing nothing is the #1084 class.
-        if [ -n "${PANE_SEND_SETTLE_S:-}" ]; then
+        # The refusal names the knob THIS axis owns. On the trace axis the loop
+        # owns PANE_VERIFY_TRACE and leaves settle alone, so guarding settle
+        # there would refuse a legitimate run and miss the real collision.
+        if [ "$ARM_AXIS" = "trace" ]; then
+            if [ -n "${PANE_VERIFY_TRACE:-}" ]; then
+                printf 'REFUSED: --trace-arms sweeps PANE_VERIFY_TRACE, but it is also set in the environment (%s).\n' \
+                    "$PANE_VERIFY_TRACE" >&2
+                printf '  One fact, two sources. Unset it, or drop --trace-arms.\n' >&2
+                exit 1
+            fi
+        elif [ -n "${PANE_SEND_SETTLE_S:-}" ]; then
             printf 'REFUSED: --arms sweeps PANE_SEND_SETTLE_S, but it is also set in the environment (%s).\n' \
                 "$PANE_SEND_SETTLE_S" >&2
             printf '  One fact, two sources. Unset it, or drop --arms to sample that single arm.\n' >&2
             exit 1
         fi
         for a in $(printf '%s' "$ARMS" | tr ',' ' '); do
+            if [ "$ARM_AXIS" = "trace" ]; then
+                case "$a" in
+                    on|off) ;;
+                    *) printf 'bad --trace-arms value: %s (expected "on off")\n' "$a" >&2; exit 1 ;;
+                esac
+            else
             case "$a" in
                 ''|*[!0-9.]*|*.*.*|.)
                     printf 'bad --arms value: %s (settle seconds, e.g. "0.3 1.5 6.0")\n' "$a" >&2; exit 1 ;;
@@ -627,6 +687,7 @@ main() {
             # Normalised through the same numeric reading the summary uses, so
             # "6 6.0" cannot be two arms here and one arm in the analysis.
             a="$(awk -v v="$a" 'BEGIN { printf "%g", v + 0 }')"
+            fi
             for b in ${arm_list[@]+"${arm_list[@]}"}; do
                 [ "$b" = "$a" ] || continue
                 printf 'REFUSED: --arms repeats %s. One block is one boot per arm, so a repeat makes that unverifiable.\n' "$a" >&2
@@ -890,7 +951,20 @@ YAML
         # path by which a label could be written without the condition
         # changing. An empty arm is single-arm mode and must not touch the
         # variable at all: an empty value would shadow the lib-common default.
-        [ -z "$arm" ] || PANE_SEND_SETTLE_S="$arm"
+        if [ "$ARM_AXIS" = "trace" ]; then
+            # The trace axis leaves settle alone and moves only the
+            # instrumentation, so a difference between arms is attributable to
+            # the instrument and to nothing else.
+            case "$arm" in
+                on)  PANE_VERIFY_TRACE="$ART/trace-boot-$i" ;;
+                # off AND the empty arm (the warm-up) both clear it. Leaving it
+                # set would point the next boot at the previous boot's trace
+                # dir -- the warm-up did exactly that on the first attempt.
+                *)   unset PANE_VERIFY_TRACE ;;
+            esac
+        else
+            [ -z "$arm" ] || PANE_SEND_SETTLE_S="$arm"
+        fi
         # Set BEFORE the
         # child runs, so a boot that fails outright still carries its arm, and
         # before SECONDS=0, so its jq fork (measured 66ms on the reference
@@ -986,12 +1060,20 @@ YAML
               loadavg_1m: (if $la == "" then null else ($la|tonumber) end),
               arm_knobs: $arm,
               settle_s: ($arm | if . == null then null else .["PANE_SEND_SETTLE_S"].v end),
+              # Hoisted the same way and for the same reason: the summariser
+              # groups on a row field and cross-checks it against the knob
+              # record, so both must come from the one in-force resolution.
+              trace_on: ($arm | if . == null then null else .["PANE_VERIFY_TRACE"].v end),
               block: (if $blk == "" then null else ($blk|tonumber) end),
               pos: (if $pos == "" then null else ($pos|tonumber) end),
-              arm_order: (if $ord == "" then null else ($ord | split(" ") | map(tonumber)) end),
+              # try/catch, not bare tonumber: the settle axis has numeric arms
+              # and the #1236 trace axis has "on"/"off", and a bare coercion
+              # aborts the whole row on the latter -- which is how the first
+              # control run died after its warm-up boot.
+              arm_order: (if $ord == "" then null else ($ord | split(" ") | map(try tonumber catch .)) end),
               arm_seed: (if $seed == "" then null else ($seed|tonumber) end)}' >> "$ROWS"
         printf 'boot %02d (%s)%s: %s%s%s%s\n' "$i" "$kind" \
-            "${blk:+ block $blk pos $pos settle=$arm}" "$outcome" \
+            "${blk:+ block $blk pos $pos $ARM_AXIS=$arm}" "$outcome" \
             "${t_submit:+ submit=${t_submit}s}" \
             "${boot_la:+ la=${boot_la}}" \
             "$([ "$retry_fired" -gt 0 ] && printf ' [send_retry fired]' || true)"

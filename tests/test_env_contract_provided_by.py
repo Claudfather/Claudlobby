@@ -21,7 +21,7 @@ CLAUDRON_FRAGMENT = {
     "_env_contract": {
         "CLAUDRON_VAULT_PATH": {
             "description": "Claudron vault path (composed into bot.conf)",
-            "tier": "fleet",
+            "default_tier": "fleet",
             "provided_by": "composer",
         },
     },
@@ -57,7 +57,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Paths]:
             {
                 "github": {"command": "gh", "args": ["mcp"]},
                 "_env_contract": {
-                    "GITHUB_PAT": {"description": "GitHub PAT", "tier": "fleet"},
+                    "GITHUB_PAT": {"description": "GitHub PAT", "default_tier": "fleet"},
                 },
             }
         )

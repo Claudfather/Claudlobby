@@ -66,10 +66,10 @@ if body=$(PRINTIFY_FIXTURE_VARIANTS="$FIX/choice_variants.json" \
 else no "create --enable-variants subset"; fi
 
 # 7. migrate --dry-run coverage report: 4 retained (White) + 4 dropped (Transparent)
-cov=$(PRINTIFY_FIXTURE_PRODUCT="$FIX/spoke_sticker_product.json" \
+cov=$(PRINTIFY_FIXTURE_PRODUCT="$FIX/legacy_sticker_product.json" \
       PRINTIFY_FIXTURE_VARIANTS="$FIX/choice_variants.json" \
       PRINTIFY_API_KEY=dummy PRINTIFY_SHOP_ID=1234567 \
-      "$SH" migrate --product SPOKE_STICKER_FIXTURE --to-provider 99 --dry-run 2>/dev/null)
+      "$SH" migrate --product LEGACY_STICKER_FIXTURE --to-provider 99 --dry-run 2>/dev/null)
 if [ "$(printf '%s' "$cov" | grep -c '\[+\]')" -eq 4 ] && [ "$(printf '%s' "$cov" | grep -c '\[-\]')" -eq 4 ]; then
   ok "migrate --dry-run coverage: 4 retained + 4 dropped"
 else no "migrate --dry-run coverage counts (got +$(printf '%s' "$cov" | grep -c '\[+\]') -$(printf '%s' "$cov" | grep -c '\[-\]'))"; fi

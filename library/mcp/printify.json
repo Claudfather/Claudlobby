@@ -2,11 +2,13 @@
   "_env_contract": {
     "PRINTIFY_API_KEY": {
       "description": "Printify Personal Access Token",
-      "tier": "fleet"
+      "default_tier": "fleet",
+      "secret": true
     },
     "PRINTIFY_SHOP_ID": {
       "description": "Printify shop ID",
-      "tier": "fleet"
+      "default_tier": "fleet",
+      "secret": false
     }
   },
   "_permissions_contract": {

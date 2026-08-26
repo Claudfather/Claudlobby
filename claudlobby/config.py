@@ -6,6 +6,7 @@ flattens lists, and resolves team membership.
 
 from __future__ import annotations
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -463,6 +464,54 @@ class AutonomousRunnerConfig:
 
 
 @dataclass
+class GithubAppConfig:
+    """Per-bot GitHub App git-auth routing (App-auth P3 #1273).
+
+    The credential VALUES ride the ``GITHUB_APP_*`` env contract the
+    ``github-app`` MCP fragment declares (fleet tier); this field only decides
+    whether and how the composed per-bot gitconfig routes git auth through the
+    App helper. ``slug`` + ``bot_user_id`` together arm the composed commit
+    identity (F-identity variant a: ``<slug>[bot]`` +
+    ``<id>+<slug>[bot]@users.noreply.github.com``); omitting either keeps the
+    operator identity flowing through the include (variant b) — one field
+    pair, no code fork. ``orgs`` scopes the App helper (and the ssh→https
+    rewrite, and whether the gh fallback is kept) to those orgs; empty means
+    host-generic github.com.
+    """
+
+    slug: str | None = None
+    bot_user_id: int | None = None
+    orgs: list[str] = field(default_factory=list)
+
+    @property
+    def host_generic(self) -> bool:
+        """No org scoping: the App serves all of github.com. The composer keys
+        the gh-fallback SUPPRESSION on this, and freshbox mirrors the same
+        emission decision — one predicate so the audit and the artifact cannot
+        drift apart."""
+        return not self.orgs
+
+    @property
+    def composes_identity(self) -> bool:
+        """Both identity fields set -> the composed [user] block arms
+        (F-identity variant a). The freshbox D7 split and the validator's
+        include-reliance warn both key on the same condition."""
+        return bool(self.slug and self.bot_user_id)
+
+
+# name -> operator-facing description, the ONE mapping every Python surface
+# spells the App env trio from (composer registry, validator warns, freshbox
+# key audit) — the same emitter-cannot-disagree-with-guard rule
+# FLEET_PULSE_ENV_KEYS states. The fragment (library/mcp/github-app.json)
+# stays the contract-declaration surface; this is the code-side mirror.
+GITHUB_APP_ENV_VARS: dict[str, str] = {
+    "GITHUB_APP_ID": "GitHub App ID (numeric; git-auth routing)",
+    "GITHUB_APP_INSTALLATION_ID": "GitHub App installation ID (git-auth routing)",
+    "GITHUB_APP_PRIVATE_KEY_PATH": "Path to the App private-key .pem (0600; git-auth routing)",
+}
+
+
+@dataclass
 class BotConfig:
     bot_id: str  # dict key — immutable system slug
     name: str  # display name (defaults to bot_id)
@@ -474,6 +523,26 @@ class BotConfig:
     scope: ScopeConfig | None = None
     # org -> env var NAME; see _parse_git_credentials
     git_credentials: dict[str, str] = field(default_factory=dict)
+    # GitHub App git-auth routing (App-auth P3 #1273, fork F8: a dedicated
+    # field, never a git_credentials value form — that parser hard-rejects
+    # non-identifier values by design). None = App mode off for this bot.
+    github_app: GithubAppConfig | None = None
+    # env var NAME -> credential source identifier. The per-scope override the
+    # tier ruling requires (#1214 F6c): a contract declares where a value comes
+    # from BY DEFAULT, and a fleet or a single bot may say otherwise for itself
+    # — "(a) should work if configured at bot, fleet, or host level".
+    # Fleet-then-bot merged, bot winning, exactly as git_credentials is.
+    # SCHEMA ONLY in this phase: nothing resolves these yet (F1(a) ships `cli`
+    # and the start-bot.sh resolver is a later phase). Declaring one today
+    # records intent and shows up in the register; it does not fetch anything.
+    credential_sources: dict[str, str] = field(default_factory=dict)
+    # Equipment names (MCP + integration) this bot declares ITSELF, as opposed
+    # to inheriting from `fleet.defaults`. The merge that builds `mcp` and
+    # `integrations` is flat and first-seen-wins, so it destroys this — and it
+    # is exactly what decides which `.env` a var's stub belongs in (#1214 F3a:
+    # "tier follows the equipment"). A GitHub App given to ONE bot is that
+    # bot's equipment; its var stub belongs in that bot's .env, not the fleet's.
+    bot_attached_equipment: frozenset[str] = field(default_factory=frozenset)
     model_strategy: ModelStrategyConfig | None = None
     account: str = "default"
     model: str | None = None
@@ -866,6 +935,60 @@ def _coerce_scope(raw: dict | None) -> ScopeConfig | None:
 # this is the only way to tell a pasted secret from an env var name.
 _GITHUB_TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
 
+# GitHub org/user login charset (GitHub's own rule: alphanumerics and single
+# hyphens, no leading/trailing/double hyphen). An org name is interpolated
+# UNESCAPED into composed .gitconfig subsection headers and insteadOf values,
+# so an unvalidated value (a quote, a newline, a `#`) is a config-injection
+# sink — the ceiling is a composed core.sshCommand, i.e. RCE at the next git
+# call. The `/`-only rejection both git-routing parsers had cannot catch it.
+_GITHUB_ORG_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9])*$")
+
+
+def _check_org_name(org: str, *, where: str, field: str) -> None:
+    """Reject an org value that is not a real GitHub login (config-injection
+    guard shared by git_credentials and github_app.orgs)."""
+    if not _GITHUB_ORG_RE.match(org):
+        raise ValueError(
+            f"{where}: {field} value {org!r} is not a valid GitHub org name "
+            "(letters, digits, single hyphens) — it is interpolated into the "
+            "composed .gitconfig and must not carry config-control characters"
+        )
+
+
+def _parse_credential_sources(raw: object, *, where: str) -> dict[str, str]:
+    """Validate one scope's ``credential_sources`` block (VAR -> source id).
+
+    One scope at a time with a ``where`` label so a mistake in fleet defaults is
+    not reported against a bot; callers dict-merge fleet then bot. The
+    ``_parse_git_credentials`` precedent, deliberately — a second shape for the
+    same job is how two blocks that must merge identically stop doing so.
+
+    Keys are env var NAMES and must satisfy the same ``SHELL_IDENT_RE`` contract
+    as every other composed env-var name. Values are source identifiers; that
+    they are members of the CLOSED registry is checked by the validator, on the
+    same footing as a contract's own ``source``, so both surfaces produce one
+    error shape and neither can be widened without the other.
+    """
+    mapping = _shaped(
+        f"{where}: credential_sources", raw, dict, "{GITHUB_PAT: cli:gh-token}"
+    )
+    out: dict[str, str] = {}
+    for key, source in mapping.items():
+        var = str(key)
+        if not SHELL_IDENT_RE.fullmatch(var):
+            raise ValueError(
+                f"{where}: credential_sources key '{var}' must be an env var NAME "
+                f"(letters, digits, underscore; not starting with a digit)"
+            )
+        if not isinstance(source, str) or not source:
+            raise ValueError(
+                f"{where}: credential_sources['{var}'] must be a source identifier "
+                f"string from the closed registry (e.g. 'cli:gh-token', 'literal'), "
+                f"got {type(source).__name__}"
+            )
+        out[var] = source
+    return out
+
 
 def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
     """Validate one tier's ``git_credentials`` block (org -> env var NAME).
@@ -892,6 +1015,7 @@ def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
                 f"'org/repo' — credential routing is org-scoped and a repo-scoped "
                 f"key would silently never match"
             )
+        _check_org_name(org, where=where, field="git_credentials key")
         if not isinstance(env_name, str) or not SHELL_IDENT_RE.match(env_name):
             raise ValueError(
                 f"{where}: git_credentials['{org}'] must be an env var NAME "
@@ -909,6 +1033,82 @@ def _parse_git_credentials(raw: object, *, where: str) -> dict[str, str]:
             )
         out[org] = env_name
     return out
+
+
+_GITHUB_APP_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _parse_github_app(raw: object, *, where: str) -> dict:
+    """Validate one tier's ``github_app`` block into a plain field dict.
+
+    Returns a DICT (not the dataclass) so the fleet→bot merge is per-field:
+    a bot restating one key must not silently reset the others to defaults.
+    Strict-bool ``enabled`` per the ``_parse_brief`` arming-knob precedent —
+    this knob changes how every git push authenticates, and a typo must not
+    arm it. Org entries reuse the no-``/`` rule from ``_parse_git_credentials``
+    (credential routing is org-scoped; a repo-scoped key silently never
+    matches).
+    """
+    if raw is None:
+        return {}
+    raw = _shaped(f"{where}: github_app", raw, dict, "{slug: my-app, bot_user_id: 123}")
+    out: dict = {}
+    if "enabled" in raw:
+        out["enabled"] = _strict_bool(f"{where}: github_app.enabled", raw["enabled"])
+    if "slug" in raw and raw["slug"] is not None:
+        slug = raw["slug"]
+        if not isinstance(slug, str) or not _GITHUB_APP_SLUG_RE.match(slug):
+            raise ValueError(
+                f"{where}: github_app.slug must be the App URL slug "
+                f"(lowercase letters, digits, hyphens), got {slug!r}"
+            )
+        out["slug"] = slug
+    if "bot_user_id" in raw and raw["bot_user_id"] is not None:
+        if not is_pos_int(raw["bot_user_id"]):
+            raise ValueError(
+                f"{where}: github_app.bot_user_id must be a positive integer "
+                f"(the App BOT USER id, not the App id), got {raw['bot_user_id']!r}"
+            )
+        out["bot_user_id"] = raw["bot_user_id"]
+    if "orgs" in raw and raw["orgs"] is not None:
+        orgs = raw["orgs"]
+        if not isinstance(orgs, list) or not all(isinstance(o, str) for o in orgs):
+            raise ValueError(
+                f"{where}: github_app.orgs must be a list of org names, got {orgs!r}"
+            )
+        for org in orgs:
+            if "/" in org or not org:
+                raise ValueError(
+                    f"{where}: github_app.orgs entry {org!r} must be an org name, "
+                    "not 'org/repo' — credential routing is org-scoped and a "
+                    "repo-scoped key would silently never match"
+                )
+            _check_org_name(org, where=where, field="github_app.orgs")
+        # De-dup while preserving order: a repeated org would compose duplicate
+        # credential/insteadOf sections.
+        out["orgs"] = list(dict.fromkeys(orgs))
+    unknown = set(raw) - {"enabled", "slug", "bot_user_id", "orgs"}
+    if unknown:
+        raise ValueError(
+            f"{where}: github_app has unknown key(s) {sorted(unknown)!r} — "
+            "known: enabled, slug, bot_user_id, orgs"
+        )
+    return out
+
+
+def _merge_github_app(defaults_raw: object, bot_raw: object, *, bot_name: str):
+    """Fleet-defaults → bot per-field merge; ``enabled: false`` after the
+    merge normalizes to None (a per-bot opt-out of a fleet-wide default)."""
+    merged = {
+        **_parse_github_app(defaults_raw, where="fleet defaults"),
+        **_parse_github_app(bot_raw, where=f"bot '{bot_name}'"),
+    }
+    if not merged:
+        return None
+    if merged.get("enabled") is False:
+        return None
+    merged.pop("enabled", None)
+    return GithubAppConfig(**merged)
 
 
 def is_pos_int(v: object) -> bool:
@@ -1245,6 +1445,20 @@ def _coerce_autonomous_runner(
     )
 
 
+def _strict_bool(label: str, value: object) -> bool:
+    """Arming-knob boolean: only a real YAML bool passes (#904 M1 precedent).
+
+    The loose bool() coercion the cosmetic knobs use would arm on any typo —
+    a YAML string is truthy — and a silently armed knob is the
+    no-silent-switches failure exactly."""
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"{label} must be a YAML boolean, got {value!r} — "
+            "an arming knob must not switch on via a typo"
+        )
+    return value
+
+
 def _parse_brief(raw: Any) -> bool:
     """Parse the bot-level ``brief:`` stanza (#904 M1) to its arming bool.
 
@@ -1255,13 +1469,7 @@ def _parse_brief(raw: Any) -> bool:
     real YAML boolean arms; anything else is a parse error naming the value.
     """
     raw = _shaped("brief", raw, dict, "{on_start: true}")
-    on_start = raw.get("on_start", False)
-    if not isinstance(on_start, bool):
-        raise ValueError(
-            f"'brief.on_start' must be a YAML boolean, got {on_start!r} — "
-            "an arming knob must not switch on via a typo"
-        )
-    return on_start
+    return _strict_bool("'brief.on_start'", raw.get("on_start", False))
 
 
 def _parse_enum(label: str, value: str | None, known: frozenset[str]) -> str | None:
@@ -1337,6 +1545,17 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
             ),
             **_parse_git_credentials(raw.get("git_credentials"), where=f"bot '{name}'"),
         },
+        github_app=_merge_github_app(
+            defaults.get("github_app"), raw.get("github_app"), bot_name=name
+        ),
+        credential_sources={
+            **_parse_credential_sources(
+                defaults.get("credential_sources"), where="fleet defaults"
+            ),
+            **_parse_credential_sources(
+                raw.get("credential_sources"), where=f"bot '{name}'"
+            ),
+        },
         model_strategy=_coerce_model_strategy(
             raw.get("model_strategy") or defaults.get("model_strategy")
         ),
@@ -1382,6 +1601,13 @@ def _coerce_bot(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> Bot
         ),
         integrations=_merge_lists(
             defaults.get("integrations"), raw.get("integrations")
+        ),
+        # Read from `raw` ONLY — `defaults` is the fleet-attached half by
+        # definition, and including it would make every bot claim every piece
+        # of fleet equipment as its own.
+        bot_attached_equipment=frozenset(
+            [e.name for e in _parse_mcp_list(raw.get("mcp"))]
+            + [str(i).split("/")[-1] for i in _as_list(raw.get("integrations"))]
         ),
         guardrails=_merge_lists(defaults.get("guardrails"), raw.get("guardrails")),
         protocols=_merge_lists(defaults.get("protocols"), raw.get("protocols")),

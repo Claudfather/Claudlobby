@@ -79,13 +79,13 @@ The single `POST` reaches the GraphQL endpoint, which is a read.
 ## The four answers worth memorising
 
 1. **`fulfillment_service` cannot tell you the supplier.** It is `"manual"` on every
-   variant — measured 4,804 of 4,804. Ask the fulfiller, not Shopify.
+   variant — measured on every one of them. Ask the fulfiller, not Shopify.
 2. **`inventory_quantity` is not stock.** When `inventory_management` is `null` the
    number is meaningless and frequently non-zero anyway. Purchasability is
    `availableForSale`. The popular "everything is 9999" version of this trap is *false* —
    9999 was 7% of variants.
-3. **A discount "count" is a node count.** 250 nodes carried 24,115 codes; one node held
-   10,928. Sum `codesCount`.
+3. **A discount "count" is a node count.** a few hundred nodes carried tens of thousands of codes; one
+   node held nearly half. Sum `codesCount`.
 4. **Unlisted is two fields, both load-bearing.** `product_type = "Hidden"` *and* the
    `hidden` tag. Half the convention means hidden on some surfaces and publicly
    browsable on others.

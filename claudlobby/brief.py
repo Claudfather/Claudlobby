@@ -118,6 +118,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .paths import Paths
+from .source_state import (
+    SOURCE_ABSENT,
+    SOURCE_OK,
+    SOURCE_UNREADABLE,
+    probe_dir,
+    probe_source,
+)
 from .workstreams import load_workstreams, registry_path
 
 SCHEMA_VERSION = 1
@@ -209,9 +216,14 @@ class Degradation:
 # --- ledger reading -----------------------------------------------------------
 
 
-LEDGER_OK = "ok"
-LEDGER_ABSENT = "absent"
-LEDGER_UNREADABLE = "unreadable"
+# Re-exported from ``source_state``, which owns the rule now that five other
+# readers need it too (#1216/#1014). Aliases rather than fresh literals so the
+# two can never drift: these strings are emitted verbatim in the schema-1
+# envelope (``provenance.*.state``) and asserted on by tests, so a second
+# definition would be a wire-format fork waiting to happen.
+LEDGER_OK = SOURCE_OK
+LEDGER_ABSENT = SOURCE_ABSENT
+LEDGER_UNREADABLE = SOURCE_UNREADABLE
 
 
 @dataclass(frozen=True)
@@ -251,6 +263,14 @@ def _read_ledger(path: Path) -> LedgerRead:
     dropped, so the brief can state its bound instead of printing a count that
     quietly under-reports.
     """
+    # Classification is delegated so this module and the five CLI readers draw
+    # the same line. The except arms below are KEPT, not vestigial: the probe
+    # opens the file and this reads it, two syscalls with a gap between them, and
+    # a read can fail where an open succeeded. Belt and braces on a read door is
+    # the right trade — the alternative is a traceback out of a read-only command.
+    probe = probe_source(path)
+    if probe.unreachable:
+        return LedgerRead(probe.state, [], 0)
     try:
         text = path.read_text()
     except FileNotFoundError:
@@ -527,7 +547,13 @@ def _dispatch_section(
         )
         return {}
 
-    bots_dir = str(paths.runtime_bots) if paths.runtime_bots.is_dir() else None
+    # probe_dir, not is_dir(): a bots dir that stats fine and raises on listing
+    # makes every .spawn lookup fail, so orphan detection returns empty for a
+    # reason that has nothing to do with the fleet.
+    _bots_probe = probe_dir(paths.runtime_bots)
+    bots_dir = (
+        str(paths.runtime_bots) if _bots_probe.state == SOURCE_OK else None
+    )
 
     # Resolve the expiry cap the way the CLI does. The matcher's Python API
     # takes max_age as a defaulted argument and only its main() consults
@@ -571,9 +597,14 @@ def _dispatch_section(
                 field="dispatches.orphaned",
                 mode="labeled",
                 reason=(
-                    f"no bots directory at {paths.runtime_bots}, so respawn "
-                    "cannot be detected and the orphaned list is empty by "
-                    "construction rather than by measurement"
+                    (
+                        f"no bots directory at {paths.runtime_bots}"
+                        if _bots_probe.state == SOURCE_ABSENT
+                        else f"the bots directory at {paths.runtime_bots} "
+                        "exists but cannot be listed"
+                    )
+                    + ", so respawn cannot be detected and the orphaned list "
+                    "is empty by construction rather than by measurement"
                 ),
                 issue="#1014",
             )
@@ -794,7 +825,39 @@ def _alerts_section(
             )
         )
 
-    if not paths.runtime_bots.is_dir():
+    # Was is_dir(), which let an unlistable dir through to collect_events and
+    # raised PermissionError out of the brief.
+    #
+    # BOTH unreachable states disclose, and that pairing is the point. An
+    # earlier round handled only UNREADABLE, so an ABSENT bots dir returned an
+    # empty alert list with nothing in degraded[] -- a reader saw no alerts and
+    # no statement that the door could not be opened. A false all-clear here is
+    # worse than anywhere else in this module, because "never serves a number it
+    # knows is wrong" is the property the whole door is built on.
+    #
+    # Same shape brief already uses for the orphan list under #1014: an empty
+    # list that is empty BY CONSTRUCTION is named as such rather than served as
+    # a measurement. The wording differs by state because the remedies differ --
+    # absent means wire the instrument, unreadable means fix the permissions.
+    _alert_probe = probe_dir(paths.runtime_bots)
+    if _alert_probe.state != SOURCE_OK:
+        degraded.append(
+            Degradation(
+                field="alerts",
+                mode="omitted",
+                reason=(
+                    (
+                        f"no bots directory at {paths.runtime_bots}"
+                        if _alert_probe.state == SOURCE_ABSENT
+                        else f"the bots directory at {paths.runtime_bots} "
+                        "exists but cannot be listed"
+                    )
+                    + ", so no alert source could be read and an empty list "
+                    "would mean 'could not look', not 'nothing is wrong'"
+                ),
+                issue="#1227",
+            )
+        )
         return []
 
     cutoff = (
@@ -1081,6 +1144,7 @@ def format_brief(brief: dict) -> str:
 
     return "\n".join(out)
 
+
 # --- shared degraded-marker helpers (both renderers) ---------------------------
 
 
@@ -1095,9 +1159,7 @@ def _section_degraded(deg: list[dict], section: str) -> list[dict]:
     silently.
     """
     return [
-        e
-        for e in deg
-        if e["field"] == section or e["field"].startswith(section + ".")
+        e for e in deg if e["field"] == section or e["field"].startswith(section + ".")
     ]
 
 

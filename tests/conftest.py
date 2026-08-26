@@ -72,11 +72,45 @@ def constructed_env(**overrides):
     return env
 
 
+def git_isolation_env(cfg, **extra):
+    """Subprocess env for driving real git against a COMPOSED gitconfig only.
+
+    One owner of the isolation contract (GIT_CONFIG_GLOBAL + system config off
+    + no terminal prompts) — it exists in several batteries and a drifted copy
+    weakens an assertion silently (dropping GIT_TERMINAL_PROMPT would hang a
+    harness rather than fail a check)."""
+    return {
+        **os.environ,
+        **extra,
+        "GIT_CONFIG_GLOBAL": str(cfg),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
 def _write_exec(path, content):
     """Write a stub script and set its exec bits (shared shell-test harness helper)."""
     with open(path, "w") as f:
         f.write(content)
     os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def booby_trap_git(bindir):
+    """Plant a `git` that records any invocation; returns the sentinel path.
+
+    The App-auth D10 helper-direct pin: token acquisition must never consult
+    git (a pathless `git credential fill` silently serves whatever identity
+    ambient config answers). Callers put `bindir` first on PATH with
+    STUB_DIR=bindir in the env, run the surface under test, and assert the
+    returned sentinel does not exist. Shared because trap and assert are
+    stringly coupled through the sentinel name — one owner keeps every
+    battery's pin identical.
+    """
+    _write_exec(
+        Path(bindir) / "git",
+        '#!/bin/bash\ntouch "$STUB_DIR/git-was-called"\nexit 1\n',
+    )
+    return Path(bindir) / "git-was-called"
 
 
 SETUP_SYSTEM = Path(__file__).resolve().parent.parent / "lib" / "setup-system"
@@ -357,7 +391,14 @@ def fleet_dir(tmp_path: Path) -> Path:
     mcp_frag = {
         "github": {"command": "gh", "args": ["mcp"]},
         "_env_contract": {
-            "GITHUB_PAT": {"description": "GitHub PAT", "tier": "fleet"},
+            # `secret` is required on every entry since #1214 Phase 1 — a
+            # fragment without it is rejected, so the shared fixture carries it
+            # or every test using this fleet fails on a well-formed fragment.
+            "GITHUB_PAT": {
+                "description": "GitHub PAT",
+                "default_tier": "fleet",
+                "secret": True,
+            },
         },
     }
     (root / "library" / "mcp" / "github.json").write_text(json.dumps(mcp_frag))
@@ -370,7 +411,8 @@ def fleet_dir(tmp_path: Path) -> Path:
         env_contract:
           GITHUB_PAT:
             description: GitHub personal access token
-            tier: fleet
+            default_tier: fleet
+            secret: true
         ---
 
         # GitHub MCP
