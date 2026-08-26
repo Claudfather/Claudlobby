@@ -141,11 +141,20 @@ fleet:
   bots:
     $BOT:
       name: $BOT
+      # DELIBERATELY NOT code-review, and the reason is a defect the smoke run
+      # caught: code-review's frontmatter carries deny: [Write, Edit,
+      # NotebookEdit]. Those land in EVERY cell from the expertise layer, so C7
+      # — whose whole job is to REMOVE the bare tool denies — could not move
+      # them: it composed the identical deny set as B0 and would have reported
+      # "C7 == B0, therefore the bare-Bash line is unconfounded" as evidence,
+      # when the cell had simply never flipped. ai-platform-reviewer declares
+      # scoped allows and NO denies, so every deny in the composed file traces
+      # to this harness's own declaration and C7 is a real flip.
       expertise:
-        - code-review
+        - ai-platform-reviewer
       channels: []
       mcp: []
-      tools:
+      tool_permissions:
         allow: [$allow]
         deny: [$deny]
 YAML
@@ -229,9 +238,33 @@ record_preconditions() {  # record_preconditions <cell>
 # in the earlier report was exactly which string came back.
 json_lines() { grep '^{' "$1" 2>/dev/null; }
 
-run_cell() {  # run_cell <name> <mode> <tool:Bash|Read> [strace:1]
-  local cell="$1" mode="$2" tool="$3" trace="${4:-}"
-  local out="$WORK/$cell.jsonl" prompt verdict raw toolname rc is_err oneline
+# The FACTOR SIGNATURE, read back off disk after compose. A cell whose flip did
+# not actually move is the worst failure available to this harness: it produces
+# a verdict identical to the baseline and that identity gets reported as
+# "this factor does not matter". The smoke run hit exactly that (C7 vs an
+# expertise-contributed deny), so intent is now asserted against composition
+# rather than assumed from the compose() arguments.
+factor_sig() {  # factor_sig <mode> <tool>
+  local l1 l3 pd td
+  l1="$(jq -r 'if ((.permissions.allow // []) | index("Bash")) != null then 1 else 0 end' "$FAKE_CFG/settings.json" 2>/dev/null)"
+  l3="$(jq -r 'if ((.permissions.allow // []) | index("Bash")) != null then 1 else 0 end' "$LOC3" 2>/dev/null)"
+  pd="$(jq -r 'if ((.permissions.deny // []) | map(select(startswith("Read("))) | length) > 0 then 1 else 0 end' "$LOC3" 2>/dev/null)"
+  td="$(jq -r 'if ((.permissions.deny // []) | index("Write")) != null then 1 else 0 end' "$LOC3" 2>/dev/null)"
+  printf 'l1bare=%s l3bare=%s pathdeny=%s tooldeny=%s mode=%s tool=%s' "$l1" "$l3" "$pd" "$td" "$1" "$2"
+}
+
+run_cell() {  # run_cell <name> <mode> <tool:Bash|Read> <expected_sig> [strace:1]
+  local cell="$1" mode="$2" tool="$3" expect="$4" trace="${5:-}"
+  local out="$WORK/$cell.jsonl" prompt verdict raw toolname rc is_err oneline actual
+
+  actual="$(factor_sig "$mode" "$tool")"
+  harness_check "$cell composed the intended flip [$actual]" \
+    "$([ "$actual" = "$expect" ] && echo yes || echo no)"
+  if [ "$actual" != "$expect" ]; then
+    say "  FATAL: $cell wanted [$expect] but composed [$actual] — the flip did not move."
+    say "         A cell that cannot move reports its non-result as evidence. Stopping."
+    exit 1
+  fi
 
   if [ "$tool" = Read ]; then
     prompt="Use the Read tool to read the file $TARGET. Do not use the Bash tool. Then report, verbatim and in full, either the file contents or the exact error text you received."
@@ -287,9 +320,18 @@ run_cell() {  # run_cell <name> <mode> <tool:Bash|Read> [strace:1]
     "$cell" "$mode" "$tool" "${toolname:-none}" "$verdict" "$rc" "$oneline" >> "$GRID"
   say "  -> $cell: $verdict (tool_used=${toolname:-none}, rc=$rc)"
   say "     RAW: $oneline"
-  printf '%s\n' "$verdict"
+  # The verdict travels by FILE, never by stdout. run_cell must run in the
+  # PARENT shell: a $(...) capture forks a subshell, which swallows every
+  # say()/harness_check() line it emits and drops the pass/fail increments on
+  # exit -- the per-cell flip assertions were invisible and uncounted that way.
+  printf '%s\n' "$verdict" > "$WORK/$cell.verdict"
 }
 
+verdict_of() { cat "$WORK/$1.verdict" 2>/dev/null; }
+
+# The baseline signature, named once so every B0 assertion and the human-readable
+# grid agree on what "baseline" meant.
+BASE_SIG="l1bare=0 l3bare=0 pathdeny=1 tooldeny=1 mode=auto tool=Bash"
 printf 'cell|mode|tool_asked|tool_used|verdict|rc|raw_error_verbatim\n' > "$GRID"
 
 # =================================== PHASE 1: C1 positive control, FIRST + x2
@@ -297,8 +339,10 @@ say ""
 say "== PHASE 1 — C1 positive control (runs FIRST; B0==C1 means harness broken) =="
 compose 0 0 1 || { say "FATAL: C1 generate failed"; exit 2; }
 write_loc1 0
-C1a="$(run_cell C1a auto Bash 1 | tail -1)"
-C1b="$(run_cell C1b auto Bash | tail -1)"
+run_cell C1a auto Bash "l1bare=0 l3bare=0 pathdeny=0 tooldeny=1 mode=auto tool=Bash" 1
+C1a="$(verdict_of C1a)"
+run_cell C1b auto Bash "l1bare=0 l3bare=0 pathdeny=0 tooldeny=1 mode=auto tool=Bash"
+C1b="$(verdict_of C1b)"
 
 # ---- non-negotiable 1: the HOME redirection ASSERTION, from the strace ------
 say ""
@@ -314,14 +358,25 @@ harness_check "redirected location 1 WAS opened (the file under test is the one 
 say "  (positive control on the instrument: >0 fake opens proves the strace filter"
 say "   itself catches settings reads, so the 0 above is a real absence, not a"
 say "   filter that never matched anything.)"
+# A failed assertion above must arrive as a DIAGNOSIS, not a bare 'no'. If the
+# binary reads neither candidate for location 1, C3 is uninterpretable and the
+# reader needs to see WHICH settings files it actually opened to know that.
+say "  settings-shaped paths actually opened during C1a (deduped):"
+grep -oE '"[^"]*settings[^"]*"' "$WORK/C1a.strace" 2>/dev/null | tr -d '"' | sort -u \
+  | sed 's/^/    /' | tee -a "$LOG" | head -25
+say "  .claude.json / config paths opened:"
+grep -oE '"[^"]*\.claude[^"]*"' "$WORK/C1a.strace" 2>/dev/null | tr -d '"' | sort -u \
+  | grep -vE 'settings' | sed 's/^/    /' | tee -a "$LOG" | head -15
 
 # ================================================= PHASE 2: B0 baseline, x2
 say ""
 say "== PHASE 2 — B0 baseline x2 =="
 compose 0 1 1 || { say "FATAL: B0 generate failed"; exit 2; }
 write_loc1 0
-B0a="$(run_cell B0a auto Bash | tail -1)"
-B0b="$(run_cell B0b auto Bash | tail -1)"
+run_cell B0a auto Bash "$BASE_SIG"
+B0a="$(verdict_of B0a)"
+run_cell B0b auto Bash "$BASE_SIG"
+B0b="$(verdict_of B0b)"
 
 # ---- harness integrity gate -------------------------------------------------
 say ""
@@ -350,23 +405,28 @@ say "== PHASE 3 — one flip per cell =="
 
 compose 1 1 1 || { say "FATAL: C2 generate failed"; exit 2; }   # +bare Bash @ loc3
 write_loc1 0
-C2="$(run_cell C2 auto Bash | tail -1)"
+run_cell C2 auto Bash "l1bare=0 l3bare=1 pathdeny=1 tooldeny=1 mode=auto tool=Bash"
+C2="$(verdict_of C2)"
 
 compose 0 1 1 || { say "FATAL: C3 generate failed"; exit 2; }   # +bare Bash @ loc1
 write_loc1 1
-C3="$(run_cell C3 auto Bash | tail -1)"
+run_cell C3 auto Bash "l1bare=1 l3bare=0 pathdeny=1 tooldeny=1 mode=auto tool=Bash"
+C3="$(verdict_of C3)"
 
 compose 0 1 1 || { say "FATAL: C5 generate failed"; exit 2; }   # mode -> manual
 write_loc1 0
-C5="$(run_cell C5 manual Bash | tail -1)"
+run_cell C5 manual Bash "l1bare=0 l3bare=0 pathdeny=1 tooldeny=1 mode=manual tool=Bash"
+C5="$(verdict_of C5)"
 
 compose 0 1 1 || { say "FATAL: C6 generate failed"; exit 2; }   # Read tool
 write_loc1 0
-C6="$(run_cell C6 auto Read | tail -1)"
+run_cell C6 auto Read "l1bare=0 l3bare=0 pathdeny=1 tooldeny=1 mode=auto tool=Read"
+C6="$(verdict_of C6)"
 
 compose 0 1 0 || { say "FATAL: C7 generate failed"; exit 2; }   # bare tool denies removed
 write_loc1 0
-C7="$(run_cell C7 auto Bash | tail -1)"
+run_cell C7 auto Bash "l1bare=0 l3bare=0 pathdeny=1 tooldeny=0 mode=auto tool=Bash"
+C7="$(verdict_of C7)"
 
 # ============================================================ close-out
 say ""
