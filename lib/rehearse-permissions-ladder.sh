@@ -98,8 +98,18 @@ say "== PHASE 0 — export, compose, preconditions =="
 git -C "$SRC_ROOT" archive --format=tar HEAD 2>/dev/null | tar -x -C "$EXPORT_ROOT" \
   || { say "FATAL: git archive failed"; exit 2; }
 
-PYBIN="$SRC_ROOT/.venv/bin/python"
-[ -x "$PYBIN" ] || PYBIN="$(command -v python3)"
+# Pick an interpreter that can actually RESOLVE the compositor's deps, rather
+# than the one that merely exists. A checkout .venv predating a dependency
+# (pydantic, here) fails at import and the failure reads as "generate failed",
+# which is a harness defect wearing the costume of a real one.
+PYBIN=""
+for cand in "$SRC_ROOT/.venv/bin/python" "$(command -v python3)"; do
+  [ -x "$cand" ] || continue
+  if "$cand" -c 'import pydantic, yaml, jinja2' >/dev/null 2>&1; then PYBIN="$cand"; break; fi
+done
+[ -n "$PYBIN" ] || { say "FATAL: no python3 resolves the compositor deps (pydantic/yaml/jinja2)"; exit 2; }
+say "  compositor interpreter: $PYBIN"
+say "  source ref            : $(git -C "$SRC_ROOT" rev-parse --short HEAD 2>/dev/null)"
 
 # ---- location 1 (the user tier, inside the redirected HOME) -----------------
 # Level 0 and level 1 differ by EXACTLY one array element. Absent-vs-present
