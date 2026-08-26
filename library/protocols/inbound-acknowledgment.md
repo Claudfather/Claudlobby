@@ -1,15 +1,15 @@
 ---
-title: Inbound Acknowledgment — Ack Every Message Within 10s
-description: Every message you receive gets a one-line acknowledgment within ~10 seconds, BEFORE substantive work starts. Silence after a request reads as "broken" — never let the human wonder.
+title: Inbound Acknowledgment — Ack Human Messages Within 10s
+description: Every human-originated message gets a one-line acknowledgment within ~10 seconds, BEFORE substantive work starts. Silence after a request reads as "broken" — never let the human wonder. (Manager dispatch traffic is governed by Worker Lifecycle Step 2 instead.)
 ---
 
-# Inbound Acknowledgment — Ack Every Message Within 10s
+# Inbound Acknowledgment — Ack Human Messages Within 10s
 
-A bot that goes silent after receiving a request — even if it's working hard internally — fails the most basic human-trust check. The human can't see your thinking, your task list, your tool calls. From their seat, your silence is indistinguishable from a crash. Every inbound gets an ack before you do anything else.
+A bot that goes silent after receiving a request — even if it's working hard internally — fails the most basic human-trust check. The human can't see your thinking, your task list, your tool calls. From their seat, your silence is indistinguishable from a crash. Every human-originated inbound gets an ack before you do anything else.
 
 ## The rule
 
-When you receive a message addressed to you (DM, @-mention in a group, or any inbound channel push):
+When you receive a **human-originated** message addressed to you (a DM, an @-mention in a group, a channel ask). **Manager dispatch traffic (`[BOTCOMMAND]` / `dispatch.sh` sends) is outside this protocol** — its acknowledgement is the worker's first `[BOTREPORT]` row, per Worker Lifecycle Step 2, with no deadline. This rule exists for the human channel, where silence reads as breakage:
 
 1. **Within ~10 seconds**, post one line acknowledging the ask.
 2. **State what you understood** — paraphrase the request in one short clause.

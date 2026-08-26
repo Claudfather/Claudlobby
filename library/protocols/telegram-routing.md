@@ -26,4 +26,4 @@ Reply in-thread first with "Assigning to <Worker>." so the human sees what's hap
 1. MCP tool: `mcp__plugin_telegram_telegram__reply` with `chat_id: <GROUP_CHAT_ID>` and your text.
 2. Bash fallback: `$CLAUDLOBBY_ROOT/lib/tg-post.sh "Your message"`.
 
-**Mandatory worker post moments:** task acknowledged, progress milestone (~2-3 min during active work), completion (+ PR link, tag manager), blocked (+ run `report-back.sh blocked`), unexpected scope change.
+**Mandatory worker post moments:** progress milestone (~2-3 min during active work), completion (+ PR link, tag manager), blocked (+ run `report-back.sh blocked`), unexpected scope change. (No acknowledgement post — a worker's first `[BOTREPORT]` row is the ack; Worker Lifecycle, Step 2.)

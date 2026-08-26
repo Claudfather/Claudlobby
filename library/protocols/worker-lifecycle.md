@@ -25,7 +25,7 @@ Example:
 [BOTCOMMAND] ari | task | "Run security audit on repo-a" | repo:repo-a | report:lead
 ```
 
-Workers parse `[BOTCOMMAND]`, ack within 5 seconds, then execute. If the manager receives no ack within 10 seconds, it retries once. A second silence triggers escalation to the human.
+Workers parse `[BOTCOMMAND]` and execute. There is no ack deadline and managers do not poll for acks. The safety net is bounded: the send path retries only the submission failures it can positively identify — best-effort pane submission, not proof of delivery — and past `expected_by`, fleet-pulse pages the manager about an id'd dispatch still classified overdue, when its gates permit (the gates are enumerated in the `dispatch` protocol's watchdog section; your id-echoing reports are what that machinery joins on).
 
 ## Outbound: dual-channel communication
 
@@ -46,7 +46,7 @@ Your tool-call activity is observed by the fleet pulse. If your session is alive
 
 ```
 1. RECEIVE     ─── parse [BOTCOMMAND] or freeform dispatch
-2. ACK         ─── Telegram + [BOTREPORT] progress
+2. ENGAGE      ─── first [BOTREPORT] row is the ack (Step 2)
 3. PLAN        ─── (conditional) subagent if complex
 4. BRANCH      ─── git checkout -b off fresh main
 5. IMPLEMENT   ─── role-specific work, Telegram milestones
@@ -67,30 +67,30 @@ For `query`: answer inline without branching or PRs — skip to Step 8 after ans
 
 **A non-`task` envelope carries no `task:<id>`, and its terminal report must not close one.** You have nothing to echo, so report without `--task` — do NOT reach for an id from earlier work to fill the field. The gap is deliberate: a `cancel`/`compact`/`restart`/`query` was never a tracked row, so there is nothing for your report to close. `report-back.sh` enforces this on its own (it suppresses the #835 auto-resolve while an unanswered non-`task` note is the most recent dispatch), so the rule holds whether or not you remember it — but supplying an unrelated id defeats it, because a *supplied* id is recorded unchanged by design.
 
-### Step 2: ACK
+### Step 2: ENGAGE (your first report is the ack)
 
-**Within 5 seconds of receiving the dispatch.** Non-negotiable, even for trivial queries.
+There is **no ack deadline**: what the machinery needs is an id-carrying `[BOTREPORT]` row — **your first report for the task IS the acknowledgement**, whenever it lands.
 
-Telegram post: `On it: <one-line summary of understood task>`
+**This contract is for id'd `task` dispatches only** — non-`task` envelopes report per Step 1, without `--task`.
 
-```bash
-# Telegram ack (MCP tool)
-mcp__plugin_telegram_telegram__reply(chat_id=$TELEGRAM_GROUP_CHAT_ID, text="On it: <summary>")
-```
+**Branch on your next tool call, never on predicted duration:**
 
-Report-back:
+- If the **id-carrying terminal report itself will be your first tool call** (you can answer/finish with nothing before it), just do that. The terminal report is the ack; do not send a separate "Acked" row first.
+- If **any other tool call will precede the terminal report** — reading a file, spawning a subagent, a git command — **or you are uncertain**, send the id-carrying progress row first, as the **first tool call**:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> progress "Acked: <summary>"
+$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> progress "Acked: <summary>" --task <id>
 ```
+
+**No Telegram ack.** The group sees your milestone and outcome posts; a per-dispatch "On it" is noise the machinery cannot join.
 
 **Echo the task id.** If the `[BOTCOMMAND]` carried a `task:<id>` field, EVERY
-report-back for that task — this ack, progress updates, and the terminal
-report — must pass it through: `--task <id>`. The overdue watchdog closes
-your dispatch by that id; a report without it does not count for an id'd
-task, and the manager will nudge you to re-report with the id.
-
-**This step happens BEFORE any other tool call.** Before reading files, before spawning subagents, before git operations. The ack is the first thing.
+report-back for that task — the early ack row (when you send one), progress
+updates, and the terminal report — must pass it through: `--task <id>`. The
+overdue watchdog closes your dispatch by that id; a report without it does
+not count for an id'd task, and the manager will nudge you to re-report with
+the id. Auto-resolution of an id-less report is a fallback with known gaps,
+not a substitute for echoing the id.
 
 ### Step 3: PLAN (conditional)
 
@@ -156,8 +156,10 @@ Done: <one-line summary>. PR: <url>
 Report-back:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> completed "<summary>" --pr <pr-url>
+$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> completed "<summary>" --pr <pr-url> --task <id>
 ```
+
+(`--task <id>` whenever the dispatch carried one.)
 
 ### Step 9: BLOCKED (any point)
 
@@ -173,24 +175,24 @@ Blocked: <what's wrong and what you tried>
 Report-back:
 
 ```bash
-$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> blocked "<reason>"
+$CLAUDLOBBY_ROOT/lib/report-back.sh <bot-name> blocked "<reason>" --task <id>
 ```
 
-Then stop. Do not attempt workarounds that might cause damage. Wait for guidance.
+(`--task <id>` whenever the dispatch carried one.) Then stop. Do not attempt workarounds that might cause damage. Wait for guidance.
 
 ## Authority and precedence
 
-This protocol is the **outer envelope**. Role-specific numbered procedures from expertise libraries (Review Methodology, Implementation Lifecycle, Query Workflow, Alert Triage) execute inside Steps 3–7. Their internal numbering does not replace Step 2 (ACK) or Step 8 (COMPLETE).
+This protocol is the **outer envelope**. Role-specific numbered procedures from expertise libraries (Review Methodology, Implementation Lifecycle, Query Workflow, Alert Triage) execute inside Steps 3–7. Their internal numbering does not replace Step 2 (ENGAGE) or Step 8 (COMPLETE).
 
-Concretely: if your expertise says "Step 1: Read the PR description" — that runs inside this protocol's Step 5 (IMPLEMENT). This protocol's Step 1 (RECEIVE) and Step 2 (ACK) have already fired before your expertise procedure begins.
+Concretely: if your expertise says "Step 1: Read the PR description" — that runs inside this protocol's Step 5 (IMPLEMENT). This protocol's Step 1 (RECEIVE) — and Step 2's early ack row, whenever other tool calls precede the terminal report — has already fired before your expertise procedure begins.
 
 ## Quick reference: what fires when
 
 | Moment | Telegram | [BOTREPORT] |
 |--------|----------|-------------|
-| Task received | "On it: ..." | `<bot-name> progress "Acked: ..."` |
+| Task received (id'd; early ack row per Step 2) | — | `<bot-name> progress "Acked: ..." --task <id>` |
 | Planning start (if applicable) | "Planning: ..." | — |
 | Every 2-3 min during work | One-line milestone | — |
-| Scope surprise | "Scope note: ..." | `<bot-name> progress "Scope: ..."` |
-| Completion | "Done: ... PR: <url>" | `<bot-name> completed "<summary>" --pr <url>` |
-| Blocked | "Blocked: ..." | `<bot-name> blocked "<reason>"` |
+| Scope surprise | "Scope note: ..." | `<bot-name> progress "Scope: ..." --task <id>` |
+| Completion | "Done: ... PR: <url>" | `<bot-name> completed "<summary>" --pr <url> --task <id>` |
+| Blocked | "Blocked: ..." | `<bot-name> blocked "<reason>" --task <id>` |
