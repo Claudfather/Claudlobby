@@ -657,6 +657,33 @@ phase_host_jobs() {
             NEXT_STEPS+=("Fix + re-run lib/setup-system to enroll $base (idempotent)")
         fi
     done
+    # Host SERVICES (resident, .service with no .timer — first tenant:
+    # claudlobby-plane-daemon). Linux only here: the launchd leg above already
+    # enrolls every composed plist, service plists included. A dormant service
+    # composes NO units at all (compose-time dormancy, see composer), so this
+    # loop only ever sees ARMED services.
+    if [ "$_OS" = "Linux" ]; then
+        local s sbase sjob
+        for s in "$host_timers_dir"/claudlobby-*.service; do
+            [ -e "$s" ] || continue
+            sbase="$(basename "$s" ".service")"
+            [ -e "$host_timers_dir/$sbase.timer" ] && continue  # timer-shaped: handled above
+            found=1
+            sjob="${sbase#claudlobby-}"
+            local svc_adopt_arg=()
+            [ "$ADOPT" = 1 ] && svc_adopt_arg=(--adopt)
+            if TIMER_DIR="$host_timers_dir" UNIT_NAME="$sbase" \
+                "$SCRIPT_DIR/install-host-service-systemd.sh" "$sjob" \
+                ${svc_adopt_arg[@]+"${svc_adopt_arg[@]}"}; then
+                ok "host service enrolled: $sbase"
+                PREREQ_OK+=("host-service-$sjob")
+            else
+                miss "host service enrollment failed: $sbase"
+                PREREQ_MISSING+=("host-service-$sjob")
+                NEXT_STEPS+=("Fix + re-run lib/setup-system to enroll $sbase (idempotent)")
+            fi
+        done
+    fi
     [ "$found" = 1 ] || log "no host job units in $host_timers_dir"
 }
 

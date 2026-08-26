@@ -285,6 +285,32 @@ def cmd_plane_doctor(args) -> int:
     return _guarded("plane doctor", run)
 
 
+def cmd_plane_serve(args) -> int:
+    """Run the ingest daemon in the foreground (supervision owns backgrounding
+    — systemd Restart=always / launchd KeepAlive, never a self-fork)."""
+    root = _resolve_paths(args).root
+
+    def run() -> int:
+        from ..plane.daemon import (
+            DaemonAlreadyRunning, PlaneDaemon, SocketOverrideInvalid,
+            SocketPathTooLong,
+        )
+
+        try:
+            PlaneDaemon(
+                root,
+                socket_override=Path(args.socket) if args.socket else None,
+                drain_interval=float(args.drain_interval),
+            ).serve()
+        except (DaemonAlreadyRunning, SocketOverrideInvalid,
+                SocketPathTooLong) as exc:
+            print(f"plane serve: REFUSED — {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    return _guarded("plane serve", run)
+
+
 def cmd_plane_schema(args) -> int:
     print(json.dumps(export_schemas(), indent=2, sort_keys=True))
     return 0

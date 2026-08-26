@@ -78,6 +78,27 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 300
+    # The observable plane's ingest daemon (unit: service = RESIDENT, no
+    # schedule; supervision restarts it). One per host -- the plane db is
+    # host-scoped. DORMANT by default, and for services dormancy is
+    # compose-time: unarmed means NO units are even composed, because the
+    # macOS enroll leg starts every claudlobby-*.plist it finds and a root
+    # pull must never start a new resident process on its own. Arm per HOST
+    # by flipping enroll: true in that host's own system.yaml (host jobs
+    # deliberately bypass the fleet defaults merge, so fleet.yaml cannot arm
+    # this one), then re-run generate + lib/setup-system. Doors degrade
+    # cleanly while unarmed (lib/plane-emit.sh falls back to the cold CLI,
+    # disclosed on stderr).
+    # DISARMING an armed daemon: flip enroll back to false and re-run
+    # generate (this PRUNES the composed units, so no future setup run can
+    # re-enroll it) — then stop the installed unit yourself, since pruning
+    # cannot reach what is already enrolled:
+    #   linux:  systemctl --user disable --now claudlobby-plane-daemon.service
+    #   macos:  launchctl bootout gui/$UID/claudlobby-plane-daemon
+    plane-daemon:
+      enroll: false
+      unit: service
+      script: "$CLAUDLOBBY_ROOT/lib/plane-daemon.sh"
     # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
     # north star): daily root-usage check, FLEET ALERT past the threshold.
     disk-monitor:

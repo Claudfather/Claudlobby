@@ -35,8 +35,11 @@ def _intent_payload(**over) -> dict:
 
 
 def test_families_registered():
+    # "system" joined in Phase 2 (the ingest daemon's lifecycle events are the
+    # first emitter); its token vocabulary stays registry-governed (F19).
     assert set(FAMILIES) == {
-        "communication", "transmission", "work_item", "assignment", "task"
+        "communication", "transmission", "work_item", "assignment", "task",
+        "system",
     }
 
 

@@ -27,3 +27,16 @@ for (_family, _field), _pol in FIELD_POLICY.items():
 
 def cap_for(family: str, field: str) -> int:
     return FIELD_POLICY[(family, field)]["cap"]
+
+
+# kind=system severity is REGISTRY-OWNED (§9b: "ingest stamps it from the
+# package-owned seed module; callers cannot set it; unknown type => null").
+# A caller-supplied severity is a caller bug (ContractViolation via the strict
+# wire model). Phase 2b grows this seed into the full SYSTEM_EVENT_TYPES
+# registry (F19: unknown tokens still INGEST — they just carry NULL severity
+# until the registry learns them).
+SYSTEM_EVENT_SEVERITY: dict[str, str] = {
+    "daemon_started": "notice",
+    "daemon_stopping": "notice",
+    "spool_drain_completed": "notice",
+}

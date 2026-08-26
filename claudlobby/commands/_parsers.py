@@ -32,6 +32,7 @@ from .plane import (
     cmd_emit_batch,
     cmd_plane_doctor,
     cmd_plane_schema,
+    cmd_plane_serve,
     cmd_plane_spool,
     cmd_plane_status,
 )
@@ -448,6 +449,11 @@ def register_subparsers(sub) -> None:
     ps.set_defaults(func=cmd_plane_status)
     pd = psub.add_parser("doctor", help="Kernel health rungs (exit 1 on attention)")
     pd.set_defaults(func=cmd_plane_doctor)
+    pv = psub.add_parser("serve", help="Run the ingest daemon (foreground)")
+    pv.add_argument("--socket", help="Socket path override (default: state/plane/ingest.sock)")
+    pv.add_argument("--drain-interval", default="600",
+                    help="Seconds between spool drains (default 600)")
+    pv.set_defaults(func=cmd_plane_serve)
     psc = psub.add_parser("schema", help="Export JSON Schemas (envelope + families)")
     psc.set_defaults(func=cmd_plane_schema)
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
