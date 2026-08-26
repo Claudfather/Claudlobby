@@ -16,26 +16,45 @@ TERMINAL_TASK_EVENTS = (
 )
 _TERMINAL = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
 
+# §6b #1/#2 (PR-B): activation derives from CARRIER-APPROPRIATE evidence —
+# submission-class rows (pane_submitted / carrier_accepted) occupy the
+# activation rung, because submission is the strongest fact the tmux carrier
+# can ever yield; a real recipient_acknowledged row TIGHTENS where a door
+# observed one, and is never inferred. carrier_queued is NOT activation
+# (accepted-but-parked behind a busy turn). And a missing producer must fail
+# toward EMPTY, never toward everything: the old attention predicate
+# (NOT EXISTS ack) inverted to all-alarm with zero producers.
+_TX_ACTIVATION = "'pane_submitted','carrier_accepted','recipient_acknowledged'"
+
 ATTENTION_SQL = (
+    # Attention = non-terminal AND (evidence of dispatch trouble OR overdue).
+    # Trouble is EVIDENCE-BASED: transmission rows exist for the dispatch, yet
+    # none reached activation — a send that failed or sits queued. An
+    # assignment with NO transmission rows at all is a producer gap (or a
+    # pre-doors import), which is silence, not alarm (§6b #2).
     "SELECT a.assignment_id FROM assignments a"
     " WHERE NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
     f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))"
-    " AND (NOT EXISTS (SELECT 1 FROM events e WHERE"
-    "   e.kind='transmission' AND e.msg_id = a.dispatch_msg_id"
-    "   AND e.event='recipient_acknowledged')"
+    " AND ((EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+    "        AND e.msg_id = a.dispatch_msg_id)"
+    "   AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind='transmission'"
+    "        AND e.msg_id = a.dispatch_msg_id"
+    f"        AND e.event IN ({_TX_ACTIVATION})))"
     "  OR a.expected_by < ?)"
 )
 
-# Attempt-status ladder below the task-event tiers (§8: activation is
-# evidence-based, derived through assignments.dispatch_msg_id -> transmission
-# rows — a contract with no acknowledged dispatch is NOT open). Submission
-# evidence (pane_submitted / carrier_accepted) reads pending_unacknowledged;
-# so does an OUTSTANDING attempt — a send_attempted/unknown/
-# duplicate_suppressed row whose attempt_no has no 'failed' verdict — because
-# a retry in flight after a failed first attempt must not report
-# dispatch_failed, while an attempt whose own verdict IS 'failed' must.
-_TX_SUBMITTED = "'pane_submitted','carrier_accepted'"
-_TX_UNRESOLVED = "'send_attempted','unknown','duplicate_suppressed'"
+# Attempt-status ladder below the task-event tiers (§8 + §6b #1): activation
+# derives through assignments.dispatch_msg_id -> transmission rows, from
+# carrier-appropriate evidence. SUBMISSION-CLASS rows (pane_submitted /
+# carrier_accepted) occupy the 'open' rung — submission is the strongest fact
+# tmux can yield; a real recipient_acknowledged row lands on the same rung as
+# the tightening case. carrier_queued and unresolved attempts (send_attempted/
+# unknown/duplicate_suppressed with no 'failed' verdict on that attempt_no)
+# read pending_unacknowledged — a retry in flight after a failed first attempt
+# must not report dispatch_failed, while an attempt whose own verdict IS
+# 'failed' must.
+_TX_OPEN = "'pane_submitted','carrier_accepted','recipient_acknowledged'"
+_TX_UNRESOLVED = "'send_attempted','carrier_queued','unknown','duplicate_suppressed'"
 
 TASK_STATUS_SQL = (
     "SELECT a.assignment_id, COALESCE("
@@ -49,10 +68,7 @@ TASK_STATUS_SQL = (
     "  WHEN a.dispatch_msg_id IS NULL THEN 'created_not_sent'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
     "    AND x.msg_id = a.dispatch_msg_id"
-    "    AND x.event='recipient_acknowledged') THEN 'open'"
-    "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
-    "    AND x.msg_id = a.dispatch_msg_id"
-    f"    AND x.event IN ({_TX_SUBMITTED})) THEN 'pending_unacknowledged'"
+    f"    AND x.event IN ({_TX_OPEN})) THEN 'open'"
     "  WHEN EXISTS (SELECT 1 FROM events x WHERE x.kind='transmission'"
     "    AND x.msg_id = a.dispatch_msg_id"
     f"    AND x.event IN ({_TX_UNRESOLVED})"

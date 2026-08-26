@@ -222,7 +222,8 @@ CREATE TABLE events (
     detail_truncated INTEGER NOT NULL DEFAULT 0,
     CHECK (
         (kind = 'transmission'
-            AND event IS NOT NULL AND event IN ('send_attempted','carrier_accepted','pane_submitted',
+            AND event IS NOT NULL AND event IN ('send_attempted','carrier_accepted','carrier_queued',
+                          'pane_submitted',
                           'failed','unknown','recipient_acknowledged',
                           'duplicate_suppressed')
             AND msg_id IS NOT NULL AND carrier IS NOT NULL
@@ -241,7 +242,7 @@ CREATE TABLE events (
                           'completed','failed','cancelled','deadline_changed',
                           'superseded','reassigned','retry_created',
                           'orphaned_by_session_loss','recovered_after_restart',
-                          'expired')
+                          'expired','supplied_id_not_open')
             AND work_item_id IS NOT NULL
             AND msg_id IS NULL AND carrier IS NULL AND attempt_no IS NULL
             AND carrier_ref IS NULL AND workstream_id IS NULL

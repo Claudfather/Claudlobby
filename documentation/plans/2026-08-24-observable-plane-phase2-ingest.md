@@ -79,6 +79,14 @@ mechanism: the shim no-ops under `PLANE_EMIT_DISABLED=1`, which harnesses export
 ruled: env flag, not socket namespace, because harnesses already own their env and a namespace
 would need daemon cooperation).
 
+**Arming (ruled at PR-B kickoff, 2026-08-26): door emission is DORMANT by default behind
+`PLANE_EMIT_ENABLED=1` in the fleet's `env:`** — the `SESSION_DIGEST_ENABLED` /
+`SPINDOWN_RECEIPT_ENABLED` precedent exactly: lib/ is a shared install that cannot be staged
+per-fleet, so a root pull must never activate new door behavior estate-wide, and an UNARMED
+fleet's doors must pay zero latency (not a ~400ms cold-CLI toll per dispatch on hosts without
+the daemon). This knob is what makes §4's one-fleet canary ladder real. `PLANE_EMIT_DISABLED=1`
+remains the harness override on top (wins over ENABLED).
+
 **The one ordering change, named as the canary's sharp edge:** report-back today SENDS then
 ledgers (`:152`/`:184`); the shim records intent BEFORE transport (F9). That flips its crash
 exposure — a crash between record and send leaves an intent with no transmission (visible,

@@ -30,20 +30,26 @@ MESSAGE_CLASSES = (
 )
 COMMAND_TYPES = ("task", "cancel", "compact", "restart", "query")
 ATTEMPT_STATES = (
-    "send_attempted", "carrier_accepted", "pane_submitted", "failed",
-    "unknown", "recipient_acknowledged", "duplicate_suppressed",
+    # carrier_queued (§6b #7, PR-B): the tmux door detected the payload was
+    # accepted by the TUI but parked behind a busy turn (pane_holds_unsubmitted
+    # at send) — accepted is not consumed, so this is NOT activation evidence.
+    "send_attempted", "carrier_accepted", "carrier_queued", "pane_submitted",
+    "failed", "unknown", "recipient_acknowledged", "duplicate_suppressed",
 )
 TASK_EVENTS = (
-    # 19 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
+    # 20 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
     # pre-deletion tuple was 20, mis-stated as 19 — the count error predated the
     # deletion): the transmission ack row is
     # the single acknowledgement fact; activation derives through the join.
+    # supplied_id_not_open ADDED (§6b #6, PR-B): the worker reported with a
+    # task id that was not in the open set at report time — a fact about the
+    # JOIN, not the work (4 real ledger rows; report-back already names it).
     "dispatch_intended", "transmission_failed", "dispatch_submitted",
     "accepted", "rejected", "progress",
     "blocked_waiting", "returned_blocked", "resumed", "completed", "failed",
     "cancelled", "deadline_changed", "superseded", "reassigned",
     "retry_created", "orphaned_by_session_loss", "recovered_after_restart",
-    "expired",
+    "expired", "supplied_id_not_open",
 )
 DECLARATION_EVENTS = ("revision_seen", "scan_completed")
 SYSTEM_SUBJECT_KINDS = ("host", "vault", "fleet", "actor", "bot_instance", "session")
