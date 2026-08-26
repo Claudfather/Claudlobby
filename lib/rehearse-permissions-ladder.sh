@@ -61,6 +61,26 @@ MODEL="${LADDER_MODEL:-claude-haiku-4-5-20251001}"
 # arm, whose positive control is a DIFFERENT cell -- see PHASE D.
 ARM="${LADDER_ARM:-C}"
 case "$ARM" in C|D) : ;; *) printf 'FATAL: LADDER_ARM must be C or D\n' >&2; exit 2 ;; esac
+
+# The target PLACEMENT defaults from the arm rather than being a second thing to
+# remember. Arm D running in-workspace would put its positive control on the C1
+# configuration, which allows -- so the control passes, every cell reports, and
+# the whole arm silently measures the question it was built to escape. A cell
+# that cannot move reports its non-result as evidence; so does an arm.
+# VALIDATED HERE, before mktemp and before the EXIT trap exists, because a
+# refusal that fires after the work dir is created but before the trap is armed
+# leaks that dir -- which is what the first version of this check did.
+PLACEMENT_DEFAULT=in-workspace
+[ "$ARM" = D ] && PLACEMENT_DEFAULT="out-of-tree"
+PLACEMENT="${LADDER_TARGET_PLACEMENT:-$PLACEMENT_DEFAULT}"
+case "$PLACEMENT" in
+  in-workspace|out-of-tree) : ;;
+  *) printf 'FATAL: LADDER_TARGET_PLACEMENT must be in-workspace or out-of-tree\n' >&2; exit 2 ;;
+esac
+if [ "$ARM" = D ] && [ "$PLACEMENT" != out-of-tree ]; then
+  printf 'FATAL: arm D IS the out-of-tree arm; LADDER_TARGET_PLACEMENT=%s contradicts it\n' "$PLACEMENT" >&2
+  exit 2
+fi
 SENTINEL="LADDER_TARGET_A91F3C"
 FLEET=permladder
 BOT=canary
@@ -100,23 +120,14 @@ BOT_DIR="$EXPORT_ROOT/local/$FLEET/runtime/bots/$BOT"
 # The out-of-tree path is COMPUTED, never taken from the caller: it must stay
 # inside the disposable $WORK, because this harness WRITES a file at it and an
 # operator-supplied path could name a real bot dir.
-# The placement DEFAULTS FROM THE ARM rather than being a second thing to
-# remember. Arm D running in-workspace would put its positive control on the
-# C1 configuration, which allows -- so the control passes, every cell reports,
-# and the whole arm silently measures the question it was built to escape.
-# A cell that cannot move reports its non-result as evidence; so does an arm.
-PLACEMENT_DEFAULT=in-workspace
-[ "$ARM" = D ] && PLACEMENT_DEFAULT="out-of-tree"
-PLACEMENT="${LADDER_TARGET_PLACEMENT:-$PLACEMENT_DEFAULT}"
+# Resolution only -- $PLACEMENT was validated above, before anything existed.
+# The out-of-tree path is COMPUTED, never taken from the caller: it must stay
+# inside the disposable $WORK, because this harness WRITES a file at it and an
+# operator-supplied path could name a real bot dir.
 case "$PLACEMENT" in
   in-workspace) TARGET_DIR="$BOT_DIR/target" ;;
   out-of-tree)  TARGET_DIR="$WORK/peer/target" ;;
-  *) printf 'FATAL: LADDER_TARGET_PLACEMENT must be in-workspace or out-of-tree\n' >&2; exit 2 ;;
 esac
-if [ "$ARM" = D ] && [ "$PLACEMENT" != out-of-tree ]; then
-  printf 'FATAL: arm D IS the out-of-tree arm; LADDER_TARGET_PLACEMENT=%s contradicts it\n' "$PLACEMENT" >&2
-  exit 2
-fi
 TARGET="$TARGET_DIR/secret.txt"
 LOC2="$BOT_DIR/.claude/settings.json"
 LOC3="$BOT_DIR/.claude/settings.local.json"
@@ -127,7 +138,16 @@ pass=0; fail=0
 say() { printf '%s\n' "$*" | tee -a "$LOG"; }
 
 cleanup() {
-  if [ -n "${LADDER_KEEP:-}" ]; then printf 'kept artifacts: %s\n' "$WORK"; return; fi
+  # The credential seed dies REGARDLESS of LADDER_KEEP, and before the keep
+  # branch returns so the one path that skips `rm -rf` cannot skip this too.
+  # seed_claude_auth copies the operator LIVE host credential into the fake
+  # config dir; keep-mode exists for the grid and the strace, never for a copy
+  # of that sitting in /tmp for as long as nobody notices. Observed: a real
+  # LADDER_KEEP=1 run left one there.
+  rm -f "$FAKE_CFG/.credentials.json" 2>/dev/null || true
+  if [ -n "${LADDER_KEEP:-}" ]; then
+    printf 'kept artifacts: %s (credential seed scrubbed)\n' "$WORK"; return
+  fi
   rm -rf "$WORK" 2>/dev/null || true
 }
 trap cleanup EXIT
