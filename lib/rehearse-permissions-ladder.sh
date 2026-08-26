@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+# rehearse-permissions-ladder.sh — #970 single-factor permissions ladder.
+#
+# Two days of #970 measurement produced three models and three retractions
+# because every cell varied several fields at once. This is the controlled
+# version: ONE flip per cell, against a pinned baseline, on a disposable bot.
+#
+# Plan (the spec, not this header):
+#   local/home/ai-platform/shared/planning/active/2026-08-26-permissions-single-factor-ladder.md
+#
+# THE FOUR NON-NEGOTIABLES, each wired as a check rather than an instruction:
+#   1. C1 is the positive control and it runs FIRST. B0 == C1 ==> harness broken,
+#      stop; nothing downstream counts.
+#   2. HOME redirection is ASSERTED, not assumed — strace proves the operator's
+#      real ~/.claude/settings.json is never opened. A harness that silently
+#      fell back to the real global would PASS BY COINCIDENCE, which is the
+#      exact failure that produced this thread.
+#   3. Error strings are captured VERBATIM with the tool name. "Permission to
+#      use Bash with command ..." and "File is in a directory that is denied ..."
+#      are different code paths; a paraphrase destroys the discriminator, and
+#      did. The untouched string is kept per cell in <cell>.results as JSONL.
+#   4. Preconditions are recorded from a PRIOR step before every cell.
+#
+# SAFETY, structural rather than careful:
+#   * everything lives in a disposable `git archive` export;
+#   * HOME is redirected, so the operator real ~/.claude is never read OR
+#     written — asserted both ways (strace, and an mtime check at the end);
+#   * channels: [] and mcp: [] on the canary. Omitting the keys is NOT opting
+#     out: the composer defaults a bot to --channels, and a canary that starts
+#     a channel it cannot authenticate poisons a HOST-GLOBAL MCP auth cache
+#     every bot reads. That took five bots across three fleets Telegram-dark
+#     for four restarts on 2026-08-25. The composed bot.conf is GREPPED for
+#     --channels before any boot; the declaration is not trusted.
+#   * no production bot, no credential target, read-only probes.
+#
+# BOUNDARY: cells are headless `claude -p` runs, not interactive tmux boots.
+# The permission decision is a CLI-layer one, but that is a claim about the
+# layer, not a measurement of a tmux session — stated, not assumed.
+#
+# Exit: 0 ladder ran - 1 harness integrity failed - 2 precondition/dep missing.
+
+set -uo pipefail
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_ROOT="$(dirname "$LIB_DIR")"
+# shellcheck source=/dev/null
+. "$LIB_DIR/lib-common.sh"
+# lib-common sets -e (and -u) at source time and installs its own EXIT trap.
+# Re-arming -e here would abort the sweep on the first non-zero cell, which is
+# exactly the state this harness must survive and report.
+set +e
+set -uo pipefail
+
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+REAL_HOME="${REAL_HOME_OVERRIDE:-$HOME}"
+REAL_GLOBAL="$REAL_HOME/.claude/settings.json"
+HOST_CREDS="$REAL_HOME/.claude/.credentials.json"
+CELL_TIMEOUT="${LADDER_CELL_TIMEOUT:-180}"
+MODEL="${LADDER_MODEL:-claude-haiku-4-5-20251001}"
+SENTINEL="LADDER_TARGET_A91F3C"
+FLEET=permladder
+BOT=canary
+PREFIX=com.permladder.rehearsal
+
+for dep in "$CLAUDE_BIN" jq python3 strace; do
+  command -v "$dep" >/dev/null 2>&1 || { printf 'SKIP: %s not found\n' "$dep"; exit 2; }
+done
+[ -f "$HOST_CREDS" ] || { printf 'SKIP: no host auth to seed at %s\n' "$HOST_CREDS"; exit 2; }
+[ -n "$_TIMEOUT_BIN" ] || { printf 'SKIP: no timeout(1)/gtimeout\n'; exit 2; }
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/permladder.XXXXXX")"
+EXPORT_ROOT="$WORK/root"
+FAKE_HOME="$WORK/home"
+FAKE_CFG="$FAKE_HOME/.claude"          # location 1 == the user tier, as in production
+TARGET_DIR="$WORK/target"              # OUTSIDE the bot cwd, replicating vera shape
+TARGET="$TARGET_DIR/secret.txt"
+BOT_DIR="$EXPORT_ROOT/local/$FLEET/runtime/bots/$BOT"
+LOC2="$BOT_DIR/.claude/settings.json"
+LOC3="$BOT_DIR/.claude/settings.local.json"
+GRID="$WORK/grid.psv"
+LOG="$WORK/ladder.log"
+
+pass=0; fail=0
+say() { printf '%s\n' "$*" | tee -a "$LOG"; }
+
+cleanup() {
+  if [ -n "${LADDER_KEEP:-}" ]; then printf 'kept artifacts: %s\n' "$WORK"; return; fi
+  rm -rf "$WORK" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+mkdir -p "$FAKE_CFG" "$TARGET_DIR" "$EXPORT_ROOT/local/$FLEET"
+printf '%s\n' "$SENTINEL" > "$TARGET"
+
+# ============================================================ PHASE 0: setup
+say "== PHASE 0 — export, compose, preconditions =="
+
+git -C "$SRC_ROOT" archive --format=tar HEAD 2>/dev/null | tar -x -C "$EXPORT_ROOT" \
+  || { say "FATAL: git archive failed"; exit 2; }
+
+PYBIN="$SRC_ROOT/.venv/bin/python"
+[ -x "$PYBIN" ] || PYBIN="$(command -v python3)"
+
+# ---- location 1 (the user tier, inside the redirected HOME) -----------------
+# Level 0 and level 1 differ by EXACTLY one array element. Absent-vs-present
+# would be two changes (file existence AND content); this is one.
+write_loc1() {  # write_loc1 <0|1>
+  if [ "$1" = 1 ]; then printf '{"permissions":{"allow":["Bash"]}}\n' > "$FAKE_CFG/settings.json"
+  else                  printf '{"permissions":{"allow":[]}}\n'       > "$FAKE_CFG/settings.json"; fi
+}
+
+# ---- location 3 (composed) --------------------------------------------------
+# One generate per cell, through the REAL compositor, so location 3 is composed
+# exactly as production composes it rather than hand-patched.
+compose() {  # compose <bare_bash:0|1> <path_deny:0|1> <bare_tool_denies:0|1>
+  local bare="$1" pdeny="$2" tdeny="$3" allow deny
+  allow='"Bash(cat *)"'
+  [ "$bare" = 1 ] && allow="\"Bash\", $allow"
+  deny=""
+  [ "$pdeny" = 1 ] && deny="\"Read(/$TARGET_DIR/**)\""
+  if [ "$tdeny" = 1 ]; then
+    [ -n "$deny" ] && deny="$deny, "
+    deny="$deny\"Write\", \"Edit\", \"NotebookEdit\""
+  fi
+  cat > "$EXPORT_ROOT/local/$FLEET/fleet.yaml" <<YAML
+fleet:
+  name: $FLEET
+  service_prefix: $PREFIX
+  plugins:
+    include_defaults: false
+  accounts:
+    default: ~/.claude
+  bots:
+    $BOT:
+      name: $BOT
+      expertise:
+        - code-review
+      channels: []
+      mcp: []
+      tools:
+        allow: [$allow]
+        deny: [$deny]
+YAML
+  ( cd "$EXPORT_ROOT" && HOME="$FAKE_HOME" CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
+      "$PYBIN" -m claudlobby --fleet "$FLEET" generate ) >"$WORK/generate.log" 2>&1
+  return $?
+}
+
+compose 0 1 1 || { say "FATAL: baseline generate failed:"; tail -20 "$WORK/generate.log" | tee -a "$LOG"; exit 2; }
+[ -f "$LOC3" ] || { say "FATAL: no composed $LOC3"; exit 2; }
+
+# ---- the channels guard: check the COMPOSITION, not the declaration ---------
+composed_flags="$(grep -E '^CLAUDE_FLAGS=' "$BOT_DIR/bot.conf" 2>/dev/null || true)"
+say "  composed CLAUDE_FLAGS: ${composed_flags:-<none>}"
+if printf '%s' "$composed_flags" | grep -q -- '--channels'; then
+  say "FATAL: composed bot.conf carries --channels despite 'channels: []'."
+  say "       Refusing to boot — this is the shape that took five bots Telegram-dark."
+  exit 2
+fi
+harness_check "composed bot.conf carries NO --channels (channels: [] took)" yes
+mcp_empty=no
+if [ ! -s "$BOT_DIR/.mcp.json" ]; then mcp_empty=yes
+elif [ "$(jq -r '.mcpServers|length' "$BOT_DIR/.mcp.json" 2>/dev/null)" = 0 ]; then mcp_empty=yes; fi
+harness_check "composed .mcp.json absent-or-empty (mcp: [])" "$mcp_empty"
+
+# ---- seed auth + trust into the redirected config dir -----------------------
+seed_claude_auth_and_trust "$FAKE_CFG" "$BOT_DIR" "$CLAUDE_BIN" "$HOST_CREDS"
+
+# ---- the clauDNA PreToolUse hook must be absent (a confound in every cell) ---
+hook_present=no
+[ -n "$(find "$FAKE_HOME" -name 'pretooluse-permissions.sh' 2>/dev/null | head -1)" ] && hook_present=yes
+harness_check "clauDNA pretooluse-permissions.sh absent from the redirected HOME" \
+  "$([ "$hook_present" = no ] && echo yes || echo no)"
+
+# ---- G3: the target exists, with known content, readable unconstrained ------
+unconstrained="$(cat "$TARGET" 2>&1)"
+harness_check "target exists and reads the sentinel from an unconstrained context" \
+  "$([ "$unconstrained" = "$SENTINEL" ] && echo yes || echo no)"
+
+REAL_GLOBAL_MTIME_BEFORE="$(stat -c %Y "$REAL_GLOBAL" 2>/dev/null || echo missing)"
+
+# ============================================ preconditions, recorded per cell
+record_preconditions() {  # record_preconditions <cell>
+  local cell="$1"
+  {
+    printf '### preconditions for %s (recorded BEFORE the run)\n' "$cell"
+    printf 'claude --version      : %s\n' "$("$CLAUDE_BIN" --version 2>&1 | head -1)"
+    printf 'loc1 path             : %s\n' "$FAKE_CFG/settings.json"
+    printf 'loc1 bytes            : %s\n' "$(cat "$FAKE_CFG/settings.json" 2>&1)"
+    printf 'loc1 bare Bash        : %s\n' \
+      "$(jq -r 'if ((.permissions.allow // []) | index("Bash")) != null then "PRESENT" else "absent" end' "$FAKE_CFG/settings.json" 2>&1)"
+    printf 'loc2 path             : %s\n' "$LOC2"
+    printf 'loc2 state            : %s\n' \
+      "$([ ! -e "$LOC2" ] && echo absent || printf 'present size=%s' "$(stat -c %s "$LOC2")")"
+    printf 'loc3 mtime            : %s\n' "$(stat -c %Y "$LOC3" 2>&1)"
+    printf 'loc3 bare Bash        : %s\n' \
+      "$(jq -r 'if ((.permissions.allow // []) | index("Bash")) != null then "PRESENT" else "absent" end' "$LOC3" 2>&1)"
+    printf 'loc3 Bash(cat *)      : %s\n' \
+      "$(jq -r 'if ((.permissions.allow // []) | index("Bash(cat *)")) != null then "PRESENT" else "absent" end' "$LOC3" 2>&1)"
+    printf 'loc3 deny array       : %s\n' "$(jq -c '.permissions.deny // []' "$LOC3" 2>&1)"
+    printf 'HOME (harness view)   : %s\n' "$FAKE_HOME"
+    printf 'CLAUDE_CONFIG_DIR     : %s\n' "$FAKE_CFG"
+  } | tee -a "$LOG"
+  # loc2 must be absent-or-empty in EVERY cell (non-negotiable 2).
+  if [ -e "$LOC2" ] && [ -s "$LOC2" ]; then
+    say "  FATAL: location 2 is present and NON-EMPTY for $cell — pinned factor moved."
+    exit 1
+  fi
+}
+
+# ==================================================================== the cell
+# Classification is read off the structured transcript; the raw error string is
+# preserved BYTE-FOR-BYTE in <cell>.results (JSONL), because the discriminator
+# in the earlier report was exactly which string came back.
+json_lines() { grep '^{' "$1" 2>/dev/null; }
+
+run_cell() {  # run_cell <name> <mode> <tool:Bash|Read> [strace:1]
+  local cell="$1" mode="$2" tool="$3" trace="${4:-}"
+  local out="$WORK/$cell.jsonl" prompt verdict raw toolname rc is_err oneline
+
+  if [ "$tool" = Read ]; then
+    prompt="Use the Read tool to read the file $TARGET. Do not use the Bash tool. Then report, verbatim and in full, either the file contents or the exact error text you received."
+  else
+    prompt="Use the Bash tool to run exactly this command: cat $TARGET. Do not use the Read tool. Then report, verbatim and in full, either the command output or the exact error text you received."
+  fi
+
+  record_preconditions "$cell"
+  say "  running $cell (mode=$mode tool=$tool model=$MODEL)"
+
+  if [ -n "$trace" ]; then
+    ( cd "$BOT_DIR" && HOME="$FAKE_HOME" CLAUDE_CONFIG_DIR="$FAKE_CFG" \
+        strace -f -e trace=openat,open -o "$WORK/$cell.strace" \
+        "$_TIMEOUT_BIN" "$CELL_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" \
+        --permission-mode "$mode" --output-format stream-json --verbose --model "$MODEL" \
+        > "$out" 2>&1 )
+  else
+    ( cd "$BOT_DIR" && HOME="$FAKE_HOME" CLAUDE_CONFIG_DIR="$FAKE_CFG" \
+        "$_TIMEOUT_BIN" "$CELL_TIMEOUT" "$CLAUDE_BIN" -p "$prompt" \
+        --permission-mode "$mode" --output-format stream-json --verbose --model "$MODEL" \
+        > "$out" 2>&1 )
+  fi
+  rc=$?
+
+  toolname="$(json_lines "$out" \
+    | jq -rc 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name' \
+      2>/dev/null | paste -sd, -)"
+  # VERBATIM, untouched, one JSON object per tool_result.
+  json_lines "$out" \
+    | jq -c 'select(.type=="user") | .message.content[]? | select(.type=="tool_result") | {is_error, content}' \
+      2>/dev/null > "$WORK/$cell.results"
+  is_err="$(jq -rs 'if length==0 then "none" else ((.[0].is_error) | tostring) end' "$WORK/$cell.results" 2>/dev/null)"
+  raw="$(jq -rs 'map(.content | tostring) | join(" ")' "$WORK/$cell.results" 2>/dev/null | head -c 3000)"
+
+  if [ -z "$toolname" ]; then
+    verdict=NO_TOOL
+  elif printf '%s' "$raw" | grep -qF "$SENTINEL"; then
+    verdict=ALLOWED
+  elif printf '%s' "$raw" | grep -qiE 'requires approval|awaiting approval|would you like|approve this'; then
+    verdict=PROMPTED
+  elif printf '%s' "$raw" | grep -qiE 'permission|denied|not allowed'; then
+    verdict=DENIED
+  elif [ "$rc" -ne 0 ] && [ -z "$raw" ]; then
+    verdict=HUNG_OR_TIMEOUT
+  elif [ "$is_err" = true ]; then
+    verdict=ERROR_OTHER
+  else
+    verdict=UNCLASSIFIED
+  fi
+
+  oneline="$(printf '%s' "$raw" | tr -d '\r' | tr '\n' ' ' | head -c 500)"
+  printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    "$cell" "$mode" "$tool" "${toolname:-none}" "$verdict" "$rc" "$oneline" >> "$GRID"
+  say "  -> $cell: $verdict (tool_used=${toolname:-none}, rc=$rc)"
+  say "     RAW: $oneline"
+  printf '%s\n' "$verdict"
+}
+
+printf 'cell|mode|tool_asked|tool_used|verdict|rc|raw_error_verbatim\n' > "$GRID"
+
+# =================================== PHASE 1: C1 positive control, FIRST + x2
+say ""
+say "== PHASE 1 — C1 positive control (runs FIRST; B0==C1 means harness broken) =="
+compose 0 0 1 || { say "FATAL: C1 generate failed"; exit 2; }
+write_loc1 0
+C1a="$(run_cell C1a auto Bash 1 | tail -1)"
+C1b="$(run_cell C1b auto Bash | tail -1)"
+
+# ---- non-negotiable 1: the HOME redirection ASSERTION, from the strace ------
+say ""
+say "== isolation assertion (strace, C1a) =="
+real_opens="$(grep -c -- "$REAL_GLOBAL" "$WORK/C1a.strace" 2>/dev/null)"; real_opens="${real_opens:-0}"
+fake_opens="$(grep -c -- "$FAKE_CFG/settings.json" "$WORK/C1a.strace" 2>/dev/null)"; fake_opens="${fake_opens:-0}"
+say "  openat hits on REAL operator global ($REAL_GLOBAL): $real_opens  (must be 0)"
+say "  openat hits on FAKE  location 1 ($FAKE_CFG/settings.json): $fake_opens  (must be >0)"
+harness_check "operator real ~/.claude/settings.json NEVER opened (isolation held)" \
+  "$([ "$real_opens" -eq 0 ] && echo yes || echo no)"
+harness_check "redirected location 1 WAS opened (the file under test is the one read)" \
+  "$([ "$fake_opens" -gt 0 ] && echo yes || echo no)"
+say "  (positive control on the instrument: >0 fake opens proves the strace filter"
+say "   itself catches settings reads, so the 0 above is a real absence, not a"
+say "   filter that never matched anything.)"
+
+# ================================================= PHASE 2: B0 baseline, x2
+say ""
+say "== PHASE 2 — B0 baseline x2 =="
+compose 0 1 1 || { say "FATAL: B0 generate failed"; exit 2; }
+write_loc1 0
+B0a="$(run_cell B0a auto Bash | tail -1)"
+B0b="$(run_cell B0b auto Bash | tail -1)"
+
+# ---- harness integrity gate -------------------------------------------------
+say ""
+say "== harness integrity gate =="
+harness_check "C1 self-consistent (C1a=$C1a C1b=$C1b)" "$([ "$C1a" = "$C1b" ] && echo yes || echo no)"
+harness_check "B0 self-consistent (B0a=$B0a B0b=$B0b)" "$([ "$B0a" = "$B0b" ] && echo yes || echo no)"
+harness_check "C1 (deny absent) reaches the target — positive control" \
+  "$([ "$C1a" = ALLOWED ] && echo yes || echo no)"
+harness_check "B0 differs from C1 — the deny is what denies" \
+  "$([ "$B0a" != "$C1a" ] && echo yes || echo no)"
+
+if [ "$C1a" != ALLOWED ] || [ "$B0a" = "$C1a" ] || [ "$C1a" != "$C1b" ] || [ "$B0a" != "$B0b" ]; then
+  say ""
+  say "STOP — harness integrity failed. B0=$B0a/$B0b  C1=$C1a/$C1b."
+  say "Per the plan: nothing downstream counts. Not running C2-C7."
+  column -t -s'|' "$GRID" 2>/dev/null | tee -a "$LOG"
+  if [ -n "${LADDER_OUT:-}" ]; then
+    mkdir -p "$LADDER_OUT" && cp "$GRID" "$LOG" "$WORK"/*.results "$LADDER_OUT/" 2>/dev/null
+  fi
+  exit 1
+fi
+
+# ==================================================== PHASE 3: the flips
+say ""
+say "== PHASE 3 — one flip per cell =="
+
+compose 1 1 1 || { say "FATAL: C2 generate failed"; exit 2; }   # +bare Bash @ loc3
+write_loc1 0
+C2="$(run_cell C2 auto Bash | tail -1)"
+
+compose 0 1 1 || { say "FATAL: C3 generate failed"; exit 2; }   # +bare Bash @ loc1
+write_loc1 1
+C3="$(run_cell C3 auto Bash | tail -1)"
+
+compose 0 1 1 || { say "FATAL: C5 generate failed"; exit 2; }   # mode -> manual
+write_loc1 0
+C5="$(run_cell C5 manual Bash | tail -1)"
+
+compose 0 1 1 || { say "FATAL: C6 generate failed"; exit 2; }   # Read tool
+write_loc1 0
+C6="$(run_cell C6 auto Read | tail -1)"
+
+compose 0 1 0 || { say "FATAL: C7 generate failed"; exit 2; }   # bare tool denies removed
+write_loc1 0
+C7="$(run_cell C7 auto Bash | tail -1)"
+
+# ============================================================ close-out
+say ""
+say "== close-out =="
+REAL_GLOBAL_MTIME_AFTER="$(stat -c %Y "$REAL_GLOBAL" 2>/dev/null || echo missing)"
+harness_check "operator real ~/.claude/settings.json UNMODIFIED (mtime $REAL_GLOBAL_MTIME_BEFORE == $REAL_GLOBAL_MTIME_AFTER)" \
+  "$([ "$REAL_GLOBAL_MTIME_BEFORE" = "$REAL_GLOBAL_MTIME_AFTER" ] && echo yes || echo no)"
+
+if [ "$C2" != "$C3" ]; then
+  say "  NOTE: C2 ($C2) and C3 ($C3) DISAGREE — the plan makes C4 (both flips)"
+  say "        indicated. NOT run: 'if a cell suggests another cell, report it'."
+fi
+
+say ""
+say "== RAW GRID =="
+column -t -s'|' "$GRID" 2>/dev/null | tee -a "$LOG"
+say ""
+say "rehearse-permissions-ladder: $pass passed, $fail failed"
+if [ -n "${LADDER_OUT:-}" ]; then
+  mkdir -p "$LADDER_OUT" && cp "$GRID" "$LOG" "$WORK"/*.results "$LADDER_OUT/" 2>/dev/null
+  say "artifacts copied to $LADDER_OUT"
+fi
+exit 0
