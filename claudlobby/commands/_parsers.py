@@ -27,6 +27,14 @@ from .env_migrate import cmd_env_migrate
 from .lessons_migrate import cmd_lessons_migrate
 from .memory_migrate import cmd_memory_migrate
 from .move_bot import cmd_move_bot
+from .plane import (
+    cmd_emit,
+    cmd_emit_batch,
+    cmd_plane_doctor,
+    cmd_plane_schema,
+    cmd_plane_spool,
+    cmd_plane_status,
+)
 from .scaffolding import cmd_new_bot, cmd_new_guardrail, cmd_new_skill
 
 
@@ -423,3 +431,26 @@ def register_subparsers(sub) -> None:
     from .events import cmd_events  # local import to avoid circular at module top-level
 
     pev.set_defaults(func=cmd_events)
+
+    # --- observable plane (Phase 1 kernel) ---
+    pe = sub.add_parser("emit", help="Validated event ingest into the plane db")
+    pe.add_argument("event_type", help="communication | transmission | work_item | assignment | task")
+    pe.add_argument("--json", required=True, help="Request JSON path, or '-' for stdin")
+    pe.set_defaults(func=cmd_emit)
+
+    peb = sub.add_parser("emit-batch", help="Atomic multi-event unit of work (F4)")
+    peb.add_argument("--json", required=True, help='{"events": [...]} path, or "-"')
+    peb.set_defaults(func=cmd_emit_batch)
+
+    pp = sub.add_parser("plane", help="Observable-plane operations")
+    psub = pp.add_subparsers(dest="plane_action", required=True)
+    ps = psub.add_parser("status", help="Kernel health: db, counts, spool")
+    ps.set_defaults(func=cmd_plane_status)
+    pd = psub.add_parser("doctor", help="Kernel health rungs (exit 1 on attention)")
+    pd.set_defaults(func=cmd_plane_doctor)
+    psc = psub.add_parser("schema", help="Export JSON Schemas (envelope + families)")
+    psc.set_defaults(func=cmd_plane_schema)
+    psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
+    psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])
+    psp.add_argument("name", nargs="?", help="Spool file name (inspect/quarantine)")
+    psp.set_defaults(func=cmd_plane_spool)
