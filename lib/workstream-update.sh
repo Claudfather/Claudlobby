@@ -37,6 +37,33 @@ set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-common.sh
 . "$LIB_DIR/lib-common.sh"
+
+# --- observable-plane dual-write (PR-B T6b; verb table per phase-2 plan §3) ----
+# Dormant behind PLANE_EMIT_ENABLED=1 (fleet env); PLANE_EMIT_DISABLED=1 wins;
+# disclosed, never blocking — workstreams.json stays the load-bearing registry.
+# Verb map (F21): open -> the workstream CONSTRUCT (the row IS the opening;
+# no `opened` token exists) · progress -> progressed · renew -> renewed +
+# renewed_until · block -> blocked · close -> closed + disposition ·
+# prune -> archived per pruned id. Emits run INSIDE the locked verb functions
+# so they carry exactly the values the registry write applied.
+PLANE_ARMED=0
+if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" ] \
+   && [ -n "${FLEET_NAME:-}" ]; then
+    PLANE_ARMED=1
+fi
+_plane_actor() { printf 'bot:%s/%s' "$FLEET_NAME" "${BOT_NAME:-operator}"; }
+_plane_emit() {
+    "$LIB_DIR/plane-emit.sh" >/dev/null 2>&1 || \
+        echo "workstream-update: plane record failed rc=$? (registry write stands)" >&2
+}
+# _plane_ws_event <id> <event> [extra-json-fragment-with-leading-comma]
+_plane_ws_event() {
+    [ "$PLANE_ARMED" = "1" ] || return 0
+    printf '{"events":[{"event_type":"workstream_event","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","payload":{"workstream_id":"%s","event":"%s","actor":"%s"%s}}]}' \
+        "$(json_escape "$1")" "$(json_escape "$FLEET_NAME")" \
+        "$(json_escape "$1")" "$2" "$(json_escape "$(_plane_actor)")" "${3:-}" \
+        | _plane_emit || true
+}
 install_error_trap ""
 
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$HOME/claudlobby}"
@@ -206,6 +233,18 @@ open)
             --arg id "$id" --arg fleet "${FLEET_NAME:-}" --arg title "$TITLE" \
             --arg project "$PROJECT" --arg owner "$OWNER" --arg next "$NEXT" \
             --arg now "$now" --arg expiry "$expiry" || return 1
+        if [ "$PLANE_ARMED" = "1" ]; then
+            local owner_frag="" proj_frag=""
+            [ -n "$OWNER" ] && owner_frag=",\"owner\":\"$(json_escape "bot:$FLEET_NAME/$OWNER")\""
+            case "$PROJECT" in
+                [a-z]*) proj_frag=",\"project_key\":\"$(json_escape "$PROJECT")\"" ;;
+            esac
+            printf '{"events":[{"event_type":"workstream","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","payload":{"workstream_id":"%s","title":"%s","opened_by":"%s"%s%s}}]}' \
+                "$(json_escape "$id")" "$(json_escape "$FLEET_NAME")" \
+                "$(json_escape "$id")" "$(json_escape "$TITLE")" \
+                "$(json_escape "$(_plane_actor)")" "$owner_frag" "$proj_frag" \
+                | _plane_emit || true
+        fi
         printf '%s\n' "$id"
     }
     with_lock "$REGISTRY.lock" _open_ws || exit $?
@@ -231,7 +270,11 @@ progress)
         _apply "$now" '.workstreams[$id].last_progress_ts = $now
                 | .workstreams[$id].lease_expires_ts = $expiry
                 | (if $next != "" then .workstreams[$id].next = $next else . end)' \
-            --arg id "$ID" --arg now "$now" --arg expiry "$expiry" --arg next "$NEXT"
+            --arg id "$ID" --arg now "$now" --arg expiry "$expiry" --arg next "$NEXT" \
+            || return 1
+        local frag=""
+        [ -n "$NEXT" ] && frag=",\"next_step\":\"$(json_escape "$NEXT")\""
+        _plane_ws_event "$ID" "progressed" "$frag"
     }
     with_lock "$REGISTRY.lock" _progress_ws || exit $?
     ;;
@@ -255,7 +298,10 @@ renew)
         now="$(_now_iso)"; expiry="$(_lease_expiry_iso)"
         _apply "$now" '.workstreams[$id].lease_expires_ts = $expiry
                 | .workstreams[$id].renewals += [{ts: $now, note: $note}]' \
-            --arg id "$ID" --arg now "$now" --arg expiry "$expiry" --arg note "$NOTE"
+            --arg id "$ID" --arg now "$now" --arg expiry "$expiry" --arg note "$NOTE" \
+            || return 1
+        _plane_ws_event "$ID" "renewed" \
+            ",\"renewed_until\":\"$(json_escape "$expiry")\",\"note\":\"$(json_escape "$NOTE")\""
     }
     with_lock "$REGISTRY.lock" _renew_ws || exit $?
     ;;
@@ -274,7 +320,10 @@ block)
         _require_exists block || return 1
         _apply "$(_now_iso)" '.workstreams[$id].status = "blocked"
                 | (if $note != "" then .workstreams[$id].next = $note else . end)' \
-            --arg id "$ID" --arg note "$NOTE"
+            --arg id "$ID" --arg note "$NOTE" || return 1
+        local frag=""
+        [ -n "$NOTE" ] && frag=",\"note\":\"$(json_escape "$NOTE")\""
+        _plane_ws_event "$ID" "blocked" "$frag"
     }
     with_lock "$REGISTRY.lock" _block_ws || exit $?
     ;;
@@ -295,7 +344,8 @@ close)
         local now; now="$(_now_iso)"
         _apply "$now" '.workstreams[$id].status = $status
                 | .workstreams[$id].closed_ts = $now' \
-            --arg id "$ID" --arg status "$STATUS" --arg now "$now"
+            --arg id "$ID" --arg status "$STATUS" --arg now "$now" || return 1
+        _plane_ws_event "$ID" "closed" ",\"disposition\":\"$STATUS\""
     }
     with_lock "$REGISTRY.lock" _close_ws || exit $?
     ;;
@@ -326,6 +376,12 @@ prune)
             || { rm -f "$tmp"; echo "workstream-update: prune: failed to collect terminal entries" >&2; return 1; }
         cat "$tmp" >> "$ARCHIVE" \
             || { rm -f "$tmp"; echo "workstream-update: prune: failed to append $ARCHIVE" >&2; return 1; }
+        if [ "$PLANE_ARMED" = "1" ]; then
+            local _pid
+            while IFS= read -r _pid; do
+                [ -n "$_pid" ] && _plane_ws_event "$_pid" "archived"
+            done < <(jq -r '.id // empty' "$tmp" 2>/dev/null || true)
+        fi
         rm -f "$tmp"
         _apply "$(_now_iso)" \
             '.workstreams |= with_entries(select(.value.status != "done" and .value.status != "abandoned"))' \
