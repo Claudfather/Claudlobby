@@ -48,6 +48,11 @@ resolver would pick, so "open but not yet due" is readable by the read door:
   Prints: "<dispatched_at> <expected_by> <task_id>" per row, oldest first
   (expected_by is "-" when the row carries none). Deadline-blind, so this is a
   strict superset of --all's rows for the same bot; --open-task is its head.
+  Deadline-blind is NOT supersede-blind (#1357): a row retired by a later
+  dispatch's --supersedes is gone from BOTH doors. It used to be gone from the
+  overdue path ONLY, because _superseded_ids was applied inside a loop gated on
+  the deadline -- so a retired row could not page and was simultaneously first
+  in line for the resolver, which is what report-back.sh writes into the ledger.
   Also states its scope on STDERR ("--open: bot=... -> N open ...") on every
   run, so an empty result names what it filtered on and can never be read as
   "nothing exists" (#1187). Stdout stays rows-only for machine callers.
@@ -426,30 +431,57 @@ def open_dispatches(
     here, or the door would hide work the resolver can still close.
 
     OPEN is deadline-blind, and that is the whole point of this door: a
-    dispatch is open until a terminal report echoing its id closes it, whether
-    or not ``now`` has passed ``expected_by``. That makes it strictly wider
-    than the watchdog's OVERDUE — every overdue row is an open row — so
+    dispatch is open until it is CLOSED (a terminal report echoing its id) or
+    RETIRED (a later dispatch to the same bot declaring ``supersedes``),
+    whether or not ``now`` has passed ``expected_by``. That makes it strictly
+    wider than the watchdog's OVERDUE — every overdue row is an open row — so
     "carrying three tasks, none late yet" becomes readable, which is a state
     no existing mode could express.
+
+    DEADLINE-BLIND IS NOT SUPERSEDE-BLIND, and conflating the two was a live
+    defect (#1357). This door consulted ``_terminal_reported_ids`` but not
+    ``_superseded_ids``, which is applied inside ``_classify_all``'s loop —
+    a loop gated on ``now <= exp``, so the retirement rule was reachable only
+    from the deadline-bound path. A retired row was therefore **invisible to
+    alerting** (filtered by ``_classify_all``, so it never pages) and
+    simultaneously the **preferred close target** (head of this list, which is
+    what ``open_task_id`` returns and what ``report-back.sh`` resolves an
+    id-less report to). Both halves fail quietly, in opposite directions: the
+    next id-less terminal report closes the row declared dead while the live
+    successor strands. Measured on four supersede pairs across three fleets;
+    the more disciplined the manager is about ``--supersedes``, the older the
+    row this door hands back, because retired rows accumulate at the head.
 
     THE loop behind ``open_task_id``, which is now just this list's head. Two
     loops would let the resolver hand back an id this list does not contain —
     the same desync class ``_terminal_reported_ids`` exists to prevent, one
-    level up.
+    level up. #1357 is that class one level out again: two doors disagreeing
+    about what OPEN means, with the resolver inheriting the wrong answer. So
+    both gates live in shared helpers rather than being restated here.
 
     The join is NOT loosened: only a terminal report carrying the same
-    (bot, task_id) closes a row, exactly as in ``_classify_all``.
+    (bot, task_id) closes a row, and only a same-bot ``supersedes`` retires
+    one, exactly as in ``_classify_all``.
     """
     bot_key = bot.lower()
     reported = _terminal_reported_ids(_load_jsonl(report_ledger))
+    dispatches = _load_jsonl(dispatch_log)
+    # Read once and reuse: the retirement set is derived from the SAME rows this
+    # loop walks, so a second read could only introduce skew.
+    superseded = _superseded_ids(dispatches)
     rows: list[tuple[int, int | None, str]] = []
-    for d in _load_jsonl(dispatch_log):
+    for d in dispatches:
         if str(d.get("bot", "")).lower() != bot_key:
             continue
         tid, da = d.get("task_id"), d.get("dispatched_at")
         if not tid or not isinstance(da, int):
             continue
         if (bot_key, str(tid)) in reported:
+            continue
+        # Retired by declaration — same gate, same helper, same order as
+        # _classify_all. Only id'd rows can be superseded, and this loop has
+        # already dropped the id-less ones.
+        if (bot_key, str(tid)) in superseded:
             continue
         exp = d.get("expected_by")
         rows.append((da, exp if isinstance(exp, int) else None, str(tid)))
@@ -482,8 +514,12 @@ def unassigned_all(
     whether any dispatch is OPEN.
 
     That restraint is the load-bearing part, not an optimisation. A manager
-    amending a task re-dispatches repeatedly, and every superseded row stays open
-    forever because the worker answers only the last id.
+    amending a task re-dispatches repeatedly, and every replaced row stays open
+    forever because the worker answers only the last id. Read "replaced" in the
+    ordinary sense, not as the --supersedes flag: #1357 made open_dispatches
+    honour DECLARED retirement, but declaration is rare (#1032 measured the flag
+    retiring zero rows in a week), so the undeclared chain this paragraph
+    describes is untouched and remains the common shape.
 
     Verified against a real chain rather than a fixture (vera, review of #1121):
     six dispatches to one worker inside 2143s for a single evolving task, five of

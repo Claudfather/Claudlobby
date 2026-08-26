@@ -1046,6 +1046,22 @@ class TestSupersession:
         _write_jsonl(rlog, [])
         return dispatch_overdue.overdue_all(str(dlog), str(rlog), self.NOW)
 
+    def _both_open_doors(self, tmp_path, dispatches, bot="w1", reports=None):
+        """(open list ids, resolver id) — the PRODUCT the class never asserted.
+
+        Every case above routes through `_overdue`, so supersession was pinned on
+        the deadline-bound path only. A helper returning one door would let the
+        same hole reopen shifted by one; this returns both because the defect was
+        the DISAGREEMENT between them, not either door's own behaviour.
+        """
+        dlog, rlog = tmp_path / "d.jsonl", tmp_path / "r.jsonl"
+        _write_jsonl(dlog, dispatches)
+        _write_jsonl(rlog, reports or [])
+        return (
+            [r[2] for r in dispatch_overdue.open_dispatches(bot, str(dlog), str(rlog))],
+            dispatch_overdue.open_task_id(bot, str(dlog), str(rlog)),
+        )
+
     def test_an_explicitly_superseded_row_is_retired(self, tmp_path):
         """The stranded row goes quiet; the replacement stays accountable."""
         out = self._overdue(
@@ -1142,6 +1158,138 @@ class TestSupersession:
             ],
         )
         assert [r[3] for r in out.get("w1", [])] == ["t-5"]
+
+    # ------------------------------------------------------------------
+    # #1357 — the open doors honour the same retirement the overdue path does.
+    #
+    # These are the cases whose ABSENCE let a live defect sit under a green
+    # suite. Supersession was tested (every case above) and `open_dispatches`
+    # was tested (TestOpenDispatches, ~90 lines) — never together, so the
+    # product went unasserted and the two doors disagreed about OPEN.
+    #
+    # A fix that merely wires `_superseded_ids` into `open_dispatches` passes
+    # the suite that also passed BEFORE the fix, so these were run against
+    # UNFIXED main (git archive of origin/main, this file grafted on) to check
+    # they are not the same certificate. Result — 3 failed, 8 passed:
+    #
+    #   FAILS on main   test_a_retired_row_is_gone_from_BOTH_open_doors
+    #                   test_the_two_doors_agree_on_what_retirement_means
+    #                   test_a_chain_leaves_no_phantom_at_the_head
+    #   PASSES on main  test_an_undeclared_queue_is_NOT_retired_from_the_open_doors
+    #                   test_supersedes_is_scoped_by_bot_on_the_open_doors_too
+    #
+    # Those last two are CONTROLS, not detectors, and passing in both arms is
+    # what makes them controls: they pin the boundary the fix must not cross
+    # (retire only on an explicit same-bot declaration). A control that failed
+    # on main would be testing the change instead of bounding it.
+    # ------------------------------------------------------------------
+
+    def test_a_retired_row_is_gone_from_BOTH_open_doors(self, tmp_path):
+        """The core regression, stated as the product rather than as one door.
+
+        A retired row was simultaneously invisible to alerting (filtered by
+        `_classify_all`) and the PREFERRED close target (head of this list, which
+        is what `report-back.sh` resolves an id-less report to). So the next
+        id-less terminal report closed the row declared dead while the live
+        successor stranded — measured on four supersede pairs across three fleets.
+        """
+        ids, head = self._both_open_doors(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-old"),
+                _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+            ],
+        )
+        assert ids == ["t-200-new"], f"the retired row is still listed open: {ids}"
+        assert head == "t-200-new", (
+            f"the resolver hands back the RETIRED row ({head}) — an id-less report "
+            "would close the row we declared dead and strand the live one"
+        )
+
+    def test_the_two_doors_agree_on_what_retirement_means(self, tmp_path):
+        """The desync assertion — neither door alone can express this.
+
+        `dispatch-overdue.py` argues `--open-task` was made literally the head of
+        `--open`'s list because a resolver that could hand back an id the list
+        does not contain is a desync class. This is that class one level out:
+        OVERDUE and OPEN disagreeing about retirement, with the resolver
+        inheriting the wrong answer. Assert the agreement, not either side.
+        """
+        dispatches = [
+            _dispatch("w1", 100, 1000, task_id="t-100-old"),
+            _dispatch("w1", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+        ]
+        overdue_ids = {r[3] for r in self._overdue(tmp_path, dispatches).get("w1", [])}
+        open_ids, head = self._both_open_doors(tmp_path, dispatches)
+        assert "t-100-old" not in overdue_ids, (
+            "positive control failed: the overdue path stopped retiring the row, "
+            "so a green agreement assertion below would prove nothing"
+        )
+        assert "t-100-old" not in set(open_ids), (
+            "OVERDUE retired the row and OPEN did not — the doors disagree"
+        )
+        assert head != "t-100-old", "the resolver inherited the wrong answer"
+        assert set(overdue_ids) <= set(open_ids), (
+            "open must stay a strict superset of overdue while sharing its "
+            f"retirement rule: open={open_ids} overdue={sorted(overdue_ids)}"
+        )
+
+    def test_an_undeclared_queue_is_NOT_retired_from_the_open_doors(self, tmp_path):
+        """The boundary, restated for the door that just gained the gate.
+
+        Retiring too eagerly turns a false-page bug into a dropped-task bug, and
+        on THIS door it would be worse than on the overdue one: the resolver
+        writes its answer into the ledger, so an over-broad gate silently marks
+        live work `completed`. Two dispatches, no declaration — both stay open,
+        oldest still first.
+        """
+        ids, head = self._both_open_doors(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-a"),
+                _dispatch("w1", 200, 1100, task_id="t-200-b"),
+            ],
+        )
+        assert ids == ["t-100-a", "t-200-b"], f"a queued dispatch was retired: {ids}"
+        assert head == "t-100-a", "FIFO resolution broke"
+
+    def test_supersedes_is_scoped_by_bot_on_the_open_doors_too(self, tmp_path):
+        """One bot's declaration must not retire another's row — the #518 scoping,
+        which is carried by `_superseded_ids` itself and so must survive being
+        consumed from a second call site."""
+        ids, head = self._both_open_doors(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 1000, task_id="t-100-old"),
+                _dispatch("w2", 200, 1100, task_id="t-200-new", supersedes="t-100-old"),
+            ],
+        )
+        assert ids == ["t-100-old"], f"w2's declaration silenced w1's row: {ids}"
+        assert head == "t-100-old"
+
+    def test_a_chain_leaves_no_phantom_at_the_head(self, tmp_path):
+        """The sharpest live reproduction: nothing went wrong operationally.
+
+        The manager superseded correctly at every hop and the worker reported
+        both live rows with explicit ids, so both closed. The first row was
+        retired two hops back, will never be reported against, and was still the
+        head of the open list — so the bot's next id-less report closed a row
+        from three hours earlier. A longer chain left a longer phantom tail.
+        """
+        ids, head = self._both_open_doors(
+            tmp_path,
+            [
+                _dispatch("w1", 100, 200, task_id="t-1"),
+                _dispatch("w1", 300, 400, task_id="t-2", supersedes="t-1"),
+                _dispatch("w1", 500, 600, task_id="t-3", supersedes="t-2"),
+            ],
+            reports=[
+                _report("w1", "2026-05-27T11:00:00Z", "completed", task_id="t-3"),
+                _report("w1", "2026-05-27T11:01:00Z", "completed", task_id="t-2"),
+            ],
+        )
+        assert ids == [], f"phantom rows survived a fully-answered chain: {ids}"
+        assert head is None, f"the resolver still offers a retired row: {head}"
 
 
 class TestUnassigned:
