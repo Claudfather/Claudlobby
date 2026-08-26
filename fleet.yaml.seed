@@ -23,7 +23,9 @@ fleet:
     dangerously_skip_permissions: false
     mcp: [github]
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication]
-    protocols: [context-management, telegram-routing, telegram-formatting]
+    # worker-lifecycle: ack/report doctrine's canonical owner (telegram-routing
+    # cites its Step 2); self-scoping, so inert for a bot receiving no dispatches.
+    protocols: [worker-lifecycle, context-management, telegram-routing, telegram-formatting]
     sandbox:
       enabled: false
       auto_allow_bash: true

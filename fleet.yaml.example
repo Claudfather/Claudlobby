@@ -65,7 +65,11 @@ fleet:
     prefers_reduced_motion: true             # settings.local prefersReducedMotion — safe now that keepalive liveness is marker-based
     mcp: [github]                             # MCP servers all bots use (bot stanza merges, not replaces)
     guardrails: [no-push-main, no-destructive-git, pii-protection, no-fabrication, no-merge-own-pr]
-    protocols: [report-back, context-management, telegram-routing, telegram-formatting]
+    # worker-lifecycle is the ack/report doctrine's canonical owner — several
+    # default protocols cite its Step 2, and it self-scopes (fires only on
+    # id'd task dispatches), so managers carry it harmlessly and cross-fleet
+    # dispatch recipients (measured: 44.6% of traffic) need it.
+    protocols: [report-back, worker-lifecycle, context-management, telegram-routing, telegram-formatting]
     # git_credentials:                         # OPTIONAL — org -> env var NAME (never a token)
     #   MyOrg: MYORG_GITHUB_PAT                # needed when bots push to >1 org: fine-grained
     #   OtherOrg: OTHERORG_GITHUB_PAT          # PATs are single-owner, so one token can't do both.
