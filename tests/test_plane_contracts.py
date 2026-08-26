@@ -35,11 +35,13 @@ def _intent_payload(**over) -> dict:
 
 
 def test_families_registered():
-    # "system" joined in Phase 2 (the ingest daemon's lifecycle events are the
-    # first emitter); its token vocabulary stays registry-governed (F19).
+    # "system" joined in Phase 2 PR-A (the daemon's lifecycle events are its
+    # first emitter; vocabulary registry-governed, F19). "workstream" +
+    # "workstream_event" joined in PR-B T6 with the workstream-update door
+    # (wire name suffixed per spec ruling #8 — the construct/kind collision).
     assert set(FAMILIES) == {
         "communication", "transmission", "work_item", "assignment", "task",
-        "system",
+        "system", "workstream", "workstream_event",
     }
 
 

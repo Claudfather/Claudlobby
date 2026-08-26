@@ -25,6 +25,8 @@ from .contracts import (
     TaskEvent,
     Transmission,
     WorkItem,
+    Workstream,
+    WorkstreamEvent,
 )
 from .identity import resolve_fleet, resolve_party
 from .ids import mint_event_id
@@ -46,6 +48,7 @@ _CONSTRUCT_TABLE = {
     "communication": "communications",
     "work_item": "work_items",
     "assignment": "assignments",
+    "workstream": "workstreams",
 }
 
 
@@ -171,6 +174,40 @@ def _family_values(conn, payload, now) -> tuple[str, dict]:
             "session_uid": payload.session_uid,
             "deadline": payload.deadline.isoformat() if payload.deadline else None,
             "successor_id": payload.successor_id,
+            "detail": json.dumps(detail, ensure_ascii=False) if detail else None,
+            "detail_truncated": 0,
+        }
+    if isinstance(payload, Workstream):
+        return "workstreams", {
+            "workstream_id": payload.workstream_id,
+            "title": payload.title,
+            "goal": payload.goal,
+            "owner_uid": (
+                resolve_party(conn, payload.owner, now) if payload.owner else None
+            ),
+            "opened_by_uid": resolve_party(conn, payload.opened_by, now),
+            "project_key": payload.project_key,
+        }
+    if isinstance(payload, WorkstreamEvent):
+        detail = {
+            k: v for k, v in {
+                "note": payload.note,
+                "next_step": payload.next_step,
+                "disposition": payload.disposition,
+                "plan_ref": payload.plan_ref,
+            }.items() if v is not None
+        }
+        return "events", {
+            "kind": "workstream",
+            "event": payload.event,
+            "workstream_id": payload.workstream_id,
+            "actor_uid": (
+                resolve_party(conn, payload.actor, now) if payload.actor else None
+            ),
+            "renewed_until": (
+                payload.renewed_until.isoformat()
+                if payload.renewed_until else None
+            ),
             "detail": json.dumps(detail, ensure_ascii=False) if detail else None,
             "detail_truncated": 0,
         }

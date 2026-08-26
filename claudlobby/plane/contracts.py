@@ -119,7 +119,8 @@ def kind_forbidden(kind: str) -> tuple[str, ...]:
     return tuple(c for c in _STREAM_COLS if c not in keep)
 
 
-FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission", "task"}
+FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission",
+                  "task", "workstream", "workstream_event"}
 
 # Field policy lives in plane/registries.py (the design's stated home) and is
 # imported here so validators ENFORCE from it — one SSOT, no duplicated caps
@@ -303,6 +304,44 @@ class SystemEvent(_Strict):
             raise ValueError("subject_alias is legal only WITH the anchor pair")
 
 
+class Workstream(_Strict):
+    """The workstream CONSTRUCT (§8/§19.3: pulled into 0001 for the bench;
+    its wire contract lands with the door, PR-B T6). The construct row IS the
+    opening — there is no `opened` event token (one-fact-one-row)."""
+
+    workstream_id: str = Field(min_length=1)    # ws-slug (single-writer mints)
+    title: str = Field(min_length=1)
+    goal: Optional[str] = None
+    owner: Optional[str] = None                 # alias
+    opened_by: str = Field(min_length=1)        # alias
+    project_key: Optional[str] = Field(None, pattern=r"[a-z][a-z0-9-]*")
+
+
+class WorkstreamEvent(_Strict):
+    """kind=workstream — wire name `workstream_event` (spec ruling #8: the one
+    suffixed wire name, resolving the construct/kind collision)."""
+
+    workstream_id: str = Field(min_length=1)
+    event: Literal[WORKSTREAM_EVENTS]
+    actor: Optional[str] = None                 # alias
+    renewed_until: Optional[AwareDatetime] = None
+    # detail tail (§9b): note/next_step are CONTENT (FIELD_POLICY-capped,
+    # authored -> over-cap REJECTS); disposition carries close --status
+    # done|abandoned (F21); plan_ref is the linked-never-stored doc pointer.
+    note: Optional[str] = None
+    next_step: Optional[str] = None
+    disposition: Optional[Literal["done", "abandoned"]] = None
+    plan_ref: Optional[str] = None
+
+    @field_validator("note", "next_step")
+    @classmethod
+    def _content_byte_caps(cls, v, info):
+        cap = FIELD_POLICY[("workstream_event", info.field_name)]["cap"]
+        if v is not None and len(v.encode("utf-8")) > cap:
+            raise ValueError(f"workstream {info.field_name} exceeds {cap} bytes")
+        return v
+
+
 FAMILIES: dict[str, type[BaseModel]] = {
     "communication": Communication,
     "transmission": Transmission,
@@ -310,6 +349,8 @@ FAMILIES: dict[str, type[BaseModel]] = {
     "assignment": Assignment,
     "task": TaskEvent,
     "system": SystemEvent,
+    "workstream": Workstream,
+    "workstream_event": WorkstreamEvent,
 }
 
 

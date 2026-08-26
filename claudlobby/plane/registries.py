@@ -15,6 +15,8 @@ FIELD_POLICY: dict[tuple[str, str], dict] = {
     ("communication", "recipient_raw"): {"class": "SENSITIVE"},
     ("work_item", "body"): {"class": "CONTENT", "cap": 16_384},
     ("task", "summary"): {"class": "CONTENT", "cap": 4_096},
+    ("workstream_event", "note"): {"class": "CONTENT", "cap": 4_096},
+    ("workstream_event", "next_step"): {"class": "CONTENT", "cap": 4_096},
     ("transmission", "destination"): {"class": "SENSITIVE"},   # rides detail
     ("system", "data"): {"class": "DIAGNOSTIC", "cap": 16_384},
 }
