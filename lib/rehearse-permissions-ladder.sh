@@ -138,8 +138,6 @@ fleet:
   service_prefix: $PREFIX
   plugins:
     include_defaults: false
-  accounts:
-    default: ~/.claude
   bots:
     $BOT:
       name: $BOT
@@ -151,7 +149,14 @@ fleet:
         allow: [$allow]
         deny: [$deny]
 YAML
-  ( cd "$EXPORT_ROOT" && HOME="$FAKE_HOME" CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
+  # HOME is NOT redirected for generate, and the asymmetry is deliberate rather
+  # than an oversight. The redirection exists to isolate CLAUDE CODE's settings
+  # reads; generate never opens ~/.claude/settings.json. Redirecting it here
+  # instead hides ~/.local site-packages from the interpreter, so the compositor
+  # dies on a missing pydantic/yaml and the failure reads as "generate failed"
+  # — a harness defect wearing the costume of a real one. The isolation claim is
+  # carried by the strace assertion over the CELL, which is where it belongs.
+  ( cd "$EXPORT_ROOT" && CLAUDLOBBY_ROOT="$EXPORT_ROOT" \
       "$PYBIN" -m claudlobby --fleet "$FLEET" generate ) >"$WORK/generate.log" 2>&1
   return $?
 }
