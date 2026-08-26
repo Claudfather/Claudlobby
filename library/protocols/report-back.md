@@ -31,7 +31,7 @@ A 2,500-character summary technically satisfies "one line" and defeats the purpo
 
 ```bash
 # Good — verdict first, detail addressed
-report-back.sh completed "Request Changes on #943: search gate fails 2/3 of its own cases. Evidence in PR comment." --pr https://github.com/org/repo/pull/943
+report-back.sh completed "Request Changes on #943: search gate fails 2/3 of its own cases. Evidence in PR comment." --pr https://github.com/org/repo/pull/943 --task t-1787000000-ab12
 
 # Bad — correct format, unreadable payload
 report-back.sh completed "Reviewed #943. Ran the exact gh issue list command using naive phrasings of the three frictions, first hit at top of 6 results, second was present but buried at position 8 of 27, third returned 0 results because the actual title says hidden env-var feature switches and the word undiscoverable appears nowhere, therefore ..."

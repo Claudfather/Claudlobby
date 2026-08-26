@@ -1,11 +1,11 @@
 ---
-title: Inbound Acknowledgment — Ack Every Message Within 10s
-description: Every message you receive gets a one-line acknowledgment within ~10 seconds, BEFORE substantive work starts. Silence after a request reads as "broken" — never let the human wonder.
+title: Inbound Acknowledgment — Ack Human Messages Within 10s
+description: Every human-originated message gets a one-line acknowledgment within ~10 seconds, BEFORE substantive work starts. Silence after a request reads as "broken" — never let the human wonder. (Manager dispatch traffic is governed by Worker Lifecycle Step 2 instead.)
 ---
 
-# Inbound Acknowledgment — Ack Every Message Within 10s
+# Inbound Acknowledgment — Ack Human Messages Within 10s
 
-A bot that goes silent after receiving a request — even if it's working hard internally — fails the most basic human-trust check. The human can't see your thinking, your task list, your tool calls. From their seat, your silence is indistinguishable from a crash. Every inbound gets an ack before you do anything else.
+A bot that goes silent after receiving a request — even if it's working hard internally — fails the most basic human-trust check. The human can't see your thinking, your task list, your tool calls. From their seat, your silence is indistinguishable from a crash. Every human-originated inbound gets an ack before you do anything else.
 
 ## The rule
 
