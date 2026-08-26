@@ -146,7 +146,7 @@ For each gate (typically 2-5 per initiative):
 2. Save dispatch to `dispatches/<manager>-<date>-opening.md`.
 3. Send via tmux send-keys to manager's session (with the standard verify-flush SOP — `set +H;` prefix if any `!word` patterns).
 4. Confirm submission (capture pane, look for thinking indicator).
-5. On all dispatches acknowledged, mark `current_stage: MONITOR`.
+5. On all dispatches submitted (step 4's pane check), mark `current_stage: MONITOR` — do not wait for acks; a recipient's ack is its first report, whenever that lands (Worker Lifecycle, Step 2).
 
 ### 5. MONITOR
 

@@ -6,7 +6,7 @@ title: Context Management
 
 - **After each completed task** → `/compact`
 - **Switching repos / projects** → `/clear`
-- **Stuck > 3 min** → stop, run `report-back.sh blocked`, don't spin
+- **Stuck > 3 min** → stop, run `report-back.sh blocked` (`--task <id>` when id'd), don't spin
 
 ## Never state a context percentage you have not seen
 

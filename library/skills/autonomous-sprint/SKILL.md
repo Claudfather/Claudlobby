@@ -116,7 +116,7 @@ For each issue, sequentially:
 
 1. **Dispatch engineer** via `/dispatch`:
    - Include issue URL, repo, and relevant context from the mission doc
-   - Engineer: acknowledge → branch → implement → test → /simplify → PR → report back
+   - Engineer: engage (first `[BOTREPORT]` row is the ack) → branch → implement → test → /simplify → PR → report back
 
 2. **On engineer completion**: immediately dispatch a reviewer
    - If approved: verify CI green → merge → post to Telegram
