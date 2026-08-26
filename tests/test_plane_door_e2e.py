@@ -184,9 +184,11 @@ def test_report_back_links_task_facts_and_closes_the_status(tmp_path, armed):
     assert txs == ["pane_submitted", "failed"]
     statuses = dict(_rows(tmp_path, TASK_STATUS_SQL))
     assert statuses[row["plane_assignment_id"]] == "completed"
-    # report ledger carries the parity join
-    rb = json.loads((tmp_path / "runtime" / "fleet" / "report-back.jsonl"
-                     ).read_text().splitlines()[-1])
+    # report ledger carries the parity join (path via discovery, not a
+    # hardcoded tier — fleet_runtime_dir owns the overlay-vs-root rule)
+    ledgers = list(tmp_path.rglob("report-back.jsonl"))
+    assert ledgers, "report ledger never written"
+    rb = json.loads(ledgers[0].read_text().splitlines()[-1])
     assert rb["plane_msg_id"].startswith("msg_")
 
 
