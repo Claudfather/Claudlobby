@@ -53,7 +53,8 @@ if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" 
 fi
 _plane_actor() { printf 'bot:%s/%s' "$FLEET_NAME" "${BOT_NAME:-operator}"; }
 _plane_emit() {
-    "$LIB_DIR/plane-emit.sh" >/dev/null 2>&1 || \
+    # stderr passes through — the shim's fallback disclosure is the contract.
+    "$LIB_DIR/plane-emit.sh" >/dev/null || \
         echo "workstream-update: plane record failed rc=$? (registry write stands)" >&2
 }
 # _plane_ws_event <id> <event> [extra-json-fragment-with-leading-comma]

@@ -73,7 +73,8 @@ if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" 
 fi
 PLANE_MSG_ID=""
 _plane_emit() {
-    "$LIB_DIR/plane-emit.sh" >/dev/null 2>&1 || \
+    # stderr passes through — the shim's fallback disclosure is the contract.
+    "$LIB_DIR/plane-emit.sh" >/dev/null || \
         echo "briefing-trigger: plane record failed rc=$? (briefing unaffected)" >&2
 }
 if [ "$PLANE_ARMED" = "1" ]; then

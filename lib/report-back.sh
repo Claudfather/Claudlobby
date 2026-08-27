@@ -167,7 +167,8 @@ fi
 PLANE_MSG_ID="" PLANE_LINK_WI="" PLANE_LINK_ASG=""
 _plane_hex32() { od -An -tx1 -N16 /dev/urandom | tr -d ' \n'; }
 _plane_emit() {
-    "$LIB_DIR/plane-emit.sh" >/dev/null 2>&1 || \
+    # stderr passes through — the shim's fallback disclosure is the contract.
+    "$LIB_DIR/plane-emit.sh" >/dev/null || \
         echo "report-back: plane record failed rc=$? (reported, unrecorded — legacy ledger has the row)" >&2
 }
 _plane_lookup_dispatch_ids() {

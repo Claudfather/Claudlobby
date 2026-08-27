@@ -76,7 +76,8 @@ _plane_json_str() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'NR>1{printf "\\n"} {printf "%s", $0}'
 }
 _plane_emit() {
-  "$(dirname "$0")/plane-emit.sh" >/dev/null 2>&1 || \
+  # stderr passes through — the shim's fallback disclosure is the contract.
+  "$(dirname "$0")/plane-emit.sh" >/dev/null || \
     echo "tg-post: plane record failed rc=$? (posted anyway — plane is additive)" >&2
 }
 if [ "$PLANE_ARMED" = "1" ]; then

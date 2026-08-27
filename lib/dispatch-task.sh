@@ -509,9 +509,12 @@ _plane_peer_context() {
 [ "$PLANE_ARMED" = "1" ] && { _plane_peer_context "$WORKER_SESSION" || true; }
 
 _plane_emit() {
-    # stdin: {"events":[...]} — routed through THE shim (socket -> cold CLI);
-    # rc/stderr disclosed, never propagated (dual-write: legacy is the record).
-    "$LIB_DIR/plane-emit.sh" >/dev/null 2>&1 || \
+    # stdin: {"events":[...]} — routed through THE shim (socket -> cold CLI).
+    # stderr passes THROUGH (the shim's fallback disclosure is the contract —
+    # eating it here made a degraded ladder silent at the door tier, caught by
+    # the validate-bot-change plane leg); only stdout is discarded. rc never
+    # propagates: dual-write, legacy is the record.
+    "$LIB_DIR/plane-emit.sh" >/dev/null || \
         echo "dispatch-task: plane record failed rc=$? (dispatched, unrecorded — legacy ledger has the row)" >&2
 }
 

@@ -126,7 +126,10 @@ unmeasured — measure first, adapt second. Nothing in Phase 2 touches the plugi
 - **Door-side latency budget:** p95 ≤ 200ms per shim emit on the Pi (warm 106ms + socket + bash
   overhead, headroom for the optimization to reclaim). Measured by a bench extension that drives
   the SHIM, not `emit()` — the number a door actually feels. §19.8 applies: a miss is a defect
-  investigation.
+  investigation. **Known lever named in advance (2026-08-27, from the Mac smoke):** the
+  shim's rung-1 client is a python3 spawn (~150-250ms interpreter startup on the Pi before any
+  socket work) — if the Pi budget fails, the investigation starts there (a `nc -U`/bash-native
+  send, or folding the pre-mint+send into one spawn), never at the model.
 - **Ambiguous-success branch enumeration** from `pane_send_verified` (inventory Remaining):
   enumerate, map each to transmission `unknown` vs `pane_submitted`; the mapping ships as a table
   in the dispatch-door task with a test per branch.

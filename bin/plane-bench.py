@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -256,18 +257,74 @@ def bench_burst(root: Path, n: int) -> dict:
     }
 
 
+def bench_shim(root: Path, n: int) -> tuple[list[float], int, bool]:
+    """PR-B T10: the number a DOOR actually feels — one lib/plane-emit.sh
+    invocation per emit, through whichever rung answers. Returns (timings,
+    fallback_count, daemon_was_serving). Budget (plan §5): p95 <= 200ms on
+    the Pi, machine-checked when the daemon rung is the one measured."""
+    import socket as _socket
+
+    shim = REPO / "lib" / "plane-emit.sh"
+    sock = root / "state" / "plane" / "ingest.sock"
+    serving = False
+    if sock.exists():
+        probe = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        probe.settimeout(1.0)
+        try:
+            probe.connect(str(sock))
+            serving = True
+        except OSError:
+            serving = False
+        finally:
+            probe.close()
+    out: list[float] = []
+    fallbacks = 0
+    env = {**os.environ, "CLAUDLOBBY_ROOT": str(root),
+           "PLANE_EMIT_ENABLED": "1",
+           # A temp root resolves no CLI of its own; the fallback rung rides
+           # this interpreter (PLANE_EMIT_CLI is a whitespace-split command
+           # line by contract).
+           "PLANE_EMIT_CLI": f"{sys.executable} -m claudlobby"}
+    for i in range(n):
+        payload = json.dumps({"events": [_request(10_000 + i)]})
+        t0 = time.perf_counter()
+        r = subprocess.run(["bash", str(shim)], input=payload,
+                           capture_output=True, text=True, env=env)
+        dt = time.perf_counter() - t0
+        if r.returncode != 0:
+            print(f"shim emit {i} failed rc={r.returncode}: {r.stderr}",
+                  file=sys.stderr)
+            continue
+        if "falling back" in r.stderr:
+            fallbacks += 1
+        out.append(dt)
+    return out, fallbacks, serving
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", type=Path, default=None)
     ap.add_argument("--cold", type=int, default=50)
     ap.add_argument("--warm", type=int, default=1000)
     ap.add_argument("--burst", type=int, default=25)
+    ap.add_argument("--shim", type=int, default=25,
+                    help="Shim-level emits (0 skips; needs a served daemon"
+                         " for the budget verdict)")
     args = ap.parse_args()
     root = args.root or Path(tempfile.mkdtemp(prefix="plane-bench-"))
 
     cold = bench_cold(root, args.cold)
     warm = bench_warm(root, args.warm)
     burst = bench_burst(root, args.burst)
+    shim_gate_failed = False
+    shim_ms: list[float] = []
+    shim_fallbacks = 0
+    shim_served = False
+    if args.shim:
+        shim, shim_fallbacks, shim_served = bench_shim(root, args.shim)
+        shim_ms = [x * 1000 for x in shim]
+        if shim_served and shim_ms and _pctl(shim_ms, 95) > 200:
+            shim_gate_failed = True
     read_gate = bench_reads(root)
 
     print("## plane-bench results\n")
@@ -281,7 +338,20 @@ def main() -> int:
     print(f"- burst n={args.burst}: wall={burst['wall_s']}s "
           f"committed={burst['committed']} spooled={burst['spooled']} "
           f"errors={len(burst['errors'])}")
+    if shim_ms:
+        mode = "daemon rung" if (shim_served and shim_fallbacks == 0) else \
+            f"cold-CLI rung ({shim_fallbacks} fallbacks — informational only)"
+        verdict = ""
+        if shim_served and shim_fallbacks == 0:
+            verdict = " — BUDGET " + ("FAIL" if shim_gate_failed else "PASS") \
+                + " (door-felt p95 <= 200ms, plan §5)"
+        print(f"- shim (lib/plane-emit.sh, {mode}): n={len(shim_ms)} "
+              f"p50={_pctl(shim_ms, 50):.1f}ms p95={_pctl(shim_ms, 95):.1f}ms "
+              f"max={max(shim_ms):.1f}ms{verdict}")
     print("\nGate (Phase-2 ingest choice): Pi cold p95 ≤ 300ms AND burst errors == 0 → direct writer; else socket daemon.")
+    if shim_gate_failed:
+        print("SHIM BUDGET FAILED (p95 > 200ms via the daemon rung)")
+        return 1
     return read_gate
 
 

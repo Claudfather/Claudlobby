@@ -319,10 +319,13 @@ class PlaneDaemon:
             # listen(): between bind() and listen() the file exists but
             # connect() gets ECONNREFUSED, so exposing the public path first
             # hands every prober a refused-connection window. A unix socket
-            # is its inode — the rename preserves the listener.
-            tmp = self.sock_path.with_name(
-                f".{self.sock_path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
-            )
+            # is its inode — the rename preserves the listener. The hidden
+            # name is MINIMAL (".s" + 8 hex): a verbose suffix pushed a
+            # public path that FIT sun_path over the limit on macOS's deep
+            # TMPDIR roots, refusing serve on exactly the roots the public
+            # check had approved (uniqueness: urandom + the exclusive lock
+            # already held above).
+            tmp = self.sock_path.with_name(f".s{os.urandom(4).hex()}")
             _check_sun_path(tmp)
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
