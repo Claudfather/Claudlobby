@@ -96,7 +96,7 @@ The monitor reads **only** pre-aggregated sources:
 | Source | Path | Shape |
 |---|---|---|
 | Transcript digests | `$CLAUDLOBBY_ROOT/state/transcript-digests/transcript-digest-YYYY-MM-DD.jsonl` | one row per finished session |
-| Bot events | `<bot-dir>/data/events/fleet-YYYY-MM-DD.jsonl` | see `fleet-observability` |
+| Bot events | `claudlobby events` (never the raw `<bot-dir>/data/events/...` path directly — see `fleet-observability`, whose composed recipe this used to duplicate and now defers to) | see `fleet-observability` |
 | Rollups | `claudlobby uptime` · `utilization` · `report-back` | fleet-level aggregates |
 
 ### Digest row contract
