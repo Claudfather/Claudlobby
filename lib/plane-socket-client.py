@@ -21,7 +21,10 @@ exit:   0 ok (committed/duplicate/spooled)
 
 from __future__ import annotations
 
-import argparse
+# T10 budget lever (measured on the Pi, 2026-08-27): interpreter spawn is the
+# door-felt cost — plain python3 ~45ms, `-S -E` ~12ms, and argparse alone adds
+# ~15ms of import. The shim invokes this file with `python3 -S -E`, so imports
+# here stay minimal-stdlib and argv is parsed by hand (two fixed flags).
 import json
 import os
 import socket
@@ -31,6 +34,25 @@ from datetime import datetime, timezone
 
 VERDICT_EXITS = {"contract_violation": 2, "bad_request": 2,
                  "total_failure": 3, "downgrade": 4}
+
+
+def _parse_argv(argv: list) -> tuple:
+    """--socket S --finalize-to F [--timeout T] — hand-rolled (see header)."""
+    sock = fin = None
+    timeout = 30.0
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--socket" and i + 1 < len(argv):
+            sock = argv[i + 1]; i += 2
+        elif a == "--finalize-to" and i + 1 < len(argv):
+            fin = argv[i + 1]; i += 2
+        elif a == "--timeout" and i + 1 < len(argv):
+            timeout = float(argv[i + 1]); i += 2
+        else:
+            print(f"plane-socket-client: unknown arg {a!r}", file=sys.stderr)
+            return None, None, timeout
+    return sock, fin, timeout
 
 
 def _finalize(events: list) -> list:
@@ -46,13 +68,15 @@ def _finalize(events: list) -> list:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--socket", required=True)
-    ap.add_argument("--finalize-to", required=True,
-                    help="File the finalized batch is written to (0600) BEFORE"
-                         " the send — the CLI-fallback replays this exact file")
-    ap.add_argument("--timeout", type=float, default=30.0)
-    args = ap.parse_args()
+    class _A:  # argparse-shaped holder (see header for why not argparse)
+        pass
+
+    args = _A()
+    args.socket, args.finalize_to, args.timeout = _parse_argv(sys.argv[1:])
+    if not args.socket or not args.finalize_to:
+        print("plane-socket-client: --socket and --finalize-to are required",
+              file=sys.stderr)
+        return 2
 
     try:
         parsed = json.loads(sys.stdin.read())

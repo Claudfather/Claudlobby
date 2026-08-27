@@ -39,9 +39,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
 
-# shellcheck source=lib-common.sh
-. "$LIB_DIR/lib-common.sh"
-set +e  # lib-common re-arms set -e at source time; the ladder inspects rcs
+# lib-common is NOT sourced on the hot path (T10 budget lever, measured on the
+# Pi): rung 1 needs nothing from it, and sourcing ~3600 lines per emit is a
+# door-felt tax. The fallback rung sources it lazily for claudlobby_cli.
+set +e  # the ladder inspects rcs
 
 ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 SOCK="${PLANE_SOCKET:-$ROOT/state/plane/ingest.sock}"
@@ -49,7 +50,9 @@ SOCK="${PLANE_SOCKET:-$ROOT/state/plane/ingest.sock}"
 finalized="$(mktemp "${TMPDIR:-/tmp}/plane-emit.XXXXXX")"
 trap 'rm -f "$finalized"' EXIT
 
-python3 "$LIB_DIR/plane-socket-client.py" \
+# -S -E: skip site/pyvenv machinery — the client is minimal-stdlib by
+# contract (measured: 45ms -> 12ms interpreter spawn on the Pi).
+python3 -S -E "$LIB_DIR/plane-socket-client.py" \
     --socket "$SOCK" --finalize-to "$finalized"
 rc=$?
 case "$rc" in
@@ -63,6 +66,9 @@ if [ -s "$finalized" ]; then
     if [ -n "${PLANE_EMIT_CLI:-}" ]; then
         $PLANE_EMIT_CLI --root "$ROOT" emit-batch --json "$finalized"
     else
+        # shellcheck source=lib-common.sh
+        . "$LIB_DIR/lib-common.sh"   # lazy: only this rung needs claudlobby_cli
+        set +e                        # lib-common re-arms set -e at source time
         claudlobby_cli --root "$ROOT" emit-batch --json "$finalized"
     fi
     rc=$?
