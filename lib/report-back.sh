@@ -183,9 +183,20 @@ _plane_lookup_dispatch_ids() {
     PLANE_LINK_ASG=$(printf '%s' "$row" | sed -n 's/.*"plane_assignment_id":"\([a-z0-9_]*\)".*/\1/p')
     return 0
 }
+_plane_session_uid() {
+    # Published by the SessionStart hook (plane-session-start.sh, T7) — the
+    # transcript identity task facts carry. Absent file = hook unarmed or a
+    # pre-hook session; the fact is simply unattributed, never guessed.
+    local f="${BOT_DIR:-}/data/.plane-session"
+    [ -n "${BOT_DIR:-}" ] && [ -f "$f" ] || return 0
+    sed -n 's/.*"session_uid":"\(sess_[0-9a-f]*\)".*/\1/p' "$f" | head -1
+}
 _plane_emit_report_intent() {
     PLANE_MSG_ID="msg_$(_plane_hex32)"
     [ -n "$TASK_ID" ] && { _plane_lookup_dispatch_ids || true; }
+    local sess_frag="" _sess
+    _sess="$(_plane_session_uid || true)"
+    [ -n "$_sess" ] && sess_frag=",\"session_uid\":\"$_sess\""
     local safe_msg sender_alias link_frag="" pr_url="" ex
     safe_msg=$(json_escape "$MESSAGE")
     sender_alias="bot:$FLEET_NAME/$BOT"
@@ -213,10 +224,10 @@ _plane_emit_report_intent() {
         [ -n "$PROGRESS" ] && frag=",\"progress\":$PROGRESS"
         [ -n "$pr_url" ] && frag="$frag,\"pr_url\":\"$(json_escape "$pr_url")\""
         if [ -n "$ev" ]; then
-            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"$ev\",\"actor\":\"$(json_escape "$sender_alias")\",\"summary\":\"$(json_escape "$SUMMARY")\"$frag}}"
+            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"$ev\",\"actor\":\"$(json_escape "$sender_alias")\",\"summary\":\"$(json_escape "$SUMMARY")\"$frag$sess_frag}}"
         fi
         if [ "$TASK_ANOMALY" = "supplied-id-not-open" ]; then
-            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$(json_escape "$sender_alias")\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\"}}"
+            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$(json_escape "$sender_alias")\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\"$sess_frag}}"
         fi
     fi
     printf '{"events":[%s]}' "$events" | _plane_emit

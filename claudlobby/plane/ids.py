@@ -21,6 +21,11 @@ _UID_PREFIX = {
     "vault": "vault_",
     "project": "proj_",
     "library_item": "lib_",
+    # F12 refinement (§19.6, delivered PR-B T7): session_uid is the TRANSCRIPT
+    # identity (stable across resume — empirically confirmed 2026-08-25);
+    # process_uid distinguishes the concurrent RESUMES of one transcript —
+    # minted fresh per process at SessionStart, never derived.
+    "process": "proc_",
 }
 
 # Anchored (round-2 F9): pydantic's pattern is a SEARCH — unanchored patterns
