@@ -348,9 +348,10 @@ Any change to **what a brand-new user is told to run** — `README.md`, `documen
 The loop:
 
 1. **Export, do not clone** — `git archive <ref> | tar -x -C <dir>`. A clone carries `.git`, and the commit messages describe the very defects you are trying to rediscover.
-2. **Run the documented commands verbatim.** Not the ones you know work — the ones the doc prints. Copy-paste them.
-3. **Log every exploration event** — any time you read source, grep, guess a flag, or apply knowledge not on the page. *Each one is a documentation defect whether or not you solved it.* Report the count.
-4. **Stop at the credential gate.** Essentially every onboarding defect lives before it, so needing real tokens is not a reason to skip the exercise.
+2. **Scrub the environment first, not after.** A bot session exports `CLAUDLOBBY_ROOT`, `GITHUB_PAT`, and more — exporting the tree isolates it, but a run launched from inside that session still silently resolves onto the wrong checkout or leaks an ambient credential into the report. The failure is silent in the general case; it was caught here only because `claudlobby validate` happened to be loud about it. Scrub list and reasoning (what to leave, and why): [`documentation/validating-cold-start.md`](documentation/validating-cold-start.md).
+3. **Run the documented commands verbatim.** Not the ones you know work — the ones the doc prints. Copy-paste them.
+4. **Log every exploration event** — any time you read source, grep, guess a flag, or apply knowledge not on the page. *Each one is a documentation defect whether or not you solved it.* Report the count.
+5. **Stop at the credential gate.** Essentially every onboarding defect lives before it, so needing real tokens is not a reason to skip the exercise.
 
 `tests/test_cold_start_contract.py` gates the mechanical half of this (no bare `pip`, a venv accompanies every install, all entry points name one template, the CLI resolver probes a submodule and prefers `.venv`). **It is a floor, not a substitute** — it cannot tell you that a doc is confusing, only that it is inconsistent.
 

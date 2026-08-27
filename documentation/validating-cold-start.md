@@ -70,6 +70,44 @@ lib/coldstart-harness.sh transcript    # harvest the session narrative
 defects you are trying to rediscover. `prepare` uses `git archive` and refuses a tree that
 carries any of `.git local .venv .env fleet.yaml runtime state`.
 
+**Scrub the environment before the run starts, not after.** "Export, do not clone" isolates the
+*tree*. Nothing isolates the *environment*, and a reader who follows every step above exactly
+still gets a contaminated run if the shell running the exercise is a bot session — which it will
+be, if a bot is the one measuring. Measured live (2026-08-27, `t-1787863382-7b06`): the first
+`claudlobby validate` inside a correctly-exported test tree silently resolved `fleet.yaml` to
+`/home/crog/claudlobby/fleet.yaml` — the shared install, a different checkout entirely — because
+the launching bot session still had `CLAUDLOBBY_ROOT` exported. A second round surfaced
+`GITHUB_PAT` set-but-empty from that same ambient session, which `validate` read and reported on
+as though it belonged to the tree under test.
+
+**The failure is silent in the general case.** Both instances above were caught only because the
+tool happened to be loud about them — an error naming a path, a warning naming a var. A quieter
+contaminated run produces a clean-looking result that measured the wrong tree entirely, with
+nothing in the output to say so. Scrub before the first documented command runs, in a subshell
+the exercise never leaves:
+
+```bash
+env -u CLAUDLOBBY_ROOT -u FLEET_NAME -u FLEET_ROOT -u BOT_NAME \
+    -u TELEGRAM_BOT_TOKEN -u GITHUB_PAT -u STARTUP_PROMPT -u CLAUDE_FLAGS bash
+# run the entire exercise inside this shell, including `prepare` itself
+```
+
+`FLEET_*`/`BOT_*`/`TELEGRAM_*` cover the rest of a composed bot's env, not just the two variables
+that happened to fire loudly this time.
+
+**Deliberately not scrubbed: `~/.env`.** It can hold real tokens on the host running the
+exercise, and the right move is to disclose it as a bound, not hide it — a real stranger's cold
+start also runs under a real `$HOME` with whatever is already in it. The goal is a *realistic*
+cold start, not a *sterile* one: scrub what would misattribute the measurement to the wrong tree
+or leak a credential into a report, not everything merely ambient.
+
+**This is not covered by `tests/test_cold_start_contract.py`, and can't be.** That gate runs
+inside the maintainer's or CI's own process and either does static analysis of doc text or drives
+a subprocess through an environment the test itself constructs — it has no way to see, and no
+reason to see, what the *operator's own shell* had exported before they typed the first command.
+The contamination is a property of the runner's environment, not of anything in this repo. Level
+1 remains a floor for what it does cover; this is why it can't be extended to cover this too.
+
 **The cold arm cannot be a subagent.** Skill registration is bound at session start, so a
 subagent inherits the parent's registry and can only read the exported `SKILL.md` as a file — it
 can never invoke `/setup`. Since the invocation is what is under test, the arm must be a fresh
