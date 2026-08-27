@@ -86,14 +86,62 @@ contaminated run produces a clean-looking result that measured the wrong tree en
 nothing in the output to say so. Scrub before the first documented command runs, in a subshell
 the exercise never leaves:
 
+**Do not hand-write the list. `env -u` takes literal names, not globs** — an earlier version of
+this section listed eight names and a comment claiming `FLEET_*`/`BOT_*`/`TELEGRAM_*` "cover the
+rest," which reads like a wildcard and isn't one. Verified against a live bot's real `bot.conf`
+(otis, reviewing this doc's own first version): **twelve** composed variables survived that
+exact command, including `BOT_DIR` and `FLEET_STATE_PATH` — path variables of the same class as
+`CLAUDLOBBY_ROOT`, the one that caused the original contamination. Worse, the one Telegram name
+on the list, `TELEGRAM_BOT_TOKEN`, **is not a variable `bot.conf` sets at all** — it composes
+`TELEGRAM_BOT_HANDLE`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_GROUP_CHAT_ID`, `TELEGRAM_REQUIRE_MENTION`,
+`TELEGRAM_STATE_DIR`, and `TELEGRAM_TOKEN_ENV_NAME` instead — six real names, none of them the one
+guessed. A hand-written list also rots the same way the README's inventory counts did (a
+different fix, same doc set): silently, in the reassuring direction, the day a new composed
+variable is added and nobody updates this page.
+
+**Derive the list from `bot.conf` instead, so the claim is true by construction.** `bot.conf` is
+generated, and every name it sets — `export`ed or not, both end up in a live bot's shell — is
+recoverable straight from its text:
+
 ```bash
-env -u CLAUDLOBBY_ROOT -u FLEET_NAME -u FLEET_ROOT -u BOT_NAME \
-    -u TELEGRAM_BOT_TOKEN -u GITHUB_PAT -u STARTUP_PROMPT -u CLAUDE_FLAGS bash
+mapfile -t NAMES < <(grep -oE '^(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=' "$BOT_DIR/bot.conf" \
+    | sed -E 's/^export[[:space:]]+//; s/=$//' | sort -u)
+UNSET_ARGS=(); for n in "${NAMES[@]}"; do UNSET_ARGS+=(-u "$n"); done
+env "${UNSET_ARGS[@]}" bash
 # run the entire exercise inside this shell, including `prepare` itself
 ```
 
-`FLEET_*`/`BOT_*`/`TELEGRAM_*` cover the rest of a composed bot's env, not just the two variables
-that happened to fire loudly this time.
+**Verified, not asserted** — 39 names derived from a real bot's `bot.conf`; a fresh shell launched
+through the command above and probed for every one of them:
+
+```
+$ env "${UNSET_ARGS[@]}" bash -c 'comm -12 <(printf "%s\n" "${NAMES[@]}" | sort) <(env | cut -d= -f1 | sort)'
+(empty — zero of the 39 survived)
+```
+
+**This covers what `bot.conf` composes. It does not cover credential-tier variables** —
+`GITHUB_PAT`, the real `TELEGRAM_BOT_TOKEN`, and anything else your fleet's `.env` cascade
+resolves are a separate tier `bot.conf` never names (only `TELEGRAM_TOKEN_ENV_NAME`, the *name of*
+the token variable, appears in its text — not the token variable itself). That set can't be
+derived the same way without reading every tier `env-tiers.sh` resolves, which this recipe does
+not attempt. Named instead, and disclosed as incomplete rather than left implicit:
+
+```bash
+env "${UNSET_ARGS[@]}" -u GITHUB_PAT -u TELEGRAM_BOT_TOKEN bash
+```
+
+**That list is not exhaustive, and saying so is the honest version of this fix, not a hedge.**
+Confirmed live on the same reference bot: `RAILWAY_API_TOKEN` survives every name above, because
+this fleet has a Railway integration this recipe doesn't know about. Any fleet-specific credential
+your own `.env` declares needs its own `-u`, or check what's actually resolving with
+`claudlobby creds-reconcile` before trusting the scrub blind.
+
+**This only applies to running the exercise from inside an existing bot session** — the only
+case where any of this can leak, because it's the only case with a `bot.conf` to leak from. A
+genuine first-time stranger's terminal has no `CLAUDLOBBY_ROOT`, no composed variables, and
+nothing to derive or scrub; this section is for a bot (or an operator working inside a bot's
+shell) measuring its own onboarding path, not for the stranger the measurement is standing in
+for.
 
 **Deliberately not scrubbed: `~/.env`.** It can hold real tokens on the host running the
 exercise, and the right move is to disclose it as a bound, not hide it — a real stranger's cold
