@@ -180,11 +180,16 @@ claudlobby --fleet my-fleet generate       # overlay mode
 
 This writes bot directories for every bot. In root mode: `runtime/bots/<name>/`. In overlay mode: `local/<fleet>/runtime/bots/<name>/`. The generator also scaffolds `.env` files with stubs for any env vars required by MCP configs and integrations.
 
+> **The examples below use `claudfather` and `com.claudlobby.seed`** because that is exactly what
+> §3's `fleet.yaml.seed` composes — bot `claudfather`, `service_prefix: com.claudlobby.seed` — so
+> every command here is copy-pasteable on a first run. On any other fleet, substitute your own bot
+> name and `service_prefix`.
+
 Inspect one:
 
 ```bash
-BOT_DIR=runtime/bots/lead                  # root mode
-BOT_DIR=local/my-fleet/runtime/bots/lead   # overlay mode
+BOT_DIR=runtime/bots/claudfather                   # root mode
+BOT_DIR=local/my-fleet/runtime/bots/claudfather   # overlay mode
 ls $BOT_DIR/
 cat $BOT_DIR/CLAUDE.md
 cat $BOT_DIR/.mcp.json
@@ -205,8 +210,8 @@ lib/setup-fleet my-fleet           # overlay mode (local/my-fleet/)
 To start a single bot without touching the rest, `lib/spin-up-bot.sh` remains the per-bot primitive (note: it restarts the bot if it's already running):
 
 ```bash
-lib/spin-up-bot.sh runtime/bots/lead                         # root mode
-lib/spin-up-bot.sh local/my-fleet/runtime/bots/lead           # overlay mode
+lib/spin-up-bot.sh runtime/bots/claudfather                        # root mode
+lib/spin-up-bot.sh local/my-fleet/runtime/bots/claudfather          # overlay mode
 ```
 
 Both detect your OS, link the service unit (systemd on Linux, launchd on macOS), enable it, and start the bot.
@@ -219,22 +224,22 @@ If you prefer manual control:
 ```bash
 mkdir -p ~/Library/LaunchAgents
 for bot in $(ls runtime/bots/); do
-  ln -sf "$PWD/runtime/bots/$bot/com.example.claudlobby.$bot.plist" ~/Library/LaunchAgents/com.example.claudlobby.$bot.plist
-  launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.example.claudlobby.$bot.plist
+  ln -sf "$PWD/runtime/bots/$bot/com.claudlobby.seed.$bot.plist" ~/Library/LaunchAgents/com.claudlobby.seed.$bot.plist
+  launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.claudlobby.seed.$bot.plist
 done
 ```
 
-(Replace `com.example.claudlobby` with your `service_prefix`. The composed unit filename is always `<service_prefix>.<bot>.plist` / `.service` — never a bare `<bot>.plist`.)
+(Replace `com.claudlobby.seed` with your `service_prefix`. The composed unit filename is always `<service_prefix>.<bot>.plist` / `.service` — never a bare `<bot>.plist`.)
 
 **Linux (systemd user):**
 ```bash
 mkdir -p ~/.config/systemd/user
 for bot in $(ls runtime/bots/); do
-  ln -sf "$PWD/runtime/bots/$bot/com.example.claudlobby.$bot.service" ~/.config/systemd/user/com.example.claudlobby.$bot.service
+  ln -sf "$PWD/runtime/bots/$bot/com.claudlobby.seed.$bot.service" ~/.config/systemd/user/com.claudlobby.seed.$bot.service
 done
 systemctl --user daemon-reload
 for bot in $(ls runtime/bots/); do
-  systemctl --user enable --now com.example.claudlobby.$bot.service
+  systemctl --user enable --now com.claudlobby.seed.$bot.service
 done
 ```
 
@@ -244,16 +249,16 @@ For Pi-style always-on operation: `loginctl enable-linger $USER` so user service
 
 ```bash
 # Service status
-systemctl --user status com.example.claudlobby.lead        # Linux
-launchctl print gui/$(id -u)/com.example.claudlobby.lead    # macOS
+systemctl --user status com.claudlobby.seed.claudfather         # Linux
+launchctl print gui/$(id -u)/com.claudlobby.seed.claudfather     # macOS
 
 # tmux session
 tmux list-sessions
 
 # Bot logs
-tail -f runtime/bots/lead/.claude/logs/* 2>/dev/null
-journalctl --user -u com.example.claudlobby.lead -f         # Linux
-tail -f lib/logs/lead.out.log lib/logs/lead.err.log          # launchd stdout/stderr logs (macOS)
+tail -f runtime/bots/claudfather/logs/*
+journalctl --user -u com.claudlobby.seed.claudfather -f          # Linux
+tail -f lib/logs/claudfather.out.log lib/logs/claudfather.err.log  # launchd stdout/stderr logs (macOS)
 ```
 
 Send a Telegram message to your bot. It should respond within a few seconds.
@@ -265,10 +270,10 @@ When you change `fleet.yaml` or anything in `library/`:
 ```bash
 claudlobby validate                              # or --fleet my-fleet
 claudlobby generate                              # regenerates all bots
-claudlobby generate --bot lead                   # regenerate one bot
+claudlobby generate --bot claudfather            # regenerate one bot
 # Then restart the affected bot:
-systemctl --user restart com.example.claudlobby.lead             # Linux
-launchctl kickstart -k gui/$(id -u)/com.example.claudlobby.lead  # macOS
+systemctl --user restart com.claudlobby.seed.claudfather              # Linux
+launchctl kickstart -k gui/$(id -u)/com.claudlobby.seed.claudfather   # macOS
 ```
 
 Skill edits in `library/skills/` are picked up live (symlinks) — no regen required, just `/compact` or restart the bot to clear its cache.

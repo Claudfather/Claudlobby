@@ -1647,7 +1647,9 @@ def _validate_placeholders(fleet: FleetConfig, report: ValidationReport) -> None
         if _is_placeholder(bot.telegram.handle):
             report.errors.append(
                 f"bot '{bot_name}': telegram.handle is still the template placeholder "
-                f"'{bot.telegram.handle}' — set the @handle BotFather gave the bot"
+                f"'{bot.telegram.handle}' — set the handle BotFather gave the bot, "
+                f"WITHOUT the leading @ (e.g. my_bot): a bare @ cannot start a "
+                f"YAML scalar, so 'handle: @my_bot' fails to parse"
             )
         if _is_placeholder(bot.telegram.chat_id):
             report.errors.append(
