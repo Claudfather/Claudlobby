@@ -139,14 +139,16 @@ that trips; treat everything else as a sighting.
 
 Use `claudlobby events` — never a hand-rolled loop over bot directories. This is **not** a fix
 for a live break: run verbatim on an armed bot, the loop below still works, including for denied
-siblings — confirmed directly, twice independently. The exact mechanism is not fully pinned down
-and two independent probes do not agree on its shape: a `for ... in "$BOTS_DIR"/*/` loop with
-`"$bot_dir"`/`"$f"` unresolved at match time evades every time it's been tested, while a *plain*
-`b=ravi; cat .../$b/...` scalar assignment — also unresolved-at-match-time, just not inside a loop
-— was reliably denied in the same testing. Separately, a fully literal path paired with some
-*unrelated* unresolved variable elsewhere in the same command (`cat <path>; echo "${RANDOM}"`) has
-also been observed to evade. What varies the outcome is not settled; that it currently doesn't
-apply to the shape this protocol actually uses is what's being acted on here.
+siblings — confirmed directly, independently, by two different bots on two different sessions.
+The mechanism (otis, `shared/planning/active/2026-08-27-deny-bypass-probe.md`): the permission
+matcher resolves a variable **only if its value is assigned in the same command as a literal** —
+`b=ravi; cat .../$b/...` is denied correctly (and `b=otis; cat .../$b/...` allowed correctly, both
+resolved against the right bot). An expansion the matcher **cannot** statically resolve from the
+command text — a glob-bound loop variable, `${RANDOM}`, `${PIPESTATUS[0]}` — makes it fail open,
+regardless of where that expansion sits or whether the path beside it is literal. The loop below
+binds `"$bot_dir"` from `"$BOTS_DIR"/*/`, a glob expansion depending on filesystem state at
+runtime — unresolvable from the command text alone — which is why it evades where a same-command
+literal assignment would not.
 
 That is exactly the problem. **It works by accident**, on some permission-matcher blind spot, not
 by design — and the same evasion is why it's silent in the reassuring direction if the matcher
