@@ -164,10 +164,16 @@ def test_kind_matrix_executed_against_installed_schema():
             row = {**base, "event": token}
             allowed = c._CARRIER_ONLY_STATES.get(token) if kind == "transmission" else None
             if allowed is not None:
-                attempt({**row, "carrier": allowed[0]})
-                wrong = "tmux" if "tmux" not in allowed else "telegram-tgpost"
-                with _pytest.raises(sq.IntegrityError):
-                    attempt({**row, "carrier": wrong})
+                # EVERY allowed carrier accepted, EVERY disallowed rejected —
+                # allowed[0]-only left a can't-drift claim false (#1372
+                # re-verify: dropping telegram-bridge from carrier_accepted
+                # stayed green under the old single-carrier probe).
+                for ok_carrier in allowed:
+                    attempt({**row, "carrier": ok_carrier})
+                for bad_carrier in c.CARRIERS:
+                    if bad_carrier not in allowed:
+                        with _pytest.raises(sq.IntegrityError):
+                            attempt({**row, "carrier": bad_carrier})
             else:
                 attempt(row)
         if manifest["vocab"] is not None:

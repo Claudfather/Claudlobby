@@ -149,14 +149,12 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     sails through as accepted. Then the TRANSFORMED form — what gets stored
     and spooled (§11) — is what the transaction receives.
 
-    T8 (the #1345-review cost disclosure, 62->106ms warm on the Pi): the
-    double pass is paid only where both passes DO something. Communications
-    have no raw-REJECT semantics (a relayed body truncates-with-proof, never
-    rejects), so they validate ONCE, on the captured form — capture still
-    runs first, so a broken capture config raises before any validation or
-    db access. Every other family validates raw first (the rejects), and the
-    second pass runs only when capture actually changed the request
-    (_apply_capture's identity contract)."""
+    T8-as-amended-by-#1372-F1: the double pass is paid only where both passes
+    DO something, but RAW validation is unconditional and FIRST for every
+    family — the T8 comms skip let capture launder malformed wire into valid
+    shape. The second (transformed-form) pass runs only when capture actually
+    changed the request (_apply_capture's identity contract); communications
+    always change under capture, so they pay both passes."""
     finalized = [_finalize(dict(r)) if isinstance(r, dict) else r
                  for r in raw_requests]
     captured: list = []

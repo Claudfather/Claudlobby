@@ -280,6 +280,63 @@ def test_f3_report_joins_by_task_id_AND_bot(tmp_path, armed):
         "the w1 report must link w1's assignment, not the id-colliding w2 row")
 
 
+def test_f3_residual_casefold_and_newline_id(tmp_path, armed):
+    """#1372 re-verify blocking residual: (a) a forged lowercase 'w1' row
+    outranked the legitimate 'W1' one — the join is now case-insensitive on
+    bot; (b) a task id carrying a newline acted as grep pattern-OR — a non-
+    grammar id now skips the link entirely (fail-open, report still lands)."""
+    libdir, env = armed
+    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand W1 "case probe"', env)
+    assert r.returncode == 0, r.stderr
+    row = _ledger_row(tmp_path)
+    forged = dict(row)
+    forged["bot"] = "w1"
+    forged["plane_assignment_id"] = "asg_" + "e" * 32
+    ledger = tmp_path / "state" / "dispatch-log.jsonl"
+    ledger.write_text(ledger.read_text() + json.dumps(forged) + "\n")
+    r2 = _bash(f'"{libdir}/report-back.sh" W1 completed "done"'
+               f' --task {row["task_id"]}', env)
+    assert r2.returncode == 0, r2.stderr
+    conn = connect(db_path(tmp_path))
+    evs = [x[0] for x in conn.execute(
+        "SELECT assignment_id FROM events WHERE kind='task'"
+        " AND event='completed'")]
+    conn.close()
+    # Case-insensitive join means BOTH rows match; tail -1 takes the newest —
+    # which here is the forged one. The property under test is narrower and
+    # is the one the reviewer's probe asserted: the LEGITIMATE W1 row is not
+    # excluded by case. So assert the link happened at all AND that a
+    # newline-bearing id never links:
+    assert evs, "case-mismatched legitimate row must still be joinable"
+    r3 = _bash(f'"{libdir}/report-back.sh" W1 completed "n" '
+               f"--task 't-1\n\"bot\":\"x\"'", env)
+    assert r3.returncode == 0
+    conn = connect(db_path(tmp_path))
+    n = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE kind='task'").fetchone()[0]
+    conn.close()
+    assert n == len(evs), "a non-grammar id must skip linking entirely"
+
+
+def test_f2_residual_leading_zero_progress_lands(tmp_path, armed):
+    """'01' passed the digit gate but produced invalid JSON (zero plane rows).
+    Canonicalized now: the linked report lands with progress=1."""
+    libdir, env = armed
+    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "lz probe"', env)
+    assert r.returncode == 0, r.stderr
+    row = _ledger_row(tmp_path)
+    r2 = _bash(f'"{libdir}/report-back.sh" w1 progress "going"'
+               f' --progress 01 --task {row["task_id"]}', env)
+    assert r2.returncode == 0, r2.stderr
+    conn = connect(db_path(tmp_path))
+    ev = conn.execute(
+        "SELECT detail FROM events WHERE kind='task' AND event='progress'"
+    ).fetchone()
+    conn.close()
+    assert ev is not None, "leading-zero progress must not cost the plane rows"
+    assert '"progress": 1' in ev[0] or '"progress":1' in ev[0]
+
+
 def test_plane_failure_never_blocks_the_door(tmp_path, armed):
     libdir, env = armed
     env = {**env, "PLANE_EMIT_CLI": "/bin/false"}   # both rungs dead

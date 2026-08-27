@@ -39,8 +39,10 @@ VERDICT_EXITS = {"contract_violation": 2, "bad_request": 2,
 def _parse_argv(argv: list) -> tuple:
     """--socket S --finalize-to F [--timeout T] — hand-rolled (see header)."""
     sock = fin = None
-    timeout = 2.0   # TOTAL deadline (see main) — the daemon answers in ~100ms;
-                    # anything slower is a wedge and the fallback rung is the fix
+    timeout = 1.0   # TOTAL deadline (see main) — Pi p95 under load is ~190ms,
+                    # so 1s is 5x headroom; anything slower is a wedge and the
+                    # fallback rung (+ the shim's cooldown marker) is the fix
+    finalize_only = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -48,12 +50,24 @@ def _parse_argv(argv: list) -> tuple:
             sock = argv[i + 1]; i += 2
         elif a == "--finalize-to" and i + 1 < len(argv):
             fin = argv[i + 1]; i += 2
+        elif a == "--finalize-only":
+            finalize_only = True; i += 1
         elif a == "--timeout" and i + 1 < len(argv):
-            timeout = float(argv[i + 1]); i += 2
+            try:
+                timeout = float(argv[i + 1])
+            except ValueError:
+                timeout = -1.0
+            i += 2
         else:
             print(f"plane-socket-client: unknown arg {a!r}", file=sys.stderr)
-            return None, None, timeout
-    return sock, fin, timeout
+            return None, None, timeout, finalize_only
+    # Finite positive only (#1372 re-verify: 'inf' reached settimeout and
+    # died on OverflowError at exit 1 — a laundered verdict code).
+    if not (0 < timeout < 3600):
+        print(f"plane-socket-client: --timeout must be a finite positive"
+              f" number of seconds < 3600", file=sys.stderr)
+        return None, None, -1.0, finalize_only
+    return sock, fin, timeout, finalize_only
 
 
 def _finalize(events: list) -> list:
@@ -73,10 +87,11 @@ def main() -> int:
         pass
 
     args = _A()
-    args.socket, args.finalize_to, args.timeout = _parse_argv(sys.argv[1:])
-    if not args.socket or not args.finalize_to:
-        print("plane-socket-client: --socket and --finalize-to are required",
-              file=sys.stderr)
+    (args.socket, args.finalize_to, args.timeout,
+     args.finalize_only) = _parse_argv(sys.argv[1:])
+    if not args.socket or not args.finalize_to or args.timeout <= 0:
+        print("plane-socket-client: --socket and --finalize-to are required"
+              " (and --timeout must be finite positive)", file=sys.stderr)
         return 2
 
     try:
@@ -94,6 +109,11 @@ def main() -> int:
     fd = os.open(args.finalize_to, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(payload + "\n")
+
+    if args.finalize_only:
+        # The shim's wedge-cooldown path: mint + persist the idempotent batch
+        # for the CLI rung, no socket attempt at all.
+        return 5
 
     # HARD TOTAL deadline, not per-operation (#1372 review F5): a live-but-
     # wedged listener accepts the connect and never replies — a per-op 30s

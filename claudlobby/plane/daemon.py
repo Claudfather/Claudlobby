@@ -121,22 +121,31 @@ def _probe_live(path: Path) -> bool:
 
 
 def probe_daemon(path: Path, timeout: float = 2.0) -> bool:
-    """TYPED handshake (#1372 review F15): connect-succeeds proves only that
-    SOMETHING listens — an arbitrary listener made doctor report a healthy
-    daemon. Send an empty request and require the daemon's own bad_request
-    verdict shape back."""
+    """TYPED handshake (#1372 review F15 + re-verify residuals): connect-
+    succeeds proves only that SOMETHING listens. Send an empty request and
+    require the daemon's own bad_request verdict shape back — where the reply
+    must be a JSON OBJECT (a `[]` reply crashed doctor on AttributeError),
+    the read is bounded by a TOTAL deadline (a trickle listener exceeded the
+    per-op timeout indefinitely), and the buffer is size-capped."""
     probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    probe.settimeout(timeout)
+    deadline = time.monotonic() + timeout
     try:
+        probe.settimeout(timeout)
         probe.connect(str(path))
         probe.sendall(b"\n")
         buf = b""
         while b"\n" not in buf:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or len(buf) > 65536:
+                return False
+            probe.settimeout(remaining)
             chunk = probe.recv(65536)
             if not chunk:
                 break
             buf += chunk
         reply = json.loads(buf)
+        if not isinstance(reply, dict):
+            return False
         return reply.get("ok") is False and reply.get("code") == "bad_request"
     except (OSError, ValueError):
         return False

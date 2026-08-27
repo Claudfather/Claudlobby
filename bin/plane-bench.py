@@ -338,6 +338,8 @@ def main() -> int:
                     help="Shim-level emits (0 skips; needs a served daemon"
                          " for the budget verdict)")
     args = ap.parse_args()
+    if args.shim < 0:
+        ap.error("--shim must be 0 or a positive integer")
     root = args.root or Path(tempfile.mkdtemp(prefix="plane-bench-"))
 
     cold = bench_cold(root, args.cold)
