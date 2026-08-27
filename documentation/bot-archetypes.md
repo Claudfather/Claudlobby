@@ -75,7 +75,8 @@ The brain of the fleet. Converses freely, delegates to workers, monitors health.
 | `/fleet-status` | Health check across all bots (alive/dead, reported context-degraded state, idle/working) |
 | `/fleet-pulse` | Actionable fleet health — restart dead workers, flag stuck panes, protect WIP |
 | `/prs` | PR activity across repos: authored, review requests, CI status |
-| `/status` | Self-diagnostic — session health, MCP connectivity, tmux fleet state, fleet-state ledger |
+| `/status` | Readout for the human: what moved, and what is waiting on their decision. Consumes `claudlobby brief`; adds the PR surface brief lacks |
+| `/selfcheck` | Self-diagnostic — session health, MCP connectivity, tmux fleet state, fleet-state ledger |
 | `/sweep` | Periodic code-quality sweep across fleet repos (cron or on demand) |
 | `/restart` | Graceful self-restart |
 | `/briefing` | Scheduled daily digests (morning/midday/evening) |
@@ -246,7 +247,7 @@ Customer-facing bot with personality. Handles orders, emails, fulfillment, task 
 | `/tasks` | Notion task/issue management |
 | `/triage` | Surface issues from email → enrich with order data → create tasks |
 | `/restart` | Graceful self-restart |
-| `/status` | Self-diagnostic |
+| `/selfcheck` | Self-diagnostic |
 
 ### Crons
 
