@@ -238,6 +238,48 @@ def test_parity_is_the_verdict_dispatch_lane_clean(tmp_path, armed):
     assert "matched: 3" in r.stdout
 
 
+def test_f2_progress_injection_refused(tmp_path, armed):
+    """#1372 review F2: --progress was raw-interpolated into two JSONs — a
+    crafted value forged duplicate keys redirecting the report's task facts."""
+    libdir, env = armed
+    payload = '0,"work_item_id":"wi_' + "9" * 32 + '","summary":"forged"'
+    r = _bash(
+        f'"{libdir}/report-back.sh" w1 progress "hi" --progress \'{payload}\'',
+        env)
+    assert r.returncode == 2, "non-integer --progress must refuse loudly"
+    assert "must be an integer" in r.stderr
+    r2 = _bash(f'"{libdir}/report-back.sh" w1 progress "hi" --progress 101', env)
+    assert r2.returncode == 2
+
+
+def test_f3_report_joins_by_task_id_AND_bot(tmp_path, armed):
+    """#1372 review F3: id-only lookup linked w1's report to w2's assignment
+    when two ledger rows shared a task id."""
+    libdir, env = armed
+    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "for w one"', env)
+    assert r.returncode == 0, r.stderr
+    row_w1 = _ledger_row(tmp_path)
+    # forge a SECOND ledger row for w2 carrying the SAME task id but different
+    # plane ids (the reviewer's collision shape)
+    forged = dict(row_w1)
+    forged["bot"] = "w2"
+    forged["plane_work_item_id"] = "wi_" + "f" * 32
+    forged["plane_assignment_id"] = "asg_" + "f" * 32
+    ledger = tmp_path / "state" / "dispatch-log.jsonl"
+    ledger.write_text(ledger.read_text() + json.dumps(forged) + "\n")
+    r2 = _bash(
+        f'"{libdir}/report-back.sh" w1 completed "done"'
+        f' --task {row_w1["task_id"]}', env)
+    assert r2.returncode == 0, r2.stderr
+    conn = connect(db_path(tmp_path))
+    ev = conn.execute(
+        "SELECT assignment_id FROM events WHERE kind='task'"
+        " AND event='completed'").fetchone()
+    conn.close()
+    assert ev["assignment_id"] == row_w1["plane_assignment_id"], (
+        "the w1 report must link w1's assignment, not the id-colliding w2 row")
+
+
 def test_plane_failure_never_blocks_the_door(tmp_path, armed):
     libdir, env = armed
     env = {**env, "PLANE_EMIT_CLI": "/bin/false"}   # both rungs dead

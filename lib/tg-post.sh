@@ -71,21 +71,25 @@ if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" 
   PLANE_ARMED=1
 fi
 PLANE_MSG_ID=""
-_plane_json_str() {
-  # backslash, quote, then newlines -> \n (telegram bodies are multiline).
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'NR>1{printf "\\n"} {printf "%s", $0}'
+_plane_jstr() {
+  # Full JSON string encoding via jq (already a hard dep of this script) —
+  # returns the QUOTED string. The prior sed/awk escaper missed tabs and
+  # control characters, so a tabbed Telegram post produced an invalid intent
+  # batch and an orphan transmission (#1372 review F14).
+  printf '%s' "$1" | jq -Rs .
 }
 _plane_emit() {
   # stderr passes through — the shim's fallback disclosure is the contract.
+  # Phase-neutral wording (#1372 F16): the intent emit precedes the send.
   "$(dirname "$0")/plane-emit.sh" >/dev/null || \
-    echo "tg-post: plane record failed rc=$? (posted anyway — plane is additive)" >&2
+    echo "tg-post: plane record failed rc=$? (post action unaffected — plane is additive)" >&2
 }
 if [ "$PLANE_ARMED" = "1" ]; then
   PLANE_MSG_ID="msg_$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
-  printf '{"events":[{"event_type":"communication","emitter":"tg-post","fleet":"%s","payload":{"msg_id":"%s","sender":"bot:%s/%s","recipient_raw":"%s","message_class":"notice","body":"%s"}}]}' \
-    "$(_plane_json_str "$FLEET_NAME")" "$PLANE_MSG_ID" \
-    "$(_plane_json_str "$FLEET_NAME")" "$(_plane_json_str "$BOT_NAME")" \
-    "$(_plane_json_str "$CHAT_ID")" "$(_plane_json_str "$MSG")" | _plane_emit || true
+  printf '{"events":[{"event_type":"communication","emitter":"tg-post","fleet":%s,"payload":{"msg_id":"%s","sender":%s,"recipient_raw":%s,"message_class":"notice","body":%s}}]}' \
+    "$(_plane_jstr "$FLEET_NAME")" "$PLANE_MSG_ID" \
+    "$(_plane_jstr "bot:$FLEET_NAME/$BOT_NAME")" \
+    "$(_plane_jstr "$CHAT_ID")" "$(_plane_jstr "$MSG")" | _plane_emit || true
 fi
 
 RESP="$(curl -s -X POST --config "$URL_CFG" \
@@ -99,9 +103,9 @@ if [ "$OK" = "true" ]; then
     TG_MSGID="$(printf '%s' "$RESP" | jq -r '.result.message_id // empty' 2>/dev/null || true)"
     CARRIER_REF_FRAG=""
     [ -n "$TG_MSGID" ] && CARRIER_REF_FRAG=",\"carrier_ref\":\"tg:$TG_MSGID\""
-    printf '{"events":[{"event_type":"transmission","emitter":"tg-post","fleet":"%s","payload":{"msg_id":"%s","attempt_no":1,"carrier":"telegram-tgpost","destination":"%s","state":"carrier_accepted"%s}}]}' \
-      "$(_plane_json_str "$FLEET_NAME")" "$PLANE_MSG_ID" \
-      "$(_plane_json_str "$CHAT_ID")" "$CARRIER_REF_FRAG" | _plane_emit || true
+    printf '{"events":[{"event_type":"transmission","emitter":"tg-post","fleet":%s,"payload":{"msg_id":"%s","attempt_no":1,"carrier":"telegram-tgpost","destination":%s,"state":"carrier_accepted"%s}}]}' \
+      "$(_plane_jstr "$FLEET_NAME")" "$PLANE_MSG_ID" \
+      "$(_plane_jstr "$CHAT_ID")" "$CARRIER_REF_FRAG" | _plane_emit || true
   fi
   printf '%s' "$RESP" | jq -r '{ok, msg_id: .result.message_id}' 2>/dev/null || true
   exit 0
@@ -109,9 +113,9 @@ fi
 
 ERR="$(printf '%s' "$RESP" | jq -r '.description // empty' 2>/dev/null || true)"
 if [ "$PLANE_ARMED" = "1" ]; then
-  printf '{"events":[{"event_type":"transmission","emitter":"tg-post","fleet":"%s","payload":{"msg_id":"%s","attempt_no":1,"carrier":"telegram-tgpost","destination":"%s","state":"failed","error":"%s"}}]}' \
-    "$(_plane_json_str "$FLEET_NAME")" "$PLANE_MSG_ID" \
-    "$(_plane_json_str "$CHAT_ID")" "$(_plane_json_str "${ERR:-rejected}")" | _plane_emit || true
+  printf '{"events":[{"event_type":"transmission","emitter":"tg-post","fleet":%s,"payload":{"msg_id":"%s","attempt_no":1,"carrier":"telegram-tgpost","destination":%s,"state":"failed","error":%s}}]}' \
+    "$(_plane_jstr "$FLEET_NAME")" "$PLANE_MSG_ID" \
+    "$(_plane_jstr "$CHAT_ID")" "$(_plane_jstr "${ERR:-rejected}")" | _plane_emit || true
 fi
 echo "tg-post: send REJECTED — message NOT delivered (ok=${OK:-<none>}${ERR:+; error: $ERR})" >&2
 printf '%s' "$RESP" | jq -r '{ok, error: .description}' 2>/dev/null || printf '%s\n' "${RESP:-<no response>}"

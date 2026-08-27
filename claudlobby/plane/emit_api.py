@@ -162,13 +162,15 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     captured: list = []
     items = []
     for r in finalized:
-        if isinstance(r, dict) and r.get("event_type") == "communication":
-            c = _apply_capture(root, r)                # CaptureConfigError propagates
-            captured.append(c)
-            items.append(validate_request(c))          # once — no raw-reject case
-            continue
+        # RAW validation runs FIRST for EVERY family — #1372 review F1: the
+        # T8 skip for communications let capture LAUNDER invalid wire (a
+        # list-of-pairs payload, privacy="bogus") into a committed row,
+        # because dict(payload) reshapes pairs and the privacy stamp
+        # overwrites the invalid token. The T8 win survives where it was
+        # measured (identity-return skips the second pass); communications
+        # pay the double pass as the price of the capture rewrite.
         first = validate_request(r)                    # ContractViolation propagates
-        c = _apply_capture(root, r)
+        c = _apply_capture(root, r)                    # CaptureConfigError propagates
         captured.append(c)
         items.append(first if c is r else validate_request(c))
     try:

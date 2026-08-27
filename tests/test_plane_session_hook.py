@@ -29,14 +29,40 @@ def _armed_env(tmp_path: Path) -> dict:
 
 
 def test_bash_derivation_matches_python_byte_for_byte(tmp_path):
-    """THE parity pin: the hook's shasum derivation and ids.derive_session_uid
-    must agree on every platform id, or the transcript join silently forks."""
+    """THE parity pin — now including the #1372-review F8 counterexamples:
+    \\uXXXX escapes (café), escaped quotes, and raw non-ASCII, which the old
+    sed parse derived DIFFERENTLY from derive_session_uid."""
     env = _armed_env(tmp_path)
-    for sid in ("8ad2aa7e-bade-4c55-b3c3-000000000000", "abc", "UPPER-and-123"):
+    for sid in ("8ad2aa7e-bade-4c55-b3c3-000000000000", "abc", "UPPER-and-123",
+                "café", 'quo"ted', "emoji-🎯"):
         r = _run(json.dumps({"session_id": sid}), env)
         assert r.returncode == 0, r.stderr
         out = json.loads((Path(env["BOT_DIR"]) / "data" / ".plane-session").read_text())
         assert out["session_uid"] == derive_session_uid(sid), sid
+    # the \u-escaped wire form of café must land on the same uid as the char
+    r = _run('{"session_id":"caf\\u00e9"}', env)
+    assert r.returncode == 0, r.stderr
+    out = json.loads((Path(env["BOT_DIR"]) / "data" / ".plane-session").read_text())
+    assert out["session_uid"] == derive_session_uid("café")
+
+
+def test_refused_start_invalidates_stale_identity(tmp_path):
+    """#1372 review F8: a later {} retained the previous session's identity,
+    attributing the new session's work to the old one. A refusal DELETES."""
+    env = _armed_env(tmp_path)
+    _run(json.dumps({"session_id": "old-transcript"}), env)
+    f = Path(env["BOT_DIR"]) / "data" / ".plane-session"
+    assert f.exists()
+    r = _run("{}", env)
+    assert r.returncode == 0 and "refusing to derive" in r.stderr
+    assert not f.exists(), "stale identity must be invalidated on refusal"
+
+
+def test_whitespace_only_id_refused(tmp_path):
+    env = _armed_env(tmp_path)
+    r = _run(json.dumps({"session_id": "   "}), env)
+    assert r.returncode == 0 and "refusing to derive" in r.stderr
+    assert not (Path(env["BOT_DIR"]) / "data" / ".plane-session").exists()
 
 
 def test_process_uid_fresh_per_invocation_and_well_formed(tmp_path):

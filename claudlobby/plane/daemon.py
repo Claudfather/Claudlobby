@@ -120,6 +120,30 @@ def _probe_live(path: Path) -> bool:
         probe.close()
 
 
+def probe_daemon(path: Path, timeout: float = 2.0) -> bool:
+    """TYPED handshake (#1372 review F15): connect-succeeds proves only that
+    SOMETHING listens — an arbitrary listener made doctor report a healthy
+    daemon. Send an empty request and require the daemon's own bad_request
+    verdict shape back."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(timeout)
+    try:
+        probe.connect(str(path))
+        probe.sendall(b"\n")
+        buf = b""
+        while b"\n" not in buf:
+            chunk = probe.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        reply = json.loads(buf)
+        return reply.get("ok") is False and reply.get("code") == "bad_request"
+    except (OSError, ValueError):
+        return False
+    finally:
+        probe.close()
+
+
 def _recv_line(conn: socket.socket) -> bytes:
     chunks = []
     total = 0

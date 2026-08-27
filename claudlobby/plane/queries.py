@@ -61,8 +61,11 @@ TASK_STATUS_SQL = (
     " (SELECT t.event FROM events t WHERE t.kind='task'"
     f"  AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL})"
     "  ORDER BY t.ingest_seq LIMIT 1),"
+    # supplied_id_not_open is a JOIN anomaly, not a lifecycle state (#1372
+    # review F11) — it must never surface as an assignment's visible status.
     " (SELECT t.event FROM events t WHERE t.kind='task'"
     "  AND t.assignment_id = a.assignment_id"
+    "  AND t.event <> 'supplied_id_not_open'"
     "  ORDER BY t.ingest_seq DESC LIMIT 1),"
     " CASE"
     "  WHEN a.dispatch_msg_id IS NULL THEN 'created_not_sent'"

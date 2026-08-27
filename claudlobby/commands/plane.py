@@ -277,10 +277,10 @@ def cmd_plane_doctor(args) -> int:
         # (unarmed; doors fall back to the cold CLI by design). Started
         # historically but not serving = ATTENTION with the corrective command
         # (§17 direction: symptom -> exact command).
-        from ..plane.daemon import _probe_live, socket_path
+        from ..plane.daemon import probe_daemon, socket_path
 
         sock = socket_path(root)
-        serving = sock.exists() and _probe_live(sock)
+        serving = sock.exists() and probe_daemon(sock)
         started = 0
         last_ingest = None
         if path.exists():

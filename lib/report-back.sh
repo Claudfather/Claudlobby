@@ -60,7 +60,16 @@ TASK_ANOMALY=""
 POSITIONAL_EXTRAS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --progress)  PROGRESS="$2"; shift 2 ;;
+        --progress)
+            # Integer 0-100 ONLY (#1372 review F2): this value is interpolated
+            # into JSON — legacy ledger AND plane batch — so a free-form value
+            # was a JSON injection seam (a crafted --progress forged duplicate
+            # keys that redirected the report's task facts to arbitrary ids).
+            case "$2" in
+                ''|*[!0-9]*) echo "report-back: --progress must be an integer 0-100, got '$2'" >&2; exit 2 ;;
+            esac
+            [ "$2" -le 100 ] || { echo "report-back: --progress must be <= 100, got '$2'" >&2; exit 2; }
+            PROGRESS="$2"; shift 2 ;;
         --artifact)  ARTIFACTS="${ARTIFACTS:+$ARTIFACTS,}$2"; shift 2 ;;
         --pr)        POSITIONAL_EXTRAS+=("pr:$2"); shift 2 ;;
         --issues)    POSITIONAL_EXTRAS+=("issues:$2"); shift 2 ;;
@@ -168,8 +177,10 @@ PLANE_MSG_ID="" PLANE_LINK_WI="" PLANE_LINK_ASG=""
 _plane_hex32() { od -An -tx1 -N16 /dev/urandom | tr -d ' \n'; }
 _plane_emit() {
     # stderr passes through — the shim's fallback disclosure is the contract.
+    # Phase-neutral wording (#1372 review F16): intent emits fire BEFORE the
+    # send, so the message must not claim the action already happened.
     "$LIB_DIR/plane-emit.sh" >/dev/null || \
-        echo "report-back: plane record failed rc=$? (reported, unrecorded — legacy ledger has the row)" >&2
+        echo "report-back: plane record failed rc=$? (report action unaffected — legacy ledger remains the record)" >&2
 }
 _plane_lookup_dispatch_ids() {
     # The join dispatch-task wrote for us: the newest ledger row carrying this
@@ -178,7 +189,13 @@ _plane_lookup_dispatch_ids() {
     local dlog row
     dlog="$(dispatch_ledger_path)"
     [ -f "$dlog" ] || return 0
-    row=$(grep -F "\"task_id\":\"$TASK_ID\"" "$dlog" 2>/dev/null | tail -1 || true)
+    # Match task id AND bot (#1372 review F3): the id-only grep linked a w1
+    # report to w2's assignment when two dispatches shared an id — the join
+    # key is the PAIR, exactly as dispatch-overdue.py joins it. grep -F on the
+    # exact JSON fragments; json_escape guarantees task text cannot fabricate
+    # either (quotes are escaped in the task field).
+    row=$(grep -F "\"task_id\":\"$TASK_ID\"" "$dlog" 2>/dev/null \
+        | grep -F "\"bot\":\"$BOT\"" | tail -1 || true)
     [ -n "$row" ] || return 0
     PLANE_LINK_WI=$(printf '%s' "$row" | sed -n 's/.*"plane_work_item_id":"\([a-z0-9_]*\)".*/\1/p')
     PLANE_LINK_ASG=$(printf '%s' "$row" | sed -n 's/.*"plane_assignment_id":"\([a-z0-9_]*\)".*/\1/p')

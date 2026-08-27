@@ -51,6 +51,12 @@ _CONSTRUCT_TABLE = {
     "workstream": "workstreams",
 }
 
+# Wire family -> physical events.kind where the two DIFFER (#1372 review F4:
+# workstream_event rows store kind='workstream'; replay verification queried
+# kind='workstream_event', found nothing, and raised divergence — breaking
+# the lost-ack socket->CLI replay for exactly this family).
+_WIRE_TO_KIND = {"workstream_event": "workstream"}
+
 
 def _insert(conn: sqlite3.Connection, table: str, values: dict) -> None:
     cols = tuple(values)
@@ -309,7 +315,7 @@ def _verify_duplicates(conn, prepared) -> list[IngestResult]:
         if table == "events":
             fam = conn.execute(
                 "SELECT ingest_seq FROM events WHERE event_id = ? AND kind = ?",
-                (event_id, family),
+                (event_id, _WIRE_TO_KIND.get(family, family)),
             ).fetchone()
         else:
             fam = conn.execute(

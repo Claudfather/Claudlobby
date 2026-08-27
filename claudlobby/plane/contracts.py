@@ -205,6 +205,18 @@ class Communication(_Strict):
             object.__setattr__(self, "truncated", fields.truncated)
 
 
+# Carrier/state matrix (#1372 review F12): pane_submitted and carrier_queued
+# are PANE facts (tmux only); carrier_accepted is a carrier-API fact (telegram
+# only). The rest are carrier-neutral. Enforced here AND in the DDL CHECK, so
+# neither the wire nor a direct-SQL writer can record physically impossible
+# evidence — which is what keeps the token-only activation queries sound.
+_CARRIER_ONLY_STATES = {
+    "pane_submitted": ("tmux",),
+    "carrier_queued": ("tmux",),
+    "carrier_accepted": ("telegram-tgpost", "telegram-bridge"),
+}
+
+
 class Transmission(_Strict):
     msg_id: str = Field(pattern=ID_PATTERNS["msg"])
     attempt_no: int = Field(ge=1)
@@ -215,6 +227,14 @@ class Transmission(_Strict):
     error: Optional[str] = None
     part_no: Optional[int] = Field(None, ge=1)     # bridge chunking (round-2 F10)
     part_count: Optional[int] = Field(None, ge=1)
+
+    def model_post_init(self, __context) -> None:
+        allowed = _CARRIER_ONLY_STATES.get(self.state)
+        if allowed is not None and self.carrier not in allowed:
+            raise ValueError(
+                f"state {self.state!r} is impossible for carrier"
+                f" {self.carrier!r} (allowed: {', '.join(allowed)})"
+            )
 
 
 class WorkItem(_Strict):

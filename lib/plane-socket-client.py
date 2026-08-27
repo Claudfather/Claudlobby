@@ -39,7 +39,8 @@ VERDICT_EXITS = {"contract_violation": 2, "bad_request": 2,
 def _parse_argv(argv: list) -> tuple:
     """--socket S --finalize-to F [--timeout T] — hand-rolled (see header)."""
     sock = fin = None
-    timeout = 30.0
+    timeout = 2.0   # TOTAL deadline (see main) — the daemon answers in ~100ms;
+                    # anything slower is a wedge and the fallback rung is the fix
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -94,10 +95,27 @@ def main() -> int:
     with os.fdopen(fd, "w") as f:
         f.write(payload + "\n")
 
+    # HARD TOTAL deadline, not per-operation (#1372 review F5): a live-but-
+    # wedged listener accepts the connect and never replies — a per-op 30s
+    # timeout let it hold an intent-first DOOR hostage for the full window
+    # (armed tg-post made zero Telegram calls under a 2s alarm). The deadline
+    # bounds connect+send+recv TOGETHER; on breach the client exits 5 and the
+    # shim's cold-CLI rung does the real work.
+    import time as _time
+
+    deadline = _time.monotonic() + args.timeout
+
+    def _remaining():
+        left = deadline - _time.monotonic()
+        if left <= 0:
+            raise OSError("shim deadline exceeded (wedged daemon?)")
+        return left
+
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(args.timeout)
+        client.settimeout(_remaining())
         client.connect(args.socket)
+        client.settimeout(_remaining())
         client.sendall(payload.encode() + b"\n")
         try:
             client.shutdown(socket.SHUT_WR)
@@ -106,6 +124,7 @@ def main() -> int:
             # to the newline regardless
         buf = b""
         while b"\n" not in buf:
+            client.settimeout(_remaining())
             chunk = client.recv(65536)
             if not chunk:
                 break

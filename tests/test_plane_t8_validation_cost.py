@@ -48,10 +48,14 @@ def _arm_full(root: Path):
     (d / "capture.json").write_text('{"*": "full"}')
 
 
-def test_communication_validates_once(tmp_path, monkeypatch):
+def test_communication_validates_twice_by_ruling(tmp_path, monkeypatch):
+    """REVERSED from T8's single-pass (#1372 review F1): raw validation for
+    communications is load-bearing — capture LAUNDERED a malformed payload
+    (list-of-pairs, privacy='bogus') into a committed row when skipped. The
+    double pass is the price of the capture rewrite."""
     calls = _counting_validate(monkeypatch)
     emit(tmp_path, _comm())
-    assert calls["n"] == 1, "no raw-REJECT case exists for communications"
+    assert calls["n"] == 2
 
 
 def test_untransformed_task_validates_once(tmp_path, monkeypatch):
@@ -87,14 +91,16 @@ def test_overcap_authored_summary_still_rejects_pre_capture(tmp_path):
     assert not db_path(tmp_path).exists()
 
 
-def test_broken_capture_config_still_raises_before_validation(tmp_path, monkeypatch):
+def test_broken_capture_config_still_raises_before_any_db(tmp_path):
+    """Ordering moved by #1372 F1 (raw validation now precedes capture for
+    every family — the laundering fix), so the pin is what actually matters:
+    a broken policy still fails LOUDLY and before any db access."""
     d = tmp_path / "state" / "plane"
     d.mkdir(parents=True)
     (d / "capture.json").write_text('{"*": "ful"}')
-    calls = _counting_validate(monkeypatch)
     with pytest.raises(CaptureConfigError):
         emit(tmp_path, _comm())
-    assert calls["n"] == 0, "a broken policy fails before any validation"
+    assert not db_path(tmp_path).exists()
 
 
 def test_metadata_comm_still_drops_body_with_proof(tmp_path):

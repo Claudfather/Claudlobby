@@ -492,16 +492,29 @@ _plane_peer_context() {
     peer_dir="$(fleet_runtime_dir 2>/dev/null)/bots/$session"
     [ -d "$peer_dir" ] || peer_dir=$(_resolve_cross_fleet_bot_dir "$session" 2>/dev/null || true)
     [ -n "$peer_dir" ] && [ -d "$peer_dir" ] || return 0
-    case "$peer_dir" in
-        */local/*/runtime/bots/*)
-            PLANE_PEER_FLEET="${peer_dir#*/local/}"
-            PLANE_PEER_FLEET="${PLANE_PEER_FLEET%%/*}" ;;
-        *) PLANE_PEER_FLEET="${FLEET_NAME:-}" ;;
-    esac
+    # Peer fleet from the peer's OWN bot.conf first (#1372 review F7): parsing
+    # the path component after /local/ attributed nested vault layouts
+    # (local/<system>/<fleet>/runtime/bots — this estate's ACTUAL shape) to
+    # the outer container. Fallback derives the component immediately before
+    # /runtime/bots, which is fleet-named in both flat and nested layouts.
+    PLANE_PEER_FLEET="$(bot_conf_get "$peer_dir" FLEET_NAME "" 2>/dev/null || true)"
+    if [ -z "$PLANE_PEER_FLEET" ]; then
+        case "$peer_dir" in
+            */runtime/bots/*)
+                PLANE_PEER_FLEET="$(basename "${peer_dir%/runtime/bots/*}")" ;;
+            *) PLANE_PEER_FLEET="${FLEET_NAME:-}" ;;
+        esac
+    fi
+    # Busy probe through the SUPPORTED doors (#1372 review F6): the socket
+    # comes from tmux_socket_for_bot (bare bot_conf_get BOT_SERVICE misses the
+    # fleet-scoped refusal semantics) and busyness from bot_is_busy — the
+    # lib-common SSOT whose signature is (socket, session). pane_is_busy takes
+    # pane TEXT; called with a socket it always read not-busy, so a busy pane
+    # emitted pane_submitted instead of carrier_queued.
     local sock sess
-    sock=$(bot_conf_get "$peer_dir" BOT_SERVICE "" 2>/dev/null || true)
+    sock=$(tmux_socket_for_bot "$peer_dir" 2>/dev/null || true)
     sess=$(basename "$peer_dir")
-    if [ -n "$sock" ] && pane_is_busy "$sock" "$sess" 2>/dev/null; then
+    if [ -n "$sock" ] && bot_is_busy "$sock" "$sess" 2>/dev/null; then
         PLANE_PEER_BUSY=1
     fi
     return 0
@@ -515,7 +528,7 @@ _plane_emit() {
     # the validate-bot-change plane leg); only stdout is discarded. rc never
     # propagates: dual-write, legacy is the record.
     "$LIB_DIR/plane-emit.sh" >/dev/null || \
-        echo "dispatch-task: plane record failed rc=$? (dispatched, unrecorded — legacy ledger has the row)" >&2
+        echo "dispatch-task: plane record failed rc=$? (dispatch action unaffected — legacy ledger remains the record)" >&2
 }
 
 _plane_emit_intent() {

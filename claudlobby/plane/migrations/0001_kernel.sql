@@ -228,6 +228,10 @@ CREATE TABLE events (
                           'duplicate_suppressed')
             AND msg_id IS NOT NULL AND carrier IS NOT NULL
             AND carrier IN ('tmux','telegram-tgpost','telegram-bridge')
+            AND (event NOT IN ('pane_submitted','carrier_queued')
+                 OR carrier = 'tmux')
+            AND (event <> 'carrier_accepted'
+                 OR carrier IN ('telegram-tgpost','telegram-bridge'))
             AND attempt_no IS NOT NULL
             AND work_item_id IS NULL AND assignment_id IS NULL
             AND workstream_id IS NULL AND subject_kind IS NULL

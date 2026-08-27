@@ -7,49 +7,75 @@
 #
 #   $BOT_DIR/data/.plane-session   (0600) —
 #     session_uid   sess_<sha256(platform id)[:32]>  — the TRANSCRIPT identity,
-#                   stable across resume (one transcript = one uid; the bash
-#                   derivation here MUST match claudlobby.plane.ids.
-#                   derive_session_uid byte-for-byte, pinned by test)
-#     process_uid   proc_<random 32 hex> — minted fresh EVERY process start,
-#                   distinguishing concurrent resumes of one transcript (F12)
+#                   stable across resume; derivation MUST match
+#                   claudlobby.plane.ids.derive_session_uid byte-for-byte
+#                   (pinned by test), so the payload is parsed and the digest
+#                   computed by python3 — a sed-and-shasum parse diverged on
+#                   \uXXXX escapes and escaped quotes (#1372 review F8).
+#     process_uid   proc_<random 32 hex> — minted fresh EVERY process start.
 #
-# report-back.sh attaches session_uid to its task facts. DORMANT unless the
-# fleet armed PLANE_EMIT_ENABLED=1 (the hook inherits the session env, which
-# sourced bot.conf); an empty/missing platform id is REJECTED with disclosure
-# (F12 — never derive from nothing). A hook must never break a boot: every
-# path exits 0.
+# CONCURRENCY BOUND (#1372 review F9, disclosed not solved): the file is
+# bot-global and latest-writer-wins. Concurrent resumes of ONE transcript
+# agree on session_uid by derivation, so reads stay correct; concurrent
+# DIFFERENT transcripts on one bot leave the older process reading the newer
+# identity. process_uid is recorded for the future OTel/process join and is
+# deliberately NOT attached to plane events yet — a reader cannot know which
+# process invoked it, and propagating a possibly-wrong uid is worse than none.
+#
+# A refused start INVALIDATES any previous identity (the stale file is
+# removed) — retaining it attributed the new session's work to the old one.
+# DORMANT unless the fleet armed PLANE_EMIT_ENABLED=1; every path exits 0 —
+# a hook must never break a boot.
 
 set -u
 
 [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || exit 0
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
 
-payload="$(cat 2>/dev/null || true)"
-session_id="$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-
-if [ -z "$session_id" ]; then
-    echo "plane-session-start: no session_id in hook payload — refusing to derive (F12)" >&2
-    exit 0
-fi
-
 bot_dir="${BOT_DIR:-}"
-if [ -z "$bot_dir" ] || [ ! -d "$bot_dir" ]; then
-    echo "plane-session-start: BOT_DIR unset or absent — nowhere to publish session identity" >&2
-    exit 0
+out=""
+if [ -n "$bot_dir" ] && [ -d "$bot_dir" ]; then
+    out="$bot_dir/data/.plane-session"
 fi
 
-# sha256 portable: shasum (macOS) or sha256sum (Linux).
-digest="$( { printf '%s' "$session_id" | shasum -a 256 2>/dev/null \
-    || printf '%s' "$session_id" | sha256sum 2>/dev/null; } | cut -c1-32 )"
-if [ -z "$digest" ]; then
-    echo "plane-session-start: no sha256 tool available — session identity not published" >&2
+_refuse() {
+    echo "plane-session-start: $1 — refusing to derive (F12)" >&2
+    # Invalidate stale identity: keeping the old file would attribute THIS
+    # session's reports to the PREVIOUS session.
+    [ -n "$out" ] && rm -f "$out" 2>/dev/null
     exit 0
-fi
-session_uid="sess_$digest"
-process_uid="proc_$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+}
+
+command -v python3 >/dev/null 2>&1 || _refuse "no python3 (JSON parse + digest parity need it)"
+[ -n "$out" ] || { echo "plane-session-start: BOT_DIR unset or absent — nowhere to publish session identity" >&2; exit 0; }
+
+payload="$(cat 2>/dev/null || true)"
+
+# One python3 -S spawn does parse + validation + BOTH uids: json.loads gives
+# the decoded string (\uXXXX, escaped quotes — the exact cases sed got wrong),
+# and hashlib on its UTF-8 bytes is derive_session_uid verbatim. The payload
+# rides an env var, NOT stdin — `python3 -` + a heredoc would make the SCRIPT
+# consume stdin and leave json.load nothing to read.
+identity="$(PLANE_HOOK_PAYLOAD="$payload" python3 -S -E -c '
+import hashlib, json, os, secrets, sys
+try:
+    sid = json.loads(os.environ.get("PLANE_HOOK_PAYLOAD", "")).get("session_id")
+except Exception:
+    sys.exit(3)
+if not isinstance(sid, str) or not sid.strip():
+    sys.exit(3)
+digest = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:32]
+print("sess_" + digest + " proc_" + secrets.token_hex(16))
+' 2>/dev/null)" || true
+
+case "$identity" in
+    sess_*" proc_"*) ;;
+    *) _refuse "no valid session_id in hook payload" ;;
+esac
+session_uid="${identity%% *}"
+process_uid="${identity##* }"
 
 mkdir -p "$bot_dir/data" 2>/dev/null || { echo "plane-session-start: cannot create $bot_dir/data" >&2; exit 0; }
-out="$bot_dir/data/.plane-session"
 tmp="$out.$$"
 umask 077
 printf '{"session_uid":"%s","process_uid":"%s","derived_at":"%s"}\n' \

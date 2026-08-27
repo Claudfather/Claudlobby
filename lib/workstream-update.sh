@@ -377,16 +377,21 @@ prune)
             || { rm -f "$tmp"; echo "workstream-update: prune: failed to collect terminal entries" >&2; return 1; }
         cat "$tmp" >> "$ARCHIVE" \
             || { rm -f "$tmp"; echo "workstream-update: prune: failed to append $ARCHIVE" >&2; return 1; }
-        if [ "$PLANE_ARMED" = "1" ]; then
-            local _pid
-            while IFS= read -r _pid; do
-                [ -n "$_pid" ] && _plane_ws_event "$_pid" "archived"
-            done < <(jq -r '.id // empty' "$tmp" 2>/dev/null || true)
-        fi
+        # Retain the pruned ids; emit archived only AFTER the registry drop
+        # succeeds (#1372 review F13): emitting first recorded `archived` for
+        # a prune that then failed, and the retry double-emitted.
+        local _pruned_ids
+        _pruned_ids="$(jq -r '.id // empty' "$tmp" 2>/dev/null || true)"
         rm -f "$tmp"
         _apply "$(_now_iso)" \
             '.workstreams |= with_entries(select(.value.status != "done" and .value.status != "abandoned"))' \
             || return 1
+        if [ "$PLANE_ARMED" = "1" ]; then
+            local _pid
+            while IFS= read -r _pid; do
+                [ -n "$_pid" ] && _plane_ws_event "$_pid" "archived"
+            done <<< "$_pruned_ids"
+        fi
         echo "Pruned $terminal terminal workstream(s) to $ARCHIVE"
     }
     with_lock "$REGISTRY.lock" _prune_ws || exit $?
