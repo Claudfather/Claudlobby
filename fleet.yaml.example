@@ -125,7 +125,7 @@ fleet:
       mission: "Coordinate the engineering team end-to-end. Dispatch work, monitor reports, surface blockers to the human within 5 minutes."
       manages: [eng-1, reviewer-1]            # bot_ids this bot manages (generates Org Structure section)
       # voice: voices/erlich-bachman.md                 # uncomment to add a personality overlay
-      skills: [dispatch, fleet-pulse, fleet-status, lifecycle, prs, status, sweep, restart]
+      skills: [dispatch, fleet-pulse, fleet-status, lifecycle, prs, status, selfcheck, sweep, restart]
       mcp: [github, notion, slack]              # merges with defaults — github from defaults, notion+slack added
       protocols: [dispatch, consensus-loop, fleet-observability, fleet-dispatch-capability, canary-rollout]
       guardrails: [merge-policy-human]

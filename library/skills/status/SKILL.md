@@ -13,7 +13,8 @@ tool_grants:
 The human asks *"what's the latest?"* and *"what's open for my input?"* constantly. This skill is
 that answer, produced the same way every time so they stop having to ask.
 
-**It answers exactly two questions. Nothing else belongs in the output.**
+**It answers exactly two questions**, plus the one-line `NOT SHOWN:` footer Step 3c may require.
+**Nothing else belongs in the output.**
 
 | | The question | The test for including a line |
 |---|---|---|
@@ -74,18 +75,41 @@ to prevent. If you cannot name the decision, it is not open for them — route i
 **Empty is a real answer.** "Nothing moved and nothing is waiting on you" is useful and takes one line.
 Never pad either list to look busy.
 
+### Step 3c — reconcile every list against `degraded[]` BEFORE you send
+
+**This is a step, not a principle.** Walk `degraded[]` from Step 1 and, for each entry, do one of two
+things. Do this even when nothing in either list touches that field — a standing gap is still true.
+
+| `mode` | What you do |
+|---|---|
+| `labeled` | The field's number **may** be stated, and the disclosure rides **in the same sentence**. Never in a later paragraph — a number that travels without its caveat is the whole failure. |
+| `omitted` | The number **does not exist**. Do not compute a substitute, do not write `0`, do not write `unknown`. **Write the named gap instead**, so a reader asking "where is that?" gets an answer rather than silence. |
+
+**Worked example — `labeled`:**
+
+```
+No critical alerts, though the alert filter omits host-job types (#903), so that is not an all-clear.
+```
+
+**Worked example — `omitted`:** this is the half that had no example, and the negative constraint
+alone ("must not appear as a number") does not tell you what to write.
+
+```
+No utilization figure: the door serves none rather than a retention artifact (#891).
+```
+
+**Where these lines live.** A disclosure that qualifies a line in MOVED or OPEN FOR YOU rides *on that
+line*. A disclosure that qualifies nothing in either list goes in a **one-line `NOT SHOWN:` footer** at
+the end. That footer is the **only** third element permitted in the output — everything else still
+obeys "two questions, nothing else." A `degraded[]` entry that appears in neither place is a
+disclosure you dropped.
+
 ## Non-negotiables
 
-**Carry `degraded[]` through — never launder it.** If `brief` labels a field, the readout says so in
-the same breath. `alerts (0)` from a door that just told you *absence of an alert is not evidence of
-health* is a false all-clear, and it is the kind that gets acted on. One clause is enough:
-
-```
-No critical alerts — though the alert filter omits host-job types (#903), so that is not an all-clear.
-```
-
-A `mode: omitted` field must not appear as a number at all. **A field neither present nor disclosed
-does not exist.**
+**Carry `degraded[]` through — never launder it.** The mechanism is **Step 3c**, which is part of the
+procedure rather than a principle stated here and hoped for. `alerts (0)` from a door that just told
+you *absence of an alert is not evidence of health* is a false all-clear, and it is the kind that gets
+acted on. **A field neither present nor disclosed does not exist.**
 
 **State the bounds.** Cap the lists, and say what was capped: `showing 5 of 143 unacked`. Silent
 truncation reads as exhaustive coverage — the same offense as inventing output.
