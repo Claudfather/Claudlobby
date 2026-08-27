@@ -127,6 +127,15 @@ cleanup() {
         systemctl --user reset-failed "$BP_SVC" >/dev/null 2>&1 || true
         command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
     fi
+    # The plane leg's daemon is a plain background process (never a unit, so
+    # it can never self-boot) — but an abort between its start and its inline
+    # kill would leak it until reboot. Trap-owned teardown, same rule as the
+    # boot probe above: the trap and ONLY the trap guarantees it.
+    if [ -n "${PL_DPID:-}" ]; then
+        kill "$PL_DPID" 2>/dev/null || true
+    fi
+    [ -n "${PL_ROOT:-}" ] && rm -rf "$PL_ROOT" 2>/dev/null
+    [ -n "${PL_SOCKDIR:-}" ] && rm -rf "$PL_SOCKDIR" 2>/dev/null
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
@@ -2324,6 +2333,81 @@ printf '%s' "$ga_fail" | grep -q 'password=' && r=no || r=yes
 harness_check "  ...and no credential of any identity was served" "$r"
 
 rm -rf "$GA_ROOT"
+
+# =============================================================================
+# PR-B T9 — the observable-plane dual-write leg: a REAL daemon on a temp root,
+# the REAL dispatch door through the REAL shim, and the ladder's degradation
+# observed rather than claimed. Gated: no venv CLI resolvable -> the leg skips
+# loudly instead of failing a host that cannot run it.
+# =============================================================================
+PL_REPO="$(cd "$LIB_DIR/.." && pwd)"
+PL_CLI=""
+if [ -x "$PL_REPO/.venv/bin/claudlobby" ]; then
+    PL_CLI="$PL_REPO/.venv/bin/claudlobby"
+elif command -v claudlobby >/dev/null 2>&1; then
+    PL_CLI="$(command -v claudlobby)"
+fi
+if [ -z "$PL_CLI" ]; then
+    echo "  SKIP  plane dual-write leg (no claudlobby CLI resolvable — install the venv)"
+else
+    PL_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/vbcplane.XXXXXX")"
+    PL_SOCKDIR="$(mktemp -d /tmp/vbcpl.XXXXXX 2>/dev/null || mktemp -d)"
+    PL_SOCK="$PL_SOCKDIR/s"
+    PL_LIB="$PL_ROOT/lib"
+    mkdir -p "$PL_LIB"
+    for _f in dispatch-task.sh lib-common.sh plane-emit.sh plane-socket-client.py dispatch-supersede-hint.py; do
+        ln -s "$PL_REPO/lib/$_f" "$PL_LIB/$_f"
+    done
+    printf '#!/bin/bash\nexit 0\n' > "$PL_LIB/dispatch.sh"; chmod +x "$PL_LIB/dispatch.sh"
+    printf '#!/bin/bash\nexit 0\n' > "$PL_ROOT/tmux"; chmod +x "$PL_ROOT/tmux"
+
+    "$PL_CLI" --root "$PL_ROOT" plane serve --socket "$PL_SOCK" \
+        > "$PL_ROOT/daemon.log" 2>&1 &
+    PL_DPID=$!
+    _pl_i=0
+    while [ "$_pl_i" -lt 100 ] && [ ! -S "$PL_SOCK" ]; do sleep 0.1; _pl_i=$((_pl_i + 1)); done
+    [ -S "$PL_SOCK" ] && r=yes || r=no
+    harness_check "plane daemon binds its socket on a temp root" "$r"
+
+    _pl_dispatch() {  # $1 = extra env assignments, $2 = task text; stderr -> $PL_ROOT/err
+        env CLAUDLOBBY_ROOT="$PL_ROOT" TMUX_BIN="$PL_ROOT/tmux" BOT_ID=vbc \
+            BOT_NAME=vbc FLEET_NAME=vbc-fleet PLANE_SOCKET="$PL_SOCK" \
+            PLANE_EMIT_CLI="$PL_CLI" OBSERVABILITY_DISPATCH_DEADLINE=600 \
+            PATH="/usr/bin:/bin" $1 \
+            bash "$PL_LIB/dispatch-task.sh" --botcommand w1 "$2" 2> "$PL_ROOT/err"
+    }
+    _pl_count() {
+        sqlite3 "$PL_ROOT/state/plane/plane.db" \
+            "SELECT COUNT(*) FROM communications" 2>/dev/null || echo 0
+    }
+
+    _pl_dispatch "PLANE_EMIT_ENABLED=1" "leg one: rung 1" >/dev/null && r=yes || r=no
+    harness_check "armed dispatch succeeds with the daemon up" "$r"
+    [ "$(_pl_count)" = "1" ] && r=yes || r=no
+    harness_check "the communication row LANDED (real db, real shim)" "$r"
+    grep -q "falling back" "$PL_ROOT/err" && r=no || r=yes
+    harness_check "  ...via rung 1 (no fallback disclosure on stderr)" "$r"
+
+    kill "$PL_DPID" 2>/dev/null || true; wait "$PL_DPID" 2>/dev/null || true
+    _pl_dispatch "PLANE_EMIT_ENABLED=1" "leg two: daemon down" >/dev/null && r=yes || r=no
+    harness_check "dispatch still succeeds with the daemon DEAD" "$r"
+    [ "$(_pl_count)" = "2" ] && r=yes || r=no
+    harness_check "the row still landed (cold-CLI rung)" "$r"
+    grep -q "falling back" "$PL_ROOT/err" && r=yes || r=no
+    harness_check "  ...and the fallback was DISCLOSED, not silent" "$r"
+
+    _pl_dispatch "PLANE_EMIT_ENABLED=1 PLANE_EMIT_DISABLED=1" "leg three: disabled" >/dev/null && r=yes || r=no
+    harness_check "PLANE_EMIT_DISABLED dispatch succeeds" "$r"
+    [ "$(_pl_count)" = "2" ] && r=yes || r=no
+    harness_check "  ...and wrote NOTHING (harness exemption is a true no-op)" "$r"
+
+    "$PL_CLI" --root "$PL_ROOT" plane doctor > "$PL_ROOT/doctor.txt" 2>&1 && r=no || r=yes
+    harness_check "doctor flags ATTENTION: daemon started historically, not serving" "$r"
+    grep -q "not serving" "$PL_ROOT/doctor.txt" && r=yes || r=no
+    harness_check "  ...naming the condition and the corrective command" "$r"
+
+    rm -rf "$PL_ROOT" "$PL_SOCKDIR"
+fi
 
 echo ""
 echo "=== $pass passed, $fail failed ==="

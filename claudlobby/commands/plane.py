@@ -272,6 +272,40 @@ def cmd_plane_doctor(args) -> int:
         except ContractViolation as exc:
             errors = getattr(exc, "errors", None)
             rung(False, "capture config", str(errors[0] if errors else exc))
+        # Daemon rung (PR-B T9): three-state, evidence-based — never assume a
+        # daemon SHOULD run. Serving = ok. Never-started + no socket = ok
+        # (unarmed; doors fall back to the cold CLI by design). Started
+        # historically but not serving = ATTENTION with the corrective command
+        # (§17 direction: symptom -> exact command).
+        from ..plane.daemon import probe_daemon, socket_path
+
+        sock = socket_path(root)
+        serving = sock.exists() and probe_daemon(sock)
+        started = 0
+        last_ingest = None
+        if path.exists():
+            conn = connect(path)
+            try:
+                started = conn.execute(
+                    "SELECT COUNT(*) FROM events WHERE kind='system'"
+                    " AND event='daemon_started'").fetchone()[0]
+                last_ingest = conn.execute(
+                    "SELECT MAX(ingested_at) FROM ingest_ledger").fetchone()[0]
+            except Exception:  # noqa: BLE001 — a pre-plane db has no tables
+                pass
+            finally:
+                conn.close()
+        if serving:
+            rung(True, "daemon", f"serving on {sock}")
+        elif started:
+            rung(False, "daemon",
+                 f"started {started}x historically but not serving — check:"
+                 " systemctl --user status claudlobby-plane-daemon.service"
+                 " (macOS: launchctl print gui/$UID/claudlobby-plane-daemon);"
+                 " doors are falling back to the cold CLI meanwhile")
+        else:
+            rung(True, "daemon", "never armed (doors fall back to cold CLI)")
+        rung(True, "last ingest", str(last_ingest or "none yet"))
         entries = spool_entries(root)
         oldest_at = _oldest_spooled_at(entries)
         rung(not entries, "spool depth",

@@ -243,8 +243,10 @@ def test_launcher_127_when_nothing_resolves(tmp_path):
     stub_dir.mkdir()
     import shutil as _shutil
 
-    _shutil.copy(_shutil.which("dirname"), stub_dir / "dirname")
-    os.chmod(stub_dir / "dirname", 0o755)
+    # SYMLINK, never copy (#1372 review verification note): a copied macOS
+    # system binary can wedge uninterruptibly under SIP/quarantine and hung
+    # the whole suite on the reviewer's host.
+    os.symlink(_shutil.which("dirname"), stub_dir / "dirname")
     r = subprocess.run(
         ["/bin/bash", str(REPO / "lib" / "plane-daemon.sh")],
         capture_output=True, text=True,

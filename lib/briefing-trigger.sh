@@ -62,11 +62,42 @@ if bot_is_busy "$SOCKET" "$BOT"; then
     defer bot_busy "bot busy"
 fi
 
+# --- observable-plane dual-write (PR-B T6; the inventory's judgment row: a
+# briefing-class communication carried as a raw slash injection — the door
+# mints it a communication). Dormant behind PLANE_EMIT_ENABLED=1; disclosed,
+# never blocking. Intent before the send (F9); the busy defer above means a
+# sent briefing lands in an idle pane, so a clean send is pane_submitted.
+PLANE_ARMED=0
+if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" ]; then
+    PLANE_ARMED=1
+fi
+PLANE_MSG_ID=""
+_plane_emit() {
+    # stderr passes through — the shim's fallback disclosure is the contract.
+    "$LIB_DIR/plane-emit.sh" >/dev/null || \
+        echo "briefing-trigger: plane record failed rc=$? (briefing unaffected)" >&2
+}
+if [ "$PLANE_ARMED" = "1" ]; then
+    PLANE_MSG_ID="msg_$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+    printf '{"events":[{"event_type":"communication","emitter":"briefing-trigger","fleet":"%s","payload":{"msg_id":"%s","sender":"system:briefing-trigger","recipient":"bot:%s/%s","recipient_raw":"%s","message_class":"briefing","body":"/briefing %s"}}]}' \
+        "$(json_escape "$FLEET")" "$PLANE_MSG_ID" \
+        "$(json_escape "$FLEET")" "$(json_escape "$BOT")" \
+        "$(json_escape "$BOT")" "$(json_escape "$SLOT")" | _plane_emit || true
+fi
+_plane_transmission() {
+    [ "$PLANE_ARMED" = "1" ] || return 0
+    printf '{"events":[{"event_type":"transmission","emitter":"briefing-trigger","fleet":"%s","payload":{"msg_id":"%s","attempt_no":1,"carrier":"tmux","destination":"%s","state":"%s"}}]}' \
+        "$(json_escape "$FLEET")" "$PLANE_MSG_ID" \
+        "$(json_escape "$BOT")" "$1" | _plane_emit || true
+}
+
 if "$LIB_DIR/dispatch.sh" "$BOT" "/briefing $SLOT"; then
     echo "$TS DISPATCH $BOT/$SLOT — /briefing $SLOT sent" >> "$LOG"
     emit_fleet_event briefing_dispatched briefing "$(briefing_data ok)" "$BOT_DIR" "$BOT"
+    _plane_transmission "pane_submitted"
 else
     echo "$TS FAIL $BOT/$SLOT — dispatch failed" >> "$LOG"
     emit_fleet_event briefing_failed briefing "$(briefing_data dispatch_failed)" "$BOT_DIR" "$BOT"
+    _plane_transmission "failed"
     exit 1
 fi

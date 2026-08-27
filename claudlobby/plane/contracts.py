@@ -30,20 +30,26 @@ MESSAGE_CLASSES = (
 )
 COMMAND_TYPES = ("task", "cancel", "compact", "restart", "query")
 ATTEMPT_STATES = (
-    "send_attempted", "carrier_accepted", "pane_submitted", "failed",
-    "unknown", "recipient_acknowledged", "duplicate_suppressed",
+    # carrier_queued (§6b #7, PR-B): the tmux door detected the payload was
+    # accepted by the TUI but parked behind a busy turn (pane_holds_unsubmitted
+    # at send) — accepted is not consumed, so this is NOT activation evidence.
+    "send_attempted", "carrier_accepted", "carrier_queued", "pane_submitted",
+    "failed", "unknown", "recipient_acknowledged", "duplicate_suppressed",
 )
 TASK_EVENTS = (
-    # 19 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
+    # 20 — receiver_acknowledged DELETED (F9 v2.1; recount ruled 2026-08-25: the
     # pre-deletion tuple was 20, mis-stated as 19 — the count error predated the
     # deletion): the transmission ack row is
     # the single acknowledgement fact; activation derives through the join.
+    # supplied_id_not_open ADDED (§6b #6, PR-B): the worker reported with a
+    # task id that was not in the open set at report time — a fact about the
+    # JOIN, not the work (4 real ledger rows; report-back already names it).
     "dispatch_intended", "transmission_failed", "dispatch_submitted",
     "accepted", "rejected", "progress",
     "blocked_waiting", "returned_blocked", "resumed", "completed", "failed",
     "cancelled", "deadline_changed", "superseded", "reassigned",
     "retry_created", "orphaned_by_session_loss", "recovered_after_restart",
-    "expired",
+    "expired", "supplied_id_not_open",
 )
 DECLARATION_EVENTS = ("revision_seen", "scan_completed")
 SYSTEM_SUBJECT_KINDS = ("host", "vault", "fleet", "actor", "bot_instance", "session")
@@ -113,7 +119,8 @@ def kind_forbidden(kind: str) -> tuple[str, ...]:
     return tuple(c for c in _STREAM_COLS if c not in keep)
 
 
-FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission", "task"}
+FLEET_REQUIRED = {"communication", "work_item", "assignment", "transmission",
+                  "task", "workstream", "workstream_event"}
 
 # Field policy lives in plane/registries.py (the design's stated home) and is
 # imported here so validators ENFORCE from it — one SSOT, no duplicated caps
@@ -198,6 +205,18 @@ class Communication(_Strict):
             object.__setattr__(self, "truncated", fields.truncated)
 
 
+# Carrier/state matrix (#1372 review F12): pane_submitted and carrier_queued
+# are PANE facts (tmux only); carrier_accepted is a carrier-API fact (telegram
+# only). The rest are carrier-neutral. Enforced here AND in the DDL CHECK, so
+# neither the wire nor a direct-SQL writer can record physically impossible
+# evidence — which is what keeps the token-only activation queries sound.
+_CARRIER_ONLY_STATES = {
+    "pane_submitted": ("tmux",),
+    "carrier_queued": ("tmux",),
+    "carrier_accepted": ("telegram-tgpost", "telegram-bridge"),
+}
+
+
 class Transmission(_Strict):
     msg_id: str = Field(pattern=ID_PATTERNS["msg"])
     attempt_no: int = Field(ge=1)
@@ -208,6 +227,14 @@ class Transmission(_Strict):
     error: Optional[str] = None
     part_no: Optional[int] = Field(None, ge=1)     # bridge chunking (round-2 F10)
     part_count: Optional[int] = Field(None, ge=1)
+
+    def model_post_init(self, __context) -> None:
+        allowed = _CARRIER_ONLY_STATES.get(self.state)
+        if allowed is not None and self.carrier not in allowed:
+            raise ValueError(
+                f"state {self.state!r} is impossible for carrier"
+                f" {self.carrier!r} (allowed: {', '.join(allowed)})"
+            )
 
 
 class WorkItem(_Strict):
@@ -297,6 +324,44 @@ class SystemEvent(_Strict):
             raise ValueError("subject_alias is legal only WITH the anchor pair")
 
 
+class Workstream(_Strict):
+    """The workstream CONSTRUCT (§8/§19.3: pulled into 0001 for the bench;
+    its wire contract lands with the door, PR-B T6). The construct row IS the
+    opening — there is no `opened` event token (one-fact-one-row)."""
+
+    workstream_id: str = Field(min_length=1)    # ws-slug (single-writer mints)
+    title: str = Field(min_length=1)
+    goal: Optional[str] = None
+    owner: Optional[str] = None                 # alias
+    opened_by: str = Field(min_length=1)        # alias
+    project_key: Optional[str] = Field(None, pattern=r"[a-z][a-z0-9-]*")
+
+
+class WorkstreamEvent(_Strict):
+    """kind=workstream — wire name `workstream_event` (spec ruling #8: the one
+    suffixed wire name, resolving the construct/kind collision)."""
+
+    workstream_id: str = Field(min_length=1)
+    event: Literal[WORKSTREAM_EVENTS]
+    actor: Optional[str] = None                 # alias
+    renewed_until: Optional[AwareDatetime] = None
+    # detail tail (§9b): note/next_step are CONTENT (FIELD_POLICY-capped,
+    # authored -> over-cap REJECTS); disposition carries close --status
+    # done|abandoned (F21); plan_ref is the linked-never-stored doc pointer.
+    note: Optional[str] = None
+    next_step: Optional[str] = None
+    disposition: Optional[Literal["done", "abandoned"]] = None
+    plan_ref: Optional[str] = None
+
+    @field_validator("note", "next_step")
+    @classmethod
+    def _content_byte_caps(cls, v, info):
+        cap = FIELD_POLICY[("workstream_event", info.field_name)]["cap"]
+        if v is not None and len(v.encode("utf-8")) > cap:
+            raise ValueError(f"workstream {info.field_name} exceeds {cap} bytes")
+        return v
+
+
 FAMILIES: dict[str, type[BaseModel]] = {
     "communication": Communication,
     "transmission": Transmission,
@@ -304,6 +369,8 @@ FAMILIES: dict[str, type[BaseModel]] = {
     "assignment": Assignment,
     "task": TaskEvent,
     "system": SystemEvent,
+    "workstream": Workstream,
+    "workstream_event": WorkstreamEvent,
 }
 
 

@@ -457,6 +457,142 @@ fi
 # Escape backslash + double-quote for valid JSON (no jq dependency).
 safe_task=$(json_escape "$TASK")
 
+# --- observable-plane dual-write (PR-B T4; phase-2 plan §3/§6b) ----------------
+# DORMANT unless the fleet arms PLANE_EMIT_ENABLED=1 (SESSION_DIGEST_ENABLED
+# precedent — a root pull must never activate door behavior, and an unarmed
+# fleet pays zero latency). PLANE_EMIT_DISABLED=1 (harness override) wins.
+# The legacy ledger stays load-bearing; every plane failure is disclosed on
+# stderr and NEVER blocks the dispatch. Construct ids are minted HERE and
+# recorded in the ledger row so report-back can join without a db read.
+PLANE_ARMED=0
+if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" ]; then
+    if [ -n "${FLEET_NAME:-}" ]; then
+        PLANE_ARMED=1
+    else
+        echo "dispatch-task: PLANE_EMIT_ENABLED but FLEET_NAME is empty — plane rows are fleet-scoped, skipping (dispatch unaffected)" >&2
+    fi
+fi
+PLANE_MSG_ID="" PLANE_WI_ID="" PLANE_ASG_ID=""
+_plane_hex32() { od -An -tx1 -N16 /dev/urandom | tr -d ' \n'; }
+if [ "$PLANE_ARMED" = "1" ]; then
+    PLANE_MSG_ID="msg_$(_plane_hex32)"
+    if [ -n "$TASK_ID" ]; then
+        PLANE_WI_ID="wi_$(_plane_hex32)"
+        PLANE_ASG_ID="asg_$(_plane_hex32)"
+    fi
+fi
+
+# Recipient context, fail-open: the alias needs the RECIPIENT fleet (§6b #4 —
+# envelope fleet is the SENDER, the recipient fleet rides the alias; 44.6% of
+# dispatch traffic is cross-fleet), and carrier_queued needs the busy probe.
+# Any resolution failure degrades to recipient_raw-only and not-busy.
+PLANE_PEER_FLEET="" PLANE_PEER_BUSY=0
+_plane_peer_context() {
+    local session="$1" peer_dir=""
+    peer_dir="$(fleet_runtime_dir 2>/dev/null)/bots/$session"
+    [ -d "$peer_dir" ] || peer_dir=$(_resolve_cross_fleet_bot_dir "$session" 2>/dev/null || true)
+    [ -n "$peer_dir" ] && [ -d "$peer_dir" ] || return 0
+    # Peer fleet from the peer's OWN bot.conf first (#1372 review F7): parsing
+    # the path component after /local/ attributed nested vault layouts
+    # (local/<system>/<fleet>/runtime/bots — this estate's ACTUAL shape) to
+    # the outer container. Fallback derives the component immediately before
+    # /runtime/bots, which is fleet-named in both flat and nested layouts.
+    PLANE_PEER_FLEET="$(bot_conf_get "$peer_dir" FLEET_NAME "" 2>/dev/null || true)"
+    if [ -z "$PLANE_PEER_FLEET" ]; then
+        case "$peer_dir" in
+            */runtime/bots/*)
+                PLANE_PEER_FLEET="$(basename "${peer_dir%/runtime/bots/*}")" ;;
+            *) PLANE_PEER_FLEET="${FLEET_NAME:-}" ;;
+        esac
+    fi
+    # Busy probe through the SUPPORTED doors (#1372 review F6): the socket
+    # comes from tmux_socket_for_bot (bare bot_conf_get BOT_SERVICE misses the
+    # fleet-scoped refusal semantics) and busyness from bot_is_busy — the
+    # lib-common SSOT whose signature is (socket, session). pane_is_busy takes
+    # pane TEXT; called with a socket it always read not-busy, so a busy pane
+    # emitted pane_submitted instead of carrier_queued.
+    local sock sess
+    sock=$(tmux_socket_for_bot "$peer_dir" 2>/dev/null || true)
+    sess=$(basename "$peer_dir")
+    if [ -n "$sock" ] && bot_is_busy "$sock" "$sess" 2>/dev/null; then
+        PLANE_PEER_BUSY=1
+    fi
+    return 0
+}
+[ "$PLANE_ARMED" = "1" ] && { _plane_peer_context "$WORKER_SESSION" || true; }
+
+_plane_emit() {
+    # stdin: {"events":[...]} — routed through THE shim (socket -> cold CLI).
+    # stderr passes THROUGH (the shim's fallback disclosure is the contract —
+    # eating it here made a degraded ladder silent at the door tier, caught by
+    # the validate-bot-change plane leg); only stdout is discarded. rc never
+    # propagates: dual-write, legacy is the record.
+    "$LIB_DIR/plane-emit.sh" >/dev/null || \
+        echo "dispatch-task: plane record failed rc=$? (dispatch action unaffected — legacy ledger remains the record)" >&2
+}
+
+_plane_emit_intent() {
+    # Intent BEFORE transport (F9): the communication (and for id'd tasks the
+    # work_item + assignment) exists before the first send attempt.
+    local safe_msg sender_alias recip_alias recip_field cmd_type msg_class src_ref
+    safe_msg=$(json_escape "$DISPATCH_MSG")
+    sender_alias="bot:$FLEET_NAME/$MANAGER"
+    recip_field=""
+    if [ -n "$PLANE_PEER_FLEET" ]; then
+        recip_alias="bot:$PLANE_PEER_FLEET/$WORKER_SESSION"
+        recip_field="\"recipient\":\"$(json_escape "$recip_alias")\","
+    fi
+    # message_class by what the send ASKS FOR (door ruling, PR-B): task and
+    # freeform ask for work (task_request); query asks for an answer
+    # (question); cancel/compact/restart are control verbs (raw_control).
+    # command_type is DOOR-FLAG provenance only (§6b #5) — never parsed from
+    # the payload text; freeform carries none.
+    cmd_type=""
+    msg_class="task_request"
+    if [ "$FORCE_ENVELOPE" = "1" ]; then
+        cmd_type="\"command_type\":\"$DISPATCH_TYPE\","
+        case "$DISPATCH_TYPE" in
+            query) msg_class="question" ;;
+            cancel|compact|restart) msg_class="raw_control" ;;
+        esac
+    fi
+    # Fragments built via if/else, never inline `$([ ... ] && ...)` — a false
+    # test inside a command substitution returns rc 1 into the assignment and
+    # errexit kills the door.
+    src_ref=""
+    [ -n "$TASK_ID" ] && src_ref="\"source_ref\":\"dispatch-log:$TASK_ID\","
+    local link_frag="" ws_frag="" repo_frag="" deadline_frag="" iso_deadline=""
+    if [ -n "$PLANE_WI_ID" ]; then
+        link_frag="\"work_item_id\":\"$PLANE_WI_ID\",\"assignment_id\":\"$PLANE_ASG_ID\","
+    fi
+    local comm wi_ev asg_ev
+    comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",\"sender\":\"$(json_escape "$sender_alias")\",${recip_field}\"recipient_raw\":\"$(json_escape "$WORKER_SESSION")\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
+    if [ -n "$TASK_ID" ]; then
+        iso_deadline=$(date -u -r "$expected_by" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || date -u -d "@$expected_by" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+        [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
+        [ -n "$DISPATCH_WORKSTREAM" ] && ws_frag=",\"workstream_id\":\"$(json_escape "$DISPATCH_WORKSTREAM")\""
+        case "$DISPATCH_REPO" in
+            */*) repo_frag=",\"repo\":\"$(json_escape "$DISPATCH_REPO")\"" ;;
+        esac
+        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$(json_escape "$sender_alias")\"${ws_frag}${repo_frag}}}"
+        asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$(json_escape "$sender_alias")\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
+        printf '{"events":[%s,%s,%s]}' "$wi_ev" "$asg_ev" "$comm" | _plane_emit
+    else
+        printf '{"events":[%s]}' "$comm" | _plane_emit
+    fi
+}
+
+_plane_emit_transmission() {
+    # Outcome-typed AFTER the send (§6b #7): a clean send into a BUSY pane is
+    # carrier_queued (accepted-not-consumed, not activation); a clean send
+    # into an idle pane is pane_submitted; a miss is failed.
+    local state="$1"
+    printf '{"events":[{"event_type":"transmission","emitter":"dispatch-task","fleet":"%s","payload":{"msg_id":"%s","attempt_no":1,"carrier":"tmux","destination":"%s","state":"%s"}}]}' \
+        "$(json_escape "$FLEET_NAME")" "$PLANE_MSG_ID" \
+        "$(json_escape "$WORKER_SESSION")" "$state" | _plane_emit
+}
+
 _append_ledger() {
     # `supersedes` is the one field that records INTENT rather than what happened.
     # A re-dispatch replaces an earlier task; the older row will never be separately
@@ -490,11 +626,40 @@ _append_ledger() {
     # ledger's always-emit convention; every consumer treats "" as falsy).
     # claudron_hits is digits-or-empty by construction (the preflight parser
     # prints a count), so no escaping.
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" >> "$LEDGER"
+    # plane_* fields (PR-B T4): the plane construct ids this dispatch minted,
+    # recorded so report-back can join legacy task id -> plane rows without a
+    # db read. Always emitted, empty when the plane is unarmed — the same
+    # schema-uniform convention as task_id/workstream above; every existing
+    # consumer reads fields by name and treats "" as falsy. Ids are hex
+    # constants by construction, so no escaping.
+    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}\n' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID" >> "$LEDGER"
     rotate_jsonl_by_ts "$LEDGER"
 }
 with_lock "$LEDGER.lock" _append_ledger
 
+# Plane intent BEFORE transport (F9): a crash between here and the send leaves
+# an intent with no transmission — visible, and exactly what reconciliation
+# exists to surface. (The legacy ledger row above is already down either way.)
+if [ "$PLANE_ARMED" = "1" ]; then
+    _plane_emit_intent || true
+fi
+
 # Send via the low-level race-safe primitive (re-validates the session).
-"$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG"
+send_rc=0
+"$LIB_DIR/dispatch.sh" "$WORKER_SESSION" "$DISPATCH_MSG" || send_rc=$?
+
+# Outcome-typed transmission (PR-B T4/§6b #7): clean send into an idle pane =
+# pane_submitted; clean send into a pane the pre-send probe saw BUSY =
+# carrier_queued (the TUI accepted it, a running turn parked it — not
+# activation); a miss = failed.
+if [ "$PLANE_ARMED" = "1" ]; then
+    if [ "$send_rc" -ne 0 ]; then
+        _plane_emit_transmission "failed" || true
+    elif [ "$PLANE_PEER_BUSY" = "1" ]; then
+        _plane_emit_transmission "carrier_queued" || true
+    else
+        _plane_emit_transmission "pane_submitted" || true
+    fi
+fi
+exit "$send_rc"

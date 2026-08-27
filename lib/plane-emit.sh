@@ -39,9 +39,10 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
 
-# shellcheck source=lib-common.sh
-. "$LIB_DIR/lib-common.sh"
-set +e  # lib-common re-arms set -e at source time; the ladder inspects rcs
+# lib-common is NOT sourced on the hot path (T10 budget lever, measured on the
+# Pi): rung 1 needs nothing from it, and sourcing ~3600 lines per emit is a
+# door-felt tax. The fallback rung sources it lazily for claudlobby_cli.
+set +e  # the ladder inspects rcs
 
 ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 SOCK="${PLANE_SOCKET:-$ROOT/state/plane/ingest.sock}"
@@ -49,9 +50,44 @@ SOCK="${PLANE_SOCKET:-$ROOT/state/plane/ingest.sock}"
 finalized="$(mktemp "${TMPDIR:-/tmp}/plane-emit.XXXXXX")"
 trap 'rm -f "$finalized"' EXIT
 
-python3 "$LIB_DIR/plane-socket-client.py" \
-    --socket "$SOCK" --finalize-to "$finalized"
-rc=$?
+# Wedge circuit-breaker (#1372 re-verify blocking residual on F5): the client
+# deadline bounds ONE emission, but doors emit twice (intent + outcome), so a
+# wedged listener still compounded past a door's own latency alarm. On a
+# transport-wedge (rc 5) a cooldown marker is set and every emission — this
+# door's second, and every other door's — skips the socket rung for
+# PLANE_WEDGE_COOLDOWN_S (default 60s, disclosed), going straight to the cold
+# CLI. Cleared by the next successful socket emit; self-heals by expiry.
+WEDGE_MARK="$ROOT/state/plane/.socket-wedged"
+COOLDOWN="${PLANE_WEDGE_COOLDOWN_S:-60}"
+skip_socket=0
+if [ -f "$WEDGE_MARK" ]; then
+    _now=$(date +%s); _mark=$(cat "$WEDGE_MARK" 2>/dev/null || echo 0)
+    case "$_mark" in ''|*[!0-9]*) _mark=0 ;; esac
+    if [ $(( _now - _mark )) -lt "$COOLDOWN" ]; then
+        skip_socket=1
+        printf 'plane-emit: socket in wedge cooldown (%ss) — straight to cold CLI\n' "$COOLDOWN" >&2
+    else
+        rm -f "$WEDGE_MARK"
+    fi
+fi
+
+if [ "$skip_socket" = "1" ]; then
+    # Finalize without a send so the CLI rung has its idempotent batch.
+    python3 -S -E "$LIB_DIR/plane-socket-client.py" \
+        --socket "$SOCK" --finalize-to "$finalized" --finalize-only
+    rc=5
+else
+    # -S -E: skip site/pyvenv machinery — the client is minimal-stdlib by
+    # contract (measured: 45ms -> 12ms interpreter spawn on the Pi).
+    python3 -S -E "$LIB_DIR/plane-socket-client.py" \
+        --socket "$SOCK" --finalize-to "$finalized"
+    rc=$?
+    if [ "$rc" -eq 5 ]; then
+        date +%s > "$WEDGE_MARK" 2>/dev/null || true
+    elif [ "$rc" -eq 0 ]; then
+        rm -f "$WEDGE_MARK" 2>/dev/null
+    fi
+fi
 case "$rc" in
     0) exit 0 ;;
     2|3|4) exit "$rc" ;;   # verdicts: the CLI would only repeat them
@@ -63,6 +99,9 @@ if [ -s "$finalized" ]; then
     if [ -n "${PLANE_EMIT_CLI:-}" ]; then
         $PLANE_EMIT_CLI --root "$ROOT" emit-batch --json "$finalized"
     else
+        # shellcheck source=lib-common.sh
+        . "$LIB_DIR/lib-common.sh"   # lazy: only this rung needs claudlobby_cli
+        set +e                        # lib-common re-arms set -e at source time
         claudlobby_cli --root "$ROOT" emit-batch --json "$finalized"
     fi
     rc=$?

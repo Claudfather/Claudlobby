@@ -79,6 +79,14 @@ mechanism: the shim no-ops under `PLANE_EMIT_DISABLED=1`, which harnesses export
 ruled: env flag, not socket namespace, because harnesses already own their env and a namespace
 would need daemon cooperation).
 
+**Arming (ruled at PR-B kickoff, 2026-08-26): door emission is DORMANT by default behind
+`PLANE_EMIT_ENABLED=1` in the fleet's `env:`** — the `SESSION_DIGEST_ENABLED` /
+`SPINDOWN_RECEIPT_ENABLED` precedent exactly: lib/ is a shared install that cannot be staged
+per-fleet, so a root pull must never activate new door behavior estate-wide, and an UNARMED
+fleet's doors must pay zero latency (not a ~400ms cold-CLI toll per dispatch on hosts without
+the daemon). This knob is what makes §4's one-fleet canary ladder real. `PLANE_EMIT_DISABLED=1`
+remains the harness override on top (wins over ENABLED).
+
 **The one ordering change, named as the canary's sharp edge:** report-back today SENDS then
 ledgers (`:152`/`:184`); the shim records intent BEFORE transport (F9). That flips its crash
 exposure — a crash between record and send leaves an intent with no transmission (visible,
@@ -118,7 +126,10 @@ unmeasured — measure first, adapt second. Nothing in Phase 2 touches the plugi
 - **Door-side latency budget:** p95 ≤ 200ms per shim emit on the Pi (warm 106ms + socket + bash
   overhead, headroom for the optimization to reclaim). Measured by a bench extension that drives
   the SHIM, not `emit()` — the number a door actually feels. §19.8 applies: a miss is a defect
-  investigation.
+  investigation. **Known lever named in advance (2026-08-27, from the Mac smoke):** the
+  shim's rung-1 client is a python3 spawn (~150-250ms interpreter startup on the Pi before any
+  socket work) — if the Pi budget fails, the investigation starts there (a `nc -U`/bash-native
+  send, or folding the pre-mint+send into one spawn), never at the model.
 - **Ambiguous-success branch enumeration** from `pane_send_verified` (inventory Remaining):
   enumerate, map each to transmission `unknown` vs `pane_submitted`; the mapping ships as a table
   in the dispatch-door task with a test per branch.

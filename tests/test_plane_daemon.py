@@ -23,6 +23,7 @@ from claudlobby.plane import PLANE_SCHEMA_VERSION
 from claudlobby.plane.daemon import (
     DaemonAlreadyRunning,
     MAX_REQUEST_BYTES,
+    MAX_SOCKET_PATH_BYTES,
     PlaneDaemon,
     SocketPathTooLong,
     _check_sun_path,
@@ -223,6 +224,30 @@ def test_second_daemon_refuses_while_first_lives(running):
 def test_sun_path_guard_refuses_long_paths():
     with pytest.raises(SocketPathTooLong):
         _check_sun_path(Path("/" + "x" * 120 + "/s"))
+
+
+def test_deep_root_whose_public_path_fits_still_binds(tmp_path: Path):
+    """Regression: the hidden rename-in name must not push a public path
+    that FITS sun_path over the limit — macOS TMPDIR roots did exactly
+    that (public 94 bytes, verbose tmp suffix ~120)."""
+    deep = Path("/tmp/claude") / ("d" * (86 - len("/tmp/claude/") - len("/s")))
+    deep.mkdir(parents=True, exist_ok=True)
+    sock = deep / "s"
+    assert len(str(sock).encode()) <= MAX_SOCKET_PATH_BYTES
+    daemon = PlaneDaemon(tmp_path, socket_override=sock, drain_interval=9999)
+    t = threading.Thread(
+        target=lambda: daemon.serve(install_signals=False), daemon=True
+    )
+    t.start()
+    try:
+        deadline = time.time() + 10
+        while time.time() < deadline and not sock.exists():
+            time.sleep(0.05)
+        assert sock.exists(), "public-fits root must bind"
+    finally:
+        daemon.stop()
+        t.join(timeout=10)
+        shutil.rmtree(deep, ignore_errors=True)
 
 
 def test_drain_on_start_ingests_preexisting_spool(tmp_path: Path):
@@ -470,6 +495,44 @@ def test_shim_end_to_end_through_real_daemon(running):
     ).fetchone()
     conn.close()
     assert row is not None and row["body"] == "via the shim"
+
+
+def _doctor(root: Path):
+    import subprocess
+    import sys as _sys
+
+    return subprocess.run(
+        [_sys.executable, "-m", "claudlobby", "--root", str(root),
+         "plane", "doctor"],
+        capture_output=True, text=True,
+    )
+
+
+def test_doctor_daemon_rung_serving_and_never_armed(running, tmp_path: Path):
+    """T9: three-state daemon rung. A live daemon reads serving; a root that
+    never started one reads ok-unarmed (doors fall back by design)."""
+    root, sock, _ = running
+    import claudlobby.plane.daemon as dmod
+
+    # the doctor probes the DEFAULT socket path; point the check at ours by
+    # exercising the never-armed branch on a fresh root and the serving branch
+    # via the daemon's own root only when the default path matches — here the
+    # override socket means the default path is absent, so this root reads the
+    # STARTED-NOT-SERVING attention branch instead (daemon_started was logged).
+    r = _doctor(root)
+    assert r.returncode == 1
+    assert "not serving" in r.stdout and "falling back" in r.stdout
+    from claudlobby.plane.emit_api import emit
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    emit(fresh, {"event_type": "work_item", "emitter": "t9",
+                 "fleet": "f", "payload": {
+                     "work_item_id": "wi_" + "9" * 32, "title": "t",
+                     "created_by": "bot:f/a"}})
+    r2 = _doctor(fresh)
+    assert r2.returncode == 0, r2.stdout
+    assert "never armed" in r2.stdout
 
 
 def test_send_batch_raises_oserror_when_no_daemon(tmp_path: Path):

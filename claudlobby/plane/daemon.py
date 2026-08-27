@@ -120,6 +120,39 @@ def _probe_live(path: Path) -> bool:
         probe.close()
 
 
+def probe_daemon(path: Path, timeout: float = 2.0) -> bool:
+    """TYPED handshake (#1372 review F15 + re-verify residuals): connect-
+    succeeds proves only that SOMETHING listens. Send an empty request and
+    require the daemon's own bad_request verdict shape back — where the reply
+    must be a JSON OBJECT (a `[]` reply crashed doctor on AttributeError),
+    the read is bounded by a TOTAL deadline (a trickle listener exceeded the
+    per-op timeout indefinitely), and the buffer is size-capped."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    deadline = time.monotonic() + timeout
+    try:
+        probe.settimeout(timeout)
+        probe.connect(str(path))
+        probe.sendall(b"\n")
+        buf = b""
+        while b"\n" not in buf:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or len(buf) > 65536:
+                return False
+            probe.settimeout(remaining)
+            chunk = probe.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        reply = json.loads(buf)
+        if not isinstance(reply, dict):
+            return False
+        return reply.get("ok") is False and reply.get("code") == "bad_request"
+    except (OSError, ValueError):
+        return False
+    finally:
+        probe.close()
+
+
 def _recv_line(conn: socket.socket) -> bytes:
     chunks = []
     total = 0
@@ -319,10 +352,13 @@ class PlaneDaemon:
             # listen(): between bind() and listen() the file exists but
             # connect() gets ECONNREFUSED, so exposing the public path first
             # hands every prober a refused-connection window. A unix socket
-            # is its inode — the rename preserves the listener.
-            tmp = self.sock_path.with_name(
-                f".{self.sock_path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
-            )
+            # is its inode — the rename preserves the listener. The hidden
+            # name is MINIMAL (".s" + 8 hex): a verbose suffix pushed a
+            # public path that FIT sun_path over the limit on macOS's deep
+            # TMPDIR roots, refusing serve on exactly the roots the public
+            # check had approved (uniqueness: urandom + the exclusive lock
+            # already held above).
+            tmp = self.sock_path.with_name(f".s{os.urandom(4).hex()}")
             _check_sun_path(tmp)
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:

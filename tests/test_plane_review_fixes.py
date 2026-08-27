@@ -352,7 +352,10 @@ def test_f7_activation_ladder_fixtures(tmp_path: Path):
     assert statuses[unsent] == "created_not_sent"
     assert statuses[failed] == "dispatch_failed", (
         "an attempt whose own verdict is failed has concluded")
-    assert statuses[submitted] == "pending_unacknowledged"
+    # §6b #1 (PR-B) deliberately moved this rung: submission-class evidence IS
+    # activation for the tmux carrier — pane_submitted occupies 'open', and a
+    # real ack row tightens onto the same rung rather than gating it.
+    assert statuses[submitted] == "open"
     assert statuses[acked] == "open"
     assert statuses[in_flight] == "pending_unacknowledged", (
         "a retry in flight after a failed attempt is outstanding, not failed")

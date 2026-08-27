@@ -169,6 +169,15 @@ defaults:
     SessionEnd:
       - command: "$CLAUDLOBBY_ROOT/lib/transcript-digest.sh"
         timeout: 150
+    # Observable-plane session identity (PR-B T7, spec §19.6/F12): derives the
+    # transcript-stable session_uid + a fresh per-process process_uid and
+    # publishes them to $BOT_DIR/data/.plane-session for the doors. Same
+    # dormancy pattern as transcript-digest: composed everywhere harmlessly,
+    # self-gated on PLANE_EMIT_ENABLED=1 in the fleet env, exit 0 on every
+    # path (a hook must never break a boot).
+    SessionStart:
+      - command: "$CLAUDLOBBY_ROOT/lib/plane-session-start.sh"
+        timeout: 15
 
   observability:
     pulse_interval: 300

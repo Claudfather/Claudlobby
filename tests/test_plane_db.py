@@ -154,10 +154,28 @@ def test_kind_matrix_executed_against_installed_schema():
 
     for kind, manifest in c.KIND_MANIFEST.items():
         base = {"kind": kind, "event": FIRST_TOKEN[kind], **VALID[kind]}
-        # 1) EVERY vocabulary member is accepted:
+        # 1) EVERY vocabulary member is accepted — under a carrier the
+        #    carrier/state matrix permits (#1372 F12: pane facts are tmux-only,
+        #    carrier_accepted telegram-only; derived from the contracts SSOT,
+        #    never a hand list). Each carrier-restricted token is ALSO probed
+        #    with a wrong carrier and must be refused.
         for token in (manifest["vocab"] or (FIRST_TOKEN[kind],
                                             "brand-new-machinery-type")):
-            attempt({**base, "event": token})
+            row = {**base, "event": token}
+            allowed = c._CARRIER_ONLY_STATES.get(token) if kind == "transmission" else None
+            if allowed is not None:
+                # EVERY allowed carrier accepted, EVERY disallowed rejected —
+                # allowed[0]-only left a can't-drift claim false (#1372
+                # re-verify: dropping telegram-bridge from carrier_accepted
+                # stayed green under the old single-carrier probe).
+                for ok_carrier in allowed:
+                    attempt({**row, "carrier": ok_carrier})
+                for bad_carrier in c.CARRIERS:
+                    if bad_carrier not in allowed:
+                        with _pytest.raises(sq.IntegrityError):
+                            attempt({**row, "carrier": bad_carrier})
+            else:
+                attempt(row)
         if manifest["vocab"] is not None:
             with _pytest.raises(sq.IntegrityError):
                 attempt({**base, "event": "no-such-token"})
@@ -177,7 +195,10 @@ def test_kind_matrix_executed_against_installed_schema():
         #    valid iff the subset contains the full anchor; dependents are
         #    legal only alongside it. For system's 2-anchor+1-dependent
         #    group: 7 subsets → 2 accepted ({kind,uid}, {kind,uid,alias}),
-        #    5 rejected. Expected totals: 50 accepted / 82 rejected / 0.
+        #    5 rejected. Totals (PR-B recount): 52 accepted / 85 rejected / 0 —
+        #    carrier_queued + supplied_id_not_open joined the vocabularies and
+        #    the three carrier-restricted tokens each gained a wrong-carrier
+        #    rejection probe (#1372 F12).
         from itertools import chain, combinations
 
         GROUP_VALS = {"subject_kind": "actor",

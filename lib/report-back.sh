@@ -60,7 +60,20 @@ TASK_ANOMALY=""
 POSITIONAL_EXTRAS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-        --progress)  PROGRESS="$2"; shift 2 ;;
+        --progress)
+            # Integer 0-100 ONLY (#1372 review F2): this value is interpolated
+            # into JSON — legacy ledger AND plane batch — so a free-form value
+            # was a JSON injection seam (a crafted --progress forged duplicate
+            # keys that redirected the report's task facts to arbitrary ids).
+            case "$2" in
+                ''|*[!0-9]*) echo "report-back: --progress must be an integer 0-100, got '$2'" >&2; exit 2 ;;
+            esac
+            # Canonicalize (10#) — '01' passed the digit gate but is invalid
+            # JSON (#1372 re-verify F2 residual: an armed linked report landed
+            # zero plane rows on a leading-zero value).
+            PROGRESS=$(( 10#$2 ))
+            [ "$PROGRESS" -le 100 ] || { echo "report-back: --progress must be <= 100, got '$2'" >&2; exit 2; }
+            shift 2 ;;
         --artifact)  ARTIFACTS="${ARTIFACTS:+$ARTIFACTS,}$2"; shift 2 ;;
         --pr)        POSITIONAL_EXTRAS+=("pr:$2"); shift 2 ;;
         --issues)    POSITIONAL_EXTRAS+=("issues:$2"); shift 2 ;;
@@ -147,9 +160,128 @@ done
 
 MESSAGE="[BOTREPORT] $BOT | $STATUS | $SUMMARY$EXTRAS"
 
+# --- observable-plane dual-write (PR-B T5; phase-2 plan §3/§6b) ----------------
+# Same arming contract as dispatch-task: dormant unless the fleet sets
+# PLANE_EMIT_ENABLED=1; PLANE_EMIT_DISABLED=1 wins; every failure disclosed,
+# never blocking — the legacy JSONL row below stays the load-bearing record in
+# its EXISTING position. The plane record is intent-FIRST (F9): the report
+# communication (+ its task facts, one atomic batch) exists before the send —
+# the deliberate crash-exposure flip the phase-2 plan names as the canary
+# sharp edge: a crash between intent and send now leaves a visible
+# intent-without-transmission instead of a sent-report-without-ledger-row.
+PLANE_ARMED=0
+if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" ]; then
+    if [ -n "${FLEET_NAME:-}" ]; then
+        PLANE_ARMED=1
+    else
+        echo "report-back: PLANE_EMIT_ENABLED but FLEET_NAME is empty — plane rows are fleet-scoped, skipping (report unaffected)" >&2
+    fi
+fi
+PLANE_MSG_ID="" PLANE_LINK_WI="" PLANE_LINK_ASG=""
+_plane_hex32() { od -An -tx1 -N16 /dev/urandom | tr -d ' \n'; }
+_plane_emit() {
+    # stderr passes through — the shim's fallback disclosure is the contract.
+    # Phase-neutral wording (#1372 review F16): intent emits fire BEFORE the
+    # send, so the message must not claim the action already happened.
+    "$LIB_DIR/plane-emit.sh" >/dev/null || \
+        echo "report-back: plane record failed rc=$? (report action unaffected — legacy ledger remains the record)" >&2
+}
+_plane_lookup_dispatch_ids() {
+    # The join dispatch-task wrote for us: the newest ledger row carrying this
+    # task id holds the plane construct ids. Fail-open — an unarmed-era or
+    # pre-PR-B row has empty fields and the task facts are simply not linked.
+    local dlog row
+    dlog="$(dispatch_ledger_path)"
+    [ -f "$dlog" ] || return 0
+    # Join hardening (#1372 re-verify blocking residual on F3). Two rules
+    # BEFORE any grep, because grep -F treats a NEWLINE in the pattern as
+    # pattern-OR — a task id carrying '\n"bot":"x"' matched and linked an
+    # unrelated assignment:
+    #   1. TASK_ID must match the minted grammar exactly (t-<epoch>-<hex4>).
+    #      A supplied id is machine-minted; anything else skips the link,
+    #      fail-open — the report still lands, just unlinked.
+    #   2. BOT must be a plain token (the session-name alphabet).
+    # The bot match is CASE-INSENSITIVE, matching dispatch-overdue.py's join
+    # semantics for real this time (the prior claim was wrong: a forged
+    # lowercase 'w1' row outranked the legitimate 'W1' one).
+    case "$TASK_ID" in
+        t-[0-9]*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+        *) return 0 ;;
+    esac
+    printf '%s' "$TASK_ID" | grep -qE '^t-[0-9]+-[0-9a-f]{4}$' || return 0
+    printf '%s' "$BOT" | grep -qE '^[A-Za-z0-9._-]+$' || return 0
+    row=$(grep -F "\"task_id\":\"$TASK_ID\"" "$dlog" 2>/dev/null \
+        | grep -iF "\"bot\":\"$BOT\"" | tail -1 || true)
+    [ -n "$row" ] || return 0
+    PLANE_LINK_WI=$(printf '%s' "$row" | sed -n 's/.*"plane_work_item_id":"\([a-z0-9_]*\)".*/\1/p')
+    PLANE_LINK_ASG=$(printf '%s' "$row" | sed -n 's/.*"plane_assignment_id":"\([a-z0-9_]*\)".*/\1/p')
+    return 0
+}
+_plane_session_uid() {
+    # Published by the SessionStart hook (plane-session-start.sh, T7) — the
+    # transcript identity task facts carry. Absent file = hook unarmed or a
+    # pre-hook session; the fact is simply unattributed, never guessed.
+    local f="${BOT_DIR:-}/data/.plane-session"
+    [ -n "${BOT_DIR:-}" ] && [ -f "$f" ] || return 0
+    sed -n 's/.*"session_uid":"\(sess_[0-9a-f]*\)".*/\1/p' "$f" | head -1
+}
+_plane_emit_report_intent() {
+    PLANE_MSG_ID="msg_$(_plane_hex32)"
+    [ -n "$TASK_ID" ] && { _plane_lookup_dispatch_ids || true; }
+    local sess_frag="" _sess
+    _sess="$(_plane_session_uid || true)"
+    [ -n "$_sess" ] && sess_frag=",\"session_uid\":\"$_sess\""
+    local safe_msg sender_alias link_frag="" pr_url="" ex
+    safe_msg=$(json_escape "$MESSAGE")
+    sender_alias="bot:$FLEET_NAME/$BOT"
+    if [ -n "$PLANE_LINK_WI" ]; then
+        link_frag="\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\","
+    fi
+    for ex in "${POSITIONAL_EXTRAS[@]+"${POSITIONAL_EXTRAS[@]}"}"; do
+        case "$ex" in pr:*) pr_url="${ex#pr:}" ;; esac
+    done
+    local comm events
+    comm="{\"event_type\":\"communication\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",\"sender\":\"$(json_escape "$sender_alias")\",\"recipient\":\"$(json_escape "bot:$FLEET_NAME/$MANAGER_SESSION")\",\"recipient_raw\":\"$(json_escape "$MANAGER_SESSION")\",\"message_class\":\"report\",${link_frag}\"body\":\"$safe_msg\"}}"
+    events="$comm"
+    if [ -n "$PLANE_LINK_WI" ]; then
+        # Task facts ride the same atomic batch (F4). Status -> token per §8:
+        # blocked reports are terminal-shaped on this estate (6/6 measured) ->
+        # returned_blocked; the supplied-id anomaly is its own first-class
+        # fact (§6b #6) alongside the report token, never instead of it.
+        local ev="" frag=""
+        case "$STATUS" in
+            completed) ev="completed" ;;
+            failed)    ev="failed" ;;
+            blocked)   ev="returned_blocked" ;;
+            progress)  ev="progress" ;;
+        esac
+        [ -n "$PROGRESS" ] && frag=",\"progress\":$PROGRESS"
+        [ -n "$pr_url" ] && frag="$frag,\"pr_url\":\"$(json_escape "$pr_url")\""
+        if [ -n "$ev" ]; then
+            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"$ev\",\"actor\":\"$(json_escape "$sender_alias")\",\"summary\":\"$(json_escape "$SUMMARY")\"$frag$sess_frag}}"
+        fi
+        if [ "$TASK_ANOMALY" = "supplied-id-not-open" ]; then
+            events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$(json_escape "$sender_alias")\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\"$sess_frag}}"
+        fi
+    fi
+    printf '{"events":[%s]}' "$events" | _plane_emit
+}
+if [ "$PLANE_ARMED" = "1" ]; then
+    _plane_emit_report_intent || true
+fi
+
 # Cross-socket send via the one safe primitive: prechecks the manager session on
 # its socket, two-step send, and logs a send_miss (no silent drop) on a miss.
-bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" "$MESSAGE" || true
+rb_send_rc=0
+bot_tmux_send "$MANAGER_SOCKET" "$MANAGER_SESSION" "$MESSAGE" || rb_send_rc=$?
+
+if [ "$PLANE_ARMED" = "1" ]; then
+    _plane_state="pane_submitted"
+    [ "$rb_send_rc" -ne 0 ] && _plane_state="failed"
+    printf '{"events":[{"event_type":"transmission","emitter":"report-back","fleet":"%s","payload":{"msg_id":"%s","attempt_no":1,"carrier":"tmux","destination":"%s","state":"%s"}}]}' \
+        "$(json_escape "$FLEET_NAME")" "$PLANE_MSG_ID" \
+        "$(json_escape "$MANAGER_SESSION")" "$_plane_state" | _plane_emit || true
+fi
 
 # Append structured JSONL event to the fleet-level report-back ledger.
 # Path follows overlay convention: local/<fleet>/runtime/ or root runtime/fleet/
@@ -175,8 +307,11 @@ _emit_ledger_event() {
     safe_summary=$(json_escape "$SUMMARY")
 
     _write_and_rotate() {
-        printf '{"ts":"%s","bot":"%s","task_id":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s","progress":"%s","artifact":"%s","task_anomaly":"%s"}\n' \
-            "$ts" "$BOT" "$(json_escape "$TASK_ID")" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" "$TASK_ANOMALY" >> "$ledger"
+        # plane_msg_id (PR-B T5): the plane communication this report minted —
+        # the parity join for the report lane (source_ref report-back:<id>).
+        # Always emitted, empty when unarmed (schema-uniform convention).
+        printf '{"ts":"%s","bot":"%s","task_id":"%s","status":"%s","summary":"%s","pr_url":"%s","issues":"%s","skill":"%s","progress":"%s","artifact":"%s","task_anomaly":"%s","plane_msg_id":"%s"}\n' \
+            "$ts" "$BOT" "$(json_escape "$TASK_ID")" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" "$TASK_ANOMALY" "$PLANE_MSG_ID" >> "$ledger"
         rotate_jsonl_by_ts "$ledger"
     }
     with_lock "$ledger.lock" _write_and_rotate

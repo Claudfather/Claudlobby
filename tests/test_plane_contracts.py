@@ -35,11 +35,13 @@ def _intent_payload(**over) -> dict:
 
 
 def test_families_registered():
-    # "system" joined in Phase 2 (the ingest daemon's lifecycle events are the
-    # first emitter); its token vocabulary stays registry-governed (F19).
+    # "system" joined in Phase 2 PR-A (the daemon's lifecycle events are its
+    # first emitter; vocabulary registry-governed, F19). "workstream" +
+    # "workstream_event" joined in PR-B T6 with the workstream-update door
+    # (wire name suffixed per spec ruling #8 — the construct/kind collision).
     assert set(FAMILIES) == {
         "communication", "transmission", "work_item", "assignment", "task",
-        "system",
+        "system", "workstream", "workstream_event",
     }
 
 
@@ -136,8 +138,10 @@ def test_work_item_body_cap_is_bytes():
 
 
 def test_receiver_acknowledged_is_gone():
+    # 20 = the F9-v2.1 nineteen + supplied_id_not_open (§6b #6, PR-B).
     from claudlobby.plane.contracts import TASK_EVENTS
-    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 19
+    assert "receiver_acknowledged" not in TASK_EVENTS and len(TASK_EVENTS) == 20
+    assert "supplied_id_not_open" in TASK_EVENTS
 
 
 def test_task_event_vocabulary_enforced():

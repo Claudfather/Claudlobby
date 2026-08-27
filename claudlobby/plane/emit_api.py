@@ -91,13 +91,18 @@ def _capture_mode(root: Path, fleet: str | None) -> str:
 def _apply_capture(root: Path, raw: dict) -> dict:
     """Round-3 F8: the policy transforms EVERY content-bearing family
     (contracts.CONTENT_FIELDS is the registry's code form), not
-    communications alone. Communications keep the proof triple on drop."""
+    communications alone. Communications keep the proof triple on drop.
+
+    IDENTITY CONTRACT (T8): returns the INPUT OBJECT ITSELF when the policy
+    changed nothing — the caller uses `is` to skip the second validation pass
+    for untransformed requests, which is the safe half of the #1345-review
+    disclosure (warm emit 62->106ms from validating twice)."""
     fields = CONTENT_FIELDS.get(raw.get("event_type"))
     if not fields:
         return raw
     mode = _capture_mode(root, raw.get("fleet"))
-    payload = dict(raw.get("payload") or {})
     if raw.get("event_type") == "communication":
+        payload = dict(raw.get("payload") or {})
         if mode == "full":
             payload["privacy"] = "full"
         else:
@@ -109,9 +114,17 @@ def _apply_capture(root: Path, raw: dict) -> dict:
                 payload["body_bytes"] = proof.body_bytes
                 payload["body_sha256"] = proof.body_sha256
                 payload["truncated"] = proof.truncated
-    elif mode != "full":
-        for field in fields:
-            payload.pop(field, None)        # dropped, no proof triple owed
+        return {**raw, "payload": payload}
+    if mode == "full":
+        return raw                          # nothing to transform — identity
+    payload = dict(raw.get("payload") or {})
+    dropped = False
+    for field in fields:
+        if field in payload:
+            payload.pop(field)              # dropped, no proof triple owed
+            dropped = True
+    if not dropped:
+        return raw                          # metadata mode, no content present
     return {**raw, "payload": payload}
 
 
@@ -130,17 +143,34 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
 
-    Order is a contract: RAW requests validate BEFORE capture transforms
-    them, or an over-cap authored body (work_item.body, task summary — REJECT
-    per §8/§11) is stripped by metadata mode first and sails through as
-    accepted. Then the TRANSFORMED request validates again, because the
-    policy-applied form is what gets stored and spooled (§11)."""
+    Order is a contract: RAW requests with REJECT semantics validate BEFORE
+    capture transforms them, or an over-cap authored body (work_item.body,
+    task summary — REJECT per §8/§11) is stripped by metadata mode first and
+    sails through as accepted. Then the TRANSFORMED form — what gets stored
+    and spooled (§11) — is what the transaction receives.
+
+    T8-as-amended-by-#1372-F1: the double pass is paid only where both passes
+    DO something, but RAW validation is unconditional and FIRST for every
+    family — the T8 comms skip let capture launder malformed wire into valid
+    shape. The second (transformed-form) pass runs only when capture actually
+    changed the request (_apply_capture's identity contract); communications
+    always change under capture, so they pay both passes."""
     finalized = [_finalize(dict(r)) if isinstance(r, dict) else r
                  for r in raw_requests]
+    captured: list = []
+    items = []
     for r in finalized:
-        validate_request(r)                            # ContractViolation propagates
-    captured = [_apply_capture(root, r) for r in finalized]
-    items = [validate_request(r) for r in captured]
+        # RAW validation runs FIRST for EVERY family — #1372 review F1: the
+        # T8 skip for communications let capture LAUNDER invalid wire (a
+        # list-of-pairs payload, privacy="bogus") into a committed row,
+        # because dict(payload) reshapes pairs and the privacy stamp
+        # overwrites the invalid token. The T8 win survives where it was
+        # measured (identity-return skips the second pass); communications
+        # pay the double pass as the price of the capture rewrite.
+        first = validate_request(r)                    # ContractViolation propagates
+        c = _apply_capture(root, r)                    # CaptureConfigError propagates
+        captured.append(c)
+        items.append(first if c is r else validate_request(c))
     try:
         conn = connect(db_path(root))
         try:
