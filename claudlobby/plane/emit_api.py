@@ -91,13 +91,18 @@ def _capture_mode(root: Path, fleet: str | None) -> str:
 def _apply_capture(root: Path, raw: dict) -> dict:
     """Round-3 F8: the policy transforms EVERY content-bearing family
     (contracts.CONTENT_FIELDS is the registry's code form), not
-    communications alone. Communications keep the proof triple on drop."""
+    communications alone. Communications keep the proof triple on drop.
+
+    IDENTITY CONTRACT (T8): returns the INPUT OBJECT ITSELF when the policy
+    changed nothing — the caller uses `is` to skip the second validation pass
+    for untransformed requests, which is the safe half of the #1345-review
+    disclosure (warm emit 62->106ms from validating twice)."""
     fields = CONTENT_FIELDS.get(raw.get("event_type"))
     if not fields:
         return raw
     mode = _capture_mode(root, raw.get("fleet"))
-    payload = dict(raw.get("payload") or {})
     if raw.get("event_type") == "communication":
+        payload = dict(raw.get("payload") or {})
         if mode == "full":
             payload["privacy"] = "full"
         else:
@@ -109,9 +114,17 @@ def _apply_capture(root: Path, raw: dict) -> dict:
                 payload["body_bytes"] = proof.body_bytes
                 payload["body_sha256"] = proof.body_sha256
                 payload["truncated"] = proof.truncated
-    elif mode != "full":
-        for field in fields:
-            payload.pop(field, None)        # dropped, no proof triple owed
+        return {**raw, "payload": payload}
+    if mode == "full":
+        return raw                          # nothing to transform — identity
+    payload = dict(raw.get("payload") or {})
+    dropped = False
+    for field in fields:
+        if field in payload:
+            payload.pop(field)              # dropped, no proof triple owed
+            dropped = True
+    if not dropped:
+        return raw                          # metadata mode, no content present
     return {**raw, "payload": payload}
 
 
@@ -130,17 +143,34 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
 
-    Order is a contract: RAW requests validate BEFORE capture transforms
-    them, or an over-cap authored body (work_item.body, task summary — REJECT
-    per §8/§11) is stripped by metadata mode first and sails through as
-    accepted. Then the TRANSFORMED request validates again, because the
-    policy-applied form is what gets stored and spooled (§11)."""
+    Order is a contract: RAW requests with REJECT semantics validate BEFORE
+    capture transforms them, or an over-cap authored body (work_item.body,
+    task summary — REJECT per §8/§11) is stripped by metadata mode first and
+    sails through as accepted. Then the TRANSFORMED form — what gets stored
+    and spooled (§11) — is what the transaction receives.
+
+    T8 (the #1345-review cost disclosure, 62->106ms warm on the Pi): the
+    double pass is paid only where both passes DO something. Communications
+    have no raw-REJECT semantics (a relayed body truncates-with-proof, never
+    rejects), so they validate ONCE, on the captured form — capture still
+    runs first, so a broken capture config raises before any validation or
+    db access. Every other family validates raw first (the rejects), and the
+    second pass runs only when capture actually changed the request
+    (_apply_capture's identity contract)."""
     finalized = [_finalize(dict(r)) if isinstance(r, dict) else r
                  for r in raw_requests]
+    captured: list = []
+    items = []
     for r in finalized:
-        validate_request(r)                            # ContractViolation propagates
-    captured = [_apply_capture(root, r) for r in finalized]
-    items = [validate_request(r) for r in captured]
+        if isinstance(r, dict) and r.get("event_type") == "communication":
+            c = _apply_capture(root, r)                # CaptureConfigError propagates
+            captured.append(c)
+            items.append(validate_request(c))          # once — no raw-reject case
+            continue
+        first = validate_request(r)                    # ContractViolation propagates
+        c = _apply_capture(root, r)
+        captured.append(c)
+        items.append(first if c is r else validate_request(c))
     try:
         conn = connect(db_path(root))
         try:
