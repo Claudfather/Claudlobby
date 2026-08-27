@@ -19,7 +19,7 @@ Both write the same JSONL schema to the same bot-local directory. Managers read 
 
 ## Where to Read
 
-Each bot's events live at:
+Each bot writes its own events to:
 
 ```
 <bot-dir>/data/events/fleet-YYYY-MM-DD.jsonl
@@ -31,7 +31,10 @@ All paths are derivable from fleet.yaml. For a fleet named `<fleet>`:
 $CLAUDLOBBY_ROOT/local/<fleet>/runtime/bots/<bot>/data/events/fleet-$(date +%Y-%m-%d).jsonl
 ```
 
-Use `resolve_bots_dir` from `lib-common.sh` to find the bots directory, then iterate.
+**That is where the data lives, not how a manager should read it.** Do not use `resolve_bots_dir`
+to iterate bot directories and read this path directly — see "Reading Events" below for why, and
+use `claudlobby events` instead. `resolve_bots_dir` stays the right tool for cases that only need
+bot *names* (e.g. enumerating who exists), not for reaching into `data/events/` across bots.
 
 ## Event Schema
 
@@ -134,33 +137,76 @@ that trips; treat everything else as a sighting.
 
 ## Reading Events
 
-Tail today's file for recent events:
+Use `claudlobby events` — never a hand-rolled loop over bot directories. This is **not** a fix
+for a live break: run verbatim on an armed bot, the loop below still works, including for denied
+siblings — confirmed directly, twice independently. The exact mechanism is not fully pinned down
+and two independent probes do not agree on its shape: a `for ... in "$BOTS_DIR"/*/` loop with
+`"$bot_dir"`/`"$f"` unresolved at match time evades every time it's been tested, while a *plain*
+`b=ravi; cat .../$b/...` scalar assignment — also unresolved-at-match-time, just not inside a loop
+— was reliably denied in the same testing. Separately, a fully literal path paired with some
+*unrelated* unresolved variable elsewhere in the same command (`cat <path>; echo "${RANDOM}"`) has
+also been observed to evade. What varies the outcome is not settled; that it currently doesn't
+apply to the shape this protocol actually uses is what's being acted on here.
+
+That is exactly the problem. **It works by accident**, on some permission-matcher blind spot, not
+by design — and the same evasion is why it's silent in the reassuring direction if the matcher
+is ever tightened: an event sweep that stops resolving would return no events, indistinguishable
+from a healthy fleet, with no warning that anything changed. Separately from permissions entirely,
+`claudlobby events` is also just the better tool for this: it's the same door `brief.py`'s alerts
+section already consumes, and it adds type/critical filtering and coverage-honesty disclosure a
+hand-rolled loop doesn't have.
+
+Tail today's events across the fleet:
 
 ```bash
-BOTS_DIR=$(resolve_bots_dir "$FLEET_NAME")
-today=$(date +%Y-%m-%d)
-for bot_dir in "$BOTS_DIR"/*/; do
-    bot=$(basename "$bot_dir")
-    f="$bot_dir/data/events/fleet-${today}.jsonl"
-    [ -f "$f" ] && echo "=== $bot ===" && tail -20 "$f"
-done
+claudlobby --fleet "$FLEET_NAME" events --tail 50
+```
+
+Scope to one bot — e.g. before dispatch, or cross-referencing a `[BOTREPORT]`:
+
+```bash
+claudlobby --fleet "$FLEET_NAME" events --bot "$BOT_NAME" --tail 20
 ```
 
 Filter for actionable events:
 
 ```bash
-f="$bot_dir/data/events/fleet-${today}.jsonl"
-[ -f "$f" ] && grep -Eh '"type":"pane_stuck"|"type":"service_down"|"type":"session_missing"' "$f"
+claudlobby --fleet "$FLEET_NAME" events --critical --tail 200
 ```
+
+**Always pass an explicit `--tail` with `--critical`.** `--tail` defaults to 50 and `--critical`
+inherits that default silently — the output states no bound and gives no hint that anything was
+dropped. Measured: the same query returned 50 rows at the default and 500 at `--tail 500`, with
+no disclosure either way. That is the exact silent-cap shape this codebase's own coverage-honesty
+discipline forbids, sitting in a shipped door; treat the default as unsafe until it's fixed
+upstream and always size `--tail` explicitly instead of relying on it.
+
+**`--critical` also does not cover every actionable type in the decision table above.** It matches a
+fixed, hand-maintained set (`session_missing`, `service_down`, `activity_stuck`, `script_error`,
+`overdue_dispatch`, `bridge_down`, `reload_failed`, `restart_failed`, `rc_timeout`) that omits
+`pane_stuck`, `wip_uncommitted`, `sweep_repo_unreachable`, and `audit_failed` — all actionable per
+the table above. Same hand-maintained-list gap `brief.py`'s alerts section already discloses
+(#903); this protocol inherits it rather than reintroducing it. Until #903 closes, pair
+`--critical` with either a periodic unfiltered `--tail N` sweep, or explicit per-type calls:
+
+```bash
+for t in pane_stuck wip_uncommitted sweep_repo_unreachable audit_failed; do
+    claudlobby --fleet "$FLEET_NAME" events --type "$t" --tail 10
+done
+```
+
+(That loop is over **type strings**, never bot paths — the command text names no bot directory,
+so it is unaffected by path-scoped deny rules regardless of arming.)
 
 ## Cross-Fleet Reads
 
-A top-level manager can read any bot's events across sub-fleets since all paths are filesystem-based and derivable from fleet.yaml. No push mechanism needed — just read the bot directories for any fleet in scope.
+A top-level manager can read any bot's events across sub-fleets. Use `claudlobby events` with
+`--fleet` rather than reading the sibling fleet's bot directories directly — same reasoning as
+above, and it works the same way whether or not the target fleet has armed.
 
 ```bash
 # Read events for a bot in a different fleet
-other_bots=$(resolve_bots_dir "other-fleet")
-cat "$other_bots/some-bot/data/events/fleet-$(date +%Y-%m-%d).jsonl"
+claudlobby --fleet "other-fleet" events --bot "some-bot" --tail 20
 ```
 
 ## Retention
