@@ -127,6 +127,15 @@ cleanup() {
         systemctl --user reset-failed "$BP_SVC" >/dev/null 2>&1 || true
         command tmux -L "$BP_SVC" kill-server 2>/dev/null || true
     fi
+    # The plane leg's daemon is a plain background process (never a unit, so
+    # it can never self-boot) — but an abort between its start and its inline
+    # kill would leak it until reboot. Trap-owned teardown, same rule as the
+    # boot probe above: the trap and ONLY the trap guarantees it.
+    if [ -n "${PL_DPID:-}" ]; then
+        kill "$PL_DPID" 2>/dev/null || true
+    fi
+    [ -n "${PL_ROOT:-}" ] && rm -rf "$PL_ROOT" 2>/dev/null
+    [ -n "${PL_SOCKDIR:-}" ] && rm -rf "$PL_SOCKDIR" 2>/dev/null
     rm -rf "$ROOT" "${RB_ROOT:-}" "${WR_ROOT:-}" "${BP_ROOT:-}" "${SC_ROOT:-}" "$TMUX_TMPDIR"
 }
 trap cleanup EXIT
