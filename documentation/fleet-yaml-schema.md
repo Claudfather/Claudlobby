@@ -99,6 +99,7 @@ fleet:
       permissions: [<list>]
       post_actions: [<list>]
       env: { <KEY>: <value>, ... }      # bot-specific env exports (merged into bot.conf)
+      secret_files: { <ENV_VAR>: <fleet-relative-path>, ... }  # OPTIONAL — secret file paths, anchored on FLEET_ROOT
       tools: [<list>]                   # OPTIONAL — library/tools/ refs (composited scripts)
       tool_permissions:                 # OPTIONAL — tool allow/deny
         deny: [<tool>, ...]
@@ -117,12 +118,15 @@ fleet:
       startup_prompt: <string>
       bench: true | false                 # OPTIONAL — benchmarking target (default: false)
       dangerously_skip_permissions: true | false  # OPTIONAL — opt into --dangerously-skip-permissions (default: false → acceptEdits)
+      skip_auto_permission_prompt: true | false          # OPTIONAL — settings.local skipAutoPermissionPrompt (default: true)
+      skip_dangerous_mode_permission_prompt: true | false # OPTIONAL — settings.local skipDangerousModePermissionPrompt (default: true)
       remote_control: true | false        # OPTIONAL — enable --remote-control (default: true)
       prompt_suggestions: true | false    # OPTIONAL — autocomplete suggestions (default: false)
       channels: [<list>]                  # OPTIONAL — channel plugins (default: [plugin:telegram@...])
       extra_flags: [<string>, ...]        # OPTIONAL — additional Claude CLI flags
       claudna_version: <string>           # OPTIONAL — pin clauDNA plugin version
       claudron_vault_path: <string>       # OPTIONAL — Claudron vault path for this bot
+      claudron_session_loop: true | false # OPTIONAL — tri-state; default follows claudron_vault_path presence
       claudosseum_tenant_id: <string>     # OPTIONAL — Claudosseum telemetry tenant
 ```
 
@@ -174,7 +178,7 @@ plugins:
 
 ### `fleet.system_defaults`
 
-Gates how much of the package's `system.yaml` (shared hooks, observability defaults, and job timers merged into every fleet) gets folded into this fleet's `defaults`. A value set directly in `fleet.defaults` always wins over the system tier for the same key — this field only controls whether the system tier is consulted at all.
+Gates how much of the package's [`system.yaml`](system-yaml-schema.md) (shared hooks, observability defaults, and job timers merged into every fleet) gets folded into this fleet's `defaults`. A value set directly in `fleet.defaults` always wins over the system tier for the same key — this field only controls whether the system tier is consulted at all.
 
 ```yaml
 fleet:
@@ -665,6 +669,24 @@ For a host path a bot should *read and write through the bot dir*, prefer `mount
 
 `claudlobby freshbox` reports the surface these declarations bless: an INFO line per declaration with the source values it actually covers (over-broad `/**` grants become visible this way), a `WARN` for a declaration that covers nothing (declaration rot), and a `FAIL` for a path-classified value that is **undeclared and unanchored in a fleet-tier `.env`** (`<bot_dir>/.env`, `local/<fleet>/.env`) — the runtime-sourced surface `generate` cannot see (`.env` values are masked in the report; a host-tier `root/.env` / `~/.env` value WARNs). Rendered `tools/` scripts are scanned for improper fleet paths on the same footing as the other emitted wiring.
 
+### `bots.<name>.secret_files`
+
+Maps an env var **name** to a **fleet-relative path** of a secret file — service-account keys,
+credentials that live inside the fleet overlay rather than as a single `.env` value. Fleet-relative
+by contract: an absolute path, a `~`-relative path, or a path containing `..` is rejected at
+`generate`, so the composed line is always derived from `${FLEET_ROOT}` rather than hand-typed.
+
+```yaml
+bots:
+  kev:
+    secret_files:
+      GOOGLE_SERVICE_ACCOUNT_JSON: secrets/kev-service-account.json
+```
+
+Composes into `bot.conf` as `export GOOGLE_SERVICE_ACCOUNT_JSON="$FLEET_ROOT/secrets/kev-service-account.json"`
+— the path is derived and migration-safe, but the *file itself* (like any fleet secret) belongs in
+`local/<fleet>/` and is never committed. Fleet-then-bot merged, bot winning, same shape as `env:`.
+
 ### `bots.<name>.bench`
 
 Boolean (default `false`). Marks this bot as the fleet's benchmarking target for cold-start timing (`lib/bench-cold-start.sh`). Multi-bot fleets should set `bench: true` on exactly one bot so the benchmarking script knows which bot to measure. The validator warns if a fleet has multiple bots and none has `bench: true`.
@@ -689,6 +711,15 @@ Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
 ### `bots.<name>.dangerously_skip_permissions`
 
 Boolean (default `false`). Set to `true` to run the bot with `--dangerously-skip-permissions`, which bypasses all tool-call permission prompts **and** the composed allow/deny lists. This is an explicit opt-in: when neither this nor `permission_mode` is set, the compositor's conservative default is `--permission-mode acceptEdits`, which is headless-safe without bypassing the permission lists. Superseded by `permission_mode` when both are set. Can be set in `defaults:` to apply fleet-wide; bot-level overrides.
+
+### `bots.<name>.skip_auto_permission_prompt` / `bots.<name>.skip_dangerous_mode_permission_prompt`
+
+Booleans (default `true` for both). Set `settings.local.json`'s `skipAutoPermissionPrompt` /
+`skipDangerousModePermissionPrompt` — the first-run interactive consent prompts Claude Code would
+otherwise show before auto-accepting edits or entering a dangerous permission mode. Distinct from
+the `--dangerously-skip-permissions` CLI flag above: these suppress the one-time interactive
+first-run prompts a headless, supervised bot would otherwise hang on with no terminal to answer
+them. Can be set in `defaults:`; bot-level overrides.
 
 ### `bots.<name>.remote_control`
 
@@ -730,6 +761,7 @@ Ecosystem-aware fields connecting bots to clauDNA, Claudron, and Claudosseum. Al
 |-------|---------|---------|
 | `claudna_version` | `CLAUDNA_VERSION` | Pin the clauDNA plugin version (e.g., `"0.2.0"`). Skills/hooks can read this to gate behavior by version. |
 | `claudron_vault_path` | `CLAUDRON_VAULT_PATH` | Pointer to the Claudron **vault root** (e.g., `"vaults/my-fleet"`) — not a per-bot sub-path; one vault is one tenant. The bot's `claudron` CLI resolves the vault from this env var (Claudron `docs/CLI_CONTRACT.md` §Environment). |
+| `claudron_session_loop` | _(none — gates hook/grant composition, not an env var)_ | Wires the Claudron session loop: composed SessionStart/PreCompact/SessionEnd hooks plus a narrow allowlist of `claudron` CLI verb grants. Tri-state boolean — unset defaults to `true` exactly when `claudron_vault_path` is set, `false` otherwise; set explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone). `true` with no `claudron_vault_path` is a `claudlobby validate` error. See `documentation/integrations/claudron-integration.md`. |
 | `claudosseum_tenant_id` | `CLAUDOSSEUM_TENANT_ID` | Tenant identifier for Claudosseum telemetry (e.g., `"tenant_abc123"`). Bots emit structured signal to this tenant when configured. |
 
 Can be set in `defaults:` (fleet-wide) or per-bot (bot overrides default). The validator warns if `claudron_vault_path` is set but the **`claudron` CLI is not reachable**, or the path does not resolve to a vault — the CLI is the fleet-consumption door (Claudron `docs/INTEGRATION.md`). It does *not* check for an MCP server: that door is demand-gated and unbuilt (decision C).
@@ -772,13 +804,15 @@ The compositor auto-derives permission entries in `settings.local.json` from sev
 
 | Source | What it generates |
 |--------|-------------------|
+| **Guardrails** | `library/guardrails/<name>.md` frontmatter can declare the same `permissions: { allow_all, allow, deny, bash_allow }` shape as expertise — guardrails are usually deny-only (their rare allows merge alongside expertise's). |
 | **Expertise profiles** | `library/expertise/<name>.md` frontmatter can declare `permissions: { allow_all, allow, deny, bash_allow }`. Merged across all expertise files. |
 | **MCP permission contracts** | `library/mcp/<name>.json` `_permissions_contract.tools` field lists tool names → generates `mcp__<server>__<tool>` allow patterns. |
 | **Channel plugins** | Bots with a Telegram handle get allow rules for `mcp__plugin_telegram_telegram__*` tools. |
-| **Skills** | Each skill generates `Skill(<name>)` and `Skill(<name>:*)` allow patterns. |
+| **Skills** | Each skill generates `Skill(<name>)` and `Skill(<name>:*)` allow patterns, plus any `tool_grants` (Bash/MCP/bare tools) the skill's own frontmatter declares. |
+| **Claudron session loop** | When `claudron_session_loop` resolves true, a narrow allowlist of `claudron` CLI verb grants (never a `Bash(claudron *)` wildcard). |
 | **Base tools** | `Read`, `Grep`, `Glob` are always allowed when an allow list is non-empty. |
 
-Layering order (later layers win on conflict): expertise → MCP contracts → channels → skills → fleet defaults → bot-level. Bot-level deny always wins.
+Layering order (later layers win on conflict): guardrails → expertise → MCP contracts → channels → skills → fleet defaults → bot-level. Bot-level deny always wins. (Sibling-bot directory isolation is a separate, always-on deny layer beneath all of these — see `permissions-model.md`.)
 
 ## Composition order (per bot)
 

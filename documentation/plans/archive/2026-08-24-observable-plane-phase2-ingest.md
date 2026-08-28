@@ -1,9 +1,50 @@
+---
+title: "Observable Plane — Phase 2: The Ingest Daemon And The Doors"
+type: plan
+status: completed
+owner: fleet owner
+created: 2026-08-24
+---
+
 # Observable plane — Phase 2: the ingest daemon and the doors
 
-**Status:** PLAN (2026-08-24). Execution gated on: PR #1341 merged; this plan reviewed per the
-operator's normal flow. Parent spec: `2026-08-18-observable-plane-design-v2.md` (authoritative on
-every model/semantic question; this plan is transport, rollout, and door work only). Door facts:
-`2026-08-25-phase0-door-inventory.md` (measured @ `e9311da`).
+**Status:** completed 2026-08-27. Shipped as two PRs: PR-A (`df43c70`, #1345 — ingest daemon, shim,
+host-service units, parity, dormant) then PR-B (`c34f12d`, #1372 — the doors emit, §6b activation
+model, five doors dual-write, session identity, Pi-verified budgets), each followed by a review-fix
+round (PR-A: `ce89c67`, 13 findings; PR-B: `a67f393` 16 findings + `c638b34` re-verification
+residuals), plus a post-merge 8-reviewer gauntlet round (`039ede4`). Outcome recorded in §Outcome
+below; the plan body beneath it is preserved as ratified and is not retro-edited.
+
+## Outcome (recorded 2026-08-28, docs-audit)
+
+Every task in §6's decomposition table has a landed commit: T0 daemon+protocol → `35f7167`; T1
+launcher+composed host-service units → `19448e8`; T2 `lib/plane-emit.sh` shim → `487ed3f`; T3
+`lib/plane-parity.py` → `a1dfada`; T4/T5/T6(a) dispatch-task/report-back/tg-post/briefing-trigger
+dual-write → `5fd028f`; T6(b) workstream door → `88fa274`; T7 SessionStart hook + `process_uid` →
+`86b4a98`; T8 capture-validation optimization → confirmed via `tests/test_plane_t8_validation_cost.py`;
+T9/T10 harness leg + doctor rungs + shim bench → `5174900`. The §6b kernel work (carrier-appropriate
+activation, `carrier_queued`) landed in `d2ea7dd` and is confirmed in
+`claudlobby/plane/contracts.py`'s `ATTEMPT_STATES`.
+
+All five named doors (`lib/dispatch-task.sh`, `lib/report-back.sh`, `lib/tg-post.sh`,
+`lib/workstream-update.sh`, `lib/briefing-trigger.sh`) confirmed carrying `PLANE_EMIT_ENABLED`-gated
+dual-write calls in this worktree. `system.yaml` confirmed carries the dormant
+`host.jobs.plane-daemon` entry (`enroll: false`, `unit: service`, `script:
+"$CLAUDLOBBY_ROOT/lib/plane-daemon.sh"`) exactly as §1's "Dormancy" row describes.
+`report-back.sh`'s "one ordering change" (§3) — plane intent recorded before the tmux send, ahead
+of the unchanged legacy send-then-ledger order — is confirmed in the current file: the plane
+intent emission (`_plane_emit_report_intent`) runs before `bot_tmux_send`, and the legacy
+`_emit_ledger_event` call still runs after it, unchanged.
+
+**Not verifiable from this repo checkout:** §4's operational rollout ladder (arming the daemon and
+each door on a real canary fleet, N days parity-clean) is fleet-`local/`-config-scoped and
+gitignored — this audit confirms the code and dormant-by-default posture, not whether any fleet has
+actually armed it.
+
+**Test evidence:** `CHANGELOG.md` records 191 plane tests across 16 suites at PR-B, plus 43 new
+regression pins from the gauntlet round (`039ede4`, failing-test set unchanged at 49 names, passed
+count 3689→3732). Independently re-run for this audit (2026-08-28, unsandboxed):
+`./.venv/bin/pytest tests/test_plane_*.py` → **265 passed, 0 failed** (current cumulative total).
 
 ## 1. Decisions carried in (all ruled; provenance noted)
 

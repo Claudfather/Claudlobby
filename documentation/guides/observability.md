@@ -20,8 +20,11 @@ description: Decision tree for diagnosing fleet issues from logs, events, and CL
 | What work completed? | Report-back ledger | `claudlobby report-back --since 24h` |
 | Fleet-wide log search | Tail all logs | `lib/tail-fleet.sh --fleet <name> --grep ERROR` |
 | Last pulse snapshot | Pulse summary file | `cat state/pulse/pulse-summary.txt` |
+| Is the observable-plane kernel healthy? | Plane kernel status (db/spool/quarantine) | `claudlobby plane doctor` |
 
 > Every bot runs its own private tmux server (`-L <socket>`, the socket name is the bot's `BOT_SERVICE`/`TMUX_SOCKET`) since per-bot-tmux-socket isolation shipped. A bare `tmux -t <bot>` targets the shared *default* server, which has none of your bots on it, and silently reports no session instead of erroring. The commands above resolve the socket via `tmux_socket_for_bot <bot-dir>` — `source lib/lib-common.sh` first (from the claudlobby repo root) to get it in scope — or skip raw tmux entirely and dispatch through `lib/dispatch.sh` / the `bot_tmux`/`bot_tmux_send` wrappers. See [advanced-patterns.md](../advanced-patterns.md) for the full model.
+
+> **Observable plane (new, dormant by default):** a second, structured-event pipeline is landing alongside everything on this page — `claudlobby/plane/` plus `lib/plane-*.sh`. Five doors (`dispatch-task.sh`, `report-back.sh`, `tg-post.sh`, `workstream-update.sh`, `briefing-trigger.sh`) dual-write into a SQLite kernel at `state/plane/plane.db` through `lib/plane-emit.sh`, which tries a unix-socket ingest daemon first and falls back to the CLI, then a local spool. It only activates when a fleet sets `PLANE_EMIT_ENABLED=1` (the daemon itself is separately dormant until `system.yaml` arms `plane-daemon.enroll: true`), and for now it's **write-side only** — `events`, `report-back`, and `brief` above still read the JSONL ledgers, which stay authoritative through this phase. Check the kernel's own health with `claudlobby plane status` / `claudlobby plane doctor`; the full model is in [`2026-08-24-observable-plane-phase2-ingest.md`](../plans/archive/2026-08-24-observable-plane-phase2-ingest.md).
 
 ## Event Data Flow
 

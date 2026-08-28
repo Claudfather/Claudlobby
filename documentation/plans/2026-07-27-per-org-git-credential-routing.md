@@ -2,9 +2,27 @@
 
 **Defect found and root-caused by:** a downstream consumer fleet, who proposed the fix shape.
 **Owned by:** crog-eng-team, who reviewed it, resolved the open question, and carried the fixes.
-**Status:** open question **resolved** (both semantics are git's documented contract — §Open
-question); review findings addressed; forks F1/F2 still awaiting a ratifier.
-**Branch:** `feat/per-org-git-credential-routing` off `main` @ `e413675`.
+**Status:** **SHIPPED** (updated 2026-08-28; superseded the line below). Merged to `main` as
+commit `c58e758` ("feat(config,composer): per-org git credential routing — defect report +
+proposal (#806)"), which folds in a same-PR follow-up commit addressing exactly the three review
+findings this doc's §Correction and §7 describe (the `useHttpPath` rationale fix, `.gitconfig`
+added to `path_audit._WIRING_STATIC`, fail-loud on a missing `[include]` target). Both forks were
+evidently ratified through implementation rather than a separate ratification step recorded in
+this doc — the merge commit body states outright "the mitigation F1 is ratified on", and the
+shipped `compose_bot_gitconfig` (`claudlobby/composer.py:608`) implements F1's lean
+(`GIT_CONFIG_GLOBAL`, bot-scoped, composed) and F2's lean (gh resolved at compose time, fallback
+line omitted when absent — see the docstring's "the resolved gh fallback") exactly as proposed
+below. `documentation/fleet-yaml-schema.md:359` now documents `fleet.defaults.git_credentials` /
+`bots.<name>.git_credentials` in full. See "Old status line (superseded)" immediately below for
+what this doc claimed before the 2026-08-28 re-audit, and "What shipped vs. this proposal" further
+down for the diff against the original design.
+
+**Old status line (superseded 2026-08-28):** open question **resolved** (both semantics are git's
+documented contract — §Open question); review findings addressed; forks F1/F2 still awaiting a
+ratifier.
+**Branch:** `feat/per-org-git-credential-routing` off `main` @ `e413675`. (This branch is a
+distinct, already-merged effort — see the note below on the *separate*, later
+`feat/github-app-per-org-identity` work, which is not a rename or continuation of this one.)
 
 Org names below are placeholders (`OrgA`, `OrgB`) except where the real target matters:
 `Claudfather/Claudlobby` is this package's own repo, which is where the failing push went.
@@ -228,6 +246,39 @@ alternative is requiring every org to be declared — more explicit, breaks unde
 
 **F3 — Binding key.** Locked to a dedicated field rather than reusing `scope.org`: `scope.org` is
 singular and the motivating case needs two orgs.
+
+## 6b. Outcome (recorded 2026-08-28)
+
+**Shipped, not renamed.** This proposal shipped under its own name and issue (#806), merged as
+commit `c58e758` plus a same-PR review-fix commit — both reachable from current `main`
+(`git merge-base --is-ancestor c58e758 HEAD` confirms). The task that prompted this re-audit asked
+whether this work "shipped under a renamed effort" given the presence of a
+`feat/github-app-per-org-identity` branch and several `implement/github-app-p*` branches in the
+repo — it did not. Those branches belong to a **separate, later** plan
+(`documentation/plans/2026-08-19-github-app-installation-token-auth.md`), which explicitly cites
+this doc as prior art it extends unchanged ("its three ordering properties and J3 are honored
+unchanged") and layers **GitHub App** auth (a different credential mechanism — installation
+tokens, not per-org PATs) on top of the `compose_bot_gitconfig` seam this doc's proposal created.
+
+**One genuine descendant, but additive, not a supersession.** That same GitHub App plan's own
+"What the plan missed entirely" section records that **per-org commit identity** (making a bot
+author commits as `<slug>[bot]` for one org while keeping the operator's identity for another, via
+`includeIf hasconfig:remote.*.url`) emerged unplanned from its canary and shipped separately as
+#1301/#1302 (commits `961f48b`/`e360dd6`/`d85fdfa`, all merged). That is a **new, additive**
+feature built on the `.gitconfig` composition this doc introduced — it changes *authorship*, not
+*credential routing* — and does not replace or rename anything this doc proposed. Per-org
+**credential routing** (which env-var-backed token a push to a given org uses) and per-org
+**commit identity** (whose name/email a commit is attributed to) are two different, independently
+shipped features sharing one composed file.
+
+**F1/F2 ratification status.** No separate `[FORK-LOCK]`-style ratification record for F1/F2 was
+found in the git-visible repo (same pattern seen on other plans in this audit batch — ratification
+happened de facto through review and merge rather than a recorded ceremony). Both forks' leans are
+exactly what shipped: F1 (`GIT_CONFIG_GLOBAL` activation) — confirmed via `composer.py:1199`
+(`export GIT_CONFIG_GLOBAL=...`) and the merge commit's own "the mitigation F1 is ratified on";
+F2 (resolve `gh` at compose time, omit the fallback line when absent) — confirmed via
+`compose_bot_gitconfig`'s docstring ("the resolved gh fallback... omitted when absent" pattern
+matches this doc's §6 F2 proposal verbatim).
 
 ## 7. What we changed
 

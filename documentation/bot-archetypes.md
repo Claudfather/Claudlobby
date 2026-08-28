@@ -91,13 +91,21 @@ The brain of the fleet. Converses freely, delegates to workers, monitors health.
 | `/home` | Smart home control (optional) |
 | `/triage` | Surface untracked items from meetings/emails into Notion |
 
-### Crons
+### Briefings
 
-```crontab
-# Daily briefings
-30 8 * * * /path/to/bot/briefing-cron.sh morning
-0 13 * * * /path/to/bot/briefing-cron.sh midday
-30 18 * * * /path/to/bot/briefing-cron.sh evening
+Equip via `fleet.yaml` — never a hand-installed cron (see
+[`fleet-yaml-schema.md`](fleet-yaml-schema.md#botsbotbriefing)). Each slot becomes a composed
+per-(bot,slot) timer whose `ExecStart` runs `lib/briefing-trigger.sh <fleet> <bot> <slot>`,
+delivering `/briefing <slot>` into the bot's own session:
+
+```yaml
+bots:
+  lead:                                  # manager bot id
+    briefing:
+      slots:                             # slot name -> systemd OnCalendar (NOT 5-field cron)
+        morning: "*-*-* 08:30:00"
+        midday:  "*-*-* 13:00:00"
+        evening: "*-*-* 18:30:00"
 ```
 
 ---
@@ -249,12 +257,18 @@ Customer-facing bot with personality. Handles orders, emails, fulfillment, task 
 | `/restart` | Graceful self-restart |
 | `/selfcheck` | Self-diagnostic |
 
-### Crons
+### Briefings
 
-```crontab
-# Daily briefings
-0 9 * * * /path/to/bot/briefing-cron.sh morning
-0 14 * * * /path/to/bot/briefing-cron.sh afternoon
+Equip via `fleet.yaml` — never a hand-installed cron (see
+[`fleet-yaml-schema.md`](fleet-yaml-schema.md#botsbotbriefing)):
+
+```yaml
+bots:
+  shop-bot:                              # business bot id
+    briefing:
+      slots:
+        morning:   "*-*-* 09:00:00"
+        afternoon: "*-*-* 14:00:00"
 ```
 
 ### Persona

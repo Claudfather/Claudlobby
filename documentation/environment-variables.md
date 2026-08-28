@@ -128,6 +128,23 @@ Emitted into **every** bot's `bot.conf` from `projects.yaml` — one pair per pr
 | `CLAUDRON_QUERY_BEFORE` | `bots.<name>.env` (manual opt-in) | `1` enables the dispatch query-before preflight: `dispatch-task.sh` prepends fleet-memory pointers (titles + paths from `claudron lookup`) to dispatched tasks. Off by default; needs the claudron CLI on PATH and `CLAUDRON_VAULT_PATH` set |
 | `CLAUDRON_QUERY_LIMIT` | `bots.<name>.env` (manual opt-in) | Max fleet-memory pointers injected per dispatch (default 3) |
 
+## Opt-in Feature Flags
+
+A handful of shared `lib/` hooks and scripts compose into **every** bot on **every** fleet
+(via `system.yaml` `defaults.hooks` or a shared `lib/` script), but ship **dormant by default** —
+each is a no-op until the specific var below is set to `"1"` under the relevant bot's
+`bots.<name>.env` (which lands in that bot's `bot.conf` and is inherited by hooks/scripts running
+in its session). This is the equippable-dormant pattern: a shared install cannot be staged
+per-bot, so rollout is gated per-fleet (or per-bot) instead of going live estate-wide on the next
+`generate` or daily reload.
+
+| Variable | Consumer | Description |
+|----------|----------|--------------|
+| `SESSION_DIGEST_ENABLED` | `lib/transcript-digest.sh` (SessionEnd hook) | `"1"` arms per-session Haiku transcript digesting for this bot. Default `0` (dormant) |
+| `PLANE_EMIT_ENABLED` | `lib/plane-session-start.sh` (SessionStart hook) | `"1"` arms observable-plane session-identity emission (`session_uid`/`process_uid`) for this bot. Default `0` (dormant) |
+| `PLANE_EMIT_DISABLED` | `lib/plane-emit.sh`, `lib/plane-session-start.sh` | `"1"` forces a no-op regardless of `PLANE_EMIT_ENABLED` — the harness/test exemption. Opposite polarity from the other flags on this list |
+| `SPINDOWN_RECEIPT_ENABLED` | `lib/spin-down-bot.sh` | `"1"` arms the `bot_teardown_started` fleet-ledger receipt on teardown for this bot's fleet. Default `0` (dormant) |
+
 ## Plugins
 
 | Variable | Source | Description |
@@ -173,3 +190,21 @@ bots:
 ```
 
 These are emitted as `export MY_CUSTOM_VAR="value"` in `bot.conf`.
+
+### Bot-Specific Secret Files
+
+`bots.<name>.secret_files` is the fleet-relative-path sibling of `env:` — it maps an env var name
+to a secret file's path *inside the fleet overlay* (service-account keys, credential files) rather
+than a literal value:
+
+```yaml
+bots:
+  my-bot:
+    secret_files:
+      GOOGLE_SERVICE_ACCOUNT_JSON: secrets/my-bot-service-account.json
+```
+
+Composes into `bot.conf` as `export GOOGLE_SERVICE_ACCOUNT_JSON="$FLEET_ROOT/secrets/my-bot-service-account.json"`
+— fleet-relative and anchored on `$FLEET_ROOT` so the path is derived rather than hand-typed
+absolute; an absolute or `~`-relative value, or one containing `..`, is rejected at `generate`. See
+[`fleet-yaml-schema.md`](fleet-yaml-schema.md#botsnamesecret_files).
