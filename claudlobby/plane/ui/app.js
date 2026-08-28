@@ -154,7 +154,10 @@ function renderChannel(env) {
         ${deliveryLine(m)}
         ${machineryBlock(m)}
       </div>`).join("");
+    const kicker = t.work_item_id
+      ? `work item${t.repo ? ` · ${esc(t.repo)}` : ""}` : "conversation";
     return `<article class="thread">
+      <div class="t-kicker">${kicker}</div>
       <div class="t-head"><span class="t-title">${esc(threadTitle(t))}</span>
         <span class="t-meta">${esc(participants)}</span></div>
       ${ladder(t)}
