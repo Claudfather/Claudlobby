@@ -153,10 +153,20 @@ def probe_daemon(path: Path, timeout: float = 2.0) -> bool:
         probe.close()
 
 
-def _recv_line(conn: socket.socket) -> bytes:
+def _recv_line(conn: socket.socket, timeout: float = 5.0) -> bytes:
+    # TOTAL deadline, not per-recv (gauntlet round, probed): with only the
+    # caller's settimeout(5.0), a client trickling 1 byte per <5s never trips
+    # any single recv and holds the SERIAL serve loop indefinitely — measured
+    # 19.5s starvation of a healthy client at 1 byte/4s, unbounded in general.
+    # Same F5 hole the client and probe_daemon already closed, server-side.
+    deadline = time.monotonic() + timeout
     chunks = []
     total = 0
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout("read deadline exceeded (trickling client?)")
+        conn.settimeout(remaining)
         chunk = conn.recv(65536)
         if not chunk:
             break
@@ -423,6 +433,8 @@ class PlaneDaemon:
                     # 5s, not 30: the loop is serial, so one stalled client
                     # holds every healthy one for the whole read deadline —
                     # a partial-sender costs the fleet 5s of ingest, not 30.
+                    # This settimeout bounds only accept-to-first-recv; the
+                    # TOTAL read bound lives in _recv_line (trickle defense).
                     conn.settimeout(5.0)
                     self._handle(conn)
                 except OSError as exc:

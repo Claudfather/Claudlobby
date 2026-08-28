@@ -44,6 +44,11 @@ def migrate(conn: sqlite3.Connection) -> int:
             f"plane.db user_version={current} is newer than this code"
             f" (supports <={SCHEMA_USER_VERSION}) — refusing downgrade"
         )
+    if current == SCHEMA_USER_VERSION:
+        # Steady state — every emit_batch lands here. Skip the resource
+        # iteration + full read of every migration file (~0.27ms/call
+        # measured, 1-2ms on the Pi) that the loop below would only discard.
+        return current
     for number, sql in _migration_files():
         if number <= current:
             continue

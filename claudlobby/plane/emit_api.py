@@ -81,14 +81,13 @@ def _load_capture_config(root: Path) -> dict:
     return modes
 
 
-def _capture_mode(root: Path, fleet: str | None) -> str:
-    """Fleet-keyed capture mode from plane config; default 'metadata' (F7/F23).
-    The caller's request never decides this."""
-    modes = _load_capture_config(root)
+def _capture_mode(modes: dict, fleet: str | None) -> str:
+    """Fleet-keyed capture mode from the loaded plane config; default
+    'metadata' (F7/F23). The caller's request never decides this."""
     return modes.get(fleet or "", modes.get("*", "metadata"))
 
 
-def _apply_capture(root: Path, raw: dict) -> dict:
+def _apply_capture(raw: dict, modes: dict) -> dict:
     """Round-3 F8: the policy transforms EVERY content-bearing family
     (contracts.CONTENT_FIELDS is the registry's code form), not
     communications alone. Communications keep the proof triple on drop.
@@ -100,7 +99,7 @@ def _apply_capture(root: Path, raw: dict) -> dict:
     fields = CONTENT_FIELDS.get(raw.get("event_type"))
     if not fields:
         return raw
-    mode = _capture_mode(root, raw.get("fleet"))
+    mode = _capture_mode(modes, raw.get("fleet"))
     if raw.get("event_type") == "communication":
         payload = dict(raw.get("payload") or {})
         if mode == "full":
@@ -159,6 +158,11 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
                  for r in raw_requests]
     captured: list = []
     items = []
+    # Capture config loads AT MOST ONCE per batch (gauntlet round): a report
+    # batch used to stat+read+re-validate capture.json per content-bearing
+    # event. Lazy, not eager, so a content-free batch (pure transmissions)
+    # keeps succeeding under a broken capture.json exactly as before.
+    modes: dict | None = None
     for r in finalized:
         # RAW validation runs FIRST for EVERY family — #1372 review F1: the
         # T8 skip for communications let capture LAUNDER invalid wire (a
@@ -168,7 +172,12 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
         # measured (identity-return skips the second pass); communications
         # pay the double pass as the price of the capture rewrite.
         first = validate_request(r)                    # ContractViolation propagates
-        c = _apply_capture(root, r)                    # CaptureConfigError propagates
+        if CONTENT_FIELDS.get(r.get("event_type")):
+            if modes is None:
+                modes = _load_capture_config(root)     # CaptureConfigError propagates
+            c = _apply_capture(r, modes)
+        else:
+            c = r
         captured.append(c)
         items.append(first if c is r else validate_request(c))
     try:

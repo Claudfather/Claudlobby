@@ -112,7 +112,7 @@ Performance gates before the implementation locks (§14): the repo has already m
 
 **Vocabulary — two axes** (reconciled with `d9c40b7`, where only `task` mints):
 - `message_class`: `task_request, report, question, answer, alert, notice, briefing, nudge, acknowledgement, chat, config_change, raw_control`.
-- `command_type` (optional): `task, cancel, compact, restart, query` — the landed dispatch `--type` set; extension governed where that vocabulary lives.
+- `command_type` (optional): `task, cancel, compact, restart, query` — the landed dispatch `--type` set; extension governed where that vocabulary lives. **Provenance ruling (§6b #5, PR-B):** `command_type` is DOOR-FLAG provenance only — stamped from the flag the door was invoked with, never parsed out of payload text; a freeform dispatch carries NULL, and a NULL on a legacy/pre-doors row means *unrecorded*, not *no command*.
 - `decision` remains reserved for Phase 5.
 
 **Misroute detection** stays in the door (warn at send time: report-shaped content to a human-channel recipient while a joined attempt sits unclosed) and in derived views.
@@ -451,7 +451,7 @@ The authoritative physical inventory: **9 tables + the spool directory in the v1
 
 ### Table-by-table (family columns; envelope omitted)
 
-**`communications`** — 21: `msg_id` TEXT **PK** · `sender_uid` NOT NULL · `sender_alias` NOT NULL · `sender_session_uid` NULL · `recipient_uid`/`recipient_alias` NULL (null ONLY when genuinely unresolvable — trust-counted; never for tmux sends) · `recipient_raw` NULL ⚑ · `message_class` NOT NULL CHECK(12) · `command_type` NULL CHECK(5) · `work_item_id` NULL · `assignment_id` NULL · `workstream_id` NULL · `deliberation_id` NULL (Phase-5 seam) · `reply_to_msg_id` NULL (self-ref) · `supersedes_msg_id` NULL (self-ref) · `body` NULL (per privacy) · `body_bytes` NOT NULL df 0 · `body_sha256` NULL · `truncated` NOT NULL df 0 · `privacy` NOT NULL CHECK(3) · `idempotency_key` NULL.
+**`communications`** — 21 (envelope-fleet ruling, §6b #4/PR-B: the envelope `fleet` is the SENDER's fleet; a cross-fleet recipient's fleet rides the `recipient_alias` — `bot:<fleet>/<session>` — resolved by the door's peer resolver, never inferred from the envelope): `msg_id` TEXT **PK** · `sender_uid` NOT NULL · `sender_alias` NOT NULL · `sender_session_uid` NULL · `recipient_uid`/`recipient_alias` NULL (null ONLY when genuinely unresolvable — trust-counted; never for tmux sends) · `recipient_raw` NULL ⚑ · `message_class` NOT NULL CHECK(12) · `command_type` NULL CHECK(5) · `work_item_id` NULL · `assignment_id` NULL · `workstream_id` NULL · `deliberation_id` NULL (Phase-5 seam) · `reply_to_msg_id` NULL (self-ref) · `supersedes_msg_id` NULL (self-ref) · `body` NULL (per privacy) · `body_bytes` NOT NULL df 0 · `body_sha256` NULL · `truncated` NOT NULL df 0 · `privacy` NOT NULL CHECK(3) · `idempotency_key` NULL.
 
 **`work_items`** — 7: `work_item_id` NOT NULL UNIQUE · `title` NOT NULL · `created_by_uid` NOT NULL · `workstream_id` NULL · `repo` NULL · `project_key` NULL · `body` NULL (authored — over-cap REJECTS).
 

@@ -47,23 +47,24 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # prune -> archived per pruned id. Emits run INSIDE the locked verb functions
 # so they carry exactly the values the registry write applied.
 PLANE_ARMED=0
-if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" ] \
-   && [ -n "${FLEET_NAME:-}" ]; then
+if plane_armed workstream-update --require-fleet; then
     PLANE_ARMED=1
 fi
 _plane_actor() { printf 'bot:%s/%s' "$FLEET_NAME" "${BOT_NAME:-operator}"; }
-_plane_emit() {
-    # stderr passes through — the shim's fallback disclosure is the contract.
-    "$LIB_DIR/plane-emit.sh" >/dev/null || \
-        echo "workstream-update: plane record failed rc=$? (registry write stands)" >&2
+# _plane_ws_event_obj <id> <event> [extra-json-fragment-with-leading-comma]
+# One workstream event OBJECT on stdout — prune batches N of these into one
+# atomic emission (gauntlet round: the per-id loop paid a shim spawn per
+# pruned id, serialized inside the registry lock).
+_plane_ws_event_obj() {
+    printf '{"event_type":"workstream_event","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","payload":{"workstream_id":"%s","event":"%s","actor":"%s"%s}}' \
+        "$(json_escape "$1")" "$(json_escape "$FLEET_NAME")" \
+        "$(json_escape "$1")" "$2" "$(json_escape "$(_plane_actor)")" "${3:-}"
 }
 # _plane_ws_event <id> <event> [extra-json-fragment-with-leading-comma]
 _plane_ws_event() {
     [ "$PLANE_ARMED" = "1" ] || return 0
-    printf '{"events":[{"event_type":"workstream_event","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","payload":{"workstream_id":"%s","event":"%s","actor":"%s"%s}}]}' \
-        "$(json_escape "$1")" "$(json_escape "$FLEET_NAME")" \
-        "$(json_escape "$1")" "$2" "$(json_escape "$(_plane_actor)")" "${3:-}" \
-        | _plane_emit || true
+    printf '{"events":[%s]}' "$(_plane_ws_event_obj "$1" "$2" "${3:-}")" \
+        | plane_emit_events workstream-update || true
 }
 install_error_trap ""
 
@@ -106,16 +107,11 @@ _lease_expiry_iso() {
     local now_epoch secs
     now_epoch=$(date -u +%s)
     secs=$(( LEASE_DAYS * 86400 ))
-    _epoch_to_iso $(( now_epoch + secs ))
+    epoch_to_iso_utc $(( now_epoch + secs ))
 }
 
-_epoch_to_iso() {
-    local epoch="$1"
-    if date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null; then
-        return 0  # BSD/macOS
-    fi
-    date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ  # GNU/Linux
-}
+# epoch->ISO lives in lib-common (epoch_to_iso_utc) — the third private copy
+# was promoted in the gauntlet round.
 
 _slugify() {
     # Lowercase, non-alnum runs -> single dash, trim leading/trailing dashes.
@@ -244,7 +240,7 @@ open)
                 "$(json_escape "$id")" "$(json_escape "$FLEET_NAME")" \
                 "$(json_escape "$id")" "$(json_escape "$TITLE")" \
                 "$(json_escape "$(_plane_actor)")" "$owner_frag" "$proj_frag" \
-                | _plane_emit || true
+                | plane_emit_events workstream-update || true
         fi
         printf '%s\n' "$id"
     }
@@ -381,20 +377,46 @@ prune)
         # succeeds (#1372 review F13): emitting first recorded `archived` for
         # a prune that then failed, and the retry double-emitted.
         local _pruned_ids
-        _pruned_ids="$(jq -r '.id // empty' "$tmp" 2>/dev/null || true)"
+        # Disclosed, never swallowed (gauntlet round): this was the one
+        # silent failure in the five door blocks — a jq failure dropped
+        # every archived emit while the prune proceeded.
+        if ! _pruned_ids="$(jq -r '.id // empty' "$tmp" 2>/dev/null)"; then
+            _pruned_ids=""
+            echo "workstream-update: prune: could not extract pruned ids — archived events not emitted (registry drop stands)" >&2
+        fi
         rm -f "$tmp"
         _apply "$(_now_iso)" \
             '.workstreams |= with_entries(select(.value.status != "done" and .value.status != "abandoned"))' \
             || return 1
-        if [ "$PLANE_ARMED" = "1" ]; then
-            local _pid
+        # ONE atomic batch, emitted AFTER the lock releases (gauntlet round):
+        # the per-id loop paid a shim invocation per pruned id INSIDE the
+        # registry lock — daemon-down, each fallback is a full CLI spawn
+        # (seconds on a Pi), so a large prune serialized every other
+        # workstream writer behind plane fallbacks for minutes; and a crash
+        # mid-loop left a permanently half-archived plane record. The batch
+        # is built here (values captured under the lock) and handed out via
+        # a FILE, never a shell variable: with_lock runs its command in a
+        # SUBSHELL on flock-capable hosts (the Pi), so a global set in here
+        # is lost there — a platform-split silent drop.
+        if [ "$PLANE_ARMED" = "1" ] && [ -n "$PLANE_PRUNE_BATCH_FILE" ]; then
+            local _pid _ev _batch=""
             while IFS= read -r _pid; do
-                [ -n "$_pid" ] && _plane_ws_event "$_pid" "archived"
+                [ -n "$_pid" ] || continue
+                _ev="$(_plane_ws_event_obj "$_pid" "archived")"
+                _batch="${_batch:+$_batch,}$_ev"
             done <<< "$_pruned_ids"
+            printf '%s' "$_batch" > "$PLANE_PRUNE_BATCH_FILE"
         fi
         echo "Pruned $terminal terminal workstream(s) to $ARCHIVE"
     }
-    with_lock "$REGISTRY.lock" _prune_ws || exit $?
+    PLANE_PRUNE_BATCH_FILE=""
+    [ "$PLANE_ARMED" = "1" ] && PLANE_PRUNE_BATCH_FILE="$(safe_mktemp)"
+    with_lock "$REGISTRY.lock" _prune_ws || { _prc=$?; rm -f "$PLANE_PRUNE_BATCH_FILE"; exit "$_prc"; }
+    if [ -n "$PLANE_PRUNE_BATCH_FILE" ] && [ -s "$PLANE_PRUNE_BATCH_FILE" ]; then
+        printf '{"events":[%s]}' "$(cat "$PLANE_PRUNE_BATCH_FILE")" \
+            | plane_emit_events workstream-update || true
+    fi
+    rm -f "$PLANE_PRUNE_BATCH_FILE"
     ;;
 
 *)

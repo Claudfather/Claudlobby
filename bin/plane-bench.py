@@ -262,23 +262,16 @@ def bench_shim(root: Path, n: int) -> tuple[list[float], int, bool]:
     invocation per emit, through whichever rung answers. Returns (timings,
     fallback_count, daemon_was_serving). Budget (plan §5): p95 <= 200ms on
     the Pi, machine-checked when the daemon rung is the one measured."""
-    import socket as _socket
-
+    from claudlobby.plane.daemon import probe_daemon
     from claudlobby.plane.db import connect, db_path
 
     shim = REPO / "lib" / "plane-emit.sh"
     sock = root / "state" / "plane" / "ingest.sock"
-    serving = False
-    if sock.exists():
-        probe = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        probe.settimeout(1.0)
-        try:
-            probe.connect(str(sock))
-            serving = True
-        except OSError:
-            serving = False
-        finally:
-            probe.close()
+    # probe_daemon, not a bare connect (gauntlet round): this delivery added
+    # the typed handshake precisely because connect-succeeds proves only that
+    # SOMETHING listens (F15) — a bench that stamps its budget verdict
+    # "daemon rung" off the weak probe can label a foreign listener serving.
+    serving = sock.exists() and probe_daemon(sock)
     out: list[float] = []
     fallbacks = 0
     emitted_ids: list[str] = []

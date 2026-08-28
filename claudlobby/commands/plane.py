@@ -9,6 +9,7 @@ of escaping as a traceback from whichever command happened to touch it.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -279,7 +280,12 @@ def cmd_plane_doctor(args) -> int:
         # (§17 direction: symptom -> exact command).
         from ..plane.daemon import probe_daemon, socket_path
 
-        sock = socket_path(root)
+        # Honor PLANE_SOCKET like the shim does (gauntlet round): doctor used
+        # to probe only the default path, so an overridden-socket fleet read
+        # "not serving" while every door happily used rung 1 — and the doctor
+        # test could never reach the serving branch against a live fixture.
+        sock = Path(os.environ["PLANE_SOCKET"]) if os.environ.get("PLANE_SOCKET") \
+            else socket_path(root)
         serving = sock.exists() and probe_daemon(sock)
         started = 0
         last_ingest = None

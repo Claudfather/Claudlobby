@@ -36,8 +36,11 @@ VERDICT_EXITS = {"contract_violation": 2, "bad_request": 2,
                  "total_failure": 3, "downgrade": 4}
 
 
-def _parse_argv(argv: list) -> tuple:
-    """--socket S --finalize-to F [--timeout T] — hand-rolled (see header)."""
+def _parse_argv(argv: list):
+    """--socket S --finalize-to F [--timeout T] [--finalize-only] — hand-rolled
+    (see header). Owns EVERY refusal message and returns None after printing
+    one: the old split (parser printed some refusals, main re-diagnosed with a
+    generic line) stacked two errors and misattributed unknown-arg failures."""
     sock = fin = None
     timeout = 1.0   # TOTAL deadline (see main) — Pi p95 under load is ~190ms,
                     # so 1s is 5x headroom; anything slower is a wedge and the
@@ -60,13 +63,17 @@ def _parse_argv(argv: list) -> tuple:
             i += 2
         else:
             print(f"plane-socket-client: unknown arg {a!r}", file=sys.stderr)
-            return None, None, timeout, finalize_only
+            return None
     # Finite positive only (#1372 re-verify: 'inf' reached settimeout and
     # died on OverflowError at exit 1 — a laundered verdict code).
     if not (0 < timeout < 3600):
         print(f"plane-socket-client: --timeout must be a finite positive"
               f" number of seconds < 3600", file=sys.stderr)
-        return None, None, -1.0, finalize_only
+        return None
+    if not sock or not fin:
+        print("plane-socket-client: --socket and --finalize-to are required",
+              file=sys.stderr)
+        return None
     return sock, fin, timeout, finalize_only
 
 
@@ -83,16 +90,10 @@ def _finalize(events: list) -> list:
 
 
 def main() -> int:
-    class _A:  # argparse-shaped holder (see header for why not argparse)
-        pass
-
-    args = _A()
-    (args.socket, args.finalize_to, args.timeout,
-     args.finalize_only) = _parse_argv(sys.argv[1:])
-    if not args.socket or not args.finalize_to or args.timeout <= 0:
-        print("plane-socket-client: --socket and --finalize-to are required"
-              " (and --timeout must be finite positive)", file=sys.stderr)
+    parsed = _parse_argv(sys.argv[1:])
+    if parsed is None:  # the parser already printed the one refusal
         return 2
+    sock_path, finalize_to, timeout, finalize_only = parsed
 
     try:
         parsed = json.loads(sys.stdin.read())
@@ -106,11 +107,11 @@ def main() -> int:
 
     finalized = _finalize(events)
     payload = json.dumps({"events": finalized}, ensure_ascii=False)
-    fd = os.open(args.finalize_to, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    fd = os.open(finalize_to, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(payload + "\n")
 
-    if args.finalize_only:
+    if finalize_only:
         # The shim's wedge-cooldown path: mint + persist the idempotent batch
         # for the CLI rung, no socket attempt at all.
         return 5
@@ -123,7 +124,7 @@ def main() -> int:
     # shim's cold-CLI rung does the real work.
     import time as _time
 
-    deadline = _time.monotonic() + args.timeout
+    deadline = _time.monotonic() + timeout
 
     def _remaining():
         left = deadline - _time.monotonic()
@@ -134,7 +135,7 @@ def main() -> int:
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(_remaining())
-        client.connect(args.socket)
+        client.connect(sock_path)
         client.settimeout(_remaining())
         client.sendall(payload.encode() + b"\n")
         try:
@@ -149,8 +150,17 @@ def main() -> int:
             if not chunk:
                 break
             buf += chunk
+            if len(buf) > 65536:
+                # probe_daemon's cap (F15 re-verify), mirrored: a same-uid
+                # squatter streaming newline-free bytes must cost bounded
+                # memory, not GBs inside the deadline.
+                raise OSError("oversized reply (not our daemon?)")
         client.close()
         resp = json.loads(buf)
+        if not isinstance(resp, dict):
+            # a non-object reply would AttributeError below at exit 1 — an
+            # undefined code; whatever sent it is not our daemon.
+            raise ValueError(f"non-object reply: {type(resp).__name__}")
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"plane-socket-client: transport failed: {exc}", file=sys.stderr)
         return 5
