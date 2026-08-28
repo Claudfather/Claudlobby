@@ -121,6 +121,12 @@ fleet:
 - No `dangerously_skip_permissions` -- standard permissions by default. The user approves commands during bootstrap. (Greg's position, supported by Rajan.)
 - No `teams` -- single-bot fleet, no dispatch hierarchy.
 - `require_mention: false` -- claudfather is the only bot in the seed fleet's group, so it listens to everything.
+- **Drift from this sample, verified against the shipped `fleet.yaml.seed`:** the token env var is
+  `token_env: TELEGRAM_TOKEN_CLAUDFATHER` (no `_BOT` infix), not `TELEGRAM_BOT_TOKEN_CLAUDFATHER` as
+  shown above. And `telegram_group_chat_id`, `human_telegram_id`, and `telegram.handle` ship as the
+  literal sentinel `"REPLACE_ME"` (see §8's resume-detection mechanism) rather than the placeholder
+  values in this illustrative snippet. `.env.seed.example` matches: `TELEGRAM_TOKEN_CLAUDFATHER=`
+  (empty, no sample token). Copy the committed files, not this sample block, when wiring credentials.
 
 ### .env.seed.example
 
@@ -508,7 +514,7 @@ Everything needed for "git clone to claudfather alive on Telegram."
 
 #### setup-host.sh details (superseded)
 
-**This script as specced was never built.** `lib/setup-host.sh` does not exist in the repo. Instead, a later and more comprehensive mechanism shipped: `lib/setup-system` (host prereqs + `system.yaml` host-job enrollment) plus `lib/setup-fleet` (idempotent per-fleet apply + enroll -- default jobs, atomic legacy-keepalive swap, bot enrollment, reconcile) and `lib/setup-fleets` (runs `setup-fleet` for every fleet on the host). These landed via the Phase 3 setup backbone (#464, 2026-07-02) -- five weeks after this spec -- and own considerably more scope than this section's original sketch (see root `CLAUDE.md`'s `lib/` table for the current command set). `setup-mac-mini.sh` still exists but is now an unused stub (124 bytes). `tests/test_setup_host.py` was never created; `tests/test_setup_backbone.py` covers the shipped backbone instead.
+**This script as specced was never built.** `lib/setup-host.sh` does not exist in the repo. Instead, a later and more comprehensive mechanism shipped: `lib/setup-system` (host prereqs + `system.yaml` host-job enrollment) plus `lib/setup-fleet` (idempotent per-fleet apply + enroll -- default jobs, atomic legacy-keepalive swap, bot enrollment, reconcile) and `lib/setup-fleets` (runs `setup-fleet` for every fleet on the host). These landed via the Phase 3 setup backbone (#464, 2026-07-02) -- five weeks after this spec -- and own considerably more scope than this section's original sketch (see root `CLAUDE.md`'s `lib/` table for the current command set). `setup-mac-mini.sh` has since been removed entirely (dead-code cleanup #767-#769, superseded by the backbone above) -- it is no longer even an unused stub. `tests/test_setup_host.py` was never created; `tests/test_setup_backbone.py` covers the shipped backbone instead.
 
 Original plan (kept for historical record):
 
@@ -558,6 +564,12 @@ Required for Pi users (Branden's position, supported by Rajan) in the original p
 | `/bootstrap` gains Telegram liveness check | ~30 |
 | Per-bot token guidance for user fleets | ~50 in bootstrap skill |
 | `/add-bot` conversational wrapper around `claudlobby new-bot` | ~80 skill |
+
+**Status check:** `/add-bot` has since shipped (`library/skills/add-bot/SKILL.md`) and is now in the
+real `fleet.yaml.seed`'s `bots.claudfather.skills` list alongside `bootstrap`/`doctor`/`fleet-status`
+-- ahead of the rest of this Phase 2 table, which is still unbuilt: no top-level `claudlobby
+bootstrap` or `claudlobby doctor` CLI subcommand exists as of this writing (`claudlobby plane
+doctor` is an unrelated observable-plane subcommand, not this one).
 
 ### Phase 3: CI + docs
 

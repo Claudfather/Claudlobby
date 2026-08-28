@@ -13,7 +13,7 @@ claudlobby is a **compositor**: a thin Python program that reads `fleet.yaml`, a
 
 ### 1. `library/` — building blocks
 
-Eleven subdirectories, each a flat collection of small files:
+Twelve subdirectories, each a flat collection of small files:
 
 ```
 library/
@@ -27,7 +27,8 @@ library/
 ├── lessons/            tmux-dispatch-shell-expansion.md, … (learned patterns)
 ├── principles/         consolidate-dont-fork.md, … (design principles)
 ├── permissions/        access.json.template (permission templates)
-└── post_actions/       (post-task lifecycle hooks — e.g. pre-stop handoff, daily wrap-up)
+├── post_actions/       (post-task lifecycle hooks — e.g. pre-stop handoff, daily wrap-up)
+└── tools/               tool.yaml + Jinja template per tool, rendered into <bot_dir>/tools/
 ```
 
 **Expertise** files are role scaffolding — what a manager *does*, not what it sounds like. (Voice goes elsewhere — see below.)
@@ -85,6 +86,11 @@ Defaults flow into every bot. Lists (skills, guardrails, protocols) accumulate; 
 
 See [`fleet-yaml-schema.md`](../fleet-yaml-schema.md) for every field.
 
+`fleet.yaml` is the middle of **three config tiers**: package-owned
+[`system.yaml`](../system-yaml-schema.md) governs HOW the platform runs (host
+jobs, per-fleet defaults), `fleet.yaml` governs WHO the bots are, and optional
+[`projects.yaml`](../projects-yaml-schema.md) governs WHAT the work is.
+
 ### 3. `runtime/bots/<name>/` — generated output
 
 For each bot in `fleet.yaml`, `claudlobby generate` writes:
@@ -99,6 +105,8 @@ runtime/bots/<name>/
 │   └── skills/              ← symlinks → library/skills/<skill>
 ├── memory/                  ← bot-owned persistent state
 ├── data/                    ← bot-owned data + scripts
+├── tools/                   ← composited scripts (0755, generated — never hand-edited)
+├── logs/                    ← bot log files
 ├── projects/                ← git checkouts (gitignored)
 ├── <service_prefix>.<name>.service   ← systemd unit (Linux)
 └── <service_prefix>.<name>.plist     ← launchd plist (macOS)
@@ -107,8 +115,8 @@ runtime/bots/<name>/
 #### CLAUDE.md composition order
 
 ```
- 1. Expertise                  library/expertise/<name>.md (concatenated)
- 2. Voice overlay              inserted after H1 (if voice: set)
+ 1. Voice overlay              inserted after H1 (if voice: set)
+ 2. Expertise                  library/expertise/<name>.md (concatenated)
  3. Fleet Mission              from fleet.yaml fleet.mission: field
  4. Mission                    from fleet.yaml bots.<name>.mission: field
  5. Autonomous Runner          "Your Continuous Job" section (if bot.autonomous_runner: set)
@@ -174,10 +182,55 @@ Bots can edit themselves in `runtime/bots/<name>/` during a session. `runtime/bo
 
   1. Bot edits its CLAUDE.md mid-session (e.g., learns a new pattern, codifies a rule)
   2. `claudlobby diff <bot>` shows the drift vs what `generate` would produce
-  3. `claudlobby promote <bot>` (interactive — v1 is manual; v2 will have a picker) moves drifted content back to `library/expertise/<role>.md`, `voices/<voice>.md`, or a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`
-  4. After promotion, `library/` reflects the learned change. Re-running `generate` produces a CLAUDE.md consistent with the new library state.
+  3. `claudlobby promote <bot>` — **v1 is a pointer only, not a mover**: it prints which `library/` file each category of drift belongs in (`library/expertise/<role>.md`, `voices/<voice>.md`, a brand-new `library/guardrails/<name>.md` or `library/protocols/<name>.md`, etc.); no content is copied automatically, and the bot's composed `CLAUDE.md` is not read back — you hand-edit the named file yourself. An interactive picker that performs the move is planned for v2.
+  4. After hand-editing `library/` per the pointer, re-running `generate` produces a CLAUDE.md consistent with the new library state.
 
 This is the foundation for the future ML / self-learning layer: drift becomes training data. When the same drift shows up across multiple bots, that's a signal a guardrail or protocol should exist.
+
+## The observable plane
+
+The four layers above answer "how does a bot get *composed*." A fifth concern sits orthogonal to
+all of them: how does anyone find out what a *running* fleet actually did — which dispatch went
+where, whether it was acknowledged, what a workstream's state is — after the fact, across
+restarts, without grepping tmux panes. That's the **observable plane** (`claudlobby/plane/`, a
+subpackage of the compositor; landed 2026-08-26/27).
+
+It's an append-only, typed event kernel — not a new generation layer. Nothing in `fleet.yaml` or
+`runtime/bots/` changes shape because of it; it's a recording substrate that the existing lib/
+scripts write into, from the side.
+
+```
+claudlobby/plane/     — the kernel: contracts (typed event envelope), minted ids, canonical
+                         serialization, SQLite storage (state/plane/plane.db), an ingest function,
+                         queries, migrations
+claudlobby/commands/plane.py
+                       — the CLI surface: `claudlobby plane {status,doctor,serve,schema,spool}`,
+                         `claudlobby emit` / `emit-batch`
+lib/plane-emit.sh     — the shim every writing door calls: unix-socket daemon → cold CLI →
+                         local spool, each fallback disclosed, never blocks the door's real action
+lib/plane-daemon.sh   — launches `claudlobby plane serve`, a long-lived socket ingest daemon
+lib/plane-session-start.sh
+                       — SessionStart hook; mints the transcript-stable session_uid attached to
+                         everything a session reports
+```
+
+**Five existing doors dual-write into it**: `dispatch-task.sh`, `report-back.sh`, `tg-post.sh`,
+`workstream-update.sh`, `briefing-trigger.sh`. Each keeps writing its legacy JSONL ledger exactly
+as before — that stays authoritative — and *additionally* emits a plane event alongside it. Dual
+write, not migration.
+
+**Everything about it is dormant by default**, the same pattern as `SESSION_DIGEST_ENABLED`
+elsewhere in this codebase: a fleet that never sets `PLANE_EMIT_ENABLED=1` pays zero cost and
+behaves exactly as it did before this existed. The daemon itself needs a *second*, host-level
+arm (`system.yaml` `host.jobs.plane-daemon.enroll: true`) — a fleet can dual-write to the cold
+CLI/spool path without ever running the daemon. See
+[`system-yaml-schema.md`](../system-yaml-schema.md#unit-service--resident-host-services) for the
+full `host.jobs`/`unit: service` shape and its arm/disarm recipe.
+
+**It's write-side only, for now.** `claudlobby events`, `report-back`, and `brief` still read the
+legacy JSONL ledgers — the plane kernel is a flight recorder being built ahead of the read/query
+layer that will eventually consume it. Full model, activation semantics, and the fleet-review
+history behind the design: `documentation/plans/2026-08-18-observable-plane-design-v2.md`.
 
 ## Validation
 
@@ -194,7 +247,7 @@ Pass `--strict` to make warnings into errors (CI use).
 
 ## Why Python (not Bash, not Node, not Bun)
 
-The compositor logic has grown to ~10,000 lines of Python — but the *future* of the system is larger still:
+The compositor logic has grown to ~24,000 lines of Python (`claudlobby/`, including the newer `plane/` observable-plane event kernel) — but the *future* of the system is larger still:
 
 - A self-learning layer behind `library/` (embeddings, similarity search for "I need a bot that…", suggested skills based on observed drift)
 - A knowledge graph linking guardrails ↔ incidents that motivated them

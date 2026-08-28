@@ -1,4 +1,52 @@
+---
+title: "Observable Plane — Phase 1: Semantic Kernel Implementation Plan"
+type: plan
+status: completed
+owner: fleet owner
+created: 2026-08-19
+---
+
 # Observable Plane — Phase 1: Semantic Kernel Implementation Plan
+
+**Status:** completed 2026-08-23. Shipped as commit `b696603` (PR #1341, squashing the
+task-by-task build); a post-ship independent review's 13 findings (4 blocking, 9 should-fix)
+were then fixed in commit `6a005e2`. Outcome recorded in §Outcome below; the plan body beneath it
+(including every unchecked `- [ ]` box) is preserved exactly as ratified and is not retro-edited —
+this repo's convention (see `2026-08-19-github-app-installation-token-auth.md`).
+
+## Outcome (recorded 2026-08-28, docs-audit)
+
+All 13 tasks (Task 0 through Task 11, plus the inserted Task 8b) executed subagent-driven via `superpowers:subagent-driven-development`, TDD
+throughout, every file matching this plan's File Structure section byte-for-byte at the module
+level (`claudlobby/plane/{canonical,ids,registries,contracts,db,migrations,identity,ingest,spool,
+emit_api}.py`, `migrations/0001_kernel.sql`, `bin/plane-bench.py`,
+`tests/fixtures/plane/canonical_golden.json`, all nine `tests/test_plane_{canonical,ids,
+contracts,db,identity,ingest,spool,cli,crash_battery}.py` files — all confirmed present in this
+worktree). `claudlobby/commands/plane.py` and `pyproject.toml`'s `pydantic>=2.5,<3` dependency +
+`claudlobby.plane` package registration also confirmed landed.
+
+**Task 10's bench gate ran for real and its two open questions both resolved:**
+- The read-benchmark gate caught a real structural finding on first run: `task-status` p50 ~355ms
+  on a local Mac (missing the 50ms budget) via a per-assignment `ORDER BY … LIMIT 1` subquery
+  walking the wrong index. Confirmed binding on the Pi at 318ms, fixed by a second migration
+  shipped in the post-ship review commit — `claudlobby/plane/migrations/0002_task_status_index.sql`
+  (`idx_events_task_assignment`) — bringing it to 1.2ms on the Pi. The F16-v2 physical-shape flip
+  this was designed to formally reopen on failure was evaluated and closed shape-stands (an index
+  fix, not a schema collapse) — see design v2 §19 items 7(f) and 8.
+- Task 10's own ingest-choice gate (`Pi cold p95 ≤ 300ms AND burst errors == 0 → direct writer;
+  else socket daemon`) also ran for real: Pi cold-emit p95 measured 534–574ms, and an independent
+  fast host measured 342.8ms — both over the 300ms ceiling — so the gate resolved to **socket
+  daemon**, which is exactly what Phase 2 PR-A then built (`claudlobby/plane/daemon.py`).
+
+**Test evidence:** `CHANGELOG.md` (`[Unreleased]`) records 122 plane tests green at Phase-1
+completion. Independently re-run for this audit (2026-08-28, unsandboxed): `./.venv/bin/pytest
+tests/test_plane_*.py` → **265 passed, 0 failed** (this count is the current cumulative total
+across Phase 1 + Phase 2 + the post-merge gauntlet fixes, not Phase-1-alone).
+
+Consumed by Phase 2 (`documentation/plans/2026-08-24-observable-plane-phase2-ingest.md`), which
+wires doors onto this kernel — see that plan's own Outcome section.
+
+---
 
 > **REVISION v2.1 (2026-08-24):** round-2 external review reconciled — ten implementation-blocking findings. Every variable-shape family INSERT derives its placeholders from column dicts (hand-counted arithmetic banned; fixed-shape INSERTs stay fixed); ingest is the sole transaction owner; migrations own their transactions in-script; the events CHECK is NULL-safe require-AND-forbid, tested by an executed INSERT matrix from `KIND_MANIFEST`; EmitRequest carries the full envelope (+origin/import_batch/confidence); `emit-batch` provides the atomic dispatch unit; the ack is single (task `receiver_acknowledged` deleted); spool fsyncs and classifies failures by SQLite error class; capture policy is config-resolved with metadata-mode body drop; files 0600/dirs 0700; id patterns anchored; NFC collisions rejected; quarantine names validated; bench is spawn-safe and gains read queries + EXPLAIN.
 

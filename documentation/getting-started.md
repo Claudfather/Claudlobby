@@ -6,7 +6,7 @@ Bring a fresh fleet up in about 30 minutes (excluding waiting on Telegram BotFat
 
 - An Anthropic account with a Claude Code subscription (Claude Max, Team, or Enterprise) or an `ANTHROPIC_API_KEY`
 - A host you control: Mac mini, Linux box, or Raspberry Pi 5
-- `python3` (3.10+), `git`, `tmux`, `jq`, `curl`, `node` (18+) installed (plus `openssl` if you use GitHub App auth — see [`runbooks/github-app-setup.md`](runbooks/github-app-setup.md); it ships preinstalled on macOS and Raspberry Pi OS)
+- `python3` (3.10+), `git`, `tmux`, `jq`, `curl`, `node` (current LTS — avoid an old, EOL'd major; see [`runbooks/pi-setup-guide.md`](runbooks/pi-setup-guide.md#nodejs--npm)) installed (plus `openssl` if you use GitHub App auth — see [`runbooks/github-app-setup.md`](runbooks/github-app-setup.md); it ships preinstalled on macOS and Raspberry Pi OS)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and logged in
 - The Telegram channel plugin: `claude plugin install telegram@claude-plugins-official`
 - A Telegram account (to create bots via [@BotFather](https://t.me/BotFather))
@@ -112,7 +112,7 @@ You can run claudlobby in **root mode** (fleet.yaml at repo root) or **overlay m
 | File | Size | Use it for |
 |------|------|-----------|
 | `fleet.yaml.seed` | ~60 lines, one bot | **Your first fleet.** Ships `claudfather`, the setup assistant. |
-| `fleet.yaml.example` | ~600 lines, full fleet | **Reference.** Documents every available field; copy fragments out of it. |
+| `fleet.yaml.example` | ~400 lines, full fleet | **Reference.** Documents every available field; copy fragments out of it. |
 
 Start from the seed. Copying the example as a first fleet means debugging a dozen bots you did
 not choose before anything runs.
@@ -200,7 +200,7 @@ The skill subdirectories should be symlinks into `library/skills/`.
 
 ## 6. Start bots
 
-The easiest way to bring up a fleet is `lib/setup-fleet` — one idempotent call that enrolls the composed default timers (keepalive, fleet-pulse, reload-fleet, creds-check, log-rotation; opt-in jobs stay dormant) and spins up every declared bot, skipping bots that are already healthy:
+The easiest way to bring up a fleet is `lib/setup-fleet` — one idempotent call that enrolls the composed default timers (keepalive, fleet-pulse, reload-fleet, creds-check, log-rotation, data-sweep; opt-in jobs like `weekly-worker-restart` stay dormant) and spins up every declared bot, skipping bots that are already healthy:
 
 ```bash
 lib/setup-fleet                    # root mode (fleet.yaml at the repo root)

@@ -505,7 +505,7 @@ Same 22 tools, namespaced under `mcp__gws-work__`.
 
 1. **Shipped (rationale corrected).** `settings.local.json` is emitted with the bot's full resolved allow list. The original rationale — that the list *had* to be self-contained because local `allow` **replaces** global — was wrong: permission arrays **union** across scopes (see [Settings file merging](#settings-file-merging)), so global allows do carry through on a trusted workspace. A complete per-bot list remains the right target, but as the #644 self-containment goal (retire the shared global into each bot's own `CLAUDE_CONFIG_DIR`), not because of a replace semantic.
 
-2. **Partially shipped.** The `f"{tool}(**)"` bug this doc flagged is fixed on the **allow** side (plain tool names now emit as-is). The same defect still exists on the **deny** side as of this writing — worth a follow-up fix.
+2. **Shipped.** The `f"{tool}(**)"` bug this doc flagged is fixed on **both** the allow and deny sides — plain tool names now emit as-is on each (`claudlobby/composer.py`'s `deny_patterns.append(tool)` for bot-level `tool_permissions.deny`, mirroring the allow-side fix). Landed alongside the rest of this doc's original correction, commit `5b51a0a` (#481, 2026-07-06); `composer.py` carries no `(**)` string anywhere as of this writing.
 
 3. **Shipped.** MCP tool contracts are the primary mechanism: every MCP fragment in `library/mcp/` declares a `_permissions_contract`, and the compositor resolves instance-qualified patterns from it.
 
