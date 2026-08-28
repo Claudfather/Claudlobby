@@ -63,8 +63,16 @@ function deliveryLine(msg) {
   return `<div class="delivery ${d.cls}">${esc(d.label)}</div>`;
 }
 
+// "[BOTCOMMAND] erlich | task | <text>" / "[BOTREPORT] x | done | <text>"
+// -> "<text>": the prefix is carrier framing (sender/class/status all render
+// as chips already), not words (operator feedback: machinery in the prose).
+function stripEnvelope(text) {
+  return text.replace(/^\[BOT(?:COMMAND|REPORT)\]\s*[^|\n]*\|\s*[^|\n]*\|\s*/,
+                      "");
+}
+
 function bodyBlock(m) {
-  if (m.body) return `<div class="body">${esc(m.body)}</div>`;
+  if (m.body) return `<div class="body">${esc(stripEnvelope(m.body))}</div>`;
   return `<div class="body redacted">message captured as metadata only`
        + ` (${m.body_bytes} bytes${m.truncated ? ", truncated" : ""})</div>`;
 }
@@ -113,13 +121,16 @@ function ladder(thread) {
     + `${esc(s.label)}</span>`).join("") + `</div>`;
 }
 
+const clip = (s, n) => (s && s.length > n ? s.slice(0, n) + "…" : s);
+
 function threadTitle(t) {
-  if (t.title) return t.title;
+  // ALWAYS clipped — dispatch titles are whole task texts, and unclipped
+  // they render the same paragraph as headline AND first message (operator
+  // screenshot, 2026-08-28). The message below carries the full words.
+  if (t.title) return clip(stripEnvelope(t.title), 100);
   const first = t.messages[0];
-  if (first && first.body) {
-    const line = first.body.split("\n")[0];
-    return line.length > 90 ? line.slice(0, 90) + "…" : line;
-  }
+  if (first && first.body) return clip(stripEnvelope(first.body)
+                                         .split("\n")[0], 100);
   const cls = first ? first.message_class.replace("_", " ") : "conversation";
   return `${cls}${first ? ` from ${first.sender_short}` : ""}`;
 }
@@ -168,7 +179,8 @@ function renderTasks(env) {
     const st = TASK_STATUS[r.status] || { label: r.status, cls: "" };
     return `<div class="card ${r.attention ? "attn" : ""}">
       <span class="st ${st.cls}">${esc(st.label)}</span>
-      <b>${esc(r.title || r.work_item_id)}</b>
+      <b>${esc(clip(stripEnvelope(r.title || ""), 160)
+             || r.work_item_id)}</b>
       <div class="sub">${esc(r.assignee_short || r.assignee_uid)}`
       + `${r.expected_by ? ` · due ${esc(ago(r.expected_by))
             .replace(" ago", " past")}` : ""}`

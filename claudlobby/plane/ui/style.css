@@ -110,6 +110,8 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .st.s-bad { color: var(--bad); border-color: var(--bad); }
 .st.s-done { color: var(--dim); }
 .card .sub { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+.card b { display: -webkit-box; -webkit-line-clamp: 3;
+          -webkit-box-orient: vertical; overflow: hidden; }
 
 /* debug rail */
 .evt { display: flex; gap: 8px; padding: 3px 6px;
