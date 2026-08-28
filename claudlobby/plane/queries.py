@@ -24,7 +24,16 @@ _TERMINAL = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
 # (accepted-but-parked behind a busy turn). And a missing producer must fail
 # toward EMPTY, never toward everything: the old attention predicate
 # (NOT EXISTS ack) inverted to all-alarm with zero producers.
-_TX_ACTIVATION = "'pane_submitted','carrier_accepted','recipient_acknowledged'"
+#
+# ONE definition (gauntlet round; the TERMINAL_TASK_EVENTS pattern above):
+# ATTENTION_SQL and TASK_STATUS_SQL must mean the SAME thing by "activated" —
+# two byte-identical constants under two names is how a promoted/demoted
+# token (this PR moved carrier_queued and recipient_acknowledged) splits
+# the attention view from the status view silently.
+ACTIVATION_TX_EVENTS = (
+    "pane_submitted", "carrier_accepted", "recipient_acknowledged",
+)
+_TX_ACTIVATION = ",".join(f"'{e}'" for e in ACTIVATION_TX_EVENTS)
 
 ATTENTION_SQL = (
     # Attention = non-terminal AND (evidence of dispatch trouble OR overdue).
@@ -53,7 +62,7 @@ ATTENTION_SQL = (
 # read pending_unacknowledged — a retry in flight after a failed first attempt
 # must not report dispatch_failed, while an attempt whose own verdict IS
 # 'failed' must.
-_TX_OPEN = "'pane_submitted','carrier_accepted','recipient_acknowledged'"
+_TX_OPEN = _TX_ACTIVATION   # the SAME activation set — never a second copy
 _TX_UNRESOLVED = "'send_attempted','carrier_queued','unknown','duplicate_suppressed'"
 
 TASK_STATUS_SQL = (

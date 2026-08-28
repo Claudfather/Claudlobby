@@ -476,6 +476,106 @@ mint_task_id() {
     printf 't-%s-%s\n' "$(date +%s)" "$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 }
 
+# --- observable-plane door helpers (gauntlet consolidation) -------------------
+# The five plane doors carried five hand-rolled copies of one dual-write
+# scaffold — arming predicate (drifting on loud-vs-silent skip), id mint (four
+# copies of the od pipeline), shim wrapper (one door resolved the shim via
+# dirname "$0" while its siblings used LIB_DIR), transmission template (five
+# printf copies). One copy each, here. Genuinely door-specific payload
+# assembly stays in each door. The shim itself (plane-emit.sh) deliberately
+# does NOT source this file on its hot path — that ruling is about the shim
+# spawn; every DOOR already sources lib-common before its plane block.
+
+# plane_armed <door> [--require-fleet] [--require-bot] -> rc 0 armed, 1 not.
+# THE arming predicate: PLANE_EMIT_ENABLED=1 arms, PLANE_EMIT_DISABLED=1
+# (harness override) wins. Identity preconditions are DISCLOSED skips — the
+# silent variants were drift, not decisions: fleet-scoped rows cannot exist
+# without the identity, and a one-line stderr disclosure is how an operator
+# learns why an armed fleet shows no rows from one door.
+plane_armed() {
+    local door="$1"; shift || true
+    [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || return 1
+    [ "${PLANE_EMIT_DISABLED:-0}" != "1" ] || return 1
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --require-fleet)
+                if [ -z "${FLEET_NAME:-}" ]; then
+                    echo "$door: PLANE_EMIT_ENABLED but FLEET_NAME is empty — plane rows are fleet-scoped, skipping plane record (door action unaffected)" >&2
+                    return 1
+                fi ;;
+            --require-bot)
+                if [ -z "${BOT_NAME:-}" ]; then
+                    echo "$door: PLANE_EMIT_ENABLED but BOT_NAME is empty — skipping plane record (door action unaffected)" >&2
+                    return 1
+                fi ;;
+        esac
+        shift
+    done
+    return 0
+}
+
+# plane_mint_id <prefix> — THE plane id mint (mint_task_id sibling):
+# <prefix>_<32 hex>, matching the anchored ids.py patterns. Four private
+# copies meant one bad edit (byte count, locale-sensitive tr) could make a
+# single door fail ingest validation on every event, disclosed only on
+# stderr nobody tails.
+plane_mint_id() {
+    printf '%s_%s' "$1" "$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
+}
+
+# plane_emit_events <door> — stdin {"events":[...]} routed through THE shim
+# (plane-emit.sh: socket -> cold CLI -> spool). stdout discarded; stderr
+# passes through (the fallback disclosure is the contract); rc never
+# propagates — dual-write, the legacy record is load-bearing.
+plane_emit_events() {
+    local door="$1"
+    "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || \
+        echo "$door: plane record failed rc=$? (door action unaffected — legacy record stands)" >&2
+}
+
+# plane_tx_event <emitter> <fleet> <carrier> <msg_id> <destination> <state>
+#                [extra-json-fragment-with-leading-comma]
+# One transmission EVENT OBJECT on stdout — the caller wraps it in a batch.
+# fleet and destination are json_escaped here; the optional fragment is the
+# callers own pre-built JSON tail (the _plane_ws_event convention).
+plane_tx_event() {
+    printf '{"event_type":"transmission","emitter":"%s","fleet":"%s","payload":{"msg_id":"%s","attempt_no":1,"carrier":"%s","destination":"%s","state":"%s"%s}}' \
+        "$1" "$(json_escape "$2")" "$4" "$3" \
+        "$(json_escape "$5")" "$6" "${7:-}"
+}
+
+# plane_peer_fleet <session> — fleet name for stamping a plane alias of the
+# bot owning <session>: its OWN bot.conf first (#1372 F7 — path parsing
+# misattributed nested vault layouts), then the path component before
+# /runtime/bots, then the callers own FLEET_NAME. Resolution goes through
+# bot_dir_for_session (the ONE session -> dir owner). Prints a name; rc 0
+# always — a resolution failure degrades to same-fleet, the pre-fix reading.
+plane_peer_fleet() {
+    local session="$1" dir="" f=""
+    dir="$(bot_dir_for_session "$session" 2>/dev/null || true)"
+    if [ -n "$dir" ] && [ -d "$dir" ]; then
+        f="$(bot_conf_get "$dir" FLEET_NAME "" 2>/dev/null || true)"
+        if [ -z "$f" ]; then
+            case "$dir" in
+                */runtime/bots/*) f="$(basename "${dir%/runtime/bots/*}")" ;;
+            esac
+        fi
+    fi
+    printf '%s' "${f:-${FLEET_NAME:-}}"
+}
+
+# epoch_to_iso_utc <epoch> — THE epoch->ISO-8601-UTC conversion (three prior
+# copies disagreed on probe order and failure semantics). BSD date first
+# (macOS), then GNU; on failure both branches have failed and the rc
+# propagates — callers that want empty-on-failure append || true.
+epoch_to_iso_utc() {
+    local epoch="$1"
+    if date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null; then
+        return 0  # BSD/macOS
+    fi
+    date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ  # GNU/Linux
+}
+
 # rotate_jsonl_by_ts <ledger>
 # Shared self-rotation for ts-keyed JSONL ledgers (dispatch-log.jsonl,
 # report-back.jsonl): keep entries newer than OBSERVABILITY_REAP_DAYS

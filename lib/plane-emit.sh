@@ -63,7 +63,13 @@ skip_socket=0
 if [ -f "$WEDGE_MARK" ]; then
     _now=$(date +%s); _mark=$(cat "$WEDGE_MARK" 2>/dev/null || echo 0)
     case "$_mark" in ''|*[!0-9]*) _mark=0 ;; esac
-    if [ $(( _now - _mark )) -lt "$COOLDOWN" ]; then
+    _delta=$(( _now - _mark ))
+    # A marker AHEAD of the clock is a skew artifact, never a live wedge: this
+    # estate's RTC-less host boots up to ~1h behind real time, so a pre-crash
+    # marker outruns the clock and a plain `delta < cooldown` pins the socket
+    # rung off for the whole skew — during the boot emit storm, exactly when
+    # rung 1 matters most. Negative delta = expired.
+    if [ "$_delta" -ge 0 ] && [ "$_delta" -lt "$COOLDOWN" ]; then
         skip_socket=1
         printf 'plane-emit: socket in wedge cooldown (%ss) — straight to cold CLI\n' "$COOLDOWN" >&2
     else
@@ -72,10 +78,14 @@ if [ -f "$WEDGE_MARK" ]; then
 fi
 
 if [ "$skip_socket" = "1" ]; then
-    # Finalize without a send so the CLI rung has its idempotent batch.
+    # Finalize without a send so the CLI rung has its idempotent batch. The
+    # client's own rc carries verdicts (2 = bad stdin, before any finalize)
+    # and 5 on finalize-only success — pass it through, never overwrite: a
+    # hardcoded 5 here turned a contract violation into "daemon unavailable"
+    # + a doomed CLI replay + exit 3, precisely during incident windows.
     python3 -S -E "$LIB_DIR/plane-socket-client.py" \
         --socket "$SOCK" --finalize-to "$finalized" --finalize-only
-    rc=5
+    rc=$?
 else
     # -S -E: skip site/pyvenv machinery — the client is minimal-stdlib by
     # contract (measured: 45ms -> 12ms interpreter spawn on the Pi).
@@ -83,7 +93,7 @@ else
         --socket "$SOCK" --finalize-to "$finalized"
     rc=$?
     if [ "$rc" -eq 5 ]; then
-        date +%s > "$WEDGE_MARK" 2>/dev/null || true
+        { date +%s > "$WEDGE_MARK"; } 2>/dev/null || true
     elif [ "$rc" -eq 0 ]; then
         rm -f "$WEDGE_MARK" 2>/dev/null
     fi

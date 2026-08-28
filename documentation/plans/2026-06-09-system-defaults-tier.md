@@ -6,7 +6,7 @@ owner: mason
 created: 2026-06-09
 updated: 2026-07-06
 tags: [claudlobby, compositor, system-defaults, observability, infrastructure]
-shipped: Core engineering (three-layer merge, SystemDefaultsConfig opt-out, hook dedup, compose_fleet_timers(), runtime/fleet/ output, thin-wrapper installs, fleet.yaml.example migration) shipped as spec'd in f6874d7 (PR #392, merged 2026-06-10) with 34+ tests -- all 4 decision forks (F1-F4) locked exactly as below. Later renamed system_defaults.yaml -> system.yaml and fleet_timers -> jobs, plus added a new host tier this doc doesn't describe (see "Post-Ship Evolution" below). Never shipped -- the 4 proposed claudlobby doctor checks and claudlobby validate informational output (doctor.py/validator.py have zero system-defaults awareness); fleet.system_defaults also lacks a field-reference entry in fleet-yaml-schema.md.
+shipped: Core engineering (three-layer merge, SystemDefaultsConfig opt-out, hook dedup, compose_fleet_timers(), runtime/fleet/ output, thin-wrapper installs, fleet.yaml.example migration) shipped as spec'd in f6874d7 (PR #392, merged 2026-06-10) with 34+ tests -- all 4 decision forks (F1-F4) locked exactly as below. Later renamed system_defaults.yaml -> system.yaml and fleet_timers -> jobs, plus added a new host tier this doc doesn't describe (see "Post-Ship Evolution" below). Never shipped -- the 4 proposed claudlobby doctor checks (doctor.py still has zero system-defaults awareness, reconfirmed 2026-08-28). Two other "never shipped" items from this line have since partially resolved -- see "2026-08-28 re-audit" in Post-Ship Evolution below: fleet-yaml-schema.md gained a `### fleet.system_defaults` field-reference entry (landed the same day as this doc's last update, via the unrelated docs-audit PR #481), and validator.py gained a narrow, differently-shaped form of system-defaults awareness (not the informational output this plan specified).
 ---
 
 # System Defaults Tier
@@ -22,6 +22,14 @@ Compositor-hardcoded infrastructure that every fleet gets automatically. Adds a 
 - **A new top-level `host:` tier was added to `system.yaml`** for host-global singleton jobs (`claude-update`, `notify-behind`, `disk-monitor`, `fleet-memory-check`) -- enrolled once per host by `setup-system`, not per-fleet. This plan predates the `host:` tier and does not describe it anywhere below.
 
 The mechanics below (three-layer merge, `SystemDefaultsConfig`, hook dedup, opt-out, `compose_fleet_timers()`) are still an accurate description of how the shipped system works in spirit -- only the file name and the `fleet_timers` key renamed. **For the current, authoritative field names and schema, see `documentation/fleet-yaml-schema.md` and `claudlobby/config.py`'s `SystemDefaultsConfig` class and system.yaml-loading code (`_resolve_system_yaml`, `_merge_system_into_defaults`).** The rest of this document is left as originally written/revised, preserved as the historical record of what was proposed -- do not write new code against `system_defaults.yaml` or `fleet_timers`.
+
+**2026-08-28 re-audit.** Re-checked the three "never shipped" claims in the Visibility section against the live repo:
+
+- **`fleet-yaml-schema.md` field reference — now exists, this claim is stale.** `documentation/fleet-yaml-schema.md:175-192` carries a full `### fleet.system_defaults` section (kill-switch shorthand, per-category dict form, precedence note). `git blame` dates it to `5b51a0aa`/PR #481 ("comprehensive documentation staleness audit"), landed 2026-07-06 — the same day this plan doc's frontmatter was last touched, so the two edits crossed in-flight rather than one being written against the other.
+- **`validator.py` — gained awareness, but not the awareness this plan specified.** `claudlobby/validator.py:1549-1567` (`_validate_timers`, added 2026-07-24 by #704/#735 — a validate/generate parity fix, unrelated to this plan) now reads `fleet.system_defaults.enabled`/`.timers` as a gate before checking timer scripts for un-anchored absolute paths. That is a real, live consumer of the field, but it is an **error-level gate for a different check**, not the `[info]`-style "system defaults active" / "fleet overrides system defaults" output this plan's `### claudlobby validate` section specifies below. That specific informational output still does not exist.
+- **`doctor.py` — confirmed still zero system-defaults awareness.** `grep -c "system.default" claudlobby/doctor.py` returns 0. None of the four proposed checks (`system-defaults-loaded`, `fleet-timers-installed`, `system-defaults-overrides`, `system-defaults-disabled`) exist under any name.
+
+Net: this doc's overall `partially-completed` status is still correct — the doctor gap (the larger of the two Visibility items) is untouched — but the specific "lacks a field-reference entry" claim is now false and is corrected in the sections below rather than silently.
 
 ## Problem
 
@@ -467,7 +475,7 @@ New checks:
 
 ### claudlobby validate
 
-**Ship status: PENDING -- not shipped.** `claudlobby/validator.py` (519 lines) has no `system_defaults`/`system-defaults` references and no generic `[info]`-style override-detection output.
+**Ship status: PENDING -- the specific output below not shipped; corrected 2026-08-28.** `claudlobby/validator.py` gained ONE `fleet.system_defaults`-aware check since this line was written — `_validate_timers` (`validator.py:1549-1567`, added 2026-07-24 by #704/#735 for an unrelated validate/generate parity fix) gates timer-script path validation on `fleet.system_defaults.enabled`/`.timers`. That is error-level plumbing for a different check, not informational output. The `[info]`-style override-detection block described immediately below — "system defaults active", "fleet overrides system defaults", hook-dedup notices — still does not exist anywhere in `validator.py`.
 
 Informational output appended to validation report:
 
@@ -568,7 +576,7 @@ Existing user fleet.yaml files that declare hooks/observability continue to work
 | `tests/test_config.py` | Extended: three-layer merge, hook dedup, SystemDefaultsConfig parsing. |
 | `tests/test_composer.py` | Extended: fleet timer generation, opt-out skips timers. |
 
-**Status note (2026-07-06):** Most rows above shipped as planned. Divergences: `claudlobby/validator.py` and `claudlobby/doctor.py` rows are **PENDING** -- neither file gained any system-defaults awareness (see Visibility section above). `documentation/fleet-yaml-schema.md` is **PARTIALLY** shipped -- it documents the `jobs`/`enroll` merge mechanics but has no dedicated `fleet.system_defaults` field-reference entry. `tests/test_config.py` and `tests/test_composer.py` were **not** extended as this table describes -- coverage was instead consolidated into the new `tests/test_system_defaults.py` (932 lines, 14 test classes), a filing deviation with no coverage gap.
+**Status note (2026-07-06, corrected 2026-08-28):** Most rows above shipped as planned. Divergences: `claudlobby/doctor.py` row is **PENDING** -- still no system-defaults awareness (see Visibility section above; reconfirmed 2026-08-28). `claudlobby/validator.py` gained a narrow, differently-purposed form of awareness on 2026-07-24 (`_validate_timers`, #704/#735) — see the `### claudlobby validate` ship-status note above; the informational output this table's row describes is still **PENDING**. `documentation/fleet-yaml-schema.md` is now **SHIPPED** for the field-reference entry specifically — a dedicated `### fleet.system_defaults` section landed 2026-07-06 via #481 (documented in "2026-08-28 re-audit" above); it was **PARTIALLY** shipped only in the narrower sense of this row (as of this note's original writing) that it didn't yet cover every merge nuance this plan's design section describes. `tests/test_config.py` and `tests/test_composer.py` were **not** extended as this table describes -- coverage was instead consolidated into the new `tests/test_system_defaults.py` (932 lines, 14 test classes), a filing deviation with no coverage gap.
 
 ## Testing Strategy
 

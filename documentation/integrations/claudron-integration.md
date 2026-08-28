@@ -2,7 +2,7 @@
 
 How claudlobby connects to [Claudron](https://github.com/Claudfather/Claudron) — the ecosystem's knowledge hub. Claudron owns the long-lived knowledge corpus in a **tenant-owned vault** (a private git repo of plain markdown); claudlobby consumes it. Claudlobby never stores the corpus, never forks Claudron's `SCHEMA.md` (the tri-repo schema SSOT), and never writes `runtime/`, `.env`, or operator PII into a vault.
 
-The full receiving-side plan is `documentation/plans/2026-07-07-claudron-consumption.md` (EPIC #509); Claudron's side is Claudfather/Claudron#14.
+The original receiving-side plan, `documentation/plans/2026-07-07-claudron-consumption.md` (EPIC #509), was closed 2026-07-24 as superseded by the cross-repo boundary-separation program — it is kept for its reasoning trail, not as a live plan. **This page is the current record of what's actually shipped.** Open follow-through work is tracked at #1248 ("the five orphans of the closed #509 epic"). Claudron's side is Claudfather/Claudron#14.
 
 ## What works today (at v0.4.0)
 
@@ -27,6 +27,8 @@ Hooks **fail open**: any error (unresolvable vault, missing git, a stalled netwo
 **One prompt on fleets (F1 is structural).** The composer sets **no claim env** — there is no `CLAUDRON_CAPTURE_OWNER` or holder variable. The single `PreCompact` capture prompt is claimed structurally: clauDNA's hook (the fleet default plugin) detects the engine's registered `hook pre-compact` entry and defers to it, so exactly one prompt fires. Bots without clauDNA get the engine's neutral prompt directly.
 
 **Grants — narrow verb allowlist only.** The composer grants `Bash(claudron lookup *)`, `Bash(claudron recall *)`, `Bash(claudron capture *)`, `Bash(claudron status *)` — the read/write verbs a bot legitimately self-serves (the query wedge, `/claudna:capture` shelling the CLI). It **never** emits `Bash(claudron *)`: the wildcard would grant `promote`/`plug`/`unplug`/`config`/`migrate` and defeat human-gated curation (boundary spec §8). The settings-installed hooks are harness-executed and pass through no permission check, so they need no grant. A vault-wired bot therefore **cannot** run `claudron promote`.
+
+**Known gap: no vault-hygiene guardrail yet (#745, open).** The grants above give every session-loop bot real write access to the tenant vault (`Bash(claudron capture *)`), but `library/guardrails/` has no rule yet governing what belongs in a capture — secrets, `runtime/` paths, operator PII. The query wedge re-injects vault content into future dispatches, so a bad capture compounds rather than staying inert. Not this doc's to close; tracked at #745.
 
 **Enable / disable.** `claudron_session_loop` is tri-state: default **on** when `claudron_vault_path` is set, **off** otherwise; set it explicitly only to override (e.g. `false` on a vault-wired bot meant to reach the vault by hand-run CLI alone — it then composes neither hooks nor verb grants). `claudron_session_loop: true` with no vault path is a `claudlobby validate` error.
 
@@ -73,6 +75,7 @@ Tracked, not built. Nothing here is a defect in a fleet that lacks it:
 
 ## References
 
-- Plan: `documentation/plans/2026-07-07-claudron-consumption.md` · EPIC #509 (children #510–#514)
+- Original plan (superseded, historical): `documentation/plans/2026-07-07-claudron-consumption.md` · EPIC #509 (children #510–#514, all closed)
+- Current follow-through: #1248 (open residuals #560, #562, #564, #745, #746)
 - Claudron roadmap: Claudfather/Claudron#14 · MCP contract: Claudfather/Claudron#17
 - Schema SSOT: `SCHEMA.md` at the Claudron repo root (their E1)

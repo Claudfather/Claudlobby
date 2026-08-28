@@ -131,6 +131,17 @@ from .registries import CONTENT_FIELDS, FIELD_POLICY  # noqa: E402  (re-export)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
+def _reject_over_cap(family: str, field: str, v):
+    """CONTENT-classified byte cap, one enforcement shape (gauntlet round —
+    three families carried three specialized copies of this check). Caps come
+    from the FIELD_POLICY SSOT; UTF-8 BYTES, not characters (round-3 F8);
+    authored content over cap REJECTS (§8/§11), never truncates."""
+    cap = FIELD_POLICY[(family, field)]["cap"]
+    if v is not None and len(v.encode("utf-8")) > cap:
+        raise ValueError(f"{family}.{field} exceeds {cap} bytes")
+    return v
+
+
 class ContractViolation(ValueError):
     """Payload violates the wire contract — caller bug, fail loud."""
 
@@ -243,7 +254,7 @@ class WorkItem(_Strict):
     created_by: str                             # alias
     workstream_id: Optional[str] = None         # the WHY axis
     repo: Optional[str] = Field(None, pattern=r"[^/\s]+/[^/\s]+")  # WHERE: owner/name
-    project_key: Optional[str] = Field(None, pattern=r"[a-z][a-z0-9-]*")  # projects.yaml slug
+    project_key: Optional[str] = Field(None, pattern=r"^[a-z][a-z0-9-]*$")  # projects.yaml slug
     # Authored, not relayed: oversized bodies REJECT — and the cap is BYTES
     # (round-3 F8: max_length counts characters; multibyte text could pass
     # the char cap while exceeding the byte budget).
@@ -252,10 +263,7 @@ class WorkItem(_Strict):
     @field_validator("body")
     @classmethod
     def _body_byte_cap(cls, v):
-        cap = FIELD_POLICY[("work_item", "body")]["cap"]
-        if v is not None and len(v.encode("utf-8")) > cap:
-            raise ValueError(f"work_item.body exceeds {cap} bytes")
-        return v
+        return _reject_over_cap("work_item", "body", v)
 
 
 class Assignment(_Strict):
@@ -279,11 +287,7 @@ class TaskEvent(_Strict):
     @field_validator("summary")
     @classmethod
     def _summary_byte_cap(cls, v):
-        # CONTENT-classified (FIELD_POLICY); authored — over-cap REJECTS.
-        cap = FIELD_POLICY[("task", "summary")]["cap"]
-        if v is not None and len(v.encode("utf-8")) > cap:
-            raise ValueError(f"task summary exceeds {cap} bytes")
-        return v
+        return _reject_over_cap("task", "summary", v)
     pr_url: Optional[str] = None
     deadline: Optional[AwareDatetime] = None
     successor_id: Optional[str] = None  # reassigned/retry_created -> assignment_id; superseded -> superseding id
@@ -334,7 +338,7 @@ class Workstream(_Strict):
     goal: Optional[str] = None
     owner: Optional[str] = None                 # alias
     opened_by: str = Field(min_length=1)        # alias
-    project_key: Optional[str] = Field(None, pattern=r"[a-z][a-z0-9-]*")
+    project_key: Optional[str] = Field(None, pattern=r"^[a-z][a-z0-9-]*$")
 
 
 class WorkstreamEvent(_Strict):
@@ -356,10 +360,7 @@ class WorkstreamEvent(_Strict):
     @field_validator("note", "next_step")
     @classmethod
     def _content_byte_caps(cls, v, info):
-        cap = FIELD_POLICY[("workstream_event", info.field_name)]["cap"]
-        if v is not None and len(v.encode("utf-8")) > cap:
-            raise ValueError(f"workstream {info.field_name} exceeds {cap} bytes")
-        return v
+        return _reject_over_cap("workstream_event", info.field_name, v)
 
 
 FAMILIES: dict[str, type[BaseModel]] = {
@@ -372,6 +373,14 @@ FAMILIES: dict[str, type[BaseModel]] = {
     "workstream": Workstream,
     "workstream_event": WorkstreamEvent,
 }
+
+# Wire family -> physical events.kind where the two DIFFER — the spec-ruling-#8
+# fact (`workstream_event` is the one suffixed wire name) declared ONCE, here
+# beside FAMILIES where the wire contract lives. Both ingest consumers (the
+# insert mapping and duplicate-replay verification) import this; F4 was
+# exactly a second site missing the mapping, and a private copy in ingest.py
+# left the insert branch hardcoding the same fact separately (gauntlet round).
+WIRE_TO_KIND: dict[str, str] = {"workstream_event": "workstream"}
 
 
 class EmitRequest(_Strict):

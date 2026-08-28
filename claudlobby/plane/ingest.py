@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 from . import PLANE_SCHEMA_VERSION
 from .contracts import (
+    WIRE_TO_KIND,
     Assignment,
     Communication,
     ContractViolation,
@@ -51,11 +52,9 @@ _CONSTRUCT_TABLE = {
     "workstream": "workstreams",
 }
 
-# Wire family -> physical events.kind where the two DIFFER (#1372 review F4:
-# workstream_event rows store kind='workstream'; replay verification queried
-# kind='workstream_event', found nothing, and raised divergence — breaking
-# the lost-ack socket->CLI replay for exactly this family).
-_WIRE_TO_KIND = {"workstream_event": "workstream"}
+# The wire->kind mapping lives in contracts.WIRE_TO_KIND (spec ruling #8),
+# imported above — F4 was a consumer missing it; a private copy here was the
+# next F4 waiting (the insert branch hardcoded the same fact separately).
 
 
 def _insert(conn: sqlite3.Connection, table: str, values: dict) -> None:
@@ -92,16 +91,40 @@ def _envelope(seq, event_id, env, *, host_uid, fleet_uid, now) -> dict:
     }
 
 
-def _family_values(conn, payload, now) -> tuple[str, dict]:
-    """(table, family-column dict) — no SQL here; _insert builds it."""
+def _batch_resolver(conn, now):
+    """Per-batch identity memo (gauntlet round, measured): a 3-event dispatch
+    batch made 8 resolve() calls for 3 unique aliases — each 3 SQL statements
+    plus a last_seen UPDATE writing an identical value (now is fixed per
+    batch), ~57% of warm emit_batch time. One resolve per (kind, alias) per
+    batch; last_seen still advances once per batch, which is what it means."""
+    memo: dict = {}
+
+    def party(alias):
+        key = ("party", alias)
+        if key not in memo:
+            memo[key] = resolve_party(conn, alias, now)
+        return memo[key]
+
+    def fleet(alias):
+        key = ("fleet", alias)
+        if key not in memo:
+            memo[key] = resolve_fleet(conn, alias, now)
+        return memo[key]
+
+    return party, fleet
+
+
+def _family_values(payload, party) -> tuple[str, dict]:
+    """(table, family-column dict) — no SQL here; _insert builds it.
+    `party` is the batch-scoped alias->uid resolver from _batch_resolver."""
     if isinstance(payload, Communication):
         return "communications", {
             "msg_id": payload.msg_id,
-            "sender_uid": resolve_party(conn, payload.sender, now),
+            "sender_uid": party(payload.sender),
             "sender_alias": payload.sender,
             "sender_session_uid": payload.sender_session_uid,
             "recipient_uid": (
-                resolve_party(conn, payload.recipient, now)
+                party(payload.recipient)
                 if payload.recipient else None
             ),
             "recipient_alias": payload.recipient,
@@ -125,7 +148,7 @@ def _family_values(conn, payload, now) -> tuple[str, dict]:
         return "work_items", {
             "work_item_id": payload.work_item_id,
             "title": payload.title,
-            "created_by_uid": resolve_party(conn, payload.created_by, now),
+            "created_by_uid": party(payload.created_by),
             "workstream_id": payload.workstream_id,
             "repo": payload.repo,
             "project_key": payload.project_key,
@@ -135,8 +158,8 @@ def _family_values(conn, payload, now) -> tuple[str, dict]:
         return "assignments", {
             "assignment_id": payload.assignment_id,
             "work_item_id": payload.work_item_id,
-            "assignee_uid": resolve_party(conn, payload.assignee, now),
-            "assigned_by_uid": resolve_party(conn, payload.assigned_by, now),
+            "assignee_uid": party(payload.assignee),
+            "assigned_by_uid": party(payload.assigned_by),
             "expected_by": (
                 payload.expected_by.isoformat() if payload.expected_by else None
             ),
@@ -175,7 +198,7 @@ def _family_values(conn, payload, now) -> tuple[str, dict]:
             "work_item_id": payload.work_item_id,
             "assignment_id": payload.assignment_id,
             "actor_uid": (
-                resolve_party(conn, payload.actor, now) if payload.actor else None
+                party(payload.actor) if payload.actor else None
             ),
             "session_uid": payload.session_uid,
             "deadline": payload.deadline.isoformat() if payload.deadline else None,
@@ -189,9 +212,9 @@ def _family_values(conn, payload, now) -> tuple[str, dict]:
             "title": payload.title,
             "goal": payload.goal,
             "owner_uid": (
-                resolve_party(conn, payload.owner, now) if payload.owner else None
+                party(payload.owner) if payload.owner else None
             ),
-            "opened_by_uid": resolve_party(conn, payload.opened_by, now),
+            "opened_by_uid": party(payload.opened_by),
             "project_key": payload.project_key,
         }
     if isinstance(payload, WorkstreamEvent):
@@ -204,11 +227,11 @@ def _family_values(conn, payload, now) -> tuple[str, dict]:
             }.items() if v is not None
         }
         return "events", {
-            "kind": "workstream",
+            "kind": WIRE_TO_KIND["workstream_event"],
             "event": payload.event,
             "workstream_id": payload.workstream_id,
             "actor_uid": (
-                resolve_party(conn, payload.actor, now) if payload.actor else None
+                party(payload.actor) if payload.actor else None
             ),
             "renewed_until": (
                 payload.renewed_until.isoformat()
@@ -254,6 +277,22 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
         (env.event_id or mint_event_id(), env, payload)
         for env, payload in items
     ]
+    # Intra-batch collision is a CONTRACT verdict, not transport (gauntlet
+    # round, probed): the same event_id twice in one batch used to collide on
+    # the second INSERT, roll back the first, then fail duplicate verification
+    # with "missing from ledger — mixed state" — daemon said `internal`,
+    # client exited 5, and the shim replayed a deterministic error through the
+    # cold CLI.
+    seen_ids: dict[str, int] = {}
+    for idx, (event_id, _env, _payload) in enumerate(prepared):
+        if event_id in seen_ids:
+            raise ContractViolation(
+                [{"loc": ("event_id",),
+                  "msg": f"intra-batch duplicate event_id {event_id}"
+                         f" (items {seen_ids[event_id]} and {idx})"}]
+            )
+        seen_ids[event_id] = idx
+    party, fleet = _batch_resolver(conn, now)
     try:
         conn.execute("BEGIN IMMEDIATE")
         results = []
@@ -264,12 +303,12 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
                 (event_id, env.event_type, now),
             )
             seq = cur.lastrowid
-            fleet_uid = resolve_fleet(conn, env.fleet, now) if env.fleet else None
+            fleet_uid = fleet(env.fleet) if env.fleet else None
             base = _envelope(
                 seq, event_id, env,
                 host_uid=host_uid, fleet_uid=fleet_uid, now=now,
             )
-            table, fam = _family_values(conn, payload, now)
+            table, fam = _family_values(payload, party)
             _insert(conn, table, {**base, **fam})
             results.append(IngestResult(event_id, seq, False))
         conn.execute("COMMIT")
@@ -315,7 +354,7 @@ def _verify_duplicates(conn, prepared) -> list[IngestResult]:
         if table == "events":
             fam = conn.execute(
                 "SELECT ingest_seq FROM events WHERE event_id = ? AND kind = ?",
-                (event_id, _WIRE_TO_KIND.get(family, family)),
+                (event_id, WIRE_TO_KIND.get(family, family)),
             ).fetchone()
         else:
             fam = conn.execute(

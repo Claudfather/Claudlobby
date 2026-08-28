@@ -155,7 +155,7 @@ measurement, not by argument.** `-e trace=openat` sees a *fresh* open. A session
 the file once at launch and kept the descriptor could re-read it with `read`/`pread64` and
 produce trace output identical to "never touched again" — and that is live rather than
 theoretical here, because the composer's write is `Path.write_text()`
-(`claudlobby/composer.py:2694`), which truncates and rewrites the **same inode** rather than
+(`claudlobby/composer.py:2717`), which truncates and rewrites the **same inode** rather than
 the tmp-then-rename this codebase uses elsewhere. A cached descriptor would therefore see the
 new content. Verified same-inode behaviour directly: `write_text` twice, inode unchanged.
 

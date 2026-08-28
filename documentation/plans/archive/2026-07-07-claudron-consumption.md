@@ -1,16 +1,48 @@
 ---
 title: "Claudlobby Consumes Claudron — the Receiving-Side Epic"
 type: plan
-status: draft
+status: superseded
 owner: chris
 tags: [ecosystem, claudron, mcp, protocols, knowledge, play:ecosystem]
 created: 2026-07-07
-updated: 2026-07-18
+updated: 2026-08-28
 links: ["#251", "#266", "#508", "#509", "#528", "#532", "#561", "Claudfather/Claudron#14", "Claudfather/Claudron#17", "Claudfather/Claudron#33", "Claudfather/Claudron#60"]
 ironclad: "cycle-1 complete (9 lenses); forks F1–F5 + F7 locked 2026-07-07, F8 locked 2026-07-18 (Decision C — clauDNA CLI-skill door; MCP fragment parked). CONVERGED. v5 (2026-07-18) re-scoped P2/P3/P4 per Decision C + full anchor re-validation (all behavioral claims hold; line drift tabled in the revision log)."
 ---
 
 # Claudlobby Consumes Claudron — the Receiving-Side Epic
+
+> **⛔ SUPERSEDED (2026-08-28 docs audit).** GitHub EPIC #509 (this plan's tracking issue) was
+> closed 2026-07-24 as superseded by the cross-repo boundary-separation program
+> (`Claudfather/Claudron` → `documentation/plans/2026-07-20-claudfather-boundary-separation.md`
+> §10 + the `2026-07-20-boundary-rearchitecture/` phase docs). This doc is kept for its reasoning
+> trail (Decision C, the fork ratifications, the anchor history) — it is **not** a live plan. What
+> it asked for was built, mostly beyond its own scope:
+>
+> | Planned here | Built as | Evidence |
+> |---|---|---|
+> | P1 (1a/1b/1c/1e) | schema pointer, ladder split, `[vault]` pinned `@v0.4.0`, CLI wedge | `pyproject.toml:21`; #519/#517/#528 |
+> | P2d (doctor readiness) | `doctor.check_claudron` + capability probes | `claudlobby/doctor.py`, `claudlobby/claudron_compat.py` |
+> | P3 (the consumption door) | **L2** — composed session-loop hooks (`SessionStart`/`PreCompact`/`SessionEnd`) + narrow per-bot verb grants; stronger than the CLI-only wedge this plan specified | `config.py` `claudron_session_loop`; `composer.py` `_merge_claudron_hooks` / `CLAUDRON_LOOP_GRANTS` |
+> | *(beyond this plan's scope)* | **L3** — the lessons corpus triaged and migrated to the vault | `documentation/plans/2026-07-23-l3-lessons-triage-ledger.md` (status: completed); `claudlobby/commands/lessons_migrate.py` |
+> | #560/#564 groundwork | **L4** — conformance gates, CI-wired | `claudlobby/conformance.py`, `tests/test_boundary_invariants.py` |
+> | — | boundary `CLAUDE.md` seams + root Ecosystem boundary section | root `CLAUDE.md`, `claudlobby/CLAUDE.md` (#664) |
+>
+> All five child issues (#510–#514), #251, and the #266 umbrella are closed. Decision C
+> (`documentation/decisions/2026-07-18-claudron-consumption-door.md`) is **not** reversed by any
+> of this — the program built on top of it, not against it.
+>
+> **Genuine residuals carried forward** (orphaned when #509 closed; tracked at **#1248**, "the
+> five orphans of the closed #509 epic"): #560 (overlay-path/reserved-name conformance, open),
+> #562 (the claudron-*installed* mount branch is untested, open), #564 (shared-tier set still
+> hardcoded + double-write into the vault, open), **#745** (vault-hygiene guardrail — bots can
+> write to the vault with no composed rule about what belongs there, open), **#746** (session-loop
+> per-session cost never measured on Pi-class hardware, open). #561 (navigate-vs-query protocol)
+> closed separately, via the `shared-documentation-vault` gated protocol variant.
+>
+> Current source of truth for what's shipped: `documentation/integrations/claudron-integration.md`.
+> The Decision Forks / Ironclad findings below remain an accurate historical record and are left
+> as originally written.
 
 Companion to Claudron's six-epic roadmap (Claudfather/Claudron PR #13 → EPIC #14, children #15–#20). Claudron authors the two inbound PRs (the `claudron.json` MCP fragment and the `frontmatter-schema.md` SSOT pointer); **this epic plans everything Claudlobby-side around receiving them**: reception criteria, an interim CLI query wedge, compositor/validator/doctor readiness, protocol cutover, the approval-gated graduation to fleet default, the version-pin policy, and the librarian standing job.
 

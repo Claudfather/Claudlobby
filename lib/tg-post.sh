@@ -66,30 +66,22 @@ printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TOKEN" > "$URL_C
 # carrier semantics per §7: API ok=true is carrier_accepted (acceptance, not
 # delivery), a rejected/empty response is failed.
 PLANE_ARMED=0
-if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" ] \
-   && [ -n "${FLEET_NAME:-}" ] && [ -n "${BOT_NAME:-}" ]; then
+if plane_armed tg-post --require-fleet --require-bot; then
   PLANE_ARMED=1
 fi
 PLANE_MSG_ID=""
-_plane_jstr() {
-  # Full JSON string encoding via jq (already a hard dep of this script) —
-  # returns the QUOTED string. The prior sed/awk escaper missed tabs and
-  # control characters, so a tabbed Telegram post produced an invalid intent
-  # batch and an orphan transmission (#1372 review F14).
-  printf '%s' "$1" | jq -Rs .
-}
-_plane_emit() {
-  # stderr passes through — the shim's fallback disclosure is the contract.
-  # Phase-neutral wording (#1372 F16): the intent emit precedes the send.
-  "$(dirname "$0")/plane-emit.sh" >/dev/null || \
-    echo "tg-post: plane record failed rc=$? (post action unaffected — plane is additive)" >&2
-}
 if [ "$PLANE_ARMED" = "1" ]; then
-  PLANE_MSG_ID="msg_$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
-  printf '{"events":[{"event_type":"communication","emitter":"tg-post","fleet":%s,"payload":{"msg_id":"%s","sender":%s,"recipient_raw":%s,"message_class":"notice","body":%s}}]}' \
-    "$(_plane_jstr "$FLEET_NAME")" "$PLANE_MSG_ID" \
-    "$(_plane_jstr "bot:$FLEET_NAME/$BOT_NAME")" \
-    "$(_plane_jstr "$CHAT_ID")" "$(_plane_jstr "$MSG")" | _plane_emit || true
+  PLANE_MSG_ID="$(plane_mint_id msg)"
+  # ONE jq -nc per emission (gauntlet round, measured): the prior per-string
+  # jq -Rs escaper spawned jq 4x here — ~60-120ms of pure spawn overhead per
+  # armed post on the Pi, on the ALERTING path. --arg is also safer than
+  # printf interpolation: jq owns every escape (the F14 tab class included)
+  # by construction. jq stays because it is already this script's hard dep.
+  jq -nc --arg fleet "$FLEET_NAME" --arg msg_id "$PLANE_MSG_ID" \
+     --arg sender "bot:$FLEET_NAME/$BOT_NAME" \
+     --arg dest "$CHAT_ID" --arg body "$MSG" \
+     '{events:[{event_type:"communication",emitter:"tg-post",fleet:$fleet,payload:{msg_id:$msg_id,sender:$sender,recipient_raw:$dest,message_class:"notice",body:$body}}]}' \
+    | plane_emit_events tg-post || true
 fi
 
 RESP="$(curl -s -X POST --config "$URL_CFG" \
@@ -101,11 +93,14 @@ OK="$(printf '%s' "$RESP" | jq -r '.ok // empty' 2>/dev/null || true)"
 if [ "$OK" = "true" ]; then
   if [ "$PLANE_ARMED" = "1" ]; then
     TG_MSGID="$(printf '%s' "$RESP" | jq -r '.result.message_id // empty' 2>/dev/null || true)"
-    CARRIER_REF_FRAG=""
-    [ -n "$TG_MSGID" ] && CARRIER_REF_FRAG=",\"carrier_ref\":\"tg:$TG_MSGID\""
-    printf '{"events":[{"event_type":"transmission","emitter":"tg-post","fleet":%s,"payload":{"msg_id":"%s","attempt_no":1,"carrier":"telegram-tgpost","destination":%s,"state":"carrier_accepted"%s}}]}' \
-      "$(_plane_jstr "$FLEET_NAME")" "$PLANE_MSG_ID" \
-      "$(_plane_jstr "$CHAT_ID")" "$CARRIER_REF_FRAG" | _plane_emit || true
+    # Digits-only gate (gauntlet round): TG_MSGID is jq -r output from the
+    # carrier's response — interpolating a non-numeric value into the ref
+    # would corrupt the batch; a message_id is always an integer.
+    case "$TG_MSGID" in *[!0-9]*) TG_MSGID="" ;; esac
+    jq -nc --arg fleet "$FLEET_NAME" --arg msg_id "$PLANE_MSG_ID" \
+       --arg dest "$CHAT_ID" --arg ref "$TG_MSGID" \
+       '{events:[{event_type:"transmission",emitter:"tg-post",fleet:$fleet,payload:({msg_id:$msg_id,attempt_no:1,carrier:"telegram-tgpost",destination:$dest,state:"carrier_accepted"} + (if $ref == "" then {} else {carrier_ref:("tg:"+$ref)} end))}]}' \
+      | plane_emit_events tg-post || true
   fi
   printf '%s' "$RESP" | jq -r '{ok, msg_id: .result.message_id}' 2>/dev/null || true
   exit 0
@@ -113,9 +108,10 @@ fi
 
 ERR="$(printf '%s' "$RESP" | jq -r '.description // empty' 2>/dev/null || true)"
 if [ "$PLANE_ARMED" = "1" ]; then
-  printf '{"events":[{"event_type":"transmission","emitter":"tg-post","fleet":%s,"payload":{"msg_id":"%s","attempt_no":1,"carrier":"telegram-tgpost","destination":%s,"state":"failed","error":%s}}]}' \
-    "$(_plane_jstr "$FLEET_NAME")" "$PLANE_MSG_ID" \
-    "$(_plane_jstr "$CHAT_ID")" "$(_plane_jstr "${ERR:-rejected}")" | _plane_emit || true
+  jq -nc --arg fleet "$FLEET_NAME" --arg msg_id "$PLANE_MSG_ID" \
+     --arg dest "$CHAT_ID" --arg err "${ERR:-rejected}" \
+     '{events:[{event_type:"transmission",emitter:"tg-post",fleet:$fleet,payload:{msg_id:$msg_id,attempt_no:1,carrier:"telegram-tgpost",destination:$dest,state:"failed",error:$err}}]}' \
+    | plane_emit_events tg-post || true
 fi
 echo "tg-post: send REJECTED — message NOT delivered (ok=${OK:-<none>}${ERR:+; error: $ERR})" >&2
 printf '%s' "$RESP" | jq -r '{ok, error: .description}' 2>/dev/null || printf '%s\n' "${RESP:-<no response>}"

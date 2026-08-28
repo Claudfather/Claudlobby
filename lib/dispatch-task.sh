@@ -465,20 +465,15 @@ safe_task=$(json_escape "$TASK")
 # stderr and NEVER blocks the dispatch. Construct ids are minted HERE and
 # recorded in the ledger row so report-back can join without a db read.
 PLANE_ARMED=0
-if [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] && [ "${PLANE_EMIT_DISABLED:-0}" != "1" ]; then
-    if [ -n "${FLEET_NAME:-}" ]; then
-        PLANE_ARMED=1
-    else
-        echo "dispatch-task: PLANE_EMIT_ENABLED but FLEET_NAME is empty — plane rows are fleet-scoped, skipping (dispatch unaffected)" >&2
-    fi
+if plane_armed dispatch-task --require-fleet; then
+    PLANE_ARMED=1
 fi
 PLANE_MSG_ID="" PLANE_WI_ID="" PLANE_ASG_ID=""
-_plane_hex32() { od -An -tx1 -N16 /dev/urandom | tr -d ' \n'; }
 if [ "$PLANE_ARMED" = "1" ]; then
-    PLANE_MSG_ID="msg_$(_plane_hex32)"
+    PLANE_MSG_ID="$(plane_mint_id msg)"
     if [ -n "$TASK_ID" ]; then
-        PLANE_WI_ID="wi_$(_plane_hex32)"
-        PLANE_ASG_ID="asg_$(_plane_hex32)"
+        PLANE_WI_ID="$(plane_mint_id wi)"
+        PLANE_ASG_ID="$(plane_mint_id asg)"
     fi
 fi
 
@@ -514,29 +509,31 @@ _plane_peer_context() {
     local sock sess
     sock=$(tmux_socket_for_bot "$peer_dir" 2>/dev/null || true)
     sess=$(basename "$peer_dir")
-    if [ -n "$sock" ] && bot_is_busy "$sock" "$sess" 2>/dev/null; then
+    # peer_dir rides as the third arg (gauntlet round): without it,
+    # bot_is_busy re-runs the whole session->dir resolution this function
+    # just did — including a second estate-wide cross-fleet sweep for the
+    # 44.6% of dispatches that are cross-fleet.
+    if [ -n "$sock" ] && bot_is_busy "$sock" "$sess" "$peer_dir" 2>/dev/null; then
         PLANE_PEER_BUSY=1
     fi
     return 0
 }
 [ "$PLANE_ARMED" = "1" ] && { _plane_peer_context "$WORKER_SESSION" || true; }
 
-_plane_emit() {
-    # stdin: {"events":[...]} — routed through THE shim (socket -> cold CLI).
-    # stderr passes THROUGH (the shim's fallback disclosure is the contract —
-    # eating it here made a degraded ladder silent at the door tier, caught by
-    # the validate-bot-change plane leg); only stdout is discarded. rc never
-    # propagates: dual-write, legacy is the record.
-    "$LIB_DIR/plane-emit.sh" >/dev/null || \
-        echo "dispatch-task: plane record failed rc=$? (dispatch action unaffected — legacy ledger remains the record)" >&2
-}
-
 _plane_emit_intent() {
     # Intent BEFORE transport (F9): the communication (and for id'd tasks the
     # work_item + assignment) exists before the first send attempt.
-    local safe_msg sender_alias recip_alias recip_field cmd_type msg_class src_ref
+    # Distinct values are escaped ONCE into safe_* locals (gauntlet round,
+    # measured): each json_escape is a fork-pipeline ~8-12ms on the Pi, and
+    # the fleet/sender/worker values used to be escaped 3-4x per emission —
+    # 50-100ms of the 200ms door budget.
+    local safe_msg safe_fleet safe_sender safe_worker
+    local sender_alias recip_alias recip_field cmd_type msg_class src_ref
     safe_msg=$(json_escape "$DISPATCH_MSG")
+    safe_fleet=$(json_escape "$FLEET_NAME")
     sender_alias="bot:$FLEET_NAME/$MANAGER"
+    safe_sender=$(json_escape "$sender_alias")
+    safe_worker=$(json_escape "$WORKER_SESSION")
     recip_field=""
     if [ -n "$PLANE_PEER_FLEET" ]; then
         recip_alias="bot:$PLANE_PEER_FLEET/$WORKER_SESSION"
@@ -566,20 +563,19 @@ _plane_emit_intent() {
         link_frag="\"work_item_id\":\"$PLANE_WI_ID\",\"assignment_id\":\"$PLANE_ASG_ID\","
     fi
     local comm wi_ev asg_ev
-    comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",\"sender\":\"$(json_escape "$sender_alias")\",${recip_field}\"recipient_raw\":\"$(json_escape "$WORKER_SESSION")\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
+    comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
     if [ -n "$TASK_ID" ]; then
-        iso_deadline=$(date -u -r "$expected_by" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-            || date -u -d "@$expected_by" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+        iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
         [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
         [ -n "$DISPATCH_WORKSTREAM" ] && ws_frag=",\"workstream_id\":\"$(json_escape "$DISPATCH_WORKSTREAM")\""
         case "$DISPATCH_REPO" in
             */*) repo_frag=",\"repo\":\"$(json_escape "$DISPATCH_REPO")\"" ;;
         esac
-        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$(json_escape "$sender_alias")\"${ws_frag}${repo_frag}}}"
-        asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$(json_escape "$FLEET_NAME")\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$(json_escape "$sender_alias")\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
-        printf '{"events":[%s,%s,%s]}' "$wi_ev" "$asg_ev" "$comm" | _plane_emit
+        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}}}"
+        asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
+        printf '{"events":[%s,%s,%s]}' "$wi_ev" "$asg_ev" "$comm" | plane_emit_events dispatch-task
     else
-        printf '{"events":[%s]}' "$comm" | _plane_emit
+        printf '{"events":[%s]}' "$comm" | plane_emit_events dispatch-task
     fi
 }
 
@@ -588,9 +584,9 @@ _plane_emit_transmission() {
     # carrier_queued (accepted-not-consumed, not activation); a clean send
     # into an idle pane is pane_submitted; a miss is failed.
     local state="$1"
-    printf '{"events":[{"event_type":"transmission","emitter":"dispatch-task","fleet":"%s","payload":{"msg_id":"%s","attempt_no":1,"carrier":"tmux","destination":"%s","state":"%s"}}]}' \
-        "$(json_escape "$FLEET_NAME")" "$PLANE_MSG_ID" \
-        "$(json_escape "$WORKER_SESSION")" "$state" | _plane_emit
+    printf '{"events":[%s]}' \
+        "$(plane_tx_event dispatch-task "$FLEET_NAME" tmux "$PLANE_MSG_ID" "$WORKER_SESSION" "$state")" \
+        | plane_emit_events dispatch-task
 }
 
 _append_ledger() {

@@ -3487,6 +3487,7 @@ def _write_timer_units(
     exec_args: list[str] | None = None,
     telegram_group_chat_id: str | None = None,
     fleet_pulse_env: dict[str, str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -3567,6 +3568,13 @@ def _write_timer_units(
     if fleet_name and name == _FLEET_PULSE_JOB and fleet_pulse_env:
         for var, value in fleet_pulse_env.items():
             service_lines.append(f"Environment={var}={value}")
+    # Caller-scoped extra env (gauntlet round; first tenant: PLANE_EMIT_ENABLED
+    # on briefing timers). Same mechanism as the two blocks above — a scheduler
+    # env is closed, so an Environment= line is the only thing the script can
+    # read — generalized so the next timer-reachable var is a call-site dict,
+    # not a fourth hand-rolled block.
+    for var, value in (extra_env or {}).items():
+        service_lines.append(f"Environment={var}={value}")
     service_lines.append(f"ExecStart={exec_start}")
     (timers_dir / f"{service_name}.service").write_text("\n".join(service_lines) + "\n")
 
@@ -3673,6 +3681,12 @@ def _write_timer_units(
             plist_lines.extend(
                 [f"    <key>{var}</key>", f"    <string>{value}</string>"]
             )
+    # Parity with the systemd extra_env block — the env-parity test compares
+    # the two platforms, so emitting on one only fails there, not in production.
+    for var, value in (extra_env or {}).items():
+        plist_lines.extend(
+            [f"    <key>{var}</key>", f"    <string>{value}</string>"]
+        )
     plist_lines.append("  </dict>")
     plist_lines.extend(
         [
@@ -3940,6 +3954,31 @@ def compose_fleet_timers(
         for slot in bot.briefing.slots
     }
     _write_briefing_manifest(timers_dir, expected_briefing)
+    # Briefing timers run in the scheduler's CLOSED env — the fleet-tier .env a
+    # bot session sources never reaches them, so PLANE_EMIT_ENABLED composed
+    # nowhere and the briefing door's plane emission was UNREACHABLE in
+    # production (gauntlet round; the arming-mechanics half is #1383). Resolve
+    # the fleet's arming through the runtime's OWN tier cascade (env_tiers —
+    # Paths.env_file is the write tier, and reading it as the answer was the
+    # #1226 defect) and carry it as an Environment= line. Arming lands on
+    # briefing timers at the NEXT generate; a resolver failure composes
+    # UNARMED (the pre-fix state) and says so.
+    briefing_extra_env: dict[str, str] | None = None
+    if briefing_bots:
+        from . import env_tiers as _env_tiers
+
+        try:
+            _res = _env_tiers.cascade(
+                _env_tiers.read_tiers(paths, fleet_name=fleet.name)
+            ).get("PLANE_EMIT_ENABLED")
+            if _res is not None and _res.value == "1":
+                briefing_extra_env = {"PLANE_EMIT_ENABLED": "1"}
+        except _env_tiers.ResolverUnavailable as exc:
+            _log.warning(
+                "briefing plane arming unresolved (%s) — briefing timers "
+                "compose UNARMED",
+                exc,
+            )
     composed_briefing: set[str] = set()
     for bot_id, bot in briefing_bots:
         for slot, expr in bot.briefing.slots.items():
@@ -3955,6 +3994,7 @@ def compose_fleet_timers(
                 paths,
                 exec_args=[bot_id, slot],
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
+                extra_env=briefing_extra_env,
             )
             composed_briefing.add(unit)
     _reconcile_briefing_units(

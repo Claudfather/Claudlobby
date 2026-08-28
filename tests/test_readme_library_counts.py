@@ -59,7 +59,12 @@ def _bash_scripts() -> list[Path]:
 def _actual() -> dict[str, int]:
     return {
         "expertise profiles": len(_md_members("expertise")),
-        "skills": len([p for p in (LIBRARY / "skills").iterdir() if p.is_dir()]),
+        # Real skill dirs only (gauntlet round): a stray __pycache__ or
+        # .DS_Store-adjacent dir would silently raise the required count.
+        "skills": len([
+            p for p in (LIBRARY / "skills").iterdir()
+            if p.is_dir() and not p.name.startswith((".", "_"))
+        ]),
         "MCP fragments": len(sorted((LIBRARY / "mcp").glob("*.json"))),
         "guardrails": len(_md_members("guardrails")),
         "protocols": len(_md_members("protocols")),
