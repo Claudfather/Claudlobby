@@ -139,9 +139,14 @@ function renderChannel(env) {
   const el = $("channel");
   if (renderState(el, env, { idleWhenEmpty: (d) => !d.threads.length })) return;
   el.innerHTML = env.data.threads.map((t) => {
-    const participants = [...new Set(
-      t.messages.flatMap((m) => [m.sender_short, m.recipient_short])
-        .filter(Boolean))].join(", ");
+    // Attribution, not a roster (operator: "there's no attributed entity"):
+    // the header names WHO -> WHOM from the thread's opening message, plus
+    // when. The full participant set is visible in the messages themselves.
+    const first = t.messages[0];
+    const participants = first
+      ? `${first.sender_short} → ${first.recipient_short || "—"}`
+        + ` · ${ago(first.occurred_at)}`
+      : "";
     const msgs = t.messages.map((m) => `
       <div class="msg">
         <div class="who"><b>${esc(m.sender_short)}</b>
