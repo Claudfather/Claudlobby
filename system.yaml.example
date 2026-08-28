@@ -122,6 +122,13 @@ host:
       enroll: false
       unit: service
       script: "$CLAUDLOBBY_ROOT/lib/plane-daemon.sh"
+    # Phase-4 operator plane (read-only UI). Same dormancy contract as
+    # plane-daemon: unarmed composes NO units. Needs the [plane-ui] extra;
+    # binds localhost — front it with Tailscale Serve (see the runbook).
+    plane-view:
+      enroll: false
+      unit: service
+      script: "$CLAUDLOBBY_ROOT/lib/plane-view.sh"
     # Disk pressure is a silent fleet-killer on small disks (the cheap-hardware
     # north star): daily root-usage check, FLEET ALERT past the threshold.
     disk-monitor:
