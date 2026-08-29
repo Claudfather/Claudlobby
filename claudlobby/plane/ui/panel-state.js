@@ -1,13 +1,15 @@
-// panel-state.js — the §16 panel-state machinery, built FIRST because the ten
-// non-happy states are the framework every surface hangs from. The server
-// decides absent/unreadable (the envelope's `state`); this module owns the
-// client-side ones (loading, daemon-disconnected, stale) and the LAW that a
-// panel never renders zero when its source is absent — an empty list renders
+// panel-state.js — the §16 panel-state machinery. The server decides
+// absent/unreadable (the envelope's `state`); this module owns the
+// client-side ones shipped so far (loading, disconnected, idle) and the LAW
+// that a panel never renders zero when its source is absent. Of §16's ten
+// states, five ship in v1 (loading/idle/absent/unreadable/disconnected);
+// emitter-disabled, stale, partial, malformed, reveal-denied arrive with
+// the surfaces that can detect them — a named deferral, not an oversight — an empty list renders
 // only when the server said ok.
 
 export const esc = (s) => (s ?? "").toString()
-  .replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
-                                '"': "&quot;" }[c]));
+  .replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
+                                 '"': "&quot;", "'": "&#39;" }[c]));
 
 export function ago(iso) {
   if (!iso) return "—";
@@ -45,8 +47,10 @@ export function renderState(el, envelope, { idleWhenEmpty = null } = {}) {
   return true;
 }
 
-export function stateBlock(state, provenance, remediation) {
-  const copy = STATE_COPY[state] || { label: state, detail: "" };
+export function stateBlock(state, provenance, remediation,
+                           copyOverride = null) {
+  const copy = copyOverride
+    || STATE_COPY[state] || { label: state, detail: "" };
   const prov = provenance
     ? `<div class="prov">source: ${esc(provenance.db || "api")}`
       + (provenance.last_ingest_at

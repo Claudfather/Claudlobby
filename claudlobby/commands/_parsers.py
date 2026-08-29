@@ -459,10 +459,10 @@ def register_subparsers(sub) -> None:
     pvw = psub.add_parser("view", help="Run the operator-plane view daemon (read-only UI)")
     pvw.add_argument("--host", default="127.0.0.1",
                      help="Bind address (default 127.0.0.1 — Tailscale Serve fronts it; a raw address is the dev fallback)")
-    pvw.add_argument("--port", default="8899", help="Bind port (default 8899)")
+    pvw.add_argument("--port", type=int, default=8899, help="Bind port (default 8899)")
     pvw.set_defaults(func=cmd_plane_view)
     po = psub.add_parser("open", help="Print/launch the operator plane URL")
-    po.add_argument("--port", default="8899", help="View daemon port (default 8899)")
+    po.add_argument("--port", type=int, default=8899, help="View daemon port (default 8899)")
     po.add_argument("--no-browser", action="store_true", help="Print the URL only")
     po.set_defaults(func=cmd_plane_open)
     psc = psub.add_parser("schema", help="Export JSON Schemas (envelope + families)")

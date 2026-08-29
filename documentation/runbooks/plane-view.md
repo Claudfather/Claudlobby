@@ -16,8 +16,14 @@ connection opens `mode=ro` with `PRAGMA query_only`.
 ```bash
 pip install -e '.[plane-ui]'          # FastAPI/uvicorn — optional extra
 claudlobby plane view                 # binds 127.0.0.1:8899
-claudlobby plane open                 # print/launch the URL
+claudlobby plane open                 # print/launch the URL (§17's open verb)
 ```
+
+`/healthz` is a **data-freshness probe**: it answers 503 whenever the plane
+db is absent or unreadable — including on a brand-new host where the
+recorder simply has not written yet — so wire monitors accordingly. The
+header's recorder pill is a live daemon PROBE (typed handshake), never
+socket-file presence.
 
 Supervised: arm `plane-view.enroll: true` under `host.jobs` in the HOST's
 system.yaml (compose-time dormancy, exactly like `plane-daemon`), regenerate,

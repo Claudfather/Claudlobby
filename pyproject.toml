@@ -18,8 +18,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "tomli; python_version < '3.11'",
-       # the plane-ui battery runs in CI (httpx = starlette TestClient engine)
-       "fastapi>=0.110,<1", "uvicorn>=0.27,<1", "httpx>=0.24"]
+       # the plane-ui battery runs in CI; self-extra keeps ONE copy of the
+       # pins (httpx = starlette TestClient engine)
+       "claudlobby[plane-ui]", "httpx>=0.24"]
 # Phase-4 operator plane UI (design walk ruling 2026-08-28): the view daemon.
 # OPTIONAL by §14's degrade rule — the core ledger, doors, and ingest daemon
 # never import these; `claudlobby plane view` refuses helpfully without them.

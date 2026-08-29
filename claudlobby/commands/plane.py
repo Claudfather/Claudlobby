@@ -341,7 +341,7 @@ def cmd_plane_view(args) -> int:
             f" ({exc})", file=sys.stderr)
         return 1
     app = create_app(root)
-    uvicorn.run(app, host=args.host, port=int(args.port), log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
 
@@ -361,10 +361,19 @@ def cmd_plane_open(args) -> int:
             out = _subprocess.run(  # noqa: S603 - fixed argv
                 [ts, "serve", "status"], capture_output=True, text=True,
                 timeout=5).stdout
+            # Adopt the https URL ONLY from the block that proxies OUR port
+            # (gauntlet, probed: the first-https match opened someone
+            # else's service the moment Serve fronted a second app).
+            current = None
             for line in out.splitlines():
-                if line.strip().startswith("https://"):
-                    url = line.split()[0]
+                stripped = line.strip()
+                if stripped.startswith("https://"):
+                    current = stripped.split()[0]
+                elif current and f"127.0.0.1:{args.port}" in stripped:
+                    url = current
                     break
+                elif stripped.startswith("http://") or not stripped:
+                    current = current if stripped else None
         except (OSError, _subprocess.SubprocessError):
             pass
     print(url)

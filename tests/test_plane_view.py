@@ -117,10 +117,27 @@ def test_absent_db_is_a_typed_state(client, path):
     assert "data" not in body  # never a fabricated zero
 
 
-def test_unreadable_db_is_distinct_from_absent(tmp_path):
+def test_dir_at_db_path_is_absent_not_unreadable(tmp_path):
+    """source_state's decided-once rule: a directory where a file belongs is
+    ABSENT — an unreadable+check-permissions answer sends someone to chmod a
+    path that is simply not a file (the first version got this backwards;
+    gauntlet)."""
     (tmp_path / "state" / "plane").mkdir(parents=True)
     (tmp_path / "state" / "plane" / "plane.db").mkdir()  # a dir, not a db
     body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    assert body["state"] == "absent"
+
+
+def test_unreadable_db_is_distinct_from_absent(tmp_path):
+    d = tmp_path / "state" / "plane"
+    d.mkdir(parents=True)
+    db = d / "plane.db"
+    db.write_bytes(b"x")
+    db.chmod(0)  # exists, cannot be opened
+    try:
+        body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    finally:
+        db.chmod(0o600)
     assert body["state"] == "unreadable"
 
 
@@ -161,6 +178,12 @@ def test_channel_threads_the_whole_conversation(tmp_path):
     assert dispatch["body"].startswith("Please review")  # full capture words
     assert [x["event"] for x in dispatch["tx"]] == [
         "carrier_queued", "pane_submitted"]           # delivery history rides
+    # Server-stamped semantics (gauntlet): the client renders facts, never
+    # re-derives vocabulary.
+    assert [x["activated"] for x in dispatch["tx"]] == [False, True]
+    assert t["delivered"] is True
+    assert t["terminal"] == "completed"
+    assert "recipient_raw" not in dispatch            # §11: raw id stays home
 
 
 def test_telegram_destination_resolves_to_name_never_raw_id(tmp_path):
@@ -233,3 +256,182 @@ def test_stream_at_head_pings_not_replays(tmp_path):
     payload = _first_sse_chunk(TestClient(create_app(tmp_path)),
                                f"/api/stream?cursor={head}&once=1")
     assert payload is None  # nothing to replay — a ping, never stale rows
+
+
+# ---------------------------------------------------------------------------
+# Gauntlet pins (8-reviewer round on the v1)
+# ---------------------------------------------------------------------------
+
+def _seed_one_sided(root, tagged_side):
+    _full_capture(root)
+    wi = "wi_" + "e" * 32
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "t", "fleet": "f",
+         "payload": {"work_item_id": wi, "title": "One-sided tag",
+                     "created_by": "bot:f/mgr"}},
+        {"event_type": "communication", "emitter": "t", "fleet": "f",
+         "payload": {"msg_id": "msg_" + "e" * 32, "sender": "bot:f/mgr",
+                     "recipient": "bot:f/w1", "message_class": "task_request",
+                     "body": "do it",
+                     **({"work_item_id": wi} if tagged_side == "dispatch"
+                        else {})}},
+        {"event_type": "communication", "emitter": "t", "fleet": "f",
+         "payload": {"msg_id": "msg_" + "f" * 32, "sender": "bot:f/w1",
+                     "recipient": "bot:f/mgr", "message_class": "report",
+                     "reply_to_msg_id": "msg_" + "e" * 32, "body": "done",
+                     **({"work_item_id": wi} if tagged_side == "reply"
+                        else {})}},
+    ])
+
+
+@pytest.mark.parametrize("tagged_side", ["dispatch", "reply"])
+def test_one_sided_work_item_still_one_thread(tmp_path, tagged_side):
+    _seed_one_sided(tmp_path, tagged_side)
+    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    threads = body["data"]["threads"]
+    assert len(threads) == 1, f"{tagged_side}-tagged pair split the story"
+    assert threads[0]["work_item_id"] == "wi_" + "e" * 32
+    assert len(threads[0]["messages"]) == 2
+
+
+def test_terminal_stamp_is_first_terminal_monotone(tmp_path):
+    """The reducer's rule: a late terminal never rewrites — the channel must
+    agree with TASK_STATUS_SQL (the client copy took the LAST terminal and
+    forked live; gauntlet)."""
+    _seed_conversation(tmp_path)
+    emit_batch(tmp_path, [
+        {"event_type": "task", "emitter": "t", "fleet": "f",
+         "payload": {"event": "superseded", "work_item_id": f"wi_{H}",
+                     "assignment_id": f"asg_{H}"}}])
+    body = TestClient(create_app(tmp_path)).get("/api/channel").json()
+    t = [x for x in body["data"]["threads"]
+         if x["work_item_id"] == f"wi_{H}"][0]
+    assert t["terminal"] == "completed"  # first terminal wins, always
+
+
+def test_body_words_strips_real_door_shapes():
+    from claudlobby.plane.view import body_words
+    d = ("[BOTCOMMAND] erlich | task | Review the thing carefully"
+         " | repo:Artemis-xyz/huntress | priority:high | task:t-123-abcd")
+    assert body_words(d) == "Review the thing carefully"
+    r = ("[BOTREPORT] jian-yang | completed | Approve on #2073"
+         " | progress:100 | pr:https://github.com/x/y/pull/1 | task:t-1-ffff")
+    assert body_words(r) == "Approve on #2073"
+    assert body_words("plain words, no framing") == "plain words, no framing"
+    assert body_words("keep | this: colon | prose") is not None
+    assert body_words(None) is None
+
+
+def test_tasks_restriction_matches_unrestricted_derivation(tmp_path):
+    """The IN-restriction is an efficiency append; output must be
+    byte-identical to the unrestricted one-definition queries."""
+    import sqlite3 as _sq
+
+    from claudlobby.plane import view
+    from claudlobby.plane.queries import ATTENTION_SQL as A, TASK_STATUS_SQL as T
+
+    _seed_conversation(tmp_path)
+    body = TestClient(create_app(tmp_path)).get("/api/tasks").json()
+    conn = _sq.connect(tmp_path / "state" / "plane" / "plane.db")
+    conn.row_factory = _sq.Row
+    unrestricted = {r["assignment_id"]: r["status"]
+                    for r in conn.execute(T)}
+    unrestricted_att = {r[0] for r in conn.execute(
+        A, (view._now_iso(),))}
+    conn.close()
+    for r in body["data"]["assignments"]:
+        assert r["status"] == unrestricted[r["assignment_id"]]
+        assert r["attention"] == (r["assignment_id"] in unrestricted_att)
+
+
+def test_spool_count_excludes_quarantine_and_sidecars(tmp_path):
+    _seed_conversation(tmp_path)
+    spool = tmp_path / "state" / "plane" / "spool"
+    spool.mkdir(parents=True, exist_ok=True)
+    (spool / "ev_a.json").write_text('{"spooled_at": "2026-01-01T00:00:00"}')
+    q = spool / "quarantine"
+    q.mkdir()
+    (q / "ev_b.json").write_text("{}")
+    (q / "ev_b.json.reason").write_text("poison")
+    body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    assert body["data"]["spool_files"] == 1  # pending only, doctor's number
+    assert body["data"]["spool_oldest_at"] == "2026-01-01T00:00:00"
+
+
+def test_summary_honors_plane_socket_override(tmp_path, monkeypatch):
+    _seed_conversation(tmp_path)
+    override = tmp_path / "elsewhere.sock"
+    override.write_text("")  # present (a stale FILE — liveness must not lie)
+    monkeypatch.setenv("PLANE_SOCKET", str(override))
+    body = TestClient(create_app(tmp_path)).get("/api/summary").json()
+    assert body["data"]["ingest_socket_present"] is True
+    assert body["data"]["daemon_serving"] is False  # probe, not presence
+
+
+def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
+    _seed_conversation(tmp_path)
+    r = TestClient(create_app(tmp_path)).get("/healthz")
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["schema_user_version"] == 2
+    assert "counts" in data and "spool_files" in data
+    assert "corrective" in data
+
+
+def test_index_served_from_package_data(tmp_path):
+    r = TestClient(create_app(tmp_path)).get("/")
+    assert r.status_code == 200
+    assert "observable plane" in r.text
+    assert r.headers.get("cache-control") == "no-cache"
+
+
+def test_stream_defaults_to_head_never_replays(tmp_path):
+    """Gauntlet consensus (3 reviewers, measured): a cursor-less connect used
+    to replay the ENTIRE ledger per viewer per reconnect."""
+    _seed_conversation(tmp_path)
+    payload = _first_sse_chunk(TestClient(create_app(tmp_path)),
+                               "/api/stream?once=1")
+    assert payload is None  # at head: a ping, never a replay
+
+
+def test_stream_honors_last_event_id(tmp_path):
+    _seed_conversation(tmp_path)
+    client = TestClient(create_app(tmp_path))
+    with client.stream("GET", "/api/stream?once=1",
+                       headers={"Last-Event-ID": "1"}) as r:
+        payload = None
+        for line in r.iter_lines():
+            if line.startswith("data:"):
+                payload = json.loads(line[5:])
+                break
+            if line.startswith(": ping"):
+                break
+    assert payload is not None
+    assert payload["rows"][0]["ingest_seq"] == 2  # resumed AFTER the id
+
+
+def test_plane_open_matches_its_own_port(monkeypatch, capsys, tmp_path):
+    """Probed in review: the first-https match opened someone else's service
+    the moment Tailscale Serve fronted a second app."""
+    import shutil
+    import types
+
+    from claudlobby.commands.plane import cmd_plane_open
+
+    stub = tmp_path / "tailscale"
+    stub.write_text(
+        "#!/bin/bash\n"
+        "cat <<'OUT'\n"
+        "https://other.tail.ts.net (tailnet only)\n"
+        "|-- proxy http://127.0.0.1:3000\n"
+        "\n"
+        "https://mini.tail.ts.net (tailnet only)\n"
+        "|-- proxy http://127.0.0.1:8899\n"
+        "OUT\n")
+    stub.chmod(0o755)
+    monkeypatch.setattr(shutil, "which",
+                        lambda name: str(stub) if name == "tailscale" else None)
+    args = types.SimpleNamespace(port=8899, no_browser=True)
+    assert cmd_plane_open(args) == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "https://mini.tail.ts.net"
