@@ -325,6 +325,66 @@ def cmd_plane_doctor(args) -> int:
     return _guarded("plane doctor", run)
 
 
+def cmd_plane_view(args) -> int:
+    """Run the Phase-4 operator-plane view daemon in the foreground (same
+    supervision posture as serve: systemd/launchd own backgrounding). Binds
+    LOCALHOST by default — Tailscale Serve fronts it per the design walk;
+    --host is the raw-bind dev fallback."""
+    root = _resolve_paths(args).root
+    try:
+        from ..plane.view import create_app
+        import uvicorn
+    except (ImportError, RuntimeError) as exc:
+        print(
+            "plane view: the UI needs the optional [plane-ui] extra — "
+            "install with: pip install -e '.[plane-ui]'"
+            f" ({exc})", file=sys.stderr)
+        return 1
+    app = create_app(root)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
+def cmd_plane_open(args) -> int:
+    """Print (and best-effort launch) the operator plane URL (§17 golden
+    path). Prefers the Tailscale Serve HTTPS URL when Serve fronts the port;
+    falls back to the local bind."""
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    url = f"http://127.0.0.1:{args.port}/"
+    ts = _shutil.which("tailscale") or (
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+        if Path("/Applications/Tailscale.app").exists() else None)
+    if ts:
+        try:
+            out = _subprocess.run(  # noqa: S603 - fixed argv
+                [ts, "serve", "status"], capture_output=True, text=True,
+                timeout=5).stdout
+            # Adopt the https URL ONLY from the block that proxies OUR port
+            # (gauntlet, probed: the first-https match opened someone
+            # else's service the moment Serve fronted a second app).
+            current = None
+            for line in out.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("https://"):
+                    current = stripped.split()[0]
+                elif current and f"127.0.0.1:{args.port}" in stripped:
+                    url = current
+                    break
+                elif stripped.startswith("http://") or not stripped:
+                    current = current if stripped else None
+        except (OSError, _subprocess.SubprocessError):
+            pass
+    print(url)
+    opener = _shutil.which("open") or _shutil.which("xdg-open")
+    if opener and not getattr(args, "no_browser", False):
+        _subprocess.Popen([opener, url],  # noqa: S603 - fixed argv
+                          stdout=_subprocess.DEVNULL,
+                          stderr=_subprocess.DEVNULL)
+    return 0
+
+
 def cmd_plane_serve(args) -> int:
     """Run the ingest daemon in the foreground (supervision owns backgrounding
     — systemd Restart=always / launchd KeepAlive, never a self-fork)."""

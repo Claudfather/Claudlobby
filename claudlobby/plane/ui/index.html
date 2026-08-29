@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>observable plane</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>observable plane</h1>
+  <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
+  <span class="pill">ingest <b id="age">—</b></span>
+  <span class="pill">rows <b id="total">—</b></span>
+  <span class="pill">spool <b id="spool">—</b></span>
+  <span class="spacer"></span>
+  <button id="debug-toggle" class="pill ghost" type="button" aria-pressed="false">machinery</button>
+</header>
+<main>
+  <section id="rail-fleet" aria-label="fleet">
+    <h2>fleet</h2>
+    <div class="scroll" id="fleet"></div>
+  </section>
+  <section id="rail-channel" aria-label="channel">
+    <h2>channel</h2>
+    <div class="scroll" id="channel"></div>
+  </section>
+  <section id="rail-right">
+    <div id="rail-attention" aria-label="attention">
+      <h2>attention <span id="attn-count" class="count" hidden></span></h2>
+      <div class="scroll" id="attention"></div>
+    </div>
+    <div id="rail-tasks" aria-label="tasks">
+      <h2>tasks</h2>
+      <div class="scroll" id="tasks"></div>
+    </div>
+    <div id="rail-debug" aria-label="event machinery" hidden>
+      <h2>event stream <span class="hint">(raw ledger)</span></h2>
+      <div class="scroll" id="debug"></div>
+    </div>
+  </section>
+</main>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

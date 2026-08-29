@@ -38,6 +38,7 @@ import json
 import os
 import signal
 import socket
+import sqlite3
 import struct
 import sys
 import time
@@ -216,6 +217,20 @@ class PlaneDaemon:
         except Exception as exc:  # noqa: BLE001 — disclosed, never fatal
             print(f"plane-daemon: lifecycle emit failed ({event}): {exc}",
                   file=sys.stderr)
+
+    def _optimize(self) -> None:
+        """PRAGMA optimize on the write path (gauntlet, measured 48x): the
+        read-only view cannot ANALYZE, and without planner stats the
+        channel's IN-queries degrade to whole-kind-slice scans as the db
+        grows. Runs at startup and each interval drain — ~ms, idempotent."""
+        try:
+            conn = connect(db_path(self.root))
+            try:
+                conn.execute("PRAGMA optimize")
+            finally:
+                conn.close()
+        except sqlite3.Error as exc:
+            print(f"plane-daemon: optimize skipped: {exc}", file=sys.stderr)
 
     def _drain_spool(self, *, reason: str) -> None:
         # Deadline advances at ATTEMPT, not success: stamping only on success
@@ -417,10 +432,12 @@ class PlaneDaemon:
         print(f"plane-daemon: serving on {self.sock_path}", file=sys.stderr)
         self._emit_system("daemon_started")
         self._drain_spool(reason="startup")
+        self._optimize()
         try:
             while not self._stop:
                 if time.monotonic() - self._last_drain >= self.drain_interval:
                     self._drain_spool(reason="interval")
+                    self._optimize()
                 try:
                     conn, _ = self._listener.accept()
                 except socket.timeout:
