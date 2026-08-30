@@ -318,3 +318,17 @@ def test_room_shows_cross_fleet_threads_from_both_sides(tmp_path):
         threads = client.get(f"/api/channel?fleet={room}").json()["data"]["threads"]
         bodies = sorted(m["body"] for t in threads for m in t["messages"])
         assert bodies == ["the answer", "the ask"], f"{room} split the thread"
+
+
+def test_hidden_attribute_actually_hides():
+    """Operator-found (2026-08-30): #focus-overlay's id-selector display rule
+    outranked [hidden]{display:none} on specificity, so `hidden` was a no-op
+    and the overlay could never be closed. Pin both halves: the reset exists
+    and the overlay ships hidden."""
+    ui = Path(__file__).resolve().parent.parent / "claudlobby" / "plane" / "ui"
+    css = (ui / "style.css").read_text()
+    assert "[hidden] { display: none !important; }" in css
+    html = (ui / "index.html").read_text()
+    import re as _re
+    m = _re.search(r'<div id="focus-overlay"[^>]*>', html)
+    assert m and " hidden" in m.group(0), "overlay must ship with hidden"

@@ -7,6 +7,10 @@
   --green: #7ee787;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* `hidden` must beat any id-selector display rule (specificity) —
+   without this, #focus-overlay/#grid ignore the attribute and the
+   overlay can never be closed (operator-found, 2026-08-30). */
+[hidden] { display: none !important; }
 body {
   background: var(--bg); color: var(--ink);
   font: 14px/1.45 -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
