@@ -497,18 +497,21 @@ document.querySelectorAll("#view-nav button").forEach((b) =>
   b.addEventListener("click", () => setView(b.dataset.view)));
 
 function openFocus(bot, fleet) {
+  if (!bot) { closeFocus(); return; }   // never a titleless empty void
   clearInterval(focusTimer);   // no prior timer bleeds into this overlay
   clearInterval(gridTimer);    // pause the full-grid poll behind the overlay
   $("focus-overlay").hidden = false;
-  $("focus-title").textContent = bot;
+  $("focus-title").textContent = fleet ? `${bot} · ${fleet}` : bot;
+  $("focus-title").dataset.bot = bot;
   $("focus-title").dataset.fleet = fleet || "";
-  $("focus-pane").innerHTML = "";
+  $("focus-pane").innerHTML = stateBlock("loading", null, null,
+    { label: `opening ${bot}…`, detail: "" });   // never blank while fetching
   const q = `/api/grid?focus=${encodeURIComponent(bot)}`
     + (fleet ? `&fleet=${encodeURIComponent(fleet)}` : "");
   let lastLines = null;
   const tick = async () => {
     const env = await jget(q);   // server ships ONLY this pane
-    if ($("focus-title").textContent !== bot) return;  // overlay moved on
+    if ($("focus-title").dataset.bot !== bot) return;  // overlay moved on
     if (!env || env.state !== "ok") {
       $("focus-pane").innerHTML = stateBlock(
         env ? env.state : "disconnected", env && env.provenance,
@@ -554,8 +557,8 @@ document.addEventListener("visibilitychange", () => {
   // (each tick renews the 30s TTL) — §14 honesty (reviewer finding).
   if (document.hidden) {
     clearInterval(focusTimer); clearInterval(gridTimer);
-  } else if (!$("focus-overlay").hidden) {
-    openFocus($("focus-title").textContent,
+  } else if (!$("focus-overlay").hidden && $("focus-title").dataset.bot) {
+    openFocus($("focus-title").dataset.bot,
               $("focus-title").dataset.fleet || null);
   } else if (currentView === "grid") {
     gridTimer = setInterval(pollGrid, 5000); pollGrid();
