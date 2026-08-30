@@ -136,9 +136,6 @@ def test_grid_ok_serves_snapshot_and_focus(tmp_path):
 # Fleet-aware channel (rooms, not a firehose)
 # ---------------------------------------------------------------------------
 
-H1, H2 = "1" * 32, "2" * 32
-
-
 def _seed_two_fleets(root: Path) -> None:
     d = root / "state" / "plane"
     d.mkdir(parents=True, exist_ok=True)
@@ -170,3 +167,88 @@ def test_channel_unknown_fleet_is_ok_empty_not_error(tmp_path):
         "/api/channel?fleet=nonexistent").json()
     assert body["state"] == "ok"
     assert body["data"]["threads"] == []  # legitimately idle — UI's word
+
+
+# ---------------------------------------------------------------------------
+# UI load-order guard (a server test can't run the browser; this pins the
+# structural invariant whose violation froze the page: the bootstrap calls
+# must follow every top-level `let`/`const` they read, or those bindings are
+# touched in their temporal dead zone on first load).
+# ---------------------------------------------------------------------------
+
+def test_app_js_bootstrap_runs_after_declarations():
+    app_js = (Path(__file__).resolve().parent.parent / "claudlobby"
+              / "plane" / "ui" / "app.js").read_text()
+    boot = app_js.index("refreshBoards();\nopenStream();")
+    # every module-scope state binding the bootstrap path reads transitively
+    for decl in ("let currentFleet", "let currentView", "let generation",
+                 "let safetyTimer"):
+        assert decl in app_js, decl
+        assert app_js.index(decl) < boot, (
+            f"{decl} is declared AFTER the bootstrap — TDZ freeze on load")
+
+
+# ---------------------------------------------------------------------------
+# Gauntlet pins (grid chunk review round)
+# ---------------------------------------------------------------------------
+
+def test_failed_capture_keeps_last_good_frame_and_ages_it(tmp_path):
+    """§16 last-successful-observation: a capture that fails must not erase
+    the last good frame or restamp it fresh (the first version stamped
+    captured_at=now on an empty frame — freshness that lies)."""
+    _bot(tmp_path, "flat", "f1", "up")
+    marker = tmp_path / "die"
+    body = '[ -f "MARKER" ] && exit 1\nprintf "good frame\\n"'
+    tmux = _fake_tmux(tmp_path, body.replace("MARKER", str(marker)))
+    s = PaneSampler(tmp_path, tmux=str(tmux))
+    s._panes = discover_panes(tmp_path)
+
+    async def run():
+        await s._capture(s._panes[0], 14)      # succeeds
+        marker.write_text("x")
+        await s._capture(s._panes[0], 14)      # now fails
+    asyncio.run(run())
+    pane = s.snapshot()["panes"][0]
+    assert pane["alive"] is False
+    assert "good frame" in pane["lines"]       # last good frame retained
+    assert pane["captured_ago_s"] is not None  # aged, not reset to fresh
+
+
+def test_same_name_bots_across_fleets_do_not_share_a_slot(tmp_path):
+    """#526: bot-name collision across fleets — each keeps its own pane."""
+    _bot(tmp_path, "flat", "f1", "twin", sock="com.f1.twin")
+    _bot(tmp_path, "flat", "f2", "twin", sock="com.f2.twin")
+    tmux = _fake_tmux(tmp_path, 'printf "sock %s\n" "$2"')  # $2 = -L socket
+    s = PaneSampler(tmp_path, tmux=str(tmux))
+    s._panes = discover_panes(tmp_path)
+
+    async def run():
+        for p in s._panes:
+            await s._capture(p, 14)
+    asyncio.run(run())
+    frames = {(p["fleet"]): p["lines"] for p in s.snapshot()["panes"]}
+    assert len(frames) == 2                     # two slots, not one
+    assert frames["f1"] != frames["f2"]         # distinct captures
+
+
+def test_focus_disambiguates_by_fleet(tmp_path):
+    _bot(tmp_path, "flat", "f1", "twin", sock="com.f1.twin")
+    _bot(tmp_path, "flat", "f2", "twin", sock="com.f2.twin")
+    s = PaneSampler(tmp_path, tmux=str(_fake_tmux(tmp_path, "true")))
+    s._panes = discover_panes(tmp_path)
+    s.focus("twin", "f2")
+    snap = {(p["fleet"]): p["focused"] for p in s.snapshot()["panes"]}
+    assert snap["f2"] is True and snap["f1"] is False
+
+
+def test_ansi_truecolor_never_emits_a_stray_basic_class(tmp_path):
+    """The truecolor arg 38;2;255;135;95 must be CONSUMED, not re-read as
+    a-95 (measured against real Claude-pane color)."""
+    app_js = (Path(__file__).resolve().parent.parent / "claudlobby"
+              / "plane" / "ui" / "app.js").read_text()
+    # structural: the extended-color branch consumes args before the basic
+    # 30-37/90-97 branch can see them.
+    assert "code === 38 || code === 48" in app_js
+    i38 = app_js.index("code === 38")
+    ibasic = app_js.index("code >= 30 && code <= 37")
+    assert i38 < ibasic, "extended-color must be handled before basic SGR"

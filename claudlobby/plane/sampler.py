@@ -25,6 +25,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..paths import _iter_fleet_dirs, tmux_socket_for_bot
+
 THUMB_LINES = 14
 FOCUS_LINES = 44
 THUMB_INTERVAL = 5.0
@@ -34,41 +36,36 @@ DISCOVER_INTERVAL = 60.0  # roster changes are generate-time events
 
 
 def discover_panes(root: Path) -> list[dict]:
-    """Every bot on the host: (fleet, bot, socket). Reads the composed
-    bot.conf files — the same discovery surface the lifecycle scripts use.
-    Flat and nested vault layouts both match local/*/runtime/bots and
-    local/*/*/runtime/bots; root-mode matches runtime/bots."""
-    out = []
+    """Every bot on the host: (fleet, bot, socket). Layout enumeration is
+    paths._iter_fleet_dirs (the ONE nested-aware fleet walk) and the socket
+    is paths.tmux_socket_for_bot (the ONE bot.conf socket reader — which
+    honors TMUX_SOCKET, the composer's single-quote form, and FLEET_NAME
+    fail-fast). A grid over a read-only daemon must not fork either SSOT."""
     root = Path(root)
-    patterns = ("local/*/runtime/bots/*", "local/*/*/runtime/bots/*",
-                "runtime/bots/*")
-    seen = set()
-    for pat in patterns:
-        for bot_dir in sorted(root.glob(pat)):
-            conf = bot_dir / "bot.conf"
-            if not conf.is_file() or bot_dir in seen:
+    out = []
+    fleet_dirs = list(_iter_fleet_dirs(root / "local"))
+    if (root / "runtime" / "bots").is_dir():
+        fleet_dirs.append(root)  # root/CLI mode: the fleet label is root.name
+    for fleet_dir in fleet_dirs:
+        bots = fleet_dir / "runtime" / "bots"
+        if not bots.is_dir():
+            continue
+        for bot_dir in sorted(bots.iterdir()):
+            if not (bot_dir / "bot.conf").is_file():
                 continue
-            seen.add(bot_dir)
-            sock = None
             try:
-                for line in conf.read_text().splitlines():
-                    line = line.strip().removeprefix("export ").strip()
-                    if line.startswith("BOT_SERVICE="):
-                        sock = line.split("=", 1)[1].strip().strip('"')
-                        break
-            except OSError:
-                continue
+                sock = tmux_socket_for_bot(bot_dir)
+            except ValueError:
+                sock = ""  # FLEET_NAME set but socket empty — skip, disclosed
             if not sock:
                 continue
-            fleet = bot_dir.parent.parent.parent.name  # <fleet>/runtime/bots
-            out.append({"fleet": fleet, "bot": bot_dir.name, "socket": sock})
+            out.append({"fleet": fleet_dir.name, "bot": bot_dir.name,
+                        "socket": sock})
     return out
 
 
 @dataclass
 class PaneSample:
-    fleet: str
-    bot: str
     alive: bool = False
     lines: str = ""
     captured_at: float = 0.0
@@ -88,9 +85,9 @@ class PaneSampler:
     _discovered_at: float = 0.0
 
     def __post_init__(self):
-        self.tmux = self.tmux or shutil.which("tmux") \
-            or ("/opt/homebrew/bin/tmux"
-                if Path("/opt/homebrew/bin/tmux").exists() else None)
+        self.tmux = self.tmux or shutil.which("tmux") or next(
+            (c for c in ("/usr/bin/tmux", "/usr/local/bin/tmux",
+                         "/opt/homebrew/bin/tmux") if Path(c).exists()), None)
 
     @property
     def available(self) -> bool:
@@ -113,10 +110,16 @@ class PaneSampler:
                 pass
             self._task = None
 
-    def focus(self, bot: str) -> None:
-        self._focus = (bot, time.monotonic())
+    def focus(self, bot: str, fleet: str | None = None) -> None:
+        # Resolve to a (fleet, bot) key: a bare bot name is ambiguous under a
+        # cross-fleet collision (#526). Given fleet wins; else the first
+        # discovered pane with that name.
+        if fleet is None:
+            match = next((p for p in self._panes if p["bot"] == bot), None)
+            fleet = match["fleet"] if match else ""
+        self._focus = ((fleet, bot), time.monotonic())
 
-    def _focused(self) -> str | None:
+    def _focused(self) -> tuple | None:
         if self._focus and time.monotonic() - self._focus[1] < FOCUS_TTL:
             return self._focus[0]
         return None
@@ -125,19 +128,23 @@ class PaneSampler:
         focused = self._focused()
         panes = []
         for p in self._panes:
-            s = self._samples.get(p["bot"])
+            s = self._samples.get((p["fleet"], p["bot"]))
             panes.append({
                 "fleet": p["fleet"], "bot": p["bot"],
                 "alive": bool(s and s.alive),
                 "lines": s.lines if s else "",
+                # age of the last SUCCESSFUL frame — a down pane keeps showing
+                # its last good frame with an honestly growing age (§16).
                 "captured_ago_s": round(time.monotonic() - s.captured_at, 1)
                                   if s and s.captured_at else None,
-                "focused": p["bot"] == focused,
+                "focused": (p["fleet"], p["bot"]) == focused,
             })
-        return {"panes": panes, "sampler_running": self._task is not None}
+        running = self._task is not None and not self._task.done()
+        return {"panes": panes, "sampler_running": running}
 
     async def _capture(self, pane: dict, lines: int) -> None:
         sess = pane["bot"]
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.tmux, "-L", pane["socket"], "capture-pane",
@@ -148,12 +155,41 @@ class PaneSampler:
             alive = proc.returncode == 0
             text = out.decode("utf-8", errors="replace") if alive else ""
         except (OSError, asyncio.TimeoutError):
+            # A wedged tmux socket (the Pi SD-stall class) times out every
+            # sweep — reap the child so it does not leak per pane per sweep.
+            if proc and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.communicate()
+                except (OSError, ProcessLookupError):
+                    pass
             alive, text = False, ""
-        self._samples[pane["bot"]] = PaneSample(
-            pane["fleet"], pane["bot"], alive,
-            "\n".join(text.splitlines()[-lines:]), time.monotonic())
+        key = (pane["fleet"], pane["bot"])   # #526: name alone collides
+        prev = self._samples.get(key)
+        if alive:
+            self._samples[key] = PaneSample(
+                True, "\n".join(text.splitlines()[-lines:]),
+                time.monotonic())
+        else:
+            # A FAILED capture must not overwrite the last good frame or its
+            # timestamp — §16's last-successful-observation. Keep the frame;
+            # mark not-alive; do not lie that it is fresh.
+            self._samples[key] = PaneSample(
+                False, prev.lines if prev else "",
+                prev.captured_at if prev else 0.0)
 
     async def _run(self) -> None:
+        try:
+            await self._loop()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the task must fail LOUD,
+            # not freeze the grid on stale frames pretending to be live.
+            import sys
+            print(f"plane-sampler: loop crashed: {exc}", file=sys.stderr)
+            raise
+
+    async def _loop(self) -> None:
         last_thumb = 0.0
         while True:
             now = time.monotonic()
@@ -162,14 +198,14 @@ class PaneSampler:
                 self._discovered_at = now
             focused = self._focused()
             if focused:
-                pane = next((p for p in self._panes if p["bot"] == focused),
-                            None)
+                pane = next((p for p in self._panes
+                             if (p["fleet"], p["bot"]) == focused), None)
                 if pane:
                     await self._capture(pane, FOCUS_LINES)
             if now - last_thumb >= THUMB_INTERVAL:
                 last_thumb = now
                 for pane in self._panes:
-                    if pane["bot"] != focused:
+                    if (pane["fleet"], pane["bot"]) != focused:
                         await self._capture(pane, THUMB_LINES)
             await asyncio.sleep(FOCUS_INTERVAL if focused
                                 else THUMB_INTERVAL / 2)

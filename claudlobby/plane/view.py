@@ -442,7 +442,7 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
         await sampler.stop()
 
     @app.get("/api/grid")
-    def grid(focus: str | None = None):
+    def grid(focus: str | None = None, fleet: str | None = None):
         """Thumbnail grid from the ONE bounded sampler (§14: browsers read
         the cache; sampling cadence is viewer-count-invariant). `focus=bot`
         raises that pane's cadence/height for a short TTL — view-internal
@@ -457,7 +457,7 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                                " unaffected (§14 degradable)",
             })
         if focus:
-            sampler.focus(focus)
+            sampler.focus(focus, fleet)
         return JSONResponse({
             "state": SOURCE_OK,
             "provenance": {"source": "tmux capture-pane",

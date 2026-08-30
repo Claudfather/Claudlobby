@@ -329,10 +329,6 @@ $("debug-toggle").addEventListener("click", () => {
   $("debug-toggle").setAttribute("aria-pressed", String(!rail.hidden));
 });
 
-["channel", "tasks", "attention", "fleet"].forEach((id) =>
-  renderState($(id), { state: "loading" }));
-refreshBoards();
-openStream();
 
 // ---------------------------------------------------------------------------
 // Grid view + fleet tabs (Phase-4 chunk 2)
@@ -344,15 +340,24 @@ openStream();
 function ansiToHtml(text) {
   const cleaned = (text || "")
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC
-    .replace(/\x1b\[[0-9;?]*[A-LN-Za-ln-z]/g, "");        // CSI non-SGR
+    .replace(/\x1b\[[0-9;?]*[@-ln-~]/g, "");      // CSI non-SGR (keep m)        // CSI non-SGR
   let out = "", cls = [];
   for (const part of cleaned.split(/(\x1b\[[0-9;]*m)/)) {
     const m = part.match(/^\x1b\[([0-9;]*)m$/);
     if (!m) { if (part) out += span(cls, part); continue; }
-    for (const code of (m[1] || "0").split(";").map(Number)) {
+    const codes = (m[1] || "0").split(";").map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const code = codes[i];
       if (code === 0) cls = [];
       else if (code === 1) cls.push("a-b");
-      else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+      else if (code === 39) cls = cls.filter((c) => !/^a-\d+$/.test(c));
+      else if (code === 38 || code === 48) {
+        // Extended color: 38;5;N (256) or 38;2;R;G;B (truecolor) — Claude
+        // panes are truecolor-heavy, so CONSUME the args (do not re-read
+        // them as basic SGR codes) rather than render them. i advances past
+        // the argument sequence; a nearest-basic mapping is a later polish.
+        i += (codes[i + 1] === 5) ? 2 : (codes[i + 1] === 2) ? 4 : 1;
+      } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
         cls = cls.filter((c) => !/^a-\d+$/.test(c));
         cls.push(`a-${code}`);
       }
@@ -366,7 +371,6 @@ function ansiToHtml(text) {
 
 let currentView = "channel";
 let currentFleet = null;   // null = auto (single fleet or "all" not yet chosen)
-let knownFleets = [];
 let gridTimer = null;
 let focusTimer = null;
 
@@ -379,20 +383,25 @@ function channelUrl() {
 function renderFleetTabs(identities) {
   const fleets = identities.filter((i) => i.kind === "fleet")
     .map((i) => i.alias).sort();
-  knownFleets = fleets;
   const el = $("fleet-tabs");
   if (fleets.length < 2) { el.innerHTML = ""; currentFleet = null; return; }
   // Per-team rooms are the DEFAULT (operator ruling): a fleet tab is always
   // selected; the merged firehose is the explicit last resort.
-  if (!currentFleet) currentFleet = fleets[0];
+  if (!currentFleet) {
+    // Rooms are the default: on first paint with >1 fleet the channel was
+    // fetched as the firehose (currentFleet null); adopt the room AND
+    // refetch so a room tab never labels firehose content.
+    currentFleet = fleets[0];
+    jget(channelUrl()).then(renderChannel);
+  }
   el.innerHTML = [...fleets, "all"].map((f) =>
     `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
     + ` data-fleet="${esc(f)}" type="button">${esc(f)}</button>`).join("");
   el.querySelectorAll("button").forEach((b) =>
     b.addEventListener("click", () => {
       currentFleet = b.dataset.fleet;
-      renderFleetTabs(identities);
-      jget(channelUrl()).then(renderChannel);
+      renderFleetTabs(identities);   // instant highlight
+      refreshBoards();               // guarded path (generation stale-guard)
     }));
 }
 
@@ -411,7 +420,8 @@ function renderGrid(env) {
     return;
   }
   el.innerHTML = panes.map((p) => `
-    <div class="pane-card ${p.alive ? "" : "dead"}" data-bot="${esc(p.bot)}">
+    <div class="pane-card ${p.alive ? "" : "dead"}" data-bot="${esc(p.bot)}"
+         data-fleet="${esc(p.fleet)}">
       <div class="p-head"><span class="dot ${p.alive ? "live" : ""}"></span>
         <b>${esc(p.bot)}</b><span class="tag">${esc(p.fleet)}</span>
         <small>${p.captured_ago_s != null ? esc(p.captured_ago_s) + "s" : "—"}</small>
@@ -420,7 +430,8 @@ function renderGrid(env) {
       ${p.alive ? "" : `<div class="dead-note">session down</div>`}
     </div>`).join("");
   el.querySelectorAll(".pane-card").forEach((c) =>
-    c.addEventListener("click", () => openFocus(c.dataset.bot)));
+    c.addEventListener("click",
+                       () => openFocus(c.dataset.bot, c.dataset.fleet)));
 }
 
 async function pollGrid() {
@@ -444,14 +455,20 @@ function setView(view) {
 document.querySelectorAll("#view-nav button").forEach((b) =>
   b.addEventListener("click", () => setView(b.dataset.view)));
 
-function openFocus(bot) {
+function openFocus(bot, fleet) {
+  clearInterval(focusTimer);   // no prior timer bleeds into this overlay
   $("focus-overlay").hidden = false;
   $("focus-title").textContent = bot;
+  $("focus-title").dataset.fleet = fleet || "";
   $("focus-pane").innerHTML = "";
+  const q = `/api/grid?focus=${encodeURIComponent(bot)}`
+    + (fleet ? `&fleet=${encodeURIComponent(fleet)}` : "");
   const tick = async () => {
-    const env = await jget(`/api/grid?focus=${encodeURIComponent(bot)}`);
+    const env = await jget(q);
     if (!env || env.state !== "ok") return;
-    const pane = env.data.panes.find((p) => p.bot === bot);
+    if ($("focus-title").textContent !== bot) return;  // overlay moved on
+    const pane = env.data.panes.find(
+      (p) => p.bot === bot && (!fleet || p.fleet === fleet));
     if (pane) $("focus-pane").innerHTML = ansiToHtml(pane.lines);
   };
   tick();
@@ -468,3 +485,11 @@ $("focus-overlay").addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("focus-overlay").hidden) closeFocus();
 });
+
+// Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)
+// has initialized. Placed mid-file it read those bindings in their temporal
+// dead zone and threw on first load, freezing the page at its loading markup.
+["channel", "tasks", "attention", "fleet"].forEach((id) =>
+  renderState($(id), { state: "loading" }));
+refreshBoards();
+openStream();
