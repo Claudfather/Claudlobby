@@ -276,11 +276,12 @@ let generation = 0;
 async function refreshBoards() {
   const gen = ++generation;   // stale responses never paint over newer ones
   const [ch, tk, fl, sm] = await Promise.all([
-    jget("/api/channel"), jget("/api/tasks"),
+    jget(channelUrl()), jget("/api/tasks"),
     jget("/api/identities"), jget("/api/summary"),
   ]);
   if (gen !== generation) return;
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
+  if (fl && fl.state === "ok") renderFleetTabs(fl.data.identities);
   restartSafety();
 }
 
@@ -332,3 +333,138 @@ $("debug-toggle").addEventListener("click", () => {
   renderState($(id), { state: "loading" }));
 refreshBoards();
 openStream();
+
+// ---------------------------------------------------------------------------
+// Grid view + fleet tabs (Phase-4 chunk 2)
+// ---------------------------------------------------------------------------
+
+// Minimal ANSI SGR -> HTML. Every TEXT run routes through esc(); only
+// class names of our own minting enter markup. Non-SGR escapes (cursor,
+// OSC titles) are stripped first.
+function ansiToHtml(text) {
+  const cleaned = (text || "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC
+    .replace(/\x1b\[[0-9;?]*[A-LN-Za-ln-z]/g, "");        // CSI non-SGR
+  let out = "", cls = [];
+  for (const part of cleaned.split(/(\x1b\[[0-9;]*m)/)) {
+    const m = part.match(/^\x1b\[([0-9;]*)m$/);
+    if (!m) { if (part) out += span(cls, part); continue; }
+    for (const code of (m[1] || "0").split(";").map(Number)) {
+      if (code === 0) cls = [];
+      else if (code === 1) cls.push("a-b");
+      else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+        cls = cls.filter((c) => !/^a-\d+$/.test(c));
+        cls.push(`a-${code}`);
+      }
+    }
+  }
+  return out;
+  function span(c, t) {
+    return c.length ? `<span class="${c.join(" ")}">${esc(t)}</span>` : esc(t);
+  }
+}
+
+let currentView = "channel";
+let currentFleet = null;   // null = auto (single fleet or "all" not yet chosen)
+let knownFleets = [];
+let gridTimer = null;
+let focusTimer = null;
+
+function channelUrl() {
+  const f = currentFleet && currentFleet !== "all"
+    ? `&fleet=${encodeURIComponent(currentFleet)}` : "";
+  return `/api/channel?limit=120${f}`;
+}
+
+function renderFleetTabs(identities) {
+  const fleets = identities.filter((i) => i.kind === "fleet")
+    .map((i) => i.alias).sort();
+  knownFleets = fleets;
+  const el = $("fleet-tabs");
+  if (fleets.length < 2) { el.innerHTML = ""; currentFleet = null; return; }
+  // Per-team rooms are the DEFAULT (operator ruling): a fleet tab is always
+  // selected; the merged firehose is the explicit last resort.
+  if (!currentFleet) currentFleet = fleets[0];
+  el.innerHTML = [...fleets, "all"].map((f) =>
+    `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
+    + ` data-fleet="${esc(f)}" type="button">${esc(f)}</button>`).join("");
+  el.querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", () => {
+      currentFleet = b.dataset.fleet;
+      renderFleetTabs(identities);
+      jget(channelUrl()).then(renderChannel);
+    }));
+}
+
+function renderGrid(env) {
+  const el = $("grid");
+  if (!env || env.state !== "ok") {
+    el.innerHTML = stateBlock(env ? env.state : "disconnected",
+                              env && env.provenance,
+                              env && env.remediation);
+    return;
+  }
+  const panes = env.data.panes;
+  if (!panes.length) {
+    el.innerHTML = stateBlock("idle", env.provenance,
+                              "no bots discovered on this host");
+    return;
+  }
+  el.innerHTML = panes.map((p) => `
+    <div class="pane-card ${p.alive ? "" : "dead"}" data-bot="${esc(p.bot)}">
+      <div class="p-head"><span class="dot ${p.alive ? "live" : ""}"></span>
+        <b>${esc(p.bot)}</b><span class="tag">${esc(p.fleet)}</span>
+        <small>${p.captured_ago_s != null ? esc(p.captured_ago_s) + "s" : "—"}</small>
+      </div>
+      <pre>${ansiToHtml(p.lines)}</pre>
+      ${p.alive ? "" : `<div class="dead-note">session down</div>`}
+    </div>`).join("");
+  el.querySelectorAll(".pane-card").forEach((c) =>
+    c.addEventListener("click", () => openFocus(c.dataset.bot)));
+}
+
+async function pollGrid() {
+  if (currentView !== "grid") return;
+  renderGrid(await jget("/api/grid"));
+}
+
+function setView(view) {
+  currentView = view;
+  $("channel").hidden = view !== "channel";
+  $("grid").hidden = view !== "grid";
+  document.querySelectorAll("#view-nav button").forEach((b) =>
+    b.classList.toggle("on", b.dataset.view === view));
+  clearInterval(gridTimer);
+  if (view === "grid") {
+    renderState($("grid"), { state: "loading" });
+    pollGrid();
+    gridTimer = setInterval(pollGrid, 5000);
+  }
+}
+document.querySelectorAll("#view-nav button").forEach((b) =>
+  b.addEventListener("click", () => setView(b.dataset.view)));
+
+function openFocus(bot) {
+  $("focus-overlay").hidden = false;
+  $("focus-title").textContent = bot;
+  $("focus-pane").innerHTML = "";
+  const tick = async () => {
+    const env = await jget(`/api/grid?focus=${encodeURIComponent(bot)}`);
+    if (!env || env.state !== "ok") return;
+    const pane = env.data.panes.find((p) => p.bot === bot);
+    if (pane) $("focus-pane").innerHTML = ansiToHtml(pane.lines);
+  };
+  tick();
+  focusTimer = setInterval(tick, 1000);
+}
+function closeFocus() {
+  $("focus-overlay").hidden = true;
+  clearInterval(focusTimer);
+}
+$("focus-close").addEventListener("click", closeFocus);
+$("focus-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "focus-overlay") closeFocus();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("focus-overlay").hidden) closeFocus();
+});

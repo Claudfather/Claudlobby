@@ -59,6 +59,7 @@ from ..source_state import (
 )
 from .daemon import probe_daemon, socket_path
 from .ingest import now_iso as _now_iso
+from .sampler import PaneSampler
 from .queries import (
     ACTIVATION_TX_EVENTS,
     ATTENTION_SQL,
@@ -200,13 +201,23 @@ _TERMINAL_SET = frozenset(TERMINAL_TASK_EVENTS)
 _ACTIVATION_SET = frozenset(ACTIVATION_TX_EVENTS)
 
 
-def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int) -> dict:
+def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
+                   fleet: str | None = None) -> dict:
+    where, params = "", []
+    if fleet:
+        # Per-team channels are the DEFAULT view (operator ruling 2026-08-29:
+        # a merged multi-team feed is confusing; rooms, not a firehose).
+        # Envelope fleet_uid is the SENDER's fleet (§6b #4).
+        where = (" WHERE fleet_uid = (SELECT uid FROM identity_registry"
+                 " WHERE kind='fleet' AND alias = ?)")
+        params.append(fleet)
     comms = [dict(r) for r in conn.execute(
         "SELECT ingest_seq, msg_id, occurred_at, sender_alias,"
         " recipient_alias, recipient_raw, message_class, command_type,"
         " privacy, body, body_bytes, truncated, work_item_id, assignment_id,"
         " reply_to_msg_id, emitter"
-        " FROM communications ORDER BY ingest_seq DESC LIMIT ?", (limit,)
+        f" FROM communications{where} ORDER BY ingest_seq DESC LIMIT ?",
+        (*params, limit)
     ).fetchall()]
     if not comms:
         return {"threads": []}
@@ -389,7 +400,7 @@ def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
 # App factory
 # --------------------------------------------------------------------------
 
-def create_app(root: Path):
+def create_app(root: Path, sampler: PaneSampler | None = None):
     if FastAPI is None:  # pragma: no cover
         raise RuntimeError(
             "the plane UI needs the [plane-ui] extra: "
@@ -405,11 +416,12 @@ def create_app(root: Path):
         return JSONResponse(_envelope(root, lambda c: _fetch_summary(c, root)))
 
     @app.get("/api/channel")
-    def channel(limit: int = 120):
+    def channel(limit: int = 120, fleet: str | None = None):
         limit = max(1, min(int(limit), _CHANNEL_LIMIT_MAX))
         names = _channel_names(root)
         return JSONResponse(
-            _envelope(root, lambda c: _fetch_channel(c, names, limit)))
+            _envelope(root,
+                      lambda c: _fetch_channel(c, names, limit, fleet)))
 
     @app.get("/api/tasks")
     def tasks():
@@ -418,6 +430,40 @@ def create_app(root: Path):
     @app.get("/api/identities")
     def identities():
         return JSONResponse(_envelope(root, _fetch_identities))
+
+    sampler = sampler or PaneSampler(root)
+
+    @app.on_event("startup")
+    async def _start_sampler():  # pragma: no cover - exercised live
+        sampler.start()
+
+    @app.on_event("shutdown")
+    async def _stop_sampler():  # pragma: no cover - exercised live
+        await sampler.stop()
+
+    @app.get("/api/grid")
+    def grid(focus: str | None = None):
+        """Thumbnail grid from the ONE bounded sampler (§14: browsers read
+        the cache; sampling cadence is viewer-count-invariant). `focus=bot`
+        raises that pane's cadence/height for a short TTL — view-internal
+        lens state, touching neither fleet nor db; the read-only ruling is
+        about the FLEET, and this endpoint stays observational."""
+        if not sampler.available:
+            return JSONResponse({
+                "state": "unavailable",
+                "provenance": {"source": "tmux", "checked_at": _now_iso()},
+                "remediation": "tmux not found on the view daemon's PATH —"
+                               " the grid needs it; channel/tasks are"
+                               " unaffected (§14 degradable)",
+            })
+        if focus:
+            sampler.focus(focus)
+        return JSONResponse({
+            "state": SOURCE_OK,
+            "provenance": {"source": "tmux capture-pane",
+                           "checked_at": _now_iso()},
+            "data": sampler.snapshot(),
+        })
 
     @app.get("/healthz")
     def healthz():
