@@ -568,6 +568,7 @@ document.addEventListener("visibilitychange", () => {
 // Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)
 // has initialized. Placed mid-file it read those bindings in their temporal
 // dead zone and threw on first load, freezing the page at its loading markup.
+$("focus-overlay").hidden = true;   // a restored-open modal never survives a load
 ["channel", "tasks", "attention", "fleet"].forEach((id) =>
   renderState($(id), { state: "loading" }));
 refreshBoards();

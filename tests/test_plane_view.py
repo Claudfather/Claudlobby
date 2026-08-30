@@ -382,7 +382,7 @@ def test_index_served_from_package_data(tmp_path):
     r = TestClient(create_app(tmp_path)).get("/")
     assert r.status_code == 200
     assert "observable plane" in r.text
-    assert r.headers.get("cache-control") == "no-cache"
+    assert r.headers.get("cache-control") == "no-store"
 
 
 def test_stream_defaults_to_head_never_replays(tmp_path):

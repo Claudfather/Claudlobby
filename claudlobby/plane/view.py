@@ -561,9 +561,12 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
     class _NoCacheStatic(StaticFiles):
         async def get_response(self, path, scope):  # pragma: no cover - thin
             resp = await super().get_response(path, scope)
-            # Deterministic freshness after a redeploy: revalidate always
-            # (heuristic freshness could serve a stale app.js — gauntlet).
-            resp.headers["Cache-Control"] = "no-cache"
+            # NEVER cache this operator tool (gauntlet: no-cache still let
+            # the browser revalidate-and-reuse a cached ES module across a
+            # redeploy — a stale app.js survived a hard refresh). no-store is
+            # the guarantee; the tool is 1-3 tailnet viewers, so the re-fetch
+            # cost is nil.
+            resp.headers["Cache-Control"] = "no-store"
             return resp
 
     app.mount("/", _NoCacheStatic(directory=str(UI_DIR), html=True),
