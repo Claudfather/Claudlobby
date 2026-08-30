@@ -383,6 +383,15 @@ def test_index_served_from_package_data(tmp_path):
     assert r.status_code == 200
     assert "observable plane" in r.text
     assert r.headers.get("cache-control") == "no-store"
+    # asset refs carry the cache-bust token (defeats a pinned ES module)
+    assert "/app.js?v=" in r.text
+
+
+def test_app_js_import_is_cache_busted(tmp_path):
+    r = TestClient(create_app(tmp_path)).get("/app.js")
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-store"
+    assert "/panel-state.js?v=" in r.text  # intra-module import busts too
 
 
 def test_stream_defaults_to_head_never_replays(tmp_path):

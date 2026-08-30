@@ -558,17 +558,46 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store"})
 
-    class _NoCacheStatic(StaticFiles):
-        async def get_response(self, path, scope):  # pragma: no cover - thin
-            resp = await super().get_response(path, scope)
-            # NEVER cache this operator tool (gauntlet: no-cache still let
-            # the browser revalidate-and-reuse a cached ES module across a
-            # redeploy — a stale app.js survived a hard refresh). no-store is
-            # the guarantee; the tool is 1-3 tailnet viewers, so the re-fetch
-            # cost is nil.
-            resp.headers["Cache-Control"] = "no-store"
-            return resp
+    # Cache-bust token = content hash of the UI bundle (changes only on a
+    # real change). no-store alone could not EVICT an ES module already
+    # pinned in a browser's module map across a redeploy (a stale app.js
+    # survived two hard refreshes); a new asset URL forces a fresh fetch
+    # unconditionally. The token is stamped onto every asset reference,
+    # INCLUDING app.js's internal `import "/panel-state.js"`, so the whole
+    # module graph busts together.
+    import hashlib
+    _bundle = b""
+    for _f in ("index.html", "app.js", "panel-state.js", "style.css"):
+        try:
+            _bundle += (UI_DIR / _f).read_bytes()
+        except OSError:
+            pass
+    asset_token = hashlib.sha256(_bundle).hexdigest()[:12]
 
-    app.mount("/", _NoCacheStatic(directory=str(UI_DIR), html=True),
-              name="ui")
+    def _no_store(resp):
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    from fastapi.responses import HTMLResponse, Response
+
+    @app.get("/", response_class=HTMLResponse)
+    def index():
+        html = (UI_DIR / "index.html").read_text()
+        html = (html.replace("/app.js", f"/app.js?v={asset_token}")
+                    .replace("/style.css", f"/style.css?v={asset_token}"))
+        return _no_store(HTMLResponse(html))
+
+    @app.get("/app.js")
+    def app_js():
+        js = (UI_DIR / "app.js").read_text()
+        # bust the intra-module import too, or the browser reuses a pinned
+        # panel-state.js from its module map.
+        js = js.replace('"/panel-state.js"', f'"/panel-state.js?v={asset_token}"')
+        return _no_store(Response(js, media_type="text/javascript"))
+
+    class _NoStoreStatic(StaticFiles):
+        async def get_response(self, path, scope):  # pragma: no cover - thin
+            return _no_store(await super().get_response(path, scope))
+
+    app.mount("/", _NoStoreStatic(directory=str(UI_DIR), html=True), name="ui")
     return app
