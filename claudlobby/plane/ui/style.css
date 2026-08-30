@@ -159,7 +159,12 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
   Menlo, monospace; color: var(--ink); overflow: hidden; white-space: pre-wrap;
   word-break: break-all; background: #0a0e13; min-height: 150px;
 }
-.pane-card.dead pre { opacity: .35; }
+/* a focused pane captures 44 lines into the SHARED slot — cap the grid tile
+   so one viewer's focus can't grow everyone's card (reviewer finding). */
+.pane-card pre { max-height: 220px; }
+.pane-card.s-down pre { opacity: .35; }
+.pane-card.s-sampling pre { opacity: .55; }
+.pane-card:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .pane-card .dead-note { color: var(--bad); font-size: 11px; padding: 0 10px 6px; }
 
 /* focus overlay */

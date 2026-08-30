@@ -2,7 +2,11 @@
 
 ONE bounded sampler per pane, cached, never multiplied by browser count —
 §14's rule verbatim: browsers read the cache; the sampling cadence is owned
-here and is invariant in the number of viewers. The live-pane upgrade path
+here and is invariant in the number of VIEWERS. The invariant is per-PROCESS:
+a second view daemon on the same host runs its own sampler against the same
+sockets, so the supervised daemon is the singleton by port-bind, and a stray
+dev instance doubles capture load — /api/grid provenance stamps the pid so
+two grids betray themselves. The live-pane upgrade path
 (ttyd `tmux attach -r`) is a NAMED DEFERRAL to the trust/gaps chunk; this
 sampler's focus mode (1s cadence, full height) is the §14-degradable form
 that ships first.
@@ -33,6 +37,7 @@ THUMB_INTERVAL = 5.0
 FOCUS_INTERVAL = 1.0
 FOCUS_TTL = 30.0          # focus decays back to thumbnail cadence untouched
 DISCOVER_INTERVAL = 60.0  # roster changes are generate-time events
+THUMB_CONCURRENCY = 4     # Pi-right: bound the fork burst per sweep
 
 
 def discover_panes(root: Path) -> list[dict]:
@@ -131,6 +136,11 @@ class PaneSampler:
             s = self._samples.get((p["fleet"], p["bot"]))
             panes.append({
                 "fleet": p["fleet"], "bot": p["bot"],
+                # tri-state (source_state #1216): a pane the sampler has not
+                # reached yet is "sampling", NOT "down" — no-evidence must not
+                # read as evidenced-dead.
+                "status": ("down" if s and not s.alive
+                           else "up" if s else "sampling"),
                 "alive": bool(s and s.alive),
                 "lines": s.lines if s else "",
                 # age of the last SUCCESSFUL frame — a down pane keeps showing
@@ -148,7 +158,7 @@ class PaneSampler:
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.tmux, "-L", pane["socket"], "capture-pane",
-                "-t", sess, "-p", "-e", "-S", f"-{lines}",
+                "-t", sess, "-p", "-e",  # visible screen; the slice bounds it
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL)
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=4.0)
@@ -204,8 +214,17 @@ class PaneSampler:
                     await self._capture(pane, FOCUS_LINES)
             if now - last_thumb >= THUMB_INTERVAL:
                 last_thumb = now
-                for pane in self._panes:
-                    if (pane["fleet"], pane["bot"]) != focused:
+                # Bounded gather, not serial (measured: 18 panes serial 1.09s,
+                # 3-9s on a Pi under load — at/past THUMB_INTERVAL; a wedged
+                # socket adds ~4s EACH serially, so a host-wide SD stall =
+                # 72s blind). Cap concurrency so a Pi's 4 cores are not
+                # swamped by 18 simultaneous forks competing with the bots.
+                sem = asyncio.Semaphore(THUMB_CONCURRENCY)
+
+                async def _one(pane):
+                    async with sem:
                         await self._capture(pane, THUMB_LINES)
-            await asyncio.sleep(FOCUS_INTERVAL if focused
-                                else THUMB_INTERVAL / 2)
+                await asyncio.gather(*[
+                    _one(p) for p in self._panes
+                    if (p["fleet"], p["bot"]) != focused])
+            await asyncio.sleep(FOCUS_INTERVAL)

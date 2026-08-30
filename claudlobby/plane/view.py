@@ -206,11 +206,16 @@ def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
     where, params = "", []
     if fleet:
         # Per-team channels are the DEFAULT view (operator ruling 2026-08-29:
-        # a merged multi-team feed is confusing; rooms, not a firehose).
-        # Envelope fleet_uid is the SENDER's fleet (§6b #4).
+        # rooms, not a firehose). A room shows every message that TOUCHES the
+        # fleet — sender OR recipient — so a cross-fleet thread stays whole in
+        # both rooms (44.6% of this estate's dispatch traffic is cross-fleet;
+        # a sender-only predicate halved every such conversation — gauntlet).
+        # sender: envelope fleet_uid (§6b #4, indexed). recipient: the
+        # recipient_alias carries bot:<fleet>/<session> by construction.
         where = (" WHERE fleet_uid = (SELECT uid FROM identity_registry"
-                 " WHERE kind='fleet' AND alias = ?)")
-        params.append(fleet)
+                 " WHERE kind='fleet' AND alias = ?)"
+                 " OR recipient_alias LIKE ?")
+        params.extend([fleet, f"bot:{fleet}/%"])
     comms = [dict(r) for r in conn.execute(
         "SELECT ingest_seq, msg_id, occurred_at, sender_alias,"
         " recipient_alias, recipient_raw, message_class, command_type,"
@@ -407,8 +412,20 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
             f"pip install -e '.[plane-ui]' ({_IMPORT_ERROR})"
         )
     root = Path(root)
+    sampler = sampler or PaneSampler(root)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _lifespan(_app):  # pragma: no cover - exercised live
+        sampler.start()
+        try:
+            yield
+        finally:
+            await sampler.stop()
+
     app = FastAPI(title="observable plane", docs_url=None, redoc_url=None,
-                  openapi_url=None)
+                  openapi_url=None, lifespan=_lifespan)
     started_at = _now_iso()
 
     @app.get("/api/summary")
@@ -431,16 +448,6 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
     def identities():
         return JSONResponse(_envelope(root, _fetch_identities))
 
-    sampler = sampler or PaneSampler(root)
-
-    @app.on_event("startup")
-    async def _start_sampler():  # pragma: no cover - exercised live
-        sampler.start()
-
-    @app.on_event("shutdown")
-    async def _stop_sampler():  # pragma: no cover - exercised live
-        await sampler.stop()
-
     @app.get("/api/grid")
     def grid(focus: str | None = None, fleet: str | None = None):
         """Thumbnail grid from the ONE bounded sampler (§14: browsers read
@@ -458,11 +465,20 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
             })
         if focus:
             sampler.focus(focus, fleet)
+        snap = sampler.snapshot()
+        if focus:
+            # The focus overlay renders ONE pane — ship one, not all 18
+            # (measured 6.3x payload waste, ~330kbps vs 50kbps per phone
+            # watcher over Tailscale from a Pi).
+            snap = {**snap, "panes": [
+                p for p in snap["panes"]
+                if p["bot"] == focus and (not fleet or p["fleet"] == fleet)]}
+        import os
         return JSONResponse({
             "state": SOURCE_OK,
-            "provenance": {"source": "tmux capture-pane",
+            "provenance": {"source": "tmux capture-pane", "pid": os.getpid(),
                            "checked_at": _now_iso()},
-            "data": sampler.snapshot(),
+            "data": snap,
         })
 
     @app.get("/healthz")

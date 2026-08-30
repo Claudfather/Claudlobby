@@ -405,6 +405,41 @@ function renderFleetTabs(identities) {
     }));
 }
 
+const STATUS_DOT = { up: "live", down: "", sampling: "warn" };
+const STATUS_NOTE = { down: "session down", sampling: "sampling…" };
+
+function renderPaneCard(el, p) {
+  el.className = "pane-card" + (p.status === "up" ? "" : ` s-${p.status}`);
+  el.dataset.lines = p.lines;   // skip the <pre> reparse when unchanged
+  el.innerHTML = `
+    <div class="p-head"><span class="dot ${STATUS_DOT[p.status] || ""}"></span>
+      <b>${esc(p.bot)}</b><span class="tag">${esc(p.fleet)}</span>
+      <small class="age">${p.captured_ago_s != null
+        ? esc(p.captured_ago_s) + "s" : "—"}</small></div>
+    <pre>${ansiToHtml(p.lines)}</pre>
+    ${STATUS_NOTE[p.status]
+      ? `<div class="dead-note">${esc(STATUS_NOTE[p.status])}</div>` : ""}`;
+}
+
+function paneCard(p) {
+  const el = document.createElement("div");
+  el.dataset.bot = p.bot;
+  el.dataset.fleet = p.fleet;
+  el.tabIndex = 0;                       // §16: keyboard-navigable
+  el.setAttribute("role", "button");
+  el.setAttribute("aria-label", `focus ${p.fleet}/${p.bot}`);
+  const open = () => openFocus(p.bot, p.fleet);
+  el.addEventListener("click", open);
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+  });
+  renderPaneCard(el, p);
+  return el;
+}
+
+// Keyed render (§16 preserved-focus + text selection — the class the channel
+// was pinned against): unchanged frames keep their DOM node so an operator
+// can actually copy a bot's terminal out.
 function renderGrid(env) {
   const el = $("grid");
   if (!env || env.state !== "ok") {
@@ -419,19 +454,25 @@ function renderGrid(env) {
                               "no bots discovered on this host");
     return;
   }
-  el.innerHTML = panes.map((p) => `
-    <div class="pane-card ${p.alive ? "" : "dead"}" data-bot="${esc(p.bot)}"
-         data-fleet="${esc(p.fleet)}">
-      <div class="p-head"><span class="dot ${p.alive ? "live" : ""}"></span>
-        <b>${esc(p.bot)}</b><span class="tag">${esc(p.fleet)}</span>
-        <small>${p.captured_ago_s != null ? esc(p.captured_ago_s) + "s" : "—"}</small>
-      </div>
-      <pre>${ansiToHtml(p.lines)}</pre>
-      ${p.alive ? "" : `<div class="dead-note">session down</div>`}
-    </div>`).join("");
-  el.querySelectorAll(".pane-card").forEach((c) =>
-    c.addEventListener("click",
-                       () => openFocus(c.dataset.bot, c.dataset.fleet)));
+  const existing = new Map(
+    [...el.querySelectorAll(".pane-card")].map(
+      (n) => [`${n.dataset.fleet}/${n.dataset.bot}`, n]));
+  const frag = document.createDocumentFragment();
+  for (const p of panes) {
+    const prev = existing.get(`${p.fleet}/${p.bot}`);
+    if (prev && prev.dataset.lines === p.lines) {
+      const age = prev.querySelector(".age");
+      if (age) age.textContent = p.captured_ago_s != null
+        ? p.captured_ago_s + "s" : "—";
+      frag.appendChild(prev);
+    } else if (prev) {
+      renderPaneCard(prev, p);
+      frag.appendChild(prev);
+    } else {
+      frag.appendChild(paneCard(p));
+    }
+  }
+  el.replaceChildren(frag);
 }
 
 async function pollGrid() {
@@ -457,19 +498,38 @@ document.querySelectorAll("#view-nav button").forEach((b) =>
 
 function openFocus(bot, fleet) {
   clearInterval(focusTimer);   // no prior timer bleeds into this overlay
+  clearInterval(gridTimer);    // pause the full-grid poll behind the overlay
   $("focus-overlay").hidden = false;
   $("focus-title").textContent = bot;
   $("focus-title").dataset.fleet = fleet || "";
   $("focus-pane").innerHTML = "";
   const q = `/api/grid?focus=${encodeURIComponent(bot)}`
     + (fleet ? `&fleet=${encodeURIComponent(fleet)}` : "");
+  let lastLines = null;
   const tick = async () => {
-    const env = await jget(q);
-    if (!env || env.state !== "ok") return;
+    const env = await jget(q);   // server ships ONLY this pane
     if ($("focus-title").textContent !== bot) return;  // overlay moved on
-    const pane = env.data.panes.find(
-      (p) => p.bot === bot && (!fleet || p.fleet === fleet));
-    if (pane) $("focus-pane").innerHTML = ansiToHtml(pane.lines);
+    if (!env || env.state !== "ok") {
+      $("focus-pane").innerHTML = stateBlock(
+        env ? env.state : "disconnected", env && env.provenance,
+        env && env.remediation);
+      lastLines = null;
+      return;
+    }
+    const pane = (env.data.panes || [])[0];
+    if (!pane) return;
+    if (pane.status !== "up") {   // a dead/sampling focus is a state, not blank
+      $("focus-pane").innerHTML = stateBlock(
+        "idle", null, null, { label: STATUS_NOTE[pane.status] || pane.status,
+                              detail: "" })
+        + `<pre>${ansiToHtml(pane.lines)}</pre>`;
+      lastLines = null;
+      return;
+    }
+    if (pane.lines !== lastLines) {   // skip reparse when unchanged
+      lastLines = pane.lines;
+      $("focus-pane").innerHTML = ansiToHtml(pane.lines);
+    }
   };
   tick();
   focusTimer = setInterval(tick, 1000);
@@ -477,6 +537,10 @@ function openFocus(bot, fleet) {
 function closeFocus() {
   $("focus-overlay").hidden = true;
   clearInterval(focusTimer);
+  if (currentView === "grid") {   // resume the grid poll
+    gridTimer = setInterval(pollGrid, 5000);
+    pollGrid();
+  }
 }
 $("focus-close").addEventListener("click", closeFocus);
 $("focus-overlay").addEventListener("click", (e) => {
@@ -484,6 +548,18 @@ $("focus-overlay").addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("focus-overlay").hidden) closeFocus();
+});
+document.addEventListener("visibilitychange", () => {
+  // A hidden tab's open overlay must not pin the server at 1s focus cadence
+  // (each tick renews the 30s TTL) — §14 honesty (reviewer finding).
+  if (document.hidden) {
+    clearInterval(focusTimer); clearInterval(gridTimer);
+  } else if (!$("focus-overlay").hidden) {
+    openFocus($("focus-title").textContent,
+              $("focus-title").dataset.fleet || null);
+  } else if (currentView === "grid") {
+    gridTimer = setInterval(pollGrid, 5000); pollGrid();
+  }
 });
 
 // Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)

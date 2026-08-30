@@ -81,8 +81,10 @@ def test_capture_marks_alive_and_dead(tmp_path):
     asyncio.run(run())
     snap = {p["bot"]: p for p in s.snapshot()["panes"]}
     assert snap["up"]["alive"] is True
+    assert snap["up"]["status"] == "up"
     assert "green" in snap["up"]["lines"]
     assert snap["down"]["alive"] is False  # a down bot is a FACT on the grid
+    assert snap["down"]["status"] == "down"
 
 
 def test_snapshot_is_pure_cache_read(tmp_path):
@@ -252,3 +254,67 @@ def test_ansi_truecolor_never_emits_a_stray_basic_class(tmp_path):
     i38 = app_js.index("code === 38")
     ibasic = app_js.index("code >= 30 && code <= 37")
     assert i38 < ibasic, "extended-color must be handled before basic SGR"
+
+
+def test_focus_endpoint_ships_only_the_focused_pane(tmp_path):
+    """Efficiency (measured 6.3x waste): the overlay renders ONE pane, so
+    /api/grid?focus= must return one, not all N."""
+    _bot(tmp_path, "flat", "f1", "up")
+    _bot(tmp_path, "flat", "f1", "other")
+    tmux = _fake_tmux(tmp_path, 'printf "x\\n"')
+    s = PaneSampler(tmp_path, tmux=str(tmux))
+    s._panes = discover_panes(tmp_path)
+
+    async def run():
+        for p in s._panes:
+            await s._capture(p, 14)
+    asyncio.run(run())
+    client = TestClient(create_app(tmp_path, sampler=s))
+    full = client.get("/api/grid").json()
+    assert len(full["data"]["panes"]) == 2
+    focused = client.get("/api/grid?focus=up&fleet=f1").json()
+    assert len(focused["data"]["panes"]) == 1
+    assert focused["data"]["panes"][0]["bot"] == "up"
+    assert "pid" in focused["provenance"]  # two grids betray themselves
+
+
+def test_never_sampled_pane_is_sampling_not_down(tmp_path):
+    """source_state #1216: a pane the sampler has not reached is 'sampling',
+    NOT 'down' — no-evidence must not read as evidenced-dead."""
+    _bot(tmp_path, "flat", "f1", "fresh")
+    s = PaneSampler(tmp_path, tmux=str(_fake_tmux(tmp_path, "true")))
+    s._panes = discover_panes(tmp_path)   # discovered, never captured
+    pane = s.snapshot()["panes"][0]
+    assert pane["status"] == "sampling"
+    assert pane["alive"] is False
+
+
+def test_room_shows_cross_fleet_threads_from_both_sides(tmp_path):
+    """The default room must show a thread that TOUCHES the fleet as sender
+    OR recipient — a sender-only predicate halved cross-fleet conversations
+    (44.6% of dispatch traffic)."""
+    d = tmp_path / "state" / "plane"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "capture.json").write_text('{"*": "full"}')
+    wi = "wi_" + "e" * 32
+    # eng -> data dispatch, and the data -> eng reply
+    emit_batch(tmp_path, [
+        {"event_type": "work_item", "emitter": "t", "fleet": "engineering",
+         "payload": {"work_item_id": wi, "title": "cross", "created_by":
+                     "bot:engineering/lead"}},
+        {"event_type": "communication", "emitter": "t", "fleet": "engineering",
+         "payload": {"msg_id": "msg_" + "e" * 32, "sender":
+                     "bot:engineering/lead", "recipient": "bot:data/worker",
+                     "message_class": "task_request", "work_item_id": wi,
+                     "body": "the ask"}},
+        {"event_type": "communication", "emitter": "t", "fleet": "data",
+         "payload": {"msg_id": "msg_" + "f" * 32, "sender": "bot:data/worker",
+                     "recipient": "bot:engineering/lead",
+                     "message_class": "report", "work_item_id": wi,
+                     "reply_to_msg_id": "msg_" + "e" * 32,
+                     "body": "the answer"}}])
+    client = TestClient(create_app(tmp_path))
+    for room in ("engineering", "data"):
+        threads = client.get(f"/api/channel?fleet={room}").json()["data"]["threads"]
+        bodies = sorted(m["body"] for t in threads for m in t["messages"])
+        assert bodies == ["the answer", "the ask"], f"{room} split the thread"
