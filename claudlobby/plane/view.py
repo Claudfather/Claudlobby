@@ -60,6 +60,7 @@ from ..source_state import (
     probe_source,
 )
 from .daemon import probe_daemon, socket_path
+from .emit_api import CaptureConfigError, _load_capture_config
 from .ingest import now_iso as _now_iso
 from .sampler import PaneSampler
 from .queries import (
@@ -367,6 +368,122 @@ def _fetch_identities(conn: sqlite3.Connection) -> dict:
     return {"identities": rows}
 
 
+# FTS markers: snippet() must not hand the client pre-built markup (every
+# body is bot-authored text that the client escapes wholesale), so matches
+# are bracketed with control bytes no real body carries; the client escapes
+# the WHOLE string, then swaps the markers for <mark> tags.
+_FTS_OPEN, _FTS_CLOSE = "\x01", "\x02"
+
+
+def _fts_query(q: str) -> str:
+    """User text -> safe FTS5 query: each whitespace token double-quoted
+    (implicit AND). Kills advanced MATCH syntax deliberately — an unbalanced
+    quote or stray NEAR( from a human search must never read as a syntax
+    ERROR (which the envelope would misclassify as source trouble)."""
+    toks = [t.replace('"', '""') for t in q.split() if t]
+    return " ".join(f'"{t}"' for t in toks)
+
+
+def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
+                  limit: int) -> dict:
+    match = _fts_query(q)
+    if not match:
+        return {"results": [], "query": q}
+    sql = (
+        "SELECT c.ingest_seq, c.msg_id, c.occurred_at, c.sender_alias,"
+        " c.recipient_alias, c.message_class, c.work_item_id,"
+        f" snippet(comms_fts, 0, '{_FTS_OPEN}', '{_FTS_CLOSE}', ' … ', 12)"
+        "  AS snip"
+        " FROM comms_fts JOIN communications c ON c.rowid = comms_fts.rowid"
+        " WHERE comms_fts MATCH ?")
+    params: list = [match]
+    if fleet:
+        sql += (" AND (c.fleet_uid = (SELECT uid FROM identity_registry"
+                " WHERE kind='fleet' AND alias = ?)"
+                " OR c.recipient_fleet = ?)")
+        params.extend([fleet, fleet])
+    sql += " ORDER BY c.ingest_seq DESC LIMIT ?"
+    params.append(limit)
+    rows = []
+    for r in conn.execute(sql, params):
+        row = dict(r)
+        row["sender_short"] = _short(row.pop("sender_alias"))
+        row["recipient_short"] = _short(row.pop("recipient_alias"))
+        rows.append(row)
+    return {"results": rows, "query": q}
+
+
+def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
+    """The trust/gaps surface (§16 F8): what the plane can and cannot see —
+    refused events (quarantine, with reasons), not-yet-ingested (spool),
+    per-door emitter freshness, per-fleet capture policy + last activity,
+    unconfirmed identities. The panel that keeps an empty board honest."""
+    # Gaps = events that ARRIVED and were refused. Quarantine entries carry
+    # a .reason sidecar; sample the newest few verbatim.
+    qdir = _plane_state_dir(root) / "spool" / "quarantine"
+    quarantined, reasons = 0, []
+    if qdir.is_dir():
+        entries = sorted(qdir.glob("*.json"),
+                         key=lambda f: f.stat().st_mtime, reverse=True)
+        quarantined = len(entries)
+        for f in entries[:5]:
+            sidecar = f.with_name(f.name + ".reason")
+            try:
+                reason = sidecar.read_text()[:300]
+            except OSError:
+                reason = "(no reason recorded)"
+            reasons.append({"event": f.name, "reason": reason})
+    spool, spool_oldest = _spool_pending(root)
+
+    # Per-door freshness: every emitter ever seen, newest event age. Data-
+    # driven — no hardcoded door roster to drift (#1009 class); a door that
+    # has NEVER fired is visible as absence against the doors that have.
+    emitters = [dict(r) for r in conn.execute(
+        "SELECT emitter, MAX(occurred_at) AS last_at, COUNT(*) AS events"
+        " FROM (SELECT emitter, occurred_at FROM events"
+        "       UNION ALL SELECT emitter, occurred_at FROM communications"
+        "       UNION ALL SELECT emitter, occurred_at FROM work_items)"
+        " GROUP BY emitter ORDER BY last_at DESC")]
+
+    # Per-fleet: capture policy (the words-vs-metadata knob) + last comm.
+    # A fleet with a policy but no rows is a DORMANT emitter — unarmed or
+    # never fired; the difference is compose-side and disclosed as such.
+    try:
+        capture = _load_capture_config(root)
+        capture_state = "ok"
+    except CaptureConfigError:
+        capture, capture_state = {}, "malformed"
+    fleets = [dict(r) for r in conn.execute(
+        "SELECT i.alias AS fleet, MAX(c.occurred_at) AS last_comm_at,"
+        " COUNT(c.msg_id) AS comms"
+        " FROM identity_registry i"
+        " LEFT JOIN communications c ON c.fleet_uid = i.uid"
+        " WHERE i.kind='fleet' GROUP BY i.alias")]
+    seen = {f["fleet"] for f in fleets}
+    for f in fleets:
+        f["capture"] = capture.get(f["fleet"], capture.get("*", "metadata"))
+    for alias, mode in sorted(capture.items()):
+        if alias != "*" and alias not in seen:
+            fleets.append({"fleet": alias, "last_comm_at": None, "comms": 0,
+                           "capture": mode,
+                           "note": "policy declared, no events ever —"
+                                   " dormant (unarmed or never fired)"})
+
+    provisional = conn.execute(
+        "SELECT COUNT(*) FROM identity_registry WHERE provisional = 1"
+    ).fetchone()[0]
+    return {
+        "quarantined": quarantined,
+        "quarantine_reasons": reasons,
+        "spool_pending": spool,
+        "spool_oldest_at": spool_oldest,
+        "emitters": emitters,
+        "fleets": fleets,
+        "capture_config": capture_state,
+        "provisional_identities": provisional,
+    }
+
+
 def _spool_pending(root: Path) -> tuple[int, str | None]:
     """(pending count, oldest spooled_at). Doctor's definition — NON-recursive
     *.json in the spool dir: the first version rglob'd, which counted every
@@ -492,6 +609,17 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                            "checked_at": _now_iso()},
             "data": snap,
         })
+
+    @app.get("/api/search")
+    def search(q: str = "", fleet: str | None = None, limit: int = 50):
+        limit = max(1, min(int(limit), 200))
+        return JSONResponse(
+            _envelope(root, lambda c: _fetch_search(c, q, fleet, limit)))
+
+    @app.get("/api/trust")
+    def trust():
+        return JSONResponse(
+            _envelope(root, lambda c: _fetch_trust(c, root)))
 
     @app.get("/healthz")
     def healthz():

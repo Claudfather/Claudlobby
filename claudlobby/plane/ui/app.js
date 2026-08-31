@@ -493,7 +493,10 @@ async function pollGrid() {
 function setView(view) {
   currentView = view;
   $("channel").hidden = view !== "channel";
+  $("search-results").hidden = true;   // leaving/entering resets search
+  $("search").value = view === "channel" ? $("search").value : "";
   $("grid").hidden = view !== "grid";
+  $("trust").hidden = view !== "trust";
   document.querySelectorAll("#view-nav button").forEach((b) =>
     b.classList.toggle("on", b.dataset.view === view));
   clearInterval(gridTimer);
@@ -501,6 +504,10 @@ function setView(view) {
     renderState($("grid"), { state: "loading" });
     pollGrid();
     gridTimer = setInterval(pollGrid, 5000);
+  }
+  if (view === "trust") {
+    renderState($("trust"), { state: "loading" });
+    jget("/api/trust").then(renderTrust);
   }
 }
 document.querySelectorAll("#view-nav button").forEach((b) =>
@@ -576,6 +583,109 @@ document.addEventListener("visibilitychange", () => {
   } else if (currentView === "grid") {
     gridTimer = setInterval(pollGrid, 5000); pollGrid();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Trust/gaps surface + channel search (Phase-4 final chunk)
+// ---------------------------------------------------------------------------
+
+function trustNum(n, okWhenZero) {
+  const cls = n === 0 ? (okWhenZero ? "trust-ok" : "trust-warn")
+                      : (okWhenZero ? "trust-bad" : "trust-ok");
+  return `<span class="trust-num ${cls}">${n}</span>`;
+}
+
+function renderTrust(env) {
+  const el = $("trust");
+  if (renderState(el, env)) return;
+  const d = env.data;
+  const emitters = d.emitters.map((e) => `
+    <div class="trust-row"><b>${esc(e.emitter)}</b>
+      <span>${esc(ago(e.last_at))}</span>
+      <small>${e.events} events</small></div>`).join("")
+    || `<div class="trust-row"><small>no emitters have fired yet</small></div>`;
+  const fleets = d.fleets.map((f) => `
+    <div class="trust-row"><b>${esc(f.fleet)}</b>
+      <span class="tag">${esc(f.capture)} capture</span>
+      <span>${f.last_comm_at ? esc(ago(f.last_comm_at)) : "no comms ever"}</span>
+      <small>${f.comms} messages${f.note ? " · " + esc(f.note) : ""}</small>
+    </div>`).join("");
+  const reasons = d.quarantine_reasons.map((r) =>
+    `<div class="reason">${esc(r.event)} — ${esc(r.reason)}</div>`).join("");
+  el.innerHTML = `
+    <div class="trust-block"><h3>gaps — what the recorder refused</h3>
+      <div class="trust-row">${trustNum(d.quarantined, true)}
+        <b>quarantined events</b>
+        <small>arrived and were refused — each is a recording gap</small></div>
+      ${reasons}
+      <div class="trust-row">${trustNum(d.spool_pending, true)}
+        <b>spooled, not yet ingested</b>
+        <small>${d.spool_oldest_at
+          ? "oldest " + esc(ago(d.spool_oldest_at)) : ""}</small></div>
+    </div>
+    <div class="trust-block"><h3>doors — per-emitter freshness</h3>
+      ${emitters}
+    </div>
+    <div class="trust-block"><h3>fleets — capture policy + liveness</h3>
+      ${d.capture_config === "malformed"
+        ? `<div class="trust-row trust-bad"><b>capture.json is malformed</b>
+             <small>policy unreadable — modes shown are defaults</small></div>`
+        : ""}
+      ${fleets}
+    </div>
+    <div class="trust-block"><h3>identities</h3>
+      <div class="trust-row">${trustNum(d.provisional_identities, true)}
+        <b>provisional identities</b>
+        <small>lazily minted, unconfirmed by the registry — Phase 2b
+        confirms these</small></div>
+    </div>`;
+}
+
+function renderSearch(env) {
+  const el = $("search-results");
+  if (!env || env.state !== "ok") {
+    el.innerHTML = stateBlock(env ? env.state : "disconnected",
+                              env && env.provenance, env && env.remediation);
+    return;
+  }
+  const hits = env.data.results;
+  if (!hits.length) {
+    el.innerHTML = stateBlock("idle", null, null,
+      { label: `no matches for “${env.data.query}”`, detail: "" });  // stateBlock escapes
+    return;
+  }
+  el.innerHTML = hits.map((h) => {
+    // esc() the WHOLE snippet, then swap the server's control-byte markers
+    // for <mark> — markup never rides in from bot-authored text.
+    const snip = esc(h.snip)
+      .replaceAll("\u0001", "<mark>").replaceAll("\u0002", "</mark>");
+    return `<div class="hit">
+      <b>${esc(h.sender_short)}</b>
+      <span class="to">→ ${esc(h.recipient_short || "—")}</span>
+      <small> · ${esc(ago(h.occurred_at))}${h.work_item_id
+        ? " · work item" : ""}</small>
+      <div class="snip">${snip}</div></div>`;
+  }).join("");
+}
+
+let searchTimer = null;
+$("search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const q = $("search").value.trim();
+  if (!q) {
+    $("search-results").hidden = true;
+    $("channel").hidden = false;
+    return;
+  }
+  searchTimer = setTimeout(async () => {
+    const f = currentFleet && currentFleet !== "all"
+      ? `&fleet=${encodeURIComponent(currentFleet)}` : "";
+    const env = await jget(`/api/search?q=${encodeURIComponent(q)}${f}`);
+    if ($("search").value.trim() !== q) return;  // stale response
+    $("channel").hidden = true;
+    $("search-results").hidden = false;
+    renderSearch(env);
+  }, 250);
 });
 
 // Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)
