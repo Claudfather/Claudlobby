@@ -304,11 +304,40 @@ def _curl_with_config(
         os.unlink(cfg_path)
 
 
-def check_credentials(paths: Paths, report: DoctorReport) -> None:
-    """Probe key credentials for validity (GitHub PAT, Railway token).
+#: The Railway tokens a fleet may declare, and the query each is
+#: DEFINITIONALLY able to answer: (variable, graphql query, scope).
+#:
+#: ONE PROBE FOR ALL TOKENS IS THE BUG. Railway issues two kinds of token and
+#: they answer different questions — a workspace-scoped token is not bound to
+#: an account, so it cannot answer `me` BY CONSTRUCTION and probing it that way
+#: reports a working credential as dead.
+#:
+#: A CREDENTIAL HAS AN IDENTITY AND A REACH; THEY ARE INDEPENDENT. An identity
+#: endpoint answers nothing about access — probe the OPERATION you need. The
+#: GitHub App branch in `lib/creds-check.sh` already embodies this (it probes
+#: `/installation/repositories` because a `ghs_` token 403s on `/user`, D13).
+#: Durable home for the rule: Claudlobby#1400.
+#:
+#: KNOWN DUPLICATION, named rather than left to be rediscovered. This table
+#: also exists in bash, as `_railway_token_specs` in `lib/creds-check.sh`, and
+#: the two cannot share a literal across languages. The previous version of
+#: this block carried the comment "matches creds-check.sh" — it was a copy kept
+#: in sync by hand, and it went stale the moment the bash side was fixed, which
+#: is exactly how `doctor` came to probe a retired variable. Change one, change
+#: both, and prefer a shared declaration if a third consumer ever appears.
+_RAILWAY_TOKENS: tuple[tuple[str, str, str], ...] = (
+    ("RAILWAY_PERSONAL_TOKEN", "me{email}", "account"),
+    ("RAILWAY_PERSONAL_PROJECT_TOKEN", "projects{edges{node{id}}}", "workspace"),
+)
 
-    Matches creds-check.sh patterns: tokens passed via --config tmpfile
-    (not -H args), Railway body checked for GraphQL errors on 200.
+
+def check_credentials(paths: Paths, report: DoctorReport) -> None:
+    """Probe key credentials for validity (GitHub PAT, Railway tokens).
+
+    Shares `creds-check.sh`'s mechanics deliberately: tokens ride a `--config`
+    tmpfile rather than argv, and a Railway 200 is still inspected for a
+    GraphQL `errors` body. It does NOT share its token table — see
+    `_RAILWAY_TOKENS` for that duplication and why it is called out.
     """
     checks_run = 0
     failures = []
@@ -338,14 +367,19 @@ def check_credentials(paths: Paths, report: DoctorReport) -> None:
         except (subprocess.TimeoutExpired, OSError):
             failures.append("GITHUB_PAT (timeout)")
 
-    # Railway token — probe via GraphQL me query (matches creds-check.sh)
-    railway_token = os.environ.get("RAILWAY_API_TOKEN")
-    if railway_token:
+    # Railway — PER TOKEN, each probed with a query it can DEFINITIONALLY
+    # answer. See `_RAILWAY_TOKENS` for why one probe for all is the bug.
+    railway_declared = 0
+    for varname, query, scope in _RAILWAY_TOKENS:
+        token = os.environ.get(varname)
+        if not token:
+            continue
+        railway_declared += 1
         checks_run += 1
         try:
             result = _curl_with_config(
                 {
-                    "Authorization": f"Bearer {railway_token}",
+                    "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
                 },
                 [
@@ -354,7 +388,7 @@ def check_credentials(paths: Paths, report: DoctorReport) -> None:
                     "-w",
                     "\n%{http_code}",
                     "-d",
-                    '{"query":"query{me{name}}"}',
+                    '{"query":"query{' + query + '}"}',
                     "https://backboard.railway.app/graphql/v2",
                 ],
             )
@@ -363,18 +397,36 @@ def check_credentials(paths: Paths, report: DoctorReport) -> None:
             body = lines[0] if len(lines) == 2 else ""
             code = lines[-1]
             if code != "200":
-                failures.append(f"RAILWAY_API_TOKEN (HTTP {code})")
+                failures.append(f"{varname} (HTTP {code})")
             elif body:
-                # Railway returns 200 with {"errors":[...]} on auth failure
+                # A REJECTED Railway token still answers 200 — the refusal
+                # rides in the body. A status-only check calls it healthy.
                 try:
                     resp = json.loads(body)
                     if "errors" in resp:
                         msg = resp["errors"][0].get("message", "unknown error")[:120]
-                        failures.append(f"RAILWAY_API_TOKEN (graphql error: {msg})")
+                        failures.append(
+                            f"{varname} ({scope}) (graphql error: {msg})"
+                        )
                 except (json.JSONDecodeError, IndexError, KeyError):
                     pass
         except (subprocess.TimeoutExpired, OSError):
-            failures.append("RAILWAY_API_TOKEN (timeout)")
+            failures.append(f"{varname} (timeout)")
+
+    # A declared-nothing Railway is SAID, never merely skipped. This block
+    # used to read one variable behind `if token:`; when that variable was
+    # retired, the whole probe stopped running and `checks_run` simply never
+    # incremented — no error, no message, and `doctor` lost Railway coverage
+    # while reporting a clean run. Absence has to be visible or removing a
+    # credential silently removes its check.
+    if railway_declared == 0:
+        report.add(
+            "credentials",
+            "warn",
+            "Railway unprobed: neither "
+            + " nor ".join(v for v, _, _ in _RAILWAY_TOKENS)
+            + " is set",
+        )
 
     if checks_run == 0:
         report.add("credentials", "warn", "no credential env vars found to probe")

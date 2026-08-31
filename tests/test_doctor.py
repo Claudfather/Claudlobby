@@ -16,6 +16,7 @@ from claudlobby.config import load_fleet
 from claudlobby.doctor import (
     DoctorReport,
     check_claudron,
+    check_credentials,
     check_env_vars,
     check_mcp_configs,
     check_services,
@@ -422,3 +423,100 @@ class TestDoctorTimerScriptParity:
         report = run_doctor(fleet, paths)
         fleet_yaml = next(c for c in report.checks if c.name == "fleet-yaml")
         assert fleet_yaml.status != "fail"
+
+
+class TestCheckCredentialsRailway:
+    """Railway had NO coverage here, which is how this block came to probe a
+    retired variable while reporting a clean run.
+
+    `check_credentials` read `RAILWAY_API_TOKEN` behind `if token:` and probed
+    it with `me`. When that variable was retired the guard simply fell through:
+    no error, no message, `checks_run` never incremented, and `doctor` lost
+    Railway coverage silently. A check that disappears when its input does is
+    indistinguishable from one that passed.
+    """
+
+    @staticmethod
+    def _capture(monkeypatch):
+        """Record every curl the credential probe makes, answering 200/{}."""
+        calls: list[list[str]] = []
+
+        class _R:
+            stdout = '{"data":{}}\n200'
+
+        def fake(headers, args):
+            calls.append(list(args))
+            return _R()
+
+        monkeypatch.setattr("claudlobby.doctor._curl_with_config", fake)
+        for var in (
+            "GITHUB_PAT",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "RAILWAY_PERSONAL_TOKEN",
+            "RAILWAY_PERSONAL_PROJECT_TOKEN",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        return calls
+
+    def _railway_payloads(self, calls) -> str:
+        return "\n".join(
+            " ".join(c) for c in calls if any("backboard.railway" in a for a in c)
+        )
+
+    def test_a_workspace_token_is_probed_with_projects_never_with_me(
+        self, doctor_fleet, monkeypatch
+    ):
+        _, _, paths = doctor_fleet
+        calls = self._capture(monkeypatch)
+        monkeypatch.setenv("RAILWAY_PERSONAL_PROJECT_TOKEN", "t")
+        check_credentials(paths, DoctorReport())
+        probes = self._railway_payloads(calls)
+        assert "projects" in probes
+        assert "me{" not in probes, (
+            "a workspace-scoped token cannot answer `me` by construction; "
+            "probing it that way reports a working credential as dead"
+        )
+
+    def test_an_account_token_is_probed_with_me(self, doctor_fleet, monkeypatch):
+        """Positive control: a test that only ever sees `projects` cannot tell
+        per-token probing from `projects`-for-everything."""
+        _, _, paths = doctor_fleet
+        calls = self._capture(monkeypatch)
+        monkeypatch.setenv("RAILWAY_PERSONAL_TOKEN", "t")
+        check_credentials(paths, DoctorReport())
+        assert "me{" in self._railway_payloads(calls)
+
+    def test_both_declared_tokens_are_probed(self, doctor_fleet, monkeypatch):
+        _, _, paths = doctor_fleet
+        calls = self._capture(monkeypatch)
+        monkeypatch.setenv("RAILWAY_PERSONAL_TOKEN", "t")
+        monkeypatch.setenv("RAILWAY_PERSONAL_PROJECT_TOKEN", "t2")
+        check_credentials(paths, DoctorReport())
+        probes = self._railway_payloads(calls)
+        assert "me{" in probes and "projects" in probes, (
+            "one dead token among several is not `Railway is broken`; each "
+            "declared token gets its own probe"
+        )
+
+    def test_no_railway_token_is_SAID_not_silently_skipped(
+        self, doctor_fleet, monkeypatch
+    ):
+        """THE REGRESSION THIS FILE EXISTS FOR.
+
+        With no Railway variable set, the old code ran nothing and said
+        nothing. Retiring a credential must not silently retire its check.
+        """
+        _, _, paths = doctor_fleet
+        self._capture(monkeypatch)
+        report = DoctorReport()
+        check_credentials(paths, report)
+        railway_notes = [
+            c for c in report.checks if "Railway" in c.detail or "RAILWAY" in c.detail
+        ]
+        assert railway_notes, (
+            "no Railway token declared and doctor said nothing at all — the "
+            "check vanished with its input"
+        )
+        assert "RAILWAY_PERSONAL_TOKEN" in railway_notes[0].detail, (
+            "the notice must name the variables, or the reader cannot act"
+        )
