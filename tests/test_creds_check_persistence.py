@@ -30,7 +30,7 @@ FORCE_RAILWAY = "not-a-real-token-forces-the-check-to-run"
 # This is the defect that shipped a red CI: `_fleet` builds its child env from
 # `_scrubbed_env`, which is an inherit-and-subtract DENYLIST — it strips
 # TELEGRAM*/CLAUDLOBBY*/FLEET*/BOT_* and passes everything else through. A
-# developer machine with a (dead) RAILWAY_API_TOKEN exported made railway_token
+# developer machine with a (dead) Railway token exported made railway_personal_token
 # resolve to `fail`; CI, with no such variable, resolved it to `skip`. The tests
 # passed on both machines a human used and failed only in CI, because they were
 # reading host state instead of their own fixture.
@@ -38,7 +38,11 @@ FORCE_RAILWAY = "not-a-real-token-forces-the-check-to-run"
 # `conftest._scrubbed_env`'s own docstring names this: "only as complete as this
 # prefix list (#846) ... new tests should not add call sites here."
 CREDENTIAL_VARS = (
-    "RAILWAY_API_TOKEN",
+    # Both Railway tokens, because the check now reads BOTH. Listing only one
+    # would re-create the very defect this comment records, through whichever
+    # var was left inheritable.
+    "RAILWAY_PERSONAL_TOKEN",
+    "RAILWAY_PERSONAL_PROJECT_TOKEN",
     "GITHUB_PERSONAL_ACCESS_TOKEN",
     "GITHUB_TOKEN",
     "GITHUB_PAT",
@@ -48,14 +52,14 @@ CREDENTIAL_VARS = (
 def _controlled(tmp_path, *, railway_fails: bool):
     """A fleet whose credential inputs are set by the TEST, not by the host.
 
-    railway_fails=True  -> railway_token resolves `fail` (token present, stub 404)
-    railway_fails=False -> railway_token resolves `skip` (no token at all)
+    railway_fails=True  -> railway_personal_token resolves `fail` (token present, stub 404)
+    railway_fails=False -> railway_personal_token resolves `skip` (no token at all)
     """
     f = _fleet(tmp_path)
     for var in CREDENTIAL_VARS:
         f["env"].pop(var, None)
     if railway_fails:
-        f["env"]["RAILWAY_API_TOKEN"] = FORCE_RAILWAY
+        f["env"]["RAILWAY_PERSONAL_TOKEN"] = FORCE_RAILWAY
     return f
 
 
@@ -159,7 +163,7 @@ class TestPersistentSkipResurfaces:
 class TestPersistentFailResurfaces:
     """The fail ladder: 1, 3, 7 days, then weekly.
 
-    ``railway_token`` is used as the vehicle, and the test SETS the token so the
+    ``railway_personal_token`` is used as the vehicle, and the test SETS the token so the
     check runs and the stub answers 404. It does not rely on the host happening
     to export one — that dependency is what turned this file red in CI while
     passing on two developer machines.
@@ -168,15 +172,15 @@ class TestPersistentFailResurfaces:
     def test_the_first_fail_alerts_as_it_always_did(self, tmp_path):
         f = _controlled(tmp_path, railway_fails=True)
         state = _run(f)
-        assert state["railway_token"]["status"] == "fail"
-        assert "railway_token FAIL" in _posts(f), (
+        assert state["railway_personal_token"]["status"] == "fail"
+        assert "railway_personal_token FAIL" in _posts(f), (
             "the transition alert must not regress"
         )
 
     def test_a_fail_that_stays_failed_re_alerts_with_its_age(self, tmp_path):
         f = _controlled(tmp_path, railway_fails=True)
         _run(f)
-        _age(f, "railway_token", 1)
+        _age(f, "railway_personal_token", 1)
         _run(f)
         posts = _posts(f)
         assert "STILL FAILING" in posts, (
@@ -192,10 +196,10 @@ class TestPersistentFailResurfaces:
     def test_it_decays_rather_than_alerting_every_tick(self, tmp_path):
         f = _controlled(tmp_path, railway_fails=True)
         _run(f)
-        _age(f, "railway_token", 1)
+        _age(f, "railway_personal_token", 1)
         _run(f)
         first = _posts(f).count("STILL FAILING")
-        _age(f, "railway_token", 1)  # day 2 — the next mark is day 3
+        _age(f, "railway_personal_token", 1)  # day 2 — the next mark is day 3
         _run(f)
         assert _posts(f).count("STILL FAILING") == first, (
             "ladder is 1, 3, 7 then weekly. Re-alerting daily would recreate "
@@ -206,7 +210,7 @@ class TestPersistentFailResurfaces:
         f = _controlled(tmp_path, railway_fails=True)
         _run(f)
         for day in (1, 2, 4):  # reaches day 1, then 3, then 7
-            _age(f, "railway_token", day)
+            _age(f, "railway_personal_token", day)
             _run(f)
         assert _posts(f).count("STILL FAILING") == 3, (
             "three re-surfaces expected at days 1, 3 and 7"
@@ -265,7 +269,7 @@ class TestTheseTestsAreHermetic:
     These tests passed on two developer machines and failed in CI, because
     `_fleet` inherits its child env through `_scrubbed_env` — a prefix DENYLIST
     that strips TELEGRAM*/CLAUDLOBBY*/FLEET*/BOT_* and passes everything else.
-    A machine with a dead RAILWAY_API_TOKEN exported resolved railway_token to
+    A machine with a dead Railway token exported resolved railway_personal_token to
     `fail`; CI, with none, resolved it to `skip`.
 
     A test whose outcome depends on which credentials happen to exist on the
@@ -273,7 +277,7 @@ class TestTheseTestsAreHermetic:
     """
 
     def test_an_ambient_token_cannot_reach_the_script(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("RAILWAY_API_TOKEN", "ambient-must-not-leak")
+        monkeypatch.setenv("RAILWAY_PERSONAL_TOKEN", "ambient-must-not-leak")
         monkeypatch.setenv("GITHUB_PAT", "ambient-must-not-leak")
         f = _controlled(tmp_path, railway_fails=False)
         for var in CREDENTIAL_VARS:
@@ -289,19 +293,19 @@ class TestTheseTestsAreHermetic:
         With a token exported this used to resolve `fail`. It must resolve
         `skip` regardless, because the TEST said no token.
         """
-        monkeypatch.setenv("RAILWAY_API_TOKEN", "ambient-must-not-leak")
+        monkeypatch.setenv("RAILWAY_PERSONAL_TOKEN", "ambient-must-not-leak")
         state = _run(_controlled(tmp_path, railway_fails=False))
-        assert state["railway_token"]["status"] == "skip", (
-            "railway_token resolved from the HOST's environment rather than the "
-            "fixture's. This is precisely the CI failure: green on a machine "
+        assert state["railway_personal_token"]["status"] == "skip", (
+            "railway_personal_token resolved from the HOST environment rather than "
+            "from the fixture. This is precisely the CI failure: green on a machine "
             "with a stale Railway token, red on one without."
         )
 
     def test_the_test_can_still_force_a_fail(self, tmp_path, monkeypatch):
         """The inverse: no ambient token, and the fixture still produces a fail."""
-        monkeypatch.delenv("RAILWAY_API_TOKEN", raising=False)
+        monkeypatch.delenv("RAILWAY_PERSONAL_TOKEN", raising=False)
         state = _run(_controlled(tmp_path, railway_fails=True))
-        assert state["railway_token"]["status"] == "fail", (
+        assert state["railway_personal_token"]["status"] == "fail", (
             "the fail ladder's vehicle must be constructed by the test, not "
             "borrowed from the host"
         )
@@ -351,9 +355,9 @@ class TestTheLadderFromAnInheritedFailingState:
     def test_it_fires_on_exactly_the_documented_days(self, tmp_path):
         f = _controlled(tmp_path, railway_fails=True)
         _run(f)
-        _strip_to_legacy(f, "railway_token")
+        _strip_to_legacy(f, "railway_personal_token")
 
-        fired = _walk(f, "railway_token", days=9, marker="STILL FAILING")
+        fired = _walk(f, "railway_personal_token", days=9, marker="STILL FAILING")
 
         assert fired == [1, 3, 7], (
             f"documented ladder is 1, 3, 7 — this fired on {fired}.\n"
@@ -370,9 +374,9 @@ class TestTheLadderFromAnInheritedFailingState:
         """Stated separately so the failure names the symptom, not just a list."""
         f = _controlled(tmp_path, railway_fails=True)
         _run(f)
-        _strip_to_legacy(f, "railway_token")
+        _strip_to_legacy(f, "railway_personal_token")
 
-        fired = _walk(f, "railway_token", days=4, marker="STILL FAILING")
+        fired = _walk(f, "railway_personal_token", days=4, marker="STILL FAILING")
 
         assert 2 not in fired, (
             "day 2 fired. The ladder is 1, 3, 7: after the day-1 alert the next "
@@ -388,12 +392,80 @@ class TestTheLadderFromAnInheritedFailingState:
         """
         f = _controlled(tmp_path, railway_fails=True)
         _run(f)
-        assert "railway_token FAIL" in _posts(f), "transition alert must still fire"
+        assert "railway_personal_token FAIL" in _posts(f), "transition alert must still fire"
 
-        fired = _walk(f, "railway_token", days=9, marker="STILL FAILING")
+        fired = _walk(f, "railway_personal_token", days=9, marker="STILL FAILING")
 
         assert fired == [1, 3, 7], (
             f"fresh-transition ladder should also be 1, 3, 7 — got {fired}. "
             "Both entry paths share one accounting; if they diverge, one of "
             "them is counting the transition alert as a ladder rung."
         )
+
+
+class TestEachRailwayTokenGetsItsOwnProbe:
+    """The #1 defect: one token read, one query used, "Railway" as a monolith.
+
+    Railway issues two token KINDS. Measured against the live API on
+    2026-08-31: an ACCOUNT token answers both `me` and `projects`; a
+    WORKSPACE token answers `projects` and returns `Not Authorized` for `me`,
+    by construction rather than by fault. Probing the second with `me` reports
+    a working credential as dead, which is what fired a FLEET ALERT daily
+    while two Railway tokens worked.
+
+    The token never rides argv (it goes in a curl config file), but the QUERY
+    does — so declaring exactly one token makes argv.log a faithful record of
+    which probe that token received.
+    """
+
+    def _railway_argv(self, fleet: dict) -> str:
+        argv = (fleet["bindir"] / "argv.log").read_text()
+        return "\n".join(
+            ln for ln in argv.splitlines() if "backboard.railway.app" in ln
+        )
+
+    def test_a_workspace_token_is_probed_with_projects_and_never_with_me(
+        self, tmp_path
+    ):
+        f = _controlled(tmp_path, railway_fails=False)
+        f["env"]["RAILWAY_PERSONAL_PROJECT_TOKEN"] = FORCE_RAILWAY
+        _run(f)
+        probes = self._railway_argv(f)
+        assert "projects" in probes, "the workspace token must be probed at all"
+        assert "me{" not in probes, (
+            "a workspace-scoped token was probed with `me`, which it cannot "
+            "answer by construction — this is the defect, restored"
+        )
+
+    def test_an_account_token_is_probed_with_me(self, tmp_path):
+        """The positive control. A test that only ever sees `projects` cannot
+        tell per-token probing from `projects`-for-everything."""
+        f = _controlled(tmp_path, railway_fails=False)
+        f["env"]["RAILWAY_PERSONAL_TOKEN"] = FORCE_RAILWAY
+        _run(f)
+        assert "me{" in self._railway_argv(f)
+
+    def test_one_dead_token_does_not_condemn_the_other(self, tmp_path):
+        """The operator-facing point. The stub 404s everything, so the declared
+        token FAILs while the undeclared one SKIPs — two verdicts, named
+        separately. Under the old code both lived in one `railway_token` key
+        and a single dead token read as "Railway is broken"."""
+        f = _controlled(tmp_path, railway_fails=False)
+        f["env"]["RAILWAY_PERSONAL_TOKEN"] = FORCE_RAILWAY
+        state = _run(f)
+        assert state["railway_personal_token"]["status"] == "fail"
+        assert state["railway_personal_project_token"]["status"] == "skip"
+
+    def test_an_undeclared_token_skips_and_names_itself(self, tmp_path):
+        """`skip` must be distinguishable from `fail`, and must say WHICH
+        variable is absent — "no Railway token" over two tokens is the
+        monolith that made the alert unreadable."""
+        state = _run(_controlled(tmp_path, railway_fails=False))
+        for key, var in (
+            ("railway_personal_token", "RAILWAY_PERSONAL_TOKEN"),
+            ("railway_personal_project_token", "RAILWAY_PERSONAL_PROJECT_TOKEN"),
+        ):
+            assert state[key]["status"] == "skip"
+            assert var in state[key]["detail"], (
+                "a skip that does not name its variable sends the reader hunting"
+            )

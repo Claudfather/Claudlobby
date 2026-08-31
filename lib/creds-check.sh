@@ -22,8 +22,13 @@
 # once it has persisted past day 3; see next_alert_day).
 #
 # Env vars consulted (sourced from $CLAUDLOBBY_ROOT/.env):
-#   GITHUB_PERSONAL_ACCESS_TOKEN  — fleet GitHub PAT
-#   RAILWAY_API_TOKEN             — account-wide Railway token
+#   GITHUB_PERSONAL_ACCESS_TOKEN   — fleet GitHub PAT
+#   RAILWAY_PERSONAL_TOKEN         — Railway ACCOUNT token; answers `me`
+#   RAILWAY_PERSONAL_PROJECT_TOKEN — Railway WORKSPACE token; answers
+#                                    `projects`, and CANNOT answer `me`
+#
+# `RAILWAY_API_TOKEN` is deliberately absent: it was dead, and checking it
+# alone is what made this alert fire daily against two working tokens.
 #
 # Telegram: every declared bot with a TELEGRAM_BOT_HANDLE gets a per-bot
 # getMe validation — see check_telegram_tokens.
@@ -344,38 +349,93 @@ check_github_pat() {
     fi
 }
 
-check_railway_token() {
-    local token="${RAILWAY_API_TOKEN:-}"
+# The Railway tokens a fleet may declare, and the query each is DEFINITIONALLY
+# able to answer. Format: VARNAME|graphql query|scope.
+#
+# ONE PROBE FOR ALL TOKENS IS THE BUG, not a simplification. Railway issues two
+# kinds of token and they answer different questions. Measured against the live
+# API, 2026-08-31:
+#
+#   RAILWAY_PERSONAL_TOKEN          me -> OK          projects -> OK
+#   RAILWAY_PERSONAL_PROJECT_TOKEN  me -> Not Authorized   projects -> OK
+#
+# A workspace-scoped token cannot answer `me` BY CONSTRUCTION — it is not bound
+# to an account — so probing it with `me` reports a working credential as dead.
+# `projects` happens to satisfy both, and using it everywhere would still be
+# wrong: a probe matched to the token's declared SCOPE also catches an account
+# token silently replaced by a workspace one, which `projects` alone cannot see.
+_railway_token_specs() {
+    cat <<'SPEC'
+RAILWAY_PERSONAL_TOKEN|me{email}|account
+RAILWAY_PERSONAL_PROJECT_TOKEN|projects{edges{node{id}}}|workspace
+SPEC
+}
+
+# One Railway token, probed with its own query. Records under its own key.
+_check_one_railway_token() {
+    local varname="$1" query="$2" scope="$3"
+    local provider token resp_body code curl_err_file auth_cfg
+    provider="railway_$(_lc "${varname#RAILWAY_}")"
+    # Indirect expansion: bash 3.2 has no nameref, and this file targets it.
+    eval "token=\"\${$varname:-}\""
+
     if [ -z "$token" ]; then
-        record_and_alert "railway_token" "skip" "no RAILWAY_API_TOKEN"
+        record_and_alert "$provider" "skip" "$varname not declared"
         return
     fi
-    # Direct GraphQL probe — avoids hard dependency on `railway` CLI
-    # being on PATH. The me query is the cheapest auth probe.
-    local resp_body code curl_err_file auth_cfg
+
     resp_body=$(safe_mktemp)
     curl_err_file=$(safe_mktemp)
-    auth_cfg=$(safe_mktemp)
-    printf 'header = "Authorization: Bearer %s"\n' "$token" > "$auth_cfg"
-    printf 'header = "Content-Type: application/json"\n' >> "$auth_cfg"
+    # auth_curl_cfg is the one owner of the tokens-never-ride-argv invariant,
+    # escaping included. The hand-rolled printf this replaces duplicated it.
+    auth_cfg="$(auth_curl_cfg \
+        "Authorization: Bearer $token" \
+        "Content-Type: application/json")"
     code="$("$CURL" -sS -o "$resp_body" -w '%{http_code}' \
         -X POST https://backboard.railway.app/graphql/v2 \
         --config "$auth_cfg" \
         --max-time 10 \
-        -d '{"query":"query{me{name}}"}' 2>"$curl_err_file")" \
+        -d "{\"query\":\"query{$query}\"}" 2>"$curl_err_file")" \
         || code="curl_err($(head -c 120 "$curl_err_file"))"
+
     if [ "$code" != "200" ]; then
-        record_and_alert "railway_token" "fail" "HTTP $code on /graphql/v2"
+        record_and_alert "$provider" "fail" "$varname: HTTP $code on /graphql/v2"
         return
     fi
-    # Even a 200 can carry an auth error in the response body.
+    # A REJECTED Railway token still answers 200 — the refusal rides in the
+    # body as a GraphQL error. Measured on all three tokens: every failure
+    # above was HTTP 200. A status-only check calls a dead token healthy.
     if "$JQ" -e '.errors' "$resp_body" >/dev/null 2>&1; then
         local err
         err="$("$JQ" -r '.errors[0].message // "unknown error"' "$resp_body" | head -c 120)"
-        record_and_alert "railway_token" "fail" "graphql error: $err"
+        record_and_alert "$provider" "fail" "$varname ($scope): $err on $query"
         return
     fi
-    record_and_alert "railway_token" "ok" "HTTP 200"
+    record_and_alert "$provider" "ok" "$varname ($scope): $query answered"
+}
+
+# Railway credential check — PER TOKEN, because "Railway" is not one credential.
+#
+# This check used to read RAILWAY_API_TOKEN alone and probe it with `me`. That
+# token is dead, so the check raised a FLEET ALERT every day while two other
+# Railway tokens worked, and the operator learned to ignore it. That is the
+# same failure the tier comment at the top of this file records — "a VALID
+# Railway token sat in a fleet .env the check never opened while the check
+# FAILed against a stale ambient one, and an operator learned to disbelieve the
+# checker". That version was fixed for TIERS; the identical defect returned as
+# MULTIPLE TOKENS and produced the identical consequence for the same person.
+#
+# So the unit of truth is a TOKEN, never the provider: each declared token gets
+# its own state key, its own verdict and its own alert naming it. One dead
+# token among several working ones is not "Railway is broken".
+check_railway_token() {
+    local spec varname query scope
+    while IFS='|' read -r varname query scope; do
+        [ -n "$varname" ] || continue
+        _check_one_railway_token "$varname" "$query" "$scope"
+    done <<EOF
+$(_railway_token_specs)
+EOF
 }
 
 check_telegram_tokens() {
