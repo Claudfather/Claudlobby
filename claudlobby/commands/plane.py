@@ -327,6 +327,29 @@ def cmd_plane_doctor(args) -> int:
                  "UNREADABLE — cannot enumerate (a gap, not a zero)")
         else:
             rung(not sc.quarantined, "quarantine", str(len(sc.quarantined)))
+        # Phase 2b: provisional actors — lazily-minted identities the
+        # registry has not yet observed. INFORMATIONAL (always-passing): a
+        # pre-generate estate is legitimately provisional; the number is
+        # here so its drop-to-zero after the first armed generate is
+        # visible, and a REGROWTH after confirmation is worth a look.
+        try:
+            prov = conn2 = None
+            import sqlite3 as _sq
+            _db = Path(root) / "state" / "plane" / "plane.db"  # pure join —
+            # never db.db_path(), whose mkdir side effect a read path must
+            # not carry (#1387 gauntlet)
+            if _db.is_file():
+                conn2 = _sq.connect(f"file:{_db}?mode=ro", uri=True)
+                prov = conn2.execute(
+                    "SELECT COUNT(*) FROM identity_registry"
+                    " WHERE provisional = 1").fetchone()[0]
+                conn2.close()
+            rung(True, "provisional identities",
+                 str(prov) if prov is not None else "no db yet")
+        except _sq.Error:
+            if conn2 is not None:
+                conn2.close()
+            rung(True, "provisional identities", "unreadable")
         return 0 if failing == 0 else 1
 
     return _guarded("plane doctor", run)
