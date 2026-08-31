@@ -407,17 +407,24 @@ def _room_filter(fleet: str) -> tuple[str, list]:
 
 def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
                   limit: int) -> dict:
-    # §11 completeness clause: search must STATE what it cannot see. A
-    # metadata-capture room answering "no matches" is a false idle — the
-    # words were never indexed, and only this count says so (gauntlet).
-    un_sql = "SELECT COUNT(*) FROM communications WHERE body IS NULL"
+    # §11 completeness clause: search must STATE what it cannot see — both
+    # halves of the spec's wording, "redacted OR TRUNCATED". body IS NULL =
+    # no words at all (metadata capture / body-less send); truncated = the
+    # words were CUT at the capture cap, so a term past the cap is
+    # unfindable while the row still looks searchable (external review,
+    # probed with a term at byte 16390). Two counts, one scan.
+    un_sql = ("SELECT COUNT(*) FILTER (WHERE body IS NULL),"
+              " COUNT(*) FILTER (WHERE truncated = 1 AND body IS NOT NULL)"
+              " FROM communications")
     un_params: list = []
     if fleet:
         clause, un_params = _room_filter(fleet)
-        un_sql += " AND" + clause
-    unsearchable = conn.execute(un_sql, un_params).fetchone()[0]
+        un_sql += " WHERE" + clause
+    unsearchable, partially_indexed = conn.execute(
+        un_sql, un_params).fetchone()
 
-    out = {"query": q, "unsearchable": unsearchable}
+    out = {"query": q, "unsearchable": unsearchable,
+           "partially_indexed": partially_indexed}
     match = _fts_query(q)
     if not match:
         return {**out, "results": []}
@@ -492,7 +499,7 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
             except OSError:
                 reason = "(no reason recorded)"
             reasons.append({"event": f.name, "reason": reason})
-    spool, spool_oldest = _spool_pending(root)
+    spool, spool_oldest, spool_state = _spool_pending(root)
 
     # Per-door freshness: every emitter ever seen, across EVERY envelope-
     # bearing table — the roster is ingest.py's _CONSTRUCT_TABLE registry
@@ -527,12 +534,23 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
         capture_state = "ok"
     except CaptureConfigError:
         capture, capture_state = {}, "malformed"
+    # Liveness keyed on ingest_seq -> LEDGER time, the same rule the emitter
+    # panel already followed — MAX(occurred_at) trusts producer clocks, and
+    # one 2099-dated row from a skewed producer pinned a fleet at "0s ago"
+    # forever (external review, probed). Producer time is not shown here;
+    # if it ever is, it must be labeled producer-reported/untrusted.
     fleets = [dict(r) for r in conn.execute(
-        "SELECT i.alias AS fleet, MAX(c.occurred_at) AS last_comm_at,"
+        "SELECT i.alias AS fleet, MAX(c.ingest_seq) AS last_seq,"
         " COUNT(c.msg_id) AS comms"
         " FROM identity_registry i"
         " LEFT JOIN communications c ON c.fleet_uid = i.uid"
         " WHERE i.kind='fleet' GROUP BY i.alias")]
+    for f in fleets:
+        seq = f.pop("last_seq")
+        row = conn.execute(
+            "SELECT ingested_at FROM ingest_ledger WHERE ingest_seq = ?",
+            (seq,)).fetchone() if seq is not None else None
+        f["last_comm_at"] = row["ingested_at"] if row else None
     seen = {f["fleet"] for f in fleets}
     for f in fleets:
         f["capture"] = capture_mode(capture, f["fleet"])  # the ONE rule
@@ -552,6 +570,7 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
         "quarantine_reasons": reasons,
         "spool_pending": spool,
         "spool_oldest_at": spool_oldest,
+        "spool_state": spool_state,
         "emitters": emitters,
         "fleets": fleets,
         "capture_config": capture_state,
@@ -559,16 +578,24 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
     }
 
 
-def _spool_pending(root: Path) -> tuple[int, str | None]:
-    """(pending count, oldest spooled_at). Doctor's definition — NON-recursive
-    *.json in the spool dir: the first version rglob'd, which counted every
-    quarantined entry + its .reason sidecar + inflight claims, inflating the
-    badge forever (gauntlet). spool_dir()/spool_entries() are not callable
-    here — they mkdir, and this daemon is read-only — so the DEFINITION is
-    replicated with this note as the drift guard."""
+def _spool_pending(root: Path) -> tuple[int, str | None, str]:
+    """(pending count, oldest spooled_at, source state). Doctor's definition —
+    NON-recursive *.json in the spool dir (the first version rglob'd, which
+    counted quarantine + sidecars + inflight claims — gauntlet).
+    spool_dir()/spool_entries() are not callable here — they mkdir, and this
+    daemon is read-only — so the DEFINITION is replicated with this note as
+    the drift guard. The state is probed, never inferred from an empty glob:
+    an unreadable spool (or spool PARENT — external review's blocker) must
+    surface as 'unreadable', because the numeric zero is a lie there and a
+    green zero from a tree the reader cannot reach is the false all-clear
+    this whole panel exists to kill. ABSENT stays a legitimate zero — the
+    spool dir is created lazily on first spooled event."""
     d = _plane_state_dir(root) / "spool"
-    if not d.is_dir():
-        return 0, None
+    probe = probe_dir(d)
+    if probe.state == SOURCE_ABSENT:
+        return 0, None, "ok"
+    if probe.state == SOURCE_UNREADABLE:
+        return 0, None, "unreadable"
     oldest = None
     count = 0
     for f in sorted(d.glob("*.json")):
@@ -579,7 +606,7 @@ def _spool_pending(root: Path) -> tuple[int, str | None]:
                 oldest = at
         except (OSError, json.JSONDecodeError):
             continue
-    return count, oldest
+    return count, oldest, "ok"
 
 
 def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
@@ -587,7 +614,7 @@ def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
     for t in ("communications", "work_items", "assignments", "workstreams",
               "events", "identity_registry", "ingest_ledger"):
         counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-    spool, spool_oldest = _spool_pending(root)
+    spool, spool_oldest, spool_state = _spool_pending(root)
     # Socket path honors PLANE_SOCKET like the shim and doctor (the first
     # version re-derived the default path — the exact overridden-socket
     # defect the last gauntlet fixed in doctor, re-imported). Liveness is a
@@ -602,6 +629,7 @@ def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
         "daemon_serving": bool(serving),
         "spool_files": spool,
         "spool_oldest_at": spool_oldest,
+        "spool_state": spool_state,
     }
 
 

@@ -510,10 +510,24 @@ function setView(view) {
     pollGrid();
     gridTimer = setInterval(pollGrid, 5000);
   }
+  clearInterval(trustTimer);
   if (view === "trust") {
     renderState($("trust"), { state: "loading" });
-    jget("/api/trust").then(renderTrust);
+    pollTrust();
+    // A one-shot snapshot froze green while events quarantined behind it
+    // (external review): filesystem-only changes add no ledger row, so SSE
+    // cannot carry them — a bounded poll while the tab is visible is the
+    // floor. 15s: trust is a slow surface; ages re-render each pass.
+    trustTimer = setInterval(pollTrust, 15000);
   }
+}
+
+let trustTimer = null;
+async function pollTrust() {
+  if (currentView !== "trust") return;
+  const env = await jget("/api/trust");
+  if (currentView !== "trust") return;   // stale response — view moved on
+  renderTrust(env);
 }
 document.querySelectorAll("#view-nav button").forEach((b) =>
   b.addEventListener("click", () => setView(b.dataset.view)));
@@ -582,11 +596,14 @@ document.addEventListener("visibilitychange", () => {
   // (each tick renews the 30s TTL) — §14 honesty (reviewer finding).
   if (document.hidden) {
     clearInterval(focusTimer); clearInterval(gridTimer);
+    clearInterval(trustTimer);
   } else if (!$("focus-overlay").hidden && $("focus-title").dataset.bot) {
     openFocus($("focus-title").dataset.bot,
               $("focus-title").dataset.fleet || null);
   } else if (currentView === "grid") {
     gridTimer = setInterval(pollGrid, 5000); pollGrid();
+  } else if (currentView === "trust") {
+    trustTimer = setInterval(pollTrust, 15000); pollTrust();
   }
 });
 
@@ -625,10 +642,13 @@ function renderTrust(env) {
         <b>quarantined events</b>
         <small>arrived and were refused — each is a recording gap</small></div>
       ${reasons}
-      <div class="trust-row">${trustNum(d.spool_pending)}
-        <b>spooled, not yet ingested</b>
-        <small>${d.spool_oldest_at
-          ? "oldest " + esc(ago(d.spool_oldest_at)) : ""}</small></div>
+      ${d.spool_state === "unreadable"
+        ? `<div class="trust-row trust-bad"><b>spool unreadable</b>
+             <small>cannot count pending — a gap, not a zero</small></div>`
+        : `<div class="trust-row">${trustNum(d.spool_pending)}
+             <b>spooled, not yet ingested</b>
+             <small>${d.spool_oldest_at
+               ? "oldest " + esc(ago(d.spool_oldest_at)) : ""}</small></div>`}
     </div>
     <div class="trust-block"><h3>doors — per-emitter freshness</h3>
       ${emitters}
@@ -654,11 +674,16 @@ function renderSearch(env) {
   const hits = env.data.results;
   // §11 completeness: say what the search CANNOT see — a metadata-capture
   // room answering "no matches" alone is a false idle.
-  const un = Number(env.data.unsearchable);   // server-typed int; belt
-  const unsearchable = un > 0
+  const un = Number(env.data.unsearchable);   // server-typed ints; belt
+  const part = Number(env.data.partially_indexed);
+  const unsearchable = (un > 0 || part > 0)
     ? `<div class="panel-state st-idle"><div class="detail">`
-      + `${un} message${un === 1 ? " has" : "s have"} no recorded words`
-      + ` here (metadata capture, or sent body-less) — unsearchable`
+      + [un > 0 ? `${un} message${un === 1 ? " has" : "s have"} no recorded`
+                  + ` words here (metadata capture, or sent body-less)` : "",
+         part > 0 ? `${part} message${part === 1 ? " is" : "s are"} only`
+                    + ` partially indexed (body truncated at capture — a`
+                    + ` term past the cap is unfindable)` : ""]
+        .filter(Boolean).join(" · ")
       + `</div></div>` : "";
   if (!hits.length) {
     el.innerHTML = stateBlock("idle", null, null,

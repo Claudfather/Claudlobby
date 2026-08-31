@@ -204,8 +204,19 @@ class TestProbeDirDoesNotCrashOnAnUnreadableAncestor:
         (parent / "child").mkdir(parents=True)
         os.chmod(parent, 0o000)
         try:
-            with pytest.raises(OSError):  # the mutation really applied
-                (parent / "child").is_dir()
+            # Premise check, version-split: <=3.12 pathlib propagated EACCES
+            # from is_dir(); 3.13+ SWALLOWS every OSError (the change that
+            # silently killed this pin into the red baseline and let the
+            # defect resurface — found live by external review). Either way
+            # the lock is really applied, and probe_dir must classify
+            # UNREADABLE on every version because it reads errnos from
+            # os.scandir at call time, not from pathlib's swallow list.
+            try:
+                stat_result = (parent / "child").is_dir()
+            except OSError:
+                pass                        # <=3.12: propagated — lock real
+            else:
+                assert stat_result is False  # 3.13+: swallowed — lock real
             assert probe_dir(parent / "child").state == SOURCE_UNREADABLE
         finally:
             os.chmod(parent, 0o755)

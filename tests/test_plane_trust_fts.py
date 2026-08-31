@@ -307,3 +307,81 @@ def test_search_matches_the_recipient_side_of_a_room(tmp_path):
     hits = TestClient(create_app(tmp_path)).get(
         "/api/search?q=zebra&fleet=engineering").json()["data"]["results"]
     assert len(hits) == 1                             # recipient-arm match
+
+
+# ---------------------------------------------------------------------------
+# External-review (Codex, PR #1395 review 5068783751) fix pins
+# ---------------------------------------------------------------------------
+
+def test_unreadable_spool_PARENT_is_disclosed_never_a_green_zero(tmp_path):
+    """THE Blocker: an unreadable spool ancestor read as spool 0 +
+    quarantine ok — Python 3.13+ made is_dir() swallow every OSError, the
+    old probe_dir pin died into the red baseline, and the defect resurfaced
+    here. probe_dir now reads errnos from os.scandir at call time; both
+    counters must disclose, never zero."""
+    import os as _os
+
+    if _os.geteuid() == 0:
+        pytest.skip("root reads through the mode bits")
+    _seed(tmp_path)
+    spool = tmp_path / "state" / "plane" / "spool"
+    (spool / "quarantine").mkdir(parents=True)
+    (spool / "ev_pending.json").write_text(
+        '{"spooled_at": "2026-01-01T00:00:00"}')
+    spool.chmod(0)                                    # the PARENT, not a leaf
+    try:
+        body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    finally:
+        spool.chmod(0o700)
+    assert body["state"] == "ok"                      # panel survives
+    assert body["data"]["spool_state"] == "unreadable"
+    assert body["data"]["spool_pending"] == 0         # withheld, flagged
+    assert body["data"]["quarantine_state"] == "unreadable"
+
+
+def test_truncated_body_is_disclosed_as_partially_indexed(tmp_path):
+    """§11's other half — 'redacted OR TRUNCATED': a term past the capture
+    cap is unfindable while the row still looks searchable. The count must
+    say so instead of a clean 'no matches'."""
+    _seed(tmp_path)
+    emit_batch(tmp_path, [{
+        "event_type": "communication", "emitter": "t", "fleet": "engineering",
+        "payload": {"msg_id": "msg_" + "f" * 32,
+                    "sender": "bot:engineering/x",
+                    "recipient": "bot:engineering/y",
+                    "message_class": "report",
+                    "body": ("x" * 16390) + " tailzebra"}}])
+    body = TestClient(create_app(tmp_path)).get(
+        "/api/search?q=tailzebra&fleet=engineering").json()
+    assert body["data"]["results"] == []              # past the cap: unfindable
+    assert body["data"]["partially_indexed"] == 1     # …and DISCLOSED
+
+
+def test_fleet_liveness_never_trusts_producer_clocks(tmp_path):
+    """A 2099-dated producer row pinned a fleet at '0s ago' forever under
+    MAX(occurred_at). Liveness now keys on ingest_seq -> LEDGER time, the
+    same rule the emitter panel follows."""
+    _seed(tmp_path)
+    emit_batch(tmp_path, [{
+        "event_type": "communication", "emitter": "t", "fleet": "engineering",
+        "occurred_at": "2099-01-01T00:00:00+00:00",
+        "payload": {"msg_id": "msg_" + "9" * 32,
+                    "sender": "bot:engineering/skewed",
+                    "recipient": "bot:engineering/y",
+                    "message_class": "chat", "body": "future-stamped"}}])
+    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    fleets = {f["fleet"]: f for f in body["data"]["fleets"]}
+    at = fleets["engineering"]["last_comm_at"]
+    assert at is not None and not at.startswith("2099")
+
+
+def test_trust_panel_polls_while_visible():
+    """External review: the trust panel was a one-shot snapshot — green
+    forever while events quarantined behind it. Structural pin (no JS
+    harness): a bounded poll exists, and visibilitychange pauses it."""
+    app_js = (Path(__file__).resolve().parent.parent / "claudlobby"
+              / "plane" / "ui" / "app.js").read_text()
+    assert "setInterval(pollTrust" in app_js
+    assert "clearInterval(trustTimer)" in app_js
+    vis = app_js[app_js.index("visibilitychange"):]
+    assert "trustTimer" in vis[:600], "visibilitychange must pause trust poll"

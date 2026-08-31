@@ -88,6 +88,8 @@ false all-clear for an outage.
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -158,28 +160,27 @@ def probe_dir(path: Path) -> SourceProbe:
     ``probe_source`` tests openability: a directory with no execute bit stats as
     a directory and then raises on iteration.
     """
-    # is_dir() is INSIDE the try, and that placement is the whole correctness of
-    # this function. Path.is_dir swallows only pathlib._IGNORED_ERRNOS — exactly
-    # ENOENT, ENOTDIR, EBADF, ELOOP, with EACCES ABSENT — so a stat it cannot
-    # perform propagates, and the guard written to stop a reader crashing on an
-    # unreachable source crashed on an unreadable one.
-    #
-    # The trigger is an unreadable ANCESTOR, not this directory: a mode-000 dir
-    # whose parent is traversable stats fine and always classified correctly,
-    # which is why three review passes went over this line. It is also the shape
-    # the real callers hit — collect_events probes <bots>/<bot>/data/events
-    # while <bots> is the one that is locked.
-    #
-    # Absent still wins over unreadable: a missing path and a non-directory both
-    # make is_dir() return False rather than raise, so they fall through to
-    # ABSENT exactly as before.
+    # os.scandir, never pathlib predicates: the classification must come from
+    # ERRNOS AT CALL TIME, not from what pathlib elects to swallow. The prior
+    # form leaned on Path.is_dir() propagating EACCES (pathlib swallowed only
+    # ENOENT/ENOTDIR/EBADF/ELOOP — measured, and pinned) — a premise Python
+    # 3.13+ KILLED: is_dir() now swallows every OSError, so an unreadable
+    # ANCESTOR read as plain False and fell through to ABSENT. The pin guarding
+    # this went red into the known-failing baseline with the interpreter
+    # upgrade, and the defect resurfaced live on the trust surface as
+    # "quarantined: 0" from a spool tree it could not even reach — the exact
+    # false all-clear this module exists to kill (external review, probed).
+    # scandir raises the real errno on every supported version: ENOENT/ENOTDIR
+    # (incl. from an absent ancestor) -> ABSENT; EACCES and the rest -> the
+    # honest UNREADABLE.
     try:
-        if not path.is_dir():
-            return SourceProbe(SOURCE_ABSENT, path)
-        next(iter(path.iterdir()), None)
+        it = os.scandir(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return SourceProbe(SOURCE_ABSENT, path)
     except OSError:
         return SourceProbe(SOURCE_UNREADABLE, path)
-    return SourceProbe(SOURCE_OK, path)
+    with it:
+        return SourceProbe(SOURCE_OK, path)
 
 
 def unreachable_line(what: str, probe: SourceProbe, *, remedy: str = "") -> str:

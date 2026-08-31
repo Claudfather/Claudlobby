@@ -40,6 +40,13 @@ CREATE INDEX idx_intents_null_body_fleet
   ON communications (fleet_uid) WHERE body IS NULL;
 CREATE INDEX idx_intents_null_body_recipient
   ON communications (recipient_fleet) WHERE body IS NULL;
+-- …and its truncated twins: §11's other half ("redacted OR truncated") —
+-- a body cut at the capture cap is only PARTIALLY indexed, and the count
+-- disclosing that rides the same keystroke path.
+CREATE INDEX idx_intents_truncated_fleet
+  ON communications (fleet_uid) WHERE truncated = 1;
+CREATE INDEX idx_intents_truncated_recipient
+  ON communications (recipient_fleet) WHERE truncated = 1;
 
 PRAGMA user_version = 5;
 COMMIT;
