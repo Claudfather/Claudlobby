@@ -654,11 +654,12 @@ function renderSearch(env) {
   const hits = env.data.results;
   // §11 completeness: say what the search CANNOT see — a metadata-capture
   // room answering "no matches" alone is a false idle.
-  const unsearchable = env.data.unsearchable > 0
+  const un = Number(env.data.unsearchable);   // server-typed int; belt
+  const unsearchable = un > 0
     ? `<div class="panel-state st-idle"><div class="detail">`
-      + `${env.data.unsearchable} message${env.data.unsearchable === 1
-        ? " is" : "s are"} metadata-capture here — words never indexed,`
-      + ` unsearchable by policy</div></div>` : "";
+      + `${un} message${un === 1 ? " has" : "s have"} no recorded words`
+      + ` here (metadata capture, or sent body-less) — unsearchable`
+      + `</div></div>` : "";
   if (!hits.length) {
     el.innerHTML = stateBlock("idle", null, null,
       { label: `no matches for “${env.data.query}”`, detail: "" })
@@ -692,10 +693,13 @@ $("search").addEventListener("input", () => {
     return;
   }
   searchTimer = setTimeout(async () => {
-    const f = currentFleet && currentFleet !== "all"
-      ? `&fleet=${encodeURIComponent(currentFleet)}` : "";
+    const fleetAtFire = currentFleet;   // room captured at fetch time —
+    const f = fleetAtFire && fleetAtFire !== "all"
+      ? `&fleet=${encodeURIComponent(fleetAtFire)}` : "";
     const env = await jget(`/api/search?q=${encodeURIComponent(q)}${f}`);
-    if ($("search").value.trim() !== q) return;  // stale response
+    // stale if the QUERY or the ROOM moved on (two rapid tab clicks raced
+    // the old room's hits under the new tab — round 2, probed)
+    if ($("search").value.trim() !== q || currentFleet !== fleetAtFire) return;
     $("channel").hidden = true;
     $("search-results").hidden = false;
     renderSearch(env);

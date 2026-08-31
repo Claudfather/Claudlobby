@@ -167,7 +167,6 @@ def test_markers_are_per_request_random(tmp_path):
     assert b1["marker_open"] != b2["marker_open"]     # fresh per request
     snip = b1["results"][0]["snip"]
     assert "\x01fake\x02" in snip                     # body bytes inert
-    assert b1["marker_open"] not in "\x01fake\x02"
 
 
 def test_search_order_rides_the_fts_index_never_a_temp_btree(tmp_path):

@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
 from pathlib import Path
 
@@ -62,7 +63,7 @@ from ..source_state import (
 )
 from .daemon import probe_daemon, socket_path
 from .emit_api import CaptureConfigError, capture_mode, load_capture_config
-from .ingest import _CONSTRUCT_TABLE
+from .ingest import CONSTRUCT_TABLES
 from .ingest import now_iso as _now_iso
 from .sampler import PaneSampler
 from .queries import (
@@ -420,7 +421,6 @@ def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
     match = _fts_query(q)
     if not match:
         return {**out, "results": []}
-    import secrets
     mopen = "\x01" + secrets.token_hex(4) + "\x01"
     mclose = "\x02" + secrets.token_hex(4) + "\x02"
     sql = (
@@ -432,9 +432,11 @@ def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
         " WHERE comms_fts MATCH ?")
     params: list = [mopen, mclose, match]
     if fleet:
+        # Unqualified columns bind to `c` unambiguously — comms_fts declares
+        # only `body` (measured; the earlier .replace() qualification was
+        # probed fragile against substring column names — round 2).
         clause, extra = _room_filter(fleet)
-        sql += " AND" + clause.replace("fleet_uid", "c.fleet_uid").replace(
-            "recipient_fleet", "c.recipient_fleet")
+        sql += " AND" + clause
         params.extend(extra)
     # ORDER BY the FTS rowid, never c.ingest_seq: identical order by
     # construction (rowid IS ingest_seq under 0005), but the rowid form
@@ -504,7 +506,7 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
     # offset ISO strings compare lexically wrong (probed). Aggregates are
     # pushed into each arm so the outer GROUP BY sees per-table rollups,
     # not every row (measured 735ms -> 470ms at 505k rows, unindexed).
-    tables = ["events", *sorted(set(_CONSTRUCT_TABLE.values()))]
+    tables = ["events", *sorted(set(CONSTRUCT_TABLES.values()))]
     arms = " UNION ALL ".join(
         f"SELECT emitter, MAX(ingest_seq) AS seq, COUNT(*) AS n"
         f" FROM {t} GROUP BY emitter" for t in tables)
