@@ -204,8 +204,19 @@ class TestProbeDirDoesNotCrashOnAnUnreadableAncestor:
         (parent / "child").mkdir(parents=True)
         os.chmod(parent, 0o000)
         try:
-            with pytest.raises(OSError):  # the mutation really applied
-                (parent / "child").is_dir()
+            # Premise check, version-split: <=3.12 pathlib propagated EACCES
+            # from is_dir(); 3.13+ SWALLOWS every OSError (the change that
+            # silently killed this pin into the red baseline and let the
+            # defect resurface — found live by external review). Either way
+            # the lock is really applied, and probe_dir must classify
+            # UNREADABLE on every version because it reads errnos from
+            # os.scandir at call time, not from pathlib's swallow list.
+            try:
+                stat_result = (parent / "child").is_dir()
+            except OSError:
+                pass                        # <=3.12: propagated — lock real
+            else:
+                assert stat_result is False  # 3.13+: swallowed — lock real
             assert probe_dir(parent / "child").state == SOURCE_UNREADABLE
         finally:
             os.chmod(parent, 0o755)
@@ -238,3 +249,84 @@ class TestProbeDirDoesNotCrashOnAnUnreadableAncestor:
         a_file.write_text("x")
         assert probe_dir(missing).state == SOURCE_ABSENT
         assert probe_dir(a_file).state == SOURCE_ABSENT
+
+
+class TestProbeDirObservesFirstReadErrors:
+    """External round 2's blocker on the scandir rewrite: opendir can
+    succeed while the FIRST readdir raises (EIO/ESTALE — failing storage,
+    FUSE, NFS; the estate's SD-stall class). An un-advanced iterator never
+    observes it and certified unreadable-as-OK. probe_dir must advance once
+    inside the exception boundary."""
+
+    def test_error_on_first_read_is_unreadable_not_ok(self, tmp_path, monkeypatch):
+        import errno
+
+        from claudlobby import source_state
+
+        class _OpensThenDies:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def __next__(self):
+                raise OSError(errno.EIO, "I/O error on first readdir")
+
+        monkeypatch.setattr(source_state.os, "scandir",
+                            lambda p: _OpensThenDies())
+        probe = source_state.probe_dir(tmp_path)
+        assert probe.state == source_state.SOURCE_UNREADABLE
+
+
+class TestScanDirMaterializesUnderOneBoundary:
+    """External round 3's blocker: probe-then-reopen let Path.glob swallow a
+    LATER readdir error, returning a partial listing as a clean empty.
+    scan_dir performs classification and the ENTIRE enumeration inside one
+    exception boundary; callers consume its list."""
+
+    def _one_then_eio(self, benign_path):
+        import errno
+        import types
+
+        class _It:
+            def __init__(self):
+                self._sent = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if not self._sent:
+                    self._sent = True
+                    return types.SimpleNamespace(path=str(benign_path))
+                raise OSError(errno.EIO, "later readdir failed")
+
+        return _It()
+
+    def test_error_after_one_benign_entry_is_unreadable_with_no_partial(
+        self, tmp_path, monkeypatch
+    ):
+        from claudlobby import source_state
+
+        monkeypatch.setattr(
+            source_state.os, "scandir",
+            lambda p: self._one_then_eio(tmp_path / "benign"))
+        probe, entries = source_state.scan_dir(tmp_path)
+        assert probe.state == source_state.SOURCE_UNREADABLE
+        assert entries == []          # a partial listing is never returned
+
+    def test_clean_dir_returns_the_full_listing(self, tmp_path):
+        from claudlobby import source_state
+
+        (tmp_path / "a.json").write_text("{}")
+        (tmp_path / "sub").mkdir()
+        probe, entries = source_state.scan_dir(tmp_path)
+        assert probe.state == source_state.SOURCE_OK
+        assert sorted(e.name for e in entries) == ["a.json", "sub"]

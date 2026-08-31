@@ -51,6 +51,10 @@ _CONSTRUCT_TABLE = {
     "assignment": "assignments",
     "workstream": "workstreams",
 }
+# Public alias: the trust surface derives its emitter-coverage roster from
+# this registry (a hand-list drifted at birth — #1393 gauntlet), and a
+# second consumer must not import a private name.
+CONSTRUCT_TABLES = _CONSTRUCT_TABLE
 
 # The wire->kind mapping lives in contracts.WIRE_TO_KIND (spec ruling #8),
 # imported above — F4 was a consumer missing it; a private copy here was the

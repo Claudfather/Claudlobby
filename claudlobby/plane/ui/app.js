@@ -403,6 +403,11 @@ function renderFleetTabs(identities) {
       currentFleet = b.dataset.fleet;
       renderFleetTabs(identities);   // instant highlight
       refreshBoards();               // guarded path (generation stale-guard)
+      if (!$("search-results").hidden) {
+        // active search: re-fire in the NEW room — otherwise the visible
+        // hits stay scoped to the old room under the new tab's highlight
+        $("search").dispatchEvent(new Event("input"));
+      }
     }));
 }
 
@@ -493,7 +498,10 @@ async function pollGrid() {
 function setView(view) {
   currentView = view;
   $("channel").hidden = view !== "channel";
+  $("search-results").hidden = true;   // any view switch closes results
+  if (view !== "channel") $("search").value = "";
   $("grid").hidden = view !== "grid";
+  $("trust").hidden = view !== "trust";
   document.querySelectorAll("#view-nav button").forEach((b) =>
     b.classList.toggle("on", b.dataset.view === view));
   clearInterval(gridTimer);
@@ -502,6 +510,30 @@ function setView(view) {
     pollGrid();
     gridTimer = setInterval(pollGrid, 5000);
   }
+  clearInterval(trustTimer);
+  if (view === "trust") {
+    renderState($("trust"), { state: "loading" });
+    pollTrust();
+    // A one-shot snapshot froze green while events quarantined behind it
+    // (external review): filesystem-only changes add no ledger row, so SSE
+    // cannot carry them — a bounded poll while the tab is visible is the
+    // floor. 15s: trust is a slow surface; ages re-render each pass.
+    trustTimer = setInterval(pollTrust, 15000);
+  }
+}
+
+let trustTimer = null;
+let trustGen = 0;   // monotonic request generation — the view check alone
+                    // loses the ABA race (leave trust, return, and an OLD
+                    // in-flight response lands while the view is trust
+                    // again, overwriting the newer state — external round
+                    // 2, probed with deferred responses)
+async function pollTrust() {
+  if (currentView !== "trust" || document.hidden) return;
+  const gen = ++trustGen;
+  const env = await jget("/api/trust");
+  if (gen !== trustGen || currentView !== "trust" || document.hidden) return;
+  renderTrust(env);
 }
 document.querySelectorAll("#view-nav button").forEach((b) =>
   b.addEventListener("click", () => setView(b.dataset.view)));
@@ -570,12 +602,139 @@ document.addEventListener("visibilitychange", () => {
   // (each tick renews the 30s TTL) — §14 honesty (reviewer finding).
   if (document.hidden) {
     clearInterval(focusTimer); clearInterval(gridTimer);
+    clearInterval(trustTimer);
   } else if (!$("focus-overlay").hidden && $("focus-title").dataset.bot) {
     openFocus($("focus-title").dataset.bot,
               $("focus-title").dataset.fleet || null);
   } else if (currentView === "grid") {
     gridTimer = setInterval(pollGrid, 5000); pollGrid();
+  } else if (currentView === "trust") {
+    trustTimer = setInterval(pollTrust, 15000); pollTrust();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Trust/gaps surface + channel search (Phase-4 final chunk)
+// ---------------------------------------------------------------------------
+
+function trustNum(n, nonzero = "trust-bad") {
+  return `<span class="trust-num ${n === 0 ? "trust-ok" : nonzero}">${n}</span>`;
+}
+
+function renderTrust(env) {
+  const el = $("trust");
+  if (renderState(el, env)) return;
+  const d = env.data;
+  const emitters = d.emitters.map((e) => `
+    <div class="trust-row"><b>${esc(e.emitter)}</b>
+      <span>${esc(ago(e.last_at))}</span>
+      <small>${e.events} events</small></div>`).join("")
+    || `<div class="trust-row"><small>no emitters have fired yet</small></div>`;
+  const fleets = d.fleets.map((f) => `
+    <div class="trust-row"><b>${esc(f.fleet)}</b>
+      <span class="tag">${esc(f.capture)} capture</span>
+      <span>${f.last_comm_at ? esc(ago(f.last_comm_at)) : "no comms ever"}</span>
+      <small>${f.comms} messages${f.note ? " · " + esc(f.note) : ""}</small>
+    </div>`).join("");
+  const reasons = d.quarantine_reasons.map((r) =>
+    `<div class="reason">${esc(r.event)} — ${esc(r.reason)}</div>`).join("");
+  el.innerHTML = `
+    <div class="trust-block"><h3>gaps — what the recorder refused</h3>
+      ${d.quarantine_state === "unreadable"
+        ? `<div class="trust-row trust-bad"><b>quarantine dir unreadable</b>
+             <small>cannot count refusals — this is a gap in the gap
+             counter, not a zero</small></div>` : ""}
+      <div class="trust-row">${trustNum(d.quarantined)}
+        <b>quarantined events</b>
+        <small>arrived and were refused — each is a recording gap</small></div>
+      ${reasons}
+      ${d.spool_state === "unreadable"
+        ? `<div class="trust-row trust-bad"><b>spool unreadable</b>
+             <small>cannot count pending — a gap, not a zero</small></div>`
+        : `<div class="trust-row">${trustNum(d.spool_pending)}
+             <b>spooled, not yet ingested</b>
+             <small>${d.spool_oldest_at
+               ? "oldest " + esc(ago(d.spool_oldest_at)) : ""}</small></div>`}
+    </div>
+    <div class="trust-block"><h3>doors — per-emitter freshness</h3>
+      ${emitters}
+    </div>
+    <div class="trust-block"><h3>fleets — capture policy + liveness</h3>
+      ${d.capture_config === "malformed"
+        ? `<div class="trust-row trust-bad"><b>capture.json is malformed</b>
+             <small>policy unreadable — modes shown are defaults</small></div>`
+        : ""}
+      ${fleets}
+    </div>
+    <div class="trust-block"><h3>identities</h3>
+      <div class="trust-row">${trustNum(d.provisional_identities, "trust-warn")}
+        <b>provisional identities</b>
+        <small>lazily minted, unconfirmed by the registry — Phase 2b
+        confirms these</small></div>
+    </div>`;
+}
+
+function renderSearch(env) {
+  const el = $("search-results");
+  if (renderState(el, env)) return;
+  const hits = env.data.results;
+  // §11 completeness: say what the search CANNOT see — a metadata-capture
+  // room answering "no matches" alone is a false idle.
+  const un = Number(env.data.unsearchable);   // server-typed ints; belt
+  const part = Number(env.data.partially_indexed);
+  const unsearchable = (un > 0 || part > 0)
+    ? `<div class="panel-state st-idle"><div class="detail">`
+      + [un > 0 ? `${un} message${un === 1 ? " has" : "s have"} no recorded`
+                  + ` words here (metadata capture, or sent body-less)` : "",
+         part > 0 ? `${part} message${part === 1 ? " is" : "s are"} only`
+                    + ` partially indexed (body truncated at capture — a`
+                    + ` term past the cap is unfindable)` : ""]
+        .filter(Boolean).join(" · ")
+      + `</div></div>` : "";
+  if (!hits.length) {
+    el.innerHTML = stateBlock("idle", null, null,
+      { label: `no matches for “${env.data.query}”`, detail: "" })
+      + unsearchable;  // stateBlock escapes its label
+    return;
+  }
+  el.innerHTML = hits.map((h) => {
+    // esc() the WHOLE snippet, then swap the server's PER-REQUEST random
+    // markers for <mark> — markup never rides in from bot-authored text,
+    // and a body carrying literal marker bytes cannot forge a highlight
+    // (it cannot predict the token).
+    const snip = esc(h.snip)
+      .replaceAll(env.data.marker_open, "<mark>")
+      .replaceAll(env.data.marker_close, "</mark>");
+    return `<div class="hit">
+      <b>${esc(h.sender_short)}</b>
+      <span class="to">→ ${esc(h.recipient_short || "—")}</span>
+      <small> · ${esc(ago(h.occurred_at))}${h.work_item_id
+        ? " · work item" : ""}</small>
+      <div class="snip">${snip}</div></div>`;
+  }).join("") + unsearchable;
+}
+
+let searchTimer = null;
+$("search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const q = $("search").value.trim();
+  if (!q) {
+    $("search-results").hidden = true;
+    $("channel").hidden = false;
+    return;
+  }
+  searchTimer = setTimeout(async () => {
+    const fleetAtFire = currentFleet;   // room captured at fetch time —
+    const f = fleetAtFire && fleetAtFire !== "all"
+      ? `&fleet=${encodeURIComponent(fleetAtFire)}` : "";
+    const env = await jget(`/api/search?q=${encodeURIComponent(q)}${f}`);
+    // stale if the QUERY or the ROOM moved on (two rapid tab clicks raced
+    // the old room's hits under the new tab — round 2, probed)
+    if ($("search").value.trim() !== q || currentFleet !== fleetAtFire) return;
+    $("channel").hidden = true;
+    $("search-results").hidden = false;
+    renderSearch(env);
+  }, 250);
 });
 
 // Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)

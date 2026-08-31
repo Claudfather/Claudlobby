@@ -12,6 +12,7 @@
   <nav id="view-nav">
     <button class="pill ghost on" data-view="channel" type="button">channel</button>
     <button class="pill ghost" data-view="grid" type="button">grid</button>
+    <button class="pill ghost" data-view="trust" type="button">trust</button>
   </nav>
   <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
   <span class="pill">ingest <b id="age">—</b></span>
@@ -26,9 +27,13 @@
     <div class="scroll" id="fleet"></div>
   </section>
   <section id="rail-channel" aria-label="channel">
-    <h2>channel <span id="fleet-tabs"></span></h2>
+    <h2>channel <span id="fleet-tabs"></span>
+      <input id="search" type="search" placeholder="search the channel…"
+             aria-label="search the channel" autocomplete="off"></h2>
+    <div class="scroll" id="search-results" hidden></div>
     <div class="scroll" id="channel"></div>
     <div class="scroll" id="grid" hidden></div>
+    <div class="scroll" id="trust" hidden></div>
   </section>
   <section id="rail-right">
     <div id="rail-attention" aria-label="attention">

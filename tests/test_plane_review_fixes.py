@@ -467,13 +467,13 @@ def test_f10_0002_applies_against_an_existing_v1_database(tmp_path: Path, monkey
     """The upgrade path, not just the fresh path: a db stamped v1 by 0001
     alone must gain 0002's index from a plain migrate()."""
     files = migrations_mod._migration_files()
-    assert [n for n, _ in files] == [1, 2, 3, 4]
+    assert [n for n, _ in files] == [1, 2, 3, 4, 5]
     conn = connect(db_path(tmp_path))
     monkeypatch.setattr(migrations_mod, "SCHEMA_USER_VERSION", 1)
     monkeypatch.setattr(migrations_mod, "_migration_files", lambda: files[:1])
     assert migrations_mod.migrate(conn) == 1
     monkeypatch.undo()
-    assert migrations_mod.migrate(conn) == 4
+    assert migrations_mod.migrate(conn) == 5
     names = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     conn.close()
@@ -492,9 +492,12 @@ def test_f11_oldest_is_min_spooled_at_not_filename_order(env):
     # filename order (aaa < fff) puts the YOUNG entry first:
     (sd / ("ev_" + "a" * 32 + ".json")).write_text(json.dumps(young))
     (sd / ("ev_" + "f" * 32 + ".json")).write_text(json.dumps(old))
-    from claudlobby.commands.plane import _oldest_spooled_at
-    from claudlobby.plane.spool import spool_entries
-    assert _oldest_spooled_at(spool_entries(root)) == "2026-08-20T10:00:00+00:00"
+    # the dict-based private helper became spool.oldest_spooled_at (path-
+    # based, shared by trust/status/doctor — external round 4); the SAME
+    # semantics stay pinned: min spooled_at, never filename order
+    from claudlobby.plane.spool import oldest_spooled_at, scan_spool
+    sc = scan_spool(root)
+    assert oldest_spooled_at(sc.pending) == "2026-08-20T10:00:00+00:00"
 
 
 def test_f11_spool_inspect_prints_entry_with_history(env):

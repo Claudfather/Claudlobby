@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
 from pathlib import Path
 
@@ -57,9 +58,13 @@ from ..source_state import (
     SOURCE_ABSENT,
     SOURCE_OK,
     SOURCE_UNREADABLE,
+    probe_dir,
     probe_source,
 )
 from .daemon import probe_daemon, socket_path
+from .emit_api import CaptureConfigError, capture_mode, load_capture_config
+from .ingest import CONSTRUCT_TABLES
+from .spool import oldest_spooled_at, scan_spool
 from .ingest import now_iso as _now_iso
 from .sampler import PaneSampler
 from .queries import (
@@ -367,27 +372,241 @@ def _fetch_identities(conn: sqlite3.Connection) -> dict:
     return {"identities": rows}
 
 
-def _spool_pending(root: Path) -> tuple[int, str | None]:
-    """(pending count, oldest spooled_at). Doctor's definition — NON-recursive
-    *.json in the spool dir: the first version rglob'd, which counted every
-    quarantined entry + its .reason sidecar + inflight claims, inflating the
-    badge forever (gauntlet). spool_dir()/spool_entries() are not callable
-    here — they mkdir, and this daemon is read-only — so the DEFINITION is
-    replicated with this note as the drift guard."""
-    d = _plane_state_dir(root) / "spool"
-    if not d.is_dir():
-        return 0, None
-    oldest = None
-    count = 0
-    for f in sorted(d.glob("*.json")):
-        count += 1
-        try:
-            at = json.loads(f.read_text()).get("spooled_at")
-            if at and (oldest is None or at < oldest):
-                oldest = at
-        except (OSError, json.JSONDecodeError):
-            continue
-    return count, oldest
+# FTS markers: snippet() must not hand the client pre-built markup (every
+# body is bot-authored text that the client escapes wholesale), so matches
+# are bracketed with markers the client swaps for <mark> AFTER escaping the
+# whole string. The markers are PER-REQUEST RANDOM (control byte + hex —
+# untouched by esc()), bound as snippet() parameters and shipped in the
+# payload: a bot-authored body cannot predict them, so a literal \x01 in a
+# message can never forge a highlight (gauntlet, probed — fixed markers
+# could).
+
+
+def _fts_query(q: str) -> str:
+    """User text -> safe FTS5 query: each whitespace token double-quoted
+    (implicit AND). Kills advanced MATCH syntax deliberately — an unbalanced
+    quote or stray NEAR( from a human search must never read as a syntax
+    ERROR (which the envelope would misclassify as source trouble). Control
+    bytes are stripped FIRST: a NUL terminates the bound string mid-quote,
+    defeating the quoting into exactly that misclassification (the 8th
+    hostile shape — gauntlet, probed)."""
+    q = "".join(c if c >= " " else " " for c in q)
+    toks = [t.replace('"', '""') for t in q.split()]
+    return " ".join(f'"{t}"' for t in toks)
+
+
+def _room_filter(fleet: str) -> tuple[str, list]:
+    """The room axis — sender fleet OR recipient fleet — as a filter clause.
+    Search uses this post-MATCH form (FTS drives the query, so the OR is a
+    cheap filter); the CHANNEL must keep its UNION-of-equality-arms form
+    (0004's measured lesson) — an axis change (e.g. a third arm) visits
+    both sites."""
+    return (" (fleet_uid = (SELECT uid FROM identity_registry"
+            "  WHERE kind='fleet' AND alias = ?)"
+            "  OR recipient_fleet = ?)"), [fleet, fleet]
+
+
+def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
+                  limit: int) -> dict:
+    # §11 completeness clause: search must STATE what it cannot see — both
+    # halves of the spec's wording, "redacted OR TRUNCATED". body IS NULL =
+    # no words at all (metadata capture / body-less send); truncated = the
+    # words were CUT at the capture cap, so a term past the cap is
+    # unfindable while the row still looks searchable (external review,
+    # probed with a term at byte 16390). TWO count queries, each predicate
+    # in its own WHERE — never FILTER aggregates: SQLite cannot use a
+    # partial index whose predicate lives only inside a FILTER, so the
+    # combined form scanned every room row past all four partials
+    # (external round 2, measured 43ms -> 1ms at 500k). Pinned by an
+    # index-USAGE EXPLAIN test, not mere index existence.
+    def _completeness_count(pred: str) -> int:
+        sql = f"SELECT COUNT(*) FROM communications WHERE {pred}"
+        params: list = []
+        if fleet:
+            clause, params = _room_filter(fleet)
+            sql += " AND" + clause
+        return conn.execute(sql, params).fetchone()[0]
+
+    unsearchable = _completeness_count("body IS NULL")
+    partially_indexed = _completeness_count(
+        "truncated = 1 AND body IS NOT NULL")
+
+    out = {"query": q, "unsearchable": unsearchable,
+           "partially_indexed": partially_indexed}
+    match = _fts_query(q)
+    if not match:
+        return {**out, "results": []}
+    mopen = "\x01" + secrets.token_hex(4) + "\x01"
+    mclose = "\x02" + secrets.token_hex(4) + "\x02"
+    sql = (
+        "SELECT c.ingest_seq, c.msg_id, c.occurred_at, c.sender_alias,"
+        " c.recipient_alias, c.message_class, c.work_item_id,"
+        " snippet(comms_fts, 0, ?, ?, ' … ', 12) AS snip"
+        " FROM comms_fts JOIN communications c"
+        "   ON c.ingest_seq = comms_fts.rowid"
+        " WHERE comms_fts MATCH ?")
+    params: list = [mopen, mclose, match]
+    if fleet:
+        # Unqualified columns bind to `c` unambiguously — comms_fts declares
+        # only `body` (measured; the earlier .replace() qualification was
+        # probed fragile against substring column names — round 2).
+        clause, extra = _room_filter(fleet)
+        sql += " AND" + clause
+        params.extend(extra)
+    # ORDER BY the FTS rowid, never c.ingest_seq: identical order by
+    # construction (rowid IS ingest_seq under 0005), but the rowid form
+    # rides FTS5's internal index and early-exits on LIMIT where the column
+    # form temp-B-tree-sorts every match (measured 123ms -> 0.2ms at 100k
+    # rows — gauntlet). Pinned by an EXPLAIN test.
+    sql += " ORDER BY comms_fts.rowid DESC LIMIT ?"
+    params.append(limit)
+    rows = []
+    for r in conn.execute(sql, params):
+        row = dict(r)
+        row["sender_short"] = _short(row.pop("sender_alias"))
+        row["recipient_short"] = _short(row.pop("recipient_alias"))
+        rows.append(row)
+    return {**out, "results": rows,
+            "marker_open": mopen, "marker_close": mclose}
+
+
+def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
+    """The trust/gaps surface (§16 F8): what the plane can and cannot see —
+    refused events (quarantine, with reasons), not-yet-ingested (spool),
+    per-door emitter freshness, per-fleet capture policy + last activity,
+    unconfirmed identities. The panel that keeps an empty board honest."""
+    # Gaps = events that ARRIVED and were refused. Quarantine entries carry
+    # a .reason sidecar; sample the newest few verbatim.
+    # Quarantine: LISTABILITY probed via source_state.probe_dir (the
+    # decided-once rule) — an unreadable dir must never read as
+    # quarantined=0 (the false all-clear this panel exists to kill;
+    # macOS glob swallows PermissionError silently — probed). Entries are
+    # guarded per-file: the daemon mutates this dir concurrently, and one
+    # reaped-between-glob-and-stat entry must not take down the whole
+    # panel (probed TOCTOU); a directory named *.json is not an event.
+    quarantined, reasons = 0, []
+    # Same shared door as the spool count (scan_spool — external rounds 3+4:
+    # enumeration-atomic, state-bearing, one definition across surfaces).
+    qscan = scan_spool(root)
+    quarantine_state = qscan.quarantine_state
+    if quarantine_state == "ok":
+        entries = []
+        for f in qscan.quarantined:
+            try:
+                if f.is_file():
+                    entries.append((f.stat().st_mtime, f))
+            except OSError:
+                continue  # reaped mid-walk — skip the entry, never crash
+        entries.sort(reverse=True)
+        quarantined = len(entries)
+        for _, f in entries[:5]:
+            sidecar = f.with_name(f.name + ".reason")
+            try:
+                # the door writes reason + newline — strip for display
+                reason = sidecar.read_text()[:300].strip()
+            except OSError:
+                reason = "(no reason recorded)"
+            reasons.append({"event": f.name, "reason": reason})
+    spool, spool_oldest, spool_state = _spool_pending(root)
+
+    # Per-door freshness: every emitter ever seen, across EVERY envelope-
+    # bearing table — the roster is ingest.py's _CONSTRUCT_TABLE registry
+    # (+ events), never a hand-list (the first version hand-listed three of
+    # five tables and a door whose only activity was workstream opens read
+    # as NEVER FIRED — the exact misread this panel exists to prevent;
+    # gauntlet, all three reviewers). Freshness is keyed on ingest_seq —
+    # the schema's ordering authority — never MAX(occurred_at): emitter
+    # clocks skew (the RTC-less Pi future-stamps at every boot, and one
+    # future timestamp would shadow real freshness forever), and mixed-
+    # offset ISO strings compare lexically wrong (probed). Aggregates are
+    # pushed into each arm so the outer GROUP BY sees per-table rollups,
+    # not every row (measured 735ms -> 470ms at 505k rows, unindexed).
+    tables = ["events", *sorted(set(CONSTRUCT_TABLES.values()))]
+    arms = " UNION ALL ".join(
+        f"SELECT emitter, MAX(ingest_seq) AS seq, COUNT(*) AS n"
+        f" FROM {t} GROUP BY emitter" for t in tables)
+    emitters = [dict(r) for r in conn.execute(
+        f"SELECT emitter, MAX(seq) AS last_seq, SUM(n) AS events"
+        f" FROM ({arms}) GROUP BY emitter ORDER BY last_seq DESC")]
+    for e in emitters:
+        row = conn.execute(
+            "SELECT ingested_at FROM ingest_ledger WHERE ingest_seq = ?",
+            (e.pop("last_seq"),)).fetchone()
+        e["last_at"] = row["ingested_at"] if row else None
+
+    # Per-fleet: capture policy (the words-vs-metadata knob) + last comm.
+    # A fleet with a policy but no rows is a DORMANT emitter — unarmed or
+    # never fired; the difference is compose-side and disclosed as such.
+    try:
+        capture = load_capture_config(root)
+        capture_state = "ok"
+    except CaptureConfigError:
+        capture, capture_state = {}, "malformed"
+    # Liveness keyed on ingest_seq -> LEDGER time, the same rule the emitter
+    # panel already followed — MAX(occurred_at) trusts producer clocks, and
+    # one 2099-dated row from a skewed producer pinned a fleet at "0s ago"
+    # forever (external review, probed). Producer time is not shown here;
+    # if it ever is, it must be labeled producer-reported/untrusted.
+    fleets = [dict(r) for r in conn.execute(
+        "SELECT i.alias AS fleet, MAX(c.ingest_seq) AS last_seq,"
+        " COUNT(c.msg_id) AS comms"
+        " FROM identity_registry i"
+        " LEFT JOIN communications c ON c.fleet_uid = i.uid"
+        " WHERE i.kind='fleet' GROUP BY i.alias")]
+    for f in fleets:
+        seq = f.pop("last_seq")
+        row = conn.execute(
+            "SELECT ingested_at FROM ingest_ledger WHERE ingest_seq = ?",
+            (seq,)).fetchone() if seq is not None else None
+        f["last_comm_at"] = row["ingested_at"] if row else None
+    seen = {f["fleet"] for f in fleets}
+    for f in fleets:
+        f["capture"] = capture_mode(capture, f["fleet"])  # the ONE rule
+    for alias, mode in sorted(capture.items()):
+        if alias != "*" and alias not in seen:
+            fleets.append({"fleet": alias, "last_comm_at": None, "comms": 0,
+                           "capture": mode,
+                           "note": "policy declared, no events ever —"
+                                   " dormant (unarmed or never fired)"})
+
+    provisional = conn.execute(
+        "SELECT COUNT(*) FROM identity_registry WHERE provisional = 1"
+    ).fetchone()[0]
+    return {
+        "quarantined": quarantined,
+        "quarantine_state": quarantine_state,
+        "quarantine_reasons": reasons,
+        "spool_pending": spool,
+        "spool_oldest_at": spool_oldest,
+        "spool_state": spool_state,
+        "emitters": emitters,
+        "fleets": fleets,
+        "capture_config": capture_state,
+        "provisional_identities": provisional,
+    }
+
+
+def _spool_pending(root: Path) -> tuple[int, str | None, str]:
+    """(pending count, oldest spooled_at, source state). Doctor's definition —
+    NON-recursive *.json in the spool dir (the first version rglob'd, which
+    counted quarantine + sidecars + inflight claims — gauntlet).
+    spool_dir()/spool_entries() are not callable here — they mkdir, and this
+    daemon is read-only — so the DEFINITION is replicated with this note as
+    the drift guard. The state is probed, never inferred from an empty glob:
+    an unreadable spool (or spool PARENT — external review's blocker) must
+    surface as 'unreadable', because the numeric zero is a lie there and a
+    green zero from a tree the reader cannot reach is the false all-clear
+    this whole panel exists to kill. ABSENT stays a legitimate zero — the
+    spool dir is created lazily on first spooled event."""
+    # THE spool definition — spool.scan_spool, shared with plane status and
+    # plane doctor so the three surfaces can never disagree about the same
+    # tree (external round 4: doctor printed a green zero for the exact
+    # spool this panel called unreadable). State-bearing and enumeration-
+    # atomic (scan_dir inside); the count is withheld unless readable.
+    sc = scan_spool(root)
+    if sc.spool_state == "unreadable":
+        return 0, None, "unreadable"
+    return len(sc.pending), oldest_spooled_at(sc.pending), "ok"
 
 
 def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
@@ -395,7 +614,7 @@ def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
     for t in ("communications", "work_items", "assignments", "workstreams",
               "events", "identity_registry", "ingest_ledger"):
         counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-    spool, spool_oldest = _spool_pending(root)
+    spool, spool_oldest, spool_state = _spool_pending(root)
     # Socket path honors PLANE_SOCKET like the shim and doctor (the first
     # version re-derived the default path — the exact overridden-socket
     # defect the last gauntlet fixed in doctor, re-imported). Liveness is a
@@ -410,6 +629,7 @@ def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
         "daemon_serving": bool(serving),
         "spool_files": spool,
         "spool_oldest_at": spool_oldest,
+        "spool_state": spool_state,
     }
 
 
@@ -492,6 +712,17 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                            "checked_at": _now_iso()},
             "data": snap,
         })
+
+    @app.get("/api/search")
+    def search(q: str = "", fleet: str | None = None, limit: int = 50):
+        limit = max(1, min(int(limit), 200))
+        return JSONResponse(
+            _envelope(root, lambda c: _fetch_search(c, q, fleet, limit)))
+
+    @app.get("/api/trust")
+    def trust():
+        return JSONResponse(
+            _envelope(root, lambda c: _fetch_trust(c, root)))
 
     @app.get("/healthz")
     def healthz():

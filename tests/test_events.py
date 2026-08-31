@@ -423,3 +423,52 @@ class TestUnlistableDirectorySources:
             )
         finally:
             bad.chmod(0o755)
+
+
+def test_late_enumeration_failure_lands_in_unreadable_coverage(
+    tmp_path, monkeypatch
+):
+    """External round 4: probe-then-glob let a mid-iteration OSError drop an
+    events ledger silently AFTER sources_read counted it clean. scan_dir's
+    list is now the enumeration — a late failure lands the bots dir in
+    unreadable coverage, never a falsely clean sweep."""
+    import errno
+    import types
+
+    from claudlobby import source_state
+    from claudlobby.commands.events import collect_events
+
+    bots = tmp_path / "bots"
+    live = bots / "live" / "data" / "events"
+    live.mkdir(parents=True)
+    (live / "events.jsonl").write_text('{"event": "x"}\n')
+    (bots / "benign").mkdir()
+
+    real = source_state.os.scandir
+
+    class _It:
+        def __init__(self):
+            self._sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if not self._sent:
+                self._sent = True
+                return types.SimpleNamespace(path=str(bots / "benign"))
+            raise OSError(errno.EIO, "later readdir failed")
+
+    monkeypatch.setattr(
+        source_state.os, "scandir",
+        lambda p: _It() if str(p) == str(bots) else real(p))
+    coverage: dict = {}
+    rows = collect_events(bots, coverage=coverage)
+    assert str(bots) in coverage["unreadable"]
+    assert rows == []
