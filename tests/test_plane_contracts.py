@@ -39,9 +39,13 @@ def test_families_registered():
     # first emitter; vocabulary registry-governed, F19). "workstream" +
     # "workstream_event" joined in PR-B T6 with the workstream-update door
     # (wire name suffixed per spec ruling #8 — the construct/kind collision).
+    # The registry lane's three joined in Phase 2b (§18): registry_snapshot
+    # + metric_sample (construct tables) and declaration (events
+    # kind=declaration — the provenance chain the hash gate never touches).
     assert set(FAMILIES) == {
         "communication", "transmission", "work_item", "assignment", "task",
         "system", "workstream", "workstream_event",
+        "registry_snapshot", "metric_sample", "declaration",
     }
 
 
