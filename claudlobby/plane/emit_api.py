@@ -87,6 +87,14 @@ def _capture_mode(modes: dict, fleet: str | None) -> str:
     return modes.get(fleet or "", modes.get("*", "metadata"))
 
 
+# Public aliases: the trust surface (view.py) is a second consumer of the
+# capture policy — reader and mode-resolution rule alike must have ONE
+# definition, or the panel silently disagrees with the recorder about what
+# policy is in force (the words-vs-metadata knob, where disagreement bites).
+load_capture_config = _load_capture_config
+capture_mode = _capture_mode
+
+
 def _apply_capture(raw: dict, modes: dict) -> dict:
     """Round-3 F8: the policy transforms EVERY content-bearing family
     (contracts.CONTENT_FIELDS is the registry's code form), not

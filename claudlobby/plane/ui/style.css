@@ -194,7 +194,9 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
           border: 1px solid var(--edge); border-radius: 6px;
           padding: 4px 10px; font-size: 12.5px; width: 240px; }
 #search:focus { outline: 1px solid var(--accent); }
-h2 { display: flex; align-items: center; }
+/* scoped: a GLOBAL h2 flex rule collapsed the whitespace in
+   every other header ("event stream(raw ledger)") — gauntlet */
+#rail-channel h2 { display: flex; align-items: center; }
 .hit { padding: 8px 12px; border-bottom: 1px solid var(--edge); }
 .hit .snip { font-size: 13px; margin-top: 2px; }
 .hit mark { background: transparent; color: var(--accent); font-weight: 600; }

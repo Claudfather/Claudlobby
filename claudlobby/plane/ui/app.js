@@ -403,6 +403,11 @@ function renderFleetTabs(identities) {
       currentFleet = b.dataset.fleet;
       renderFleetTabs(identities);   // instant highlight
       refreshBoards();               // guarded path (generation stale-guard)
+      if (!$("search-results").hidden) {
+        // active search: re-fire in the NEW room — otherwise the visible
+        // hits stay scoped to the old room under the new tab's highlight
+        $("search").dispatchEvent(new Event("input"));
+      }
     }));
 }
 
@@ -493,8 +498,8 @@ async function pollGrid() {
 function setView(view) {
   currentView = view;
   $("channel").hidden = view !== "channel";
-  $("search-results").hidden = true;   // leaving/entering resets search
-  $("search").value = view === "channel" ? $("search").value : "";
+  $("search-results").hidden = true;   // any view switch closes results
+  if (view !== "channel") $("search").value = "";
   $("grid").hidden = view !== "grid";
   $("trust").hidden = view !== "trust";
   document.querySelectorAll("#view-nav button").forEach((b) =>
@@ -589,10 +594,8 @@ document.addEventListener("visibilitychange", () => {
 // Trust/gaps surface + channel search (Phase-4 final chunk)
 // ---------------------------------------------------------------------------
 
-function trustNum(n, okWhenZero) {
-  const cls = n === 0 ? (okWhenZero ? "trust-ok" : "trust-warn")
-                      : (okWhenZero ? "trust-bad" : "trust-ok");
-  return `<span class="trust-num ${cls}">${n}</span>`;
+function trustNum(n, nonzero = "trust-bad") {
+  return `<span class="trust-num ${n === 0 ? "trust-ok" : nonzero}">${n}</span>`;
 }
 
 function renderTrust(env) {
@@ -614,11 +617,15 @@ function renderTrust(env) {
     `<div class="reason">${esc(r.event)} — ${esc(r.reason)}</div>`).join("");
   el.innerHTML = `
     <div class="trust-block"><h3>gaps — what the recorder refused</h3>
-      <div class="trust-row">${trustNum(d.quarantined, true)}
+      ${d.quarantine_state === "unreadable"
+        ? `<div class="trust-row trust-bad"><b>quarantine dir unreadable</b>
+             <small>cannot count refusals — this is a gap in the gap
+             counter, not a zero</small></div>` : ""}
+      <div class="trust-row">${trustNum(d.quarantined)}
         <b>quarantined events</b>
         <small>arrived and were refused — each is a recording gap</small></div>
       ${reasons}
-      <div class="trust-row">${trustNum(d.spool_pending, true)}
+      <div class="trust-row">${trustNum(d.spool_pending)}
         <b>spooled, not yet ingested</b>
         <small>${d.spool_oldest_at
           ? "oldest " + esc(ago(d.spool_oldest_at)) : ""}</small></div>
@@ -634,7 +641,7 @@ function renderTrust(env) {
       ${fleets}
     </div>
     <div class="trust-block"><h3>identities</h3>
-      <div class="trust-row">${trustNum(d.provisional_identities, true)}
+      <div class="trust-row">${trustNum(d.provisional_identities, "trust-warn")}
         <b>provisional identities</b>
         <small>lazily minted, unconfirmed by the registry — Phase 2b
         confirms these</small></div>
@@ -643,29 +650,36 @@ function renderTrust(env) {
 
 function renderSearch(env) {
   const el = $("search-results");
-  if (!env || env.state !== "ok") {
-    el.innerHTML = stateBlock(env ? env.state : "disconnected",
-                              env && env.provenance, env && env.remediation);
-    return;
-  }
+  if (renderState(el, env)) return;
   const hits = env.data.results;
+  // §11 completeness: say what the search CANNOT see — a metadata-capture
+  // room answering "no matches" alone is a false idle.
+  const unsearchable = env.data.unsearchable > 0
+    ? `<div class="panel-state st-idle"><div class="detail">`
+      + `${env.data.unsearchable} message${env.data.unsearchable === 1
+        ? " is" : "s are"} metadata-capture here — words never indexed,`
+      + ` unsearchable by policy</div></div>` : "";
   if (!hits.length) {
     el.innerHTML = stateBlock("idle", null, null,
-      { label: `no matches for “${env.data.query}”`, detail: "" });  // stateBlock escapes
+      { label: `no matches for “${env.data.query}”`, detail: "" })
+      + unsearchable;  // stateBlock escapes its label
     return;
   }
   el.innerHTML = hits.map((h) => {
-    // esc() the WHOLE snippet, then swap the server's control-byte markers
-    // for <mark> — markup never rides in from bot-authored text.
+    // esc() the WHOLE snippet, then swap the server's PER-REQUEST random
+    // markers for <mark> — markup never rides in from bot-authored text,
+    // and a body carrying literal marker bytes cannot forge a highlight
+    // (it cannot predict the token).
     const snip = esc(h.snip)
-      .replaceAll("\u0001", "<mark>").replaceAll("\u0002", "</mark>");
+      .replaceAll(env.data.marker_open, "<mark>")
+      .replaceAll(env.data.marker_close, "</mark>");
     return `<div class="hit">
       <b>${esc(h.sender_short)}</b>
       <span class="to">→ ${esc(h.recipient_short || "—")}</span>
       <small> · ${esc(ago(h.occurred_at))}${h.work_item_id
         ? " · work item" : ""}</small>
       <div class="snip">${snip}</div></div>`;
-  }).join("");
+  }).join("") + unsearchable;
 }
 
 let searchTimer = null;

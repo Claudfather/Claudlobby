@@ -57,10 +57,12 @@ from ..source_state import (
     SOURCE_ABSENT,
     SOURCE_OK,
     SOURCE_UNREADABLE,
+    probe_dir,
     probe_source,
 )
 from .daemon import probe_daemon, socket_path
-from .emit_api import CaptureConfigError, _load_capture_config
+from .emit_api import CaptureConfigError, capture_mode, load_capture_config
+from .ingest import _CONSTRUCT_TABLE
 from .ingest import now_iso as _now_iso
 from .sampler import PaneSampler
 from .queries import (
@@ -370,39 +372,76 @@ def _fetch_identities(conn: sqlite3.Connection) -> dict:
 
 # FTS markers: snippet() must not hand the client pre-built markup (every
 # body is bot-authored text that the client escapes wholesale), so matches
-# are bracketed with control bytes no real body carries; the client escapes
-# the WHOLE string, then swaps the markers for <mark> tags.
-_FTS_OPEN, _FTS_CLOSE = "\x01", "\x02"
+# are bracketed with markers the client swaps for <mark> AFTER escaping the
+# whole string. The markers are PER-REQUEST RANDOM (control byte + hex —
+# untouched by esc()), bound as snippet() parameters and shipped in the
+# payload: a bot-authored body cannot predict them, so a literal \x01 in a
+# message can never forge a highlight (gauntlet, probed — fixed markers
+# could).
 
 
 def _fts_query(q: str) -> str:
     """User text -> safe FTS5 query: each whitespace token double-quoted
     (implicit AND). Kills advanced MATCH syntax deliberately — an unbalanced
     quote or stray NEAR( from a human search must never read as a syntax
-    ERROR (which the envelope would misclassify as source trouble)."""
-    toks = [t.replace('"', '""') for t in q.split() if t]
+    ERROR (which the envelope would misclassify as source trouble). Control
+    bytes are stripped FIRST: a NUL terminates the bound string mid-quote,
+    defeating the quoting into exactly that misclassification (the 8th
+    hostile shape — gauntlet, probed)."""
+    q = "".join(c if c >= " " else " " for c in q)
+    toks = [t.replace('"', '""') for t in q.split()]
     return " ".join(f'"{t}"' for t in toks)
+
+
+def _room_filter(fleet: str) -> tuple[str, list]:
+    """The room axis — sender fleet OR recipient fleet — as a filter clause.
+    Search uses this post-MATCH form (FTS drives the query, so the OR is a
+    cheap filter); the CHANNEL must keep its UNION-of-equality-arms form
+    (0004's measured lesson) — an axis change (e.g. a third arm) visits
+    both sites."""
+    return (" (fleet_uid = (SELECT uid FROM identity_registry"
+            "  WHERE kind='fleet' AND alias = ?)"
+            "  OR recipient_fleet = ?)"), [fleet, fleet]
 
 
 def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
                   limit: int) -> dict:
+    # §11 completeness clause: search must STATE what it cannot see. A
+    # metadata-capture room answering "no matches" is a false idle — the
+    # words were never indexed, and only this count says so (gauntlet).
+    un_sql = "SELECT COUNT(*) FROM communications WHERE body IS NULL"
+    un_params: list = []
+    if fleet:
+        clause, un_params = _room_filter(fleet)
+        un_sql += " AND" + clause
+    unsearchable = conn.execute(un_sql, un_params).fetchone()[0]
+
+    out = {"query": q, "unsearchable": unsearchable}
     match = _fts_query(q)
     if not match:
-        return {"results": [], "query": q}
+        return {**out, "results": []}
+    import secrets
+    mopen = "\x01" + secrets.token_hex(4) + "\x01"
+    mclose = "\x02" + secrets.token_hex(4) + "\x02"
     sql = (
         "SELECT c.ingest_seq, c.msg_id, c.occurred_at, c.sender_alias,"
         " c.recipient_alias, c.message_class, c.work_item_id,"
-        f" snippet(comms_fts, 0, '{_FTS_OPEN}', '{_FTS_CLOSE}', ' … ', 12)"
-        "  AS snip"
-        " FROM comms_fts JOIN communications c ON c.rowid = comms_fts.rowid"
+        " snippet(comms_fts, 0, ?, ?, ' … ', 12) AS snip"
+        " FROM comms_fts JOIN communications c"
+        "   ON c.ingest_seq = comms_fts.rowid"
         " WHERE comms_fts MATCH ?")
-    params: list = [match]
+    params: list = [mopen, mclose, match]
     if fleet:
-        sql += (" AND (c.fleet_uid = (SELECT uid FROM identity_registry"
-                " WHERE kind='fleet' AND alias = ?)"
-                " OR c.recipient_fleet = ?)")
-        params.extend([fleet, fleet])
-    sql += " ORDER BY c.ingest_seq DESC LIMIT ?"
+        clause, extra = _room_filter(fleet)
+        sql += " AND" + clause.replace("fleet_uid", "c.fleet_uid").replace(
+            "recipient_fleet", "c.recipient_fleet")
+        params.extend(extra)
+    # ORDER BY the FTS rowid, never c.ingest_seq: identical order by
+    # construction (rowid IS ingest_seq under 0005), but the rowid form
+    # rides FTS5's internal index and early-exits on LIMIT where the column
+    # form temp-B-tree-sorts every match (measured 123ms -> 0.2ms at 100k
+    # rows — gauntlet). Pinned by an EXPLAIN test.
+    sql += " ORDER BY comms_fts.rowid DESC LIMIT ?"
     params.append(limit)
     rows = []
     for r in conn.execute(sql, params):
@@ -410,7 +449,8 @@ def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
         row["sender_short"] = _short(row.pop("sender_alias"))
         row["recipient_short"] = _short(row.pop("recipient_alias"))
         rows.append(row)
-    return {"results": rows, "query": q}
+    return {**out, "results": rows,
+            "marker_open": mopen, "marker_close": mclose}
 
 
 def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
@@ -420,36 +460,68 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
     unconfirmed identities. The panel that keeps an empty board honest."""
     # Gaps = events that ARRIVED and were refused. Quarantine entries carry
     # a .reason sidecar; sample the newest few verbatim.
+    # Quarantine: LISTABILITY probed via source_state.probe_dir (the
+    # decided-once rule) — an unreadable dir must never read as
+    # quarantined=0 (the false all-clear this panel exists to kill;
+    # macOS glob swallows PermissionError silently — probed). Entries are
+    # guarded per-file: the daemon mutates this dir concurrently, and one
+    # reaped-between-glob-and-stat entry must not take down the whole
+    # panel (probed TOCTOU); a directory named *.json is not an event.
     qdir = _plane_state_dir(root) / "spool" / "quarantine"
     quarantined, reasons = 0, []
-    if qdir.is_dir():
-        entries = sorted(qdir.glob("*.json"),
-                         key=lambda f: f.stat().st_mtime, reverse=True)
+    qprobe = probe_dir(qdir)
+    quarantine_state = ("unreadable" if qprobe.state == SOURCE_UNREADABLE
+                        else "ok")
+    if qprobe.state == SOURCE_OK:
+        entries = []
+        for f in qdir.glob("*.json"):
+            try:
+                if f.is_file():
+                    entries.append((f.stat().st_mtime, f))
+            except OSError:
+                continue  # reaped mid-walk — skip the entry, never crash
+        entries.sort(reverse=True)
         quarantined = len(entries)
-        for f in entries[:5]:
+        for _, f in entries[:5]:
             sidecar = f.with_name(f.name + ".reason")
             try:
-                reason = sidecar.read_text()[:300]
+                # the door writes reason + newline — strip for display
+                reason = sidecar.read_text()[:300].strip()
             except OSError:
                 reason = "(no reason recorded)"
             reasons.append({"event": f.name, "reason": reason})
     spool, spool_oldest = _spool_pending(root)
 
-    # Per-door freshness: every emitter ever seen, newest event age. Data-
-    # driven — no hardcoded door roster to drift (#1009 class); a door that
-    # has NEVER fired is visible as absence against the doors that have.
+    # Per-door freshness: every emitter ever seen, across EVERY envelope-
+    # bearing table — the roster is ingest.py's _CONSTRUCT_TABLE registry
+    # (+ events), never a hand-list (the first version hand-listed three of
+    # five tables and a door whose only activity was workstream opens read
+    # as NEVER FIRED — the exact misread this panel exists to prevent;
+    # gauntlet, all three reviewers). Freshness is keyed on ingest_seq —
+    # the schema's ordering authority — never MAX(occurred_at): emitter
+    # clocks skew (the RTC-less Pi future-stamps at every boot, and one
+    # future timestamp would shadow real freshness forever), and mixed-
+    # offset ISO strings compare lexically wrong (probed). Aggregates are
+    # pushed into each arm so the outer GROUP BY sees per-table rollups,
+    # not every row (measured 735ms -> 470ms at 505k rows, unindexed).
+    tables = ["events", *sorted(set(_CONSTRUCT_TABLE.values()))]
+    arms = " UNION ALL ".join(
+        f"SELECT emitter, MAX(ingest_seq) AS seq, COUNT(*) AS n"
+        f" FROM {t} GROUP BY emitter" for t in tables)
     emitters = [dict(r) for r in conn.execute(
-        "SELECT emitter, MAX(occurred_at) AS last_at, COUNT(*) AS events"
-        " FROM (SELECT emitter, occurred_at FROM events"
-        "       UNION ALL SELECT emitter, occurred_at FROM communications"
-        "       UNION ALL SELECT emitter, occurred_at FROM work_items)"
-        " GROUP BY emitter ORDER BY last_at DESC")]
+        f"SELECT emitter, MAX(seq) AS last_seq, SUM(n) AS events"
+        f" FROM ({arms}) GROUP BY emitter ORDER BY last_seq DESC")]
+    for e in emitters:
+        row = conn.execute(
+            "SELECT ingested_at FROM ingest_ledger WHERE ingest_seq = ?",
+            (e.pop("last_seq"),)).fetchone()
+        e["last_at"] = row["ingested_at"] if row else None
 
     # Per-fleet: capture policy (the words-vs-metadata knob) + last comm.
     # A fleet with a policy but no rows is a DORMANT emitter — unarmed or
     # never fired; the difference is compose-side and disclosed as such.
     try:
-        capture = _load_capture_config(root)
+        capture = load_capture_config(root)
         capture_state = "ok"
     except CaptureConfigError:
         capture, capture_state = {}, "malformed"
@@ -461,7 +533,7 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
         " WHERE i.kind='fleet' GROUP BY i.alias")]
     seen = {f["fleet"] for f in fleets}
     for f in fleets:
-        f["capture"] = capture.get(f["fleet"], capture.get("*", "metadata"))
+        f["capture"] = capture_mode(capture, f["fleet"])  # the ONE rule
     for alias, mode in sorted(capture.items()):
         if alias != "*" and alias not in seen:
             fleets.append({"fleet": alias, "last_comm_at": None, "comms": 0,
@@ -474,6 +546,7 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
     ).fetchone()[0]
     return {
         "quarantined": quarantined,
+        "quarantine_state": quarantine_state,
         "quarantine_reasons": reasons,
         "spool_pending": spool,
         "spool_oldest_at": spool_oldest,
