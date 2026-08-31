@@ -276,11 +276,12 @@ let generation = 0;
 async function refreshBoards() {
   const gen = ++generation;   // stale responses never paint over newer ones
   const [ch, tk, fl, sm] = await Promise.all([
-    jget("/api/channel"), jget("/api/tasks"),
+    jget(channelUrl()), jget("/api/tasks"),
     jget("/api/identities"), jget("/api/summary"),
   ]);
   if (gen !== generation) return;
   renderChannel(ch); renderTasks(tk); renderFleet(fl); renderSummary(sm);
+  if (fl && fl.state === "ok") renderFleetTabs(fl.data.identities);
   restartSafety();
 }
 
@@ -328,6 +329,259 @@ $("debug-toggle").addEventListener("click", () => {
   $("debug-toggle").setAttribute("aria-pressed", String(!rail.hidden));
 });
 
+
+// ---------------------------------------------------------------------------
+// Grid view + fleet tabs (Phase-4 chunk 2)
+// ---------------------------------------------------------------------------
+
+// Minimal ANSI SGR -> HTML. Every TEXT run routes through esc(); only
+// class names of our own minting enter markup. Non-SGR escapes (cursor,
+// OSC titles) are stripped first.
+function ansiToHtml(text) {
+  const cleaned = (text || "")
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC
+    .replace(/\x1b\[[0-9;?]*[@-ln-~]/g, "");   // CSI non-SGR (keeps m)
+  let out = "", cls = [];
+  for (const part of cleaned.split(/(\x1b\[[0-9;]*m)/)) {
+    const m = part.match(/^\x1b\[([0-9;]*)m$/);
+    if (!m) { if (part) out += span(cls, part); continue; }
+    const codes = (m[1] || "0").split(";").map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const code = codes[i];
+      if (code === 0) cls = [];
+      else if (code === 1) cls.push("a-b");
+      else if (code === 39) cls = cls.filter((c) => !/^a-\d+$/.test(c));
+      else if (code === 38 || code === 48) {
+        // Extended color: 38;5;N (256) or 38;2;R;G;B (truecolor) — Claude
+        // panes are truecolor-heavy, so CONSUME the args (do not re-read
+        // them as basic SGR codes) rather than render them. i advances past
+        // the argument sequence; a nearest-basic mapping is a later polish.
+        i += (codes[i + 1] === 5) ? 2 : (codes[i + 1] === 2) ? 4 : 1;
+      } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+        cls = cls.filter((c) => !/^a-\d+$/.test(c));
+        cls.push(`a-${code}`);
+      }
+    }
+  }
+  return out;
+  function span(c, t) {
+    return c.length ? `<span class="${c.join(" ")}">${esc(t)}</span>` : esc(t);
+  }
+}
+
+let currentView = "channel";
+let currentFleet = null;   // null = auto (single fleet or "all" not yet chosen)
+let gridTimer = null;
+let focusTimer = null;
+
+function channelUrl() {
+  const f = currentFleet && currentFleet !== "all"
+    ? `&fleet=${encodeURIComponent(currentFleet)}` : "";
+  return `/api/channel?limit=120${f}`;
+}
+
+function renderFleetTabs(identities) {
+  const fleets = identities.filter((i) => i.kind === "fleet")
+    .map((i) => i.alias).sort();
+  const el = $("fleet-tabs");
+  if (fleets.length < 2) { el.innerHTML = ""; currentFleet = null; return; }
+  // Per-team rooms are the DEFAULT (operator ruling): a fleet tab is always
+  // selected; the merged firehose is the explicit last resort.
+  if (!currentFleet) {
+    // Rooms are the default: on first paint with >1 fleet the channel was
+    // fetched as the firehose (currentFleet null); adopt the room and
+    // refetch THROUGH the generation guard — the direct fetch was the one
+    // unguarded render path left (gauntlet round 2).
+    currentFleet = fleets[0];
+    refreshBoards();
+  }
+  el.innerHTML = [...fleets, "all"].map((f) =>
+    `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
+    + ` data-fleet="${esc(f)}" type="button">${esc(f)}</button>`).join("");
+  el.querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", () => {
+      currentFleet = b.dataset.fleet;
+      renderFleetTabs(identities);   // instant highlight
+      refreshBoards();               // guarded path (generation stale-guard)
+    }));
+}
+
+const STATUS_DOT = { up: "live", down: "", sampling: "warn" };
+const STATUS_NOTE = { down: "session down", sampling: "sampling…" };
+
+function renderPaneCard(el, p) {
+  el.className = "pane-card" + (p.status === "up" ? "" : ` s-${p.status}`);
+  el._lines = p.lines;   // JS property, not a multi-KB DOM attribute
+  el.innerHTML = `
+    <div class="p-head"><span class="dot ${STATUS_DOT[p.status] || ""}"></span>
+      <b>${esc(p.bot)}</b><span class="tag">${esc(p.fleet)}</span>
+      <small class="age">${p.captured_ago_s != null
+        ? esc(p.captured_ago_s) + "s" : "—"}</small></div>
+    <pre>${ansiToHtml(p.lines)}</pre>
+    ${STATUS_NOTE[p.status]
+      ? `<div class="dead-note">${esc(STATUS_NOTE[p.status])}</div>` : ""}`;
+}
+
+function paneCard(p) {
+  const el = document.createElement("div");
+  el.dataset.bot = p.bot;
+  el.dataset.fleet = p.fleet;
+  el.tabIndex = 0;                       // §16: keyboard-navigable
+  el.setAttribute("role", "button");
+  el.setAttribute("aria-label", `focus ${p.fleet}/${p.bot}`);
+  const open = () => openFocus(p.bot, p.fleet);
+  el.addEventListener("click", open);
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+  });
+  renderPaneCard(el, p);
+  return el;
+}
+
+// Keyed render (§16 preserved-focus + text selection — the class the channel
+// was pinned against): unchanged frames keep their DOM node so an operator
+// can actually copy a bot's terminal out.
+function renderGrid(env) {
+  const el = $("grid");
+  if (!env || env.state !== "ok") {
+    el.innerHTML = stateBlock(env ? env.state : "disconnected",
+                              env && env.provenance,
+                              env && env.remediation);
+    return;
+  }
+  const panes = env.data.panes;
+  if (!panes.length) {
+    el.innerHTML = stateBlock("idle", env.provenance,
+                              "no bots discovered on this host");
+    return;
+  }
+  const existing = new Map(
+    [...el.querySelectorAll(".pane-card")].map(
+      (n) => [`${n.dataset.fleet}/${n.dataset.bot}`, n]));
+  const frag = document.createDocumentFragment();
+  if (env.data.sampler_running === false) {
+    // The one signal separating "sampler crashed, frames aging" from
+    // "all well" — surfaced, never silent (§16).
+    const warn = document.createElement("div");
+    warn.className = "panel-state st-unreadable";
+    warn.innerHTML = `<div class="label">sampler stopped — frames are` +
+      ` aging</div><div class="remedy">restart the view daemon</div>`;
+    frag.appendChild(warn);
+  }
+  for (const p of panes) {
+    const prev = existing.get(`${p.fleet}/${p.bot}`);
+    if (prev && prev._lines === p.lines) {
+      const age = prev.querySelector(".age");
+      if (age) age.textContent = p.captured_ago_s != null
+        ? p.captured_ago_s + "s" : "—";
+      frag.appendChild(prev);
+    } else if (prev) {
+      renderPaneCard(prev, p);
+      frag.appendChild(prev);
+    } else {
+      frag.appendChild(paneCard(p));
+    }
+  }
+  el.replaceChildren(frag);
+}
+
+async function pollGrid() {
+  if (currentView !== "grid") return;
+  renderGrid(await jget("/api/grid"));
+}
+
+function setView(view) {
+  currentView = view;
+  $("channel").hidden = view !== "channel";
+  $("grid").hidden = view !== "grid";
+  document.querySelectorAll("#view-nav button").forEach((b) =>
+    b.classList.toggle("on", b.dataset.view === view));
+  clearInterval(gridTimer);
+  if (view === "grid") {
+    renderState($("grid"), { state: "loading" });
+    pollGrid();
+    gridTimer = setInterval(pollGrid, 5000);
+  }
+}
+document.querySelectorAll("#view-nav button").forEach((b) =>
+  b.addEventListener("click", () => setView(b.dataset.view)));
+
+function openFocus(bot, fleet) {
+  if (!bot) { closeFocus(); return; }   // never a titleless empty void
+  clearInterval(focusTimer);   // no prior timer bleeds into this overlay
+  clearInterval(gridTimer);    // pause the full-grid poll behind the overlay
+  $("focus-overlay").hidden = false;
+  $("focus-title").textContent = fleet ? `${bot} · ${fleet}` : bot;
+  $("focus-title").dataset.bot = bot;
+  $("focus-title").dataset.fleet = fleet || "";
+  $("focus-pane").innerHTML = stateBlock("loading", null, null,
+    { label: `opening ${bot}…`, detail: "" });   // never blank while fetching
+  const q = `/api/grid?focus=${encodeURIComponent(bot)}`
+    + (fleet ? `&fleet=${encodeURIComponent(fleet)}` : "");
+  let lastSig = null;
+  const tick = async () => {
+    const env = await jget(q);   // server ships ONLY this pane
+    if ($("focus-title").dataset.bot !== bot) return;  // overlay moved on
+    if (!env || env.state !== "ok") {
+      $("focus-pane").innerHTML = stateBlock(
+        env ? env.state : "disconnected", env && env.provenance,
+        env && env.remediation);
+      lastSig = null;
+      return;
+    }
+    const pane = (env.data.panes || [])[0];
+    if (!pane) {   // ghost focus: a state, never "opening…" forever
+      $("focus-pane").innerHTML = stateBlock("idle", null, null,
+        { label: `no such pane: ${bot}`, detail: "" });
+      lastSig = null;
+      return;
+    }
+    // ONE signature over status+frame: an unchanged frame never re-renders
+    // (preserved selection — including on a DOWN pane, where copying the
+    // last screen matters most), and a status flip always does.
+    const sig = pane.status + "\u0000" + pane.lines;
+    if (sig === lastSig) return;
+    lastSig = sig;
+    $("focus-pane").innerHTML = (pane.status === "up" ? "" : stateBlock(
+      "idle", null, null, { label: STATUS_NOTE[pane.status] || pane.status,
+                            detail: "" }))
+      + ansiToHtml(pane.lines);
+  };
+  tick();
+  focusTimer = setInterval(tick, 1000);
+}
+function closeFocus() {
+  $("focus-overlay").hidden = true;
+  clearInterval(focusTimer);
+  if (currentView === "grid") {   // resume the grid poll
+    gridTimer = setInterval(pollGrid, 5000);
+    pollGrid();
+  }
+}
+$("focus-close").addEventListener("click", closeFocus);
+$("focus-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "focus-overlay") closeFocus();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("focus-overlay").hidden) closeFocus();
+});
+document.addEventListener("visibilitychange", () => {
+  // A hidden tab's open overlay must not pin the server at 1s focus cadence
+  // (each tick renews the 30s TTL) — §14 honesty (reviewer finding).
+  if (document.hidden) {
+    clearInterval(focusTimer); clearInterval(gridTimer);
+  } else if (!$("focus-overlay").hidden && $("focus-title").dataset.bot) {
+    openFocus($("focus-title").dataset.bot,
+              $("focus-title").dataset.fleet || null);
+  } else if (currentView === "grid") {
+    gridTimer = setInterval(pollGrid, 5000); pollGrid();
+  }
+});
+
+// Bootstrap LAST — after every top-level `let` (currentFleet, currentView…)
+// has initialized. Placed mid-file it read those bindings in their temporal
+// dead zone and threw on first load, freezing the page at its loading markup.
+$("focus-overlay").hidden = true;   // a restored-open modal never survives a load
 ["channel", "tasks", "attention", "fleet"].forEach((id) =>
   renderState($(id), { state: "loading" }));
 refreshBoards();

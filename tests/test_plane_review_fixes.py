@@ -467,13 +467,13 @@ def test_f10_0002_applies_against_an_existing_v1_database(tmp_path: Path, monkey
     """The upgrade path, not just the fresh path: a db stamped v1 by 0001
     alone must gain 0002's index from a plain migrate()."""
     files = migrations_mod._migration_files()
-    assert [n for n, _ in files] == [1, 2]
+    assert [n for n, _ in files] == [1, 2, 3, 4]
     conn = connect(db_path(tmp_path))
     monkeypatch.setattr(migrations_mod, "SCHEMA_USER_VERSION", 1)
     monkeypatch.setattr(migrations_mod, "_migration_files", lambda: files[:1])
     assert migrations_mod.migrate(conn) == 1
     monkeypatch.undo()
-    assert migrations_mod.migrate(conn) == 2
+    assert migrations_mod.migrate(conn) == 4
     names = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='index'")}
     conn.close()

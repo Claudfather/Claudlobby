@@ -52,7 +52,7 @@ export function stateBlock(state, provenance, remediation,
   const copy = copyOverride
     || STATE_COPY[state] || { label: state, detail: "" };
   const prov = provenance
-    ? `<div class="prov">source: ${esc(provenance.db || "api")}`
+    ? `<div class="prov">source: ${esc(provenance.db || provenance.source || "api")}`
       + (provenance.last_ingest_at
          ? ` · last ingest ${esc(ago(provenance.last_ingest_at))}` : "")
       + ` · checked ${esc(ago(provenance.checked_at))}</div>`

@@ -36,7 +36,9 @@ this module import-guards them so the core ledger never needs them.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -59,6 +61,7 @@ from ..source_state import (
 )
 from .daemon import probe_daemon, socket_path
 from .ingest import now_iso as _now_iso
+from .sampler import PaneSampler
 from .queries import (
     ACTIVATION_TX_EVENTS,
     ATTENTION_SQL,
@@ -200,14 +203,40 @@ _TERMINAL_SET = frozenset(TERMINAL_TASK_EVENTS)
 _ACTIVATION_SET = frozenset(ACTIVATION_TX_EVENTS)
 
 
-def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int) -> dict:
-    comms = [dict(r) for r in conn.execute(
-        "SELECT ingest_seq, msg_id, occurred_at, sender_alias,"
-        " recipient_alias, recipient_raw, message_class, command_type,"
-        " privacy, body, body_bytes, truncated, work_item_id, assignment_id,"
-        " reply_to_msg_id, emitter"
-        " FROM communications ORDER BY ingest_seq DESC LIMIT ?", (limit,)
-    ).fetchall()]
+def _fetch_channel(conn: sqlite3.Connection, names: dict, limit: int,
+                   fleet: str | None = None) -> dict:
+    cols = ("ingest_seq, msg_id, occurred_at, sender_alias,"
+            " recipient_alias, recipient_raw, message_class, command_type,"
+            " privacy, body, body_bytes, truncated, work_item_id,"
+            " assignment_id, reply_to_msg_id, emitter")
+    if fleet:
+        # Per-team channels are the DEFAULT view (operator ruling 2026-08-29:
+        # rooms, not a firehose). A room shows every message that TOUCHES the
+        # fleet — sender OR recipient — so a cross-fleet thread stays whole in
+        # both rooms (44.6% of this estate's dispatch traffic is cross-fleet;
+        # a sender-only predicate halved every such conversation — gauntlet).
+        # A UNION of two EQUALITY arms, never `OR recipient_alias LIKE`: the
+        # OR forced a full reverse scan (0003 shipped inert against its own
+        # query — three reviewers EXPLAIN'd it independently), and LIKE let a
+        # fleet named `en_` absorb `eng`'s room. Each arm SEARCHes its index
+        # (0003 sender / 0004 recipient_fleet) and early-exits on LIMIT;
+        # UNION dedupes the same-fleet-both-arms overlap. Pinned by an
+        # EXPLAIN-plan test so the scan cannot silently return.
+        comms = [dict(r) for r in conn.execute(
+            f"SELECT * FROM (SELECT {cols} FROM communications"
+            "  WHERE fleet_uid = (SELECT uid FROM identity_registry"
+            "   WHERE kind='fleet' AND alias = ?)"
+            "  ORDER BY ingest_seq DESC LIMIT ?)"
+            " UNION "
+            f"SELECT * FROM (SELECT {cols} FROM communications"
+            "  WHERE recipient_fleet = ?"
+            "  ORDER BY ingest_seq DESC LIMIT ?)"
+            " ORDER BY ingest_seq DESC LIMIT ?",
+            (fleet, limit, fleet, limit, limit)).fetchall()]
+    else:
+        comms = [dict(r) for r in conn.execute(
+            f"SELECT {cols} FROM communications"
+            " ORDER BY ingest_seq DESC LIMIT ?", (limit,)).fetchall()]
     if not comms:
         return {"threads": []}
     msg_ids = [c["msg_id"] for c in comms]
@@ -372,7 +401,6 @@ def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
     # defect the last gauntlet fixed in doctor, re-imported). Liveness is a
     # PROBE, not file presence: a crashed daemon's stale socket file stats
     # fine (health from an artifact — the fail-toward-fine direction).
-    import os
     sock = Path(os.environ["PLANE_SOCKET"]) if os.environ.get("PLANE_SOCKET") \
         else socket_path(Path(root))
     serving = sock.exists() and probe_daemon(sock)
@@ -389,15 +417,27 @@ def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:
 # App factory
 # --------------------------------------------------------------------------
 
-def create_app(root: Path):
+def create_app(root: Path, sampler: PaneSampler | None = None):
     if FastAPI is None:  # pragma: no cover
         raise RuntimeError(
             "the plane UI needs the [plane-ui] extra: "
             f"pip install -e '.[plane-ui]' ({_IMPORT_ERROR})"
         )
     root = Path(root)
+    sampler = sampler or PaneSampler(root)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _lifespan(_app):  # pragma: no cover - exercised live
+        sampler.start()
+        try:
+            yield
+        finally:
+            await sampler.stop()
+
     app = FastAPI(title="observable plane", docs_url=None, redoc_url=None,
-                  openapi_url=None)
+                  openapi_url=None, lifespan=_lifespan)
     started_at = _now_iso()
 
     @app.get("/api/summary")
@@ -405,11 +445,12 @@ def create_app(root: Path):
         return JSONResponse(_envelope(root, lambda c: _fetch_summary(c, root)))
 
     @app.get("/api/channel")
-    def channel(limit: int = 120):
+    def channel(limit: int = 120, fleet: str | None = None):
         limit = max(1, min(int(limit), _CHANNEL_LIMIT_MAX))
         names = _channel_names(root)
         return JSONResponse(
-            _envelope(root, lambda c: _fetch_channel(c, names, limit)))
+            _envelope(root,
+                      lambda c: _fetch_channel(c, names, limit, fleet)))
 
     @app.get("/api/tasks")
     def tasks():
@@ -418,6 +459,39 @@ def create_app(root: Path):
     @app.get("/api/identities")
     def identities():
         return JSONResponse(_envelope(root, _fetch_identities))
+
+    @app.get("/api/grid")
+    def grid(focus: str | None = None, fleet: str | None = None):
+        """Thumbnail grid from the ONE bounded sampler (§14: browsers read
+        the cache; sampling cadence is viewer-count-invariant). `focus=bot`
+        raises that pane's cadence/height for a short TTL — view-internal
+        lens state, touching neither fleet nor db; the read-only ruling is
+        about the FLEET, and this endpoint stays observational."""
+        if not sampler.available:
+            return JSONResponse({
+                "state": "unavailable",
+                "provenance": {"source": "tmux", "checked_at": _now_iso()},
+                "remediation": "tmux not found on the view daemon's PATH —"
+                               " the grid needs it; channel/tasks are"
+                               " unaffected (§14 degradable)",
+            })
+        if focus:
+            sampler.focus(focus, fleet)
+        snap = sampler.snapshot()
+        if focus:
+            # The focus overlay renders ONE pane — ship one, not all 18
+            # (measured 6.3x payload waste). Filter on the flag the sampler
+            # stamped: focus() already resolved the (fleet, bot) ambiguity,
+            # and a second half-copy of that predicate shipped TWO panes for
+            # twin-named bots (gauntlet round 2, probed).
+            snap = {**snap, "panes": [p for p in snap["panes"]
+                                      if p["focused"]]}
+        return JSONResponse({
+            "state": SOURCE_OK,
+            "provenance": {"source": "tmux capture-pane", "pid": os.getpid(),
+                           "checked_at": _now_iso()},
+            "data": snap,
+        })
 
     @app.get("/healthz")
     def healthz():
@@ -496,14 +570,61 @@ def create_app(root: Path):
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store"})
 
-    class _NoCacheStatic(StaticFiles):
-        async def get_response(self, path, scope):  # pragma: no cover - thin
-            resp = await super().get_response(path, scope)
-            # Deterministic freshness after a redeploy: revalidate always
-            # (heuristic freshness could serve a stale app.js — gauntlet).
-            resp.headers["Cache-Control"] = "no-cache"
-            return resp
+    # Cache-bust token: no-store alone could not EVICT an ES module already
+    # pinned in a browser's module map across a redeploy (a stale app.js
+    # survived two hard refreshes); a new asset URL forces a fresh fetch
+    # unconditionally, stamped onto every asset reference INCLUDING app.js's
+    # internal `import "/panel-state.js"` so the module graph busts together.
+    # Derived per request from the files' mtimes, never once per process:
+    # this estate updates source under running daemons by design
+    # (update-siblings pulls weekly; weekly-worker-restart restarts BOTS,
+    # not host services), so a process-lifetime token went stale in exactly
+    # the redeploy window it was built for (gauntlet round 2). Four stats
+    # per page load — index() already reads the file per request.
+    _UI_FILES = ("index.html", "app.js", "panel-state.js", "style.css")
 
-    app.mount("/", _NoCacheStatic(directory=str(UI_DIR), html=True),
-              name="ui")
+    def asset_token() -> str:
+        stamp = ":".join(
+            str((UI_DIR / f).stat().st_mtime_ns) if (UI_DIR / f).exists()
+            else "absent" for f in _UI_FILES)
+        return hashlib.sha256(stamp.encode()).hexdigest()[:12]
+
+    def _no_store(resp):
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    from fastapi.responses import HTMLResponse, Response
+
+    def _rewritten_index() -> "HTMLResponse":
+        tok = asset_token()
+        html = (UI_DIR / "index.html").read_text()
+        html = (html.replace("/app.js", f"/app.js?v={tok}")
+                    .replace("/style.css", f"/style.css?v={tok}"))
+        return _no_store(HTMLResponse(html))
+
+    @app.get("/", response_class=HTMLResponse)
+    def index():
+        return _rewritten_index()
+
+    @app.get("/index.html", response_class=HTMLResponse)
+    def index_alias():
+        # The mount served this path RAW — an unbusted second door to the
+        # page that re-pins stale modules (gauntlet round 2, probed).
+        return _rewritten_index()
+
+    @app.get("/app.js")
+    def app_js():
+        js = (UI_DIR / "app.js").read_text()
+        # bust the intra-module import too, or the browser reuses a pinned
+        # panel-state.js from its module map.
+        js = js.replace('"/panel-state.js"',
+                        f'"/panel-state.js?v={asset_token()}"')
+        return _no_store(Response(js, media_type="text/javascript"))
+
+    class _NoStoreStatic(StaticFiles):
+        async def get_response(self, path, scope):  # pragma: no cover - thin
+            return _no_store(await super().get_response(path, scope))
+
+    # html=True dropped: the explicit routes own / and /index.html now.
+    app.mount("/", _NoStoreStatic(directory=str(UI_DIR)), name="ui")
     return app

@@ -373,7 +373,7 @@ def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
     r = TestClient(create_app(tmp_path)).get("/healthz")
     assert r.status_code == 200
     data = r.json()["data"]
-    assert data["schema_user_version"] == 2
+    assert data["schema_user_version"] == 4
     assert "counts" in data and "spool_files" in data
     assert "corrective" in data
 
@@ -382,7 +382,16 @@ def test_index_served_from_package_data(tmp_path):
     r = TestClient(create_app(tmp_path)).get("/")
     assert r.status_code == 200
     assert "observable plane" in r.text
-    assert r.headers.get("cache-control") == "no-cache"
+    assert r.headers.get("cache-control") == "no-store"
+    # asset refs carry the cache-bust token (defeats a pinned ES module)
+    assert "/app.js?v=" in r.text
+
+
+def test_app_js_import_is_cache_busted(tmp_path):
+    r = TestClient(create_app(tmp_path)).get("/app.js")
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-store"
+    assert "/panel-state.js?v=" in r.text  # intra-module import busts too
 
 
 def test_stream_defaults_to_head_never_replays(tmp_path):

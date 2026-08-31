@@ -55,3 +55,22 @@ flipping capture starts words at the flip, never retroactively.
 Optional `state/plane/channels.json` maps raw carrier addresses to names
 (`{"-100123": "Engineering group"}`) so a Telegram destination never renders
 as a raw chat id.
+
+## The grid shows raw terminals — operators only (ruling 2026-08-29)
+
+The thumbnail grid and focus pane render each bot's LIVE terminal verbatim
+(`tmux capture-pane`), **ungoverned by the message-capture privacy policy**.
+Anything on a bot's screen — a token echoed by a tool, a `git remote` URL,
+vault content, PII, an in-flight credential — is visible to every tailnet
+peer of the page. This is deliberate: it is the founding "watch my fleet
+work" capability, and the trust boundary is the same as an operator running
+`tmux attach` after SSHing to the host — your fleet, your tailnet, your
+terminals.
+
+Posture, therefore: **the plane view is operators-only and tailnet-scoped.**
+Do not expose it beyond the tailnet, and treat viewer access as equivalent
+to shell access to the host. The channel's per-fleet `capture.json` policy
+does **not** apply to the grid; a metadata-only fleet's full terminal is
+still visible there. A per-bot grid opt-out / secret-redaction knob is
+tracked as a follow-up — until it lands, the grid is all-or-nothing per host
+(gate the whole view daemon if any bot must never be shown).

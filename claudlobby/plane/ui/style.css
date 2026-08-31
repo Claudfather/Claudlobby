@@ -7,6 +7,10 @@
   --green: #7ee787;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* `hidden` must beat any id-selector display rule (specificity) —
+   without this, #focus-overlay/#grid ignore the attribute and the
+   overlay can never be closed (operator-found, 2026-08-30). */
+[hidden] { display: none !important; }
 body {
   background: var(--bg); color: var(--ink);
   font: 14px/1.45 -apple-system, "SF Pro Text", "Segoe UI", sans-serif;
@@ -137,3 +141,50 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
   main > section { border-right: 0; border-bottom: 1px solid var(--edge); }
   body { overflow: auto; height: auto; }
 }
+
+/* view nav + fleet tabs */
+#view-nav { display: flex; gap: 6px; }
+#view-nav .on { color: var(--accent); border-color: var(--accent); }
+#fleet-tabs { margin-left: 10px; text-transform: none; letter-spacing: 0; }
+#fleet-tabs button { margin-right: 4px; }
+
+/* thumbnail grid */
+#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 10px; padding: 10px; align-content: start; }
+.pane-card { background: var(--panel); border: 1px solid var(--edge);
+             border-radius: 8px; overflow: hidden; cursor: pointer; }
+.pane-card:hover { border-color: var(--accent); }
+.pane-card .p-head { display: flex; gap: 8px; align-items: center;
+                     padding: 6px 10px; border-bottom: 1px solid var(--edge);
+                     font-size: 12.5px; }
+.pane-card .p-head small { color: var(--dim); margin-left: auto; }
+.pane-card pre, #focus-pane {
+  margin: 0; padding: 8px 10px; font: 10.5px/1.35 ui-monospace, SFMono-Regular,
+  Menlo, monospace; color: var(--ink); overflow: hidden; white-space: pre-wrap;
+  word-break: break-all; background: #0a0e13; min-height: 150px;
+}
+/* a focused pane captures 44 lines into the SHARED slot — cap the grid tile
+   so one viewer's focus can't grow everyone's card (reviewer finding). */
+.pane-card pre { max-height: 220px; }
+.pane-card.s-down pre { opacity: .35; }
+.pane-card.s-sampling pre { opacity: .55; }
+.pane-card:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pane-card .dead-note { color: var(--bad); font-size: 11px; padding: 0 10px 6px; }
+
+/* focus overlay */
+#focus-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6);
+                 display: flex; align-items: center; justify-content: center;
+                 z-index: 10; }
+#focus-box { width: min(1000px, 92vw); max-height: 88vh; display: flex;
+             flex-direction: column; background: var(--panel);
+             border: 1px solid var(--edge); border-radius: 10px; }
+#focus-head { display: flex; align-items: center; justify-content: space-between;
+              padding: 8px 12px; border-bottom: 1px solid var(--edge); }
+#focus-pane { overflow-y: auto; font-size: 12px; min-height: 300px; }
+
+/* ANSI SGR palette (esc-safe converter output) */
+.a-b { font-weight: 700; }
+.a-30{color:#484f58}.a-31{color:#ff7b72}.a-32{color:#3fb950}.a-33{color:#d29922}
+.a-34{color:#58a6ff}.a-35{color:#bc8cff}.a-36{color:#39c5cf}.a-37{color:#b1bac4}
+.a-90{color:#6e7681}.a-91{color:#ffa198}.a-92{color:#56d364}.a-93{color:#e3b341}
+.a-94{color:#79c0ff}.a-95{color:#d2a8ff}.a-96{color:#56d4dd}.a-97{color:#f0f6fc}

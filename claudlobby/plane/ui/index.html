@@ -9,6 +9,10 @@
 <body>
 <header>
   <h1>observable plane</h1>
+  <nav id="view-nav">
+    <button class="pill ghost on" data-view="channel" type="button">channel</button>
+    <button class="pill ghost" data-view="grid" type="button">grid</button>
+  </nav>
   <span class="pill"><span id="beat" class="dot"></span><span id="beat-label">connecting…</span></span>
   <span class="pill">ingest <b id="age">—</b></span>
   <span class="pill">rows <b id="total">—</b></span>
@@ -22,8 +26,9 @@
     <div class="scroll" id="fleet"></div>
   </section>
   <section id="rail-channel" aria-label="channel">
-    <h2>channel</h2>
+    <h2>channel <span id="fleet-tabs"></span></h2>
     <div class="scroll" id="channel"></div>
+    <div class="scroll" id="grid" hidden></div>
   </section>
   <section id="rail-right">
     <div id="rail-attention" aria-label="attention">
@@ -40,6 +45,13 @@
     </div>
   </section>
 </main>
+<div id="focus-overlay" role="dialog" aria-modal="true" aria-label="focused pane" hidden>
+  <div id="focus-box">
+    <div id="focus-head"><b id="focus-title"></b>
+      <button id="focus-close" class="pill ghost" type="button">close (esc)</button></div>
+    <pre id="focus-pane"></pre>
+  </div>
+</div>
 <script type="module" src="/app.js"></script>
 </body>
 </html>
