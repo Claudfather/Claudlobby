@@ -340,7 +340,7 @@ $("debug-toggle").addEventListener("click", () => {
 function ansiToHtml(text) {
   const cleaned = (text || "")
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC
-    .replace(/\x1b\[[0-9;?]*[@-ln-~]/g, "");      // CSI non-SGR (keep m)        // CSI non-SGR
+    .replace(/\x1b\[[0-9;?]*[@-ln-~]/g, "");   // CSI non-SGR (keeps m)
   let out = "", cls = [];
   for (const part of cleaned.split(/(\x1b\[[0-9;]*m)/)) {
     const m = part.match(/^\x1b\[([0-9;]*)m$/);
@@ -389,10 +389,11 @@ function renderFleetTabs(identities) {
   // selected; the merged firehose is the explicit last resort.
   if (!currentFleet) {
     // Rooms are the default: on first paint with >1 fleet the channel was
-    // fetched as the firehose (currentFleet null); adopt the room AND
-    // refetch so a room tab never labels firehose content.
+    // fetched as the firehose (currentFleet null); adopt the room and
+    // refetch THROUGH the generation guard — the direct fetch was the one
+    // unguarded render path left (gauntlet round 2).
     currentFleet = fleets[0];
-    jget(channelUrl()).then(renderChannel);
+    refreshBoards();
   }
   el.innerHTML = [...fleets, "all"].map((f) =>
     `<button class="pill ghost ${f === currentFleet ? "on" : ""}"`
@@ -410,7 +411,7 @@ const STATUS_NOTE = { down: "session down", sampling: "sampling…" };
 
 function renderPaneCard(el, p) {
   el.className = "pane-card" + (p.status === "up" ? "" : ` s-${p.status}`);
-  el.dataset.lines = p.lines;   // skip the <pre> reparse when unchanged
+  el._lines = p.lines;   // JS property, not a multi-KB DOM attribute
   el.innerHTML = `
     <div class="p-head"><span class="dot ${STATUS_DOT[p.status] || ""}"></span>
       <b>${esc(p.bot)}</b><span class="tag">${esc(p.fleet)}</span>
@@ -458,9 +459,18 @@ function renderGrid(env) {
     [...el.querySelectorAll(".pane-card")].map(
       (n) => [`${n.dataset.fleet}/${n.dataset.bot}`, n]));
   const frag = document.createDocumentFragment();
+  if (env.data.sampler_running === false) {
+    // The one signal separating "sampler crashed, frames aging" from
+    // "all well" — surfaced, never silent (§16).
+    const warn = document.createElement("div");
+    warn.className = "panel-state st-unreadable";
+    warn.innerHTML = `<div class="label">sampler stopped — frames are` +
+      ` aging</div><div class="remedy">restart the view daemon</div>`;
+    frag.appendChild(warn);
+  }
   for (const p of panes) {
     const prev = existing.get(`${p.fleet}/${p.bot}`);
-    if (prev && prev.dataset.lines === p.lines) {
+    if (prev && prev._lines === p.lines) {
       const age = prev.querySelector(".age");
       if (age) age.textContent = p.captured_ago_s != null
         ? p.captured_ago_s + "s" : "—";
@@ -508,7 +518,7 @@ function openFocus(bot, fleet) {
     { label: `opening ${bot}…`, detail: "" });   // never blank while fetching
   const q = `/api/grid?focus=${encodeURIComponent(bot)}`
     + (fleet ? `&fleet=${encodeURIComponent(fleet)}` : "");
-  let lastLines = null;
+  let lastSig = null;
   const tick = async () => {
     const env = await jget(q);   // server ships ONLY this pane
     if ($("focus-title").dataset.bot !== bot) return;  // overlay moved on
@@ -516,23 +526,26 @@ function openFocus(bot, fleet) {
       $("focus-pane").innerHTML = stateBlock(
         env ? env.state : "disconnected", env && env.provenance,
         env && env.remediation);
-      lastLines = null;
+      lastSig = null;
       return;
     }
     const pane = (env.data.panes || [])[0];
-    if (!pane) return;
-    if (pane.status !== "up") {   // a dead/sampling focus is a state, not blank
-      $("focus-pane").innerHTML = stateBlock(
-        "idle", null, null, { label: STATUS_NOTE[pane.status] || pane.status,
-                              detail: "" })
-        + `<pre>${ansiToHtml(pane.lines)}</pre>`;
-      lastLines = null;
+    if (!pane) {   // ghost focus: a state, never "opening…" forever
+      $("focus-pane").innerHTML = stateBlock("idle", null, null,
+        { label: `no such pane: ${bot}`, detail: "" });
+      lastSig = null;
       return;
     }
-    if (pane.lines !== lastLines) {   // skip reparse when unchanged
-      lastLines = pane.lines;
-      $("focus-pane").innerHTML = ansiToHtml(pane.lines);
-    }
+    // ONE signature over status+frame: an unchanged frame never re-renders
+    // (preserved selection — including on a DOWN pane, where copying the
+    // last screen matters most), and a status flip always does.
+    const sig = pane.status + "\u0000" + pane.lines;
+    if (sig === lastSig) return;
+    lastSig = sig;
+    $("focus-pane").innerHTML = (pane.status === "up" ? "" : stateBlock(
+      "idle", null, null, { label: STATUS_NOTE[pane.status] || pane.status,
+                            detail: "" }))
+      + ansiToHtml(pane.lines);
   };
   tick();
   focusTimer = setInterval(tick, 1000);

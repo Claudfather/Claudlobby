@@ -80,11 +80,9 @@ def test_capture_marks_alive_and_dead(tmp_path):
             await s._capture(p, 14)
     asyncio.run(run())
     snap = {p["bot"]: p for p in s.snapshot()["panes"]}
-    assert snap["up"]["alive"] is True
     assert snap["up"]["status"] == "up"
     assert "green" in snap["up"]["lines"]
-    assert snap["down"]["alive"] is False  # a down bot is a FACT on the grid
-    assert snap["down"]["status"] == "down"
+    assert snap["down"]["status"] == "down"  # a down bot is a FACT on the grid
 
 
 def test_snapshot_is_pure_cache_read(tmp_path):
@@ -211,7 +209,7 @@ def test_failed_capture_keeps_last_good_frame_and_ages_it(tmp_path):
         await s._capture(s._panes[0], 14)      # now fails
     asyncio.run(run())
     pane = s.snapshot()["panes"][0]
-    assert pane["alive"] is False
+    assert pane["status"] == "down"
     assert "good frame" in pane["lines"]       # last good frame retained
     assert pane["captured_ago_s"] is not None  # aged, not reset to fresh
 
@@ -243,7 +241,7 @@ def test_focus_disambiguates_by_fleet(tmp_path):
     assert snap["f2"] is True and snap["f1"] is False
 
 
-def test_ansi_truecolor_never_emits_a_stray_basic_class(tmp_path):
+def test_ansi_truecolor_never_emits_a_stray_basic_class():
     """The truecolor arg 38;2;255;135;95 must be CONSUMED, not re-read as
     a-95 (measured against real Claude-pane color)."""
     app_js = (Path(__file__).resolve().parent.parent / "claudlobby"
@@ -286,7 +284,6 @@ def test_never_sampled_pane_is_sampling_not_down(tmp_path):
     s._panes = discover_panes(tmp_path)   # discovered, never captured
     pane = s.snapshot()["panes"][0]
     assert pane["status"] == "sampling"
-    assert pane["alive"] is False
 
 
 def test_room_shows_cross_fleet_threads_from_both_sides(tmp_path):
@@ -332,3 +329,123 @@ def test_hidden_attribute_actually_hides():
     import re as _re
     m = _re.search(r'<div id="focus-overlay"[^>]*>', html)
     assert m and " hidden" in m.group(0), "overlay must ship with hidden"
+
+
+# ---------------------------------------------------------------------------
+# Gauntlet round 2 pins (the fix-round review — three reviewers)
+# ---------------------------------------------------------------------------
+
+def test_room_query_never_scans_communications(tmp_path):
+    """Three reviewers independently EXPLAIN'd the OR form back to a full
+    reverse scan — 0003 shipped inert against its own query. The UNION
+    equality form must SEARCH both arms; this pin keeps the scan from
+    silently returning."""
+    import sqlite3 as _sq
+
+    _seed_two_fleets(tmp_path)
+    conn = _sq.connect(tmp_path / "state" / "plane" / "plane.db")
+    cols = "ingest_seq, msg_id"
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN "
+        f"SELECT * FROM (SELECT {cols} FROM communications"
+        "  WHERE fleet_uid = (SELECT uid FROM identity_registry"
+        "   WHERE kind='fleet' AND alias = ?)"
+        "  ORDER BY ingest_seq DESC LIMIT ?)"
+        " UNION "
+        f"SELECT * FROM (SELECT {cols} FROM communications"
+        "  WHERE recipient_fleet = ?"
+        "  ORDER BY ingest_seq DESC LIMIT ?)"
+        " ORDER BY ingest_seq DESC LIMIT ?",
+        ("engineering", 10, "engineering", 10, 10)).fetchall()
+    conn.close()
+    detail = " | ".join(r[-1] for r in plan)
+    assert "SCAN communications" not in detail, detail
+    assert "idx_intents_fleet_seq" in detail, detail
+    assert "idx_intents_recipient_fleet" in detail, detail
+
+
+def test_room_is_immune_to_like_metacharacters(tmp_path):
+    """Probed in review: `?fleet=en_` absorbed `eng`'s room and `?fleet=%`
+    returned the whole firehose dressed as a room. Equality arms retire the
+    metacharacter class."""
+    _seed_two_fleets(tmp_path)
+    client = TestClient(create_app(tmp_path))
+    for evil in ("en_", "%", "engineerin_"):
+        body = client.get(f"/api/channel?fleet={evil}").json()
+        assert body["state"] == "ok"
+        assert body["data"]["threads"] == [], f"{evil!r} leaked a room"
+
+
+def test_index_html_alias_is_rewritten_too(tmp_path):
+    """Probed in review: /index.html served the RAW file via the mount —
+    an unbusted second door that re-pins stale modules."""
+    client = TestClient(create_app(tmp_path))
+    for path in ("/", "/index.html"):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert "/app.js?v=" in r.text, path
+        assert r.headers.get("cache-control") == "no-store"
+
+
+def test_asset_token_tracks_in_place_updates(tmp_path):
+    """The token must change when a UI file changes UNDER the running
+    daemon (update-siblings pulls weekly; host services are not restarted
+    by the worker restart) — a process-lifetime token went stale in exactly
+    that window."""
+    import os as _os
+    import re as _re
+
+    from claudlobby.plane import view as view_mod
+
+    client = TestClient(create_app(tmp_path))
+    tok1 = _re.search(r"/app\.js\?v=([a-f0-9]+)", client.get("/").text).group(1)
+    app_js = view_mod.UI_DIR / "app.js"
+    st = app_js.stat()
+    _os.utime(app_js, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    try:
+        tok2 = _re.search(r"/app\.js\?v=([a-f0-9]+)",
+                          client.get("/").text).group(1)
+    finally:
+        _os.utime(app_js, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert tok1 != tok2
+
+
+def test_focus_ships_exactly_one_pane_for_twin_names(tmp_path):
+    """Probed in review: the endpoint's own filter re-derived the sampler's
+    resolution and shipped TWO panes for twin-named bots. It now filters on
+    the sampler's stamped flag — one pane, always."""
+    _bot(tmp_path, "flat", "f1", "twin", sock="com.f1.twin")
+    _bot(tmp_path, "flat", "f2", "twin", sock="com.f2.twin")
+    tmux = _fake_tmux(tmp_path, 'printf "x\\n"')
+    s = PaneSampler(tmp_path, tmux=str(tmux))
+    s._panes = discover_panes(tmp_path)
+
+    async def run():
+        for p in s._panes:
+            await s._capture(p, 14)
+    asyncio.run(run())
+    client = TestClient(create_app(tmp_path, sampler=s))
+    body = client.get("/api/grid?focus=twin").json()
+    assert len(body["data"]["panes"]) == 1
+
+
+def test_wedged_capture_reap_does_not_block_on_grandchild_pipe(tmp_path):
+    """Probed in review: kill-then-communicate() waited on the stdout PIPE,
+    which an orphaned grandchild held for its lifetime (30s probed;
+    unbounded on a D-state tmux). wait() + bound must return promptly."""
+    import time as _time
+
+    _bot(tmp_path, "flat", "f1", "wedge")
+    # parent hangs (trips the 4s timeout); its backgrounded child holds the
+    # stdout pipe long past the kill.
+    tmux = _fake_tmux(tmp_path, "sleep 30 &\nexec sleep 30")
+    s = PaneSampler(tmp_path, tmux=str(tmux))
+    s._panes = discover_panes(tmp_path)
+
+    async def run():
+        t0 = _time.monotonic()
+        await s._capture(s._panes[0], 14)
+        return _time.monotonic() - t0
+    elapsed = asyncio.run(run())
+    assert elapsed < 7.0, f"reap blocked {elapsed:.1f}s on the orphan pipe"
+    assert s.snapshot()["panes"][0]["status"] == "down"

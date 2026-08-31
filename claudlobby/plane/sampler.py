@@ -139,9 +139,10 @@ class PaneSampler:
                 # tri-state (source_state #1216): a pane the sampler has not
                 # reached yet is "sampling", NOT "down" — no-evidence must not
                 # read as evidenced-dead.
+                # status is THE fact; a separate alive bool was a
+                # duplicated derivation with zero consumers (gauntlet r2).
                 "status": ("down" if s and not s.alive
                            else "up" if s else "sampling"),
-                "alive": bool(s and s.alive),
                 "lines": s.lines if s else "",
                 # age of the last SUCCESSFUL frame — a down pane keeps showing
                 # its last good frame with an honestly growing age (§16).
@@ -167,11 +168,17 @@ class PaneSampler:
         except (OSError, asyncio.TimeoutError):
             # A wedged tmux socket (the Pi SD-stall class) times out every
             # sweep — reap the child so it does not leak per pane per sweep.
+            # proc.wait(), NEVER communicate(): communicate() waits on the
+            # stdout PIPE, which an orphaned grandchild can hold open for
+            # its whole lifetime (probed: 30s; unbounded against a D-state
+            # tmux — the exact stall this handles). wait() waits on the
+            # process alone, bounded again so an unkillable D-state child
+            # cannot pin the sweep.
             if proc and proc.returncode is None:
                 try:
                     proc.kill()
-                    await proc.communicate()
-                except (OSError, ProcessLookupError):
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+                except (OSError, ProcessLookupError, asyncio.TimeoutError):
                     pass
             alive, text = False, ""
         key = (pane["fleet"], pane["bot"])   # #526: name alone collides
