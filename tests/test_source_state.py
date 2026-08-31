@@ -277,3 +277,56 @@ class TestProbeDirObservesFirstReadErrors:
                             lambda p: _OpensThenDies())
         probe = source_state.probe_dir(tmp_path)
         assert probe.state == source_state.SOURCE_UNREADABLE
+
+
+class TestScanDirMaterializesUnderOneBoundary:
+    """External round 3's blocker: probe-then-reopen let Path.glob swallow a
+    LATER readdir error, returning a partial listing as a clean empty.
+    scan_dir performs classification and the ENTIRE enumeration inside one
+    exception boundary; callers consume its list."""
+
+    def _one_then_eio(self, benign_path):
+        import errno
+        import types
+
+        class _It:
+            def __init__(self):
+                self._sent = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if not self._sent:
+                    self._sent = True
+                    return types.SimpleNamespace(path=str(benign_path))
+                raise OSError(errno.EIO, "later readdir failed")
+
+        return _It()
+
+    def test_error_after_one_benign_entry_is_unreadable_with_no_partial(
+        self, tmp_path, monkeypatch
+    ):
+        from claudlobby import source_state
+
+        monkeypatch.setattr(
+            source_state.os, "scandir",
+            lambda p: self._one_then_eio(tmp_path / "benign"))
+        probe, entries = source_state.scan_dir(tmp_path)
+        assert probe.state == source_state.SOURCE_UNREADABLE
+        assert entries == []          # a partial listing is never returned
+
+    def test_clean_dir_returns_the_full_listing(self, tmp_path):
+        from claudlobby import source_state
+
+        (tmp_path / "a.json").write_text("{}")
+        (tmp_path / "sub").mkdir()
+        probe, entries = source_state.scan_dir(tmp_path)
+        assert probe.state == source_state.SOURCE_OK
+        assert sorted(e.name for e in entries) == ["a.json", "sub"]

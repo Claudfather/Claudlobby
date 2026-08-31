@@ -191,6 +191,35 @@ def probe_dir(path: Path) -> SourceProbe:
     return SourceProbe(SOURCE_OK, path)
 
 
+def scan_dir(path: Path) -> tuple[SourceProbe, list[Path]]:
+    """Classification AND enumeration as ONE act, under one exception
+    boundary. Returns (probe, entries): the FULLY MATERIALIZED listing —
+    every readdir performed inside the boundary — empty unless the probe
+    is OK.
+
+    Callers must consume THIS list, never re-glob after a probe: a second
+    enumeration reopens the directory, and ``Path.glob`` SUPPRESSES an
+    OSError raised mid-iteration — so a dir that lists one benign entry and
+    then fails (EIO/ESTALE on a later readdir: failing storage, FUSE, NFS)
+    returned a partial listing as a clean empty, recreating the
+    cannot-see-as-nothing-there inversion one layer below ``probe_dir``
+    (external round 3, probed: live spool entries behind a benign
+    ``quarantine/`` entry reported pending=0, state=ok). ``probe_dir``
+    remains the door for callers that only need reachability; any caller
+    that will ENUMERATE must use this instead.
+    """
+    entries: list[Path] = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                entries.append(Path(entry.path))
+    except (FileNotFoundError, NotADirectoryError):
+        return SourceProbe(SOURCE_ABSENT, path), []
+    except OSError:
+        return SourceProbe(SOURCE_UNREADABLE, path), []
+    return SourceProbe(SOURCE_OK, path), entries
+
+
 def unreachable_line(what: str, probe: SourceProbe, *, remedy: str = "") -> str:
     """The one-line disclosure, worded the same way by every caller.
 

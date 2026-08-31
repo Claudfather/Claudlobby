@@ -412,3 +412,82 @@ def test_completeness_counts_use_the_partial_indexes(tmp_path):
     conn.close()
     assert "idx_intents_null_body" in plan_null, plan_null
     assert "idx_intents_truncated" in plan_trunc, plan_trunc
+
+
+def _scandir_one_then_eio(target_dir, benign_name):
+    """Selective fake: real os.scandir everywhere EXCEPT target_dir, where
+    one benign entry lists and the NEXT readdir raises EIO — the reviewer's
+    round-3 shape (enumeration succeeds initially, fails later)."""
+    import errno
+    import os as _os
+    import types
+
+    real = _os.scandir
+
+    class _It:
+        def __init__(self):
+            self._sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if not self._sent:
+                self._sent = True
+                return types.SimpleNamespace(
+                    path=str(target_dir / benign_name))
+            raise OSError(errno.EIO, "later readdir failed")
+
+    def fake(p):
+        if str(p) == str(target_dir):
+            return _It()
+        return real(p)
+
+    return fake
+
+
+def test_later_readdir_failure_never_reads_as_a_green_zero(
+    tmp_path, monkeypatch
+):
+    """External round 3's blocker, the reviewer's exact repro: the spool
+    lists its benign quarantine/ entry, a LATER readdir raises EIO, and a
+    LIVE pending entry sits behind it. probe-then-glob reported 0/'ok';
+    scan_dir must report unreadable and withhold the count."""
+    from claudlobby import source_state
+
+    _seed(tmp_path)
+    spool = tmp_path / "state" / "plane" / "spool"
+    (spool / "quarantine").mkdir(parents=True)
+    (spool / "ev_live.json").write_text('{"spooled_at": "2026-01-01T00:00:00"}')
+    monkeypatch.setattr(source_state.os, "scandir",
+                        _scandir_one_then_eio(spool, "quarantine"))
+    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    assert body["state"] == "ok"
+    assert body["data"]["spool_state"] == "unreadable"
+    assert body["data"]["spool_pending"] == 0        # withheld, never partial
+
+
+def test_later_readdir_failure_in_quarantine_is_disclosed(
+    tmp_path, monkeypatch
+):
+    """Same hole, quarantine side: a .reason sidecar lists first, a later
+    readdir fails, a LIVE quarantined event sits behind it."""
+    from claudlobby import source_state
+
+    _seed(tmp_path)
+    q = tmp_path / "state" / "plane" / "spool" / "quarantine"
+    q.mkdir(parents=True)
+    (q / "ev_live.json").write_text("{}")
+    (q / "ev_live.json.reason").write_text("real refusal")
+    monkeypatch.setattr(source_state.os, "scandir",
+                        _scandir_one_then_eio(q, "ev_live.json.reason"))
+    body = TestClient(create_app(tmp_path)).get("/api/trust").json()
+    assert body["state"] == "ok"
+    assert body["data"]["quarantine_state"] == "unreadable"
+    assert body["data"]["quarantined"] == 0

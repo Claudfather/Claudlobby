@@ -60,6 +60,7 @@ from ..source_state import (
     SOURCE_UNREADABLE,
     probe_dir,
     probe_source,
+    scan_dir,
 )
 from .daemon import probe_daemon, socket_path
 from .emit_api import CaptureConfigError, capture_mode, load_capture_config
@@ -485,12 +486,17 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
     # panel (probed TOCTOU); a directory named *.json is not an event.
     qdir = _plane_state_dir(root) / "spool" / "quarantine"
     quarantined, reasons = 0, []
-    qprobe = probe_dir(qdir)
+    # scan_dir, never probe-then-glob (external round 3 — same hole as the
+    # spool: a .reason sidecar lists first, a later readdir fails, glob
+    # returns the partial as a clean empty).
+    qprobe, qentries = scan_dir(qdir)
     quarantine_state = ("unreadable" if qprobe.state == SOURCE_UNREADABLE
                         else "ok")
     if qprobe.state == SOURCE_OK:
         entries = []
-        for f in qdir.glob("*.json"):
+        for f in qentries:
+            if not f.name.endswith(".json"):
+                continue
             try:
                 if f.is_file():
                     entries.append((f.stat().st_mtime, f))
@@ -598,14 +604,18 @@ def _spool_pending(root: Path) -> tuple[int, str | None, str]:
     this whole panel exists to kill. ABSENT stays a legitimate zero — the
     spool dir is created lazily on first spooled event."""
     d = _plane_state_dir(root) / "spool"
-    probe = probe_dir(d)
+    # scan_dir, never probe-then-glob: glob swallows a mid-iteration
+    # OSError, so a listing that fails AFTER one benign entry (the
+    # quarantine/ subdir lists first) read as a clean zero past the probe
+    # (external round 3, probed). The returned list IS the enumeration.
+    probe, entries = scan_dir(d)
     if probe.state == SOURCE_ABSENT:
         return 0, None, "ok"
     if probe.state == SOURCE_UNREADABLE:
         return 0, None, "unreadable"
     oldest = None
     count = 0
-    for f in sorted(d.glob("*.json")):
+    for f in sorted(e for e in entries if e.name.endswith(".json")):
         count += 1
         try:
             at = json.loads(f.read_text()).get("spooled_at")
