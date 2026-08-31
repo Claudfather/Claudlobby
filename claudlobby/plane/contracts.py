@@ -18,6 +18,7 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
+    model_validator,
 )
 
 from . import SUPPORTED_SCHEMA_VERSIONS
@@ -363,6 +364,231 @@ class WorkstreamEvent(_Strict):
         return _reject_over_cap("workstream_event", info.field_name, v)
 
 
+# ---------------------------------------------------------------------------
+# Phase 2b — the registry lane (spec §9b: field lists FINAL 2026-08-20).
+# Entity payloads are keyframes of slow-changing RESOLVED state; volatile
+# telemetry goes to metric_samples (F12/F20). uid fields are Optional on the
+# WIRE: uids are system-minted (F10) — ingest resolves entity_alias through
+# identity_registry and the stored entity_uid COLUMN is authoritative; a
+# payload-carried uid is advisory. Fields marked sensitive in §9b keep their
+# classification at render (§11) — the wire carries them verbatim.
+# ---------------------------------------------------------------------------
+
+
+class _HostSystem(_Strict):
+    claudlobby_version: str
+    claude_version: str
+    node_version: Optional[str] = None
+    python_version: str
+    host_jobs: list[dict] = []
+    plugins: list[dict] = []
+    emitters: list[dict] = []
+    defaults_tier_hash: str
+
+
+class HostPayload(_Strict):
+    host_uid: Optional[str] = None
+    aliases: dict
+    os: Literal["linux", "darwin"]
+    arch: str
+    kernel: str
+    ram_total_mb: int
+    disk_total_gb: int
+    system: _HostSystem
+    declared_fleets: list[str]
+    schema_version: str
+
+
+class _VaultCompat(_Strict):
+    floor: str
+    cli_version: Optional[str] = None
+    ok: bool
+
+
+class VaultPayload(_Strict):
+    vault_uid: Optional[str] = None
+    alias: str
+    role: Literal["primary", "mounted"]
+    mount_path: str
+    remote: str                                   # sensitive (§11)
+    compat: _VaultCompat
+    carries_fleets: bool
+    gitignore_safe: bool
+    schema_version: str
+
+
+class _FleetGroup(_Strict):
+    name: str
+    manager: str
+    members: list[str]
+    mission: Optional[str] = None
+
+
+class _FleetDefaults(_Strict):
+    model: str
+    effort: Optional[str] = None
+    account: str
+    list_tier_hashes: dict[str, str]
+
+
+class FleetPayload(_Strict):
+    fleet_uid: Optional[str] = None
+    alias: str
+    service_prefix: str
+    mission: Optional[str] = None
+    mission_file: Optional[dict] = None
+    manager: object                               # str | [str] — F5 scalar
+    groups: list[_FleetGroup] = []
+    org_edges: list[dict] = []
+    roster: list[str]
+    defaults_summary: _FleetDefaults
+    env_keys: list[str] = []                      # names ONLY, never values
+    jobs: list[dict] = []
+    plugins_additional: list[str] = []
+    vault_binding: dict
+    telegram: Optional[dict] = None               # group_alias only (§11)
+    declared_hash: str
+    vault_rev: Optional[str] = None
+    schema_version: str
+
+
+class ProjectPayload(_Strict):
+    project_uid: Optional[str] = None
+    key: str
+    fleet_uid: Optional[str] = None
+    title: str
+    repos: list[str]
+    tier: Literal["auto", "review", "preview", "human"]
+    validation_hash: str
+    mission_file: Optional[dict] = None
+    declared_hash: str
+    vault_rev: Optional[str] = None
+    schema_version: str
+
+
+class LibraryItemPayload(_Strict):
+    library_item_uid: Optional[str] = None
+    category: str
+    name: str
+    source_tier: Literal["shared", "fleet-overlay"]
+    fleet_uid: Optional[str] = None
+    content_hash: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    declared_hash: str
+    vault_rev: Optional[str] = None
+    schema_version: str
+
+
+class _BotPosture(_Strict):
+    permissions_mode: str                         # sensitive as a block (§11)
+    tool_allow: list[str] = []
+    tool_deny: list[str] = []
+    sandbox: dict = {}
+    permissions_grants: dict = {}
+    hooks: list[dict] = []
+    env_keys: list[str] = []
+    rc_enabled: bool = False
+    telegram: dict = {}
+    git_credentials_profile: Optional[str] = None
+
+
+class BotPayload(_Strict):
+    actor_uid: Optional[str] = None
+    bot_instance_uid: Optional[str] = None
+    alias: str                                    # "bot:<fleet>/<name>"
+    display_name: Optional[str] = None
+    fleet_uid: Optional[str] = None
+    account: str
+    service: str
+    model: str
+    effort: Optional[str] = None
+    org: dict = {}
+    equipment: dict = {}
+    posture: _BotPosture
+    schedule: dict = {}
+    vault_binding: Optional[dict] = None
+    composed_hashes: dict
+    declared_hash: str
+    vault_rev: Optional[str] = None
+    schema_version: str
+
+
+ENTITY_PAYLOADS: dict[str, type[BaseModel]] = {
+    "host": HostPayload,
+    "vault": VaultPayload,
+    "fleet": FleetPayload,
+    "project": ProjectPayload,
+    "library_item": LibraryItemPayload,
+    "bot": BotPayload,
+}
+
+# entity_type -> identity_registry kind. Bot keyframes key on the INSTANCE
+# (§9b: entity_uid is the per-host supervised install; the logical actor is
+# reachable through the payload and confirmed alongside at ingest).
+ENTITY_IDENTITY_KIND: dict[str, str] = {
+    "host": "host", "vault": "vault", "fleet": "fleet",
+    "bot": "bot_instance", "project": "project",
+    "library_item": "library_item",
+}
+
+
+class RegistrySnapshot(_Strict):
+    entity_type: Literal["host", "vault", "fleet", "bot", "project",
+                         "library_item"]
+    entity_alias: str = Field(min_length=1)
+    tombstone: bool = False
+    # dict on the wire, validated against ENTITY_PAYLOADS[entity_type] by
+    # validate_request; None iff tombstone (mirrors the DDL CHECK).
+    payload: Optional[dict] = None
+    cause: Literal["generate", "probe", "equip", "migration"]
+    scan_id: str = Field(min_length=1)
+    vault_rev: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _payload_iff_not_tombstone(self):
+        if self.tombstone and self.payload is not None:
+            raise ValueError("a tombstone carries no payload")
+        if not self.tombstone and self.payload is None:
+            raise ValueError("a non-tombstone snapshot requires a payload")
+        return self
+
+
+class MetricSample(_Strict):
+    subject_kind: Literal["host", "vault", "fleet", "actor", "bot_instance",
+                          "session"]
+    subject: str = Field(min_length=1)            # alias; uid resolved at ingest
+    metric: str = Field(min_length=1)             # registry-governed, warn-on-unknown
+    value: object                                 # number | bool | str | object
+    status: Optional[Literal["ok", "warn", "alert"]] = None
+
+
+class Declaration(_Strict):
+    """events kind=declaration — the provenance chain that never disappears
+    into the hash gate: revision_seen records every newly observed vault
+    revision even when resolved state is byte-identical; scan_completed is
+    the fact that makes tombstones valid (same scan_id, complete=true)."""
+
+    event: Literal["revision_seen", "scan_completed"]
+    subject_kind: Literal["vault", "host"]
+    subject: str = Field(min_length=1)            # alias; uid resolved at ingest
+    vault_rev: Optional[str] = None               # revision_seen detail
+    scan_id: Optional[str] = None                 # scan_completed detail (REQUIRED there)
+    scope: Optional[str] = None
+    counts: Optional[dict] = None
+    complete: Optional[bool] = None
+    source_rev: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _per_token_detail(self):
+        if self.event == "scan_completed" and not self.scan_id:
+            raise ValueError("scan_completed requires scan_id (round-3 F11:"
+                             " a completion must join its tombstones)")
+        if self.event == "revision_seen" and not self.vault_rev:
+            raise ValueError("revision_seen requires vault_rev")
+        return self
+
+
 FAMILIES: dict[str, type[BaseModel]] = {
     "communication": Communication,
     "transmission": Transmission,
@@ -372,6 +598,9 @@ FAMILIES: dict[str, type[BaseModel]] = {
     "system": SystemEvent,
     "workstream": Workstream,
     "workstream_event": WorkstreamEvent,
+    "registry_snapshot": RegistrySnapshot,
+    "metric_sample": MetricSample,
+    "declaration": Declaration,
 }
 
 # Wire family -> physical events.kind where the two DIFFER — the spec-ruling-#8
@@ -430,6 +659,18 @@ def validate_request(raw: dict) -> tuple[EmitRequest, BaseModel]:
         payload = model.model_validate(env.payload)
     except ValidationError as exc:
         raise ContractViolation(exc.errors()) from exc
+    if isinstance(payload, RegistrySnapshot) and payload.payload is not None:
+        # the inner entity payload is typed per entity_type (§9b FINAL):
+        # a snapshot whose payload fails its entity contract is a contract
+        # verdict at the door, never a stored malformed keyframe
+        entity_model = ENTITY_PAYLOADS[payload.entity_type]
+        try:
+            entity_model.model_validate(payload.payload)
+        except ValidationError as exc:
+            raise ContractViolation(
+                [{"loc": ("payload", payload.entity_type, *e["loc"]),
+                  "msg": e["msg"]} for e in exc.errors()]
+            ) from exc
     return env, payload
 
 

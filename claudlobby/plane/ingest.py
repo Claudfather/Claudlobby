@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import PLANE_SCHEMA_VERSION
+from .canonical import canonical_hash
 from .contracts import (
     WIRE_TO_KIND,
     Assignment,
@@ -28,8 +29,12 @@ from .contracts import (
     WorkItem,
     Workstream,
     WorkstreamEvent,
+    Declaration,
+    ENTITY_IDENTITY_KIND,
+    MetricSample,
+    RegistrySnapshot,
 )
-from .identity import resolve_fleet, resolve_party
+from .identity import resolve, resolve_fleet, resolve_party
 from .ids import mint_event_id
 from .registries import FIELD_POLICY, SYSTEM_EVENT_SEVERITY
 
@@ -50,6 +55,8 @@ _CONSTRUCT_TABLE = {
     "work_item": "work_items",
     "assignment": "assignments",
     "workstream": "workstreams",
+    "registry_snapshot": "registry_snapshots",
+    "metric_sample": "metric_samples",
 }
 # Public alias: the trust surface derives its emitter-coverage roster from
 # this registry (a hand-list drifted at birth — #1393 gauntlet), and a
@@ -115,7 +122,16 @@ def _batch_resolver(conn, now):
             memo[key] = resolve_fleet(conn, alias, now)
         return memo[key]
 
-    return party, fleet
+    def entity(kind, alias):
+        # kind-explicit resolution for the registry lane (Phase 2b): entity
+        # snapshots and metric subjects name kinds the party() inference
+        # cannot (host, vault, bot_instance, project, library_item)
+        key = (kind, alias)
+        if key not in memo:
+            memo[key] = resolve(conn, kind, alias, now=now)
+        return memo[key]
+
+    return party, fleet, entity
 
 
 def _family_values(payload, party) -> tuple[str, dict]:
@@ -274,6 +290,80 @@ def _family_values(payload, party) -> tuple[str, dict]:
     raise TypeError(f"no insert mapping for {type(payload).__name__}")
 
 
+def _confirm(conn: sqlite3.Connection, uid: str) -> None:
+    """Phase 1's identity loop closes here (spec §18): the registry OBSERVED
+    the declared entity, so its lazily-minted identity stops being
+    provisional. A sanctioned UPDATE (§9b mutation surface)."""
+    conn.execute(
+        "UPDATE identity_registry SET provisional = 0 WHERE uid = ?", (uid,))
+
+
+def _registry_row(conn, payload, entity, host_uid):
+    """(entity_uid, values-or-None): None = hash-suppressed. Resolution +
+    confirmation happen even when suppressed — the scan observed the entity,
+    and provenance rides the never-gated declaration events."""
+    kind = ENTITY_IDENTITY_KIND[payload.entity_type]
+    uid = entity(kind, payload.entity_alias)
+    _confirm(conn, uid)
+    if payload.entity_type == "bot":
+        # the logical actor is confirmed ALONGSIDE its instance (§18): the
+        # roster observation is what ends the actor's provisional life
+        _confirm(conn, entity("actor", payload.entity_alias))
+    values = {
+        "entity_type": payload.entity_type,
+        "entity_uid": uid,
+        "entity_alias": payload.entity_alias,
+        "tombstone": 1 if payload.tombstone else 0,
+        "payload": None,
+        "payload_hash": None,
+        "cause": payload.cause,
+        "scan_id": payload.scan_id,
+        "vault_rev": payload.vault_rev,
+    }
+    if payload.tombstone:
+        return uid, values
+    phash = canonical_hash(payload.payload)
+    prev = conn.execute(
+        "SELECT payload_hash, tombstone FROM registry_snapshots"
+        " WHERE host_uid = ? AND entity_type = ? AND entity_uid = ?"
+        " ORDER BY ingest_seq DESC LIMIT 1",
+        (host_uid, payload.entity_type, uid)).fetchone()
+    if prev and not prev["tombstone"] and prev["payload_hash"] == phash:
+        return uid, None    # the write gate: unchanged state writes nothing
+    values["payload"] = json.dumps(payload.payload, ensure_ascii=False)
+    values["payload_hash"] = phash
+    return uid, values
+
+
+def _metric_row(payload, entity):
+    return {
+        "subject_kind": payload.subject_kind,
+        "subject_uid": entity(payload.subject_kind, payload.subject),
+        "metric": payload.metric,
+        "value": json.dumps(payload.value, ensure_ascii=False),
+        "status": payload.status,
+    }
+
+
+def _declaration_row(payload, entity):
+    if payload.event == "revision_seen":
+        detail = {"vault_rev": payload.vault_rev}
+    else:
+        detail = {k: v for k, v in {
+            "scan_id": payload.scan_id, "scope": payload.scope,
+            "counts": payload.counts, "complete": payload.complete,
+            "source_rev": payload.source_rev}.items() if v is not None}
+    return {
+        "kind": "declaration",
+        "event": payload.event,
+        "subject_kind": payload.subject_kind,
+        "subject_uid": entity(payload.subject_kind, payload.subject),
+        "subject_alias": payload.subject,
+        "detail": json.dumps(detail, ensure_ascii=False),
+        "detail_truncated": 0,
+    }
+
+
 def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
     """items: [(EmitRequest, payload)] — ONE transaction, all-or-nothing."""
     now = now_iso()
@@ -296,11 +386,29 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
                          f" (items {seen_ids[event_id]} and {idx})"}]
             )
         seen_ids[event_id] = idx
-    party, fleet = _batch_resolver(conn, now)
+    party, fleet, entity = _batch_resolver(conn, now)
     try:
         conn.execute("BEGIN IMMEDIATE")
         results = []
         for event_id, env, payload in prepared:
+            fam_override = None
+            if isinstance(payload, RegistrySnapshot):
+                _uid, fam_override = _registry_row(
+                    conn, payload, entity, host_uid)
+                if fam_override is None:
+                    # hash-suppressed: unchanged resolved state writes
+                    # NOTHING (no ledger row — replay verification must
+                    # never find a ledger entry with no family row).
+                    # Reported as duplicate: same state observed again.
+                    results.append(IngestResult(event_id, None, True))
+                    continue
+                table_override = "registry_snapshots"
+            elif isinstance(payload, MetricSample):
+                fam_override = _metric_row(payload, entity)
+                table_override = "metric_samples"
+            elif isinstance(payload, Declaration):
+                fam_override = _declaration_row(payload, entity)
+                table_override = "events"
             cur = conn.execute(
                 "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
                 " VALUES (?, ?, ?)",
@@ -312,7 +420,10 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
                 seq, event_id, env,
                 host_uid=host_uid, fleet_uid=fleet_uid, now=now,
             )
-            table, fam = _family_values(payload, party)
+            if fam_override is not None:
+                table, fam = table_override, fam_override
+            else:
+                table, fam = _family_values(payload, party)
             _insert(conn, table, {**base, **fam})
             results.append(IngestResult(event_id, seq, False))
         conn.execute("COMMIT")
@@ -321,7 +432,7 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         if "ingest_ledger.event_id" in str(exc):
-            return _verify_duplicates(conn, prepared)
+            return _verify_duplicates(conn, prepared, host_uid)
         raise
     except BaseException:
         if conn.in_transaction:
@@ -329,7 +440,31 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
         raise
 
 
-def _verify_duplicates(conn, prepared) -> list[IngestResult]:
+def _suppressed_on_replay(conn, payload, host_uid) -> bool:
+    """Deterministic re-evaluation of the hash gate for a ledger-less
+    RegistrySnapshot met during duplicate verification: a retried batch
+    (ack lost) legitimately contains events whose first attempt was
+    hash-SUPPRESSED — no ledger row exists BY DESIGN, not by corruption.
+    Read-only (SELECT, never resolve/mint): the first attempt's commit
+    persisted the identities; absence here is genuine mixed state."""
+    if not isinstance(payload, RegistrySnapshot) or payload.tombstone:
+        return False
+    kind = ENTITY_IDENTITY_KIND[payload.entity_type]
+    row = conn.execute(
+        "SELECT uid FROM identity_registry WHERE kind = ? AND alias = ?",
+        (kind, payload.entity_alias)).fetchone()
+    if row is None:
+        return False
+    prev = conn.execute(
+        "SELECT payload_hash, tombstone FROM registry_snapshots"
+        " WHERE host_uid = ? AND entity_type = ? AND entity_uid = ?"
+        " ORDER BY ingest_seq DESC LIMIT 1",
+        (host_uid, payload.entity_type, row["uid"])).fetchone()
+    return bool(prev and not prev["tombstone"]
+                and prev["payload_hash"] == canonical_hash(payload.payload))
+
+
+def _verify_duplicates(conn, prepared, host_uid=None) -> list[IngestResult]:
     """Duplicate replay = success ONLY if every event landed FULLY before AND
     AS THE SAME THING: ledger row present, family row present (round-2 F1),
     the incoming event_type EQUAL to the stored family, and the stored row's
@@ -343,6 +478,9 @@ def _verify_duplicates(conn, prepared) -> list[IngestResult]:
             (event_id,),
         ).fetchone()
         if ledger is None:
+            if _suppressed_on_replay(conn, payload, host_uid):
+                results.append(IngestResult(event_id, None, True))
+                continue
             raise RuntimeError(
                 f"duplicate-classification refused: {event_id} missing from"
                 " ledger while the batch collided — mixed state"
