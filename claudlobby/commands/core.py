@@ -16,6 +16,7 @@ from ..source_state import (
     UNREACHABLE_REMEDIES,
     probe_dir,
     probe_source,
+    scan_dir,
     unreachable_line,
 )
 from ..validator import validate
@@ -670,14 +671,19 @@ def cmd_uptime(args) -> int:
     # rc 0, the unreachable-vs-empty collapse this module exists to kill
     # (external round 2, probed; source_state named this caller and the
     # audit found it had never been wired).
-    probe = probe_dir(bots_dir)
+    # scan_dir, and the returned list IS what aggregate_fleet consumes — a
+    # probe followed by aggregate_fleet's own glob re-opened the directory,
+    # and glob swallows a mid-iteration OSError: a LIVE bot behind a benign
+    # entry vanished at rc 0 (external round 4, probed).
+    probe, bot_dirs = scan_dir(bots_dir)
     if not probe.reachable:
         line = unreachable_line("the runtime bots dir", probe)
         print(line, file=sys.stderr if args.json else sys.stdout)
         return 1
 
     windows = [args.window] if args.window else list(WINDOWS.keys())
-    results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot)
+    results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
+                              bot_dirs=bot_dirs)
 
     if not results:
         log.info("No bots found in %s", bots_dir)

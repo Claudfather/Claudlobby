@@ -353,3 +353,55 @@ class TestUptimeUnreachableBotsDir:
             runtime.chmod(0o755)
         assert rc == 1
         assert "cannot" in capsys.readouterr().out
+
+
+class TestUptimeLateEnumerationFailure:
+    """External round 4: the probe's FIRST enumeration completed, then
+    aggregate_fleet re-globbed and the SECOND enumeration failed mid-
+    iteration — glob swallowed it and a LIVE bot vanished at rc 0. The fix
+    is ONE enumeration: cmd_uptime hands scan_dir's materialized list to
+    aggregate_fleet. NOTE the pin strategy: the failure cannot be injected
+    through os.scandir monkeypatching for the glob half — pathlib's globber
+    binds os.scandir as a staticmethod at import time — so the contract is
+    pinned at the seam: (a) aggregate_fleet consumes the given list and
+    NEVER re-enumerates; (b) cmd_uptime passes its scan listing. With
+    scan_dir's own atomicity pins, the chain is closed."""
+
+    def test_aggregate_consumes_the_list_and_never_reenumerates(self, tmp_path):
+        from claudlobby.uptime import aggregate_fleet
+
+        bots = tmp_path / "bots"
+        real_bot = bots / "realbot"
+        (real_bot / "logs").mkdir(parents=True)
+        (real_bot / "bot.conf").write_text('BOT_ID="realbot"\n')
+
+        # an EMPTY materialized listing must yield no rows even though a
+        # real bot sits in bots_dir — proof nothing re-globs the dir (the
+        # mutation that ignores bot_dirs finds realbot here and goes red)
+        assert aggregate_fleet(bots, windows=["24h"], bot_dirs=[]) == {}
+
+        # ...and the listing IS what gets consumed
+        got = aggregate_fleet(bots, windows=["24h"], bot_dirs=[real_bot])
+        assert "realbot" in got
+
+    def test_cmd_uptime_hands_its_scan_to_aggregate(self, tmp_path, monkeypatch):
+        import types
+
+        from claudlobby import uptime as uptime_mod
+        from claudlobby.commands.core import cmd_uptime
+
+        bots = tmp_path / "runtime" / "bots"
+        (bots / "somebot").mkdir(parents=True)
+        (bots / "somebot" / "bot.conf").write_text('BOT_ID="somebot"\n')
+
+        seen = {}
+        def _recorder(bots_dir, windows=None, bot_filter=None, bot_dirs=None):
+            seen["bot_dirs"] = bot_dirs
+            return {}
+
+        monkeypatch.setattr(uptime_mod, "aggregate_fleet", _recorder)
+        cmd_uptime(types.SimpleNamespace(
+            root=str(tmp_path), fleet=None, bot=None, window=None,
+            json=False))
+        assert seen["bot_dirs"] is not None, "cmd_uptime must pass its scan"
+        assert bots / "somebot" in seen["bot_dirs"]

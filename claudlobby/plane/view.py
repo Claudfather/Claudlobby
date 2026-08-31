@@ -60,11 +60,11 @@ from ..source_state import (
     SOURCE_UNREADABLE,
     probe_dir,
     probe_source,
-    scan_dir,
 )
 from .daemon import probe_daemon, socket_path
 from .emit_api import CaptureConfigError, capture_mode, load_capture_config
 from .ingest import CONSTRUCT_TABLES
+from .spool import oldest_spooled_at, scan_spool
 from .ingest import now_iso as _now_iso
 from .sampler import PaneSampler
 from .queries import (
@@ -484,19 +484,14 @@ def _fetch_trust(conn: sqlite3.Connection, root: Path) -> dict:
     # guarded per-file: the daemon mutates this dir concurrently, and one
     # reaped-between-glob-and-stat entry must not take down the whole
     # panel (probed TOCTOU); a directory named *.json is not an event.
-    qdir = _plane_state_dir(root) / "spool" / "quarantine"
     quarantined, reasons = 0, []
-    # scan_dir, never probe-then-glob (external round 3 — same hole as the
-    # spool: a .reason sidecar lists first, a later readdir fails, glob
-    # returns the partial as a clean empty).
-    qprobe, qentries = scan_dir(qdir)
-    quarantine_state = ("unreadable" if qprobe.state == SOURCE_UNREADABLE
-                        else "ok")
-    if qprobe.state == SOURCE_OK:
+    # Same shared door as the spool count (scan_spool — external rounds 3+4:
+    # enumeration-atomic, state-bearing, one definition across surfaces).
+    qscan = scan_spool(root)
+    quarantine_state = qscan.quarantine_state
+    if quarantine_state == "ok":
         entries = []
-        for f in qentries:
-            if not f.name.endswith(".json"):
-                continue
+        for f in qscan.quarantined:
             try:
                 if f.is_file():
                     entries.append((f.stat().st_mtime, f))
@@ -603,27 +598,15 @@ def _spool_pending(root: Path) -> tuple[int, str | None, str]:
     green zero from a tree the reader cannot reach is the false all-clear
     this whole panel exists to kill. ABSENT stays a legitimate zero — the
     spool dir is created lazily on first spooled event."""
-    d = _plane_state_dir(root) / "spool"
-    # scan_dir, never probe-then-glob: glob swallows a mid-iteration
-    # OSError, so a listing that fails AFTER one benign entry (the
-    # quarantine/ subdir lists first) read as a clean zero past the probe
-    # (external round 3, probed). The returned list IS the enumeration.
-    probe, entries = scan_dir(d)
-    if probe.state == SOURCE_ABSENT:
-        return 0, None, "ok"
-    if probe.state == SOURCE_UNREADABLE:
+    # THE spool definition — spool.scan_spool, shared with plane status and
+    # plane doctor so the three surfaces can never disagree about the same
+    # tree (external round 4: doctor printed a green zero for the exact
+    # spool this panel called unreadable). State-bearing and enumeration-
+    # atomic (scan_dir inside); the count is withheld unless readable.
+    sc = scan_spool(root)
+    if sc.spool_state == "unreadable":
         return 0, None, "unreadable"
-    oldest = None
-    count = 0
-    for f in sorted(e for e in entries if e.name.endswith(".json")):
-        count += 1
-        try:
-            at = json.loads(f.read_text()).get("spooled_at")
-            if at and (oldest is None or at < oldest):
-                oldest = at
-        except (OSError, json.JSONDecodeError):
-            continue
-    return count, oldest, "ok"
+    return len(sc.pending), oldest_spooled_at(sc.pending), "ok"
 
 
 def _fetch_summary(conn: sqlite3.Connection, root: Path) -> dict:

@@ -491,3 +491,35 @@ def test_later_readdir_failure_in_quarantine_is_disclosed(
     assert body["state"] == "ok"
     assert body["data"]["quarantine_state"] == "unreadable"
     assert body["data"]["quarantined"] == 0
+
+
+def test_doctor_and_status_agree_with_trust_on_an_unenumerable_spool(
+    tmp_path, monkeypatch, capsys
+):
+    """External round 4's blocker: `plane doctor` printed '[ok] spool depth
+    — 0 pending' at rc 0 for the exact tree /api/trust called unreadable —
+    two first-party surfaces disagreeing about the same directory. All
+    three now consume spool.scan_spool: doctor fails the rung and exits
+    nonzero; status discloses instead of a numeric zero."""
+    from claudlobby import source_state
+    from claudlobby.commands.plane import cmd_plane_doctor, cmd_plane_status
+
+    _seed(tmp_path)
+    spool = tmp_path / "state" / "plane" / "spool"
+    (spool / "quarantine").mkdir(parents=True)
+    (spool / "ev_live.json").write_text('{"spooled_at": "2026-01-01T00:00:00"}')
+    monkeypatch.setattr(source_state.os, "scandir",
+                        _scandir_one_then_eio(spool, "quarantine"))
+
+    import types
+    args = types.SimpleNamespace(root=str(tmp_path))
+    rc = cmd_plane_doctor(args)
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert "UNREADABLE" in out and "spool depth" in out
+    assert "0 pending" not in out                    # never the green zero
+
+    rc = cmd_plane_status(args)
+    out = capsys.readouterr().out
+    assert "unreadable" in out
+    assert "spool: 0 pending" not in out

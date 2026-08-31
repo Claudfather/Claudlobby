@@ -23,8 +23,8 @@ from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
 from ..plane.migrations import DowngradeError, SCHEMA_USER_VERSION, migrate
 from ..plane.spool import (
-    SpoolWriteError, drain, quarantine_dir, quarantine_entry, spool_dir,
-    spool_entries,
+    SpoolWriteError, drain, oldest_spooled_at, quarantine_dir,
+    quarantine_entry, scan_spool, spool_dir, spool_entries,
 )
 
 _FAMILY_COUNTS = {
@@ -117,20 +117,6 @@ def cmd_emit_batch(args) -> int:
     return _guarded("emit-batch", run)
 
 
-def _oldest_spooled_at(entries: list[dict]) -> str | None:
-    """min over PARSED spooled_at — filenames are random event ids, so
-    filename order says nothing about age."""
-    stamps = []
-    for e in entries:
-        raw = e.get("spooled_at")
-        if not raw:
-            continue
-        try:
-            stamps.append(datetime.fromisoformat(raw))
-        except ValueError:
-            continue
-    return min(stamps).isoformat() if stamps else None
-
 
 def cmd_plane_status(args) -> int:
     root = _resolve_paths(args).root
@@ -160,14 +146,24 @@ def cmd_plane_status(args) -> int:
                 print(f"provisional actors: {len(prov)}")
             finally:
                 conn.close()
-        entries = spool_entries(root)
-        oldest_at = _oldest_spooled_at(entries)
-        oldest = ""
-        if oldest_at:
-            age = datetime.now(timezone.utc) - datetime.fromisoformat(oldest_at)
-            oldest = f", oldest {int(age.total_seconds())}s"
-        print(f"spool: {len(entries)} pending{oldest}")
-        print(f"quarantine: {len(list(quarantine_dir(root).glob('*.json')))}")
+        # scan_spool — THE shared spool definition (external round 4: this
+        # command printed 'spool: 0 pending' for a tree /api/trust called
+        # unreadable; a numeric zero from an unenumerable dir is the lie).
+        sc = scan_spool(root)
+        if sc.spool_state == "unreadable":
+            print("spool: unreadable — cannot count (a gap, not a zero)")
+        else:
+            oldest_at = oldest_spooled_at(sc.pending)
+            oldest = ""
+            if oldest_at:
+                age = (datetime.now(timezone.utc)
+                       - datetime.fromisoformat(oldest_at))
+                oldest = f", oldest {int(age.total_seconds())}s"
+            print(f"spool: {len(sc.pending)} pending{oldest}")
+        if sc.quarantine_state == "unreadable":
+            print("quarantine: unreadable — cannot count")
+        else:
+            print(f"quarantine: {len(sc.quarantined)}")
         return 0
 
     return _guarded("plane status", run)
@@ -312,14 +308,25 @@ def cmd_plane_doctor(args) -> int:
         else:
             rung(True, "daemon", "never armed (doors fall back to cold CLI)")
         rung(True, "last ingest", str(last_ingest or "none yet"))
-        entries = spool_entries(root)
-        oldest_at = _oldest_spooled_at(entries)
-        rung(not entries, "spool depth",
-             f"{len(entries)} pending" + (f", oldest {oldest_at}" if oldest_at else ""))
-        inflight = len(list(spool_dir(root).glob("*.json.inflight.*")))
-        rung(inflight == 0, "inflight claims", str(inflight))
-        quarantined = len(list(quarantine_dir(root).glob("*.json")))
-        rung(quarantined == 0, "quarantine", str(quarantined))
+        # scan_spool — the same shared definition the trust panel and
+        # status consume; an unreadable enumeration is a FAILING rung and a
+        # nonzero exit, never a green zero (external round 4, probed).
+        sc = scan_spool(root)
+        if sc.spool_state == "unreadable":
+            rung(False, "spool depth",
+                 "UNREADABLE — cannot enumerate (a gap, not a zero)")
+            rung(False, "inflight claims", "unreadable")
+        else:
+            oldest_at = oldest_spooled_at(sc.pending)
+            rung(not sc.pending, "spool depth",
+                 f"{len(sc.pending)} pending"
+                 + (f", oldest {oldest_at}" if oldest_at else ""))
+            rung(not sc.inflight, "inflight claims", str(len(sc.inflight)))
+        if sc.quarantine_state == "unreadable":
+            rung(False, "quarantine",
+                 "UNREADABLE — cannot enumerate (a gap, not a zero)")
+        else:
+            rung(not sc.quarantined, "quarantine", str(len(sc.quarantined)))
         return 0 if failing == 0 else 1
 
     return _guarded("plane doctor", run)

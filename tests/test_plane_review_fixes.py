@@ -492,9 +492,12 @@ def test_f11_oldest_is_min_spooled_at_not_filename_order(env):
     # filename order (aaa < fff) puts the YOUNG entry first:
     (sd / ("ev_" + "a" * 32 + ".json")).write_text(json.dumps(young))
     (sd / ("ev_" + "f" * 32 + ".json")).write_text(json.dumps(old))
-    from claudlobby.commands.plane import _oldest_spooled_at
-    from claudlobby.plane.spool import spool_entries
-    assert _oldest_spooled_at(spool_entries(root)) == "2026-08-20T10:00:00+00:00"
+    # the dict-based private helper became spool.oldest_spooled_at (path-
+    # based, shared by trust/status/doctor — external round 4); the SAME
+    # semantics stay pinned: min spooled_at, never filename order
+    from claudlobby.plane.spool import oldest_spooled_at, scan_spool
+    sc = scan_spool(root)
+    assert oldest_spooled_at(sc.pending) == "2026-08-20T10:00:00+00:00"
 
 
 def test_f11_spool_inspect_prints_entry_with_history(env):

@@ -156,15 +156,35 @@ def aggregate_fleet(
     bots_dir: Path,
     windows: list[str] | None = None,
     bot_filter: str | None = None,
+    bot_dirs: list[Path] | None = None,
 ) -> dict:
-    """Aggregate metrics for all bots (or one) in a fleet's runtime dir."""
+    """Aggregate metrics for all bots (or one) in a fleet's runtime dir.
+
+    ``bot_dirs``: the FULLY MATERIALIZED listing from the caller's
+    ``scan_dir`` — when given, no re-enumeration happens here. The glob
+    fallback re-opens the directory after the caller's probe, and
+    ``Path.glob`` swallows a mid-iteration OSError, so a live bot behind a
+    benign entry vanished silently at rc 0 (external round 4, probed).
+    CLI callers must pass it; the fallback survives only for direct
+    library use against dirs the caller already trusts."""
     if windows is None:
         windows = list(WINDOWS.keys())
 
     now = datetime.now(timezone.utc)
     results: dict[str, dict] = {}
 
-    for bot_conf in sorted(bots_dir.glob("*/bot.conf")):
+    if bot_dirs is not None:
+        candidates = []
+        for bd in sorted(bot_dirs):
+            try:
+                if (bd / "bot.conf").is_file():
+                    candidates.append(bd / "bot.conf")
+            except OSError:
+                continue
+    else:
+        candidates = sorted(bots_dir.glob("*/bot.conf"))
+
+    for bot_conf in candidates:
         bot_dir = bot_conf.parent
         bot_name = bot_dir.name
         if bot_filter and bot_name != bot_filter:

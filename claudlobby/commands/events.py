@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from ..source_state import SOURCE_ABSENT, SOURCE_UNREADABLE, probe_dir
+from ..source_state import SOURCE_ABSENT, SOURCE_UNREADABLE, probe_dir, scan_dir
 
 # Critical event types — fleet health problems that need attention.
 CRITICAL_TYPES = {
@@ -65,7 +65,10 @@ def collect_events(
         # is_dir() passes for a dir with no execute bit, and iterdir() then
         # raises — a read door that crashed would trade a false all-clear for
         # an outage, which source_state exists to refuse.
-        _bots = probe_dir(bots_dir)
+        # scan_dir, and its list IS the enumeration — a probe followed by
+        # iterdir() re-opened the directory, and a mid-iteration OSError
+        # after one benign entry dropped bots silently (external round 4).
+        _bots, _entries = scan_dir(bots_dir)
         if _bots.state == SOURCE_UNREADABLE:
             unreadable.append(str(bots_dir))
             bot_dirs = []
@@ -73,7 +76,7 @@ def collect_events(
             absent.append(str(bots_dir))
             bot_dirs = []
         else:
-            bot_dirs = sorted(bots_dir.iterdir())
+            bot_dirs = sorted(_entries)
     ledgers = [(bd / "data" / "events", None) for bd in bot_dirs]
     if fleet_events_dir is not None:
         ledgers.append((Path(fleet_events_dir), bot))
@@ -84,7 +87,7 @@ def collect_events(
         # nothing, so is_dir() here counted a dropped source as READ and left
         # coverage silent. Permissions are the cheap repro; the class is any
         # OSError on listing.
-        _probe = probe_dir(events_path)
+        _probe, _files = scan_dir(events_path)
         if _probe.state == SOURCE_ABSENT:
             absent.append(str(events_path))
             continue
@@ -92,7 +95,7 @@ def collect_events(
             unreadable.append(str(events_path))
             continue
         sources_read += 1
-        for f in sorted(events_path.glob("*.jsonl")):
+        for f in sorted(e for e in _files if e.name.endswith(".jsonl")):
             try:
                 for line in f.read_text().splitlines():
                     line = line.strip()
