@@ -301,3 +301,55 @@ class TestFmtDuration:
 
     def test_days_hours(self):
         assert _fmt_duration(90000) == "1d1h"
+
+
+class TestUptimeUnreachableBotsDir:
+    """External round 2 (estate audit): cmd_uptime used is_dir()+glob, so an
+    unreadable bots dir rendered a LIVE fleet as successful emptiness — "No
+    bots found" at rc 0. It now goes through probe_dir like the other read
+    doors: rc 1 with the shared disclosure line."""
+
+    def _args(self, root, **kw):
+        import types
+        return types.SimpleNamespace(
+            root=str(root), fleet=None, bot=None, window=None, json=False,
+            **kw)
+
+    def test_unreadable_bots_dir_is_rc1_disclosed(self, tmp_path, capsys):
+        import os
+
+        import pytest
+
+        from claudlobby.commands.core import cmd_uptime
+
+        if os.geteuid() == 0:
+            pytest.skip("root reads through the mode bits")
+        bots = tmp_path / "runtime" / "bots"
+        (bots / "somebot").mkdir(parents=True)
+        bots.chmod(0)
+        try:
+            rc = cmd_uptime(self._args(tmp_path))
+        finally:
+            bots.chmod(0o755)
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "cannot" in out and "unreadable" in out
+
+    def test_unreadable_ANCESTOR_is_rc1_disclosed(self, tmp_path, capsys):
+        import os
+
+        import pytest
+
+        from claudlobby.commands.core import cmd_uptime
+
+        if os.geteuid() == 0:
+            pytest.skip("root reads through the mode bits")
+        runtime = tmp_path / "runtime"
+        (runtime / "bots" / "somebot").mkdir(parents=True)
+        runtime.chmod(0)
+        try:
+            rc = cmd_uptime(self._args(tmp_path))
+        finally:
+            runtime.chmod(0o755)
+        assert rc == 1
+        assert "cannot" in capsys.readouterr().out

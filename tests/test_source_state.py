@@ -249,3 +249,31 @@ class TestProbeDirDoesNotCrashOnAnUnreadableAncestor:
         a_file.write_text("x")
         assert probe_dir(missing).state == SOURCE_ABSENT
         assert probe_dir(a_file).state == SOURCE_ABSENT
+
+
+class TestProbeDirObservesFirstReadErrors:
+    """External round 2's blocker on the scandir rewrite: opendir can
+    succeed while the FIRST readdir raises (EIO/ESTALE — failing storage,
+    FUSE, NFS; the estate's SD-stall class). An un-advanced iterator never
+    observes it and certified unreadable-as-OK. probe_dir must advance once
+    inside the exception boundary."""
+
+    def test_error_on_first_read_is_unreadable_not_ok(self, tmp_path, monkeypatch):
+        import errno
+
+        from claudlobby import source_state
+
+        class _OpensThenDies:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def __next__(self):
+                raise OSError(errno.EIO, "I/O error on first readdir")
+
+        monkeypatch.setattr(source_state.os, "scandir",
+                            lambda p: _OpensThenDies())
+        probe = source_state.probe_dir(tmp_path)
+        assert probe.state == source_state.SOURCE_UNREADABLE

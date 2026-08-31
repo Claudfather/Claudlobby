@@ -523,10 +523,16 @@ function setView(view) {
 }
 
 let trustTimer = null;
+let trustGen = 0;   // monotonic request generation — the view check alone
+                    // loses the ABA race (leave trust, return, and an OLD
+                    // in-flight response lands while the view is trust
+                    // again, overwriting the newer state — external round
+                    // 2, probed with deferred responses)
 async function pollTrust() {
-  if (currentView !== "trust") return;
+  if (currentView !== "trust" || document.hidden) return;
+  const gen = ++trustGen;
   const env = await jget("/api/trust");
-  if (currentView !== "trust") return;   // stale response — view moved on
+  if (gen !== trustGen || currentView !== "trust" || document.hidden) return;
   renderTrust(env);
 }
 document.querySelectorAll("#view-nav button").forEach((b) =>

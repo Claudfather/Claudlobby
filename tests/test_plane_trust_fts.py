@@ -385,3 +385,30 @@ def test_trust_panel_polls_while_visible():
     assert "clearInterval(trustTimer)" in app_js
     vis = app_js[app_js.index("visibilitychange"):]
     assert "trustTimer" in vis[:600], "visibilitychange must pause trust poll"
+    # the ABA guard (external round 2): a monotonic generation, checked
+    # after the await — the view check alone lets an OLD response land
+    # when the operator leaves and returns before it resolves
+    assert "++trustGen" in app_js
+    assert "gen !== trustGen" in app_js
+
+
+def test_completeness_counts_use_the_partial_indexes(tmp_path):
+    """External round 2, measured 43ms->1ms at 500k: FILTER aggregates
+    defeated all four partial indexes. The split predicate-in-WHERE form
+    must USE them — usage pinned, not mere existence."""
+    import sqlite3 as _sq
+
+    _seed(tmp_path)
+    conn = _sq.connect(tmp_path / "state" / "plane" / "plane.db")
+    room = (" AND (fleet_uid = (SELECT uid FROM identity_registry"
+            " WHERE kind='fleet' AND alias = 'engineering')"
+            " OR recipient_fleet = 'engineering')")
+    plan_null = " | ".join(r[-1] for r in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM communications"
+        " WHERE body IS NULL" + room))
+    plan_trunc = " | ".join(r[-1] for r in conn.execute(
+        "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM communications"
+        " WHERE truncated = 1 AND body IS NOT NULL" + room))
+    conn.close()
+    assert "idx_intents_null_body" in plan_null, plan_null
+    assert "idx_intents_truncated" in plan_trunc, plan_trunc

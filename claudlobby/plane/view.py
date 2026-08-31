@@ -412,16 +412,23 @@ def _fetch_search(conn: sqlite3.Connection, q: str, fleet: str | None,
     # no words at all (metadata capture / body-less send); truncated = the
     # words were CUT at the capture cap, so a term past the cap is
     # unfindable while the row still looks searchable (external review,
-    # probed with a term at byte 16390). Two counts, one scan.
-    un_sql = ("SELECT COUNT(*) FILTER (WHERE body IS NULL),"
-              " COUNT(*) FILTER (WHERE truncated = 1 AND body IS NOT NULL)"
-              " FROM communications")
-    un_params: list = []
-    if fleet:
-        clause, un_params = _room_filter(fleet)
-        un_sql += " WHERE" + clause
-    unsearchable, partially_indexed = conn.execute(
-        un_sql, un_params).fetchone()
+    # probed with a term at byte 16390). TWO count queries, each predicate
+    # in its own WHERE — never FILTER aggregates: SQLite cannot use a
+    # partial index whose predicate lives only inside a FILTER, so the
+    # combined form scanned every room row past all four partials
+    # (external round 2, measured 43ms -> 1ms at 500k). Pinned by an
+    # index-USAGE EXPLAIN test, not mere index existence.
+    def _completeness_count(pred: str) -> int:
+        sql = f"SELECT COUNT(*) FROM communications WHERE {pred}"
+        params: list = []
+        if fleet:
+            clause, params = _room_filter(fleet)
+            sql += " AND" + clause
+        return conn.execute(sql, params).fetchone()[0]
+
+    unsearchable = _completeness_count("body IS NULL")
+    partially_indexed = _completeness_count(
+        "truncated = 1 AND body IS NOT NULL")
 
     out = {"query": q, "unsearchable": unsearchable,
            "partially_indexed": partially_indexed}

@@ -173,14 +173,22 @@ def probe_dir(path: Path) -> SourceProbe:
     # scandir raises the real errno on every supported version: ENOENT/ENOTDIR
     # (incl. from an absent ancestor) -> ABSENT; EACCES and the rest -> the
     # honest UNREADABLE.
+    # …and the iterator is ADVANCED ONCE inside the same boundary: opendir
+    # can succeed while the first readdir raises (EIO/ESTALE from failing
+    # storage, FUSE, or a network filesystem — the estate's SD-stall class),
+    # and an un-advanced scandir never observes it. The first rewrite
+    # returned OK from the open alone and re-certified exactly that
+    # unreadable-as-healthy state (external round 2, probed with an
+    # iterator raising on its first entry). This is the property the
+    # original iterdir form had and the scandir rewrite briefly lost.
     try:
-        it = os.scandir(path)
+        with os.scandir(path) as entries:
+            next(entries, None)
     except (FileNotFoundError, NotADirectoryError):
         return SourceProbe(SOURCE_ABSENT, path)
     except OSError:
         return SourceProbe(SOURCE_UNREADABLE, path)
-    with it:
-        return SourceProbe(SOURCE_OK, path)
+    return SourceProbe(SOURCE_OK, path)
 
 
 def unreachable_line(what: str, probe: SourceProbe, *, remedy: str = "") -> str:
