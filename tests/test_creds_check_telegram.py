@@ -415,7 +415,11 @@ def test_composed_env_alldead_exports_scanned_state_dir(tmp_path):
             "GITHUB_PERSONAL_ACCESS_TOKEN": "",
             "GITHUB_TOKEN": "",
             "GITHUB_PAT": "",
-            "RAILWAY_API_TOKEN": "",
+            # BOTH Railway tokens: the check reads each separately now, so
+            # scrubbing one and inheriting the other is the same host-leak
+            # this comment is about, just through the other variable.
+            "RAILWAY_PERSONAL_TOKEN": "",
+            "RAILWAY_PERSONAL_PROJECT_TOKEN": "",
             "MCP_PROBE_URL": "",
         }
     )
