@@ -300,3 +300,88 @@ def test_fleet_rail_shows_participants_never_registry_entities(tmp_path):
         "/api/identities").json()["data"]["identities"]}
     assert "library_item" not in kinds
     assert "actor" in kinds and "fleet" in kinds
+
+
+# ---------------------------------------------------------------------------
+# Gauntlet round-2 pins
+# ---------------------------------------------------------------------------
+
+def test_array_shaped_error_records_failed(tmp_path):
+    """r2 MAJOR (probed): jq's if-with-empty-condition evaluated NO branch
+    on an array response — the r1 fix was dead on the exact shape it
+    certified as real. Shape-guarded detection pins both array forms."""
+    for name, resp in (
+        ("flagged", {"isError": True,
+                     "content": [{"type": "text", "text": "Error: blocked"}]}),
+        ("bare", [{"type": "text", "text": "Error: Forbidden: bot was"
+                                            " blocked by the user"}]),
+    ):
+        root = _root(tmp_path / name)
+        payload = json.dumps({
+            "tool_name": "mcp__plugin_telegram_telegram__reply",
+            "tool_input": {"chat_id": "-1", "text": "hi"},
+            "tool_response": resp})
+        assert _run(OUT, payload, _env(root)).returncode == 0
+        tx = _rows(root, "SELECT event FROM events WHERE kind='transmission'")
+        assert [t["event"] for t in tx] == ["failed"], name
+
+
+def test_success_echoing_error_text_stays_accepted(tmp_path):
+    """r2 MEDIUM (probed false-FAILED): a bot relaying an alert echoes
+    'Error: …' in a SUCCESSFUL object-wrapped response — structured-first
+    detection must record accepted."""
+    root = _root(tmp_path)
+    payload = json.dumps({
+        "tool_name": "mcp__plugin_telegram_telegram__reply",
+        "tool_input": {"chat_id": "-1",
+                       "text": "Error: disk-monitor failed on pi4"},
+        "tool_response": {"result": {
+            "message_id": 123,
+            "text": "Error: disk-monitor failed on pi4"}}})
+    assert _run(OUT, payload, _env(root)).returncode == 0
+    tx = _rows(root, "SELECT event FROM events WHERE kind='transmission'")
+    assert [t["event"] for t in tx] == ["carrier_accepted"]
+
+
+def test_explicit_iserror_false_short_circuits_to_accepted(tmp_path):
+    root = _root(tmp_path)
+    payload = json.dumps({
+        "tool_name": "mcp__plugin_telegram_telegram__reply",
+        "tool_input": {"chat_id": "-1", "text": "hi"},
+        "tool_response": {"isError": False,
+                          "content": [{"type": "text",
+                                       "text": "Error: just an echo"}]}})
+    assert _run(OUT, payload, _env(root)).returncode == 0
+    tx = _rows(root, "SELECT event FROM events WHERE kind='transmission'")
+    assert [t["event"] for t in tx] == ["carrier_accepted"]
+
+
+def test_value_invalid_ts_never_loses_the_batch(tmp_path):
+    """r2 MEDIUM (probed): 2026-13-01 passed the shape regex, pydantic
+    rejected it, and the atomic batch lost BOTH rows incl. a legit sibling.
+    Value-validation keeps every message; only the bad ts is dropped."""
+    root = _root(tmp_path)
+    prompt = ('<channel source="telegram" chat_id="-1" message_id="1"'
+              ' user="chris" ts="2026-13-01T10:00:00Z">bad ts</channel>'
+              '<channel source="telegram" chat_id="-1" message_id="2"'
+              ' user="chris" ts="2026-09-01T10:00:00Z">good ts</channel>')
+    r = _run(IN, json.dumps({"prompt": prompt}), _env(root))
+    assert r.returncode == 0 and r.stdout == ""
+    rows = _rows(root, "SELECT body, occurred_at FROM communications"
+                       " ORDER BY ingest_seq")
+    assert [x["body"] for x in rows] == ["bad ts", "good ts"]
+    assert not rows[0]["occurred_at"].startswith("2026-13")
+    assert rows[1]["occurred_at"].startswith("2026-09-01T10:00:00")
+
+
+def test_newline_after_channel_is_not_dropped_by_the_prefilter(tmp_path):
+    """r2 LOW: the regex accepts whitespace after <channel; the prefilter
+    must not silently drop what the decider accepts — a false negative
+    loses an operator message."""
+    root = _root(tmp_path)
+    prompt = ('<channel\n  source="telegram" chat_id="-1" message_id="3"'
+              ' user="chris">wrapped attrs</channel>')
+    r = _run(IN, json.dumps({"prompt": prompt}), _env(root))
+    assert r.returncode == 0 and r.stdout == ""
+    rows = _rows(root, "SELECT body FROM communications")
+    assert [x["body"] for x in rows] == ["wrapped attrs"]

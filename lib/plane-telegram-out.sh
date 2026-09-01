@@ -60,19 +60,33 @@ case "$TG_MSGID" in *[!0-9]*) TG_MSGID="" ;; esac
 
 # The transmission state is a CARRIER-API FACT (contracts: carrier_accepted
 # means the carrier took it) — recording accepted on a FAILED send is a
-# false claim (gauntlet MAJOR, probed with real error shapes: chat not
-# found, bot was blocked). Error-shaped responses emit `failed` + the error
-# text; only the absence of any error signal records accepted.
+# false claim (r1 MAJOR, probed). Detection is SHAPE-GUARDED and
+# structured-first (r2 MAJOR, probed: `.isError?` on an ARRAY response
+# yields empty, and jq's if-with-empty-condition evaluates NO branch — the
+# r1 fix was dead on the exact shape it certified as real):
+#   1. any object anywhere carrying isError:true  -> failed (strings joined)
+#   2. any object carrying isError:false          -> accepted (explicit)
+#   3. any object carrying an error field         -> failed (that text)
+#   4. a BARE-ARRAY response whose FIRST string starts "Error"/"Telegram
+#      error" -> failed — narrow by design: an object-wrapped success that
+#      merely ECHOES error-ish text (a bot relaying an alert) must stay
+#      accepted (r2 MEDIUM, probed false-FAILED).
 TG_ERR="$(printf '%s' "$PAYLOAD" | jq -r '
-  if (.tool_response.isError? == true) then
-    ([.tool_response | .. | strings] | join(" ") | .[0:200])
-  elif (.tool_response.error?) then
-    (.tool_response.error | tostring | .[0:200])
-  elif ([.tool_response? | .. | strings
-         | select(test("^(Error|Telegram error)"))] | length) > 0 then
-    ([.tool_response | .. | strings
-      | select(test("^(Error|Telegram error)"))] | first | .[0:200])
-  else empty end' 2>/dev/null || true)"
+  ([.tool_response? | .. | objects | select(has("isError")) | .isError])
+    as $flags
+  | ([.tool_response? | .. | objects | .error? | select(. != null)])
+    as $errs
+  | if ($flags | any(. == true)) then
+      ([.tool_response? | .. | strings] | join(" ") | .[0:200])
+    elif ($flags | length) > 0 then empty
+    elif ($errs | length) > 0 then ($errs | first | tostring | .[0:200])
+    elif ((.tool_response? | type) == "array")
+         and (([.tool_response[] | .. | strings
+                | select(test("^(Error|Telegram error)"))] | length) > 0)
+    then
+      ([.tool_response[] | .. | strings
+        | select(test("^(Error|Telegram error)"))] | first | .[0:200])
+    else empty end' 2>/dev/null || true)"
 
 MSG_ID="$(plane_mint_id msg)" || exit 0
 jq -nc --arg fleet "$FLEET_NAME" --arg msg_id "$MSG_ID" \

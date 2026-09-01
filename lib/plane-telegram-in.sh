@@ -44,8 +44,12 @@ PAYLOAD="$(cat 2>/dev/null || true)"
 # ZERO-FORK prefilter (the gh-mention-guard idiom, measured there 3.5ms vs
 # 137ms on a Pi): on an armed fleet EVERY prompt pays this hook, and an
 # ordinary prompt must exit before any source, mint or python spawn.
+# Loose ON PURPOSE: the python regex is the decider; the prefilter only
+# skips the spawn on ordinary prompts, and a prefilter FALSE NEGATIVE
+# silently drops an operator message (r2 — the regex accepts a newline/tab
+# after `<channel`, so the glob must not require the space).
 case "$PAYLOAD" in
-  *'<channel '*'source=\"telegram\"'*) ;;
+  *'<channel'*'telegram'*) ;;
   *) exit 0 ;;
 esac
 
@@ -92,12 +96,19 @@ for m in tags:
     tg_id = attrs.get("message_id") or ""
     msg_id = "msg_" + secrets.token_hex(16)
     envelope = {}
-    ts = attrs.get("ts") or ""
+    ts = (attrs.get("ts") or "").replace("Z", "+00:00").replace("z", "+00:00")
     # §4: the carrier's ts IS the occurrence instant and this hook is a
-    # relay. Guarded: an unparseable ts is dropped, never allowed to fail
-    # the batch.
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T[0-9:.]+(Z|[+-]\d{2}:?\d{2})", ts):
-        envelope["occurred_at"] = ts.replace("Z", "+00:00")
+    # relay. VALUE-validated, not shape-validated (r2, probed: 2026-13-01
+    # passed the old regex, pydantic rejected it, and the validate-all-
+    # atomic batch lost BOTH rows — including a legit sibling message):
+    # only a ts the datetime parser itself accepts rides the envelope.
+    if ts:
+        try:
+            from datetime import datetime
+            if datetime.fromisoformat(ts).tzinfo is not None:
+                envelope["occurred_at"] = ts
+        except ValueError:
+            pass
     events.append({
         "event_type": "communication", "emitter": "telegram-hook",
         "fleet": fleet, **envelope,
