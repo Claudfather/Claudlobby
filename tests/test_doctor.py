@@ -422,3 +422,184 @@ class TestDoctorTimerScriptParity:
         report = run_doctor(fleet, paths)
         fleet_yaml = next(c for c in report.checks if c.name == "fleet-yaml")
         assert fleet_yaml.status != "fail"
+
+
+class TestCheckCredentialsScoping:
+    """#1377 — probe only what the fleet declares, resolved through the cascade.
+
+    The load-bearing assertion in this class is `_curl_with_config` NEVER being
+    called. Reading the report text proves the verdict changed; it does not
+    prove the outbound call stopped, and the outbound call IS the defect. So the
+    transport is monkeypatched with a recorder that fails the test if it fires.
+    """
+
+    @staticmethod
+    def _stage_cascade(paths, monkeypatch):
+        """Stage the REAL runtime resolver and an isolated HOST tier.
+
+        Required by every test in this class that expects a value decision.
+        `Paths.env_resolved` REFUSES rather than falling back when it cannot
+        reach `lib/env-tiers.sh`, so without this the function short-circuits to
+        its resolver-unavailable branch and an absence-assertion passes for the
+        wrong reason — which is exactly what happened while writing these.
+        A stub resolver is not an option: it would certify a cascade the runtime
+        does not have (tests/test_credentials.py makes the same call).
+        """
+        repo = Path(__file__).resolve().parent.parent
+        (paths.root / "lib").mkdir(parents=True, exist_ok=True)
+        for f in ("lib-common.sh", "env-tiers.sh"):
+            (paths.root / "lib" / f).write_bytes((repo / "lib" / f).read_bytes())
+        fake_home = paths.root.parent / "home"
+        fake_home.mkdir(exist_ok=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+    @staticmethod
+    def _no_network(monkeypatch):
+        """Replace the transport with a tripwire. Returns the call log."""
+        calls: list = []
+
+        def _boom(headers, extra_args):
+            calls.append(extra_args)
+            raise AssertionError(
+                f"check_credentials made an outbound call it should not have: {extra_args}"
+            )
+
+        monkeypatch.setattr("claudlobby.doctor._curl_with_config", _boom)
+        return calls
+
+    def test_ambient_token_for_an_undeclared_integration_is_never_probed(
+        self, doctor_fleet, monkeypatch
+    ):
+        """The #1377 reproduction: the fleet declares github, never railway."""
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        self._stage_cascade(paths, monkeypatch)
+        monkeypatch.setenv("RAILWAY_API_TOKEN", "rw_ambient_never_declared")
+        monkeypatch.delenv("GITHUB_PAT", raising=False)
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+
+        # No call fired (the tripwire would have raised), and the fleet's
+        # verdict no longer mentions a service it does not use.
+        assert "RAILWAY" not in report.checks[0].detail.upper()
+        assert report.checks[0].status != "fail"
+
+    def test_a_declared_var_present_only_in_the_shell_is_named_not_probed(
+        self, doctor_fleet, monkeypatch
+    ):
+        """A bot resolves from the cascade, not the operator's shell.
+
+        Probing the shell value would report a health the fleet does not have.
+        Dropping it silently would hide a state that genuinely confuses people.
+        So it is reported and not probed.
+        """
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        self._stage_cascade(paths, monkeypatch)
+        monkeypatch.setenv("GITHUB_PAT", "ghp_only_in_my_shell")
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        detail = report.checks[0].detail
+        assert "GITHUB_PAT" in detail
+        assert "shell" in detail and "not probed" in detail
+
+    def test_declared_with_a_cascade_value_IS_probed(self, doctor_fleet, monkeypatch):
+        """The positive control.
+
+        Every other test here asserts an absence, and a function that had simply
+        stopped working would pass all of them. This one proves the probe still
+        fires for the case it is supposed to serve.
+        """
+        _, fleet, paths = doctor_fleet
+        monkeypatch.delenv("GITHUB_PAT", raising=False)
+        self._stage_cascade(paths, monkeypatch)
+        (paths.root / ".env").write_text("GITHUB_PAT=ghp_in_the_cascade\n")
+
+        seen: list = []
+
+        class _R:
+            stdout = "200"
+            returncode = 0
+
+        def _fake(headers, extra_args):
+            seen.append((headers, extra_args))
+            return _R()
+
+        monkeypatch.setattr("claudlobby.doctor._curl_with_config", _fake)
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        assert len(seen) == 1, "the declared, resolvable credential was not probed"
+        assert "api.github.com" in " ".join(seen[0][1])
+        assert report.checks[0].status == "pass"
+        assert "probed OK" in report.checks[0].detail
+
+    def test_silence_states_its_scope_rather_than_implying_validity(
+        self, doctor_fleet, monkeypatch
+    ):
+        """Coverage honesty: a pass must not read as "credentials are fine".
+
+        "Nothing was probed" has causes with different remedies, and the old
+        code collapsed all of them into one reassuring line.
+        """
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        self._stage_cascade(paths, monkeypatch)
+        monkeypatch.delenv("GITHUB_PAT", raising=False)
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        detail = report.checks[0].detail
+        # It names the var and points at the check that owns the missing value,
+        # instead of "no credential env vars found to probe".
+        assert "GITHUB_PAT" in detail
+        assert "env-vars" in detail
+        assert "no credential env vars found" not in detail
+
+    def test_a_broken_manifest_warns_rather_than_crashing_doctor(
+        self, doctor_fleet, monkeypatch
+    ):
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        monkeypatch.setattr(
+            "claudlobby.credentials.declared_for_fleet",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        assert report.checks[0].status == "warn"
+
+    def test_an_unreachable_cascade_refuses_rather_than_reading_as_no_value(
+        self, doctor_fleet, monkeypatch
+    ):
+        """`ResolverUnavailable` must not become "declared with no value".
+
+        Those two have opposite remedies — install/repair the resolver, versus
+        go and set a credential — and the runtime raises precisely so the
+        distinction survives. Folding it into an empty mapping would recreate
+        the unreachable-vs-empty defect inside a fix for its sibling. The
+        fixture deliberately does NOT stage lib/env-tiers.sh.
+        """
+        _, fleet, paths = doctor_fleet
+        self._no_network(monkeypatch)
+        monkeypatch.setenv("GITHUB_PAT", "ghp_whatever")
+
+        report = DoctorReport()
+        from claudlobby.doctor import check_credentials
+
+        check_credentials(fleet, paths, report)
+        assert report.checks[0].status == "warn"
+        assert "cannot read the .env cascade" in report.checks[0].detail
+        assert "no value" not in report.checks[0].detail
