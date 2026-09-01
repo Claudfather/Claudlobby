@@ -407,8 +407,14 @@ def cmd_plane_registry(args) -> int:
                 uid_file = root / "state" / "host-uid"
                 try:
                     this_host = uid_file.read_text().strip()
-                except OSError:
+                except FileNotFoundError:
                     this_host = ""
+                except OSError as exc:
+                    # unreachable ≠ absent (r4): a perms failure must not
+                    # read as "no scan yet" — opposite remedies
+                    print(f"registry --verify: host identity UNREADABLE"
+                          f" at {uid_file} ({exc})", file=sys.stderr)
+                    return 1
                 if not this_host:
                     print(f"registry --verify: no host identity at"
                           f" {uid_file} — no scan has recorded here yet",

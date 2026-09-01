@@ -130,21 +130,13 @@ def current_hash(conn, host_uid: str, entity_type: str,
     """The current row's payload_hash per the READER'S definition, or None
     when the entity is effectively deleted (F11-valid tombstone winning
     its partition) or never seen. The write side's two questions ride this
-    one door: ingest's hash gate compares against it, and
-    ``entity_is_current`` is its is-not-None reading. The DEFINITION is
-    also the emitter's (REG_CURRENT_KEYS_SQL, same underlying SQL) — its
-    bulk form lives beside this one in queries.py."""
+    one door: ingest's hash gate compares against it, and its is-not-None
+    reading is the tombstone dedup's answer. The DEFINITION is also the
+    emitter's (REG_CURRENT_KEYS_SQL, same underlying SQL) — its bulk form
+    lives beside this one in queries.py."""
     row = conn.execute(REG_CURRENT_POINT_SQL,
                        (host_uid, entity_type, entity_uid)).fetchone()
     return None if row is None else row[0]
-
-
-def entity_is_current(conn, host_uid: str, entity_type: str,
-                      entity_uid: str) -> bool:
-    """Is the entity present per the reader (see ``current_hash``)?"""
-    row = conn.execute(REG_CURRENT_POINT_SQL,
-                       (host_uid, entity_type, entity_uid)).fetchone()
-    return row is not None
 
 
 def invalid_tombstones(conn) -> list[dict]:
@@ -163,6 +155,13 @@ def last_scan(conn) -> dict | None:
     if not rows:
         return None
     out = json.loads(rows[0]["detail"])
+    if not isinstance(out, dict):
+        # valid JSON is not yet a valid detail (r4, probed: '42' parsed
+        # fine and then TypeError'd PAST the doors' narrow catch set —
+        # the same class _require_object documents); raise the CAUGHT
+        # class with a real message instead
+        raise ValueError(
+            f"scan_completed detail is not an object: {out!r}")
     out["occurred_at"] = rows[0]["occurred_at"]
     return out
 

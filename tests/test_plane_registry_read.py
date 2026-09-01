@@ -326,6 +326,56 @@ def test_doctor_and_registry_survive_a_corrupt_declaration_row(tmp_path):
     assert "Traceback" not in r2.stderr
 
 
+def test_snapshot_ingest_survives_a_corrupt_completion_row(tmp_path):
+    """r4 MAJOR (probed): the reader-keyed gate parses every completion
+    detail whenever the partition holds a tombstone — one corrupt row
+    made a whole generate-shaped batch RAISE out of emit_batch, unspooled
+    (clean sibling keyframes lost too). The snapshot path now wears the
+    same armor as the tombstone path: unreadable gate ⇒ write."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T1, P1), _done("s1", T1),
+                      _tomb(BOT, "s2", T2), _done("s2", T2)])
+    db = root / "state" / "plane" / "plane.db"
+    c = sqlite3.connect(db)
+    c.execute("UPDATE events SET detail='{broken'"
+              " WHERE event='scan_completed'")
+    c.commit()
+    c.close()
+    # a mixed generate-shaped batch: the tombstoned entity re-observed
+    # plus a clean sibling — BOTH must land
+    out = emit_batch(root, [
+        _snap(BOT, "s3", T3, P2),
+        _snap("bot:f/dinesh", "s3", T3, _bot("bot:f/dinesh"))])
+    assert [o.status for o in out] == ["committed", "committed"]
+    # persistence asserted RAW: the reader legitimately raises through a
+    # corrupt db at the library level (the CLI door is what catches) —
+    # what F1 pins is that the WRITE landed despite it
+    conn = _conn(root)
+    landed = {r[0] for r in conn.execute(
+        "SELECT entity_alias FROM registry_snapshots"
+        " WHERE tombstone=0 AND scan_id='s3'")}
+    assert landed == {BOT, "bot:f/dinesh"}
+
+
+def test_doctor_survives_valid_json_non_dict_detail(tmp_path):
+    """r4 MEDIUM (probed): detail='42' is valid JSON, so json.loads
+    succeeded and the occurred_at attach TypeError'd PAST the narrow
+    catch — doctor died whole again. last_scan now raises the CAUGHT
+    class; the rung fails and the later rungs still print."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T1, P1), _done("s1", T1)])
+    db = root / "state" / "plane" / "plane.db"
+    c = sqlite3.connect(db)
+    c.execute("UPDATE events SET detail='42' WHERE event='scan_completed'")
+    c.commit()
+    c.close()
+    r = _cli(root, "doctor")
+    assert r.returncode == 1
+    assert "registry lane" in r.stdout and "unreadable" in r.stdout
+    assert "spool depth" in r.stdout
+    assert "Traceback" not in r.stderr
+
+
 def test_cli_changes_zero_and_exclusive_modes(tmp_path):
     """r3 minors, pinned at the door: --changes 0 stays in changes mode
     (argparse falsiness used to fall through to the list), and the four

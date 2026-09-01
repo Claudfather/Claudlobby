@@ -341,6 +341,11 @@ def _registry_row(conn, payload, entity, host_uid):
     from .registry_read import current_hash
     if payload.tombstone:
         if prev and prev["tombstone"]:
+            # (r3 disclosure lives here: duplicate same-scan tombstones
+            # BEFORE their completion both commit — at each evaluation the
+            # entity genuinely is still current, the emitter cannot
+            # produce the shape, and post-completion duplicates suppress.
+            # Row spam only, accepted.)
             try:
                 still_current = current_hash(
                     conn, host_uid, payload.entity_type, uid) is not None
@@ -356,7 +361,19 @@ def _registry_row(conn, payload, entity, host_uid):
                 return uid, None   # already gone — nothing to re-claim
         return uid, values
     phash = canonical_hash(_gate_view(payload.payload))
-    if current_hash(conn, host_uid, payload.entity_type, uid) == phash:
+    try:
+        cur = current_hash(conn, host_uid, payload.entity_type, uid)
+    except sqlite3.Error as exc:
+        # the SNAPSHOT path needs the same armor as the tombstone path
+        # above (r4, probed: the F11 join parses every completion detail
+        # whenever the partition holds a tombstone, so ONE corrupt row
+        # made a whole generate batch raise unspooled — clean keyframes
+        # lost with it). Unreadable gate ⇒ treat as changed and WRITE:
+        # append-only, and the next healthy read self-heals.
+        print(f"plane ingest: registry gate unreadable ({exc}) — writing"
+              f" the keyframe", file=sys.stderr)
+        cur = None
+    if cur == phash:
         return uid, None    # the write gate: unchanged per the READER
     values["payload"] = json.dumps(payload.payload, ensure_ascii=False)
     values["payload_hash"] = phash
