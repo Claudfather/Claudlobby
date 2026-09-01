@@ -207,3 +207,21 @@ def test_future_marker_age_clamps_at_zero(tmp_path):
               if s["metric"] == "bot.heartbeat")
     assert hb["state"] == "BUSY"          # pre-existing marker_age_within
     assert hb["marker_age_s"] == 0
+
+
+def test_wedged_emit_never_stalls_the_tick(tmp_path):
+    """The fold's load-bearing property, pinned by TIME: with the emit
+    rung wedged (a 60s-sleeping CLI, no daemon), the tick must return
+    promptly — the watchdog can never wait on a record. The row pins
+    cannot see this (a synchronous emit passes them too — caught when the
+    unbackground mutation came back green)."""
+    libdir, bot, env = _rig(tmp_path)
+    wedge = tmp_path / "wedge-cli"
+    wedge.write_text("#!/bin/bash\nsleep 60\n")
+    wedge.chmod(0o755)
+    env["PLANE_EMIT_CLI"] = str(wedge)
+    t0 = time.monotonic()
+    r = _tick(libdir, bot, env)
+    elapsed = time.monotonic() - t0
+    assert r.returncode == 0, r.stderr
+    assert elapsed < 15, f"tick stalled {elapsed:.1f}s behind a wedged emit"
