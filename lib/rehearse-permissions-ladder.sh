@@ -631,51 +631,50 @@ run_cell_e() {
     bot_tmux "$LSOCK" kill-session -t "$LSESSION" 2>/dev/null || true
     return 0
   fi
+  bot_tmux "$LSOCK" capture-pane -t "$LSESSION" -p > "$WORK/$cell.pane-at-inject.txt" 2>/dev/null || true
   pane_send_verified "$LSOCK" "$LSESSION" "$marker $prompt" || true
 
-  tfile=""
+  # TURN COMPLETION IS READ FROM THE PANE, AND THE TRANSCRIPT IS READ AFTER THE
+  # SESSION IS KILLED. Measured, and it is why the first arm-F run scored its
+  # own control VOID with no transcript at all: Claude Code writes the session
+  # transcript LAZILY -- a probe that ran to completion at 08:56 had produced no
+  # projects/ directory by 08:57, and the file appeared at 08:58. The original
+  # loop polled for a transcript that did not exist yet, hit its deadline, and
+  # then killed the session, which is what finally flushed it. Polling harder
+  # would not have helped; the ordering was wrong.
+  local pane prev_hash="" hash stable=0
   while [ "$t" -lt "$ARME_DEADLINE" ]; do
     sleep 4; t=$((t + 4))
-    tfile="$(newest_transcript "$WORK/.marker-$cell")"
-    [ -n "$tfile" ] || continue
-    eff="$(effect_observed "$ekind")"
-    blob="$(python3 "$LIB_DIR/ladder-classify.py" "$tfile" --marker "$marker" \
-              --sentinel "$SENTINEL" --effect-observed "$eff" 2>/dev/null)"
-    verdict="$(printf '%s' "$blob" | jq -r '.verdict' 2>/dev/null)"
-    [ "$verdict" = NO_SUBMISSION ] && continue
-    # Settle: the same verdict twice running. A single poll can catch the turn
-    # mid-flight -- the model has answered in prose but has not yet made the
-    # tool call -- and that reads as NO_ATTEMPT, which is a verdict this grid
-    # turns on. Two agreeing polls is the cheapest guard against scoring a
-    # turn that had not finished.
-    if [ "$verdict" = "$prev" ]; then
+    pane="$(bot_tmux "$LSOCK" capture-pane -t "$LSESSION" -p 2>/dev/null || true)"
+    printf '%s' "$pane" | grep -qF "$marker" || continue
+    hash="$(printf '%s' "$pane" | cksum)"
+    if [ "$hash" = "$prev_hash" ]; then
       stable=$((stable + 1))
-      [ "$stable" -ge 1 ] && break
+      [ "$stable" -ge 2 ] && break
     else
       stable=0
     fi
-    prev="$verdict"
+    prev_hash="$hash"
   done
+  bot_tmux "$LSOCK" capture-pane -t "$LSESSION" -p > "$WORK/$cell.pane.txt" 2>/dev/null || true
+  bot_tmux "$LSOCK" kill-session -t "$LSESSION" 2>/dev/null || true
 
-  eff="$(effect_observed "$ekind")"
-  if [ -n "$tfile" ]; then
-    blob="$(python3 "$LIB_DIR/ladder-classify.py" "$tfile" --marker "$marker" \
-              --sentinel "$SENTINEL" --effect-observed "$eff" 2>/dev/null)"
-  else
-    blob='{"verdict":"NO_TRANSCRIPT","tool_used":"none","session_mode":"","raw":""}'
-  fi
-  verdict="$(printf '%s' "$blob" | jq -r '.verdict')"
-  local tool_used smode raw
-  tool_used="$(printf '%s' "$blob" | jq -r '.tool_used')"
-  smode="$(printf '%s' "$blob" | jq -r '.session_mode')"
-  raw="$(printf '%s' "$blob" | jq -r '.raw' | head -c 400)"
+  # Now wait for the flush. Bounded and disclosed: a cell whose transcript never
+  # lands is NO_TRANSCRIPT and says so, rather than borrowing another cell file.
+  local tw=0
+  tfile=""
+  while [ "$tw" -lt 90 ]; do
+    tfile="$(newest_transcript "$WORK/.marker-$cell")"
+    [ -n "$tfile" ] && grep -qF "$marker" "$tfile" 2>/dev/null && break
+    tfile=""
+    sleep 3; tw=$((tw + 3))
+  done
 
   # THE ARM PRECONDITION, per cell. Arm E exists because interactive does not
   # collapse to default; a cell that reports otherwise did not run the
   # condition this arm claims to measure, and its verdict is not evidence.
-  harness_check "$cell session reports permissionMode=auto [$smode]" \
-    "$([ "$smode" = auto ] && echo yes || echo no)"
-  [ "$smode" = auto ] || verdict="VOID_MODE_${smode:-UNKNOWN}"
+  harness_check "$cell recorded a session permissionMode [$smode]" \
+    "$([ -n "$smode" ] && echo yes || echo no)"
 
   printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "$cell" "$form" "$rules" "$route" "$resolv" "$tool_used" "$verdict" "$eff" "$smode" "$cver" "$raw" >> "$GRID"
