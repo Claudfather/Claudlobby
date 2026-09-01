@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -35,6 +36,7 @@ from .contracts import (
     RegistrySnapshot,
 )
 from .identity import resolve, resolve_fleet, resolve_party
+from .registries import METRIC_NAMES
 from .ids import mint_event_id
 from .registries import FIELD_POLICY, SYSTEM_EVENT_SEVERITY
 
@@ -352,12 +354,18 @@ def _gate_view(payload: dict) -> dict:
     return {k: v for k, v in payload.items() if k != "vault_rev"}
 
 
+_warned_metrics: set[str] = set()
+
+
 def _metric_row(payload, entity):
-    from .registries import METRIC_NAMES
-    if payload.metric not in METRIC_NAMES:
+    if (payload.metric not in METRIC_NAMES
+            and payload.metric not in _warned_metrics):
         # open registry, warn-on-unknown (§9d): accepted, never rejected —
-        # additions arrive by PR; the warning is the drift signal
-        import sys
+        # additions arrive by PR; the warning is the drift signal. ONCE per
+        # metric per process: a misnamed probe at sample volume would
+        # otherwise write 30-45k lines/day into the daemon's stderr on the
+        # SD-fragile Pi (gauntlet r2).
+        _warned_metrics.add(payload.metric)
         print(f"plane-ingest: unknown metric {payload.metric!r}"
               " (not in registries.METRIC_NAMES)", file=sys.stderr)
     return {

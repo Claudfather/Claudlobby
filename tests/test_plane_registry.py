@@ -59,7 +59,7 @@ def _fleet_root(tmp_path: Path, *, armed: bool = True,
     worker = ("\n    worker-1:\n"
               "      expertise: [software-engineering]\n"
               "      reports_to: lead\n") if worker_stanza else "\n"
-    env = 'env: {PLANE_EMIT_ENABLED: "1"}' if armed else "env: {}"
+    env = "env: {}"   # arming rides the .env TIER, never this
     (root / "fleet.yaml").write_text(
         "fleet:\n"
         "  name: test-fleet\n"
@@ -481,3 +481,121 @@ def test_library_walk_discovers_integrations(tmp_path):
         " WHERE entity_type='library_item'")]
     conn.close()
     assert "shared/integrations/github-app" in aliases
+
+
+# ---------------------------------------------------------------------------
+# Gauntlet round-2 pins
+# ---------------------------------------------------------------------------
+
+def test_floor_is_semver_max_never_lexical():
+    """r2 consensus, probed on the LIVE floor: lexical max returned
+    'unbuilt — demand-gated' (sorts after every digit) and the r1 pin only
+    asserted membership — a pin passing on the wrong value. Exact
+    correctness pinned: numeric-tuple max over semver-shaped entries."""
+    import re as _re
+
+    from claudlobby.claudron_compat import COMPAT_FLOOR
+    from claudlobby.plane.registry_emit import vault_payload  # noqa: F401
+
+    semver = [tuple(int(x) for x in c.default_order_release.split("."))
+              for c in COMPAT_FLOOR
+              if _re.fullmatch(r"\d+\.\d+\.\d+", c.default_order_release)]
+    expected = ".".join(str(x) for x in max(semver)) if semver else "none"
+    # assemble against a real vault dir to read the floor the payload ships
+    import tempfile
+    from claudlobby.config import load_fleet
+    from claudlobby.paths import Paths as _P
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d) / "claudlobby"
+        root.mkdir()
+        vault = Path(d) / "v"
+        vault.mkdir()
+        (root / "fleet.yaml").write_text(
+            "fleet:\n  name: f\n  service_prefix: com.f\n  defaults:\n"
+            f"    claudron_vault_path: {vault}\n"
+            "  bots:\n    b:\n      expertise: [x]\n")
+        fleet, _ = load_fleet(root / "fleet.yaml")
+        vp = __import__("claudlobby.plane.registry_emit",
+                        fromlist=["vault_payload"]).vault_payload(
+            _P(root=root), fleet)
+    assert vp["compat"]["floor"] == expected
+    assert "demand" not in vp["compat"]["floor"]
+
+
+def test_safe_hash_survives_mixed_keys_and_is_deterministic():
+    """r2, probed: the r1 fallback's own sorted() raised TypeError on
+    int/bool YAML keys (`on:`, `2026:`) — the vaporize re-created one level
+    down; and a raw set repr is PYTHONHASHSEED-nondeterministic."""
+    from claudlobby.plane.registry_emit import _safe_hash
+
+    mixed = {True: "x", "a": 1, 2026: 0.5}
+    h1 = _safe_hash(mixed)
+    h2 = _safe_hash({2026: 0.5, "a": 1, True: "x"})
+    assert h1 == h2 and h1.startswith("sha256:")
+    s1 = _safe_hash({"caps": {"b", "a", "c"}})
+    s2 = _safe_hash({"caps": {"c", "a", "b"}})
+    assert s1 == s2
+
+
+def test_fleet_with_its_own_vault_never_tombstones_a_siblings(tmp_path):
+    """r2, probed: scanned-ANY-vault scope let a vault-carrying fleet
+    tombstone a sibling fleet's vault — the ping-pong one fleet over. Scope
+    is the EXACT enumerated alias."""
+    root = _fleet_root(tmp_path)
+    myvault = tmp_path / "myvault"
+    myvault.mkdir()
+    text = (root / "fleet.yaml").read_text().replace(
+        "  defaults:", "  defaults:\n    claudron_vault_path: " + str(myvault))
+    (root / "fleet.yaml").write_text(text)
+    emit_batch(root, [{
+        "event_type": "registry_snapshot", "emitter": "t", "fleet": "other",
+        "payload": {"entity_type": "vault", "entity_alias": "sibling-vault",
+                    "payload": {"alias": "sibling-vault", "role": "primary",
+                                "mount_path": "/sv", "remote": "",
+                                "compat": {"floor": "0.3.0"},
+                                "carries_fleets": True,
+                                "gitignore_safe": True,
+                                "schema_version": "1"},
+                    "cause": "generate", "scan_id": "so"}}])
+    s = _scan(root)                       # scans ITS OWN vault (myvault)
+    assert s["complete"] is True
+    conn = _db(root)
+    stones = [r["entity_alias"] for r in conn.execute(
+        "SELECT entity_alias FROM registry_snapshots"
+        " WHERE tombstone=1 AND entity_type='vault'")]
+    conn.close()
+    assert stones == []                   # the sibling's vault stands
+
+
+def test_lost_host_uid_skips_the_diff_loudly_never_a_false_clean(
+    tmp_path, caplog
+):
+    """r2, probed: the 'read path' MINTED a fresh uid on absence, the
+    filter dropped every row, and the scan reported a CLEAN zero. Now: the
+    uid file is READ in the diff path (the later emit legitimately re-mints
+    for new envelopes — that is the write path's job); absent-at-diff-time
+    -> the diff is skipped with a WARNING and the scan discloses
+    complete=False, never a silent tombstoned=0 that reads as clean."""
+    import logging
+
+    root = _fleet_root(tmp_path)
+    _scan(root)
+    (root / "state" / "host-uid").unlink()
+    root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
+    with caplog.at_level(logging.WARNING, logger="claudlobby.plane.registry"):
+        s = _scan(root2)
+    assert s["tombstoned"] == 0
+    assert s["complete"] is False          # cannot-diff is disclosed, not clean
+    assert any("host-uid" in r.message for r in caplog.records)
+
+
+def test_unknown_metric_warns_once_per_process(tmp_path, capsys):
+    root = _fleet_root(tmp_path)
+    for _ in range(3):
+        emit_batch(root, [{
+            "event_type": "metric_sample", "emitter": "t",
+            "fleet": "test-fleet",
+            "payload": {"subject_kind": "host", "subject": "h",
+                        "metric": "dup.warn.metric", "value": 1}}])
+    err = capsys.readouterr().err
+    assert err.count("dup.warn.metric") <= 1

@@ -19,9 +19,20 @@ did not name them. Scope membership is derivable from alias conventions
 (``bot:<fleet>/…``, ``<fleet>/<key>``, ``shared/…``) and the scan_completed
 declaration names its scope string.
 
-Dormancy (estate rule): armed per fleet by ``PLANE_EMIT_ENABLED=1`` in the
-fleet's env — a root pull must never switch on new emission. The generate
-hook is NON-BLOCKING: a scan failure logs and never breaks generate.
+Dormancy (estate rule): armed per fleet through the runtime's .env tier
+cascade (``PLANE_EMIT_ENABLED=1`` in the fleet-tier ``.env`` — the SAME
+resolution the composer uses for briefing-timer arming). NOTE the carrier
+split: ``fleet.yaml env:`` reaches composed ``bot.conf`` (runtime doors and
+hooks read it) but does NOT arm generate-time scans — the .env tier arms
+BOTH, so it is the recommended single carrier. A root pull must never
+switch on new emission; the generate hook is NON-BLOCKING (a scan failure
+logs and never breaks generate).
+
+F11 boundary (disclosed): this emitter enforces the PREVENTION half —
+incomplete enumerations never tombstone, empty-but-complete tombstones its
+scope. The VALIDATION half (a reader honoring tombstones only when a
+same-scan_id ``scan_completed`` with complete=true exists — spec §9 line
+146) is chunk-B projection territory and is enforced nowhere yet.
 """
 
 from __future__ import annotations
@@ -31,11 +42,14 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import uuid
 from pathlib import Path
 
+from ..claudron_compat import COMPAT_FLOOR
+from ..paths import _iter_fleet_dirs
 from .canonical import CanonicalizationError, canonical_hash
 
 log = logging.getLogger("claudlobby.plane.registry")
@@ -49,7 +63,10 @@ def _library_kinds(paths) -> list[str]:
     for base in (paths.base_library,
                  getattr(paths, "overlay_library", None)):
         if base and base.is_dir():
-            kinds.update(d.name for d in base.iterdir() if d.is_dir())
+            kinds.update(
+                d.name for d in base.iterdir()
+                if d.is_dir() and not d.name.startswith(".")
+                and d.name != "__pycache__")
     return sorted(kinds)
 
 _SCHEMA = "1"
@@ -77,18 +94,36 @@ def _hash_or_none(p: Path) -> str | None:
         return None
 
 
+def _fallback_normalize(obj):
+    """Total, deterministic normalization for the fallback hash: dict keys
+    sorted by repr (mixed int/bool/str keys — YAML 1.1's `on:`/`2026:` — must
+    never raise: the r1 fallback's own sorted() re-created the vaporize one
+    level down, probed r2); sets sorted by repr (a raw set repr is
+    PYTHONHASHSEED-nondeterministic across processes — keyframe churn)."""
+    if isinstance(obj, dict):
+        return [[repr(k), _fallback_normalize(v)]
+                for k, v in sorted(obj.items(), key=lambda kv: repr(kv[0]))]
+    if isinstance(obj, (list, tuple)):
+        return [_fallback_normalize(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        return sorted(repr(v) for v in obj)
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return repr(obj)
+
+
 def _safe_hash(obj) -> str:
-    """canonical_hash that degrades to a repr-hash instead of raising:
-    CANON_V1 refuses floats, and one float in a project's raw YAML must not
-    vaporize the whole scan (gauntlet r1, measured — the non-blocking hook
-    turned it into 'no registry ever'). The repr form is deterministic for
-    the same input, which is all the hash gate needs."""
+    """canonical_hash that DEGRADES instead of raising: CANON_V1 refuses
+    floats and non-string keys, and one such value in a project's raw YAML
+    must not vaporize the whole scan (gauntlet r1 measured; r2 hardened the
+    fallback itself). The fallback is json-over-a-total-normalizer —
+    deterministic across processes, which is all the hash gate needs."""
     try:
         return canonical_hash(obj)
-    except CanonicalizationError:
-        return "sha256:" + hashlib.sha256(
-            repr(sorted(obj.items()) if isinstance(obj, dict) else obj)
-            .encode()).hexdigest()
+    except (CanonicalizationError, TypeError, ValueError):
+        blob = json.dumps(_fallback_normalize(obj), sort_keys=False,
+                          ensure_ascii=False, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(blob.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +156,6 @@ def host_payload(paths) -> dict:
     # paths._iter_fleet_dirs — the ONE nested-aware fleet walk. The shipped
     # depth-1 glob measured [] on the live nested-vault host (gauntlet r1);
     # spec: "fleet aliases from manifests — NEVER process inference".
-    from ..paths import _iter_fleet_dirs
     declared_fleets = sorted(
         d.name for d in _iter_fleet_dirs(paths.root / "local")
         if (d / "fleet.yaml").is_file())
@@ -179,7 +213,6 @@ def vault_payload(paths, fleet) -> dict | None:
         safe = ("runtime" in gi) and (".env" in gi)
     except OSError:
         pass
-    from ..claudron_compat import COMPAT_FLOOR
     # the floor summary = the highest slated release across the capability
     # tuple (deterministic; "pinned SHA" entries sort in but never win a
     # semver max). ok is None, NEVER a hardcoded True: no compat probe runs
@@ -188,8 +221,14 @@ def vault_payload(paths, fleet) -> dict | None:
     # and the shipped getattr FLOOR fallback made floor permanently
     # "unset": under a hash gate, defaulted getattr is strictly worse than
     # the bare attribute).
-    floor = max((c.default_order_release for c in COMPAT_FLOOR),
-                default="none")
+    # semver-SHAPED entries only, compared as int tuples: the lexical max
+    # returned 'unbuilt — demand-gated' on the live floor (it sorts after
+    # every digit) and '0.10.0' < '0.9.0' lexically — both probed, and the
+    # hash gate would have frozen the wrong floor forever (gauntlet r2).
+    _semver = [tuple(int(x) for x in c.default_order_release.split("."))
+               for c in COMPAT_FLOOR
+               if re.fullmatch(r"\d+\.\d+\.\d+", c.default_order_release)]
+    floor = ".".join(str(x) for x in max(_semver)) if _semver else "none"
     return {
         "alias": vpath.name,
         "role": "primary",
@@ -442,17 +481,20 @@ def _vault_rev(paths) -> str | None:
 def _in_scope(entity_type: str, alias: str, fleet_name: str,
               scanned: set) -> bool:
     """Tombstone scope: what THIS scan is authoritative for. Host and shared
-    library are host-global (every scan enumerates them); the VAULT is in
-    scope only when this scan actually enumerated one — vault enumeration is
-    fleet-binding-dependent, so a vaultless fleet's complete scan must never
-    tombstone another fleet's vault (gauntlet r1, probed: tombstone/
-    resurrect ping-pong per generate rotation on a multi-fleet host). Bots/
-    projects/overlay items belong to their fleet by alias convention (every
-    prefix includes a separator, so prefix-name siblings cannot collide)."""
+    library are host-global (every scan enumerates them). The VAULT is in
+    scope only for the EXACT alias this scan enumerated: vault enumeration
+    is fleet-binding-dependent, so neither a vaultless fleet (r1, probed)
+    nor a fleet bound to a DIFFERENT vault (r2, probed — the ping-pong one
+    fleet over) may tombstone a sibling's vault. Disclosed trade-off: a
+    fleet that re-binds to a new vault leaves its OLD vault keyframe
+    standing — no generate scan owns that alias any more; an operator-cause
+    emission (equip/migration) retires it. Bots/projects/overlay items
+    belong to their fleet by alias convention (every prefix includes a
+    separator, so prefix-name siblings cannot collide)."""
     if entity_type == "host":
         return True
     if entity_type == "vault":
-        return any(t == "vault" for t, _a in scanned)
+        return ("vault", alias) in scanned
     if entity_type == "fleet":
         return alias == fleet_name
     if entity_type == "bot":
@@ -479,9 +521,8 @@ def run_generate_scan(paths, fleet) -> dict | None:
         return None
     from .. import env_tiers as _env_tiers
     try:
-        _res = _env_tiers.cascade(
-            _env_tiers.read_tiers(paths, fleet_name=fleet.name)
-        ).get("PLANE_EMIT_ENABLED")
+        _res = _env_tiers.resolve(
+            paths, fleet_name=fleet.name).get("PLANE_EMIT_ENABLED")
     except _env_tiers.ResolverUnavailable as exc:
         log.warning("registry scan: arming unresolved (%s) — UNARMED", exc)
         return None
@@ -532,6 +573,7 @@ def run_generate_scan(paths, fleet) -> dict | None:
     # name. Read-only db peek; a missing db = first scan = nothing to
     # tombstone. Never against an incomplete enumeration (F11).
     tombstoned = 0
+    foreign_rows = 0
     if complete:
         import sqlite3
         db = Path(root) / "state" / "plane" / "plane.db"  # pure join (no
@@ -541,19 +583,34 @@ def run_generate_scan(paths, fleet) -> dict | None:
             try:
                 conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
                 conn.row_factory = sqlite3.Row
-                # THIS host's envelope uid — the SAME door ingest stamps
-                # rows with (ids.ensure_host_uid), never an identity-alias
-                # guess: the registry's host-ENTITY uid is a different
-                # namespace, and matching on it filtered every row
-                # (gauntlet r1 fix round, caught by the pins).
-                from .ids import ensure_host_uid
-                this_host = ensure_host_uid(Path(root) / "state")
+                # THIS host's envelope uid — the SAME value ingest stamps
+                # rows with, READ from the uid file, never ensure_host_uid:
+                # ensure_ MINTS on absence (mkdir+write — a write this read
+                # path must not carry, r2 probed), and a fresh uid would
+                # filter every row into a FALSE CLEAN. Absent/invalid file
+                # -> the diff is skipped LOUDLY, never silently empty.
+                uid_file = Path(root) / "state" / "host-uid"
+                try:
+                    this_host = uid_file.read_text().strip()
+                except OSError:
+                    this_host = ""
+                if not this_host:
+                    log.warning(
+                        "registry scan: host-uid unreadable at %s —"
+                        " tombstone diff SKIPPED (cannot scope rows to this"
+                        " host)", uid_file)
+                    raise sqlite3.Error("host-uid unreadable")
                 rows = conn.execute(
                     "SELECT entity_type, entity_uid, entity_alias, tombstone,"
                     " MAX(ingest_seq) FROM registry_snapshots"
                     " WHERE origin = 'live' AND host_uid = ?"
                     " GROUP BY entity_type, entity_uid",
                     (this_host,)).fetchall()
+                # rows recorded under OTHER hosts (legacy imports): counted
+                # and DISCLOSED, never silently excluded (r2)
+                foreign_rows = conn.execute(
+                    "SELECT COUNT(*) FROM registry_snapshots"
+                    " WHERE host_uid != ?", (this_host,)).fetchone()[0]
                 conn.close()
                 for r in rows:
                     if r["tombstone"]:
@@ -602,4 +659,5 @@ def run_generate_scan(paths, fleet) -> dict | None:
         by_status[o.status] = by_status.get(o.status, 0) + 1
     return {"scan_id": scan_id, "entities": len(entities),
             "tombstoned": tombstoned, "complete": complete,
+            "foreign_host_rows": foreign_rows,
             "outcomes": by_status}

@@ -589,7 +589,7 @@ class Declaration(_Strict):
     scope: Optional[str] = None
     counts: Optional[dict] = None
     complete: Optional[bool] = None
-    source_rev: Optional[str] = None
+    source_rev: Optional[str] = None   # optional BY DESIGN: vaultless fleets scan too
 
     @model_validator(mode="after")
     def _per_token_detail(self):

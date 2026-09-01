@@ -13,7 +13,7 @@ repos: [Claudfather/Claudlobby]
 
 Two systems grew from the same substrate — a compositor, one tmux session per bot, the same supervision scripts — and built opposite UI layers on top. The sibling built a **cockpit**: a write-capable Gateway that classifies every pane every second, dispatches, runs a self-maintaining board, a decision queue, durable chat and schedules — with in-memory truth that resets on restart and no authentication inside the perimeter. Claudlobby built a **flight recorder**: an append-only ledger with minted identity, provenance on every envelope, typed panel states, capture policy, and a view that is read-only by construction.
 
-The recorder is the moat and should stay. What it lacks is a **present tense**: the plane can say what happened but not what is happening. The grid answers "is the session up", never "is the bot working"; the attention rail knows dispatch trouble and deadlines, not a bot's question, a stale in-flight task, or a stopped fleet (#1361). Every high-ranked item below is a present-tense instrument, and all of them become cheap after one: a single activity classification over the frames the sampler already captures.
+The recorder is the moat and should stay. What it lacks is a **present tense**: the plane can say what happened but not what is happening. The grid answers "is the session up", never "is the bot working"; the attention rail knows dispatch trouble and deadlines, not a bot's question, a stale in-flight task, or a stopped fleet (#1361). Every high-ranked item below is a present-tense instrument, and all of them become cheap after one wiring job: recording the verdict `keepalive` already renders every minute as the metric samples the design reserved for it, so that *presence* — the derivation the design names as live, poller-fed and never a table — has both of its inputs.
 
 What follows: the compare/contrast, a ranked punch list (10), what is deliberately not harvested and why, and five candidate directions for the next kindle round. Recommendation: spec **Play A — Present tense** first.
 
@@ -61,18 +61,32 @@ The present tense (§5.1); a real human-action queue (§5.5); header stats in op
 
 The sibling's activity sub-labels (thinking / editing / writing / reading / running) come from grepping the CLI's verb ladder. `lib/lib-common.sh` retired exactly that — "the churning verb lists silently degrade on UI changes and must not reappear" (gate: `tests/test_busy_ssot.py`) — in favour of one stable affordance (`esc to interrupt`) plus the `data/.last-tool-call` marker. Harvest the two-window *scoping* and the *debounce*, not the verb ladder as a truth source.
 
+### One truth, two inputs (the split-truth question)
+
+The sibling keeps two truths — an in-memory pane map and a store — and its own defects list is what that costs (§7 entities 10–11 vanish on restart; sequence numbers reset without an epoch). The plane's design forecloses it: **facts are recorded as `metric_samples`; presence is a derivation over the latest samples plus a live poll, and the derivation is deliberately never a table** (§9b: *"Presence now names the Lane C LIVE derivation — is-it-up-right-now, in-memory, poller-fed, never a table"*). Today only half of that exists. The view's sampler polls liveness live (`tmux capture-pane` return code, 5 s), while keepalive's busy/idle verdict — the other input, already computed every tick from the SSOT patterns — is written to the legacy JSONL and never reaches the plane. `metric_samples` (table, contract, ingest path) landed on `plane/phase2b-registry` in migration 0006 with `bot.heartbeat`, `bot.session_up` and `bot.pane_last_change_age_s` already seeded in the metric registry and no emitter yet. The earlier draft of item 1 would have classified inside the poller and emitted "later" — that is exactly the sibling's split, and it is withdrawn. The recorded half comes first: keepalive becomes a door. The poller keeps rendering pixels and alive/dead, and classifies nothing. One input stays unrecorded by design — the live poll — and that is not a second truth: if the poller dies, the page degrades to "last recorded heartbeat 3m ago", typed as stale.
+
+### OTel and LangSmith — a source swap, not a substitute
+
+From the current Claude Code monitoring docs (read 2026-08-31): seven event types (`user_prompt`, `assistant_response`, `tool_result`, `api_request`, `api_error`, `tool_decision`, `permission_mode_changed`, all carrying `prompt.id`), six metrics (`session.count`, `cost.usage`, `token.usage`, `lines_of_code.count`, `code_edit_tool.decision`, `active_time.total`), logs exported every 5 s and metrics every 60 s by default, OTLP over `http/json` straight to a localhost endpoint with no collector, `OTEL_RESOURCE_ATTRIBUTES` honoured (so the composer can stamp `bot_instance_uid` / fleet onto everything a session emits), content gated behind opt-in flags (`OTEL_LOG_USER_PROMPTS`, `…ASSISTANT_RESPONSES`, `…TOOL_DETAILS`, `…TOOL_CONTENT`, `…RAW_API_BODIES`). **Undocumented:** the attributes on `api_error` (status / limit class), any idle heartbeat, any session-end or process-death event, hook visibility, and the `agent_id` / `workflow.run_id` attributes the design recorded as verified on 2026-08-18 — the pilot re-verifies those.
+
+What that buys: the **inside half** of presence without touching tmux — an activity stream per bot (`tool_result` / `api_request` at 5 s freshness) that is the standardized form of today's `.last-tool-call` marker, plus tokens and cost for the usage lane, plus possibly the one thing neither a pane regex nor the hook payload can see (`bot-vitals.sh` says so in its header): an `api_error` at the instant a session stalls on a limit — #1361's class — *if* its attributes carry the class, which the docs do not say. What it cannot buy, by construction: the **outside half**. Nothing is emitted when a session is idle, dead, wedged or stopped mid-turn; the four states #1361 needs separated look identical from inside, because the signal is produced by the thing that failed. `bot.session_up` stays an outside observation (keepalive / the sampler's `has-session`) under any telemetry.
+
+LangSmith is the other axis: intra-session traces (messages, tools, subagents, `thread_id` grouping), hosted, opt-in per fleet under §11. It answers *what did the bot do in that turn*, never *is it alive* — and polling a SaaS to learn whether a local process is up is the wrong direction. Phase-5 material (the why), not presence.
+
+So: no rebuild. Item 1 opens one existing door. The Phase-3 OTel pilot (§12) then decides whether the OTel stream replaces the heartbeat's *busy* half — the ingest daemon would gain an OTLP/HTTP door, which fits its ingest-only tripwire — and keepalive keeps emitting `session_up` either way. The model stays; the source of one input changes.
+
 ## Gaps — the ranked punch list
 
 Ranked by (impact × ease) / risk. Top three in full; the rest one line each.
 
-### 1. Give the grid a present tense
+### 1. Give the grid a present tense — as the presence derivation the design already names
 
 - **Lenses:** wedge · coverage · differentiation
 - **Severity:** high
 - **Impact:** the founding surface ("watch my fleet work") cannot tell working from idle; #1361 documents five hours of a stopped estate reading as busy from every existing signal. Lands §17's 60-second "next action" clock and the grid half of the story-first criterion.
-- **Effort:** days. The sampler already captures every pane on a 5 s cadence and already resolves each bot's directory, so the two inputs `lib/` uses are free: the `.last-tool-call` marker age (within the same 180 s window `lib/` uses, overridable) and the one busy regex, with the prompt-glyph idle regex; debounce working→idle over ~5 samples the way §5.1 does; anything else is `unknown`, typed and counted on the trust view. Show `working · idle · down` on the card with the marker age (#1361's "one column"), and context-% only when the frame carries it — never a fabricated value.
-- **Risk:** a second copy of the busy vocabulary in Python is the drift class the spec's own top finding (§20.1) and `test_busy_ssot.py` exist to prevent. Mitigate with one fixture set of recorded frames run through both implementations, or move the two patterns to a file both read. Fully reversible.
-- **Open question:** presentational only, or also emitted as `pane_activity` metric samples (F20) so utilization and history derive from the same source? Recommend presentational first, emit second.
+- **Effort:** hours to a day or two — **nothing new is classified.** `lib/keepalive.sh` already renders BUSY / IDLE / UNKNOWN for every bot on its tick (marker-first: `.last-tool-call` within 180 s; then the one busy regex; `pane_is_idle` for the prompt) and writes it only to the legacy JSONL. Make keepalive a door: emit `bot.heartbeat {state, marker_age_s}` and `bot.session_up` as `metric_samples` rows each tick — the table, contract and ingest path are on this branch (0006), the metric names are seeded, and §9b names keepalive as exactly this emitter at per-minute cadence (sized 30–45k rows/day, 30-day retention). Presence is then the Lane C derivation the design describes — latest heartbeat sample joined to the view sampler's live alive/dead poll — and the grid card, the header counts and the freshness suppression all read presence. Show `working · idle · down` with the marker age (#1361's "one column"); context-% only if a source ever carries it, never fabricated.
+- **Risk:** the drift risk in the earlier draft is gone — there is no second classifier anywhere, and the sampler never classifies. What is real: busy/idle lags up to one keepalive tick (a cadence knob, not a design cost), and keepalive is not yet a door, so this is the first Phase 2b *emitter* (bash, the `plane_emit_events` pattern in lib-common, dormant behind `PLANE_EMIT_ENABLED` like the five doors). Reversible.
+- **Open question:** heartbeat cadence — keep keepalive's tick or add a lighter one; and whether the Phase 3 OTel pilot supersedes the *busy* half of the heartbeat (see *OTel and LangSmith* below).
 
 ### 2. A header that speaks the operator's language
 
@@ -102,7 +116,7 @@ Cut: splitting `app.js` by view (real, low impact at three viewers). Filed elsew
 
 ### Meta-pattern
 
-The plane can say what happened; it cannot say what is happening. Items 1–4 and 7 are all the present tense — working now, needs me now, moved recently — and all of them derive from one classification over frames the sampler already holds. Build the classifier once and the rest become derivations rather than features. The recorder stays the moat; the sibling's advantage was never its data model, it was the one-second present tense.
+The plane can say what happened; it cannot say what is happening. Items 1–4 and 7 are all the present tense — working now, needs me now, moved recently — and all of them read *presence*, the derivation the design already names (latest heartbeat sample + live session poll), which nobody has wired because keepalive's verdict still lands only in the legacy JSONL. Open that one door and the rest become derivations rather than features. The recorder stays the moat; the sibling's advantage was never its data model, it was the one-second present tense — and the plane gets a one-minute one for the price of a door.
 
 ## Risks
 
@@ -131,13 +145,15 @@ For the kindle round, one at a time — the first is the ask at the end of this 
 
 | Play | Bundles | Why it compounds | Impact | Effort | Mission | |
 |---|---|---|---|---|---|---|
-| A. Present tense | items 1, 2, 4 (+ `pane_activity` samples later) | header counts, freshness suppression and "idle bot holding work" all derive from one classification | High | Med | Strong | 🟢 |
+| A. Present tense | keepalive → `bot.heartbeat` / `bot.session_up` samples; the presence derivation; items 1, 2, 4 | header counts, freshness suppression and "idle bot holding work" all read one derivation — recorded and live | High | Low–Med | Strong | 🟢 |
 | B. One queue of human calls | items 3, 5, 7 → then the first write verb (ack/resolve, attributed) | the mobile triage story; the seam for the §11 reveal act and the first authenticated non-GET route | High | Med (read) / High (write) | Strong | 🟢 |
 | C. Work, not messages | item 6 + #1394 + projects from the 2b registry | the mission lens — the north star's multi-workstream gap | Med–High | Med | Strong | 🟡 |
 | D. Recurring, with consent | item 8 → the consent gate via git | filling idle time is north-star; the surface is secondary | Med | Med | Med | 🟡 |
 | E. Talk back | composer → `dispatch.sh`, durable operator messages, unread | the sibling proves it is wanted; the highest-risk write | High | High | Strong | 🔴 until F22 |
 
-Deprecation candidates: the `rows` / `spool` / `ingest` header pills (duplicated on trust); `fleet-utilization.sh`'s keepalive-log parse once `pane_activity` samples exist.
+The Phase-3 OTel pilot is a later source swap for the heartbeat's busy half, not a prerequisite for A.
+
+Deprecation candidates: the `rows` / `spool` / `ingest` header pills (duplicated on trust); `fleet-utilization.sh`'s keepalive-log parse once `bot.heartbeat` samples exist.
 
 ## Related
 
