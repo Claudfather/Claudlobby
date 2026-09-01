@@ -94,9 +94,16 @@ plane_presence_samples() {
     # still in flight SKIPS: presence tolerates a gap, the reader types
     # staleness. rc-wise the tick never depends on the record; disclosures
     # land in keepalive.log, not the journal.
+    # The claim is honored only while FRESH (2 ticks): kill -0 alone let a
+    # RE-USED pid block a bot indefinitely — proven live within minutes of
+    # deploy (takahashi: pidfile held 1543, occupied by an unrelated
+    # long-lived process; zero heartbeats across every sweep while eight
+    # siblings recorded). A stale claim means wedge-or-reuse and both want
+    # one new emit; pileup stays bounded at ~one background proc per 120s.
     local pidf="$BOT_DIR/data/.plane-presence.pid" prev
     prev="$(cat "$pidf" 2>/dev/null || true)"
-    if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null; then
+    if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null \
+       && marker_age_within "$pidf" 120; then
         return 0
     fi
     local fleet_esc subj payload
