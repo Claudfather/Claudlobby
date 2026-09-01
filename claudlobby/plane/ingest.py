@@ -331,25 +331,33 @@ def _registry_row(conn, payload, entity, host_uid):
         " WHERE host_uid = ? AND entity_type = ? AND entity_uid = ?"
         " ORDER BY ingest_seq DESC LIMIT 1",
         (host_uid, payload.entity_type, uid)).fetchone()
+    # EVERY suppression decision below asks the READER'S question through
+    # one definition (chunk-B gauntlet SEV-1 + r3 — see the derivation at
+    # queries.REG_CURRENT_POINT_SQL). Ledger-latest (`prev`) keyed both
+    # decisions before, and both broke: an invalid tombstone suppressed
+    # every later valid deletion, and a stale-clock backfill row made the
+    # gate suppress every honest rescan while the reader served the stale
+    # payload indefinitely.
+    from .registry_read import current_hash
     if payload.tombstone:
         if prev and prev["tombstone"]:
-            # Suppress a repeat tombstone ONLY when the entity is already
-            # EFFECTIVELY deleted per the READER'S definition (F11-valid
-            # and winning its partition). Keying on mere existence let one
-            # crashed scan's invalid tombstone suppress every later valid
-            # deletion — permanent false PRESENT in the exact case F11
-            # exists for (chunk-B gauntlet, probed SEV-1). Same mechanism
-            # heals the stale-clock case: a valid tombstone losing the
-            # occurred_at ordering leaves the entity current, so the
-            # re-tombstone lands with a fresh instant and wins.
-            from .registry_read import entity_is_current
-            if not entity_is_current(conn, host_uid,
-                                     payload.entity_type, uid):
+            try:
+                still_current = current_hash(
+                    conn, host_uid, payload.entity_type, uid) is not None
+            except sqlite3.Error as exc:
+                # unreadable ≠ deleted: fail toward WRITING (append-only,
+                # still needs a completion to be honored) rather than
+                # raising — a raise here loses the whole batch unspooled
+                # for probe/equip/migration causes (r3, disclosed)
+                print(f"plane ingest: registry current-check unreadable"
+                      f" ({exc}) — writing the tombstone", file=sys.stderr)
+                still_current = True
+            if not still_current:
                 return uid, None   # already gone — nothing to re-claim
         return uid, values
     phash = canonical_hash(_gate_view(payload.payload))
-    if prev and not prev["tombstone"] and prev["payload_hash"] == phash:
-        return uid, None    # the write gate: unchanged state writes nothing
+    if current_hash(conn, host_uid, payload.entity_type, uid) == phash:
+        return uid, None    # the write gate: unchanged per the READER
     values["payload"] = json.dumps(payload.payload, ensure_ascii=False)
     values["payload_hash"] = phash
     return uid, values

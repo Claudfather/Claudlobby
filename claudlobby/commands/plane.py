@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -266,26 +267,32 @@ def cmd_plane_doctor(args) -> int:
                 # and its completion — the reader already ignores them; the
                 # rung surfaces that they exist. Last-scan freshness rides
                 # the same rung set; "no scan yet" is dormancy, not fault.
-                # NO try/except: migrate() above guarantees the table, and
-                # a blanket catch rendered real defects as a green rung
-                # with a false diagnosis (gauntlet — the exact
-                # unreachable-vs-empty collapse source_state forbids).
+                # The catch is NARROW and FAILS THE RUNG — never green
+                # (round 2 deleted a blanket except that rendered defects
+                # as a passing "pre-0006" diagnosis), and never a crash
+                # (r3, probed: one malformed detail row killed the whole
+                # doctor, taking the daemon/spool rungs an operator needs
+                # most when the db is sick — unreachable ≠ empty ≠ dead
+                # instrument).
                 from ..plane import registry_read as _rr
-                inv = _rr.invalid_tombstones(conn)
-                rung(not inv, "tombstone validity (F11)",
-                     f"{len(inv)} unvalidated"
-                     + (f" — newest scan {inv[0]['scan_id']}" if inv
-                        else ""))
-                ls = _rr.last_scan(conn)
-                if ls is None:
-                    rung(True, "registry scan", "none yet (lane dormant"
-                         " or first generate pending)")
-                else:
-                    rung(bool(ls.get("complete")), "registry scan",
-                         f"{ls['occurred_at']} scope={ls.get('scope')}"
-                         + ("" if ls.get("complete")
-                            else " — INCOMPLETE (tombstones from it"
-                                 " are not honored)"))
+                try:
+                    inv = _rr.invalid_tombstones(conn)
+                    rung(not inv, "tombstone validity (F11)",
+                         f"{len(inv)} unvalidated"
+                         + (f" — newest scan {inv[0]['scan_id']}" if inv
+                            else ""))
+                    ls = _rr.last_scan(conn)
+                    if ls is None:
+                        rung(True, "registry scan", "none yet (lane"
+                             " dormant or first generate pending)")
+                    else:
+                        rung(bool(ls.get("complete")), "registry scan",
+                             f"{ls['occurred_at']} scope={ls.get('scope')}"
+                             + ("" if ls.get("complete")
+                                else " — INCOMPLETE (tombstones from it"
+                                     " are not honored)"))
+                except (sqlite3.Error, ValueError) as exc:
+                    rung(False, "registry lane", f"unreadable: {exc}")
             finally:
                 conn.close()
         try:
@@ -378,24 +385,39 @@ def cmd_plane_registry(args) -> int:
         conn = connect(path)
         try:
             migrate(conn)
+        except Exception:
+            conn.close()
+            raise
+        try:
             if args.verify:
-                # --verify re-derives the estate, which needs the fleet
-                # OVERLAY — that is the global selector's job, not a
-                # subcommand flag (the two shared a dest and the collision
-                # made legal reads refuse — gauntlet, probed)
-                if not getattr(args, "fleet", None):
-                    print("registry --verify re-derives one fleet's estate"
-                          " — run: claudlobby --fleet <name> plane registry"
-                          " --verify", file=sys.stderr)
-                    return 2
+                # --verify re-derives the estate through the fleet config —
+                # root-mode fleet.yaml or the global --fleet overlay;
+                # _load_fleet_or_exit owns that resolution and its errors
                 from ._helpers import _load_fleet_or_exit
                 from ..plane.registry_emit import (
                     _vault_rev, assemble_entities)
                 fleet, _ = _load_fleet_or_exit(paths)
+                # READ the host identity the ingest path recorded — never
+                # mint. ensure_host_uid(root) here minted a FRESH uid at
+                # the wrong path, scoping the projection to nothing: a
+                # healthy estate read as 100% phantom drift, and a read
+                # door left a write behind (r3 BLOCKER, probed; the pin
+                # drives THIS door, not the API — the rehearse-env-cascade
+                # lesson).
+                uid_file = root / "state" / "host-uid"
+                try:
+                    this_host = uid_file.read_text().strip()
+                except OSError:
+                    this_host = ""
+                if not this_host:
+                    print(f"registry --verify: no host identity at"
+                          f" {uid_file} — no scan has recorded here yet",
+                          file=sys.stderr)
+                    return 1
                 assembled, complete = assemble_entities(
                     paths, fleet, _vault_rev(paths))
                 rep = rr.verify_current(conn, assembled, fleet=fleet.name,
-                                        host_uid=ensure_host_uid(root))
+                                        host_uid=this_host)
                 print(f"checked {rep.checked} entities"
                       + ("" if complete else
                          "  [enumeration INCOMPLETE — drift below is"
@@ -470,6 +492,12 @@ def cmd_plane_registry(args) -> int:
                       f" {(r['payload_hash'] or '')[:12]}"
                       f"  {r['occurred_at']}")
             return 0
+        except (sqlite3.Error, ValueError) as exc:
+            # a read door must not traceback on one corrupt row (r3,
+            # probed: malformed declaration detail killed the whole
+            # command) — refuse loudly instead, rc 1
+            print(f"registry unreadable: {exc}", file=sys.stderr)
+            return 1
         finally:
             conn.close()
 

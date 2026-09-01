@@ -28,11 +28,12 @@ BOTH, so it is the recommended single carrier. A root pull must never
 switch on new emission; the generate hook is NON-BLOCKING (a scan failure
 logs and never breaks generate).
 
-F11 boundary (disclosed): this emitter enforces the PREVENTION half —
-incomplete enumerations never tombstone, empty-but-complete tombstones its
-scope. The VALIDATION half (a reader honoring tombstones only when a
-same-scan_id ``scan_completed`` with complete=true exists — spec §9 line
-146) is chunk-B projection territory and is enforced nowhere yet.
+F11 boundary: this emitter enforces the PREVENTION half — incomplete
+enumerations never tombstone, empty-but-complete tombstones its scope.
+The VALIDATION half lives in ``queries.py`` (the shared effective-rows
+CTE — see ``_F11_COMPLETION_JOIN``), and the write side consults the
+same definition for suppression (``REG_CURRENT_KEYS_SQL`` below;
+chunk B closed the IOU this paragraph used to carry).
 """
 
 from __future__ import annotations
@@ -618,21 +619,18 @@ def run_generate_scan(paths, fleet) -> dict | None:
                     "SELECT COUNT(*) FROM registry_snapshots"
                     " WHERE host_uid != ?", (this_host,)).fetchone()[0]
                 # Tombstone eligibility asks the READER'S question — is the
-                # entity still CURRENT (F11-valid, winning its partition)?
-                # The old latest-row-is-a-tombstone skip keyed on existence,
-                # so a crashed scan's invalid tombstone suppressed every
-                # later valid deletion (chunk-B gauntlet, probed SEV-1) and
-                # a stale-clock tombstone that lost the ordering was never
-                # re-emitted. One bulk read of the same REG_CURRENT the
-                # reader serves; a private predicate here is how the two
-                # sides split.
-                from .queries import REG_CURRENT_SQL
+                # entity still current? (chunk-B gauntlet SEV-1; the full
+                # story lives at queries.REG_CURRENT_POINT_SQL.) One bulk
+                # read of the reader's own SQL. Known residual, disclosed:
+                # candidates are origin='live' while current is
+                # origin-blind, so a legacy-origin row that is current can
+                # never be tombstoned by a scan — operator-cause emission
+                # is its only retirement (r3, probed).
+                from .queries import REG_CURRENT_KEYS_SQL
                 current_keys = {
                     (cr["entity_type"], cr["entity_uid"])
-                    for cr in conn.execute(
-                        "SELECT entity_type, entity_uid FROM ("
-                        + REG_CURRENT_SQL + ") WHERE host_uid = ?",
-                        (this_host,))}
+                    for cr in conn.execute(REG_CURRENT_KEYS_SQL,
+                                           (this_host,))}
                 conn.close()
                 for r in rows:
                     if (r["entity_type"], r["entity_uid"]) not in current_keys:

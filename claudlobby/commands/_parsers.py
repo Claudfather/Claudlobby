@@ -491,8 +491,8 @@ def register_subparsers(sub) -> None:
                       " (default 20)")
     mode.add_argument("--verify", action="store_true",
                       help="Hash-verify the projection against the"
-                      " re-derived estate (run with the global"
-                      " --fleet <name>)")
+                      " re-derived estate (root-mode fleet.yaml, or the"
+                      " global --fleet <name> for an overlay)")
     prg.set_defaults(func=cmd_plane_registry)
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
     psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])

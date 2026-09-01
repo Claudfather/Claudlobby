@@ -206,6 +206,26 @@ def test_unchanged_rescan_suppresses_every_keyframe(tmp_path):
     assert s2["outcomes"]["committed"] == 1          # scan_completed only
 
 
+def test_cli_verify_door_matches_a_fresh_scan(tmp_path):
+    """r3 BLOCKER: the shipping --verify door derived the host uid at the
+    WRONG PATH (minting a fresh identity that matched no row), so a
+    healthy just-scanned estate reported 100% phantom drift at rc 1 — and
+    left a stray uid file behind, a write from a read door. The chunk's
+    own test certified the API directly while the door was dead (the
+    rehearse-env-cascade lesson). This pin drives THE DOOR."""
+    import subprocess
+    import sys
+    root = _fleet_root(tmp_path)
+    _scan(root)
+    r = subprocess.run(
+        [sys.executable, "-m", "claudlobby", "--root", str(root),
+         "plane", "registry", "--verify"],
+        capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "projection matches the estate" in r.stdout
+    assert not (root / "host-uid").exists()   # read doors leave no writes
+
+
 def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path):
     """Chunk-B gauntlet SEV-1, the EMITTER half (probed): the diff's old
     latest-row-is-a-tombstone skip keyed on existence, so a crashed scan's

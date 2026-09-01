@@ -161,16 +161,25 @@ REG_CURRENT_SQL = (
     " ORDER BY entity_type, entity_alias"
 )
 
-# Point form of REG_CURRENT for WRITE-SIDE suppression decisions (chunk-B
-# gauntlet, probed SEV-1): "is this entity effectively deleted?" must mean
-# exactly what the READER means by absent. The write side used to key its
-# tombstone dedup on a tombstone row merely EXISTING — so one crashed
-# scan's invalid tombstone suppressed every later valid deletion, a
-# permanent false PRESENT in the exact case F11 exists for. A second
-# spelling of "current" here would re-open that split.
-REG_ENTITY_IS_CURRENT_SQL = (
-    "SELECT 1 FROM (" + REG_CURRENT_SQL + ")"
+# WRITE-SIDE forms of REG_CURRENT (chunk-B gauntlet, probed SEV-1 + r3):
+# every write-side suppression decision must ask what the READER would
+# answer — "current" spelled a second way is how the two sides disagreed
+# into a permanent false PRESENT (existence-keyed tombstone dedup) and a
+# permanently-stale payload (the hash gate keyed on ledger-latest while
+# the reader is the occurred_at winner; a stale-clock backfill then
+# suppressed every honest rescan). The POINT form returns the current
+# row's payload_hash: row-is-None = effectively deleted; the hash is what
+# the ingest gate compares against. The KEYS form is the emitter's bulk
+# read for tombstone eligibility. Both live HERE so zero Lane-C SQL is
+# assembled anywhere else.
+REG_CURRENT_POINT_SQL = (
+    "SELECT payload_hash FROM (" + REG_CURRENT_SQL + ")"
     " WHERE host_uid = ? AND entity_type = ? AND entity_uid = ? LIMIT 1"
+)
+
+REG_CURRENT_KEYS_SQL = (
+    "SELECT entity_type, entity_uid FROM (" + REG_CURRENT_SQL + ")"
+    " WHERE host_uid = ?"
 )
 
 # SCD2 windows: each F11-valid row opens at its occurred_at and closes at

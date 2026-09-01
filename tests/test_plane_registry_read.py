@@ -279,6 +279,67 @@ def test_reader_fleet_scope_uses_the_emitter_rules(tmp_path):
     assert "bot:other/x" not in aliases             # another fleet's
 
 
+def test_hash_gate_compares_against_the_reader_current_row(tmp_path):
+    """r3 MAJOR: the gate keyed on ledger-latest while the reader is the
+    occurred_at winner — a stale-clock backfill row made every honest
+    rescan 'duplicate' and the registry served the stale payload forever.
+    The gate now asks the reader (one definition), so the rescan lands."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T2, P1), _done("s1", T2)])
+    # stale-clock backfill: older occurred_at, higher seq, different payload
+    emit_batch(root, [_snap(BOT, "s2", T1, P2)])
+    conn = _conn(root)
+    assert rr.current_entities(conn)[0]["payload"]["model"] == "opus"
+    # the honest rescan of the true estate (fresh instant) must not be
+    # suppressed by the backfill row's identical ledger-latest hash
+    emit_batch(root, [_snap(BOT, "s3", T3, P2)])
+    conn = _conn(root)
+    assert rr.current_entities(conn)[0]["payload"]["model"] == "fable"
+
+
+def test_doctor_and_registry_survive_a_corrupt_declaration_row(tmp_path):
+    """r3 MEDIUM: one malformed detail row used to kill the WHOLE doctor
+    (traceback past the rungs an operator needs most when the db is sick)
+    and traceback the registry door. Both now refuse loudly: doctor fails
+    the rung and keeps going; registry exits 1 with the reason."""
+    root = _root(tmp_path)
+    # a TOMBSTONE row is what forces the F11 join to parse the detail —
+    # on a snapshot-only db SQLite short-circuits the OR and the listing
+    # is correctly unaffected by the corruption (first fixture, measured)
+    emit_batch(root, [_snap(BOT, "s1", T1, P1), _done("s1", T1),
+                      _snap("bot:f/dinesh", "s1", T1, _bot("bot:f/dinesh")),
+                      _tomb(BOT, "s2", T2), _done("s2", T2)])
+    db = root / "state" / "plane" / "plane.db"
+    c = sqlite3.connect(db)
+    c.execute("UPDATE events SET detail='{broken'"
+              " WHERE event='scan_completed'")
+    c.commit()
+    c.close()
+    r = _cli(root, "doctor")
+    assert r.returncode == 1
+    assert "registry lane" in r.stdout and "unreadable" in r.stdout
+    assert "spool depth" in r.stdout          # later rungs still printed
+    assert "Traceback" not in r.stderr
+    r2 = _cli(root, "registry")
+    assert r2.returncode == 1
+    assert "registry unreadable" in r2.stderr
+    assert "Traceback" not in r2.stderr
+
+
+def test_cli_changes_zero_and_exclusive_modes(tmp_path):
+    """r3 minors, pinned at the door: --changes 0 stays in changes mode
+    (argparse falsiness used to fall through to the list), and the four
+    modes refuse combination."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T1, P1)])
+    r = _cli(root, "registry", "--changes", "0")
+    assert r.returncode == 0
+    assert BOT not in r.stdout                # the list mode did NOT run
+    r2 = _cli(root, "registry", "--show", "x", "--history", "y")
+    assert r2.returncode == 2
+    assert "not allowed with" in r2.stderr
+
+
 # --- verify (the injectable-assembly seam) ---------------------------------
 
 def test_verify_matches_and_detects_each_drift_direction(tmp_path):

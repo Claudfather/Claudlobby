@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 
 from .queries import (
     REG_CHANGES_SQL,
+    REG_CURRENT_POINT_SQL,
     REG_CURRENT_SQL,
     REG_HISTORY_SQL,
     REG_INVALID_TOMBSTONES_SQL,
@@ -124,15 +125,24 @@ def recent_changes(conn, *, limit: int = 50) -> list[dict]:
     return out
 
 
+def current_hash(conn, host_uid: str, entity_type: str,
+                 entity_uid: str) -> str | None:
+    """The current row's payload_hash per the READER'S definition, or None
+    when the entity is effectively deleted (F11-valid tombstone winning
+    its partition) or never seen. The write side's two questions ride this
+    one door: ingest's hash gate compares against it, and
+    ``entity_is_current`` is its is-not-None reading. The DEFINITION is
+    also the emitter's (REG_CURRENT_KEYS_SQL, same underlying SQL) — its
+    bulk form lives beside this one in queries.py."""
+    row = conn.execute(REG_CURRENT_POINT_SQL,
+                       (host_uid, entity_type, entity_uid)).fetchone()
+    return None if row is None else row[0]
+
+
 def entity_is_current(conn, host_uid: str, entity_type: str,
                       entity_uid: str) -> bool:
-    """The write side's question, answered with the READER'S definition
-    (REG_ENTITY_IS_CURRENT_SQL — F11-valid and winning its partition).
-    Shared by ingest's tombstone dedup and the emitter's diff; a private
-    copy in either is how the two sides disagreed into a permanent false
-    PRESENT (chunk-B gauntlet, probed)."""
-    from .queries import REG_ENTITY_IS_CURRENT_SQL
-    row = conn.execute(REG_ENTITY_IS_CURRENT_SQL,
+    """Is the entity present per the reader (see ``current_hash``)?"""
+    row = conn.execute(REG_CURRENT_POINT_SQL,
                        (host_uid, entity_type, entity_uid)).fetchone()
     return row is not None
 
