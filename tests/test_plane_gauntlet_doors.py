@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -216,7 +217,15 @@ def test_crash_between_intent_and_send_leaves_visible_intent(tmp_path, armed):
         comms: list = []
         while time.monotonic() < deadline:
             if db_path(tmp_path).exists():
-                comms = _rows(tmp_path, "SELECT msg_id FROM communications")
+                # the db FILE lands before migrations create the tables —
+                # on a loaded CI runner this poll raced into that window
+                # ("no such table: communications", twice on #1421's CI,
+                # never locally). Mid-creation is simply not-ready-yet.
+                try:
+                    comms = _rows(tmp_path,
+                                  "SELECT msg_id FROM communications")
+                except sqlite3.OperationalError:
+                    comms = []
                 if comms:
                     break
             time.sleep(0.1)
