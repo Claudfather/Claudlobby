@@ -261,6 +261,30 @@ def cmd_plane_doctor(args) -> int:
                      f"user_version {version} (code supports {SCHEMA_USER_VERSION})")
                 prov = provisional_actors(conn)
                 rung(True, "provisional actors", str(len(prov)))
+                # Registry-lane trust (chunk B): tombstones the F11 join
+                # does not validate mean a scan died between its tombstones
+                # and its completion — the reader already ignores them; the
+                # rung surfaces that they exist. Last-scan freshness rides
+                # the same rung set; "no scan yet" is dormancy, not fault.
+                from ..plane import registry_read as _rr
+                try:
+                    inv = _rr.invalid_tombstones(conn)
+                    rung(not inv, "tombstone validity (F11)",
+                         f"{len(inv)} unvalidated"
+                         + (f" — newest scan {inv[0]['scan_id']}" if inv
+                            else ""))
+                    ls = _rr.last_scan(conn)
+                    if ls is None:
+                        rung(True, "registry scan", "none yet (lane dormant"
+                             " or first generate pending)")
+                    else:
+                        rung(bool(ls.get("complete")), "registry scan",
+                             f"{ls['occurred_at']} scope={ls.get('scope')}"
+                             + ("" if ls.get("complete")
+                                else " — INCOMPLETE (tombstones from it"
+                                     " are not honored)"))
+                except Exception:  # noqa: BLE001 — pre-0006 db has no table
+                    rung(True, "registry lane", "schema predates 0006")
             finally:
                 conn.close()
         try:
@@ -330,6 +354,111 @@ def cmd_plane_doctor(args) -> int:
         return 0 if failing == 0 else 1
 
     return _guarded("plane doctor", run)
+
+
+def cmd_plane_registry(args) -> int:
+    """The registry lane's read door (chunk B): current state, SCD history,
+    field-level changes, and --verify (projection vs re-derived estate).
+    Every answer is F11-validated — a tombstone counts only when its scan's
+    completion says complete=true — because queries.py's shared CTE is the
+    single place that rule lives."""
+    paths = _resolve_paths(args)
+    root = paths.root
+
+    def run() -> int:
+        from ..plane import registry_read as rr
+
+        path = db_path(root)
+        if not path.exists():
+            print(f"registry: no plane db at {path} — no scan has run here"
+                  " (arm PLANE_EMIT_ENABLED=1 in the fleet-tier .env and"
+                  " run generate)", file=sys.stderr)
+            return 1
+        conn = connect(path)
+        try:
+            migrate(conn)
+            if args.verify:
+                if not args.fleet:
+                    print("registry --verify needs --fleet <name> (the"
+                          " assembly enumerates one fleet)", file=sys.stderr)
+                    return 2
+                from ._helpers import _load_fleet_or_exit
+                from ..plane.registry_emit import (
+                    _vault_rev, assemble_entities)
+                fleet, _ = _load_fleet_or_exit(paths)
+                assembled, complete = assemble_entities(
+                    paths, fleet, _vault_rev(paths))
+                rep = rr.verify_current(conn, assembled, fleet=fleet.name)
+                print(f"checked {rep.checked} entities"
+                      + ("" if complete else
+                         "  [enumeration INCOMPLETE — drift below is"
+                         " partial evidence]"))
+                for label, keys in (("DRIFT", rep.drifted),
+                                    ("missing from db", rep.missing_from_db),
+                                    ("missing from estate",
+                                     rep.missing_from_estate)):
+                    for etype, alias in keys:
+                        print(f"  [{label}] {etype} {alias}")
+                if rep.ok:
+                    print("projection matches the estate")
+                return 0 if rep.ok else 1
+            if args.history:
+                rows = rr.entity_history(conn, args.history)
+                if not rows:
+                    print(f"no registry rows for {args.history!r}",
+                          file=sys.stderr)
+                    return 1
+                for r in rows:
+                    state = "TOMBSTONE" if r["tombstone"] else \
+                        (r["payload_hash"] or "")[:12]
+                    until = r["valid_to"] or "now"
+                    print(f"{r['valid_from']} -> {until}  {state}"
+                          f"  cause={r['cause']} scan={r['scan_id']}")
+                return 0
+            if args.changes:
+                for c in rr.recent_changes(conn, limit=args.changes):
+                    print(f"{c['occurred_at']}  {c['entity_type']}"
+                          f" {c['entity_alias']}  {c['change']}")
+                    for fld, (old, new) in sorted(c["fields"].items()):
+                        print(f"    {fld}: {old!r} -> {new!r}")
+                return 0
+            if args.show:
+                rows = [r for r in rr.current_entities(conn)
+                        if r["entity_alias"] == args.show
+                        or r["entity_uid"] == args.show]
+                if not rows:
+                    print(f"{args.show!r} is not in the current registry"
+                          " (deleted, never scanned, or a typo — try"
+                          " --history)", file=sys.stderr)
+                    return 1
+                for r in rows:
+                    print(json.dumps(
+                        {k: r[k] for k in ("entity_type", "entity_alias",
+                                           "entity_uid", "payload",
+                                           "payload_hash", "cause",
+                                           "scan_id", "occurred_at")},
+                        indent=2, ensure_ascii=False))
+                return 0
+            rows = rr.current_entities(conn, entity_type=args.type,
+                                       fleet=args.fleet)
+            if not rows:
+                print("registry is empty for this filter (no completed"
+                      " scan, or nothing matches)", file=sys.stderr)
+                return 0
+            for r in rows:
+                print(f"{r['entity_type']:13} {r['entity_alias']:44}"
+                      f" {(r['payload_hash'] or '')[:12]}"
+                      f"  {r['occurred_at']}")
+            inv = rr.invalid_tombstones(conn)
+            if inv:
+                print(f"[trust] {len(inv)} tombstone(s) NOT honored —"
+                      " no complete same-scan_id scan_completed"
+                      " (run plane doctor)", file=sys.stderr)
+            return 0
+        finally:
+            conn.close()
+
+    return _guarded("plane registry", run)
 
 
 def cmd_plane_view(args) -> int:

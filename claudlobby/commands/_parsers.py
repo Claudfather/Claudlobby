@@ -28,6 +28,7 @@ from .lessons_migrate import cmd_lessons_migrate
 from .memory_migrate import cmd_memory_migrate
 from .move_bot import cmd_move_bot
 from .plane import (
+    cmd_plane_registry,
     cmd_emit,
     cmd_emit_batch,
     cmd_plane_doctor,
@@ -467,6 +468,25 @@ def register_subparsers(sub) -> None:
     po.set_defaults(func=cmd_plane_open)
     psc = psub.add_parser("schema", help="Export JSON Schemas (envelope + families)")
     psc.set_defaults(func=cmd_plane_schema)
+    prg = psub.add_parser(
+        "registry",
+        help="Registry lane reads: current state, history, changes, verify")
+    prg.add_argument("--type", choices=(
+        "host", "vault", "fleet", "bot", "project", "library_item"),
+        help="Filter current listing by entity type")
+    prg.add_argument("--fleet", help="Filter by fleet scope"
+                     " (also selects the fleet for --verify)")
+    prg.add_argument("--show", metavar="ALIAS",
+                     help="One entity's current payload (alias or uid)")
+    prg.add_argument("--history", metavar="ALIAS",
+                     help="One entity's SCD windows (alias or uid)")
+    prg.add_argument("--changes", type=int, nargs="?", const=20,
+                     metavar="N", help="Recent field-level changes"
+                     " (default 20)")
+    prg.add_argument("--verify", action="store_true",
+                     help="Hash-verify the projection against the"
+                     " re-derived estate (needs --fleet)")
+    prg.set_defaults(func=cmd_plane_registry)
     psp = psub.add_parser("spool", help="Inspect/drain the emit spool")
     psp.add_argument("spool_action", choices=["list", "inspect", "retry", "quarantine"])
     psp.add_argument("name", nargs="?", help="Spool file name (inspect/quarantine)")

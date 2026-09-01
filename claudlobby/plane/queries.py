@@ -118,6 +118,97 @@ WORKSTREAM_STATUS_SQL = (
     " ELSE 'active' END AS status FROM workstreams w"
 )
 
+# --- Registry lane, the READ half (chunk B; spec §9 lines 143-146) --------
+#
+# THE F11 VALIDATION HALF IS ENFORCED HERE AND ONLY HERE: a tombstone is
+# honored only when a scan_completed declaration with the SAME scan_id and
+# complete=true exists — the join is by scan_id, never by time. The emitter
+# enforces prevention (incomplete enumerations never tombstone); this CTE is
+# the reader's half, shared by all three registry queries so the two halves
+# cannot drift apart per-query. Snapshots are never completion-gated: the
+# hash gate self-heals state, the completion event exists to make ABSENCE
+# trustworthy. `complete` is stored as canonical JSON true/false, which
+# json_extract yields as 1/0 (pinned).
+_F11_COMPLETION_JOIN = (
+    "EXISTS (SELECT 1 FROM events d WHERE d.kind='declaration'"
+    " AND d.event='scan_completed'"
+    " AND json_extract(d.detail,'$.scan_id') = rs.scan_id"
+    " AND json_extract(d.detail,'$.complete') = 1)"
+)
+
+_REG_EFFECTIVE = (
+    "effective AS ("
+    " SELECT rs.*,"
+    "  (rs.tombstone = 0 OR " + _F11_COMPLETION_JOIN + ") AS f11_valid"
+    " FROM registry_snapshots rs)"
+)
+
+# Current state per SCD partition: the latest F11-valid row wins; when that
+# row is a (valid) tombstone the entity is absent from current. An INVALID
+# tombstone is not merely demoted — it is excluded, so the prior snapshot
+# remains current. Ordering is (occurred_at, ingest_seq), the spec's ONE
+# SCD ordering (line 145: first-hand snapshots carry null observed_at, and
+# ingest_seq breaks producer-timestamp ties) — current is simply its tail.
+REG_CURRENT_SQL = (
+    "WITH " + _REG_EFFECTIVE + ", latest AS ("
+    " SELECT e.*, ROW_NUMBER() OVER ("
+    "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
+    "   ORDER BY e.occurred_at DESC, e.ingest_seq DESC) AS rn"
+    " FROM effective e WHERE e.f11_valid = 1)"
+    " SELECT host_uid, entity_type, entity_uid, entity_alias, payload,"
+    " payload_hash, cause, scan_id, vault_rev, occurred_at, ingest_seq"
+    " FROM latest WHERE rn = 1 AND tombstone = 0"
+    " ORDER BY entity_type, entity_alias"
+)
+
+# SCD2 windows: each F11-valid row opens at its occurred_at and closes at
+# the partition's next row (NULL = still open). Tombstone rows appear as
+# window-openers of the deleted period — the reader renders them, never
+# filters them, or deletion vanishes from history.
+REG_HISTORY_SQL = (
+    "WITH " + _REG_EFFECTIVE +
+    " SELECT e.host_uid, e.entity_type, e.entity_uid, e.entity_alias,"
+    " e.tombstone, e.payload, e.payload_hash, e.cause, e.scan_id,"
+    " e.occurred_at AS valid_from,"
+    " LEAD(e.occurred_at) OVER ("
+    "   PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
+    "   ORDER BY e.occurred_at, e.ingest_seq) AS valid_to,"
+    " e.ingest_seq"
+    " FROM effective e WHERE e.f11_valid = 1"
+    " ORDER BY e.entity_type, e.entity_alias, e.occurred_at, e.ingest_seq"
+)
+
+# Consecutive rows in a partition ARE the diff view (spec line 143). This
+# pairs each row with its predecessor; the FIELD-level diff is computed by
+# registry_read.diff_fields at read time — payloads are nested JSON and a
+# json_each diff in SQL would re-implement canonicalization badly.
+REG_CHANGES_SQL = (
+    "WITH " + _REG_EFFECTIVE + ", ordered AS ("
+    " SELECT e.*,"
+    "  LAG(e.payload) OVER w AS prev_payload,"
+    "  LAG(e.payload_hash) OVER w AS prev_hash,"
+    "  LAG(e.tombstone) OVER w AS prev_tombstone"
+    " FROM effective e WHERE e.f11_valid = 1"
+    " WINDOW w AS (PARTITION BY e.host_uid, e.entity_type, e.entity_uid"
+    "   ORDER BY e.occurred_at, e.ingest_seq))"
+    " SELECT entity_type, entity_alias, entity_uid, tombstone, payload,"
+    " prev_payload, prev_tombstone, cause, scan_id,"
+    " occurred_at, ingest_seq"
+    " FROM ordered"
+    " WHERE prev_hash IS NOT NULL OR prev_tombstone IS NOT NULL"
+    " ORDER BY ingest_seq DESC"
+)
+
+# Trust: tombstones the F11 join does NOT validate. Nonzero means a scan
+# died between its tombstones and its completion (or emitted incomplete) —
+# the reader is already ignoring them; doctor surfaces that they exist.
+REG_INVALID_TOMBSTONES_SQL = (
+    "SELECT entity_type, entity_alias, scan_id, occurred_at, ingest_seq"
+    " FROM registry_snapshots rs WHERE rs.tombstone = 1"
+    " AND NOT " + _F11_COMPLETION_JOIN +
+    " ORDER BY ingest_seq DESC"
+)
+
 RECONCILIATION_SQL = (
     "SELECT COUNT(*) FROM events s WHERE s.kind='transmission'"
     " AND s.event='pane_submitted' AND NOT EXISTS"
