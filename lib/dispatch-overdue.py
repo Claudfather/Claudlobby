@@ -860,8 +860,43 @@ def _refuse_undeterminable_orphans(bots_dir: str | None) -> bool:
     return False
 
 
-def _refuse_unreadable_report_ledger(mode: str, rlog: str) -> bool:
+def _refuse_unreadable_report_ledger(
+    mode: str, rlog: str, *, refuse_on_absent: bool = True
+) -> bool:
     """#1232. Print the refusal for `mode` and return True, or False to proceed.
+
+    ABSENT AND UNOPENABLE ARE DIFFERENT FACTS AND THE MODES SPLIT ON THEM. The
+    first version refused on both everywhere and broke the #835 resolver: a
+    fleet that has never reported has NO ledger file, and the first report is
+    exactly the call that must still work.
+
+      not a file      -> nothing was ever written there. On a never-reported
+                         fleet EVERY id'd row genuinely IS open, so "all open"
+                         is TRUE and the head of that list is the RIGHT id.
+      exists, raises  -> rows exist that cannot be read, so some are certainly
+                         closed and the head may be an already-CLOSED row.
+
+    So `refuse_on_absent=False` is passed by --open-task alone, and the reason
+    is that absence makes ITS answer more certain rather than less.
+
+    THE COST OF THAT, STATED BECAUSE IT IS A CHOICE AND NOT A FREE ONE: a WRONG
+    PATH on --open-task is now permanently SILENT. That is a real bug that
+    really happened -- state/ passed where runtime/ belonged, for six hours --
+    and under this design the resolver would have kept returning nothing
+    without complaint.
+
+    It is still the right trade, and the asymmetry is what justifies it:
+
+      --open       with a wrong path LIES. It returns a confident inflated
+                   number that a human reads and acts on.
+      --open-task  with a wrong path only UNDER-DELIVERS. Reports stay id-less
+                   and dispatches do not auto-close. Degradation, not
+                   falsehood, and it fails safe.
+
+    Refusing on --open prevents a lie. Not refusing on --open-task preserves the
+    legitimate never-reported case at the price of a silent degradation. Do not
+    "fix" the silence later without re-reading this: a silent resolver here is
+    the intended cost, not the bug that was fixed.
 
     Exactly the failure class :830 already guards for --orphans, pointed at the
     input three managers actually pass by hand. The join closes a dispatch by
@@ -886,6 +921,8 @@ def _refuse_unreadable_report_ledger(mode: str, rlog: str) -> bool:
     is simply not a file.
     """
     if not os.path.isfile(rlog):
+        if not refuse_on_absent:
+            return False
         print(
             f"dispatch-overdue.py: {mode} cannot read the report ledger: "
             f"{rlog!r} is not a file\n"
@@ -949,7 +986,10 @@ def main() -> int:
         # report-back still degrades to an id-less report, never an error.
         if _reject_bot_slot("--open-task", argv[2]):
             return 2
-        if _refuse_unreadable_report_ledger("--open-task", argv[4]):
+        # ABSENT is legitimate here and must resolve: see the docstring.
+        if _refuse_unreadable_report_ledger(
+            "--open-task", argv[4], refuse_on_absent=False
+        ):
             return 3
         tid = open_task_id(argv[2], argv[3], argv[4])
         if tid:

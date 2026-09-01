@@ -1662,10 +1662,9 @@ class TestReportLedgerRefusal:
         "argv_tail",
         [
             ["--open", "w1", "DLOG", "MISSING"],
-            ["--open-task", "w1", "DLOG", "MISSING"],
             ["w1", "DLOG", "MISSING"],  # single-bot mode
         ],
-        ids=["open", "open-task", "single-bot"],
+        ids=["open", "single-bot"],
     )
     def test_absent_ledger_refuses_at_rc3_with_nothing_on_stdout(
         self, tmp_path, monkeypatch, capsys, argv_tail
@@ -1684,6 +1683,47 @@ class TestReportLedgerRefusal:
         cap = capsys.readouterr()
         assert cap.out == "", "refusal text on stdout becomes a phantom row"
         assert "cannot read the report ledger" in cap.err
+
+    def test_open_task_PROCEEDS_on_an_absent_ledger(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The #835 resolver must survive the never-reported fleet.
+
+        A fleet that has never reported has no ledger file, and the FIRST
+        report is exactly the call that must work. Absence makes this door's
+        answer MORE certain, not less: nothing has been closed, so the head of
+        the open list is correct by construction.
+
+        Refusing here is what broke three validate-bot-change.sh assertions.
+        """
+        dlog, _ = self._rows(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["dispatch-overdue.py", "--open-task", "w1", dlog,
+             str(tmp_path / "never-reported.jsonl")],
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out.strip() == "t-1"
+
+    def test_open_task_STILL_refuses_when_the_ledger_is_unopenable(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The other absence. Rows exist that cannot be read, so some are
+        certainly closed and the head may be an already-CLOSED row — resolving
+        would stamp a false closure. Degrading to an id-less report is strictly
+        better, so this one DOES refuse."""
+        dlog, rlog = self._rows(tmp_path)
+        os.chmod(rlog, 0o000)
+        try:
+            if os.access(rlog, os.R_OK):
+                pytest.skip("cannot make a file unreadable as this user")
+            monkeypatch.setattr(
+                "sys.argv", ["dispatch-overdue.py", "--open-task", "w1", dlog, rlog]
+            )
+            assert dispatch_overdue.main() == 3
+            assert capsys.readouterr().out == ""
+        finally:
+            os.chmod(rlog, 0o644)
 
     def test_an_EXISTING_but_empty_ledger_still_answers(
         self, tmp_path, monkeypatch, capsys
