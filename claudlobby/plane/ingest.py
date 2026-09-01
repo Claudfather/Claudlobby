@@ -333,7 +333,19 @@ def _registry_row(conn, payload, entity, host_uid):
         (host_uid, payload.entity_type, uid)).fetchone()
     if payload.tombstone:
         if prev and prev["tombstone"]:
-            return uid, None   # tombstone-of-a-tombstone writes nothing
+            # Suppress a repeat tombstone ONLY when the entity is already
+            # EFFECTIVELY deleted per the READER'S definition (F11-valid
+            # and winning its partition). Keying on mere existence let one
+            # crashed scan's invalid tombstone suppress every later valid
+            # deletion — permanent false PRESENT in the exact case F11
+            # exists for (chunk-B gauntlet, probed SEV-1). Same mechanism
+            # heals the stale-clock case: a valid tombstone losing the
+            # occurred_at ordering leaves the entity current, so the
+            # re-tombstone lands with a fresh instant and wins.
+            from .registry_read import entity_is_current
+            if not entity_is_current(conn, host_uid,
+                                     payload.entity_type, uid):
+                return uid, None   # already gone — nothing to re-claim
         return uid, values
     phash = canonical_hash(_gate_view(payload.payload))
     if prev and not prev["tombstone"] and prev["payload_hash"] == phash:

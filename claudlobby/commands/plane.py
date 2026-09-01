@@ -266,25 +266,26 @@ def cmd_plane_doctor(args) -> int:
                 # and its completion — the reader already ignores them; the
                 # rung surfaces that they exist. Last-scan freshness rides
                 # the same rung set; "no scan yet" is dormancy, not fault.
+                # NO try/except: migrate() above guarantees the table, and
+                # a blanket catch rendered real defects as a green rung
+                # with a false diagnosis (gauntlet — the exact
+                # unreachable-vs-empty collapse source_state forbids).
                 from ..plane import registry_read as _rr
-                try:
-                    inv = _rr.invalid_tombstones(conn)
-                    rung(not inv, "tombstone validity (F11)",
-                         f"{len(inv)} unvalidated"
-                         + (f" — newest scan {inv[0]['scan_id']}" if inv
-                            else ""))
-                    ls = _rr.last_scan(conn)
-                    if ls is None:
-                        rung(True, "registry scan", "none yet (lane dormant"
-                             " or first generate pending)")
-                    else:
-                        rung(bool(ls.get("complete")), "registry scan",
-                             f"{ls['occurred_at']} scope={ls.get('scope')}"
-                             + ("" if ls.get("complete")
-                                else " — INCOMPLETE (tombstones from it"
-                                     " are not honored)"))
-                except Exception:  # noqa: BLE001 — pre-0006 db has no table
-                    rung(True, "registry lane", "schema predates 0006")
+                inv = _rr.invalid_tombstones(conn)
+                rung(not inv, "tombstone validity (F11)",
+                     f"{len(inv)} unvalidated"
+                     + (f" — newest scan {inv[0]['scan_id']}" if inv
+                        else ""))
+                ls = _rr.last_scan(conn)
+                if ls is None:
+                    rung(True, "registry scan", "none yet (lane dormant"
+                         " or first generate pending)")
+                else:
+                    rung(bool(ls.get("complete")), "registry scan",
+                         f"{ls['occurred_at']} scope={ls.get('scope')}"
+                         + ("" if ls.get("complete")
+                            else " — INCOMPLETE (tombstones from it"
+                                 " are not honored)"))
             finally:
                 conn.close()
         try:
@@ -378,9 +379,14 @@ def cmd_plane_registry(args) -> int:
         try:
             migrate(conn)
             if args.verify:
-                if not args.fleet:
-                    print("registry --verify needs --fleet <name> (the"
-                          " assembly enumerates one fleet)", file=sys.stderr)
+                # --verify re-derives the estate, which needs the fleet
+                # OVERLAY — that is the global selector's job, not a
+                # subcommand flag (the two shared a dest and the collision
+                # made legal reads refuse — gauntlet, probed)
+                if not getattr(args, "fleet", None):
+                    print("registry --verify re-derives one fleet's estate"
+                          " — run: claudlobby --fleet <name> plane registry"
+                          " --verify", file=sys.stderr)
                     return 2
                 from ._helpers import _load_fleet_or_exit
                 from ..plane.registry_emit import (
@@ -388,7 +394,8 @@ def cmd_plane_registry(args) -> int:
                 fleet, _ = _load_fleet_or_exit(paths)
                 assembled, complete = assemble_entities(
                     paths, fleet, _vault_rev(paths))
-                rep = rr.verify_current(conn, assembled, fleet=fleet.name)
+                rep = rr.verify_current(conn, assembled, fleet=fleet.name,
+                                        host_uid=ensure_host_uid(root))
                 print(f"checked {rep.checked} entities"
                       + ("" if complete else
                          "  [enumeration INCOMPLETE — drift below is"
@@ -415,8 +422,13 @@ def cmd_plane_registry(args) -> int:
                     print(f"{r['valid_from']} -> {until}  {state}"
                           f"  cause={r['cause']} scan={r['scan_id']}")
                 return 0
-            if args.changes:
-                for c in rr.recent_changes(conn, limit=args.changes):
+            if args.changes is not None:
+                changes = rr.recent_changes(conn, limit=args.changes)
+                if not changes:
+                    print("no registry changes recorded yet",
+                          file=sys.stderr)
+                    return 0
+                for c in changes:
                     print(f"{c['occurred_at']}  {c['entity_type']}"
                           f" {c['entity_alias']}  {c['change']}")
                     for fld, (old, new) in sorted(c["fields"].items()):
@@ -440,7 +452,15 @@ def cmd_plane_registry(args) -> int:
                         indent=2, ensure_ascii=False))
                 return 0
             rows = rr.current_entities(conn, entity_type=args.type,
-                                       fleet=args.fleet)
+                                       fleet=args.scope_fleet)
+            # the trust line PRECEDES the empty early-return: one unhonored
+            # tombstone deleting your only entity must not read as silence
+            # (gauntlet, probed)
+            inv = rr.invalid_tombstones(conn)
+            if inv:
+                print(f"[trust] {len(inv)} tombstone(s) NOT honored —"
+                      " no complete same-scan_id scan_completed"
+                      " (run plane doctor)", file=sys.stderr)
             if not rows:
                 print("registry is empty for this filter (no completed"
                       " scan, or nothing matches)", file=sys.stderr)
@@ -449,11 +469,6 @@ def cmd_plane_registry(args) -> int:
                 print(f"{r['entity_type']:13} {r['entity_alias']:44}"
                       f" {(r['payload_hash'] or '')[:12]}"
                       f"  {r['occurred_at']}")
-            inv = rr.invalid_tombstones(conn)
-            if inv:
-                print(f"[trust] {len(inv)} tombstone(s) NOT honored —"
-                      " no complete same-scan_id scan_completed"
-                      " (run plane doctor)", file=sys.stderr)
             return 0
         finally:
             conn.close()

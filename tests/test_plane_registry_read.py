@@ -157,11 +157,11 @@ def test_changes_carry_field_level_diffs(tmp_path):
     emit_batch(root, [_snap(BOT, "s2", T2, P2)])
     conn = _conn(root)
     chg = rr.recent_changes(conn)
-    assert len(chg) == 1
-    assert chg[0]["change"] == "updated"
+    assert [c["change"] for c in chg] == ["updated", "first_observed"]
     assert chg[0]["fields"]["model"] == ("opus", "fable")
     assert chg[0]["fields"]["equipment.skills"] == (
         ["status"], ["dispatch", "status"])   # _bot sorts, like the emitter
+    assert chg[1]["fields"] == {}             # first sighting, no field storm
 
 
 def test_changes_render_deletion_and_recreation(tmp_path):
@@ -171,7 +171,7 @@ def test_changes_render_deletion_and_recreation(tmp_path):
     emit_batch(root, [_snap(BOT, "s3", T3, P2)])
     conn = _conn(root)
     changes = {c["change"] for c in rr.recent_changes(conn)}
-    assert changes == {"deleted", "recreated"}
+    assert changes == {"first_observed", "deleted", "recreated"}
     cur = rr.current_entities(conn)
     assert cur[0]["payload"]["model"] == "fable"    # recreation is current
 
@@ -180,6 +180,79 @@ def test_diff_fields_added_and_removed_keys():
     assert rr.diff_fields({"a": 1}, {"b": 2}) == {
         "a": (1, None), "b": (None, 2)}
     assert rr.diff_fields({"x": {"y": 1}}, {"x": {"y": 1}}) == {}
+    # the public-door non-dict branch (unreachable from shipped callers,
+    # kept for direct consumers): top-level scalars diff under "."
+    assert rr.diff_fields(1, 2) == {".": (1, 2)}
+    assert rr.diff_fields(1, 1) == {}
+
+
+# --- round-2 pins: the write side asks the reader's question ---------------
+
+def test_crashed_scan_tombstone_does_not_block_later_deletion(tmp_path):
+    """Gauntlet SEV-1 (probed): a scan dying between its tombstone and its
+    completion left an INVALID tombstone that suppressed every later valid
+    deletion at both write layers — permanent false PRESENT in the exact
+    case F11 exists for. Suppression now asks the reader's own question
+    (effectively deleted?), so the later complete scan CAN delete."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T1, P1), _done("s1", T1),
+                      _tomb(BOT, "s2", T2)])          # crashed: no completion
+    conn = _conn(root)
+    assert [c["entity_alias"] for c in rr.current_entities(conn)] == [BOT]
+    emit_batch(root, [_tomb(BOT, "s3", T3), _done("s3", T3)])
+    conn = _conn(root)
+    assert rr.current_entities(conn) == []            # deletion finally lands
+    assert [i["scan_id"] for i in rr.invalid_tombstones(conn)] == ["s2"]
+
+
+def test_stale_clock_tombstone_heals_by_re_tombstoning(tmp_path):
+    """A valid tombstone stamped with an OLDER occurred_at loses the SCD
+    ordering (spec line 145 rules the ordering; pinned here) — the entity
+    stays current. The heal: a later re-tombstone is NOT suppressed (the
+    entity is still current) and lands with a fresh instant that wins."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T2, P1), _done("s1", T2),
+                      _tomb(BOT, "s2", T1), _done("s2", T1)])  # older instant
+    conn = _conn(root)
+    assert [c["entity_alias"] for c in rr.current_entities(conn)] == [BOT]
+    assert rr.invalid_tombstones(conn) == []          # valid, just losing
+    emit_batch(root, [_tomb(BOT, "s4", T3), _done("s4", T3)])
+    conn = _conn(root)
+    assert rr.current_entities(conn) == []
+
+
+def test_repeat_tombstone_of_an_effective_deletion_is_suppressed(tmp_path):
+    """The dedup's legitimate half survives the fix: once a deletion is
+    EFFECTIVE, re-tombstoning writes nothing (no row spam)."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T1, P1), _done("s1", T1),
+                      _tomb(BOT, "s2", T2), _done("s2", T2),
+                      _tomb(BOT, "s3", T3), _done("s3", T3)])
+    conn = _conn(root)
+    stones = conn.execute("SELECT COUNT(*) FROM registry_snapshots"
+                          " WHERE tombstone=1").fetchone()[0]
+    assert stones == 1                                # s3's was suppressed
+    assert rr.current_entities(conn) == []
+
+
+def test_verify_host_scoping_and_duplicate_assembly(tmp_path):
+    """Two guards probed in review: a foreign host's partition must not
+    read as phantom drift when host_uid is passed, and a duplicate alias
+    in an injected assembly must not double-count or contradict itself."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T1, P1)])
+    conn = _conn(root)
+    host = conn.execute("SELECT host_uid FROM registry_snapshots"
+                        " LIMIT 1").fetchone()[0]
+    rep = rr.verify_current(conn, [("bot", BOT, P1)], fleet="f",
+                            host_uid=host)
+    assert rep.ok and rep.checked == 1
+    rep2 = rr.verify_current(conn, [("bot", BOT, P1)], fleet="f",
+                             host_uid="host_nonexistent")
+    assert rep2.missing_from_db == [("bot", BOT)]     # scoped away, honest
+    dup = rr.verify_current(
+        conn, [("bot", BOT, P2), ("bot", BOT, P1)], fleet="f")
+    assert dup.ok and dup.checked == 1                # last wins, once
 
 
 def test_last_scan_reports_the_newest_completion(tmp_path):
@@ -240,8 +313,11 @@ def test_verify_ignores_vault_rev_like_the_hash_gate(tmp_path):
 # --- CLI + doctor smoke (the real doors, subprocess) ------------------------
 
 def _cli(root: Path, *argv: str) -> subprocess.CompletedProcess:
+    # module form, not REPO/.venv/bin: CI has no .venv — the running
+    # interpreter (venv locally, CI's env there) is the one true binary
+    import sys
     return subprocess.run(
-        [str(REPO / ".venv" / "bin" / "claudlobby"), "--root", str(root),
+        [sys.executable, "-m", "claudlobby", "--root", str(root),
          "plane", *argv],
         capture_output=True, text=True, timeout=120)
 
@@ -272,6 +348,25 @@ def test_cli_registry_list_show_history_and_trust_line(tmp_path):
     r5 = _cli(root2, "registry", "--history", BOT)
     assert r5.returncode == 0
     assert "TOMBSTONE" in r5.stdout
+    # --scope is a DB fact, never an overlay requirement (the shared
+    # --fleet dest collided with the global overlay selector — probed)
+    r6 = _cli(root, "registry", "--scope", "f")
+    assert r6.returncode == 0
+    assert BOT in r6.stdout
+
+
+def test_cli_trust_line_survives_an_empty_registry(tmp_path):
+    """One unhonored tombstone deleting your only entity must not read as
+    silence — the trust line precedes the empty early-return (probed: it
+    used to vanish exactly when it mattered most)."""
+    root = _root(tmp_path)
+    emit_batch(root, [_snap(BOT, "s1", T1, P1), _done("s1", T1),
+                      _tomb(BOT, "s2", T2), _done("s2", T2),   # valid delete
+                      _tomb("bot:f/ghost", "s4", T3)])         # invalid, ghost
+    r = _cli(root, "registry")
+    assert r.returncode == 0
+    assert "empty" in r.stderr
+    assert "NOT honored" in r.stderr
 
 
 def test_doctor_surfaces_invalid_tombstones_and_scan_health(tmp_path):

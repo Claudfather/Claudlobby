@@ -206,6 +206,33 @@ def test_unchanged_rescan_suppresses_every_keyframe(tmp_path):
     assert s2["outcomes"]["committed"] == 1          # scan_completed only
 
 
+def test_emitter_re_tombstones_after_a_crashed_scan(tmp_path):
+    """Chunk-B gauntlet SEV-1, the EMITTER half (probed): the diff's old
+    latest-row-is-a-tombstone skip keyed on existence, so a crashed scan's
+    invalid tombstone suppressed every later valid deletion. The diff now
+    asks the reader's question (still current?) and re-tombstones."""
+    root = _fleet_root(tmp_path)
+    _scan(root)
+    # a crashed scan's leftovers: a tombstone with NO completion
+    emit_batch(root, [{
+        "event_type": "registry_snapshot", "emitter": "t",
+        "fleet": "test-fleet",
+        "payload": {"entity_type": "bot",
+                    "entity_alias": "bot:test-fleet/worker-1",
+                    "cause": "generate", "scan_id": "crashed-scan",
+                    "tombstone": True}}])
+    # roster removal + a REAL complete scan: deletion must finally land
+    root2 = _fleet_root(tmp_path, workers="[]", worker_stanza=False)
+    s = _scan(root2)
+    assert s["complete"] is True
+    assert s["tombstoned"] == 1        # re-tombstoned despite the leftover
+    from claudlobby.plane import registry_read as rr
+    conn = _db(root)
+    aliases = [r["entity_alias"] for r in rr.current_entities(conn)]
+    conn.close()
+    assert "bot:test-fleet/worker-1" not in aliases
+
+
 def test_roster_removal_tombstones_in_scope_only(tmp_path):
     root = _fleet_root(tmp_path)
     _scan(root)

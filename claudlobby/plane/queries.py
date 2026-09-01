@@ -161,6 +161,18 @@ REG_CURRENT_SQL = (
     " ORDER BY entity_type, entity_alias"
 )
 
+# Point form of REG_CURRENT for WRITE-SIDE suppression decisions (chunk-B
+# gauntlet, probed SEV-1): "is this entity effectively deleted?" must mean
+# exactly what the READER means by absent. The write side used to key its
+# tombstone dedup on a tombstone row merely EXISTING — so one crashed
+# scan's invalid tombstone suppressed every later valid deletion, a
+# permanent false PRESENT in the exact case F11 exists for. A second
+# spelling of "current" here would re-open that split.
+REG_ENTITY_IS_CURRENT_SQL = (
+    "SELECT 1 FROM (" + REG_CURRENT_SQL + ")"
+    " WHERE host_uid = ? AND entity_type = ? AND entity_uid = ? LIMIT 1"
+)
+
 # SCD2 windows: each F11-valid row opens at its occurred_at and closes at
 # the partition's next row (NULL = still open). Tombstone rows appear as
 # window-openers of the deleted period — the reader renders them, never
@@ -182,6 +194,10 @@ REG_HISTORY_SQL = (
 # pairs each row with its predecessor; the FIELD-level diff is computed by
 # registry_read.diff_fields at read time — payloads are nested JSON and a
 # json_each diff in SQL would re-implement canonicalization badly.
+# First-in-partition rows are INCLUDED (both prev columns null) and render
+# as first_observed — spec's own derivation name, and a new entity is
+# prime drift signal (chunk-B gauntlet: the old WHERE silently dropped
+# exactly those rows from --changes).
 REG_CHANGES_SQL = (
     "WITH " + _REG_EFFECTIVE + ", ordered AS ("
     " SELECT e.*,"
@@ -195,7 +211,6 @@ REG_CHANGES_SQL = (
     " prev_payload, prev_tombstone, cause, scan_id,"
     " occurred_at, ingest_seq"
     " FROM ordered"
-    " WHERE prev_hash IS NOT NULL OR prev_tombstone IS NOT NULL"
     " ORDER BY ingest_seq DESC"
 )
 

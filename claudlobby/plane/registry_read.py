@@ -99,12 +99,19 @@ def diff_fields(prev, curr, prefix: str = "") -> dict[str, tuple]:
 def recent_changes(conn, *, limit: int = 50) -> list[dict]:
     """The registry_changes view: consecutive-row pairs, newest first, each
     carrying its field-level diff. Transitions to/from tombstone render as
-    ``deleted`` / ``recreated`` rather than a field storm."""
-    rows = [_parse(r) for r in _q(conn, REG_CHANGES_SQL)]
+    ``deleted`` / ``recreated``, a first-in-partition row as
+    ``first_observed`` (spec's derivation name — honestly first-OBSERVED,
+    not created) — never a field storm."""
+    rows = [_parse(r) for r in _q(conn, REG_CHANGES_SQL)[:limit]]
     out = []
-    for r in rows[:limit]:
+    for r in rows:
+        first = (r.get("prev_payload") is None
+                 and r.get("prev_tombstone") is None)
         if r["tombstone"]:
             r["change"] = "deleted"
+            r["fields"] = {}
+        elif first:
+            r["change"] = "first_observed"
             r["fields"] = {}
         elif r.get("prev_tombstone"):
             r["change"] = "recreated"
@@ -115,6 +122,19 @@ def recent_changes(conn, *, limit: int = 50) -> list[dict]:
                                       r.get("payload") or {})
         out.append(r)
     return out
+
+
+def entity_is_current(conn, host_uid: str, entity_type: str,
+                      entity_uid: str) -> bool:
+    """The write side's question, answered with the READER'S definition
+    (REG_ENTITY_IS_CURRENT_SQL — F11-valid and winning its partition).
+    Shared by ingest's tombstone dedup and the emitter's diff; a private
+    copy in either is how the two sides disagreed into a permanent false
+    PRESENT (chunk-B gauntlet, probed)."""
+    from .queries import REG_ENTITY_IS_CURRENT_SQL
+    row = conn.execute(REG_ENTITY_IS_CURRENT_SQL,
+                       (host_uid, entity_type, entity_uid)).fetchone()
+    return row is not None
 
 
 def invalid_tombstones(conn) -> list[dict]:
@@ -152,7 +172,8 @@ class VerifyReport:
                     or self.missing_from_estate)
 
 
-def verify_current(conn, assembled, *, fleet: str) -> VerifyReport:
+def verify_current(conn, assembled, *, fleet: str,
+                   host_uid: str | None = None) -> VerifyReport:
     """Hash-verify the current projection against a re-derived estate
     (spec: "current-state, hash-verified"). ``assembled`` is the emitter's
     ``assemble_entities`` output — injected, so the unit seam needs no
@@ -171,7 +192,11 @@ def verify_current(conn, assembled, *, fleet: str) -> VerifyReport:
     from .registry_emit import _in_scope
 
     report = VerifyReport()
-    scanned = {(t, a) for t, a, _ in assembled}
+    # last-wins dedupe: an assembly cannot legitimately name one alias
+    # twice, but an injected duplicate must not double-count `checked` or
+    # report drift beside a match (gauntlet, probed)
+    by_key = {(t, a): p for t, a, p in assembled}
+    scanned = set(by_key)
 
     def scoped(etype: str, alias: str) -> bool:
         return _in_scope(etype, alias, fleet, scanned)
@@ -179,10 +204,13 @@ def verify_current(conn, assembled, *, fleet: str) -> VerifyReport:
     projected = {
         (r["entity_type"], r["entity_alias"]): r["payload_hash"]
         for r in _q(conn, REG_CURRENT_SQL)
-        if scoped(r["entity_type"], r["entity_alias"])
+        # host scoping guards the (today-unreachable) multi-host db: a
+        # foreign host's partition row must not read as phantom drift
+        if (host_uid is None or r["host_uid"] == host_uid)
+        and scoped(r["entity_type"], r["entity_alias"])
     }
     seen: set[tuple[str, str]] = set()
-    for etype, alias, payload in assembled:
+    for (etype, alias), payload in by_key.items():
         if not scoped(etype, alias):
             continue
         key = (etype, alias)

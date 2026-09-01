@@ -617,10 +617,26 @@ def run_generate_scan(paths, fleet) -> dict | None:
                 foreign_rows = conn.execute(
                     "SELECT COUNT(*) FROM registry_snapshots"
                     " WHERE host_uid != ?", (this_host,)).fetchone()[0]
+                # Tombstone eligibility asks the READER'S question — is the
+                # entity still CURRENT (F11-valid, winning its partition)?
+                # The old latest-row-is-a-tombstone skip keyed on existence,
+                # so a crashed scan's invalid tombstone suppressed every
+                # later valid deletion (chunk-B gauntlet, probed SEV-1) and
+                # a stale-clock tombstone that lost the ordering was never
+                # re-emitted. One bulk read of the same REG_CURRENT the
+                # reader serves; a private predicate here is how the two
+                # sides split.
+                from .queries import REG_CURRENT_SQL
+                current_keys = {
+                    (cr["entity_type"], cr["entity_uid"])
+                    for cr in conn.execute(
+                        "SELECT entity_type, entity_uid FROM ("
+                        + REG_CURRENT_SQL + ") WHERE host_uid = ?",
+                        (this_host,))}
                 conn.close()
                 for r in rows:
-                    if r["tombstone"]:
-                        continue
+                    if (r["entity_type"], r["entity_uid"]) not in current_keys:
+                        continue   # effectively deleted — nothing to re-claim
                     key = (r["entity_type"], r["entity_alias"])
                     if key in seen:
                         continue
