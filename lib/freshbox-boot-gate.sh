@@ -93,6 +93,20 @@ result_has_sentinel() {  # rc 0 iff the final result text carries the probe toke
   json_lines "$1" | jq -rc 'select(.type=="result") | .result // ""' 2>/dev/null |
     grep -qF "$SENTINEL"
 }
+agent_tool_used() {  # rc 0 iff the transcript contains an Agent tool_use
+  # Agent is the discriminator the Bash probe below CANNOT be. The operator
+  # global allow list carries a BARE "Bash" at index 0 (223 entries, verified),
+  # so every Bash command is allowed estate-wide no matter what the composed
+  # file says -- a Bash-based check cannot tell a surviving composed allow from
+  # a global one, and dozens of successful Bash calls were nearly reported as
+  # proof that composed allows survive. Agent is composed here (code-review
+  # expertise grants it) and is ABSENT from the global list, so it is honored
+  # only if the composed file is honored.
+  json_lines "$1" \
+    | jq -rc 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Agent") | .name' \
+      2>/dev/null | grep -q .
+}
+
 bash_tool_used() {  # rc 0 iff the transcript contains a Bash tool_use (a gated, non-base tool)
   [ -n "$(json_lines "$1" |
     jq -rc 'select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Bash") | .name' \
@@ -216,7 +230,7 @@ harness_check "vault-wired bot cannot run claudron promote (no promote grant, no
 # Two asks in one boot: retrieve the probe token via a GATED Bash tool (proves a
 # non-base composed grant is honored end-to-end), and echo any RECALL_ token from
 # the injected SessionStart brief (proves the recall brief reached the session).
-BOOT_PROMPT="Use the Bash tool to run exactly this command: cat probe.txt. Then reply with the token it prints, and on a second line, any token starting with RECALL_ that appears anywhere in your session context (write NONE if there is none). Do not use the Read tool."
+BOOT_PROMPT="Use the Bash tool to run exactly this command: cat probe.txt. Then use the Agent tool to launch one subagent with the prompt: reply with the single word PONG. Then reply with the token cat printed, and on a second line, any token starting with RECALL_ that appears anywhere in your session context (write NONE if there is none). Do not use the Read tool."
 boot() {  # boot <config_dir> <out_file>
   # CLAUDRON_VAULT_PATH is exported into the boot so the SessionStart hook resolves
   # the vault (start-bot.sh sources it from bot.conf in production; set directly here).
@@ -315,6 +329,82 @@ seeded_advisory="no"; grep -qiE "$ADVISORY_RE" "$TRANSCRIPT" 2>/dev/null && seed
 teeth="no"
 if [ "$notrust_advisory" = yes ] && [ "$seeded_advisory" = no ]; then teeth="yes"; fi
 harness_check "trust-seed teeth: no-trust boot drops the whole composed settings.local.json (untrusted advisory present only without the seed)" "$teeth"
+
+# --- the BEHAVIOURAL half of the trust question (#1232 follow-on) -------------
+# Everything above proves the binary SAYS it dropped the composed file. It does
+# not prove an allow stopped working, and the ADR
+# (documentation/decisions/permissions-model.md:324) claims this gate asserts
+# "the loss of a gated Bash grant" -- an assertion that was never in this file.
+# Two reasons the old wording could not have delivered it:
+#   1. the advisory is a LOG LINE, a self-report, not an observed refusal;
+#   2. the probe was BASH, and a bare "Bash" sits at index 0 of the 223-entry
+#      operator global allow list, so Bash is allowed estate-wide regardless of
+#      what the composed file does. It can never discriminate.
+# Agent fixes both: composed here via code-review expertise, absent from the
+# global list, and actually exercised by the boot prompt.
+#
+# THREE OUTCOMES, DELIBERATELY NOT COLLAPSED TO PASS/FAIL. A control that did
+# not run must never read as a clean result:
+#   control used Agent, test did not  -> composed allows ARE dropped untrusted
+#   control used Agent, test also did -> composed allows SURVIVE untrusted, and
+#                                        the ADR is wrong about allows
+#   control did NOT use Agent         -> UNDETERMINED. The model declined the
+#                                        tool, so the probe never ran; this is
+#                                        reported as a gap, never as a pass.
+#
+# CONFOUND, STATED RATHER THAN DESIGNED AROUND. Stripping the trust seed drops
+# the WHOLE composed file, so the no-trust arm loses the composed allow AND the
+# composed skipAutoPermissionPrompt / skipDangerousModePermissionPrompt at once.
+# A refusal there therefore shows the untrusted STATE loses the grant; it does
+# not isolate which dropped setting caused it. That is sufficient for the estate
+# question -- 20 of 21 bots run untrusted -- and insufficient for a mechanism
+# claim. Do not upgrade it to one. Separately, no --permission-mode is passed
+# here, so the session takes the binary default; if a future arm passes auto,
+# auto-approval could mask a dropped allow and this assertion would stop
+# discriminating.
+#
+# FIRST REAL RUN, 2026-09-01, and BOTH trust assertions came back RED:
+#   permissionMode         : default in BOTH arms (so the auto-approval confound
+#                            above did NOT apply -- measured, not assumed)
+#   permission_denials     : [] in BOTH arms
+#   untrusted advisory     : 0 occurrences in BOTH arms -- it did not fire at all
+#   Agent tool_use         : present in BOTH arms
+#   no-trust arm genuinely untrusted: its .claude.json projects[] is EMPTY while
+#                            the seeded arm carries hasTrustDialogAccepted=true,
+#                            so the arm is valid and the result is not vacuous
+#   both arms returned the probe sentinel and exited success
+#
+# So on this binary the advisory the ADR cites as its proof DOES NOT REPRODUCE,
+# and a composed-only, non-globally-allowed grant was honored on an untrusted
+# workspace. The teeth check rests entirely on that advisory, which is why it is
+# now red: the cited evidence stopped reproducing, not the harness breaking.
+#
+# THE BOUND, and it is the reason this does not yet refute the ADR outright:
+# Agent is the ONLY composed-only non-Bash grant in this composition, so if the
+# binary DEFAULT-ALLOWS Agent the probe cannot discriminate and its success
+# proves nothing. That is untested. Settling it is one more arm: compose the
+# bot WITHOUT code-review expertise so Agent is never granted, boot untrusted,
+# and see whether Agent still runs. Works -> Agent is default-allowed and this
+# probe is void. Refused -> the probe is valid and composed allows genuinely
+# survive an untrusted workspace.
+control_agent="no"; agent_tool_used "$TRANSCRIPT" && control_agent="yes"
+test_agent="no";    agent_tool_used "$MUT_OUT"    && test_agent="yes"
+if [ "$control_agent" = no ]; then
+  behavioural="undetermined"
+elif [ "$test_agent" = no ]; then
+  behavioural="yes"
+else
+  behavioural="survived"
+fi
+printf 'behavioural allow probe: control(seeded)=%s test(no-trust)=%s -> %s\n' \
+  "$control_agent" "$test_agent" "$behavioural"
+harness_check "behavioural: a composed-only NON-BASH allow (Agent) is honored with the trust seed and lost without it" \
+  "$([ "$behavioural" = yes ] && echo yes || echo no)"
+if [ "$behavioural" = undetermined ]; then
+  printf '  NOTE: control boot never used Agent, so the probe did not run. This is a COVERAGE GAP, not evidence either way.\n'
+elif [ "$behavioural" = survived ]; then
+  printf '  NOTE: Agent was used in BOTH arms -- a composed-only allow SURVIVED an untrusted workspace. That contradicts the ADR claim; re-derive before citing it.\n'
+fi
 
 # --- verdict ------------------------------------------------------------------
 printf '\nfreshbox-boot-gate: %d passed, %d failed\n' "$pass" "$fail"
