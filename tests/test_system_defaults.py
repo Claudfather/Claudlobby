@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from textwrap import dedent
 
@@ -453,6 +454,12 @@ class TestSystemDefaultsFile:
         assert "host" in raw
         d = raw["defaults"]
         assert "hooks" in d
+        # the #1402 telegram-carrier hooks ship in the package defaults —
+        # the composed-render probe was session-only, this pins the entries
+        flat = json.dumps(d["hooks"])
+        assert "plane-telegram-out.sh" in flat
+        assert "plane-telegram-in.sh" in flat
+        assert "mcp__plugin_telegram_telegram__reply" in flat
         assert "observability" in d
         assert "jobs" in d
         assert "fleet-pulse" in d["jobs"]
