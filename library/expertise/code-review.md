@@ -8,8 +8,17 @@ permissions:
   # tool and does not bind Bash at all, so it read as a constraint while
   # enforcing nothing against a shell. Measured independently on two fleets:
   # `python3 -c` open()/write() created and removed a file under it, and `cat`
-  # heredocs wrote 61 of 62 targets. 368 memory files were written by four bots
-  # carrying this rule (rajan 167, vera 80, navi 80, pranav 41). It also
+  # heredocs wrote 61 of 62 targets — a BOUNDED probe run, otis 2026-08-24 and
+  # clog on rajan 2026-09-01, so that ratio is fixed and does not move.
+  #
+  # THE COUNT THAT DOES MOVE, and the mutability is in the sentence on purpose
+  # because a citation strips the header: 376 memory files across the four bots
+  # carrying this rule AS OF 2026-09-01, AND STILL RISING — 8 of those accrued
+  # during that same day, while the rule was armed. A static count would only
+  # show it failed historically; a rising one shows it failing as you read this.
+  # Per-bot breakdown, the re-derivation command, and the earlier 368 reading it
+  # superseded are in #1409 — do not re-quote the figure without the "as of"
+  # and the direction. It also
   # contradicted the harness memory instruction, which tells every bot to write
   # its memory files with Write, and which vera hit on her first file of a
   # session.
@@ -78,7 +87,8 @@ permissions:
   #
   # That IS a reduction, and naming it plainly is the point. A bare deny is not
   # decorative: it removes the native tool, which enforces. What it does not do
-  # is bind Bash, so a heredoc wrote freely underneath it — 368 files did.
+  # is bind Bash, so a heredoc wrote freely underneath it — see the rising count
+  # above rather than a second copy of the number here.
   # NEITHER SHAPE MAKES A REVIEWER READ-ONLY: bare removes a tool and Bash walks
   # past it; path-scoped filters command forms and an interpreter walks past
   # that. The rule traded away was one that pushed writes off the audited native

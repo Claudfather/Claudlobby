@@ -2,8 +2,10 @@
 
 `library/expertise/code-review.md` carried `deny: [Write, Edit, NotebookEdit]`
 from 2026-05-09, meaning to make reviewers read-only. A BARE TOOL NAME blocks
-only the native tool and does not bind Bash, so 368 memory files were written by
-four bots while it was armed. It is removed.
+only the native tool and does not bind Bash, so hundreds of memory files were
+written by four bots while it was armed — the count is stamped and dated in
+`library/expertise/code-review.md` and derived in #1409, deliberately not
+duplicated here, because it is still rising. It is removed.
 
 The path-scoped replacement over `projects/` was proposed and WITHDRAWN on
 evidence: a reviewer's documented workflow writes inside that tree (`git fetch`,
