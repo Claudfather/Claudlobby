@@ -90,29 +90,45 @@ def _samples(root: Path):
         return [dict(r) for r in conn.execute(
             "SELECT subject_kind, subject_uid, metric, value"
             " FROM metric_samples ORDER BY ingest_seq")]
+    except sqlite3.OperationalError:
+        return []          # db mid-creation by the background emit
     finally:
         conn.close()
 
 
-def test_idle_tick_records_session_up_and_heartbeat(tmp_path):
+def _wait_samples(root: Path, n: int = 1, timeout: float = 20.0):
+    """The emit is BACKGROUNDED (r2 fold: a wedged rung must never stall
+    the watchdog sweep) — the tick returns before the row lands, so pins
+    poll instead of asserting instantly."""
+    deadline = time.monotonic() + timeout
+    rows = _samples(root)
+    while len(rows) < n and time.monotonic() < deadline:
+        time.sleep(0.2)
+        rows = _samples(root)
+    return rows
+
+
+def test_idle_tick_records_the_heartbeat_only(tmp_path):
+    """One sample per live tick (r2 volume fold): session-up-ness is
+    derivable from heartbeat presence, so the per-tick session_up=true row
+    is gone — pinned, because its return would double the lane."""
     libdir, bot, env = _rig(tmp_path)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
-    rows = _samples(tmp_path)
-    by_metric = {s["metric"]: s for s in rows}
-    assert json.loads(by_metric["bot.session_up"]["value"]) is True
-    hb = json.loads(by_metric["bot.heartbeat"]["value"])
+    rows = _wait_samples(tmp_path)
+    assert [s["metric"] for s in rows] == ["bot.heartbeat"]
+    hb = json.loads(rows[0]["value"])
     assert hb["state"] == "IDLE"
     assert "marker_age_s" not in hb       # no marker -> no fabricated age
-    assert by_metric["bot.heartbeat"]["subject_kind"] == "bot_instance"
-    assert by_metric["bot.heartbeat"]["subject_uid"].startswith("boti_")
+    assert rows[0]["subject_kind"] == "bot_instance"
+    assert rows[0]["subject_uid"].startswith("boti_")
 
 
 def test_busy_marker_tick_carries_marker_age(tmp_path):
     libdir, bot, env = _rig(tmp_path, fresh_marker=True)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
-    hb = next(json.loads(s["value"]) for s in _samples(tmp_path)
+    hb = next(json.loads(s["value"]) for s in _wait_samples(tmp_path)
               if s["metric"] == "bot.heartbeat")
     assert hb["state"] == "BUSY"
     assert isinstance(hb["marker_age_s"], int) and hb["marker_age_s"] >= 0
@@ -122,7 +138,7 @@ def test_unknown_pane_records_unknown(tmp_path):
     libdir, bot, env = _rig(tmp_path, pane="#### garbage ####")
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
-    hb = next(json.loads(s["value"]) for s in _samples(tmp_path)
+    hb = next(json.loads(s["value"]) for s in _wait_samples(tmp_path)
               if s["metric"] == "bot.heartbeat")
     assert hb["state"] == "UNKNOWN"
 
@@ -134,7 +150,7 @@ def test_dead_session_records_session_down_and_no_heartbeat(tmp_path):
     libdir, bot, env = _rig(tmp_path, has_session=False)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
-    rows = _samples(tmp_path)
+    rows = _wait_samples(tmp_path)
     assert [s["metric"] for s in rows] == ["bot.session_up"]
     assert json.loads(rows[0]["value"]) is False
     assert (bot / "start-stub.log").exists()   # the restart ladder ran
@@ -164,6 +180,7 @@ def test_heartbeat_subject_joins_the_registry_keyframe(tmp_path):
                                 "schema_version": "1"}}}])
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
+    assert len(_wait_samples(tmp_path, n=1)) >= 1
     conn = sqlite3.connect(db_path(tmp_path))
     key_uid = conn.execute(
         "SELECT entity_uid FROM registry_snapshots").fetchone()[0]
@@ -172,3 +189,21 @@ def test_heartbeat_subject_joins_the_registry_keyframe(tmp_path):
         " WHERE metric='bot.heartbeat'").fetchone()[0]
     conn.close()
     assert hb_uid == key_uid
+
+
+def test_future_marker_age_clamps_at_zero(tmp_path):
+    """r2 (probed): an RTC-skewed future mtime recorded a gigantic
+    negative marker_age_s verbatim. Age has floor semantics — clamp at 0,
+    never a signed delta."""
+    libdir, bot, env = _rig(tmp_path)
+    marker = bot / "data" / ".last-tool-call"
+    marker.touch()
+    import os
+    future = time.time() + 86400 * 30
+    os.utime(marker, (future, future))
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+    hb = next(json.loads(s["value"]) for s in _wait_samples(tmp_path)
+              if s["metric"] == "bot.heartbeat")
+    assert hb["state"] == "BUSY"          # pre-existing marker_age_within
+    assert hb["marker_age_s"] == 0

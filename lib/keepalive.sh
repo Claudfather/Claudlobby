@@ -61,38 +61,68 @@ emit_keepalive_event() {
 }
 
 # ---- plane door: presence's RECORDED half (#1361, harvest item 1) ----------
-# The verdict this tick ALREADY computed, emitted as metric_samples through
-# the shim — the table, contract and metric names shipped in migration 0006
-# with no emitter until now. Subject is the INSTANCE alias
+# The verdict this tick ALREADY computed, emitted as ONE metric_sample per
+# tick through the shim — the table, contract and metric names shipped in
+# migration 0006 with no emitter until now. Subject is the INSTANCE alias
 # (bot:<fleet>/<name>): identity resolution at ingest lands on the SAME uid
 # the registry keyframes use, so heartbeat samples join equipment/history
-# with no glue. Dormant per the estate rule (PLANE_EMIT_ENABLED rides
-# bot.conf env, loaded above); NON-BLOCKING (the tick's real work never
-# waits on a record); the view sampler keeps rendering pixels and
+# with no glue. Arming reaches this script as an Environment= line stamped
+# on the keepalive job unit from the fleet tier cascade (the #1383
+# mechanism — a scheduler env is closed, so the fleet-tier .env alone
+# never arrives here). NON-BLOCKING rc-wise AND clock-wise (background
+# emit, pid-guarded); the view sampler keeps rendering pixels and
 # classifies NOTHING — the recorded half lives here, the sibling's
-# two-truths split stays forsworn. session_up=false rides the dead-session
-# path (no heartbeat there: no pane was classified, and a fabricated
-# verdict is the lie this lane exists to kill). The SKIP paths (boot in
-# flight, restart race) deliberately emit nothing — transitional, the next
-# tick records. Every [ ] guard is an if-block: this script runs
-# set -euo pipefail, and a failing `[ x ] && return` list would kill the
-# tick.
+# two-truths split stays forsworn. The live tick emits bot.heartbeat only
+# (session-up-ness is derivable from heartbeat presence); the dead-session
+# path emits the one fact heartbeat cannot carry, bot.session_up=false,
+# and NO heartbeat — no pane was classified, and a fabricated verdict is
+# the lie this lane exists to kill. The SKIP paths (boot in flight,
+# restart race) deliberately emit nothing — transitional, the next tick
+# records (unpinned, disclosed).
 plane_presence_samples() {
-    local hb_state="$1" session_up="$2"
-    if [ "${PLANE_EMIT_ENABLED:-0}" != "1" ]; then return 0; fi
-    if [ "${PLANE_EMIT_DISABLED:-0}" = "1" ]; then return 0; fi
-    if [ -z "${FLEET_NAME:-}" ] || [ -z "${BOT_NAME:-}" ]; then return 0; fi
-    local fleet_esc subj hb="" agefrag="" m_epoch
+    local verdict="$1"   # BUSY|IDLE|UNKNOWN, or DOWN (the dead-session fact)
+    # THE arming predicate (lib-common) — a hand-rolled copy here re-forked
+    # what #1384 consolidated, with silent identity skips the ruling calls
+    # drift (r2 gauntlet). plane_armed is if-safe under set -e.
+    if ! plane_armed keepalive --require-fleet --require-bot; then
+        return 0
+    fi
+    # No pileup on a wedged rung (r2 gauntlet, probed): the cold-CLI rung
+    # has no wall-clock bound and keepalive-all sweeps ticks SEQUENTIALLY —
+    # one D-state stall must never wedge the whole fleet's watchdog. The
+    # emit runs in a BACKGROUND subshell, and a tick whose previous emit is
+    # still in flight SKIPS: presence tolerates a gap, the reader types
+    # staleness. rc-wise the tick never depends on the record; disclosures
+    # land in keepalive.log, not the journal.
+    local pidf="$BOT_DIR/data/.plane-presence.pid" prev
+    prev="$(cat "$pidf" 2>/dev/null || true)"
+    if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null; then
+        return 0
+    fi
+    local fleet_esc subj payload
     fleet_esc="$(json_escape "$FLEET_NAME")"
     subj="$(json_escape "bot:$FLEET_NAME/$BOT_NAME")"
-    if [ -n "$hb_state" ]; then
+    if [ "$verdict" = "DOWN" ]; then
+        payload='{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.session_up","value":false}'
+    else
+        # Session-up-ness is DERIVABLE from heartbeat presence (r2 volume
+        # fold: a per-tick session_up=true row doubled the lane for a fact
+        # the heartbeat already carries; only the dead path keeps the
+        # explicit false). marker_age_s clamps at 0: an RTC-skewed future
+        # mtime (this estate boots with a stale clock) otherwise records a
+        # huge negative age readers would mis-sort — age has floor
+        # semantics, not signed-delta semantics.
+        local agefrag="" m_epoch age
         if m_epoch=$(stat_mtime "$BOT_DIR/data/.last-tool-call" 2>/dev/null); then
-            agefrag=',"marker_age_s":'$(( $(date +%s) - m_epoch ))
+            age=$(( $(date +%s) - m_epoch ))
+            if [ "$age" -lt 0 ]; then age=0; fi
+            agefrag=',"marker_age_s":'"$age"
         fi
-        hb=',{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.heartbeat","value":{"state":"'"$hb_state"'"'"$agefrag"'}}}'
+        payload='{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.heartbeat","value":{"state":"'"$verdict"'"'"$agefrag"'}}'
     fi
-    printf '%s' '{"events":[{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.session_up","value":'"$session_up"'}}'"$hb"']}' \
-        | plane_emit_events keepalive || true
+    ( printf '%s' '{"events":[{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":'"$payload"'}]}' \
+        | plane_emit_events keepalive || true ) >>"$LOG" 2>&1 &
+    printf '%d' $! > "$pidf" 2>/dev/null || true
 }
 
 # send_reload_command <slash-command>
@@ -253,7 +283,7 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         emit_keepalive_event "SKIP" "boot in flight (unit mid-start), not restarting"
         exit 0
     fi
-    plane_presence_samples "" false
+    plane_presence_samples DOWN
     restart_bot_service "session dead"
     exit 0
 fi
@@ -367,4 +397,4 @@ case "$state" in
         fi
         ;;
 esac
-plane_presence_samples "$state" true
+plane_presence_samples "$state"

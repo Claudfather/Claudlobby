@@ -2422,14 +2422,17 @@ else
         PLANE_SOCKET="$PL_SOCK" PLANE_EMIT_CLI="$PL_CLI" \
         PLANE_EMIT_ENABLED=1 PATH="/usr/bin:/bin" \
         bash "$PL_LIB/keepalive.sh" "$KAB" >/dev/null 2>&1 || true
-    _ka_hb=$(sqlite3 "$PL_ROOT/state/plane/plane.db" \
-        "SELECT COUNT(*) FROM metric_samples WHERE metric='bot.heartbeat'" \
-        2>/dev/null || echo 0)
-    _ka_su=$(sqlite3 "$PL_ROOT/state/plane/plane.db" \
-        "SELECT COUNT(*) FROM metric_samples WHERE metric='bot.session_up'" \
-        2>/dev/null || echo 0)
-    [ "$_ka_hb" -ge 1 ] && [ "$_ka_su" -ge 1 ] && r=yes || r=no
-    harness_check "keepalive armed tick records heartbeat + session_up samples" "$r"
+    # the emit is BACKGROUNDED (a wedged rung must never stall the
+    # watchdog sweep) — poll briefly for the row instead of racing it
+    _ka_hb=0; _ka_i=0
+    while [ "$_ka_i" -lt 100 ] && [ "$_ka_hb" -lt 1 ]; do
+        _ka_hb=$(sqlite3 "$PL_ROOT/state/plane/plane.db" \
+            "SELECT COUNT(*) FROM metric_samples WHERE metric='bot.heartbeat'" \
+            2>/dev/null || echo 0)
+        sleep 0.2; _ka_i=$((_ka_i + 1))
+    done
+    [ "$_ka_hb" -ge 1 ] && r=yes || r=no
+    harness_check "keepalive armed tick records the heartbeat sample" "$r"
 
     "$PL_CLI" --root "$PL_ROOT" plane doctor > "$PL_ROOT/doctor.txt" 2>&1 && r=no || r=yes
     harness_check "doctor flags ATTENTION: daemon started historically, not serving" "$r"
