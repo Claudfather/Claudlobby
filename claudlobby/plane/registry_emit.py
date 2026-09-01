@@ -652,8 +652,15 @@ def run_generate_scan(paths, fleet) -> dict | None:
         events.append({
             "event_type": "declaration", "emitter": "generate",
             "fleet": fleet.name,
+            # the vault alias comes FROM THE ASSEMBLY (the chunk-B
+            # extraction moved `vp` inside assemble_entities and left this
+            # reference dangling — NameError on every VAULT-ARMED fleet's
+            # scan, invisible to a test corpus whose fixtures were all
+            # vaultless; found live on the estate, first post-merge scan)
             "payload": {"event": "revision_seen", "subject_kind": "vault",
-                        "subject": (vp or {}).get("alias", "vault"),
+                        "subject": next(
+                            (a for t, a, _ in entities if t == "vault"),
+                            "vault"),
                         "vault_rev": vault_rev}})
 
     counts: dict[str, int] = {}

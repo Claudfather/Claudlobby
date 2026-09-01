@@ -206,6 +206,38 @@ def test_unchanged_rescan_suppresses_every_keyframe(tmp_path):
     assert s2["outcomes"]["committed"] == 1          # scan_completed only
 
 
+def test_vault_armed_scan_completes_and_names_the_vault(tmp_path,
+                                                        monkeypatch):
+    """Post-merge live catch: the chunk-B extraction left a dangling `vp`
+    in run_generate_scan's revision_seen block — NameError on every
+    VAULT-ARMED fleet's scan, invisible here because every fixture was
+    vaultless. This pin arms the vault branch (stubbed payload + rev, the
+    cheap seam) and asserts the scan completes and the declaration names
+    the vault's alias from the assembly."""
+    from claudlobby.plane import registry_emit as re_mod
+    monkeypatch.setattr(
+        re_mod, "vault_payload",
+        lambda paths, fleet: {"alias": "vault:local/home",
+                              "role": "primary", "mount_path": "/v",
+                              "remote": "git@example:none",
+                              "compat": {"floor": "1"},
+                              "carries_fleets": True,
+                              "gitignore_safe": True,
+                              "schema_version": "1"})
+    monkeypatch.setattr(re_mod, "_vault_rev", lambda paths: "rev-abc123")
+    root = _fleet_root(tmp_path)
+    s = _scan(root)
+    assert s is not None and s["complete"] is True
+    conn = _db(root)
+    decl = conn.execute(
+        "SELECT subject_alias, detail FROM events WHERE kind='declaration'"
+        " AND event='revision_seen'").fetchall()
+    conn.close()
+    assert len(decl) == 1
+    assert decl[0]["subject_alias"] == "vault:local/home"
+    assert "rev-abc123" in decl[0]["detail"]
+
+
 def test_cli_verify_door_matches_a_fresh_scan(tmp_path):
     """r3 BLOCKER: the shipping --verify door derived the host uid at the
     WRONG PATH (minting a fresh identity that matched no row), so a
