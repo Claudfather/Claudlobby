@@ -199,6 +199,20 @@ fi
 # ---- location 1 (the user tier, inside the redirected HOME) -----------------
 # Level 0 and level 1 differ by EXACTLY one array element. Absent-vs-present
 # would be two changes (file existence AND content); this is one.
+# SUPERSEDED FOR ARMS E/F -- see write_loc1_parity. LEFT UNCHANGED ON PURPOSE:
+# arms C and D published a grid with this function in it, and quietly changing
+# the instrument that produced a published result is worse than superseding it
+# in the open. KNOWN DEFECT, measured 2026-09-01: this writes ONLY a permissions
+# .allow array, so the redirected loc1 DROPS every other key the real operator
+# global carries -- permissions.defaultMode ("auto"), permissions.deny/ask, and
+# `sandbox` {enabled:true, autoAllowBashIfSandboxed:TRUE, allowUnsandboxedCommands
+# :true}, plus skipAutoPermissionPrompt and skipDangerousModePermissionPrompt.
+# autoAllowBashIfSandboxed is a setting about BASH permission behaviour, so arms
+# C/D ran their Bash cells in an environment production does not have. Their
+# RESULT doc bounds itself as "a default-mode measurement" and attributes that to
+# headlessness; the cause was this stub. Section C5 -- "headless resolves auto
+# and manual both to default" -- was therefore measured with no defaultMode
+# present at loc1, and its premise is untested at production parity.
 write_loc1() {  # write_loc1 <0|1>
   if [ "$1" = 1 ]; then printf '{"permissions":{"allow":["Bash"]}}\n' > "$FAKE_CFG/settings.json"
   else                  printf '{"permissions":{"allow":[]}}\n'       > "$FAKE_CFG/settings.json"; fi
@@ -297,7 +311,12 @@ record_preconditions() {  # record_preconditions <cell>
     printf '### preconditions for %s (recorded BEFORE the run)\n' "$cell"
     printf 'claude --version      : %s\n' "$("$CLAUDE_BIN" --version 2>&1 | head -1)"
     printf 'loc1 path             : %s\n' "$FAKE_CFG/settings.json"
-    printf 'loc1 bytes            : %s\n' "$(cat "$FAKE_CFG/settings.json" 2>&1)"
+    printf 'loc1 summary          : allow=%s defaultMode=%s sandbox=%s deny=%s\n' \
+      "$(jq -r '.permissions.allow|length' "$FAKE_CFG/settings.json" 2>/dev/null)" \
+      "$(jq -r '.permissions.defaultMode // "ABSENT"' "$FAKE_CFG/settings.json" 2>/dev/null)" \
+      "$(jq -r 'if .sandbox then (.sandbox.autoAllowBashIfSandboxed|tostring) else "ABSENT" end' "$FAKE_CFG/settings.json" 2>/dev/null)" \
+      "$(jq -r '.permissions.deny|length' "$FAKE_CFG/settings.json" 2>/dev/null)"
+    printf 'loc1 allow (controlled): %s\n' "$(jq -c '.permissions.allow' "$FAKE_CFG/settings.json" 2>&1 | head -c 200)"
     printf 'loc1 bare Bash        : %s\n' \
       "$(jq -r 'if ((.permissions.allow // []) | index("Bash")) != null then "PRESENT" else "absent" end' "$FAKE_CFG/settings.json" 2>&1)"
     printf 'loc2 path             : %s\n' "$LOC2"
@@ -686,8 +705,49 @@ run_cell_e() {
   bot_tmux "$LSOCK" kill-session -t "$LSESSION" 2>/dev/null || true
 }
 
+# PRODUCTION-PARITY loc1. The control was supposed to vary the GRANT LIST and
+# hold everything else fixed; a minimal stub varies the grant list AND silently
+# drops every other global-tier setting, which is the pinned-factor-is-invisible
+# trap one layer down. This takes the real operator global, replaces the allow
+# list with the controlled value, and pins deny/ask empty (the ladder composes
+# denies at loc3). Everything else -- permissions.defaultMode, sandbox, the
+# prompt-skip flags -- is preserved verbatim, so the canary matches production on
+# every axis except the one under test.
+#
+# hooks / statusLine / plugins are DELETED rather than preserved: they execute
+# code and name paths in the operator tree, and a disposable canary must not run
+# operator hooks. That is a deliberate, disclosed divergence from parity.
 write_loc1_tools() {  # write_loc1_tools <json-array-body>
-  printf '{"permissions":{"allow":[%s]}}\n' "$1" > "$FAKE_CFG/settings.json"
+  jq --argjson allow "[$1]" '
+        del(.hooks, .statusLine, .enabledPlugins, .extraKnownMarketplaces)
+      | .permissions.allow = $allow
+      | .permissions.deny  = []
+      | .permissions.ask   = []
+    ' "$REAL_GLOBAL" > "$FAKE_CFG/settings.json" 2>/dev/null \
+    || printf '{"permissions":{"allow":[%s]}}\n' "$1" > "$FAKE_CFG/settings.json"
+  # Parity is ASSERTED, not assumed: a jq failure silently falling back to the
+  # stub would reintroduce the exact defect this function exists to remove.
+  local dm sb
+  dm="$(jq -r '.permissions.defaultMode // "ABSENT"' "$FAKE_CFG/settings.json" 2>/dev/null)"
+  sb="$(jq -r 'if .sandbox then "present" else "ABSENT" end' "$FAKE_CFG/settings.json" 2>/dev/null)"
+  harness_check "loc1 carries production defaultMode [$dm] and sandbox [$sb]" \
+    "$([ "$dm" != ABSENT ] && [ "$sb" = present ] && echo yes || echo no)"
+  # PROMPTING IS THE OBSERVABLE, not a side effect of it -- a manual-arm cell is
+  # discriminated by whether a prompt appeared. So these two booleans ARE part of
+  # the measuring instrument, and a stub that drops them changes the READING
+  # rather than the environment. Confirmed explicitly rather than inherited.
+  local sap sdp
+  sap="$(jq -r '.skipAutoPermissionPrompt // "ABSENT"' "$FAKE_CFG/settings.json" 2>/dev/null)"
+  sdp="$(jq -r '.skipDangerousModePermissionPrompt // "ABSENT"' "$FAKE_CFG/settings.json" 2>/dev/null)"
+  harness_check "loc1 carries the prompt-governing booleans [skipAuto=$sap skipDangerous=$sdp]" \
+    "$([ "$sap" != ABSENT ] && [ "$sdp" != ABSENT ] && echo yes || echo no)"
+  say "  loc1 PARITY NOTE: production global with permissions.allow replaced by the"
+  say "    controlled value. deny/ask pinned empty, which IS parity -- the global"
+  say "    carries only [allow, defaultMode] under permissions, no deny and no ask."
+  say "    DELIBERATE NON-PARITY, disclosed rather than silent: hooks, statusLine,"
+  say "    enabledPlugins and extraKnownMarketplaces are REMOVED, so this canary"
+  say "    differs from production on hook execution. Known, and a bound on every"
+  say "    verdict below."
 }
 
 
