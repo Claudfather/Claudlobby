@@ -879,24 +879,43 @@ def _refuse_unreadable_report_ledger(
     So `refuse_on_absent=False` is passed by --open-task alone, and the reason
     is that absence makes ITS answer more certain rather than less.
 
-    THE COST OF THAT, STATED BECAUSE IT IS A CHOICE AND NOT A FREE ONE: a WRONG
-    PATH on --open-task is now permanently SILENT. That is a real bug that
-    really happened -- state/ passed where runtime/ belonged, for six hours --
-    and under this design the resolver would have kept returning nothing
-    without complaint.
+    THE COST, STATED BECAUSE IT IS A CHOICE AND NOT A FREE ONE. An earlier
+    version of this paragraph said a wrong path here merely leaves the resolver
+    SILENT -- "degradation, not falsehood". THAT WAS WRONG, and it was refuted
+    by tracing the real report-back.sh caller instead of reading this docstring
+    (vera, 2026-09-01).
 
-    It is still the right trade, and the asymmetry is what justifies it:
+    THE RESIDUAL RISK IS A WRONG-ID ATTRIBUTION, NOT A QUIET NO-OP. For a bot
+    with id'd history, a wrong or absent path makes EVERY id'd dispatch in
+    history read as open, and this door returns the HEAD of that list -- an
+    OLD, ALREADY-CLOSED id. report-back.sh then stamps it into the ledger, so a
+    report is attributed to a task that never received it and a long-closed
+    dispatch reads as freshly completed. That is the same failure class as the
+    false completion row in #1417.
 
-      --open       with a wrong path LIES. It returns a confident inflated
-                   number that a human reads and acts on.
-      --open-task  with a wrong path only UNDER-DELIVERS. Reports stay id-less
-                   and dispatches do not auto-close. Degradation, not
-                   falsehood, and it fails safe.
+    Measured on the real 2026-09-01 dispatch log with an absent ledger:
+      vera -> t-1787669625-219a   dispatched 2026-08-25, COMPLETED 2026-08-25
+      ravi -> t-1787683189-0f60   dispatched 2026-08-25, COMPLETED 2026-08-25
+    Seven-day-old finished work, handed back as the id to close.
 
-    Refusing on --open prevents a lie. Not refusing on --open-task preserves the
-    legitimate never-reported case at the price of a silent degradation. Do not
-    "fix" the silence later without re-reading this: a silent resolver here is
-    the intended cost, not the bug that was fixed.
+    A future reader who believes the old "silent no-op" version will treat a
+    stale id as a MISSING one and look in the wrong place. It is a false
+    attribution. Look for it in the ledger, not in the gaps.
+
+    THE TRADE STILL HOLDS, for a different reason than the dead one:
+      refusing on absent breaks the LEGITIMATE first report from a fleet that
+      has never reported -- a CERTAINTY on every new fleet, and the case that
+      broke three #835 assertions;
+      the stale-id case needs a WRONG PATH reaching --open-task specifically,
+      and report-back.sh supplies that path in code rather than from an
+      operator.
+    Low-probability wrong attribution against certain breakage of a real case.
+
+    A THIRD OPTION DISSOLVES THE TRADE and is filed rather than built here:
+    distinguish ledger-absent-AND-bot-has-no-id'd-history (the genuine first
+    report -> proceed) from ledger-absent-AND-bot-HAS-history (suspicious ->
+    return nothing rather than a stale head). Both facts are already in the
+    dispatch log this module reads. See the follow-up on #1418.
 
     Exactly the failure class :830 already guards for --orphans, pointed at the
     input three managers actually pass by hand. The join closes a dispatch by
