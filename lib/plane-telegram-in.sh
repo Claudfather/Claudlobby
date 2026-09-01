@@ -4,8 +4,20 @@
 # messages, the plane's founding operator-in-the-stream gap). A channel
 # message arrives injected as a user turn shaped:
 #
-#   <channel source="telegram" chat_id="..." message_id="..." user="..."
-#            ts="...">the words</channel>
+#   <channel source="plugin:telegram:telegram" chat_id="..."
+#            message_id="..." user="..." user_id="..." ts="...">
+#   the words
+#   </channel>
+#
+# THE SOURCE VALUE IS THE PLUGIN-QUALIFIED NAME (r4, read from a LIVE
+# transcript on the deployed estate): `plugin:telegram:telegram`, not the
+# bare `telegram` three rounds of fixtures carried — the deployed hook
+# dropped the operator's first real message because nobody had pulled the
+# tag from a transcript. The matcher accepts `telegram` or ANY value
+# ending `:telegram` (prefix unconstrained — a version-qualified plugin
+# name must not become the next silent drop); the canonical test fixture
+# is the live tag SHAPE-verbatim, its identifier values faked (public
+# repo — the PII rule bars real chat/user ids in committed assets).
 #
 # This hook matches THAT SHAPE ONLY — an ordinary prompt exits at the
 # zero-fork prefilter below — and emits, PER TAG (the plugin may batch two
@@ -82,8 +94,12 @@ prompt = hook.get("prompt") or ""
 # literal </channel> truncates at that close — the non-greedy stop is what
 # keeps two ADJACENT tags from merging, and the plugin's own injection
 # never embeds an unescaped close.
+# (?<![\w-]) so data-source= is not read as source= (probed); the prefix
+# before the final :telegram is deliberately unconstrained within the
+# quoted value — failing toward accept is the r4 direction
 tags = re.finditer(
-    r"<channel\s+([^>]*\bsource=\"telegram\"[^>]*)>(.*?)</channel>",
+    r"<channel\s+([^>]*(?<![\w-])source=\"(?:[^\"]*:)?telegram\"[^>]*)>"
+    r"(.*?)</channel>",
     prompt, re.DOTALL)
 events = []
 for m in tags:
@@ -130,6 +146,19 @@ for m in tags:
                     **({"carrier_ref": f"tg:{tg_id}"}
                        if tg_id.isdigit() else {})}})
 if not events:
+    # THE QUIET-DROP SEAM (r4): a complete channel tag whose source does
+    # not match dies silently here — exactly how the live defect hid. A
+    # well-formed tag carrying a source attr earns one stderr line naming
+    # the value (probed: the false-positive population is dev text quoting
+    # full tags — one hook-log line, never model context). The bare
+    # no-tags path stays silent: it fires on every prefilter false
+    # positive and disclosure there would be noise.
+    m = re.search(
+        r"<channel\s+[^>]*(?<![\w-])source=\"([^\"]*)\"[^>]*>.*?</channel>",
+        prompt, re.DOTALL)
+    if m:
+        print("plane-telegram-in: channel tag with unmatched source=\""
+              + m.group(1)[:80] + "\" — not recorded", file=sys.stderr)
     sys.exit(0)
 print(json.dumps({"events": events}, ensure_ascii=False))
 PYEOF
@@ -141,7 +170,10 @@ PYEOF
 # when nothing matched (rc 0). A nonzero rc is real breakage, and the one
 # path that drops a message must say so (r3: the argv plumbing lost
 # oversized payloads at rc 0 with no stderr).
-BATCH="$(printf '%s' "$PAYLOAD" | python3 -S -E -c "$PYPROG" "$FLEET_NAME" "$BOT_ID" 2>/dev/null)"
+# python stderr flows through (the unmatched-source disclosure rides it);
+# an uncaught traceback lands in the hook log and the rc gate below still
+# discloses the drop
+BATCH="$(printf '%s' "$PAYLOAD" | python3 -S -E -c "$PYPROG" "$FLEET_NAME" "$BOT_ID")"
 if [ $? -ne 0 ]; then
   echo "plane-telegram-in: parser failed (payload ${#PAYLOAD}B) — message not recorded" >&2
   exit 0
