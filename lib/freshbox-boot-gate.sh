@@ -382,11 +382,34 @@ harness_check "trust-seed teeth: no-trust boot drops the whole composed settings
 # THE BOUND, and it is the reason this does not yet refute the ADR outright:
 # Agent is the ONLY composed-only non-Bash grant in this composition, so if the
 # binary DEFAULT-ALLOWS Agent the probe cannot discriminate and its success
-# proves nothing. That is untested. Settling it is one more arm: compose the
-# bot WITHOUT code-review expertise so Agent is never granted, boot untrusted,
-# and see whether Agent still runs. Works -> Agent is default-allowed and this
-# probe is void. Refused -> the probe is valid and composed allows genuinely
-# survive an untrusted workspace.
+# proves nothing. That is untested, so the cell is UNINTERPRETABLE -- not a
+# refutation of the ADR and not a confirmation of it.
+#
+# WHY Agent WAS CHOSEN AND WHY THAT WAS NOT ENOUGH. It was picked because it is
+# absent from the 223-entry operator global ALLOW LIST. That is a different
+# mechanism from the tool DEFAULT-ALLOWING itself, and only the first was
+# checked. It is the bare-Bash trap one layer over: bare "Bash" at index 0 of
+# the global list makes every Bash probe useless, and a tool that is
+# default-allowed makes a non-Bash probe useless the same way, for a reason a
+# grep of the allow list cannot see.
+#
+# RESUME REQUIRES A GRANT DEMONSTRABLY NOT DEFAULT-ALLOWED. Do not pick one on
+# priors -- priors are exactly what this precondition exists to stop us
+# trusting. Establish it with a PRECONDITION CELL, run BEFORE the trust arms:
+#   exercise the candidate on a bot with NO composed allow for it and no global
+#   allow for it.
+#     it runs      -> the tool default-allows it. The candidate is USELESS.
+#                     Pick another and re-run this cell.
+#     it prompts   -> it discriminates, and the trust arms then mean something.
+#     or refuses
+# Skill(...) is the better candidate than Agent on priors -- and that sentence
+# is itself a prior, so it does not substitute for the cell.
+#
+# THE POSITIVE FINDING THAT SURVIVES REGARDLESS, and it cost this boot pair:
+# permissionMode came back DEFAULT IN BOTH ARMS, so the --permission-mode auto
+# auto-approval confound is EXCLUDED for this cell. That was a live worry when
+# the assertion was specced and it is now closed. Whatever else is rebuilt
+# here, that question does not need re-asking.
 control_agent="no"; agent_tool_used "$TRANSCRIPT" && control_agent="yes"
 test_agent="no";    agent_tool_used "$MUT_OUT"    && test_agent="yes"
 if [ "$control_agent" = no ]; then
