@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,50 @@ def test_unchanged_rescan_suppresses_every_keyframe(tmp_path):
     s2 = _scan(root)
     assert s2["outcomes"]["duplicate"] == s2["entities"]
     assert s2["outcomes"]["committed"] == 1          # scan_completed only
+
+
+def test_vault_rev_refuses_the_enclosing_framework_repo(tmp_path):
+    """Live estate catch: a host whose local/ has no .git let git -C walk
+    up to the CLAUDLOBBY checkout — every vault_rev recorded was the
+    framework's HEAD (wrong provenance, plausible sha; revision_seen
+    fired per root pull, not per vault commit). Authority test: the
+    answering toplevel must not be the framework root. An honest None
+    beats a plausible-wrong rev."""
+    from claudlobby.plane.registry_emit import _vault_rev
+
+    class P:
+        pass
+
+    def _git(cwd, *args):
+        subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                       check=True,
+                       env={**__import__("os").environ,
+                            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                            "GIT_COMMITTER_NAME": "t",
+                            "GIT_COMMITTER_EMAIL": "t@t"})
+
+    # shape 1: framework repo encloses a plain (no-.git) fleet dir — the
+    # walk-up reaches claudlobby itself: must be None, never its HEAD
+    root = tmp_path / "claudlobby"
+    fd = root / "local" / "f"
+    fd.mkdir(parents=True)
+    _git(root, "init", "-q")
+    (root / "x").write_text("x")
+    _git(root, "add", "."); _git(root, "commit", "-qm", "framework")
+    p = P(); p.root = root; p.fleet_dir = fd
+    assert _vault_rev(p) is None
+    # shape 2: local/ is its OWN repo (the vault) — the walk-up is
+    # load-bearing and the vault's sha comes back, not the framework's
+    _git(root / "local", "init", "-q")
+    (root / "local" / "y").write_text("y")
+    _git(root / "local", "add", "."); _git(root / "local", "commit",
+                                           "-qm", "vault")
+    rev = _vault_rev(p)
+    assert rev is not None
+    framework_rev = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True).stdout.strip()
+    assert rev != framework_rev
 
 
 def test_vault_armed_scan_completes_and_names_the_vault(tmp_path,

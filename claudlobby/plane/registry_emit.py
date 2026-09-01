@@ -467,10 +467,24 @@ def library_items(paths, fleet_name: str, vault_rev: str | None):
 # ---------------------------------------------------------------------------
 
 def _vault_rev(paths) -> str | None:
+    """The vault repo's revision, or None when no vault repo ANSWERS WITH
+    AUTHORITY. git -C <fleet_dir> deliberately walks up (the laptop layout:
+    fleet_dir is a subdir of the vault repo) — but on a host whose local/
+    has no .git the walk-up reaches the enclosing FRAMEWORK checkout and
+    answers with claudlobby's own HEAD: wrong provenance wearing a
+    plausible sha, and revision_seen firing on every root pull instead of
+    every vault commit (found live on the estate). The authority test:
+    the answering toplevel must not be the framework root itself — an
+    honest None beats a plausible-wrong rev."""
     fleet_dir = getattr(paths, "fleet_dir", None)
     if not fleet_dir:
         return None
     try:
+        top = subprocess.run(
+            ["git", "-C", str(fleet_dir), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10).stdout.strip()
+        if not top or Path(top).resolve() == Path(paths.root).resolve():
+            return None
         out = subprocess.run(
             ["git", "-C", str(fleet_dir), "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=10)
