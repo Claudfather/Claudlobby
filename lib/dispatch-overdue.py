@@ -78,7 +78,11 @@ empty result. It reaches that state most easily by FORGETTING a flag, since
 `<dlog> <rlog> <now>` with no mode falls straight through to it.
 
 Only --open/--open-task are gated so far (see _not_a_bot_id). SINGLE-BOT MODE
-IS NOT, and closing it is the same one-line _reject_bot_slot call, not a
+IS NOT -- though #1232's report-ledger guard now closes HALF of it: the
+forgotten-flag route (`<dlog> <rlog> <now>`) refuses at rc 3, because `now`
+lands in the rlog slot and a timestamp is not a readable file. A path in the
+BOT slot beside a genuinely readable ledger is still silent at rc 0, and
+closing THAT is the same one-line _reject_bot_slot call, not a
 harder dlog/rlog-swap detection -- stated because an earlier version of this
 paragraph filed single-bot mode under "logs-first" and would have sent the
 next reader looking for the harder fix.
@@ -856,6 +860,57 @@ def _refuse_undeterminable_orphans(bots_dir: str | None) -> bool:
     return False
 
 
+def _refuse_unreadable_report_ledger(mode: str, rlog: str) -> bool:
+    """#1232. Print the refusal for `mode` and return True, or False to proceed.
+
+    Exactly the failure class :830 already guards for --orphans, pointed at the
+    input three managers actually pass by hand. The join closes a dispatch by
+    finding its terminal report; with no readable ledger there is nothing to
+    join against, so EVERY id'd row comes back open -- indistinguishable from a
+    fleet that closed nothing. Substitute the nouns in the --orphans reasoning
+    and it is the same sentence.
+
+    The line is PRESENCE, not emptiness. A ledger that exists holding zero rows
+    is a fleet that has not reported yet, and "every dispatch is still open" is
+    TRUE for it. Only absence or an IO failure makes that answer a fabrication.
+
+    Openability is tested rather than is_file() for the reason probe_source
+    tests it in claudlobby/source_state.py: a path that stats fine and then
+    raises is the mode that takes out a read door, and a stat-only probe
+    certifies it. This module stays stdlib-only and cannot import that, so it
+    carries the same check locally -- the same constraint :843 states.
+
+    is_file() is still the FIRST gate, deliberately. A directory where a file
+    belongs raises IsADirectoryError, which is an OSError, so probing first
+    would report it as unreadable and send someone to run chmod on a path that
+    is simply not a file.
+    """
+    if not os.path.isfile(rlog):
+        print(
+            f"dispatch-overdue.py: {mode} cannot read the report ledger: "
+            f"{rlog!r} is not a file\n"
+            "  every id'd row would classify as OPEN for want of a terminal "
+            "report, which is indistinguishable from a fleet that closed "
+            "nothing.",
+            file=sys.stderr,
+        )
+        return True
+    try:
+        with open(rlog, "rb"):
+            pass
+    except OSError as exc:
+        print(
+            f"dispatch-overdue.py: {mode} cannot read the report ledger: "
+            f"{rlog!r} exists but cannot be opened ({exc.strerror})\n"
+            "  every id'd row would classify as OPEN for want of a terminal "
+            "report, which is indistinguishable from a fleet that closed "
+            "nothing.",
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
 def _reject_bot_slot(mode: str, value: str) -> bool:
     """Print the #1187 shape refusal for `mode`, or return False to proceed."""
     why = _not_a_bot_id(value)
@@ -894,6 +949,8 @@ def main() -> int:
         # report-back still degrades to an id-less report, never an error.
         if _reject_bot_slot("--open-task", argv[2]):
             return 2
+        if _refuse_unreadable_report_ledger("--open-task", argv[4]):
+            return 3
         tid = open_task_id(argv[2], argv[3], argv[4])
         if tid:
             print(tid)
@@ -907,6 +964,8 @@ def main() -> int:
             return 2
         if _reject_bot_slot("--open", argv[2]):
             return 2
+        if _refuse_unreadable_report_ledger("--open", argv[4]):
+            return 3
         rows = open_dispatches(argv[2], argv[3], argv[4])
         for da, exp, tid in rows:
             print(f"{da} {exp if exp is not None else '-'} {tid}")
@@ -986,6 +1045,8 @@ def main() -> int:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         return 2
     bot, dlog, rlog = argv[1], argv[2], argv[3]
+    if _refuse_unreadable_report_ledger("single-bot mode", rlog):
+        return 3
     now = (
         int(argv[4])
         if len(argv) > 4
