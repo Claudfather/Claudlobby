@@ -60,7 +60,7 @@ MODEL="${LADDER_MODEL:-claude-haiku-4-5-20251001}"
 # Which arm. C is the in-workspace single-factor ladder; D is the out-of-tree
 # arm, whose positive control is a DIFFERENT cell -- see PHASE D.
 ARM="${LADDER_ARM:-C}"
-case "$ARM" in C|D|E|F) : ;; *) printf 'FATAL: LADDER_ARM must be C, D or E\n' >&2; exit 2 ;; esac
+case "$ARM" in C|D|E|F|G) : ;; *) printf 'FATAL: LADDER_ARM must be C, D or E\n' >&2; exit 2 ;; esac
 
 # The target PLACEMENT defaults from the arm rather than being a second thing to
 # remember. Arm D running in-workspace would put its positive control on the C1
@@ -527,7 +527,8 @@ EDITMARK="LADDER_EDITED_B7D2"
 # parameters is how their results would quietly stop being the results they
 # reported.
 compose_e() {
-  local allow="$1" deny="$2" want_mcp="$3" mcp_line="mcp: []" ext_line=""
+  local allow="$1" deny="$2" want_mcp="$3" expertise="${4:-ai-platform-reviewer}"
+  local mcp_line="mcp: []" ext_line=""
   [ "$want_mcp" = 1 ] && mcp_line="mcp: [github]"
   cat > "$EXPORT_ROOT/local/$FLEET/fleet.yaml" <<YAML
 fleet:
@@ -539,7 +540,7 @@ fleet:
     $BOT:
       name: $BOT
       expertise:
-        - ai-platform-reviewer
+        - $expertise
       channels: []
       $mcp_line
 $ext_line
@@ -689,9 +690,28 @@ run_cell_e() {
     sleep 3; tw=$((tw + 3))
   done
 
-  # THE ARM PRECONDITION, per cell. Arm E exists because interactive does not
-  # collapse to default; a cell that reports otherwise did not run the
-  # condition this arm claims to measure, and its verdict is not evidence.
+  # Classify only now: the transcript exists (or provably does not), and the
+  # effect is read off the FILESYSTEM rather than off the tool prose.
+  eff="$(effect_observed "$ekind")"
+  if [ -n "$tfile" ]; then
+    blob="$(python3 "$LIB_DIR/ladder-classify.py" "$tfile" --marker "$marker" \
+              --sentinel "$SENTINEL" --effect-observed "$eff" 2>/dev/null)"
+  else
+    blob='{"verdict":"NO_TRANSCRIPT","tool_used":"none","session_mode":"","raw":""}'
+  fi
+  verdict="$(printf '%s' "$blob" | jq -r '.verdict' 2>/dev/null)"
+  local tool_used smode raw
+  tool_used="$(printf '%s' "$blob" | jq -r '.tool_used' 2>/dev/null)"
+  smode="$(printf '%s' "$blob" | jq -r '.session_mode' 2>/dev/null)"
+  raw="$(printf '%s' "$blob" | jq -r '.raw' 2>/dev/null | head -c 400)"
+  verdict="${verdict:-UNCLASSIFIED}"; tool_used="${tool_used:-none}"; smode="${smode:-}"; raw="${raw:-}"
+
+  # The session mode is RECORDED, never required. Measured 2026-09-01: `auto` is
+  # the one enum member that does not take effect -- manual, dontAsk, acceptEdits
+  # and plan all round-trip, and `default` is simply the transcript name for the
+  # mode the CLI calls `manual`. A gate demanding auto would void every cell for
+  # a reason that is a finding rather than a fault. Constancy is checked once, at
+  # close-out, across all run cells.
   harness_check "$cell recorded a session permissionMode [$smode]" \
     "$([ -n "$smode" ] && echo yes || echo no)"
 
@@ -1275,6 +1295,83 @@ say ""
 say "   Fa ALLOWED  => redirect targets are NOT inspected; the argument-position"
 say "                 hypothesis SURVIVES this attack (it is not confirmed by it)."
 say "   Fa DENIED   => redirect targets ARE inspected; the hypothesis is REFUTED."
+fi
+
+# ============================ PHASE G: the live two-factor state (vera)
+if [ "$ARM" = G ]; then
+say ""
+say "== PHASE G — allow AND deny of the same name, the estate live two-factor state =="
+say ""
+say "  WHY A SECOND BASELINE RATHER THAN A TWO-FLIP CELL. vera carries bare Write"
+say "  in BOTH columns of her composed file: tool_permissions.allow [Edit, Write]"
+say "  from fleet.yaml, AND a bare Write deny from the code-review expertise. Both"
+say "  survive composition. That is the #970/#1406 case and it is the only such"
+say "  bot of 21. From a NEUTRAL baseline it is unreachable by one flip -- adding"
+say "  a deny is one flip, adding allow AND deny of the same name is two -- so a"
+say "  strict one-flip ladder cannot produce the live configuration the whole"
+say "  reproduction exists to explain. Putting the ALLOW IN THE BASELINE makes"
+say "  adding the deny a single flip again, and the cell lands on vera real state"
+say "  with one-factor discipline intact."
+say ""
+say "  WHY THE DENY MUST COME FROM THE EXPERTISE TIER. composer.py:2455 strips an"
+say "  allow that exactly matches a BOT-LEVEL deny, so declaring both in fleet.yaml"
+say "  composes the allow away and the two-factor state never exists. vera state"
+say "  arises because her deny arrives from code-review. So this arm DELIBERATELY"
+say "  composes code-review -- the expertise #1368 excluded as instrument defect 1"
+say "  -- and the safety is that the composed allow AND deny are both asserted to"
+say "  contain Write before any cell runs. Armed on purpose, and checked."
+say ""
+say "  CONTROL, and its limit stated rather than papered over: a BARE deny admits"
+say "  no allowed-path control within the same composition, so baseline B has no"
+say "  control of its own. G0 -- allow present, NO deny -- is the class control and"
+say "  it proves the instrument can register ALLOWED for the Write tool in this"
+say "  canary. That is what section 3b requires; it is not a control on baseline B."
+say ""
+export TMUX_TMPDIR="$WORK/tmux"; mkdir -p "$TMUX_TMPDIR"
+WRITE_PROBE="$TARGET_DIR/probe_write.txt"
+A_CONST='"Bash(cat *)", "Bash(grep *)", "Bash(ls *)", "Bash(stat *)"'
+SUF=" Then report, verbatim and in full, either the result or the exact error text you received."
+P_WRITE="Use the Write tool to create the file $WRITE_PROBE containing exactly this text: $EDITMARK — do not use the Bash tool and do not use the Edit tool.$SUF"
+SQ="'"
+P_PY_WRITE="Run this exact Bash command: python3 -c \"import sys;open(sys.argv[1],${SQ}w${SQ}).write(sys.argv[2])\" $WRITE_PROBE $EDITMARK$SUF"
+printf 'cell|deny_form|estate_rules|route|resolvable|tool_used|verdict|effect|session_mode|claude_version|raw_verbatim\n' > "$GRID"
+
+# --- G0: class control. allow present, NO deny. Must ALLOW. -----------------
+compose_e "$A_CONST, \"Write\"" "" 0 ai-platform-reviewer || { say "FATAL: G0 generate failed"; exit 2; }
+write_loc1_tools '"Write"'
+run_cell_e G0 none 0 write-tool n/a "$P_WRITE" write_probe '[]' 1
+assert_isolation G0
+
+if gate_class Write G0; then
+  # --- baseline B: vera. allow AND deny of the same name, both composed. ----
+  compose_e "$A_CONST, \"Write\"" "" 0 code-review || { say "FATAL: EWv generate failed"; exit 2; }
+  write_loc1_tools '"Write"'
+  va="$(jq -r 'if ((.permissions.allow // [])|index("Write")) != null then "yes" else "no" end' "$LOC3")"
+  vd="$(jq -r 'if ((.permissions.deny  // [])|index("Write")) != null then "yes" else "no" end' "$LOC3")"
+  harness_check "baseline B reproduces vera: bare Write in BOTH columns [allow=$va deny=$vd]" \
+    "$([ "$va" = yes ] && [ "$vd" = yes ] && echo yes || echo no)"
+  if [ "$va" != yes ] || [ "$vd" != yes ]; then
+    say "FATAL: the two-factor state did not compose. Refusing to report a one-factor cell as vera."
+    exit 1
+  fi
+  say "  composed deny : $(composed_deny)"
+  say "  composed allow: $(composed_allow)"
+  run_cell_e EWv bare-deny-PLUS-matching-allow 1 write-tool n/a "$P_WRITE" write_probe "$(composed_deny)"
+  run_cell_e EWv-sh bare-deny-PLUS-matching-allow 1 bash-python3-PAIRED-ROUTE interpreter-opaque "$P_PY_WRITE" write_probe "$(composed_deny)"
+else
+  skip_class Write EWv EWv-sh
+fi
+
+say ""
+say "== TWO-BASELINE COMPARISON =="
+printf '   %-46s %s\n' "G0  allow, NO deny (class control):"     "$(verdict_of G0)"     | tee -a "$LOG"
+printf '   %-46s %s\n' "EWv allow + matching bare deny (vera):"  "$(verdict_of EWv)"    | tee -a "$LOG"
+printf '   %-46s %s\n' "EWv-sh same state, python3 route:"       "$(verdict_of EWv-sh)" | tee -a "$LOG"
+say ""
+say "   Compare EWv against arm E EWb (bare deny, NO matching allow). Same flip,"
+say "   two baselines. DIFFER => the allow is doing something despite deny-wins,"
+say "   which answers #970 directly. AGREE => deny-wins is confirmed against the"
+say "   LIVE configuration rather than a synthetic one."
 fi
 
 # ============================================================ close-out
