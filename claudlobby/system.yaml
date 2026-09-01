@@ -160,6 +160,14 @@ defaults:
       - command: "$CLAUDLOBBY_ROOT/lib/gh-mention-guard.sh"
     PostToolUse:
       - command: "$CLAUDLOBBY_ROOT/lib/bot-vitals.sh"
+      # The OUTBOUND Telegram carrier (#1402): the plugin's MCP reply path
+      # was the plane's blind spot -- a bot answering the operator left no
+      # record while tg-post notices did. Matcher-scoped to the reply tool;
+      # composed dormant (PLANE_EMIT_ENABLED=1, the transcript-digest
+      # pattern), exit 0 on every path.
+      - command: "$CLAUDLOBBY_ROOT/lib/plane-telegram-out.sh"
+        matcher: "mcp__plugin_telegram_telegram__reply"
+        timeout: 15
     # Ingestion layer for the ai-platform fleet-monitor (#785 Phase A): distil
     # each finished session into one structured JSONL row via a cheap Haiku
     # pass, so the monitor reasons over per-session digests and never over raw
@@ -184,6 +192,15 @@ defaults:
     # path (a hook must never break a boot).
     SessionStart:
       - command: "$CLAUDLOBBY_ROOT/lib/plane-session-start.sh"
+        timeout: 15
+    # The INBOUND Telegram carrier (#1402): recognizes the plugin's channel
+    # injection shape and records the OPERATOR's own message as a first-
+    # class communication (sender human:<user>). Matches that shape ONLY --
+    # ordinary prompts exit untouched, and stdout stays empty on every path
+    # (UserPromptSubmit stdout is added to the model's context). Same
+    # dormancy as the rest of the plane hooks.
+    UserPromptSubmit:
+      - command: "$CLAUDLOBBY_ROOT/lib/plane-telegram-in.sh"
         timeout: 15
 
   observability:
