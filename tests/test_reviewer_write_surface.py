@@ -57,9 +57,25 @@ def _bot(bot_id: str, expertise: list[str]) -> BotConfig:
 
 
 @pytest.fixture
-def paths(tmp_path) -> Paths:
-    (tmp_path / "lib").mkdir()
-    return Paths(root=tmp_path, fleet_dir=None)
+def paths() -> Paths:
+    """Rooted at the REAL repo, and asserts it resolved.
+
+    A `tmp_path` root has no `library/`, so `find_library_file` returns None and
+    `_resolve_expertise_permissions` silently `continue`s past the profile
+    (composer.py:2275-2280). Every test below would then pass identically if
+    `code-review.md` were deleted outright — coverage that certifies nothing,
+    which is the exact object this PR argues against, one layer up.
+
+    The assert is the load-bearing half. Pointing at the real root fixes it
+    today; asserting the lookup resolved is what stops a future path change from
+    silently restoring the decoy, since the failure mode reads as a pass.
+    """
+    p = Paths(root=REPO, fleet_dir=None)
+    assert p.find_library_file("expertise", REVIEWER_EXPERTISE, ".md") is not None, (
+        "fixture cannot resolve the expertise file, so composition would silently "
+        "skip it and these tests would assert nothing"
+    )
+    return p
 
 
 def _deny(bot, fleet, paths) -> list[str]:
@@ -77,9 +93,14 @@ class TestReviewerProjectsTreeStaysWritable:
             _bot("vera", [REVIEWER_EXPERTISE]),
             _bot("otis", ["software-engineering"]),
         )
-        deny = _deny(vera, _fleet(vera, otis), paths)
-        own_projects = str(paths.bot_runtime("vera") / "projects")
-        offenders = [d for d in deny if own_projects in d or "/projects/" in d]
+        fleet = _fleet(vera, otis)
+        deny = _deny(vera, fleet, paths)
+        # Match each BOT'S projects subtree explicitly, never a bare "/projects/"
+        # substring: this repo is itself checked out under a bot's projects/ dir,
+        # so a substring test matches the composed ROOT and reports a rule that
+        # targets `<root>/runtime/bots/otis/**` as if it targeted a projects tree.
+        targets = [str(paths.bot_runtime(b) / "projects") for b in fleet.bots]
+        offenders = [d for d in deny if any(t in d for t in targets)]
         assert offenders == [], (
             "a deny now reaches a reviewer's own projects/ tree: "
             f"{offenders}. #1406 excluded it deliberately — worktree bookkeeping "

@@ -87,8 +87,12 @@ permissions:
   #
   # That IS a reduction, and naming it plainly is the point. A bare deny is not
   # decorative: it removes the native tool, which enforces. What it does not do
-  # is bind Bash, so a heredoc wrote freely underneath it — see the rising count
-  # above rather than a second copy of the number here.
+  # is bind Bash. Two SEPARATE facts establish that, and fusing them overstates
+  # both: (1) the two-fleet probe above showed heredocs and `python3 -c` writing
+  # under an armed bare deny — that is the mechanism; (2) the rising memory-file
+  # count above shows writes kept landing on bots carrying the rule — that is
+  # the scale. The count alone does not prove HOW each file was written, and no
+  # claim here rests on it doing so.
   # NEITHER SHAPE MAKES A REVIEWER READ-ONLY: bare removes a tool and Bash walks
   # past it; path-scoped filters command forms and an interpreter walks past
   # that. The rule traded away was one that pushed writes off the audited native
