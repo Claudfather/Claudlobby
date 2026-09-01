@@ -509,14 +509,7 @@ EDITMARK="LADDER_EDITED_B7D2"
 # reported.
 compose_e() {
   local allow="$1" deny="$2" want_mcp="$3" mcp_line="mcp: []" ext_line=""
-  if [ "$want_mcp" = 1 ]; then
-    mcp_line="mcp: [github]"
-    # The stand-in lives in $WORK, outside the fleet, so the L1 source guard
-    # would classify its absolute path as an undeclared source. Declared rather
-    # than anchored: it is genuinely external to the fleet and saying so is the
-    # honest form.
-    ext_line="      external_paths: [$WORK]"
-  fi
+  [ "$want_mcp" = 1 ] && mcp_line="mcp: [github]"
   cat > "$EXPORT_ROOT/local/$FLEET/fleet.yaml" <<YAML
 fleet:
   name: $FLEET
@@ -558,11 +551,13 @@ boot_cell_session() {  # boot_cell_session <trace:0|1> <cell>
   if [ "$trace" = 1 ]; then
     bot_tmux "$LSOCK" new-session -d -s "$LSESSION" -c "$BOT_DIR" -x 200 -y 50 \
       env HOME="$FAKE_HOME" CLAUDE_CONFIG_DIR="$FAKE_CFG" \
+      CLAUDLOBBY_ROOT="$EXPORT_ROOT" FLEET_ROOT="$EXPORT_ROOT/local/$FLEET" \
       strace -f -e trace=openat,open -o "$WORK/$cell.strace" \
       "$CLAUDE_BIN" --permission-mode auto --model "$MODEL"
   else
     bot_tmux "$LSOCK" new-session -d -s "$LSESSION" -c "$BOT_DIR" -x 200 -y 50 \
       env HOME="$FAKE_HOME" CLAUDE_CONFIG_DIR="$FAKE_CFG" \
+      CLAUDLOBBY_ROOT="$EXPORT_ROOT" FLEET_ROOT="$EXPORT_ROOT/local/$FLEET" \
       "$CLAUDE_BIN" --permission-mode auto --model "$MODEL"
   fi
 }
@@ -904,10 +899,10 @@ A_CONST='"Bash(cat *)", "Bash(grep *)", "Bash(ls *)", "Bash(stat *)"'
 
 # ---- the hermetic MCP stand-in (see lib/ladder-mcp-standin.py for the bound) --
 mkdir -p "$EXPORT_ROOT/local/$FLEET/library/mcp"
-cp "$LIB_DIR/ladder-mcp-standin.py" "$WORK/ladder-mcp-standin.py"
+cp "$LIB_DIR/ladder-mcp-standin.py" "$EXPORT_ROOT/local/$FLEET/ladder-mcp-standin.py"
 cat > "$EXPORT_ROOT/local/$FLEET/library/mcp/github.json" <<JSON
 {
-  "github": { "command": "python3", "args": ["-u", "$WORK/ladder-mcp-standin.py"] },
+  "github": { "command": "python3", "args": ["-u", "\${FLEET_ROOT}/ladder-mcp-standin.py"] },
   "_permissions_contract": { "tools": ["merge_pull_request"] }
 }
 JSON
@@ -1082,9 +1077,11 @@ say "   as agreement."
 compose_e "$A_CONST" "" 1 || { say "FATAL: EG0 generate failed"; exit 2; }
 write_loc1_tools '"mcp__github__merge_pull_request"'
 mcp_cmd="$(jq -r '.mcpServers.github.args[1] // "MISSING"' "$BOT_DIR/.mcp.json" 2>/dev/null)"
-harness_check "composed .mcp.json names the LOCAL stand-in, not the real GitHub server [$mcp_cmd]" \
-  "$([ "$mcp_cmd" = "$WORK/ladder-mcp-standin.py" ] && echo yes || echo no)"
-if [ "$mcp_cmd" != "$WORK/ladder-mcp-standin.py" ]; then
+STANDIN_PATH="$EXPORT_ROOT/local/$FLEET/ladder-mcp-standin.py"
+mcp_resolved="${mcp_cmd/\$\{FLEET_ROOT\}/$EXPORT_ROOT/local/$FLEET}"
+harness_check "composed .mcp.json RESOLVES to the local stand-in, which exists [$mcp_resolved]" \
+  "$([ "$mcp_resolved" = "$STANDIN_PATH" ] && [ -f "$STANDIN_PATH" ] && echo yes || echo no)"
+if [ "$mcp_resolved" != "$STANDIN_PATH" ] || [ ! -f "$STANDIN_PATH" ]; then
   say "FATAL: the MCP class would run against something other than the stand-in. Refusing."
   exit 1
 fi
