@@ -21,12 +21,19 @@
 # output is captured, disclosures go to stderr — and exits 0: a hook must
 # never block or reshape a turn.
 #
-# The payload rides ARGV into python (`python3 -` takes its PROGRAM from
-# stdin, so a piped payload under a heredoc is silently dead — caught by
-# the battery). ARG_MAX bounds that at ~1MB; Telegram messages cap at
-# 4096 chars, ~250x inside the ceiling (disclosed, not re-plumbed).
+# The PROGRAM rides argv (-c) and the payload rides STDIN — each on the
+# channel that has no ceiling for it. Both wrong plumbings failed for
+# real: `python3 -` takes its program from stdin, so a piped payload under
+# a heredoc is silently dead (r1, caught by the battery); a payload on
+# argv dies at ARG_MAX ~1MB, and a multi-tag injection can exceed the
+# per-message 4096 cap, so the loss was silent exactly when the batch was
+# biggest (r3, probed at 1.5MB/2.5MB: rc 0, nothing recorded, no stderr).
 #
 # DORMANT (PLANE_EMIT_ENABLED=1) and NON-BLOCKING, the estate pattern.
+# Deliberately does NOT source lib-common.sh: nothing here needs it, and
+# the 3,865-line source costs ~50ms per channel message on a Pi (r3; the
+# gh-mention-guard precedent) — plane-emit.sh is called direct, with the
+# same failure disclosure plane_emit_events would have printed.
 
 set -u
 
@@ -43,33 +50,30 @@ PAYLOAD="$(cat 2>/dev/null || true)"
 
 # ZERO-FORK prefilter (the gh-mention-guard idiom, measured there 3.5ms vs
 # 137ms on a Pi): on an armed fleet EVERY prompt pays this hook, and an
-# ordinary prompt must exit before any source, mint or python spawn.
-# Loose ON PURPOSE: the python regex is the decider; the prefilter only
-# skips the spawn on ordinary prompts, and a prefilter FALSE NEGATIVE
-# silently drops an operator message (r2 — the regex accepts a newline/tab
-# after `<channel`, so the glob must not require the space).
+# ordinary prompt must exit before any mint or python spawn. Loose ON
+# PURPOSE: the python regex is the decider; the prefilter only skips the
+# spawn on ordinary prompts, and a prefilter FALSE NEGATIVE silently drops
+# an operator message (r2 — the regex accepts a newline/tab after
+# `<channel`, so the glob must not require the space).
 case "$PAYLOAD" in
   *'<channel'*'telegram'*) ;;
   *) exit 0 ;;
 esac
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib-common.sh
-. "$LIB_DIR/lib-common.sh"
-set +e  # lib-common re-arms set -e at source time; a hook must not die
 
-# One python3 parses the hook JSON, walks EVERY channel tag, and builds the
-# batch — msg ids minted per message inside (multi-tag needs one each).
-# Stdout is captured for the pipe only; empty when nothing matched.
-BATCH="$(python3 - "$FLEET_NAME" "$BOT_ID" "$PAYLOAD" 2>/dev/null <<'PYEOF'
+# read -d NUL is a builtin (no fork) and returns 1 at EOF-without-NUL,
+# which is the expected way this heredoc ends.
+IFS= read -r -d '' PYPROG <<'PYEOF' || true
 import json
 import re
 import secrets
 import sys
+from datetime import datetime
 
 fleet, bot = sys.argv[1], sys.argv[2]
 try:
-    hook = json.loads(sys.argv[3])
+    hook = json.loads(sys.stdin.read())
 except Exception:
     sys.exit(0)
 prompt = hook.get("prompt") or ""
@@ -94,6 +98,9 @@ for m in tags:
     user = re.sub(r"[^\w.:-]", "_", attrs.get("user") or "telegram")[:64]
     chat = attrs.get("chat_id") or ""
     tg_id = attrs.get("message_id") or ""
+    # the msg_ mint: same <prefix>_<32hex> rule as lib-common.sh's
+    # plane_mint_id (per-tag minting needs it in-process; ingest pins the
+    # format) — an edit to either must visit its twin
     msg_id = "msg_" + secrets.token_hex(16)
     envelope = {}
     ts = (attrs.get("ts") or "").replace("Z", "+00:00").replace("z", "+00:00")
@@ -104,7 +111,6 @@ for m in tags:
     # only a ts the datetime parser itself accepts rides the envelope.
     if ts:
         try:
-            from datetime import datetime
             if datetime.fromisoformat(ts).tzinfo is not None:
                 envelope["occurred_at"] = ts
         except ValueError:
@@ -127,7 +133,20 @@ if not events:
     sys.exit(0)
 print(json.dumps({"events": events}, ensure_ascii=False))
 PYEOF
-)" || true
+
+# One python3 (-S -E, the plane-emit.sh spawn discipline: 45ms -> 12ms
+# measured there on a Pi) parses the hook JSON from STDIN, walks EVERY
+# channel tag, and builds the batch — msg ids minted per message inside
+# (multi-tag needs one each). Stdout is captured for the pipe only; empty
+# when nothing matched (rc 0). A nonzero rc is real breakage, and the one
+# path that drops a message must say so (r3: the argv plumbing lost
+# oversized payloads at rc 0 with no stderr).
+BATCH="$(printf '%s' "$PAYLOAD" | python3 -S -E -c "$PYPROG" "$FLEET_NAME" "$BOT_ID" 2>/dev/null)"
+if [ $? -ne 0 ]; then
+  echo "plane-telegram-in: parser failed (payload ${#PAYLOAD}B) — message not recorded" >&2
+  exit 0
+fi
 [ -n "$BATCH" ] || exit 0
-printf '%s' "$BATCH" | plane_emit_events telegram-hook >/dev/null 2>&1 || true
+printf '%s' "$BATCH" | "$LIB_DIR/plane-emit.sh" >/dev/null || \
+  echo "plane-telegram-in: plane record failed rc=$? — message not recorded" >&2
 exit 0

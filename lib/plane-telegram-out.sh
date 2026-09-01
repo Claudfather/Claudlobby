@@ -24,7 +24,10 @@ set -u
 
 [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || exit 0
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
-[ -n "${FLEET_NAME:-}" ] && [ -n "${BOT_ID:-}" ] || exit 0
+if [ -z "${FLEET_NAME:-}" ] || [ -z "${BOT_ID:-}" ]; then
+  echo "plane-telegram-out: armed but FLEET_NAME/BOT_ID unset — not recording" >&2
+  exit 0
+fi
 command -v jq >/dev/null 2>&1 || exit 0
 
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,16 +45,23 @@ case "$TOOL" in
 esac
 
 CHAT_ID="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.chat_id // empty' 2>/dev/null)"
-TEXT="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.text // .tool_input.message // empty' 2>/dev/null)"
+TEXT="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.text // empty' 2>/dev/null)"
 [ -n "$CHAT_ID" ] && [ -n "$TEXT" ] || exit 0
 
-# The tool response MAY carry the carrier's message id — real MCP hook
-# responses arrive OBJECT- or ARRAY-shaped across plugin versions, so the
-# walk is `..`-recursive (the first version's fixed paths hard-errored on
-# the array shape and the capture fallback was dead for exactly the shape
-# it targeted — gauntlet, measured; jq form verified by the reviewer).
+# The carrier ref. GROUND TRUTH (r3, probed against the installed plugin,
+# telegram@0.0.7): the reply tool's success text is `sent (id: 12345)` /
+# `sent 2 parts (ids: 12345, 12346)` — it NEVER says message_id, so the
+# live rung captures the real string (first id = the head of the reply).
+# The structured .message_id walk and the message_id-string capture stay
+# as shape-drift tolerance only. Every rung walks `..`-recursively — real
+# MCP hook responses arrive OBJECT- or ARRAY-shaped across plugin
+# versions, and the first version's fixed paths hard-errored on the array
+# shape (gauntlet, measured).
 TG_MSGID="$(printf '%s' "$PAYLOAD" | jq -r '
   first(
+    (.tool_response? | .. | strings
+       | (capture("sent(?: [0-9]+ parts)? \\(ids?: (?<id>[0-9]+)").id)?
+         // empty),
     (.tool_response? | .. | .message_id? // empty),
     (.tool_response? | .. | strings
        | (capture("message_id[\"=: ]+(?<id>[0-9]+)").id)? // empty)
@@ -63,29 +73,32 @@ case "$TG_MSGID" in *[!0-9]*) TG_MSGID="" ;; esac
 # false claim (r1 MAJOR, probed). Detection is SHAPE-GUARDED and
 # structured-first (r2 MAJOR, probed: `.isError?` on an ARRAY response
 # yields empty, and jq's if-with-empty-condition evaluates NO branch — the
-# r1 fix was dead on the exact shape it certified as real):
+# r1 fix was dead on the exact shape it certified as real). The tree is
+# walked ONCE and each rung reads its own slice (r3 dedup, pin-equivalent):
 #   1. any object anywhere carrying isError:true  -> failed (strings joined)
+#      — THE LIVE RUNG: the installed plugin (telegram@0.0.7, probed) fails
+#      as {content:[...], isError:true} with text `reply failed after N of
+#      M chunk(s) sent: ...`, delivered whole per the CC hook docs
 #   2. any object carrying isError:false          -> accepted (explicit)
 #   3. any object carrying an error field         -> failed (that text)
-#   4. a BARE-ARRAY response whose FIRST string starts "Error"/"Telegram
-#      error" -> failed — narrow by design: an object-wrapped success that
-#      merely ECHOES error-ish text (a bot relaying an alert) must stay
-#      accepted (r2 MEDIUM, probed false-FAILED).
+#   4. a BARE-ARRAY response with ANY string starting "Error"/"Telegram
+#      error"/"reply failed" (the real plugin prefix, r3) -> failed —
+#      arrays only by design: an object-wrapped success that merely ECHOES
+#      error-ish text (a bot relaying an alert) must stay accepted (r2
+#      MEDIUM, probed false-FAILED); and ANY string, never just the first —
+#      an array item's first string is its `type` field's value (r2 pin)
 TG_ERR="$(printf '%s' "$PAYLOAD" | jq -r '
-  ([.tool_response? | .. | objects | select(has("isError")) | .isError])
-    as $flags
-  | ([.tool_response? | .. | objects | .error? | select(. != null)])
-    as $errs
+  [.tool_response? | ..] as $nodes
+  | ([$nodes[] | objects | select(has("isError")) | .isError]) as $flags
+  | ([$nodes[] | objects | .error? | select(. != null)]) as $errs
+  | ([$nodes[] | strings
+      | select(test("^(Error|Telegram error|reply failed)"))]) as $anchored
   | if ($flags | any(. == true)) then
-      ([.tool_response? | .. | strings] | join(" ") | .[0:200])
+      ([$nodes[] | strings] | join(" ") | .[0:200])
     elif ($flags | length) > 0 then empty
     elif ($errs | length) > 0 then ($errs | first | tostring | .[0:200])
-    elif ((.tool_response? | type) == "array")
-         and (([.tool_response[] | .. | strings
-                | select(test("^(Error|Telegram error)"))] | length) > 0)
-    then
-      ([.tool_response[] | .. | strings
-        | select(test("^(Error|Telegram error)"))] | first | .[0:200])
+    elif ((.tool_response? | type) == "array") and (($anchored | length) > 0)
+    then ($anchored | first | .[0:200])
     else empty end' 2>/dev/null || true)"
 
 MSG_ID="$(plane_mint_id msg)" || exit 0
@@ -106,5 +119,5 @@ jq -nc --arg fleet "$FLEET_NAME" --arg msg_id "$MSG_ID" \
                             else {carrier_ref:("tg:"+$ref)} end))
                    else {state:"failed",error:$err} end))}
     ])}' \
-  | plane_emit_events telegram-hook >/dev/null 2>&1 || true
+  | plane_emit_events telegram-hook || true
 exit 0
