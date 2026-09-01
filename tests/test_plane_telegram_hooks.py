@@ -166,6 +166,10 @@ def test_inbound_ignores_ordinary_prompts_with_empty_stdout(tmp_path):
                    "channel source=telegram without the tag shape",
                    "<channel source=\"slack\" chat_id=\"1\">hi</channel>",
                    "<channel source=\"plugin:slack:slack\" chat_id=\"1\">"
+                   "hi</channel>",
+                   # data-source is not source (r4 probe: \b matched after
+                   # the hyphen; the lookbehind must not)
+                   "<channel data-source=\"telegram\" chat_id=\"1\">"
                    "hi</channel>"):
         r = _run(IN, json.dumps({"prompt": prompt}), _env(root))
         assert r.returncode == 0
@@ -455,6 +459,44 @@ def test_the_live_transcript_tag_shape_verbatim(tmp_path):
     tx = _rows(root, "SELECT carrier_ref FROM events"
                      " WHERE kind='transmission'")
     assert tx[0]["carrier_ref"] == "tg:8888"
+
+
+def test_qualified_source_tolerances(tmp_path):
+    """r4 review: the prefix before the final :telegram is unconstrained
+    within the quoted value — a version-qualified plugin name must not
+    become the next silent drop — while the final segment must be exactly
+    telegram."""
+    cases = (("plugin:telegram@0.0.8:telegram", True),
+             ("x:telegram", True),
+             ("plugin:telegram:slack", False),
+             ("telegramx", False))
+    for i, (src, accepted) in enumerate(cases):
+        root = _root(tmp_path / str(i))
+        r = _run(IN, _channel_prompt(source=src), _env(root))
+        assert r.returncode == 0 and r.stdout == ""
+        got = len(_rows(root, "SELECT 1 FROM communications")) == 1
+        assert got == accepted, src
+
+
+def test_unmatched_source_on_a_complete_tag_discloses_to_stderr(tmp_path):
+    """r4 review (the quiet-drop seam): a complete channel tag whose
+    source does not match must say so on stderr — this exact silence is
+    how the live defect hid until the operator looked at the board. The
+    bare no-tags path stays silent (it fires on every prefilter false
+    positive)."""
+    root = _root(tmp_path)
+    r = _run(IN, _channel_prompt(source="plugin:telegram2:telegram2"),
+             _env(root))
+    assert r.returncode == 0 and r.stdout == ""
+    assert "unmatched source" in r.stderr
+    assert "plugin:telegram2:telegram2" in r.stderr
+    assert not (root / "state" / "plane" / "plane.db").exists()
+    # and the silent path stays silent: telegram appears, no complete tag
+    r2 = _run(IN, json.dumps(
+        {"prompt": "notes on <channel handling for telegram bridges"}),
+        _env(root))
+    assert r2.returncode == 0 and r2.stdout == ""
+    assert "unmatched source" not in r2.stderr
 
 
 # ---------------------------------------------------------------------------

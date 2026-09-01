@@ -339,7 +339,9 @@ Any change that affects **how a bot behaves at runtime** (lib/ supervision & obs
    - For observability/trust-loop behaviors: `bash lib/validate-bot-change.sh` stands up a throwaway bot + tmux sessions and asserts the events fire end-to-end. Extend it when you add a new event/check.
    - For other behavior: spin a bot (`lib/spin-up-bot.sh`), drive the affected path, and watch `data/events/*.jsonl` / `keepalive.log` / the pane.
 
-**Cite the observation in the PR body** ("ran `validate-bot-change.sh` → activity_stuck + overdue_dispatch fired; manager notified") — claimed evidence is not evidence. This is also how latent bugs surface: the harness above caught a `fleet-pulse.sh` sweep-abort that every unit test missed.
+**Cite the observation in the PR body** ("ran `validate-bot-change.sh` → activity_stuck + overdue_dispatch fired; manager notified") — claimed evidence is not evidence.
+
+**When a change matches an externally produced shape** (a plugin's injection, a carrier's response, a tool's output), ground the canonical fixture in a **live capture** — a transcript or real response — never in reading the producer's source; and commit the capture's **shape, never its identifiers** (the repo is public). Four gauntlet rounds on the Telegram carrier (#1404/#1411) each found the same class: fixtures certifying a shape reality does not produce, the last one shipped and silently dropped the operator's first live message. This is also how latent bugs surface: the harness above caught a `fleet-pulse.sh` sweep-abort that every unit test missed.
 
 **This gate proves the code; it does not prove the rollout.** Clearing it is mandatory for every runtime change. Separately, when a change to the framework itself (claudlobby, clauDNA, claudron) ships **live fleet-wide** — supervision/`lib` scripts, plugins, the bridge, composed `bot.conf` — the manager should *by default* canary the rollout on one production bot before rolling the fleet: a strong default for fleet-wide framework changes, not a universal mandate (skip it for single-bot, product-repo, or non-runtime work). See the `canary-rollout` protocol.
 
