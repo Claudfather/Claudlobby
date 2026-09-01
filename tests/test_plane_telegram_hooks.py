@@ -191,3 +191,112 @@ def test_inbound_dormant_and_broken_stdin(tmp_path):
         r = _run(IN, garbage, _env(root))
         assert r.returncode == 0 and r.stdout == ""
     assert not (root / "state" / "plane" / "plane.db").exists()
+
+
+# ---------------------------------------------------------------------------
+# Gauntlet round-1 fix pins
+# ---------------------------------------------------------------------------
+
+def test_outbound_failed_send_records_failed_never_accepted(tmp_path):
+    """The round's MAJOR (probed): carrier_accepted is a CARRIER-API FACT,
+    and the hook recorded it for sends the carrier refused. Error-shaped
+    responses now record `failed` + the error text."""
+    for resp in ({"error": "Bad Request: chat not found"},
+                 {"isError": True,
+                  "content": [{"type": "text",
+                               "text": "Error: Forbidden: bot was blocked"}]}):
+        root = _root(tmp_path / resp.get("error", "e2")[:8].replace(" ", "_"))
+        payload = json.dumps({
+            "tool_name": "mcp__plugin_telegram_telegram__reply",
+            "tool_input": {"chat_id": "-100999", "text": "hi"},
+            "tool_response": resp})
+        assert _run(OUT, payload, _env(root)).returncode == 0
+        tx = _rows(root, "SELECT event, detail FROM events"
+                         " WHERE kind='transmission'")
+        assert len(tx) == 1
+        assert tx[0]["event"] == "failed"
+
+
+def test_outbound_extracts_ref_from_array_shaped_response(tmp_path):
+    """Spec F1 (measured): real MCP hook responses arrive ARRAY-shaped and
+    the fixed-path jq hard-errored — the fallback was dead for exactly the
+    shape it targeted. The recursive walk covers both."""
+    root = _root(tmp_path)
+    payload = json.dumps({
+        "tool_name": "mcp__plugin_telegram_telegram__reply",
+        "tool_input": {"chat_id": "-100999", "text": "hi"},
+        "tool_response": [{"type": "text",
+                           "text": "Sent. message_id: 5150"}]})
+    assert _run(OUT, payload, _env(root)).returncode == 0
+    tx = _rows(root, "SELECT event, carrier_ref FROM events"
+                     " WHERE kind='transmission'")
+    assert tx[0]["event"] == "carrier_accepted"
+    assert tx[0]["carrier_ref"] == "tg:5150"
+
+
+def test_inbound_records_every_batched_tag(tmp_path):
+    """First-match-only silently dropped a second batched message; every
+    tag is now recorded with its own msg id."""
+    root = _root(tmp_path)
+    prompt = ('<channel source="telegram" chat_id="-1" message_id="1"'
+              ' user="chris">first ask</channel> and then '
+              '<channel source="telegram" chat_id="-1" message_id="2"'
+              ' user="chris">second ask</channel>')
+    r = _run(IN, json.dumps({"prompt": prompt}), _env(root))
+    assert r.returncode == 0 and r.stdout == ""
+    bodies = sorted(x["body"] for x in _rows(
+        root, "SELECT body FROM communications"))
+    assert bodies == ["first ask", "second ask"]
+
+
+def test_inbound_carries_the_carrier_ts_as_occurred_at(tmp_path):
+    """§4 (spec F2): the telegram ts IS the occurrence instant — this hook
+    is a relay. An unparseable ts is dropped, never fails the batch."""
+    root = _root(tmp_path)
+    r = _run(IN, _channel_prompt(ts="2026-09-01T10:00:00Z"), _env(root))
+    assert r.returncode == 0
+    rows = _rows(root, "SELECT occurred_at FROM communications")
+    assert rows[0]["occurred_at"].startswith("2026-09-01T10:00:00")
+    root2 = _root(tmp_path / "badts")
+    r = _run(IN, _channel_prompt(ts="not-a-time"), _env(root2))
+    assert r.returncode == 0
+    assert len(_rows(root2, "SELECT 1 FROM communications")) == 1
+
+
+def test_short_renders_the_human_by_name():
+    from claudlobby.plane.view import _short
+
+    assert _short("human:chris") == "chris"
+    assert _short("bot:fleet/erlich") == "erlich"
+    assert _short("human:") == "human:"     # degenerate stays whole
+
+
+def test_fleet_rail_shows_participants_never_registry_entities(tmp_path):
+    """Operator-flagged regression: the 2b scan minted an identity per
+    keyframed entity and the rail rendered all 208 library items. The rail
+    is PARTICIPANTS (fleet/actor) — entity identities belong to the
+    registry surfaces."""
+    from claudlobby.plane.emit_api import emit_batch as _eb
+
+    root = _root(tmp_path)
+    _eb(root, [
+        {"event_type": "communication", "emitter": "t", "fleet": "f",
+         "payload": {"msg_id": "msg_" + "a" * 32, "sender": "bot:f/erlich",
+                     "recipient": "bot:f/dinesh", "message_class": "chat",
+                     "body": "x"}},
+        {"event_type": "registry_snapshot", "emitter": "t", "fleet": "f",
+         "payload": {"entity_type": "library_item",
+                     "entity_alias": "shared/skills/status",
+                     "payload": {"category": "skills", "name": "status",
+                                 "source_tier": "shared",
+                                 "content_hash": "h", "declared_hash": "h",
+                                 "schema_version": "1"},
+                     "cause": "generate", "scan_id": "s"}}])
+    import sys
+    sys.path.insert(0, str(REPO))
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+    kinds = {r["kind"] for r in TestClient(create_app(root)).get(
+        "/api/identities").json()["data"]["identities"]}
+    assert "library_item" not in kinds
+    assert "actor" in kinds and "fleet" in kinds

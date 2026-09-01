@@ -45,27 +45,52 @@ CHAT_ID="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.chat_id // empty' 2>/dev/
 TEXT="$(printf '%s' "$PAYLOAD" | jq -r '.tool_input.text // .tool_input.message // empty' 2>/dev/null)"
 [ -n "$CHAT_ID" ] && [ -n "$TEXT" ] || exit 0
 
-# the tool response MAY carry the carrier's message id — shapes vary across
-# plugin versions, so every candidate path is tried and absence is fine
+# The tool response MAY carry the carrier's message id — real MCP hook
+# responses arrive OBJECT- or ARRAY-shaped across plugin versions, so the
+# walk is `..`-recursive (the first version's fixed paths hard-errored on
+# the array shape and the capture fallback was dead for exactly the shape
+# it targeted — gauntlet, measured; jq form verified by the reviewer).
 TG_MSGID="$(printf '%s' "$PAYLOAD" | jq -r '
-  .tool_response.message_id
-  // .tool_response.result.message_id
-  // (.tool_response.content[0].text? // "" | capture("message_id[\"=: ]+(?<id>[0-9]+)").id)?
-  // empty' 2>/dev/null || true)"
+  first(
+    (.tool_response? | .. | .message_id? // empty),
+    (.tool_response? | .. | strings
+       | (capture("message_id[\"=: ]+(?<id>[0-9]+)").id)? // empty)
+  ) // empty' 2>/dev/null || true)"
 case "$TG_MSGID" in *[!0-9]*) TG_MSGID="" ;; esac
+
+# The transmission state is a CARRIER-API FACT (contracts: carrier_accepted
+# means the carrier took it) — recording accepted on a FAILED send is a
+# false claim (gauntlet MAJOR, probed with real error shapes: chat not
+# found, bot was blocked). Error-shaped responses emit `failed` + the error
+# text; only the absence of any error signal records accepted.
+TG_ERR="$(printf '%s' "$PAYLOAD" | jq -r '
+  if (.tool_response.isError? == true) then
+    ([.tool_response | .. | strings] | join(" ") | .[0:200])
+  elif (.tool_response.error?) then
+    (.tool_response.error | tostring | .[0:200])
+  elif ([.tool_response? | .. | strings
+         | select(test("^(Error|Telegram error)"))] | length) > 0 then
+    ([.tool_response | .. | strings
+      | select(test("^(Error|Telegram error)"))] | first | .[0:200])
+  else empty end' 2>/dev/null || true)"
 
 MSG_ID="$(plane_mint_id msg)" || exit 0
 jq -nc --arg fleet "$FLEET_NAME" --arg msg_id "$MSG_ID" \
    --arg sender "bot:$FLEET_NAME/$BOT_ID" \
    --arg dest "$CHAT_ID" --arg body "$TEXT" --arg ref "$TG_MSGID" \
+   --arg err "$TG_ERR" \
    '{events:([
       {event_type:"communication",emitter:"telegram-hook",fleet:$fleet,
        payload:{msg_id:$msg_id,sender:$sender,recipient_raw:$dest,
                 message_class:"chat",body:$body}},
       {event_type:"transmission",emitter:"telegram-hook",fleet:$fleet,
        payload:({msg_id:$msg_id,attempt_no:1,carrier:"telegram-bridge",
-                 destination:$dest,state:"carrier_accepted"}
-                + (if $ref == "" then {} else {carrier_ref:("tg:"+$ref)} end))}
+                 destination:$dest}
+                + (if $err == ""
+                   then ({state:"carrier_accepted"}
+                         + (if $ref == "" then {}
+                            else {carrier_ref:("tg:"+$ref)} end))
+                   else {state:"failed",error:$err} end))}
     ])}' \
   | plane_emit_events telegram-hook >/dev/null 2>&1 || true
 exit 0

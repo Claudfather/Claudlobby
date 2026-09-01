@@ -95,11 +95,16 @@ def body_words(text: str | None) -> str | None:
 
 
 def _short(alias: str | None) -> str | None:
-    """Alias-first presentation (§11): `bot:fleet/name` -> `name`. The full
-    alias stays in the payload for expand/hover; the UI leads with this."""
+    """Alias-first presentation (§11): `bot:fleet/name` -> `name` and
+    `human:chris` -> `chris` (#1402 — the operator renders by name, same
+    grammar as every bot). The full alias stays in the payload."""
     if not alias:
         return alias
-    return alias.rsplit("/", 1)[-1] if "/" in alias else alias
+    if "/" in alias:
+        return alias.rsplit("/", 1)[-1]
+    if alias.startswith("human:"):
+        return alias[len("human:"):] or alias
+    return alias
 
 
 def _plane_state_dir(root: Path) -> Path:
@@ -361,11 +366,22 @@ def _fetch_tasks(conn: sqlite3.Connection) -> dict:
             "attention_count": sum(1 for r in rows if r["attention"])}
 
 
+# The rail renders PARTICIPANTS. The 2b registry scan mints an identity
+# for every entity it keyframes — 200+ library items, projects, the host,
+# the vault, and a bot_instance twin per actor — and an unfiltered read
+# flooded the fleet rail with all of them (operator-flagged: "it used to
+# only have bots!"). Entity identities belong to the registry surfaces
+# (chunk B), not the roster.
+_RAIL_KINDS = ("fleet", "actor")   # humans resolve as actors
+
+
 def _fetch_identities(conn: sqlite3.Connection) -> dict:
+    ph = ",".join("?" * len(_RAIL_KINDS))
     rows = []
     for r in conn.execute(
         "SELECT uid, kind, alias, provisional, first_seen, last_seen"
-        " FROM identity_registry ORDER BY last_seen DESC LIMIT 200"):
+        f" FROM identity_registry WHERE kind IN ({ph})"
+        " ORDER BY last_seen DESC LIMIT 200", _RAIL_KINDS):
         row = dict(r)
         row["short"] = _short(row["alias"])
         rows.append(row)
