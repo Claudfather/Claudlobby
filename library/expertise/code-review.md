@@ -80,7 +80,10 @@ permissions:
   # that. The rule traded away was one that pushed writes off the audited native
   # tools and onto a shell, while breaking the harness memory instruction that
   # tells every bot to write memory with Write. Do not read the absence of a
-  # deny here as "a reviewer is read-only". It never was.
+  # deny here as "a reviewer is read-only". It never was, and removing the rule
+  # did not open anything that was closed. Making a reviewer actually read-only
+  # is a real and still-unsolved problem; it is tracked in #1406 and #970, not
+  # here, and it will not be solved by a declaration in this file.
   bash_allow: [git, gh, grep, find, cat, head, tail, diff]
 ---
 
