@@ -199,6 +199,24 @@ fi
 # ---- location 1 (the user tier, inside the redirected HOME) -----------------
 # Level 0 and level 1 differ by EXACTLY one array element. Absent-vs-present
 # would be two changes (file existence AND content); this is one.
+# NOT PRODUCTION PARITY -- known, and it confounded this arm (found by otis,
+# 2026-09-01). This writes ONLY permissions.allow. The real location 1 that bots
+# resolve (${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json, start-bot.sh:73)
+# also carries permissions.defaultMode=auto, sandbox={enabled,
+# autoAllowBashIfSandboxed=true, allowUnsandboxedCommands=true},
+# skipAutoPermissionPrompt and skipDangerousModePermissionPrompt.
+#
+# Two consequences, and the second is the one that reached the published grid:
+#   1. autoAllowBashIfSandboxed governs BASH PERMISSION BEHAVIOUR, and arms C
+#      and D run every Bash cell against this stub -- a confound ON the axis
+#      under test, not background noise.
+#   2. With no defaultMode present, --permission-mode auto has nothing to
+#      resolve from, which is sufficient to explain the C5 collapse. The grid
+#      originally attributed that to headlessness; it should not have.
+#
+# A single-factor ladder REQUIRES that everything not under test match
+# production. This does not, and the deviation is silent because the extra keys
+# are absent rather than wrong. Any rebuild starts by fixing this.
 write_loc1() {  # write_loc1 <0|1>
   if [ "$1" = 1 ]; then printf '{"permissions":{"allow":["Bash"]}}\n' > "$FAKE_CFG/settings.json"
   else                  printf '{"permissions":{"allow":[]}}\n'       > "$FAKE_CFG/settings.json"; fi
@@ -547,14 +565,26 @@ C3="$(verdict_of C3)"
 # bypassPermissions round-trips intact. So the auto/manual flip is unavailable
 # in this arm: running it would re-run B0 under a different flag spelling and
 # return B0's verdict, and that agreement would be read as "mode does not
-# change enforcement" -- a conclusion the cell never earned. The flip needs the
-# interactive tmux boot the plan called "a reboot, not a TUI toggle"; it is not
-# a headless cell. Recorded as NOT_MEASURABLE so the gap is visible in the grid
-# rather than absent from it.
-C5=NOT_MEASURABLE_HEADLESS
-printf 'C5|manual|n/a|Bash|none|%s|-|auto and manual both resolve to session permissionMode=default in headless -p (claude 2.1.240); flip unavailable in this arm, needs an interactive boot\n' \
+# change enforcement" -- a conclusion the cell never earned.
+#
+# ATTRIBUTION CORRECTED 2026-09-01, found by otis. The label was
+# NOT_MEASURABLE_HEADLESS, which named headlessness as the cause. That was not
+# earned. write_loc1 above emits ONLY permissions.allow, while the production
+# location 1 also carries permissions.defaultMode=auto -- so auto had nothing
+# to resolve FROM, and the missing field is sufficient to explain the collapse
+# without invoking headlessness at all. The cell is still not measurable in
+# this arm; what changed is that we no longer claim to know why. Renamed to a
+# cause-neutral label. Note defaultMode is NESTED under .permissions, so a
+# top-level grep of the operator global returns a false negative -- that is how
+# this was missed on the first pass.
+#
+# Settling it needs a loc1 at PARITY (defaultMode plus the sandbox block), and
+# separately an interactive boot. Those are two factors and must not be varied
+# together, or the rerun is confounded the same way this arm was.
+C5=NOT_MEASURABLE_THIS_ARM
+printf 'C5|manual|n/a|Bash|none|%s|-|auto and manual both resolved to session permissionMode=default in this arm (claude 2.1.240); cause NOT established -- loc1 here is a stub carrying only permissions.allow, so defaultMode was absent; flip needs a parity loc1 and an interactive boot\n' \
   "$C5" >> "$GRID"
-say "  -> C5: $C5 (not run -- the flip is unavailable headless; see grid note)"
+say "  -> C5: $C5 (not run -- flip unavailable in this arm; cause not established, see grid note)"
 
 compose 0 1 1 || { say "FATAL: C6 generate failed"; exit 2; }   # Read tool
 write_loc1 0
