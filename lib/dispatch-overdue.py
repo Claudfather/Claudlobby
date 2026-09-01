@@ -896,7 +896,14 @@ def _refuse_unreadable_report_ledger(
     Measured on the real 2026-09-01 dispatch log with an absent ledger:
       vera -> t-1787669625-219a   dispatched 2026-08-25, COMPLETED 2026-08-25
       ravi -> t-1787683189-0f60   dispatched 2026-08-25, COMPLETED 2026-08-25
-    Seven-day-old finished work, handed back as the id to close.
+    Seven-day-old finished work, handed back as the id to close. THREE OF SEVEN
+    BOTS SAMPLED RESOLVE A STALE ID THIS WAY.
+
+    THAT IS THE FAILURE MODE'S REACH UNDER AN ABSENT LEDGER, NOT A COUNT OF LIVE
+    INCIDENTS. report-back.sh supplies the ledger path in code, so the wrong-path
+    case does not arise in normal operation. Read without this bound, "three of
+    seven bots resolve a stale id" sounds like three bots are currently
+    mis-attributing work. They are not.
 
     A future reader who believes the old "silent no-op" version will treat a
     stale id as a MISSING one and look in the wrong place. It is a false
