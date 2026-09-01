@@ -24,12 +24,16 @@ permissions:
   # a claim about whatever ships next week. Measured 2026-09-01, ai-platform:
   # these forms were REFUSED against a denied path (`sed -i`, `cat`, a
   # redirect), against a positive control on a non-denied path that succeeded.
-  # These CROSSED: `python3 -c open()` on a literal denied path, and any
-  # expansion the matcher could not statically resolve (`${RANDOM}`, `${HOME}`)
-  # sitting anywhere in the command — filed as #1408. A resolvable expansion
-  # rules CORRECTLY in both directions (`b=ravi; cat .../$b/...` was denied),
-  # so the discriminator is static resolvability, not the presence of a
-  # variable. kev measured the denied case independently on 2026-08-31.
+  # These CROSSED, by at least two INDEPENDENT routes — #1408: (1) `python3 -c
+  # open()` with the denied path written LITERALLY, no variable involved at all;
+  # (2) an expansion the matcher could not statically resolve (`${RANDOM}`,
+  # `${HOME}`) anywhere in the command, beside an otherwise-matching literal
+  # path. Within route 2 only, the discriminator is static resolvability rather
+  # than the presence of a variable: a RESOLVABLE expansion rules correctly in
+  # both directions (`b=ravi; cat .../$b/...` denied; `b=otis; ...` allowed, own
+  # tree) — kev, session 111bc488, 2026-09-01. Do not generalise either route
+  # into "the" mechanism; that framing was filed and corrected once already, and
+  # #1408 is still under active measurement.
   #
   # So do not read Layer 0 as closing the write path. It refuses plain shell
   # forms that name the path. That is the whole of it.
