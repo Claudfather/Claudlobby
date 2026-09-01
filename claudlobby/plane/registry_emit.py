@@ -28,11 +28,12 @@ BOTH, so it is the recommended single carrier. A root pull must never
 switch on new emission; the generate hook is NON-BLOCKING (a scan failure
 logs and never breaks generate).
 
-F11 boundary (disclosed): this emitter enforces the PREVENTION half —
-incomplete enumerations never tombstone, empty-but-complete tombstones its
-scope. The VALIDATION half (a reader honoring tombstones only when a
-same-scan_id ``scan_completed`` with complete=true exists — spec §9 line
-146) is chunk-B projection territory and is enforced nowhere yet.
+F11 boundary: this emitter enforces the PREVENTION half — incomplete
+enumerations never tombstone, empty-but-complete tombstones its scope.
+The VALIDATION half lives in ``queries.py`` (the shared effective-rows
+CTE — see ``_F11_COMPLETION_JOIN``), and the write side consults the
+same definition for suppression (``REG_CURRENT_KEYS_SQL`` below;
+chunk B closed the IOU this paragraph used to carry).
 """
 
 from __future__ import annotations
@@ -506,6 +507,32 @@ def _in_scope(entity_type: str, alias: str, fleet_name: str,
     return False
 
 
+def assemble_entities(paths, fleet, vault_rev):
+    """The scan's enumeration, PURE: ([(entity_type, alias, payload)…],
+    complete). Extracted (chunk B) so hash-verification can re-derive the
+    estate through the SAME assembly the emitter records — a second
+    assembly would drift exactly like a second env cascade (#1226)."""
+    entities: list[tuple[str, str, dict]] = []
+    entities.append(("host", platform.node(), host_payload(paths)))
+    vp = vault_payload(paths, fleet)
+    if vp:
+        entities.append(("vault", vp["alias"], vp))
+    entities.append(("fleet", fleet.name,
+                     fleet_payload(paths, fleet, vault_rev)))
+    for key in sorted(fleet.projects):
+        entities.append((
+            "project", f"{fleet.name}/{key}",
+            project_payload(paths, fleet, fleet.projects[key], vault_rev)))
+    for bot_id in sorted(fleet.bots):
+        p = bot_payload(paths, fleet, fleet.bots[bot_id], vault_rev)
+        entities.append(("bot", p["alias"], p))
+    lib_items, skipped = library_items(paths, fleet.name, vault_rev)
+    for alias, payload in lib_items:
+        entities.append(("library_item", alias, payload))
+    # F11: a partial enumeration invalidates tombstones
+    return entities, not skipped
+
+
 def run_generate_scan(paths, fleet) -> dict | None:
     """Emit one generate-cause registry scan for *fleet*. Returns the summary
     dict, or None when the fleet is UNARMED (dormancy rule). Raises only
@@ -534,27 +561,7 @@ def run_generate_scan(paths, fleet) -> dict | None:
     root = paths.root
     scan_id = f"scan-{uuid.uuid4().hex[:12]}"
     vault_rev = _vault_rev(paths)
-    complete = True
-
-    entities: list[tuple[str, str, dict]] = []
-    entities.append(("host", platform.node(), host_payload(paths)))
-    vp = vault_payload(paths, fleet)
-    if vp:
-        entities.append(("vault", vp["alias"], vp))
-    entities.append(("fleet", fleet.name,
-                     fleet_payload(paths, fleet, vault_rev)))
-    for key in sorted(fleet.projects):
-        entities.append((
-            "project", f"{fleet.name}/{key}",
-            project_payload(paths, fleet, fleet.projects[key], vault_rev)))
-    for bot_id in sorted(fleet.bots):
-        p = bot_payload(paths, fleet, fleet.bots[bot_id], vault_rev)
-        entities.append(("bot", p["alias"], p))
-    lib_items, skipped = library_items(paths, fleet.name, vault_rev)
-    for alias, payload in lib_items:
-        entities.append(("library_item", alias, payload))
-    if skipped:
-        complete = False   # F11: a partial enumeration invalidates tombstones
+    entities, complete = assemble_entities(paths, fleet, vault_rev)
 
     def snap(etype, alias, payload, tombstone=False):
         body = {"entity_type": etype, "entity_alias": alias,
@@ -611,10 +618,23 @@ def run_generate_scan(paths, fleet) -> dict | None:
                 foreign_rows = conn.execute(
                     "SELECT COUNT(*) FROM registry_snapshots"
                     " WHERE host_uid != ?", (this_host,)).fetchone()[0]
+                # Tombstone eligibility asks the READER'S question — is the
+                # entity still current? (chunk-B gauntlet SEV-1; the full
+                # story lives at queries.REG_CURRENT_POINT_SQL.) One bulk
+                # read of the reader's own SQL. Known residual, disclosed:
+                # candidates are origin='live' while current is
+                # origin-blind, so a legacy-origin row that is current can
+                # never be tombstoned by a scan — operator-cause emission
+                # is its only retirement (r3, probed).
+                from .queries import REG_CURRENT_KEYS_SQL
+                current_keys = {
+                    (cr["entity_type"], cr["entity_uid"])
+                    for cr in conn.execute(REG_CURRENT_KEYS_SQL,
+                                           (this_host,))}
                 conn.close()
                 for r in rows:
-                    if r["tombstone"]:
-                        continue
+                    if (r["entity_type"], r["entity_uid"]) not in current_keys:
+                        continue   # effectively deleted — nothing to re-claim
                     key = (r["entity_type"], r["entity_alias"])
                     if key in seen:
                         continue
