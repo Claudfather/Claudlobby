@@ -78,7 +78,11 @@ empty result. It reaches that state most easily by FORGETTING a flag, since
 `<dlog> <rlog> <now>` with no mode falls straight through to it.
 
 Only --open/--open-task are gated so far (see _not_a_bot_id). SINGLE-BOT MODE
-IS NOT, and closing it is the same one-line _reject_bot_slot call, not a
+IS NOT -- though #1232's report-ledger guard now closes HALF of it: the
+forgotten-flag route (`<dlog> <rlog> <now>`) refuses at rc 3, because `now`
+lands in the rlog slot and a timestamp is not a readable file. A path in the
+BOT slot beside a genuinely readable ledger is still silent at rc 0, and
+closing THAT is the same one-line _reject_bot_slot call, not a
 harder dlog/rlog-swap detection -- stated because an earlier version of this
 paragraph filed single-bot mode under "logs-first" and would have sent the
 next reader looking for the harder fix.
@@ -856,6 +860,120 @@ def _refuse_undeterminable_orphans(bots_dir: str | None) -> bool:
     return False
 
 
+def _refuse_unreadable_report_ledger(
+    mode: str, rlog: str, *, refuse_on_absent: bool = True
+) -> bool:
+    """#1232. Print the refusal for `mode` and return True, or False to proceed.
+
+    ABSENT AND UNOPENABLE ARE DIFFERENT FACTS AND THE MODES SPLIT ON THEM. The
+    first version refused on both everywhere and broke the #835 resolver: a
+    fleet that has never reported has NO ledger file, and the first report is
+    exactly the call that must still work.
+
+      not a file      -> nothing was ever written there. On a never-reported
+                         fleet EVERY id'd row genuinely IS open, so "all open"
+                         is TRUE and the head of that list is the RIGHT id.
+      exists, raises  -> rows exist that cannot be read, so some are certainly
+                         closed and the head may be an already-CLOSED row.
+
+    So `refuse_on_absent=False` is passed by --open-task alone, and the reason
+    is that absence makes ITS answer more certain rather than less.
+
+    THE COST, STATED BECAUSE IT IS A CHOICE AND NOT A FREE ONE. An earlier
+    version of this paragraph said a wrong path here merely leaves the resolver
+    SILENT -- "degradation, not falsehood". THAT WAS WRONG, and it was refuted
+    by tracing the real report-back.sh caller instead of reading this docstring
+    (vera, 2026-09-01).
+
+    THE RESIDUAL RISK IS A WRONG-ID ATTRIBUTION, NOT A QUIET NO-OP. For a bot
+    with id'd history, a wrong or absent path makes EVERY id'd dispatch in
+    history read as open, and this door returns the HEAD of that list -- an
+    OLD, ALREADY-CLOSED id. report-back.sh then stamps it into the ledger, so a
+    report is attributed to a task that never received it and a long-closed
+    dispatch reads as freshly completed. That is the same failure class as the
+    false completion row in #1417.
+
+    Measured on the real 2026-09-01 dispatch log with an absent ledger:
+      vera -> t-1787669625-219a   dispatched 2026-08-25, COMPLETED 2026-08-25
+      ravi -> t-1787683189-0f60   dispatched 2026-08-25, COMPLETED 2026-08-25
+    Seven-day-old finished work, handed back as the id to close. THREE OF SEVEN
+    BOTS SAMPLED RESOLVE A STALE ID THIS WAY.
+
+    THAT IS THE FAILURE MODE'S REACH UNDER AN ABSENT LEDGER, NOT A COUNT OF LIVE
+    INCIDENTS. report-back.sh supplies the ledger path in code, so the wrong-path
+    case does not arise in normal operation. Read without this bound, "three of
+    seven bots resolve a stale id" sounds like three bots are currently
+    mis-attributing work. They are not.
+
+    A future reader who believes the old "silent no-op" version will treat a
+    stale id as a MISSING one and look in the wrong place. It is a false
+    attribution. Look for it in the ledger, not in the gaps.
+
+    THE TRADE STILL HOLDS, for a different reason than the dead one:
+      refusing on absent breaks the LEGITIMATE first report from a fleet that
+      has never reported -- a CERTAINTY on every new fleet, and the case that
+      broke three #835 assertions;
+      the stale-id case needs a WRONG PATH reaching --open-task specifically,
+      and report-back.sh supplies that path in code rather than from an
+      operator.
+    Low-probability wrong attribution against certain breakage of a real case.
+
+    A THIRD OPTION DISSOLVES THE TRADE and is filed rather than built here:
+    distinguish ledger-absent-AND-bot-has-no-id'd-history (the genuine first
+    report -> proceed) from ledger-absent-AND-bot-HAS-history (suspicious ->
+    return nothing rather than a stale head). Both facts are already in the
+    dispatch log this module reads. See the follow-up on #1418.
+
+    Exactly the failure class :830 already guards for --orphans, pointed at the
+    input three managers actually pass by hand. The join closes a dispatch by
+    finding its terminal report; with no readable ledger there is nothing to
+    join against, so EVERY id'd row comes back open -- indistinguishable from a
+    fleet that closed nothing. Substitute the nouns in the --orphans reasoning
+    and it is the same sentence.
+
+    The line is PRESENCE, not emptiness. A ledger that exists holding zero rows
+    is a fleet that has not reported yet, and "every dispatch is still open" is
+    TRUE for it. Only absence or an IO failure makes that answer a fabrication.
+
+    Openability is tested rather than is_file() for the reason probe_source
+    tests it in claudlobby/source_state.py: a path that stats fine and then
+    raises is the mode that takes out a read door, and a stat-only probe
+    certifies it. This module stays stdlib-only and cannot import that, so it
+    carries the same check locally -- the same constraint :843 states.
+
+    is_file() is still the FIRST gate, deliberately. A directory where a file
+    belongs raises IsADirectoryError, which is an OSError, so probing first
+    would report it as unreadable and send someone to run chmod on a path that
+    is simply not a file.
+    """
+    if not os.path.isfile(rlog):
+        if not refuse_on_absent:
+            return False
+        print(
+            f"dispatch-overdue.py: {mode} cannot read the report ledger: "
+            f"{rlog!r} is not a file\n"
+            "  every id'd row would classify as OPEN for want of a terminal "
+            "report, which is indistinguishable from a fleet that closed "
+            "nothing.",
+            file=sys.stderr,
+        )
+        return True
+    try:
+        with open(rlog, "rb"):
+            pass
+    except OSError as exc:
+        print(
+            f"dispatch-overdue.py: {mode} cannot read the report ledger: "
+            f"{rlog!r} exists but cannot be opened ({exc.strerror})\n"
+            "  every id'd row would classify as OPEN for want of a terminal "
+            "report, which is indistinguishable from a fleet that closed "
+            "nothing.",
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
 def _reject_bot_slot(mode: str, value: str) -> bool:
     """Print the #1187 shape refusal for `mode`, or return False to proceed."""
     why = _not_a_bot_id(value)
@@ -894,6 +1012,11 @@ def main() -> int:
         # report-back still degrades to an id-less report, never an error.
         if _reject_bot_slot("--open-task", argv[2]):
             return 2
+        # ABSENT is legitimate here and must resolve: see the docstring.
+        if _refuse_unreadable_report_ledger(
+            "--open-task", argv[4], refuse_on_absent=False
+        ):
+            return 3
         tid = open_task_id(argv[2], argv[3], argv[4])
         if tid:
             print(tid)
@@ -907,6 +1030,8 @@ def main() -> int:
             return 2
         if _reject_bot_slot("--open", argv[2]):
             return 2
+        if _refuse_unreadable_report_ledger("--open", argv[4]):
+            return 3
         rows = open_dispatches(argv[2], argv[3], argv[4])
         for da, exp, tid in rows:
             print(f"{da} {exp if exp is not None else '-'} {tid}")
@@ -986,6 +1111,8 @@ def main() -> int:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         return 2
     bot, dlog, rlog = argv[1], argv[2], argv[3]
+    if _refuse_unreadable_report_ledger("single-bot mode", rlog):
+        return 3
     now = (
         int(argv[4])
         if len(argv) > 4

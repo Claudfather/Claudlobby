@@ -919,19 +919,39 @@ class TestBotSlotShapeGate:
         with pytest.raises(ValueError):
             dispatch_overdue.main()
 
-    def test_single_bot_mode_is_the_ONE_remaining_silent_shape(
+    def test_forgotten_flag_falling_into_single_bot_mode_now_refuses(
         self, tmp_path, monkeypatch, capsys
     ):
-        """A tripwire on a disclosed gap, deliberately asserting today's WRONG
-        behaviour: a path in single-bot mode's bot slot is still silent at rc 0.
+        """Flipped, not deleted, per this test's own standing instruction (#1232).
 
-        When someone wires _reject_bot_slot into single-bot mode this test FAILS
-        — which is the point. It forces the module docstring, the CLAUDE.md row
-        and this class to move in the same commit, instead of the doc drifting
-        out of date the way it just did. Flip the assertion, do not delete it.
+        It asserted rc 0 + silence for `<dlog> <rlog> <now>` — the forgotten-flag
+        route into single-bot mode. That is now rc 3, because the #1232 report
+        ledger guard reaches it: `now` lands in the rlog slot and a timestamp is
+        not a readable file. Closed by a DIFFERENT route than the one the old
+        docstring predicted (_reject_bot_slot on the bot slot), which is why the
+        assertion flips here rather than the test being retired.
         """
         dlog, rlog = self._rows(tmp_path)
         monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", dlog, rlog, "100000"])
+        assert dispatch_overdue.main() == 3
+        assert capsys.readouterr().out == ""
+
+    def test_single_bot_mode_bot_slot_is_STILL_ungated_with_a_real_ledger(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The half #1232 does NOT close, kept as a live tripwire.
+
+        The guard above fires on the *ledger* slot, so it catches the forgotten
+        flag and nothing else. A path in the BOT slot beside a genuinely
+        readable ledger still parses, matches nothing, and returns rc 0 with no
+        output — byte-identical to a real empty result. Closing that is still
+        the one-line _reject_bot_slot call.
+
+        Asserts today's WRONG behaviour deliberately. When someone wires the
+        shape gate in, this FAILS — flip it then, do not delete it.
+        """
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", dlog, rlog, rlog])
         assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out == ""
 
@@ -1613,3 +1633,143 @@ def test_orphans_refuses_on_an_unlistable_bots_dir(tmp_path):
     assert proc.returncode == 3, f"expected refusal, got rc={proc.returncode}"
     assert proc.stdout == "", "stdout is parsed by fleet-pulse.sh; must stay empty"
     assert "unlistable" in proc.stderr.lower() or "cannot" in proc.stderr.lower()
+
+
+class TestReportLedgerRefusal:
+    """#1232 — a reader that cannot reach its report ledger must not answer.
+
+    The join closes a dispatch by finding its terminal report. With no readable
+    ledger there is nothing to join against, so EVERY id'd row comes back open
+    — indistinguishable from a fleet that closed nothing. Three managers read
+    inflated counts for six hours; on one fleet the inflated number EQUALLED
+    the true one, so no amount of inspection could have caught it there.
+
+    Exactly the class :830 already guarded for --orphans, pointed at the input
+    people actually pass by hand.
+    """
+
+    def _rows(self, tmp_path):
+        dlog = tmp_path / "d.jsonl"
+        rlog = tmp_path / "r.jsonl"
+        dlog.write_text(
+            '{"ts":"2026-09-01T00:00:00Z","bot":"w1","task_id":"t-1",'
+            '"dispatched_at":1000,"expected_by":2000}\n'
+        )
+        rlog.write_text("")
+        return str(dlog), str(rlog)
+
+    @pytest.mark.parametrize(
+        "argv_tail",
+        [
+            ["--open", "w1", "DLOG", "MISSING"],
+            ["w1", "DLOG", "MISSING"],  # single-bot mode
+        ],
+        ids=["open", "single-bot"],
+    )
+    def test_absent_ledger_refuses_at_rc3_with_nothing_on_stdout(
+        self, tmp_path, monkeypatch, capsys, argv_tail
+    ):
+        """rc carries the refusal; the TEXT must never touch stdout.
+
+        Placement is measured, not stylistic: report-back.sh:117 pipes --open
+        through `awk {print $3}` and fleet-pulse.sh reads this stdout into a
+        cache. A line printed there becomes a phantom row.
+        """
+        dlog, _ = self._rows(tmp_path)
+        argv = [a.replace("DLOG", dlog).replace("MISSING", str(tmp_path / "nope.jsonl"))
+                for a in argv_tail]
+        monkeypatch.setattr("sys.argv", ["dispatch-overdue.py", *argv])
+        assert dispatch_overdue.main() == 3
+        cap = capsys.readouterr()
+        assert cap.out == "", "refusal text on stdout becomes a phantom row"
+        assert "cannot read the report ledger" in cap.err
+
+    def test_open_task_PROCEEDS_on_an_absent_ledger(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The #835 resolver must survive the never-reported fleet.
+
+        A fleet that has never reported has no ledger file, and the FIRST
+        report is exactly the call that must work. Absence makes this door's
+        answer MORE certain, not less: nothing has been closed, so the head of
+        the open list is correct by construction.
+
+        Refusing here is what broke three validate-bot-change.sh assertions.
+        """
+        dlog, _ = self._rows(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv",
+            ["dispatch-overdue.py", "--open-task", "w1", dlog,
+             str(tmp_path / "never-reported.jsonl")],
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out.strip() == "t-1"
+
+    def test_open_task_STILL_refuses_when_the_ledger_is_unopenable(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The other absence. Rows exist that cannot be read, so some are
+        certainly closed and the head may be an already-CLOSED row — resolving
+        would stamp a false closure. Degrading to an id-less report is strictly
+        better, so this one DOES refuse."""
+        dlog, rlog = self._rows(tmp_path)
+        os.chmod(rlog, 0o000)
+        try:
+            if os.access(rlog, os.R_OK):
+                pytest.skip("cannot make a file unreadable as this user")
+            monkeypatch.setattr(
+                "sys.argv", ["dispatch-overdue.py", "--open-task", "w1", dlog, rlog]
+            )
+            assert dispatch_overdue.main() == 3
+            assert capsys.readouterr().out == ""
+        finally:
+            os.chmod(rlog, 0o644)
+
+    def test_an_EXISTING_but_empty_ledger_still_answers(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The line is PRESENCE, not emptiness.
+
+        A ledger holding zero rows is a fleet that has not reported yet, and
+        "every dispatch is still open" is TRUE for it. Refusing here would
+        trade a false all-clear for a false outage.
+        """
+        dlog, rlog = self._rows(tmp_path)
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out.strip() != ""
+
+    def test_present_but_unopenable_refuses(self, tmp_path, monkeypatch, capsys):
+        """Openability, not is_file(): a path that stats fine and then raises is
+        the mode that takes out a read door, and a stat-only probe certifies it."""
+        dlog, rlog = self._rows(tmp_path)
+        os.chmod(rlog, 0o000)
+        try:
+            if os.access(rlog, os.R_OK):  # running as root — probe cannot fire
+                pytest.skip("cannot make a file unreadable as this user")
+            monkeypatch.setattr(
+                "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, rlog]
+            )
+            assert dispatch_overdue.main() == 3
+            assert "cannot be opened" in capsys.readouterr().err
+        finally:
+            os.chmod(rlog, 0o644)
+
+    def test_a_directory_reports_NOT_A_FILE_not_a_permission_problem(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """is_file() stays the FIRST gate. IsADirectoryError is an OSError, so
+        probing first would report a directory as unreadable and send someone
+        to run chmod on a path that is simply not a file."""
+        dlog, _ = self._rows(tmp_path)
+        d = tmp_path / "isadir.jsonl"
+        d.mkdir()
+        monkeypatch.setattr(
+            "sys.argv", ["dispatch-overdue.py", "--open", "w1", dlog, str(d)]
+        )
+        assert dispatch_overdue.main() == 3
+        err = capsys.readouterr().err
+        assert "is not a file" in err and "cannot be opened" not in err
+
