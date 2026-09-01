@@ -42,3 +42,36 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "daemon_stopping": "notice",
     "spool_drain_completed": "notice",
 }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: the metric-name registry (§9b MetricSample — open registry,
+# warn-on-unknown at ingest, additions by PR). Units live HERE, never on
+# rows. Seed = the spec's walked list (§9b Emitters paragraph).
+# ---------------------------------------------------------------------------
+
+METRIC_NAMES: dict[str, dict] = {
+    "host.load": {"unit": "load", "description": "1/5/15-min load triplet"},
+    "host.mem_available_mb": {"unit": "MB", "description": "available RAM"},
+    "host.disk_free_gb": {"unit": "GB", "description": "free disk"},
+    "host.thermal_flags": {"unit": "flags", "description": "Pi vcgencmd thermal"},
+    "host.undervoltage": {"unit": "bool", "description": "Pi undervoltage flag"},
+    "host.boot_time": {"unit": "iso8601", "description": "last boot instant"},
+    "host.job_ran": {"unit": "run", "description": "one sample per machinery run"},
+    "vault.behind": {"unit": "commits", "description": "behind upstream"},
+    "vault.ahead": {"unit": "commits", "description": "ahead of upstream"},
+    "vault.last_fetch_age_s": {"unit": "s", "description": "age of last fetch"},
+    "vault.fetch_failed": {"unit": "bool",
+                           "description": "a failed fetch must never render"
+                                          " as up-to-date"},
+    "bot.session_up": {"unit": "bool", "description": "tmux session alive"},
+    "bot.bridge_up": {"unit": "bool", "description": "telegram poller alive"},
+    "bot.rc_ok": {"unit": "bool", "description": "remote control live"},
+    "bot.pane_last_change_age_s": {"unit": "s", "description": "pane activity age"},
+    "bot.heartbeat": {"unit": "run", "description": "keepalive heartbeat"},
+    "bot.rss_mb": {"unit": "MB", "description": "resident set size"},
+    "env.key_state": {"unit": "state",
+                      "description": "creds-check key state (names never"
+                                     " values; the #1213 present-but-empty"
+                                     " class)"},
+}

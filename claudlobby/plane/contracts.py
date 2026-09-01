@@ -402,7 +402,10 @@ class HostPayload(_Strict):
 class _VaultCompat(_Strict):
     floor: str
     cli_version: Optional[str] = None
-    ok: bool
+    # Optional, deviating from §9b's bare bool DELIBERATELY: no compat
+    # probe runs at generate, and a fabricated verdict frozen by the hash
+    # gate is the lie this lane exists to kill. None = no probe ran.
+    ok: Optional[bool] = None
 
 
 class VaultPayload(_Strict):
@@ -558,8 +561,17 @@ class MetricSample(_Strict):
     subject_kind: Literal["host", "vault", "fleet", "actor", "bot_instance",
                           "session"]
     subject: str = Field(min_length=1)            # alias; uid resolved at ingest
-    metric: str = Field(min_length=1)             # registry-governed, warn-on-unknown
-    value: object                                 # number | bool | str | object
+    metric: str = Field(min_length=1)   # open registry (registries.
+                                        # METRIC_NAMES): ingest WARNS on
+                                        # unknown, never rejects
+    value: object = Field(...)                    # number | bool | str | object
+
+    @field_validator("value")
+    @classmethod
+    def _value_not_none(cls, v):
+        if v is None:
+            raise ValueError("a sample without a value is not a sample")
+        return v
     status: Optional[Literal["ok", "warn", "alert"]] = None
 
 
@@ -581,9 +593,15 @@ class Declaration(_Strict):
 
     @model_validator(mode="after")
     def _per_token_detail(self):
-        if self.event == "scan_completed" and not self.scan_id:
-            raise ValueError("scan_completed requires scan_id (round-3 F11:"
-                             " a completion must join its tombstones)")
+        if self.event == "scan_completed":
+            if not self.scan_id:
+                raise ValueError("scan_completed requires scan_id (round-3"
+                                 " F11: a completion must join its"
+                                 " tombstones)")
+            if self.complete is None or self.counts is None \
+                    or self.scope is None:
+                raise ValueError("scan_completed requires scope, counts and"
+                                 " complete (§9d detail)")
         if self.event == "revision_seen" and not self.vault_rev:
             raise ValueError("revision_seen requires vault_rev")
         return self

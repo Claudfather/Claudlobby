@@ -29,27 +29,37 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import platform
 import shutil
 import subprocess
 import uuid
 from pathlib import Path
 
-from .canonical import canonical_hash
+from .canonical import CanonicalizationError, canonical_hash
 
 log = logging.getLogger("claudlobby.plane.registry")
 
-_LIBRARY_KINDS = (
-    "expertise", "skills", "mcp", "guardrails", "protocols", "tools",
-    "voices", "resources", "lessons", "principles", "permissions",
-    "post_actions",
-)
+# Library categories are DISCOVERED, never hand-listed: the shipped list
+# missed `integrations` (never keyframed, never tombstonable) and scanned a
+# nonexistent `voices` dir — the #1009 hand-list class, made worse here by
+# the hash gate freezing the omission forever (gauntlet round 1).
+def _library_kinds(paths) -> list[str]:
+    kinds: set[str] = set()
+    for base in (paths.base_library,
+                 getattr(paths, "overlay_library", None)):
+        if base and base.is_dir():
+            kinds.update(d.name for d in base.iterdir() if d.is_dir())
+    return sorted(kinds)
 
 _SCHEMA = "1"
 
 
 def _file_hash(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    # sha256:-prefixed like canonical_hash — ONE hash rendering estate-wide
+    # (CANON_V1); a probe-facet emitter re-hashing the same item must
+    # reproduce the exact string or every item flickers between emitters.
+    return "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
 
 
 def _tree_hash(d: Path) -> str:
@@ -67,16 +77,28 @@ def _hash_or_none(p: Path) -> str | None:
         return None
 
 
+def _safe_hash(obj) -> str:
+    """canonical_hash that degrades to a repr-hash instead of raising:
+    CANON_V1 refuses floats, and one float in a project's raw YAML must not
+    vaporize the whole scan (gauntlet r1, measured — the non-blocking hook
+    turned it into 'no registry ever'). The repr form is deterministic for
+    the same input, which is all the hash gate needs."""
+    try:
+        return canonical_hash(obj)
+    except CanonicalizationError:
+        return "sha256:" + hashlib.sha256(
+            repr(sorted(obj.items()) if isinstance(obj, dict) else obj)
+            .encode()).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Payload assembly (§9b — deterministic, volatile facts excluded per F12)
 # ---------------------------------------------------------------------------
 
 def host_payload(paths) -> dict:
-    import os as _os
-
     disk = shutil.disk_usage("/")
     try:
-        page = _os.sysconf("SC_PAGE_SIZE") * _os.sysconf("SC_PHYS_PAGES")
+        page = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
         ram_mb = int(page / (1024 * 1024))
     except (ValueError, OSError, AttributeError):
         ram_mb = 0
@@ -96,10 +118,13 @@ def host_payload(paths) -> dict:
     except (OSError, subprocess.SubprocessError):
         clv = ""
     system_yaml = paths.root / "claudlobby" / "system.yaml"
+    # paths._iter_fleet_dirs — the ONE nested-aware fleet walk. The shipped
+    # depth-1 glob measured [] on the live nested-vault host (gauntlet r1);
+    # spec: "fleet aliases from manifests — NEVER process inference".
+    from ..paths import _iter_fleet_dirs
     declared_fleets = sorted(
-        d.name for d in (paths.root / "local").iterdir()
-        if d.is_dir() and (d / "fleet.yaml").is_file()
-    ) if (paths.root / "local").is_dir() else []
+        d.name for d in _iter_fleet_dirs(paths.root / "local")
+        if (d / "fleet.yaml").is_file())
     return {
         "aliases": {"hostname": platform.node()},
         "os": "darwin" if platform.system() == "Darwin" else "linux",
@@ -125,8 +150,15 @@ def host_payload(paths) -> dict:
     }
 
 
+def _fleet_vault_path(fleet) -> str | None:
+    # the fleet-tier value lives in defaults (config.py merges it there);
+    # FleetConfig has no claudron_vault_path attr — the shipped getattr
+    # returned None forever (gauntlet r1)
+    return (fleet.defaults or {}).get("claudron_vault_path") or None
+
+
 def vault_payload(paths, fleet) -> dict | None:
-    vp = getattr(fleet, "claudron_vault_path", None) or next(
+    vp = _fleet_vault_path(fleet) or next(
         (b.claudron_vault_path for b in fleet.bots.values()
          if b.claudron_vault_path), None)
     if not vp:
@@ -147,14 +179,23 @@ def vault_payload(paths, fleet) -> dict | None:
         safe = ("runtime" in gi) and (".env" in gi)
     except OSError:
         pass
-    from .. import claudron_compat
-    floor = str(getattr(claudron_compat, "FLOOR", "")) or "unset"
+    from ..claudron_compat import COMPAT_FLOOR
+    # the floor summary = the highest slated release across the capability
+    # tuple (deterministic; "pinned SHA" entries sort in but never win a
+    # semver max). ok is None, NEVER a hardcoded True: no compat probe runs
+    # here, and a fabricated verdict frozen by the hash gate is the §16 sin
+    # this whole lane exists to kill (gauntlet r1 — the shipped True lied,
+    # and the shipped getattr FLOOR fallback made floor permanently
+    # "unset": under a hash gate, defaulted getattr is strictly worse than
+    # the bare attribute).
+    floor = max((c.default_order_release for c in COMPAT_FLOOR),
+                default="none")
     return {
         "alias": vpath.name,
         "role": "primary",
         "mount_path": str(vpath),
         "remote": remote,                      # sensitive (§11) at render
-        "compat": {"floor": floor, "ok": True},
+        "compat": {"floor": floor, "ok": None},
         "carries_fleets": (vpath / "local").is_dir()
                           or "local" in vpath.parts,
         "gitignore_safe": safe,
@@ -165,8 +206,14 @@ def vault_payload(paths, fleet) -> dict | None:
 def _mission_file(paths, rel: str | None) -> dict | None:
     if not rel:
         return None
-    p = Path(rel) if Path(rel).is_absolute() else paths.fleet_dir / rel \
-        if getattr(paths, "fleet_dir", None) else Path(rel)
+    # fleet_config_dir / rel — the composer's own resolution (composer.py
+    # resolves this exact field the same way), and Path(dir) / "/abs"
+    # yields the absolute path anyway, so ONE expression covers both; the
+    # stored path is absolute (CANON_V1 producer's duty). The shipped
+    # CWD-dependent fallback flickered the hash per invocation dir
+    # (gauntlet r1, measured).
+    base = getattr(paths, "fleet_config_dir", None) or paths.root
+    p = base / rel
     h = _hash_or_none(p)
     return {"path": str(p), "content_hash": h} if h else None
 
@@ -206,7 +253,7 @@ def fleet_payload(paths, fleet, vault_rev: str | None) -> dict:
             getattr(fleet.plugins, "additional", []) or []),
         "vault_binding": {
             "vault_uid": None,
-            "path": str(getattr(fleet, "claudron_vault_path", "") or ""),
+            "path": str(_fleet_vault_path(fleet) or ""),
         },
         "telegram": ({"group_alias": "fleet-group"}
                      if fleet.telegram_group_chat_id else None),
@@ -216,7 +263,7 @@ def fleet_payload(paths, fleet, vault_rev: str | None) -> dict:
     }
 
 
-def project_payload(fleet, proj, vault_rev: str | None) -> dict:
+def project_payload(paths, fleet, proj, vault_rev: str | None) -> dict:
     validation = getattr(proj, "validation", None)
     tier = getattr(validation, "tier", None) or "review"
     return {
@@ -224,10 +271,10 @@ def project_payload(fleet, proj, vault_rev: str | None) -> dict:
         "title": proj.title,
         "repos": sorted(proj.repos),
         "tier": tier,
-        "validation_hash": canonical_hash(
+        "validation_hash": _safe_hash(
             getattr(proj, "raw", {}).get("validation") or {}),
-        "mission_file": None,
-        "declared_hash": canonical_hash(getattr(proj, "raw", {}) or {}),
+        "mission_file": _mission_file(paths, proj.mission_file),
+        "declared_hash": _safe_hash(getattr(proj, "raw", {}) or {}),
         "vault_rev": vault_rev,
         "schema_version": _SCHEMA,
     }
@@ -244,10 +291,9 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         "sandbox": {
             "enabled": getattr(bot.sandbox, "enabled", None),
             "auto_allow_bash": getattr(bot.sandbox, "auto_allow_bash", None),
-            "config_hash": canonical_hash(
-                getattr(bot.sandbox, "__dict__", {}) and {
-                    k: v for k, v in vars(bot.sandbox).items()
-                    if not k.startswith("_")} or {}),
+            "config_hash": _safe_hash(
+                {k: v for k, v in vars(bot.sandbox).items()
+                 if not k.startswith("_")}),
         },
         "permissions_grants": {
             "count": len(bot.permissions),
@@ -297,7 +343,7 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         "reports_to": bot.reports_to,
         "manages": sorted(bot.manages or []),
         "group": group,
-        "scope_hash": canonical_hash(vars(bot.scope)) if bot.scope else None,
+        "scope_hash": _safe_hash(vars(bot.scope)) if bot.scope else None,
     }
     briefing = bot.briefing
     schedule = {
@@ -339,7 +385,7 @@ def library_items(paths, fleet_name: str, vault_rev: str | None):
     items: list[tuple[str, dict]] = []
     skipped = 0
     shared_root = paths.root / "library"
-    for kind in _LIBRARY_KINDS:
+    for kind in _library_kinds(paths):
         for base in paths.library_search_dirs(kind):
             if not base.is_dir():
                 continue
@@ -393,12 +439,20 @@ def _vault_rev(paths) -> str | None:
         return None
 
 
-def _in_scope(entity_type: str, alias: str, fleet_name: str) -> bool:
-    """Tombstone scope: what THIS scan is authoritative for. Host, vault and
-    shared library are host-global (any fleet's scan enumerates them); bots/
-    projects/overlay items belong to their fleet by alias convention."""
-    if entity_type in ("host", "vault"):
+def _in_scope(entity_type: str, alias: str, fleet_name: str,
+              scanned: set) -> bool:
+    """Tombstone scope: what THIS scan is authoritative for. Host and shared
+    library are host-global (every scan enumerates them); the VAULT is in
+    scope only when this scan actually enumerated one — vault enumeration is
+    fleet-binding-dependent, so a vaultless fleet's complete scan must never
+    tombstone another fleet's vault (gauntlet r1, probed: tombstone/
+    resurrect ping-pong per generate rotation on a multi-fleet host). Bots/
+    projects/overlay items belong to their fleet by alias convention (every
+    prefix includes a separator, so prefix-name siblings cannot collide)."""
+    if entity_type == "host":
         return True
+    if entity_type == "vault":
+        return any(t == "vault" for t, _a in scanned)
     if entity_type == "fleet":
         return alias == fleet_name
     if entity_type == "bot":
@@ -414,11 +468,24 @@ def run_generate_scan(paths, fleet) -> dict | None:
     """Emit one generate-cause registry scan for *fleet*. Returns the summary
     dict, or None when the fleet is UNARMED (dormancy rule). Raises only
     upward through the non-blocking hook in cmd_generate."""
-    defaults_env = (fleet.defaults or {}).get("env") or {}
-    import os
-    armed = str(defaults_env.get("PLANE_EMIT_ENABLED")
-                or os.environ.get("PLANE_EMIT_ENABLED") or "") == "1"
-    if not armed:
+    # Arming resolves through the runtime's OWN .env tier cascade —
+    # env_tiers, exactly as the composer resolves the SAME variable for
+    # briefing timers. The shipped check read fleet.defaults["env"], a tier
+    # the estate does not use: measured armed-the-documented-way -> None —
+    # dead in production while every test passed (gauntlet r1). A resolver
+    # failure means UNARMED (dormancy fails closed); PLANE_EMIT_DISABLED=1
+    # is the ruled harness exemption, honored here like every door.
+    if os.environ.get("PLANE_EMIT_DISABLED") == "1":
+        return None
+    from .. import env_tiers as _env_tiers
+    try:
+        _res = _env_tiers.cascade(
+            _env_tiers.read_tiers(paths, fleet_name=fleet.name)
+        ).get("PLANE_EMIT_ENABLED")
+    except _env_tiers.ResolverUnavailable as exc:
+        log.warning("registry scan: arming unresolved (%s) — UNARMED", exc)
+        return None
+    if _res is None or _res.value != "1":
         return None
 
     from .emit_api import emit_batch
@@ -438,7 +505,7 @@ def run_generate_scan(paths, fleet) -> dict | None:
     for key in sorted(fleet.projects):
         entities.append((
             "project", f"{fleet.name}/{key}",
-            project_payload(fleet, fleet.projects[key], vault_rev)))
+            project_payload(paths, fleet, fleet.projects[key], vault_rev)))
     for bot_id in sorted(fleet.bots):
         p = bot_payload(paths, fleet, fleet.bots[bot_id], vault_rev)
         entities.append(("bot", p["alias"], p))
@@ -466,18 +533,27 @@ def run_generate_scan(paths, fleet) -> dict | None:
     # tombstone. Never against an incomplete enumeration (F11).
     tombstoned = 0
     if complete:
-        from .db import db_path
         import sqlite3
-        db = Path(root) / "state" / "plane" / "plane.db"
+        db = Path(root) / "state" / "plane" / "plane.db"  # pure join (no
+        # db_path(): its mkdir is a write this read path must not carry)
         seen = {(t, a) for t, a, _ in entities}
         if db.is_file():
             try:
                 conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
                 conn.row_factory = sqlite3.Row
+                # THIS host's envelope uid — the SAME door ingest stamps
+                # rows with (ids.ensure_host_uid), never an identity-alias
+                # guess: the registry's host-ENTITY uid is a different
+                # namespace, and matching on it filtered every row
+                # (gauntlet r1 fix round, caught by the pins).
+                from .ids import ensure_host_uid
+                this_host = ensure_host_uid(Path(root) / "state")
                 rows = conn.execute(
                     "SELECT entity_type, entity_uid, entity_alias, tombstone,"
                     " MAX(ingest_seq) FROM registry_snapshots"
-                    " GROUP BY entity_type, entity_uid").fetchall()
+                    " WHERE origin = 'live' AND host_uid = ?"
+                    " GROUP BY entity_type, entity_uid",
+                    (this_host,)).fetchall()
                 conn.close()
                 for r in rows:
                     if r["tombstone"]:
@@ -486,7 +562,7 @@ def run_generate_scan(paths, fleet) -> dict | None:
                     if key in seen:
                         continue
                     if _in_scope(r["entity_type"], r["entity_alias"],
-                                 fleet.name):
+                                 fleet.name, seen):
                         events.append(snap(r["entity_type"],
                                            r["entity_alias"], None,
                                            tombstone=True))
@@ -516,8 +592,11 @@ def run_generate_scan(paths, fleet) -> dict | None:
                     "complete": complete, "source_rev": vault_rev}})
 
     outcomes = []
-    for i in range(0, len(events), 50):
-        outcomes.extend(emit_batch(root, events[i:i + 50]))
+    # One cold-path CLI spawn + transaction per chunk; 50 keeps a ~190-event
+    # fleet scan to ~4 spawns while staying far under any payload cap.
+    _CHUNK = 50
+    for i in range(0, len(events), _CHUNK):
+        outcomes.extend(emit_batch(root, events[i:i + _CHUNK]))
     by_status: dict[str, int] = {}
     for o in outcomes:
         by_status[o.status] = by_status.get(o.status, 0) + 1

@@ -304,11 +304,15 @@ def _registry_row(conn, payload, entity, host_uid):
     and provenance rides the never-gated declaration events."""
     kind = ENTITY_IDENTITY_KIND[payload.entity_type]
     uid = entity(kind, payload.entity_alias)
-    _confirm(conn, uid)
-    if payload.entity_type == "bot":
-        # the logical actor is confirmed ALONGSIDE its instance (§18): the
-        # roster observation is what ends the actor's provisional life
-        _confirm(conn, entity("actor", payload.entity_alias))
+    if not payload.tombstone:
+        # Confirmation is for OBSERVED entities only — a tombstone is the
+        # opposite claim, and confirming it silenced the exact provisional
+        # signal doctor watches; a tombstone for a never-seen alias even
+        # minted-and-confirmed a ghost (gauntlet r1, probed).
+        _confirm(conn, uid)
+        if payload.entity_type == "bot":
+            # the logical actor is confirmed ALONGSIDE its instance (§18)
+            _confirm(conn, entity("actor", payload.entity_alias))
     values = {
         "entity_type": payload.entity_type,
         "entity_uid": uid,
@@ -320,14 +324,16 @@ def _registry_row(conn, payload, entity, host_uid):
         "scan_id": payload.scan_id,
         "vault_rev": payload.vault_rev,
     }
-    if payload.tombstone:
-        return uid, values
-    phash = canonical_hash(payload.payload)
     prev = conn.execute(
         "SELECT payload_hash, tombstone FROM registry_snapshots"
         " WHERE host_uid = ? AND entity_type = ? AND entity_uid = ?"
         " ORDER BY ingest_seq DESC LIMIT 1",
         (host_uid, payload.entity_type, uid)).fetchone()
+    if payload.tombstone:
+        if prev and prev["tombstone"]:
+            return uid, None   # tombstone-of-a-tombstone writes nothing
+        return uid, values
+    phash = canonical_hash(_gate_view(payload.payload))
     if prev and not prev["tombstone"] and prev["payload_hash"] == phash:
         return uid, None    # the write gate: unchanged state writes nothing
     values["payload"] = json.dumps(payload.payload, ensure_ascii=False)
@@ -335,7 +341,25 @@ def _registry_row(conn, payload, entity, host_uid):
     return uid, values
 
 
+def _gate_view(payload: dict) -> dict:
+    """The hash gate's view of a payload: everything EXCEPT vault_rev. The
+    vault takes commits daily (memories, captures) and generate runs daily,
+    so a rev inside the hashed bytes turned every vault commit into a full
+    keyframe set per fleet (gauntlet r1, measured) — blowing the spec's
+    tens-of-rows/week envelope. Provenance is exactly what revision_seen
+    declarations exist for, and vault_rev remains a stored COLUMN; only the
+    gate ignores it."""
+    return {k: v for k, v in payload.items() if k != "vault_rev"}
+
+
 def _metric_row(payload, entity):
+    from .registries import METRIC_NAMES
+    if payload.metric not in METRIC_NAMES:
+        # open registry, warn-on-unknown (§9d): accepted, never rejected —
+        # additions arrive by PR; the warning is the drift signal
+        import sys
+        print(f"plane-ingest: unknown metric {payload.metric!r}"
+              " (not in registries.METRIC_NAMES)", file=sys.stderr)
     return {
         "subject_kind": payload.subject_kind,
         "subject_uid": entity(payload.subject_kind, payload.subject),
@@ -461,10 +485,11 @@ def _suppressed_on_replay(conn, payload, host_uid) -> bool:
         " ORDER BY ingest_seq DESC LIMIT 1",
         (host_uid, payload.entity_type, row["uid"])).fetchone()
     return bool(prev and not prev["tombstone"]
-                and prev["payload_hash"] == canonical_hash(payload.payload))
+                and prev["payload_hash"]
+                == canonical_hash(_gate_view(payload.payload)))
 
 
-def _verify_duplicates(conn, prepared, host_uid=None) -> list[IngestResult]:
+def _verify_duplicates(conn, prepared, host_uid) -> list[IngestResult]:
     """Duplicate replay = success ONLY if every event landed FULLY before AND
     AS THE SAME THING: ledger row present, family row present (round-2 F1),
     the incoming event_type EQUAL to the stored family, and the stored row's
