@@ -687,6 +687,31 @@ run_cell_e() {
   bot_tmux "$LSOCK" kill-session -t "$LSESSION" 2>/dev/null || true
 }
 
+write_loc1_tools() {  # write_loc1_tools <json-array-body>
+  printf '{"permissions":{"allow":[%s]}}\n' "$1" > "$FAKE_CFG/settings.json"
+}
+
+
+skip_class() {  # skip_class <class> <cells...>
+  local cls="$1"; shift
+  local c
+  for c in "$@"; do
+    printf '%s|-|-|-|-|-|NOT_RUN_CLASS_VOID|-|-|-|control for the %s class did not ALLOW\n' "$c" "$cls" >> "$GRID"
+    printf 'NOT_RUN_CLASS_VOID\n' > "$WORK/$c.verdict"
+  done
+}
+gate_class() {  # gate_class <class> <control_cell>
+  local v; v="$(verdict_of "$2")"
+  if [ -n "${LADDER_COMPOSE_ONLY:-}" ]; then say "  (compose-only: $1 gate not evaluated)"; return 0; fi
+  harness_check "$1 control $2 came back ALLOWED (a cell in this class COULD refute)" \
+    "$([ "$v" = ALLOWED ] && echo yes || echo no)"
+  [ "$v" = ALLOWED ] && return 0
+  [ -n "${LADDER_COMPOSE_ONLY:-}" ] && [ "$v" = COMPOSE_ONLY ] && return 0
+  say "  CLASS VOID: $1 — control $2 = $v. Its deny cells are NOT RUN."
+  return 1
+}
+
+
 BASE_SIG="l1bare=0 l3bare=0 pathdeny=1 tooldeny=1 mode=auto tool=Bash"
 printf 'cell|flag_mode|session_mode|tool_asked|tool_used|verdict|rc|raw_error_verbatim\n' > "$GRID"
 
@@ -847,7 +872,7 @@ say ""
 say "  BOUND: three runs, per the dispatch, and no cell is repeated. This arm"
 say "         therefore carries NO nondeterminism check of its own; the C arm's"
 say "         (B0a=B0b, C1a=C1b) covers in-workspace cells only."
-else
+elif [ "$ARM" = E ]; then
 # ============================== PHASE E: tool class x deny form, INTERACTIVE
 say ""
 say "== PHASE E — Axis A (tool class) x Axis B (deny form), on INTERACTIVE boots =="
@@ -908,10 +933,6 @@ cat > "$EXPORT_ROOT/local/$FLEET/library/mcp/github.json" <<JSON
 }
 JSON
 
-write_loc1_tools() {  # write_loc1_tools <json-array-body>
-  printf '{"permissions":{"allow":[%s]}}\n' "$1" > "$FAKE_CFG/settings.json"
-}
-
 D_NONE='[]'
 D_BASH='["Bash"]'
 D_READ='["Read"]'
@@ -944,25 +965,6 @@ printf 'cell|deny_form|estate_rules|route|resolvable|tool_used|verdict|effect|se
 # A class whose CONTROL did not come back ALLOWED is VOID: a DENIED verdict is
 # worthless unless some cell in that class could have refuted it. Counting the
 # cells that could have refuted, never the ones that agreed.
-skip_class() {  # skip_class <class> <cells...>
-  local cls="$1"; shift
-  local c
-  for c in "$@"; do
-    printf '%s|-|-|-|-|-|NOT_RUN_CLASS_VOID|-|-|-|control for the %s class did not ALLOW\n' "$c" "$cls" >> "$GRID"
-    printf 'NOT_RUN_CLASS_VOID\n' > "$WORK/$c.verdict"
-  done
-}
-gate_class() {  # gate_class <class> <control_cell>
-  local v; v="$(verdict_of "$2")"
-  if [ -n "${LADDER_COMPOSE_ONLY:-}" ]; then say "  (compose-only: $1 gate not evaluated)"; return 0; fi
-  harness_check "$1 control $2 came back ALLOWED (a cell in this class COULD refute)" \
-    "$([ "$v" = ALLOWED ] && echo yes || echo no)"
-  [ "$v" = ALLOWED ] && return 0
-  [ -n "${LADDER_COMPOSE_ONLY:-}" ] && [ "$v" = COMPOSE_ONLY ] && return 0
-  say "  CLASS VOID: $1 — control $2 = $v. Its deny cells are NOT RUN."
-  return 1
-}
-
 # ================================================== class 1: Bash
 say ""; say "-- Bash class --"
 compose_e "$A_CONST" "" 0 || { say "FATAL: EB0 generate failed"; exit 2; }
@@ -1190,7 +1192,7 @@ if gate_class redirect F0; then
   compose_e "$A_CONST" "\"Edit(/$TARGET_DIR/**)\"" 0 || { say "FATAL: Fb generate failed"; exit 2; }
   write_loc1_tools '"Bash"'
   run_cell_e Fb path-scoped-EDIT 118 bash-HEREDOC-to-ALLOWED-path n/a "$P_HEREDOC_OK" alt_probe "$D_EDITP"
-  if [ "$(verdict_of Fb)" = ALLOWED ]; then
+  if [ "$(verdict_of Fb)" = ALLOWED ] || { [ -n "${LADDER_COMPOSE_ONLY:-}" ] && [ "$(verdict_of Fb)" = COMPOSE_ONLY ]; }; then
     compose_e "$A_CONST" "\"Edit(/$TARGET_DIR/**)\"" 0 || { say "FATAL: Fa generate failed"; exit 2; }
     write_loc1_tools '"Bash"'
     run_cell_e Fa path-scoped-EDIT 118 bash-simple-REDIRECT-to-DENIED-path n/a "$P_REDIR_DENIED" write_probe "$D_EDITP"
