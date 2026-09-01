@@ -77,8 +77,12 @@ def _out_payload(**tool_input) -> str:
 
 def _channel_prompt(body: str = "please give me a /status update",
                     **attrs) -> str:
-    a = {"source": "telegram", "chat_id": "-100999", "message_id": "77",
-         "user": "chris", "ts": "2026-09-01T10:00:00Z", **attrs}
+    # source is the PLUGIN-QUALIFIED name (r4: read from a live transcript
+    # — the bare "telegram" three rounds of fixtures carried was wrong and
+    # the deployed hook dropped the operator's first real message)
+    a = {"source": "plugin:telegram:telegram", "chat_id": "-100999",
+         "message_id": "77", "user": "chris", "user_id": "70001",
+         "ts": "2026-09-01T10:00:00Z", **attrs}
     attr_s = " ".join(f'{k}="{v}"' for k, v in a.items())
     return json.dumps({"prompt": f"<channel {attr_s}>{body}</channel>"})
 
@@ -160,7 +164,9 @@ def test_inbound_ignores_ordinary_prompts_with_empty_stdout(tmp_path):
     root = _root(tmp_path)
     for prompt in ("fix the bug in parser.py",
                    "channel source=telegram without the tag shape",
-                   "<channel source=\"slack\" chat_id=\"1\">hi</channel>"):
+                   "<channel source=\"slack\" chat_id=\"1\">hi</channel>",
+                   "<channel source=\"plugin:slack:slack\" chat_id=\"1\">"
+                   "hi</channel>"):
         r = _run(IN, json.dumps({"prompt": prompt}), _env(root))
         assert r.returncode == 0
         assert r.stdout == ""
@@ -414,6 +420,41 @@ def test_newline_after_channel_is_not_dropped_by_the_prefilter(tmp_path):
     assert r.returncode == 0 and r.stdout == ""
     rows = _rows(root, "SELECT body FROM communications")
     assert [x["body"] for x in rows] == ["wrapped attrs"]
+
+
+# ---------------------------------------------------------------------------
+# Round-4 pin: the live tag, verbatim
+# ---------------------------------------------------------------------------
+
+def test_the_live_transcript_tag_shape_verbatim(tmp_path):
+    """r4 (live estate): the operator's first real message was DROPPED —
+    the decider required source="telegram" while the plugin injects the
+    plugin-qualified `plugin:telegram:telegram`, a constant derived at r0
+    without pulling a transcript and inherited by three rounds of
+    fixtures. THIS fixture is the injected tag from erlich's transcript
+    (2026-09-01) SHAPE-verbatim: attr order, the qualified source, the
+    user_id attr, the body's wrapping newlines, the millisecond Z ts —
+    but every identifier VALUE is a shape-preserving fake, because the
+    repo is public and the PII rule bars real chat/user ids in committed
+    assets. Two rules, stated together: the canonical case comes from a
+    live transcript, never from reading source — and what it carries into
+    git is the transcript's SHAPE, never its identifiers."""
+    root = _root(tmp_path)
+    prompt = ('<channel source="plugin:telegram:telegram"'
+              ' chat_id="-1001234567890" message_id="8888"'
+              ' user="operatorhandle" user_id="1234567890"'
+              ' ts="2026-09-01T13:10:04.000Z">\nChecking in\n</channel>')
+    r = _run(IN, json.dumps({"prompt": prompt}), _env(root))
+    assert r.returncode == 0 and r.stdout == ""
+    comms = _rows(root, "SELECT sender_alias, body, occurred_at"
+                        " FROM communications")
+    assert len(comms) == 1
+    assert comms[0]["sender_alias"] == "human:operatorhandle"
+    assert comms[0]["body"] == "Checking in"
+    assert comms[0]["occurred_at"].startswith("2026-09-01T13:10:04")
+    tx = _rows(root, "SELECT carrier_ref FROM events"
+                     " WHERE kind='transmission'")
+    assert tx[0]["carrier_ref"] == "tg:8888"
 
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,17 @@
 # messages, the plane's founding operator-in-the-stream gap). A channel
 # message arrives injected as a user turn shaped:
 #
-#   <channel source="telegram" chat_id="..." message_id="..." user="..."
-#            ts="...">the words</channel>
+#   <channel source="plugin:telegram:telegram" chat_id="..."
+#            message_id="..." user="..." user_id="..." ts="...">
+#   the words
+#   </channel>
+#
+# THE SOURCE VALUE IS THE PLUGIN-QUALIFIED NAME (r4, read from a LIVE
+# transcript on the deployed estate): `plugin:telegram:telegram`, not the
+# bare `telegram` three rounds of fixtures carried — the deployed hook
+# dropped the operator's first real message because nobody had pulled the
+# tag from a transcript. The matcher accepts `telegram` or any value
+# ending `:telegram`; the canonical test fixture is the live tag verbatim.
 #
 # This hook matches THAT SHAPE ONLY — an ordinary prompt exits at the
 # zero-fork prefilter below — and emits, PER TAG (the plugin may batch two
@@ -83,7 +92,7 @@ prompt = hook.get("prompt") or ""
 # keeps two ADJACENT tags from merging, and the plugin's own injection
 # never embeds an unescaped close.
 tags = re.finditer(
-    r"<channel\s+([^>]*\bsource=\"telegram\"[^>]*)>(.*?)</channel>",
+    r"<channel\s+([^>]*\bsource=\"(?:[\w.:-]*:)?telegram\"[^>]*)>(.*?)</channel>",
     prompt, re.DOTALL)
 events = []
 for m in tags:
