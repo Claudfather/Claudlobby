@@ -2375,6 +2375,21 @@ def compose_settings_local(
     # warnings per bot per boot and loses no enforcement: Edit rules cover every
     # file-editing tool, Write included.
     #
+    # CONFIRMED UNDER INTERACTIVE, AND THE RULE IS WIDER THAN THIS COMMENT SAID
+    # (#1406 arm F, 2026-09-01, claude 2.1.240, real tmux TUI, single-factor pair
+    # differing in ONE string with both controls green first):
+    #
+    #   deny Edit(//<dir>/**)  vs  `echo X > <dir>/f`  -> DENIED,  file NOT written
+    #   deny Write(//<dir>/**) vs  the SAME command    -> ALLOWED, file written
+    #
+    # So the Write(...) rule really is never consulted -- that half is measured,
+    # not inferred. But the Edit(...) rule also catches a SHELL REDIRECT, which is
+    # not a "file-editing tool" at all. Read literally, the sentence above would
+    # have a maintainer reason about this as tool-scoped and conclude a shell
+    # write escapes it. It does not. The rule binds by PATH, across the Bash tool
+    # as well, which is why the sibling-isolation Edit rules carry real weight
+    # against a heredoc or a redirect and not merely against Edit/Write calls.
+    #
     # WHAT #873's "isolation is intact" GOT HALF RIGHT, measured: bare-absolute
     # EDIT is NOT inert — it blocks (twice, with a no-rule control proving the rule
     # caused it, not a workspace boundary). So on a trusted workspace the integrity
