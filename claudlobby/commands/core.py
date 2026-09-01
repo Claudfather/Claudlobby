@@ -244,6 +244,24 @@ def cmd_generate(args) -> int:
 
     _warn_unresolvable_skill_refs(paths)
 
+    # Phase 2b: the generate-time registry scan (cause=generate). NON-
+    # BLOCKING and dormant: unarmed fleets (no PLANE_EMIT_ENABLED=1 in the
+    # fleet env) return None silently, and a scan failure must never break
+    # a generate — the composed estate is correct with or without its
+    # keyframes; the scan just records what generate produced.
+    try:
+        from ..plane.registry_emit import run_generate_scan
+        summary = run_generate_scan(paths, fleet)
+        if summary:
+            log.info(
+                "registry scan %s: %d entities (%d tombstoned,"
+                " complete=%s) — %s",
+                summary["scan_id"], summary["entities"],
+                summary["tombstoned"], summary["complete"],
+                summary["outcomes"])
+    except Exception as exc:  # noqa: BLE001 — non-blocking by contract
+        log.warning("registry scan failed (generate unaffected): %s", exc)
+
     return 0
 
 
