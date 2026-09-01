@@ -3889,6 +3889,30 @@ def compose_fleet_timers(
     timers_dir.mkdir(parents=True, exist_ok=True)
     prefix = fleet.service_prefix
 
+    # Scheduler-run scripts live in a CLOSED env — the fleet-tier .env a bot
+    # session sources never reaches them, so PLANE_EMIT_ENABLED composed
+    # nowhere and a timer-run door was UNREACHABLE in production (#1383,
+    # first found on briefing; the keepalive presence door is the second
+    # consumer — its per-minute tick runs from the keepalive job unit).
+    # Resolve the fleet arming ONCE through the runtime tier cascade and
+    # stamp it as an Environment= line on exactly the jobs whose scripts
+    # read it; a resolver failure composes UNARMED and says so.
+    plane_extra_env: dict[str, str] | None = None
+    from . import env_tiers as _env_tiers
+
+    try:
+        _pl_res = _env_tiers.cascade(
+            _env_tiers.read_tiers(paths, fleet_name=fleet.name)
+        ).get("PLANE_EMIT_ENABLED")
+        if _pl_res is not None and _pl_res.value == "1":
+            plane_extra_env = {"PLANE_EMIT_ENABLED": "1"}
+    except _env_tiers.ResolverUnavailable as exc:
+        _log.warning(
+            "plane arming unresolved (%s) — timer-run plane doors compose"
+            " UNARMED",
+            exc,
+        )
+
     if emit_defaults:
         for name, cfg in timers.items():
             sched = _resolve_timer_schedule(cfg, merged_defaults)
@@ -3909,6 +3933,7 @@ def compose_fleet_timers(
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
+                extra_env=(plane_extra_env if name == "keepalive" else None),
             )
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
@@ -3963,22 +3988,7 @@ def compose_fleet_timers(
     # #1226 defect) and carry it as an Environment= line. Arming lands on
     # briefing timers at the NEXT generate; a resolver failure composes
     # UNARMED (the pre-fix state) and says so.
-    briefing_extra_env: dict[str, str] | None = None
-    if briefing_bots:
-        from . import env_tiers as _env_tiers
-
-        try:
-            _res = _env_tiers.cascade(
-                _env_tiers.read_tiers(paths, fleet_name=fleet.name)
-            ).get("PLANE_EMIT_ENABLED")
-            if _res is not None and _res.value == "1":
-                briefing_extra_env = {"PLANE_EMIT_ENABLED": "1"}
-        except _env_tiers.ResolverUnavailable as exc:
-            _log.warning(
-                "briefing plane arming unresolved (%s) — briefing timers "
-                "compose UNARMED",
-                exc,
-            )
+    briefing_extra_env = plane_extra_env
     composed_briefing: set[str] = set()
     for bot_id, bot in briefing_bots:
         for slot, expr in bot.briefing.slots.items():
