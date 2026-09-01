@@ -60,6 +60,41 @@ emit_keepalive_event() {
     reap_event_files "$events_dir" 'keepalive-*.jsonl' "$KEEPALIVE_REAP_DAYS"
 }
 
+# ---- plane door: presence's RECORDED half (#1361, harvest item 1) ----------
+# The verdict this tick ALREADY computed, emitted as metric_samples through
+# the shim — the table, contract and metric names shipped in migration 0006
+# with no emitter until now. Subject is the INSTANCE alias
+# (bot:<fleet>/<name>): identity resolution at ingest lands on the SAME uid
+# the registry keyframes use, so heartbeat samples join equipment/history
+# with no glue. Dormant per the estate rule (PLANE_EMIT_ENABLED rides
+# bot.conf env, loaded above); NON-BLOCKING (the tick's real work never
+# waits on a record); the view sampler keeps rendering pixels and
+# classifies NOTHING — the recorded half lives here, the sibling's
+# two-truths split stays forsworn. session_up=false rides the dead-session
+# path (no heartbeat there: no pane was classified, and a fabricated
+# verdict is the lie this lane exists to kill). The SKIP paths (boot in
+# flight, restart race) deliberately emit nothing — transitional, the next
+# tick records. Every [ ] guard is an if-block: this script runs
+# set -euo pipefail, and a failing `[ x ] && return` list would kill the
+# tick.
+plane_presence_samples() {
+    local hb_state="$1" session_up="$2"
+    if [ "${PLANE_EMIT_ENABLED:-0}" != "1" ]; then return 0; fi
+    if [ "${PLANE_EMIT_DISABLED:-0}" = "1" ]; then return 0; fi
+    if [ -z "${FLEET_NAME:-}" ] || [ -z "${BOT_NAME:-}" ]; then return 0; fi
+    local fleet_esc subj hb="" agefrag="" m_epoch
+    fleet_esc="$(json_escape "$FLEET_NAME")"
+    subj="$(json_escape "bot:$FLEET_NAME/$BOT_NAME")"
+    if [ -n "$hb_state" ]; then
+        if m_epoch=$(stat_mtime "$BOT_DIR/data/.last-tool-call" 2>/dev/null); then
+            agefrag=',"marker_age_s":'$(( $(date +%s) - m_epoch ))
+        fi
+        hb=',{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.heartbeat","value":{"state":"'"$hb_state"'"'"$agefrag"'}}}'
+    fi
+    printf '%s' '{"events":[{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.session_up","value":'"$session_up"'}}'"$hb"']}' \
+        | plane_emit_events keepalive || true
+}
+
 # send_reload_command <slash-command>
 # Verbatim send via pane_send_verified — NOT bot_tmux_send, which sanitizes (see
 # that helper for why a slash command must reach the pane untouched). Caller
@@ -218,6 +253,7 @@ if ! check_tmux_session "$TMUX_SESSION" "$TMUX_SOCKET"; then
         emit_keepalive_event "SKIP" "boot in flight (unit mid-start), not restarting"
         exit 0
     fi
+    plane_presence_samples "" false
     restart_bot_service "session dead"
     exit 0
 fi
@@ -331,3 +367,4 @@ case "$state" in
         fi
         ;;
 esac
+plane_presence_samples "$state" true

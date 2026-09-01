@@ -2401,6 +2401,36 @@ else
     [ "$(_pl_count)" = "2" ] && r=yes || r=no
     harness_check "  ...and wrote NOTHING (harness exemption is a true no-op)" "$r"
 
+    # -- keepalive presence door (chunk: keepalive-as-a-door) ---------------
+    # An ARMED keepalive tick against a stubbed-idle pane must record the
+    # verdict as metric_samples (bot.heartbeat + bot.session_up) through the
+    # real shim into the real db — the Observe step for presence recording.
+    ln -s "$PL_REPO/lib/keepalive.sh" "$PL_LIB/keepalive.sh"
+    printf '#!/bin/bash\nexit 0\n' > "$PL_LIB/start-bot.sh"
+    chmod +x "$PL_LIB/start-bot.sh"
+    KAB="$PL_ROOT/bots/kbot"
+    mkdir -p "$KAB/data"
+    # BOT_SERVICE must be REAL: with FLEET_NAME set, tmux_socket_for_bot
+    # refuses an empty service (the shared-server SPOF guard) and the tick
+    # dies before any verdict — the stub tmux ignores socket args anyway
+    printf 'BOT_NAME="kbot"\nFLEET_NAME="vbc-fleet"\nBOT_SERVICE="com.vbc.kbot"\n' \
+        > "$KAB/bot.conf"
+    printf '#!/bin/bash\ncase "$*" in *capture-pane*) printf ">\\n" ;; *) exit 0 ;; esac\n' \
+        > "$PL_ROOT/ktmux"
+    chmod +x "$PL_ROOT/ktmux"
+    env CLAUDLOBBY_ROOT="$PL_ROOT" TMUX_BIN="$PL_ROOT/ktmux" \
+        PLANE_SOCKET="$PL_SOCK" PLANE_EMIT_CLI="$PL_CLI" \
+        PLANE_EMIT_ENABLED=1 PATH="/usr/bin:/bin" \
+        bash "$PL_LIB/keepalive.sh" "$KAB" >/dev/null 2>&1 || true
+    _ka_hb=$(sqlite3 "$PL_ROOT/state/plane/plane.db" \
+        "SELECT COUNT(*) FROM metric_samples WHERE metric='bot.heartbeat'" \
+        2>/dev/null || echo 0)
+    _ka_su=$(sqlite3 "$PL_ROOT/state/plane/plane.db" \
+        "SELECT COUNT(*) FROM metric_samples WHERE metric='bot.session_up'" \
+        2>/dev/null || echo 0)
+    [ "$_ka_hb" -ge 1 ] && [ "$_ka_su" -ge 1 ] && r=yes || r=no
+    harness_check "keepalive armed tick records heartbeat + session_up samples" "$r"
+
     "$PL_CLI" --root "$PL_ROOT" plane doctor > "$PL_ROOT/doctor.txt" 2>&1 && r=no || r=yes
     harness_check "doctor flags ATTENTION: daemon started historically, not serving" "$r"
     grep -q "not serving" "$PL_ROOT/doctor.txt" && r=yes || r=no
