@@ -662,20 +662,46 @@ run_cell_e() {
   # loop polled for a transcript that did not exist yet, hit its deadline, and
   # then killed the session, which is what finally flushed it. Polling harder
   # would not have helped; the ordering was wrong.
-  local pane prev_hash="" hash stable=0
+  # COMPLETION MUST MEAN THE PAYLOAD LEFT THE INPUT BOX. The first version
+  # matched the marker ANYWHERE in the pane -- including inside the input region
+  # -- so a payload that was typed but never submitted looked like a finished
+  # turn, and the cell killed the session on it. Both arms voided that way, and
+  # the per-cell pane artifact is what showed it: the prompt was sitting between
+  # the input borders, unsent. A detector that reads a strand as a clean turn is
+  # the same fails-toward-clean shape this harness exists to avoid.
+  #
+  # So: the input REGION is extracted with the shipped pane_input_region helper
+  # (never a hand-rolled tail -N, which is what makes glyph-anchored parsing
+  # correct), and a payload still sitting in it is re-submitted with a bare
+  # Enter -- the documented remedy for a landed-but-unsubmitted dispatch.
+  local pane region prev_hash="" hash stable=0 resends=0
   while [ "$t" -lt "$ARME_DEADLINE" ]; do
     sleep 4; t=$((t + 4))
     pane="$(bot_tmux "$LSOCK" capture-pane -t "$LSESSION" -p 2>/dev/null || true)"
+    region="$(pane_input_region "$pane" 2>/dev/null || true)"
+    if printf '%s' "$region" | grep -qF "$marker"; then
+      # Still unsubmitted. Re-fire Enter, bounded, and record that we did.
+      if [ "$resends" -lt 3 ]; then
+        bot_tmux "$LSOCK" send-keys -t "$LSESSION" Enter 2>/dev/null || true
+        resends=$((resends + 1))
+        say "     $cell: payload still unsubmitted at ${t}s — resent Enter (#$resends)"
+      fi
+      prev_hash=""; stable=0
+      continue
+    fi
+    # Marker has left the input box. Require it to be visible in the transcript
+    # area AND the pane to settle, so a mid-turn pause is not read as the end.
     printf '%s' "$pane" | grep -qF "$marker" || continue
     hash="$(printf '%s' "$pane" | cksum)"
     if [ "$hash" = "$prev_hash" ]; then
       stable=$((stable + 1))
-      [ "$stable" -ge 2 ] && break
+      [ "$stable" -ge 3 ] && break
     else
       stable=0
     fi
     prev_hash="$hash"
   done
+  printf '%s\n' "${resends:-0}" > "$WORK/$cell.resends"
   bot_tmux "$LSOCK" capture-pane -t "$LSESSION" -p > "$WORK/$cell.pane.txt" 2>/dev/null || true
   bot_tmux "$LSOCK" kill-session -t "$LSESSION" 2>/dev/null || true
 
