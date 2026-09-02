@@ -225,3 +225,28 @@ def test_wedged_emit_never_stalls_the_tick(tmp_path):
     elapsed = time.monotonic() - t0
     assert r.returncode == 0, r.stderr
     assert elapsed < 15, f"tick stalled {elapsed:.1f}s behind a wedged emit"
+
+
+def test_pid_guard_honors_fresh_claims_and_ignores_stale_ones(tmp_path):
+    """Live-found within minutes of deploy: kill -0 alone let a RE-USED
+    pid block a bot's emissions indefinitely (takahashi, pid 1543 held by
+    an unrelated long-lived process). The claim is honored only while
+    FRESH; a stale pidfile — wedge or reuse alike — admits one new emit."""
+    import os
+    libdir, bot, env = _rig(tmp_path)
+    holder = subprocess.Popen(["sleep", "300"])
+    try:
+        pidf = bot / "data" / ".plane-presence.pid"
+        pidf.write_text(str(holder.pid))
+        r = _tick(libdir, bot, env)          # fresh claim + live pid: skip
+        assert r.returncode == 0, r.stderr
+        time.sleep(2)
+        assert _samples(tmp_path) == []
+        old = time.time() - 600
+        os.utime(pidf, (old, old))           # stale claim, same live pid
+        r2 = _tick(libdir, bot, env)
+        assert r2.returncode == 0, r2.stderr
+        rows = _wait_samples(tmp_path)
+        assert [s["metric"] for s in rows] == ["bot.heartbeat"]
+    finally:
+        holder.kill()
