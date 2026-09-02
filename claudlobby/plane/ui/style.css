@@ -230,3 +230,41 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .trust-bad { color: var(--bad); }
 .reason { font: 11.5px ui-monospace, Menlo, monospace; color: var(--dim);
           padding: 2px 0 2px 12px; word-break: break-all; }
+
+
+/* fleet inventory + equipment (#1405) */
+.inv-head { color: var(--dim); font-size: 12px; margin: 6px 0 10px; }
+.bot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px; margin-bottom: 14px; }
+.bot-card { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
+  cursor: pointer; background: var(--panel); }
+.bot-card:hover, .bot-card:focus { border-color: var(--ok); outline: none; }
+.bot-card .bc-head { display: flex; justify-content: space-between; gap: 6px; }
+.bot-card .bc-head small, .bot-card .bc-org { color: var(--dim); font-size: 11px; }
+.bot-card .bc-counts { font-size: 12px; margin: 4px 0; }
+.proj-row { display: flex; justify-content: space-between; padding: 3px 0;
+  border-bottom: 1px solid var(--line); }
+.proj-row small, .lib-row small, .lib-group summary small { color: var(--dim); }
+.lib-group { margin: 4px 0; }
+.lib-group summary { cursor: pointer; padding: 3px 0; }
+.lib-row { display: flex; justify-content: space-between; padding: 2px 0 2px 14px;
+  font-size: 12px; }
+.lib-row.unused { color: var(--dim); }
+#equip-detail { border: 1px solid var(--ok); border-radius: 6px; padding: 10px 12px;
+  margin-bottom: 12px; background: var(--panel); }
+.ed-head { display: flex; align-items: center; gap: 8px; }
+.ed-head small { color: var(--dim); }
+.ed-head .ed-close { margin-left: auto; }
+.ed-mission { color: var(--dim); font-size: 12px; margin: 4px 0 8px; }
+.ed-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.ed-cols h4 { margin: 8px 0 4px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--dim); }
+.eq-row { margin: 3px 0; display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline; }
+.eq-row b { min-width: 90px; font-size: 12px; }
+.chip { font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  background: color-mix(in srgb, var(--dim) 18%, transparent); }
+.chg-row { font-size: 12px; padding: 2px 0; }
+.chg-row small { color: var(--dim); margin-right: 6px; }
+.hash-row { display: flex; justify-content: space-between; font-size: 11px; }
+.dim { color: var(--dim); font-size: 12px; }
+@media (max-width: 800px) { .ed-cols { grid-template-columns: 1fr; } }
