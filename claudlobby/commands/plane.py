@@ -293,6 +293,26 @@ def cmd_plane_doctor(args) -> int:
                                      " are not honored)"))
                 except (sqlite3.Error, ValueError) as exc:
                     rung(False, "registry lane", f"unreadable: {exc}")
+                # Reconcile-check rung (chunk: doctor IOUs — closes the
+                # chunk-B disclosure that RECONCILIATION_SQL was bench-only).
+                # Counts submitted-but-not-acked transmissions. This is
+                # INFORMATIONAL, never a failure: §6b rules the tmux carrier
+                # yields no recipient_acknowledged at all, so a nonzero count
+                # is the EXPECTED steady state, not a fault — a pass/fail
+                # gate here would alarm on every tmux dispatch forever.
+                try:
+                    from ..plane.queries import RECONCILIATION_SQL
+                    unacked = conn.execute(RECONCILIATION_SQL).fetchone()[0]
+                    # RECONCILIATION_SQL filters pane_submitted, which is
+                    # TMUX-ONLY (contracts): telegram emits carrier_accepted
+                    # and is NOT counted here, so this rung sees only unacked
+                    # tmux — expected, never a fault (§6b). No telegram claim
+                    # (gauntlet: the SQL cannot deliver it).
+                    rung(True, "reconcile (tmux submitted-not-acked)",
+                         f"{unacked} — expected: the tmux carrier yields no"
+                         " ack, so this is the steady state, not a gap")
+                except sqlite3.Error as exc:
+                    rung(False, "reconcile", f"unreadable: {exc}")
             finally:
                 conn.close()
         try:
@@ -359,6 +379,19 @@ def cmd_plane_doctor(args) -> int:
                  "UNREADABLE — cannot enumerate (a gap, not a zero)")
         else:
             rung(not sc.quarantined, "quarantine", str(len(sc.quarantined)))
+        # Composed-hash-drift rung (chunk: doctor IOUs — closes the chunk-B
+        # disclosure that the --verify capability existed but doctor never
+        # surfaced it). Doctor SURFACES the check; it does NOT re-run it.
+        # The real drift check re-derives + re-hashes the WHOLE estate,
+        # which is (a) too heavy for a per-invocation health command and
+        # (b) needs the host-uid — and an earlier version of this rung
+        # MINTED it on absence, reintroducing the #1429 verify BLOCKER (a
+        # read-only health command leaving a write behind, phantom drift).
+        # Both problems vanish by pointing at the door that owns the check.
+        rung(True, "composed-hash drift",
+             "run `claudlobby --fleet <name> plane registry --verify` —"
+             " the read-only estate-vs-scan check (doctor stays lightweight;"
+             " re-derivation is that door's job)")
         return 0 if failing == 0 else 1
 
     return _guarded("plane doctor", run)

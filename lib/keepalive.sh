@@ -154,7 +154,17 @@ plane_presence_samples() {
         # form is portable where macOS bash 3.2 has no pkill -g / setsid).
         _kill_tree() {
             local _p="$1" _c
-            for _c in $(pgrep -P "$_p" 2>/dev/null); do _kill_tree "$_c"; done
+            # `|| true` INSIDE the substitution: pgrep exits 1 at every leaf of
+            # every reap (a process with no children is the terminating case,
+            # not a failure), and on bash 3.2 that rc fires the inherited ERR
+            # trap from a for-word substitution even though set -e does NOT
+            # exit there — so every tick of every armed bot logged a phantom
+            # `script_error` ("non-zero exit at line 155", the funcdef line
+            # bash 3.2 reports for in-function failures) while nothing failed.
+            # 87/day fleet-wide, measured 2026-09-02; the alphabetical skew
+            # (damodaran 77) was launchd killing later bots' reapers at sweep
+            # teardown before they could log — suppression, not health.
+            for _c in $(pgrep -P "$_p" 2>/dev/null || true); do _kill_tree "$_c"; done
             kill -9 "$_p" 2>/dev/null || true
         }
         _kill_tree "$_w"
