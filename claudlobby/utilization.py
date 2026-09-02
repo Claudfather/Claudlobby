@@ -71,7 +71,11 @@ def _compute_busy_pct(
             duration = (windowed[i + 1][0] - ts).total_seconds()
         else:
             duration = (now - ts).total_seconds()
-        duration = min(duration, _MAX_INTERVAL_SECS)
+        # cap a gap at 10 min of the preceding state (pinned legacy choice), and
+        # CLAMP a negative duration to 0: a log never produced one, but a
+        # time-skewed or out-of-order sample series can, and a negative
+        # denominator renders as -50% / 300% (plane gauntlet, probed)
+        duration = max(0.0, min(duration, _MAX_INTERVAL_SECS))
 
         if state == "BUSY":
             busy_secs += duration
@@ -258,3 +262,10 @@ def format_utilization_summary(results: list[BotUtilization]) -> str:
         else:
             parts.append(f"{u.name} {int(u.busy_pct_24h)}% busy")
     return "team utilization: " + ", ".join(parts) if parts else "no bots"
+
+
+# Public names for the ONE definition of busy/idle math, so the plane's
+# heartbeat-series reader (claudlobby.plane.utilization) imports a stable
+# contract rather than a private helper an unwitting rename could break.
+compute_busy_pct = _compute_busy_pct
+find_state_transition = _find_state_transition
