@@ -520,7 +520,11 @@ async function pollGrid() {
   const byAlias = {};
   if (presEnv && presEnv.data) {
     for (const b of presEnv.data.bots) byAlias[b.alias] = b;
-    renderPresenceStrip(presEnv.data.counts);
+    // the recorded half can fail while the live half still answers — the
+    // server discloses it (state !== ok / recorded_unavailable); surface
+    // that, never swallow it into a badge-less grid with no hint
+    renderPresenceStrip(presEnv.data.counts,
+                        presEnv.state !== "ok" || presEnv.data.recorded_unavailable);
   }
   if (gridEnv && gridEnv.data && gridEnv.data.panes) {
     for (const p of gridEnv.data.panes) {
@@ -534,7 +538,7 @@ async function pollGrid() {
 const PRESENCE_ORDER = ["working", "idle", "stale", "unknown", "sampling",
                         "down"];
 
-function renderPresenceStrip(counts) {
+function renderPresenceStrip(counts, recordedDown) {
   const el = $("presence-strip");
   if (!el || !counts) return;
   // only the states actually present, in a stable order — a zero is real
@@ -543,6 +547,11 @@ function renderPresenceStrip(counts) {
   const parts = PRESENCE_ORDER
     .filter((s) => counts[s] > 0)
     .map((s) => `<span class="pres pres-${s}">${counts[s]} ${s}</span>`);
+  if (recordedDown) {
+    // the activity half is dark — say so, never a badge-less grid with no
+    // hint (the disclosure the server sent must reach the operator)
+    parts.push(`<span class="pres pres-stale">activity half unavailable</span>`);
+  }
   el.innerHTML = parts.join(" ");
   el.hidden = parts.length === 0;
 }

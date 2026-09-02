@@ -740,34 +740,43 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
         just leaves every live status ``sampling`` (the recorded half
         still types staleness). Never a table; computed per request."""
         from datetime import datetime, timezone
-        from .presence import derive_presence, presence_counts
+        from .presence import (
+            STALE_AFTER_S, derive_presence, presence_counts)
         from .queries import LATEST_HEARTBEAT_SQL
 
+        # the staleness horizon is keepalive's active window (a separate
+        # process, so an env knob is the only carrier) — coupled, not a
+        # twin literal; default matches the keepalive default
+        try:
+            stale_after = float(os.environ.get(
+                "KEEPALIVE_ACTIVE_WINDOW_S", STALE_AFTER_S))
+        except ValueError:
+            stale_after = STALE_AFTER_S
+        now = datetime.now(timezone.utc)
         live = sampler.snapshot()["panes"] if sampler.available else []
         env = _envelope(root, lambda c: [
             dict(zip(("alias", "value", "ingested_at"), row))
             for row in c.execute(LATEST_HEARTBEAT_SQL)])
-        if env["state"] not in (SOURCE_OK,):
-            # recorded half unreachable — still serve the live half, and
-            # disclose the recorded gap in the same envelope (never a
-            # silent zero for a source that failed)
-            rows = derive_presence([], live, now=datetime.now(timezone.utc))
-            return JSONResponse({
-                "state": env["state"],
-                "provenance": env.get("provenance", {}),
-                "remediation": env.get("remediation"),
-                "data": {"bots": [r.__dict__ for r in rows],
+        recorded = env["data"] if env["state"] == SOURCE_OK else []
+        rows = derive_presence(recorded, live, now=now,
+                               stale_after_s=stale_after)
+        body = {"data": {"bots": [r.__dict__ for r in rows],
                          "counts": presence_counts(rows),
-                         "sampler_available": sampler.available}})
-        rows = derive_presence(env["data"], live,
-                               now=datetime.now(timezone.utc))
-        return JSONResponse({
-            "state": SOURCE_OK,
-            "provenance": {"source": "heartbeat samples + live sampler",
-                           "checked_at": _now_iso()},
-            "data": {"bots": [r.__dict__ for r in rows],
-                     "counts": presence_counts(rows),
-                     "sampler_available": sampler.available}})
+                         "sampler_available": sampler.available}}
+        if env["state"] != SOURCE_OK:
+            # recorded half unreachable — still serve the live half, and
+            # DISCLOSE the recorded gap (never a silent zero for a source
+            # that failed); the UI surfaces this, it does not swallow it
+            body["state"] = env["state"]
+            body["provenance"] = env.get("provenance", {})
+            body["remediation"] = env.get("remediation")
+            body["data"]["recorded_unavailable"] = True
+        else:
+            body["state"] = SOURCE_OK
+            body["provenance"] = {
+                "source": "heartbeat samples + live sampler",
+                "checked_at": _now_iso()}
+        return JSONResponse(body)
 
     @app.get("/api/search")
     def search(q: str = "", fleet: str | None = None, limit: int = 50):

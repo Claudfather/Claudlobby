@@ -34,9 +34,13 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 
-# 3 keepalive ticks (default cadence 60s): a recording quiet this long has
-# stopped being current. Not a table constant — the reader's judgment of
-# when the recorded half's verdict has expired, stated once.
+# 3 keepalive ticks: a recording quiet this long has stopped being current.
+# Derived from keepalive's own active window (KEEPALIVE_ACTIVE_WINDOW_S,
+# default 180s ≈ 3 cycles) rather than a twin literal — if that cadence is
+# ever tuned, presence must not silently mis-type staleness (the coupling
+# class the keepalive-door fold flagged for its 120s constant). The
+# endpoint passes the resolved value; the module default matches the
+# keepalive default so a pure call is still honest.
 STALE_AFTER_S = 180.0
 
 # The presence vocabulary, closed:
@@ -82,7 +86,7 @@ def derive_presence(heartbeats, live_panes, *, now,
     status defaults to ``sampling`` — no-evidence, not down).
     """
     def _get(row, key):
-        return row[key] if isinstance(row, dict) else getattr(row, key)
+        return row[key]     # the query is dict-wrapped upstream; one shape
 
     live_by_alias = {
         f"bot:{p['fleet']}/{p['bot']}": p.get("status", "sampling")
