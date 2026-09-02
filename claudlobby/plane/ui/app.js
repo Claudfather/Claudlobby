@@ -898,8 +898,13 @@ function renderInventory(env, orgEnv) {
       </div>`).join("")}</details>`;
   }).join("");
   const orgHtml = orgEnv && orgEnv.state === "ok" && orgEnv.data
-    ? `<details class="org" open><summary>org${orgEnv.data.manager ? ` · manager ${esc(orgEnv.data.manager)}` : ""}${
-        orgEnv.data.cycles.length ? ` · <b>${orgEnv.data.cycles.length} reporting cycle(s)</b>` : ""}</summary>
+    ? `<details class="org" open><summary>org · ${esc(orgEnv.data.fleet)}${orgEnv.data.manager ? ` · manager ${esc(orgEnv.data.manager)}` : ""}${
+        orgEnv.data.cycles.length ? ` · <b>${orgEnv.data.cycles.length} reporting cycle(s)</b>` : ""}${
+        orgEnv.data.malformed_edges ? ` · <b>${esc(orgEnv.data.malformed_edges)} malformed edge(s) skipped</b>` : ""}${
+        // the org tree is ONE fleet's; under the "all" pick on a multi-fleet
+        // host the inventory shows every fleet — say which tree this is
+        (orgEnv.data.available || []).length > 1 && (!currentFleet || currentFleet === "all")
+          ? ` · <small>1 of ${orgEnv.data.available.length} fleets — pick a fleet for its tree</small>` : ""}</summary>
         <ul class="org-tree">${orgEnv.data.roots.map(orgNode).join("")}</ul></details>`
     : "";
   el.innerHTML = `

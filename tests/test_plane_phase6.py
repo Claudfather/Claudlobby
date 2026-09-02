@@ -25,7 +25,7 @@ def _root(tmp_path: Path) -> Path:
 
 
 def _fleet_kf(edges, manager="erlich", roster=None):
-    bots = sorted({e["bot"] for e in edges})
+    bots = sorted({e["bot"] for e in edges if isinstance(e.get("bot"), str)})
     return {"event_type": "registry_snapshot", "emitter": "t", "fleet": F,
             "payload": {"entity_type": "fleet", "entity_alias": F,
                         "cause": "generate", "scan_id": "s1",
@@ -123,7 +123,10 @@ def test_utilization_is_the_legacy_math_over_the_plane_series(tmp_path):
         conn.close()
     assert u["erlich"]["busy_pct_24h"] == 75.0        # 3 busy min / 4 measured
     assert u["erlich"]["last_state"] == "IDLE" and u["erlich"]["idle_since"]
-    assert u["dinesh"]["busy_pct_24h"] == 0.0 and u["dinesh"]["idle_since"] is None
+    # an always-idle bot has been idle since its FIRST sample (the legacy
+    # definition: the start of the current idle run), never None
+    assert u["dinesh"]["busy_pct_24h"] == 0.0
+    assert u["dinesh"]["idle_since"] == (NOW - timedelta(minutes=2)).isoformat()
     assert u["erlich"]["samples"] == 5
 
 
@@ -230,5 +233,59 @@ def test_org_fleet_none_is_deterministic_and_disclosed(tmp_path):
         t = org_tree(conn, None)
         assert t["fleet"] == "f" and t["available"] == ["f", "g"]   # sorted-first, disclosed
         assert org_tree(conn, "nope") is None                        # typed absent, not g's tree
+    finally:
+        conn.close()
+
+
+def test_malformed_org_edges_are_skipped_and_disclosed_never_a_500(tmp_path):
+    """Independent lens (sev-3): org_edges is list[dict] at the contract but
+    the INNER shape is untyped, so a dict reports_to or an int bot reached
+    the reader and threw — HTTP 500 instead of the typed envelope every
+    other bad input gets. Skip + disclose; the good edges still build."""
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+    root = _root(tmp_path)
+    emit_batch(root, [_fleet_kf([
+        {"bot": "erlich", "reports_to": None},
+        {"bot": "dinesh", "reports_to": {"oops": 1}},     # dict reports_to
+        {"bot": 42, "reports_to": "erlich"},              # int bot
+        {"bot": "gilfoyle", "reports_to": "erlich"}],
+        roster=["erlich", "dinesh", "gilfoyle"]), _done()])
+    body = TestClient(create_app(root), raise_server_exceptions=False).get(
+        "/api/org", params={"fleet": F}).json()
+    assert body["state"] == "ok"
+    d = body["data"]
+    assert d["malformed_edges"] == 2
+    assert [r["bot"] for r in d["roots"]] == ["dinesh", "erlich"]   # dinesh: no valid edge -> root
+    assert [x["bot"] for x in d["roots"][1]["reports"]] == ["gilfoyle"]
+
+
+def test_idle_since_is_the_first_idle_of_the_run(tmp_path):
+    """Independent lens: idle_since diverged from the legacy definition
+    (first IDLE of the current run vs last BUSY). One definition now."""
+    root = _root(tmp_path)
+    start = NOW - timedelta(minutes=3)
+    _hb(root, "erlich", ["BUSY", "IDLE", "IDLE", "IDLE"], start)
+    conn = connect(db_path(root))
+    try:
+        u = bot_utilization(conn, now=NOW, fleet=F)[0]
+    finally:
+        conn.close()
+    assert u["idle_since"] == (start + timedelta(minutes=1)).isoformat()
+
+
+def test_sql_fleet_scope_escapes_like_wildcards(tmp_path):
+    """The fleet filter is a LIKE in SQL (perf): a fleet named with `_`
+    must not match a sibling differing at that character."""
+    root = _root(tmp_path)
+    for fl in ("f_x", "fxx"):
+        emit_batch(root, [{"event_type": "metric_sample", "emitter": "k", "fleet": fl,
+                           "occurred_at": (NOW - timedelta(minutes=1)).isoformat(),
+                           "payload": {"subject_kind": "bot_instance",
+                                       "subject": f"bot:{fl}/b", "metric": "bot.heartbeat",
+                                       "value": {"state": "BUSY"}}}])
+    conn = connect(db_path(root))
+    try:
+        assert [r["alias"] for r in bot_utilization(conn, now=NOW, fleet="f_x")] == ["bot:f_x/b"]
     finally:
         conn.close()

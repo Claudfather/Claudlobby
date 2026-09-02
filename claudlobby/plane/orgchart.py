@@ -34,9 +34,19 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
         return None          # an unknown fleet is typed absent, never another fleet's tree
     ent = ents[0]
     p = ent.get("payload") or {}
-    edges = [e for e in (p.get("org_edges") or [])
-             if isinstance(e, dict) and e.get("bot")]
-    roster = set(p.get("roster") or [e["bot"] for e in edges])
+    # org_edges is typed list[dict] at the contract — the INNER shape is not,
+    # so a non-string `bot` or a dict `reports_to` reaches this reader (lens:
+    # TypeError → HTTP 500 on a contract-valid keyframe). Skip and DISCLOSE
+    # a malformed edge rather than crash the operator's view.
+    malformed = 0
+    edges = []
+    for e in (p.get("org_edges") or []):
+        if (isinstance(e, dict) and isinstance(e.get("bot"), str) and e["bot"]
+                and (e.get("reports_to") is None or isinstance(e.get("reports_to"), str))):
+            edges.append(e)
+        else:
+            malformed += 1
+    roster = {b for b in (p.get("roster") or [e["bot"] for e in edges]) if isinstance(b, str)}
     edged = {e["bot"] for e in edges}
     children: dict[str, list] = defaultdict(list)
     for e in edges:
@@ -77,4 +87,5 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
     return {"fleet": ent["entity_alias"], "manager": p.get("manager"),
             "groups": p.get("groups") or [], "roots": tree,
             "bots": len(roster | edged), "cycles": sorted(set(cycles)),
+            "malformed_edges": malformed,
             "available": available, "last_seen": ent.get("occurred_at")}

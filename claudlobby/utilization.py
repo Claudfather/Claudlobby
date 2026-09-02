@@ -262,3 +262,10 @@ def format_utilization_summary(results: list[BotUtilization]) -> str:
         else:
             parts.append(f"{u.name} {int(u.busy_pct_24h)}% busy")
     return "team utilization: " + ", ".join(parts) if parts else "no bots"
+
+
+# Public names for the ONE definition of busy/idle math, so the plane's
+# heartbeat-series reader (claudlobby.plane.utilization) imports a stable
+# contract rather than a private helper an unwitting rename could break.
+compute_busy_pct = _compute_busy_pct
+find_state_transition = _find_state_transition

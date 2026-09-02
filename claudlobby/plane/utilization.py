@@ -10,7 +10,10 @@ spool can invert (probed: 300% busy). A sample stamped in the future
 (RTC skew) is dropped as a clock error, not data (probed: -50% busy). A
 downtime gap credits at most 10 minutes of the preceding state — the
 legacy definition's pinned choice, inherited rather than re-decided. A
-series shorter than two samples reports 0.0, never a fabricated number.
+single sample's state extends to `now` (the legacy semantic), so a bot
+with one fresh BUSY sample reads 100% and one IDLE sample 0% — one
+minute of evidence, honestly one minute of evidence; `samples` is on the
+row so a reader can weigh it.
 """
 
 from __future__ import annotations
@@ -18,12 +21,16 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from ..utilization import _compute_busy_pct
+from ..utilization import compute_busy_pct, find_state_transition
 
+# Fleet scope is applied IN SQL (a LIKE on the alias) — the lens measured
+# 730 ms at 21 bots × 7 d when every fleet's rows were fetched and parsed
+# before Python discarded the other fleets'.
 HEARTBEAT_SERIES_SQL = (
     "SELECT i.alias AS alias, m.occurred_at AS occurred_at, m.value AS value"
     " FROM metric_samples m JOIN identity_registry i ON i.uid = m.subject_uid"
     " WHERE m.metric = 'bot.heartbeat' AND m.occurred_at >= ?"
+    " AND (? IS NULL OR i.alias LIKE ? ESCAPE '\\')"
     " ORDER BY i.alias, m.occurred_at, m.ingest_seq"
 )
 
@@ -41,10 +48,9 @@ def bot_utilization(conn, *, now: datetime | None = None,
     if now is None:
         now = datetime.now(timezone.utc)
     since = (now - timedelta(days=days)).isoformat()
+    like = None if fleet is None else "bot:" + fleet.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%"
     series: dict[str, list] = {}
-    for alias, occ, raw in conn.execute(HEARTBEAT_SERIES_SQL, (since,)):
-        if fleet is not None and not alias.startswith(f"bot:{fleet}/"):
-            continue
+    for alias, occ, raw in conn.execute(HEARTBEAT_SERIES_SQL, (since, like, like)):
         ts = _parse(occ)
         try:
             state = (json.loads(raw) if isinstance(raw, str) else raw or {}).get("state")
@@ -58,14 +64,15 @@ def bot_utilization(conn, *, now: datetime | None = None,
     out = []
     for alias in sorted(series):
         entries = series[alias]
-        last_busy = max((ts for ts, st in entries if st == "BUSY"), default=None)
+        # idle_since = the FIRST IDLE of the current idle run — the legacy
+        # definition (find_state_transition), not "last BUSY": one definition
+        idle_since = find_state_transition(entries, "IDLE") if entries[-1][1] == "IDLE" else None
         out.append({
             "alias": alias, "short": alias.rsplit("/", 1)[-1],
             "samples": len(entries),
-            "busy_pct_24h": round(_compute_busy_pct(entries, timedelta(days=1), now), 1),
-            "busy_pct_7d": round(_compute_busy_pct(entries, timedelta(days=7), now), 1),
+            "busy_pct_24h": round(compute_busy_pct(entries, timedelta(days=1), now), 1),
+            "busy_pct_7d": round(compute_busy_pct(entries, timedelta(days=7), now), 1),
             "last_state": entries[-1][1],
-            "idle_since": (last_busy.isoformat() if last_busy and entries[-1][1] == "IDLE"
-                           else None),
+            "idle_since": idle_since.isoformat() if idle_since else None,
         })
     return out
