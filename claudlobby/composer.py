@@ -4169,6 +4169,16 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
                         )
             continue
         sched = _resolve_timer_schedule(cfg, {})
+        # Arming carrier for a self-gated host door (chunk 3a.1): a host
+        # timer starts with a CLOSED env, so a door that self-gates on a
+        # flag (plane-prune on PLANE_PRUNE_ENABLED) needs it stamped as an
+        # Environment= line — the same closed-scheduler-env problem the
+        # keepalive door solved for fleet timers (#1383). Resolved ONCE
+        # through the host tier cascade (no fleet name → host+root tiers)
+        # and stamped only on the job that reads it; a resolver failure
+        # composes UNARMED (the safe default for a DELETE door).
+        extra_env = _host_job_plane_arming(paths) if name == "plane-prune" \
+            else None
         _write_timer_units(
             timers_dir,
             f"claudlobby-{name}",
@@ -4180,8 +4190,26 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             paths,
             persistent=bool(cfg.get("persistent", False)),
             randomized_delay=int(cfg.get("randomized_delay") or 0),
+            extra_env=extra_env,
         )
     return timers_dir
+
+
+def _host_job_plane_arming(paths: Paths) -> dict[str, str] | None:
+    """Resolve PLANE_PRUNE_ENABLED from the host tier cascade for the
+    plane-prune door's Environment= line. None = unarmed (the safe default
+    for a DELETE door: a resolver failure never arms it)."""
+    from . import env_tiers as _env_tiers
+    try:
+        res = _env_tiers.cascade(
+            _env_tiers.read_tiers(paths)).get("PLANE_PRUNE_ENABLED")
+    except _env_tiers.ResolverUnavailable as exc:
+        _log.warning("plane-prune arming unresolved (%s) — composes UNARMED",
+                     exc)
+        return None
+    if res is not None and res.value == "1":
+        return {"PLANE_PRUNE_ENABLED": "1"}
+    return None
 
 
 def compose_fleet(fleet: FleetConfig, paths: Paths, log=None) -> dict[str, Path]:
