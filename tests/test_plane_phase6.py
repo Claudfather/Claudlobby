@@ -135,7 +135,11 @@ def test_utilization_skips_unreadable_samples_and_scopes_by_fleet(tmp_path):
                        "payload": {"subject_kind": "bot_instance",
                                    "subject": f"bot:{F}/erlich",
                                    "metric": "bot.heartbeat", "value": 42}}])   # poison
+    # an explicit in-window stamp: without one, ingest stamps the REAL wall
+    # clock, which is hours past the frozen NOW and is (correctly) dropped
+    # as a future sample
     other = {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "g",
+             "occurred_at": (NOW - timedelta(minutes=1)).isoformat(),
              "payload": {"subject_kind": "bot_instance", "subject": "bot:g/twin",
                          "metric": "bot.heartbeat", "value": {"state": "BUSY"}}}
     emit_batch(root, [other])
@@ -163,6 +167,66 @@ def test_endpoints_and_typed_absence(tmp_path):
     util = c.get("/api/utilization", params={"fleet": F}).json()
     assert util["state"] == "ok" and util["data"][0]["short"] == "erlich"
     miss = c.get("/api/org", params={"fleet": "nope"}).json()
-    assert miss["state"] == "ok" or miss["state"] == "idle"   # falls back to first fleet or typed idle
+    assert miss["state"] == "idle"          # never another fleet's tree under this name
     empty = TestClient(create_app(tmp_path / "none")).get("/api/org").json()
     assert empty["state"] == "absent" and "data" not in empty
+
+
+def test_future_and_out_of_order_samples_never_produce_impossible_percentages(tmp_path):
+    """Self-probe (the lens was rate-limited): a future-stamped sample gave
+    -50% and ingest-ordered samples gave 300%. Time order + a negative
+    clamp at the one definition + dropping future stamps."""
+    root = _root(tmp_path)
+    def hb(bot, at, st):
+        return {"event_type": "metric_sample", "emitter": "k", "fleet": F,
+                "occurred_at": at.isoformat(),
+                "payload": {"subject_kind": "bot_instance", "subject": f"bot:{F}/{bot}",
+                            "metric": "bot.heartbeat", "value": {"state": st}}}
+    # out of order: IDLE@-1m ingested before BUSY@-3m
+    emit_batch(root, [hb("a", NOW - timedelta(minutes=1), "IDLE")])
+    emit_batch(root, [hb("a", NOW - timedelta(minutes=3), "BUSY")])
+    # future: BUSY@-2m then IDLE@+30m (RTC skew)
+    emit_batch(root, [hb("b", NOW - timedelta(minutes=2), "BUSY"),
+                      hb("b", NOW + timedelta(minutes=30), "IDLE")])
+    conn = connect(db_path(root))
+    try:
+        u = {r["short"]: r for r in bot_utilization(conn, now=NOW, fleet=F)}
+    finally:
+        conn.close()
+    assert u["a"]["busy_pct_24h"] == round(100 * 120 / (120 + 60), 1)   # 2m busy, 1m idle
+    assert 0.0 <= u["b"]["busy_pct_24h"] <= 100.0
+    assert u["b"]["samples"] == 1                                       # future dropped
+
+
+def test_org_tree_keeps_every_roster_bot_and_lists_a_duplicate_edge_once(tmp_path):
+    """Self-probe: a roster bot with no edge VANISHED from the chart, a
+    duplicate edge rendered its bot twice, and `bots` counted edges."""
+    root = _root(tmp_path)
+    emit_batch(root, [_fleet_kf([{"bot": "a", "reports_to": None},
+                                 {"bot": "b", "reports_to": "a"},
+                                 {"bot": "b", "reports_to": "a"}],
+                                roster=["a", "b", "c"]), _done()])
+    conn = connect(db_path(root))
+    try:
+        t = org_tree(conn, F)
+    finally:
+        conn.close()
+    assert [r["bot"] for r in t["roots"]] == ["a", "c"]          # c present as a root
+    assert [x["bot"] for x in t["roots"][0]["reports"]] == ["b"]  # once
+    assert t["bots"] == 3
+
+
+def test_org_fleet_none_is_deterministic_and_disclosed(tmp_path):
+    root = _root(tmp_path)
+    emit_batch(root, [_fleet_kf([{"bot": "x", "reports_to": None}]), _done()])
+    g = _fleet_kf([{"bot": "y", "reports_to": None}])
+    g["fleet"] = "g"; g["payload"]["entity_alias"] = "g"; g["payload"]["payload"]["alias"] = "g"
+    d = _done(); d["fleet"] = "g"; d["payload"]["scope"] = "g"
+    emit_batch(root, [g, d])
+    conn = connect(db_path(root))
+    try:
+        t = org_tree(conn, None)
+        assert t["fleet"] == "f" and t["available"] == ["f", "g"]   # sorted-first, disclosed
+        assert org_tree(conn, "nope") is None                        # typed absent, not g's tree
+    finally:
+        conn.close()

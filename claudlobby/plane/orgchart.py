@@ -20,22 +20,33 @@ from . import registry_read as _rr
 def org_tree(conn, fleet: str | None = None) -> dict | None:
     """The reporting tree for one fleet (the first keyframed fleet when
     ``fleet`` is None). None = no fleet keyframe yet (absent ≠ empty)."""
-    ents = _rr.current_entities(conn, entity_type="fleet", fleet=fleet)
-    if fleet is not None:
-        ents = [e for e in ents if e["entity_alias"] == fleet] or ents
+    available = sorted(r[0] for r in conn.execute(
+        "SELECT alias FROM identity_registry WHERE kind='fleet'"
+        " AND alias NOT LIKE '\\_%' ESCAPE '\\'"))
+    if fleet is None:
+        # deterministic: the first fleet by name, with the choice disclosed
+        fleet = available[0] if available else None
+        if fleet is None:
+            return None
+    ents = [e for e in _rr.current_entities(conn, entity_type="fleet", fleet=fleet)
+            if e["entity_alias"] == fleet]
     if not ents:
-        return None
+        return None          # an unknown fleet is typed absent, never another fleet's tree
     ent = ents[0]
     p = ent.get("payload") or {}
     edges = [e for e in (p.get("org_edges") or [])
              if isinstance(e, dict) and e.get("bot")]
     roster = set(p.get("roster") or [e["bot"] for e in edges])
+    edged = {e["bot"] for e in edges}
     children: dict[str, list] = defaultdict(list)
     for e in edges:
-        if e.get("reports_to") in roster:
-            children[e["reports_to"]].append(e["bot"])
-    roots = sorted(e["bot"] for e in edges
-                   if not e.get("reports_to") or e["reports_to"] not in roster)
+        if e.get("reports_to") in roster and e["bot"] not in children[e["reports_to"]]:
+            children[e["reports_to"]].append(e["bot"])   # a duplicate edge lists once
+    # roots: no reports_to, reports_to outside the roster, OR a roster bot
+    # with no edge at all — that bot must not vanish from the chart (probed)
+    roots = sorted({e["bot"] for e in edges
+                    if not e.get("reports_to") or e["reports_to"] not in roster}
+                   | (roster - edged))
     cycles: list[str] = []
 
     def node(bot: str, seen: frozenset) -> dict:
@@ -56,11 +67,11 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
             walk(c)
     for n in tree:
         walk(n)
-    orphaned = sorted(set(e["bot"] for e in edges) - reached)
+    orphaned = sorted((edged | roster) - reached)
     for b in orphaned:
         cycles.append(b)
         tree.append(node(b, frozenset({b})))
     return {"fleet": ent["entity_alias"], "manager": p.get("manager"),
             "groups": p.get("groups") or [], "roots": tree,
-            "bots": len(edges), "cycles": sorted(set(cycles)),
-            "last_seen": ent.get("occurred_at")}
+            "bots": len(roster | edged), "cycles": sorted(set(cycles)),
+            "available": available, "last_seen": ent.get("occurred_at")}

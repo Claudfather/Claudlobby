@@ -71,7 +71,11 @@ def _compute_busy_pct(
             duration = (windowed[i + 1][0] - ts).total_seconds()
         else:
             duration = (now - ts).total_seconds()
-        duration = min(duration, _MAX_INTERVAL_SECS)
+        # cap a gap at 10 min of the preceding state (pinned legacy choice), and
+        # CLAMP a negative duration to 0: a log never produced one, but a
+        # time-skewed or out-of-order sample series can, and a negative
+        # denominator renders as -50% / 300% (plane gauntlet, probed)
+        duration = max(0.0, min(duration, _MAX_INTERVAL_SECS))
 
         if state == "BUSY":
             busy_secs += duration

@@ -5,8 +5,12 @@ which reads keepalive JSONL) is reused verbatim over the plane's series —
 busy % = BUSY seconds / (BUSY + IDLE seconds), downtime gaps and UNKNOWN
 excluded — so the two surfaces can never disagree on what "busy" means.
 Durations come from consecutive samples' ``occurred_at`` (the emitter's
-tick instant); a series shorter than two samples reports 0.0, never a
-fabricated number.
+tick instant) in TIME order — never ingest order, which a re-ingested
+spool can invert (probed: 300% busy). A sample stamped in the future
+(RTC skew) is dropped as a clock error, not data (probed: -50% busy). A
+downtime gap credits at most 10 minutes of the preceding state — the
+legacy definition's pinned choice, inherited rather than re-decided. A
+series shorter than two samples reports 0.0, never a fabricated number.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ HEARTBEAT_SERIES_SQL = (
     "SELECT i.alias AS alias, m.occurred_at AS occurred_at, m.value AS value"
     " FROM metric_samples m JOIN identity_registry i ON i.uid = m.subject_uid"
     " WHERE m.metric = 'bot.heartbeat' AND m.occurred_at >= ?"
-    " ORDER BY i.alias, m.ingest_seq"
+    " ORDER BY i.alias, m.occurred_at, m.ingest_seq"
 )
 
 
@@ -48,6 +52,8 @@ def bot_utilization(conn, *, now: datetime | None = None,
             state = None
         if ts is None or not isinstance(state, str):
             continue                      # an unreadable sample is skipped, not counted
+        if ts > now + timedelta(seconds=60):
+            continue                      # a future stamp is a clock error, not data
         series.setdefault(alias, []).append((ts, state))
     out = []
     for alias in sorted(series):
