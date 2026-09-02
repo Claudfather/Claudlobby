@@ -729,6 +729,46 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
             "data": snap,
         })
 
+    @app.get("/api/presence")
+    def presence():
+        """The Lane C presence derivation (chunk 2): the latest recorded
+        heartbeat per bot joined with the sampler's live liveness poll into
+        one working/idle/down/stale/unknown/sampling verdict + header
+        counts. The two inputs have opposite failure modes and are fetched
+        independently — a db that cannot answer returns the panel state
+        (the sampler half still renders); the sampler being unavailable
+        just leaves every live status ``sampling`` (the recorded half
+        still types staleness). Never a table; computed per request."""
+        from datetime import datetime, timezone
+        from .presence import derive_presence, presence_counts
+        from .queries import LATEST_HEARTBEAT_SQL
+
+        live = sampler.snapshot()["panes"] if sampler.available else []
+        env = _envelope(root, lambda c: [
+            dict(zip(("alias", "value", "ingested_at"), row))
+            for row in c.execute(LATEST_HEARTBEAT_SQL)])
+        if env["state"] not in (SOURCE_OK,):
+            # recorded half unreachable — still serve the live half, and
+            # disclose the recorded gap in the same envelope (never a
+            # silent zero for a source that failed)
+            rows = derive_presence([], live, now=datetime.now(timezone.utc))
+            return JSONResponse({
+                "state": env["state"],
+                "provenance": env.get("provenance", {}),
+                "remediation": env.get("remediation"),
+                "data": {"bots": [r.__dict__ for r in rows],
+                         "counts": presence_counts(rows),
+                         "sampler_available": sampler.available}})
+        rows = derive_presence(env["data"], live,
+                               now=datetime.now(timezone.utc))
+        return JSONResponse({
+            "state": SOURCE_OK,
+            "provenance": {"source": "heartbeat samples + live sampler",
+                           "checked_at": _now_iso()},
+            "data": {"bots": [r.__dict__ for r in rows],
+                     "counts": presence_counts(rows),
+                     "sampler_available": sampler.available}})
+
     @app.get("/api/search")
     def search(q: str = "", fleet: str | None = None, limit: int = 50):
         limit = max(1, min(int(limit), 200))

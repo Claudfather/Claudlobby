@@ -233,6 +233,30 @@ REG_INVALID_TOMBSTONES_SQL = (
     " ORDER BY ingest_seq DESC"
 )
 
+# --- Presence: the recorded half of the derivation (chunk 2) --------------
+#
+# The LATEST bot.heartbeat sample per instance, by ingest_seq (ledger order
+# is authoritative — producer timestamps may arrive skewed, the estate's
+# RTC-less-Pi class). Joined to identity_registry so the row carries the
+# alias the sampler keys on (bot:<fleet>/<name>), and to the ingest_ledger
+# for the sample's ingested_at — the freshness clock the derivation reads
+# to type a quiet recording as STALE rather than trusting an old verdict.
+# Presence itself is NEVER a table (spec §9b: an in-memory derivation over
+# the latest samples plus a live poll); this query is only its recorded
+# input.
+LATEST_HEARTBEAT_SQL = (
+    "WITH latest AS ("
+    " SELECT subject_uid, value, ingest_seq,"
+    "  ROW_NUMBER() OVER (PARTITION BY subject_uid"
+    "    ORDER BY ingest_seq DESC) AS rn"
+    " FROM metric_samples WHERE metric='bot.heartbeat')"
+    " SELECT i.alias AS alias, l.value AS value, g.ingested_at AS ingested_at"
+    " FROM latest l"
+    " JOIN identity_registry i ON i.uid = l.subject_uid"
+    " JOIN ingest_ledger g ON g.ingest_seq = l.ingest_seq"
+    " WHERE l.rn = 1"
+)
+
 RECONCILIATION_SQL = (
     "SELECT COUNT(*) FROM events s WHERE s.kind='transmission'"
     " AND s.event='pane_submitted' AND NOT EXISTS"
