@@ -14,8 +14,8 @@
 # health monitor is elsewhere — this only RECORDS.
 #
 # Facet readers are the estate's proven cross-platform patterns
-# (avail_ram_mb + df_pcent from lib-common; the vcgencmd decode from
-# host-health-check.sh's convention) — never reinvented. Pi-only facets
+# (avail_ram_mb from lib-common; a -P-wrapped df for portable free-GB; the
+# vcgencmd decode from host-health-check.sh's convention) — never reinvented. Pi-only facets
 # (thermal, undervoltage) are emitted ONLY where vcgencmd exists; on a
 # non-Pi host they are absent, not fabricated as zero.
 
@@ -30,7 +30,11 @@ if ! plane_armed plane-host-probe; then
     exit 0
 fi
 
-HOST="$(json_escape "$(hostname 2>/dev/null || uname -n)")"
+_host_raw="$(hostname 2>/dev/null || uname -n 2>/dev/null)"
+# an empty subject fails min_length=1 and rejects the WHOLE batch — job_ran
+# included, the exact edge the proof-of-run exists for (gauntlet SEV-3)
+[ -n "$_host_raw" ] || _host_raw="unknown-host"
+HOST="$(json_escape "$_host_raw")"
 
 # Each reader prints one metric_sample EVENT object, or nothing when the
 # facet is unavailable (absent ≠ zero). subject_kind=host; value is a
@@ -42,11 +46,16 @@ _metric() {  # <metric> <json-value>
         "$HOST" "$1" "$2"
 }
 
-# host.load — the 1/5/15 triplet from uptime (portable: BSD says "load
-# averages:", GNU "load average:"; the last three comma-or-space numbers).
-_load="$(uptime 2>/dev/null | awk -F'load average[s]?: *' 'NF>1{
-    gsub(/,/," ",$2); n=split($2,a," ");
-    if(n>=3){printf "{\"one\":%s,\"five\":%s,\"fifteen\":%s}",a[1],a[2],a[3]}}')"
+# host.load — the 1/5/15 triplet from uptime (portable: BSD "load
+# averages:" space-sep, GNU "load average:" comma-sep). Each token is
+# VALIDATED as a bare decimal and DROPPED otherwise: a comma-decimal
+# locale (de_DE/fr_FR: "0,52, 0,58") would otherwise split a decimal comma
+# into a bogus separator and record silently-wrong numbers both directions
+# (gauntlet SEV-2). C-locale forced for the same reason.
+_load="$(LC_ALL=C uptime 2>/dev/null | awk -F'load average[s]?: *' 'NF>1{
+    n=split($2,a,/[, ]+/);
+    ok=1; for(i=1;i<=3;i++){ if(a[i] !~ /^[0-9]+\.[0-9]+$/) ok=0 }
+    if(n>=3 && ok){printf "{\"one\":%s,\"five\":%s,\"fifteen\":%s}",a[1],a[2],a[3]}}')"
 [ -n "$_load" ] && _add "$(_metric host.load "$_load")"
 
 # host.mem_available_mb — lib-common avail_ram_mb (the fleet-memory-check
@@ -75,14 +84,24 @@ if command -v vcgencmd >/dev/null 2>&1; then
     fi
 fi
 
-# host.boot_time — the last boot instant (ISO). Linux: `uptime -s`
-# (space→T). macOS: kern.boottime's sec=NNN epoch → date -r.
-_boot=""
-if _b="$(uptime -s 2>/dev/null)" && [ -n "$_b" ]; then
-    _boot="${_b/ /T}"
-elif _sec="$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = *\([0-9]*\).*/\1/p')" \
-        && [ -n "$_sec" ]; then
-    _boot="$(date -u -r "$_sec" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+# host.boot_time — the last boot instant, UTC+Z on BOTH platforms (a naive
+# local Linux stamp vs a UTC macOS stamp made Pi and Mac uncomparable —
+# gauntlet SEV-3). Linux: /proc/stat btime (epoch, unambiguous) →
+# date -u. macOS: kern.boottime's `sec = NNN` — the FIRST digit run, NOT
+# a greedy match, because the string also holds `usec = …` and `.*sec = `
+# greedily captured the wrong number (every Mac recorded a 1970 boot
+# every minute — gauntlet SEV-1, live).
+_boot=""; _bsec=""
+if [ -r /proc/stat ]; then
+    _bsec="$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null)"
+elif command -v sysctl >/dev/null 2>&1; then
+    _bsec="$(sysctl -n kern.boottime 2>/dev/null \
+        | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p')"
+fi
+case "$_bsec" in ''|*[!0-9]*) _bsec="" ;; esac
+if [ -n "$_bsec" ]; then
+    _boot="$(date -u -r "$_bsec" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -d "@$_bsec" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
 fi
 [ -n "$_boot" ] && _add "$(_metric host.boot_time "\"$_boot\"")"
 
