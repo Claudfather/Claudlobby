@@ -158,6 +158,20 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
                      padding: 6px 10px; border-bottom: 1px solid var(--edge);
                      font-size: 12.5px; }
 .pane-card .p-head small { color: var(--dim); margin-left: auto; }
+
+/* presence verdict badge (the derived working/idle/down word, #1361) */
+.pres { font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  font-weight: 600; letter-spacing: .02em; }
+.pres-working { background: color-mix(in srgb, var(--ok) 22%, transparent);
+  color: var(--ok); }
+.pres-idle { background: color-mix(in srgb, var(--dim) 20%, transparent);
+  color: var(--dim); }
+.pres-down { background: color-mix(in srgb, var(--bad) 22%, transparent);
+  color: var(--bad); }
+.pres-stale, .pres-unknown { background: color-mix(in srgb, var(--warn) 20%,
+  transparent); color: var(--warn); }
+.pres-sampling { color: var(--dim); }
+.presence-strip .pres { margin-left: 4px; }
 .pane-card pre, #focus-pane {
   margin: 0; padding: 8px 10px; font: 10.5px/1.35 ui-monospace, SFMono-Regular,
   Menlo, monospace; color: var(--ink); overflow: hidden; white-space: pre-wrap;

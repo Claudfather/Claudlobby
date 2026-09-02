@@ -729,6 +729,67 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
             "data": snap,
         })
 
+    @app.get("/api/presence")
+    def presence():
+        """The Lane C presence derivation (chunk 2): the latest recorded
+        heartbeat per bot joined with the sampler's live liveness poll into
+        one working/idle/down/stale/unknown/sampling verdict + header
+        counts. The two inputs have opposite failure modes and are fetched
+        independently — a db that cannot answer returns the panel state
+        (the sampler half still renders); the sampler being unavailable
+        just leaves every live status ``sampling`` (the recorded half
+        still types staleness). Never a table; computed per request."""
+        from datetime import datetime, timezone
+        from .presence import (
+            STALE_AFTER_S, derive_presence, presence_counts)
+        from .queries import LATEST_HEARTBEAT_SQL
+
+        # the staleness horizon is keepalive's active window (a separate
+        # process, so an env knob is the only carrier) — coupled, not a
+        # twin literal; default matches the keepalive default
+        try:
+            stale_after = float(os.environ.get(
+                "KEEPALIVE_ACTIVE_WINDOW_S", STALE_AFTER_S))
+        except ValueError:
+            stale_after = STALE_AFTER_S
+        now = datetime.now(timezone.utc)
+        # the live half must fail INDEPENDENTLY of the recorded half (the
+        # endpoint's own law): snapshot() is a pure cache read, but a raise
+        # or a shape without "panes" must not 500 the panel and take the
+        # recorded half down with it (probed) — degrade to no live poll,
+        # disclosed, exactly as the db side does
+        sampler_degraded = False
+        live = []
+        if sampler.available:
+            try:
+                live = sampler.snapshot().get("panes", [])
+            except Exception:  # noqa: BLE001 — a read door must not crash
+                sampler_degraded = True
+        env = _envelope(root, lambda c: [
+            dict(zip(("alias", "value", "ingested_at"), row))
+            for row in c.execute(LATEST_HEARTBEAT_SQL)])
+        recorded = env["data"] if env["state"] == SOURCE_OK else []
+        rows = derive_presence(recorded, live, now=now,
+                               stale_after_s=stale_after)
+        body = {"data": {"bots": [r.__dict__ for r in rows],
+                         "counts": presence_counts(rows),
+                         "sampler_available": (sampler.available
+                                               and not sampler_degraded)}}
+        if env["state"] != SOURCE_OK:
+            # recorded half unreachable — still serve the live half, and
+            # DISCLOSE the recorded gap (never a silent zero for a source
+            # that failed); the UI surfaces this, it does not swallow it
+            body["state"] = env["state"]
+            body["provenance"] = env.get("provenance", {})
+            body["remediation"] = env.get("remediation")
+            body["data"]["recorded_unavailable"] = True
+        else:
+            body["state"] = SOURCE_OK
+            body["provenance"] = {
+                "source": "heartbeat samples + live sampler",
+                "checked_at": _now_iso()}
+        return JSONResponse(body)
+
     @app.get("/api/search")
     def search(q: str = "", fleet: str | None = None, limit: int = 50):
         limit = max(1, min(int(limit), 200))

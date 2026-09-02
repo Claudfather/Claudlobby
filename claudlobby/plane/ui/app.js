@@ -414,11 +414,27 @@ function renderFleetTabs(identities) {
 const STATUS_DOT = { up: "live", down: "", sampling: "warn" };
 const STATUS_NOTE = { down: "session down", sampling: "sampling…" };
 
+// Presence is the DERIVED verdict (working/idle/down/stale/unknown/
+// sampling) the /api/presence join computes — the plain-language word
+// #1361 is about, not the raw liveness poll. The card badges it; the raw
+// status still drives the terminal-frame styling below.
+const PRESENCE_WORD = {
+  working: "working", idle: "idle", down: "down", stale: "stale",
+  unknown: "unknown", sampling: "sampling…",
+};
+
 function renderPaneCard(el, p) {
   el.className = "pane-card" + (p.status === "up" ? "" : ` s-${p.status}`);
   el._lines = p.lines;   // JS property, not a multi-KB DOM attribute
+  const pr = p.presence;
+  const badge = pr
+    ? `<span class="pres pres-${pr}">${esc(PRESENCE_WORD[pr] || pr)}` +
+      (pr === "working" && p.marker_age_s != null
+        ? ` ${esc(p.marker_age_s)}s` : "") + `</span>`
+    : "";
   el.innerHTML = `
     <div class="p-head"><span class="dot ${STATUS_DOT[p.status] || ""}"></span>
+      ${badge}
       <b>${esc(p.bot)}</b><span class="tag">${esc(p.fleet)}</span>
       <small class="age">${p.captured_ago_s != null
         ? esc(p.captured_ago_s) + "s" : "—"}</small></div>
@@ -490,9 +506,54 @@ function renderGrid(env) {
   el.replaceChildren(frag);
 }
 
+// Presence rides alongside the frames: /api/grid is the terminal thumbnails
+// (liveness + lines), /api/presence is the derived verdict per bot. Merge by
+// alias so each card carries its working/idle/down word, and roll the counts
+// into the header strip. A presence-fetch failure never blanks the grid —
+// the frames still render; the badges just go absent (the recorded half is
+// the degradable one).
 async function pollGrid() {
   if (currentView !== "grid") return;
-  renderGrid(await jget("/api/grid"));
+  const [gridEnv, presEnv] = await Promise.all([
+    jget("/api/grid"), jget("/api/presence").catch(() => null),
+  ]);
+  const byAlias = {};
+  if (presEnv && presEnv.data) {
+    for (const b of presEnv.data.bots) byAlias[b.alias] = b;
+    // the recorded half can fail while the live half still answers — the
+    // server discloses it (state !== ok / recorded_unavailable); surface
+    // that, never swallow it into a badge-less grid with no hint
+    renderPresenceStrip(presEnv.data.counts,
+                        presEnv.state !== "ok" || presEnv.data.recorded_unavailable);
+  }
+  if (gridEnv && gridEnv.data && gridEnv.data.panes) {
+    for (const p of gridEnv.data.panes) {
+      const pr = byAlias[`bot:${p.fleet}/${p.bot}`];
+      if (pr) { p.presence = pr.presence; p.marker_age_s = pr.marker_age_s; }
+    }
+  }
+  renderGrid(gridEnv);
+}
+
+const PRESENCE_ORDER = ["working", "idle", "stale", "unknown", "sampling",
+                        "down"];
+
+function renderPresenceStrip(counts, recordedDown) {
+  const el = $("presence-strip");
+  if (!el || !counts) return;
+  // only the states actually present, in a stable order — a zero is real
+  // (presence_counts always carries every key) but a header of six zeros is
+  // noise; the trust view is where the full breakdown lives
+  const parts = PRESENCE_ORDER
+    .filter((s) => counts[s] > 0)
+    .map((s) => `<span class="pres pres-${s}">${counts[s]} ${s}</span>`);
+  if (recordedDown) {
+    // the activity half is dark — say so, never a badge-less grid with no
+    // hint (the disclosure the server sent must reach the operator)
+    parts.push(`<span class="pres pres-stale">activity half unavailable</span>`);
+  }
+  el.innerHTML = parts.join(" ");
+  el.hidden = parts.length === 0;
 }
 
 function setView(view) {
