@@ -245,3 +245,47 @@ def test_prune_launcher_is_thin_and_root_flag_precedes_subcommand():
     # smoke caught the inverted order as a real argparse refusal)
     assert 'ARGS=(--root "$ROOT" plane prune "$@")' in body
     assert body.count("exec") >= 3            # the venv/PATH/python3 ladder
+
+
+def test_host_prune_timer_arms_from_the_host_tier(tmp_path, monkeypatch):
+    """Chunk 3a.1: a host timer starts with a CLOSED env, so the
+    self-gated prune door needs PLANE_PRUNE_ENABLED stamped as an
+    Environment= line — resolved from the host tier cascade, on the
+    plane-prune job only, unarmed by default (the safe default for a
+    DELETE door)."""
+    from claudlobby.composer import compose_host_timers
+    from claudlobby.paths import Paths
+    import claudlobby.composer as comp
+
+    root = tmp_path / "root"
+    (root / "claudlobby").mkdir(parents=True)
+    # a minimal host.jobs with plane-prune + a neighbor
+    (root / "claudlobby" / "system.yaml").write_text(
+        "host:\n  jobs:\n"
+        "    plane-prune:\n      enroll: false\n"
+        "      script: \"$CLAUDLOBBY_ROOT/lib/plane-prune.sh\"\n"
+        "      schedule: \"*-*-* 05:15:00\"\n      type: oneshot\n"
+        "    claude-update:\n"
+        "      script: \"$CLAUDLOBBY_ROOT/lib/update-claude-code.sh\"\n"
+        "      schedule: \"*-*-* 04:00:00\"\n      type: oneshot\n")
+    paths = Paths(root=root)
+
+    import claudlobby.env_tiers as et
+    # armed: the host tier resolves PLANE_PRUNE_ENABLED=1
+    from claudlobby.env_tiers import Resolution
+    monkeypatch.setattr(et, "read_tiers",
+                        lambda paths, bot_name=None, fleet_name=None: [])
+    monkeypatch.setattr(et, "cascade", lambda tiers: {
+        "PLANE_PRUNE_ENABLED": Resolution(
+            name="PLANE_PRUNE_ENABLED", value="1", tier="host", path=None)})
+    out = compose_host_timers(paths)
+    svc = (out / "claudlobby-plane-prune.service").read_text()
+    assert "Environment=PLANE_PRUNE_ENABLED=1" in svc
+    # the neighbor job never gets it
+    upd = (out / "claudlobby-claude-update.service").read_text()
+    assert "PLANE_PRUNE_ENABLED" not in upd
+    # unarmed: no flag stamped
+    monkeypatch.setattr(et, "cascade", lambda tiers: {})
+    out2 = compose_host_timers(paths)
+    assert "PLANE_PRUNE_ENABLED" not in (
+        out2 / "claudlobby-plane-prune.service").read_text()
