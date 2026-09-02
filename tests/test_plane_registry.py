@@ -723,3 +723,28 @@ def test_unknown_metric_warns_once_per_process(tmp_path, capsys):
                         "metric": "dup.warn.metric", "value": 1}}])
     err = capsys.readouterr().err
     assert err.count("dup.warn.metric") <= 1
+
+
+def test_revision_seen_never_mints_a_phantom_vault(tmp_path, monkeypatch):
+    """Retro round (probed): a truthy vault_rev with NO vault entity in the
+    assembly is reachable (fleet_dir inside the vault repo, no declared
+    binding) and the old "vault" fallback minted a provisional identity no
+    snapshot could confirm, with the rev's provenance attached to a
+    nonexistent entity forever. Gated now: no vault entity, no
+    declaration — honest silence."""
+    from claudlobby.plane import registry_emit as re_mod
+    monkeypatch.setattr(re_mod, "vault_payload", lambda paths, fleet: None)
+    monkeypatch.setattr(re_mod, "_vault_rev", lambda paths: "rev-phantom1")
+    root = _fleet_root(tmp_path)
+    s = _scan(root)
+    assert s is not None and s["complete"] is True
+    conn = _db(root)
+    decl = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE kind='declaration'"
+        " AND event='revision_seen'").fetchone()[0]
+    ghosts = conn.execute(
+        "SELECT COUNT(*) FROM identity_registry WHERE kind='vault'"
+        " AND alias='vault'").fetchone()[0]
+    conn.close()
+    assert decl == 0
+    assert ghosts == 0

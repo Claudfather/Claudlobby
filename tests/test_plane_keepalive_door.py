@@ -250,3 +250,40 @@ def test_pid_guard_honors_fresh_claims_and_ignores_stale_ones(tmp_path):
         assert [s["metric"] for s in rows] == ["bot.heartbeat"]
     finally:
         holder.kill()
+
+
+def test_wedged_emit_is_reaped_at_the_timeout(tmp_path):
+    """Retro round: under a PERMANENTLY wedged rung the unbounded emit
+    made pileup a rate, not a ceiling (~720 stuck procs/day on the
+    documented D-state mode). The reaper kills the emit at
+    KEEPALIVE_EMIT_TIMEOUT_S; the pin runs a 3s bound against a 300s
+    wedge and asserts the wedge process is GONE shortly after."""
+    libdir, bot, env = _rig(tmp_path)
+    wedge = tmp_path / "wedge-cli"
+    wedge.write_text("#!/bin/bash\nsleep 300\n")
+    wedge.chmod(0o755)
+    env["PLANE_EMIT_CLI"] = str(wedge)
+    # 8s, not 3: under battery load the reaper can win the race against
+    # the wedge SPAWN itself (cold rung ~1-2s, worse loaded), failing
+    # phase 1 vacuously — measured as a battery-only flake
+    env["KEEPALIVE_EMIT_TIMEOUT_S"] = "8"
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+
+    def _wedge_alive() -> bool:
+        p = subprocess.run(["pgrep", "-f", str(wedge)],
+                           capture_output=True, text=True)
+        return bool(p.stdout.strip())
+
+    # phase 1: the wedge must APPEAR first — asserting absence from t=0
+    # passes vacuously before the cold-CLI rung has spawned it (caught
+    # when the remove-the-reaper mutation came back green)
+    deadline = time.monotonic() + 15
+    while not _wedge_alive() and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert _wedge_alive(), "wedge never spawned — cannot exercise the reaper"
+    # phase 2: the reaper removes it well before its 300s sleep
+    deadline = time.monotonic() + 30
+    while _wedge_alive() and time.monotonic() < deadline:
+        time.sleep(1)
+    assert not _wedge_alive(), "the wedged emit survived its reaper"
