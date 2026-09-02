@@ -122,3 +122,22 @@ def test_keepalive_unit_carries_the_arming_too(tmp_path, monkeypatch):
     unarmed = _compose_with_defaults(tmp_path, monkeypatch, armed="0")
     assert "PLANE_EMIT_ENABLED" not in (
         unarmed / "com.test.keepalive.service").read_text()
+
+
+def test_keepalive_unit_abandons_its_children(tmp_path, monkeypatch):
+    """The keepalive sweep backgrounds each bot's plane emit; the supervisor's
+    control-group kill at job exit dropped the LAST bot's heartbeat every
+    tick (live: 1 sample in 7 days vs ~1300 per sibling; a manual tick landed
+    at once). The composed unit lets children outlive the job on both
+    platforms; a job without the knob is untouched."""
+    timers = _compose_with_defaults(tmp_path, monkeypatch, armed="1")
+    svc = (timers / "com.test.keepalive.service").read_text()
+    plist = (timers / "com.test.keepalive.plist").read_text()
+    assert "KillMode=process" in svc
+    assert "<key>AbandonProcessGroup</key>" in plist and "<true/>" in plist
+    other = next(p for p in timers.glob("com.test.*.service")
+                 if "keepalive" not in p.name)
+    assert "KillMode" not in other.read_text()
+    other_plist = timers / other.name.replace(".service", ".plist")
+    if other_plist.exists():
+        assert "AbandonProcessGroup" not in other_plist.read_text()

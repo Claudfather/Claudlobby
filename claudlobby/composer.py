@@ -3503,6 +3503,7 @@ def _write_timer_units(
     telegram_group_chat_id: str | None = None,
     fleet_pulse_env: dict[str, str] | None = None,
     extra_env: dict[str, str] | None = None,
+    abandon_children: bool = False,
 ) -> None:
     """Write the .service/.timer/.plist units for a single timer.
 
@@ -3590,6 +3591,15 @@ def _write_timer_units(
     # not a fourth hand-rolled block.
     for var, value in (extra_env or {}).items():
         service_lines.append(f"Environment={var}={value}")
+    if abandon_children:
+        # The script backgrounds work that must outlive the job (keepalive's
+        # per-bot plane emit, reaped on its own clock). With the default
+        # control-group kill, the LAST bot's emit dies at sweep exit every
+        # tick — measured live: the alphabetically-last bot landed 1
+        # heartbeat in 7 days while every sibling landed ~1300, and a manual
+        # tick outside the supervisor landed at once. Same rationale as the
+        # bot service unit's KillMode=process.
+        service_lines.append("KillMode=process")
     service_lines.append(f"ExecStart={exec_start}")
     (timers_dir / f"{service_name}.service").write_text("\n".join(service_lines) + "\n")
 
@@ -3750,6 +3760,10 @@ def _write_timer_units(
             "  </dict>",
         ]
         plist_lines.extend(cal_interval)
+    if abandon_children:
+        # launchd kills the job's process group at exit unless told to abandon
+        # it — see the KillMode=process note above (same live measurement)
+        plist_lines.extend(["  <key>AbandonProcessGroup</key>", "  <true/>"])
     plist_lines.extend(
         [
             "</dict>",
@@ -3943,6 +3957,7 @@ def compose_fleet_timers(
                 fleet.name,
                 paths,
                 persistent=bool(cfg.get("persistent", False)),
+                abandon_children=bool(cfg.get("abandon_children", False)),
                 randomized_delay=int(cfg.get("randomized_delay") or 0),
                 telegram_group_chat_id=fleet.telegram_group_chat_id,
                 fleet_pulse_env=(
@@ -4215,6 +4230,7 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             None,
             paths,
             persistent=bool(cfg.get("persistent", False)),
+            abandon_children=bool(cfg.get("abandon_children", False)),
             randomized_delay=int(cfg.get("randomized_delay") or 0),
             extra_env=extra_env,
         )
