@@ -300,6 +300,11 @@ defaults:
       script: "$CLAUDLOBBY_ROOT/lib/keepalive-all.sh"
       interval: 60
       type: oneshot
+      # The per-bot plane emit is backgrounded and reaped on its own clock;
+      # it must outlive the sweep. Without this the supervisor's control-group
+      # kill at job exit silently dropped the LAST bot's heartbeat every tick
+      # (measured: 1 sample in 7 days vs ~1300 for every sibling).
+      abandon_children: true
     log-rotation:
       script: "$CLAUDLOBBY_ROOT/lib/log-rotate-fleet.sh"
       interval: 86400
