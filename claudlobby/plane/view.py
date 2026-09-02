@@ -381,9 +381,17 @@ def _fetch_identities(conn: sqlite3.Connection) -> dict:
     for r in conn.execute(
         "SELECT uid, kind, alias, provisional, first_seen, last_seen"
         f" FROM identity_registry WHERE kind IN ({ph})"
+        # exclude internal `_`-prefixed scope sentinels (e.g. the `_host`
+        # fleet the host probe emits under — a host job has no real fleet,
+        # so its sentinel is not a participant the rail should show)
+        " AND alias NOT LIKE '\\_%' ESCAPE '\\'"
         " ORDER BY last_seen DESC LIMIT 200", _RAIL_KINDS):
         row = dict(r)
         row["short"] = _short(row["alias"])
+        # a human actor is legitimately-provisional (never in a roster to
+        # confirm) — do NOT badge it as an unconfirmed suspect
+        if row["alias"].startswith("human:"):
+            row["provisional"] = 0
         rows.append(row)
     return {"identities": rows}
 

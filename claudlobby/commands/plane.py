@@ -293,6 +293,21 @@ def cmd_plane_doctor(args) -> int:
                                      " are not honored)"))
                 except (sqlite3.Error, ValueError) as exc:
                     rung(False, "registry lane", f"unreadable: {exc}")
+                # Reconcile-check rung (chunk: doctor IOUs — closes the
+                # chunk-B disclosure that RECONCILIATION_SQL was bench-only).
+                # Counts submitted-but-not-acked transmissions. This is
+                # INFORMATIONAL, never a failure: §6b rules the tmux carrier
+                # yields no recipient_acknowledged at all, so a nonzero count
+                # is the EXPECTED steady state, not a fault — a pass/fail
+                # gate here would alarm on every tmux dispatch forever.
+                try:
+                    from ..plane.queries import RECONCILIATION_SQL
+                    unacked = conn.execute(RECONCILIATION_SQL).fetchone()[0]
+                    rung(True, "reconcile (submitted-not-acked)",
+                         f"{unacked} — expected for carriers that yield no"
+                         " ack (tmux); a telegram gap would show here")
+                except sqlite3.Error as exc:
+                    rung(False, "reconcile", f"unreadable: {exc}")
             finally:
                 conn.close()
         try:
@@ -359,6 +374,49 @@ def cmd_plane_doctor(args) -> int:
                  "UNREADABLE — cannot enumerate (a gap, not a zero)")
         else:
             rung(not sc.quarantined, "quarantine", str(len(sc.quarantined)))
+        # Composed-hash-drift rung (chunk: doctor IOUs — closes the chunk-B
+        # disclosure that the --verify door existed but doctor never ran it).
+        # Surfaces bots/entities whose current composed output drifted from
+        # the last registry keyframe. Re-deriving the estate needs a FLEET,
+        # so it runs only when one resolves (root-mode fleet.yaml or the
+        # global --fleet); with no fleet context the rung POINTS at the
+        # per-fleet door rather than silently skipping — the capability is
+        # surfaced either way.
+        if db_path(root).exists():
+            try:
+                from ._helpers import _load_fleet_or_exit
+                from ..plane import registry_read as _rr
+                from ..plane.registry_emit import (
+                    _vault_rev, assemble_entities)
+                paths = _resolve_paths(args)
+                if getattr(args, "fleet", None) or (
+                        paths.root / "fleet.yaml").exists():
+                    fleet, _ = _load_fleet_or_exit(paths)
+                    from ..plane.ids import ensure_host_uid
+                    conn2 = connect(db_path(root))
+                    try:
+                        assembled, complete = assemble_entities(
+                            paths, fleet, _vault_rev(paths))
+                        rep = _rr.verify_current(
+                            conn2, assembled, fleet=fleet.name,
+                            host_uid=(paths.root / "state" / "host-uid"
+                                      ).read_text().strip()
+                            if (paths.root / "state" / "host-uid").exists()
+                            else ensure_host_uid(paths.root / "state"))
+                    finally:
+                        conn2.close()
+                    n = len(rep.drifted) + len(rep.missing_from_db)
+                    rung(n == 0, "composed-hash drift",
+                         f"{n} entit{'y' if n == 1 else 'ies'} drifted from"
+                         f" the last scan (fleet {fleet.name}); run generate"
+                         if n else f"none (fleet {fleet.name}, "
+                         f"{rep.checked} checked)")
+                else:
+                    rung(True, "composed-hash drift",
+                         "not checked (needs a fleet) — run"
+                         " `claudlobby --fleet <name> plane registry --verify`")
+            except (sqlite3.Error, ValueError, OSError) as exc:
+                rung(False, "composed-hash drift", f"unreadable: {exc}")
         return 0 if failing == 0 else 1
 
     return _guarded("plane doctor", run)
