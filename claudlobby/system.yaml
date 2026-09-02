@@ -54,6 +54,19 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 600
+    # Host hardware/system facet emitter (spec §2b, cause=probe): reads the
+    # VOLATILE facets (load, available RAM, free disk, Pi thermal/undervolt,
+    # boot time) — which F12 keeps OUT of the registry keyframe — and emits
+    # them as host.* metric_samples for the Host card. Per-minute cadence
+    # (30k-row envelope, guarded by the plane-prune retention lane). DORMANT
+    # by default; self-gates on PLANE_EMIT_ENABLED (the standard emission
+    # flag, stamped by the host-timer arming carrier) — a read-only emitter,
+    # so it shares the plane flag rather than earning its own.
+    plane-host-probe:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/plane-host-probe.sh"
+      interval: 60
+      type: oneshot
     # Source-currency REPORT (read-only, never pulls): how far each framework
     # checkout -- claudlobby AND its discovered siblings -- is behind its newest
     # release, plus the distinct "on the newest release but main has moved"

@@ -137,7 +137,7 @@ claudlobby warm-cache            # pre-download npx packages for MCP servers
 **Gives you:**
 
 - `library/` — 19 expertise profiles (manager, engineer, reviewer, designer, business, data-engineering, …), 53 skills (dispatch, lifecycle, prs, sweep, fleet-status, briefing, status, triage, …), 17 MCP fragments (github, github-app, gws, google-analytics, google-search-console, meta-ads, meta-business, posthog, notion, linear, slack, shopify, printify, homeassistant, docker, spotify, granola), 24 guardrails, 39 protocols
-- `lib/` — 82 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
+- `lib/` — 83 bash lifecycle scripts: `start-bot.sh`, `keepalive.sh`, `report-back.sh`, `tg-post.sh`, `creds-check.sh` (daily credential keepalive), `fleet-state-update.sh`, and more
 - `bin/claudlobby` — the Python compositor
 - `fleet.yaml.example` — a full fleet manifest template you can copy and adapt
 
