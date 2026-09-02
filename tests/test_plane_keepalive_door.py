@@ -266,12 +266,21 @@ def test_wedged_emit_is_reaped_at_the_timeout(tmp_path):
     env["KEEPALIVE_EMIT_TIMEOUT_S"] = "3"
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
-    deadline = time.monotonic() + 30
-    alive = True
-    while alive and time.monotonic() < deadline:
+
+    def _wedge_alive() -> bool:
         p = subprocess.run(["pgrep", "-f", str(wedge)],
                            capture_output=True, text=True)
-        alive = bool(p.stdout.strip())
-        if alive:
-            time.sleep(1)
-    assert not alive, "the wedged emit survived its reaper"
+        return bool(p.stdout.strip())
+
+    # phase 1: the wedge must APPEAR first — asserting absence from t=0
+    # passes vacuously before the cold-CLI rung has spawned it (caught
+    # when the remove-the-reaper mutation came back green)
+    deadline = time.monotonic() + 15
+    while not _wedge_alive() and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert _wedge_alive(), "wedge never spawned — cannot exercise the reaper"
+    # phase 2: the reaper removes it well before its 300s sleep
+    deadline = time.monotonic() + 30
+    while _wedge_alive() and time.monotonic() < deadline:
+        time.sleep(1)
+    assert not _wedge_alive(), "the wedged emit survived its reaper"
