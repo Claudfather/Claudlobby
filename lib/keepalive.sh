@@ -146,7 +146,18 @@ plane_presence_samples() {
             sleep 1
             _i=$((_i + 1))
         done
-        kill -9 "$_w" 2>/dev/null || true
+        # kill the TREE, not the pipeline leader: $_w is the backgrounded
+        # FUNCTION subshell, whose real work is grandchildren (plane-emit.sh
+        # -> the cold CLI). A bare kill -9 "$_w" reaped the leader and
+        # ORPHANED the wedged CLI alive — the whole point defeated (found by
+        # observing five survivors after the pin "passed"; the recursive
+        # form is portable where macOS bash 3.2 has no pkill -g / setsid).
+        _kill_tree() {
+            local _p="$1" _c
+            for _c in $(pgrep -P "$_p" 2>/dev/null); do _kill_tree "$_c"; done
+            kill -9 "$_p" 2>/dev/null || true
+        }
+        _kill_tree "$_w"
     ) >/dev/null 2>&1 &
     printf '%d' $! > "$pidf" 2>/dev/null || true
 }
