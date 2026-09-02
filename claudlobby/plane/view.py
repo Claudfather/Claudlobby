@@ -826,6 +826,25 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
             })
         return JSONResponse(env)
 
+    @app.get("/api/org")
+    def org(fleet: str | None = None):
+        """The reporting tree from the fleet keyframe (Phase 6): a pure
+        read; no fleet keyframe yet is a typed idle state, never {}."""
+        from .orgchart import org_tree
+        env = _envelope(root, lambda c: org_tree(c, fleet))
+        if env.get("state") == SOURCE_OK and env.get("data") is None:
+            return JSONResponse({"state": "idle", "provenance": env.get("provenance", {}),
+                                 "remediation": "no fleet keyframe yet — run"
+                                                " `claudlobby --fleet <name> generate`"})
+        return JSONResponse(env)
+
+    @app.get("/api/utilization")
+    def utilization(fleet: str | None = None):
+        """Busy/idle % per bot from the recorded heartbeat samples (Phase 6),
+        the legacy rollup's math over the plane's series — one definition."""
+        from .utilization import bot_utilization
+        return JSONResponse(_envelope(root, lambda c: bot_utilization(c, fleet=fleet)))
+
     @app.get("/api/search")
     def search(q: str = "", fleet: str | None = None, limit: int = 50):
         limit = max(1, min(int(limit), 200))

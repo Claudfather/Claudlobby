@@ -268,3 +268,12 @@ h2 .hint { text-transform: none; letter-spacing: 0; }
 .hash-row { display: flex; justify-content: space-between; font-size: 11px; }
 .dim { color: var(--dim); font-size: 12px; }
 @media (max-width: 800px) { .ed-cols { grid-template-columns: 1fr; } }
+
+/* org chart + utilization (Phase 6) */
+.org { margin: 4px 0 10px; }
+.org summary { cursor: pointer; }
+.org-tree, .org-tree ul { list-style: none; padding-left: 16px; margin: 2px 0; }
+.org-tree li { position: relative; padding: 1px 0; font-size: 12px; }
+.org-tree li::before { content: "└ "; color: var(--dim); }
+.org-tree li.cycle { color: var(--warn); }
+.bot-card .bc-util { font-size: 11px; color: var(--dim); }

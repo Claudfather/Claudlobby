@@ -828,7 +828,24 @@ async function pollFleet() {
   // fleet-qualified from the server (gauntlet)
   const f = currentFleet && currentFleet !== "all"
     ? `?fleet=${encodeURIComponent(currentFleet)}` : "";
-  renderInventory(await jget("/api/inventory" + f));
+  // org + utilization ride alongside; either failing never blanks the
+  // inventory (the same opposite-failure-modes rule as grid + presence)
+  const [inv, org, util] = await Promise.all([
+    jget("/api/inventory" + f),
+    jget("/api/org" + f).catch(() => null),
+    jget("/api/utilization" + f).catch(() => null),
+  ]);
+  if (inv && inv.data && util && util.data) {
+    const by = {};
+    for (const u of util.data) by[u.alias] = u;
+    for (const b of inv.data.bots) { const u = by[b.alias]; if (u) b.util = u; }
+  }
+  renderInventory(inv, org);
+}
+
+function orgNode(n) {
+  return `<li${n.cycle ? ' class="cycle"' : ""}>${esc(n.bot)}${n.cycle ? " <small>(cycle)</small>" : ""}` +
+    (n.reports.length ? `<ul>${n.reports.map(orgNode).join("")}</ul>` : "") + `</li>`;
 }
 
 function countsLine(counts) {
@@ -836,7 +853,7 @@ function countsLine(counts) {
     .map((k) => `${counts[k]} ${k.replace("_", " ")}`).join(" · ");
 }
 
-function renderInventory(env) {
+function renderInventory(env, orgEnv) {
   const el = $("fleet");
   if (!env || env.state !== "ok") {
     el.innerHTML = stateBlock(env ? env.state : "disconnected",
@@ -856,6 +873,7 @@ function renderInventory(env) {
         <small>${esc(b.model || "")}${b.permissions_mode
           ? ` · ${esc(b.permissions_mode)}` : ""}</small></div>
       <div class="bc-counts">${esc(countsLine(b.counts)) || "no equipment recorded"}</div>
+      ${b.util ? `<div class="bc-util">busy ${esc(b.util.busy_pct_24h)}% today · ${esc(b.util.busy_pct_7d)}% 7d</div>` : ""}
       ${b.reports_to ? `<div class="bc-org">reports to ${esc(b.reports_to)}</div>` : ""}
       ${b.manages && b.manages.length
         ? `<div class="bc-org">manages ${esc(b.manages.join(", "))}</div>` : ""}
@@ -879,10 +897,16 @@ function renderInventory(env) {
           : i.used_by.length ? esc(i.used_by.join(", ")) : "unused"}</small>
       </div>`).join("")}</details>`;
   }).join("");
+  const orgHtml = orgEnv && orgEnv.state === "ok" && orgEnv.data
+    ? `<details class="org" open><summary>org${orgEnv.data.manager ? ` · manager ${esc(orgEnv.data.manager)}` : ""}${
+        orgEnv.data.cycles.length ? ` · <b>${orgEnv.data.cycles.length} reporting cycle(s)</b>` : ""}</summary>
+        <ul class="org-tree">${orgEnv.data.roots.map(orgNode).join("")}</ul></details>`
+    : "";
   el.innerHTML = `
     <div id="equip-detail" hidden></div>
     <div class="inv-head">${d.counts.bots} bots · ${d.counts.projects} projects ·
       ${d.counts.library_in_use}/${d.counts.library} library items in use</div>
+    ${orgHtml}
     <div class="bot-grid">${bots}</div>
     <h3>projects</h3>${projects}
     <h3>library</h3>${library}`;
