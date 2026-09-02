@@ -528,6 +528,12 @@ def cmd_plane_prune(args) -> int:
                   file=sys.stderr)
             return 0
         days = args.days if args.days is not None else DEFAULT_RETENTION_DAYS
+        if days < 0:
+            # a negative window's future cutoff would delete EVERYTHING — a
+            # clean contract refusal (rc 2), never a raw traceback (gauntlet)
+            raise ContractViolation(
+                [{"loc": ("days",), "msg": "retention days cannot be"
+                  " negative (a future cutoff would delete all samples)"}])
         conn = connect(path)
         try:
             migrate(conn)   # DowngradeError -> 4 via the guard

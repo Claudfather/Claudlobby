@@ -162,10 +162,14 @@ def test_custom_window_and_negative_refused(tmp_path):
 
 # --- CLI door + composition ------------------------------------------------
 
-def _cli(root: Path, *argv):
+def _cli(root: Path, *argv, armed=True):
+    import os
+    env = dict(os.environ)
+    if armed:
+        env["PLANE_PRUNE_ENABLED"] = "1"   # the launcher self-gate
     return subprocess.run(
         [sys.executable, "-m", "claudlobby", "--root", str(root),
-         "plane", *argv], capture_output=True, text=True, timeout=120)
+         "plane", *argv], capture_output=True, text=True, timeout=120, env=env)
 
 
 def test_cli_prune_ages_out_and_dry_run_is_safe(tmp_path):
@@ -192,6 +196,47 @@ def test_prune_job_composes_dormant_and_reads_root():
     job = sysyaml["host"]["jobs"]["plane-prune"]
     assert job["enroll"] is False             # a DELETE door never auto-arms
     assert "plane-prune.sh" in job["script"]
+
+
+def _launcher(root: Path, *argv, armed):
+    import os
+    # the throwaway root has no .venv; the launcher resolves the CLI via
+    # its PATH rung, so put the repo venv there (how the estate resolves)
+    env = dict(os.environ, CLAUDLOBBY_ROOT=str(root),
+               PATH=f"{REPO / '.venv' / 'bin'}:" + os.environ.get("PATH", ""))
+    if armed:
+        env["PLANE_PRUNE_ENABLED"] = "1"
+    return subprocess.run(
+        ["bash", str(REPO / "lib" / "plane-prune.sh"), *argv],
+        capture_output=True, text=True, timeout=120, env=env)
+
+
+def test_launcher_self_gates_on_the_arming_flag(tmp_path):
+    """r-gauntlet: enroll:false is NOT enforced for host timers
+    (setup-system enrolls every composed unit), so for a DELETE door the
+    launcher self-gates — unarmed, it no-ops loudly and deletes nothing;
+    armed, it runs. Defense in depth beyond the dormant manifest."""
+    root = _root(tmp_path)
+    _sample(root)
+    _backdate_all(root, days_old=40)
+    dormant = _launcher(root, "--dry-run", armed=False)
+    assert dormant.returncode == 0
+    assert "dormant" in dormant.stderr
+    assert _counts(root)[0] == 1              # unarmed touched nothing
+    armed = _launcher(root, armed=True)
+    assert armed.returncode == 0
+    assert _counts(root)[0] == 0              # armed pruned
+
+
+def test_cli_negative_window_is_a_clean_refusal(tmp_path):
+    """r-gauntlet: --days -1 (a future cutoff that would delete
+    EVERYTHING) is a ContractViolation → rc 2, never a raw traceback."""
+    root = _root(tmp_path)
+    _sample(root)
+    r = _cli(root, "prune", "--days", "-1")
+    assert r.returncode == 2
+    assert "Traceback" not in r.stderr
+    assert _counts(root)[0] == 1              # nothing deleted
 
 
 def test_prune_launcher_is_thin_and_root_flag_precedes_subcommand():

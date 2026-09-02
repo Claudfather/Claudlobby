@@ -12,14 +12,20 @@ enforced here:
     family row, so the dedupe window is the ledger's lifetime. A
     retention pass that deleted a ledger row would shrink that horizon
     and let a replayed old event re-ingest as new.
-  - **Aged by ``ingested_at``, the ledger's forward clock — never
-    ``occurred_at``.** occurred_at is the carrier's instant and skews on
-    the RTC-less Pi; ingested_at is when the row entered the db. Deleting
-    by ingested_at can NEVER drop a row learned about recently (a
-    backfilled sample with an ancient occurred_at is kept 30 days from
-    ingestion — correct: it is in the join window from when we learned
-    it). The conservative direction, because the failure mode of
-    over-deleting is silent data loss.
+  - **Aged by ``ingested_at``, the ledger's landing clock — never
+    ``occurred_at``.** occurred_at is the carrier's instant and skews
+    freely on the RTC-less Pi; ingested_at is when the row entered the db,
+    which is FORWARD-MOVING during normal operation. So a backfilled
+    sample with an ancient occurred_at is kept 30 days from ingestion
+    (correct: it is in the join window from when we learned it), and the
+    conservative direction holds — because the failure mode of
+    over-deleting is silent data loss. The one exposure (gauntlet-probed):
+    ingested_at is `now()`, NOT strictly monotonic, so a >30-day BACKWARD
+    clock step at boot (this host's stale-RTC class) can stamp a fresh row
+    with an old ingested_at that a later corrected-clock prune deletes. A
+    routine minutes-scale skew is safe (deletes 0), only a gross error
+    bites, and a lost heartbeat re-emits next tick — so the sample lane
+    tolerates it; a durable family would need a monotonic cutoff.
 
 This module is the pure logic; the daemon does NOT run it (INGEST ONLY by
 scope tripwire) — a separate CLI door (``claudlobby plane prune``) invoked
