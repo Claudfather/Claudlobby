@@ -62,6 +62,7 @@ TS=$(ts_iso)
 #                     glob would also match binary LevelDB / browser-profile
 #                     logs — live state, not logs.
 #   *.bak             backup copies
+#   .plane-rc-relay-* the RC-relay Stop hook's dedupe markers (0-byte, one per relayed turn)
 # Durable assets (scripts, configs, ledgers, drafts) never match and are
 # never swept, wherever they sit under data/.
 find_stale_ephemeral() {
@@ -69,7 +70,8 @@ find_stale_ephemeral() {
         \( -path '*/events/*.jsonl' \
            -o -name 'cron.log' -o -name 'git-pull.log' \
            -o -name 'briefing*.log' -o -name 'home-assistant.log' \
-           -o -name '*.bak' \) \
+           -o -name '*.bak' \
+           -o -name '.plane-rc-relay-*' \) \
         -mtime +"$2" -print0 2>/dev/null
 }
 
