@@ -16,6 +16,15 @@ TERMINAL_TASK_EVENTS = (
 )
 _TERMINAL = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
 
+# ONE definition of "this assignment is still open" — ATTENTION_SQL and the
+# attention-expiry sweep must agree on it, or a card can sit in the queue
+# that the sweep considers closed (or vice versa). `a` is the assignments
+# alias in the enclosing query.
+NON_TERMINAL_CLAUSE = (
+    " NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
+    f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))"
+)
+
 # §6b #1/#2 (PR-B): activation derives from CARRIER-APPROPRIATE evidence —
 # submission-class rows (pane_submitted / carrier_accepted) occupy the
 # activation rung, because submission is the strongest fact the tmux carrier

@@ -179,3 +179,75 @@ def test_job_composes_dormant_and_arms_on_its_own_flag(tmp_path, monkeypatch):
     assert "Environment=PLANE_EXPIRE_ENABLED=1" in (
         out / "claudlobby-plane-expire.service").read_text()
     assert "PLANE_EXPIRE" not in (out / "claudlobby-plane-prune.service").read_text()
+
+
+def _progress(root, wi, aid):
+    emit_batch(root, [{"event_type": "task", "emitter": "t", "fleet": F,
+                       "payload": {"work_item_id": wi, "assignment_id": aid,
+                                   "event": "progress", "progress": 1}}])
+
+
+def test_an_alive_assignment_is_never_expired(tmp_path):
+    """Gauntlet SEV-1 fold (proven live): the default dispatch deadline is
+    30 min, so 'overdue >7d' is just 'dispatched >7d ago'. A bot posting
+    progress is ALIVE whatever the deadline says — no-evidence is not
+    evidence-of-death. Expiring it would shadow its later `completed`
+    forever (status takes the first terminal event)."""
+    root = _root(tmp_path)
+    stale = _dispatch(root, "a", expected_by=NOW - timedelta(days=10))
+    alive = _dispatch(root, "d", expected_by=NOW - timedelta(days=10))
+    _progress(root, *alive)                # progress lands NOW (inside horizon)
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW + timedelta(minutes=1), after_days=7)
+    finally:
+        conn.close()
+    assert [r["assignment_id"] for r in plan.rows] == [stale[1]]   # alive kept
+
+
+def test_a_changed_deadline_is_honored(tmp_path):
+    """Gauntlet F2 fold: a deadline_changed that moved the deadline into
+    the future must keep the assignment — the sweep reads the EFFECTIVE
+    deadline, not the original row."""
+    root = _root(tmp_path)
+    wi, aid = _dispatch(root, "e", expected_by=NOW - timedelta(days=10))
+    emit_batch(root, [{"event_type": "task", "emitter": "t", "fleet": F,
+                       "payload": {"work_item_id": wi, "assignment_id": aid,
+                                   "event": "deadline_changed",
+                                   "deadline": (NOW + timedelta(days=5)).isoformat()}}])
+    # backdate that event's ingest so the quiet-horizon clause is not what saves it
+    db = connect(db_path(root))
+    try:
+        db.execute("UPDATE events SET ingested_at=? WHERE event='deadline_changed'",
+                   ((NOW - timedelta(days=9)).isoformat(),))
+    finally:
+        db.close()
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    assert plan.rows == []
+
+
+def test_concurrent_sweeps_collapse_to_one_expired_row(tmp_path):
+    """Gauntlet F3 fold: the event_id is derived from the assignment id,
+    so two sweeps that both read non-terminal and both emit produce ONE
+    ledger row — idempotent concurrently, not just in sequence."""
+    root = _root(tmp_path)
+    _seed(root)
+    conn = connect(db_path(root))
+    try:
+        plan = expirable(conn, now=NOW, after_days=7)
+    finally:
+        conn.close()
+    evs = expired_events(plan, now=NOW, after_days=7)
+    emit_batch(root, evs)
+    emit_batch(root, evs)                  # the racing second sweep
+    conn = connect(db_path(root))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM events WHERE kind='task'"
+                         " AND event='expired'").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1

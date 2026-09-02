@@ -15,12 +15,24 @@ laws:
   - **A Lane-B FACT through normal ingest, never a table write.** Status
     is always derived (contract × events × clock × policy); the sweep adds
     the event that lets the derivation say "expired", it edits nothing.
-  - **Idempotent by construction.** The query excludes anything already
-    terminal, so a second run finds nothing — no dedupe bookkeeping.
+  - **Quiet for the whole horizon, or not at all.** The gauntlet proved
+    the naive predicate (deadline passed, no terminal) expires work that
+    is demonstrably ALIVE: the default dispatch deadline is 30 minutes,
+    so "overdue >7d" is just "dispatched >7d ago" — every week-long task
+    whose bot posts `progress` — and because status takes the FIRST
+    terminal event, the real `completed` that lands later is shadowed
+    forever. So an assignment with ANY task event inside the horizon is
+    kept (no-evidence is not evidence-of-death — presence.py's law), and
+    a `deadline_changed` moves the deadline the predicate reads.
+  - **Idempotent by construction, sequentially AND concurrently.** The
+    query excludes anything already terminal, so a second run finds
+    nothing; and the event_id is DERIVED from the assignment id, so two
+    sweeps racing between read and emit collapse to one ledger row.
   - **Deadline-only.** Trouble-class attention (a dispatch that never
     activated, no deadline passed) is a human's to judge; this door never
     expires it. And an assignment whose fleet cannot be attributed is
-    SKIPPED and disclosed — never emitted under a fabricated fleet.
+    SKIPPED and disclosed — never emitted under a fabricated fleet
+    (unreachable through ingest, which requires a fleet; defensive).
   - **Dormant and self-gated** (``PLANE_EXPIRE_ENABLED``), like the
     retention door: an event-emitting policy sweep must not arrive
     switched on via a root pull.
@@ -31,18 +43,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from .queries import TERMINAL_TASK_EVENTS
+import hashlib
+
+from .queries import NON_TERMINAL_CLAUSE
 
 DEFAULT_AFTER_DAYS = 7
-_TERMINAL = ",".join(f"'{e}'" for e in TERMINAL_TASK_EVENTS)
 
+# Binds (cutoff, cutoff): the EFFECTIVE deadline (latest deadline_changed,
+# else the assignment's expected_by) must be older than the cutoff, the
+# assignment must be non-terminal (the SAME clause ATTENTION_SQL uses), and
+# NO task event of any kind may have landed since the cutoff — a bot still
+# posting progress is alive, whatever its deadline says.
 EXPIRABLE_SQL = (
     "SELECT a.assignment_id, a.work_item_id, a.expected_by, f.alias AS fleet"
     " FROM assignments a"
     " LEFT JOIN identity_registry f ON f.uid = a.fleet_uid"
-    " WHERE a.expected_by IS NOT NULL AND a.expected_by < ?"
-    " AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-    f"   AND t.assignment_id = a.assignment_id AND t.event IN ({_TERMINAL}))"
+    " WHERE a.expected_by IS NOT NULL"
+    " AND COALESCE((SELECT d.deadline FROM events d WHERE d.kind='task'"
+    "     AND d.event='deadline_changed' AND d.assignment_id = a.assignment_id"
+    "     AND d.deadline IS NOT NULL ORDER BY d.ingest_seq DESC LIMIT 1),"
+    "    a.expected_by) < ?"
+    " AND" + NON_TERMINAL_CLAUSE +
+    " AND NOT EXISTS (SELECT 1 FROM events q WHERE q.kind='task'"
+    "   AND q.assignment_id = a.assignment_id AND q.ingested_at >= ?)"
     " ORDER BY a.expected_by"
 )
 
@@ -62,9 +85,9 @@ def expirable(conn, *, now: datetime | None = None,
         raise ValueError("expiry horizon cannot be negative")
     cutoff = (now - timedelta(days=after_days)).isoformat()
     seen: dict[str, dict] = {}
-    for r in conn.execute(EXPIRABLE_SQL, (cutoff,)):
+    for r in conn.execute(EXPIRABLE_SQL, (cutoff, cutoff)):
         d = dict(zip(("assignment_id", "work_item_id", "expected_by", "fleet"), r))
-        seen[d["assignment_id"]] = d      # last row wins on a replayed id
+        seen[d["assignment_id"]] = d      # assignment_id is UNIQUE; dict for order
     rows = [d for d in seen.values() if d["fleet"]]
     unattributed = [d["assignment_id"] for d in seen.values() if not d["fleet"]]
     return ExpiryPlan(cutoff=cutoff, rows=rows, unattributed=unattributed)
@@ -77,9 +100,14 @@ def expired_events(plan: ExpiryPlan, *, now: datetime | None = None,
     if now is None:
         now = datetime.now(timezone.utc)
     stamp = now.isoformat()
+    # a DERIVED event_id: two sweeps racing between read and emit produce
+    # the same id, and the ledger's dedupe collapses the second to a
+    # duplicate — idempotency that holds concurrently, not just in sequence
     return [{
         "event_type": "task", "emitter": "attention-expiry",
         "fleet": r["fleet"], "occurred_at": stamp,
+        "event_id": "ev_" + hashlib.sha256(
+            f"{r['assignment_id']}:expired".encode()).hexdigest()[:32],
         "payload": {
             "work_item_id": r["work_item_id"],
             "assignment_id": r["assignment_id"],

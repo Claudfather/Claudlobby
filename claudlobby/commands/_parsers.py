@@ -484,8 +484,9 @@ def register_subparsers(sub) -> None:
         help="Attention expiry sweep: emit `expired` for assignments overdue"
         " past the horizon (7d; a Lane-B fact through ingest, idempotent)")
     pex.add_argument("--after-days", type=int, default=None,
-                     help="Days past expected_by before an assignment expires"
-                     " (default 7)")
+                     help="Days an overdue assignment must be QUIET (no task"
+                     " event) before it expires (default 7; 0 = anything overdue"
+                     " and silent right now — sharp)")
     pex.add_argument("--dry-run", action="store_true",
                      help="Report the count without emitting")
     pex.set_defaults(func=cmd_plane_expire)
