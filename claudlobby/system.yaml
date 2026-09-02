@@ -230,6 +230,14 @@ defaults:
     UserPromptSubmit:
       - command: "$CLAUDLOBBY_ROOT/lib/plane-telegram-in.sh"
         timeout: 15
+    # Observable-plane Telegram carrier, the RC-relay OUTBOUND half (#1412):
+    # when a bot answers a Telegram-initiated turn with plain final text
+    # (no reply tool call) the bridge's RC auto-relay delivers it and no
+    # PostToolUse fires — this Stop hook records that final answer, carrier
+    # state `unknown` (delivery unobserved), dormant on PLANE_EMIT_ENABLED.
+    Stop:
+      - command: "$CLAUDLOBBY_ROOT/lib/plane-rc-relay-out.sh"
+        timeout: 15
 
   observability:
     pulse_interval: 300
