@@ -4186,6 +4186,8 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             extra_env = _host_job_plane_arming(paths, "PLANE_PRUNE_ENABLED")
         elif name == "plane-host-probe":
             extra_env = _host_job_plane_arming(paths, "PLANE_EMIT_ENABLED")
+        elif name == "plane-expire":
+            extra_env = _host_job_plane_arming(paths, "PLANE_EXPIRE_ENABLED")
         else:
             extra_env = None
         _write_timer_units(
