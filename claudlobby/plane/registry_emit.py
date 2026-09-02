@@ -480,15 +480,22 @@ def _vault_rev(paths) -> str | None:
     if not fleet_dir:
         return None
     try:
-        top = subprocess.run(
-            ["git", "-C", str(fleet_dir), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=10).stdout.strip()
+        # one spawn for both facts (Pi spawn cost); ambient GIT_DIR /
+        # GIT_WORK_TREE scrubbed — they would redirect the answer to a
+        # foreign repo that passes the authority test (retro round)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+        out = subprocess.run(
+            ["git", "-C", str(fleet_dir), "rev-parse",
+             "--show-toplevel", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10, env=env)
+        lines = out.stdout.strip().splitlines()
+        if len(lines) < 2:
+            return None
+        top, rev = lines[0].strip(), lines[1].strip()
         if not top or Path(top).resolve() == Path(paths.root).resolve():
             return None
-        out = subprocess.run(
-            ["git", "-C", str(fleet_dir), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=10)
-        return out.stdout.strip() or None
+        return rev or None
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -662,19 +669,21 @@ def run_generate_scan(paths, fleet) -> dict | None:
                 log.warning("registry scan: tombstone diff skipped (%s)", exc)
                 complete = False
 
-    if vault_rev:
+    # the vault alias comes FROM THE ASSEMBLY (the chunk-B extraction left
+    # `vp` dangling — NameError on every vault-armed scan; found live) and
+    # the block is GATED on a vault entity actually existing: a truthy rev
+    # with no vault entity is reachable (fleet_dir inside the vault repo,
+    # no declared vault binding) and the old "vault" fallback minted a
+    # PHANTOM provisional identity no snapshot could ever confirm, with
+    # the rev's provenance attached to a nonexistent entity forever
+    # (retro round, probed). Honest silence, the _vault_rev principle.
+    _vault_subject = next((a for t, a, _ in entities if t == "vault"), None)
+    if vault_rev and _vault_subject:
         events.append({
             "event_type": "declaration", "emitter": "generate",
             "fleet": fleet.name,
-            # the vault alias comes FROM THE ASSEMBLY (the chunk-B
-            # extraction moved `vp` inside assemble_entities and left this
-            # reference dangling — NameError on every VAULT-ARMED fleet's
-            # scan, invisible to a test corpus whose fixtures were all
-            # vaultless; found live on the estate, first post-merge scan)
             "payload": {"event": "revision_seen", "subject_kind": "vault",
-                        "subject": next(
-                            (a for t, a, _ in entities if t == "vault"),
-                            "vault"),
+                        "subject": _vault_subject,
                         "vault_rev": vault_rev}})
 
     counts: dict[str, int] = {}

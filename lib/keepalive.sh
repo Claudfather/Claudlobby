@@ -103,7 +103,7 @@ plane_presence_samples() {
     local pidf="$BOT_DIR/data/.plane-presence.pid" prev
     prev="$(cat "$pidf" 2>/dev/null || true)"
     if [ -n "$prev" ] && kill -0 "$prev" 2>/dev/null \
-       && marker_age_within "$pidf" 120; then
+       && marker_age_within "$pidf" $(( ${KEEPALIVE_EMIT_TIMEOUT_S:-110} + 10 )); then
         return 0
     fi
     local fleet_esc subj payload
@@ -127,8 +127,27 @@ plane_presence_samples() {
         fi
         payload='{"subject_kind":"bot_instance","subject":"'"$subj"'","metric":"bot.heartbeat","value":{"state":"'"$verdict"'"'"$agefrag"'}}'
     fi
-    ( printf '%s' '{"events":[{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":'"$payload"'}]}' \
-        | plane_emit_events keepalive || true ) >>"$LOG" 2>&1 &
+    # The background emit is WALL-CLOCK BOUNDED (retro round): under a
+    # permanently wedged rung (the estate's documented D-state SD stall)
+    # an unbounded emit made "bounded pileup" a RATE, not a ceiling —
+    # ~720 stuck processes/day. The outer subshell reaps its emit at
+    # KEEPALIVE_EMIT_TIMEOUT_S (portable — macOS has no timeout(1)), so
+    # the in-flight claim self-expires and concurrency ceilings at ~1.
+    # The staleness window derives from the SAME knob (+10s), keeping the
+    # guard and the reaper coupled by construction rather than by twin
+    # constants.
+    local _eto="${KEEPALIVE_EMIT_TIMEOUT_S:-110}"
+    (
+        printf '%s' '{"events":[{"event_type":"metric_sample","emitter":"keepalive","fleet":"'"$fleet_esc"'","payload":'"$payload"'}]}' \
+            | plane_emit_events keepalive >>"$LOG" 2>&1 &
+        _w=$!
+        _i=0
+        while kill -0 "$_w" 2>/dev/null && [ "$_i" -lt "$_eto" ]; do
+            sleep 1
+            _i=$((_i + 1))
+        done
+        kill -9 "$_w" 2>/dev/null || true
+    ) >/dev/null 2>&1 &
     printf '%d' $! > "$pidf" 2>/dev/null || true
 }
 

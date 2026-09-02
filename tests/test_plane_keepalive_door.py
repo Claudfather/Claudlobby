@@ -250,3 +250,28 @@ def test_pid_guard_honors_fresh_claims_and_ignores_stale_ones(tmp_path):
         assert [s["metric"] for s in rows] == ["bot.heartbeat"]
     finally:
         holder.kill()
+
+
+def test_wedged_emit_is_reaped_at_the_timeout(tmp_path):
+    """Retro round: under a PERMANENTLY wedged rung the unbounded emit
+    made pileup a rate, not a ceiling (~720 stuck procs/day on the
+    documented D-state mode). The reaper kills the emit at
+    KEEPALIVE_EMIT_TIMEOUT_S; the pin runs a 3s bound against a 300s
+    wedge and asserts the wedge process is GONE shortly after."""
+    libdir, bot, env = _rig(tmp_path)
+    wedge = tmp_path / "wedge-cli"
+    wedge.write_text("#!/bin/bash\nsleep 300\n")
+    wedge.chmod(0o755)
+    env["PLANE_EMIT_CLI"] = str(wedge)
+    env["KEEPALIVE_EMIT_TIMEOUT_S"] = "3"
+    r = _tick(libdir, bot, env)
+    assert r.returncode == 0, r.stderr
+    deadline = time.monotonic() + 30
+    alive = True
+    while alive and time.monotonic() < deadline:
+        p = subprocess.run(["pgrep", "-f", str(wedge)],
+                           capture_output=True, text=True)
+        alive = bool(p.stdout.strip())
+        if alive:
+            time.sleep(1)
+    assert not alive, "the wedged emit survived its reaper"
