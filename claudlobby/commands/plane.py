@@ -582,6 +582,53 @@ def cmd_plane_prune(args) -> int:
     return _guarded("plane prune", run)
 
 
+def cmd_plane_expire(args) -> int:
+    """Attention expiry sweep: emit a terminal `expired` task event for
+    every assignment whose deadline passed more than the horizon ago and
+    that nothing has closed — so the attention queue shows what needs the
+    operator NOW, not last Tuesday. A Lane-B fact through normal ingest,
+    idempotent by construction (already-terminal rows are excluded). Runs
+    from a dormant timer, never the ingest daemon. `--dry-run` reports."""
+    root = _resolve_paths(args).root
+
+    def run() -> int:
+        from ..plane.expiry import (
+            DEFAULT_AFTER_DAYS, expirable, expired_events)
+        from ..plane.emit_api import emit_batch
+
+        path = db_path(root)
+        if not path.exists():
+            print(f"expire: no plane db at {path} — nothing to sweep",
+                  file=sys.stderr)
+            return 0
+        days = args.after_days if args.after_days is not None \
+            else DEFAULT_AFTER_DAYS
+        if days < 0:
+            raise ContractViolation(
+                [{"loc": ("after_days",), "msg": "expiry horizon cannot be"
+                  " negative"}])
+        conn = connect(path)
+        try:
+            migrate(conn)
+            plan = expirable(conn, after_days=days)
+        finally:
+            conn.close()
+        for aid in plan.unattributed:
+            print(f"expire: skipped {aid} — no fleet attribution (never"
+                  " emitted under a fabricated fleet)", file=sys.stderr)
+        if args.dry_run or not plan.rows:
+            print(f"attention: {'would expire' if args.dry_run else 'expired'}"
+                  f" {len(plan.rows)} assignment(s) overdue >{days}d"
+                  f" (cutoff {plan.cutoff})")
+            return 0
+        emit_batch(root, expired_events(plan, after_days=days))
+        print(f"attention: expired {len(plan.rows)} assignment(s) overdue"
+              f" >{days}d (cutoff {plan.cutoff})")
+        return 0
+
+    return _guarded("plane expire", run)
+
+
 def cmd_plane_view(args) -> int:
     """Run the Phase-4 operator-plane view daemon in the foreground (same
     supervision posture as serve: systemd/launchd own backgrounding). Binds

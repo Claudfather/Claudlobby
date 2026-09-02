@@ -1685,6 +1685,39 @@ def compose_access_json(bot: BotConfig, fleet: FleetConfig) -> dict | None:
 # ----------------------------------------------------------------------
 
 
+def resolve_effective_protocols(
+    bot: BotConfig, fleet: FleetConfig, paths: Paths, *, is_manager: bool
+) -> list[str]:
+    """The protocols a bot is ACTUALLY composed with: the declared list plus
+    the system defaults that are available to this fleet (manager-role
+    defaults only for a manager), then the fleet-fit exclusions applied to
+    the FINAL list. ONE definition: the compose path and the plane's
+    registry keyframe both call this, so what the registry records is what
+    the bot runs with — a keyframe of the declared-only list read every
+    default protocol as "unused" on every overlay fleet (#1405 gauntlet).
+
+    The exclusions run OUTSIDE the defaults branch, because the hazard is
+    the DECLARED half — which the availability gate never sees. Measured
+    before that line existed: a vault-wired fleet declaring
+    `shared-documentation` composed the hand-scan form, the vault form and
+    the template's vault section — three `Shared Documentation` headings
+    with opposite instructions (#1172 in a worse form). Opting out of the
+    defaults must not re-admit a declared form that does not fit the fleet.
+    """
+    facts = defaults.Facts(
+        shared_docs=paths.shared_docs is not None,
+        vault_wired=bot_is_vault_wired(bot),
+    )
+    protocol_names = list(bot.protocols)
+    sd = fleet.system_defaults
+    if sd.enabled and sd.protocols:
+        roles = (defaults.ROLE_MANAGER,) if is_manager else ()
+        for name in defaults.resolve("protocols", roles):
+            if defaults.available(name, facts) and name not in protocol_names:
+                protocol_names.append(name)
+    return defaults.resolve_exclusions(protocol_names, facts)
+
+
 def resolve_effective_integrations(bot: BotConfig, paths: Paths) -> list[str]:
     """Return the list of integration names to use for a bot.
 
@@ -1769,26 +1802,8 @@ def compose_claude_md(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     # matters. `tests/test_shared_docs_default.py` pins the agreement on the
     # composed FILE rather than at the predicate, so it holds however either
     # side is spelled.
-    facts = defaults.Facts(
-        shared_docs=paths.shared_docs is not None,
-        vault_wired=bot_is_vault_wired(bot),
-    )
-    protocol_names = list(bot.protocols)
-    sd = fleet.system_defaults
-    if sd.enabled and sd.protocols:
-        roles = (defaults.ROLE_MANAGER,) if is_manager else ()
-        for name in defaults.resolve("protocols", roles):
-            if defaults.available(name, facts) and name not in protocol_names:
-                protocol_names.append(name)
-    # Applied to the FINAL list, and OUTSIDE the opt-out branch above, because
-    # the hazard is the DECLARED half — which the availability gate never sees.
-    # Measured before this line existed: a vault-wired fleet declaring
-    # `shared-documentation` composed the hand-scan form, the vault form, and
-    # the template's vault section — three `Shared Documentation` headings with
-    # opposite instructions, which is #1172 in a worse form than the original.
-    # Outside the branch because opting out of the DEFAULTS must not re-admit a
-    # declared form that does not fit the fleet.
-    protocol_names = defaults.resolve_exclusions(protocol_names, facts)
+    protocol_names = resolve_effective_protocols(
+        bot, fleet, paths, is_manager=is_manager)
 
     # Projects table composes for managers only (F6-style context budget:
     # workers resolve tiers from the bot.conf env map, not prose).
@@ -4186,6 +4201,8 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
             extra_env = _host_job_plane_arming(paths, "PLANE_PRUNE_ENABLED")
         elif name == "plane-host-probe":
             extra_env = _host_job_plane_arming(paths, "PLANE_EMIT_ENABLED")
+        elif name == "plane-expire":
+            extra_env = _host_job_plane_arming(paths, "PLANE_EXPIRE_ENABLED")
         else:
             extra_env = None
         _write_timer_units(
