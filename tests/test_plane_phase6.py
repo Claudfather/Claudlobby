@@ -214,6 +214,8 @@ def test_org_tree_keeps_every_roster_bot_and_lists_a_duplicate_edge_once(tmp_pat
     assert [r["bot"] for r in t["roots"]] == ["a", "c"]          # c present as a root
     assert [x["bot"] for x in t["roots"][0]["reports"]] == ["b"]  # once
     assert t["bots"] == 3
+    assert t["cycles"] == []       # c is a legitimate root, NOT a disclosed cycle
+    assert not any(r.get("cycle") for r in t["roots"])
 
 
 def test_org_fleet_none_is_deterministic_and_disclosed(tmp_path):

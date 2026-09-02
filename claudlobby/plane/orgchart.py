@@ -58,7 +58,10 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
                             for c in sorted(children.get(bot, []))]}
 
     tree = [node(r, frozenset()) for r in roots]
-    # a pure cycle (no root at all) would otherwise vanish: surface it
+    # a pure cycle among EDGED bots (no root at all) would otherwise vanish:
+    # surface it as a cycle. Roster bots with no edge are roots above, never
+    # cycles (a mutant that dropped the roots clause re-added them here AS
+    # cycles and stayed green — the pin now asserts cycles == [])
     reached = set()
 
     def walk(n):
@@ -67,7 +70,7 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
             walk(c)
     for n in tree:
         walk(n)
-    orphaned = sorted((edged | roster) - reached)
+    orphaned = sorted(edged - reached)
     for b in orphaned:
         cycles.append(b)
         tree.append(node(b, frozenset({b})))
