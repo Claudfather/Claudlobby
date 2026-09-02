@@ -263,7 +263,10 @@ def test_wedged_emit_is_reaped_at_the_timeout(tmp_path):
     wedge.write_text("#!/bin/bash\nsleep 300\n")
     wedge.chmod(0o755)
     env["PLANE_EMIT_CLI"] = str(wedge)
-    env["KEEPALIVE_EMIT_TIMEOUT_S"] = "3"
+    # 8s, not 3: under battery load the reaper can win the race against
+    # the wedge SPAWN itself (cold rung ~1-2s, worse loaded), failing
+    # phase 1 vacuously — measured as a battery-only flake
+    env["KEEPALIVE_EMIT_TIMEOUT_S"] = "8"
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
 
