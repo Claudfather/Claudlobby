@@ -402,6 +402,7 @@ function renderFleetTabs(identities) {
     b.addEventListener("click", () => {
       currentFleet = b.dataset.fleet;
       renderFleetTabs(identities);   // instant highlight
+      if (currentView === "fleet") pollFleet();   // the tab follows the pick
       refreshBoards();               // guarded path (generation stale-guard)
       if (!$("search-results").hidden) {
         // active search: re-fire in the NEW room — otherwise the visible
@@ -822,7 +823,12 @@ const EQUIP_ORDER = ["expertise", "skills", "mcp", "integrations", "guardrails",
 async function pollFleet() {
   if (currentView !== "fleet") return;
   renderState($("fleet"), { state: "loading" });
-  renderInventory(await jget("/api/inventory"));
+  // honor the fleet picker (the same f= the channel/search use); with no
+  // pick, every fleet the host records — cross-fleet twins come back
+  // fleet-qualified from the server (gauntlet)
+  const f = currentFleet && currentFleet !== "all"
+    ? `?fleet=${encodeURIComponent(currentFleet)}` : "";
+  renderInventory(await jget("/api/inventory" + f));
 }
 
 function countsLine(counts) {
@@ -868,8 +874,9 @@ function renderInventory(env) {
     return `<details class="lib-group"><summary>${esc(cat)}
         <small>${items.length} · ${inUse} in use</small></summary>
       ${items.map((i) => `<div class="lib-row${i.used_by.length ? "" : " unused"}">
-        <span>${esc(i.name)}</span>
-        <small>${i.used_by.length ? esc(i.used_by.join(", ")) : "unused"}</small>
+        <span>${esc(i.name)}${i.tier && i.tier !== "shared" ? ` <small>${esc(i.tier)}</small>` : ""}</span>
+        <small>${i.shadowed ? "shadowed by an overlay copy"
+          : i.used_by.length ? esc(i.used_by.join(", ")) : "unused"}</small>
       </div>`).join("")}</details>`;
   }).join("");
   el.innerHTML = `
@@ -908,8 +915,8 @@ async function openEquipment(alias) {
     .join("") || `<div class="dim">no equipment recorded</div>`;
   const po = b.posture || {};
   const changes = b.changes.length ? b.changes.slice(0, 20).map((c) => `
-    <div class="chg-row"><small>${esc(c.occurred_at || "")}</small>
-      ${esc((c.fields || []).join(", "))}</div>`).join("")
+    <div class="chg-row"><small>${esc(ago(c.occurred_at) || c.occurred_at || "")}</small>
+      ${c.kind && c.kind !== "updated" ? `<b>${esc(c.kind)}</b> ` : ""}${esc((c.fields || []).join(", "))}</div>`).join("")
     : `<div class="dim">no changes across ${esc(b.versions)} keyframe${b.versions === 1 ? "" : "s"}</div>`;
   box.innerHTML = `
     <div class="ed-head"><b>${esc(b.short)}</b>

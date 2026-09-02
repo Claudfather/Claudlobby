@@ -168,6 +168,8 @@ def test_equipment_detail_carries_composition_and_history_diffs(tmp_path):
     assert eq["org"]["mission"] == "run the fleet"
     assert eq["versions"] == 2
     assert len(eq["changes"]) == 1
+    assert eq["changes"][0]["kind"] == "updated"
+    assert eq["changes"][0]["occurred_at"]          # valid_from, never None
     changed = eq["changes"][0]["fields"]
     assert any("skills" in f for f in changed)
     assert any("guardrails" in f for f in changed)
@@ -204,3 +206,95 @@ def test_absent_db_is_typed_never_zero(tmp_path):
     body = TestClient(create_app(root)).get("/api/inventory").json()
     assert body["state"] == "absent"
     assert "data" not in body
+
+
+def test_history_is_newest_first_with_timestamps(tmp_path):
+    """Gauntlet SEV-2 fold: the history door aliases the instant as
+    valid_from; every change carries it (not None) and the list is
+    newest-first across >1 change."""
+    root = _root(tmp_path)
+    _seed(root)
+    emit_batch(root, [_bot(f"bot:{FLEET}/erlich", skills=("dispatch",),
+                           mcp=("github",), guardrails=("no-push-main",),
+                           scan="s2", mission="run the fleet"), _done("s2")])
+    emit_batch(root, [_bot(f"bot:{FLEET}/erlich", skills=("dispatch",),
+                           mcp=("github",), guardrails=("no-push-main",),
+                           model="sonnet", scan="s3", mission="run the fleet"),
+                      _done("s3")])
+    conn = connect(db_path(root))
+    try:
+        eq = bot_equipment(conn, f"bot:{FLEET}/erlich")
+    finally:
+        conn.close()
+    assert [c["scan_id"] for c in eq["changes"]] == ["s3", "s2"]   # newest first
+    assert all(c["occurred_at"] for c in eq["changes"])
+    assert "model" in eq["changes"][0]["fields"]                   # s3: model
+    assert any("skills" in f for f in eq["changes"][1]["fields"])  # s2: skills
+
+
+def test_tombstone_transition_is_typed_not_a_field_storm(tmp_path):
+    """Gauntlet SEV-3 fold: delete+recreate renders as typed deleted /
+    recreated rows (mirroring recent_changes), never a 10-field diff, and
+    `versions` counts live keyframes only."""
+    root = _root(tmp_path)
+    _seed(root)
+    emit_batch(root, [
+        {"event_type": "registry_snapshot", "emitter": "t", "fleet": FLEET,
+         "payload": {"entity_type": "bot", "entity_alias": f"bot:{FLEET}/erlich",
+                     "cause": "generate", "scan_id": "s2", "tombstone": True}},
+        _done("s2")])
+    emit_batch(root, [_bot(f"bot:{FLEET}/erlich", skills=("dispatch", "pulse"),
+                           mcp=("github",), guardrails=("no-push-main",),
+                           scan="s3", mission="run the fleet"), _done("s3")])
+    conn = connect(db_path(root))
+    try:
+        eq = bot_equipment(conn, f"bot:{FLEET}/erlich")
+    finally:
+        conn.close()
+    kinds = [c["kind"] for c in eq["changes"]]
+    assert kinds == ["recreated", "deleted"]
+    assert all(c["fields"] == [] for c in eq["changes"])
+    assert eq["versions"] == 2                      # the tombstone row excluded
+
+
+def test_overlay_shadowed_shared_item_is_not_in_use(tmp_path):
+    """Gauntlet SEV-3 fold: library_search_dirs is overlay-first — when a
+    fleet overlay carries the same (category, name), only the overlay is
+    composed; the shared copy is marked shadowed with used_by=[] so the
+    operator does not keep a dead file."""
+    root = _root(tmp_path)
+    _seed(root)
+    ov = _lib("skills", "pulse")
+    ov["payload"]["entity_alias"] = f"{FLEET}/skills/pulse"
+    ov["payload"]["payload"]["source_tier"] = "fleet-overlay"   # closed enum
+    emit_batch(root, [ov, _done("s1b")])
+    conn = connect(db_path(root))
+    try:
+        inv = fleet_inventory(conn, FLEET)
+    finally:
+        conn.close()
+    rows = {r["alias"]: r for r in inv["library"]}
+    assert rows[f"{FLEET}/skills/pulse"]["used_by"] == ["dinesh", "erlich"]
+    assert rows["shared/skills/pulse"]["shadowed"] is True
+    assert rows["shared/skills/pulse"]["used_by"] == []
+
+
+def test_cross_fleet_short_name_collision_is_qualified(tmp_path):
+    """Gauntlet SEV-5 fold: two fleets both naming `erlich` (the #526
+    class) are labelled fleet/erlich in an all-fleets read, so cards stay
+    distinguishable and used_by never attributes one twin's equipment to
+    the other."""
+    root = _root(tmp_path)
+    _seed(root)
+    twin = _bot("bot:g/erlich", skills=("dispatch",), scan="t1")
+    twin["fleet"] = "g"
+    emit_batch(root, [twin, {**_done("t1"), "fleet": "g"}])
+    conn = connect(db_path(root))
+    try:
+        inv = fleet_inventory(conn, None)          # all fleets
+    finally:
+        conn.close()
+    shorts = sorted(b["short"] for b in inv["bots"])
+    assert shorts == ["dinesh", "f/erlich", "g/erlich"]
+    lib = {(r["category"], r["name"]): r["used_by"] for r in inv["library"]}
+    assert lib[("skills", "dispatch")] == ["f/erlich", "g/erlich"]

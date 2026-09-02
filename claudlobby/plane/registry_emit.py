@@ -320,6 +320,11 @@ def project_payload(paths, fleet, proj, vault_rev: str | None) -> dict:
     }
 
 
+def _composer():
+    from .. import composer as _c   # lazy: composer imports this package
+    return _c
+
+
 def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
     tp = bot.tool_permissions
     posture = {
@@ -362,9 +367,20 @@ def bot_payload(paths, fleet, bot, vault_rev: str | None) -> dict:
         "voice": bot.voice,
         "skills": sorted(bot.skills),
         "mcp": sorted(getattr(m, "name", str(m)) for m in bot.mcp),
-        "integrations": sorted(bot.integrations),
+        # EFFECTIVE sets, through the composer's own resolvers (one
+        # definition): the composer auto-pairs an integration for every MCP
+        # with a matching integrations/<name>.md and adds the available
+        # default protocols at compose time — none of which the DECLARED
+        # lists carry, so a keyframe of bot.integrations/bot.protocols read
+        # every auto-paired integration and default protocol as "unused" in
+        # the inventory while composed into the bot's CLAUDE.md (#1405
+        # gauntlet SEV-1). Lazy import: composer imports the plane package.
+        "integrations": sorted(_composer().resolve_effective_integrations(
+            bot, paths)),
         "guardrails": sorted(bot.guardrails),
-        "protocols": sorted(bot.protocols),
+        "protocols": sorted(_composer().resolve_effective_protocols(
+            bot, fleet, paths,
+            is_manager=bot.bot_id in fleet.manager_bots())),
         "resources": sorted(bot.resources),
         "lessons": sorted(bot.lessons),
         "principles": sorted(bot.principles),

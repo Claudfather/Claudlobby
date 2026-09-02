@@ -3,7 +3,7 @@ sharpened by the operator's wording: "a viz over the bot directory / composed
 config", per bot and rolled up per fleet).
 
 The data is ALREADY recorded: every bot keyframe carries an ``equipment``
-dict (expertise, skills, mcp, guardrails, protocols, hooks, …) plus posture
+dict (expertise, skills, mcp, guardrails, protocols, …) plus posture
 and org, and every library item / project is keyframed too. The v1 rail
 briefly listed all of it (208 library items flooding the participant rail),
 was filtered to participants, and the operator asked for the CONTENT to get
@@ -41,10 +41,16 @@ EQUIPMENT_KEYS = (
 
 
 def _short(alias: str) -> str:
-    # bot:<fleet>/<name> -> name ; shared/<cat>/<name> -> name ; else alias
-    if alias.startswith("bot:"):
-        return alias.rsplit("/", 1)[-1]
-    return alias.rsplit("/", 1)[-1] if "/" in alias else alias
+    # bot:<fleet>/<name> -> name ; shared/<cat>/<name> -> name ; a bare
+    # alias has no "/" and rsplit returns it whole (one branch, gauntlet)
+    return alias.rsplit("/", 1)[-1]
+
+
+def _fleet_of(alias: str) -> str | None:
+    # bot:<fleet>/<name> -> fleet
+    if alias.startswith("bot:") and "/" in alias:
+        return alias[4:].rsplit("/", 1)[0]
+    return None
 
 
 def _equipment_of(payload: dict) -> dict:
@@ -81,11 +87,24 @@ def fleet_inventory(conn, fleet: str | None = None) -> dict:
                                  fleet=fleet)
 
     bot_rows = [_bot_row(b) for b in bots]
-    # (category, name) -> [bot short names] — the used_by join
+    # A short name that two fleets both use (an `erlich` on each — the #526
+    # collision class) is qualified as fleet/name in every label, so an
+    # all-fleets read never shows two indistinguishable cards or attributes
+    # one bot's equipment to its twin (gauntlet, probed).
+    seen: dict[str, int] = {}
+    for b in bots:
+        seen[_short(b["entity_alias"])] = seen.get(_short(b["entity_alias"]), 0) + 1
+
+    def _label(alias: str) -> str:
+        sh = _short(alias)
+        return f"{_fleet_of(alias)}/{sh}" if seen.get(sh, 0) > 1 else sh
+    for r in bot_rows:
+        r["short"] = _label(r["alias"])
+    # (category, name) -> [bot labels] — the used_by join
     equips: dict[tuple, list] = {}
     for b in bots:
         eq = _equipment_of(b.get("payload") or {})
-        short = _short(b["entity_alias"])
+        short = _label(b["entity_alias"])
         for cat, names in eq.items():
             if isinstance(names, list):
                 for n in names:
@@ -93,17 +112,27 @@ def fleet_inventory(conn, fleet: str | None = None) -> dict:
             elif isinstance(names, str) and names:
                 equips.setdefault((cat, names), []).append(short)
 
+    # library_search_dirs is overlay-first: when a fleet overlay carries the
+    # same (category, name) as a shared item, only the OVERLAY is composed.
+    # The shared copy must not read "in use" or the operator keeps a dead
+    # file (gauntlet, probed): it is marked shadowed with used_by=[].
+    overlay_keys = {(p.get("category"), p.get("name"))
+                    for p in ((it.get("payload") or {}) for it in items)
+                    if p.get("source_tier") not in (None, "shared")}
     library = []
     for it in items:
         p = it.get("payload") or {}
         cat, name = p.get("category"), p.get("name")
+        shadowed = (p.get("source_tier") == "shared"
+                    and (cat, name) in overlay_keys)
         library.append({
             "alias": it["entity_alias"],
             "category": cat,
             "name": name,
             "tier": p.get("source_tier"),
             "title": p.get("title"),
-            "used_by": sorted(equips.get((cat, name), [])),
+            "shadowed": shadowed,
+            "used_by": [] if shadowed else sorted(equips.get((cat, name), [])),
         })
     library.sort(key=lambda r: (str(r["category"]), str(r["name"])))
 
@@ -138,18 +167,33 @@ def bot_equipment(conn, alias: str) -> dict | None:
     p = ent.get("payload") or {}
     eq = _equipment_of(p)
     history = _rr.entity_history(conn, alias)   # oldest..newest
+    # The history door aliases the row's instant as valid_from (SCD2), NOT
+    # occurred_at — reading the wrong key rendered every change with an
+    # empty timestamp (gauntlet SEV-2: "what changed last Tuesday" needs
+    # the when). A tombstone transition is TYPED deleted/recreated rather
+    # than rendered as a 10-field storm — mirroring recent_changes.
     changes = []
-    prev = None
+    prev, prev_tomb = None, None
     for h in history:
         hp = h.get("payload") or {}
+        tomb = bool(h.get("tombstone"))
+        when, sid = h.get("valid_from"), h.get("scan_id")
         if prev is not None:
-            d = _rr.diff_fields(prev, hp)
-            if d:
-                changes.append({"occurred_at": h.get("occurred_at"),
-                                "scan_id": h.get("scan_id"),
-                                "fields": sorted(d.keys())})
-        prev = hp
+            if tomb and not prev_tomb:
+                changes.append({"occurred_at": when, "scan_id": sid,
+                                "kind": "deleted", "fields": []})
+            elif prev_tomb and not tomb:
+                changes.append({"occurred_at": when, "scan_id": sid,
+                                "kind": "recreated", "fields": []})
+            elif not tomb:
+                d = _rr.diff_fields(prev, hp)
+                if d:
+                    changes.append({"occurred_at": when, "scan_id": sid,
+                                    "kind": "updated",
+                                    "fields": sorted(d.keys())})
+        prev, prev_tomb = hp, tomb
     changes.reverse()   # newest first for the card
+    live_versions = sum(1 for h in history if not h.get("tombstone"))
     return {
         "alias": alias, "short": _short(alias),
         "model": p.get("model"), "account": p.get("account"),
@@ -161,6 +205,6 @@ def bot_equipment(conn, alias: str) -> dict | None:
         "composed_hashes": p.get("composed_hashes") or {},
         "vault_rev": p.get("vault_rev"),
         "last_seen": ent.get("occurred_at"),
-        "versions": len(history),
+        "versions": live_versions,
         "changes": changes,
     }
