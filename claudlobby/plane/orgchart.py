@@ -39,6 +39,7 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
     # TypeError → HTTP 500 on a contract-valid keyframe). Skip and DISCLOSE
     # a malformed edge rather than crash the operator's view.
     malformed = 0
+    malformed_bots: list[str] = []   # NAMED, so "2 malformed" and "x is a root" connect
     edges = []
     for e in (p.get("org_edges") or []):
         if (isinstance(e, dict) and isinstance(e.get("bot"), str) and e["bot"]
@@ -46,7 +47,12 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
             edges.append(e)
         else:
             malformed += 1
-    roster = {b for b in (p.get("roster") or [e["bot"] for e in edges]) if isinstance(b, str)}
+            b = e.get("bot") if isinstance(e, dict) else None
+            if isinstance(b, str) and b:
+                malformed_bots.append(b)
+    # truthiness too: an empty-string roster entry is contract-valid (no
+    # min_length) and rendered as a phantom root (round-2 lens)
+    roster = {b for b in (p.get("roster") or [e["bot"] for e in edges]) if isinstance(b, str) and b}
     edged = {e["bot"] for e in edges}
     children: dict[str, list] = defaultdict(list)
     for e in edges:
@@ -87,5 +93,5 @@ def org_tree(conn, fleet: str | None = None) -> dict | None:
     return {"fleet": ent["entity_alias"], "manager": p.get("manager"),
             "groups": p.get("groups") or [], "roots": tree,
             "bots": len(roster | edged), "cycles": sorted(set(cycles)),
-            "malformed_edges": malformed,
+            "malformed_edges": malformed, "malformed_bots": sorted(set(malformed_bots)),
             "available": available, "last_seen": ent.get("occurred_at")}

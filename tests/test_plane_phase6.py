@@ -256,6 +256,7 @@ def test_malformed_org_edges_are_skipped_and_disclosed_never_a_500(tmp_path):
     assert body["state"] == "ok"
     d = body["data"]
     assert d["malformed_edges"] == 2
+    assert d["malformed_bots"] == ["dinesh"]      # named: the int-bot edge has no name to give
     assert [r["bot"] for r in d["roots"]] == ["dinesh", "erlich"]   # dinesh: no valid edge -> root
     assert [x["bot"] for x in d["roots"][1]["reports"]] == ["gilfoyle"]
 
@@ -289,3 +290,19 @@ def test_sql_fleet_scope_escapes_like_wildcards(tmp_path):
         assert [r["alias"] for r in bot_utilization(conn, now=NOW, fleet="f_x")] == ["bot:f_x/b"]
     finally:
         conn.close()
+
+
+def test_empty_roster_entry_is_not_a_phantom_root(tmp_path):
+    """Round-2 lens: roster is list[str] with no min_length, so "" is
+    contract-valid — it rendered as a nameless root. Filtered by truthiness
+    like the bot field."""
+    root = _root(tmp_path)
+    emit_batch(root, [_fleet_kf([{"bot": "erlich", "reports_to": None}],
+                                roster=["erlich", ""]), _done()])
+    conn = connect(db_path(root))
+    try:
+        t = org_tree(conn, F)
+    finally:
+        conn.close()
+    assert [r["bot"] for r in t["roots"]] == ["erlich"]
+    assert t["bots"] == 1

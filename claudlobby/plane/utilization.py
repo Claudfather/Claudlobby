@@ -25,7 +25,10 @@ from ..utilization import compute_busy_pct, find_state_transition
 
 # Fleet scope is applied IN SQL (a LIKE on the alias) — the lens measured
 # 730 ms at 21 bots × 7 d when every fleet's rows were fetched and parsed
-# before Python discarded the other fleets'.
+# before Python discarded the other fleets'. Measured trade (round 2): a
+# scan with a LIKE, not a seek (no alias index) — ~1.4× faster for a
+# scoped read on a multi-fleet host, ~15% SLOWER for fleet=None ("all")
+# where nothing is discarded. The scoped read is the common one.
 HEARTBEAT_SERIES_SQL = (
     "SELECT i.alias AS alias, m.occurred_at AS occurred_at, m.value AS value"
     " FROM metric_samples m JOIN identity_registry i ON i.uid = m.subject_uid"
