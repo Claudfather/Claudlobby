@@ -31,6 +31,7 @@ from .plane import (
     cmd_emit,
     cmd_emit_batch,
     cmd_plane_doctor,
+    cmd_plane_prune,
     cmd_plane_registry,
     cmd_plane_schema,
     cmd_plane_open,
@@ -468,6 +469,15 @@ def register_subparsers(sub) -> None:
     po.set_defaults(func=cmd_plane_open)
     psc = psub.add_parser("schema", help="Export JSON Schemas (envelope + families)")
     psc.set_defaults(func=cmd_plane_schema)
+    ppr = psub.add_parser(
+        "prune",
+        help="Age out raw metric_samples past the retention window (30d;"
+        " family-scoped, never the ledger)")
+    ppr.add_argument("--days", type=int, default=None,
+                     help="Retention window in days (default 30)")
+    ppr.add_argument("--dry-run", action="store_true",
+                     help="Report the count without deleting")
+    ppr.set_defaults(func=cmd_plane_prune)
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")
