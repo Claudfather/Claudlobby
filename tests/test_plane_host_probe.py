@@ -153,14 +153,32 @@ def test_launcher_parses_and_references():
     assert r.returncode == 0, r.stderr
 
 
-def test_boot_time_is_the_real_instant_not_1970_and_utc(tmp_path):
-    """r-gauntlet SEV-1 (proven live on macOS): the greedy sed matched
-    `usec` inside kern.boottime, recording a 1970 boot every minute on
-    every Mac. The first-digit-run extraction gets the real sec; UTC+Z."""
+def test_boot_time_sed_extracts_sec_not_usec():
+    """r-gauntlet SEV-1, pinned PORTABLY (the bug was in the parse, so pin
+    the parse — CI is Linux and prefers /proc/stat, which a rig cannot
+    stub): the exact macOS extraction must take `sec`, NOT the `usec` the
+    greedy `.*sec = ` captured (every Mac recorded a 1970 boot/minute)."""
+    boottime = "{ sec = 1786878506, usec = 60460 } Sun Aug 16 2026"
+    good = subprocess.run(
+        ["sed", "-n", r"s/[^0-9]*\([0-9][0-9]*\).*/\1/p"],
+        input=boottime, capture_output=True, text=True).stdout.strip()
+    assert good == "1786878506"              # sec, not usec
+    bad = subprocess.run(
+        ["sed", "-n", r"s/.*sec = *\([0-9]*\).*/\1/p"],
+        input=boottime, capture_output=True, text=True).stdout.strip()
+    assert bad == "60460"                    # the old greedy bug, for contrast
+
+
+def test_boot_time_is_a_real_utc_instant_not_1970(tmp_path):
+    """End-to-end, OS-tolerant: whichever source the host uses (/proc/stat
+    on Linux, kern.boottime on macOS) the recorded boot_time is a valid
+    UTC+Z ISO instant and never 1970 (the SEV-1 symptom)."""
+    import re
     root, env = _rig(tmp_path)
     assert _run(root, env).returncode == 0
     bt = _samples(root)["host.boot_time"]["value"].strip('"')
-    assert bt == "2026-08-16T11:08:26Z"      # real instant, not 1970, +Z
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", bt), bt
+    assert not bt.startswith("1970")
 
 
 def test_comma_decimal_locale_load_is_dropped_not_corrupted(tmp_path):
