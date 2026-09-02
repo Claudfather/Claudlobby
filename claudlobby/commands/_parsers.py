@@ -31,6 +31,7 @@ from .plane import (
     cmd_emit,
     cmd_emit_batch,
     cmd_plane_doctor,
+    cmd_plane_expire,
     cmd_plane_prune,
     cmd_plane_registry,
     cmd_plane_schema,
@@ -478,6 +479,17 @@ def register_subparsers(sub) -> None:
     ppr.add_argument("--dry-run", action="store_true",
                      help="Report the count without deleting")
     ppr.set_defaults(func=cmd_plane_prune)
+    pex = psub.add_parser(
+        "expire",
+        help="Attention expiry sweep: emit `expired` for assignments overdue"
+        " past the horizon (7d; a Lane-B fact through ingest, idempotent)")
+    pex.add_argument("--after-days", type=int, default=None,
+                     help="Days an overdue assignment must be QUIET (no task"
+                     " event) before it expires (default 7; 0 = anything overdue"
+                     " and silent right now — sharp)")
+    pex.add_argument("--dry-run", action="store_true",
+                     help="Report the count without emitting")
+    pex.set_defaults(func=cmd_plane_expire)
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")

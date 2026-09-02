@@ -54,6 +54,21 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 600
+    # Attention expiry sweep: emit a terminal `expired` task event for
+    # every assignment whose deadline passed more than the horizon ago and
+    # that nothing closed — the attention queue then shows what needs the
+    # operator NOW, not last Tuesday. A Lane-B fact through normal ingest
+    # (never a table write), idempotent by construction. DORMANT by default
+    # and self-gated on PLANE_EXPIRE_ENABLED (a policy sweep must not arrive
+    # switched on via a root pull). Horizon: override the script line
+    # (e.g. "... --after-days 14").
+    plane-expire:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/plane-expire.sh"
+      schedule: "*-*-* 05:30:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
     # Host hardware/system facet emitter (spec §2b, cause=probe): reads the
     # VOLATILE facets (load, available RAM, free disk, Pi thermal/undervolt,
     # boot time) — which F12 keeps OUT of the registry keyframe — and emits
