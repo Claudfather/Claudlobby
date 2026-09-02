@@ -96,7 +96,19 @@ def derive_presence(heartbeats, live_panes, *, now,
     for r in heartbeats:
         alias = _get(r, "alias")
         raw = _get(r, "value")
-        val = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        # The MetricSample.value contract is `object` (number|bool|str|
+        # object), so a bot.heartbeat with a SCALAR or list value commits
+        # fine — from a non-keepalive emitter, a legacy import, or a manual
+        # emit. A reader that assumed a dict 500'd the WHOLE panel on one
+        # poison row (probed: worse than the mislabel #1361 kills). A value
+        # that cannot be read as a state-bearing object IS an unknown-state
+        # heartbeat: parse defensively, never trust, never crash.
+        try:
+            val = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            val = None
+        if not isinstance(val, dict):
+            val = {}
         ingested = _parse_iso(_get(r, "ingested_at"))
         age = (now - ingested).total_seconds() if ingested else None
         hb_by_alias[alias] = (val, age)

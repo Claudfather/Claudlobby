@@ -753,7 +753,18 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
         except ValueError:
             stale_after = STALE_AFTER_S
         now = datetime.now(timezone.utc)
-        live = sampler.snapshot()["panes"] if sampler.available else []
+        # the live half must fail INDEPENDENTLY of the recorded half (the
+        # endpoint's own law): snapshot() is a pure cache read, but a raise
+        # or a shape without "panes" must not 500 the panel and take the
+        # recorded half down with it (probed) — degrade to no live poll,
+        # disclosed, exactly as the db side does
+        sampler_degraded = False
+        live = []
+        if sampler.available:
+            try:
+                live = sampler.snapshot().get("panes", [])
+            except Exception:  # noqa: BLE001 — a read door must not crash
+                sampler_degraded = True
         env = _envelope(root, lambda c: [
             dict(zip(("alias", "value", "ingested_at"), row))
             for row in c.execute(LATEST_HEARTBEAT_SQL)])
@@ -762,7 +773,8 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                                stale_after_s=stale_after)
         body = {"data": {"bots": [r.__dict__ for r in rows],
                          "counts": presence_counts(rows),
-                         "sampler_available": sampler.available}}
+                         "sampler_available": (sampler.available
+                                               and not sampler_degraded)}}
         if env["state"] != SOURCE_OK:
             # recorded half unreachable — still serve the live half, and
             # DISCLOSE the recorded gap (never a silent zero for a source

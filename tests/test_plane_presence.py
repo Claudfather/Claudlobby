@@ -267,3 +267,105 @@ def test_presence_endpoint_discloses_a_dead_recorded_half(tmp_path):
     # the live half still rendered: the down bot is present from the poll
     assert body["data"]["counts"]["down"] == 1
     assert body.get("remediation")
+
+
+def test_poison_heartbeat_value_never_crashes_the_panel(tmp_path):
+    """r-probe SEV-1 (proven end-to-end): MetricSample.value is `object`,
+    so a bot.heartbeat with a SCALAR/list value commits — and a reader
+    assuming a dict 500'd the WHOLE panel, all healthy bots invisible.
+    A value that can't be read as a state object IS unknown-state; the
+    healthy bots survive."""
+    from claudlobby.plane.emit_api import emit_batch
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+
+    root = tmp_path / "root"
+    (root / "state" / "plane").mkdir(parents=True)
+    (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+
+    def _kf(alias):
+        return {"event_type": "registry_snapshot", "emitter": "t",
+                "fleet": "f", "payload": {
+                    "entity_type": "bot", "entity_alias": alias,
+                    "cause": "generate", "scan_id": "s1",
+                    "payload": {"alias": alias, "account": "a", "service": "s",
+                                "model": "opus",
+                                "posture": {"permissions_mode": "plan"},
+                                "composed_hashes": {}, "declared_hash": "d",
+                                "schema_version": "1"}}}
+
+    def _hbs(alias, value):
+        return {"event_type": "metric_sample", "emitter": "x", "fleet": "f",
+                "payload": {"subject_kind": "bot_instance", "subject": alias,
+                            "metric": "bot.heartbeat", "value": value}}
+
+    good = "bot:f/good"
+    poison = "bot:f/poison"
+    emit_batch(root, [_kf(good), _kf(poison),
+                      _hbs(good, {"state": "BUSY", "marker_age_s": 1}),
+                      _hbs(poison, 42)])          # scalar value — committed
+
+    class _S:
+        available = True
+
+        def snapshot(self):
+            return {"panes": [_pane("f", "good", "up"),
+                              _pane("f", "poison", "up")],
+                    "sampler_running": True}
+
+        def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    body = TestClient(create_app(root, sampler=_S())).get(
+        "/api/presence").json()
+    assert body["state"] == "ok"           # no 500
+    by = {b["alias"]: b["presence"] for b in body["data"]["bots"]}
+    assert by[good] == "working"           # healthy bot survives the poison
+    assert by[poison] == "unknown"         # unreadable value -> unknown-state
+
+
+def test_a_raising_sampler_never_takes_the_recorded_half_down(tmp_path):
+    """r-probe SEV-2: the two halves must fail independently. A sampler
+    whose snapshot() raises degrades to no-live-poll (disclosed), and the
+    recorded half still renders."""
+    from claudlobby.plane.emit_api import emit_batch
+    from fastapi.testclient import TestClient
+    from claudlobby.plane.view import create_app
+
+    root = tmp_path / "root"
+    (root / "state" / "plane").mkdir(parents=True)
+    (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    emit_batch(root, [
+        {"event_type": "registry_snapshot", "emitter": "t", "fleet": "f",
+         "payload": {"entity_type": "bot", "entity_alias": BOT,
+                     "cause": "generate", "scan_id": "s1",
+                     "payload": {"alias": BOT, "account": "a", "service": "s",
+                                 "model": "opus",
+                                 "posture": {"permissions_mode": "plan"},
+                                 "composed_hashes": {}, "declared_hash": "d",
+                                 "schema_version": "1"}}},
+        {"event_type": "metric_sample", "emitter": "keepalive", "fleet": "f",
+         "payload": {"subject_kind": "bot_instance", "subject": BOT,
+                     "metric": "bot.heartbeat", "value": {"state": "IDLE"}}}])
+
+    class _Raises:
+        available = True
+
+        def snapshot(self):
+            raise RuntimeError("sampler exploded")
+
+        def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    body = TestClient(create_app(root, sampler=_Raises())).get(
+        "/api/presence").json()
+    assert body["state"] == "ok"                       # no 500
+    assert body["data"]["sampler_available"] is False  # disclosed degraded
+    # the recorded half judged the bot on its own (no live poll -> sampling)
+    assert body["data"]["bots"][0]["presence"] == "idle"
