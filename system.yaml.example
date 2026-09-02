@@ -62,6 +62,21 @@ host:
       type: oneshot
       persistent: true
       randomized_delay: 600
+    # Metric-sample retention (spec §F20): age out raw metric_samples past
+    # the 30-day incident-join window from the root's plane db. Host-scoped
+    # (one plane db per install, not per fleet); family-scoped DELETE that
+    # NEVER touches the ledger; runs from this timer, never the ingest-only
+    # daemon. DORMANT by default (`enroll: false`) — a DELETE door must not
+    # arrive switched on via a root pull; a host arms it when metric_samples
+    # flow. A fleet changes the window by overriding the script line
+    # (e.g. "... prune --days 60").
+    plane-prune:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/plane-prune.sh"
+      schedule: "*-*-* 05:15:00"
+      type: oneshot
+      persistent: true
+      randomized_delay: 600
     # Source-currency REPORT (read-only, never pulls): how far each framework
     # checkout -- claudlobby AND its discovered siblings -- is behind its newest
     # release, plus the distinct "on the newest release but main has moved"

@@ -510,6 +510,45 @@ def cmd_plane_registry(args) -> int:
     return _guarded("plane registry", run)
 
 
+def cmd_plane_prune(args) -> int:
+    """Age out raw metric_samples past the retention window (chunk 3a;
+    spec §F20: 30-day raws, the incident-join window). Family-scoped — the
+    ONLY DELETE the plane performs, and it never touches the ledger (the
+    dedupe horizon). Runs from a composed timer, NOT the ingest-only
+    daemon. `--dry-run` reports the count without deleting."""
+    root = _resolve_paths(args).root
+
+    def run() -> int:
+        from ..plane.retention import (
+            DEFAULT_RETENTION_DAYS, prune_metric_samples)
+
+        path = db_path(root)
+        if not path.exists():
+            print(f"prune: no plane db at {path} — nothing to age out",
+                  file=sys.stderr)
+            return 0
+        days = args.days if args.days is not None else DEFAULT_RETENTION_DAYS
+        if days < 0:
+            # a negative window's future cutoff would delete EVERYTHING — a
+            # clean contract refusal (rc 2), never a raw traceback (gauntlet)
+            raise ContractViolation(
+                [{"loc": ("days",), "msg": "retention days cannot be"
+                  " negative (a future cutoff would delete all samples)"}])
+        conn = connect(path)
+        try:
+            migrate(conn)   # DowngradeError -> 4 via the guard
+            res = prune_metric_samples(conn, days=days,
+                                       dry_run=args.dry_run)
+        finally:
+            conn.close()
+        verb = "would delete" if res.dry_run else "deleted"
+        print(f"metric_samples: {verb} {res.candidates if res.dry_run else res.deleted}"
+              f" rows older than {days}d (cutoff {res.cutoff})")
+        return 0
+
+    return _guarded("plane prune", run)
+
+
 def cmd_plane_view(args) -> int:
     """Run the Phase-4 operator-plane view daemon in the foreground (same
     supervision posture as serve: systemd/launchd own backgrounding). Binds
