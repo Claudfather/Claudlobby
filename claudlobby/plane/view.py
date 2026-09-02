@@ -798,6 +798,34 @@ def create_app(root: Path, sampler: PaneSampler | None = None):
                 "checked_at": _now_iso()}
         return JSONResponse(body)
 
+    @app.get("/api/inventory")
+    def inventory(fleet: str | None = None):
+        """Fleet inventory (#1405): what is active on a fleet — bots (compact
+        equipment summary), projects, and library items with a used_by
+        rollup. A pure read over chunk B's registry doors; the content the
+        v1 rail demoted, given its own room. `fleet` omitted = every fleet
+        this host records."""
+        from .inventory import fleet_inventory
+        return JSONResponse(
+            _envelope(root, lambda c: fleet_inventory(c, fleet)))
+
+    @app.get("/api/equipment")
+    def equipment(alias: str):
+        """One bot's composition + registry change history (#1405). A bot
+        with no current keyframe is a typed `idle` state with a remedy —
+        absent ≠ empty, never a bare {} the UI would render as a blank
+        card."""
+        from .inventory import bot_equipment
+        env = _envelope(root, lambda c: bot_equipment(c, alias))
+        if env.get("state") == SOURCE_OK and env.get("data") is None:
+            return JSONResponse({
+                "state": "idle",
+                "provenance": env.get("provenance", {}),
+                "remediation": f"no current keyframe for {alias} — run"
+                               " `claudlobby --fleet <name> generate` to scan",
+            })
+        return JSONResponse(env)
+
     @app.get("/api/search")
     def search(q: str = "", fleet: str | None = None, limit: int = 50):
         limit = max(1, min(int(limit), 200))

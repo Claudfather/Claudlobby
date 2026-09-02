@@ -402,6 +402,7 @@ function renderFleetTabs(identities) {
     b.addEventListener("click", () => {
       currentFleet = b.dataset.fleet;
       renderFleetTabs(identities);   // instant highlight
+      if (currentView === "fleet") pollFleet();   // the tab follows the pick
       refreshBoards();               // guarded path (generation stale-guard)
       if (!$("search-results").hidden) {
         // active search: re-fire in the NEW room — otherwise the visible
@@ -563,6 +564,8 @@ function setView(view) {
   if (view !== "channel") $("search").value = "";
   $("grid").hidden = view !== "grid";
   $("trust").hidden = view !== "trust";
+  $("fleet").hidden = view !== "fleet";
+  if (view === "fleet") pollFleet();
   document.querySelectorAll("#view-nav button").forEach((b) =>
     b.classList.toggle("on", b.dataset.view === view));
   clearInterval(gridTimer);
@@ -806,3 +809,139 @@ $("focus-overlay").hidden = true;   // a restored-open modal never survives a lo
   renderState($(id), { state: "loading" }));
 refreshBoards();
 openStream();
+
+
+// --- fleet inventory + per-bot equipment (#1405) ---------------------------
+// The content the v1 rail demoted (208 library items flooding the participant
+// list), given its own room: what is active on the fleet, and what each bot
+// is composed of — "a viz over the bot directory / composed config". Pure
+// read over the registry doors; alias-first; every value esc()'d.
+const EQUIP_ORDER = ["expertise", "skills", "mcp", "integrations", "guardrails",
+  "protocols", "resources", "lessons", "principles", "post_actions", "tools",
+  "plugins", "voice"];
+
+async function pollFleet() {
+  if (currentView !== "fleet") return;
+  renderState($("fleet"), { state: "loading" });
+  // honor the fleet picker (the same f= the channel/search use); with no
+  // pick, every fleet the host records — cross-fleet twins come back
+  // fleet-qualified from the server (gauntlet)
+  const f = currentFleet && currentFleet !== "all"
+    ? `?fleet=${encodeURIComponent(currentFleet)}` : "";
+  renderInventory(await jget("/api/inventory" + f));
+}
+
+function countsLine(counts) {
+  return EQUIP_ORDER.filter((k) => counts[k] > 0)
+    .map((k) => `${counts[k]} ${k.replace("_", " ")}`).join(" · ");
+}
+
+function renderInventory(env) {
+  const el = $("fleet");
+  if (!env || env.state !== "ok") {
+    el.innerHTML = stateBlock(env ? env.state : "disconnected",
+                              env && env.provenance, env && env.remediation);
+    return;
+  }
+  const d = env.data;
+  if (!d.bots.length) {
+    el.innerHTML = stateBlock("idle", env.provenance,
+      "no bots keyframed yet — run `claudlobby --fleet <name> generate`");
+    return;
+  }
+  const bots = d.bots.map((b) => `
+    <div class="bot-card" data-alias="${esc(b.alias)}" tabindex="0" role="button"
+         aria-label="equipment of ${esc(b.short)}">
+      <div class="bc-head"><b>${esc(b.short)}</b>
+        <small>${esc(b.model || "")}${b.permissions_mode
+          ? ` · ${esc(b.permissions_mode)}` : ""}</small></div>
+      <div class="bc-counts">${esc(countsLine(b.counts)) || "no equipment recorded"}</div>
+      ${b.reports_to ? `<div class="bc-org">reports to ${esc(b.reports_to)}</div>` : ""}
+      ${b.manages && b.manages.length
+        ? `<div class="bc-org">manages ${esc(b.manages.join(", "))}</div>` : ""}
+    </div>`).join("");
+  const projects = d.projects.length ? d.projects.map((p) => `
+    <div class="proj-row"><b>${esc(p.title || p.key)}</b>
+      <small>${esc(p.tier || "")}${p.repos.length
+        ? ` · ${esc(p.repos.length)} repo${p.repos.length === 1 ? "" : "s"}` : ""}</small></div>`).join("")
+    : `<div class="dim">no projects keyframed</div>`;
+  // library grouped by category, collapsed — 208 rows is a wall, not a story
+  const byCat = {};
+  for (const it of d.library) (byCat[it.category] = byCat[it.category] || []).push(it);
+  const library = Object.keys(byCat).sort().map((cat) => {
+    const items = byCat[cat];
+    const inUse = items.filter((i) => i.used_by.length).length;
+    return `<details class="lib-group"><summary>${esc(cat)}
+        <small>${items.length} · ${inUse} in use</small></summary>
+      ${items.map((i) => `<div class="lib-row${i.used_by.length ? "" : " unused"}">
+        <span>${esc(i.name)}${i.tier && i.tier !== "shared" ? ` <small>${esc(i.tier)}</small>` : ""}</span>
+        <small>${i.shadowed ? "shadowed by an overlay copy"
+          : i.used_by.length ? esc(i.used_by.join(", ")) : "unused"}</small>
+      </div>`).join("")}</details>`;
+  }).join("");
+  el.innerHTML = `
+    <div id="equip-detail" hidden></div>
+    <div class="inv-head">${d.counts.bots} bots · ${d.counts.projects} projects ·
+      ${d.counts.library_in_use}/${d.counts.library} library items in use</div>
+    <div class="bot-grid">${bots}</div>
+    <h3>projects</h3>${projects}
+    <h3>library</h3>${library}`;
+  el.querySelectorAll(".bot-card").forEach((c) => {
+    const open = () => openEquipment(c.dataset.alias);
+    c.addEventListener("click", open);
+    c.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+  });
+}
+
+async function openEquipment(alias) {
+  const box = $("equip-detail");
+  if (!box) return;
+  box.hidden = false;
+  renderState(box, { state: "loading" });
+  const env = await jget(`/api/equipment?alias=${encodeURIComponent(alias)}`);
+  if (!env || env.state !== "ok") {
+    box.innerHTML = stateBlock(env ? env.state : "disconnected",
+                               env && env.provenance, env && env.remediation);
+    return;
+  }
+  const b = env.data;
+  const chips = (arr) => (arr || []).map((x) => `<span class="chip">${esc(String(x))}</span>`).join("");
+  const eq = EQUIP_ORDER.filter((k) => b.equipment[k] && (Array.isArray(b.equipment[k])
+      ? b.equipment[k].length : true))
+    .map((k) => `<div class="eq-row"><b>${esc(k.replace("_", " "))}</b>
+      ${Array.isArray(b.equipment[k]) ? chips(b.equipment[k]) : chips([b.equipment[k]])}</div>`)
+    .join("") || `<div class="dim">no equipment recorded</div>`;
+  const po = b.posture || {};
+  const changes = b.changes.length ? b.changes.slice(0, 20).map((c) => `
+    <div class="chg-row"><small>${esc(ago(c.occurred_at) || c.occurred_at || "")}</small>
+      ${c.kind && c.kind !== "updated" ? `<b>${esc(c.kind)}</b> ` : ""}${esc((c.fields || []).join(", "))}</div>`).join("")
+    : `<div class="dim">no changes across ${esc(b.versions)} keyframe${b.versions === 1 ? "" : "s"}</div>`;
+  box.innerHTML = `
+    <div class="ed-head"><b>${esc(b.short)}</b>
+      <small>${esc(b.model || "")}${b.account ? ` · ${esc(b.account)}` : ""}</small>
+      <button class="pill ghost ed-close" type="button">close</button></div>
+    ${b.org && b.org.mission ? `<div class="ed-mission">${esc(b.org.mission)}</div>` : ""}
+    <div class="ed-cols">
+      <div><h4>equipment</h4>${eq}</div>
+      <div><h4>posture</h4>
+        <div class="eq-row"><b>permissions</b>${chips([po.permissions_mode || "—"])}</div>
+        <div class="eq-row"><b>tool allow</b>${chips(po.tool_allow || [])}</div>
+        <div class="eq-row"><b>tool deny</b>${chips(po.tool_deny || [])}</div>
+        ${po.sandbox ? `<div class="eq-row"><b>sandbox</b>${chips([
+          po.sandbox.enabled ? "enabled" : "off"])}</div>` : ""}
+        <h4>org</h4>
+        ${b.org && b.org.reports_to ? `<div class="eq-row"><b>reports to</b>${chips([b.org.reports_to])}</div>` : ""}
+        ${b.org && b.org.manages && b.org.manages.length
+          ? `<div class="eq-row"><b>manages</b>${chips(b.org.manages)}</div>` : ""}
+        <h4>changes</h4>${changes}
+        <details class="machinery"><summary>composed hashes</summary>
+          ${Object.entries(b.composed_hashes || {}).map(([k, v]) =>
+            `<div class="hash-row"><span>${esc(k)}</span><code>${esc(String(v).slice(0, 12))}</code></div>`).join("")}
+        </details>
+      </div>
+    </div>`;
+  box.querySelector(".ed-close").addEventListener("click", () => { box.hidden = true; });
+  box.scrollIntoView({ block: "nearest" });
+}

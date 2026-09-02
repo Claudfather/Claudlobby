@@ -748,3 +748,43 @@ def test_revision_seen_never_mints_a_phantom_vault(tmp_path, monkeypatch):
     conn.close()
     assert decl == 0
     assert ghosts == 0
+
+
+def test_keyframe_carries_effective_integrations_and_protocols(tmp_path):
+    """#1405 gauntlet SEV-1: the keyframe recorded the DECLARED
+    integrations/protocols, but the composer auto-pairs an integration for
+    every MCP with a matching integrations/<name>.md and adds the available
+    default protocols — so a keyframe of the declared lists read every
+    auto-paired integration and default protocol as "unused" while composed
+    into the bot. The keyframe now goes through the composer's own
+    resolvers (one definition): equal to the effective sets, and a STRICT
+    superset of the declared lists on this shape."""
+    from claudlobby.composer import (
+        resolve_effective_integrations, resolve_effective_protocols)
+    from claudlobby.plane.registry_emit import bot_payload
+
+    root = _fleet_root(tmp_path)
+    # a worker with an MCP but NO declared integrations, and the pairing file
+    (root / "library" / "mcp").mkdir(exist_ok=True)
+    (root / "library" / "mcp" / "github.json").write_text(
+        '{"command": "npx", "args": ["x"]}')
+    (root / "library" / "integrations").mkdir(exist_ok=True)
+    (root / "library" / "integrations" / "github.md").write_text(
+        "---\ntitle: GH\n---\n# GH\n")
+    fy = (root / "fleet.yaml").read_text().replace(
+        "      reports_to: lead\n", "      reports_to: lead\n      mcp: [github]\n")
+    (root / "fleet.yaml").write_text(fy)
+    fleet, _ = load_fleet(root / "fleet.yaml")
+    paths = Paths(root=root)
+    bot = fleet.bots["worker-1"]
+    assert not bot.integrations                    # nothing DECLARED
+
+    eq = bot_payload(paths, fleet, bot, None)["equipment"]
+    eff_i = sorted(resolve_effective_integrations(bot, paths))
+    eff_p = sorted(resolve_effective_protocols(
+        bot, fleet, paths, is_manager=bot.bot_id in fleet.manager_bots()))
+    assert eq["integrations"] == eff_i             # the composer's truth
+    assert eq["protocols"] == eff_p
+    assert "github" in eq["integrations"]          # auto-paired, undeclared
+    assert set(eq["integrations"]) > set(bot.integrations)   # strict superset
+    assert set(eq["protocols"]) >= set(bot.protocols)
