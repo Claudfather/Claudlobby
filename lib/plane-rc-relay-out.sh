@@ -41,9 +41,15 @@ if [ -z "${FLEET_NAME:-}" ] || [ -z "${BOT_ID:-}" ]; then
     echo "plane-rc-relay-out: armed but FLEET_NAME/BOT_ID unset — not recording" >&2
     exit 0
 fi
+if [ -z "${BOT_DIR:-}" ]; then
+    # never default the marker dir to cwd: a bot's cwd is its project
+    # checkout, and telemetry written there is the #874 class (gauntlet)
+    echo "plane-rc-relay-out: armed but BOT_DIR unset — not recording" >&2
+    exit 0
+fi
 PAYLOAD="$(cat 2>/dev/null || true)"
 [ -n "$PAYLOAD" ] || exit 0
-MARKER_DIR="${BOT_DIR:-.}/data"
+MARKER_DIR="$BOT_DIR/data"
 
 IFS= read -r -d '' PYPROG <<'PYEOF' || true
 import json, os, re, sys
@@ -55,21 +61,47 @@ except ValueError:
 tp = payload.get("transcript_path") or ""
 if not tp or not os.path.isfile(tp):
     sys.exit(0)
-try:
-    with open(tp, encoding="utf-8", errors="replace") as fh:
-        lines = fh.read().splitlines()
-except OSError:
-    sys.exit(0)
-ents = []
-for ln in lines:
-    try:
-        ents.append(json.loads(ln))
-    except ValueError:
-        ents.append(None)
-# 1. the turn's prompt entry: the last user entry that is not a tool_result
+# The turn is always at the END of the transcript, so read a bounded TAIL
+# and widen only until a prompt entry appears — never the whole file. A
+# whole-file parse measured 422 MB peak RSS on a 62 MB transcript at every
+# turn end of every armed bot (gauntlet), a half-gigabyte transient the Pi
+# cannot afford. Cap: 32 MB.
+def _tail_entries(path, start_mb=2, cap_mb=32):
+    size = os.path.getsize(path)
+    window = start_mb * 1024 * 1024
+    while True:
+        offset = max(0, size - window)
+        with open(path, "rb") as fh:
+            fh.seek(offset)
+            raw = fh.read().decode("utf-8", errors="replace")
+        lines = raw.splitlines()
+        if offset > 0 and lines:
+            lines = lines[1:]          # drop the partial first line
+        ents = []
+        for ln in lines:
+            try:
+                ents.append(json.loads(ln))
+            except ValueError:
+                ents.append(None)
+        has_prompt = any(e and e.get("type") == "user" and not _is_tool_result(e)
+                         for e in ents)
+        if has_prompt or offset == 0 or window >= cap_mb * 1024 * 1024:
+            return ents
+        window *= 4
+
 def _is_tool_result(e):
     c = (e.get("message") or {}).get("content")
     return isinstance(c, list) and any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c)
+
+try:
+    ents = _tail_entries(tp)
+except OSError:
+    sys.exit(0)
+# 1. the turn's prompt entry: the last user entry that is not a tool_result.
+# KNOWN MISS CLASS (gauntlet, source-derived, unchanged until a live capture
+# per the r4 rule): a skill expansion or a task-notification lands as a
+# LATER user entry inside the same operator turn, so this rule reads it as
+# the prompt and skips the turn — a miss, never a false record.
 idx = None
 for i in range(len(ents) - 1, -1, -1):
     e = ents[i]
@@ -122,8 +154,11 @@ if uid:
         os.close(fd)
     except FileExistsError:
         sys.exit(0)
-    except OSError:
-        pass
+    except OSError as exc:
+        # no dedupe is possible → do not record; a re-fired Stop would
+        # otherwise double-record exactly when the marker cannot be written
+        print(f"plane-rc-relay-out: marker unwritable ({exc}) — not recording", file=sys.stderr)
+        sys.exit(0)
 print(json.dumps({"events": [
     {"event_type": "communication", "emitter": "rc-relay-hook", "fleet": fleet,
      "payload": {"msg_id": msg_id, "sender": f"bot:{fleet}/{bot}",
@@ -135,7 +170,7 @@ print(json.dumps({"events": [
 PYEOF
 
 MSG_ID="$(plane_mint_id msg)" || exit 0
-BATCH="$(printf '%s' "$PAYLOAD" | python3 -S -E -c "$PYPROG" "$FLEET_NAME" "$BOT_ID" "$MARKER_DIR" "$MSG_ID" 2>/dev/null)"
+BATCH="$(printf '%s' "$PAYLOAD" | python3 -S -E -c "$PYPROG" "$FLEET_NAME" "$BOT_ID" "$MARKER_DIR" "$MSG_ID")"
 [ -n "$BATCH" ] || exit 0
 printf '%s' "$BATCH" | plane_emit_events rc-relay-hook >&2 || true
 exit 0

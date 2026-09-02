@@ -179,3 +179,66 @@ def test_stop_hook_is_composed_fleet_wide():
     assert (REPO / "system.yaml.example").read_text().split(
         "# --- verbatim copy of the package tier below ---\n", 1)[1] == (
         REPO / "claudlobby" / "system.yaml").read_text()
+
+
+def test_big_transcript_is_read_bounded_and_fast(tmp_path):
+    """Gauntlet F2 fold: the turn is at the END, so a bounded tail read
+    finds it without parsing a 60 MB history (422 MB RSS per turn end on
+    the Pi). A 6 MB transcript with the channel turn last: recorded, and
+    the hook finishes quickly."""
+    import time
+    root = _root(tmp_path)
+    filler = [{"type": "assistant", "uuid": f"f{i}", "sessionId": "s0",
+               "message": {"role": "assistant", "stop_reason": "end_turn",
+                           "content": [{"type": "text", "text": "x" * 2000}]}}
+              for i in range(3000)]                        # ~6 MB
+    t0 = time.monotonic()
+    r = _run(tmp_path, root, filler + [_channel_user(), _assistant("Final answer.")])
+    assert r.returncode == 0 and r.stdout == ""
+    assert time.monotonic() - t0 < 10
+    assert len(_rows(root, "SELECT 1 FROM communications")) == 1
+
+
+def test_bot_dir_unset_refuses_and_writes_nothing_into_cwd(tmp_path):
+    """Gauntlet F3 fold (#874 class): with BOT_DIR unset the hook must
+    refuse — never default the marker dir to cwd, which is a bot's project
+    checkout."""
+    root = _root(tmp_path)
+    tp = _transcript(tmp_path, [_channel_user(), _assistant("hi")])
+    env = _env(tmp_path, root); env.pop("BOT_DIR")
+    cwd = tmp_path / "checkout"; cwd.mkdir()
+    r = subprocess.run(["bash", str(HOOK)], input=json.dumps(
+        {"session_id": "s1", "transcript_path": str(tp), "hook_event_name": "Stop"}),
+        capture_output=True, text=True, env=env, cwd=cwd, timeout=120)
+    assert r.returncode == 0 and r.stdout == ""
+    assert "BOT_DIR unset" in r.stderr
+    assert not (cwd / "data").exists()
+    assert _rows(root, "SELECT 1 FROM communications") == []
+
+
+def test_unwritable_marker_dir_skips_rather_than_double_records(tmp_path):
+    """Gauntlet F4 fold: no dedupe possible → no record (disclosed), so a
+    re-fired Stop can never double-record."""
+    import os, stat
+    if os.geteuid() == 0:
+        return                                          # root ignores modes
+    root = _root(tmp_path)
+    data = tmp_path / "bot" / "data"
+    data.chmod(0o500)
+    try:
+        ents = [_channel_user(), _assistant("hi")]
+        r1 = _run(tmp_path, root, ents); r2 = _run(tmp_path, root, ents)
+        assert r1.returncode == 0 and r2.returncode == 0
+        assert "marker unwritable" in r1.stderr
+        assert _rows(root, "SELECT 1 FROM communications") == []
+    finally:
+        data.chmod(0o700)
+
+
+def test_python_errors_are_not_swallowed():
+    """Gauntlet F5 fold: the python invocation must not hide tracebacks
+    behind 2>/dev/null — a shape error must be distinguishable from
+    'not this door's turn'."""
+    body = HOOK.read_text()
+    line = next(l for l in body.splitlines() if 'python3 -S -E -c "$PYPROG"' in l)
+    assert "2>/dev/null" not in line
