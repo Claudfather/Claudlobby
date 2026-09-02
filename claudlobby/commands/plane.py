@@ -303,9 +303,14 @@ def cmd_plane_doctor(args) -> int:
                 try:
                     from ..plane.queries import RECONCILIATION_SQL
                     unacked = conn.execute(RECONCILIATION_SQL).fetchone()[0]
-                    rung(True, "reconcile (submitted-not-acked)",
-                         f"{unacked} — expected for carriers that yield no"
-                         " ack (tmux); a telegram gap would show here")
+                    # RECONCILIATION_SQL filters pane_submitted, which is
+                    # TMUX-ONLY (contracts): telegram emits carrier_accepted
+                    # and is NOT counted here, so this rung sees only unacked
+                    # tmux — expected, never a fault (§6b). No telegram claim
+                    # (gauntlet: the SQL cannot deliver it).
+                    rung(True, "reconcile (tmux submitted-not-acked)",
+                         f"{unacked} — expected: the tmux carrier yields no"
+                         " ack, so this is the steady state, not a gap")
                 except sqlite3.Error as exc:
                     rung(False, "reconcile", f"unreadable: {exc}")
             finally:
@@ -375,48 +380,18 @@ def cmd_plane_doctor(args) -> int:
         else:
             rung(not sc.quarantined, "quarantine", str(len(sc.quarantined)))
         # Composed-hash-drift rung (chunk: doctor IOUs — closes the chunk-B
-        # disclosure that the --verify door existed but doctor never ran it).
-        # Surfaces bots/entities whose current composed output drifted from
-        # the last registry keyframe. Re-deriving the estate needs a FLEET,
-        # so it runs only when one resolves (root-mode fleet.yaml or the
-        # global --fleet); with no fleet context the rung POINTS at the
-        # per-fleet door rather than silently skipping — the capability is
-        # surfaced either way.
-        if db_path(root).exists():
-            try:
-                from ._helpers import _load_fleet_or_exit
-                from ..plane import registry_read as _rr
-                from ..plane.registry_emit import (
-                    _vault_rev, assemble_entities)
-                paths = _resolve_paths(args)
-                if getattr(args, "fleet", None) or (
-                        paths.root / "fleet.yaml").exists():
-                    fleet, _ = _load_fleet_or_exit(paths)
-                    from ..plane.ids import ensure_host_uid
-                    conn2 = connect(db_path(root))
-                    try:
-                        assembled, complete = assemble_entities(
-                            paths, fleet, _vault_rev(paths))
-                        rep = _rr.verify_current(
-                            conn2, assembled, fleet=fleet.name,
-                            host_uid=(paths.root / "state" / "host-uid"
-                                      ).read_text().strip()
-                            if (paths.root / "state" / "host-uid").exists()
-                            else ensure_host_uid(paths.root / "state"))
-                    finally:
-                        conn2.close()
-                    n = len(rep.drifted) + len(rep.missing_from_db)
-                    rung(n == 0, "composed-hash drift",
-                         f"{n} entit{'y' if n == 1 else 'ies'} drifted from"
-                         f" the last scan (fleet {fleet.name}); run generate"
-                         if n else f"none (fleet {fleet.name}, "
-                         f"{rep.checked} checked)")
-                else:
-                    rung(True, "composed-hash drift",
-                         "not checked (needs a fleet) — run"
-                         " `claudlobby --fleet <name> plane registry --verify`")
-            except (sqlite3.Error, ValueError, OSError) as exc:
-                rung(False, "composed-hash drift", f"unreadable: {exc}")
+        # disclosure that the --verify capability existed but doctor never
+        # surfaced it). Doctor SURFACES the check; it does NOT re-run it.
+        # The real drift check re-derives + re-hashes the WHOLE estate,
+        # which is (a) too heavy for a per-invocation health command and
+        # (b) needs the host-uid — and an earlier version of this rung
+        # MINTED it on absence, reintroducing the #1429 verify BLOCKER (a
+        # read-only health command leaving a write behind, phantom drift).
+        # Both problems vanish by pointing at the door that owns the check.
+        rung(True, "composed-hash drift",
+             "run `claudlobby --fleet <name> plane registry --verify` —"
+             " the read-only estate-vs-scan check (doctor stays lightweight;"
+             " re-derivation is that door's job)")
         return 0 if failing == 0 else 1
 
     return _guarded("plane doctor", run)

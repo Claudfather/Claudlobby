@@ -97,24 +97,31 @@ def test_doctor_reconcile_rung_is_informational(tmp_path):
                      "carrier": "tmux", "destination": "erlich",
                      "state": "pane_submitted"}}])
     r = _cli(root, "doctor")
-    assert "reconcile (submitted-not-acked)" in r.stdout
+    assert "reconcile (tmux submitted-not-acked)" in r.stdout
     # the reconcile line is OK, not ATTENTION (informational)
     line = next(ln for ln in r.stdout.splitlines() if "reconcile" in ln)
     assert line.startswith("[ok]")
     assert " 1 " in line                       # the count is surfaced
 
 
-def test_doctor_drift_rung_points_at_verify_without_a_fleet(tmp_path):
-    """With no fleet context (root has no fleet.yaml), the drift rung
-    surfaces the capability by pointing at the --verify door rather than
-    silently skipping."""
+def test_doctor_drift_rung_points_at_verify_and_never_writes(tmp_path):
+    """Doctor SURFACES drift-checking by pointing at the --verify door,
+    and does NOT re-derive: the heavy estate re-hash is that door's job,
+    and an earlier version MINTED host-uid here, reintroducing the #1429
+    read-door-leaves-a-write BLOCKER. The rung is [ok] informational, and
+    doctor writes nothing (no host-uid minted)."""
     root = _root(tmp_path)
     emit_batch(root, [
         {"event_type": "metric_sample", "emitter": "t", "fleet": "f",
          "payload": {"subject_kind": "host", "subject": "h",
                      "metric": "host.job_ran", "value": 1}}])
+    # ensure no host-uid exists so a minting rung would create one
+    hostuid = root / "state" / "host-uid"
+    if hostuid.exists():
+        hostuid.unlink()
     r = _cli(root, "doctor")
-    assert "composed-hash drift" in r.stdout
     drift = next(ln for ln in r.stdout.splitlines()
                  if "composed-hash drift" in ln)
+    assert drift.startswith("[ok]")
     assert "registry --verify" in drift
+    assert not hostuid.exists()          # a read door leaves NO write
