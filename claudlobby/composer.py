@@ -4177,8 +4177,17 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
         # through the host tier cascade (no fleet name → host+root tiers)
         # and stamped only on the job that reads it; a resolver failure
         # composes UNARMED (the safe default for a DELETE door).
-        extra_env = _host_job_plane_arming(paths) if name == "plane-prune" \
-            else None
+        # Host doors that emit into the plane self-gate on a closed
+        # scheduler env, so the flag is stamped from the host tier cascade
+        # (chunk 3a.1). plane-prune uses its OWN flag (a DELETE door earns
+        # a dedicated arm); plane-host-probe is read-only emission and uses
+        # the standard PLANE_EMIT_ENABLED.
+        if name == "plane-prune":
+            extra_env = _host_job_plane_arming(paths, "PLANE_PRUNE_ENABLED")
+        elif name == "plane-host-probe":
+            extra_env = _host_job_plane_arming(paths, "PLANE_EMIT_ENABLED")
+        else:
+            extra_env = None
         _write_timer_units(
             timers_dir,
             f"claudlobby-{name}",
@@ -4195,20 +4204,21 @@ def compose_host_timers(paths: Paths, *, output_dir: Path | None = None) -> Path
     return timers_dir
 
 
-def _host_job_plane_arming(paths: Paths) -> dict[str, str] | None:
-    """Resolve PLANE_PRUNE_ENABLED from the host tier cascade for the
-    plane-prune door's Environment= line. None = unarmed (the safe default
-    for a DELETE door: a resolver failure never arms it)."""
+def _host_job_plane_arming(paths: Paths, flag: str) -> dict[str, str] | None:
+    """Resolve a plane arming flag from the host tier cascade for a
+    self-gated host door's Environment= line. None = unarmed (the safe
+    default: a resolver failure never arms). `flag` is the door's own
+    variable (PLANE_PRUNE_ENABLED for the DELETE door, PLANE_EMIT_ENABLED
+    for read-only emission)."""
     from . import env_tiers as _env_tiers
     try:
-        res = _env_tiers.cascade(
-            _env_tiers.read_tiers(paths)).get("PLANE_PRUNE_ENABLED")
+        res = _env_tiers.cascade(_env_tiers.read_tiers(paths)).get(flag)
     except _env_tiers.ResolverUnavailable as exc:
-        _log.warning("plane-prune arming unresolved (%s) — composes UNARMED",
-                     exc)
+        _log.warning("host-job arming unresolved for %s (%s) — composes"
+                     " UNARMED", flag, exc)
         return None
     if res is not None and res.value == "1":
-        return {"PLANE_PRUNE_ENABLED": "1"}
+        return {flag: "1"}
     return None
 
 

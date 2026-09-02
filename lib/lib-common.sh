@@ -2413,6 +2413,33 @@ sed_i() {
     fi
 }
 
+# --- Portable host facets (shared by fleet-memory-check + the plane probe) ---
+
+# avail_ram_mb — available RAM in MB, cross-platform. One definition (moved
+# from fleet-memory-check.sh so the plane host probe reads the SAME figure
+# a health check does — a second copy would drift the number the operator
+# sees between the two surfaces).
+avail_ram_mb() {
+    if [ -f /proc/meminfo ]; then
+        # MemAvailable is the kernel's own "this much is usable" figure.
+        # Fall back to MemFree if not present (very old kernels). Decide in
+        # END — MemFree precedes MemAvailable in /proc/meminfo, so per-line
+        # printing would emit BOTH numbers concatenated.
+        awk '/^MemAvailable:/ { avail=$2 } /^MemFree:/ { free=$2 }
+             END { v = (avail ? avail : free); printf "%d", v/1024 }' \
+            /proc/meminfo
+    else
+        # macOS: vm_stat reports pages; multiply by page size (usually 4096).
+        local page_size
+        page_size=$(pagesize 2>/dev/null || sysctl -n hw.pagesize 2>/dev/null || echo 4096)
+        vm_stat | awk -v ps="$page_size" '
+            /Pages free/               { free = $3+0 }
+            /Pages inactive/           { inactive = $3+0 }
+            /Pages speculative/        { spec = $3+0 }
+            END { printf "%d", (free + inactive + spec) * ps / 1048576 }'
+    fi
+}
+
 # --- Portable df -------------------------------------------------------------
 
 df_pcent() {
