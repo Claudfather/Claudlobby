@@ -153,7 +153,19 @@ fi
 # the shadow's OWN carrier; explained divergences with agreeing heads never
 # page (they record as clean). A check that cannot run is disclosed on stderr,
 # never read as clean.
-_shadow_page() { TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" "$LIB_DIR/tg-post.sh" "$1" >/dev/null 2>&1 || printf '%s ALERT-DELIVERY-FAILED escalation shadow_divergence: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$?" >&2; }
+_shadow_page() {
+    local _rc=0
+    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+        "$LIB_DIR/tg-post.sh" "$1" >/dev/null 2>&1 || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        # debounce_notify writes its marker on fire regardless of delivery; a
+        # page that never left must not silence the next ten minutes, so the
+        # marker is cleared and the next sweep fires again (the retry the
+        # sibling escalation block promises).
+        printf '%s ALERT-DELIVERY-FAILED escalation shadow_divergence: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$_rc" >&2
+        _SHADOW_PAGE_FAILED=1
+    fi
+}
 _shadow_bridge() {
     [ "${PLANE_SHADOW_ENABLED:-0}" = "1" ] || return 0
     [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: shadow bridge armed but no escalation chat - a divergence could not page" >&2; return 0; }
@@ -165,8 +177,12 @@ _shadow_bridge() {
         *) echo "fleet-pulse: shadow check unavailable (rc $_rc): $(printf '%s' "$_out" | tail -1 | cut -c1-160)" >&2; return 0 ;;
     esac
     local _pairs; _pairs=$(printf '%s' "$_out" | awk '{print $1"/"$2}' | tr '\n' ' ')
+    _SHADOW_PAGE_FAILED=0
     debounce_notify "$state_dir" fleet shadow_divergence _shadow_page \
         "FLEET ALERT: cutover shadow divergence on ${_pairs% }. The plane and the legacy ledger disagree about a bot's open or overdue set - run: claudlobby --fleet $fleet plane shadow --show 5" "" 600
+    # debounce_notify writes its marker AFTER the pager returns, whatever the
+    # pager did; a page that never left must not silence the next ten minutes.
+    [ "${_SHADOW_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet shadow_divergence
     return 0
 }
 
