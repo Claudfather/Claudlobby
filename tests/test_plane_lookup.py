@@ -87,6 +87,48 @@ def test_superseded_event_makes_the_old_assignment_terminal(tmp_path):
     assert open_ids == [asg2]
 
 
+def _report_back_lookup(root, task_id, bot, dlog):
+    """Drive the REAL _plane_lookup_dispatch_ids from lib/report-back.sh (the
+    function text is extracted from the shipped file, never a copy) with the
+    ledger door stubbed to *dlog*; prints the two link vars."""
+    src = (REPO / "lib" / "report-back.sh").read_text()
+    start = src.index("_plane_lookup_dispatch_ids() {")
+    fn = src[start:src.index("\n}\n", start) + 3]
+    script = (
+        f"dispatch_ledger_path() {{ printf '%s' '{dlog}'; }}\n"
+        f"{fn}\n"
+        f"TASK_ID='{task_id}' BOT='{bot}' FLEET_NAME='{F}' CLAUDLOBBY_ROOT='{root}'\n"
+        "PLANE_LINK_WI='' PLANE_LINK_ASG=''\n"
+        "_plane_lookup_dispatch_ids\n"
+        'printf \'%s %s\' "$PLANE_LINK_WI" "$PLANE_LINK_ASG"\n')
+    # BASH_SOURCE[0] inside the function resolves the lookup script's dir
+    script = script.replace('"$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py"',
+                            f'"{LOOKUP}"')
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       timeout=60)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.split()
+
+
+def test_report_back_links_through_the_plane_with_the_dispatch_log_absent(tmp_path):
+    """J2's hard precondition, behaviourally: no dispatch-log.jsonl anywhere,
+    a plane row for the task -> the report still links. (The first version
+    returned before asking the plane; a text-order pin could not see it.)"""
+    root = _root(tmp_path)
+    wi, asg, _ = _dispatch(root, "a", "t-1-aaaa", bot="w1")
+    assert _report_back_lookup(root, "t-1-aaaa", "w1",
+                               tmp_path / "absent" / "dispatch-log.jsonl") == [wi, asg]
+
+
+def test_report_back_falls_back_to_the_ledger_when_the_plane_is_absent(tmp_path):
+    dlog = tmp_path / "dispatch-log.jsonl"
+    dlog.write_text('{"ts":"2026-09-01T00:00:00Z","manager":"m","bot":"w1",'
+                    '"task_id":"t-1-aaaa","plane_msg_id":"msg_1",'
+                    '"plane_work_item_id":"wi_legacy","plane_assignment_id":"asg_legacy"}\n')
+    assert _report_back_lookup(tmp_path / "noplane", "t-1-aaaa", "w1", dlog) == [
+        "wi_legacy", "asg_legacy"]
+
+
 def test_the_two_doors_call_the_lookup_before_the_ledger():
     rb = (REPO / "lib" / "report-back.sh").read_text()
     dt = (REPO / "lib" / "dispatch-task.sh").read_text()

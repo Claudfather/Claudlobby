@@ -186,7 +186,10 @@ _plane_lookup_dispatch_ids() {
     # pre-PR-B row has empty fields and the task facts are simply not linked.
     local dlog row
     dlog="$(dispatch_ledger_path)"
-    [ -f "$dlog" ] || return 0
+    # NOTE: the ledger-exists gate sits on the GREP FALLBACK below, not here.
+    # The first version of the plane-first block was placed under it, so an
+    # absent dispatch log returned before the plane was ever asked - the exact
+    # state the cutover retires the dispatch log INTO (spec lens, #1446).
     # Join hardening (#1372 re-verify blocking residual on F3, tightened in
     # the gauntlet round). Grammar gates BEFORE any grep, because grep -F
     # treats a NEWLINE in the pattern as pattern-OR — a task id carrying
@@ -219,6 +222,7 @@ _plane_lookup_dispatch_ids() {
         PLANE_LINK_WI=${_ids%% *}; _ids=${_ids#* }; PLANE_LINK_ASG=${_ids%% *}
         return 0
     fi
+    [ -f "$dlog" ] || return 0
     row=$(grep -F "\"task_id\":\"$TASK_ID\"" "$dlog" 2>/dev/null \
         | grep -iF "\"bot\":\"$BOT\"" | tail -1 || true)
     [ -n "$row" ] || return 0

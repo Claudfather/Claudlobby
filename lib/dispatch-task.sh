@@ -571,6 +571,8 @@ _plane_emit_intent() {
         if [ -n "$_sup" ]; then
             SUP_WI=${_sup%% *}; _sup=${_sup#* }; SUP_ASG=${_sup%% *}; SUP_MSG=${_sup##* }
             [ -n "$SUP_MSG" ] && [ "$SUP_MSG" != "$SUP_ASG" ] && sup_frag="\"supersedes_msg_id\":\"$SUP_MSG\","
+            # source_ref names THIS dispatch (the successor): the supersession is a
+            # fact this row created; the retired row is named by assignment_id.
             sup_ev="{\"event_type\":\"task\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$SUP_WI\",\"assignment_id\":\"$SUP_ASG\",\"event\":\"superseded\",\"successor_id\":\"$PLANE_ASG_ID\"}}"
         else
             echo "dispatch-task: --supersedes $DISPATCH_SUPERSEDES not found in the plane — legacy-only supersession" >&2
