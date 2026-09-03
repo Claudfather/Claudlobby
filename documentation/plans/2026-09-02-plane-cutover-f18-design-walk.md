@@ -1,6 +1,6 @@
 # Plane cutover (F18) — design walk
 
-**Status:** walk for the operator's ruling (2026-09-02). Tracking: #1444. Nothing here is built.
+**Status:** RULED (2026-09-02 evening). Each junction got its own evaluative session — go/no-go against the intent (*off JSON as soon as possible; the plane becomes the record*) and its target purpose. **All four: GO-WITH-CHANGES.** The changes are folded below as corrections to this walk, each verified in the code before being written here. Tracking: #1444. The build queue is at the end; chunk 1 is in flight.
 
 ## Why this is the largest remaining piece
 
@@ -72,3 +72,43 @@ Two things the table settles: supervision state (`fleet-state.json`) is out of s
 4. The shadow-mode week as the flip gate.
 
 Deferred, named: supervision state in the plane (a new construct — separate walk); cross-host federation; the `who-reviewed` join (a small door once report rows are in the plane).
+
+
+---
+
+## Evaluative-session verdicts (all four GO-WITH-CHANGES) — corrections to the walk above
+
+### J1 — reader order: GO-WITH-CHANGES
+- Dependency claims verified in code (`report-back.sh:118` resolves through `--open-task`; `brief.py` imports the matcher as a **module**, so brief's dispatch section *is* the matcher and they migrate together; `fleet-pulse.sh` shells `--all`/`--orphans`/`--unassigned`).
+- **Correction — orphans cannot move to a `proc_uid` join.** `plane-session-start.sh` mints a process uid but it is deliberately NOT attached to plane events; there is no process kind and no dispatch-time proc uid. Orphans stay a **hybrid** door (plane data + the host-local `.spawn` join).
+- **`--supersedes` never reached the plane** (JSONL-only; 14 of 189 closed rows historically), so the plane's open set over-reports until `supersedes_msg_id` is set and a terminal `superseded` task event is emitted. Wired in chunk 1.
+- Unreachable-vs-empty: `db.connect()` auto-creates the file; doctor's exists-before-connect probe must become a shared helper. A dead ingest daemon with a spool reads as "quiet" — the stale gap.
+
+### J2 — how the legacy writes end: GO-WITH-CHANGES
+- **Hard precondition (verified `report-back.sh:183-215`):** report-back recovers the plane ids for its *own* emission by grepping `dispatch-log.jsonl`. Retiring the dispatch door's legacy write first would silently unlink every report row. Chunk 1 gives it a plane-side lookup with the grep as fallback.
+- Per-door flags (`PLANE_LEGACY_WRITE_<DOOR>=0`), never one fleet-level flag — that reproduces the all-or-nothing failure one level down.
+- `tg-post.sh` writes no ledger (nothing to retire). `workstreams.json` is one object the parity reader cannot parse (per-line JSON) — an adapter is owed. `briefing-trigger.sh` stamps no `source_ref` — parity is unmeasurable until it does.
+- Doc pass owed: the fleet-pulse and code-audit-sweep skills and `protocols/dispatch.md` tell bots to read the JSONL directly.
+
+### J3 — epoch + import: GO-WITH-CHANGES
+- **Correction — "the JSONL holds months" is false.** Both ledgers self-rotate at `OBSERVABILITY_REAP_DAYS` (7, pinned by every fleet; `dispatch-task.sh:633`, `report-back.sh:323`). Dual-write began 2026-08-28, so the pre-dual-write tail is about two days and evaporating. The importer's permanent job is **parity-found gaps**, not archaeology.
+- **A stamped `plane_*` id is not proof the row exists**: the dispatch door stamps the ledger *before* it emits (`:632` then `:641`, rc discarded) and a spooled emit exits 0. The true gap is what `plane-parity.py` reports missing over the id-bearing rows too — and parity has **never been run** against a live ledger.
+- A dispatch import needs **four** events (work_item, assignment, communication, `pane_submitted` transmission), or `TASK_STATUS_SQL` renders every imported dispatch `created_not_sent` (`queries.py:89,102`). `blocked` maps to `returned_blocked`.
+- **Fleet attribution:** the dispatch log is host-global with no fleet column; the only sound signal is a matching row in that fleet's own report-back ledger. A roster guess is unsound (#526, `move-bot`). Unattributable rows stay legacy-only, never guessed.
+- Import ids hash **content** (ledger name + raw line + role suffix), never position — rotation rewrites lines.
+- The epoch rides as a **`system` event** (open vocabulary; `fleet` is a valid subject kind) — zero contract change; widening `Declaration` is a fine follow-up. No per-row confidence field for v1.
+
+### J4 — verification and the flip gate: GO-WITH-CHANGES
+- **Correction — "a week" is a timer, not a proof.** Gate = **per bot, per reader**: 20 consecutive clean shadow comparisons with at least one open-to-closed transition observed; `--open-task` alone: **200 real resolutions, zero divergences of any class**. Recorded history is **replayed** through the comparator on day one to front-load evidence.
+- Shadow diffs ride as **system events** (`shadow_parity_clean` / `shadow_parity_diverged`, registry-governed severity) — never a side file. Cheap readers → `notice` + a doctor rung; any `--open-task` mismatch or unclassified case → `critical` on the existing FLEET ALERT path.
+- Three legitimate divergence classes, pre-declared: clock skew (reuse parity's `--skew-grace`), plane-more-right, and an **intentional derivation change** declared before shadow starts.
+- The `--open-task` comparator is **structurally unwired** from the resolver during shadow — no flag can route the plane's answer into a write path.
+- Rollback = the legacy write stays alive, unread, for a burn-in window; no legacy-read fallback is built.
+
+## Build queue (cross-junction, ordered; each chunk under the standing loop)
+1. **Task-id lookup door** (`lib/plane-lookup.py`, stdlib, by `source_ref`) + `--supersedes` wired to the plane + report-back plane-first id recovery with the JSONL grep as fallback. *(in flight)*
+2. **Parity, run for real** on the Mini + the id-bearing-missing-in-plane gap report; the parity-gap **importer** (`plane import --fleet --dry-run`: four-event dispatch mapping, content-hashed ids, fleet via the report ledger, epoch as a system event).
+3. `OPEN_ASSIGNMENTS_FOR_ASSIGNEE_SQL` + a shared exists-before-connect probe + the stdlib reader; the **shadow-diff primitive** (system events + doctor rung + FLEET ALERT for critical).
+4. Shadow mode on the list modes → brief → fleet-pulse; the count gate; history replay.
+5. Flip the list-mode readers; per-door legacy-write flags; retire `workstreams` (after the parity adapter) and `briefing-trigger` (after `source_ref`).
+6. `--open-task` shadow (unwired) → 200 clean → flip; retire the dispatch and report-back JSONL writes; `who-reviewed` plane join; the doc pass.
