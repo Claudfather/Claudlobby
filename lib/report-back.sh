@@ -186,7 +186,10 @@ _plane_lookup_dispatch_ids() {
     # pre-PR-B row has empty fields and the task facts are simply not linked.
     local dlog row
     dlog="$(dispatch_ledger_path)"
-    [ -f "$dlog" ] || return 0
+    # NOTE: the ledger-exists gate sits on the GREP FALLBACK below, not here.
+    # The first version of the plane-first block was placed under it, so an
+    # absent dispatch log returned before the plane was ever asked - the exact
+    # state the cutover retires the dispatch log INTO (spec lens, #1446).
     # Join hardening (#1372 re-verify blocking residual on F3, tightened in
     # the gauntlet round). Grammar gates BEFORE any grep, because grep -F
     # treats a NEWLINE in the pattern as pattern-OR — a task id carrying
@@ -206,6 +209,20 @@ _plane_lookup_dispatch_ids() {
     local _task_pat='^t-[0-9]+-[0-9a-f]{4}$' _bot_pat='^[A-Za-z0-9._-]+$'
     [[ "$TASK_ID" =~ $_task_pat ]] || return 0
     [[ "$BOT" =~ $_bot_pat ]] || return 0
+    # PLANE FIRST (cutover chunk 1): the dispatch stamped source_ref
+    # dispatch-log:<task_id> on its plane rows, so ask the plane for the ids
+    # before grepping the legacy ledger. A not-found answer keeps the grep
+    # as the fallback until cutover — a stamped id is not proof the plane
+    # row exists (the ledger is stamped BEFORE the emit).
+    local _ids
+    _ids=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
+        --root "${CLAUDLOBBY_ROOT:-}" --task-id "$TASK_ID" \
+        --assignee "bot:${FLEET_NAME:-}/$BOT" 2>/dev/null || true)
+    if [ -n "$_ids" ]; then
+        PLANE_LINK_WI=${_ids%% *}; _ids=${_ids#* }; PLANE_LINK_ASG=${_ids%% *}
+        return 0
+    fi
+    [ -f "$dlog" ] || return 0
     row=$(grep -F "\"task_id\":\"$TASK_ID\"" "$dlog" 2>/dev/null \
         | grep -iF "\"bot\":\"$BOT\"" | tail -1 || true)
     [ -n "$row" ] || return 0

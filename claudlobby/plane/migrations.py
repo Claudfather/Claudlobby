@@ -10,7 +10,7 @@ import re
 import sqlite3
 from importlib import resources
 
-SCHEMA_USER_VERSION = 6
+SCHEMA_USER_VERSION = 7
 
 _MIGRATION_RE = re.compile(r"^(\d{4})_.+\.sql$")
 

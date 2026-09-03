@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the F18 cutover, chunk 1: the plane answered by legacy task id (#1444)
+
+- **`lib/plane-lookup.py`** — stdlib, read-only lookup of a dispatch's plane ids by its legacy `task_id` through the `source_ref = "dispatch-log:<task_id>"` every dispatch already stamps. Exit codes follow the unreachable-is-not-empty rule (0 found / 0 not-found with a stderr note / 3 unreachable / 2 usage); a stamped `plane_*` id is not proof the row exists (the ledger is stamped before the emit), so consumers keep their legacy fallback until cutover. Migration 0007 indexes `assignments(source_ref)`.
+- **`report-back.sh`** recovers the work_item / assignment ids for its own emission from the plane FIRST and greps `dispatch-log.jsonl` only as the fallback — the cutover's hard precondition, since retiring the dispatch log's write would otherwise silently unlink every report row.
+- **`dispatch-task.sh --supersedes`** now reaches the plane: `supersedes_msg_id` on the new communication and a terminal `superseded` task event (`successor_id` = the new assignment) on the retired one. Until now supersession was JSONL-only (14 of 189 closed rows historically), so the plane's open set over-reported.
+- The cutover walk (`documentation/plans/2026-09-02-plane-cutover-f18-design-walk.md`) carries the four evaluative-session verdicts — all GO-WITH-CHANGES — and the ordered cross-junction build queue.
+
 ### Added
 
 - **The observable plane, Phase 2b + Phase 4 — the registry lane, the operator plane, and live presence (the estate's first look at itself).** The kernel and dual-write doors (below) fed rows; this stretch makes them legible. Each chunk shipped under a build → multi-round review-and-fold gauntlet (executed adversarial probes, mutation-verified pins, two-leg full-suite gates) → admin-merge → live Mini deploy loop.
