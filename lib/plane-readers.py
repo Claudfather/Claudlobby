@@ -3,16 +3,18 @@
 
 The matcher (``dispatch-overdue.py``) is a stdlib script every consumer shells,
 so its plane source cannot import the package (the ``plane-lookup.py`` /
-``plane-shadow-check.py`` precedent). This module is the stdlib twin of two
-package definitions — keep them in step:
+``plane-shadow-check.py`` precedent). This module is the stdlib twin of the
+package definitions — keep them in step (the SQL is pinned byte-identical):
 
-- ``open_rows``   ↔ ``claudlobby.plane.queries.OPEN_ASSIGNMENTS_AT_SQL`` +
-                    ``claudlobby.plane.shadow.plane_open``
+- ``open_rows``    ↔ ``claudlobby.plane.queries.OPEN_ASSIGNMENTS_AT_SQL`` +
+                     ``claudlobby.plane.shadow.plane_open``
 - ``overdue_rows`` ↔ ``claudlobby.plane.shadow.plane_overdue`` (deadline
-                    passed, the #460 expiry cap, the bot's own ``progress``
-                    inside the grace — the watchdog's rules, mirrored)
+                     passed, the expiry cap, the bot's own ``progress`` inside
+                     the grace — the watchdog's rules, mirrored; id-less rows
+                     are KEPT, as that reader keeps them)
+- ``declared``     ↔ ``claudlobby.plane.cutover.declared``
 
-Read-only (``mode=ro`` + ``query_only``); a missing db raises
+Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
 ``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
 rollback is the flag, not a silent fallback.
 """
@@ -22,6 +24,8 @@ from __future__ import annotations
 import os
 import sqlite3
 from datetime import datetime, timezone
+from typing import Optional
+
 
 class PlaneUnreachable(RuntimeError):
     pass
@@ -38,6 +42,7 @@ def connect(root: str) -> sqlite3.Connection:
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
         conn.execute("PRAGMA query_only = 1")
+        conn.execute("SELECT 1 FROM identity_registry LIMIT 0")   # the schema is there
         return conn
     except sqlite3.Error as exc:
         raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
@@ -46,26 +51,33 @@ def connect(root: str) -> sqlite3.Connection:
 # Twin of queries.OPEN_ASSIGNMENTS_AT_SQL — BYTE-IDENTICAL (pinned by test), so
 # the flipped reader and the shadow's plane side can never drift apart.
 OPEN_SQL = (
-    'SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a WHER'
-    'E a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)  AND NOT EXISTS (SELECT 1 FROM '
-    "events t WHERE t.kind='task'    AND t.event IN ('completed','failed','cancelled','returned"
-    "_blocked','superseded','reassigned','expired') AND (? IS NULL OR t.occurred_at <= ?)    AN"
-    "D (t.assignment_id = a.assignment_id      OR (a.source_ref LIKE 'dispatch-log:%' AND a.sou"
-    "rce_ref NOT LIKE 'dispatch-log:sha:%'          AND t.assignment_id IN (SELECT s.assignment"
-    '_id FROM assignments s            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref ='
-    ' a.source_ref              AND (? IS NULL OR s.occurred_at <= ?))))) ORDER BY a.occurred_a'
-    't, a.ingest_seq'
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a WHERE"
+    " a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)  AND NOT EXISTS (SELECT 1 FROM ev"
+    "ents t WHERE t.kind='task'    AND t.event IN ('completed','failed','cancelled','returned_bl"
+    "ocked','superseded','reassigned','expired') AND (? IS NULL OR t.occurred_at <= ?)    AND (t."
+    "assignment_id = a.assignment_id      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_re"
+    "f NOT LIKE 'dispatch-log:sha:%'          AND t.assignment_id IN (SELECT s.assignment_id FRO"
+    "M assignments s            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.sourc"
+    "e_ref              AND (? IS NULL OR s.occurred_at <= ?))))) ORDER BY a.occurred_at, a.inge"
+    "st_seq"
 )
-UIDS_SQL = "SELECT uid FROM identity_registry WHERE lower(alias) = lower(?)"
-ACTOR_SQL = "SELECT uid FROM identity_registry WHERE alias = ? AND kind = 'actor' LIMIT 1"
+ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
 LAST_PROGRESS_SQL = (
     "SELECT MAX(e.occurred_at) FROM events e WHERE e.kind = 'task' AND e.event = 'progress'"
     " AND e.actor_uid = ? AND e.occurred_at <= ?"
 )
-ROSTER_SQL = "SELECT DISTINCT alias FROM identity_registry WHERE kind = 'actor' AND alias LIKE ?"
+# Twin of cutover.LATEST_DECLARED_SQL: the fleet is matched on the anchor
+# COLUMN first (survives a truncated detail), the detail's fleet second.
+DECLARED_SQL = (
+    "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = ?"
+    " AND e.detail_truncated = 0 AND json_extract(e.detail, '$.reader') = ?"
+    " AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"
+    " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
+)
+DISPATCH = "dispatch-log:"
 
 
-def _epoch(iso: str | None) -> int | None:
+def _epoch(iso: Optional[str]) -> Optional[int]:
     if not iso:
         return None
     try:
@@ -74,40 +86,68 @@ def _epoch(iso: str | None) -> int | None:
         return None
 
 
-def open_rows(conn: sqlite3.Connection, fleet: str, bot: str,
-              at: str | None = None) -> list[tuple[int, int | None, str]]:
-    """The legacy ``open_dispatches`` tuple shape — (dispatched_at,
-    expected_by, task_id), oldest first — from the plane. Assignments with no
-    legacy task id (none exists for a task row) are skipped: the legacy list
-    is id'd rows only."""
-    out: list[tuple[int, int | None, str]] = []
-    for (uid,) in conn.execute(UIDS_SQL, (f"bot:{fleet}/{bot}",)).fetchall():
+def roster(conn: sqlite3.Connection, fleet: str) -> dict[str, dict]:
+    """bot (lower-cased key, the legacy bot key) → {"uids": [...], "actor": uid|None}
+    from ONE registry scan: every identity whose alias is ``bot:<fleet>/<name>``.
+    Empty = the plane holds no bot of this fleet at all."""
+    prefix = f"bot:{fleet}/"
+    out: dict[str, dict] = {}
+    for alias, uid, kind in conn.execute(ROSTER_SQL, (prefix + "%",)):
+        if not alias.startswith(prefix):
+            continue
+        entry = out.setdefault(alias[len(prefix):].lower(), {"uids": [], "actor": None})
+        entry["uids"].append(uid)
+        if kind == "actor" and entry["actor"] is None:
+            entry["actor"] = uid
+    return out
+
+
+def bot_entry(conn: sqlite3.Connection, fleet: str, bot: str) -> Optional[dict]:
+    """One bot's registry entry (case-insensitive alias, like the legacy bot key)."""
+    return roster(conn, fleet).get(bot.lower())
+
+
+def open_rows(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+              *, entry: Optional[dict] = None, idd_only: bool = True
+              ) -> list[tuple[int, Optional[int], Optional[str]]]:
+    """The legacy ``open_dispatches`` tuple shape — (dispatched_at, expected_by,
+    task_id), oldest first — from the plane. ``idd_only`` drops rows with no
+    legacy task id (``sha:`` refs, or none): the open LIST is id'd rows only;
+    the overdue reader keeps them (task_id None → the legacy ``-``)."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    out: list[tuple[int, Optional[int], Optional[str]]] = []
+    for uid in (entry or {}).get("uids", []):
         for occurred_at, source_ref, _asg, expected_by in conn.execute(
                 OPEN_SQL, (uid, at, at, at, at, at, at)):
-            if not source_ref or not source_ref.startswith("dispatch-log:") \
-                    or source_ref.startswith("dispatch-log:sha:"):
+            tid = None
+            if source_ref and source_ref.startswith(DISPATCH) \
+                    and not source_ref.startswith(DISPATCH + "sha:"):
+                tid = source_ref[len(DISPATCH):]
+            if idd_only and tid is None:
                 continue
             da = _epoch(occurred_at)
             if da is None:
                 continue
-            out.append((da, _epoch(expected_by), source_ref[len("dispatch-log:"):]))
+            out.append((da, _epoch(expected_by), tid))
     out.sort(key=lambda t: t[0])
     return out
 
 
-def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int,
-                 max_age: int, progress_grace: int) -> list[tuple[int, int, int, str]]:
+def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, max_age: int,
+                 progress_grace: int, entry: Optional[dict] = None
+                 ) -> list[tuple[int, int, int, Optional[str]]]:
     """The legacy ``--all`` row shape — (dispatched_at, expected_by, elapsed,
-    task_id) — from the plane, the watchdog's rules mirrored."""
+    task_id) — from the plane, the watchdog's rules mirrored; task_id None
+    for an id-less row (the caller prints ``-``)."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
     at = datetime.fromtimestamp(now, timezone.utc).isoformat()
-    rows = open_rows(conn, fleet, bot, at)
+    rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=False)
     last_progress = None
-    if progress_grace > 0:
-        hit = conn.execute(ACTOR_SQL, (f"bot:{fleet}/{bot}",)).fetchone()
-        if hit:
-            row = conn.execute(LAST_PROGRESS_SQL, (hit[0], at)).fetchone()
-            last_progress = _epoch(row[0]) if row and row[0] else None
-    out: list[tuple[int, int, int, str]] = []
+    actor = (entry or {}).get("actor")
+    if progress_grace > 0 and actor:
+        row = conn.execute(LAST_PROGRESS_SQL, (actor, at)).fetchone()
+        last_progress = _epoch(row[0]) if row and row[0] else None
+    out: list[tuple[int, int, int, Optional[str]]] = []
     for da, exp, tid in rows:
         if exp is None or now <= exp:
             continue
@@ -120,8 +160,8 @@ def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int,
     return out
 
 
-def roster(conn: sqlite3.Connection, fleet: str) -> list[str]:
-    """Every bot the plane knows for the fleet (actor aliases)."""
-    prefix = f"bot:{fleet}/"
-    return sorted(r[0][len(prefix):] for r in conn.execute(ROSTER_SQL, (prefix + "%",))
-                  if r[0].startswith(prefix))
+def declared(conn: sqlite3.Connection, fleet: str, reader: str) -> Optional[str]:
+    """The instant of the LATEST ``cutover_declared`` for (fleet, reader), or
+    None: a flag nobody declared is not a flip."""
+    row = conn.execute(DECLARED_SQL, ("cutover_declared", reader, f"fleet:{fleet}", fleet)).fetchone()
+    return row[0] if row else None

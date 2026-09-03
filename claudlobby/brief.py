@@ -576,22 +576,33 @@ def _dispatch_section(
     # never falls back to the JSONL: an unreachable plane under a set flag is
     # OMITTED with the remedy named, because a silent fallback would let a
     # flipped fleet read legacy again without anyone knowing.
-    flipped = getattr(doors, "plane_read_enabled", lambda _r: False)
+    # Cutover chunk 5: the matcher's providers pick the source themselves
+    # (`source="auto"` = the reader's flag AND a recorded declaration), so
+    # brief and the matcher flip together (J1) and brief carries no flag
+    # logic of its own. The plane path never falls back to the JSONL: an
+    # unreachable plane under a declared flip is OMITTED with the remedy
+    # named, because a silent fallback would let a flipped fleet read legacy
+    # again without anyone knowing. An install whose matcher predates the
+    # sources is called the old way and serves the JSONL.
+    has_sources = hasattr(doors, "resolve_source")
+    plane_ctx = {"source": "auto", "fleet": paths.fleet_name, "root": str(paths.root)}
+    plane_err = getattr(doors, "PlaneUnreachable", ())
+
+    def _omit(field: str, exc: BaseException) -> None:
+        degraded.append(Degradation(
+            field=field, mode="omitted",
+            reason=f"the flip is declared for this reader but the plane source is unreachable:"
+                   f" {exc} — restore the plane db or flip the flag back to 0",
+            issue="#1444"))
+
     classify = getattr(doors, "_classify_all", None)
-    if flipped("overdue"):
+    if classify is not None:
         try:
-            over = doors.overdue_all_plane(now, max_age, fleet=paths.fleet_name,
-                                           root=str(paths.root))
-        except Exception as exc:
-            over = {}
-            degraded.append(Degradation(
-                field="dispatches.overdue", mode="omitted",
-                reason=f"PLANE_READ_OVERDUE=1 but the plane source is unreachable: {exc}"
-                       " — restore the plane db or flip the flag back to 0",
-                issue="#1444"))
-        orph = doors.orphaned_all(str(dlog), str(rlog), now, max_age, bots_dir)
-    elif classify is not None:
-        over, orph = classify(str(dlog), str(rlog), now, max_age, bots_dir)
+            over, orph = (classify(str(dlog), str(rlog), now, max_age, bots_dir, **plane_ctx)
+                          if has_sources else classify(str(dlog), str(rlog), now, max_age, bots_dir))
+        except plane_err as exc:
+            _omit("dispatches.overdue", exc)
+            over, orph = {}, classify(str(dlog), str(rlog), now, max_age, bots_dir)[1]
     else:
         over = doors.overdue_all(str(dlog), str(rlog), now, max_age, bots_dir)
         orph = doors.orphaned_all(str(dlog), str(rlog), now, max_age, bots_dir)
@@ -643,19 +654,13 @@ def _dispatch_section(
             )
         )
         open_rows = []
-    elif flipped("open"):
-        try:
-            open_rows = doors.open_dispatches_plane(bot_id, fleet=paths.fleet_name,
-                                                    root=str(paths.root))
-        except Exception as exc:
-            open_rows = []
-            degraded.append(Degradation(
-                field="dispatches.open", mode="omitted",
-                reason=f"PLANE_READ_OPEN=1 but the plane source is unreachable: {exc}"
-                       " — restore the plane db or flip the flag back to 0",
-                issue="#1444"))
     else:
-        open_rows = open_door(bot_id, str(dlog), str(rlog))
+        try:
+            open_rows = (open_door(bot_id, str(dlog), str(rlog), **plane_ctx)
+                         if has_sources else open_door(bot_id, str(dlog), str(rlog)))
+        except plane_err as exc:
+            _omit("dispatches.open", exc)
+            open_rows = []
 
     return {
         "open": [

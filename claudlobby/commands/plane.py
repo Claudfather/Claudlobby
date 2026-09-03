@@ -345,7 +345,7 @@ def cmd_plane_doctor(args) -> int:
                                 rung(False, f"cutover {reader}",
                                      "flag unresolvable (env tiers door unavailable)")
                                 continue
-                            ok, why = _cut.flag_vs_declaration(on, (decl.get(reader) or (None,))[0])
+                            ok, why = _cut.flag_vs_declaration(on, decl.get(reader, (None, None))[0])
                             rung(ok, f"cutover {reader}", why)
                 except Exception as exc:
                     rung(False, "cutover", f"unreadable: {exc}")
@@ -922,11 +922,7 @@ def _read_flags(paths) -> dict[str, bool | None]:
         cascade = _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=paths.fleet_name))
     except _env_tiers.ResolverUnavailable:
         return {r: None for r in READ_FLAGS}
-    out = {}
-    for reader, flag in READ_FLAGS.items():
-        res = cascade.get(flag)
-        out[reader] = res is not None and res.value == "1"
-    return out
+    return {reader: _env_tiers.armed(cascade, flag) for reader, flag in READ_FLAGS.items()}
 
 
 def cmd_plane_cutover(args) -> int:
@@ -954,6 +950,7 @@ def cmd_plane_cutover(args) -> int:
             return 3
         try:
             streaks = _sh.gate_summary(conn, fleet, roster, (args.reader,))
+            anchor = _cut.fleet_uid(conn, fleet)          # the fleet's identity, when it has one
         finally:
             conn.close()
         short = _cut.unmet(streaks)
@@ -964,7 +961,8 @@ def cmd_plane_cutover(args) -> int:
                   f" streaks short of the gate; keep shadowing, or --force <reason>")
             return 1
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        ev = _cut.declaration_event(fleet, args.reader, streaks, now, forced=args.force or None)
+        ev = _cut.declaration_event(fleet, args.reader, streaks, now, forced=args.force or None,
+                                    subject_uid=anchor)
         counts = _sh.record(root, [ev])
         flag = _cut.READ_FLAGS[args.reader]
         if counts.get("duplicate") and not counts.get("committed"):
