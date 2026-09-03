@@ -3929,12 +3929,19 @@ def compose_fleet_timers(
     plane_extra_env: dict[str, str] | None = None
     from . import env_tiers as _env_tiers
 
+    shadow_extra_env: dict[str, str] | None = None
     try:
-        _pl_res = _env_tiers.cascade(
+        _cascade = _env_tiers.cascade(
             _env_tiers.read_tiers(paths, fleet_name=fleet.name)
-        ).get("PLANE_EMIT_ENABLED")
+        )
+        _pl_res = _cascade.get("PLANE_EMIT_ENABLED")
         if _pl_res is not None and _pl_res.value == "1":
             plane_extra_env = {"PLANE_EMIT_ENABLED": "1"}
+        # The shadow comparison (cutover chunk 3) has its OWN carrier: a
+        # recorded fact must not start being written because emission is on.
+        _sh_res = _cascade.get("PLANE_SHADOW_ENABLED")
+        if _sh_res is not None and _sh_res.value == "1":
+            shadow_extra_env = {"PLANE_SHADOW_ENABLED": "1"}
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(
             "plane arming unresolved (%s) — timer-run plane doors compose"
@@ -3963,7 +3970,8 @@ def compose_fleet_timers(
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
-                extra_env=(plane_extra_env if name == "keepalive" else None),
+                extra_env=(plane_extra_env if name == "keepalive"
+                           else shadow_extra_env if name == "plane-shadow" else None),
             )
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)

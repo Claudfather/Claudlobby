@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the F18 cutover, chunk 3: the shadow-diff primitive (#1444, J4)
+
+- **`claudlobby --fleet <f> plane shadow [--bot B] [--record] [--gate] [--replay-hours N]`** — per bot, the legacy open set (the install's `dispatch-overdue.py`, through brief's seam) against the plane's (`OPEN_ASSIGNMENTS_AT_SQL`, bounded to an instant), compared as multisets with the head compared on its own; divergences classed `skew` / `legacy_supersedes_pre_cutover` / `intentional` / `divergence`. `--record` writes one `shadow_parity_clean` (notice) or `shadow_parity_diverged` (critical) system event per (bot, instant) with a derived id; `--gate` reads the J4 bar from those records (20 consecutive clean with a transition; rc 1 until met); `--replay-hours` front-loads the streaks from history. rc 3 when a ledger or the db is unreachable. Doctor gains a `shadow parity` rung.
+- **`lib/plane-shadow.sh` + the dormant `plane-shadow` fleet timer** (10-minute cadence), self-gated and composer-stamped on `PLANE_SHADOW_ENABLED` — its own carrier, so emission being on never starts writing comparisons. Never writes a ledger, never routes the plane's answer into a door.
+
 ### Added — the F18 cutover, chunk 2: the operator's parity door and the parity-gap importer (#1444)
 
 - **`claudlobby plane parity`** — are the legacy ledgers fully in the plane? Bakes in the two ledgers and their join keys, names a cause for every missing row (`pre-go-live` / `unstamped` / `stamped-lost`) and counts multiplicity per (source_ref, kind, event). rc 0 clean, 1 gaps, 3 unreachable — an absent ledger or db never reads as clean; `--json` for machines. First live run of the door (Mini, whole ledgers): dispatch-log 194/307 matched (75 pre-go-live, 38 from the unarmed fleet, 0 lost emits); report-back 253/316 (63 pre-go-live). The importer's dry run for artemis-engineering planned 60 dispatches + 62 reports and wrote nothing.

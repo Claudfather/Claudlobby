@@ -41,6 +41,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "daemon_started": "notice",
     "daemon_stopping": "notice",
     "spool_drain_completed": "notice",
+    # cutover chunk 3 — the shadow primitive's record (J4): a clean
+    # comparison is routine; a divergence is the flip's stop signal.
+    "shadow_parity_clean": "notice",
+    "shadow_parity_diverged": "critical",
 }
 
 
