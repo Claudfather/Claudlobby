@@ -143,6 +143,41 @@ if [ -f "$dispatch_log" ]; then
         --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
 fi
 
+# --- Cutover shadow bridge (chunk 4, J4): a DIVERGED latest comparison pages ---
+# The shadow timer records legacy-vs-plane comparisons; the plane never alerts
+# through the fleet it observes on its own, so the fleet's own watchdog asks
+# `plane shadow --check` and posts a FLEET ALERT through its existing debounced
+# escalation path when a (bot, reader) diverged. Gated on the shadow's OWN
+# carrier; explained divergences with agreeing heads never page. A CLI that
+# cannot run is disclosed, never read as clean.
+_shadow_bridge() {
+    [ "${PLANE_SHADOW_ENABLED:-0}" = "1" ] || return 0
+    [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: shadow bridge armed but no escalation chat — a divergence could not page" >&2; return 0; }
+    local _out _rc=0
+    _out=$(claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" plane shadow --check 2>&1) || _rc=$?
+    case "$_rc" in
+        0) return 0 ;;
+        1) ;;
+        *) echo "fleet-pulse: shadow check unavailable (rc $_rc): $(printf '%s' "$_out" | tail -1 | cut -c1-160)" >&2; return 0 ;;
+    esac
+    local _marker="$state_dir/escalation_shadow_divergence" _age
+    if [ -f "$_marker" ]; then
+        _age=$(( $(date +%s) - $(stat_mtime "$_marker" 2>/dev/null || echo 0) ))
+        [ "$_age" -lt 600 ] && return 0
+    fi
+    local _summary; _summary=$(printf '%s' "$_out" | tail -1 | cut -c1-300)
+    local _msg="FLEET ALERT: cutover shadow divergence — ${_summary}. The plane and the legacy ledger disagree about a bot's open or overdue set; run: claudlobby --fleet $fleet plane shadow --show 5"
+    local _rc2=0
+    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+        "$LIB_DIR/tg-post.sh" "$_msg" >/dev/null 2>&1 || _rc2=$?
+    if [ "$_rc2" -eq 0 ]; then
+        touch "$_marker"
+    else
+        printf '%s ALERT-DELIVERY-FAILED escalation shadow_divergence: tg-post exit %s -- debounce marker NOT set, will retry next sweep\n' "$(ts_iso)" "$_rc2" >&2
+    fi
+    return 0
+}
+
 # _emit_new_orphans <bot_dir> <bot_id>
 # Record each orphaned dispatch ONCE, the first sweep it is seen (#835).
 #
@@ -529,6 +564,8 @@ _ESCALATION_STATE_DIR="$_alert_state_dir"
 if [ -z "$_ESCALATION_CHAT_ID" ]; then
     echo "fleet-pulse: WARNING — no escalation Telegram chat ID resolved; critical fleet alerts will NOT be delivered. Set FLEET_PULSE_ESCALATION_CHAT_ID, or ensure at least one bot's bot.conf defines TELEGRAM_GROUP_CHAT_ID." >&2
 fi
+
+_shadow_bridge || true
 
 if [ -n "$_ESCALATION_CHAT_ID" ]; then
     # Compute window start (portable: GNU date then BSD date fallback)

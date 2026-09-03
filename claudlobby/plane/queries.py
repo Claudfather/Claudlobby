@@ -36,7 +36,7 @@ NON_TERMINAL_CLAUSE = (
 # uid by the caller on the small registry (case-insensitively), so the read
 # hits idx_assignments_assignee; `at` None = unbounded (everything landed).
 OPEN_ASSIGNMENTS_AT_SQL = (
-    "SELECT a.occurred_at, a.source_ref, a.assignment_id"
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by"
     " FROM assignments a"
     " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
     "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"

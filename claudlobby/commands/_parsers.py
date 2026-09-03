@@ -522,7 +522,13 @@ def register_subparsers(sub) -> None:
     psh.add_argument("--record", action="store_true",
                      help="Record each comparison (shadow_parity_clean/diverged)")
     psh.add_argument("--gate", action="store_true",
-                     help="Report the per-bot gate from recorded comparisons")
+                     help="Report the per-(bot, reader) gate from recorded comparisons")
+    psh.add_argument("--check", action="store_true",
+                     help="The fleet-pulse bridge: rc 1 when any (bot, reader)'s LATEST"
+                     " recorded comparison diverged (unexplained, or the heads differ)")
+    psh.add_argument("--reader", choices=("open", "overdue", "all"), default="all",
+                     help="Which reader to shadow: the deadline-blind open list, the"
+                     " watchdog's overdue set, or both (default)")
     psh.add_argument("--replay-hours", type=int, default=0,
                      help="Also compare at each of the last N hourly instants"
                      " (front-loads the gate from history)")
