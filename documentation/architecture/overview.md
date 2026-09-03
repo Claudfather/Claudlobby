@@ -189,6 +189,10 @@ This is the foundation for the future ML / self-learning layer: drift becomes tr
 
 ## The observable plane
 
+Full reference: [`observable-plane.md`](observable-plane.md) — the families and
+the envelope, identity, the write spine, every door and its arming carrier, the
+read side, the F18 cutover state machine, migrations and retention.
+
 The four layers above answer "how does a bot get *composed*." A fifth concern sits orthogonal to
 all of them: how does anyone find out what a *running* fleet actually did — which dispatch went
 where, whether it was acknowledged, what a workstream's state is — after the fact, across
