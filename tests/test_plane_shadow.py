@@ -303,10 +303,10 @@ def test_cli_compares_records_and_gates(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     r = _cli(root, "--record", "--replay-hours", "2")
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "2 bot(s) x 2 reader(s) x 3 instant(s): 12 clean, 0 diverged" in r.stdout
-    assert "recorded: committed=12" in r.stdout
+    assert "2 bot(s) x 3 reader(s) x 3 instant(s): 15 clean, 0 diverged" in r.stdout
+    assert "recorded: committed=15" in r.stdout
     again = _cli(root, "--record", "--replay-hours", "2")
-    assert "committed=4 duplicate=8" in again.stdout        # the hour marks replay as duplicates
+    assert "committed=5 duplicate=10" in again.stdout       # the hour marks replay as duplicates
     g = _cli(root, "--gate")
     assert g.returncode == 1 and "NOT met" in g.stdout and "w2 [open]:" in g.stdout   # 4 comparisons, no transition
     assert _cli(root, "--bot", "nobody").returncode == 2                        # not on the roster
@@ -400,7 +400,7 @@ def test_cli_check_reader_and_gate_per_reader(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     r = _cli(root, "--record")
     assert r.returncode in (0, 1), r.stdout + r.stderr
-    assert "x 2 reader(s) x 1 instant(s)" in r.stdout
+    assert "x 3 reader(s) x 1 instant(s)" in r.stdout
     c = _cli(root, "--check")
     assert c.returncode == 0 and "0 diverged (bot, reader) pair(s)" in c.stdout
     only = _cli(root, "--reader", "open")
@@ -408,7 +408,11 @@ def test_cli_check_reader_and_gate_per_reader(tmp_path):
     g = _cli(root, "--gate")
     assert g.returncode == 1 and "w1 [overdue]" in g.stdout and "(bot, reader) pairs met" in g.stdout
     # a recorded divergence flips the check
-    d_bad = sh.ShadowDiff(F, "w2", sh.dt_iso(NOW + timedelta(hours=1)), ["t-3-cccc"], [], reader=sh.READER_OPEN)
+    # newer than the CLI's real-clock records above (NOW is a fixed constant; a
+    # divergence dated from it stops being the LATEST record the moment the wall
+    # clock passes it — the pin was a time bomb)
+    d_bad = sh.ShadowDiff(F, "w2", sh.dt_iso(datetime.now(timezone.utc) + timedelta(hours=1)),
+                          ["t-3-cccc"], [], reader=sh.READER_OPEN)
     sh.record(root, [sh.shadow_event(d_bad)])
     c2 = _cli(root, "--check")
     assert c2.returncode == 1 and "w2/open" in c2.stdout

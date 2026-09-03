@@ -112,17 +112,17 @@ def test_retire_writes_refuses_until_every_reader_is_declared_then_records(tmp_p
     for reader in ("open", "overdue"):
         _declare(root, reader)
     still = _cli(root, "cutover", "--retire-writes")
-    assert still.returncode == 1 and "open_task" in still.stdout
-    _declare(root, "open_task")
+    assert still.returncode == 1 and "open_task" in still.stdout and "unassigned" in still.stdout
+    _declare(root, "open_task"); _declare(root, "unassigned")
     done = _cli(root, "cutover", "--retire-writes")
     assert done.returncode == 0, done.stdout + done.stderr
     assert "PLANE_LEGACY_WRITE_DISPATCH=0" in done.stdout and "PLANE_LEGACY_WRITE_REPORT=0" in done.stdout
-    assert "--unassigned" in done.stdout                                            # the frozen-ledger reader, named
+    assert "--unassigned" in done.stdout and "frozen" not in done.stdout.lower()   # every reader follows its flip
     with _ro(root) as conn:
         at, forced = cut.retired(conn, F)
         assert at and forced is None
         data = json.loads(conn.execute("SELECT detail FROM events WHERE event = 'legacy_write_retired'").fetchone()[0])
-    assert data["undeclared"] == [] and set(data["declared"]) == {"open", "overdue", "open_task"}
+    assert data["undeclared"] == [] and set(data["declared"]) == {"open", "overdue", "open_task", "unassigned"}
     assert data["flags"] == {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH=0", "report": "PLANE_LEGACY_WRITE_REPORT=0"}
     again = _cli(root, "cutover", "--retire-writes")
     assert again.returncode == 0 and "already retired" in again.stdout             # nothing new recorded
@@ -188,7 +188,8 @@ def test_write_flag_vs_retirement_names_the_missing_half():
     assert cut.write_flag_vs_retirement(False, "2026-09-03T09:00:00+00:00")[0] is False
     assert cut.write_flag_vs_retirement(True, "2026-09-03T09:00:00+00:00") == (True, "retired (recorded 2026-09-03T09:00:00+00:00)")
     assert cut.write_flag_vs_retirement(False, None) == (True, "writing (not retired)")
-    assert cut.undeclared({}) == ["open", "overdue", "open_task"] and cut.undeclared({"open": ("t", None)}) == ["overdue", "open_task"]
+    assert cut.undeclared({}) == ["open", "overdue", "open_task", "unassigned"]
+    assert cut.undeclared({"open": ("t", None)}) == ["overdue", "open_task", "unassigned"]
 
 
 def test_bot_conf_carries_a_retired_write_flag(tmp_path, monkeypatch):

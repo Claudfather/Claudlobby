@@ -523,7 +523,7 @@ def register_subparsers(sub) -> None:
                       help="Chunk 6b: declare the legacy JSONL writes retired (dispatch-log +"
                       " report-back) — refuses unless every reader is declared; records"
                       " legacy_write_retired; prints the PLANE_LEGACY_WRITE_*=0 lines")
-    pcut.add_argument("--reader", choices=("open", "overdue", "open_task"), default=None,
+    pcut.add_argument("--reader", choices=("open", "overdue", "open_task", "unassigned"), default=None,
                       help="Which reader flips: the open list, the watchdog's overdue set, or the"
                       " resolver (--open-task; its bar is 200 agreeing heads + a head change)")
     pcut.add_argument("--force", default="",
@@ -542,7 +542,7 @@ def register_subparsers(sub) -> None:
     psh.add_argument("--check", action="store_true",
                      help="The fleet-pulse bridge: rc 1 when any (bot, reader)'s LATEST"
                      " recorded comparison diverged (unexplained, or the heads differ)")
-    psh.add_argument("--reader", choices=("open", "overdue", "open_task", "all"), default="all",
+    psh.add_argument("--reader", choices=("open", "overdue", "unassigned", "open_task", "all"), default="all",
                      help="Which reader to shadow: the deadline-blind open list, the"
                      " watchdog's overdue set, or both (default); open_task is --gate/--check"
                      " only (the resolver's head is graded inside the open records)")

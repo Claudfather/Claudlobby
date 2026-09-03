@@ -893,9 +893,23 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
             # the legacy overdue classification answers for EVERY bot at once
             legacy_overdue = (sh.legacy_overdue_all(doors, dl, rl, now=at, max_age_s=max_age)
                               if sh.READER_OVERDUE in readers else {})
+            if sh.READER_UNASSIGNED in readers:
+                # a FLEET-level reader: one comparison per instant, keyed by the fleet's
+                # own alias (the record's bot slot names the fleet)
+                pr = doors._plane_readers()
+                d = sh.diff(fleet, "_fleet", sh.legacy_unassigned(doors, dl, rl, now=at),
+                            sh.plane_unassigned(conn, fleet, pr, now=at, at=bound),
+                            now=at, skew_s=args.skew_grace, reader=sh.READER_UNASSIGNED)
+                if not replay or args.verbose:
+                    print(f"  fleet [{sh.READER_UNASSIGNED}]: legacy={len(d.legacy_ids)} plane={len(d.plane_ids)}"
+                          f" {'clean' if d.clean else 'DIVERGED ' + str(d.classes())}")
+                diverged += 0 if d.clean else 1
+                events.append(sh.shadow_event(d))
             for bot in bots:
                 plane_rows = sh.plane_open(conn, fleet, bot, at=bound)   # once per (bot, instant)
                 for reader in readers:
+                    if reader == sh.READER_UNASSIGNED:
+                        continue                                   # fleet-level: compared above, once
                     if reader == sh.READER_OPEN:
                         legacy = sh.legacy_open(doors, bot, dl, rl)
                         # the resolver's answers (chunk 6a): legacy with its id-less
@@ -1030,9 +1044,8 @@ def cmd_plane_cutover(args) -> int:
             print(f"  then `claudlobby --fleet {fleet} generate` and restart the sessions;"
                   " the shadow ends here — there is no legacy side left to grade;"
                   " rollback = the flags back to 1")
-            print("  STILL ON THE FROZEN LEDGER after this: `dispatch-overdue.py --unassigned` (the"
-                  " idle-worker check has no plane path yet) — it cannot see dispatches or reports"
-                  " after the retirement; `--orphans` and the supersede hint follow the flips")
+            print("  every matcher reader (--open, --all, --orphans, --open-task, --unassigned) follows"
+                  " its flip; the workstreams and briefing writes are the remaining residual")
             return 0
         if already is not None:
             print(f"cutover: note — the legacy writes are retired ({already[0]}); the shadow cannot"
@@ -1118,7 +1131,7 @@ def cmd_plane_shadow(args) -> int:
                       " (--gate / --check still read what was recorded)", file=sys.stderr)
                 return 2
         from ..plane import shadow as sh
-        readers = sh.READERS if args.reader == "all" else (args.reader,)
+        readers = (sh.READERS + (sh.READER_UNASSIGNED,)) if args.reader == "all" else (args.reader,)
         if args.reader == sh.READER_OPEN_TASK and not (args.gate or args.check):
             print("shadow: open_task is a gate mode — the resolver's head is graded inside"
                   " the open reader's records; use --gate --reader open_task (or --check)",

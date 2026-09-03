@@ -274,6 +274,53 @@ def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = Non
     return rows[0][2] if rows else None
 
 
+# The idle-worker check (chunk 7a, the last reader to get a plane path): per
+# bot, the NEWEST terminal task event by the bot and the NEWEST assignment to
+# it — purely temporal, like the legacy rule (it never asks whether work is
+# open). The legacy TERMINAL statuses are completed/failed/blocked; the plane's
+# are completed/failed/returned_blocked (the report door's own mapping).
+NEWEST_TERMINAL_BY_ACTOR_SQL = (
+    "SELECT e.occurred_at, e.event, a.source_ref FROM events e"
+    " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.event IN ('completed','failed','returned_blocked')"
+    " AND e.actor_uid = ? AND (? IS NULL OR e.occurred_at <= ?)"
+    " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
+)
+NEWEST_ASSIGNMENT_SQL = (
+    "SELECT a.occurred_at FROM assignments a WHERE a.assignee_uid IN (%s)"
+    " AND (? IS NULL OR a.occurred_at <= ?) ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
+)
+LEGACY_STATUS = {"completed": "completed", "failed": "failed", "returned_blocked": "blocked"}
+
+
+def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_threshold: int = 0,
+                    at: Optional[str] = None) -> dict[str, tuple[int, int, str, str]]:
+    """The legacy ``unassigned_all`` shape — {bot: (reported_at, idle_seconds,
+    task_id, status)} — from the plane: workers whose newest report is
+    terminal and were never re-tasked afterwards (the #1024 mirror)."""
+    out: dict[str, tuple[int, int, str, str]] = {}
+    for bot, entry in roster(conn, fleet).items():
+        actor = entry.get("actor")
+        if not actor:
+            continue
+        rep = conn.execute(NEWEST_TERMINAL_BY_ACTOR_SQL, (actor, at, at)).fetchone()
+        if rep is None:
+            continue
+        rts = _epoch(rep[0])
+        if rts is None:
+            continue
+        uids = entry["uids"]
+        asg = conn.execute(NEWEST_ASSIGNMENT_SQL % ",".join("?" * len(uids)), (*uids, at, at)).fetchone()
+        last_d = _epoch(asg[0]) if asg and asg[0] else None
+        if last_d is not None and last_d > rts:
+            continue                                   # re-tasked after reporting: the loop is intact
+        idle = now - rts
+        if idle < 0 or idle < idle_threshold:
+            continue
+        out[bot] = (rts, idle, _task_id(rep[2]) or "-", LEGACY_STATUS.get(rep[1], rep[1]))
+    return out
+
+
 RETIRED_SQL = (
     "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = ?"
     " AND e.detail_truncated = 0 AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"

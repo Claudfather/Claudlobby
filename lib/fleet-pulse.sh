@@ -271,7 +271,7 @@ _ensure_unassigned_scan() {
     _unassigned_scanned=1
     [ -f "$dispatch_log" ] || return 0
     _unassigned_cache=$(safe_mktemp)
-    python3 "$LIB_DIR/dispatch-overdue.py" --unassigned "$dispatch_log" "$report_ledger" \
+    python3 "$LIB_DIR/dispatch-overdue.py" --unassigned "$dispatch_log" "$report_ledger" --fleet "$fleet" \
         2>/dev/null > "$_unassigned_cache" || true
 }
 
