@@ -33,13 +33,27 @@ NON_TERMINAL_CLAUSE = (
 # legacy answer against tomorrow's plane. The alias join is case-insensitive
 # on the whole alias, matching the legacy matcher's case-insensitive bot key.
 # Oldest first, ingest order as the tiebreak: the legacy list's order.
+# The plane's OPEN SET for one assignee AS OF an instant (cutover chunk 3, the
+# shadow primitive). Deliberately NOT NON_TERMINAL_CLAUSE: that closes per
+# ASSIGNMENT (attention and expiry's question), while the legacy list reader
+# being shadowed closes per (bot, TASK ID) — a redispatched task id with one
+# terminal report closes every row that carried it — so this closes an
+# assignment when a terminal task event by the instant names it OR a sibling
+# assignment of the same assignee with the same dispatch-log source_ref.
+# Params: (assignee_uid, at, at, at, at, at, at) — the assignee resolved to a
+# uid by the caller on the small registry (case-insensitively), so the read
+# hits idx_assignments_assignee; `at` None = unbounded (everything landed).
 OPEN_ASSIGNMENTS_AT_SQL = (
     "SELECT a.occurred_at, a.source_ref, a.assignment_id"
-    " FROM assignments a JOIN identity_registry i ON i.uid = a.assignee_uid"
-    " WHERE lower(i.alias) = lower(?) AND a.occurred_at <= ?"
+    " FROM assignments a"
+    " WHERE a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)"
     "  AND NOT EXISTS (SELECT 1 FROM events t WHERE t.kind='task'"
-    "    AND t.assignment_id = a.assignment_id"
-    f"    AND t.event IN ({_TERMINAL}) AND t.occurred_at <= ?)"
+    f"    AND t.event IN ({_TERMINAL}) AND (? IS NULL OR t.occurred_at <= ?)"
+    "    AND (t.assignment_id = a.assignment_id"
+    "      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
+    "          AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s"
+    "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
+    "              AND (? IS NULL OR s.occurred_at <= ?)))))"
     " ORDER BY a.occurred_at, a.ingest_seq"
 )
 

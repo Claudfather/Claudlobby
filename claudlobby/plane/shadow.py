@@ -12,29 +12,44 @@ Structural invariants:
 - the legacy answer comes from the INSTALL's ``lib/dispatch-overdue.py``
   module (``brief.load_dispatch_doors`` — the same seam brief uses), never a
   re-implementation of the join: two copies of "open" is the #1357 class;
+- the plane answer mirrors the legacy reader's SEMANTICS, deliberately: the
+  legacy join closes by (bot, task id), so a redispatched task id with one
+  terminal report closes every row that carried it — the plane's per-
+  assignment truth is richer, but the reader being replaced is the list
+  reader, and a permanent "divergence" on every redispatch would grade the
+  plane against a question it was not asked;
 - the comparator never writes a ledger and never routes the plane's answer
   into any door — ``report-back.sh`` is untouched by this chunk;
 - a comparison against an unreachable ledger or db is REFUSED, not recorded
   as clean;
 - every divergence carries a pre-declared CLASS, so the gate can tell a
-  real disagreement from the three legitimate ones: ``skew`` (a row inside
+  real disagreement from the three explained ones: ``skew`` (a row inside
   the emit grace — the dispatch door stamps the ledger BEFORE it emits, and a
   spooled emit lands later), ``legacy_supersedes_pre_cutover`` (a row the
   JSONL retired by ``--supersedes`` before chunk 1 wired supersession to the
   plane — plane-more-wrong but explained, and it drains as those rows
-  rotate), and ``intentional`` (a task id declared before shadow started);
+  rotate) and ``intentional`` (a task id declared before shadow started);
+  anything else is ``divergence``;
 - the record is a ``system`` event per (bot, comparison) —
   ``shadow_parity_clean`` (notice) / ``shadow_parity_diverged`` (critical) —
   whose ``data`` carries both answers, both heads and each divergence's
   class, and whose event id is DERIVED from (bot, instant), so a replayed
-  instant classifies duplicate rather than double-counting.
+  instant classifies duplicate rather than double-counting; replayed
+  instants are the top-of-hour marks, never ``now`` minus N hours, so two
+  invocations replay the SAME instants (measured: microseconds in the
+  instant made every re-run mint fresh comparisons from zero new evidence).
 
-The gate (J4): per bot, 20 consecutive clean comparisons with at least one
-open→closed TRANSITION observed between consecutive comparisons — a bot
-whose open set never changed has not exercised the join. ``--replay-hours``
-re-derives both answers at past instants (both readers are deadline-blind,
-so the open set at instant T is dispatches ≤ T minus closures ≤ T) and
-records them, so the gate does not start from zero the day shadow arms.
+The gate (J4, the LIST modes): per bot, 20 consecutive clean comparisons
+with at least one open→closed TRANSITION observed between two consecutive
+CLEAN comparisons — a bot whose open set never changed has not exercised
+the join. **This is not the ``--open-task`` bar**: the head of the list is
+the answer a report gets written against, and J4 gives it its own gate —
+200 real resolutions with zero divergences of any class — which chunk 6
+builds from these same records (``data.head_agrees``); nothing here
+licenses flipping the resolver. ``--replay-hours`` re-derives both answers
+at past instants (both readers are deadline-blind, so the open set at
+instant T is dispatches ≤ T minus closures ≤ T) and records them, so the
+gate does not start from zero the day shadow arms.
 """
 
 from __future__ import annotations
@@ -42,13 +57,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 from .ids import derive_uid
-from .parity import DISPATCH, read_ledger, ts19
+from .parity import DISPATCH, epoch_iso, read_ledger, ts19
 from .queries import OPEN_ASSIGNMENTS_AT_SQL
 
 EVENT_CLEAN = "shadow_parity_clean"
@@ -57,75 +73,100 @@ READER = "open"
 DEFAULT_SKEW_S = 600
 GATE_CLEAN_RUN = 20
 GATE_TRANSITIONS = 1
+TAIL_LIMIT = 200        # records the streak reads per bot: the gate needs the tail, never the history
+LIST_CAP = 60           # ids kept per side in a record (oldest first); counts carry the rest
+DIVERGENCE_CAP = 40     # divergences listed in a record; the count carries the rest
 
 CLASS_SKEW = "skew"
 CLASS_LEGACY_SUPERSEDES = "legacy_supersedes_pre_cutover"
 CLASS_INTENTIONAL = "intentional"
 CLASS_DIVERGENCE = "divergence"
-EXPLAINED = (CLASS_SKEW, CLASS_LEGACY_SUPERSEDES, CLASS_INTENTIONAL)
 
-FAR_FUTURE = "9999-12-31T23:59:59+00:00"
+ACTOR_UIDS_SQL = "SELECT uid FROM identity_registry WHERE lower(alias) = lower(?)"
 
 
-def _iso(dt: datetime) -> str:
+def dt_iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _epoch_iso(epoch) -> str:
-    try:
-        return datetime.fromtimestamp(int(epoch), timezone.utc).isoformat()
-    except (TypeError, ValueError, OverflowError, OSError):
-        return ""
+def replay_instants(now: datetime, hours: int) -> list[datetime]:
+    """The last *hours* top-of-hour marks before *now*, oldest first — the
+    same instants on every invocation inside an hour, so a re-run replays
+    duplicates rather than minting fresh comparisons."""
+    top = now.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return [top - timedelta(hours=h) for h in range(hours - 1, -1, -1)]
 
 
 # --- the two answers -----------------------------------------------------------
 
 @dataclass
 class OpenRow:
-    task_id: Optional[str]      # legacy id (None for a plane assignment without one)
-    at: str                     # dispatched instant, ISO (ts19-comparable)
-    ref: str                    # what identifies the row on its own side
+    task_id: Optional[str]          # legacy id (None for a plane assignment without one)
+    at: str                         # dispatched instant, ISO (ts19-comparable)
+    ref: Optional[str] = None       # the plane's own id when there is no task id
+
+    @property
+    def label(self) -> str:
+        return self.task_id or self.ref or "?"
 
 
 def plane_open(conn: sqlite3.Connection, fleet: str, bot: str, *,
-               at: str = FAR_FUTURE) -> list[OpenRow]:
+               at: Optional[str] = None) -> list[OpenRow]:
     """The plane's open set for ``bot:<fleet>/<bot>`` as of instant *at*
-    (default: now — everything landed). Oldest first, the legacy order."""
-    alias = f"bot:{fleet}/{bot}"
-    rows = conn.execute(OPEN_ASSIGNMENTS_AT_SQL, (alias, at, at)).fetchall()
+    (None = everything landed). Oldest first, the legacy order. The alias is
+    resolved on the small registry first (case-insensitively, like the
+    legacy bot key), then the assignments are read by uid — the indexed
+    column — rather than through an unindexable ``lower()`` join."""
+    uids = [r[0] for r in conn.execute(ACTOR_UIDS_SQL, (f"bot:{fleet}/{bot}",))]
     out: list[OpenRow] = []
-    for occurred_at, source_ref, assignment_id in rows:
-        task_id = None
-        if source_ref and source_ref.startswith(f"{DISPATCH}:") \
-                and not source_ref.startswith(f"{DISPATCH}:sha:"):
-            task_id = source_ref[len(DISPATCH) + 1:]
-        out.append(OpenRow(task_id, str(occurred_at or ""), assignment_id))
+    for uid in uids:
+        for occurred_at, source_ref, assignment_id in conn.execute(
+                OPEN_ASSIGNMENTS_AT_SQL, (uid, at, at, at, at, at, at)):
+            task_id = None
+            if source_ref and source_ref.startswith(f"{DISPATCH}:") \
+                    and not source_ref.startswith(f"{DISPATCH}:sha:"):
+                task_id = source_ref[len(DISPATCH) + 1:]
+            out.append(OpenRow(task_id, str(occurred_at or ""), assignment_id))
+    out.sort(key=lambda r: r.at)
     return out
 
 
-def legacy_open(doors, bot: str, dispatch_path: Path, report_path: Path, *,
-                at: Optional[str] = None) -> list[OpenRow]:
-    """The legacy open set through the INSTALL's matcher. With *at*, both
-    ledgers are first cut to rows whose ``ts`` is ≤ the instant (temp files
-    the matcher reads exactly as it reads the real ones), so the answer is
-    what the matcher WOULD have said then."""
-    dlog, rlog = str(dispatch_path), str(report_path)
-    if at is not None:
-        tmp = Path(tempfile.mkdtemp(prefix="plane-shadow-"))
-        for name, src in (("dispatch-log.jsonl", dispatch_path), ("report-back.jsonl", report_path)):
+@contextmanager
+def ledgers_at(dispatch_path: Path, report_path: Path,
+               at: Optional[str]) -> Iterator[tuple[str, str]]:
+    """The two ledger paths the legacy matcher should read for instant *at*:
+    the real files when *at* is None, otherwise copies cut to rows whose
+    ``ts`` is ≤ the instant, in a temp dir that lives for the block. Cut
+    ONCE per instant and reused across every bot — the ledgers are
+    bot-invariant, so cutting per (bot, instant) multiplied the parse, and
+    the first version never removed its temp dirs at all."""
+    if at is None:
+        yield str(dispatch_path), str(report_path)
+        return
+    with tempfile.TemporaryDirectory(prefix="plane-shadow-") as tmp:
+        for name, src in (("dispatch-log.jsonl", dispatch_path),
+                          ("report-back.jsonl", report_path)):
             _, _, rows, _ = read_ledger(src)
-            (tmp / name).write_text("".join(
+            (Path(tmp) / name).write_text("".join(
                 r.raw + "\n" for r in rows if ts19(r.ts) <= ts19(at)))
-        dlog, rlog = str(tmp / "dispatch-log.jsonl"), str(tmp / "report-back.jsonl")
-    return [OpenRow(str(tid), _epoch_iso(da), str(tid))
-            for da, _exp, tid in doors.open_dispatches(bot, dlog, rlog)]
+        yield str(Path(tmp) / "dispatch-log.jsonl"), str(Path(tmp) / "report-back.jsonl")
 
 
-def superseded_ids(doors, bot: str, dispatch_path: Path) -> set[str]:
-    """Task ids the JSONL retired by a same-bot ``--supersedes`` — the
-    matcher's own rule, read from its own helper."""
-    rows = doors._load_jsonl(str(dispatch_path))
-    return {tid for b, tid in doors._superseded_ids(rows) if b == bot.lower()}
+def legacy_open(doors, bot: str, dispatch_log: str, report_ledger: str) -> list[OpenRow]:
+    """The legacy open set through the INSTALL's matcher, on the paths
+    ``ledgers_at`` handed out."""
+    return [OpenRow(str(tid), epoch_iso(da) or "")
+            for da, _exp, tid in doors.open_dispatches(bot, dispatch_log, report_ledger)]
+
+
+def superseded_by_bot(doors, dispatch_path: Path) -> dict[str, set[str]]:
+    """Task ids the JSONL retired by a same-bot ``--supersedes``, per bot
+    (lower-cased key, the matcher's own) — the matcher's own rule, read from
+    its own helper, ONCE for the whole ledger."""
+    out: dict[str, set[str]] = {}
+    for b, tid in doors._superseded_ids(doors._load_jsonl(str(dispatch_path))):
+        out.setdefault(b, set()).add(tid)
+    return out
 
 
 # --- the diff ------------------------------------------------------------------
@@ -178,6 +219,19 @@ class ShadowDiff:
         return out
 
 
+def _classify(row: OpenRow, side: str, grace: str, superseded: set[str],
+              intentional: set[str]) -> str:
+    """ONE classifier for both sides — a class added to one loop and
+    forgotten in the other is the #1357 shape."""
+    if row.task_id in intentional:
+        return CLASS_INTENTIONAL
+    if side == "plane_only" and row.task_id in superseded:
+        return CLASS_LEGACY_SUPERSEDES
+    if ts19(row.at) >= grace:
+        return CLASS_SKEW
+    return CLASS_DIVERGENCE
+
+
 def diff(fleet: str, bot: str, legacy: list[OpenRow], plane: list[OpenRow], *,
          now: datetime, skew_s: int = DEFAULT_SKEW_S,
          superseded: Optional[set[str]] = None,
@@ -187,52 +241,45 @@ def diff(fleet: str, bot: str, legacy: list[OpenRow], plane: list[OpenRow], *,
     sides) and the heads as the two lists' first elements."""
     superseded = superseded or set()
     intentional = intentional or set()
-    grace = ts19(_iso(now - timedelta(seconds=skew_s)))
-    out = ShadowDiff(fleet, bot, _iso(now),
+    grace = ts19(dt_iso(now - timedelta(seconds=skew_s)))
+    out = ShadowDiff(fleet, bot, dt_iso(now),
                      [r.task_id or "" for r in legacy],
                      [r.task_id for r in plane])
-    plane_pool = [r for r in plane]
+    plane_pool = list(plane)
     for row in legacy:
         match = next((p for p in plane_pool if p.task_id == row.task_id), None)
         if match is not None:
             plane_pool.remove(match)
             continue
-        cls = CLASS_INTENTIONAL if row.task_id in intentional \
-            else CLASS_SKEW if ts19(row.at) >= grace \
-            else CLASS_DIVERGENCE
-        out.divergences.append(Divergence(row.task_id, "legacy_only", cls, row.ref))
+        out.divergences.append(Divergence(
+            row.task_id, "legacy_only",
+            _classify(row, "legacy_only", grace, superseded, intentional), row.label))
     for row in plane_pool:
-        cls = CLASS_INTENTIONAL if row.task_id in intentional \
-            else CLASS_LEGACY_SUPERSEDES if row.task_id in superseded \
-            else CLASS_SKEW if ts19(row.at) >= grace \
-            else CLASS_DIVERGENCE
-        out.divergences.append(Divergence(row.task_id, "plane_only", cls, row.ref))
+        out.divergences.append(Divergence(
+            row.task_id, "plane_only",
+            _classify(row, "plane_only", grace, superseded, intentional), row.label))
     return out
 
 
 # --- the record ----------------------------------------------------------------
 
-ACTOR_UID_SQL = "SELECT uid FROM identity_registry WHERE alias = ? AND kind = 'actor' LIMIT 1"
-
-
 def actor_uid(conn: sqlite3.Connection, alias: str) -> Optional[str]:
     """The bot's actor uid when the plane knows it — the subject anchor.
-    A bot with no plane history has none; the record then carries the
-    alias alone (the contract wants kind and uid together or neither)."""
-    row = conn.execute(ACTOR_UID_SQL, (alias,)).fetchone()
+    A bot with no plane history has none; the record then carries no
+    subject (the contract wants kind, uid and alias together or not at all)
+    and is keyed by ``data.bot`` alone."""
+    row = conn.execute(
+        "SELECT uid FROM identity_registry WHERE alias = ? AND kind = 'actor' LIMIT 1",
+        (alias,)).fetchone()
     return row[0] if row else None
 
 
-LIST_CAP = 40   # ids kept per side in the record; counts carry the rest
-
-
 def shadow_event(d: ShadowDiff, *, subject_uid: Optional[str] = None) -> dict:
-    """One system event per comparison; id derived from (bot, instant). The
-    record is keyed by ``data.bot`` (the streak reads it with json_extract),
-    and ANCHORED on the bot's actor uid when the plane knows it — the
-    contract allows a subject alias only with its kind+uid pair, and a bot
-    with no plane history has none. Id lists are capped (oldest first) so the
-    diagnostic stays under its cap and never truncates into non-JSON."""
+    """One system event per comparison; id derived from (bot, instant).
+    Every list is CAPPED so the record stays far under the diagnostic cap:
+    a record that truncated would lose its JSON and with it the bot key —
+    and the bigger the divergence, the likelier the truncation, which is
+    adverse selection against the evidence the gate exists to see."""
     alias = f"bot:{d.fleet}/{d.bot}"
     data = {
         "reader": READER,
@@ -245,9 +292,10 @@ def shadow_event(d: ShadowDiff, *, subject_uid: Optional[str] = None) -> dict:
         "head_legacy": d.head_legacy,
         "head_plane": d.head_plane,
         "head_agrees": d.head_agrees,
+        "divergences_n": len(d.divergences),
         "divergences": [
             {"task_id": x.task_id, "side": x.side, "class": x.cls, "ref": x.ref}
-            for x in d.divergences],
+            for x in d.divergences[:DIVERGENCE_CAP]],
         "classes": d.classes(),
     }
     return {
@@ -280,53 +328,109 @@ class Streak:
     def gate_ok(self) -> bool:
         return self.clean_run >= GATE_CLEAN_RUN and self.transitions >= GATE_TRANSITIONS
 
+    def line(self) -> str:
+        mark = "met" if self.gate_ok else "NOT met"
+        return (f"{self.bot}: clean_run={self.clean_run}/{GATE_CLEAN_RUN}"
+                f" transitions={self.transitions}/{GATE_TRANSITIONS}"
+                f" comparisons={self.comparisons}"
+                f" last_diverged={self.last_diverged_at or '-'} -> {mark}")
 
-STREAK_SQL = (
+
+# A record is keyed by its data.bot; a record that truncated (which the caps
+# above make unreachable, but which the gate must survive) has no JSON left,
+# so it is keyed by its subject alias instead — a truncated DIVERGENCE must
+# still end a run, never vanish.
+# json_extract RAISES on malformed JSON (a truncated detail is a raw prefix),
+# so it is only evaluated for an intact record; CASE short-circuits.
+_KEY = ("COALESCE(CASE WHEN e.detail_truncated = 0 THEN json_extract(e.detail, '$.bot') END,"
+        " e.subject_alias)")
+TAIL_SQL = (
     "SELECT e.event, e.occurred_at, e.detail, e.detail_truncated FROM events e"
-    " WHERE e.kind = 'system' AND e.event IN (?, ?)"
-    "  AND e.detail_truncated = 0 AND json_extract(e.detail, '$.bot') = ?"
-    " ORDER BY e.occurred_at, e.ingest_seq"
+    f" WHERE e.kind = 'system' AND e.event IN (?, ?) AND {_KEY} = ?"
+    " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT ?"
 )
-
+COUNT_SQL = (
+    "SELECT COUNT(*) FROM events e"
+    f" WHERE e.kind = 'system' AND e.event IN (?, ?) AND {_KEY} = ?"
+)
 SHADOWED_BOTS_SQL = (
-    "SELECT DISTINCT json_extract(e.detail, '$.bot') FROM events e"
-    " WHERE e.kind = 'system' AND e.event IN (?, ?) AND e.detail_truncated = 0"
-    "  AND json_extract(e.detail, '$.bot') LIKE ?"
+    f"SELECT DISTINCT {_KEY} FROM events e"
+    f" WHERE e.kind = 'system' AND e.event IN (?, ?) AND {_KEY} LIKE ?"
 )
 
 
 def streak(conn: sqlite3.Connection, fleet: str, bot: str) -> Streak:
-    """Derived from the recorded comparisons in time order: the clean run
-    at the tail, and how many transitions that run contains. A transition is
-    an id present in one clean comparison's open set and absent from the next
-    — the join being exercised, not merely re-read."""
+    """Derived from the recorded comparisons, newest first, reading only
+    the tail (``TAIL_LIMIT``) — the gate is about the run at the end, never
+    the history. A transition is an id present in one clean comparison's
+    open set and absent from the next clean one — the join being exercised,
+    not merely re-read; a divergence ends the run, truncated or not."""
     alias = f"bot:{fleet}/{bot}"
     s = Streak(bot)
-    prev_open: Optional[list] = None
-    for event, at, detail, truncated in conn.execute(
-            STREAK_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias)):
-        s.comparisons += 1
-        s.last_at = at
+    s.comparisons = conn.execute(COUNT_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias)).fetchone()[0]
+    tail = conn.execute(TAIL_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, TAIL_LIMIT)).fetchall()
+    if tail:
+        s.last_at = tail[0][1]
+    run: list[Optional[list]] = []            # the tail's clean comparisons, newest first
+    for event, at, detail, truncated in tail:
         if event != EVENT_CLEAN:
-            s.clean_run, s.transitions, prev_open = 0, 0, None
             s.last_diverged_at = at
-            continue
-        s.clean_run += 1
-        open_now: Optional[list] = None
-        if detail and not truncated:
+            break
+        open_set: Optional[list] = None       # unknown when the record lost its JSON
+        if not truncated and detail:
             try:
-                open_now = list(json.loads(detail).get("legacy") or [])
-            except (json.JSONDecodeError, AttributeError):
-                open_now = None
-        if prev_open is not None and open_now is not None \
-                and any(i not in open_now for i in prev_open):
+                open_set = list(json.loads(detail).get("legacy") or [])
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                open_set = None
+        run.append(open_set)
+    s.clean_run = len(run)
+    for newer, older in zip(run, run[1:]):    # an id that left the set between two known sets
+        if newer is not None and older is not None and any(i not in newer for i in older):
             s.transitions += 1
-        prev_open = open_now
     return s
 
 
 def shadowed_bots(conn: sqlite3.Connection, fleet: str) -> list[str]:
+    prefix = f"bot:{fleet}/"
     return sorted(
-        r[0][len(f"bot:{fleet}/"):] for r in conn.execute(
-            SHADOWED_BOTS_SQL, (EVENT_CLEAN, EVENT_DIVERGED, f"bot:{fleet}/%"))
-        if r[0] and r[0].startswith(f"bot:{fleet}/"))
+        r[0][len(prefix):] for r in conn.execute(
+            SHADOWED_BOTS_SQL, (EVENT_CLEAN, EVENT_DIVERGED, f"{prefix}%"))
+        if r[0] and r[0].startswith(prefix))
+
+
+def record(root: Path, events: list[dict]) -> dict[str, int]:
+    """Land comparisons through normal ingest, ONE instant per batch: the
+    ingest refuses a MIXED batch (some rows duplicate, some new — "mixed
+    state") as a matter of atomicity, and a replay is exactly that shape —
+    the hour marks duplicate while the live comparison is new. A batch that
+    still collides (a bot added to the roster since the marks were first
+    recorded) falls back to one event per batch. Returns outcome counts."""
+    from .emit_api import emit_batch
+    counts = {"committed": 0, "duplicate": 0, "spooled": 0}
+    by_instant: dict[str, list[dict]] = {}
+    seen: set[str] = set()
+    for ev in events:
+        if ev["event_id"] in seen:          # a live instant that IS an hour mark: one fact
+            continue
+        seen.add(ev["event_id"])
+        by_instant.setdefault(ev["occurred_at"], []).append(ev)
+    for batch in by_instant.values():
+        try:
+            outcomes = emit_batch(root, batch)
+        except RuntimeError as exc:                      # the mixed-state refusal
+            if "duplicate-classification refused" not in str(exc):
+                raise
+            outcomes = [o for ev in batch for o in emit_batch(root, [ev])]
+        for o in outcomes:
+            counts[o.status] = counts.get(o.status, 0) + 1
+    return counts
+
+
+def gate_summary(conn: sqlite3.Connection, fleet: str,
+                 roster: Optional[list[str]] = None) -> list[Streak]:
+    """One streak per bot — every bot on *roster* (the declared fleet) plus
+    any recorded one. A declared bot with NO comparison recorded is short,
+    named as such, never absent: an absence read as clean is the
+    ``source_state`` class."""
+    bots = sorted(set(roster or []) | set(shadowed_bots(conn, fleet)))
+    return [streak(conn, fleet, b) for b in bots]

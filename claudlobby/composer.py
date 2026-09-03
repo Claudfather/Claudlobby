@@ -3868,6 +3868,15 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
     )
 
 
+# Fleet jobs whose SCRIPT reads an arming flag (the closed-scheduler-env class
+# #1383): the composer resolves each through the runtime tier cascade and
+# stamps it on exactly that unit. Add a row per dormant door.
+FLEET_JOB_ARMING: dict[str, str] = {
+    "keepalive": "PLANE_EMIT_ENABLED",
+    "plane-shadow": "PLANE_SHADOW_ENABLED",
+}
+
+
 def compose_fleet_timers(
     fleet: FleetConfig,
     paths: Paths,
@@ -3929,19 +3938,21 @@ def compose_fleet_timers(
     plane_extra_env: dict[str, str] | None = None
     from . import env_tiers as _env_tiers
 
-    shadow_extra_env: dict[str, str] | None = None
+    # Which fleet job reads which arming flag — a TABLE, so the next dormant
+    # door adds a row rather than a branch; each flag resolves through the
+    # one cascade read below. The shadow comparison (cutover chunk 3) rides
+    # its OWN carrier: a recorded fact must not start being written because
+    # emission is on.
+    job_extra_env: dict[str, dict[str, str]] = {}
     try:
         _cascade = _env_tiers.cascade(
             _env_tiers.read_tiers(paths, fleet_name=fleet.name)
         )
-        _pl_res = _cascade.get("PLANE_EMIT_ENABLED")
-        if _pl_res is not None and _pl_res.value == "1":
-            plane_extra_env = {"PLANE_EMIT_ENABLED": "1"}
-        # The shadow comparison (cutover chunk 3) has its OWN carrier: a
-        # recorded fact must not start being written because emission is on.
-        _sh_res = _cascade.get("PLANE_SHADOW_ENABLED")
-        if _sh_res is not None and _sh_res.value == "1":
-            shadow_extra_env = {"PLANE_SHADOW_ENABLED": "1"}
+        for _job, _flag in FLEET_JOB_ARMING.items():
+            _res = _cascade.get(_flag)
+            if _res is not None and _res.value == "1":
+                job_extra_env[_job] = {_flag: "1"}
+        plane_extra_env = job_extra_env.get("keepalive")
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(
             "plane arming unresolved (%s) — timer-run plane doors compose"
@@ -3970,8 +3981,7 @@ def compose_fleet_timers(
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
-                extra_env=(plane_extra_env if name == "keepalive"
-                           else shadow_extra_env if name == "plane-shadow" else None),
+                extra_env=job_extra_env.get(name),
             )
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)

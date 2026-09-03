@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,21 @@ def content_key(raw_line: str) -> str:
     """The content hash an importer stamps as ``<ledger>:sha:<key>`` — over
     the raw line, never its position: rotation rewrites the file."""
     return derive_hex(raw_line)
+
+
+def epoch_iso(epoch) -> Optional[str]:
+    """The ledgers store instants as epoch seconds (``dispatched_at``,
+    ``expected_by``; null or junk when absent); the contract and the shadow
+    want an aware ISO instant. ONE definition — the importer and the shadow
+    both ride it, and a zero/negative/junk value is ABSENT (None), never
+    1970."""
+    try:
+        value = float(epoch)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return datetime.fromtimestamp(value, timezone.utc).isoformat()
 
 
 def ts19(value) -> str:

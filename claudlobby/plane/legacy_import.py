@@ -49,7 +49,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -57,7 +57,8 @@ from .contracts import ContractViolation
 from .emit_api import validate_item
 from .ids import derive_hex
 from .parity import (
-    DISPATCH, REPORT, LedgerParity, LegacyRow, compare, content_key, read_ledger,
+    DISPATCH, REPORT, LedgerParity, LegacyRow, compare, content_key, epoch_iso,
+    read_ledger,
 )
 
 EMITTER = "plane-import"
@@ -73,18 +74,6 @@ _UNTITLED = "(untitled legacy dispatch)"
 
 def _h(*parts: str) -> str:
     return derive_hex("\n".join(parts))
-
-
-def _iso(epoch) -> Optional[str]:
-    """The ledger stores ``expected_by`` / ``dispatched_at`` as epoch seconds
-    (or null); the contract wants an aware ISO instant."""
-    try:
-        value = float(epoch)
-    except (TypeError, ValueError):
-        return None
-    if value <= 0:
-        return None
-    return datetime.fromtimestamp(value, timezone.utc).isoformat()
 
 
 @dataclass
@@ -159,7 +148,7 @@ def dispatch_events(row: LegacyRow, fleet: str, manager: str,
         wi_p["workstream_id"] = str(r["workstream"])
     asg_p: dict = {"assignment_id": asg, "work_item_id": wi, "assignee": assignee,
                    "assigned_by": manager, "dispatch_msg_id": msg}
-    expected = _iso(r.get("expected_by"))
+    expected = epoch_iso(r.get("expected_by"))
     if expected:
         asg_p["expected_by"] = expected
     comm_p: dict = {"msg_id": msg, "sender": manager, "recipient": assignee,
