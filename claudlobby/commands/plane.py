@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ._helpers import _load_fleet_or_exit, _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
-from ..plane.db import connect, connect_ro, db_file, db_path
+from ..plane.db import connect, db_file, db_path, open_ro
 from ..plane.emit_api import emit, emit_batch, _load_capture_config
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
@@ -656,15 +656,13 @@ def _one_line(text: str) -> str:
 
 
 def _open_plane_ro(root: Path, door: str, out):
-    """The exists-before-connect probe both cutover doors share: a read-only
-    connection, or None after printing the refusal to *out* (rc 3 is the
-    caller's). ``db_file`` is a pure join — a refusal must not leave a
-    directory behind."""
-    path = db_file(root)
-    if not path.is_file():
-        print(f"{door}: UNREACHABLE — no plane db at {path}", file=out)
-        return None
-    return connect_ro(path)
+    """A read-only connection through ``db.open_ro`` (the probe every read
+    door and brief share), or None after printing the refusal to *out* (rc 3
+    is the caller's)."""
+    conn, reason = open_ro(root)
+    if conn is None:
+        print(f"{door}: UNREACHABLE — {reason}", file=out)
+    return conn
 
 
 def cmd_plane_parity(args) -> int:
@@ -843,31 +841,42 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
                     rlog: Path, args, readers) -> int:
     from ..plane import shadow as sh
     now = datetime.now(timezone.utc)
-    max_age = int(getattr(doors, "DEFAULT_OVERDUE_MAX_AGE_S", 86400))
+    # The cap and the grace resolved the way the WATCHDOG resolves them (env
+    # overrides included) - a gate that validated the compiled-in defaults
+    # would read clean on a fleet whose real watchdog runs a different rule.
+    max_age = int(doors._resolve_max_age()) if hasattr(doors, "_resolve_max_age") \
+        else int(getattr(doors, "DEFAULT_OVERDUE_MAX_AGE_S", 86400))
     grace = int(doors._resolve_progress_grace()) if hasattr(doors, "_resolve_progress_grace") else 0
     intentional = {t.strip() for t in (args.intentional or "").split(",") if t.strip()}
     instants = [(at, True) for at in sh.replay_instants(now, args.replay_hours)] \
         if args.replay_hours else []
     instants.append((now, False))
     superseded = sh.superseded_by_bot(doors, dlog)
+    malformed = {bot: sh.malformed_deadlines(doors, bot, str(dlog)) for bot in bots}
     uids = {bot: sh.actor_uid(conn, f"bot:{fleet}/{bot}") for bot in bots}
     events: list[dict] = []
     diverged = 0
     for at, replay in instants:
         bound = sh.dt_iso(at) if replay else None
         with sh.ledgers_at(dlog, rlog, bound) as (dl, rl):
+            # the legacy overdue classification answers for EVERY bot at once
+            legacy_overdue = (sh.legacy_overdue_all(doors, dl, rl, now=at, max_age_s=max_age)
+                              if sh.READER_OVERDUE in readers else {})
             for bot in bots:
+                plane_rows = sh.plane_open(conn, fleet, bot, at=bound)   # once per (bot, instant)
                 for reader in readers:
                     if reader == sh.READER_OPEN:
                         legacy = sh.legacy_open(doors, bot, dl, rl)
-                        plane = sh.plane_open(conn, fleet, bot, at=bound)
+                        plane = plane_rows
                     else:
-                        legacy = sh.legacy_overdue(doors, bot, dl, rl, now=at, max_age_s=max_age)
+                        legacy = legacy_overdue.get(bot.lower(), [])
                         plane = sh.plane_overdue(conn, fleet, bot, now=at, max_age_s=max_age,
-                                                 progress_grace_s=grace)
+                                                 progress_grace_s=grace, rows=plane_rows,
+                                                 uid=uids[bot])
                     d = sh.diff(fleet, bot, legacy, plane, now=at, skew_s=args.skew_grace,
                                 superseded=superseded.get(bot.lower(), set()),
-                                intentional=intentional, reader=reader)
+                                intentional=intentional, reader=reader,
+                                malformed=malformed[bot] if reader == sh.READER_OVERDUE else None)
                     if not replay or args.verbose:
                         print(f"  {bot} [{reader}]{' @ ' + sh.ts19(d.at) if replay else ''}:"
                               f" legacy={len(d.legacy_ids)} plane={len(d.plane_ids)}"

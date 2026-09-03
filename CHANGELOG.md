@@ -8,8 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added — the F18 cutover, chunk 4: the overdue reader, the fleet-pulse bridge, brief's shadow section (#1444, J4)
 
-- **`plane shadow`** shadows a second reader — the watchdog's overdue set (`reader=overdue`: deadline passed, the expiry cap, the bot's progress grace, mirrored rule for rule; the legacy side is overdue ∪ orphans) — records and streaks keyed by reader, `--reader open|overdue|all`, `--gate` per (bot, reader), and **`--check`**: rc 1 when any (bot, reader)'s latest recorded comparison diverged.
-- **`fleet-pulse.sh`** bridges a divergence to the fleet: under `PLANE_SHADOW_ENABLED` it runs the check once per sweep and posts a FLEET ALERT through its existing debounced escalation path.
+- **`plane shadow`** shadows a second reader — the watchdog's overdue set (`reader=overdue`: deadline passed, the expiry cap and the bot's progress grace resolved the way the watchdog resolves them; the legacy side read with no bots dir; a legacy row with a non-int deadline is the explained `legacy_malformed_deadline`) — records and streaks keyed by reader, `--reader open|overdue|all`, `--gate` per (bot, reader), and **`--check`**: rc 1 when any (bot, reader)'s latest recorded comparison diverged.
+- **`lib/plane-shadow-check.py`** — the same question answered stdlib for the fleet's watchdog; **`fleet-pulse.sh`** runs it once per sweep under `PLANE_SHADOW_ENABLED` and pages the escalation chat through the house `debounce_notify`, clearing the marker when the check reads clean.
 - **`claudlobby brief`** gains a `shadow` section — the streaks per reader from the recorded comparisons; `degraded` when nothing is recorded or the plane db is absent, never a clean-looking zero.
 
 ### Added — the F18 cutover, chunk 3: the shadow-diff primitive (#1444, J4)

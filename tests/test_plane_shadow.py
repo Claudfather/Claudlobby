@@ -334,10 +334,6 @@ def test_the_launcher_is_dormant_and_the_job_is_composed_unarmed(tmp_path):
 
 # --- chunk 4: the overdue reader, the check, the bridge, brief -----------------
 
-def _epoch_of(dt):
-    return int(dt.timestamp())
-
-
 def test_the_overdue_reader_agrees_and_mirrors_the_watchdog_rules(tmp_path):
     """Both answers to the watchdog's question on one fixture: a past
     deadline is overdue on both sides; a report closes it on both; a
@@ -357,7 +353,7 @@ def test_the_overdue_reader_agrees_and_mirrors_the_watchdog_rules(tmp_path):
     assert sh.diff(F, "w1", legacy, plane, now=now, reader=sh.READER_OVERDUE).clean
     # a progress report by w1 inside the grace shields the row on both sides
     prog_at = now - timedelta(seconds=min(grace, 600) // 2)
-    wi2, asg2 = next((f"wi_{'2':0>32}", f"asg_{'2':0>32}") for _ in [0])
+    wi2, asg2 = f"wi_{'2':0>32}", f"asg_{'2':0>32}"
     emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
                        "source_ref": f"report-back:msg_{'8':0>32}", "occurred_at": sh.dt_iso(prog_at),
                        "payload": {"work_item_id": wi2, "assignment_id": asg2, "event": "progress",
@@ -413,12 +409,66 @@ def test_cli_check_reader_and_gate_per_reader(tmp_path):
     assert c2.returncode == 1 and "w2/open" in c2.stdout
 
 
-def test_the_fleet_pulse_bridge_is_gated_and_reads_the_check():
+def test_the_fleet_pulse_bridge_is_gated_runs_the_stdlib_check_and_debounces():
     src = (REPO / "lib" / "fleet-pulse.sh").read_text()
-    assert 'plane shadow --check' in src and '"${PLANE_SHADOW_ENABLED:-0}" = "1"' in src
-    assert "escalation_shadow_divergence" in src
+    assert 'plane-shadow-check.py' in src and '"${PLANE_SHADOW_ENABLED:-0}" = "1"' in src
+    assert 'debounce_notify "$state_dir" fleet shadow_divergence' in src
+    assert 'debounce_clear "$state_dir" fleet shadow_divergence' in src
     assert src.index("_shadow_bridge() {") < src.index("_shadow_bridge || true")
     assert subprocess.run(["bash", "-n", str(REPO / "lib" / "fleet-pulse.sh")]).returncode == 0
+
+
+def _check(root):
+    return subprocess.run([sys.executable, "-S", "-E", str(REPO / "lib" / "plane-shadow-check.py"),
+                           "--root", str(root), "--fleet", F], capture_output=True, text=True)
+
+
+def test_the_stdlib_check_agrees_with_the_package_door(tmp_path):
+    """The watchdog runs the stdlib twin; it must answer what the package
+    door answers: nothing recorded -> clean (the gate, not the bridge, minds
+    silence); a diverged latest record -> rc 1 naming the pair; a later
+    clean one -> rc 0 again; no db -> rc 3."""
+    root, paths, _, _ = _scene(tmp_path)
+    r = _check(root)
+    assert r.returncode == 0 and r.stdout == ""
+    t0 = NOW - timedelta(hours=2)
+    sh.record(root, [sh.shadow_event(sh.ShadowDiff(F, "w1", sh.dt_iso(t0), ["t-2-bbbb"], [], reader=sh.READER_OVERDUE))])
+    r = _check(root)
+    assert r.returncode == 1 and r.stdout.split()[:2] == ["w1", "overdue"]
+    with _ro(root) as conn:
+        assert [(b, rd) for b, rd, _ in sh.latest_diverged(conn, F, ["w1"])] == [("w1", "overdue")]
+    sh.record(root, [sh.shadow_event(sh.ShadowDiff(F, "w1", sh.dt_iso(t0 + timedelta(hours=1)), ["t-2-bbbb"], ["t-2-bbbb"], reader=sh.READER_OVERDUE))])
+    assert _check(root).returncode == 0
+    assert _check(tmp_path / "nowhere").returncode == 3
+
+
+def test_the_expiry_cap_resolves_the_way_the_watchdog_does(tmp_path):
+    """DISPATCH_OVERDUE_MAX_AGE_S is what the real watchdog honours; the
+    door must resolve the same cap on both sides, not the compiled default."""
+    import os as _os
+    root, paths, _, _ = _scene(tmp_path)
+    env = {**_os.environ, "DISPATCH_OVERDUE_MAX_AGE_S": "1"}     # every row aged out
+    r = subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root), "--fleet", F,
+                        "plane", "shadow", "--reader", "overdue"], capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "w1 [overdue]: legacy=0 plane=0" in r.stdout
+
+
+def test_a_malformed_legacy_deadline_is_explained_not_paged(tmp_path):
+    root, paths, d, r = _scene(tmp_path)
+    d[1]["expected_by"] = "not-an-epoch"          # t-2's ledger row: the watchdog drops it
+    _write(dispatch_ledger_path(paths), d)
+    doors = load_dispatch_doors(paths)
+    now = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
+    with _ro(root) as conn:
+        plane = sh.plane_overdue(conn, F, "w1", now=now, max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S, progress_grace_s=0)
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = sh.legacy_overdue(doors, "w1", dl, rl, now=now, max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S)
+        bad = sh.malformed_deadlines(doors, "w1", dl)
+    assert [x.task_id for x in plane] == ["t-2-bbbb"] and legacy == [] and bad == {"t-2-bbbb"}
+    dd = sh.diff(F, "w1", legacy, plane, now=now, reader=sh.READER_OVERDUE, malformed=bad)
+    assert dd.classes() == {sh.CLASS_LEGACY_MALFORMED: 1} and dd.unexplained == []
+    assert not dd.clean                                   # the heads still differ: disclosed, and not paging as a class
+
 
 
 def test_brief_carries_the_streaks_and_degrades_on_silence(tmp_path):

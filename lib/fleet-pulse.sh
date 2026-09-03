@@ -146,35 +146,27 @@ fi
 # --- Cutover shadow bridge (chunk 4, J4): a DIVERGED latest comparison pages ---
 # The shadow timer records legacy-vs-plane comparisons; the plane never alerts
 # through the fleet it observes on its own, so the fleet's own watchdog asks
-# `plane shadow --check` and posts a FLEET ALERT through its existing debounced
-# escalation path when a (bot, reader) diverged. Gated on the shadow's OWN
-# carrier; explained divergences with agreeing heads never page. A CLI that
-# cannot run is disclosed, never read as clean.
+# the STDLIB check (lib/plane-shadow-check.py - a sweep on a Pi must not import
+# the package every 300s) and pages through the house debounce
+# (debounce_notify, the same helper every other notice here rides), clearing
+# the marker when the check reads clean so a recurrence pages again. Gated on
+# the shadow's OWN carrier; explained divergences with agreeing heads never
+# page (they record as clean). A check that cannot run is disclosed on stderr,
+# never read as clean.
+_shadow_page() { TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" "$LIB_DIR/tg-post.sh" "$1" >/dev/null 2>&1 || printf '%s ALERT-DELIVERY-FAILED escalation shadow_divergence: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$?" >&2; }
 _shadow_bridge() {
     [ "${PLANE_SHADOW_ENABLED:-0}" = "1" ] || return 0
-    [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: shadow bridge armed but no escalation chat — a divergence could not page" >&2; return 0; }
+    [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: shadow bridge armed but no escalation chat - a divergence could not page" >&2; return 0; }
     local _out _rc=0
-    _out=$(claudlobby_cli --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" plane shadow --check 2>&1) || _rc=$?
+    _out=$(python3 "$LIB_DIR/plane-shadow-check.py" --root "$CLAUDLOBBY_ROOT" --fleet "$fleet" 2>&1) || _rc=$?
     case "$_rc" in
-        0) return 0 ;;
+        0) debounce_clear "$state_dir" fleet shadow_divergence; return 0 ;;
         1) ;;
         *) echo "fleet-pulse: shadow check unavailable (rc $_rc): $(printf '%s' "$_out" | tail -1 | cut -c1-160)" >&2; return 0 ;;
     esac
-    local _marker="$state_dir/escalation_shadow_divergence" _age
-    if [ -f "$_marker" ]; then
-        _age=$(( $(date +%s) - $(stat_mtime "$_marker" 2>/dev/null || echo 0) ))
-        [ "$_age" -lt 600 ] && return 0
-    fi
-    local _summary; _summary=$(printf '%s' "$_out" | tail -1 | cut -c1-300)
-    local _msg="FLEET ALERT: cutover shadow divergence — ${_summary}. The plane and the legacy ledger disagree about a bot's open or overdue set; run: claudlobby --fleet $fleet plane shadow --show 5"
-    local _rc2=0
-    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
-        "$LIB_DIR/tg-post.sh" "$_msg" >/dev/null 2>&1 || _rc2=$?
-    if [ "$_rc2" -eq 0 ]; then
-        touch "$_marker"
-    else
-        printf '%s ALERT-DELIVERY-FAILED escalation shadow_divergence: tg-post exit %s -- debounce marker NOT set, will retry next sweep\n' "$(ts_iso)" "$_rc2" >&2
-    fi
+    local _pairs; _pairs=$(printf '%s' "$_out" | awk '{print $1"/"$2}' | tr '\n' ' ')
+    debounce_notify "$state_dir" fleet shadow_divergence _shadow_page \
+        "FLEET ALERT: cutover shadow divergence on ${_pairs% }. The plane and the legacy ledger disagree about a bot's open or overdue set - run: claudlobby --fleet $fleet plane shadow --show 5" "" 600
     return 0
 }
 

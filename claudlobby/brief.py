@@ -797,29 +797,26 @@ def _shadow_section(paths: Paths, bot_id: str, degraded: list[Degradation]) -> d
     re-derived here. Absent plane db, or no comparison recorded for the bot,
     is a labeled degradation rather than a clean-looking zero: the flip gate
     must never read "met" from silence."""
-    from .plane.db import db_file
-    from .plane.parity import connect_ro
+    import sqlite3
+    from .plane.db import open_ro
     from .plane import shadow as sh
 
     fleet_name = paths.fleet_name or ""
-    path = db_file(paths.root)
-    if not path.is_file():
+    conn, reason = open_ro(paths.root)          # the probe every plane read door shares
+    if conn is None:
         degraded.append(Degradation(
             field="shadow", mode="omitted",
-            reason=f"no plane db at {path} — no shadow comparison can have been recorded",
-            issue="#1444"))
+            reason=f"{reason} — no shadow comparison can be read", issue="#1444"))
         return {}
     try:
-        conn = connect_ro(path)
-        try:
-            streaks = [sh.streak(conn, fleet_name, bot_id, r) for r in sh.READERS]
-        finally:
-            conn.close()
-    except Exception as exc:                     # sqlite3.Error and kin: unreadable, disclosed
+        streaks = [sh.streak(conn, fleet_name, bot_id, r) for r in sh.READERS]
+    except sqlite3.Error as exc:                 # opened but unreadable (a pre-migration db)
         degraded.append(Degradation(
             field="shadow", mode="omitted",
             reason=f"plane db unreadable: {exc}", issue="#1444"))
         return {}
+    finally:
+        conn.close()
     out = {
         st.reader: {
             "comparisons": st.comparisons, "clean_run": st.clean_run,
@@ -1030,11 +1027,6 @@ def _short(ts: str | None) -> str:
     return (ts or "—")[:19].replace("T", " ")
 
 
-def shadow_gate_run() -> int:
-    from .plane import shadow as sh
-    return sh.GATE_CLEAN_RUN
-
-
 def format_brief(brief: dict) -> str:
     """Sectioned plain text. Degraded fields are marked at the section header
     AND listed in full at the end — the inline marker is where the reader's eye
@@ -1185,13 +1177,14 @@ def format_brief(brief: dict) -> str:
         out.append(f"  {_short(a['ts'])}  {a['type']:<20} {a.get('source') or ''}")
     out.extend(more)
     out.append("")
+    from .plane import shadow as sh
     shadow = brief.get("shadow") or {}
     out.append(f"SHADOW — cutover comparisons, per reader{mark('shadow')}")
     if not shadow:
         out.append("  (none — see degraded)")
     for reader, st in shadow.items():
         state = "gate met" if st["gate_ok"] else "gate NOT met"
-        out.append(f"  {reader}: clean_run {st['clean_run']}/{shadow_gate_run()}"
+        out.append(f"  {reader}: clean_run {st['clean_run']}/{sh.GATE_CLEAN_RUN}"
                    f" transitions {st['transitions']} comparisons {st['comparisons']}"
                    f" last_diverged {st['last_diverged_at'] or '-'} — {state}")
     out.append("")
