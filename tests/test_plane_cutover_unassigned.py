@@ -150,3 +150,19 @@ def test_a_report_that_resolved_nothing_is_the_newest_report_but_not_terminal(tm
     jsonl = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
     plane = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
     assert jsonl.stdout == plane.stdout == ""
+
+
+def test_a_peers_later_report_does_not_touch_this_bots_idleness(tmp_path):
+    """The newest-report question is PER BOT on both sides: w2's later progress
+    report leaves w1 idle (w1's own newest report is still its completion)."""
+    root, paths, d, r = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    _finish(root, paths, r, wi=f"wi_{'2':0>32}", asg=f"asg_{'2':0>32}", task_id="t-2-bbbb", ts="2026-09-02T13:00:00Z")
+    later = "2026-09-02T13:45:00Z"
+    _report(root, f"wi_{'3':0>32}", f"asg_{'3':0>32}", later, bot="w2", event="progress", extra={"progress": 10})
+    r.append(_rrow(later, "t-3-cccc", "progress", bot="w2", progress="10"))
+    from claudlobby.brief import report_ledger_path
+    _write(report_ledger_path(paths), r)
+    jsonl = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
+    plane = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
+    assert jsonl.stdout == plane.stdout and plane.stdout.startswith("w1 ") and "w2" not in plane.stdout
