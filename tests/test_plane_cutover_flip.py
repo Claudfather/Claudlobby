@@ -227,3 +227,93 @@ def test_the_watchdog_names_its_fleet_on_the_overdue_call():
     src = (REPO / "lib" / "fleet-pulse.sh").read_text()
     line = next(l for l in src.splitlines() if 'dispatch-overdue.py" --all' in l)
     assert '--fleet "$fleet"' in line
+
+
+# --- pins the first mutation pass found missing ------------------------------------
+
+def test_the_expiry_cap_and_the_progress_grace_hold_on_both_sources(tmp_path):
+    from claudlobby.plane.emit_api import emit_batch
+    from tests.test_plane_cutover_parity import _rrow, _write
+    root, paths, _, r = _scene(tmp_path)
+    dl, rl = str(dispatch_ledger_path(paths)), str(report_ledger_path(paths))
+    later = NOW_EPOCH + 30 * 86400                      # the cap drops the ancient rows on both
+    jsonl = _matcher(root, "--all", dl, rl, str(later), "--source", "jsonl")
+    plane = _matcher(root, "--all", dl, rl, str(later), "--source", "plane", "--fleet", F)
+    assert jsonl.returncode == 0 == plane.returncode and jsonl.stdout == plane.stdout == ""
+    prog_at = datetime.fromtimestamp(NOW_EPOCH - 300, timezone.utc)   # w1 reported progress 5 min ago
+    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
+                       "source_ref": f"report-back:msg_{'8':0>32}", "occurred_at": sh.dt_iso(prog_at),
+                       "payload": {"work_item_id": f"wi_{'2':0>32}", "assignment_id": f"asg_{'2':0>32}",
+                                   "event": "progress", "actor": f"bot:{F}/w1", "progress": 10}}])
+    r.append({**_rrow(sh.dt_iso(prog_at), "t-2-bbbb", "progress", progress="10"),
+              "ts": sh.dt_iso(prog_at).replace("+00:00", "Z")})
+    _write(report_ledger_path(paths), r)
+    jsonl = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
+    plane = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
+    assert jsonl.stdout == plane.stdout and "t-2-bbbb" not in plane.stdout and "t-3-cccc" in plane.stdout
+
+
+def test_another_fleets_bot_never_leaks_into_the_overdue_set(tmp_path):
+    from claudlobby.plane.emit_api import emit_batch
+    root, paths, _, _ = _scene(tmp_path)
+    dl, rl = str(dispatch_ledger_path(paths)), str(report_ledger_path(paths))
+    ts, wi, asg, msg = "2026-09-02T09:00:00Z", f"wi_{'9':0>32}", f"asg_{'9':0>32}", f"msg_{'9':0>32}"
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "dispatch-task", "fleet": "g", "occurred_at": ts,
+         "source_ref": "dispatch-log:t-9-zzzz",
+         "payload": {"work_item_id": wi, "title": "t", "created_by": "bot:g/mgr"}},
+        {"event_type": "assignment", "emitter": "dispatch-task", "fleet": "g", "occurred_at": ts,
+         "source_ref": "dispatch-log:t-9-zzzz",
+         "payload": {"assignment_id": asg, "work_item_id": wi, "assignee": "bot:g/w9",
+                     "assigned_by": "bot:g/mgr", "dispatch_msg_id": msg,
+                     "expected_by": "2026-09-02T10:00:00+00:00"}},
+        {"event_type": "communication", "emitter": "dispatch-task", "fleet": "g", "occurred_at": ts,
+         "source_ref": "dispatch-log:t-9-zzzz",
+         "payload": {"msg_id": msg, "sender": "bot:g/mgr", "recipient": "bot:g/w9",
+                     "message_class": "task_request", "command_type": "task",
+                     "work_item_id": wi, "assignment_id": asg, "body": "t"}}])
+    ours = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
+    theirs = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", "g")
+    assert ours.returncode == 0 and "w9" not in ours.stdout and "t-9-zzzz" not in ours.stdout
+    assert [l.split()[0] for l in ours.stdout.splitlines()] == ["w1", "w2"]
+    assert theirs.stdout.startswith("w9 ") and "t-9-zzzz" in theirs.stdout and "w1" not in theirs.stdout
+
+
+def test_the_latest_declaration_wins(tmp_path):
+    root, paths, _, _ = _scene(tmp_path)
+    import time
+    first = _cli(root, "cutover", "--reader", "overdue", "--force", "first")
+    assert first.returncode == 0 and "committed=1" in first.stdout
+    again = _cli(root, "cutover", "--reader", "overdue", "--force", "again")   # same second: one fact
+    if "duplicate=1" in again.stdout:
+        assert "already declared at this instant" in again.stdout
+    time.sleep(1.1)
+    assert _cli(root, "cutover", "--reader", "overdue", "--force", "second").returncode == 0
+    with _ro(root) as conn:
+        assert cut.declared(conn, F)["overdue"][1] == "second"
+
+
+def test_a_hash_keyed_assignment_has_no_legacy_id_and_is_skipped_by_both_readers(tmp_path):
+    """A `dispatch-log:sha:` assignment (an import of a row the ledger held
+    without a task id) is not an id'd row: the legacy list never had it, so
+    the plane source must not manufacture one."""
+    from claudlobby.plane.emit_api import emit_batch
+    root, paths, _, _ = _scene(tmp_path)
+    dl, rl = str(dispatch_ledger_path(paths)), str(report_ledger_path(paths))
+    ts, wi, asg, msg = "2026-09-02T09:30:00Z", f"wi_{'7':0>32}", f"asg_{'7':0>32}", f"msg_{'7':0>32}"
+    ref = "dispatch-log:sha:" + "ab" * 8
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F, "occurred_at": ts,
+         "source_ref": ref, "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{F}/mgr"}},
+        {"event_type": "assignment", "emitter": "dispatch-task", "fleet": F, "occurred_at": ts,
+         "source_ref": ref, "payload": {"assignment_id": asg, "work_item_id": wi,
+                                        "assignee": f"bot:{F}/w1", "assigned_by": f"bot:{F}/mgr",
+                                        "dispatch_msg_id": msg, "expected_by": "2026-09-02T10:00:00+00:00"}},
+        {"event_type": "communication", "emitter": "dispatch-task", "fleet": F, "occurred_at": ts,
+         "source_ref": ref, "payload": {"msg_id": msg, "sender": f"bot:{F}/mgr", "recipient": f"bot:{F}/w1",
+                                        "message_class": "task_request", "command_type": "task",
+                                        "work_item_id": wi, "assignment_id": asg, "body": "t"}}])
+    for args in (("--open", "w1", dl, rl), ("--all", dl, rl, str(NOW_EPOCH))):
+        jsonl = _matcher(root, *args, "--source", "jsonl")
+        plane = _matcher(root, *args, "--source", "plane", "--fleet", F)
+        assert jsonl.stdout == plane.stdout and "sha:" not in plane.stdout and "t-2-bbbb" in plane.stdout

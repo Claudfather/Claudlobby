@@ -967,6 +967,9 @@ def cmd_plane_cutover(args) -> int:
         ev = _cut.declaration_event(fleet, args.reader, streaks, now, forced=args.force or None)
         counts = _sh.record(root, [ev])
         flag = _cut.READ_FLAGS[args.reader]
+        if counts.get("duplicate") and not counts.get("committed"):
+            print(f"cutover: {args.reader} already declared at this instant ({now}) — one fact,"
+                  " nothing new recorded")
         print(f"cutover: declared {args.reader} → plane at {now}"
               + (f" (FORCED: {args.force})" if args.force else "")
               + f" [{', '.join(f'{k}={v}' for k, v in counts.items() if v)}]")
