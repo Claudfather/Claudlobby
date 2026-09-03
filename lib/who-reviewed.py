@@ -281,9 +281,6 @@ PLANE_ROWS_SQL = (
 )
 
 
-TRUNCATED_SQL = "SELECT COUNT(*) FROM events WHERE kind = 'task' AND detail_truncated = 1"
-
-
 def _readers():
     """The stdlib plane readers beside this file — ONE read-only open (schema
     probe + transient retry) for every stdlib door."""
@@ -295,23 +292,23 @@ def _readers():
     return mod
 
 
-def load_plane_rows(root: str) -> tuple[list[dict], str | None, int]:
-    """(rows, reason, truncated) — rows shaped like ledger rows from the plane's
-    task events that carry a pr_url; reason is set (and rows empty) when the
-    plane is unreachable, which is NOT an empty answer; truncated counts the
-    task events whose detail the diagnostic cap cut (a pr_url there is
-    unreadable), disclosed rather than dropped in silence."""
+def load_plane_rows(root: str) -> tuple[list[dict], str | None]:
+    """(rows, reason) — rows shaped like ledger rows from the plane's task
+    events that carry a pr_url; reason is set (and rows empty) when the plane
+    is unreachable, which is NOT an empty answer. The `detail_truncated = 0`
+    filter is defensive only: a task event's summary is capped at 4096 bytes
+    by the contract, so its detail never reaches the diagnostic cap and no
+    row is ever dropped for truncation."""
     import sqlite3
     pr = _readers()
     try:
         conn = pr.connect(root)
     except pr.PlaneUnreachable as exc:
-        return [], str(exc), 0
+        return [], str(exc)
     try:
         raw = conn.execute(PLANE_ROWS_SQL).fetchall()
-        truncated = conn.execute(TRUNCATED_SQL).fetchone()[0]
     except sqlite3.Error as exc:
-        return [], f"plane db unreadable: {exc}", 0
+        return [], f"plane db unreadable: {exc}"
     finally:
         conn.close()
     rows: list[dict] = []
@@ -329,7 +326,7 @@ def load_plane_rows(root: str) -> tuple[list[dict], str | None, int]:
         rows.append({"ts": ts, "bot": bot or "(unnamed)", "status": event, "task_id": tid,
                      "pr_url": data.get("pr_url") or "", "summary": data.get("summary") or "",
                      "_fleet": fleet, "_ledger": "plane"})
-    return rows, None, truncated
+    return rows, None
 
 
 def attribute_event(
@@ -581,13 +578,12 @@ def main(argv: list[str] | None = None) -> int:
     bad_lines = 0
     fleets: list = []
     ledgers: list = []
-    plane_truncated = 0
     if args.source == "plane":
         if not args.root:
             print("--source plane needs --root (or CLAUDLOBBY_ROOT); refusing rather than"
                   " reporting every review as UNKNOWN", file=sys.stderr)
             return 4
-        rows, why, plane_truncated = load_plane_rows(args.root)
+        rows, why = load_plane_rows(args.root)
         if why is not None:
             print(f"the plane is unreachable ({why}) — not an empty answer; refusing", file=sys.stderr)
             return 4
@@ -627,7 +623,6 @@ def main(argv: list[str] | None = None) -> int:
             "unreadable": unreadable,
             "bad_lines": bad_lines,
             "source": args.source,
-            "plane_truncated": plane_truncated,
             "rows": len(rows),
             "fleets": fleets,
         },

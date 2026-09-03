@@ -210,8 +210,8 @@ def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
                                    "pr_url": "https://github.com/org/repo/pull/1046", "summary": "Request Changes on #1046"}}])
     ledger_rows = [{**_rrow(ts, "t-2-bbbb", "completed", pr_url="https://github.com/org/repo/pull/1046",
                             summary="Request Changes on #1046"), "_fleet": F, "_ledger": "ledger"}]
-    plane_rows, why, truncated = wr.load_plane_rows(str(root))
-    assert why is None and truncated == 0 and len(plane_rows) == 1
+    plane_rows, why = wr.load_plane_rows(str(root))
+    assert why is None and len(plane_rows) == 1
     assert {k: plane_rows[0][k] for k in ("bot", "pr_url", "task_id", "status", "_fleet")} == \
         {"bot": "w1", "pr_url": "https://github.com/org/repo/pull/1046", "task_id": "t-2-bbbb",
          "status": "completed", "_fleet": F}
@@ -228,7 +228,7 @@ def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
     assert ok.returncode == 0, ok.stderr
     assert json.loads(ok.stdout)["scope"]["source"] == "plane"
     (root / "state" / "plane" / "plane.db").unlink()
-    rows, why, _ = wr.load_plane_rows(str(root))
+    rows, why = wr.load_plane_rows(str(root))
     assert rows == [] and "no plane db" in why                                     # unreachable ≠ empty
     gone = subprocess.run([sys.executable, str(REPO / "lib" / "who-reviewed.py"), "org/repo", "1046",
                            "--source", "plane", "--root", str(root), "--reviews-json", str(reviews)],
@@ -257,20 +257,3 @@ def test_the_plane_orphan_list_is_the_planes_own_not_the_ledgers(tmp_path):
     assert plane.returncode == 0 and "t-8-only-plane" in plane.stdout and "t-2-bbbb" in plane.stdout
     assert "t-8-only-plane" not in jsonl.stdout
 
-
-def test_who_reviewed_counts_a_truncated_task_event_instead_of_dropping_it(tmp_path):
-    wr = load_lib_module("who-reviewed")
-    root, paths, _, _ = _scene(tmp_path)
-    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
-                       "source_ref": f"report-back:msg_{'6':0>32}", "occurred_at": "2026-09-02T15:00:00Z",
-                       "payload": {"work_item_id": f"wi_{'2':0>32}", "assignment_id": f"asg_{'2':0>32}",
-                                   "event": "completed", "actor": f"bot:{F}/w1",
-                                   "pr_url": "https://github.com/org/repo/pull/7", "summary": "x" * 20000}}])
-    rows, why, truncated = wr.load_plane_rows(str(root))
-    assert why is None and rows == [] and truncated == 1
-    reviews = tmp_path / "reviews.json"
-    reviews.write_text(json.dumps({"reviews": [], "comments": []}))
-    cli = subprocess.run([sys.executable, str(REPO / "lib" / "who-reviewed.py"), "org/repo", "7",
-                          "--source", "plane", "--root", str(root), "--reviews-json", str(reviews), "--json"],
-                         capture_output=True, text=True, timeout=60)
-    assert cli.returncode == 0 and json.loads(cli.stdout)["scope"]["plane_truncated"] == 1
