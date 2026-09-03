@@ -26,14 +26,6 @@ NON_TERMINAL_CLAUSE = (
 )
 
 # The plane's OPEN SET for one assignee AS OF an instant (cutover chunk 3, the
-# shadow primitive): assignments landed by then with no terminal task event
-# by then. The same terminal vocabulary as NON_TERMINAL_CLAUSE, bounded in
-# time on BOTH sides so a replay at a past instant answers what the plane
-# held then — a replay that used today's closures would grade yesterday's
-# legacy answer against tomorrow's plane. The alias join is case-insensitive
-# on the whole alias, matching the legacy matcher's case-insensitive bot key.
-# Oldest first, ingest order as the tiebreak: the legacy list's order.
-# The plane's OPEN SET for one assignee AS OF an instant (cutover chunk 3, the
 # shadow primitive). Deliberately NOT NON_TERMINAL_CLAUSE: that closes per
 # ASSIGNMENT (attention and expiry's question), while the legacy list reader
 # being shadowed closes per (bot, TASK ID) — a redispatched task id with one
@@ -55,6 +47,8 @@ OPEN_ASSIGNMENTS_AT_SQL = (
     "            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.source_ref"
     "              AND (? IS NULL OR s.occurred_at <= ?)))))"
     " ORDER BY a.occurred_at, a.ingest_seq"
+)
+
 # The plane answered by a LEGACY source_ref for ONE assignee (cutover chunks
 # 1-3b): the assignments that carry `source_ref` (a dispatch-log task id)
 # whose assignee alias matches case-insensitively, the legacy matcher's own
