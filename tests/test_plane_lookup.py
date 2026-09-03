@@ -60,6 +60,55 @@ def test_found_prints_ids_latest_first_and_filters_assignee(tmp_path):
     assert miss.returncode == 0 and miss.stdout == "" and "not found" in miss.stderr
 
 
+def test_empty_root_is_unreachable_not_a_relative_path(tmp_path, monkeypatch):
+    root = _root(tmp_path)
+    _dispatch(root, "a", "t-1-aaaa")
+    monkeypatch.chdir(root)           # a db sits exactly where "" would resolve
+    r = _run("", "--task-id", "t-1-aaaa")
+    assert r.returncode == 3 and r.stdout == "" and "unreachable" in r.stderr
+
+
+def test_assignee_filter_fails_closed_without_a_registry_alias(tmp_path):
+    root = _root(tmp_path)
+    _dispatch(root, "a", "t-1-aaaa")
+    conn = connect(db_path(root))
+    try:
+        conn.execute("UPDATE assignments SET assignee_uid = 'actor_' || substr(hex(randomblob(16)),1,32)")
+        conn.commit()
+    finally:
+        conn.close()
+    r = _run(root, "--task-id", "t-1-aaaa", "--assignee", f"bot:{F}/w1")
+    assert r.returncode == 0 and r.stdout == "" and "not found" in r.stderr
+
+
+def test_two_field_output_for_an_assignment_without_a_dispatch_msg_id(tmp_path):
+    """dispatch_msg_id is optional on the contract; the door then prints
+    two fields and dispatch-task.sh must NOT read the assignment id as the
+    msg id. The parse+guard lines are extracted from the shipped script."""
+    root = _root(tmp_path)
+    wi, asg = f"wi_{'c':0>32}", f"asg_{'c':0>32}"
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F,
+         "source_ref": "dispatch-log:t-2-cccc",
+         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{F}/mgr"}},
+        {"event_type": "assignment", "emitter": "dispatch-task", "fleet": F,
+         "source_ref": "dispatch-log:t-2-cccc",
+         "payload": {"assignment_id": asg, "work_item_id": wi,
+                     "assignee": f"bot:{F}/w1", "assigned_by": f"bot:{F}/mgr"}}])
+    r = _run(root, "--task-id", "t-2-cccc")
+    assert r.returncode == 0 and r.stdout.split() == [wi, asg]
+    dt = (REPO / "lib" / "dispatch-task.sh").read_text()
+    parse = next(l for l in dt.splitlines() if "SUP_WI=${_sup%% *}" in l)
+    guard = next(l for l in dt.splitlines() if 'sup_frag="\\"supersedes_msg_id' in l)
+    def frag(stdout):
+        return subprocess.run(
+            ["bash", "-c", f"_sup='{stdout}'; sup_frag=''\n{parse}\n{guard}\n"
+             "printf '%s' \"$sup_frag\""], capture_output=True, text=True).stdout
+    assert frag(r.stdout.strip()) == ""                       # two fields: no supersedes_msg_id
+    msg = f"msg_{'d':0>32}"
+    assert frag(f"{wi} {asg} {msg}") == f'"supersedes_msg_id":"{msg}",'
+
+
 def test_not_found_is_empty_rc0_and_unreachable_is_rc3(tmp_path):
     root = _root(tmp_path)
     _dispatch(root, "a", "t-1-aaaa")

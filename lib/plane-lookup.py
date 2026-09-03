@@ -44,6 +44,12 @@ def main(argv=None) -> int:
     ap.add_argument("--assignee", default=None,
                     help="bot:<fleet>/<name>; name part compared case-insensitively")
     a = ap.parse_args(argv)
+    if not a.root:
+        # An empty root would resolve RELATIVE to the cwd and could find a
+        # stranger's db there — unreachable, never a guess (adversarial lens).
+        print("plane-lookup: --root is empty (CLAUDLOBBY_ROOT unset?) — unreachable",
+              file=sys.stderr)
+        return 3
     db = os.path.join(a.root, "state", "plane", "plane.db")
     if not os.path.isfile(db):
         print(f"plane-lookup: no plane db at {db} — unreachable, not empty", file=sys.stderr)
@@ -65,7 +71,10 @@ def main(argv=None) -> int:
         fl, _, name = a.assignee.rpartition("/")
         want = (fl.lower(), name.lower())
     for wi, asg, msg, alias in rows:
-        if want and alias:
+        if want:
+            # Fail CLOSED: an assignee the registry cannot name is not a match.
+            if not alias:
+                continue
             fl, _, name = alias.rpartition("/")
             if (fl.lower(), name.lower()) != want:
                 continue
