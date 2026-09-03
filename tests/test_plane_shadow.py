@@ -518,6 +518,7 @@ def test_overdue_rows_are_oldest_first_on_both_sides(tmp_path):
     bot must come back oldest first on both sides, like the legacy list."""
     root, paths, d, r = _scene(tmp_path)
     _dispatch(root, "8", "t-8-8888", "2026-09-02T09:00:00Z", ledger=d)     # older than t-2 (10:00)
+    _dispatch(root, "9", "t-9-9999", "2026-09-02T11:00:00Z", ledger=d)     # newer: ledger order != sort != reverse
     _write(dispatch_ledger_path(paths), d)
     doors = load_dispatch_doors(paths)
     now = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
@@ -528,4 +529,4 @@ def test_overdue_rows_are_oldest_first_on_both_sides(tmp_path):
     with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
         legacy = [x.task_id for x in sh.legacy_overdue(doors, "w1", dl, rl, now=now,
                                                          max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S)]
-    assert legacy == ["t-8-8888", "t-2-bbbb"] == plane
+    assert legacy == ["t-8-8888", "t-2-bbbb", "t-9-9999"] == plane
