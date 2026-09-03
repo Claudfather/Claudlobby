@@ -189,52 +189,28 @@ This is the foundation for the future ML / self-learning layer: drift becomes tr
 
 ## The observable plane
 
-Full reference: [`observable-plane.md`](observable-plane.md) — the families and
-the envelope, identity, the write spine, every door and its arming carrier, the
-read side, the F18 cutover state machine, migrations and retention.
-
 The four layers above answer "how does a bot get *composed*." A fifth concern sits orthogonal to
 all of them: how does anyone find out what a *running* fleet actually did — which dispatch went
-where, whether it was acknowledged, what a workstream's state is — after the fact, across
-restarts, without grepping tmux panes. That's the **observable plane** (`claudlobby/plane/`, a
-subpackage of the compositor; landed 2026-08-26/27).
+where, whether it was acknowledged, what a bot is doing right now, what the operator said and what
+came back — after the fact, across restarts, without grepping tmux panes. That is the **observable
+plane** (`claudlobby/plane/`, a subpackage of the compositor): one append-only, typed SQLite
+database per host that the existing `lib/` doors and hooks write into from the side, and that the
+read side — `brief`, the operator plane (`claudlobby plane view`), the fleet-pulse watchdog's
+reader, the dispatch resolver — answers from.
 
-It's an append-only, typed event kernel — not a new generation layer. Nothing in `fleet.yaml` or
-`runtime/bots/` changes shape because of it; it's a recording substrate that the existing lib/
-scripts write into, from the side.
+Full reference: [`observable-plane.md`](observable-plane.md) — the ten families and the common
+envelope, identity (aliases vs minted uids), the write spine and its ladder (daemon socket → cold
+CLI → spool), every door and the flag that arms it, the read side (and which doors are NOT
+read-only), the F18 cutover state machine (shadow → gate → declare → flip → retire) with the
+rollback at each stage, migrations and retention.
 
-```
-claudlobby/plane/     — the kernel: contracts (typed event envelope), minted ids, canonical
-                         serialization, SQLite storage (state/plane/plane.db), an ingest function,
-                         queries, migrations
-claudlobby/commands/plane.py
-                       — the CLI surface: `claudlobby plane {status,doctor,serve,schema,spool}`,
-                         `claudlobby emit` / `emit-batch`
-lib/plane-emit.sh     — the shim every writing door calls: unix-socket daemon → cold CLI →
-                         local spool, each fallback disclosed, never blocks the door's real action
-lib/plane-daemon.sh   — launches `claudlobby plane serve`, a long-lived socket ingest daemon
-lib/plane-session-start.sh
-                       — SessionStart hook; mints the transcript-stable session_uid attached to
-                         everything a session reports
-```
-
-**Five existing doors dual-write into it**: `dispatch-task.sh`, `report-back.sh`, `tg-post.sh`,
-`workstream-update.sh`, `briefing-trigger.sh`. Each keeps writing its legacy JSONL ledger exactly
-as before — that stays authoritative — and *additionally* emits a plane event alongside it. Dual
-write, not migration.
-
-**Everything about it is dormant by default**, the same pattern as `SESSION_DIGEST_ENABLED`
-elsewhere in this codebase: a fleet that never sets `PLANE_EMIT_ENABLED=1` pays zero cost and
-behaves exactly as it did before this existed. The daemon itself needs a *second*, host-level
-arm (`system.yaml` `host.jobs.plane-daemon.enroll: true`) — a fleet can dual-write to the cold
-CLI/spool path without ever running the daemon. See
-[`system-yaml-schema.md`](../system-yaml-schema.md#unit-service--resident-host-services) for the
-full `host.jobs`/`unit: service` shape and its arm/disarm recipe.
-
-**It's write-side only, for now.** `claudlobby events`, `report-back`, and `brief` still read the
-legacy JSONL ledgers — the plane kernel is a flight recorder being built ahead of the read/query
-layer that will eventually consume it. Full model, activation semantics, and the fleet-review
-history behind the design: `documentation/plans/2026-08-18-observable-plane-design-v2.md`.
+Two properties matter at this altitude. **Everything is dormant by default**: a fleet that never
+sets `PLANE_EMIT_ENABLED=1` in its `.env` tier pays nothing; the ingest daemon, the view daemon and
+the sweeps are separately armed host jobs (`system.yaml`, see
+[`system-yaml-schema.md`](../system-yaml-schema.md#unit-service--resident-host-services)). And
+**nothing in `fleet.yaml` or `runtime/bots/` changes shape because of it** — the plane records what
+the doors already do; the legacy JSONL ledgers keep being written until the cutover retires them,
+one reader at a time, with the parity of the two answers measured and recorded before any flip.
 
 ## Validation
 
