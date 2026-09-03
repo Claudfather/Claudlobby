@@ -1215,10 +1215,11 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
     read_flags = _read_flag_env(paths, fleet.name)
     if read_flags:
         lines.append("")
-        lines.append("# Cutover read flags (chunk 5): the SESSION carrier for PLANE_READ_* —")
-        lines.append("# resolved from the fleet .env tier at compose time, because start-bot.sh")
-        lines.append("# exports bot.conf and sources the tiers without export. A flag here is")
-        lines.append("# half a flip: the matcher serves the plane only once `plane cutover` declared it.")
+        lines.append("# Cutover flags (chunks 5-6b): the SESSION carrier for PLANE_READ_* (1 = flip)")
+        lines.append("# and PLANE_LEGACY_WRITE_* (0 = retired) — resolved from the fleet .env tier at")
+        lines.append("# compose time, because start-bot.sh exports bot.conf and sources the tiers")
+        lines.append("# without export. A flag here is half the fact: the matcher serves the plane only")
+        lines.append("# once `plane cutover` declared it, and a retired write is recorded the same way.")
         for k, v in sorted(read_flags.items()):
             lines.append(f"export {k}={_shq(v)}")
         lines.append("")
@@ -3906,11 +3907,13 @@ def _read_flag_env(paths: Paths, fleet_name: str | None) -> dict[str, str]:
     key = (str(paths.root), fleet_name or "")
     if key not in _READ_FLAG_MEMO:
         from . import env_tiers as _env_tiers
-        from .plane.cutover import READ_FLAGS
+        from .plane.cutover import READ_FLAGS, WRITE_FLAGS
         env: dict[str, str] = {}
         try:
             cascade = _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=fleet_name))
             env = {f: "1" for f in READ_FLAGS.values() if _env_tiers.armed(cascade, f)}
+            # chunk 6b: a RETIRED legacy write (the tier says 0) rides the same carrier
+            env.update({f: "0" for f in WRITE_FLAGS.values() if _env_tiers.resolves_to(cascade, f, "0")})
         except _env_tiers.ResolverUnavailable as exc:
             _log.warning("cutover read flags unresolved (%s) — bot.conf composes them UNSET", exc)
         _READ_FLAG_MEMO[key] = env

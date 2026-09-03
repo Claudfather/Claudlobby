@@ -519,7 +519,11 @@ def register_subparsers(sub) -> None:
         help="Cutover chunk 5: declare a reader's flip to the plane — refuses"
         " unless the J4 gate is met on every bot, records cutover_declared,"
         " prints the PLANE_READ_* flag line (rc 0 declared / 1 refused / 3 unreachable)")
-    pcut.add_argument("--reader", choices=("open", "overdue", "open_task"), required=True,
+    pcut.add_argument("--retire-writes", action="store_true",
+                      help="Chunk 6b: declare the legacy JSONL writes retired (dispatch-log +"
+                      " report-back) — refuses unless every reader is declared; records"
+                      " legacy_write_retired; prints the PLANE_LEGACY_WRITE_*=0 lines")
+    pcut.add_argument("--reader", choices=("open", "overdue", "open_task"), default=None,
                       help="Which reader flips: the open list, the watchdog's overdue set, or the"
                       " resolver (--open-task; its bar is 200 agreeing heads + a head change)")
     pcut.add_argument("--force", default="",

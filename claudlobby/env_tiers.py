@@ -242,10 +242,17 @@ def resolve(
     return cascade(read_tiers(paths, bot_name=bot_name, fleet_name=fleet_name))
 
 
+def resolves_to(cascade: dict[str, "Resolution"], flag: str, value: str) -> bool:
+    """Does *flag* resolve to exactly *value* in *cascade*? The one comparison
+    every compose-time flag decision uses; `armed` is its "1" form, the
+    retired legacy writes (chunk 6b) its "0" form."""
+    res = cascade.get(flag)
+    return res is not None and res.value == value
+
+
 def armed(cascade: dict[str, "Resolution"], flag: str) -> bool:
     """Does *flag* resolve to exactly "1" in *cascade*? ONE definition of
     "armed" for every compose-time arming decision (timer stamps, bot.conf
     carriers, the doctor's flag rungs) — the same test hand-rolled three
     times is the #892/#1143 drift shape this module's docstring names."""
-    res = cascade.get(flag)
-    return res is not None and res.value == "1"
+    return resolves_to(cascade, flag, "1")

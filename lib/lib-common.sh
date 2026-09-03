@@ -527,10 +527,51 @@ plane_mint_id() {
 # (plane-emit.sh: socket -> cold CLI -> spool). stdout discarded; stderr
 # passes through (the fallback disclosure is the contract); rc never
 # propagates — dual-write, the legacy record is load-bearing.
+# The wrapper never blocks the door, but it SURFACES the result: PLANE_EMIT_LAST_RC
+# is 0 after a recorded emission and the shim rc after a failed one (chunk 6b),
+# so a door that has retired its legacy write can still write the ledger when
+# the plane did not record — a dispatch or report must land SOMEWHERE.
+# Feed it through a here-string (`plane_emit_events door <<<"$batch"`), never a
+# pipeline, wherever the caller needs PLANE_EMIT_LAST_RC afterwards: a pipeline
+# runs the function in a subshell and the result never comes back.
+PLANE_EMIT_LAST_RC=0
 plane_emit_events() {
-    local door="$1"
-    "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || \
-        echo "$door: plane record failed rc=$? (door action unaffected — legacy record stands)" >&2
+    local door="$1" _rc=0
+    "${BASH_SOURCE[0]%/*}/plane-emit.sh" >/dev/null || _rc=$?
+    PLANE_EMIT_LAST_RC=$_rc
+    if [ "$_rc" -ne 0 ]; then
+        echo "$door: plane record failed rc=$_rc (door action unaffected)" >&2
+    fi
+    return 0
+}
+
+# plane_write_retired <door> <FLAG_NAME> -- returns 0 when the legacy JSONL append
+# may be SKIPPED, 1 when the door must write it. Skipping needs FOUR facts, and
+# the missing one is disclosed: the flag says 0; the plane is armed; the
+# retirement is RECORDED (plane cutover --retire-writes, read through the
+# stdlib lookup so a copy-pasted .env cannot retire a write nobody declared);
+# and THIS emission succeeded (PLANE_EMIT_LAST_RC). Default 1: keep writing.
+plane_write_retired() {
+    local door="$1" flag_name="$2" flag_val
+    eval "flag_val=\${$flag_name:-1}"
+    [ "$flag_val" = "0" ] || return 1
+    if [ "${PLANE_ARMED:-0}" != "1" ]; then
+        echo "$door: $flag_name=0 but the plane is unarmed -- writing the ledger anyway" >&2
+        return 1
+    fi
+    if [ "${PLANE_EMIT_LAST_RC:-1}" -ne 0 ]; then
+        echo "$door: $flag_name=0 but the plane did not record this one (rc=$PLANE_EMIT_LAST_RC) -- writing the ledger" >&2
+        return 1
+    fi
+    local _retired
+    _retired=$(python3 -S -E "${BASH_SOURCE[0]%/*}/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
+        --retired --fleet "${FLEET_NAME:-}" 2>/dev/null || true)
+    if [ -z "$_retired" ]; then
+        echo "$door: $flag_name=0 but no legacy_write_retired is recorded for ${FLEET_NAME:-?} -- writing the ledger (plane cutover --retire-writes first)" >&2
+        return 1
+    fi
+    echo "$door: legacy write retired ($_retired) -- the plane recorded it" >&2
+    return 0
 }
 
 # plane_tx_event <emitter> <fleet> <carrier> <msg_id> <destination> <state>

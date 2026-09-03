@@ -313,7 +313,9 @@ $_pairs
 EOF_IDLESS
         fi
     fi
-    printf '{"events":[%s]}' "$events" | plane_emit_events report-back
+    local _batch
+    printf -v _batch '{"events":[%s]}' "$events"
+    plane_emit_events report-back <<<"$_batch"            # same shell: PLANE_EMIT_LAST_RC reaches the ledger decision
 }
 if [ "$PLANE_ARMED" = "1" ]; then
     _plane_emit_report_intent || true
@@ -363,6 +365,12 @@ _emit_ledger_event() {
             "$ts" "$BOT" "$(json_escape "$TASK_ID")" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" "$TASK_ANOMALY" "$PLANE_MSG_ID" >> "$ledger"
         rotate_jsonl_by_ts "$ledger"
     }
+    # Cutover chunk 6b: the legacy append retires behind PLANE_LEGACY_WRITE_REPORT=0;
+    # plane_write_retired (lib-common) skips it only when the flag says 0 AND the
+    # plane is armed AND the retirement is recorded AND this report was recorded.
+    if plane_write_retired report-back PLANE_LEGACY_WRITE_REPORT; then
+        return 0
+    fi
     with_lock "$ledger.lock" _write_and_rotate
 }
 _emit_ledger_event "${POSITIONAL_EXTRAS[@]+"${POSITIONAL_EXTRAS[@]}"}" || true

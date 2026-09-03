@@ -410,8 +410,9 @@ def test_the_grammar_refuses_a_dropped_value_and_a_plane_source_off_its_modes(tm
         assert r.returncode == 2 and r.stdout == "" and "needs a value" in r.stderr, args
     accepted = _matcher(root, "--open-task", "w1", dl, rl, "--source", "plane", "--fleet", F)
     assert accepted.returncode == 0 and "no meaning" not in accepted.stderr   # the resolver flips too (6a)
-    for args in (("--orphans", dl, rl, "--bots-dir", str(root)),
-                 ("--unassigned", dl, rl),
+    orphans = _matcher(root, "--orphans", dl, rl, "--bots-dir", str(root), "--source", "plane", "--fleet", F)
+    assert orphans.returncode == 0 and "no meaning" not in orphans.stderr     # the orphan list follows the overdue flip (6b)
+    for args in (("--unassigned", dl, rl),
                  ("w1", dl, rl)):
         r = _matcher(root, *args, "--source", "plane", "--fleet", F)
         assert r.returncode == 2 and r.stdout == "" and "no meaning" in r.stderr, args
@@ -422,6 +423,34 @@ def test_the_grammar_refuses_a_dropped_value_and_a_plane_source_off_its_modes(tm
     a = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--bots-dir", str(bots), "--source", "jsonl")
     b = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "jsonl", "--bots-dir", str(bots))
     assert a.returncode == 0 == b.returncode and a.stdout == b.stdout
+
+
+def test_the_stdlib_open_falls_back_to_a_query_only_connection_on_cantopen(tmp_path, monkeypatch):
+    """Under the system python3 a `mode=ro` URI open fails with CANTOPEN on a
+    WAL database whose writer has closed; the fallback opens normally and
+    holds the connection read-only by pragma — a write still refuses."""
+    import sqlite3 as _sq
+    root, _, _, _ = _scene(tmp_path)
+    m = _stdlib_readers()
+    real = _sq.connect
+    seen = []
+
+    def uri_fails(*a, **kw):
+        seen.append(a[0])
+        if kw.get("uri"):
+            raise _sq.OperationalError("unable to open database file")
+        return real(*a, **kw)
+    monkeypatch.setattr(m.sqlite3, "connect", uri_fails)
+    conn = m.connect(str(root))
+    assert seen[0].startswith("file:") and not seen[1].startswith("file:")      # ro URI first, then the plain path
+    assert {"w1", "w2"} <= set(m.roster(conn, F))
+    try:
+        conn.execute("DELETE FROM identity_registry")
+    except _sq.OperationalError as exc:
+        assert "readonly" in str(exc) or "query_only" in str(exc).lower() or "attempt to write" in str(exc)
+    else:
+        raise AssertionError("the fallback connection must refuse writes")
+    conn.close()
 
 
 def test_the_stdlib_open_retries_a_transient_cantopen_once_then_refuses(tmp_path, monkeypatch):

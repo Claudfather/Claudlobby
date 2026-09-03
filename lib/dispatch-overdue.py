@@ -300,25 +300,31 @@ def _open_task_plane(p: "_Plane", bot: str) -> str | None:
 
 
 def _overdue_all_plane(p: "_Plane", now: int, max_age: int, bots_dir: str | None
-                       ) -> dict[str, list[tuple[int, int, int, str]]]:
-    """The plane's overdue set for every bot the plane knows, with the SAME
+                       ) -> tuple[dict[str, list[tuple[int, int, int, str]]],
+                                  dict[str, list[tuple[int, int, int, str]]]]:
+    """(overdue, orphaned) for every bot the plane knows, with the SAME
     orphan split the legacy reader applies (a dispatch older than the bot's
-    .spawn is the orphan list's, never paged as overdue)."""
+    .spawn is the orphan list's, never paged as overdue) — so --orphans
+    follows the overdue flip instead of reading a ledger that may have
+    stopped growing (chunk 6b)."""
     grace = _resolve_progress_grace()
     spawn_cache: dict[str, int | None] = {}
     try:
         out: dict[str, list[tuple[int, int, int, str]]] = {}
+        orphans: dict[str, list[tuple[int, int, int, str]]] = {}
         for bot, entry in sorted(p.roster.items()):
             for da, exp, elapsed, tid in p.pr.overdue_rows(
                     p.conn, p.fleet, bot, now=now, max_age=max_age, progress_grace=grace, entry=entry):
+                row = (da, exp, elapsed, tid if tid else "-")
                 if tid and bots_dir:
                     if bot not in spawn_cache:
                         spawn_cache[bot] = _spawn_epoch(bots_dir, bot)
                     spawn = spawn_cache[bot]
                     if spawn is not None and spawn > da:
-                        continue                              # the orphan list's row
-                out.setdefault(bot, []).append((da, exp, elapsed, tid if tid else "-"))
-        return out
+                        orphans.setdefault(bot, []).append(row)
+                        continue
+                out.setdefault(bot, []).append(row)
+        return out, orphans
     except sqlite3.Error as exc:
         raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
     finally:
@@ -450,11 +456,9 @@ def _classify_all(
     """
     p = plane if plane is not None else _select("overdue", source, fleet=fleet, root=root)
     if p is not None:
-        # Overdue from the plane; the orphan list stays the legacy hybrid
-        # (.spawn against the ledger) — --orphans has no plane counterpart.
-        over = _overdue_all_plane(p, now, max_age, bots_dir)
-        _, orph = _classify_all(dispatch_log, report_ledger, now, max_age, bots_dir)
-        return over, orph
+        # Both sets from the plane — the orphan list is the overdue reader's
+        # own split, so it flips with it and never reads a frozen ledger.
+        return _overdue_all_plane(p, now, max_age, bots_dir)
     dispatches = _load_jsonl(dispatch_log)
     reports = _load_jsonl(report_ledger)
 
@@ -1228,7 +1232,7 @@ def _take_source(argv: list[str]) -> tuple[list[str], str, str | None, str | Non
     return out, source, fleet, root
 
 
-PLANE_SOURCED_MODES = ("--open", "--all", "--open-task")
+PLANE_SOURCED_MODES = ("--open", "--all", "--orphans", "--open-task")
 
 
 def _refuse_plane_source_off_mode(argv: list[str], source: str) -> bool:
@@ -1403,8 +1407,7 @@ def main() -> int:
             return 3
         try:
             over, orph = _classify_all(dlog, rlog, now, max_age, bots_dir,
-                                       source=source if argv[1] == "--all" else "jsonl",
-                                       fleet=fleet_opt, root=root_opt)   # one open: _select inside
+                                       source=source, fleet=fleet_opt, root=root_opt)   # one open: _select inside
         except PlaneUnreachable as exc:
             print(f"dispatch-overdue: --all plane source: UNREACHABLE — {exc}", file=sys.stderr)
             return 3

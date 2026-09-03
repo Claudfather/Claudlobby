@@ -50,26 +50,45 @@ def db_file(root: str) -> str:
 OPEN_RETRY_S = 0.25
 
 
+def _open(path: str, readonly_uri: bool) -> sqlite3.Connection:
+    conn = (sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0) if readonly_uri
+            else sqlite3.connect(path, timeout=2.0))
+    conn.execute("PRAGMA query_only = 1")
+    conn.execute("SELECT 1 FROM identity_registry LIMIT 0")   # the schema is there
+    return conn
+
+
 def connect(root: str, *, retries: int = 1) -> sqlite3.Connection:
-    """A read-only connection whose FIRST read has succeeded. Retried once
-    after a short pause: on the live Mini a `mode=ro` open answered
-    "unable to open database file" for ~20s while the ingest daemon held
-    the WAL, then cleared — a transient the reader must not turn into a
-    page. A persistent failure still raises: refuse, never answer empty."""
+    """A connection that only READS, whose first read has succeeded.
+
+    The `mode=ro` URI open is tried first. On a WAL database whose writer
+    has closed (no `-wal`/`-shm` beside it), the SQLite bundled with the
+    system python3 the bash doors run answers "unable to open database
+    file" for a read-only URI — it cannot create the shared-memory file
+    from a read-only handle. That was the Mini's ~20s "transient" after a
+    daemon restart, and it is deterministic under /usr/bin/python3 3.9. So
+    a CANTOPEN falls back to a normal connection held read-only by
+    `PRAGMA query_only` (SQLite may create the WAL side files; the pragma
+    refuses every write). Anything else is retried once after a short
+    pause, then raised: refuse, never answer empty."""
     path = db_file(root)
     if not os.path.isfile(path):
         raise PlaneUnreachable(f"no plane db at {path}")
     last: Optional[Exception] = None
     for attempt in range(retries + 1):
         try:
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
-            conn.execute("PRAGMA query_only = 1")
-            conn.execute("SELECT 1 FROM identity_registry LIMIT 0")   # the schema is there
-            return conn
+            return _open(path, readonly_uri=True)
+        except sqlite3.OperationalError as exc:
+            last = exc
+            if "unable to open" in str(exc):
+                try:
+                    return _open(path, readonly_uri=False)
+                except sqlite3.Error as exc2:
+                    last = exc2
         except sqlite3.Error as exc:
             last = exc
-            if attempt < retries:
-                time.sleep(OPEN_RETRY_S)
+        if attempt < retries:
+            time.sleep(OPEN_RETRY_S)
     raise PlaneUnreachable(f"plane db unreadable: {last}") from last
 
 
@@ -253,6 +272,21 @@ def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = Non
         return None
     rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=True)
     return rows[0][2] if rows else None
+
+
+RETIRED_SQL = (
+    "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = ?"
+    " AND e.detail_truncated = 0 AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"
+    " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
+)
+
+
+def retired(conn: sqlite3.Connection, fleet: str) -> Optional[str]:
+    """The instant the fleet's legacy writes were retired (``legacy_write_retired``),
+    or None — the twin of ``cutover.retired``; the doors skip their ledger
+    append only when this is recorded."""
+    row = conn.execute(RETIRED_SQL, ("legacy_write_retired", f"fleet:{fleet}", fleet)).fetchone()
+    return row[0] if row else None
 
 
 def declared(conn: sqlite3.Connection, fleet: str, reader: str) -> Optional[str]:

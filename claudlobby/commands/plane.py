@@ -338,9 +338,10 @@ def cmd_plane_doctor(args) -> int:
                 # flip that half-happened.
                 try:
                     from ..plane import cutover as _cut
+                    _casc = _cascade_for(paths) if paths.fleet_name else None
                     if paths.fleet_name:
                         decl = _cut.declared(conn, paths.fleet_name)
-                        for reader, on in _read_flags(paths).items():
+                        for reader, on in _read_flags(paths, _casc).items():
                             if on is None:
                                 rung(False, f"cutover {reader}",
                                      "flag unresolvable (env tiers door unavailable)")
@@ -349,6 +350,20 @@ def cmd_plane_doctor(args) -> int:
                             rung(ok, f"cutover {reader}", why)
                 except Exception as exc:
                     rung(False, "cutover", f"unreadable: {exc}")
+                # chunk 6b — each legacy write door's flag against the retirement record
+                try:
+                    from ..plane import cutover as _cut
+                    if paths.fleet_name:
+                        ret = _cut.retired(conn, paths.fleet_name)
+                        for door, off in _write_flags(paths, _casc).items():
+                            if off is None:
+                                rung(False, f"legacy write {door}",
+                                     "flag unresolvable (env tiers door unavailable)")
+                                continue
+                            ok, why = _cut.write_flag_vs_retirement(off, ret[0] if ret else None)
+                            rung(ok, f"legacy write {door}", why)
+                except Exception as exc:
+                    rung(False, "legacy writes", f"unreadable: {exc}")
             finally:
                 conn.close()
         try:
@@ -919,17 +934,37 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
     return 1 if diverged else 0
 
 
-def _read_flags(paths) -> dict[str, bool | None]:
-    """reader → whether its PLANE_READ_* flag resolves to 1 in the fleet's
-    env tiers (None when the resolver is unavailable — disclosed, never
-    assumed off)."""
+def _cascade_for(paths):
+    """The fleet's env-tier cascade, or None when the resolver door is
+    unavailable (disclosed by the caller, never assumed). ONE subprocess per
+    doctor run — both flag families read it."""
+    from .. import env_tiers as _env_tiers
+    try:
+        return _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=paths.fleet_name))
+    except _env_tiers.ResolverUnavailable:
+        return None
+
+
+def _read_flags(paths, cascade=None) -> dict[str, bool | None]:
+    """reader → whether its PLANE_READ_* flag resolves to 1 (None when the
+    resolver is unavailable — disclosed, never assumed off)."""
     from .. import env_tiers as _env_tiers
     from ..plane.cutover import READ_FLAGS
-    try:
-        cascade = _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=paths.fleet_name))
-    except _env_tiers.ResolverUnavailable:
+    cascade = cascade if cascade is not None else _cascade_for(paths)
+    if cascade is None:
         return {r: None for r in READ_FLAGS}
     return {reader: _env_tiers.armed(cascade, flag) for reader, flag in READ_FLAGS.items()}
+
+
+def _write_flags(paths, cascade=None) -> dict[str, bool | None]:
+    """door → whether its PLANE_LEGACY_WRITE_* flag resolves to 0 (retired);
+    None when the resolver is unavailable."""
+    from .. import env_tiers as _env_tiers
+    from ..plane.cutover import WRITE_FLAGS
+    cascade = cascade if cascade is not None else _cascade_for(paths)
+    if cascade is None:
+        return {d: None for d in WRITE_FLAGS}
+    return {door: _env_tiers.resolves_to(cascade, flag, "0") for door, flag in WRITE_FLAGS.items()}
 
 
 def cmd_plane_cutover(args) -> int:
@@ -952,14 +987,57 @@ def cmd_plane_cutover(args) -> int:
         if roster is None:
             print(f"cutover: UNREACHABLE — fleet manifest: {why}")
             return 3
+        if bool(args.reader) == bool(args.retire_writes):
+            print("cutover: exactly one of --reader <open|overdue|open_task> or --retire-writes",
+                  file=sys.stderr)
+            return 2
         conn = _open_plane_ro(root, "cutover", sys.stdout)
         if conn is None:
             return 3
         try:
-            streaks = _sh.gate_summary(conn, fleet, roster, (args.reader,))
             anchor = _cut.fleet_uid(conn, fleet)          # the fleet's identity, when it has one
+            already = _cut.retired(conn, fleet)
+            if args.retire_writes:
+                decl = _cut.declared(conn, fleet)
+                missing = _cut.undeclared(decl)
+            else:
+                streaks = _sh.gate_summary(conn, fleet, roster, (args.reader,))
         finally:
             conn.close()
+        if args.retire_writes:
+            # Chunk 6b: retiring a write ENDS the shadow for every reader that read
+            # that ledger, so every reader must be declared first — or forced,
+            # with the reason recorded.
+            for r in _sh.GATED:
+                print(("  declared " if r in decl else "  MISSING  ") + r
+                      + (f" ({decl[r][0]})" if r in decl else ""))
+            if missing and not args.force:
+                print(f"cutover: REFUSED — {len(missing)} reader(s) not declared:"
+                      f" {', '.join(missing)}; declare them, or --force <reason>")
+                return 1
+            if already is not None and not args.force:
+                print(f"cutover: the legacy writes are already retired for {fleet} ({already[0]});"
+                      " nothing new recorded (--force <reason> records a new retirement)")
+                return 0
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            ev = _cut.retirement_event(fleet, decl, now, forced=args.force or None,
+                                       subject_uid=anchor)
+            counts = _sh.record(root, [ev])
+            print(f"cutover: legacy writes retired for {fleet} at {now}"
+                  + (f" (FORCED: {args.force})" if args.force else "")
+                  + f" [{', '.join(f'{k}={v}' for k, v in counts.items() if v)}]")
+            print("  add to the fleet .env tier:  " + "  ".join(f"{f}=0" for f in _cut.WRITE_FLAGS.values()))
+            print(f"  then `claudlobby --fleet {fleet} generate` and restart the sessions;"
+                  " the shadow ends here — there is no legacy side left to grade;"
+                  " rollback = the flags back to 1")
+            print("  STILL ON THE FROZEN LEDGER after this: `dispatch-overdue.py --unassigned` (the"
+                  " idle-worker check has no plane path yet) — it cannot see dispatches or reports"
+                  " after the retirement; `--orphans` and the supersede hint follow the flips")
+            return 0
+        if already is not None:
+            print(f"cutover: note — the legacy writes are retired ({already[0]}); the shadow cannot"
+                  " record new evidence for this reader, so this declaration stands on what was"
+                  " recorded before the retirement")
         short = _cut.unmet(streaks)
         for st in streaks:
             print(("  ok   " if st.gate_ok else "  SHORT ") + st.line())
@@ -1030,6 +1108,15 @@ def cmd_plane_shadow(args) -> int:
         conn = _open_plane_ro(root, "shadow", sys.stdout)
         if conn is None:
             return 3
+        if not (args.gate or args.check):
+            from ..plane import cutover as _cut
+            ret = _cut.retired(conn, fleet)
+            if ret is not None:
+                conn.close()
+                print(f"shadow: the legacy writes are retired for {fleet} ({ret[0]}) — there is"
+                      " no legacy side left to grade; the shadow ended with the retirement"
+                      " (--gate / --check still read what was recorded)", file=sys.stderr)
+                return 2
         from ..plane import shadow as sh
         readers = sh.READERS if args.reader == "all" else (args.reader,)
         if args.reader == sh.READER_OPEN_TASK and not (args.gate or args.check):

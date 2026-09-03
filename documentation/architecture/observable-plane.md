@@ -127,11 +127,15 @@ their own flag). The read side (`brief`, `plane view`) needs no flag.
   (dry-run), `plane cutover` (it refuses before writing), `brief`, `plane view`,
   and the stdlib readers below.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
-  `lib/plane-shadow-check.py`) — the plane answered from bash doors without
-  paying the package import: the open list and the overdue set (SQL pinned
-  byte-identical to `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the
-  legacy-id join, the divergence check. One read-only open (schema probe +
-  a transient retry) shared by all three.
+  `lib/plane-shadow-check.py`, `lib/who-reviewed.py --source plane`) — the
+  plane answered from bash doors without paying the package import: the open
+  list and the overdue set (SQL pinned byte-identical to
+  `queries.OPEN_ASSIGNMENTS_AT_SQL`), the resolver, the legacy-id join, the
+  divergence check, the retirement. One open shared by all: the `mode=ro`
+  URI first, and on CANTOPEN a plain connection held read-only by `PRAGMA
+  query_only` — under the system `python3` the doors run, a read-only URI
+  cannot open a WAL database whose writer has closed (it cannot create the
+  shared-memory file), which is what a daemon restart looks like.
 
 ## The cutover (F18) — from the JSONL ledgers to the plane
 
@@ -171,10 +175,20 @@ recorded state machine:
    the JSONL keeps serving. An unreachable plane under a declared flip
    REFUSES (rc 3, empty stdout) — never a silent fallback — and the watchdog
    pages a refused reader. Rollback at this stage: the flag back to 0.
-5. **Retire the writes** (chunk 6b, in build): `PLANE_LEGACY_WRITE_DISPATCH` /
-   `_REPORT` default `1`; `plane cutover --retire-writes` refuses unless every
-   reader is declared and records `legacy_write_retired` — retiring a write
-   ENDS the shadow for the readers that read that ledger.
+5. **Retire the writes.** `PLANE_LEGACY_WRITE_DISPATCH` / `_REPORT` default
+   `1`; `plane cutover --retire-writes` refuses unless every reader is
+   declared and records `legacy_write_retired` — retiring a write ENDS the
+   shadow for the readers that read that ledger (`plane shadow` compare and
+   record modes refuse afterwards; `--gate`/`--check` still read the
+   records). A door skips its JSONL append only on FOUR facts: the flag
+   says 0, the plane is armed, the retirement is recorded, and THAT
+   emission succeeded (`PLANE_EMIT_LAST_RC`) — every other case writes the
+   ledger and says why, because a dispatch or report must land somewhere.
+   Rollback: the flags back to 1. Still on the frozen ledger afterwards:
+   `dispatch-overdue.py --unassigned` (no plane path yet — named by the
+   door), the workstreams and briefing writes (their plane adapter is
+   unbuilt). `who-reviewed.py --source plane` keeps attribution alive off
+   the plane's task events.
 
 `plane parity` is the reconciliation door (matched / pre-go-live / unstamped /
 stamped-lost per row, with the multiplicity a report legitimately has) and
