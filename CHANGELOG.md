@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — cutover chunk 6b: the legacy writes retired per door as the end of shadowing; who-reviewed's plane join (#1444)
+
+- `PLANE_LEGACY_WRITE_DISPATCH` / `PLANE_LEGACY_WRITE_REPORT` (default 1): `dispatch-task.sh` and `report-back.sh` skip their JSONL append at 0 — only while the plane is armed (an unarmed plane writes the ledger anyway and says so). The composed `bot.conf` carries a retired flag from the fleet `.env` tier.
+- `claudlobby plane cutover --retire-writes [--force <reason>]`: refuses until every reader (`open`, `overdue`, `open_task`) is declared, records `legacy_write_retired` (registered, notice; the doors, the declarations it stands on), prints the flag lines; `plane shadow` compare/record modes end with it (`--gate`/`--check` still read the records); `plane doctor` gains a `legacy write <door>` rung per door.
+- `lib/who-reviewed.py --source plane`: the same attribution join off the plane's task events (pr_url in the task detail, the actor alias, the assignment's source_ref), so attribution survives the report ledger's retirement; an unreachable plane refuses.
+
 ### Added — cutover chunk 6a: the resolver shadowed by its own streak, then flipped; id-less dispatches emitted live and answered (#1444)
 
 - `lib/dispatch-task.sh`: every dispatch lands the construct triple — id-less ones keyed `dispatch-log:sha:<content key of the ledger line>` (`sha256_hex32` in lib-common; the line composed once with `printf -v` before the locked append; no sha tool → disclose, communication only). `lib/report-back.sh`: an id-less report with a terminal status closes every open id-less dispatch of the bot on the plane (`plane-lookup.py --open-idless`), as the legacy ledger does.

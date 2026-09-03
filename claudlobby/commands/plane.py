@@ -349,6 +349,20 @@ def cmd_plane_doctor(args) -> int:
                             rung(ok, f"cutover {reader}", why)
                 except Exception as exc:
                     rung(False, "cutover", f"unreadable: {exc}")
+                # chunk 6b — each legacy write door's flag against the retirement record
+                try:
+                    from ..plane import cutover as _cut
+                    if paths.fleet_name:
+                        ret = _cut.retired(conn, paths.fleet_name)
+                        for door, off in _write_flags(paths).items():
+                            if off is None:
+                                rung(False, f"legacy write {door}",
+                                     "flag unresolvable (env tiers door unavailable)")
+                                continue
+                            ok, why = _cut.write_flag_vs_retirement(off, ret[0] if ret else None)
+                            rung(ok, f"legacy write {door}", why)
+                except Exception as exc:
+                    rung(False, "legacy writes", f"unreadable: {exc}")
             finally:
                 conn.close()
         try:
@@ -932,6 +946,22 @@ def _read_flags(paths) -> dict[str, bool | None]:
     return {reader: _env_tiers.armed(cascade, flag) for reader, flag in READ_FLAGS.items()}
 
 
+def _write_flags(paths) -> dict[str, bool | None]:
+    """door → whether its PLANE_LEGACY_WRITE_* flag resolves to 0 (retired) in the
+    fleet's env tiers (None when the resolver is unavailable)."""
+    from .. import env_tiers as _env_tiers
+    from ..plane.cutover import WRITE_FLAGS
+    try:
+        cascade = _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=paths.fleet_name))
+    except _env_tiers.ResolverUnavailable:
+        return {d: None for d in WRITE_FLAGS}
+    out = {}
+    for door, flag in WRITE_FLAGS.items():
+        res = cascade.get(flag)
+        out[door] = res is not None and res.value == "0"
+    return out
+
+
 def cmd_plane_cutover(args) -> int:
     """Declare a reader's flip to the plane (cutover chunk 5): refuses unless
     the J4 gate is met for that reader on every declared bot, records
@@ -952,14 +982,45 @@ def cmd_plane_cutover(args) -> int:
         if roster is None:
             print(f"cutover: UNREACHABLE — fleet manifest: {why}")
             return 3
+        if bool(args.reader) == bool(args.retire_writes):
+            print("cutover: exactly one of --reader <open|overdue|open_task> or --retire-writes",
+                  file=sys.stderr)
+            return 2
         conn = _open_plane_ro(root, "cutover", sys.stdout)
         if conn is None:
             return 3
         try:
-            streaks = _sh.gate_summary(conn, fleet, roster, (args.reader,))
             anchor = _cut.fleet_uid(conn, fleet)          # the fleet's identity, when it has one
+            if args.retire_writes:
+                decl = _cut.declared(conn, fleet)
+                missing = _cut.undeclared(decl)
+            else:
+                streaks = _sh.gate_summary(conn, fleet, roster, (args.reader,))
         finally:
             conn.close()
+        if args.retire_writes:
+            # Chunk 6b: retiring a write ENDS the shadow for every reader that read
+            # that ledger, so every reader must be declared first — or forced,
+            # with the reason recorded.
+            for r in _sh.GATED:
+                print(("  declared " if r in decl else "  MISSING  ") + r
+                      + (f" ({decl[r][0]})" if r in decl else ""))
+            if missing and not args.force:
+                print(f"cutover: REFUSED — {len(missing)} reader(s) not declared:"
+                      f" {', '.join(missing)}; declare them, or --force <reason>")
+                return 1
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            ev = _cut.retirement_event(fleet, decl, now, forced=args.force or None,
+                                       subject_uid=anchor)
+            counts = _sh.record(root, [ev])
+            print(f"cutover: legacy writes retired for {fleet} at {now}"
+                  + (f" (FORCED: {args.force})" if args.force else "")
+                  + f" [{', '.join(f'{k}={v}' for k, v in counts.items() if v)}]")
+            print("  add to the fleet .env tier:  " + "  ".join(f"{f}=0" for f in _cut.WRITE_FLAGS.values()))
+            print(f"  then `claudlobby --fleet {fleet} generate` and restart the sessions;"
+                  " the shadow ends here — there is no legacy side left to grade;"
+                  " rollback = the flags back to 1")
+            return 0
         short = _cut.unmet(streaks)
         for st in streaks:
             print(("  ok   " if st.gate_ok else "  SHORT ") + st.line())
@@ -1030,6 +1091,15 @@ def cmd_plane_shadow(args) -> int:
         conn = _open_plane_ro(root, "shadow", sys.stdout)
         if conn is None:
             return 3
+        if not (args.gate or args.check):
+            from ..plane import cutover as _cut
+            ret = _cut.retired(conn, fleet)
+            if ret is not None:
+                conn.close()
+                print(f"shadow: the legacy writes are retired for {fleet} ({ret[0]}) — there is"
+                      " no legacy side left to grade; the shadow ended with the retirement"
+                      " (--gate / --check still read what was recorded)", file=sys.stderr)
+                return 2
         from ..plane import shadow as sh
         readers = sh.READERS if args.reader == "all" else (args.reader,)
         if args.reader == sh.READER_OPEN_TASK and not (args.gate or args.check):

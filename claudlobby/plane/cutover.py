@@ -25,6 +25,13 @@ from .shadow import BAR_BY_READER, GATE_TRANSITIONS, GATED, Streak
 
 EVENT_DECLARED = "cutover_declared"
 READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
+# Chunk 6b — the legacy WRITES, per door. Default 1 (keep writing); a fleet
+# retires a door's JSONL append with 0, and retiring a write ENDS the shadow
+# for every reader that read that ledger (there is no legacy side left to
+# grade) — so the retirement is gated on every reader being declared, and
+# recorded as its own epoch.
+EVENT_RETIRED = "legacy_write_retired"
+WRITE_FLAGS = {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH", "report": "PLANE_LEGACY_WRITE_REPORT"}
 
 # The fleet is matched on the anchor COLUMN first (survives a truncated
 # detail), the detail's fleet second (a declaration recorded before the fleet
@@ -37,6 +44,12 @@ LATEST_DECLARED_SQL = (
     " ORDER BY e.occurred_at DESC, e.ingest_seq DESC"
 )
 FLEET_UID_SQL = "SELECT uid FROM identity_registry WHERE alias = ? AND kind = 'fleet' LIMIT 1"
+LATEST_RETIRED_SQL = (
+    "SELECT e.occurred_at, json_extract(e.detail, '$.forced') FROM events e"
+    " WHERE e.kind = 'system' AND e.event = ? AND e.detail_truncated = 0"
+    " AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"
+    " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
+)
 
 
 def fleet_alias(fleet: str) -> str:
@@ -96,6 +109,57 @@ def declared(conn: sqlite3.Connection, fleet: str) -> dict[str, tuple[str, Optio
         if reader in READ_FLAGS and reader not in out:
             out[reader] = (at, forced)
     return out
+
+
+def undeclared(decl: dict[str, tuple[str, Optional[str]]]) -> list[str]:
+    """The readers a write retirement still waits on."""
+    return [r for r in GATED if r not in decl]
+
+
+def retirement_event(fleet: str, decl: dict[str, tuple[str, Optional[str]]], now: str, *,
+                     forced: Optional[str] = None, subject_uid: Optional[str] = None) -> dict:
+    """The system event recording the retirement of the legacy writes: the
+    doors, the declarations it stands on, the flags it expects. Id derived
+    from (fleet, instant, reason) like the declaration's."""
+    return {
+        "event_type": "system",
+        "emitter": "plane-cutover",
+        "fleet": fleet,
+        "occurred_at": now,
+        "event_id": derive_uid("ev", f"retire:{fleet}:{now}:{forced or ''}"),
+        "payload": {
+            "event": EVENT_RETIRED,
+            **({"subject_kind": "fleet", "subject_uid": subject_uid,
+                "subject_alias": fleet_alias(fleet)} if subject_uid else {}),
+            "data": {
+                "fleet": fleet,
+                "doors": sorted(WRITE_FLAGS),
+                "flags": {d: f"{f}=0" for d, f in WRITE_FLAGS.items()},
+                "declared": {r: at for r, (at, _f) in decl.items()},
+                "undeclared": undeclared(decl),
+                "forced": forced,
+            },
+        },
+    }
+
+
+def retired(conn: sqlite3.Connection, fleet: str) -> Optional[tuple[str, Optional[str]]]:
+    """(instant, forced reason or None) of the LATEST retirement on this
+    fleet, or None: the legacy writes are still the record."""
+    row = conn.execute(LATEST_RETIRED_SQL, (EVENT_RETIRED, fleet_alias(fleet), fleet)).fetchone()
+    return (row[0], row[1]) if row else None
+
+
+def write_flag_vs_retirement(flag_retired: bool, retired_at: Optional[str]) -> tuple[bool, str]:
+    """The doctor's verdict for one legacy write door: consistent, or which half is missing."""
+    if flag_retired and retired_at is None:
+        return False, ("flag retired (0) but NO retirement recorded — the door writes the ledger"
+                       " anyway when the plane is unarmed; `plane cutover --retire-writes` first")
+    if not flag_retired and retired_at is not None:
+        return False, f"retirement recorded {retired_at} but the flag still writes — the door has not stopped"
+    if flag_retired:
+        return True, f"retired (recorded {retired_at})"
+    return True, "writing (not retired)"
 
 
 def flag_vs_declaration(flag_on: bool, declared_at: Optional[str]) -> tuple[bool, str]:

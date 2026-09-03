@@ -49,6 +49,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # to the plane (with the gate evidence, or a --force reason) is a fact the
     # ledger must carry; the flag alone is invisible history.
     "cutover_declared": "notice",
+    # cutover chunk 6b — the legacy writes retired: the END of shadowing for
+    # the ledgers those writes fed, a fact the ledger must carry.
+    "legacy_write_retired": "notice",
 }
 
 

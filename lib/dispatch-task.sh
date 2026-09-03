@@ -676,7 +676,18 @@ _append_ledger() {
 # exactly as the importer keys an unstamped row.
 printf -v LEDGER_LINE '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}' \
         "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID"
-with_lock "$LEDGER.lock" _append_ledger
+# Cutover chunk 6b: the legacy append retires behind PLANE_LEGACY_WRITE_DISPATCH=0
+# (composed into bot.conf from the fleet .env tier) -- honoured ONLY while the plane
+# is armed: a dispatch must land somewhere, so an unarmed plane writes the ledger
+# and says so. Retiring the write ends the shadow for every reader of this ledger.
+if [ "${PLANE_LEGACY_WRITE_DISPATCH:-1}" = "0" ] && [ "$PLANE_ARMED" = "1" ]; then
+    echo "dispatch-task: legacy dispatch-log write retired (PLANE_LEGACY_WRITE_DISPATCH=0) -- the plane is the record" >&2
+else
+    if [ "${PLANE_LEGACY_WRITE_DISPATCH:-1}" = "0" ]; then
+        echo "dispatch-task: PLANE_LEGACY_WRITE_DISPATCH=0 but the plane is unarmed -- writing the ledger anyway" >&2
+    fi
+    with_lock "$LEDGER.lock" _append_ledger
+fi
 
 # Plane intent BEFORE transport (F9): a crash between here and the send leaves
 # an intent with no transmission — visible, and exactly what reconciliation

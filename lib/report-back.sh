@@ -363,6 +363,15 @@ _emit_ledger_event() {
             "$ts" "$BOT" "$(json_escape "$TASK_ID")" "$STATUS" "$safe_summary" "$pr_url" "$issues" "$skill" "$PROGRESS" "$ARTIFACTS" "$TASK_ANOMALY" "$PLANE_MSG_ID" >> "$ledger"
         rotate_jsonl_by_ts "$ledger"
     }
+    # Cutover chunk 6b: the legacy append retires behind PLANE_LEGACY_WRITE_REPORT=0,
+    # honoured ONLY while the plane is armed (a report must land somewhere).
+    if [ "${PLANE_LEGACY_WRITE_REPORT:-1}" = "0" ] && [ "${PLANE_ARMED:-0}" = "1" ]; then
+        echo "report-back: legacy report-back write retired (PLANE_LEGACY_WRITE_REPORT=0) -- the plane is the record" >&2
+        return 0
+    fi
+    if [ "${PLANE_LEGACY_WRITE_REPORT:-1}" = "0" ]; then
+        echo "report-back: PLANE_LEGACY_WRITE_REPORT=0 but the plane is unarmed -- writing the ledger anyway" >&2
+    fi
     with_lock "$ledger.lock" _write_and_rotate
 }
 _emit_ledger_event "${POSITIONAL_EXTRAS[@]+"${POSITIONAL_EXTRAS[@]}"}" || true

@@ -263,6 +263,57 @@ def load_ledger(path: str, fleet: str) -> tuple[list[dict], int]:
 # ----------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# The plane side (cutover chunk 6b): the same join off the plane's task events
+# instead of the report ledgers, so attribution survives the report ledger's
+# retirement. A report's `pr_url` rides the task event's detail (not the
+# communication body, which the capture policy may strip), the actor alias
+# names the bot AND its fleet, and the assignment's source_ref carries the
+# legacy task id. Rows are shaped like ledger rows so `attribute` is untouched.
+# ----------------------------------------------------------------------
+
+PLANE_ROWS_SQL = (
+    "SELECT e.occurred_at, i.alias, e.event, e.detail, a.source_ref"
+    " FROM events e JOIN identity_registry i ON i.uid = e.actor_uid"
+    " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.detail_truncated = 0"
+    " AND json_extract(e.detail, '$.pr_url') IS NOT NULL"
+)
+
+
+def load_plane_rows(root: str) -> tuple[list[dict], str | None]:
+    """(rows, reason) — rows shaped like ledger rows from the plane's task
+    events that carry a pr_url; reason is set (and rows empty) when the plane
+    is unreachable, which is NOT an empty answer."""
+    import sqlite3
+    db = os.path.join(root, "state", "plane", "plane.db")
+    if not os.path.isfile(db):
+        return [], f"no plane db at {db}"
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
+        conn.execute("PRAGMA query_only = 1")
+        raw = conn.execute(PLANE_ROWS_SQL).fetchall()
+        conn.close()
+    except sqlite3.Error as exc:
+        return [], f"plane db unreadable: {exc}"
+    rows: list[dict] = []
+    for occurred_at, alias, event, detail, source_ref in raw:
+        try:
+            data = json.loads(detail) if detail else {}
+        except (ValueError, TypeError):
+            continue
+        fleet, _, bot = (alias or "").partition("/")
+        fleet = fleet[len("bot:"):] if fleet.startswith("bot:") else fleet
+        ts = (occurred_at or "").replace("+00:00", "Z")
+        tid = ""
+        if source_ref and source_ref.startswith("dispatch-log:") and not source_ref.startswith("dispatch-log:sha:"):
+            tid = source_ref[len("dispatch-log:"):]
+        rows.append({"ts": ts, "bot": bot or "(unnamed)", "status": event, "task_id": tid,
+                     "pr_url": data.get("pr_url") or "", "summary": data.get("summary") or "",
+                     "issues": "", "artifact": "", "_fleet": fleet, "_ledger": "plane"})
+    return rows, None
+
+
 def attribute_event(
     event: dict,
     rows: list[dict],
@@ -484,6 +535,9 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("CLAUDLOBBY_ROOT", ""),
         help="claudlobby root for ledger discovery",
     )
+    parser.add_argument("--source", choices=("ledger", "plane"), default="ledger",
+                        help="join against the report ledgers (default) or the plane's"
+                        " task events (cutover chunk 6b — survives the ledger's retirement)")
     parser.add_argument("--tolerance", type=int, default=DEFAULT_TOLERANCE_S)
     parser.add_argument("--backward", type=int, default=DEFAULT_BACKWARD_S)
     args = parser.parse_args(argv)
@@ -504,7 +558,17 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     # Ledger side
-    if args.ledger:
+    if args.source == "plane":
+        if not args.root:
+            print("--source plane needs --root (or CLAUDLOBBY_ROOT); refusing rather than"
+                  " reporting every review as UNKNOWN", file=sys.stderr)
+            return 4
+        plane_rows, why = load_plane_rows(args.root)
+        if why is not None:
+            print(f"the plane is unreachable ({why}) — not an empty answer; refusing", file=sys.stderr)
+            return 4
+        ledgers = []
+    elif args.ledger:
         ledgers = [
             (os.path.basename(os.path.dirname(os.path.dirname(p))) or "(explicit)", p)
             for p in args.ledger
@@ -523,6 +587,9 @@ def main(argv: list[str] | None = None) -> int:
     unreadable = 0
     bad_lines = 0
     fleets = []
+    if args.source == "plane":
+        rows.extend(plane_rows)
+        fleets = sorted({r["_fleet"] for r in plane_rows})
     for fleet, path in ledgers:
         loaded, bad = load_ledger(path, fleet)
         if bad < 0:
