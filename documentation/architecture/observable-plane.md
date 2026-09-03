@@ -42,7 +42,7 @@ unknown token is a `ContractViolation`, never a silently stored string.
 | `work_items` | a unit of work | created by a dispatch, linked from its assignment and communication |
 | `assignments` | work assigned to a bot with a deadline | `expected_by`; `source_ref = dispatch-log:<task_id>` (or `dispatch-log:sha:<content key>` for an id-less dispatch) is the legacy join key |
 | `workstreams` | the per-fleet workstream registry's plane twin | `workstream-update.sh` emits its construct + verb events |
-| `events` | everything that happens TO a construct | `kind` = task (progress, completed, failed, returned_blocked, cancelled, superseded, reassigned, expired …), transmission (pane_submitted, carrier_queued, carrier_accepted, recipient_acknowledged, failed), workstream, system (registry-stamped severity; a DIAGNOSTIC cap of 16 KB on `detail`, `detail_truncated` when it hit) |
+| `events` | everything that happens TO a construct | `kind` = task (progress, completed, failed, returned_blocked, cancelled, superseded, reassigned, expired …), transmission (send_attempted, pane_submitted, carrier_queued, carrier_accepted, recipient_acknowledged, failed, duplicate_suppressed, unknown — `ATTEMPT_STATES`), workstream, system (registry-stamped severity; a DIAGNOSTIC cap of 16 KB on `detail`, `detail_truncated` when it hit) |
 | `identity_registry` | aliases → uids | kinds host, vault, fleet, actor, bot_instance, session; provisional actors until a registry keyframe confirms them |
 | `registry_snapshots` | entity keyframes × observed change | the SCD partition is (host, entity type, entity uid); `payload_hash` gates the write; a tombstone is the one stored operation |
 | `metric_samples` | numeric time series | names from the `METRIC_NAMES` registry (`bot.heartbeat`, `host.load`, …); retention 30 days (`plane prune`) |
@@ -89,7 +89,8 @@ and never blocks its real action on it.
 | `lib/dispatch-task.sh` | work_item + assignment + communication (+ the `pane_submitted` / `carrier_queued` / `failed` transmission after the send); `--supersedes` sets `supersedes_msg_id` and a terminal `superseded` on the retired assignment; an id-less dispatch is keyed by the content hash of its ledger line | `PLANE_EMIT_ENABLED` |
 | `lib/report-back.sh` | the report as a communication; task events on the assignment the legacy task id resolves to (`lib/plane-lookup.py`); an id-less terminal report closes the bot's open id-less dispatches | `PLANE_EMIT_ENABLED` |
 | `lib/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_ENABLED` |
-| `lib/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states | `PLANE_EMIT_ENABLED` |
+| `lib/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_ENABLED` |
+| `lib/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_ENABLED` |
 | `lib/plane-session-start.sh` (hook) | the session uid + a per-process uid to `$BOT_DIR/data/.plane-session` | `PLANE_EMIT_ENABLED` |
 | `lib/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_ENABLED` |
 | `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; declaration events | `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) |
@@ -118,11 +119,13 @@ their own flag). The read side (`brief`, `plane view`) needs no flag.
 - **`plane status` / `plane doctor`** — the health page and the pre-flight
   rungs (schema, provisional actors, tombstone validity, reconciliation, the
   shadow gate, each cutover flag against its declaration). **These RUN
-  `migrate()` and are therefore not read-only** — a newer db refuses them
-  (`DowngradeError`, rc 4) and an unmerged package's doctor will migrate a live
-  db. Verify a branch on a live host only through the read-only doors: `plane
-  shadow`, `plane parity`, `plane import` (dry-run), `plane cutover` (it refuses
-  before writing), `brief`, and the stdlib readers below.
+  `migrate()` and are therefore not read-only — and so do `plane registry`,
+  `plane prune`, `plane expire` and `spool retry`** — a newer db refuses them
+  (`DowngradeError`, rc 4) and an unmerged package's doctor (or registry read)
+  will migrate a live db. Verify a branch on a live host only through the
+  doors that open read-only: `plane shadow`, `plane parity`, `plane import`
+  (dry-run), `plane cutover` (it refuses before writing), `brief`, `plane view`,
+  and the stdlib readers below.
 - **The stdlib readers** (`lib/plane-readers.py`, `lib/plane-lookup.py`,
   `lib/plane-shadow-check.py`) — the plane answered from bash doors without
   paying the package import: the open list and the overdue set (SQL pinned
@@ -190,7 +193,7 @@ is the one definition of "resolves to 1".
 
 **Migrations** — `claudlobby/plane/migrations/NNNN_*.sql`, `user_version`-gated
 (`migrations.py`); the daemon migrates at start, and so do `plane status` /
-`plane doctor` / `spool retry`. 0001 kernel · 0002 task-status index · 0003/0004
+`plane doctor` / `plane registry` / `plane prune` / `plane expire` / `spool retry`. 0001 kernel · 0002 task-status index · 0003/0004
 the fleet room · 0005 FTS · 0006 the registry lane · 0007 `assignments(source_ref)`
 (the legacy join) · 0008 `events(actor_uid, occurred_at)` (progress grace, the
 resolver's guard). A newer db refuses older code (rc 4), never downgrades.
