@@ -511,3 +511,21 @@ def test_a_future_deadline_is_open_but_not_overdue_on_both_sides(tmp_path):
         legacy = [x.task_id for x in sh.legacy_overdue(doors, "w1", dl, rl, now=now,
                                                          max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S)]
     assert "t-7-7777" in open_ids and "t-7-7777" not in over and over == legacy == ["t-2-bbbb"]
+
+
+def test_overdue_rows_are_oldest_first_on_both_sides(tmp_path):
+    """The head is the answer that gets written: two overdue rows for one
+    bot must come back oldest first on both sides, like the legacy list."""
+    root, paths, d, r = _scene(tmp_path)
+    _dispatch(root, "8", "t-8-8888", "2026-09-02T09:00:00Z", ledger=d)     # older than t-2 (10:00)
+    _write(dispatch_ledger_path(paths), d)
+    doors = load_dispatch_doors(paths)
+    now = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
+    with _ro(root) as conn:
+        plane = [x.task_id for x in sh.plane_overdue(conn, F, "w1", now=now,
+                                                       max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S,
+                                                       progress_grace_s=0)]
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = [x.task_id for x in sh.legacy_overdue(doors, "w1", dl, rl, now=now,
+                                                         max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S)]
+    assert legacy == ["t-8-8888", "t-2-bbbb"] == plane
