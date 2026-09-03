@@ -418,3 +418,18 @@ def test_import_an_oversized_field_refuses_under_the_default_capture_too(tmp_pat
                            capture={})
     assert plan.reports == 0 and len(plan.invalid) == 1 and "summary" in plan.invalid[0]
     assert apply_import(root, plan)["committed"] == len(plan.events) == 4
+
+
+def test_parity_cli_refuses_a_db_that_opens_but_cannot_be_read(tmp_path):
+    """A corrupt db opens lazily and fails on the first query: that is
+    UNREACHABLE (rc 3 + a line), never a traceback — with a ledger present,
+    so the refusal is the db's, not the ledger's."""
+    import subprocess, sys as _sys
+    root = tmp_path / "root"
+    (root / "state" / "plane").mkdir(parents=True)
+    (root / "state" / "plane" / "plane.db").write_bytes(b"not a sqlite file" * 200)
+    _write(root / "state" / "dispatch-log.jsonl", [_drow("2026-08-28T00:47:02Z", "t-0-0000")])
+    r = subprocess.run([_sys.executable, "-m", "claudlobby", "--root", str(root), "plane", "parity"],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 3 and "UNREACHABLE" in r.stdout and "plane db unreadable" in r.stdout
+    assert "Traceback" not in r.stderr

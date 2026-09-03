@@ -668,6 +668,11 @@ def cmd_plane_parity(args) -> int:
                 compare(conn, DISPATCH, dispatch_ledger_path(paths), since=args.since),
                 compare(conn, REPORT, report_ledger_path(paths), since=args.since),
             ]
+        except sqlite3.Error as exc:
+            # A db that opens but cannot be read (corrupt, locked past the
+            # timeout) is UNREACHABLE, not empty: rc 3 + a line, never a traceback.
+            print(f"parity: UNREACHABLE — plane db unreadable: {exc}", file=out)
+            return 3
         finally:
             conn.close()
         rc = 0
@@ -736,6 +741,9 @@ def cmd_plane_import(args) -> int:
                                report_path=report_ledger_path(paths),
                                now=datetime.now(timezone.utc), since=args.since,
                                capture=_load_capture_config(root))
+        except sqlite3.Error as exc:
+            print(f"import: UNREACHABLE — plane db unreadable: {exc}")
+            return 3
         finally:
             conn.close()
         if not plan.reachable:
