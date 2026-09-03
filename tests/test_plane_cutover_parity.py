@@ -18,7 +18,7 @@ from claudlobby.plane.legacy_import import apply_import, plan_import
 from claudlobby.plane.parity import (
     CAUSE_PRE_GO_LIVE, CAUSE_STAMPED_LOST, CAUSE_UNSTAMPED, DISPATCH, REPORT, compare,
 )
-from claudlobby.plane.queries import TASK_STATUS_SQL
+from claudlobby.plane.queries import NON_TERMINAL_CLAUSE, TASK_STATUS_SQL
 from tests.plane_fixtures import plane_root as _root, ro as _ro
 
 F = "f"
@@ -433,3 +433,65 @@ def test_parity_cli_refuses_a_db_that_opens_but_cannot_be_read(tmp_path):
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 3 and "UNREACHABLE" in r.stdout and "plane db unreadable" in r.stdout
     assert "Traceback" not in r.stderr
+
+
+# --- pre-cutover supersessions (chunk 3b) ------------------------------------
+
+def _open_ids(root):
+    with _ro(root) as conn:
+        return sorted(r[0] for r in conn.execute(
+            "SELECT a.assignment_id FROM assignments a WHERE" + NON_TERMINAL_CLAUSE))
+
+
+def test_import_closes_a_pre_cutover_supersession_the_plane_still_holds_open(tmp_path):
+    """--supersedes reached only the JSONL before chunk 1: the plane held
+    every retired assignment open (the shadow's first live run found five
+    bots diverging on exactly this). The plan emits the terminal superseded
+    event on the open assignment, successor = the superseding row's plane
+    assignment, and a closed assignment is never planned again."""
+    root = _root(tmp_path)
+    wi1, asg1, msg1 = _live_dispatch(root, "a", "t-1-aaaa", ts="2026-08-28T15:53:33Z")
+    wi2, asg2, msg2 = _live_dispatch(root, "b", "t-2-bbbb", ts="2026-08-29T10:00:00Z")
+    dlog = tmp_path / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "report-back.jsonl"
+    _write(dlog, [_drow("2026-08-28T15:53:32Z", "t-1-aaaa", plane=(msg1, wi1, asg1)),
+                  {**_drow("2026-08-29T10:00:00Z", "t-2-bbbb", plane=(msg2, wi2, asg2)),
+                   "supersedes": "t-1-aaaa"}])
+    _write(rlog, [])
+    assert _open_ids(root) == sorted([asg1, asg2])
+    with _ro(root) as conn:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    assert plan.dispatches == 0 and plan.reports == 0 and plan.supersessions == 1
+    ev = plan.events[0]
+    assert ev["event_type"] == "task" and ev["origin"] == "legacy"
+    assert ev["payload"] == {"work_item_id": wi1, "assignment_id": asg1, "event": "superseded",
+                             "successor_id": asg2}
+    assert apply_import(root, plan)["committed"] == 1
+    assert _open_ids(root) == [asg2]
+    with _ro(root) as conn:
+        again = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    assert again.supersessions == 0 and again.events == []
+
+
+def test_supersession_closure_needs_the_plane_row_for_this_fleet(tmp_path):
+    """Attribution is the plane's own alias: a same-named bot in another fleet
+    is untouched, and a superseding row the plane never got has no successor."""
+    root = _root(tmp_path)
+    wi1, asg1, msg1 = _live_dispatch(root, "a", "t-1-aaaa", ts="2026-08-28T15:53:33Z")
+    emit_batch(root, [{"event_type": "work_item", "emitter": "t", "fleet": "g",
+                       "payload": {"work_item_id": f"wi_{'e':0>32}", "title": "t", "created_by": "bot:g/mgr"}},
+                      {"event_type": "assignment", "emitter": "t", "fleet": "g",
+                       "source_ref": "dispatch-log:t-1-aaaa",
+                       "payload": {"assignment_id": f"asg_{'e':0>32}", "work_item_id": f"wi_{'e':0>32}",
+                                   "assignee": "bot:g/w1", "assigned_by": "bot:g/mgr"}}])
+    dlog = tmp_path / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "report-back.jsonl"
+    _write(dlog, [{**_drow("2026-08-29T10:00:00Z", "t-9-9999"), "supersedes": "t-1-aaaa"}])   # not in the plane
+    _write(rlog, [])
+    with _ro(root) as conn:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    closures = [e for e in plan.events if e["payload"].get("event") == "superseded"]
+    assert len(closures) == 1 and closures[0]["payload"]["assignment_id"] == asg1
+    assert "successor_id" not in closures[0]["payload"]
+    apply_import(root, plan)
+    assert _open_ids(root) == [f"asg_{'e':0>32}"]                    # fleet g's row untouched

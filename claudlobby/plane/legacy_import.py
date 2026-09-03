@@ -32,7 +32,17 @@ Every rule below is from the J3 evaluation and was verified in code:
   role)`` — content, never position, because rotation rewrites lines;
 - the manager's alias resolves through the identity registry when exactly
   one fleet has a bot of that name; otherwise it is assumed to be F and the
-  assumption is COUNTED in the plan.
+  assumption is COUNTED in the plan;
+- **a legacy supersession closes its retired assignment in the plane** (chunk
+  3b): ``--supersedes`` reached only the JSONL before chunk 1, so the plane
+  still held every pre-cutover retired assignment open — the first live run
+  of the shadow (#1448) found five bots diverging on exactly this, with heads
+  that differ, and those rows never close on their own. For every legacy row
+  declaring ``supersedes: T`` the plan emits the terminal ``superseded`` task
+  event on each OPEN plane assignment for (``bot:F/<bot>``, ``dispatch-log:T``)
+  — attribution by the plane's OWN alias on that assignment, never a roster
+  guess — with ``successor_id`` the superseding row's plane assignment when
+  the plane has it. A closed assignment is never planned again.
 - **content is identity**: no door ever rewrites a ledger line (rotation only
   drops whole lines), so a line whose bytes changed IS a different row and
   imports as one. A hand-edited row therefore lands beside its earlier self
@@ -56,6 +66,7 @@ from typing import Optional
 from .contracts import ContractViolation
 from .emit_api import validate_item
 from .ids import derive_hex
+from .queries import NON_TERMINAL_CLAUSE
 from .parity import (
     DISPATCH, REPORT, LedgerParity, LegacyRow, compare, content_key, epoch_iso,
     read_ledger,
@@ -91,6 +102,7 @@ class ImportPlan:
     malformed: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)      # a unit the contracts refuse
     assumed_manager_fleet: int = 0
+    supersessions: int = 0        # retired assignments the plane still held open
 
     @property
     def reachable(self) -> bool:
@@ -227,6 +239,48 @@ def _violation(events: list[dict], capture: dict) -> Optional[str]:
     return None
 
 
+OPEN_BY_REF_SQL = (
+    "SELECT a.assignment_id, a.work_item_id FROM assignments a"
+    " JOIN identity_registry i ON i.uid = a.assignee_uid"
+    " WHERE a.source_ref = ? AND lower(i.alias) = lower(?) AND" + NON_TERMINAL_CLAUSE
+    + " ORDER BY a.ingest_seq"
+)
+LATEST_BY_REF_SQL = (
+    "SELECT a.assignment_id FROM assignments a"
+    " JOIN identity_registry i ON i.uid = a.assignee_uid"
+    " WHERE a.source_ref = ? AND lower(i.alias) = lower(?)"
+    " ORDER BY a.ingest_seq DESC LIMIT 1"
+)
+
+
+def supersession_events(conn: sqlite3.Connection, fleet: str, rows: list[LegacyRow],
+                        batch: str) -> list[dict]:
+    """The terminal ``superseded`` events for every legacy ``supersedes``
+    whose retired assignment the plane still holds OPEN for this fleet's
+    bot. Every open sibling of a redispatched id is closed (the legacy join
+    retires by (bot, task id)); the event id derives from the row and the
+    assignment, so a re-run plans nothing once the assignment is terminal."""
+    events: list[dict] = []
+    for row in rows:
+        r = row.row
+        retired, bot = r.get("supersedes"), r.get("bot")
+        if not retired or not bot or not _NAME.match(str(bot)):
+            continue
+        alias = f"bot:{fleet}/{bot}"
+        successor = None
+        if r.get("task_id"):
+            hit = conn.execute(LATEST_BY_REF_SQL, (f"{DISPATCH}:{r['task_id']}", alias)).fetchone()
+            successor = hit[0] if hit else None
+        for asg, wi in conn.execute(OPEN_BY_REF_SQL, (f"{DISPATCH}:{retired}", alias)).fetchall():
+            payload = {"work_item_id": wi, "assignment_id": asg, "event": "superseded"}
+            if successor:
+                payload["successor_id"] = successor
+            events.append(_envelope(
+                "task", f"{DISPATCH}:{r.get('task_id') or retired}", fleet, row.ts, batch,
+                _h(DISPATCH, row.raw, f"ev:superseded:{asg}"), payload))
+    return events
+
+
 def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
                 report_path: Path, now: datetime, since: Optional[str] = None,
                 capture: Optional[dict] = None) -> ImportPlan:
@@ -234,7 +288,8 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
     is the fleet capture config ``emit_batch`` will apply (so validation
     here matches what the door does)."""
     capture = capture or {}
-    dp = compare(conn, DISPATCH, dispatch_path, since=since)
+    dispatch_read = read_ledger(dispatch_path)      # read ONCE: parity + supersessions
+    dp = compare(conn, DISPATCH, dispatch_path, since=since, ledger_read=dispatch_read)
     report_read = read_ledger(report_path)          # read ONCE: parity + attribution
     rp = compare(conn, REPORT, report_path, since=since, ledger_read=report_read)
     batch = f"imp_{_h(fleet, now.isoformat())[:16]}"
@@ -299,6 +354,14 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
             continue
         plan.events.extend(events)
         plan.reports += 1
+    closures = supersession_events(conn, fleet, dispatch_read[2], batch)
+    for ev in closures:
+        err = _violation([ev], capture)
+        if err:
+            plan.invalid.append(f"superseded:{ev['payload']['assignment_id']}: {err}")
+            continue
+        plan.events.append(ev)
+        plan.supersessions += 1
     return plan
 
 
