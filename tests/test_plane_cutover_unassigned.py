@@ -85,6 +85,7 @@ def test_the_fleet_pulse_unit_carries_the_unassigned_flag_and_names_its_fleet(tm
     src = (REPO / "lib" / "fleet-pulse.sh").read_text()
     line = next(l for l in src.splitlines() if 'dispatch-overdue.py" --unassigned' in l)
     assert '--fleet "$fleet"' in line
+    assert "|| _unassigned_rc=$?" in src and "cannot be judged this pass" in src   # a refusal is disclosed, never an empty answer
 
 
 def test_retire_writes_no_longer_names_a_frozen_reader(tmp_path):
