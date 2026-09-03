@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the cutover shadow explains what the plane knows better; a control dispatch carries no plane deadline (#1444)
+
+- Two explained divergence classes: `plane_superseded` (the plane's door landed `superseded` on a legacy-open row — a re-dispatch to ANOTHER bot, which the legacy matcher does not honour, #1357) and `plane_idless` (a plane-only sha-keyed construct the ledger cannot name). The heads are compared past the structurally explained rows; the shadow's open list is id'd rows only, mirroring `plane-readers.open_rows`. Measured live: one bot paged every ten minutes for a task the fleet had moved to another bot.
+- `dispatch-task.sh`: the plane assignment's `expected_by` mirrors the ledger's — a control dispatch (query / cancel / compact / restart) withholds it on BOTH sides; the first 6a build stamped it on the plane only, so the plane read "overdue" on queries the ledger deliberately kept silent.
+- The fleet-pulse shadow bridge re-notifies after `FLEET_PULSE_SHADOW_RENOTIFY_S` (default 1h, was 10 min): under the hard-flip ruling the shadow is an instrument, not a gate.
+
 ### Added — cutover chunk 7a: the idle-worker check gets its plane path; every matcher reader follows a flip (#1444)
 
 - `lib/plane-readers.py::unassigned_rows` — the idle-worker check from the plane, the legacy rule mirrored: the bot's newest REPORT of any status (its newest `report` communication), then the terminal status off the task event sharing that report's ref — or off the `report_status` system event the report door now lands when a terminal report resolved no assignment (a bare note); every per-bot read spans all of the bot's uids (a case-variant alias mints a second actor). `dispatch-overdue.py --unassigned` flips with `PLANE_READ_UNASSIGNED` (flag AND declaration); the shadow gains the fleet-level `unassigned` reader (one comparison per instant, keyed `_fleet`); `plane cutover --reader unassigned`; the fleet-pulse unit is stamped with the flag, names its fleet, and discloses a refused reader; `--retire-writes` requires the fourth reader and no longer names a frozen one.

@@ -605,8 +605,16 @@ _plane_emit_intent() {
     local comm wi_ev asg_ev
     comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
     if [ -n "$dispatch_ref" ]; then
-        iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
-        [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
+        # The plane's deadline MIRRORS the ledger's: a control dispatch (query /
+        # cancel / compact / restart) withholds it on both sides, for the reason
+        # written above the null — an id-less row with a deadline goes overdue
+        # and names nothing. The first 6a build stamped it on the plane only, so
+        # the plane read "overdue" on queries the ledger deliberately kept silent
+        # and the shadow paged on every one of them.
+        if [ "$EXPECTED_BY_JSON" != "null" ]; then
+            iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
+            [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
+        fi
         [ -n "$DISPATCH_WORKSTREAM" ] && ws_frag=",\"workstream_id\":\"$(json_escape "$DISPATCH_WORKSTREAM")\""
         case "$DISPATCH_REPO" in
             */*) repo_frag=",\"repo\":\"$(json_escape "$DISPATCH_REPO")\"" ;;

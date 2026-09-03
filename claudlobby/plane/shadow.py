@@ -118,7 +118,18 @@ CLASS_SKEW = "skew"
 CLASS_LEGACY_SUPERSEDES = "legacy_supersedes_pre_cutover"
 CLASS_LEGACY_MALFORMED = "legacy_malformed_deadline"   # the ledger row's deadline is not an int
 CLASS_INTENTIONAL = "intentional"
+# The plane knows MORE than the ledger on two shapes, and both are explained
+# rather than paged (measured live 2026-09-03: one bot paged every ten minutes
+# for a task the fleet had moved to another bot):
+CLASS_PLANE_SUPERSEDED = "plane_superseded"   # the plane's door landed `superseded` on it (any successor bot);
+#                                               the legacy matcher retires only a SAME-bot --supersedes (#1357)
+CLASS_PLANE_IDLESS = "plane_idless"           # a plane-only row with no legacy task id (a sha-keyed construct):
+#                                               the ledger cannot name it, and a control dispatch carries no deadline
 CLASS_DIVERGENCE = "divergence"
+# The structurally explained classes — the heads are compared PAST these rows
+# (skew is temporal, not structural: a fresh row at the head still differs).
+STRUCTURAL_CLASSES = frozenset({CLASS_LEGACY_SUPERSEDES, CLASS_LEGACY_MALFORMED, CLASS_INTENTIONAL,
+                                CLASS_PLANE_SUPERSEDED, CLASS_PLANE_IDLESS})
 
 ACTOR_UIDS_SQL = "SELECT uid FROM identity_registry WHERE lower(alias) = lower(?)"
 
@@ -150,12 +161,16 @@ class OpenRow:
 
 
 def plane_open(conn: sqlite3.Connection, fleet: str, bot: str, *,
-               at: Optional[str] = None) -> list[OpenRow]:
+               at: Optional[str] = None, idless: bool = False) -> list[OpenRow]:
     """The plane's open set for ``bot:<fleet>/<bot>`` as of instant *at*
     (None = everything landed). Oldest first, the legacy order. The alias is
     resolved on the small registry first (case-insensitively, like the
     legacy bot key), then the assignments are read by uid — the indexed
-    column — rather than through an unindexable ``lower()`` join."""
+    column — rather than through an unindexable ``lower()`` join.
+    Mirrors ``plane-readers.open_rows``: the open LIST is id'd rows only —
+    a sha-keyed construct (chunk 6a's id-less dispatch) is the overdue
+    reader's, so it is returned only with *idless* (the caller that feeds
+    ``plane_overdue``)."""
     uids = [r[0] for r in conn.execute(ACTOR_UIDS_SQL, (f"bot:{fleet}/{bot}",))]
     out: list[OpenRow] = []
     for uid in uids:
@@ -165,9 +180,36 @@ def plane_open(conn: sqlite3.Connection, fleet: str, bot: str, *,
             if source_ref and source_ref.startswith(f"{DISPATCH}:") \
                     and not source_ref.startswith(f"{DISPATCH}:sha:"):
                 task_id = source_ref[len(DISPATCH) + 1:]
+            if task_id is None and not idless:
+                continue
             out.append(OpenRow(task_id, str(occurred_at or ""), assignment_id,
                                str(expected_by) if expected_by else None))
     out.sort(key=lambda r: r.at)
+    return out
+
+
+PLANE_SUPERSEDED_SQL = (
+    "SELECT a.source_ref FROM assignments a"
+    " WHERE a.assignee_uid = ? AND a.source_ref LIKE 'dispatch-log:%'"
+    " AND a.source_ref NOT LIKE 'dispatch-log:sha:%'"
+    " AND EXISTS (SELECT 1 FROM events t WHERE t.assignment_id = a.assignment_id"
+    "             AND t.kind = 'task' AND t.event = 'superseded'"
+    "             AND (? IS NULL OR t.occurred_at <= ?))"
+)
+
+
+def plane_superseded(conn: sqlite3.Connection, fleet: str, bot: str, *,
+                     at: Optional[str] = None) -> set[str]:
+    """Task ids of the bot's assignments the plane's door closed with a
+    ``superseded`` event by instant *at* — whoever the successor's bot is.
+    The legacy matcher retires a row only on a SAME-bot ``--supersedes``
+    (#1357), so a re-dispatch to another bot leaves the ledger's row open
+    while the plane, which records every supersession, has closed it: a
+    legacy-only row the plane explains, not a divergence."""
+    out: set[str] = set()
+    for uid, in conn.execute(ACTOR_UIDS_SQL, (f"bot:{fleet}/{bot}",)):
+        for ref, in conn.execute(PLANE_SUPERSEDED_SQL, (uid, at, at)):
+            out.add(ref[len(DISPATCH) + 1:])
     return out
 
 
@@ -217,8 +259,8 @@ def plane_overdue(conn: sqlite3.Connection, fleet: str, bot: str, *, now: dateti
     host-local (a `.spawn` file) and invisible to the plane, so the legacy
     side of this comparison is overdue ∪ orphans (J1: orphans stay hybrid)."""
     at = dt_iso(now)
-    if rows is None:                             # the open reader's rows, when a caller has them
-        rows = plane_open(conn, fleet, bot, at=at)
+    if rows is None:                             # the open reader's rows (WITH id-less: this reader keeps them)
+        rows = plane_open(conn, fleet, bot, at=at, idless=True)
     if uid is None:
         uid = actor_uid(conn, f"bot:{fleet}/{bot}")
     last_progress = None
@@ -332,15 +374,35 @@ class ShadowDiff:
 
     @property
     def resolver_agrees(self) -> bool:
-        return self.resolver_legacy == self.resolver_plane
+        """The two resolvers' answers match — or the legacy answer is a row
+        the plane is structurally right to lack (``resolver_explained``):
+        the legacy resolver would stamp a worker's id-less report onto a task
+        the fleet moved to another bot, which is exactly the wrong attribution
+        (#1417's class) the plane's answer avoids. Recorded as agreement, with
+        the explanation recorded beside it."""
+        return self.resolver_legacy == self.resolver_plane or self.resolver_explained
+
+    @property
+    def resolver_explained(self) -> bool:
+        return (self.resolver_legacy is not None and self.resolver_legacy != self.resolver_plane
+                and self.resolver_legacy in self._structural("legacy_only"))
+
+    def _structural(self, side: str) -> set[Optional[str]]:
+        """Ids this side holds that a STRUCTURAL class explains — the heads
+        are read past them: a row the other side is right to lack is not
+        the answer that gets written."""
+        return {d.task_id or None for d in self.divergences
+                if d.side == side and d.cls in STRUCTURAL_CLASSES}
 
     @property
     def head_legacy(self) -> Optional[str]:
-        return self.legacy_ids[0] if self.legacy_ids else None
+        skip = self._structural("legacy_only")
+        return next((t or None for t in self.legacy_ids if (t or None) not in skip), None)
 
     @property
     def head_plane(self) -> Optional[str]:
-        return self.plane_ids[0] if self.plane_ids else None
+        skip = self._structural("plane_only")
+        return next((t or None for t in self.plane_ids if (t or None) not in skip), None)
 
     @property
     def head_agrees(self) -> bool:
@@ -353,9 +415,12 @@ class ShadowDiff:
     @property
     def clean(self) -> bool:
         """Clean = no UNEXPLAINED divergence AND the heads agree. An explained
-        divergence (skew, a pre-cutover supersession, a declared id) is
+        divergence (skew, a pre-cutover supersession, a declared id, a
+        supersession only the plane honours, an id-less construct) is
         disclosed but does not break the streak; a head disagreement always
-        does, because the head is the answer that gets written."""
+        does, because the head is the answer that gets written — read past
+        the structurally explained rows, since a row the other side is right
+        to lack is never that answer."""
         return not self.unexplained and self.head_agrees and self.resolver_agrees
 
     def classes(self) -> dict[str, int]:
@@ -366,15 +431,20 @@ class ShadowDiff:
 
 
 def _classify(row: OpenRow, side: str, grace: str, superseded: set[str],
-              intentional: set[str], malformed: set[str] = frozenset()) -> str:
+              intentional: set[str], malformed: set[str] = frozenset(),
+              plane_superseded: set[str] = frozenset()) -> str:
     """ONE classifier for both sides — a class added to one loop and
     forgotten in the other is the #1357 shape."""
     if row.task_id in intentional:
         return CLASS_INTENTIONAL
+    if side == "plane_only" and row.task_id is None:
+        return CLASS_PLANE_IDLESS
     if side == "plane_only" and row.task_id in superseded:
         return CLASS_LEGACY_SUPERSEDES
     if side == "plane_only" and row.task_id in malformed:
         return CLASS_LEGACY_MALFORMED
+    if side == "legacy_only" and row.task_id in plane_superseded:
+        return CLASS_PLANE_SUPERSEDED
     if ts19(row.at) >= grace:
         return CLASS_SKEW
     return CLASS_DIVERGENCE
@@ -387,13 +457,16 @@ def diff(fleet: str, bot: str, legacy: list[OpenRow], plane: list[OpenRow], *,
          reader: str = READER_OPEN,
          malformed: Optional[set[str]] = None,
          resolver_legacy: Optional[str] = None,
-         resolver_plane: Optional[str] = None) -> ShadowDiff:
+         resolver_plane: Optional[str] = None,
+         plane_superseded: Optional[set[str]] = None) -> ShadowDiff:
     """Pure: the two answers in, the classified disagreement out. Ids are
     compared as MULTISETS (a redispatched task id is two open rows on both
-    sides) and the heads as the two lists' first elements."""
+    sides; an id-less row on both sides pairs by count) and the heads as the
+    two lists' first elements past the structurally explained rows."""
     superseded = superseded or set()
     intentional = intentional or set()
     malformed = malformed or set()
+    plane_superseded = plane_superseded or set()
     grace = ts19(dt_iso(now - timedelta(seconds=skew_s)))
     out = ShadowDiff(fleet, bot, dt_iso(now),
                      [r.task_id or "" for r in legacy],
@@ -401,17 +474,19 @@ def diff(fleet: str, bot: str, legacy: list[OpenRow], plane: list[OpenRow], *,
                      resolver_legacy=resolver_legacy, resolver_plane=resolver_plane)
     plane_pool = list(plane)
     for row in legacy:
-        match = next((p for p in plane_pool if p.task_id == row.task_id), None)
+        match = next((p for p in plane_pool if (p.task_id or None) == (row.task_id or None)), None)
         if match is not None:
             plane_pool.remove(match)
             continue
         out.divergences.append(Divergence(
             row.task_id, "legacy_only",
-            _classify(row, "legacy_only", grace, superseded, intentional, malformed), row.label))
+            _classify(row, "legacy_only", grace, superseded, intentional, malformed, plane_superseded),
+            row.label))
     for row in plane_pool:
         out.divergences.append(Divergence(
             row.task_id, "plane_only",
-            _classify(row, "plane_only", grace, superseded, intentional, malformed), row.label))
+            _classify(row, "plane_only", grace, superseded, intentional, malformed, plane_superseded),
+            row.label))
     return out
 
 
@@ -449,6 +524,7 @@ def shadow_event(d: ShadowDiff, *, subject_uid: Optional[str] = None) -> dict:
         "resolver_legacy": d.resolver_legacy,
         "resolver_plane": d.resolver_plane,
         "resolver_agrees": d.resolver_agrees,
+        "resolver_explained": d.resolver_explained,
         "divergences_n": len(d.divergences),
         "divergences": [
             {"task_id": x.task_id, "side": x.side, "class": x.cls, "ref": x.ref}
@@ -573,7 +649,8 @@ def head_streak(conn: sqlite3.Connection, fleet: str, bot: str) -> Streak:
     """The resolver's streak, read off the OPEN reader's records (chunk 6a):
     newest first, a record counts toward the run when its RESOLVER answers
     agree and are non-empty (None == None proves nothing: an idle record is
-    skipped, neither counted nor breaking); a diverged record, a resolver
+    skipped, neither counted nor breaking, and so is an EXPLAINED disagreement
+    — a legacy answer the plane's own record refutes); a diverged record, a resolver
     disagreement, a record without the resolver fields (pre-6a) or a
     truncated one ends the run; a transition is the resolver's answer
     CHANGING between two counted records. Bar: GATE_HEAD_CLEAN_RUN."""
@@ -592,8 +669,10 @@ def head_streak(conn: sqlite3.Connection, fleet: str, bot: str) -> Streak:
             s.last_diverged_at = at
             break
         answer = data.get("resolver_legacy")
-        if answer is None:
-            continue                                   # idle on both sides: proves nothing
+        if answer is None or data.get("resolver_explained") is True:
+            continue                                   # idle on both sides, or an explained disagreement
+            #                                            (the legacy answer a plane record refutes):
+            #                                            neither proves the resolver, neither breaks it
         answers.append(answer)
     s.clean_run = len(answers)
     s.transitions = sum(1 for newer, older in zip(answers, answers[1:]) if newer != older)

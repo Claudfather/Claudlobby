@@ -134,13 +134,17 @@ def test_dispatch_query_armed_lands_the_triple_under_the_importers_content_key(t
     comm = conn.execute(
         "SELECT message_class, command_type, work_item_id, source_ref FROM communications"
     ).fetchone()
-    asg = conn.execute("SELECT source_ref, assignment_id, work_item_id FROM assignments").fetchone()
+    asg = conn.execute("SELECT source_ref, assignment_id, work_item_id, expected_by FROM assignments").fetchone()
     n_wi = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
     conn.close()
     line = (tmp_path / "state" / "dispatch-log.jsonl").read_text().splitlines()[-1].strip()
     row = json.loads(line)
     assert comm["message_class"] == "question" and comm["command_type"] == "query"
     assert row["task_id"] == "" and row["plane_msg_id"].startswith("msg_")
+    # the deadline is withheld on BOTH sides: the ledger's null and no plane
+    # expected_by — a query that could go "overdue" on the plane alone paged
+    # the shadow on every unanswered one (measured live 2026-09-03)
+    assert row["expected_by"] is None and asg["expected_by"] is None
     assert n_wi == 1 and asg is not None
     assert asg["source_ref"] == comm["source_ref"] == f"dispatch-log:sha:{content_key(line)}"
     assert asg["assignment_id"] == row["plane_assignment_id"] and asg["work_item_id"] == row["plane_work_item_id"]

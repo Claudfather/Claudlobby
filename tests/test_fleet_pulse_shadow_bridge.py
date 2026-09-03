@@ -98,3 +98,12 @@ def test_a_refused_overdue_reader_pages_rather_than_reading_as_nothing_overdue(t
     src = (REPO / "lib" / "fleet-pulse.sh").read_text()
     assert '2>"$_overdue_reader_err" > "$_overdue_cache" || _overdue_reader_rc=$?' in src
     assert "_overdue_reader_guard || true" in src
+
+
+def test_the_bridge_renotifies_hourly_by_default_under_the_hard_flip_ruling():
+    """The shadow is an instrument, not a gate (operator ruling 2026-09-03);
+    a standing divergence paged six times an hour at the old 10-min window."""
+    src = (REPO / "lib" / "fleet-pulse.sh").read_text()
+    i = src.index("fleet shadow_divergence _shadow_page")
+    assert '"${FLEET_PULSE_SHADOW_RENOTIFY_S:-3600}"' in src[i:i + 900]
+    assert '"" 600' not in src[i:i + 900]
