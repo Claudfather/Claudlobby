@@ -169,7 +169,7 @@ def _resolve_progress_grace() -> int:
 # fallback is the one path that would make a flipped fleet read legacy again
 # without anyone knowing. --open-task keeps its own bar (chunk 6).
 PLANE_READ_FLAGS = {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE",
-                    "open_task": "PLANE_READ_OPEN_TASK"}
+                    "open_task": "PLANE_READ_OPEN_TASK", "unassigned": "PLANE_READ_UNASSIGNED"}
 SOURCES = ("jsonl", "plane", "auto")
 
 
@@ -697,6 +697,11 @@ def unassigned_all(
     report_ledger: str,
     now: int,
     idle_threshold: int = 0,
+    *,
+    source: str = "jsonl",
+    fleet: str | None = None,
+    root: str | None = None,
+    plane: "_Plane | None" = None,
 ) -> dict[str, tuple[int, int, str, str]]:
     """Workers that reported terminal and were never re-tasked — the #1024 mirror.
 
@@ -752,6 +757,14 @@ def unassigned_all(
     bot.conf, the same split activity_stuck uses: this owns the join, the caller
     owns the policy. One scan therefore serves bots with different thresholds.
     """
+    p = plane if plane is not None else _select("unassigned", source, fleet=fleet, root=root)
+    if p is not None:
+        try:
+            return p.pr.unassigned_rows(p.conn, p.fleet, now=now, idle_threshold=idle_threshold)
+        except sqlite3.Error as exc:
+            raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
+        finally:
+            p.close()
     reports = _load_jsonl(report_ledger)
     dispatches = _load_jsonl(dispatch_log)
 
@@ -1232,7 +1245,7 @@ def _take_source(argv: list[str]) -> tuple[list[str], str, str | None, str | Non
     return out, source, fleet, root
 
 
-PLANE_SOURCED_MODES = ("--open", "--all", "--orphans", "--open-task")
+PLANE_SOURCED_MODES = ("--open", "--all", "--orphans", "--open-task", "--unassigned")
 
 
 def _refuse_plane_source_off_mode(argv: list[str], source: str) -> bool:
@@ -1380,9 +1393,14 @@ def main() -> int:
             if len(argv) > 4
             else int(datetime.datetime.now(datetime.timezone.utc).timestamp())
         )
-        for bot_id, (rts, idle, tid, status) in sorted(
-            unassigned_all(argv[2], argv[3], now).items()
-        ):
+        try:
+            plane = _select("unassigned", source, fleet=fleet_opt, root=root_opt)
+            rows = unassigned_all(argv[2], argv[3], now, plane=plane,
+                                  source="plane" if plane is not None else "jsonl")
+        except PlaneUnreachable as exc:
+            print(f"dispatch-overdue: --unassigned plane source: UNREACHABLE — {exc}", file=sys.stderr)
+            return 3
+        for bot_id, (rts, idle, tid, status) in sorted(rows.items()):
             print(f"{bot_id} {rts} {idle} {tid} {status}")
         return 0
 

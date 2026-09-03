@@ -186,7 +186,7 @@ _shadow_bridge() {
     local _pairs; _pairs=$(printf '%s' "$_out" | awk '{print $1"/"$2}' | tr '\n' ' ')
     _SHADOW_PAGE_FAILED=0
     debounce_notify "$state_dir" fleet shadow_divergence _shadow_page \
-        "FLEET ALERT: cutover shadow divergence on ${_pairs% }. The plane and the legacy ledger disagree about a bot's open or overdue set - run: claudlobby --fleet $fleet plane shadow --show 5" "" 600
+        "FLEET ALERT: cutover shadow divergence on ${_pairs% }. The plane and the legacy ledger disagree about a bot's open or overdue set (or the fleet's idle-worker set) - run: claudlobby --fleet $fleet plane shadow --show 5" "" 600
     # debounce_notify writes its marker AFTER the pager returns, whatever the
     # pager did; a page that never left must not silence the next ten minutes.
     [ "${_SHADOW_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet shadow_divergence
@@ -271,8 +271,18 @@ _ensure_unassigned_scan() {
     _unassigned_scanned=1
     [ -f "$dispatch_log" ] || return 0
     _unassigned_cache=$(safe_mktemp)
-    python3 "$LIB_DIR/dispatch-overdue.py" --unassigned "$dispatch_log" "$report_ledger" \
-        2>/dev/null > "$_unassigned_cache" || true
+    # rc kept (chunk 7a): a flipped reader REFUSES (rc 3) when the plane cannot
+    # serve, and an empty cache would read as "no idle workers"; the refusal is
+    # disclosed on stderr (the overdue reader pages; the idle check is quieter
+    # by design — it is an advisory notice, not an alert).
+    _unassigned_rc=0
+    python3 "$LIB_DIR/dispatch-overdue.py" --unassigned "$dispatch_log" "$report_ledger" --fleet "$fleet" \
+        2>"$_unassigned_cache.err" > "$_unassigned_cache" || _unassigned_rc=$?
+    if [ "$_unassigned_rc" -ne 0 ]; then
+        echo "fleet-pulse: the idle-worker reader exited ${_unassigned_rc} — worker_unassigned cannot be judged this pass: $(tail -1 "$_unassigned_cache.err" 2>/dev/null | cut -c1-160)" >&2
+        : > "$_unassigned_cache"
+    fi
+    rm -f "$_unassigned_cache.err"
 }
 
 # A bot.conf value that must be an integer. A non-numeric (or empty) setting

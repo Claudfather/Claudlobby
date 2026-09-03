@@ -186,9 +186,10 @@ def test_shadow_open_task_is_a_gate_mode_only(tmp_path):
     d = json.loads(data)
     assert d["resolver_agrees"] is True and d["resolver_legacy"] == d["resolver_plane"] in ("t-2-bbbb", "t-3-cccc")
     assert _cli(root, "shadow", "--check", "--reader", "open_task").returncode == 0
-    _record(root, "w1", NOW, ["t-2-bbbb"], resolver=("t-2-bbbb", None))
+    from datetime import datetime, timezone
+    _record(root, "w1", datetime.now(timezone.utc) + timedelta(hours=1), ["t-2-bbbb"], resolver=("t-2-bbbb", None))
     assert _cli(root, "shadow", "--check", "--reader", "open_task").returncode == 1
-    assert cut.READ_FLAGS["open_task"] == "PLANE_READ_OPEN_TASK" and sh.GATED == ("open", "overdue", "open_task")
+    assert cut.READ_FLAGS["open_task"] == "PLANE_READ_OPEN_TASK" and sh.GATED == ("open", "overdue", "open_task", "unassigned")
 
 
 def test_a_peers_terminal_report_does_not_discharge_this_bots_idless_dispatch(tmp_path):

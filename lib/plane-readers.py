@@ -274,6 +274,81 @@ def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = Non
     return rows[0][2] if rows else None
 
 
+# The idle-worker check (chunk 7a, the last reader to get a plane path): per
+# bot, the NEWEST report by the bot — of ANY status, exactly as the legacy
+# rule reads the newest report row and only then asks whether it is terminal
+# (a later `progress` means the worker is busy, not idle) — against the NEWEST
+# assignment to it. Purely temporal; it never asks whether work is open. The
+# report door lands every report as a `report` communication and, when it
+# resolved an assignment, a task event; the communication is the newest-report
+# fact (a report on nothing still counts, as its ledger row does), the task
+# event beside it carries the status.
+# Every per-bot query spans ALL of the bot's uids (a case-variant alias mints a
+# second actor; the roster collapses them, so must the reads — the adversarial
+# lens found a report under the second uid vanishing from the idle check).
+_NEWEST_REPORT_SQL = (
+    "SELECT c.occurred_at, c.msg_id FROM communications c"
+    " WHERE c.message_class = 'report' AND c.sender_uid IN (%s) AND (? IS NULL OR c.occurred_at <= ?)"
+    " ORDER BY c.occurred_at DESC, c.ingest_seq DESC LIMIT 1"
+)
+_REPORT_TASK_EVENT_SQL = (
+    "SELECT e.event, a.source_ref FROM events e"
+    " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.source_ref = ? AND e.actor_uid IN (%s)"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+# a report that resolved nothing carries its status as a report_status system
+# event on the bot, under the same report-back:<msg> ref (chunk 7a)
+_REPORT_STATUS_SQL = (
+    "SELECT json_extract(e.detail, '$.status') FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'report_status' AND e.source_ref = ? AND e.subject_uid IN (%s)"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+LEGACY_TO_EVENT = {"completed": "completed", "failed": "failed", "blocked": "returned_blocked"}
+REPORT_STATUS_EVENTS = ("completed", "failed", "returned_blocked", "progress")
+NEWEST_ASSIGNMENT_SQL = (
+    "SELECT a.occurred_at FROM assignments a WHERE a.assignee_uid IN (%s)"
+    " AND (? IS NULL OR a.occurred_at <= ?) ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
+)
+LEGACY_STATUS = {"completed": "completed", "failed": "failed", "returned_blocked": "blocked"}
+
+
+def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_threshold: int = 0,
+                    at: Optional[str] = None) -> dict[str, tuple[int, int, str, str]]:
+    """The legacy ``unassigned_all`` shape — {bot: (reported_at, idle_seconds,
+    task_id, status)} — from the plane: workers whose newest report is
+    terminal and were never re-tasked afterwards (the #1024 mirror)."""
+    out: dict[str, tuple[int, int, str, str]] = {}
+    for bot, entry in roster(conn, fleet).items():
+        uids = entry["uids"]
+        if not uids:
+            continue
+        marks = ",".join("?" * len(uids))
+        rep = conn.execute(_NEWEST_REPORT_SQL % marks, (*uids, at, at)).fetchone()
+        if rep is None:
+            continue
+        rts = _epoch(rep[0])
+        if rts is None:
+            continue
+        ref = f"report-back:{rep[1]}"
+        ev = conn.execute(_REPORT_TASK_EVENT_SQL % marks, (ref, *uids)).fetchone()
+        status = ev[0] if ev else None
+        if status is None:
+            marker = conn.execute(_REPORT_STATUS_SQL % marks, (ref, *uids)).fetchone()
+            status = LEGACY_TO_EVENT.get(marker[0]) if marker and marker[0] else None
+        if status not in ("completed", "failed", "returned_blocked"):
+            continue                                   # the newest report is not terminal (progress, or a bare note)
+        asg = conn.execute(NEWEST_ASSIGNMENT_SQL % marks, (*uids, at, at)).fetchone()
+        last_d = _epoch(asg[0]) if asg and asg[0] else None
+        if last_d is not None and last_d > rts:
+            continue                                   # re-tasked after reporting: the loop is intact
+        idle = now - rts
+        if idle < 0 or idle < idle_threshold:
+            continue
+        out[bot] = (rts, idle, (_task_id(ev[1]) if ev else None) or "-", LEGACY_STATUS.get(status, status))
+    return out
+
+
 RETIRED_SQL = (
     "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = ?"
     " AND e.detail_truncated = 0 AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"

@@ -11,7 +11,15 @@ if [ "${PLANE_SHADOW_ENABLED:-0}" != "1" ]; then
     printf 'plane-shadow: dormant (set PLANE_SHADOW_ENABLED=1 to arm the shadow comparison)\n' >&2
     exit 0
 fi
-FLEET="${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}"
+# The composed fleet timer passes the fleet as the FIRST positional (the
+# fleet-pulse convention, composer: `<script> <fleet>`); the env names win only
+# when no positional is given. Found on the Mini: the unit ran 24 times and
+# exited 2 every time, "no fleet", because the launcher read only the env.
+FLEET=""
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    FLEET="$1"; shift
+fi
+FLEET="${FLEET:-${CLAUDLOBBY_FLEET:-${FLEET_NAME:-}}}"
 if [ -z "$FLEET" ]; then
     printf 'plane-shadow: no fleet in CLAUDLOBBY_FLEET/FLEET_NAME - the open set is per fleet\n' >&2
     exit 0

@@ -313,6 +313,20 @@ $_pairs
 EOF_IDLESS
         fi
     fi
+    # A report whose STATUS reached no task event (a terminal note that resolved
+    # nothing, or an id'd report the plane could not link) still has a status
+    # the idle-worker check reads off the legacy row — so it rides the plane as
+    # a `report_status` system event on the bot's actor (alias-resolved at
+    # ingest), under the same report-back:<msg> ref. Never for progress (not
+    # a status the check reads) and never beside a task event (one fact).
+    case ",$events," in
+        *'"event_type":"task"'*) ;;
+        *)
+            case "$STATUS" in
+                completed|failed|blocked)
+                    events="$events,{\"event_type\":\"system\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"event\":\"report_status\",\"subject_kind\":\"actor\",\"subject\":\"$safe_sender\",\"data\":{\"status\":\"$STATUS\",\"msg_id\":\"$PLANE_MSG_ID\"}}}" ;;
+            esac ;;
+    esac
     local _batch
     printf -v _batch '{"events":[%s]}' "$events"
     plane_emit_events report-back <<<"$_batch"            # same shell: PLANE_EMIT_LAST_RC reaches the ledger decision

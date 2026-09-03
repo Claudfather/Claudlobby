@@ -58,11 +58,38 @@ def _dispatch(root, n, task_id, ts, *, bot="w1", ledger):
     return wi, asg
 
 
+_REPORT_SEQ = [0]
+
+
+def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, status=None):
+    """What the REAL report door lands for one report: the `report` communication
+    and, when it resolved an assignment, the task event — both under one
+    `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing.)"""
+    _REPORT_SEQ[0] += 1
+    msg = f"msg_{'e' * 24}{_REPORT_SEQ[0]:0>8x}"      # 32 hex, the contract's shape; 'e…' keeps it apart from the dispatch msgs
+    ref = f"report-back:{msg}"
+    events = [{"event_type": "communication", "emitter": "report-back", "fleet": F,
+               "source_ref": ref, "occurred_at": ts,
+               "payload": {"msg_id": msg, "sender": f"bot:{F}/{bot}", "recipient": f"bot:{F}/mgr",
+                           "recipient_raw": "mgr", "message_class": "report",
+                           **({"work_item_id": wi, "assignment_id": asg} if event else {}), "body": "r"}}]
+    if event:
+        events.append({"event_type": "task", "emitter": "report-back", "fleet": F,
+                       "source_ref": ref, "occurred_at": ts,
+                       "payload": {"work_item_id": wi, "assignment_id": asg, "event": event,
+                                   "actor": f"bot:{F}/{bot}", **(extra or {})}})
+    elif status in ("completed", "failed", "blocked"):
+        # the door's report_status marker: a terminal report that resolved nothing
+        events.append({"event_type": "system", "emitter": "report-back", "fleet": F,
+                       "source_ref": ref, "occurred_at": ts,
+                       "payload": {"event": "report_status", "subject_kind": "actor",
+                                   "subject": f"bot:{F}/{bot}", "data": {"status": status, "msg_id": msg}}})
+    emit_batch(root, events)
+    return msg
+
+
 def _complete(root, wi, asg, ts, task_id, reports, *, bot="w1"):
-    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
-                       "source_ref": f"report-back:msg_{'9':0>32}", "occurred_at": ts,
-                       "payload": {"work_item_id": wi, "assignment_id": asg,
-                                   "event": "completed", "actor": f"bot:{F}/{bot}"}}])
+    _report(root, wi, asg, ts, bot=bot)
     reports.append(_rrow(ts, task_id, "completed", bot=bot))
 
 
@@ -303,10 +330,10 @@ def test_cli_compares_records_and_gates(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     r = _cli(root, "--record", "--replay-hours", "2")
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "2 bot(s) x 2 reader(s) x 3 instant(s): 12 clean, 0 diverged" in r.stdout
-    assert "recorded: committed=12" in r.stdout
+    assert "2 bot(s) x 3 reader(s) x 3 instant(s): 15 clean, 0 diverged" in r.stdout
+    assert "recorded: committed=15" in r.stdout
     again = _cli(root, "--record", "--replay-hours", "2")
-    assert "committed=4 duplicate=8" in again.stdout        # the hour marks replay as duplicates
+    assert "committed=5 duplicate=10" in again.stdout       # the hour marks replay as duplicates
     g = _cli(root, "--gate")
     assert g.returncode == 1 and "NOT met" in g.stdout and "w2 [open]:" in g.stdout   # 4 comparisons, no transition
     assert _cli(root, "--bot", "nobody").returncode == 2                        # not on the roster
@@ -326,6 +353,25 @@ def test_cli_refuses_without_the_ledgers_the_db_or_the_manifest(tmp_path):
     (root / "local" / F / "fleet.yaml").unlink()
     r = _cli(root)
     assert r.returncode == 3 and "fleet manifest" in r.stdout and "Traceback" not in r.stderr
+
+
+def test_the_launcher_takes_the_fleet_the_composed_unit_passes(tmp_path):
+    """The composer renders `<script> <fleet>` (the fleet-pulse convention); the
+    launcher must read that positional — on the Mini it read only the env,
+    exited 2 on every timer run, and no comparison was ever recorded."""
+    import subprocess
+    stub = tmp_path / "claudlobby"
+    stub.write_text("#!/bin/bash\nprintf '%s ' \"$@\"; echo\n")
+    stub.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "PLANE_SHADOW_ENABLED": "1", "CLAUDLOBBY_ROOT": str(tmp_path),
+           "CLAUDLOBBY_CLI": str(stub)}
+    r = subprocess.run(["bash", str(REPO / "lib" / "plane-shadow.sh"), "myfleet"], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and "--fleet myfleet plane shadow --record" in r.stdout, r.stdout + r.stderr
+    r2 = subprocess.run(["bash", str(REPO / "lib" / "plane-shadow.sh")], capture_output=True, text=True, env=env, timeout=60)
+    assert r2.returncode != 0 or "no fleet" in r2.stderr                     # no positional, no env: still refuses
+    r3 = subprocess.run(["bash", str(REPO / "lib" / "plane-shadow.sh"), "myfleet", "--replay-hours", "2"],
+                        capture_output=True, text=True, env=env, timeout=60)
+    assert "--fleet myfleet plane shadow --record --replay-hours 2" in r3.stdout      # flags still pass through
 
 
 def test_the_launcher_is_dormant_and_the_job_is_composed_unarmed(tmp_path):
@@ -400,7 +446,7 @@ def test_cli_check_reader_and_gate_per_reader(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     r = _cli(root, "--record")
     assert r.returncode in (0, 1), r.stdout + r.stderr
-    assert "x 2 reader(s) x 1 instant(s)" in r.stdout
+    assert "x 3 reader(s) x 1 instant(s)" in r.stdout
     c = _cli(root, "--check")
     assert c.returncode == 0 and "0 diverged (bot, reader) pair(s)" in c.stdout
     only = _cli(root, "--reader", "open")
@@ -408,7 +454,11 @@ def test_cli_check_reader_and_gate_per_reader(tmp_path):
     g = _cli(root, "--gate")
     assert g.returncode == 1 and "w1 [overdue]" in g.stdout and "(bot, reader) pairs met" in g.stdout
     # a recorded divergence flips the check
-    d_bad = sh.ShadowDiff(F, "w2", sh.dt_iso(NOW + timedelta(hours=1)), ["t-3-cccc"], [], reader=sh.READER_OPEN)
+    # newer than the CLI's real-clock records above (NOW is a fixed constant; a
+    # divergence dated from it stops being the LATEST record the moment the wall
+    # clock passes it — the pin was a time bomb)
+    d_bad = sh.ShadowDiff(F, "w2", sh.dt_iso(datetime.now(timezone.utc) + timedelta(hours=1)),
+                          ["t-3-cccc"], [], reader=sh.READER_OPEN)
     sh.record(root, [sh.shadow_event(d_bad)])
     c2 = _cli(root, "--check")
     assert c2.returncode == 1 and "w2/open" in c2.stdout

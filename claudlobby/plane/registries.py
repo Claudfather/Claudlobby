@@ -52,6 +52,9 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # cutover chunk 6b — the legacy writes retired: the END of shadowing for
     # the ledgers those writes fed, a fact the ledger must carry.
     "legacy_write_retired": "notice",
+    # cutover chunk 7a — a report whose status reached no task event (a terminal
+    # note that resolved nothing): the status the idle-worker check reads.
+    "report_status": "notice",
 }
 
 

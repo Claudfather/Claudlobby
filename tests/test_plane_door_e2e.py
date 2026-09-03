@@ -389,3 +389,27 @@ def test_an_idless_report_answers_open_idless_dispatches_through_the_real_doors(
     after_p = _sp.run(matcher + ["--source", "plane", "--fleet", "e2e-fleet"], capture_output=True, text=True, env=mx)
     assert after_j.stdout.strip() == after_p.stdout.strip() == task_id, (after_j.stderr, after_p.stderr)
     assert "[source=plane]" in after_p.stderr and after_j.stderr == ""
+
+
+def test_a_terminal_bare_note_lands_its_status_marker_through_the_real_door(tmp_path, armed):
+    """Chunk 7a: a `completed` report with no --task and nothing open resolves
+    no assignment — the door lands the report communication AND a
+    report_status system event on the bot's actor, so the plane idle check
+    reads the status the legacy row carries."""
+    libdir, env = armed
+    r = _bash(f'"{libdir}/report-back.sh" w1 completed "all done, nothing open"', env)
+    assert r.returncode == 0, r.stderr
+    conn = connect(db_path(tmp_path))
+    comm = conn.execute("SELECT msg_id, sender_alias FROM communications WHERE message_class='report'").fetchone()
+    marker = conn.execute(
+        "SELECT subject_kind, subject_alias, source_ref, json_extract(detail,'$.status') FROM events"
+        " WHERE kind='system' AND event='report_status'").fetchone()
+    n_task = conn.execute("SELECT COUNT(*) FROM events WHERE kind='task'").fetchone()[0]
+    conn.close()
+    assert n_task == 0 and comm is not None
+    assert tuple(marker) == ("actor", comm["sender_alias"], f"report-back:{comm['msg_id']}", "completed")
+    r2 = _bash(f'"{libdir}/report-back.sh" w1 progress "still looking"', env)     # progress: no marker
+    assert r2.returncode == 0
+    conn = connect(db_path(tmp_path))
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE kind='system' AND event='report_status'").fetchone()[0] == 1
+    conn.close()

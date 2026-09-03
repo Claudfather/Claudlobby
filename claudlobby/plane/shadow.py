@@ -59,7 +59,7 @@ watchdog resolves them (``DISPATCH_OVERDUE_MAX_AGE_S``,
 ``DISPATCH_PROGRESS_GRACE_S``); the legacy side is read with no bots dir,
 so nothing is split off as an orphan — the split is a host-local
 ``.spawn`` fact the plane cannot see (J1: orphans stay hybrid), and
-``--unassigned`` has no plane counterpart yet: neither is shadowed. A
+``--unassigned`` is the fleet-level ``unassigned`` reader (chunk 7a), compared once per instant under the ``_fleet`` key. A
 legacy row whose deadline is not an int is dropped by the watchdog and
 kept by the plane — ``legacy_malformed_deadline``, explained, never
 paging. Records and streaks are keyed by ``data.reader``. ``plane shadow
@@ -96,12 +96,15 @@ GATE_TRANSITIONS = 1
 # third comparison. Its bar is its own: a stale head is a false completion
 # (#1418), so 200 agreeing heads with at least one head CHANGE.
 READER_OPEN_TASK = "open_task"
-GATED = READERS + (READER_OPEN_TASK,)
+# The idle-worker check (chunk 7a): a set of bots, compared like the lists.
+READER_UNASSIGNED = "unassigned"
+FLEET_BOT = "_fleet"            # the record's bot slot for a fleet-level reader
+GATED = READERS + (READER_OPEN_TASK, READER_UNASSIGNED)
 GATE_HEAD_CLEAN_RUN = 200
 # The bar per reader, ONE registry (a Streak reads its bar from its reader,
 # never from settable state): the list readers' 20, the resolver's 200.
 BAR_BY_READER = {READER_OPEN: GATE_CLEAN_RUN, READER_OVERDUE: GATE_CLEAN_RUN,
-                 READER_OPEN_TASK: GATE_HEAD_CLEAN_RUN}
+                 READER_OPEN_TASK: GATE_HEAD_CLEAN_RUN, READER_UNASSIGNED: GATE_CLEAN_RUN}
 # The resolver's tail: only records with a NON-EMPTY resolver answer count
 # toward its run (None == None proves nothing), so an idle bot's records are
 # skipped, not counted — the tail must reach past them to find 200 real ones.
@@ -263,6 +266,21 @@ def legacy_overdue_all(doors, dispatch_log: str, report_ledger: str, *,
     return {b: [OpenRow(None if tid == "-" else str(tid), epoch_iso(da) or "")
                 for da, _exp, _late, tid in sorted(rows, key=lambda t: t[0])]
             for b, rows in overdue.items()}
+
+
+def legacy_unassigned(doors, dispatch_log: str, report_ledger: str, *, now: datetime) -> list[OpenRow]:
+    """The legacy idle-worker set at *now* as OpenRows keyed by BOT (the
+    task_id slot carries the bot name, the instant its newest report) — the
+    unassigned reader compares a set of bots, not a set of tasks."""
+    rows = doors.unassigned_all(dispatch_log, report_ledger, int(now.timestamp()))
+    return [OpenRow(bot, epoch_iso(rts) or "") for bot, (rts, _idle, _tid, _st) in sorted(rows.items())]
+
+
+def plane_unassigned(conn: sqlite3.Connection, fleet: str, pr, *, now: datetime,
+                     at: Optional[str] = None) -> list[OpenRow]:
+    """The plane's idle-worker set at *now* through the stdlib readers."""
+    rows = pr.unassigned_rows(conn, fleet, now=int(now.timestamp()), at=at)
+    return [OpenRow(bot, epoch_iso(rts) or "") for bot, (rts, _idle, _tid, _st) in sorted(rows.items())]
 
 
 def legacy_overdue(doors, bot: str, dispatch_log: str, report_ledger: str, *,
@@ -625,9 +643,12 @@ def gate_summary(conn: sqlite3.Connection, fleet: str,
     fleet) plus any recorded one. A declared bot with NO comparison recorded
     is short, named as such, never absent: an absence read as clean is the
     ``source_state`` class."""
-    bots = sorted(set(roster or []) | set(shadowed_bots(conn, fleet)))
-    return [head_streak(conn, fleet, b) if r == READER_OPEN_TASK else streak(conn, fleet, b, r)
-            for b in bots for r in readers]
+    bots = sorted((set(roster or []) | set(shadowed_bots(conn, fleet))) - {FLEET_BOT})
+    out = [head_streak(conn, fleet, b) if r == READER_OPEN_TASK else streak(conn, fleet, b, r)
+           for b in bots for r in readers if r != READER_UNASSIGNED]
+    if READER_UNASSIGNED in readers:
+        out.append(streak(conn, fleet, FLEET_BOT, READER_UNASSIGNED))   # one streak per fleet
+    return out
 
 
 def latest_diverged(conn: sqlite3.Connection, fleet: str, roster: list[str],
