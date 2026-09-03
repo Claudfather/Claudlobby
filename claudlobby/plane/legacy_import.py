@@ -18,12 +18,15 @@ Every rule below is from the J3 evaluation and was verified in code:
 - a report imports as its communication plus its task event
   (``completed`` / ``failed`` / ``returned_blocked`` / ``progress``), with the
   ``supplied_id_not_open`` anomaly alongside when the row recorded one;
-- **fleet attribution is by the fleet's own report ledger and nothing
-  else**: the dispatch log is host-global with no fleet column, bots move
-  fleets and names collide across them (#526), so a dispatch row belongs to
-  fleet F only if F's ``report-back.jsonl`` holds a report for its task id.
-  Anything else is skipped and DISCLOSED, never guessed — which also means
-  query rows (no task id by design) are never imported;
+- **fleet attribution has two rules, gated by whether a plane row exists.**
+  A dispatch row that is MISSING from the plane has no row to read an alias
+  from, so it belongs to fleet F only if F's own ``report-back.jsonl`` holds a
+  report for its task id — the dispatch log is host-global with no fleet
+  column, bots move fleets and names collide across them (#526). Anything
+  else is skipped and DISCLOSED, never guessed — which also means query rows
+  (no task id by design) are never imported. Where the plane row EXISTS (a
+  report linking to its dispatch, a supersession closing its retired
+  assignment) the plane's own recorded assignee alias is the authority;
 - a report whose dispatch row is in neither the plane nor this plan has no
   work item to hang on (``TaskEvent.work_item_id`` is required) and is an
   orphan: skipped and disclosed;
@@ -66,7 +69,7 @@ from typing import Optional
 from .contracts import ContractViolation
 from .emit_api import validate_item
 from .ids import derive_hex
-from .queries import NON_TERMINAL_CLAUSE
+from .queries import LATEST_ASSIGNMENT_BY_REF_SQL, OPEN_ASSIGNMENTS_BY_REF_SQL
 from .parity import (
     DISPATCH, REPORT, LedgerParity, LegacyRow, compare, content_key, epoch_iso,
     read_ledger,
@@ -239,27 +242,17 @@ def _violation(events: list[dict], capture: dict) -> Optional[str]:
     return None
 
 
-OPEN_BY_REF_SQL = (
-    "SELECT a.assignment_id, a.work_item_id FROM assignments a"
-    " JOIN identity_registry i ON i.uid = a.assignee_uid"
-    " WHERE a.source_ref = ? AND lower(i.alias) = lower(?) AND" + NON_TERMINAL_CLAUSE
-    + " ORDER BY a.ingest_seq"
-)
-LATEST_BY_REF_SQL = (
-    "SELECT a.assignment_id FROM assignments a"
-    " JOIN identity_registry i ON i.uid = a.assignee_uid"
-    " WHERE a.source_ref = ? AND lower(i.alias) = lower(?)"
-    " ORDER BY a.ingest_seq DESC LIMIT 1"
-)
-
-
 def supersession_events(conn: sqlite3.Connection, fleet: str, rows: list[LegacyRow],
                         batch: str) -> list[dict]:
     """The terminal ``superseded`` events for every legacy ``supersedes``
     whose retired assignment the plane still holds OPEN for this fleet's
     bot. Every open sibling of a redispatched id is closed (the legacy join
     retires by (bot, task id)); the event id derives from the row and the
-    assignment, so a re-run plans nothing once the assignment is terminal."""
+    assignment, so a re-run plans nothing once the assignment is terminal.
+    A raw-text ``--supersedes`` mints no task id of its own (the dispatch
+    door envelopes only typed sends), so the event's source_ref then names
+    the retired id. The shadow (chunk 3) CLASSIFIES the same ``supersedes``
+    field through the legacy matcher's helper; this is where it CLOSES."""
     events: list[dict] = []
     for row in rows:
         r = row.row
@@ -269,9 +262,11 @@ def supersession_events(conn: sqlite3.Connection, fleet: str, rows: list[LegacyR
         alias = f"bot:{fleet}/{bot}"
         successor = None
         if r.get("task_id"):
-            hit = conn.execute(LATEST_BY_REF_SQL, (f"{DISPATCH}:{r['task_id']}", alias)).fetchone()
+            hit = conn.execute(LATEST_ASSIGNMENT_BY_REF_SQL,
+                               (f"{DISPATCH}:{r['task_id']}", alias)).fetchone()
             successor = hit[0] if hit else None
-        for asg, wi in conn.execute(OPEN_BY_REF_SQL, (f"{DISPATCH}:{retired}", alias)).fetchall():
+        for asg, wi in conn.execute(OPEN_ASSIGNMENTS_BY_REF_SQL,
+                                    (f"{DISPATCH}:{retired}", alias)).fetchall():
             payload = {"work_item_id": wi, "assignment_id": asg, "event": "superseded"}
             if successor:
                 payload["successor_id"] = successor
@@ -334,12 +329,12 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
             continue
         ids = ids_by_task.get(task_id)
         if ids is None and task_id:
-            hit = conn.execute(
-                "SELECT work_item_id, assignment_id FROM assignments"
-                " WHERE source_ref = ? ORDER BY ingest_seq DESC LIMIT 1",
-                (f"{DISPATCH}:{task_id}",)).fetchone()
+            # the plane's row for THIS bot — the legacy join links a report
+            # by (bot, task id), never by task id alone
+            hit = conn.execute(LATEST_ASSIGNMENT_BY_REF_SQL,
+                               (f"{DISPATCH}:{task_id}", f"bot:{fleet}/{bot}")).fetchone()
             if hit:
-                ids = {"wi": hit[0], "asg": hit[1]}
+                ids = {"wi": hit[1], "asg": hit[0]}
         if ids is None:
             plan.orphan_reports.append(m.key)
             continue

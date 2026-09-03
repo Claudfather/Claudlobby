@@ -19,6 +19,7 @@ from claudlobby.plane.parity import (
     CAUSE_PRE_GO_LIVE, CAUSE_STAMPED_LOST, CAUSE_UNSTAMPED, DISPATCH, REPORT, compare,
 )
 from claudlobby.plane.queries import NON_TERMINAL_CLAUSE, TASK_STATUS_SQL
+from tests.plane_fixtures import open_assignment_ids as _open_ids
 from tests.plane_fixtures import plane_root as _root, ro as _ro
 
 F = "f"
@@ -437,12 +438,6 @@ def test_parity_cli_refuses_a_db_that_opens_but_cannot_be_read(tmp_path):
 
 # --- pre-cutover supersessions (chunk 3b) ------------------------------------
 
-def _open_ids(root):
-    with _ro(root) as conn:
-        return sorted(r[0] for r in conn.execute(
-            "SELECT a.assignment_id FROM assignments a WHERE" + NON_TERMINAL_CLAUSE))
-
-
 def test_import_closes_a_pre_cutover_supersession_the_plane_still_holds_open(tmp_path):
     """--supersedes reached only the JSONL before chunk 1: the plane held
     every retired assignment open (the shadow's first live run found five
@@ -495,3 +490,37 @@ def test_supersession_closure_needs_the_plane_row_for_this_fleet(tmp_path):
     assert "successor_id" not in closures[0]["payload"]
     apply_import(root, plan)
     assert _open_ids(root) == [f"asg_{'e':0>32}"]                    # fleet g's row untouched
+
+
+def test_a_raw_text_supersedes_row_closes_too_and_names_the_retired_id(tmp_path):
+    """A raw-text --supersedes mints no task id (only typed sends are
+    enveloped): the closure still lands, with no successor and a source_ref
+    naming the retired id."""
+    root = _root(tmp_path)
+    wi1, asg1, msg1 = _live_dispatch(root, "a", "t-1-aaaa", ts="2026-08-28T15:53:33Z")
+    dlog = tmp_path / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "report-back.jsonl"
+    _write(dlog, [{**_drow("2026-08-29T10:00:00Z", ""), "supersedes": "t-1-aaaa"}])
+    _write(rlog, [])
+    with _ro(root) as conn:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    closures = [e for e in plan.events if e["payload"].get("event") == "superseded"]
+    assert len(closures) == 1 and closures[0]["source_ref"] == "dispatch-log:t-1-aaaa"
+    assert "successor_id" not in closures[0]["payload"]
+    apply_import(root, plan)
+    assert _open_ids(root) == []
+
+
+def test_a_report_links_only_to_its_own_bots_assignment(tmp_path):
+    """The legacy join links a report by (bot, task id): a report from
+    another bot for the same task id is an orphan here too, never linked to
+    someone else's assignment."""
+    root = _root(tmp_path)
+    wi, asg, msg = _live_dispatch(root, "a", "t-1-aaaa", ts="2026-08-28T15:53:33Z", bot="w1")
+    dlog = tmp_path / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "report-back.jsonl"
+    _write(dlog, [_drow("2026-08-28T15:53:32Z", "t-1-aaaa", plane=(msg, wi, asg))])
+    _write(rlog, [_rrow("2026-08-28T16:00:00Z", "t-1-aaaa", "completed", bot="w2")])
+    with _ro(root) as conn:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    assert plan.reports == 0 and len(plan.orphan_reports) == 1
