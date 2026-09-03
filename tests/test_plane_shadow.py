@@ -355,6 +355,25 @@ def test_cli_refuses_without_the_ledgers_the_db_or_the_manifest(tmp_path):
     assert r.returncode == 3 and "fleet manifest" in r.stdout and "Traceback" not in r.stderr
 
 
+def test_the_launcher_takes_the_fleet_the_composed_unit_passes(tmp_path):
+    """The composer renders `<script> <fleet>` (the fleet-pulse convention); the
+    launcher must read that positional — on the Mini it read only the env,
+    exited 2 on every timer run, and no comparison was ever recorded."""
+    import subprocess
+    stub = tmp_path / "claudlobby"
+    stub.write_text("#!/bin/bash\nprintf '%s ' \"$@\"; echo\n")
+    stub.chmod(0o755)
+    env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "PLANE_SHADOW_ENABLED": "1", "CLAUDLOBBY_ROOT": str(tmp_path),
+           "CLAUDLOBBY_CLI": str(stub)}
+    r = subprocess.run(["bash", str(REPO / "lib" / "plane-shadow.sh"), "myfleet"], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0 and "--fleet myfleet plane shadow --record" in r.stdout, r.stdout + r.stderr
+    r2 = subprocess.run(["bash", str(REPO / "lib" / "plane-shadow.sh")], capture_output=True, text=True, env=env, timeout=60)
+    assert r2.returncode != 0 or "no fleet" in r2.stderr                     # no positional, no env: still refuses
+    r3 = subprocess.run(["bash", str(REPO / "lib" / "plane-shadow.sh"), "myfleet", "--replay-hours", "2"],
+                        capture_output=True, text=True, env=env, timeout=60)
+    assert "--fleet myfleet plane shadow --record --replay-hours 2" in r3.stdout      # flags still pass through
+
+
 def test_the_launcher_is_dormant_and_the_job_is_composed_unarmed(tmp_path):
     r = subprocess.run(["bash", str(REPO / "lib" / "plane-shadow.sh")], capture_output=True, text=True,
                        env={"PATH": "/usr/bin:/bin"})

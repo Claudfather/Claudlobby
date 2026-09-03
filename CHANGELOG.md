@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — cutover chunk 7a: the idle-worker check gets its plane path; every matcher reader follows a flip (#1444)
+
+- `lib/plane-readers.py::unassigned_rows` — the idle-worker check from the plane, the legacy rule mirrored: the bot's newest REPORT of any status (its newest `report` communication), then the terminal status off the task event sharing that report's ref — or off the `report_status` system event the report door now lands when a terminal report resolved no assignment (a bare note); every per-bot read spans all of the bot's uids (a case-variant alias mints a second actor). `dispatch-overdue.py --unassigned` flips with `PLANE_READ_UNASSIGNED` (flag AND declaration); the shadow gains the fleet-level `unassigned` reader (one comparison per instant, keyed `_fleet`); `plane cutover --reader unassigned`; the fleet-pulse unit is stamped with the flag, names its fleet, and discloses a refused reader; `--retire-writes` requires the fourth reader and no longer names a frozen one.
+- `SystemEvent` accepts `subject` — an ALIAS resolved at ingest (the metric-sample form) — so a bash door can anchor a system event on a bot's actor or the fleet without knowing a uid; `report_status` registered (notice).
+- Two chunk-3/6a `--check` pins were clock time bombs (dated from the fixed `NOW`); they record relative to the real clock. The shared completion fixture lands what the report door lands (the communication + the task event under one ref).
+
 ### Added — cutover chunk 6b: the legacy writes retired per door as the end of shadowing; who-reviewed's plane join (#1444)
 
 - `PLANE_LEGACY_WRITE_DISPATCH` / `PLANE_LEGACY_WRITE_REPORT` (default 1). A door skips its JSONL append only on FOUR facts (`plane_write_retired` in lib-common): the flag says 0, the plane is armed, the retirement is recorded (`plane-lookup.py --retired`), and that emission succeeded (`plane_emit_events` now surfaces `PLANE_EMIT_LAST_RC`; the dispatch door emits before deciding) — every other case writes the ledger and says why. The composed `bot.conf` carries a retired flag from the fleet `.env` tier (`env_tiers.resolves_to`).
