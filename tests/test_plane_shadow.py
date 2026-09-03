@@ -193,8 +193,13 @@ def test_the_record_stays_far_under_the_diagnostic_cap(tmp_path):
     assert len(json.dumps(data).encode()) < 12000
 
 
-def _record(root, bot, at, legacy_ids, *, clean=True):
-    d = sh.ShadowDiff(F, bot, sh.dt_iso(at), legacy_ids, list(legacy_ids) if clean else [])
+def _record(root, bot, at, legacy_ids, *, clean=True, resolver="head"):
+    """One recorded open comparison. ``resolver="head"`` = the resolver agreed on
+    the list's head (the common case); a pair = explicit (legacy, plane) answers."""
+    head = legacy_ids[0] if legacy_ids else None
+    rl, rp = (head, head) if resolver == "head" else resolver
+    d = sh.ShadowDiff(F, bot, sh.dt_iso(at), legacy_ids, list(legacy_ids) if clean else [],
+                      resolver_legacy=rl, resolver_plane=rp)
     emit_batch(root, [sh.shadow_event(d)])
 
 

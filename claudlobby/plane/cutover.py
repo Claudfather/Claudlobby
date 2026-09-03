@@ -21,10 +21,10 @@ import sqlite3
 from typing import Optional
 
 from .ids import derive_uid
-from .shadow import GATE_CLEAN_RUN, GATE_TRANSITIONS, READERS, Streak
+from .shadow import BAR_BY_READER, GATE_TRANSITIONS, GATED, Streak
 
 EVENT_DECLARED = "cutover_declared"
-READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in READERS}
+READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
 
 # The fleet is matched on the anchor COLUMN first (survives a truncated
 # detail), the detail's fleet second (a declaration recorded before the fleet
@@ -74,7 +74,8 @@ def declaration_event(fleet: str, reader: str, streaks: list[Streak], now: str, 
                 "fleet": fleet,
                 "reader": reader,
                 "flag": READ_FLAGS[reader],
-                "gate": {"clean_run": GATE_CLEAN_RUN, "transitions": GATE_TRANSITIONS},
+                "gate": {"clean_run": (streaks[0].clean_bar if streaks else BAR_BY_READER[reader]),
+                         "transitions": GATE_TRANSITIONS},
                 "gate_met": not unmet(streaks),
                 "forced": forced,
                 "streaks": [

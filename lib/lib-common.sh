@@ -3924,3 +3924,14 @@ reap_event_files() {
     [ -d "$events_dir" ] || return 0
     find "$events_dir" -name "$name_glob" -type f -mtime +"$reap_days" -delete 2>/dev/null || true
 }
+
+# sha256_hex32 <string> -- the first 32 hex chars of sha256 over the exact bytes
+# (no trailing newline): the importer content key (plane.ids.derive_hex), so a
+# live door and a later import of the same ledger line agree on one ref.
+sha256_hex32() {
+    if command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$1" | shasum -a 256 | cut -c1-32
+    else
+        printf '%s' "$1" | sha256sum | cut -c1-32
+    fi
+}

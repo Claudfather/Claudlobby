@@ -883,6 +883,11 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
                 for reader in readers:
                     if reader == sh.READER_OPEN:
                         legacy = sh.legacy_open(doors, bot, dl, rl)
+                        # the resolver's answers (chunk 6a): legacy with its id-less
+                        # guard and the #1418 rule at THIS instant; the plane's head
+                        # through the stdlib readers the matcher itself ships
+                        resolver_legacy = doors.open_task_id(bot, dl, rl, now=int(at.timestamp()))
+                        resolver_plane = doors._plane_readers().head(conn, fleet, bot, bound)
                         plane = plane_rows
                     else:
                         legacy = legacy_overdue.get(bot.lower(), [])
@@ -890,6 +895,8 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
                                                  progress_grace_s=grace, rows=plane_rows,
                                                  uid=uids[bot])
                     d = sh.diff(fleet, bot, legacy, plane, now=at, skew_s=args.skew_grace,
+                                **({"resolver_legacy": resolver_legacy, "resolver_plane": resolver_plane}
+                                   if reader == sh.READER_OPEN else {}),
                                 superseded=superseded.get(bot.lower(), set()),
                                 intentional=intentional, reader=reader,
                                 malformed=malformed[bot] if reader == sh.READER_OVERDUE else None)
@@ -1025,6 +1032,11 @@ def cmd_plane_shadow(args) -> int:
             return 3
         from ..plane import shadow as sh
         readers = sh.READERS if args.reader == "all" else (args.reader,)
+        if args.reader == sh.READER_OPEN_TASK and not (args.gate or args.check):
+            print("shadow: open_task is a gate mode — the resolver's head is graded inside"
+                  " the open reader's records; use --gate --reader open_task (or --check)",
+                  file=sys.stderr)
+            return 2
         try:
             if args.check:
                 return _shadow_check(conn, fleet, roster, readers)

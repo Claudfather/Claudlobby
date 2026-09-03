@@ -477,11 +477,13 @@ PLANE_MSG_ID="" PLANE_WI_ID="" PLANE_ASG_ID=""
 # over-reported. Not found in the plane → no wiring, disclosed.
 SUP_WI="" SUP_ASG="" SUP_MSG="" sup_frag="" sup_ev=""
 if [ "$PLANE_ARMED" = "1" ]; then
+    # Cutover chunk 6a: EVERY dispatch mints the construct triple, id-less ones
+    # too (query / cancel / compact / restart) -- the plane must hold every
+    # dispatch the legacy ledger holds, or the flipped readers cannot see an
+    # overdue id-less dispatch nor apply the resolver id-less guard (#1418).
     PLANE_MSG_ID="$(plane_mint_id msg)"
-    if [ -n "$TASK_ID" ]; then
-        PLANE_WI_ID="$(plane_mint_id wi)"
-        PLANE_ASG_ID="$(plane_mint_id asg)"
-    fi
+    PLANE_WI_ID="$(plane_mint_id wi)"
+    PLANE_ASG_ID="$(plane_mint_id asg)"
 fi
 
 # Recipient context, fail-open: the alias needs the RECIPIENT fleet (§6b #4 —
@@ -563,8 +565,26 @@ _plane_emit_intent() {
     # Fragments built via if/else, never inline `$([ ... ] && ...)` — a false
     # test inside a command substitution returns rc 1 into the assignment and
     # errexit kills the door.
+    # The dispatch ref: the legacy task id, or the importer content key of the
+    # ledger line for an id-less dispatch (cutover chunk 6a) -- one ref for the
+    # live door and any later import, so they classify as one fact.
+    local dispatch_ref
+    if [ -n "$TASK_ID" ]; then
+        dispatch_ref="dispatch-log:$TASK_ID"
+    else
+        local _key
+        _key=$(sha256_hex32 "$LEDGER_LINE" 2>/dev/null || true)
+        if [ -z "$_key" ]; then
+            # No sha tool on this host: disclose, and emit the communication only
+            # rather than mint a malformed ref (unreachable on Linux/macOS).
+            echo "dispatch-task: no sha256 tool -- id-less dispatch emitted as a communication only" >&2
+            dispatch_ref=""
+        else
+            dispatch_ref="dispatch-log:sha:$_key"
+        fi
+    fi
     src_ref=""
-    [ -n "$TASK_ID" ] && src_ref="\"source_ref\":\"dispatch-log:$TASK_ID\","
+    [ -n "$dispatch_ref" ] && src_ref="\"source_ref\":\"$dispatch_ref\","
     if [ -n "$DISPATCH_SUPERSEDES" ] && [ -n "$PLANE_ASG_ID" ]; then
         _sup=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
             --task-id "$DISPATCH_SUPERSEDES" 2>/dev/null || true)
@@ -573,7 +593,7 @@ _plane_emit_intent() {
             [ -n "$SUP_MSG" ] && [ "$SUP_MSG" != "$SUP_ASG" ] && sup_frag="\"supersedes_msg_id\":\"$SUP_MSG\","
             # source_ref names THIS dispatch (the successor): the supersession is a
             # fact this row created; the retired row is named by assignment_id.
-            sup_ev="{\"event_type\":\"task\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$SUP_WI\",\"assignment_id\":\"$SUP_ASG\",\"event\":\"superseded\",\"successor_id\":\"$PLANE_ASG_ID\"}}"
+            sup_ev="{\"event_type\":\"task\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$SUP_WI\",\"assignment_id\":\"$SUP_ASG\",\"event\":\"superseded\",\"successor_id\":\"$PLANE_ASG_ID\"}}"
         else
             echo "dispatch-task: --supersedes $DISPATCH_SUPERSEDES not found in the plane — legacy-only supersession" >&2
         fi
@@ -584,15 +604,15 @@ _plane_emit_intent() {
     fi
     local comm wi_ev asg_ev
     comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
-    if [ -n "$TASK_ID" ]; then
+    if [ -n "$dispatch_ref" ]; then
         iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
         [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
         [ -n "$DISPATCH_WORKSTREAM" ] && ws_frag=",\"workstream_id\":\"$(json_escape "$DISPATCH_WORKSTREAM")\""
         case "$DISPATCH_REPO" in
             */*) repo_frag=",\"repo\":\"$(json_escape "$DISPATCH_REPO")\"" ;;
         esac
-        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}}}"
-        asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
+        wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}}}"
+        asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
         printf '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}" | plane_emit_events dispatch-task
     else
         printf '{"events":[%s]}' "$comm" | plane_emit_events dispatch-task
@@ -648,10 +668,14 @@ _append_ledger() {
     # schema-uniform convention as task_id/workstream above; every existing
     # consumer reads fields by name and treats "" as falsy. Ids are hex
     # constants by construction, so no escaping.
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}\n' \
-        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID" >> "$LEDGER"
+    printf '%s\n' "$LEDGER_LINE" >> "$LEDGER"
     rotate_jsonl_by_ts "$LEDGER"
 }
+# The row text, composed ONCE here into a variable (printf -v: no fork; main
+# shell, so a subshell lock cannot lose it) and keyed for the plane below
+# exactly as the importer keys an unstamped row.
+printf -v LEDGER_LINE '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}' \
+        "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID"
 with_lock "$LEDGER.lock" _append_ledger
 
 # Plane intent BEFORE transport (F9): a crash between here and the send leaves

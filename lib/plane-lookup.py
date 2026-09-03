@@ -40,35 +40,75 @@ SQL = (
 )
 
 
+def _readers():
+    """The stdlib plane readers beside this file — ONE read-only open (schema
+    probe + transient retry) for every stdlib door (chunk 6a fold)."""
+    import importlib.util
+    src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "plane-readers.py")
+    spec = importlib.util.spec_from_file_location("plane_readers", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _open_idless(a) -> int:
+    """`--open-idless --fleet F --bot B`: `<work_item_id> <assignment_id>` per
+    OPEN id-less dispatch of the bot (cutover chunk 6a) — what report-back.sh
+    closes on the bot's next terminal report, as the legacy ledger closes
+    id-less rows by any later terminal report. Empty = nothing open (rc 0);
+    unreachable = rc 3."""
+    pr = _readers()
+    try:
+        conn = pr.connect(a.root)
+    except pr.PlaneUnreachable as exc:
+        print(f"plane-lookup: {exc} — unreachable, not empty", file=sys.stderr)
+        return 3
+    try:
+        for wi, asg in pr.open_idless_assignments(conn, a.fleet, a.bot):
+            print(f"{wi} {asg}")
+    except sqlite3.Error as exc:
+        print(f"plane-lookup: db unreadable: {exc}", file=sys.stderr)
+        return 3
+    finally:
+        conn.close()
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--root", required=True)
-    ap.add_argument("--task-id", required=True)
+    ap.add_argument("--task-id", default=None)
     ap.add_argument("--assignee", default=None,
                     help="bot:<fleet>/<name>; name part compared case-insensitively")
+    ap.add_argument("--open-idless", action="store_true",
+                    help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
+    ap.add_argument("--fleet", default=None)
+    ap.add_argument("--bot", default=None)
     a = ap.parse_args(argv)
     if not a.root:
-        # An empty root would resolve RELATIVE to the cwd and could find a
-        # stranger's db there — unreachable, never a guess (adversarial lens).
+        # An empty root is CLAUDLOBBY_ROOT unset in the caller: unreachable, not empty.
         print("plane-lookup: --root is empty (CLAUDLOBBY_ROOT unset?) — unreachable",
               file=sys.stderr)
         return 3
-    db = os.path.join(a.root, "state", "plane", "plane.db")
-    if not os.path.isfile(db):
-        print(f"plane-lookup: no plane db at {db} — unreachable, not empty", file=sys.stderr)
+    if a.open_idless:
+        if not (a.fleet and a.bot):
+            ap.error("--open-idless needs --fleet and --bot")
+        return _open_idless(a)
+    if not a.task_id:
+        ap.error("--task-id is required (or --open-idless)")
+    pr = _readers()
+    try:
+        conn = pr.connect(a.root)            # no db / unopenable: unreachable, never empty
+    except pr.PlaneUnreachable as exc:
+        print(f"plane-lookup: {exc} — unreachable, not empty", file=sys.stderr)
         return 3
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
-        conn.execute("PRAGMA query_only = 1")
         rows = conn.execute(SQL, (f"dispatch-log:{a.task_id}",)).fetchall()
     except sqlite3.Error as exc:
         print(f"plane-lookup: db unreadable: {exc}", file=sys.stderr)
         return 3
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        conn.close()
     want = None
     if a.assignee:
         fl, _, name = a.assignee.rpartition("/")

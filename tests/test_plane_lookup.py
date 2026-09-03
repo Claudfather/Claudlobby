@@ -202,8 +202,8 @@ def test_supersedes_reaches_the_plane_through_the_real_dispatch_door(tmp_path):
         (mock / f).chmod(0o755)
     (fake_lib / "plane-emit.sh").chmod(0o755)
     (fake_lib / "dispatch.sh").symlink_to(mock / "dispatch.sh")
-    for real in ("lib-common.sh", "plane-lookup.py", "dispatch-supersede-hint.py",
-                 "dispatch-overdue.py"):
+    for real in ("lib-common.sh", "plane-lookup.py", "plane-readers.py",
+                 "dispatch-supersede-hint.py", "dispatch-overdue.py"):
         (fake_lib / real).symlink_to(REPO / "lib" / real)
     patched = mock / "dispatch-task.sh"
     src = (REPO / "lib" / "dispatch-task.sh").read_text()

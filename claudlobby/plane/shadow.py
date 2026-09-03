@@ -88,9 +88,25 @@ EVENT_DIVERGED = "shadow_parity_diverged"
 READER_OPEN = "open"          # dispatch-overdue.py --open / --open-task: the deadline-blind list
 READER_OVERDUE = "overdue"    # dispatch-overdue.py --all: the watchdog's input (overdue ∪ orphans)
 READERS = (READER_OPEN, READER_OVERDUE)
-DEFAULT_SKEW_S = 600
 GATE_CLEAN_RUN = 20
 GATE_TRANSITIONS = 1
+# The resolver (dispatch-overdue.py --open-task) is the open list's HEAD, and
+# every open record already carries head_legacy / head_plane / head_agrees —
+# so it is a STREAK MODE over the open reader's records (chunk 6a), never a
+# third comparison. Its bar is its own: a stale head is a false completion
+# (#1418), so 200 agreeing heads with at least one head CHANGE.
+READER_OPEN_TASK = "open_task"
+GATED = READERS + (READER_OPEN_TASK,)
+GATE_HEAD_CLEAN_RUN = 200
+# The bar per reader, ONE registry (a Streak reads its bar from its reader,
+# never from settable state): the list readers' 20, the resolver's 200.
+BAR_BY_READER = {READER_OPEN: GATE_CLEAN_RUN, READER_OVERDUE: GATE_CLEAN_RUN,
+                 READER_OPEN_TASK: GATE_HEAD_CLEAN_RUN}
+# The resolver's tail: only records with a NON-EMPTY resolver answer count
+# toward its run (None == None proves nothing), so an idle bot's records are
+# skipped, not counted — the tail must reach past them to find 200 real ones.
+HEAD_TAIL_LIMIT = 1000
+DEFAULT_SKEW_S = 600
 TAIL_LIMIT = 200        # records the streak reads per bot: the gate needs the tail, never the history
 LIST_CAP = 60           # ids kept per side in a record (oldest first); counts carry the rest
 DIVERGENCE_CAP = 40     # divergences listed in a record; the count carries the rest
@@ -290,6 +306,15 @@ class ShadowDiff:
     plane_ids: list[Optional[str]]
     divergences: list[Divergence] = field(default_factory=list)
     reader: str = READER_OPEN
+    # The RESOLVER's answers on both sides (chunk 6a): the legacy open_task_id
+    # (with its id-less guard) and the plane's head — recorded on every open
+    # record so the resolver's gate grades the guard, not just the list's head.
+    resolver_legacy: Optional[str] = None
+    resolver_plane: Optional[str] = None
+
+    @property
+    def resolver_agrees(self) -> bool:
+        return self.resolver_legacy == self.resolver_plane
 
     @property
     def head_legacy(self) -> Optional[str]:
@@ -313,7 +338,7 @@ class ShadowDiff:
         divergence (skew, a pre-cutover supersession, a declared id) is
         disclosed but does not break the streak; a head disagreement always
         does, because the head is the answer that gets written."""
-        return not self.unexplained and self.head_agrees
+        return not self.unexplained and self.head_agrees and self.resolver_agrees
 
     def classes(self) -> dict[str, int]:
         out: dict[str, int] = {}
@@ -342,7 +367,9 @@ def diff(fleet: str, bot: str, legacy: list[OpenRow], plane: list[OpenRow], *,
          superseded: Optional[set[str]] = None,
          intentional: Optional[set[str]] = None,
          reader: str = READER_OPEN,
-         malformed: Optional[set[str]] = None) -> ShadowDiff:
+         malformed: Optional[set[str]] = None,
+         resolver_legacy: Optional[str] = None,
+         resolver_plane: Optional[str] = None) -> ShadowDiff:
     """Pure: the two answers in, the classified disagreement out. Ids are
     compared as MULTISETS (a redispatched task id is two open rows on both
     sides) and the heads as the two lists' first elements."""
@@ -352,7 +379,8 @@ def diff(fleet: str, bot: str, legacy: list[OpenRow], plane: list[OpenRow], *,
     grace = ts19(dt_iso(now - timedelta(seconds=skew_s)))
     out = ShadowDiff(fleet, bot, dt_iso(now),
                      [r.task_id or "" for r in legacy],
-                     [r.task_id for r in plane], reader=reader)
+                     [r.task_id for r in plane], reader=reader,
+                     resolver_legacy=resolver_legacy, resolver_plane=resolver_plane)
     plane_pool = list(plane)
     for row in legacy:
         match = next((p for p in plane_pool if p.task_id == row.task_id), None)
@@ -400,6 +428,9 @@ def shadow_event(d: ShadowDiff, *, subject_uid: Optional[str] = None) -> dict:
         "head_legacy": d.head_legacy,
         "head_plane": d.head_plane,
         "head_agrees": d.head_agrees,
+        "resolver_legacy": d.resolver_legacy,
+        "resolver_plane": d.resolver_plane,
+        "resolver_agrees": d.resolver_agrees,
         "divergences_n": len(d.divergences),
         "divergences": [
             {"task_id": x.task_id, "side": x.side, "class": x.cls, "ref": x.ref}
@@ -434,8 +465,12 @@ class Streak:
     last_at: Optional[str] = None
 
     @property
+    def clean_bar(self) -> int:
+        return BAR_BY_READER.get(self.reader, GATE_CLEAN_RUN)
+
+    @property
     def gate_ok(self) -> bool:
-        return self.clean_run >= GATE_CLEAN_RUN and self.transitions >= GATE_TRANSITIONS
+        return self.clean_run >= self.clean_bar and self.transitions >= GATE_TRANSITIONS
 
     @property
     def latest_diverged(self) -> bool:
@@ -445,7 +480,7 @@ class Streak:
 
     def line(self) -> str:
         mark = "met" if self.gate_ok else "NOT met"
-        return (f"{self.bot} [{self.reader}]: clean_run={self.clean_run}/{GATE_CLEAN_RUN}"
+        return (f"{self.bot} [{self.reader}]: clean_run={self.clean_run}/{self.clean_bar}"
                 f" transitions={self.transitions}/{GATE_TRANSITIONS}"
                 f" comparisons={self.comparisons}"
                 f" last_diverged={self.last_diverged_at or '-'} -> {mark}")
@@ -485,12 +520,8 @@ def streak(conn: sqlite3.Connection, fleet: str, bot: str,
     the history. A transition is an id present in one clean comparison's
     open set and absent from the next clean one — the join being exercised,
     not merely re-read; a divergence ends the run, truncated or not."""
-    alias = f"bot:{fleet}/{bot}"
     s = Streak(bot, reader)
-    s.comparisons = conn.execute(COUNT_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, reader)).fetchone()[0]
-    tail = conn.execute(TAIL_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, reader, TAIL_LIMIT)).fetchall()
-    if tail:
-        s.last_at = tail[0][1]
+    s.comparisons, tail, s.last_at = _tail(conn, fleet, bot, reader, TAIL_LIMIT)
     run: list[Optional[list]] = []            # the tail's clean comparisons, newest first
     for event, at, detail, truncated in tail:
         if event != EVENT_CLEAN:
@@ -507,6 +538,47 @@ def streak(conn: sqlite3.Connection, fleet: str, bot: str,
     for newer, older in zip(run, run[1:]):    # an id that left the set between two known sets
         if newer is not None and older is not None and any(i not in newer for i in older):
             s.transitions += 1
+    return s
+
+
+def _tail(conn: sqlite3.Connection, fleet: str, bot: str, reader: str, limit: int
+          ) -> tuple[int, list, Optional[str]]:
+    """The shared preamble of both streaks: (comparisons, the tail newest
+    first, the newest instant) for one (bot, reader)."""
+    alias = f"bot:{fleet}/{bot}"
+    comparisons = conn.execute(COUNT_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, reader)).fetchone()[0]
+    tail = conn.execute(TAIL_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, reader, limit)).fetchall()
+    return comparisons, tail, (tail[0][1] if tail else None)
+
+
+def head_streak(conn: sqlite3.Connection, fleet: str, bot: str) -> Streak:
+    """The resolver's streak, read off the OPEN reader's records (chunk 6a):
+    newest first, a record counts toward the run when its RESOLVER answers
+    agree and are non-empty (None == None proves nothing: an idle record is
+    skipped, neither counted nor breaking); a diverged record, a resolver
+    disagreement, a record without the resolver fields (pre-6a) or a
+    truncated one ends the run; a transition is the resolver's answer
+    CHANGING between two counted records. Bar: GATE_HEAD_CLEAN_RUN."""
+    s = Streak(bot, READER_OPEN_TASK)
+    s.comparisons, tail, s.last_at = _tail(conn, fleet, bot, READER_OPEN, HEAD_TAIL_LIMIT)
+    answers: list[str] = []
+    for event, at, detail, truncated in tail:
+        data = None
+        if event == EVENT_CLEAN and not truncated and detail:
+            try:
+                data = json.loads(detail)
+            except (json.JSONDecodeError, TypeError):
+                data = None
+        if not isinstance(data, dict) or "resolver_agrees" not in data \
+                or data.get("resolver_agrees") is not True:
+            s.last_diverged_at = at
+            break
+        answer = data.get("resolver_legacy")
+        if answer is None:
+            continue                                   # idle on both sides: proves nothing
+        answers.append(answer)
+    s.clean_run = len(answers)
+    s.transitions = sum(1 for newer, older in zip(answers, answers[1:]) if newer != older)
     return s
 
 
@@ -554,7 +626,8 @@ def gate_summary(conn: sqlite3.Connection, fleet: str,
     is short, named as such, never absent: an absence read as clean is the
     ``source_state`` class."""
     bots = sorted(set(roster or []) | set(shadowed_bots(conn, fleet)))
-    return [streak(conn, fleet, b, r) for b in bots for r in readers]
+    return [head_streak(conn, fleet, b) if r == READER_OPEN_TASK else streak(conn, fleet, b, r)
+            for b in bots for r in readers]
 
 
 def latest_diverged(conn: sqlite3.Connection, fleet: str, roster: list[str],

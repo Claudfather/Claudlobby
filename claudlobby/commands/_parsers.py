@@ -519,8 +519,9 @@ def register_subparsers(sub) -> None:
         help="Cutover chunk 5: declare a reader's flip to the plane — refuses"
         " unless the J4 gate is met on every bot, records cutover_declared,"
         " prints the PLANE_READ_* flag line (rc 0 declared / 1 refused / 3 unreachable)")
-    pcut.add_argument("--reader", choices=("open", "overdue"), required=True,
-                      help="Which list reader flips: the open list or the watchdog's overdue set")
+    pcut.add_argument("--reader", choices=("open", "overdue", "open_task"), required=True,
+                      help="Which reader flips: the open list, the watchdog's overdue set, or the"
+                      " resolver (--open-task; its bar is 200 agreeing heads + a head change)")
     pcut.add_argument("--force", default="",
                       help="Declare despite a short gate; the reason is recorded in the event")
     pcut.set_defaults(func=cmd_plane_cutover)
@@ -537,9 +538,10 @@ def register_subparsers(sub) -> None:
     psh.add_argument("--check", action="store_true",
                      help="The fleet-pulse bridge: rc 1 when any (bot, reader)'s LATEST"
                      " recorded comparison diverged (unexplained, or the heads differ)")
-    psh.add_argument("--reader", choices=("open", "overdue", "all"), default="all",
+    psh.add_argument("--reader", choices=("open", "overdue", "open_task", "all"), default="all",
                      help="Which reader to shadow: the deadline-blind open list, the"
-                     " watchdog's overdue set, or both (default)")
+                     " watchdog's overdue set, or both (default); open_task is --gate/--check"
+                     " only (the resolver's head is graded inside the open records)")
     psh.add_argument("--replay-hours", type=int, default=0,
                      help="Also compare at each of the last N hourly instants"
                      " (front-loads the gate from history)")
