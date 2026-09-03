@@ -11,6 +11,9 @@ call sites are pinned by shape; their live behaviour is the Mini canary.
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -185,3 +188,53 @@ def test_the_two_doors_call_the_lookup_before_the_ledger():
     assert "plane-lookup.py" in dt and '"superseded"' in dt and "supersedes_msg_id" in dt
     for f in ("report-back.sh", "dispatch-task.sh"):
         assert subprocess.run(["bash", "-n", str(REPO / "lib" / f)]).returncode == 0
+
+
+def test_supersedes_reaches_the_plane_through_the_real_dispatch_door(tmp_path):
+    """Drive the REAL lib/dispatch-task.sh (tmux + dispatch.sh mocked, the
+    plane emit captured) with --supersedes naming a task the plane holds:
+    the batch must carry supersedes_msg_id on the new communication and a
+    terminal `superseded` task event whose successor_id is the NEW
+    assignment. Mutation-pinned: dropping the event from the batch was a
+    surviving mutant."""
+    root = _root(tmp_path)
+    wi_old, asg_old, msg_old = _dispatch(root, "a", "t-1-aaaa", bot="myworker")
+    mock = tmp_path / "mock"
+    fake_lib = mock / "lib"
+    fake_lib.mkdir(parents=True)
+    capture = mock / "plane-batches.jsonl"
+    (mock / "tmux").write_text("#!/bin/bash\nexit 0\n")
+    (mock / "dispatch.sh").write_text("#!/bin/bash\nexit 0\n")
+    (fake_lib / "plane-emit.sh").write_text(
+        f"#!/bin/bash\ncat >> '{capture}'\nprintf '\\n' >> '{capture}'\nexit 0\n")
+    for f in ("tmux", "dispatch.sh"):
+        (mock / f).chmod(0o755)
+    (fake_lib / "plane-emit.sh").chmod(0o755)
+    (fake_lib / "dispatch.sh").symlink_to(mock / "dispatch.sh")
+    for real in ("lib-common.sh", "plane-lookup.py", "dispatch-supersede-hint.py",
+                 "dispatch-overdue.py"):
+        (fake_lib / real).symlink_to(REPO / "lib" / real)
+    patched = mock / "dispatch-task.sh"
+    src = (REPO / "lib" / "dispatch-task.sh").read_text()
+    patched.write_text(re.sub(r"^LIB_DIR=.*$", f'LIB_DIR="{fake_lib}"', src, count=1,
+                              flags=re.M))
+    env = {**os.environ, "PATH": f"{mock}:{os.environ['PATH']}", "TMUX_BIN": str(mock / "tmux"),
+           "CLAUDLOBBY_ROOT": str(root), "BOT_NAME": "mgr", "FLEET_NAME": F,
+           "PLANE_EMIT_ENABLED": "1"}
+    # --type task forces the envelope: only an enveloped dispatch mints a task
+    # id, and only a task dispatch emits work_item + assignment (a freeform
+    # send is a bare communication by design).
+    r = subprocess.run(["bash", str(patched), "--type", "task", "--supersedes", "t-1-aaaa",
+                        "myworker", "Redo the thing"],
+                       capture_output=True, text=True, env=env, timeout=120)
+    assert r.returncode == 0, r.stderr
+    batches = [json.loads(l) for l in capture.read_text().splitlines() if l.strip()]
+    events = [e for b in batches for e in b["events"]]
+    asg_new = next(e["payload"]["assignment_id"] for e in events if e["event_type"] == "assignment")
+    comm = next(e["payload"] for e in events if e["event_type"] == "communication")
+    sup = [e["payload"] for e in events
+           if e["event_type"] == "task" and e["payload"].get("event") == "superseded"]
+    assert comm["supersedes_msg_id"] == msg_old
+    assert sup == [{"work_item_id": wi_old, "assignment_id": asg_old,
+                    "event": "superseded", "successor_id": asg_new}]
+    assert asg_new != asg_old
