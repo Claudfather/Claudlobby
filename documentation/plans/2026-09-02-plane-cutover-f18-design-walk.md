@@ -153,6 +153,8 @@ Structural: no reader flips, no write retires, no new carrier (the shadow's flag
 
 **6c — the doc pass.** `documentation/architecture/observable-plane.md` (the line "Not yet described in `documentation/architecture/`" in CLAUDE.md is the debt): the families, the envelope, the lanes, the doors and their flags, the cutover state machine (shadow → declare → flip → retire) with the exact commands, and the rollback at each stage. CLAUDE.md's plane paragraph shrinks to a pointer. No code.
 
+*(6a built: PR #1452 — the live id-less emission under the importer's key, `plane-readers.answering_idless`/`head`, `--open-task` under `PLANE_READ_OPEN_TASK`, `shadow.head_streak` with the 200-head bar, `plane cutover --reader open_task`, the #1418 legacy rule.)*
+
 **Order and gates.** 6a needs the flipped `--open` in production long enough to accumulate 200 resolutions (the shadow timer, armed by the operator); 6b needs 6a declared; 6c can land any time and should land first.
 
 ### Chunk 6a ruling (before the code): id-less dispatches are emitted LIVE with the importer's content key
