@@ -33,6 +33,12 @@ Every rule below is from the J3 evaluation and was verified in code:
 - the manager's alias resolves through the identity registry when exactly
   one fleet has a bot of that name; otherwise it is assumed to be F and the
   assumption is COUNTED in the plan.
+- **content is identity**: no door ever rewrites a ledger line (rotation only
+  drops whole lines), so a line whose bytes changed IS a different row and
+  imports as one. A hand-edited row therefore lands beside its earlier self
+  under a new ``sha:`` source_ref rather than replacing it — accepted and
+  pinned, not hidden, because the alternative (a natural key such as
+  task id + timestamp) would silently merge two genuine same-second reports.
 
 The epoch declaration is deliberately NOT here: it lands with the flip
 that consumes it. Dry-run is the default; ``apply_import`` writes.

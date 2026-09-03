@@ -415,3 +415,62 @@ def test_import_resolves_the_manager_alias_through_the_registry(tmp_path):
         conn.close()
     assert plan.events[0]["payload"]["created_by"] == f"bot:{F}/boss"
     assert plan.assumed_manager_fleet == 1
+
+
+def test_import_an_oversized_field_refuses_only_its_own_unit(tmp_path):
+    """task.summary caps at 4096 bytes and the contract REJECTS (never
+    truncates). Measured before the per-unit validation: one such row raised
+    out of emit_batch and zero of the other units landed."""
+    root = _root(tmp_path)
+    dlog, rlog = _ledgers(tmp_path, root)
+    _write(dlog, [_drow("2026-08-28T00:47:02Z", "t-0-0000", task="ok"),
+                  _drow("2026-08-28T00:48:02Z", "t-0-1111", task="ok2")])
+    _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed"),
+                  _rrow("2026-08-28T03:01:00Z", "t-0-1111", "completed", summary="x" * 5000)])
+    conn = _ro(root)
+    try:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW,
+                           capture={"*": "full"})
+    finally:
+        conn.close()
+    assert plan.dispatches == 2 and plan.reports == 1 and len(plan.invalid) == 1
+    assert "summary" in plan.invalid[0]
+    assert apply_import(root, plan)["committed"] == len(plan.events) == 10
+
+
+def test_import_a_hand_edited_row_is_a_new_row_by_design(tmp_path):
+    """Content is identity: a line whose bytes changed imports beside its
+    earlier self. Pinned so the property is a decision, not a surprise."""
+    root = _root(tmp_path)
+    dlog, rlog = _ledgers(tmp_path, root)
+    conn = _ro(root)
+    try:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    finally:
+        conn.close()
+    apply_import(root, plan)
+    _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed", summary="edited")])
+    conn = _ro(root)
+    try:
+        again = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    finally:
+        conn.close()
+    assert again.dispatches == 0 and again.reports == 1
+    assert apply_import(root, again)["committed"] == 2
+    conn = connect(db_path(root))
+    try:
+        refs = [r[0] for r in conn.execute(
+            "SELECT DISTINCT source_ref FROM events WHERE kind='task' AND event='completed'")]
+    finally:
+        conn.close()
+    assert len(refs) == 2 and all(r.startswith("report-back:sha:") for r in refs)
+
+
+def test_parity_cli_refusal_leaves_no_directory_behind(tmp_path):
+    import subprocess, sys as _sys
+    root = tmp_path / "bare"
+    root.mkdir()
+    r = subprocess.run([_sys.executable, "-m", "claudlobby", "--root", str(root), "plane", "parity"],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 3 and "UNREACHABLE" in r.stdout
+    assert not (root / "state").exists()

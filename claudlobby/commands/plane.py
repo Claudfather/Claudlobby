@@ -629,6 +629,12 @@ def cmd_plane_expire(args) -> int:
     return _guarded("plane expire", run)
 
 
+def _one_line(text: str) -> str:
+    """A ledger key carries the row's raw bytes; a newline in a task id would
+    break the one-row-per-line listing (the JSON form escapes it already)."""
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _fleet_name(paths) -> "str | None":
     return paths.fleet_dir.name if paths.fleet_dir else None
 
@@ -646,9 +652,11 @@ def cmd_plane_parity(args) -> int:
         from ..plane.parity import DISPATCH, REPORT, compare, connect_ro
 
         out = sys.stderr if args.json else sys.stdout
-        path = db_path(root)
+        # A plain join for the pre-check: db_path() mkdirs state/plane as a side
+        # effect, and a read-only door must not leave a directory behind on refusal.
+        path = root / "state" / "plane" / "plane.db"
         if not path.is_file():
-            print(f"parity: UNREACHABLE — no plane db at {path}", file=sys.stderr)
+            print(f"parity: UNREACHABLE — no plane db at {path}", file=out)
             return 3
         conn = connect_ro(path)
         try:
@@ -674,11 +682,11 @@ def cmd_plane_parity(args) -> int:
                 print("  the ledger exists and holds no rows — nothing to compare",
                       file=out)
             for m in p.missing[:args.show]:
-                print(f"  missing {m.cause} {m.ts} {m.key}", file=out)
+                print(f"  missing {m.cause} {m.ts} {_one_line(m.key)}", file=out)
             if len(p.missing) > args.show:
                 print(f"  ... and {len(p.missing) - args.show} more", file=out)
             for d in p.duplicates[:args.show]:
-                print(f"  duplicate {d}", file=out)
+                print(f"  duplicate {_one_line(d)}", file=out)
             if not p.clean and rc == 0:
                 rc = 1
         if args.json:
@@ -716,9 +724,9 @@ def cmd_plane_import(args) -> int:
                   " only through that fleet's own report ledger, never a roster"
                   " guess", file=sys.stderr)
             return 2
-        path = db_path(root)
+        path = root / "state" / "plane" / "plane.db"     # no mkdir side effect on refusal
         if not path.is_file():
-            print(f"import: UNREACHABLE — no plane db at {path}", file=sys.stderr)
+            print(f"import: UNREACHABLE — no plane db at {path}")
             return 3
         conn = connect_ro(path)
         try:
@@ -748,7 +756,8 @@ def cmd_plane_import(args) -> int:
                             ("refused by the contracts", plan.invalid)):
             if keys:
                 print(f"  skipped {len(keys)} {label}: "
-                      + ", ".join(keys[:5]) + (" ..." if len(keys) > 5 else ""))
+                      + ", ".join(_one_line(k) for k in keys[:5])
+                      + (" ..." if len(keys) > 5 else ""))
         if plan.assumed_manager_fleet:
             print(f"  assumed {plan.assumed_manager_fleet} manager alias(es) in"
                   f" {fleet} (registry did not name a unique fleet)")
