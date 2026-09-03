@@ -1317,6 +1317,11 @@ emit_fleet_event() {
     # emission recorded). Best-effort like the append: never fails the caller.
     local _fleet="${FLEET_NAME:-}"
     if [ -n "$_fleet" ] && plane_armed emit_fleet_event 2>/dev/null; then
+        # plane_write_retired reads the script-level PLANE_ARMED the dispatch and
+        # report doors set at their top; this door is a library function every
+        # script calls, so it carries the verdict itself (dynamic scope: the
+        # check below sees it, the caller never does).
+        local PLANE_ARMED=1
         local _subj _kind _batch _safe_data
         if [ "$bot_id" = "fleet" ]; then
             _kind=fleet; _subj="$_fleet"                # the plane's fleet alias is the bare name
@@ -1332,7 +1337,8 @@ emit_fleet_event() {
             "$(json_escape "$event_source")" "$(json_escape "$_fleet")" "$ts" \
             "$(json_escape "$event_type")" "$_kind" "$(json_escape "$_subj")" "$_safe_data"
         plane_emit_events emit_fleet_event <<<"$_batch"
-        if plane_write_retired emit_fleet_event PLANE_LEGACY_WRITE_EVENTS 2>/dev/null; then
+        # stderr passes through: the missing fact is DISCLOSED, that is the contract
+        if plane_write_retired emit_fleet_event PLANE_LEGACY_WRITE_EVENTS; then
             return 0
         fi
     fi

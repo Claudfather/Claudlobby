@@ -82,9 +82,19 @@ def main(argv=None) -> int:
                     help="bot:<fleet>/<name>; name part compared case-insensitively")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
+    ap.add_argument("--declared", default=None, metavar="READER",
+                    help="print the instant READER was declared cut over to the plane for --fleet"
+                    " (cutover_declared), or nothing — the bash readers' half of a flip's two facts")
     ap.add_argument("--retired", action="store_true",
                     help="print the instant the fleet's legacy writes were retired, or nothing"
                     " (needs --fleet; chunk 6b — the doors' second fact)")
+    ap.add_argument("--events", action="store_true",
+                    help="print the fleet's events as legacy JSONL rows, oldest first (needs --fleet;"
+                    " --since <iso> bounds; --bot / --type filter) — Phase B, the bot-events ledger from the plane")
+    ap.add_argument("--escalation", default=None, metavar="TYPE",
+                    help="print '<bot> <latest_iso>' per bot carrying TYPE since --since (needs --fleet)")
+    ap.add_argument("--since", default=None)
+    ap.add_argument("--type", default=None)
     ap.add_argument("--fleet", default=None)
     ap.add_argument("--bot", default=None)
     a = ap.parse_args(argv)
@@ -97,9 +107,9 @@ def main(argv=None) -> int:
         if not (a.fleet and a.bot):
             ap.error("--open-idless needs --fleet and --bot")
         return _open_idless(a)
-    if a.retired:
+    if a.events or a.escalation:
         if not a.fleet:
-            ap.error("--retired needs --fleet")
+            ap.error("--events / --escalation need --fleet")
         pr = _readers()
         try:
             conn = pr.connect(a.root)
@@ -107,7 +117,30 @@ def main(argv=None) -> int:
             print(f"plane-lookup: {exc} — unreachable, not empty", file=sys.stderr)
             return 3
         try:
-            at = pr.retired(conn, a.fleet)
+            if a.escalation:
+                for bot, at in sorted(pr.escalation(conn, a.fleet, a.escalation, a.since or "").items()):
+                    print(f"{bot} {at}")
+            else:
+                import json as _json
+                for row in pr.fleet_events(conn, a.fleet, since=a.since, bot=a.bot, event_type=a.type):
+                    print(_json.dumps({k: v for k, v in row.items() if not k.startswith("_")}, separators=(",", ":")))
+        except sqlite3.Error as exc:
+            print(f"plane-lookup: db unreadable: {exc}", file=sys.stderr)
+            return 3
+        finally:
+            conn.close()
+        return 0
+    if a.retired or a.declared:
+        if not a.fleet:
+            ap.error("--retired / --declared need --fleet")
+        pr = _readers()
+        try:
+            conn = pr.connect(a.root)
+        except pr.PlaneUnreachable as exc:
+            print(f"plane-lookup: {exc} — unreachable, not empty", file=sys.stderr)
+            return 3
+        try:
+            at = pr.retired(conn, a.fleet) if a.retired else pr.declared(conn, a.fleet, a.declared)
         finally:
             conn.close()
         if at:

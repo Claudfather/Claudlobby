@@ -596,6 +596,25 @@ _rb_today=$(date +%Y-%m-%d)
 # errtrace (#844) a normal empty span logged a script_error every pulse — on the
 # per-minute path. Suppressing at the statement is what marks a benign non-zero
 # as intended; masking it afterwards only hides it from one of the two readers.
+# Phase B: the events readers follow the flip — flag AND a recorded
+# declaration for the `events` reader (memoised once per sweep); a flag alone
+# is disclosed and the files keep serving.
+_events_from_plane_memo=""
+_events_from_plane() {
+    if [ -z "$_events_from_plane_memo" ]; then
+        _events_from_plane_memo=no
+        if [ "${PLANE_READ_EVENTS:-0}" = "1" ]; then
+            if python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --declared events --fleet "$fleet" 2>/dev/null | grep -q .; then
+                _events_from_plane_memo=yes
+            else
+                echo "fleet-pulse: PLANE_READ_EVENTS=1 but no cutover_declared for $fleet/events - the events readers keep the files (plane cutover --reader events)" >&2
+            fi
+        fi
+    fi
+    [ "$_events_from_plane_memo" = yes ]
+}
+_rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")
+
 _readback_efiles() {
     local _bd="$1" _d _f
     for _d in "$today" "$_rb_today"; do
@@ -648,6 +667,24 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
         for _crit_type in service_down session_missing bridge_down rc_timeout; do
             _affected_bots=""
             _affected_count=0
+            if _events_from_plane; then
+                # Phase B: the same question as a Lane-C query — which declared
+                # bots carry this critical type inside the window (the plane
+                # readers' `escalation`); a refusal is disclosed, never empty.
+                _esc_rows=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalation "$_crit_type" \
+                    --since "$_window_start" --fleet "$fleet" 2>"$state_dir/.esc-err") || {
+                    echo "fleet-pulse: escalation reader UNREACHABLE for $_crit_type: $(tail -1 "$state_dir/.esc-err" 2>/dev/null | cut -c1-140) - not judged this pass" >&2
+                    rm -f "$state_dir/.esc-err"; continue; }
+                rm -f "$state_dir/.esc-err"
+                while read -r _bid _latest_ts; do
+                    [ -n "$_bid" ] || continue
+                    bot_in_fleet "$_bid" "$declared_bots" || continue
+                    _affected_bots="$_affected_bots $_bid"
+                    _affected_count=$((_affected_count + 1))
+                done <<EOF_ESC
+$_esc_rows
+EOF_ESC
+            else
             for bot_dir in "$BOTS_DIR"/*/; do
                 [ -d "$bot_dir" ] || continue
                 _bid=$(basename "$bot_dir")
@@ -666,6 +703,7 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
                     fi
                 fi
             done
+            fi
 
             if [ "$_affected_count" -ge "$_ESCALATION_THRESHOLD" ]; then
                 _esc_marker="$state_dir/escalation_${_crit_type}"
@@ -744,7 +782,14 @@ _summary_tmp=$(safe_mktemp)
         fi
 
         _s_alerts=""
-        _s_efiles=$(_readback_efiles "$_s_bot_dir")
+        if _events_from_plane; then
+            for _s_ct in session_missing service_down bridge_down activity_stuck rc_timeout; do
+                python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalation "$_s_ct" \
+                    --since "$_rb_yesterday" --fleet "$fleet" 2>/dev/null | grep -q "^${_s_bid} " && _s_alerts="$_s_alerts $_s_ct"
+            done
+        fi
+        _s_efiles=""
+        _events_from_plane || _s_efiles=$(_readback_efiles "$_s_bot_dir")
         if [ -n "$_s_efiles" ]; then
             for _s_ct in session_missing service_down bridge_down activity_stuck rc_timeout; do
                 # shellcheck disable=SC2086  # _s_efiles: newline list of ledger paths, intentional split

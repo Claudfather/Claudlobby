@@ -21,7 +21,7 @@ import sqlite3
 from typing import Optional
 
 from .ids import derive_uid
-from .shadow import BAR_BY_READER, GATE_TRANSITIONS, GATED, Streak
+from .shadow import BAR_BY_READER, GATE_TRANSITIONS, GATED, UNSHADOWED, Streak
 
 EVENT_DECLARED = "cutover_declared"
 READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
@@ -88,9 +88,14 @@ def declaration_event(fleet: str, reader: str, streaks: list[Streak], now: str, 
                 "fleet": fleet,
                 "reader": reader,
                 "flag": READ_FLAGS[reader],
-                "gate": {"clean_run": (streaks[0].clean_bar if streaks else BAR_BY_READER[reader]),
-                         "transitions": GATE_TRANSITIONS},
-                "gate_met": not unmet(streaks),
+                # An UNSHADOWED reader (Phase B's direct move) has no gate to
+                # meet: the record says so (shadowed=false, no bar, gate_met
+                # null) rather than claiming an empty streak list met a bar.
+                "shadowed": reader not in UNSHADOWED,
+                "gate": ({"clean_run": (streaks[0].clean_bar if streaks else BAR_BY_READER[reader]),
+                          "transitions": GATE_TRANSITIONS}
+                         if reader not in UNSHADOWED else {"clean_run": None, "transitions": None}),
+                "gate_met": (not unmet(streaks)) if reader not in UNSHADOWED else None,
                 "forced": forced,
                 "streaks": [
                     {"bot": s.bot, "clean_run": s.clean_run,

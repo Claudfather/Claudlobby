@@ -97,7 +97,7 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
 # lane may age these past the incident-join window; a critical type is never
 # aged (the `metric_samples` precedent: never the ledger, only a family's rows).
 CHATTY_SYSTEM_EVENTS: frozenset[str] = frozenset({
-    "send_miss", "send_retry", "send_blind", "send_blind_recovered", "script_error",
+    "send_miss", "send_retry", "send_blind", "send_blind_recovered",
     "shadow_parity_clean", "pane_stuck",
 })
 

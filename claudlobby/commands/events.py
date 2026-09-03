@@ -22,6 +22,66 @@ CRITICAL_TYPES = {
 }
 
 
+def plane_events_source(paths) -> tuple[bool, str | None]:
+    """(flipped, reason): whether the events reader serves the plane. Flag
+    (PLANE_READ_EVENTS=1 in the process env) AND a recorded `cutover_declared`
+    for the `events` reader — the same two facts every flipped reader needs;
+    a flag alone is disclosed, never a flip. Unreachable is refused, never
+    read as empty (Phase B)."""
+    import os
+    if os.environ.get("PLANE_READ_EVENTS", "0") != "1":
+        return False, None
+    from ..plane.db import open_ro
+    from ..plane import cutover as _cut
+    fleet = getattr(paths, "fleet_name", None)
+    if not fleet:
+        return False, "PLANE_READ_EVENTS=1 but no fleet is named — serving the ledgers"
+    conn, why = open_ro(paths.root)
+    if conn is None:
+        raise RuntimeError(f"PLANE_READ_EVENTS=1 but the plane is unreachable: {why}")
+    try:
+        decl = _cut.declared(conn, fleet)
+    finally:
+        conn.close()
+    if "events" not in decl:
+        return False, (f"PLANE_READ_EVENTS=1 but no cutover_declared for {fleet}/events — the flip is"
+                       f" not declared; serving the ledgers (`claudlobby --fleet {fleet} plane cutover --reader events`)")
+    return True, None
+
+
+def collect_plane_events(paths, *, bot=None, event_type=None, source=None, critical_only=False,
+                         since=None, coverage=None) -> list[dict]:
+    """The fleet's events from the plane as legacy rows — the same filters and
+    row shape as `collect_events`, through the stdlib readers the bash doors
+    ship (one definition of the row rendering)."""
+    import importlib.util
+    from ..plane.db import open_ro
+    src = paths.root / "lib" / "plane-readers.py"
+    if not src.is_file():
+        src = Path(__file__).resolve().parent.parent.parent / "lib" / "plane-readers.py"
+    spec = importlib.util.spec_from_file_location("plane_readers", src)
+    pr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pr)
+    conn, why = open_ro(paths.root)
+    if conn is None:
+        raise RuntimeError(f"the plane is unreachable: {why}")
+    try:
+        rows = pr.fleet_events(conn, paths.fleet_name, since=since, bot=bot, event_type=event_type)
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        if source and r.get("source") != source:
+            continue
+        if critical_only and r.get("type") not in CRITICAL_TYPES:
+            continue
+        out.append({k: v for k, v in r.items() if not k.startswith("_")})
+    if coverage is not None:
+        coverage.update({"sources_total": 1, "sources_read": 1, "absent": [], "unreadable": [],
+                         "source": "plane", "truncated": sum(1 for r in rows if r.get("_truncated"))})
+    return out
+
+
 def collect_events(
     bots_dir: Path | str,
     *,
@@ -227,7 +287,17 @@ def cmd_events(args) -> int:
         return 1
 
     coverage: dict = {}
-    events = collect_events(
+    try:
+        flipped, note = plane_events_source(paths)
+    except RuntimeError as exc:
+        print(f"claudlobby events: UNREACHABLE — {exc}", file=sys.stderr)
+        return 3
+    if note:
+        print(f"claudlobby events: {note}", file=sys.stderr)
+    events = collect_plane_events(
+        paths, bot=args.bot, event_type=args.type, source=args.source, critical_only=args.critical,
+        coverage=coverage,
+    ) if flipped else collect_events(
         bots_dir,
         bot=args.bot,
         event_type=args.type,

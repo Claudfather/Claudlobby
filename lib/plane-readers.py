@@ -357,7 +357,7 @@ FLEET_UID_SQL = "SELECT uid FROM identity_registry WHERE kind = 'fleet' AND alia
 MACHINERY_EVENTS = ("shadow_parity_clean", "shadow_parity_diverged", "cutover_declared",
                     "legacy_write_retired", "daemon_started", "daemon_stopping", "spool_drain_completed")
 FLEET_EVENTS_SQL = (
-    "SELECT e.occurred_at, e.event, e.severity, e.subject_kind, e.subject_alias,"
+    "SELECT e.occurred_at, e.event, e.subject_kind, e.subject_alias,"
     " e.detail, e.detail_truncated FROM events e"
     " WHERE e.kind = 'system' AND e.fleet_uid = ? AND (? IS NULL OR e.occurred_at >= ?)"
     " AND e.event NOT IN (" + ",".join(f"'{m}'" for m in MACHINERY_EVENTS) + ")"
@@ -368,6 +368,19 @@ ESCALATION_SQL = (
     " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.event = ? AND e.subject_kind = 'actor'"
     " AND e.occurred_at >= ? GROUP BY e.subject_alias"
 )
+
+
+def since_form(since: Optional[str]) -> Optional[str]:
+    """A window start in the form occurred_at is STORED in (pydantic parses
+    the emitter's instant and it lands as isoformat: `Z` becomes `+00:00`,
+    an offset stays, a naive instant stays naive) — a lexical `>=` between
+    the two forms is otherwise wrong at the boundary ('+' sorts before 'Z')."""
+    if not since:
+        return since
+    try:
+        return datetime.fromisoformat(since.replace("Z", "+00:00")).isoformat()
+    except ValueError:
+        return since
 
 
 def fleet_uid(conn: sqlite3.Connection, fleet: str) -> Optional[str]:
@@ -400,6 +413,7 @@ def fleet_events(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] =
     uid = fleet_uid(conn, fleet)
     if uid is None:
         return []
+    since = since_form(since)
     out = []
     for row in conn.execute(FLEET_EVENTS_SQL, (uid, since, since)):
         r = legacy_event_row(*row, fleet)
@@ -418,7 +432,7 @@ def escalation(conn: sqlite3.Connection, fleet: str, event_type: str, window_sta
     if uid is None:
         return {}
     prefix = f"bot:{fleet}/"
-    return {alias[len(prefix):]: at for alias, at in conn.execute(ESCALATION_SQL, (uid, event_type, window_start))
+    return {alias[len(prefix):]: at for alias, at in conn.execute(ESCALATION_SQL, (uid, event_type, since_form(window_start)))
             if alias and alias.startswith(prefix)}
 
 

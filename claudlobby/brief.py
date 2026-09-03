@@ -941,12 +941,24 @@ def _alerts_section(
         .replace("+00:00", "Z")
     )
 
-    events = collect_events(
-        paths.runtime_bots,
-        bot=bot_id,
-        critical_only=True,
-        fleet_events_dir=paths.root / "state" / "events",
-    )
+    from .commands.events import collect_plane_events, plane_events_source
+    try:
+        flipped, note = plane_events_source(paths)
+    except RuntimeError as exc:
+        degraded.append(Degradation(field="alerts", mode="omitted",
+                                    reason=f"PLANE_READ_EVENTS=1 but the plane is unreachable: {exc}"
+                                           " — restore the plane db or flip the flag back to 0",
+                                    issue="#1444"))
+        return []
+    if flipped:
+        events = collect_plane_events(paths, bot=bot_id, critical_only=True, since=cutoff)
+    else:
+        events = collect_events(
+            paths.runtime_bots,
+            bot=bot_id,
+            critical_only=True,
+            fleet_events_dir=paths.root / "state" / "events",
+        )
     return [
         {
             "ts": e.get("ts"),

@@ -78,10 +78,10 @@ def test_the_flag_map_is_one_fact_across_the_boundary(tmp_path):
     from claudlobby.paths import Paths
     root, paths, _, _ = _scene(tmp_path)
     doors = load_dispatch_doors(paths)
-    assert doors.PLANE_READ_FLAGS == cut.READ_FLAGS == {"open": "PLANE_READ_OPEN",
-                                                        "overdue": "PLANE_READ_OVERDUE",
-                                                        "open_task": "PLANE_READ_OPEN_TASK",
-                                                        "unassigned": "PLANE_READ_UNASSIGNED"}
+    assert cut.READ_FLAGS == {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE",
+                              "open_task": "PLANE_READ_OPEN_TASK", "unassigned": "PLANE_READ_UNASSIGNED",
+                              "events": "PLANE_READ_EVENTS"}
+    assert doors.PLANE_READ_FLAGS == {k: v for k, v in cut.READ_FLAGS.items() if k != "events"}   # the matcher's readers
     assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"
 
 
@@ -375,7 +375,7 @@ def test_bot_conf_carries_the_read_flags_the_fleet_tier_arms(tmp_path, monkeypat
 
 def test_the_fleet_pulse_unit_is_the_multi_flag_job(tmp_path, monkeypatch):
     from claudlobby.composer import FLEET_JOB_ARMING
-    assert FLEET_JOB_ARMING["fleet-pulse"] == ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED")
+    assert FLEET_JOB_ARMING["fleet-pulse"] == ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS")
     timers, _ = _composed(tmp_path, monkeypatch, {"PLANE_SHADOW_ENABLED": "1", "PLANE_READ_OVERDUE": "1"})
     pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
     assert "Environment=PLANE_SHADOW_ENABLED=1" in pulse and "Environment=PLANE_READ_OVERDUE=1" in pulse

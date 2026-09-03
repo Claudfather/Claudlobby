@@ -316,7 +316,7 @@ LATEST_HEARTBEAT_SQL = (
 # {source, legacy_ts, data}. These render it back as the legacy row shape so
 # every reader keeps its row contract.
 FLEET_EVENTS_SQL = (
-    "SELECT e.occurred_at, e.event, e.severity, e.subject_kind, e.subject_alias,"
+    "SELECT e.occurred_at, e.event, e.subject_kind, e.subject_alias,"
     " e.detail, e.detail_truncated FROM events e"
     " WHERE e.kind = 'system' AND e.fleet_uid = ?"
     " AND (? IS NULL OR e.occurred_at >= ?)"

@@ -1005,8 +1005,11 @@ def cmd_plane_cutover(args) -> int:
         if roster is None:
             print(f"cutover: UNREACHABLE — fleet manifest: {why}")
             return 3
+        if args.reader in _sh.UNSHADOWED and not args.retire_writes:
+            # a direct move: no streaks exist; declare with the reason recorded
+            args.force = args.force or "direct move (Phase B, no shadow) — operator ruling 2026-09-03"
         if bool(args.reader) == bool(args.retire_writes):
-            print("cutover: exactly one of --reader <open|overdue|open_task> or --retire-writes",
+            print("cutover: exactly one of --reader <" + "|".join(_sh.GATED) + "> or --retire-writes",
                   file=sys.stderr)
             return 2
         conn = _open_plane_ro(root, "cutover", sys.stdout)

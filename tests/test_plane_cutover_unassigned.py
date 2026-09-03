@@ -78,7 +78,7 @@ def test_the_fleet_pulse_unit_carries_the_unassigned_flag_and_names_its_fleet(tm
     from claudlobby.composer import FLEET_JOB_ARMING
     from tests.test_plane_cutover_flip import _composed
     from tests.test_plane_shadow import REPO
-    assert FLEET_JOB_ARMING["fleet-pulse"] == ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED")
+    assert FLEET_JOB_ARMING["fleet-pulse"] == ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS")
     timers, _ = _composed(tmp_path, monkeypatch, {"PLANE_READ_UNASSIGNED": "1"})
     pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
     assert "Environment=PLANE_READ_UNASSIGNED=1" in pulse
