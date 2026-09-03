@@ -73,6 +73,32 @@ done < <(discover_framework_checkouts)
 
 echo "$ts WATCHING ${#WATCHED[@]} repo(s): ${WATCHED[*]}" >> "$LOG"
 
+# currency_outcome_phrase
+# Render the verdict notify_currency just recorded, for the audit log.
+#
+# THE DEFECT THIS EXISTS FOR: each of the three sites below used to write
+# "notice raised" to the log BEFORE calling notify_currency, and never read its
+# result. So the log could only ever say one thing, which made it useless as a
+# check and worse than useless as evidence: with the fallback Telegram token
+# dead (#552) the log recorded a run of correctly-escalated notices while the
+# journal carried ALERT-DELIVERY-FAILED for every one of them. Two artifacts
+# disagreeing, and the one a human audits was the one asserting nothing was
+# wrong. A log line that can only ever say one thing is not a check.
+#
+# Three outcomes, kept distinct. `suppressed` is not a failure — the debounce
+# working as designed — but it is also not a notice, so folding it into either
+# neighbour restates the original lie in a quieter register.
+currency_outcome_phrase() {
+    case "${_CURRENCY_OUTCOME:-suppressed}" in
+        delivered)
+            printf 'notice DELIVERED' ;;
+        undelivered)
+            printf 'notice RAISED BUT NOT DELIVERED (channel rejected it; see the ALERT-DELIVERY-FAILED journal line and the alert_delivery_failed ledger row)' ;;
+        *)
+            printf 'notice SUPPRESSED (debounced, already notified — nothing sent)' ;;
+    esac
+}
+
 for repo in "${WATCHED[@]}"; do
     name=$(basename "$repo")
 
@@ -95,9 +121,9 @@ for repo in "${WATCHED[@]}"; do
 
     if [ -z "$tag" ]; then
         if [ "$behind" -gt 0 ]; then
-            echo "$ts [$name] BEHIND origin/$branch by $behind (untagged repo) — notice raised" >> "$LOG"
             notify_currency "$name" "source_behind" "$behind" \
                 "$name on $(hostname) is $behind commit(s) behind origin/$branch — apply with: git -C $repo pull --ff-only"
+            echo "$ts [$name] BEHIND origin/$branch by $behind (untagged repo) — $(currency_outcome_phrase)" >> "$LOG"
         else
             echo "$ts [$name] IN SYNC with origin/$branch" >> "$LOG"
             currency_clear "$name" "source_behind"
@@ -108,17 +134,17 @@ for repo in "${WATCHED[@]}"; do
     tag_behind=$(git -C "$repo" rev-list --count "HEAD..$tag" 2>/dev/null || echo 0)
     if [ "${tag_behind:-0}" -gt 0 ]; then
         # Behind a cut release — the case update-siblings.sh can actually fix.
-        echo "$ts [$name] BEHIND TAG $tag by $tag_behind — notice raised" >> "$LOG"
         notify_currency "$name" "source_behind" "$tag_behind" \
             "$name on $(hostname) is $tag_behind commit(s) behind release $tag — apply with: git -C $repo pull --ff-only"
+        echo "$ts [$name] BEHIND TAG $tag by $tag_behind — $(currency_outcome_phrase)" >> "$LOG"
     elif [ "$behind" -gt 0 ]; then
         # On the newest release, but main has moved. Deliberately NOT phrased as
         # "pull": on a versioned dependency that would mean running unreleased
         # dev code. The remedy named is cutting a release — a human decision.
         # This is the shape #1009 was filed from and could not previously say.
-        echo "$ts [$name] AT RELEASE $tag, main +$behind — release-gap notice raised" >> "$LOG"
         notify_currency "$name" "source_release_gap" "$behind" \
             "$name on $(hostname) is at its newest release ($tag) but origin/$branch is $behind commit(s) ahead — unreleased fixes are not deployed; cut a release or upgrade deliberately"
+        echo "$ts [$name] AT RELEASE $tag, main +$behind — release-gap $(currency_outcome_phrase)" >> "$LOG"
     else
         echo "$ts [$name] IN SYNC with origin/$branch and release $tag" >> "$LOG"
         currency_clear "$name" "source_behind"

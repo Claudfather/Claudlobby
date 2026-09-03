@@ -2154,6 +2154,15 @@ debounce_notify() {
     local marker="$state_dir/${bot_id}.${suffix}"
     local window="${FLEET_PULSE_REARM_WINDOW_S:-$_REARM_WINDOW_S_DEFAULT}"
     local fire=0 seen="" raw="" last_rearm=0 new_rearm=0 now
+    # Out-variable for callers that must distinguish "suppressed by the
+    # debounce" from "sent" — those are different facts and a caller that
+    # cannot tell them apart reports notices that were never raised. Reset
+    # per call, deliberately: this is a shell global, so a caller in a loop
+    # would otherwise read the PREVIOUS iteration verdict. Never a return
+    # code, for the reason _emit_fleet_signal documents at length — callers
+    # here run `set -euo pipefail` and call this unguarded, so a non-zero
+    # would abort the watchdog that detected the condition.
+    _DEBOUNCE_FIRED=0
     if [ ! -f "$marker" ]; then
         # First sighting of the condition always fires, and records NO re-arm —
         # so the first recipient change afterwards is still free.
@@ -2184,6 +2193,7 @@ debounce_notify() {
         fi
     fi
     if [ "$fire" -eq 1 ]; then
+        _DEBOUNCE_FIRED=1
         "$notify_fn" "$message"
         # Written only on fire, deliberately: the marker's MTIME is what
         # marker_age_within reads for the renotify window above, so touching it
@@ -3195,13 +3205,37 @@ repo_newest_tag() {
 # stalled condition stays quiet; a worsening one speaks up.
 #
 # Requires BOTS_DIR and STATE_DIR in the caller's scope.
+#
+# Sets _CURRENCY_OUTCOME to the verdict of THIS call: `delivered`,
+# `undelivered` (raised, but the channel rejected it) or `suppressed` (the
+# debounce fired nothing at all). Three values rather than a boolean because
+# collapsing any two of them re-creates the bug this seam exists to close: a
+# caller that logs "raised" for all three cannot distinguish a healthy fleet
+# from a dead Telegram token, and the log is the artifact a human audits.
+#
+# BOTH globals are reset before the call. _ALERT_DELIVERED is set inside
+# _emit_fleet_signal and _DEBOUNCE_FIRED inside debounce_notify, so both
+# survive across a caller loop; read without a reset, the second repo in a
+# sweep inherits the first repo verdict. Measured shape, not a hypothetical:
+# notify-behind sweeps every framework checkout in one process.
 notify_currency() {
     local name="${1:?notify_currency: <repo-name> required}"
     local etype="${2:?notify_currency: <event_type> required}"
     local distinct="${3-}" message="${4:?notify_currency: <message> required}"
     _nc_emit() { emit_fleet_notice "$BOTS_DIR" "$etype" "$1"; }
+    _CURRENCY_OUTCOME=suppressed
+    _ALERT_DELIVERED=0
+    _DEBOUNCE_FIRED=0
     debounce_notify "$STATE_DIR" "$name" "$etype" _nc_emit \
         "$message" "$distinct" "${CURRENCY_RENOTIFY_S:-604800}"
+    if [ "${_DEBOUNCE_FIRED:-0}" -eq 1 ]; then
+        if [ "${_ALERT_DELIVERED:-0}" -eq 1 ]; then
+            _CURRENCY_OUTCOME=delivered
+        else
+            _CURRENCY_OUTCOME=undelivered
+        fi
+    fi
+    return 0
 }
 
 # currency_clear <repo-name> <event_type>
