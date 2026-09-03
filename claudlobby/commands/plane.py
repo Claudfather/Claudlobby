@@ -16,7 +16,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ._helpers import _resolve_paths
+from ._helpers import _load_fleet_or_exit, _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
 from ..plane.db import connect, connect_ro, db_file, db_path
 from ..plane.emit_api import emit, emit_batch, _load_capture_config
@@ -237,7 +237,8 @@ def cmd_plane_doctor(args) -> int:
     Phase 2; these are the checks the kernel alone can answer). Exit 0 when
     every rung passes, 1 when any needs attention; version refusals still
     exit 4 through the guard."""
-    root = _resolve_paths(args).root
+    paths = _resolve_paths(args)
+    root = paths.root
 
     def run() -> int:
         failing = 0
@@ -313,6 +314,25 @@ def cmd_plane_doctor(args) -> int:
                          " ack, so this is the steady state, not a gap")
                 except sqlite3.Error as exc:
                     rung(False, "reconcile", f"unreadable: {exc}")
+                try:
+                    from ..plane import shadow as _sh
+                    fl = paths.fleet_name
+                    if fl:
+                        roster, _why = _fleet_roster(paths)
+                        sts = _sh.gate_summary(conn, fl, roster or [])
+                        if not any(x.comparisons for x in sts):
+                            rung(True, "shadow parity (cutover J4)",
+                                 "no comparisons recorded yet — `plane shadow --record`"
+                                 " (dormant timer: PLANE_SHADOW_ENABLED=1)")
+                        else:
+                            met = [x for x in sts if x.gate_ok]
+                            div = [x.last_diverged_at for x in sts if x.last_diverged_at]
+                            rung(len(met) == len(sts), "shadow parity (cutover J4)",
+                                 f"{len(met)}/{len(sts)} bots met the gate"
+                                 f" ({_sh.GATE_CLEAN_RUN} clean + a transition)"
+                                 + (f"; last divergence {max(div)}" if div else ""))
+                except Exception as exc:          # a rung must never take the doctor down
+                    rung(False, "shadow parity", f"unreadable: {exc}")
             finally:
                 conn.close()
         try:
@@ -779,6 +799,125 @@ def cmd_plane_import(args) -> int:
         return 0
 
     return _guarded("plane import", run)
+
+
+def _fleet_roster(paths) -> "tuple[list[str] | None, str | None]":
+    """The declared bots of the overlay fleet, or (None, reason) when the
+    manifest cannot be read — a refusal the caller prints, never sys.exit."""
+    from ..config import load_fleet
+    try:
+        fleet_cfg, _ = load_fleet(paths.fleet_yaml)
+    except Exception as exc:              # a missing/unparseable manifest is UNREACHABLE
+        return None, f"{paths.fleet_yaml}: {exc}"
+    return sorted(fleet_cfg.bots), None
+
+
+def _shadow_gate(conn, fleet: str, roster: list[str]) -> int:
+    from ..plane import shadow as sh
+    streaks = sh.gate_summary(conn, fleet, roster)
+    short = [st.bot for st in streaks if not st.gate_ok]
+    for st in streaks:
+        print(f"  {st.line()}")
+    print(f"shadow[{fleet}] gate: {len(streaks) - len(short)}/{len(streaks)} bots met"
+          f" ({sh.GATE_CLEAN_RUN} clean + {sh.GATE_TRANSITIONS} transition)"
+          + (f"; short: {', '.join(short)}" if short else ""))
+    return 1 if short else 0
+
+
+def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: Path,
+                    rlog: Path, args) -> int:
+    from ..plane import shadow as sh
+    now = datetime.now(timezone.utc)
+    intentional = {t.strip() for t in (args.intentional or "").split(",") if t.strip()}
+    instants = [(at, True) for at in sh.replay_instants(now, args.replay_hours)] \
+        if args.replay_hours else []
+    instants.append((now, False))
+    superseded = sh.superseded_by_bot(doors, dlog)
+    uids = {bot: sh.actor_uid(conn, f"bot:{fleet}/{bot}") for bot in bots}
+    events: list[dict] = []
+    diverged = 0
+    for at, replay in instants:
+        bound = sh.dt_iso(at) if replay else None
+        with sh.ledgers_at(dlog, rlog, bound) as (dl, rl):
+            for bot in bots:
+                legacy = sh.legacy_open(doors, bot, dl, rl)
+                plane = sh.plane_open(conn, fleet, bot, at=bound)
+                d = sh.diff(fleet, bot, legacy, plane, now=at, skew_s=args.skew_grace,
+                            superseded=superseded.get(bot.lower(), set()),
+                            intentional=intentional)
+                if not replay or args.verbose:
+                    print(f"  {bot}{' @ ' + sh.ts19(d.at) if replay else ''}:"
+                          f" legacy={len(d.legacy_ids)} plane={len(d.plane_ids)}"
+                          f" head={'agrees' if d.head_agrees else 'DIFFERS'}"
+                          f" {'clean' if d.clean else 'DIVERGED'}"
+                          + (f" {d.classes()}" if d.divergences else ""))
+                    for x in d.unexplained[:args.show]:
+                        print(f"    {x.side} {_one_line(x.ref)} ({x.cls})")
+                diverged += 0 if d.clean else 1
+                events.append(sh.shadow_event(d, subject_uid=uids[bot]))
+    print(f"shadow[{fleet}]: {len(bots)} bot(s) x {len(instants)} instant(s):"
+          f" {len(events) - diverged} clean, {diverged} diverged")
+    if args.record:
+        counts = sh.record(root, events)
+        print(f"shadow[{fleet}] recorded: committed={counts['committed']}"
+              f" duplicate={counts['duplicate']} spooled={counts['spooled']}")
+    return 1 if diverged else 0
+
+
+def cmd_plane_shadow(args) -> int:
+    """The shadow-diff primitive (cutover chunk 3): per bot, the legacy open
+    set (the install's dispatch-overdue.py, through brief's seam) against
+    the plane's, classified, optionally RECORDED as a system event, and the
+    J4 gate derived from what was recorded. Never writes a ledger, never
+    routes the plane's answer anywhere. rc 0 clean (or gate met) / 1 a
+    divergence (or gate not met) / 2 usage / 3 unreachable."""
+    paths = _resolve_paths(args)
+    root = paths.root
+
+    def run() -> int:
+        from ..brief import dispatch_ledger_path, load_dispatch_doors, report_ledger_path
+        from ..plane.parity import read_ledger
+        from ..source_state import SOURCE_OK
+
+        fleet = paths.fleet_name
+        if not fleet:
+            print("shadow: needs --fleet <name> — the plane's open set is per"
+                  " bot:<fleet>/<name>", file=sys.stderr)
+            return 2
+        roster, why = _fleet_roster(paths)
+        if roster is None:
+            print(f"shadow: UNREACHABLE — fleet manifest: {why}")
+            return 3
+        if args.bot and args.bot not in roster:
+            print(f"shadow: {args.bot} is not on the {fleet} roster ({', '.join(roster)})"
+                  " — a comparison for a name nobody dispatches to would read clean by"
+                  " emptiness", file=sys.stderr)
+            return 2
+        doors = load_dispatch_doors(paths)
+        if doors is None:
+            print(f"shadow: UNREACHABLE — lib/dispatch-overdue.py not loadable from {paths.lib}")
+            return 3
+        dlog, rlog = dispatch_ledger_path(paths), report_ledger_path(paths)
+        for label, path in (("dispatch-log", dlog), ("report-back", rlog)):
+            state, detail, _, _ = read_ledger(path)
+            if state not in (SOURCE_OK, "empty"):
+                print(f"shadow: UNREACHABLE — {label}: {detail}")
+                return 3
+        conn = _open_plane_ro(root, "shadow", sys.stdout)
+        if conn is None:
+            return 3
+        try:
+            if args.gate:
+                return _shadow_gate(conn, fleet, roster)
+            bots = [args.bot] if args.bot else roster
+            return _shadow_compare(conn, root, fleet, bots, doors, dlog, rlog, args)
+        except sqlite3.Error as exc:
+            print(f"shadow: UNREACHABLE — plane db unreadable: {exc}")
+            return 3
+        finally:
+            conn.close()
+
+    return _guarded("plane shadow", run)
 
 
 def cmd_plane_view(args) -> int:

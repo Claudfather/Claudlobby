@@ -327,6 +327,15 @@ defaults:
     # Composed-but-dormant: bouncing workers onto the staged binary is
     # disruptive, so enrollment is a per-fleet opt-in (enroll: true in
     # fleet.yaml), never a cold-start default.
+    # Cutover J4 shadow (chunk 3): records the legacy-vs-plane open-set
+    # comparison per bot every 10 minutes so the flip gate is derived from
+    # recorded facts. Dormant: enroll + arm with PLANE_SHADOW_ENABLED=1 in the
+    # fleet .env tier (the composer stamps it on this unit).
+    plane-shadow:
+      enroll: false
+      script: "$CLAUDLOBBY_ROOT/lib/plane-shadow.sh"
+      interval: 600
+      type: oneshot
     weekly-worker-restart:
       enroll: false
       script: "$CLAUDLOBBY_ROOT/lib/weekly-worker-restart.sh"

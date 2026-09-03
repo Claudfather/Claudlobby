@@ -141,3 +141,39 @@ def test_keepalive_unit_abandons_its_children(tmp_path, monkeypatch):
     other_plist = timers / other.name.replace(".service", ".plist")
     if other_plist.exists():
         assert "AbandonProcessGroup" not in other_plist.read_text()
+
+
+def _compose_shadow(tmp_path: Path, monkeypatch, armed: str):
+    """The shadow comparison (cutover chunk 3) rides its OWN carrier,
+    PLANE_SHADOW_ENABLED, stamped on the plane-shadow unit only — the
+    defaults-on fleet of the keepalive pin, with the cascade answering the
+    shadow flag and NOT the emission flag."""
+    fl = dedent(_FLEET).replace("system_defaults: false", "system_defaults: true")
+    root = tmp_path / "fs"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "fleet.yaml").write_text(fl)
+    fleet, md = load_fleet(root / "fleet.yaml")
+    paths = Paths(root=root, fleet_dir=root)
+    import claudlobby.env_tiers as env_tiers_mod
+    res = Resolution(name="PLANE_SHADOW_ENABLED", value=armed, tier="fleet", path=None)
+    monkeypatch.setattr(env_tiers_mod, "read_tiers",
+                        lambda paths, fleet_name=None, bot_name=None: [])
+    monkeypatch.setattr(env_tiers_mod, "cascade",
+                        lambda tiers: {"PLANE_SHADOW_ENABLED": res})
+    return compose_fleet_timers(fleet, paths, md)
+
+
+def test_shadow_arming_stamps_only_the_shadow_unit(tmp_path, monkeypatch):
+    timers = _compose_shadow(tmp_path, monkeypatch, armed="1")
+    service = (timers / "com.test.plane-shadow.service").read_text()
+    plist = (timers / "com.test.plane-shadow.plist").read_text()
+    assert "Environment=PLANE_SHADOW_ENABLED=1" in service
+    assert "<key>PLANE_SHADOW_ENABLED</key>" in plist
+    assert "PLANE_SHADOW_ENABLED" not in (timers / "com.test.keepalive.service").read_text()
+    assert "PLANE_EMIT_ENABLED" not in service        # emission on does not arm the record
+    assert "com.test.plane-shadow" in (timers / "DORMANT").read_text()
+
+
+def test_unarmed_shadow_composes_no_shadow_env(tmp_path, monkeypatch):
+    timers = _compose_shadow(tmp_path, monkeypatch, armed="0")
+    assert "PLANE_SHADOW_ENABLED" not in (timers / "com.test.plane-shadow.service").read_text()

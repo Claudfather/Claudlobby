@@ -34,6 +34,7 @@ from .plane import (
     cmd_plane_expire,
     cmd_plane_import,
     cmd_plane_parity,
+    cmd_plane_shadow,
     cmd_plane_prune,
     cmd_plane_registry,
     cmd_plane_schema,
@@ -512,6 +513,29 @@ def register_subparsers(sub) -> None:
     pim.add_argument("--apply", action="store_true",
                      help="Write the batch (default: plan and report only)")
     pim.set_defaults(func=cmd_plane_import)
+    psh = psub.add_parser(
+        "shadow",
+        help="Cutover J4 shadow: the legacy open set vs the plane's, per bot,"
+        " classified; --record writes the comparison as a system event;"
+        " --gate reads the streaks (rc 0 met / 1 not / 3 unreachable)")
+    psh.add_argument("--bot", default=None, help="One bot (default: the fleet roster)")
+    psh.add_argument("--record", action="store_true",
+                     help="Record each comparison (shadow_parity_clean/diverged)")
+    psh.add_argument("--gate", action="store_true",
+                     help="Report the per-bot gate from recorded comparisons")
+    psh.add_argument("--replay-hours", type=int, default=0,
+                     help="Also compare at each of the last N hourly instants"
+                     " (front-loads the gate from history)")
+    psh.add_argument("--skew-grace", type=int, default=600,
+                     help="Seconds a row may be newer than the comparison and"
+                     " still class as skew (default 600)")
+    psh.add_argument("--intentional", default="",
+                     help="Comma-separated task ids declared as intentional divergence")
+    psh.add_argument("--show", type=int, default=5,
+                     help="Unexplained divergences to list per bot (default 5)")
+    psh.add_argument("--verbose", action="store_true",
+                     help="Print every replayed instant, not just now")
+    psh.set_defaults(func=cmd_plane_shadow)
     prg = psub.add_parser(
         "registry",
         help="Registry lane reads: current state, history, changes, verify")
