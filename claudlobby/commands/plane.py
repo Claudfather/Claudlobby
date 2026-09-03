@@ -906,7 +906,10 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
                 diverged += 0 if d.clean else 1
                 events.append(sh.shadow_event(d))
             for bot in bots:
-                plane_rows = sh.plane_open(conn, fleet, bot, at=bound)   # once per (bot, instant)
+                # once per (bot, instant): every open row (the overdue reader keeps
+                # the id-less ones) and what the plane closed by supersession
+                plane_rows = sh.plane_open(conn, fleet, bot, at=bound, idless=True)
+                plane_sup = sh.plane_superseded(conn, fleet, bot, at=bound)
                 for reader in readers:
                     if reader == sh.READER_UNASSIGNED:
                         continue                                   # fleet-level: compared above, once
@@ -917,7 +920,7 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
                         # through the stdlib readers the matcher itself ships
                         resolver_legacy = doors.open_task_id(bot, dl, rl, now=int(at.timestamp()))
                         resolver_plane = doors._plane_readers().head(conn, fleet, bot, bound)
-                        plane = plane_rows
+                        plane = [r for r in plane_rows if r.task_id is not None]   # the open LIST is id'd rows only
                     else:
                         legacy = legacy_overdue.get(bot.lower(), [])
                         plane = sh.plane_overdue(conn, fleet, bot, now=at, max_age_s=max_age,
@@ -927,6 +930,7 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
                                 **({"resolver_legacy": resolver_legacy, "resolver_plane": resolver_plane}
                                    if reader == sh.READER_OPEN else {}),
                                 superseded=superseded.get(bot.lower(), set()),
+                                plane_superseded=plane_sup,
                                 intentional=intentional, reader=reader,
                                 malformed=malformed[bot] if reader == sh.READER_OVERDUE else None)
                     if not replay or args.verbose:

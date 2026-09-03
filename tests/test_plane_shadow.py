@@ -160,7 +160,83 @@ def test_a_pre_cutover_supersession_is_explained_and_an_intentional_id_too(tmp_p
     assert not d1.clean                                          # t-5 legacy-only: real + head differs
     d2 = sh.diff(F, "w1", legacy, plane, now=NOW, superseded=sup["w1"], intentional={"t-5-eeee"})
     assert d2.classes() == {sh.CLASS_LEGACY_SUPERSEDES: 1, sh.CLASS_INTENTIONAL: 1}
-    assert d2.unexplained == [] and not d2.head_agrees and not d2.clean   # heads still differ
+    # the heads are read PAST structurally explained rows (both here), so an
+    # explained-only comparison records clean — it used to diverge on the head
+    assert d2.unexplained == [] and d2.head_legacy is None and d2.head_plane is None
+    assert d2.head_agrees and d2.clean
+
+
+def test_a_cross_bot_supersession_is_the_planes_to_know_and_explained(tmp_path):
+    """The manager re-dispatched w1's t-2 to w2 with --supersedes: the plane's
+    door lands `superseded` on t-2's assignment whoever the successor's bot
+    is, while the legacy matcher retires only a SAME-bot supersedes (#1357).
+    The legacy-only row is explained by the plane's own record and the heads
+    are compared past it. Measured live 2026-09-03: gilfoyle paged every ten
+    minutes for a task the fleet had moved to dinesh."""
+    root, paths, d, r = _scene(tmp_path)
+    asg2 = "asg_" + "2".rjust(32, "0")
+    wi4, asg4, _ = _live_dispatch(root, "4", "t-4-dddd", ts="2026-09-02T13:00:00Z", bot="w2")
+    emit_batch(root, [{"event_type": "task", "emitter": "dispatch-task", "fleet": F,
+                       "source_ref": "dispatch-log:t-4-dddd", "occurred_at": "2026-09-02T13:00:01Z",
+                       "payload": {"work_item_id": "wi_" + "2".rjust(32, "0"), "assignment_id": asg2,
+                                   "event": "superseded", "successor_id": asg4}}])
+    d.append({**_drow("2026-09-02T13:00:00Z", "t-4-dddd", bot="w2"),
+              "dispatched_at": _epoch("2026-09-02T13:00:00Z"), "supersedes": "t-2-bbbb"})
+    _write(dispatch_ledger_path(paths), d)
+    doors, legacy, plane = _both(root, paths, "w1")
+    assert [x.task_id for x in legacy] == ["t-2-bbbb"] and plane == []     # the ledger keeps it, the plane closed it
+    assert sh.superseded_by_bot(doors, dispatch_ledger_path(paths)) == {"w2": {"t-2-bbbb"}}   # keyed by the SUCCESSOR's bot
+    with _ro(root) as conn:
+        assert sh.plane_superseded(conn, F, "w1") == {"t-2-bbbb"}
+        assert sh.plane_superseded(conn, F, "w1", at="2026-09-02T12:59:00Z") == set()   # a replay before it landed
+        assert sh.plane_superseded(conn, F, "w2") == set()
+    blind = sh.diff(F, "w1", legacy, plane, now=NOW)
+    assert blind.classes() == {sh.CLASS_DIVERGENCE: 1} and not blind.clean   # without the plane's record: real
+    seen = sh.diff(F, "w1", legacy, plane, now=NOW, plane_superseded={"t-2-bbbb"})
+    assert seen.classes() == {sh.CLASS_PLANE_SUPERSEDED: 1} and seen.unexplained == []
+    assert seen.head_legacy is None and seen.head_agrees and seen.clean
+    # the RESOLVERS disagree too (legacy would hand back the moved task, the plane
+    # nothing) and the same record explains it — recorded as agreement WITH the
+    # explanation beside it, never as a bare match
+    res = sh.diff(F, "w1", legacy, plane, now=NOW, plane_superseded={"t-2-bbbb"},
+                  resolver_legacy="t-2-bbbb", resolver_plane=None)
+    assert res.resolver_explained and res.resolver_agrees and res.clean
+    other = sh.diff(F, "w1", legacy, plane, now=NOW, plane_superseded={"t-2-bbbb"},
+                    resolver_legacy="t-9-zzzz", resolver_plane=None)
+    assert not other.resolver_explained and not other.resolver_agrees and not other.clean
+    assert sh.shadow_event(res)["payload"]["data"]["resolver_explained"] is True
+    assert seen.legacy_ids == ["t-2-bbbb"]                                  # the record still names the row
+    out = _cli(root)                                                         # the compare loop feeds the set
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "w1 [open]: legacy=1 plane=0 head=agrees clean" in out.stdout, out.stdout
+
+
+def test_an_idless_plane_row_is_the_overdue_readers_and_explained_never_the_open_lists(tmp_path):
+    """A chunk-6a construct (sha-keyed) is invisible to the legacy open LIST
+    by definition — the shadow's open side mirrors `plane-readers.open_rows`
+    — and in the overdue comparison a plane-only one is explained rather
+    than paged: the ledger row of a control dispatch carries no deadline it
+    could go overdue on, so the plane's is the one that names nothing."""
+    root, paths, d, r = _scene(tmp_path)
+    _live_dispatch(root, "9", "", ts="2026-09-02T13:30:00Z", expected_by="2026-09-02T14:00:00Z",
+                   ref="dispatch-log:sha:" + "ab" * 16)
+    with _ro(root) as conn:
+        assert [x.task_id for x in sh.plane_open(conn, F, "w1")] == ["t-2-bbbb"]
+        rows = sh.plane_open(conn, F, "w1", idless=True)
+        assert [x.task_id for x in rows] == ["t-2-bbbb", None]
+        overdue = sh.plane_overdue(conn, F, "w1", now=NOW, max_age_s=0, progress_grace_s=0, rows=rows)
+        assert [x.task_id for x in sh.plane_overdue(conn, F, "w1", now=NOW, max_age_s=0,
+                                                   progress_grace_s=0)] == [x.task_id for x in overdue]
+    idless = [x for x in overdue if x.task_id is None]
+    assert len(idless) == 1
+    dd = sh.diff(F, "w1", [], idless, now=NOW, reader=sh.READER_OVERDUE)
+    assert dd.classes() == {sh.CLASS_PLANE_IDLESS: 1} and dd.unexplained == []
+    assert dd.head_plane is None and dd.head_agrees and dd.clean
+    paired = sh.diff(F, "w1", [sh.OpenRow(None, "2026-09-02T13:30:00Z", "-", None)], idless,
+                     now=NOW, reader=sh.READER_OVERDUE)
+    assert paired.divergences == [] and paired.clean                        # id-less on both sides pairs by count
+    doors, legacy, plane = _both(root, paths, "w1")
+    assert [x.task_id for x in plane] == ["t-2-bbbb"]                        # never in the open comparison
 
 
 def test_a_redispatched_id_is_two_rows_on_both_sides_and_one_report_closes_both(tmp_path):
@@ -522,7 +598,7 @@ def test_a_malformed_legacy_deadline_is_explained_not_paged(tmp_path):
     assert [x.task_id for x in plane] == ["t-2-bbbb"] and legacy == [] and bad == {"t-2-bbbb"}
     dd = sh.diff(F, "w1", legacy, plane, now=now, reader=sh.READER_OVERDUE, malformed=bad)
     assert dd.classes() == {sh.CLASS_LEGACY_MALFORMED: 1} and dd.unexplained == []
-    assert not dd.clean                                   # the heads still differ: disclosed, and not paging as a class
+    assert dd.head_plane is None and dd.clean             # the head is read past the explained row: disclosed, never paged
 
 
 

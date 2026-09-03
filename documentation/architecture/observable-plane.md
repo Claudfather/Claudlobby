@@ -147,7 +147,11 @@ recorded state machine:
 1. **Shadow.** `plane shadow --record` compares, per bot and per reader, the
    legacy answer (the install's own `lib/dispatch-overdue.py`, through
    `brief`'s seam) with the plane's, classifies every divergence (`skew`
-   inside the emit grace, `legacy_supersedes_pre_cutover`,
+   inside the emit grace, `legacy_supersedes_pre_cutover`, `plane_superseded`
+   and `plane_idless` — the two shapes where the plane knows MORE than the
+   ledger: a supersession from another bot's dispatch, which the legacy matcher
+   does not honour, and a sha-keyed construct the ledger cannot name; the heads
+   are compared past every structurally explained row —
    `legacy_malformed_deadline`, `intentional`, else `divergence`) and records
    the comparison as a system event. The `plane-shadow` fleet timer does this
    every 10 minutes once armed; `--replay-hours N` front-loads it from history
