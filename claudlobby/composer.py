@@ -1212,6 +1212,16 @@ def compose_bot_conf(bot: BotConfig, fleet: FleetConfig, paths: Paths) -> str:
             'STARTUP_PROMPT="Welcome back. Read your CLAUDE.md. Idle and await Telegram messages."'
         )
 
+    read_flags = _read_flag_env(paths, fleet.name)
+    if read_flags:
+        lines.append("")
+        lines.append("# Cutover read flags (chunk 5): the SESSION carrier for PLANE_READ_* —")
+        lines.append("# resolved from the fleet .env tier at compose time, because start-bot.sh")
+        lines.append("# exports bot.conf and sources the tiers without export. A flag here is")
+        lines.append("# half a flip: the matcher serves the plane only once `plane cutover` declared it.")
+        for k, v in sorted(read_flags.items()):
+            lines.append(f"export {k}={_shq(v)}")
+        lines.append("")
     return "\n".join(lines) + "\n"
 
 
@@ -3871,10 +3881,40 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
 # Fleet jobs whose SCRIPT reads an arming flag (the closed-scheduler-env class
 # #1383): the composer resolves each through the runtime tier cascade and
 # stamps it on exactly that unit. Add a row per dormant door.
-FLEET_JOB_ARMING: dict[str, str] = {
-    "keepalive": "PLANE_EMIT_ENABLED",
-    "plane-shadow": "PLANE_SHADOW_ENABLED",
+FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = {
+    "keepalive": ("PLANE_EMIT_ENABLED",),
+    "plane-shadow": ("PLANE_SHADOW_ENABLED",),
+    # fleet-pulse reads TWO plane flags: the chunk-4 divergence bridge
+    # (PLANE_SHADOW_ENABLED — the timer unit sources no .env, so without this
+    # stamp the bridge could never arm from a timer) and the chunk-5 flip of
+    # its overdue reader (PLANE_READ_OVERDUE — per reader, never one
+    # fleet-wide flag). The one genuinely multi-flag job.
+    "fleet-pulse": ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE"),
 }
+
+# The cutover read flags also need a SESSION carrier: start-bot.sh exports
+# bot.conf (`set -a`) but sources the .env tiers WITHOUT export, so a bare
+# `PLANE_READ_OPEN=1` in the fleet tier never reaches report-back.sh or brief
+# inside a bot session (measured in bash and zsh — spec lens, chunk 5).
+# compose_bot_conf therefore carries the armed read flags, resolved from the
+# same cascade the timers use, memoized per (root, fleet) so a 21-bot generate
+# pays the env-tiers subprocess once.
+_READ_FLAG_MEMO: dict[tuple[str, str], dict[str, str]] = {}
+
+
+def _read_flag_env(paths: Paths, fleet_name: str | None) -> dict[str, str]:
+    key = (str(paths.root), fleet_name or "")
+    if key not in _READ_FLAG_MEMO:
+        from . import env_tiers as _env_tiers
+        from .plane.cutover import READ_FLAGS
+        env: dict[str, str] = {}
+        try:
+            cascade = _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=fleet_name))
+            env = {f: "1" for f in READ_FLAGS.values() if _env_tiers.armed(cascade, f)}
+        except _env_tiers.ResolverUnavailable as exc:
+            _log.warning("cutover read flags unresolved (%s) — bot.conf composes them UNSET", exc)
+        _READ_FLAG_MEMO[key] = env
+    return _READ_FLAG_MEMO[key]
 
 
 def compose_fleet_timers(
@@ -3948,10 +3988,10 @@ def compose_fleet_timers(
         _cascade = _env_tiers.cascade(
             _env_tiers.read_tiers(paths, fleet_name=fleet.name)
         )
-        for _job, _flag in FLEET_JOB_ARMING.items():
-            _res = _cascade.get(_flag)
-            if _res is not None and _res.value == "1":
-                job_extra_env[_job] = {_flag: "1"}
+        for _job, _flags in FLEET_JOB_ARMING.items():
+            _armed = {f: "1" for f in _flags if _env_tiers.armed(_cascade, f)}
+            if _armed:
+                job_extra_env[_job] = _armed
         plane_extra_env = job_extra_env.get("keepalive")
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(

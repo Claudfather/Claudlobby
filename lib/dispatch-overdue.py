@@ -114,6 +114,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import sqlite3
 import sys
 
 _TERMINAL = {"completed", "failed", "blocked"}
@@ -150,6 +151,148 @@ def _resolve_progress_grace() -> int:
         return int(os.environ.get("DISPATCH_PROGRESS_GRACE_S"))
     except (TypeError, ValueError):
         return DEFAULT_PROGRESS_GRACE_S
+
+
+# --- cutover chunk 5: the plane as a SOURCE for the two list readers ---------
+# `--open` and `--all` can answer from the plane instead of the JSONL, behind a
+# flag PER READER (PLANE_READ_OPEN / PLANE_READ_OVERDUE — composed into
+# bot.conf for the session doors and stamped on the fleet-pulse unit, both from
+# the fleet .env tier). A flag alone is NOT a flip: the plane serves only when
+# a `cutover_declared` record exists for (fleet, reader) — the epoch `plane
+# cutover --reader` writes after the J4 gate — so a flag set ahead of the
+# declaration is disclosed and the JSONL keeps serving. The JSONL path stays
+# callable by name (`source="jsonl"`): the shadow keeps grading legacy against
+# plane AFTER the flip. Source selection lives HERE, in the providers, so
+# main() prints once and brief needs no branching of its own. An unreachable
+# plane under a declared flip REFUSES (rc 3), never falls back — a silent
+# fallback is the one path that would make a flipped fleet read legacy again
+# without anyone knowing. --open-task keeps its own bar (chunk 6).
+PLANE_READ_FLAGS = {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE"}
+SOURCES = ("jsonl", "plane", "auto")
+
+
+class PlaneUnreachable(RuntimeError):
+    """The plane must serve (declared flip, or --source plane) and cannot."""
+
+
+def plane_read_enabled(reader: str) -> bool:
+    return os.environ.get(PLANE_READ_FLAGS[reader], "0") == "1"
+
+
+def _plane_readers():
+    """Import the stdlib plane reader beside this file (never the package)."""
+    import importlib.util
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plane-readers.py")
+    spec = importlib.util.spec_from_file_location("plane_readers", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _plane_context(fleet: str | None, root: str | None) -> tuple[str, str]:
+    """(fleet, root) for a plane read, or a loud refusal — the plane's rows are
+    per fleet alias, so a read without a fleet cannot be answered."""
+    fleet = fleet or os.environ.get("CLAUDLOBBY_FLEET") or os.environ.get("FLEET_NAME") or ""
+    root = root or os.environ.get("CLAUDLOBBY_ROOT") or ""
+    if not fleet or not root:
+        raise PlaneUnreachable("plane source needs a fleet (--fleet / CLAUDLOBBY_FLEET /"
+                               " FLEET_NAME) and a root (--root / CLAUDLOBBY_ROOT)")
+    return fleet, root
+
+
+class _Plane:
+    """One read-only plane session: connection + roster, opened for a source
+    that resolved to the plane. Every plane failure is PlaneUnreachable."""
+
+    def __init__(self, fleet: str | None, root: str | None):
+        self.fleet, self.root = _plane_context(fleet, root)
+        self.pr = _plane_readers()
+        try:
+            self.conn = self.pr.connect(self.root)
+            self.roster = self.pr.roster(self.conn, self.fleet)
+        except (self.pr.PlaneUnreachable, sqlite3.Error, OSError) as exc:
+            raise PlaneUnreachable(str(exc)) from exc
+        if not self.roster:
+            # A schema-valid plane that holds no bot of this fleet is a wrong
+            # root or a fleet the plane has never seen — either way an answer of
+            # "nothing open" would be absence read as clean (#1014's class).
+            self.conn.close()
+            raise PlaneUnreachable(f"the plane at {self.root} holds no bot of fleet"
+                                   f" {self.fleet!r} — wrong root, or a fleet it has never seen")
+
+    def close(self) -> None:
+        self.conn.close()
+
+
+def resolve_source(reader: str, source: str = "auto", *, fleet: str | None = None,
+                   root: str | None = None) -> str:
+    """Which side serves *reader*: 'jsonl' or 'plane'. 'auto' = the reader's
+    flag AND a recorded declaration; a flag with no declaration is disclosed
+    on stderr and serves the JSONL. Raises PlaneUnreachable when the plane
+    must serve and cannot."""
+    if source not in SOURCES:
+        raise ValueError(f"source must be one of {SOURCES}, not {source!r}")
+    if source != "auto":
+        return source
+    if not plane_read_enabled(reader):
+        return "jsonl"
+    p = _Plane(fleet, root)
+    try:
+        at = p.pr.declared(p.conn, p.fleet, reader)
+    except sqlite3.Error as exc:
+        p.close()
+        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
+    p.close()
+    if at is None:
+        print(f"dispatch-overdue: {PLANE_READ_FLAGS[reader]}=1 but no cutover_declared for"
+              f" {p.fleet}/{reader} — the flip is not declared; serving the JSONL"
+              f" (`claudlobby --fleet {p.fleet} plane cutover --reader {reader}`)", file=sys.stderr)
+        return "jsonl"
+    return "plane"
+
+
+def _open_dispatches_plane(bot: str, *, fleet: str | None, root: str | None
+                           ) -> list[tuple[int, int | None, str]]:
+    p = _Plane(fleet, root)
+    try:
+        entry = p.roster.get(bot.lower())
+        if entry is None:
+            print(f"dispatch-overdue: no identity row for bot:{p.fleet}/{bot} in the plane —"
+                  " nothing open by the plane's account (if this bot is declared, its"
+                  " dispatches never reached the plane)", file=sys.stderr)
+            return []
+        return [(da, exp, tid) for da, exp, tid in p.pr.open_rows(p.conn, p.fleet, bot, entry=entry)]
+    except sqlite3.Error as exc:
+        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
+    finally:
+        p.close()
+
+
+def _overdue_all_plane(now: int, max_age: int, bots_dir: str | None, *, fleet: str | None,
+                       root: str | None) -> dict[str, list[tuple[int, int, int, str]]]:
+    """The plane's overdue set for every bot the plane knows, with the SAME
+    orphan split the legacy reader applies (a dispatch older than the bot's
+    .spawn is the orphan list's, never paged as overdue)."""
+    p = _Plane(fleet, root)
+    grace = _resolve_progress_grace()
+    spawn_cache: dict[str, int | None] = {}
+    try:
+        out: dict[str, list[tuple[int, int, int, str]]] = {}
+        for bot, entry in sorted(p.roster.items()):
+            for da, exp, elapsed, tid in p.pr.overdue_rows(
+                    p.conn, p.fleet, bot, now=now, max_age=max_age, progress_grace=grace, entry=entry):
+                if tid and bots_dir:
+                    if bot not in spawn_cache:
+                        spawn_cache[bot] = _spawn_epoch(bots_dir, bot)
+                    spawn = spawn_cache[bot]
+                    if spawn is not None and spawn > da:
+                        continue                              # the orphan list's row
+                out.setdefault(bot, []).append((da, exp, elapsed, tid if tid else "-"))
+        return out
+    except sqlite3.Error as exc:
+        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
+    finally:
+        p.close()
 
 
 def _resolve_max_age() -> int:
@@ -260,6 +403,10 @@ def _classify_all(
     now: int,
     max_age: int = DEFAULT_OVERDUE_MAX_AGE_S,
     bots_dir: str | None = None,
+    *,
+    source: str = "jsonl",
+    fleet: str | None = None,
+    root: str | None = None,
 ) -> tuple[
     dict[str, list[tuple[int, int, int, str]]],
     dict[str, list[tuple[int, int, int, str]]],
@@ -270,6 +417,12 @@ def _classify_all(
     orphaned_all each re-parse both ledgers, so calling them in pairs doubles
     the work. Contracts live on those two; this is the implementation.
     """
+    if resolve_source("overdue", source, fleet=fleet, root=root) == "plane":
+        # Overdue from the plane; the orphan list stays the legacy hybrid
+        # (.spawn against the ledger) — --orphans has no plane counterpart.
+        over = _overdue_all_plane(now, max_age, bots_dir, fleet=fleet, root=root)
+        _, orph = _classify_all(dispatch_log, report_ledger, now, max_age, bots_dir)
+        return over, orph
     dispatches = _load_jsonl(dispatch_log)
     reports = _load_jsonl(report_ledger)
 
@@ -425,6 +578,10 @@ def open_dispatches(
     bot: str,
     dispatch_log: str,
     report_ledger: str,
+    *,
+    source: str = "jsonl",
+    fleet: str | None = None,
+    root: str | None = None,
 ) -> list[tuple[int, int | None, str]]:
     """The bot's still-open id'd dispatches, OLDEST FIRST.
 
@@ -467,6 +624,8 @@ def open_dispatches(
     (bot, task_id) closes a row, and only a same-bot ``supersedes`` retires
     one, exactly as in ``_classify_all``.
     """
+    if resolve_source("open", source, fleet=fleet, root=root) == "plane":
+        return _open_dispatches_plane(bot, fleet=fleet, root=root)
     bot_key = bot.lower()
     reported = _terminal_reported_ids(_load_jsonl(report_ledger))
     dispatches = _load_jsonl(dispatch_log)
@@ -989,8 +1148,57 @@ def _reject_bot_slot(mode: str, value: str) -> bool:
     return True
 
 
+def _take_source(argv: list[str]) -> tuple[list[str], str, str | None, str | None]:
+    """Strip `--source jsonl|plane|auto` (default auto: the per-reader flags),
+    `--fleet <name>` and `--root <dir>` from argv, wherever they sit."""
+    out, source, fleet, root = [], "auto", None, None
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("--source", "--fleet", "--root"):
+            if i + 1 >= len(argv) or argv[i + 1].startswith("--"):
+                # A dropped value must not fall back to the ambient fleet (#526's
+                # cross-fleet class): refuse, the usage code.
+                raise SystemExit(f"dispatch-overdue: {argv[i]} needs a value")
+            if argv[i] == "--source":
+                source = argv[i + 1]
+            elif argv[i] == "--fleet":
+                fleet = argv[i + 1]
+            else:
+                root = argv[i + 1]
+            i += 2
+            continue
+        out.append(argv[i]); i += 1
+    if source not in SOURCES:
+        raise SystemExit(f"dispatch-overdue: --source must be jsonl|plane|auto, not {source!r}")
+    return out, source, fleet, root
+
+
+PLANE_SOURCED_MODES = ("--open", "--all")
+
+
+def _refuse_plane_source_off_mode(argv: list[str], source: str) -> bool:
+    """`--source plane` on a mode with no plane source (--orphans is hybrid,
+    --unassigned has no counterpart, --open-task keeps its own bar until
+    chunk 6, single-bot mode is legacy) must be refused, not ignored: an
+    operator auditing with it cannot otherwise tell "ignored" from "the
+    plane agrees". `auto` stays silent — the flags apply where defined."""
+    if source == "plane" and (len(argv) < 2 or argv[1] not in PLANE_SOURCED_MODES):
+        mode = argv[1] if len(argv) > 1 and argv[1].startswith("--") else "single-bot mode"
+        print(f"dispatch-overdue: --source plane has no meaning for {mode}"
+              f" (plane-sourced modes: {', '.join(PLANE_SOURCED_MODES)})", file=sys.stderr)
+        return True
+    return False
+
+
 def main() -> int:
-    argv, bots_dir = _take_bots_dir(sys.argv)
+    try:                                   # source flags first, wherever they sit;
+        argv, source, fleet_opt, root_opt = _take_source(sys.argv)
+    except SystemExit as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    argv, bots_dir = _take_bots_dir(argv)  # then the trailing --bots-dir pair
+    if _refuse_plane_source_off_mode(argv, source):
+        return 2
     if len(argv) < 3:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         return 2
@@ -1030,9 +1238,18 @@ def main() -> int:
             return 2
         if _reject_bot_slot("--open", argv[2]):
             return 2
-        if _refuse_unreadable_report_ledger("--open", argv[4]):
+        try:
+            src = resolve_source("open", source, fleet=fleet_opt, root=root_opt)
+        except PlaneUnreachable as exc:
+            print(f"dispatch-overdue: --open plane source: UNREACHABLE — {exc}", file=sys.stderr)
             return 3
-        rows = open_dispatches(argv[2], argv[3], argv[4])
+        if src == "jsonl" and _refuse_unreadable_report_ledger("--open", argv[4]):
+            return 3
+        try:
+            rows = open_dispatches(argv[2], argv[3], argv[4], source=src, fleet=fleet_opt, root=root_opt)
+        except PlaneUnreachable as exc:
+            print(f"dispatch-overdue: --open plane source: UNREACHABLE — {exc}", file=sys.stderr)
+            return 3
         for da, exp, tid in rows:
             print(f"{da} {exp if exp is not None else '-'} {tid}")
         # State the scope, ALWAYS and on STDERR (#1187). Always, because the
@@ -1059,7 +1276,7 @@ def main() -> int:
         # script, both arms. That caller reads stdout and discards stderr, so
         # this line is inert for it by construction.
         print(
-            f"--open: bot={argv[2]!r} -> {len(rows)} open id'd dispatch(es)",
+            f"--open: bot={argv[2]!r} -> {len(rows)} open id'd dispatch(es) [source={src}]",
             file=sys.stderr,
         )
         return 0
@@ -1100,7 +1317,13 @@ def main() -> int:
         )
         if argv[1] == "--orphans" and _refuse_undeterminable_orphans(bots_dir):
             return 3
-        over, orph = _classify_all(dlog, rlog, now, max_age, bots_dir)
+        try:
+            over, orph = _classify_all(dlog, rlog, now, max_age, bots_dir,
+                                       source=source if argv[1] == "--all" else "jsonl",
+                                       fleet=fleet_opt, root=root_opt)
+        except PlaneUnreachable as exc:
+            print(f"dispatch-overdue: --all plane source: UNREACHABLE — {exc}", file=sys.stderr)
+            return 3
         rows = over if argv[1] == "--all" else orph
         for bot_id, entries in sorted(rows.items()):
             for da, exp, elapsed, tid in entries:

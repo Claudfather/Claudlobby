@@ -571,9 +571,38 @@ def _dispatch_section(
     # privacy — its own docstring names it "THE in-process door when a caller
     # wants both sets". Fall back to the public pair on an install that predates
     # it, since a slower answer beats no answer.
+    # Cutover chunk 5: the matcher's per-reader flags flip the DEFAULT source
+    # here too (brief and the matcher are one migration — J1). The plane path
+    # never falls back to the JSONL: an unreachable plane under a set flag is
+    # OMITTED with the remedy named, because a silent fallback would let a
+    # flipped fleet read legacy again without anyone knowing.
+    # Cutover chunk 5: the matcher's providers pick the source themselves
+    # (`source="auto"` = the reader's flag AND a recorded declaration), so
+    # brief and the matcher flip together (J1) and brief carries no flag
+    # logic of its own. The plane path never falls back to the JSONL: an
+    # unreachable plane under a declared flip is OMITTED with the remedy
+    # named, because a silent fallback would let a flipped fleet read legacy
+    # again without anyone knowing. An install whose matcher predates the
+    # sources is called the old way and serves the JSONL.
+    has_sources = hasattr(doors, "resolve_source")
+    plane_ctx = {"source": "auto", "fleet": paths.fleet_name, "root": str(paths.root)}
+    plane_err = getattr(doors, "PlaneUnreachable", ())
+
+    def _omit(field: str, exc: BaseException) -> None:
+        degraded.append(Degradation(
+            field=field, mode="omitted",
+            reason=f"the flip is declared for this reader but the plane source is unreachable:"
+                   f" {exc} — restore the plane db or flip the flag back to 0",
+            issue="#1444"))
+
     classify = getattr(doors, "_classify_all", None)
     if classify is not None:
-        over, orph = classify(str(dlog), str(rlog), now, max_age, bots_dir)
+        try:
+            over, orph = (classify(str(dlog), str(rlog), now, max_age, bots_dir, **plane_ctx)
+                          if has_sources else classify(str(dlog), str(rlog), now, max_age, bots_dir))
+        except plane_err as exc:
+            _omit("dispatches.overdue", exc)
+            over, orph = {}, classify(str(dlog), str(rlog), now, max_age, bots_dir)[1]
     else:
         over = doors.overdue_all(str(dlog), str(rlog), now, max_age, bots_dir)
         orph = doors.orphaned_all(str(dlog), str(rlog), now, max_age, bots_dir)
@@ -626,7 +655,12 @@ def _dispatch_section(
         )
         open_rows = []
     else:
-        open_rows = open_door(bot_id, str(dlog), str(rlog))
+        try:
+            open_rows = (open_door(bot_id, str(dlog), str(rlog), **plane_ctx)
+                         if has_sources else open_door(bot_id, str(dlog), str(rlog)))
+        except plane_err as exc:
+            _omit("dispatches.open", exc)
+            open_rows = []
 
     return {
         "open": [

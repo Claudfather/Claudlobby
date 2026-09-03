@@ -26,24 +26,25 @@ F = "f"
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
 
 
-def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None):
+def _live_dispatch(root, n, task_id, *, ts, bot="w1", expected_by=None, fleet=None):
     """A dispatch the LIVE door landed: three events, emitter dispatch-task.
     *expected_by* (ISO) mirrors the ledger row's deadline when a test needs
     the watchdog's question answered on both sides."""
+    fl = fleet or F
     wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
     emit_batch(root, [
-        {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F,
+        {"event_type": "work_item", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": f"dispatch-log:{task_id}", "occurred_at": ts,
-         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{F}/mgr"}},
-        {"event_type": "assignment", "emitter": "dispatch-task", "fleet": F,
+         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{fl}/mgr"}},
+        {"event_type": "assignment", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": f"dispatch-log:{task_id}", "occurred_at": ts,
          "payload": {"assignment_id": asg, "work_item_id": wi,
-                     "assignee": f"bot:{F}/{bot}", "assigned_by": f"bot:{F}/mgr",
+                     "assignee": f"bot:{fl}/{bot}", "assigned_by": f"bot:{fl}/mgr",
                      "dispatch_msg_id": msg,
                      **({"expected_by": expected_by} if expected_by else {})}},
-        {"event_type": "communication", "emitter": "dispatch-task", "fleet": F,
+        {"event_type": "communication", "emitter": "dispatch-task", "fleet": fl,
          "source_ref": f"dispatch-log:{task_id}", "occurred_at": ts,
-         "payload": {"msg_id": msg, "sender": f"bot:{F}/mgr", "recipient": f"bot:{F}/{bot}",
+         "payload": {"msg_id": msg, "sender": f"bot:{fl}/mgr", "recipient": f"bot:{fl}/{bot}",
                      "message_class": "task_request", "command_type": "task",
                      "work_item_id": wi, "assignment_id": asg, "body": "t"}}])
     return wi, asg, msg

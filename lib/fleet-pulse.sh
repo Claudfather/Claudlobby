@@ -136,9 +136,16 @@ reap_events() {
 # echoed and the row would alarm every cycle until it aged out.
 _overdue_cache=$(safe_mktemp)
 _orphan_cache=$(safe_mktemp)
+# The overdue reader's rc and stderr are KEPT (chunk 5): once the reader is
+# flipped to the plane, a refusal (rc 3 -- the plane unreachable, or holding no
+# bot of this fleet) leaves the cache EMPTY, and an empty cache reads as "nothing
+# overdue". _overdue_reader_guard turns that into a page, after the escalation
+# chat is resolved below.
+_overdue_reader_rc=0
+_overdue_reader_err=$(safe_mktemp)
 if [ -f "$dispatch_log" ]; then
-    python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" \
-        --bots-dir "$BOTS_DIR" 2>/dev/null > "$_overdue_cache" || true
+    python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" --fleet "$fleet" \
+        --bots-dir "$BOTS_DIR" 2>"$_overdue_reader_err" > "$_overdue_cache" || _overdue_reader_rc=$?
     python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$dispatch_log" "$report_ledger" \
         --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true
 fi
@@ -183,6 +190,39 @@ _shadow_bridge() {
     # debounce_notify writes its marker AFTER the pager returns, whatever the
     # pager did; a page that never left must not silence the next ten minutes.
     [ "${_SHADOW_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet shadow_divergence
+    return 0
+}
+
+# --- Cutover overdue-reader guard (chunk 5): a REFUSED --all is not "nothing overdue" ---
+# The flipped overdue reader refuses (rc 3) rather than falling back to the
+# JSONL when the plane cannot serve; the sweep above keeps its rc and stderr,
+# and this guard pages -- debounced, the shadow bridge's shape -- so a dark
+# watchdog is a paged watchdog. rc 0 clears the marker; any other rc is
+# disclosed on stderr and never paged (rc 2 is a call-shape bug, not an outage).
+_overdue_page() {
+    local _rc=0
+    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+        "$LIB_DIR/tg-post.sh" "$1" >/dev/null 2>&1 || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        printf '%s ALERT-DELIVERY-FAILED escalation overdue_reader_unreachable: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$_rc" >&2
+        _OVERDUE_PAGE_FAILED=1
+    fi
+}
+
+_overdue_reader_guard() {
+    case "${_overdue_reader_rc:-0}" in
+        0) debounce_clear "$state_dir" fleet overdue_reader_unreachable; return 0 ;;
+        3) ;;
+        *) echo "fleet-pulse: overdue reader exited ${_overdue_reader_rc}: $(tail -1 "${_overdue_reader_err:-/dev/null}" 2>/dev/null | cut -c1-160)" >&2; return 0 ;;
+    esac
+    local _why
+    _why=$(grep -m1 UNREACHABLE "${_overdue_reader_err:-/dev/null}" 2>/dev/null | cut -c1-200)
+    [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: overdue reader UNREACHABLE and no escalation chat - the watchdog is dark for overdue dispatches: ${_why}" >&2; return 0; }
+    _OVERDUE_PAGE_FAILED=0
+    debounce_notify "$state_dir" fleet overdue_reader_unreachable _overdue_page \
+        "FLEET ALERT: the overdue reader for ${fleet} is UNREACHABLE - the watchdog cannot see overdue dispatches until the plane is restored, or PLANE_READ_OVERDUE is flipped back to 0. (${_why})" \
+        "" 600 || true
+    [ "${_OVERDUE_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet overdue_reader_unreachable
     return 0
 }
 
@@ -574,6 +614,7 @@ if [ -z "$_ESCALATION_CHAT_ID" ]; then
 fi
 
 _shadow_bridge || true
+_overdue_reader_guard || true
 
 if [ -n "$_ESCALATION_CHAT_ID" ]; then
     # Compute window start (portable: GNU date then BSD date fallback)
