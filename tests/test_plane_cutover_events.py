@@ -292,10 +292,13 @@ def test_plane_lookup_answers_the_events_and_escalation_questions(tmp_path):
     assert at_start.stdout == "w2 service_down 2026-09-03T10:06:00+00:00\n"     # 10:05:00 itself is NOT after
     one = _lookup(root, "--escalation", "--since", "2026-09-03T10:00:00Z", "--fleet", F, "--type", "service_down")
     assert one.stdout == "w2 service_down 2026-09-03T10:06:00+00:00\n"
-    # a NAIVE window start is the host's local clock (fleet-pulse's `date +%Y-%m-%dT%H:%M`)
-    local_naive = datetime(2026, 9, 3, 10, 4, 30, tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M")
+    # a NAIVE window start is the host's local clock (fleet-pulse's `date +%Y-%m-%dT%H:%M`):
+    # the local rendering of 10:05:30Z must read back as 10:05:30Z — on a host behind
+    # UTC a naive-as-UTC reading would open the window hours earlier and admit w1's 10:05
+    local_naive = datetime(2026, 9, 3, 10, 5, 30, tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S")
     naive = _lookup(root, "--escalation", "--since", local_naive, "--fleet", F)
-    assert naive.stdout.startswith("w1 session_missing 2026-09-03T10:05:00+00:00")
+    assert naive.stdout == "w2 service_down 2026-09-03T10:06:00+00:00\n", (local_naive, naive.stdout)
+    assert _stdlib_readers().since_form(local_naive) == "2026-09-03T10:05:30+00:00"
     quiet = _lookup(root, "--escalation", "--since", "2026-09-03T10:07:00Z", "--fleet", F)
     assert quiet.returncode == 0 and quiet.stdout == ""                            # nothing inside the window
     garbage = _lookup(root, "--escalation", "--since", "yesterday-ish", "--fleet", F)
