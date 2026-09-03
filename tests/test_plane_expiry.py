@@ -18,6 +18,7 @@ from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.expiry import expirable, expired_events
 from claudlobby.plane.queries import ATTENTION_SQL, TASK_STATUS_SQL
+from tests.plane_fixtures import plane_root
 
 REPO = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
@@ -25,10 +26,7 @@ F = "example-fleet"
 
 
 def _root(tmp_path):
-    root = tmp_path / "root"
-    (root / "state" / "plane").mkdir(parents=True)
-    (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
-    return root
+    return plane_root(tmp_path)
 
 
 def _dispatch(root, n, *, expected_by):

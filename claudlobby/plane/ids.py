@@ -7,6 +7,7 @@ which is exactly the longitudinal-join corruption F10 exists to prevent.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import uuid
@@ -45,6 +46,20 @@ def mint(prefix: str) -> str:
     return prefix + uuid.uuid4().hex
 
 
+def derive_hex(material: str) -> str:
+    """The deterministic 32-hex the plane derives from content: sha256 of
+    *material*, truncated — ONE definition, so the truncation and hash are a
+    single decision (expiry's `expired` event ids, the importer's ids, the
+    parity content key all ride it)."""
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def derive_uid(prefix: str, material: str) -> str:
+    """``<prefix>_<derive_hex(material)>`` — a minted-shape id that is a pure
+    function of its material, so a replay classifies duplicate."""
+    return f"{prefix}_{derive_hex(material)}"
+
+
 def mint_event_id() -> str:
     return mint("ev_")
 
@@ -67,7 +82,6 @@ def derive_session_uid(platform_session_id: str) -> str:
     Deliberately deterministic, not random (§9d): any emitter — bash included,
     via shasum — computes the same uid for the same session with no registry
     lookup, and the transcript/OTel join needs exactly that stability."""
-    import hashlib
 
     if not platform_session_id or not platform_session_id.strip():
         raise ValueError("empty platform session id — refusing to derive")

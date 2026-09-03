@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ._helpers import _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
-from ..plane.db import connect, db_path
+from ..plane.db import connect, connect_ro, db_file, db_path
 from ..plane.emit_api import emit, emit_batch, _load_capture_config
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
@@ -250,7 +250,7 @@ def cmd_plane_doctor(args) -> int:
             if not ok:
                 failing += 1
 
-        path = db_path(root)
+        path = db_file(root)
         if not path.exists():
             rung(True, "db", f"absent (not yet used): {path}")
         else:
@@ -409,7 +409,7 @@ def cmd_plane_registry(args) -> int:
     def run() -> int:
         from ..plane import registry_read as rr
 
-        path = db_path(root)
+        path = db_file(root)
         if not path.exists():
             print(f"registry: no plane db at {path} — no scan has run here"
                   " (arm PLANE_EMIT_ENABLED=1 in the fleet-tier .env and"
@@ -555,7 +555,7 @@ def cmd_plane_prune(args) -> int:
         from ..plane.retention import (
             DEFAULT_RETENTION_DAYS, prune_metric_samples)
 
-        path = db_path(root)
+        path = db_file(root)
         if not path.exists():
             print(f"prune: no plane db at {path} — nothing to age out",
                   file=sys.stderr)
@@ -596,7 +596,7 @@ def cmd_plane_expire(args) -> int:
             DEFAULT_AFTER_DAYS, expirable, expired_events)
         from ..plane.emit_api import emit_batch
 
-        path = db_path(root)
+        path = db_file(root)
         if not path.exists():
             print(f"expire: no plane db at {path} — nothing to sweep",
                   file=sys.stderr)
@@ -627,6 +627,158 @@ def cmd_plane_expire(args) -> int:
         return 0
 
     return _guarded("plane expire", run)
+
+
+def _one_line(text: str) -> str:
+    """A ledger key carries the row's raw bytes; a newline in a task id would
+    break the one-row-per-line listing (the JSON form escapes it already)."""
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _open_plane_ro(root: Path, door: str, out):
+    """The exists-before-connect probe both cutover doors share: a read-only
+    connection, or None after printing the refusal to *out* (rc 3 is the
+    caller's). ``db_file`` is a pure join — a refusal must not leave a
+    directory behind."""
+    path = db_file(root)
+    if not path.is_file():
+        print(f"{door}: UNREACHABLE — no plane db at {path}", file=out)
+        return None
+    return connect_ro(path)
+
+
+def cmd_plane_parity(args) -> int:
+    """The operator's parity door (cutover chunk 2): are the two legacy
+    ledgers fully in the plane? Bakes in the ledger paths, the join keys
+    and a cause for every missing row (`plane.parity`). rc 0 clean, 1 gaps,
+    3 unreachable — an absent ledger or db never reads as clean."""
+    paths = _resolve_paths(args)
+    root = paths.root
+
+    def run() -> int:
+        from ..brief import dispatch_ledger_path, report_ledger_path
+        from ..plane.parity import DISPATCH, REPORT, compare
+
+        out = sys.stderr if args.json else sys.stdout
+        conn = _open_plane_ro(root, "parity", out)
+        if conn is None:
+            return 3
+        try:
+            reports = [
+                compare(conn, DISPATCH, dispatch_ledger_path(paths), since=args.since),
+                compare(conn, REPORT, report_ledger_path(paths), since=args.since),
+            ]
+        except sqlite3.Error as exc:
+            # A db that opens but cannot be read (corrupt, locked past the
+            # timeout) is UNREACHABLE, not empty: rc 3 + a line, never a traceback.
+            print(f"parity: UNREACHABLE — plane db unreadable: {exc}", file=out)
+            return 3
+        finally:
+            conn.close()
+        rc = 0
+        for p in reports:
+            if not p.reachable:
+                # rc carries the refusal; the text goes where stdout is not
+                # machine-parsed (source_state) — stderr only under --json.
+                print(f"parity: {p.ledger}: UNREACHABLE — {p.detail}", file=out)
+                rc = 3
+                continue
+            causes = ", ".join(f"{c}={n}" for c, n in sorted(p.causes().items())) or "-"
+            print(f"parity: {p.ledger} ({p.path}) rows={p.total} matched={p.matched}"
+                  f" missing={len(p.missing)} [{causes}] duplicates={len(p.duplicates)}"
+                  f" malformed={p.malformed} go_live={p.go_live or '-'}", file=out)
+            if p.state == "empty":
+                print("  the ledger exists and holds no rows — nothing to compare",
+                      file=out)
+            for m in p.missing[:args.show]:
+                print(f"  missing {m.cause} {m.ts} {_one_line(m.key)}", file=out)
+            if len(p.missing) > args.show:
+                print(f"  ... and {len(p.missing) - args.show} more", file=out)
+            for d in p.duplicates[:args.show]:
+                print(f"  duplicate {_one_line(d)}", file=out)
+            if not p.clean and rc == 0:
+                rc = 1
+        if args.json:
+            print(json.dumps({
+                "schema": 1, "rc": rc, "since": args.since,
+                "ledgers": [{
+                    "ledger": p.ledger, "path": str(p.path), "state": p.state,
+                    "detail": p.detail, "rows": p.total, "matched": p.matched,
+                    "malformed": p.malformed, "go_live": p.go_live,
+                    "causes": p.causes(), "duplicates": p.duplicates,
+                    "missing": [{"key": m.key, "ts": m.ts, "cause": m.cause}
+                                for m in p.missing],
+                } for p in reports]}, indent=2))
+        return rc
+
+    return _guarded("plane parity", run)
+
+
+def cmd_plane_import(args) -> int:
+    """The parity-gap importer (cutover chunk 2): land the legacy rows the
+    plane is missing for THIS fleet, through normal ingest, origin=legacy.
+    Attribution is by the fleet's own report ledger — so it needs --fleet.
+    Dry-run is the default; --apply writes."""
+    paths = _resolve_paths(args)
+    root = paths.root
+
+    def run() -> int:
+        from ..brief import dispatch_ledger_path, report_ledger_path
+        from ..plane.legacy_import import apply_import, plan_import
+
+        fleet = paths.fleet_name
+        if not fleet:
+            print("import: needs --fleet <name> — a dispatch row belongs to a fleet"
+                  " only through that fleet's own report ledger, never a roster"
+                  " guess", file=sys.stderr)
+            return 2
+        conn = _open_plane_ro(root, "import", sys.stdout)
+        if conn is None:
+            return 3
+        try:
+            plan = plan_import(conn, fleet=fleet,
+                               dispatch_path=dispatch_ledger_path(paths),
+                               report_path=report_ledger_path(paths),
+                               now=datetime.now(timezone.utc), since=args.since,
+                               capture=_load_capture_config(root))
+        except sqlite3.Error as exc:
+            print(f"import: UNREACHABLE — plane db unreadable: {exc}")
+            return 3
+        finally:
+            conn.close()
+        if not plan.reachable:
+            for p in (plan.dispatch, plan.report):
+                if not p.reachable:
+                    print(f"import: {p.ledger}: UNREACHABLE — {p.detail}",
+                          file=sys.stderr)
+            return 3
+        print(f"import[{fleet}] batch {plan.batch}: {plan.dispatches} dispatch(es)"
+              f" x4 events + {plan.reports} report(s) -> {len(plan.events)} event(s)")
+        # Disclosures ride stdout: this is a human table nobody parses, and a
+        # stderr-only disclosure is what hid #1216 for a day (source_state).
+        for label, keys in (("unattributed (no report in this fleet's ledger)",
+                             plan.unattributed),
+                            ("orphan reports (no dispatch row anywhere)",
+                             plan.orphan_reports),
+                            ("unknown status", plan.unknown_status),
+                            ("malformed", plan.malformed),
+                            ("refused by the contracts", plan.invalid)):
+            if keys:
+                print(f"  skipped {len(keys)} {label}: "
+                      + ", ".join(_one_line(k) for k in keys[:5])
+                      + (" ..." if len(keys) > 5 else ""))
+        if plan.assumed_manager_fleet:
+            print(f"  assumed {plan.assumed_manager_fleet} manager alias(es) in"
+                  f" {fleet} (registry did not name a unique fleet)")
+        if not args.apply:
+            print("dry-run: nothing written (pass --apply to land the batch)")
+            return 0
+        counts = apply_import(root, plan)
+        print(f"import[{fleet}] committed={counts['committed']}"
+              f" duplicate={counts['duplicate']} spooled={counts['spooled']}")
+        return 0
+
+    return _guarded("plane import", run)
 
 
 def cmd_plane_view(args) -> int:

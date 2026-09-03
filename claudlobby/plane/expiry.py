@@ -43,8 +43,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-import hashlib
 
+from .ids import derive_uid
 from .queries import NON_TERMINAL_CLAUSE
 
 DEFAULT_AFTER_DAYS = 7
@@ -106,8 +106,7 @@ def expired_events(plan: ExpiryPlan, *, now: datetime | None = None,
     return [{
         "event_type": "task", "emitter": "attention-expiry",
         "fleet": r["fleet"], "occurred_at": stamp,
-        "event_id": "ev_" + hashlib.sha256(
-            f"{r['assignment_id']}:expired".encode()).hexdigest()[:32],
+        "event_id": derive_uid("ev", f"{r['assignment_id']}:expired"),
         "payload": {
             "work_item_id": r["work_item_id"],
             "assignment_id": r["assignment_id"],

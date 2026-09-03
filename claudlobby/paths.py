@@ -549,6 +549,12 @@ class Paths:
         return self.runtime / "fleet"
 
     @property
+    def fleet_name(self) -> str | None:
+        """The overlay fleet's name (its dir name at flat OR nested depth), or
+        None in root mode — the one-liner four modules had inlined."""
+        return self.fleet_dir.name if self.fleet_dir else None
+
+    @property
     def fleet_state(self) -> Path:
         """Directory for fleet-scoped runtime state (report-back.jsonl,
         workstreams.json): the fleet's own ``runtime/`` in overlay mode, the

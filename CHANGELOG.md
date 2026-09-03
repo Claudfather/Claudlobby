@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the F18 cutover, chunk 2: the operator's parity door and the parity-gap importer (#1444)
+
+- **`claudlobby plane parity`** — are the legacy ledgers fully in the plane? Bakes in the two ledgers and their join keys, names a cause for every missing row (`pre-go-live` / `unstamped` / `stamped-lost`) and counts multiplicity per (source_ref, kind, event). rc 0 clean, 1 gaps, 3 unreachable — an absent ledger or db never reads as clean; `--json` for machines. First live run of the door (Mini, whole ledgers): dispatch-log 194/307 matched (75 pre-go-live, 38 from the unarmed fleet, 0 lost emits); report-back 253/316 (63 pre-go-live). The importer's dry run for artemis-engineering planned 60 dispatches + 62 reports and wrote nothing.
+- **`claudlobby --fleet <f> plane import [--apply]`** — lands the rows the plane is missing for THIS fleet through normal ingest with `origin=legacy` + an `import_batch`: four events per dispatch (so status never reads `created_not_sent`), communication + task event per report, attribution by the fleet's own report ledger only (unattributable rows skipped and disclosed), stamped rows keep their ids, unstamped rows get content-hashed ids, and a re-run classifies `duplicate`. Dry-run by default.
+
 ### Added — the F18 cutover, chunk 1: the plane answered by legacy task id (#1444)
 
 - **`lib/plane-lookup.py`** — stdlib, read-only lookup of a dispatch's plane ids by its legacy `task_id` through the `source_ref = "dispatch-log:<task_id>"` every dispatch already stamps. Exit codes follow the unreachable-is-not-empty rule (0 found / 0 not-found with a stderr note / 3 unreachable / 2 usage); a stamped `plane_*` id is not proof the row exists (the ledger is stamped before the emit), so consumers keep their legacy fallback until cutover. Migration 0007 indexes `assignments(source_ref)`.
