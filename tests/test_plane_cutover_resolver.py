@@ -124,3 +124,27 @@ def test_shadow_open_task_is_a_gate_mode_only(tmp_path):
     gate = _cli(root, "shadow", "--gate", "--reader", "open_task")
     assert gate.returncode == 1 and "[open_task]" in gate.stdout and "/200" in gate.stdout
     assert cut.READ_FLAGS["open_task"] == "PLANE_READ_OPEN_TASK" and sh.GATED == ("open", "overdue", "open_task")
+
+
+def test_a_peers_terminal_report_does_not_discharge_this_bots_idless_dispatch(tmp_path):
+    """The guard is per bot on both sides: w2 finishing something after w1's
+    unanswered id-less dispatch says nothing about w1 — both resolvers keep
+    answering nothing for w1 until w1 itself reports."""
+    root, paths, d, r = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    ts = "2026-09-02T11:00:00Z"
+    _live_dispatch(root, "7", "sha:" + "ef" * 8, ts=ts, expected_by="2026-09-02T12:00:00+00:00")
+    row = _drow(ts, "", expected_by=1788000000)
+    row["dispatched_at"] = _epoch(ts)
+    d.append(row)
+    _write(dispatch_ledger_path(paths), d)
+    done = "2026-09-02T11:30:00Z"
+    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
+                       "source_ref": f"report-back:msg_{'3':0>32}", "occurred_at": done,
+                       "payload": {"work_item_id": f"wi_{'3':0>32}", "assignment_id": f"asg_{'3':0>32}",
+                                   "event": "completed", "actor": f"bot:{F}/w2"}}])
+    r.append(_rrow(done, "t-3-cccc", "completed", bot="w2"))
+    _write(report_ledger_path(paths), r)
+    jsonl = _matcher(root, "--open-task", "w1", dl, rl, "--source", "jsonl")
+    plane = _matcher(root, "--open-task", "w1", dl, rl, "--source", "plane", "--fleet", F)
+    assert jsonl.returncode == 0 == plane.returncode and jsonl.stdout == plane.stdout == ""
