@@ -18,12 +18,15 @@ Every rule below is from the J3 evaluation and was verified in code:
 - a report imports as its communication plus its task event
   (``completed`` / ``failed`` / ``returned_blocked`` / ``progress``), with the
   ``supplied_id_not_open`` anomaly alongside when the row recorded one;
-- **fleet attribution is by the fleet's own report ledger and nothing
-  else**: the dispatch log is host-global with no fleet column, bots move
-  fleets and names collide across them (#526), so a dispatch row belongs to
-  fleet F only if F's ``report-back.jsonl`` holds a report for its task id.
-  Anything else is skipped and DISCLOSED, never guessed — which also means
-  query rows (no task id by design) are never imported;
+- **fleet attribution has two rules, gated by whether a plane row exists.**
+  A dispatch row that is MISSING from the plane has no row to read an alias
+  from, so it belongs to fleet F only if F's own ``report-back.jsonl`` holds a
+  report for its task id — the dispatch log is host-global with no fleet
+  column, bots move fleets and names collide across them (#526). Anything
+  else is skipped and DISCLOSED, never guessed — which also means query rows
+  (no task id by design) are never imported. Where the plane row EXISTS (a
+  report linking to its dispatch, a supersession closing its retired
+  assignment) the plane's own recorded assignee alias is the authority;
 - a report whose dispatch row is in neither the plane nor this plan has no
   work item to hang on (``TaskEvent.work_item_id`` is required) and is an
   orphan: skipped and disclosed;
@@ -32,7 +35,17 @@ Every rule below is from the J3 evaluation and was verified in code:
   role)`` — content, never position, because rotation rewrites lines;
 - the manager's alias resolves through the identity registry when exactly
   one fleet has a bot of that name; otherwise it is assumed to be F and the
-  assumption is COUNTED in the plan.
+  assumption is COUNTED in the plan;
+- **a legacy supersession closes its retired assignment in the plane** (chunk
+  3b): ``--supersedes`` reached only the JSONL before chunk 1, so the plane
+  still held every pre-cutover retired assignment open — the first live run
+  of the shadow (#1448) found five bots diverging on exactly this, with heads
+  that differ, and those rows never close on their own. For every legacy row
+  declaring ``supersedes: T`` the plan emits the terminal ``superseded`` task
+  event on each OPEN plane assignment for (``bot:F/<bot>``, ``dispatch-log:T``)
+  — attribution by the plane's OWN alias on that assignment, never a roster
+  guess — with ``successor_id`` the superseding row's plane assignment when
+  the plane has it. A closed assignment is never planned again.
 - **content is identity**: no door ever rewrites a ledger line (rotation only
   drops whole lines), so a line whose bytes changed IS a different row and
   imports as one. A hand-edited row therefore lands beside its earlier self
@@ -56,6 +69,7 @@ from typing import Optional
 from .contracts import ContractViolation
 from .emit_api import validate_item
 from .ids import derive_hex
+from .queries import LATEST_ASSIGNMENT_BY_REF_SQL, OPEN_ASSIGNMENTS_BY_REF_SQL
 from .parity import (
     DISPATCH, REPORT, LedgerParity, LegacyRow, compare, content_key, epoch_iso,
     read_ledger,
@@ -91,6 +105,7 @@ class ImportPlan:
     malformed: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)      # a unit the contracts refuse
     assumed_manager_fleet: int = 0
+    supersessions: int = 0        # retired assignments the plane still held open
 
     @property
     def reachable(self) -> bool:
@@ -227,6 +242,51 @@ def _violation(events: list[dict], capture: dict) -> Optional[str]:
     return None
 
 
+def supersession_events(conn: sqlite3.Connection, fleet: str, rows: list[LegacyRow],
+                        batch: str, planned: Optional[dict[str, dict]] = None) -> list[dict]:
+    """The terminal ``superseded`` events for every legacy ``supersedes``
+    whose retired assignment the plane still holds OPEN for this fleet's
+    bot. Every open sibling of a redispatched id is closed (the legacy join
+    retires by (bot, task id)); the event id derives from the row and the
+    assignment, so a re-run plans nothing once the assignment is terminal.
+    A raw-text ``--supersedes`` mints no task id of its own (the dispatch
+    door envelopes only typed sends), so the event's source_ref then names
+    the retired id. *planned* maps task ids to the ids THIS run's dispatch
+    imports mint, so a retired dispatch imported in the same run is closed
+    in the same run (the closure follows its assignment in the batch) rather
+    than on the next one. The shadow (chunk 3) CLASSIFIES the same
+    ``supersedes`` field through the legacy matcher's helper; this is where
+    it CLOSES."""
+    planned = planned or {}
+    events: list[dict] = []
+    for row in rows:
+        r = row.row
+        retired, bot = r.get("supersedes"), r.get("bot")
+        if not retired or not bot or not _NAME.match(str(bot)):
+            continue
+        alias = f"bot:{fleet}/{bot}"
+        successor = None
+        if r.get("task_id"):
+            if str(r["task_id"]) in planned:
+                successor = planned[str(r["task_id"])]["asg"]
+            else:
+                hit = conn.execute(LATEST_ASSIGNMENT_BY_REF_SQL,
+                                   (f"{DISPATCH}:{r['task_id']}", alias)).fetchone()
+                successor = hit[0] if hit else None
+        targets = [(asg, wi) for asg, wi in conn.execute(
+            OPEN_ASSIGNMENTS_BY_REF_SQL, (f"{DISPATCH}:{retired}", alias)).fetchall()]
+        if str(retired) in planned:                 # imported by THIS run: the alias is bot:F/<bot> by construction
+            targets.append((planned[str(retired)]["asg"], planned[str(retired)]["wi"]))
+        for asg, wi in targets:
+            payload = {"work_item_id": wi, "assignment_id": asg, "event": "superseded"}
+            if successor:
+                payload["successor_id"] = successor
+            events.append(_envelope(
+                "task", f"{DISPATCH}:{r.get('task_id') or retired}", fleet, row.ts, batch,
+                _h(DISPATCH, row.raw, f"ev:superseded:{asg}"), payload))
+    return events
+
+
 def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
                 report_path: Path, now: datetime, since: Optional[str] = None,
                 capture: Optional[dict] = None) -> ImportPlan:
@@ -234,7 +294,8 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
     is the fleet capture config ``emit_batch`` will apply (so validation
     here matches what the door does)."""
     capture = capture or {}
-    dp = compare(conn, DISPATCH, dispatch_path, since=since)
+    dispatch_read = read_ledger(dispatch_path)      # read ONCE: parity + supersessions
+    dp = compare(conn, DISPATCH, dispatch_path, since=since, ledger_read=dispatch_read)
     report_read = read_ledger(report_path)          # read ONCE: parity + attribution
     rp = compare(conn, REPORT, report_path, since=since, ledger_read=report_read)
     batch = f"imp_{_h(fleet, now.isoformat())[:16]}"
@@ -279,12 +340,12 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
             continue
         ids = ids_by_task.get(task_id)
         if ids is None and task_id:
-            hit = conn.execute(
-                "SELECT work_item_id, assignment_id FROM assignments"
-                " WHERE source_ref = ? ORDER BY ingest_seq DESC LIMIT 1",
-                (f"{DISPATCH}:{task_id}",)).fetchone()
+            # the plane's row for THIS bot — the legacy join links a report
+            # by (bot, task id), never by task id alone
+            hit = conn.execute(LATEST_ASSIGNMENT_BY_REF_SQL,
+                               (f"{DISPATCH}:{task_id}", f"bot:{fleet}/{bot}")).fetchone()
             if hit:
-                ids = {"wi": hit[0], "asg": hit[1]}
+                ids = {"wi": hit[1], "asg": hit[0]}
         if ids is None:
             plan.orphan_reports.append(m.key)
             continue
@@ -299,6 +360,14 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
             continue
         plan.events.extend(events)
         plan.reports += 1
+    closures = supersession_events(conn, fleet, dispatch_read[2], batch, planned=ids_by_task)
+    for ev in closures:
+        err = _violation([ev], capture)
+        if err:
+            plan.invalid.append(f"superseded:{ev['payload']['assignment_id']}: {err}")
+            continue
+        plan.events.append(ev)
+        plan.supersessions += 1
     return plan
 
 

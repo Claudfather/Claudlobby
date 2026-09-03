@@ -17,6 +17,14 @@ def plane_root(tmp_path: Path, *, capture: str = '{"*": "full"}') -> Path:
     return root
 
 
+def open_assignment_ids(root: Path) -> list[str]:
+    """The plane's open assignments by production's own definition of open."""
+    from claudlobby.plane.queries import NON_TERMINAL_CLAUSE
+    with ro(root) as conn:
+        return sorted(r[0] for r in conn.execute(
+            "SELECT a.assignment_id FROM assignments a WHERE" + NON_TERMINAL_CLAUSE))
+
+
 @contextmanager
 def ro(root: Path):
     conn = connect_ro(db_file(root))

@@ -773,7 +773,9 @@ def cmd_plane_import(args) -> int:
                           file=sys.stderr)
             return 3
         print(f"import[{fleet}] batch {plan.batch}: {plan.dispatches} dispatch(es)"
-              f" x4 events + {plan.reports} report(s) -> {len(plan.events)} event(s)")
+              f" x4 events + {plan.reports} report(s)"
+              f" + {plan.supersessions} pre-cutover supersession(s) to close"
+              f" -> {len(plan.events)} event(s)")
         # Disclosures ride stdout: this is a human table nobody parses, and a
         # stderr-only disclosure is what hid #1216 for a day (source_state).
         for label, keys in (("unattributed (no report in this fleet's ledger)",

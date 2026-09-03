@@ -20,8 +20,7 @@ from pathlib import Path
 
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.queries import NON_TERMINAL_CLAUSE
-from tests.plane_fixtures import plane_root
+from tests.plane_fixtures import open_assignment_ids, plane_root
 
 REPO = Path(__file__).resolve().parent.parent
 LOOKUP = REPO / "lib" / "plane-lookup.py"
@@ -128,13 +127,7 @@ def test_superseded_event_makes_the_old_assignment_terminal(tmp_path):
                        "source_ref": "dispatch-log:t-2-bbbb",
                        "payload": {"work_item_id": wi1, "assignment_id": asg1,
                                    "event": "superseded", "successor_id": asg2}}])
-    conn = connect(db_path(root))
-    try:
-        open_ids = [r[0] for r in conn.execute(
-            "SELECT a.assignment_id FROM assignments a WHERE" + NON_TERMINAL_CLAUSE)]
-    finally:
-        conn.close()
-    assert open_ids == [asg2]
+    assert open_assignment_ids(root) == [asg2]
 
 
 def _report_back_lookup(root, task_id, bot, dlog):

@@ -28,6 +28,9 @@ import os
 import sqlite3
 import sys
 
+# The package twin of this read is queries.LATEST_ASSIGNMENT_BY_REF_SQL (the
+# importer's report link and supersession closure ride it); a bash door cannot
+# import the package, so the SQL lives twice - keep the two in step.
 SQL = (
     "SELECT a.work_item_id, a.assignment_id, a.dispatch_msg_id, i.alias"
     " FROM assignments a"
