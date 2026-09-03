@@ -58,7 +58,8 @@ class Harness:
     would have been sent.
     """
 
-    def __init__(self, tmp_path, behind=0, bots_at="runtime/bots"):
+    def __init__(self, tmp_path, behind=0, bots_at="runtime/bots",
+                 tag_at_seed=None, tag_after=None):
         self.origin = str(tmp_path / "origin")
         self.root = str(tmp_path / "root")
         self.capture = str(tmp_path / "tg-capture")
@@ -66,11 +67,19 @@ class Harness:
         os.makedirs(self.origin)
         _git(self.origin, "init", "-b", "main")
         _commit(self.origin, "seed")
+        # A tag at seed is inherited by the clone, so it sits at the root's
+        # HEAD: the release-gap shape (on the newest release, main has moved).
+        if tag_at_seed:
+            _git(self.origin, "tag", tag_at_seed)
         subprocess.run(
             GIT + ["clone", self.origin, self.root], check=True, capture_output=True
         )
         for i in range(behind):
             _commit(self.origin, f"ahead-{i}")
+        # A tag landing AFTER the clone is one the root is behind: the
+        # behind-a-cut-release shape. notify-behind fetches --tags to see it.
+        if tag_after:
+            _git(self.origin, "tag", tag_after)
 
         os.makedirs(os.path.join(self.root, "lib"), exist_ok=True)
         _write_exec(os.path.join(self.root, "lib", "tg-post.sh"), TG_STUB)
@@ -319,3 +328,145 @@ class TestFleetSignalPrimitives:
         assert len(lines) == 1
         assert "FLEET NOTICE [heads_up]: fyi" in lines[0]
         assert '"source":"notice"' in h.events()
+
+
+# tg-post's real rejected-send shape: HTTP 200 with {"ok":false}, which the
+# script parses into exit 3 plus a diagnostic on stderr. The success stub
+# (TG_STUB) cannot exercise the branch that matters here.
+TG_STUB_REJECTED = (
+    "#!/bin/bash\n"
+    'printf "%s|%s|%s\\n" "$TELEGRAM_GROUP_CHAT_ID" "$TELEGRAM_STATE_DIR" "$1" >> "$TG_CAPTURE"\n'
+    'echo "tg-post: send REJECTED — message NOT delivered'
+    ' (ok=false; error: Unauthorized)" >&2\n'
+    "exit 3\n"
+)
+
+
+class TestCurrencyOutcomeIsLogged:
+    """The log must record what DELIVERY actually did, not that an attempt was
+    about to be made.
+
+    The defect these pin: notify-behind wrote "notice raised" to the log and
+    only then called notify_currency, whose verdict it never read. The two
+    artifacts then disagreed — the log a human audits said success while the
+    journal carried ALERT-DELIVERY-FAILED — and the only artifact that would
+    reveal a dead channel was the one asserting there was nothing wrong.
+
+    Three outcomes, deliberately distinguished, because collapsing any two
+    re-creates the bug: delivered, raised-but-undelivered, and suppressed by
+    the debounce (which raised nothing at all).
+    """
+
+    def _reject(self, h):
+        _write_exec(os.path.join(h.root, "lib", "tg-post.sh"), TG_STUB_REJECTED)
+
+    def _log(self, h):
+        p = os.path.join(h.root, "state", "notify-behind.log")
+        return open(p).read() if os.path.exists(p) else ""
+
+    def test_delivered_send_is_logged_as_delivered(self, tmp_path):
+        h = Harness(tmp_path, behind=2)
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        assert len(h.captured()) == 1, "precondition: the send was attempted"
+        assert "notice DELIVERED" in self._log(h)
+
+    def test_rejected_send_is_not_logged_as_delivered(self, tmp_path):
+        # The headline defect. A dead token must never leave a log line a human
+        # would audit as a correctly-escalated notice.
+        h = Harness(tmp_path, behind=2)
+        self._reject(h)
+        r = h.run()
+        assert r.returncode == 0, r.stderr
+        log = self._log(h)
+        assert "NOT DELIVERED" in log
+        assert "notice DELIVERED" not in log
+        # The old text is the specific lie; it must not survive anywhere.
+        assert "notice raised" not in log
+
+    def test_rejected_send_still_reports_the_distance(self, tmp_path):
+        # The behind-count is factual regardless of delivery; fixing the
+        # outcome clause must not cost the operator the measurement.
+        h = Harness(tmp_path, behind=2)
+        self._reject(h)
+        assert h.run().returncode == 0
+        assert "BEHIND" in self._log(h) and "2" in self._log(h)
+
+    def test_debounced_tick_is_not_logged_as_raised(self, tmp_path):
+        # Second run inside the renotify window raises nothing at all. Logging
+        # it as a raised notice inflates the apparent escalation count with
+        # notices that were never sent.
+        h = Harness(tmp_path, behind=2)
+        assert h.run().returncode == 0
+        first = self._log(h)
+        assert h.run().returncode == 0
+        second = self._log(h)[len(first):]
+        assert len(h.captured()) == 1, "precondition: the second tick sent nothing"
+        assert "SUPPRESSED" in second
+        assert "DELIVERED" not in second
+
+    def test_release_gap_site_reports_its_outcome(self, tmp_path):
+        # The third site (source_release_gap) carried the same defect and is
+        # reached only when a tag sits at HEAD while main has moved.
+        h = Harness(tmp_path, behind=2, tag_at_seed="v1.0.0")
+        self._reject(h)
+        assert h.run().returncode == 0
+        log = self._log(h)
+        assert "release-gap notice" in log
+        assert "NOT DELIVERED" in log
+        assert "notice raised" not in log
+
+    def test_behind_tag_site_reports_its_outcome(self, tmp_path):
+        # The second site: behind a cut release.
+        h = Harness(tmp_path, behind=2, tag_after="v2.0.0")
+        self._reject(h)
+        assert h.run().returncode == 0
+        log = self._log(h)
+        assert "BEHIND TAG v2.0.0" in log
+        assert "NOT DELIVERED" in log
+        assert "notice raised" not in log
+
+
+class TestCurrencyOutcomeDoesNotLeak:
+    """_ALERT_DELIVERED is a shell global set inside _emit_fleet_signal, so it
+    survives across loop iterations. notify_currency must therefore report
+    per-call, never whatever the previous repo left behind — otherwise a
+    suppressed notice inherits the prior repo's success and the fix reproduces
+    the original lie one layer down.
+    """
+
+    def _probe(self, tmp_path, script):
+        h = Harness(tmp_path, behind=0)
+        bots_dir = os.path.join(h.root, "runtime", "bots")
+        state_dir = os.path.join(h.root, "state", "currency")
+        os.makedirs(state_dir, exist_ok=True)
+        body = (
+            f'. "{LIB_COMMON}"\n'
+            f'BOTS_DIR="{bots_dir}"\nSTATE_DIR="{state_dir}"\n' + script
+        )
+        r = subprocess.run(
+            ["bash", "-c", body], env=h.env(), capture_output=True, text=True
+        )
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+
+    def test_delivered_then_suppressed_reports_suppressed(self, tmp_path):
+        out = self._probe(
+            tmp_path,
+            'notify_currency repoA source_behind 1 "msg A"\n'
+            'echo "first=$_CURRENCY_OUTCOME"\n'
+            # Same repo+event+distinct: the debounce marker suppresses this one.
+            'notify_currency repoA source_behind 1 "msg A"\n'
+            'echo "second=$_CURRENCY_OUTCOME"\n',
+        )
+        assert "first=delivered" in out
+        assert "second=suppressed" in out
+
+    def test_fired_flag_is_reset_per_call(self, tmp_path):
+        out = self._probe(
+            tmp_path,
+            'notify_currency repoA source_behind 1 "msg A"\n'
+            'notify_currency repoA source_behind 1 "msg A"\n'
+            'echo "fired=$_DEBOUNCE_FIRED"\n',
+        )
+        assert "fired=0" in out
