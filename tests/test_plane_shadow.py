@@ -439,3 +439,25 @@ def test_brief_carries_the_streaks_and_degrades_on_silence(tmp_path):
     (root / "state" / "plane" / "plane.db").unlink()
     b3 = build_brief(fleet, paths, "w1", now)
     assert b3["shadow"] == {} and any(x["field"] == "shadow" and x["mode"] == "omitted" for x in b3["degraded"])
+
+
+def test_a_future_deadline_is_open_but_not_overdue_on_both_sides(tmp_path):
+    root, paths, d, r = _scene(tmp_path)
+    now = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
+    future = int((now + timedelta(days=2)).timestamp())
+    row = _drow("2026-09-02T13:00:00Z", "t-7-7777", expected_by=future)
+    row["dispatched_at"] = _epoch("2026-09-02T13:00:00Z")
+    _live_dispatch(root, "7", "t-7-7777", ts="2026-09-02T13:00:00Z",
+                   expected_by=datetime.fromtimestamp(future, timezone.utc).isoformat())
+    d.append(row)
+    _write(dispatch_ledger_path(paths), d)
+    doors = load_dispatch_doors(paths)
+    with _ro(root) as conn:
+        open_ids = [x.task_id for x in sh.plane_open(conn, F, "w1")]
+        over = [x.task_id for x in sh.plane_overdue(conn, F, "w1", now=now,
+                                                     max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S,
+                                                     progress_grace_s=0)]
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = [x.task_id for x in sh.legacy_overdue(doors, "w1", dl, rl, now=now,
+                                                         max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S)]
+    assert "t-7-7777" in open_ids and "t-7-7777" not in over and over == legacy == ["t-2-bbbb"]

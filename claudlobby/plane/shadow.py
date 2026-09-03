@@ -205,14 +205,15 @@ def plane_overdue(conn: sqlite3.Connection, fleet: str, bot: str, *, now: dateti
 
 def legacy_overdue(doors, bot: str, dispatch_log: str, report_ledger: str, *,
                    now: datetime, max_age_s: int) -> list[OpenRow]:
-    """The legacy watchdog answer through the INSTALL's matcher: overdue ∪
-    orphans for the bot (no bots dir, so nothing is split off as an orphan —
-    the plane cannot see a spawn either). The progress grace is the
-    matcher's own (DISPATCH_PROGRESS_GRACE_S or its default)."""
-    overdue, orphans = doors._classify_all(dispatch_log, report_ledger,
-                                           int(now.timestamp()), max_age_s, None)
-    rows = overdue.get(bot.lower(), []) + orphans.get(bot.lower(), [])
-    rows.sort(key=lambda t: t[0])
+    """The legacy watchdog answer through the INSTALL's matcher, with NO bots
+    dir: the orphan split is a host-local `.spawn` fact the plane cannot see
+    (J1: orphans stay hybrid), and without a bots dir the matcher never
+    splits one off — every past-deadline row is in its overdue set, which
+    is the union the comparison wants. The progress grace is the matcher's
+    own (DISPATCH_PROGRESS_GRACE_S or its default)."""
+    overdue, _never_split = doors._classify_all(dispatch_log, report_ledger,
+                                                int(now.timestamp()), max_age_s, None)
+    rows = sorted(overdue.get(bot.lower(), []), key=lambda t: t[0])
     return [OpenRow(None if tid == "-" else str(tid), epoch_iso(da) or "")
             for da, _exp, _late, tid in rows]
 
