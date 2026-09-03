@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — cutover Phase B1: the bot-events ledger moves to the plane as a direct move (#1444)
+
+- `emit_fleet_event` (lib-common) lands every fleet event on the plane FIRST — a system event anchored on the bot's actor (or the fleet) by ALIAS, its detail `{source, legacy_ts, data}` so `plane-readers.fleet_events` re-renders the legacy row byte for byte — and retires its JSONL append behind `PLANE_LEGACY_WRITE_EVENTS=0` on the four facts; every `emit_fleet_event` type registered with its severity (critical = `CRITICAL_TYPES`); `CHATTY_SYSTEM_EVENTS` named for the retention lane (never a critical type).
+- `claudlobby events`, brief's alerts, fleet-pulse's escalation loop + summary + read-back follow the `events` flip (`PLANE_READ_EVENTS` AND a `cutover_declared`); unreachable refuses (rc 3 / `degraded[]` / `not judged this pass`). `plane-lookup.py --declared <reader>`, `--events`, `--escalation <type>`; `plane-readers.since_form` (a window start in the stored form).
+- `plane cutover --reader events` declares as a DIRECT MOVE (no shadow — operator ruling 2026-09-03): the record says `shadowed: false`, `gate_met: null`, the ruling as the reason. `--retire-writes` waits on it and prints `PLANE_LEGACY_WRITE_EVENTS=0`; the fleet-pulse unit carries `PLANE_READ_EVENTS`.
+- `tests/test_plane_cutover_events.py`: the real door (both anchors, the four facts including a failed emission), the readers on both sides of the flip, and a real `fleet-pulse.sh` sweep paging from the plane after the files are retired.
 ### Fixed — the cutover shadow explains what the plane knows better; a control dispatch carries no plane deadline (#1444)
 
 - Two explained divergence classes: `plane_superseded` (the plane's door landed `superseded` on a legacy-open row — a re-dispatch to ANOTHER bot, which the legacy matcher does not honour, #1357) and `plane_idless` (a plane-only sha-keyed construct the ledger cannot name). The heads are compared past the structurally explained rows; the shadow's open list is id'd rows only, mirroring `plane-readers.open_rows`. Measured live: one bot paged every ten minutes for a task the fleet had moved to another bot.
