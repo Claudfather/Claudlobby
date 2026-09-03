@@ -25,6 +25,20 @@ def db_path(root: Path) -> Path:
     return p
 
 
+def open_ro(root: Path, *, timeout: float = 5.0) -> tuple[sqlite3.Connection | None, str | None]:
+    """The exists-before-connect probe every read door shares: a read-only
+    connection, or ``(None, reason)`` when the db is absent or cannot be
+    opened — the caller prints or degrades, never guesses. ``db_file`` is a
+    pure join, so a refusal leaves no directory behind."""
+    path = db_file(root)
+    if not path.is_file():
+        return None, f"no plane db at {path}"
+    try:
+        return connect_ro(path, timeout=timeout), None
+    except sqlite3.Error as exc:
+        return None, f"plane db unreadable: {exc}"
+
+
 def connect_ro(path: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
     """Read-only, and the file must ALREADY exist: ``connect`` auto-creates a
     db, so a read door on a typo'd root would otherwise open an empty plane

@@ -50,6 +50,22 @@ licenses flipping the resolver. ``--replay-hours`` re-derives both answers
 at past instants (both readers are deadline-blind, so the open set at
 instant T is dispatches ≤ T minus closures ≤ T) and records them, so the
 gate does not start from zero the day shadow arms.
+
+Chunk 4 adds the second reader and the two consumers. ``reader=overdue``
+shadows the WATCHDOG's question (``dispatch-overdue.py --all``) rule for
+rule — deadline passed, the #460 expiry cap, the bot's own ``progress``
+inside the grace — with the cap and the grace resolved the way the
+watchdog resolves them (``DISPATCH_OVERDUE_MAX_AGE_S``,
+``DISPATCH_PROGRESS_GRACE_S``); the legacy side is read with no bots dir,
+so nothing is split off as an orphan — the split is a host-local
+``.spawn`` fact the plane cannot see (J1: orphans stay hybrid), and
+``--unassigned`` has no plane counterpart yet: neither is shadowed. A
+legacy row whose deadline is not an int is dropped by the watchdog and
+kept by the plane — ``legacy_malformed_deadline``, explained, never
+paging. Records and streaks are keyed by ``data.reader``. ``plane shadow
+--check`` (and its stdlib twin ``lib/plane-shadow-check.py``, the one the
+fleet's watchdog runs) answers the fleet-pulse bridge: a (bot, reader)
+whose LATEST recorded comparison diverged; ``brief`` carries the streaks.
 """
 
 from __future__ import annotations
@@ -69,7 +85,9 @@ from .queries import OPEN_ASSIGNMENTS_AT_SQL
 
 EVENT_CLEAN = "shadow_parity_clean"
 EVENT_DIVERGED = "shadow_parity_diverged"
-READER = "open"
+READER_OPEN = "open"          # dispatch-overdue.py --open / --open-task: the deadline-blind list
+READER_OVERDUE = "overdue"    # dispatch-overdue.py --all: the watchdog's input (overdue ∪ orphans)
+READERS = (READER_OPEN, READER_OVERDUE)
 DEFAULT_SKEW_S = 600
 GATE_CLEAN_RUN = 20
 GATE_TRANSITIONS = 1
@@ -79,6 +97,7 @@ DIVERGENCE_CAP = 40     # divergences listed in a record; the count carries the 
 
 CLASS_SKEW = "skew"
 CLASS_LEGACY_SUPERSEDES = "legacy_supersedes_pre_cutover"
+CLASS_LEGACY_MALFORMED = "legacy_malformed_deadline"   # the ledger row's deadline is not an int
 CLASS_INTENTIONAL = "intentional"
 CLASS_DIVERGENCE = "divergence"
 
@@ -104,6 +123,7 @@ class OpenRow:
     task_id: Optional[str]          # legacy id (None for a plane assignment without one)
     at: str                         # dispatched instant, ISO (ts19-comparable)
     ref: Optional[str] = None       # the plane's own id when there is no task id
+    expected_by: Optional[str] = None
 
     @property
     def label(self) -> str:
@@ -120,13 +140,14 @@ def plane_open(conn: sqlite3.Connection, fleet: str, bot: str, *,
     uids = [r[0] for r in conn.execute(ACTOR_UIDS_SQL, (f"bot:{fleet}/{bot}",))]
     out: list[OpenRow] = []
     for uid in uids:
-        for occurred_at, source_ref, assignment_id in conn.execute(
+        for occurred_at, source_ref, assignment_id, expected_by in conn.execute(
                 OPEN_ASSIGNMENTS_AT_SQL, (uid, at, at, at, at, at, at)):
             task_id = None
             if source_ref and source_ref.startswith(f"{DISPATCH}:") \
                     and not source_ref.startswith(f"{DISPATCH}:sha:"):
                 task_id = source_ref[len(DISPATCH) + 1:]
-            out.append(OpenRow(task_id, str(occurred_at or ""), assignment_id))
+            out.append(OpenRow(task_id, str(occurred_at or ""), assignment_id,
+                               str(expected_by) if expected_by else None))
     out.sort(key=lambda r: r.at)
     return out
 
@@ -159,6 +180,87 @@ def legacy_open(doors, bot: str, dispatch_log: str, report_ledger: str) -> list[
             for da, _exp, tid in doors.open_dispatches(bot, dispatch_log, report_ledger)]
 
 
+LAST_PROGRESS_SQL = (
+    "SELECT MAX(e.occurred_at) FROM events e WHERE e.kind = 'task' AND e.event = 'progress'"
+    " AND e.actor_uid = ? AND e.occurred_at <= ?"
+)
+
+
+def plane_overdue(conn: sqlite3.Connection, fleet: str, bot: str, *, now: datetime,
+                  max_age_s: int, progress_grace_s: int,
+                  rows: Optional[list[OpenRow]] = None,
+                  uid: Optional[str] = None) -> list[OpenRow]:
+    """The plane's answer to the WATCHDOG's question, mirroring the legacy
+    ``_classify_all`` rule for rule: open (by task id) as of *now*, deadline
+    passed, not older than *max_age_s* (the #460 expiry cap), and not shielded
+    by the bot's own ``progress`` report inside *progress_grace_s* (the legacy
+    grace keys on the BOT's last progress, not the row's). The orphan split is
+    host-local (a `.spawn` file) and invisible to the plane, so the legacy
+    side of this comparison is overdue ∪ orphans (J1: orphans stay hybrid)."""
+    at = dt_iso(now)
+    if rows is None:                             # the open reader's rows, when a caller has them
+        rows = plane_open(conn, fleet, bot, at=at)
+    if uid is None:
+        uid = actor_uid(conn, f"bot:{fleet}/{bot}")
+    last_progress = None
+    if uid and progress_grace_s > 0:
+        row = conn.execute(LAST_PROGRESS_SQL, (uid, at)).fetchone()
+        last_progress = row[0] if row and row[0] else None
+    out: list[OpenRow] = []
+    for r in rows:
+        if not r.expected_by or ts19(r.expected_by) >= ts19(at):
+            continue
+        try:
+            dispatched = datetime.fromisoformat(r.at)
+        except ValueError:
+            continue
+        if max_age_s > 0 and (now - dispatched).total_seconds() > max_age_s:
+            continue
+        if last_progress and ts19(r.at) < ts19(last_progress) <= ts19(at) \
+                and (now - datetime.fromisoformat(last_progress)).total_seconds() <= progress_grace_s:
+            continue
+        out.append(r)
+    return out
+
+
+def malformed_deadlines(doors, bot: str, dispatch_log: str) -> set[str]:
+    """Task ids of the bot's ledger rows the watchdog DROPS for a deadline or
+    dispatch instant that is not an int (``_classify_all``'s first gate) —
+    the plane keeps its own copy of the row, so the overdue comparison
+    explains the resulting plane-only row rather than paging on it."""
+    out: set[str] = set()
+    for d in doors._load_jsonl(dispatch_log):
+        if str(d.get("bot", "")).lower() != bot.lower() or not d.get("task_id"):
+            continue
+        if not isinstance(d.get("expected_by"), int) or not isinstance(d.get("dispatched_at"), int):
+            out.add(str(d["task_id"]))
+    return out
+
+
+def legacy_overdue_all(doors, dispatch_log: str, report_ledger: str, *,
+                       now: datetime, max_age_s: int) -> dict[str, list[OpenRow]]:
+    """Every bot's legacy overdue set in ONE classification (the matcher
+    reads both ledgers once and answers for all bots), keyed by the
+    matcher's lower-cased bot key — the shape a per-instant loop wants."""
+    overdue, _never_split = doors._classify_all(dispatch_log, report_ledger,
+                                                int(now.timestamp()), max_age_s, None)
+    return {b: [OpenRow(None if tid == "-" else str(tid), epoch_iso(da) or "")
+                for da, _exp, _late, tid in sorted(rows, key=lambda t: t[0])]
+            for b, rows in overdue.items()}
+
+
+def legacy_overdue(doors, bot: str, dispatch_log: str, report_ledger: str, *,
+                   now: datetime, max_age_s: int) -> list[OpenRow]:
+    """The legacy watchdog answer through the INSTALL's matcher, with NO bots
+    dir: the orphan split is a host-local `.spawn` fact the plane cannot see
+    (J1: orphans stay hybrid), and without a bots dir the matcher never
+    splits one off — every past-deadline row is in its overdue set, which
+    is the union the comparison wants. The progress grace is the matcher's
+    own (DISPATCH_PROGRESS_GRACE_S or its default)."""
+    return legacy_overdue_all(doors, dispatch_log, report_ledger,
+                              now=now, max_age_s=max_age_s).get(bot.lower(), [])
+
+
 def superseded_by_bot(doors, dispatch_path: Path) -> dict[str, set[str]]:
     """Task ids the JSONL retired by a same-bot ``--supersedes``, per bot
     (lower-cased key, the matcher's own) — the matcher's own rule, read from
@@ -187,6 +289,7 @@ class ShadowDiff:
     legacy_ids: list[str]
     plane_ids: list[Optional[str]]
     divergences: list[Divergence] = field(default_factory=list)
+    reader: str = READER_OPEN
 
     @property
     def head_legacy(self) -> Optional[str]:
@@ -220,13 +323,15 @@ class ShadowDiff:
 
 
 def _classify(row: OpenRow, side: str, grace: str, superseded: set[str],
-              intentional: set[str]) -> str:
+              intentional: set[str], malformed: set[str] = frozenset()) -> str:
     """ONE classifier for both sides — a class added to one loop and
     forgotten in the other is the #1357 shape."""
     if row.task_id in intentional:
         return CLASS_INTENTIONAL
     if side == "plane_only" and row.task_id in superseded:
         return CLASS_LEGACY_SUPERSEDES
+    if side == "plane_only" and row.task_id in malformed:
+        return CLASS_LEGACY_MALFORMED
     if ts19(row.at) >= grace:
         return CLASS_SKEW
     return CLASS_DIVERGENCE
@@ -235,16 +340,19 @@ def _classify(row: OpenRow, side: str, grace: str, superseded: set[str],
 def diff(fleet: str, bot: str, legacy: list[OpenRow], plane: list[OpenRow], *,
          now: datetime, skew_s: int = DEFAULT_SKEW_S,
          superseded: Optional[set[str]] = None,
-         intentional: Optional[set[str]] = None) -> ShadowDiff:
+         intentional: Optional[set[str]] = None,
+         reader: str = READER_OPEN,
+         malformed: Optional[set[str]] = None) -> ShadowDiff:
     """Pure: the two answers in, the classified disagreement out. Ids are
     compared as MULTISETS (a redispatched task id is two open rows on both
     sides) and the heads as the two lists' first elements."""
     superseded = superseded or set()
     intentional = intentional or set()
+    malformed = malformed or set()
     grace = ts19(dt_iso(now - timedelta(seconds=skew_s)))
     out = ShadowDiff(fleet, bot, dt_iso(now),
                      [r.task_id or "" for r in legacy],
-                     [r.task_id for r in plane])
+                     [r.task_id for r in plane], reader=reader)
     plane_pool = list(plane)
     for row in legacy:
         match = next((p for p in plane_pool if p.task_id == row.task_id), None)
@@ -253,11 +361,11 @@ def diff(fleet: str, bot: str, legacy: list[OpenRow], plane: list[OpenRow], *,
             continue
         out.divergences.append(Divergence(
             row.task_id, "legacy_only",
-            _classify(row, "legacy_only", grace, superseded, intentional), row.label))
+            _classify(row, "legacy_only", grace, superseded, intentional, malformed), row.label))
     for row in plane_pool:
         out.divergences.append(Divergence(
             row.task_id, "plane_only",
-            _classify(row, "plane_only", grace, superseded, intentional), row.label))
+            _classify(row, "plane_only", grace, superseded, intentional, malformed), row.label))
     return out
 
 
@@ -282,7 +390,7 @@ def shadow_event(d: ShadowDiff, *, subject_uid: Optional[str] = None) -> dict:
     adverse selection against the evidence the gate exists to see."""
     alias = f"bot:{d.fleet}/{d.bot}"
     data = {
-        "reader": READER,
+        "reader": d.reader,
         "bot": alias,
         "at": d.at,
         "legacy_n": len(d.legacy_ids),
@@ -303,7 +411,7 @@ def shadow_event(d: ShadowDiff, *, subject_uid: Optional[str] = None) -> dict:
         "emitter": "plane-shadow",
         "fleet": d.fleet,
         "occurred_at": d.at,
-        "event_id": derive_uid("ev", f"shadow:{READER}:{alias}:{d.at}"),
+        "event_id": derive_uid("ev", f"shadow:{d.reader}:{alias}:{d.at}"),
         "payload": {
             "event": EVENT_CLEAN if d.clean else EVENT_DIVERGED,
             **({"subject_kind": "actor", "subject_uid": subject_uid, "subject_alias": alias}
@@ -318,6 +426,7 @@ def shadow_event(d: ShadowDiff, *, subject_uid: Optional[str] = None) -> dict:
 @dataclass
 class Streak:
     bot: str
+    reader: str = READER_OPEN
     comparisons: int = 0
     clean_run: int = 0            # consecutive clean comparisons at the tail
     transitions: int = 0          # open→closed transitions seen inside the clean run
@@ -328,9 +437,15 @@ class Streak:
     def gate_ok(self) -> bool:
         return self.clean_run >= GATE_CLEAN_RUN and self.transitions >= GATE_TRANSITIONS
 
+    @property
+    def latest_diverged(self) -> bool:
+        """The newest record ended the run at once: the bridge's question,
+        derived from the same tail the gate reads rather than a second query."""
+        return self.comparisons > 0 and self.clean_run == 0 and self.last_diverged_at is not None
+
     def line(self) -> str:
         mark = "met" if self.gate_ok else "NOT met"
-        return (f"{self.bot}: clean_run={self.clean_run}/{GATE_CLEAN_RUN}"
+        return (f"{self.bot} [{self.reader}]: clean_run={self.clean_run}/{GATE_CLEAN_RUN}"
                 f" transitions={self.transitions}/{GATE_TRANSITIONS}"
                 f" comparisons={self.comparisons}"
                 f" last_diverged={self.last_diverged_at or '-'} -> {mark}")
@@ -344,14 +459,18 @@ class Streak:
 # so it is only evaluated for an intact record; CASE short-circuits.
 _KEY = ("COALESCE(CASE WHEN e.detail_truncated = 0 THEN json_extract(e.detail, '$.bot') END,"
         " e.subject_alias)")
+# A record's reader; a truncated record has none and counts for EVERY reader
+# (conservative: a truncated divergence ends every run, never none).
+_READER = ("(e.detail_truncated = 1 OR"
+           f" COALESCE(json_extract(e.detail, '$.reader'), '{READER_OPEN}') = ?)")
 TAIL_SQL = (
     "SELECT e.event, e.occurred_at, e.detail, e.detail_truncated FROM events e"
-    f" WHERE e.kind = 'system' AND e.event IN (?, ?) AND {_KEY} = ?"
+    f" WHERE e.kind = 'system' AND e.event IN (?, ?) AND {_KEY} = ? AND {_READER}"
     " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT ?"
 )
 COUNT_SQL = (
     "SELECT COUNT(*) FROM events e"
-    f" WHERE e.kind = 'system' AND e.event IN (?, ?) AND {_KEY} = ?"
+    f" WHERE e.kind = 'system' AND e.event IN (?, ?) AND {_KEY} = ? AND {_READER}"
 )
 SHADOWED_BOTS_SQL = (
     f"SELECT DISTINCT {_KEY} FROM events e"
@@ -359,16 +478,17 @@ SHADOWED_BOTS_SQL = (
 )
 
 
-def streak(conn: sqlite3.Connection, fleet: str, bot: str) -> Streak:
+def streak(conn: sqlite3.Connection, fleet: str, bot: str,
+           reader: str = READER_OPEN) -> Streak:
     """Derived from the recorded comparisons, newest first, reading only
     the tail (``TAIL_LIMIT``) — the gate is about the run at the end, never
     the history. A transition is an id present in one clean comparison's
     open set and absent from the next clean one — the join being exercised,
     not merely re-read; a divergence ends the run, truncated or not."""
     alias = f"bot:{fleet}/{bot}"
-    s = Streak(bot)
-    s.comparisons = conn.execute(COUNT_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias)).fetchone()[0]
-    tail = conn.execute(TAIL_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, TAIL_LIMIT)).fetchall()
+    s = Streak(bot, reader)
+    s.comparisons = conn.execute(COUNT_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, reader)).fetchone()[0]
+    tail = conn.execute(TAIL_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, reader, TAIL_LIMIT)).fetchall()
     if tail:
         s.last_at = tail[0][1]
     run: list[Optional[list]] = []            # the tail's clean comparisons, newest first
@@ -427,10 +547,22 @@ def record(root: Path, events: list[dict]) -> dict[str, int]:
 
 
 def gate_summary(conn: sqlite3.Connection, fleet: str,
-                 roster: Optional[list[str]] = None) -> list[Streak]:
-    """One streak per bot — every bot on *roster* (the declared fleet) plus
-    any recorded one. A declared bot with NO comparison recorded is short,
-    named as such, never absent: an absence read as clean is the
+                 roster: Optional[list[str]] = None,
+                 readers: tuple[str, ...] = READERS) -> list[Streak]:
+    """One streak per (bot, reader) — every bot on *roster* (the declared
+    fleet) plus any recorded one. A declared bot with NO comparison recorded
+    is short, named as such, never absent: an absence read as clean is the
     ``source_state`` class."""
     bots = sorted(set(roster or []) | set(shadowed_bots(conn, fleet)))
-    return [streak(conn, fleet, b) for b in bots]
+    return [streak(conn, fleet, b, r) for b in bots for r in readers]
+
+
+def latest_diverged(conn: sqlite3.Connection, fleet: str, roster: list[str],
+                    readers: tuple[str, ...] = READERS) -> list[tuple[str, str, str]]:
+    """(bot, reader, at) for every (bot, reader) whose LATEST recorded
+    comparison diverged — the fleet-pulse bridge's question, read off the
+    same streaks the gate uses. A diverged record means an unexplained
+    divergence OR a head disagreement; explained-only divergences with
+    agreeing heads record as clean and never page."""
+    return [(st.bot, st.reader, st.last_diverged_at or "")
+            for st in gate_summary(conn, fleet, roster, readers) if st.latest_diverged]

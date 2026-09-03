@@ -49,9 +49,11 @@ def _epoch(iso):
 def _dispatch(root, n, task_id, ts, *, bot="w1", ledger):
     """One dispatch on BOTH sides: the live door's three plane events (the
     chunk-2 helper) + the ledger row with a real epoch-int dispatched_at."""
-    wi, asg, msg = _live_dispatch(root, n, task_id, ts=ts, bot=bot)
-    row = _drow(ts, task_id, bot=bot, plane=(msg, wi, asg))
+    row = _drow(ts, task_id, bot=bot)
     row["dispatched_at"] = _epoch(ts)
+    deadline = datetime.fromtimestamp(row["expected_by"], timezone.utc).isoformat()
+    wi, asg, msg = _live_dispatch(root, n, task_id, ts=ts, bot=bot, expected_by=deadline)
+    row["plane_msg_id"], row["plane_work_item_id"], row["plane_assignment_id"] = msg, wi, asg
     ledger.append(row)
     return wi, asg
 
@@ -214,7 +216,7 @@ def test_the_gate_needs_a_clean_run_with_a_transition(tmp_path):
         assert s.clean_run == 0 and s.transitions == 0 and not s.gate_ok
         assert s.last_diverged_at and s.comparisons == sh.GATE_CLEAN_RUN + 2
         assert sh.shadowed_bots(conn, F) == ["w1"]
-        summary = sh.gate_summary(conn, F, ["w1", "w2"])   # w2 declared, never compared: SHORT
+        summary = sh.gate_summary(conn, F, ["w1", "w2"], readers=(sh.READER_OPEN,))   # w2 declared, never compared: SHORT
         assert [(x.bot, x.comparisons, x.gate_ok) for x in summary] == [("w1", 22, False), ("w2", 0, False)]
 
 
@@ -296,12 +298,12 @@ def test_cli_compares_records_and_gates(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     r = _cli(root, "--record", "--replay-hours", "2")
     assert r.returncode == 0, r.stderr + r.stdout
-    assert "2 bot(s) x 3 instant(s): 6 clean, 0 diverged" in r.stdout
-    assert "recorded: committed=6" in r.stdout
+    assert "2 bot(s) x 2 reader(s) x 3 instant(s): 12 clean, 0 diverged" in r.stdout
+    assert "recorded: committed=12" in r.stdout
     again = _cli(root, "--record", "--replay-hours", "2")
-    assert "committed=2 duplicate=4" in again.stdout        # the hour marks replay as duplicates
+    assert "committed=4 duplicate=8" in again.stdout        # the hour marks replay as duplicates
     g = _cli(root, "--gate")
-    assert g.returncode == 1 and "NOT met" in g.stdout and "w2:" in g.stdout   # 4 comparisons, no transition
+    assert g.returncode == 1 and "NOT met" in g.stdout and "w2 [open]:" in g.stdout   # 4 comparisons, no transition
     assert _cli(root, "--bot", "nobody").returncode == 2                        # not on the roster
     assert _cli(root, "--intentional", "t-1-aaaa, t-2-bbbb").returncode == 0    # spaces tolerated
 
@@ -328,3 +330,203 @@ def test_the_launcher_is_dormant_and_the_job_is_composed_unarmed(tmp_path):
     assert subprocess.run(["bash", "-n", str(REPO / "lib" / "plane-shadow.sh")]).returncode == 0
     sysyaml = (REPO / "claudlobby" / "system.yaml").read_text()
     assert "plane-shadow:" in sysyaml and 'script: "$CLAUDLOBBY_ROOT/lib/plane-shadow.sh"' in sysyaml
+
+
+# --- chunk 4: the overdue reader, the check, the bridge, brief -----------------
+
+def test_the_overdue_reader_agrees_and_mirrors_the_watchdog_rules(tmp_path):
+    """Both answers to the watchdog's question on one fixture: a past
+    deadline is overdue on both sides; a report closes it on both; a
+    progress report inside the grace shields it on both; the expiry cap
+    drops an ancient one on both."""
+    root, paths, d, r = _scene(tmp_path)
+    now = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
+    doors = load_dispatch_doors(paths)
+    max_age = doors.DEFAULT_OVERDUE_MAX_AGE_S
+    grace = doors._resolve_progress_grace()
+    # t-2 (dispatched 09-02 10:00, expected_by from the fixture = 1788000000 = 08-29): overdue
+    with _ro(root) as conn:
+        plane = sh.plane_overdue(conn, F, "w1", now=now, max_age_s=max_age, progress_grace_s=grace)
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = sh.legacy_overdue(doors, "w1", dl, rl, now=now, max_age_s=max_age)
+    assert [x.task_id for x in legacy] == ["t-2-bbbb"] == [x.task_id for x in plane]
+    assert sh.diff(F, "w1", legacy, plane, now=now, reader=sh.READER_OVERDUE).clean
+    # a progress report by w1 inside the grace shields the row on both sides
+    prog_at = now - timedelta(seconds=min(grace, 600) // 2)
+    wi2, asg2 = f"wi_{'2':0>32}", f"asg_{'2':0>32}"
+    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
+                       "source_ref": f"report-back:msg_{'8':0>32}", "occurred_at": sh.dt_iso(prog_at),
+                       "payload": {"work_item_id": wi2, "assignment_id": asg2, "event": "progress",
+                                   "actor": f"bot:{F}/w1", "progress": 10}}])
+    r.append({**_rrow(sh.dt_iso(prog_at), "t-2-bbbb", "progress", progress="10"), "ts": sh.dt_iso(prog_at).replace("+00:00", "Z")})
+    _write(report_ledger_path(paths), r)
+    with _ro(root) as conn:
+        plane = sh.plane_overdue(conn, F, "w1", now=now, max_age_s=max_age, progress_grace_s=grace)
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = sh.legacy_overdue(doors, "w1", dl, rl, now=now, max_age_s=max_age)
+    assert legacy == [] and plane == []
+    # far later, the expiry cap drops the ancient row on both sides
+    later = now + timedelta(days=30)
+    with _ro(root) as conn:
+        plane = sh.plane_overdue(conn, F, "w1", now=later, max_age_s=max_age, progress_grace_s=grace)
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = sh.legacy_overdue(doors, "w1", dl, rl, now=later, max_age_s=max_age)
+    assert legacy == [] and plane == []
+
+
+def test_records_and_streaks_are_keyed_by_reader(tmp_path):
+    root = _root(tmp_path)
+    t0 = NOW - timedelta(hours=5)
+    d_open = sh.ShadowDiff(F, "w1", sh.dt_iso(t0), ["t-1-aaaa"], ["t-1-aaaa"], reader=sh.READER_OPEN)
+    d_over = sh.ShadowDiff(F, "w1", sh.dt_iso(t0), ["t-1-aaaa"], [], reader=sh.READER_OVERDUE)
+    assert sh.shadow_event(d_open)["event_id"] != sh.shadow_event(d_over)["event_id"]
+    sh.record(root, [sh.shadow_event(d_open), sh.shadow_event(d_over)])
+    with _ro(root) as conn:
+        assert sh.streak(conn, F, "w1", sh.READER_OPEN).clean_run == 1
+        s_over = sh.streak(conn, F, "w1", sh.READER_OVERDUE)
+        assert s_over.clean_run == 0 and s_over.last_diverged_at
+        assert sh.latest_diverged(conn, F, ["w1"]) == [("w1", sh.READER_OVERDUE, sh.dt_iso(t0))]
+        pairs = {(x.bot, x.reader): x.gate_ok for x in sh.gate_summary(conn, F, ["w1", "w2"])}
+    assert set(pairs) == {("w1", "open"), ("w1", "overdue"), ("w2", "open"), ("w2", "overdue")}
+    assert not any(pairs.values())
+
+
+def test_cli_check_reader_and_gate_per_reader(tmp_path):
+    root, paths, _, _ = _scene(tmp_path)
+    r = _cli(root, "--record")
+    assert r.returncode in (0, 1), r.stdout + r.stderr
+    assert "x 2 reader(s) x 1 instant(s)" in r.stdout
+    c = _cli(root, "--check")
+    assert c.returncode == 0 and "0 diverged (bot, reader) pair(s)" in c.stdout
+    only = _cli(root, "--reader", "open")
+    assert "x 1 reader(s)" in only.stdout and "[overdue]" not in only.stdout
+    g = _cli(root, "--gate")
+    assert g.returncode == 1 and "w1 [overdue]" in g.stdout and "(bot, reader) pairs met" in g.stdout
+    # a recorded divergence flips the check
+    d_bad = sh.ShadowDiff(F, "w2", sh.dt_iso(NOW + timedelta(hours=1)), ["t-3-cccc"], [], reader=sh.READER_OPEN)
+    sh.record(root, [sh.shadow_event(d_bad)])
+    c2 = _cli(root, "--check")
+    assert c2.returncode == 1 and "w2/open" in c2.stdout
+
+
+def test_the_fleet_pulse_bridge_is_gated_runs_the_stdlib_check_and_debounces():
+    src = (REPO / "lib" / "fleet-pulse.sh").read_text()
+    assert 'plane-shadow-check.py' in src and '"${PLANE_SHADOW_ENABLED:-0}" = "1"' in src
+    assert 'debounce_notify "$state_dir" fleet shadow_divergence' in src
+    assert 'debounce_clear "$state_dir" fleet shadow_divergence' in src
+    assert src.index("_shadow_bridge() {") < src.index("_shadow_bridge || true")
+    assert subprocess.run(["bash", "-n", str(REPO / "lib" / "fleet-pulse.sh")]).returncode == 0
+
+
+def _check(root):
+    return subprocess.run([sys.executable, "-S", "-E", str(REPO / "lib" / "plane-shadow-check.py"),
+                           "--root", str(root), "--fleet", F], capture_output=True, text=True)
+
+
+def test_the_stdlib_check_agrees_with_the_package_door(tmp_path):
+    """The watchdog runs the stdlib twin; it must answer what the package
+    door answers: nothing recorded -> clean (the gate, not the bridge, minds
+    silence); a diverged latest record -> rc 1 naming the pair; a later
+    clean one -> rc 0 again; no db -> rc 3."""
+    root, paths, _, _ = _scene(tmp_path)
+    r = _check(root)
+    assert r.returncode == 0 and r.stdout == ""
+    t0 = NOW - timedelta(hours=2)
+    sh.record(root, [sh.shadow_event(sh.ShadowDiff(F, "w1", sh.dt_iso(t0), ["t-2-bbbb"], [], reader=sh.READER_OVERDUE))])
+    r = _check(root)
+    assert r.returncode == 1 and r.stdout.split()[:2] == ["w1", "overdue"]
+    with _ro(root) as conn:
+        assert [(b, rd) for b, rd, _ in sh.latest_diverged(conn, F, ["w1"])] == [("w1", "overdue")]
+    sh.record(root, [sh.shadow_event(sh.ShadowDiff(F, "w1", sh.dt_iso(t0 + timedelta(hours=1)), ["t-2-bbbb"], ["t-2-bbbb"], reader=sh.READER_OVERDUE))])
+    assert _check(root).returncode == 0
+    assert _check(tmp_path / "nowhere").returncode == 3
+
+
+def test_the_expiry_cap_resolves_the_way_the_watchdog_does(tmp_path):
+    """DISPATCH_OVERDUE_MAX_AGE_S is what the real watchdog honours; the
+    door must resolve the same cap on both sides, not the compiled default."""
+    import os as _os
+    root, paths, _, _ = _scene(tmp_path)
+    env = {**_os.environ, "DISPATCH_OVERDUE_MAX_AGE_S": "1"}     # every row aged out
+    r = subprocess.run([sys.executable, "-m", "claudlobby", "--root", str(root), "--fleet", F,
+                        "plane", "shadow", "--reader", "overdue"], capture_output=True, text=True, env=env)
+    assert r.returncode == 0 and "w1 [overdue]: legacy=0 plane=0" in r.stdout
+
+
+def test_a_malformed_legacy_deadline_is_explained_not_paged(tmp_path):
+    root, paths, d, r = _scene(tmp_path)
+    d[1]["expected_by"] = "not-an-epoch"          # t-2's ledger row: the watchdog drops it
+    _write(dispatch_ledger_path(paths), d)
+    doors = load_dispatch_doors(paths)
+    now = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
+    with _ro(root) as conn:
+        plane = sh.plane_overdue(conn, F, "w1", now=now, max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S, progress_grace_s=0)
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = sh.legacy_overdue(doors, "w1", dl, rl, now=now, max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S)
+        bad = sh.malformed_deadlines(doors, "w1", dl)
+    assert [x.task_id for x in plane] == ["t-2-bbbb"] and legacy == [] and bad == {"t-2-bbbb"}
+    dd = sh.diff(F, "w1", legacy, plane, now=now, reader=sh.READER_OVERDUE, malformed=bad)
+    assert dd.classes() == {sh.CLASS_LEGACY_MALFORMED: 1} and dd.unexplained == []
+    assert not dd.clean                                   # the heads still differ: disclosed, and not paging as a class
+
+
+
+def test_brief_carries_the_streaks_and_degrades_on_silence(tmp_path):
+    from claudlobby.brief import build_brief, format_brief
+    from claudlobby.config import load_fleet
+    root, paths, _, _ = _scene(tmp_path)
+    fleet, _ = load_fleet(paths.fleet_yaml)
+    now = int(NOW.timestamp())
+    b = build_brief(fleet, paths, "w1", now)
+    assert set(b["shadow"]) == {"open", "overdue"}
+    assert any(x["field"] == "shadow" for x in b["degraded"])          # nothing recorded yet
+    assert "SHADOW — cutover comparisons" in format_brief(b)
+    _cli(root, "--record")
+    b2 = build_brief(fleet, paths, "w1", now)
+    assert b2["shadow"]["open"]["comparisons"] == 1 and b2["shadow"]["open"]["gate_ok"] is False
+    assert not any(x["field"] == "shadow" for x in b2["degraded"])
+    assert "open: clean_run 1/20" in format_brief(b2)
+    (root / "state" / "plane" / "plane.db").unlink()
+    b3 = build_brief(fleet, paths, "w1", now)
+    assert b3["shadow"] == {} and any(x["field"] == "shadow" and x["mode"] == "omitted" for x in b3["degraded"])
+
+
+def test_a_future_deadline_is_open_but_not_overdue_on_both_sides(tmp_path):
+    root, paths, d, r = _scene(tmp_path)
+    now = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
+    future = int((now + timedelta(days=2)).timestamp())
+    row = _drow("2026-09-02T13:00:00Z", "t-7-7777", expected_by=future)
+    row["dispatched_at"] = _epoch("2026-09-02T13:00:00Z")
+    _live_dispatch(root, "7", "t-7-7777", ts="2026-09-02T13:00:00Z",
+                   expected_by=datetime.fromtimestamp(future, timezone.utc).isoformat())
+    d.append(row)
+    _write(dispatch_ledger_path(paths), d)
+    doors = load_dispatch_doors(paths)
+    with _ro(root) as conn:
+        open_ids = [x.task_id for x in sh.plane_open(conn, F, "w1")]
+        over = [x.task_id for x in sh.plane_overdue(conn, F, "w1", now=now,
+                                                     max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S,
+                                                     progress_grace_s=0)]
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = [x.task_id for x in sh.legacy_overdue(doors, "w1", dl, rl, now=now,
+                                                         max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S)]
+    assert "t-7-7777" in open_ids and "t-7-7777" not in over and over == legacy == ["t-2-bbbb"]
+
+
+def test_overdue_rows_are_oldest_first_on_both_sides(tmp_path):
+    """The head is the answer that gets written: two overdue rows for one
+    bot must come back oldest first on both sides, like the legacy list."""
+    root, paths, d, r = _scene(tmp_path)
+    _dispatch(root, "8", "t-8-8888", "2026-09-02T09:00:00Z", ledger=d)     # older than t-2 (10:00)
+    _dispatch(root, "9", "t-9-9999", "2026-09-02T11:00:00Z", ledger=d)     # newer: ledger order != sort != reverse
+    _write(dispatch_ledger_path(paths), d)
+    doors = load_dispatch_doors(paths)
+    now = datetime(2026, 9, 2, 20, 0, tzinfo=timezone.utc)
+    with _ro(root) as conn:
+        plane = [x.task_id for x in sh.plane_overdue(conn, F, "w1", now=now,
+                                                       max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S,
+                                                       progress_grace_s=0)]
+    with sh.ledgers_at(dispatch_ledger_path(paths), report_ledger_path(paths), None) as (dl, rl):
+        legacy = [x.task_id for x in sh.legacy_overdue(doors, "w1", dl, rl, now=now,
+                                                         max_age_s=doors.DEFAULT_OVERDUE_MAX_AGE_S)]
+    assert legacy == ["t-8-8888", "t-2-bbbb", "t-9-9999"] == plane

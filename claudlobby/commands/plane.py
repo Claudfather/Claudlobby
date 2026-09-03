@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ._helpers import _load_fleet_or_exit, _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
-from ..plane.db import connect, connect_ro, db_file, db_path
+from ..plane.db import connect, db_file, db_path, open_ro
 from ..plane.emit_api import emit, emit_batch, _load_capture_config
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
@@ -656,15 +656,13 @@ def _one_line(text: str) -> str:
 
 
 def _open_plane_ro(root: Path, door: str, out):
-    """The exists-before-connect probe both cutover doors share: a read-only
-    connection, or None after printing the refusal to *out* (rc 3 is the
-    caller's). ``db_file`` is a pure join — a refusal must not leave a
-    directory behind."""
-    path = db_file(root)
-    if not path.is_file():
-        print(f"{door}: UNREACHABLE — no plane db at {path}", file=out)
-        return None
-    return connect_ro(path)
+    """A read-only connection through ``db.open_ro`` (the probe every read
+    door and brief share), or None after printing the refusal to *out* (rc 3
+    is the caller's)."""
+    conn, reason = open_ro(root)
+    if conn is None:
+        print(f"{door}: UNREACHABLE — {reason}", file=out)
+    return conn
 
 
 def cmd_plane_parity(args) -> int:
@@ -814,50 +812,82 @@ def _fleet_roster(paths) -> "tuple[list[str] | None, str | None]":
     return sorted(fleet_cfg.bots), None
 
 
-def _shadow_gate(conn, fleet: str, roster: list[str]) -> int:
+def _shadow_check(conn, fleet: str, roster: list[str], readers) -> int:
+    """The fleet-pulse bridge's question: does any (bot, reader) have a
+    DIVERGED latest comparison? rc 1 names them; explained-only divergences
+    with agreeing heads never page."""
     from ..plane import shadow as sh
-    streaks = sh.gate_summary(conn, fleet, roster)
-    short = [st.bot for st in streaks if not st.gate_ok]
+    hits = sh.latest_diverged(conn, fleet, roster, readers)
+    for bot, reader, at in hits:
+        print(f"  {bot} [{reader}] diverged at {at}")
+    print(f"shadow[{fleet}] check: {len(hits)} diverged (bot, reader) pair(s)"
+          + (" — " + ", ".join(f"{b}/{r}" for b, r, _ in hits) if hits else ""))
+    return 1 if hits else 0
+
+
+def _shadow_gate(conn, fleet: str, roster: list[str], readers) -> int:
+    from ..plane import shadow as sh
+    streaks = sh.gate_summary(conn, fleet, roster, readers)
+    short = [f"{st.bot}/{st.reader}" for st in streaks if not st.gate_ok]
     for st in streaks:
         print(f"  {st.line()}")
-    print(f"shadow[{fleet}] gate: {len(streaks) - len(short)}/{len(streaks)} bots met"
+    print(f"shadow[{fleet}] gate: {len(streaks) - len(short)}/{len(streaks)} (bot, reader) pairs met"
           f" ({sh.GATE_CLEAN_RUN} clean + {sh.GATE_TRANSITIONS} transition)"
           + (f"; short: {', '.join(short)}" if short else ""))
     return 1 if short else 0
 
 
 def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: Path,
-                    rlog: Path, args) -> int:
+                    rlog: Path, args, readers) -> int:
     from ..plane import shadow as sh
     now = datetime.now(timezone.utc)
+    # The cap and the grace resolved the way the WATCHDOG resolves them (env
+    # overrides included) - a gate that validated the compiled-in defaults
+    # would read clean on a fleet whose real watchdog runs a different rule.
+    max_age = int(doors._resolve_max_age()) if hasattr(doors, "_resolve_max_age") \
+        else int(getattr(doors, "DEFAULT_OVERDUE_MAX_AGE_S", 86400))
+    grace = int(doors._resolve_progress_grace()) if hasattr(doors, "_resolve_progress_grace") else 0
     intentional = {t.strip() for t in (args.intentional or "").split(",") if t.strip()}
     instants = [(at, True) for at in sh.replay_instants(now, args.replay_hours)] \
         if args.replay_hours else []
     instants.append((now, False))
     superseded = sh.superseded_by_bot(doors, dlog)
+    malformed = {bot: sh.malformed_deadlines(doors, bot, str(dlog)) for bot in bots}
     uids = {bot: sh.actor_uid(conn, f"bot:{fleet}/{bot}") for bot in bots}
     events: list[dict] = []
     diverged = 0
     for at, replay in instants:
         bound = sh.dt_iso(at) if replay else None
         with sh.ledgers_at(dlog, rlog, bound) as (dl, rl):
+            # the legacy overdue classification answers for EVERY bot at once
+            legacy_overdue = (sh.legacy_overdue_all(doors, dl, rl, now=at, max_age_s=max_age)
+                              if sh.READER_OVERDUE in readers else {})
             for bot in bots:
-                legacy = sh.legacy_open(doors, bot, dl, rl)
-                plane = sh.plane_open(conn, fleet, bot, at=bound)
-                d = sh.diff(fleet, bot, legacy, plane, now=at, skew_s=args.skew_grace,
-                            superseded=superseded.get(bot.lower(), set()),
-                            intentional=intentional)
-                if not replay or args.verbose:
-                    print(f"  {bot}{' @ ' + sh.ts19(d.at) if replay else ''}:"
-                          f" legacy={len(d.legacy_ids)} plane={len(d.plane_ids)}"
-                          f" head={'agrees' if d.head_agrees else 'DIFFERS'}"
-                          f" {'clean' if d.clean else 'DIVERGED'}"
-                          + (f" {d.classes()}" if d.divergences else ""))
-                    for x in d.unexplained[:args.show]:
-                        print(f"    {x.side} {_one_line(x.ref)} ({x.cls})")
-                diverged += 0 if d.clean else 1
-                events.append(sh.shadow_event(d, subject_uid=uids[bot]))
-    print(f"shadow[{fleet}]: {len(bots)} bot(s) x {len(instants)} instant(s):"
+                plane_rows = sh.plane_open(conn, fleet, bot, at=bound)   # once per (bot, instant)
+                for reader in readers:
+                    if reader == sh.READER_OPEN:
+                        legacy = sh.legacy_open(doors, bot, dl, rl)
+                        plane = plane_rows
+                    else:
+                        legacy = legacy_overdue.get(bot.lower(), [])
+                        plane = sh.plane_overdue(conn, fleet, bot, now=at, max_age_s=max_age,
+                                                 progress_grace_s=grace, rows=plane_rows,
+                                                 uid=uids[bot])
+                    d = sh.diff(fleet, bot, legacy, plane, now=at, skew_s=args.skew_grace,
+                                superseded=superseded.get(bot.lower(), set()),
+                                intentional=intentional, reader=reader,
+                                malformed=malformed[bot] if reader == sh.READER_OVERDUE else None)
+                    if not replay or args.verbose:
+                        print(f"  {bot} [{reader}]{' @ ' + sh.ts19(d.at) if replay else ''}:"
+                              f" legacy={len(d.legacy_ids)} plane={len(d.plane_ids)}"
+                              f" head={'agrees' if d.head_agrees else 'DIFFERS'}"
+                              f" {'clean' if d.clean else 'DIVERGED'}"
+                              + (f" {d.classes()}" if d.divergences else ""))
+                        for x in d.unexplained[:args.show]:
+                            print(f"    {x.side} {_one_line(x.ref)} ({x.cls})")
+                    diverged += 0 if d.clean else 1
+                    events.append(sh.shadow_event(d, subject_uid=uids[bot]))
+    print(f"shadow[{fleet}]: {len(bots)} bot(s) x {len(readers)} reader(s) x {len(instants)} instant(s):"
           f" {len(events) - diverged} clean, {diverged} diverged")
     if args.record:
         counts = sh.record(root, events)
@@ -871,8 +901,10 @@ def cmd_plane_shadow(args) -> int:
     set (the install's dispatch-overdue.py, through brief's seam) against
     the plane's, classified, optionally RECORDED as a system event, and the
     J4 gate derived from what was recorded. Never writes a ledger, never
-    routes the plane's answer anywhere. rc 0 clean (or gate met) / 1 a
-    divergence (or gate not met) / 2 usage / 3 unreachable."""
+    routes the plane's answer anywhere. Two readers: the deadline-blind
+    open list and the watchdog's overdue set. rc 0 clean (or gate met, or
+    check clean) / 1 a divergence (or gate not met, or check found one) /
+    2 usage / 3 unreachable."""
     paths = _resolve_paths(args)
     root = paths.root
 
@@ -908,11 +940,15 @@ def cmd_plane_shadow(args) -> int:
         conn = _open_plane_ro(root, "shadow", sys.stdout)
         if conn is None:
             return 3
+        from ..plane import shadow as sh
+        readers = sh.READERS if args.reader == "all" else (args.reader,)
         try:
+            if args.check:
+                return _shadow_check(conn, fleet, roster, readers)
             if args.gate:
-                return _shadow_gate(conn, fleet, roster)
+                return _shadow_gate(conn, fleet, roster, readers)
             bots = [args.bot] if args.bot else roster
-            return _shadow_compare(conn, root, fleet, bots, doors, dlog, rlog, args)
+            return _shadow_compare(conn, root, fleet, bots, doors, dlog, rlog, args, readers)
         except sqlite3.Error as exc:
             print(f"shadow: UNREACHABLE — plane db unreadable: {exc}")
             return 3

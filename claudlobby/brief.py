@@ -791,6 +791,47 @@ def _reports_section(
     return {"cursor": cursor, "unacked": unacked}
 
 
+def _shadow_section(paths: Paths, bot_id: str, degraded: list[Degradation]) -> dict:
+    """The cutover shadow's streaks for this bot, per reader, from the
+    RECORDED comparisons in the plane (chunk 4) — read-only, never
+    re-derived here. Absent plane db, or no comparison recorded for the bot,
+    is a labeled degradation rather than a clean-looking zero: the flip gate
+    must never read "met" from silence."""
+    import sqlite3
+    from .plane.db import open_ro
+    from .plane import shadow as sh
+
+    fleet_name = paths.fleet_name or ""
+    conn, reason = open_ro(paths.root)          # the probe every plane read door shares
+    if conn is None:
+        degraded.append(Degradation(
+            field="shadow", mode="omitted",
+            reason=f"{reason} — no shadow comparison can be read", issue="#1444"))
+        return {}
+    try:
+        streaks = [sh.streak(conn, fleet_name, bot_id, r) for r in sh.READERS]
+    except sqlite3.Error as exc:                 # opened but unreadable (a pre-migration db)
+        degraded.append(Degradation(
+            field="shadow", mode="omitted",
+            reason=f"plane db unreadable: {exc}", issue="#1444"))
+        return {}
+    finally:
+        conn.close()
+    out = {
+        st.reader: {
+            "comparisons": st.comparisons, "clean_run": st.clean_run,
+            "transitions": st.transitions, "gate_ok": st.gate_ok,
+            "last_diverged_at": st.last_diverged_at, "last_at": st.last_at,
+        } for st in streaks}
+    if not any(st.comparisons for st in streaks):
+        degraded.append(Degradation(
+            field="shadow", mode="labeled",
+            reason="no shadow comparison recorded for this bot yet — the gate cannot"
+                   " be met from silence (`plane shadow --record`, or arm PLANE_SHADOW_ENABLED)",
+            issue="#1444"))
+    return out
+
+
 def _alerts_section(
     paths: Paths, bot_id: str, now: int, degraded: list[Degradation]
 ) -> list[dict]:
@@ -933,6 +974,7 @@ def build_brief(fleet, paths: Paths, bot_id: str, now: int) -> dict:
             paths, read_cursor(paths, bot_id), terminal, degraded
         ),
         "alerts": _alerts_section(paths, bot_id, now, degraded),
+        "shadow": _shadow_section(paths, bot_id, degraded),
     }
 
     # #526, the residence mismatch, as a standing bound whenever the section IS
@@ -1134,6 +1176,17 @@ def format_brief(brief: dict) -> str:
     for a in shown:
         out.append(f"  {_short(a['ts'])}  {a['type']:<20} {a.get('source') or ''}")
     out.extend(more)
+    out.append("")
+    from .plane import shadow as sh
+    shadow = brief.get("shadow") or {}
+    out.append(f"SHADOW — cutover comparisons, per reader{mark('shadow')}")
+    if not shadow:
+        out.append("  (none — see degraded)")
+    for reader, st in shadow.items():
+        state = "gate met" if st["gate_ok"] else "gate NOT met"
+        out.append(f"  {reader}: clean_run {st['clean_run']}/{sh.GATE_CLEAN_RUN}"
+                   f" transitions {st['transitions']} comparisons {st['comparisons']}"
+                   f" last_diverged {st['last_diverged_at'] or '-'} — {state}")
     out.append("")
 
     if deg:
