@@ -153,7 +153,9 @@ def hint(
     """
     mod = overdue_mod or _load_overdue()
     try:
-        rows = mod.open_dispatches(bot, dispatch_log, report_ledger)
+        # source="auto" (chunk 6b): follows the open reader's flip, so the hint
+        # and open_at_dispatch never read a ledger the retirement froze.
+        rows = mod.open_dispatches(bot, dispatch_log, report_ledger, source="auto")
     except Exception:
         return 0, [], ""  # fail open: never break a dispatch over a hint
     open_ids = [tid for _da, _eb, tid in rows]

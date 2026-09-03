@@ -3913,10 +3913,7 @@ def _read_flag_env(paths: Paths, fleet_name: str | None) -> dict[str, str]:
             cascade = _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=fleet_name))
             env = {f: "1" for f in READ_FLAGS.values() if _env_tiers.armed(cascade, f)}
             # chunk 6b: a RETIRED legacy write (the tier says 0) rides the same carrier
-            for f in WRITE_FLAGS.values():
-                res = cascade.get(f)
-                if res is not None and res.value == "0":
-                    env[f] = "0"
+            env.update({f: "0" for f in WRITE_FLAGS.values() if _env_tiers.resolves_to(cascade, f, "0")})
         except _env_tiers.ResolverUnavailable as exc:
             _log.warning("cutover read flags unresolved (%s) — bot.conf composes them UNSET", exc)
         _READ_FLAG_MEMO[key] = env

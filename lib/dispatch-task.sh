@@ -613,9 +613,13 @@ _plane_emit_intent() {
         esac
         wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}}}"
         asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"$dispatch_ref\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
-        printf '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}" | plane_emit_events dispatch-task
+        local _batch
+        printf -v _batch '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}"
+        plane_emit_events dispatch-task <<<"$_batch"       # same shell: PLANE_EMIT_LAST_RC reaches the ledger decision
     else
-        printf '{"events":[%s]}' "$comm" | plane_emit_events dispatch-task
+        local _batch
+        printf -v _batch '{"events":[%s]}' "$comm"
+        plane_emit_events dispatch-task <<<"$_batch"
     fi
 }
 
@@ -676,24 +680,21 @@ _append_ledger() {
 # exactly as the importer keys an unstamped row.
 printf -v LEDGER_LINE '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}' \
         "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID"
-# Cutover chunk 6b: the legacy append retires behind PLANE_LEGACY_WRITE_DISPATCH=0
-# (composed into bot.conf from the fleet .env tier) -- honoured ONLY while the plane
-# is armed: a dispatch must land somewhere, so an unarmed plane writes the ledger
-# and says so. Retiring the write ends the shadow for every reader of this ledger.
-if [ "${PLANE_LEGACY_WRITE_DISPATCH:-1}" = "0" ] && [ "$PLANE_ARMED" = "1" ]; then
-    echo "dispatch-task: legacy dispatch-log write retired (PLANE_LEGACY_WRITE_DISPATCH=0) -- the plane is the record" >&2
-else
-    if [ "${PLANE_LEGACY_WRITE_DISPATCH:-1}" = "0" ]; then
-        echo "dispatch-task: PLANE_LEGACY_WRITE_DISPATCH=0 but the plane is unarmed -- writing the ledger anyway" >&2
-    fi
-    with_lock "$LEDGER.lock" _append_ledger
-fi
-
-# Plane intent BEFORE transport (F9): a crash between here and the send leaves
-# an intent with no transmission — visible, and exactly what reconciliation
-# exists to surface. (The legacy ledger row above is already down either way.)
+# Plane intent BEFORE transport (F9) — and BEFORE the legacy append (chunk 6b):
+# a crash between here and the send leaves an intent with no transmission,
+# visible, and exactly what reconciliation exists to surface; and the ledger
+# decision below needs to know whether THIS emission was recorded.
 if [ "$PLANE_ARMED" = "1" ]; then
     _plane_emit_intent || true
+fi
+
+# Cutover chunk 6b: the legacy append retires behind PLANE_LEGACY_WRITE_DISPATCH=0
+# (composed into bot.conf from the fleet .env tier). plane_write_retired skips
+# it only when the flag says 0 AND the plane is armed AND the retirement is
+# RECORDED AND this emission succeeded -- every other case writes the ledger
+# and says why. Retiring the write ends the shadow for every reader of it.
+if ! plane_write_retired dispatch-task PLANE_LEGACY_WRITE_DISPATCH; then
+    with_lock "$LEDGER.lock" _append_ledger
 fi
 
 # Send via the low-level race-safe primitive (re-validates the session).

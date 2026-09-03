@@ -133,7 +133,6 @@ def retirement_event(fleet: str, decl: dict[str, tuple[str, Optional[str]]], now
                 "subject_alias": fleet_alias(fleet)} if subject_uid else {}),
             "data": {
                 "fleet": fleet,
-                "doors": sorted(WRITE_FLAGS),
                 "flags": {d: f"{f}=0" for d, f in WRITE_FLAGS.items()},
                 "declared": {r: at for r, (at, _f) in decl.items()},
                 "undeclared": undeclared(decl),
@@ -150,25 +149,32 @@ def retired(conn: sqlite3.Connection, fleet: str) -> Optional[tuple[str, Optiona
     return (row[0], row[1]) if row else None
 
 
+def _flag_verdict(flag_active: bool, recorded_at: Optional[str], *, flag_only: str,
+                  record_only: str, both: str, neither: str) -> tuple[bool, str]:
+    """The doctor's verdict for one flag against its record — ONE 4-branch shape
+    for both epochs: consistent (both or neither), or which half is missing."""
+    if flag_active and recorded_at is None:
+        return False, flag_only
+    if not flag_active and recorded_at is not None:
+        return False, record_only.format(at=recorded_at)
+    if flag_active:
+        return True, both.format(at=recorded_at)
+    return True, neither
+
+
 def write_flag_vs_retirement(flag_retired: bool, retired_at: Optional[str]) -> tuple[bool, str]:
-    """The doctor's verdict for one legacy write door: consistent, or which half is missing."""
-    if flag_retired and retired_at is None:
-        return False, ("flag retired (0) but NO retirement recorded — the door writes the ledger"
-                       " anyway when the plane is unarmed; `plane cutover --retire-writes` first")
-    if not flag_retired and retired_at is not None:
-        return False, f"retirement recorded {retired_at} but the flag still writes — the door has not stopped"
-    if flag_retired:
-        return True, f"retired (recorded {retired_at})"
-    return True, "writing (not retired)"
+    return _flag_verdict(
+        flag_retired, retired_at,
+        flag_only="flag retired (0) but NO retirement recorded — the door keeps writing the ledger"
+                  " and says so; `plane cutover --retire-writes` first",
+        record_only="retirement recorded {at} but the flag still writes — the door has not stopped",
+        both="retired (recorded {at})", neither="writing (not retired)")
 
 
 def flag_vs_declaration(flag_on: bool, declared_at: Optional[str]) -> tuple[bool, str]:
-    """The doctor's verdict for one reader: consistent, or which half is missing."""
-    if flag_on and declared_at is None:
-        return False, ("flag set but NO declaration recorded — the matcher keeps serving the"
-                       " JSONL; `plane cutover --reader` first")
-    if not flag_on and declared_at is not None:
-        return False, f"declared {declared_at} but the flag is off — the flip did not land"
-    if flag_on:
-        return True, f"flipped to the plane (declared {declared_at})"
-    return True, "legacy (not declared, not flipped)"
+    return _flag_verdict(
+        flag_on, declared_at,
+        flag_only="flag set but NO declaration recorded — the matcher keeps serving the JSONL;"
+                  " `plane cutover --reader` first",
+        record_only="declared {at} but the flag is off — the flip did not land",
+        both="flipped to the plane (declared {at})", neither="legacy (not declared, not flipped)")

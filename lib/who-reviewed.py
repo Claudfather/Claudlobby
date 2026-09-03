@@ -281,21 +281,39 @@ PLANE_ROWS_SQL = (
 )
 
 
-def load_plane_rows(root: str) -> tuple[list[dict], str | None]:
-    """(rows, reason) — rows shaped like ledger rows from the plane's task
-    events that carry a pr_url; reason is set (and rows empty) when the plane
-    is unreachable, which is NOT an empty answer."""
+TRUNCATED_SQL = "SELECT COUNT(*) FROM events WHERE kind = 'task' AND detail_truncated = 1"
+
+
+def _readers():
+    """The stdlib plane readers beside this file — ONE read-only open (schema
+    probe + transient retry) for every stdlib door."""
+    import importlib.util
+    src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "plane-readers.py")
+    spec = importlib.util.spec_from_file_location("plane_readers", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_plane_rows(root: str) -> tuple[list[dict], str | None, int]:
+    """(rows, reason, truncated) — rows shaped like ledger rows from the plane's
+    task events that carry a pr_url; reason is set (and rows empty) when the
+    plane is unreachable, which is NOT an empty answer; truncated counts the
+    task events whose detail the diagnostic cap cut (a pr_url there is
+    unreadable), disclosed rather than dropped in silence."""
     import sqlite3
-    db = os.path.join(root, "state", "plane", "plane.db")
-    if not os.path.isfile(db):
-        return [], f"no plane db at {db}"
+    pr = _readers()
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
-        conn.execute("PRAGMA query_only = 1")
+        conn = pr.connect(root)
+    except pr.PlaneUnreachable as exc:
+        return [], str(exc), 0
+    try:
         raw = conn.execute(PLANE_ROWS_SQL).fetchall()
-        conn.close()
+        truncated = conn.execute(TRUNCATED_SQL).fetchone()[0]
     except sqlite3.Error as exc:
-        return [], f"plane db unreadable: {exc}"
+        return [], f"plane db unreadable: {exc}", 0
+    finally:
+        conn.close()
     rows: list[dict] = []
     for occurred_at, alias, event, detail, source_ref in raw:
         try:
@@ -310,8 +328,8 @@ def load_plane_rows(root: str) -> tuple[list[dict], str | None]:
             tid = source_ref[len("dispatch-log:"):]
         rows.append({"ts": ts, "bot": bot or "(unnamed)", "status": event, "task_id": tid,
                      "pr_url": data.get("pr_url") or "", "summary": data.get("summary") or "",
-                     "issues": "", "artifact": "", "_fleet": fleet, "_ledger": "plane"})
-    return rows, None
+                     "_fleet": fleet, "_ledger": "plane"})
+    return rows, None, truncated
 
 
 def attribute_event(
@@ -558,16 +576,22 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     # Ledger side
+    rows: list[dict] = []
+    unreadable = 0
+    bad_lines = 0
+    fleets: list = []
+    ledgers: list = []
+    plane_truncated = 0
     if args.source == "plane":
         if not args.root:
             print("--source plane needs --root (or CLAUDLOBBY_ROOT); refusing rather than"
                   " reporting every review as UNKNOWN", file=sys.stderr)
             return 4
-        plane_rows, why = load_plane_rows(args.root)
+        rows, why, plane_truncated = load_plane_rows(args.root)
         if why is not None:
             print(f"the plane is unreachable ({why}) — not an empty answer; refusing", file=sys.stderr)
             return 4
-        ledgers = []
+        fleets = sorted({r["_fleet"] for r in rows})
     elif args.ledger:
         ledgers = [
             (os.path.basename(os.path.dirname(os.path.dirname(p))) or "(explicit)", p)
@@ -583,13 +607,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 4
 
-    rows: list[dict] = []
-    unreadable = 0
-    bad_lines = 0
-    fleets = []
-    if args.source == "plane":
-        rows.extend(plane_rows)
-        fleets = sorted({r["_fleet"] for r in plane_rows})
     for fleet, path in ledgers:
         loaded, bad = load_ledger(path, fleet)
         if bad < 0:
@@ -609,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
             "ledgers_found": len(ledgers),
             "unreadable": unreadable,
             "bad_lines": bad_lines,
+            "source": args.source,
+            "plane_truncated": plane_truncated,
             "rows": len(rows),
             "fleets": fleets,
         },

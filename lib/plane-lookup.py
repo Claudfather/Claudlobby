@@ -82,6 +82,9 @@ def main(argv=None) -> int:
                     help="bot:<fleet>/<name>; name part compared case-insensitively")
     ap.add_argument("--open-idless", action="store_true",
                     help="list the bot's OPEN id-less assignments (needs --fleet and --bot)")
+    ap.add_argument("--retired", action="store_true",
+                    help="print the instant the fleet's legacy writes were retired, or nothing"
+                    " (needs --fleet; chunk 6b — the doors' second fact)")
     ap.add_argument("--fleet", default=None)
     ap.add_argument("--bot", default=None)
     a = ap.parse_args(argv)
@@ -94,6 +97,22 @@ def main(argv=None) -> int:
         if not (a.fleet and a.bot):
             ap.error("--open-idless needs --fleet and --bot")
         return _open_idless(a)
+    if a.retired:
+        if not a.fleet:
+            ap.error("--retired needs --fleet")
+        pr = _readers()
+        try:
+            conn = pr.connect(a.root)
+        except pr.PlaneUnreachable as exc:
+            print(f"plane-lookup: {exc} — unreachable, not empty", file=sys.stderr)
+            return 3
+        try:
+            at = pr.retired(conn, a.fleet)
+        finally:
+            conn.close()
+        if at:
+            print(at)
+        return 0
     if not a.task_id:
         ap.error("--task-id is required (or --open-idless)")
     pr = _readers()
