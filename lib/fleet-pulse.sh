@@ -186,7 +186,7 @@ _shadow_bridge() {
     local _pairs; _pairs=$(printf '%s' "$_out" | awk '{print $1"/"$2}' | tr '\n' ' ')
     _SHADOW_PAGE_FAILED=0
     debounce_notify "$state_dir" fleet shadow_divergence _shadow_page \
-        "FLEET ALERT: cutover shadow divergence on ${_pairs% }. The plane and the legacy ledger disagree about a bot's open or overdue set - run: claudlobby --fleet $fleet plane shadow --show 5" "" 600
+        "FLEET ALERT: cutover shadow divergence on ${_pairs% }. The plane and the legacy ledger disagree about a bot's open or overdue set (or the fleet's idle-worker set) - run: claudlobby --fleet $fleet plane shadow --show 5" "" 600
     # debounce_notify writes its marker AFTER the pager returns, whatever the
     # pager did; a page that never left must not silence the next ten minutes.
     [ "${_SHADOW_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet shadow_divergence

@@ -136,7 +136,7 @@ def _batch_resolver(conn, now):
     return party, fleet, entity
 
 
-def _family_values(payload, party) -> tuple[str, dict]:
+def _family_values(payload, party, entity=None) -> tuple[str, dict]:
     """(table, family-column dict) — no SQL here; _insert builds it.
     `party` is the batch-scoped alias->uid resolver from _batch_resolver."""
     if isinstance(payload, Communication):
@@ -279,13 +279,23 @@ def _family_values(payload, party) -> tuple[str, dict]:
             if len(raw) > cap:
                 detail = raw[:cap].decode("utf-8", errors="ignore")
                 truncated = 1
+        subject_uid, subject_alias = payload.subject_uid, payload.subject_alias
+        if payload.subject is not None:
+            # the alias form (Phase B): resolved/minted at ingest like a metric
+            # sample's subject; an actor alias goes through party() so its fleet
+            # parent is minted the way every other actor's is
+            if entity is None:
+                raise TypeError("a system event naming its subject by alias needs the entity resolver")
+            subject_uid = (party(payload.subject) if payload.subject_kind == "actor"
+                           else entity(payload.subject_kind, payload.subject))
+            subject_alias = payload.subject
         return "events", {
             "kind": "system",
             "event": payload.event,
             "severity": SYSTEM_EVENT_SEVERITY.get(payload.event),
             "subject_kind": payload.subject_kind,
-            "subject_uid": payload.subject_uid,
-            "subject_alias": payload.subject_alias,
+            "subject_uid": subject_uid,
+            "subject_alias": subject_alias,
             "detail": detail,
             "detail_truncated": truncated,
         }
@@ -492,7 +502,7 @@ def ingest_many(conn, items, *, host_uid) -> list[IngestResult]:
             if fam_override is not None:
                 table, fam = table_override, fam_override
             else:
-                table, fam = _family_values(payload, party)
+                table, fam = _family_values(payload, party, entity)
             _insert(conn, table, {**base, **fam})
             results.append(IngestResult(event_id, seq, False))
         conn.execute("COMMIT")

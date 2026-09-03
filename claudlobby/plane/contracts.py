@@ -318,9 +318,20 @@ class SystemEvent(_Strict):
     subject_kind: Optional[Literal[SYSTEM_SUBJECT_KINDS]] = None
     subject_uid: Optional[str] = Field(None, min_length=1)
     subject_alias: Optional[str] = None
+    # `subject` (cutover Phase B): an ALIAS to resolve at ingest — the
+    # MetricSample form — for emitters that cannot know a uid (a bash door's
+    # `emit_fleet_event`). Needs subject_kind, excludes the uid anchor pair;
+    # ingest mints/looks up the uid and stamps subject_alias from it.
+    subject: Optional[str] = Field(None, min_length=1)
     data: Optional[dict] = None
 
     def model_post_init(self, __context) -> None:
+        if self.subject is not None:
+            if self.subject_kind is None:
+                raise ValueError("subject (an alias) needs subject_kind")
+            if self.subject_uid is not None or self.subject_alias is not None:
+                raise ValueError("subject (an alias) excludes the uid anchor pair — one or the other")
+            return
         if (self.subject_uid is None) != (self.subject_kind is None):
             raise ValueError(
                 "subject_kind and subject_uid are an anchor pair — both or neither"

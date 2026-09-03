@@ -59,7 +59,7 @@ watchdog resolves them (``DISPATCH_OVERDUE_MAX_AGE_S``,
 ``DISPATCH_PROGRESS_GRACE_S``); the legacy side is read with no bots dir,
 so nothing is split off as an orphan — the split is a host-local
 ``.spawn`` fact the plane cannot see (J1: orphans stay hybrid), and
-``--unassigned`` has no plane counterpart yet: neither is shadowed. A
+``--unassigned`` is the fleet-level ``unassigned`` reader (chunk 7a), compared once per instant under the ``_fleet`` key. A
 legacy row whose deadline is not an int is dropped by the watchdog and
 kept by the plane — ``legacy_malformed_deadline``, explained, never
 paging. Records and streaks are keyed by ``data.reader``. ``plane shadow

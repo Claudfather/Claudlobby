@@ -167,3 +167,42 @@ def test_a_peers_later_report_does_not_touch_this_bots_idleness(tmp_path):
     jsonl = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
     plane = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
     assert jsonl.stdout == plane.stdout and plane.stdout.startswith("w1 ") and "w2" not in plane.stdout
+
+
+def test_a_terminal_note_that_resolved_nothing_is_idle_on_both_sides(tmp_path):
+    """The general lens's finding: a `completed` report with no task id and no
+    open id-less dispatch lands only a communication — its status rode nowhere
+    on the plane, so the idle check said busy while the ledger said idle. The
+    door now lands a report_status marker; both sides agree."""
+    root, paths, d, r = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    note = "2026-09-02T13:15:00Z"
+    _report(root, None, None, note, event=None, status="completed")
+    r.append(_rrow(note, "", "completed", summary="all done, nothing open"))
+    from claudlobby.brief import report_ledger_path
+    _write(report_ledger_path(paths), r)
+    jsonl = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
+    plane = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
+    assert jsonl.stdout == plane.stdout and plane.stdout.startswith("w1 ") and plane.stdout.rstrip().endswith("- completed")
+
+
+def test_a_case_variant_alias_does_not_lose_the_bots_report(tmp_path):
+    """The adversarial lens: a dispatch to `bot:f/W1` and a report from
+    `bot:f/w1` mint two actor uids; every per-bot read spans all of them, so
+    the idle check agrees with the ledger (which is case-insensitive)."""
+    from tests.test_plane_cutover_parity import _drow, _live_dispatch
+    from tests.test_plane_shadow import _epoch
+    root, paths, d, r = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    ts = "2026-09-02T12:30:00Z"
+    _live_dispatch(root, "6", "t-6-ffff", ts=ts, bot="W1", expected_by="2026-09-03T00:00:00+00:00")
+    row = _drow(ts, "t-6-ffff", bot="W1"); row["dispatched_at"] = _epoch(ts); d.append(row)
+    from claudlobby.brief import dispatch_ledger_path, report_ledger_path
+    _write(dispatch_ledger_path(paths), d)
+    done = "2026-09-02T13:00:00Z"
+    _report(root, f"wi_{'6':0>32}", f"asg_{'6':0>32}", done, bot="w1")        # the lower-case alias reports
+    r.append(_rrow(done, "t-6-ffff", "completed", bot="w1"))
+    _write(report_ledger_path(paths), r)
+    jsonl = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
+    plane = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
+    assert jsonl.stdout == plane.stdout and plane.stdout.startswith("w1 ") and "t-6-ffff completed" in plane.stdout

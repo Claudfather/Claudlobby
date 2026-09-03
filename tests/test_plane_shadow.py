@@ -61,7 +61,7 @@ def _dispatch(root, n, task_id, ts, *, bot="w1", ledger):
 _REPORT_SEQ = [0]
 
 
-def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None):
+def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None, status=None):
     """What the REAL report door lands for one report: the `report` communication
     and, when it resolved an assignment, the task event — both under one
     `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing.)"""
@@ -78,6 +78,12 @@ def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None):
                        "source_ref": ref, "occurred_at": ts,
                        "payload": {"work_item_id": wi, "assignment_id": asg, "event": event,
                                    "actor": f"bot:{F}/{bot}", **(extra or {})}})
+    elif status in ("completed", "failed", "blocked"):
+        # the door's report_status marker: a terminal report that resolved nothing
+        events.append({"event_type": "system", "emitter": "report-back", "fleet": F,
+                       "source_ref": ref, "occurred_at": ts,
+                       "payload": {"event": "report_status", "subject_kind": "actor",
+                                   "subject": f"bot:{F}/{bot}", "data": {"status": status, "msg_id": msg}}})
     emit_batch(root, events)
     return msg
 
