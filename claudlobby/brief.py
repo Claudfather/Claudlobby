@@ -571,8 +571,26 @@ def _dispatch_section(
     # privacy — its own docstring names it "THE in-process door when a caller
     # wants both sets". Fall back to the public pair on an install that predates
     # it, since a slower answer beats no answer.
+    # Cutover chunk 5: the matcher's per-reader flags flip the DEFAULT source
+    # here too (brief and the matcher are one migration — J1). The plane path
+    # never falls back to the JSONL: an unreachable plane under a set flag is
+    # OMITTED with the remedy named, because a silent fallback would let a
+    # flipped fleet read legacy again without anyone knowing.
+    flipped = getattr(doors, "plane_read_enabled", lambda _r: False)
     classify = getattr(doors, "_classify_all", None)
-    if classify is not None:
+    if flipped("overdue"):
+        try:
+            over = doors.overdue_all_plane(now, max_age, fleet=paths.fleet_name,
+                                           root=str(paths.root))
+        except Exception as exc:
+            over = {}
+            degraded.append(Degradation(
+                field="dispatches.overdue", mode="omitted",
+                reason=f"PLANE_READ_OVERDUE=1 but the plane source is unreachable: {exc}"
+                       " — restore the plane db or flip the flag back to 0",
+                issue="#1444"))
+        orph = doors.orphaned_all(str(dlog), str(rlog), now, max_age, bots_dir)
+    elif classify is not None:
         over, orph = classify(str(dlog), str(rlog), now, max_age, bots_dir)
     else:
         over = doors.overdue_all(str(dlog), str(rlog), now, max_age, bots_dir)
@@ -625,6 +643,17 @@ def _dispatch_section(
             )
         )
         open_rows = []
+    elif flipped("open"):
+        try:
+            open_rows = doors.open_dispatches_plane(bot_id, fleet=paths.fleet_name,
+                                                    root=str(paths.root))
+        except Exception as exc:
+            open_rows = []
+            degraded.append(Degradation(
+                field="dispatches.open", mode="omitted",
+                reason=f"PLANE_READ_OPEN=1 but the plane source is unreachable: {exc}"
+                       " — restore the plane db or flip the flag back to 0",
+                issue="#1444"))
     else:
         open_rows = open_door(bot_id, str(dlog), str(rlog))
 

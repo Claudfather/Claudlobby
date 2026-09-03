@@ -35,6 +35,7 @@ from .plane import (
     cmd_plane_import,
     cmd_plane_parity,
     cmd_plane_shadow,
+    cmd_plane_cutover,
     cmd_plane_prune,
     cmd_plane_registry,
     cmd_plane_schema,
@@ -513,6 +514,16 @@ def register_subparsers(sub) -> None:
     pim.add_argument("--apply", action="store_true",
                      help="Write the batch (default: plan and report only)")
     pim.set_defaults(func=cmd_plane_import)
+    pcut = psub.add_parser(
+        "cutover",
+        help="Cutover chunk 5: declare a reader's flip to the plane — refuses"
+        " unless the J4 gate is met on every bot, records cutover_declared,"
+        " prints the PLANE_READ_* flag line (rc 0 declared / 1 refused / 3 unreachable)")
+    pcut.add_argument("--reader", choices=("open", "overdue"), required=True,
+                      help="Which list reader flips: the open list or the watchdog's overdue set")
+    pcut.add_argument("--force", default="",
+                      help="Declare despite a short gate; the reason is recorded in the event")
+    pcut.set_defaults(func=cmd_plane_cutover)
     psh = psub.add_parser(
         "shadow",
         help="Cutover J4 shadow: the legacy open set vs the plane's, per bot,"

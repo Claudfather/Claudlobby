@@ -45,6 +45,10 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # comparison is routine; a divergence is the flip's stop signal.
     "shadow_parity_clean": "notice",
     "shadow_parity_diverged": "critical",
+    # cutover chunk 5 — the epoch, recorded when it happens: a reader flipped
+    # to the plane (with the gate evidence, or a --force reason) is a fact the
+    # ledger must carry; the flag alone is invisible history.
+    "cutover_declared": "notice",
 }
 
 

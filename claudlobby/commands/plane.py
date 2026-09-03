@@ -333,6 +333,22 @@ def cmd_plane_doctor(args) -> int:
                                  + (f"; last divergence {max(div)}" if div else ""))
                 except Exception as exc:          # a rung must never take the doctor down
                     rung(False, "shadow parity", f"unreadable: {exc}")
+                # cutover chunk 5 — each reader's flag against its declaration:
+                # a flag nobody declared, or a declaration nobody armed, is a
+                # flip that half-happened.
+                try:
+                    from ..plane import cutover as _cut
+                    if paths.fleet_name:
+                        decl = _cut.declared(conn, paths.fleet_name)
+                        for reader, on in _read_flags(paths).items():
+                            if on is None:
+                                rung(False, f"cutover {reader}",
+                                     "flag unresolvable (env tiers door unavailable)")
+                                continue
+                            ok, why = _cut.flag_vs_declaration(on, (decl.get(reader) or (None,))[0])
+                            rung(ok, f"cutover {reader}", why)
+                except Exception as exc:
+                    rung(False, "cutover", f"unreadable: {exc}")
             finally:
                 conn.close()
         try:
@@ -894,6 +910,72 @@ def _shadow_compare(conn, root: Path, fleet: str, bots: list[str], doors, dlog: 
         print(f"shadow[{fleet}] recorded: committed={counts['committed']}"
               f" duplicate={counts['duplicate']} spooled={counts['spooled']}")
     return 1 if diverged else 0
+
+
+def _read_flags(paths) -> dict[str, bool | None]:
+    """reader → whether its PLANE_READ_* flag resolves to 1 in the fleet's
+    env tiers (None when the resolver is unavailable — disclosed, never
+    assumed off)."""
+    from .. import env_tiers as _env_tiers
+    from ..plane.cutover import READ_FLAGS
+    try:
+        cascade = _env_tiers.cascade(_env_tiers.read_tiers(paths, fleet_name=paths.fleet_name))
+    except _env_tiers.ResolverUnavailable:
+        return {r: None for r in READ_FLAGS}
+    out = {}
+    for reader, flag in READ_FLAGS.items():
+        res = cascade.get(flag)
+        out[reader] = res is not None and res.value == "1"
+    return out
+
+
+def cmd_plane_cutover(args) -> int:
+    """Declare a reader's flip to the plane (cutover chunk 5): refuses unless
+    the J4 gate is met for that reader on every declared bot, records
+    `cutover_declared` (streaks at the instant, or the --force reason) and
+    prints the flag line the operator adds. rc 0 declared / 1 refused (gate
+    not met) / 2 usage / 3 unreachable."""
+    paths = _resolve_paths(args)
+    root = paths.root
+
+    def run() -> int:
+        from ..plane import cutover as _cut
+        from ..plane import shadow as _sh
+        fleet = paths.fleet_name
+        if not fleet:
+            print("cutover: needs --fleet <name>", file=sys.stderr)
+            return 2
+        roster, why = _fleet_roster(paths)
+        if roster is None:
+            print(f"cutover: UNREACHABLE — fleet manifest: {why}")
+            return 3
+        conn = _open_plane_ro(root, "cutover", sys.stdout)
+        if conn is None:
+            return 3
+        try:
+            streaks = _sh.gate_summary(conn, fleet, roster, (args.reader,))
+        finally:
+            conn.close()
+        short = _cut.unmet(streaks)
+        for st in streaks:
+            print(("  ok   " if st.gate_ok else "  SHORT ") + st.line())
+        if short and not args.force:
+            print(f"cutover: REFUSED — {len(short)}/{len(streaks)} (bot, {args.reader})"
+                  f" streaks short of the gate; keep shadowing, or --force <reason>")
+            return 1
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ev = _cut.declaration_event(fleet, args.reader, streaks, now, forced=args.force or None)
+        counts = _sh.record(root, [ev])
+        flag = _cut.READ_FLAGS[args.reader]
+        print(f"cutover: declared {args.reader} → plane at {now}"
+              + (f" (FORCED: {args.force})" if args.force else "")
+              + f" [{', '.join(f'{k}={v}' for k, v in counts.items() if v)}]")
+        print(f"  add to the fleet .env tier:  {flag}=1")
+        print("  then `claudlobby --fleet " + fleet + " generate` (stamps the timers) and"
+              " restart the sessions that read it; rollback = the flag back to 0")
+        return 0
+
+    return _guarded("cutover", run)
 
 
 def cmd_plane_shadow(args) -> int:

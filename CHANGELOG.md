@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — cutover chunk 5: the list readers flip to the plane behind per-reader flags; the epoch recorded (#1444)
+
+- `lib/plane-readers.py` (stdlib): the plane answering `--open` (SQL byte-identical to `queries.OPEN_ASSIGNMENTS_AT_SQL`, pinned) and `--all` (the watchdog's rules mirrored). `lib/dispatch-overdue.py` gains `--source jsonl|plane|auto` + `--fleet`; auto follows `PLANE_READ_OPEN` / `PLANE_READ_OVERDUE`; the JSONL path stays callable by name for the shadow; an unreachable plane under a set flag refuses (rc 3), never falls back.
+- `brief` follows the same flags (open + overdue sections), omitting loudly on an unreachable plane; `fleet-pulse.sh` names its fleet on the `--all` call; the composer's `FLEET_JOB_ARMING` now carries a tuple of flags per job and stamps `PLANE_READ_OVERDUE` on the fleet-pulse unit.
+- `claudlobby plane cutover --reader open|overdue [--force <reason>]` (`plane/cutover.py`): refuses short of the J4 gate, records `cutover_declared` (registered, severity notice) with the streaks at that instant, prints the flag line. `plane doctor` gains a `cutover <reader>` rung per reader: flag vs declaration.
+
 ### Added — the F18 cutover, chunk 4: the overdue reader, the fleet-pulse bridge, brief's shadow section (#1444, J4)
 
 - **`plane shadow`** shadows a second reader — the watchdog's overdue set (`reader=overdue`: deadline passed, the expiry cap and the bot's progress grace resolved the way the watchdog resolves them; the legacy side read with no bots dir; a legacy row with a non-int deadline is the explained `legacy_malformed_deadline`) — records and streaks keyed by reader, `--reader open|overdue|all`, `--gate` per (bot, reader), and **`--check`**: rc 1 when any (bot, reader)'s latest recorded comparison diverged.

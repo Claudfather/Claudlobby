@@ -3871,9 +3871,12 @@ def _write_briefing_manifest(timers_dir: Path, expected: set[str]) -> None:
 # Fleet jobs whose SCRIPT reads an arming flag (the closed-scheduler-env class
 # #1383): the composer resolves each through the runtime tier cascade and
 # stamps it on exactly that unit. Add a row per dormant door.
-FLEET_JOB_ARMING: dict[str, str] = {
-    "keepalive": "PLANE_EMIT_ENABLED",
-    "plane-shadow": "PLANE_SHADOW_ENABLED",
+FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = {
+    "keepalive": ("PLANE_EMIT_ENABLED",),
+    "plane-shadow": ("PLANE_SHADOW_ENABLED",),
+    # cutover chunk 5 — the watchdog's overdue reader answers from the plane
+    # when the fleet tier flips it (per reader, never one fleet-wide flag).
+    "fleet-pulse": ("PLANE_READ_OVERDUE",),
 }
 
 
@@ -3948,10 +3951,11 @@ def compose_fleet_timers(
         _cascade = _env_tiers.cascade(
             _env_tiers.read_tiers(paths, fleet_name=fleet.name)
         )
-        for _job, _flag in FLEET_JOB_ARMING.items():
-            _res = _cascade.get(_flag)
-            if _res is not None and _res.value == "1":
-                job_extra_env[_job] = {_flag: "1"}
+        for _job, _flags in FLEET_JOB_ARMING.items():
+            _armed = {f: "1" for f in _flags
+                      if (_r := _cascade.get(f)) is not None and _r.value == "1"}
+            if _armed:
+                job_extra_env[_job] = _armed
         plane_extra_env = job_extra_env.get("keepalive")
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(

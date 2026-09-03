@@ -137,7 +137,7 @@ reap_events() {
 _overdue_cache=$(safe_mktemp)
 _orphan_cache=$(safe_mktemp)
 if [ -f "$dispatch_log" ]; then
-    python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" \
+    python3 "$LIB_DIR/dispatch-overdue.py" --all "$dispatch_log" "$report_ledger" --fleet "$fleet" \
         --bots-dir "$BOTS_DIR" 2>/dev/null > "$_overdue_cache" || true
     python3 "$LIB_DIR/dispatch-overdue.py" --orphans "$dispatch_log" "$report_ledger" \
         --bots-dir "$BOTS_DIR" 2>/dev/null > "$_orphan_cache" || true

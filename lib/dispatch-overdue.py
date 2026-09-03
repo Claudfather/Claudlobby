@@ -152,6 +152,74 @@ def _resolve_progress_grace() -> int:
         return DEFAULT_PROGRESS_GRACE_S
 
 
+# --- cutover chunk 5: the plane as a SOURCE for the two list readers ---------
+# `--open` and `--all` can answer from the plane instead of the JSONL, behind a
+# flag PER READER (PLANE_READ_OPEN / PLANE_READ_OVERDUE, resolved from the
+# fleet .env tier and stamped on the units whose scripts run this matcher). The
+# JSONL path stays callable by name (`source="jsonl"`): the shadow keeps grading
+# legacy against plane AFTER the flip, so the flag only moves the DEFAULT every
+# consumer gets (report-back's --open list, fleet-pulse's --all, brief's
+# dispatch section) — the readers flip together. Rollback is the flag back to
+# 0; a plane source that cannot be reached REFUSES (rc 3), never falls back:
+# a silent fallback is the one path that would make a flipped fleet read
+# legacy again without anyone knowing. --open-task keeps its own bar (chunk 6).
+PLANE_READ_FLAGS = {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE"}
+
+
+def plane_read_enabled(reader: str) -> bool:
+    return os.environ.get(PLANE_READ_FLAGS[reader], "0") == "1"
+
+
+def _plane_readers():
+    """Import the stdlib plane reader beside this file (never the package)."""
+    import importlib.util
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plane-readers.py")
+    spec = importlib.util.spec_from_file_location("plane_readers", src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _plane_context(fleet: str | None, root: str | None) -> tuple[str, str]:
+    """(fleet, root) for a plane read, or a loud refusal — the plane's rows are
+    per fleet alias, so a read without a fleet cannot be answered."""
+    fleet = fleet or os.environ.get("CLAUDLOBBY_FLEET") or os.environ.get("FLEET_NAME") or ""
+    root = root or os.environ.get("CLAUDLOBBY_ROOT") or ""
+    if not fleet or not root:
+        raise RuntimeError("plane source needs a fleet (--fleet / CLAUDLOBBY_FLEET / FLEET_NAME)"
+                           " and CLAUDLOBBY_ROOT")
+    return fleet, root
+
+
+def open_dispatches_plane(bot: str, *, fleet: str | None = None,
+                          root: str | None = None) -> list[tuple[int, int | None, str]]:
+    fleet, root = _plane_context(fleet, root)
+    pr = _plane_readers()
+    conn = pr.connect(root)
+    try:
+        return pr.open_rows(conn, fleet, bot)
+    finally:
+        conn.close()
+
+
+def overdue_all_plane(now: int, max_age: int, *, fleet: str | None = None,
+                      root: str | None = None) -> dict[str, list[tuple[int, int, int, str]]]:
+    fleet, root = _plane_context(fleet, root)
+    pr = _plane_readers()
+    grace = _resolve_progress_grace()
+    conn = pr.connect(root)
+    try:
+        out: dict[str, list] = {}
+        for bot in pr.roster(conn, fleet):
+            rows = pr.overdue_rows(conn, fleet, bot, now=now, max_age=max_age,
+                                   progress_grace=grace)
+            if rows:
+                out[bot.lower()] = rows
+        return out
+    finally:
+        conn.close()
+
+
 def _resolve_max_age() -> int:
     """Read the expiry cap from env, falling back to the default.
 
@@ -989,8 +1057,25 @@ def _reject_bot_slot(mode: str, value: str) -> bool:
     return True
 
 
+def _take_source(argv: list[str]) -> tuple[list[str], str, str | None]:
+    """Strip `--source jsonl|plane|auto` (default auto: the per-reader flags)
+    and `--fleet <name>` from argv, wherever they sit."""
+    out, source, fleet = [], "auto", None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--source" and i + 1 < len(argv):
+            source = argv[i + 1]; i += 2; continue
+        if argv[i] == "--fleet" and i + 1 < len(argv):
+            fleet = argv[i + 1]; i += 2; continue
+        out.append(argv[i]); i += 1
+    if source not in ("jsonl", "plane", "auto"):
+        raise SystemExit(f"dispatch-overdue: --source must be jsonl|plane|auto, not {source!r}")
+    return out, source, fleet
+
+
 def main() -> int:
     argv, bots_dir = _take_bots_dir(sys.argv)
+    argv, source, fleet_opt = _take_source(argv)
     if len(argv) < 3:
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         return 2
@@ -1030,6 +1115,16 @@ def main() -> int:
             return 2
         if _reject_bot_slot("--open", argv[2]):
             return 2
+        if source == "plane" or (source == "auto" and plane_read_enabled("open")):
+            try:
+                rows = open_dispatches_plane(argv[2], fleet=fleet_opt)
+            except Exception as exc:                      # unreachable plane: REFUSE, never fall back
+                print(f"dispatch-overdue: --open plane source: UNREACHABLE — {exc}", file=sys.stderr)
+                return 3
+            for da, exp, tid in rows:
+                print(f"{da} {exp if exp is not None else '-'} {tid}")
+            print(f"dispatch-overdue: --open scope: bot={argv[2]} source=plane", file=sys.stderr)
+            return 0
         if _refuse_unreadable_report_ledger("--open", argv[4]):
             return 3
         rows = open_dispatches(argv[2], argv[3], argv[4])
@@ -1100,6 +1195,16 @@ def main() -> int:
         )
         if argv[1] == "--orphans" and _refuse_undeterminable_orphans(bots_dir):
             return 3
+        if argv[1] == "--all" and (source == "plane" or (source == "auto" and plane_read_enabled("overdue"))):
+            try:
+                rows = overdue_all_plane(now, max_age, fleet=fleet_opt)
+            except Exception as exc:
+                print(f"dispatch-overdue: --all plane source: UNREACHABLE — {exc}", file=sys.stderr)
+                return 3
+            for bot_id, entries in sorted(rows.items()):
+                for da, exp, elapsed, tid in entries:
+                    print(f"{bot_id} {da} {exp} {elapsed} {tid}")
+            return 0
         over, orph = _classify_all(dlog, rlog, now, max_age, bots_dir)
         rows = over if argv[1] == "--all" else orph
         for bot_id, entries in sorted(rows.items()):
