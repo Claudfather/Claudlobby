@@ -48,6 +48,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .contracts import ContractViolation, validate_request
+from .emit_api import _apply_capture
 from .parity import (
     DISPATCH, REPORT, LedgerParity, LegacyRow, compare, content_key, read_ledger,
 )
@@ -92,6 +94,7 @@ class ImportPlan:
     orphan_reports: list[str] = field(default_factory=list) # no dispatch row anywhere
     unknown_status: list[str] = field(default_factory=list)
     malformed: list[str] = field(default_factory=list)
+    invalid: list[str] = field(default_factory=list)      # a unit the contracts refuse
     assumed_manager_fleet: int = 0
 
     @property
@@ -215,10 +218,26 @@ def report_events(row: LegacyRow, fleet: str, wi: str, asg: str,
     return events
 
 
+def _violation(events: list[dict], capture: dict) -> Optional[str]:
+    """Validate one unit's events the way ``emit_batch`` will (capture mode
+    applied first) — ``emit_batch`` validates the WHOLE batch before its one
+    transaction, so an unvalidated unit would abort every other row with it.
+    A unit the contracts refuse is counted and disclosed, never sent."""
+    try:
+        for event in events:
+            validate_request(_apply_capture(event, capture))
+    except ContractViolation as exc:
+        return str(exc)[:160]
+    return None
+
+
 def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
-                report_path: Path, now: datetime,
-                since: Optional[str] = None) -> ImportPlan:
-    """Derive the batch for *fleet* from parity. Pure: reads only."""
+                report_path: Path, now: datetime, since: Optional[str] = None,
+                capture: Optional[dict] = None) -> ImportPlan:
+    """Derive the batch for *fleet* from parity. Pure: reads only. *capture*
+    is the fleet capture config ``emit_batch`` will apply (so validation
+    here matches what the door does)."""
+    capture = capture or {}
     dp = compare(conn, DISPATCH, dispatch_path, since=since)
     rp = compare(conn, REPORT, report_path, since=since)
     batch = f"imp_{_h(fleet, now.isoformat())[:16]}"
@@ -242,8 +261,12 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
             plan.malformed.append(m.key)
             continue
         alias, assumed = manager_alias(conn, fleet, str(manager))
-        plan.assumed_manager_fleet += int(assumed)
         ids, events = dispatch_events(m.row, fleet, alias, batch)
+        err = _violation(events, capture)
+        if err:
+            plan.invalid.append(f"{m.key}: {err}")
+            continue
+        plan.assumed_manager_fleet += int(assumed)
         ids_by_task[str(task_id)] = ids
         manager_by_task[str(task_id)] = alias
         plan.events.extend(events)
@@ -270,6 +293,10 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
                                manager_by_task.get(task_id), batch)
         if events is None:
             plan.unknown_status.append(m.key)
+            continue
+        err = _violation(events, capture)
+        if err:
+            plan.invalid.append(f"{m.key}: {err}")
             continue
         plan.events.extend(events)
         plan.reports += 1

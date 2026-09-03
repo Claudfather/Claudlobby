@@ -67,8 +67,7 @@ def _rrow(ts, task_id, status, *, bot="w1", summary="done", pr_url="",
     return {"ts": ts, "bot": bot, "task_id": task_id, "status": status,
             "summary": summary, "pr_url": pr_url, "issues": "", "skill": "",
             "progress": progress, "artifact": "", "task_anomaly": anomaly,
-            "plane_msg_id": plane_msg_id, "plane_work_item_id": "",
-            "plane_assignment_id": ""}
+            "plane_msg_id": plane_msg_id}
 
 
 def _write(path: Path, rows, *, extra_lines=()):
@@ -364,3 +363,55 @@ def test_import_ids_survive_ledger_rotation(tmp_path):
     assert second_refs and "dispatch-log:t-0-0000" not in second_refs
     for ref, rows in second_refs.items():          # every surviving row: identical ids
         assert first_refs[ref] == rows, ref        # (a position hash re-mints or COLLIDES)
+
+
+def test_import_a_unit_the_contracts_refuse_is_skipped_and_the_rest_lands(tmp_path):
+    """emit_batch validates the WHOLE batch before its one transaction, so an
+    unvalidated unit would take every good row down with it. A stamped row
+    whose plane id is malformed is refused per unit, counted, and disclosed."""
+    root = _root(tmp_path)
+    dlog, rlog = _ledgers(tmp_path, root)
+    _write(dlog, [
+        _drow("2026-08-28T00:47:02Z", "t-0-0000", task="Old work"),
+        _drow("2026-08-28T00:48:02Z", "t-5-5555", plane=("msg_short", "", "")),   # bad msg id
+    ])
+    _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed"),
+                  _rrow("2026-08-28T03:01:00Z", "t-5-5555", "completed")])
+    conn = _ro(root)
+    try:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW,
+                           capture={"*": "full"})
+    finally:
+        conn.close()
+    assert plan.dispatches == 1 and len(plan.invalid) == 1 and plan.invalid[0].startswith("task:t-5-5555")
+    assert plan.orphan_reports == [] or plan.reports == 1   # its report has no assignment to hang on
+    assert apply_import(root, plan)["committed"] == len(plan.events) > 0
+
+
+def test_import_resolves_the_manager_alias_through_the_registry(tmp_path):
+    """Exactly one fleet knows the manager's name -> that alias, not assumed;
+    two fleets know it -> assumed to be F and COUNTED, never picked. (The
+    live fixture's own manager `mgr` is known in F, so a fresh name is used.)"""
+    root = _root(tmp_path)
+    dlog, rlog = _ledgers(tmp_path, root)
+    _write(dlog, [_drow("2026-08-28T00:47:02Z", "t-0-0000", manager="boss", task="Old work")])
+    emit_batch(root, [{"event_type": "work_item", "emitter": "t", "fleet": "g",
+                       "payload": {"work_item_id": f"wi_{'e':0>32}", "title": "t",
+                                   "created_by": "bot:g/boss"}}])     # boss is known in fleet g only
+    conn = _ro(root)
+    try:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    finally:
+        conn.close()
+    assert plan.events[0]["payload"]["created_by"] == "bot:g/boss"
+    assert plan.assumed_manager_fleet == 0
+    emit_batch(root, [{"event_type": "work_item", "emitter": "t", "fleet": "h",
+                       "payload": {"work_item_id": f"wi_{'d':0>32}", "title": "t",
+                                   "created_by": "bot:h/boss"}}])     # now two fleets know it
+    conn = _ro(root)
+    try:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    finally:
+        conn.close()
+    assert plan.events[0]["payload"]["created_by"] == f"bot:{F}/boss"
+    assert plan.assumed_manager_fleet == 1

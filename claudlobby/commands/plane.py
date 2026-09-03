@@ -661,7 +661,9 @@ def cmd_plane_parity(args) -> int:
         rc = 0
         for p in reports:
             if not p.reachable:
-                print(f"parity: {p.ledger}: UNREACHABLE — {p.detail}", file=sys.stderr)
+                # rc carries the refusal; the text goes where stdout is not
+                # machine-parsed (source_state) — stderr only under --json.
+                print(f"parity: {p.ledger}: UNREACHABLE — {p.detail}", file=out)
                 rc = 3
                 continue
             causes = ", ".join(f"{c}={n}" for c, n in sorted(p.causes().items())) or "-"
@@ -723,7 +725,8 @@ def cmd_plane_import(args) -> int:
             plan = plan_import(conn, fleet=fleet,
                                dispatch_path=dispatch_ledger_path(paths),
                                report_path=report_ledger_path(paths),
-                               now=datetime.now(timezone.utc), since=args.since)
+                               now=datetime.now(timezone.utc), since=args.since,
+                               capture=_load_capture_config(root))
         finally:
             conn.close()
         if not plan.reachable:
@@ -734,20 +737,21 @@ def cmd_plane_import(args) -> int:
             return 3
         print(f"import[{fleet}] batch {plan.batch}: {plan.dispatches} dispatch(es)"
               f" x4 events + {plan.reports} report(s) -> {len(plan.events)} event(s)")
+        # Disclosures ride stdout: this is a human table nobody parses, and a
+        # stderr-only disclosure is what hid #1216 for a day (source_state).
         for label, keys in (("unattributed (no report in this fleet's ledger)",
                              plan.unattributed),
                             ("orphan reports (no dispatch row anywhere)",
                              plan.orphan_reports),
                             ("unknown status", plan.unknown_status),
-                            ("malformed", plan.malformed)):
+                            ("malformed", plan.malformed),
+                            ("refused by the contracts", plan.invalid)):
             if keys:
                 print(f"  skipped {len(keys)} {label}: "
-                      + ", ".join(keys[:5]) + (" ..." if len(keys) > 5 else ""),
-                      file=sys.stderr)
+                      + ", ".join(keys[:5]) + (" ..." if len(keys) > 5 else ""))
         if plan.assumed_manager_fleet:
             print(f"  assumed {plan.assumed_manager_fleet} manager alias(es) in"
-                  f" {fleet} (registry did not name a unique fleet)",
-                  file=sys.stderr)
+                  f" {fleet} (registry did not name a unique fleet)")
         if not args.apply:
             print("dry-run: nothing written (pass --apply to land the batch)")
             return 0
