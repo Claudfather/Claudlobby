@@ -353,10 +353,14 @@ def test_import_ids_survive_ledger_rotation(tmp_path):
         second = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
     finally:
         conn.close()
-    ids_first = {e["event_id"] for e in first.events}
-    ids_second = {e["event_id"] for e in second.events}
-    assert ids_second and ids_second <= ids_first        # nothing re-minted by position
-    def asg_of(plan):
-        return next(e["payload"]["assignment_id"] for e in plan.events
-                    if e["event_type"] == "assignment" and e["source_ref"] == "dispatch-log:t-0-1111")
-    assert asg_of(first) == asg_of(second)
+    def by_ref(plan):
+        out: dict = {}
+        for e in plan.events:
+            out.setdefault(e["source_ref"], set()).add(
+                (e["event_type"], e["event_id"], e["payload"].get("work_item_id"),
+                 e["payload"].get("assignment_id"), e["payload"].get("msg_id")))
+        return out
+    first_refs, second_refs = by_ref(first), by_ref(second)
+    assert second_refs and "dispatch-log:t-0-0000" not in second_refs
+    for ref, rows in second_refs.items():          # every surviving row: identical ids
+        assert first_refs[ref] == rows, ref        # (a position hash re-mints or COLLIDES)
