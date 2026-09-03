@@ -12,7 +12,7 @@ from claudlobby.plane.emit_api import emit_batch
 from tests.plane_fixtures import ro as _ro
 from tests.test_plane_cutover_flip import F, NOW_EPOCH, _cli, _declare, _ledgers, _matcher, _scene
 from tests.test_plane_cutover_parity import _rrow, _write
-from tests.test_plane_shadow import _complete
+from tests.test_plane_shadow import _complete, _report
 
 
 def _finish(root, paths, r, *, wi, asg, task_id, ts, bot="w1"):
@@ -93,3 +93,60 @@ def test_retire_writes_no_longer_names_a_frozen_reader(tmp_path):
         _declare(root, reader)
     done = _cli(root, "cutover", "--retire-writes")
     assert done.returncode == 0 and "frozen" not in done.stdout.lower() and "--unassigned" in done.stdout
+
+
+def test_a_plane_only_completion_makes_the_flipped_check_answer_from_the_plane(tmp_path):
+    """Asymmetric on purpose: w1's completion is recorded on the plane only (the
+    ledger never saw it). Unflipped, the check follows the ledger (w1 not
+    idle); flipped, it follows the plane (w1 idle) — the mutant that never
+    consulted the plane survived every symmetric pin."""
+    root, paths, d, r = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    _report(root, f"wi_{'2':0>32}", f"asg_{'2':0>32}", "2026-09-02T13:00:00Z")   # plane only: no ledger row
+    _declare(root, "unassigned")
+    legacy = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), PLANE_READ_UNASSIGNED="0", CLAUDLOBBY_FLEET=F)
+    flipped = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), PLANE_READ_UNASSIGNED="1", CLAUDLOBBY_FLEET=F)
+    assert legacy.returncode == 0 and legacy.stdout == ""                         # the ledger saw no report
+    assert flipped.returncode == 0 and flipped.stdout.startswith("w1 ") and "t-2-bbbb completed" in flipped.stdout
+
+
+def test_a_progress_report_is_not_terminal_and_a_blocked_one_keeps_the_legacy_word(tmp_path):
+    """Two rules the symmetric scene could not distinguish: a later `progress`
+    (non-terminal) report means the worker is NOT idle on either side; a
+    `returned_blocked` task event prints as the legacy `blocked`."""
+    root, paths, d, r = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    _finish(root, paths, r, wi=f"wi_{'2':0>32}", asg=f"asg_{'2':0>32}", task_id="t-2-bbbb", ts="2026-09-02T13:00:00Z")
+    prog = "2026-09-02T13:30:00Z"
+    _report(root, f"wi_{'2':0>32}", f"asg_{'2':0>32}", prog, event="progress", extra={"progress": 50})
+    r.append(_rrow(prog, "t-2-bbbb", "progress", progress="50"))
+    from claudlobby.brief import report_ledger_path
+    _write(report_ledger_path(paths), r)
+    jsonl = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
+    plane = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
+    assert jsonl.stdout == plane.stdout == ""                                      # progress: not idle, both sides
+    # w2's open task ends blocked on both sides
+    blocked = "2026-09-02T14:00:00Z"
+    _report(root, f"wi_{'3':0>32}", f"asg_{'3':0>32}", blocked, bot="w2", event="returned_blocked")
+    r.append(_rrow(blocked, "t-3-cccc", "blocked", bot="w2"))
+    _write(report_ledger_path(paths), r)
+    jsonl = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
+    plane = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
+    assert jsonl.stdout == plane.stdout and plane.stdout.startswith("w2 ") and plane.stdout.rstrip().endswith("t-3-cccc blocked")
+
+
+def test_a_report_that_resolved_nothing_is_the_newest_report_but_not_terminal(tmp_path):
+    """A bare note (the door lands its communication, no task event) after a
+    completion: the ledger holds a non-terminal row, the plane a report with
+    no status — not idle on either side, like a progress report."""
+    root, paths, d, r = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    _finish(root, paths, r, wi=f"wi_{'2':0>32}", asg=f"asg_{'2':0>32}", task_id="t-2-bbbb", ts="2026-09-02T13:00:00Z")
+    note = "2026-09-02T13:15:00Z"
+    _report(root, None, None, note, event=None)
+    r.append(_rrow(note, "", "progress", summary="just a note"))
+    from claudlobby.brief import report_ledger_path
+    _write(report_ledger_path(paths), r)
+    jsonl = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "jsonl")
+    plane = _matcher(root, "--unassigned", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F)
+    assert jsonl.stdout == plane.stdout == ""

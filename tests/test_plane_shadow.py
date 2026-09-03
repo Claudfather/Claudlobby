@@ -58,11 +58,32 @@ def _dispatch(root, n, task_id, ts, *, bot="w1", ledger):
     return wi, asg
 
 
+_REPORT_SEQ = [0]
+
+
+def _report(root, wi, asg, ts, *, bot="w1", event="completed", extra=None):
+    """What the REAL report door lands for one report: the `report` communication
+    and, when it resolved an assignment, the task event — both under one
+    `report-back:<msg_id>` ref. (`event=None` = a report that resolved nothing.)"""
+    _REPORT_SEQ[0] += 1
+    msg = f"msg_{'e' * 24}{_REPORT_SEQ[0]:0>8x}"      # 32 hex, the contract's shape; 'e…' keeps it apart from the dispatch msgs
+    ref = f"report-back:{msg}"
+    events = [{"event_type": "communication", "emitter": "report-back", "fleet": F,
+               "source_ref": ref, "occurred_at": ts,
+               "payload": {"msg_id": msg, "sender": f"bot:{F}/{bot}", "recipient": f"bot:{F}/mgr",
+                           "recipient_raw": "mgr", "message_class": "report",
+                           **({"work_item_id": wi, "assignment_id": asg} if event else {}), "body": "r"}}]
+    if event:
+        events.append({"event_type": "task", "emitter": "report-back", "fleet": F,
+                       "source_ref": ref, "occurred_at": ts,
+                       "payload": {"work_item_id": wi, "assignment_id": asg, "event": event,
+                                   "actor": f"bot:{F}/{bot}", **(extra or {})}})
+    emit_batch(root, events)
+    return msg
+
+
 def _complete(root, wi, asg, ts, task_id, reports, *, bot="w1"):
-    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
-                       "source_ref": f"report-back:msg_{'9':0>32}", "occurred_at": ts,
-                       "payload": {"work_item_id": wi, "assignment_id": asg,
-                                   "event": "completed", "actor": f"bot:{F}/{bot}"}}])
+    _report(root, wi, asg, ts, bot=bot)
     reports.append(_rrow(ts, task_id, "completed", bot=bot))
 
 

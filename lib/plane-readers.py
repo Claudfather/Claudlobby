@@ -275,17 +275,26 @@ def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = Non
 
 
 # The idle-worker check (chunk 7a, the last reader to get a plane path): per
-# bot, the NEWEST terminal task event by the bot and the NEWEST assignment to
-# it — purely temporal, like the legacy rule (it never asks whether work is
-# open). The legacy TERMINAL statuses are completed/failed/blocked; the plane's
-# are completed/failed/returned_blocked (the report door's own mapping).
-NEWEST_TERMINAL_BY_ACTOR_SQL = (
-    "SELECT e.occurred_at, e.event, a.source_ref FROM events e"
-    " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
-    " WHERE e.kind = 'task' AND e.event IN ('completed','failed','returned_blocked')"
-    " AND e.actor_uid = ? AND (? IS NULL OR e.occurred_at <= ?)"
-    " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
+# bot, the NEWEST report by the bot — of ANY status, exactly as the legacy
+# rule reads the newest report row and only then asks whether it is terminal
+# (a later `progress` means the worker is busy, not idle) — against the NEWEST
+# assignment to it. Purely temporal; it never asks whether work is open. The
+# report door lands every report as a `report` communication and, when it
+# resolved an assignment, a task event; the communication is the newest-report
+# fact (a report on nothing still counts, as its ledger row does), the task
+# event beside it carries the status.
+NEWEST_REPORT_SQL = (
+    "SELECT c.occurred_at, c.msg_id FROM communications c"
+    " WHERE c.message_class = 'report' AND c.sender_uid = ? AND (? IS NULL OR c.occurred_at <= ?)"
+    " ORDER BY c.occurred_at DESC, c.ingest_seq DESC LIMIT 1"
 )
+REPORT_TASK_EVENT_SQL = (
+    "SELECT e.event, a.source_ref FROM events e"
+    " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.source_ref = ? AND e.actor_uid = ?"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+REPORT_STATUS_EVENTS = ("completed", "failed", "returned_blocked", "progress")
 NEWEST_ASSIGNMENT_SQL = (
     "SELECT a.occurred_at FROM assignments a WHERE a.assignee_uid IN (%s)"
     " AND (? IS NULL OR a.occurred_at <= ?) ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
@@ -303,12 +312,16 @@ def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_thre
         actor = entry.get("actor")
         if not actor:
             continue
-        rep = conn.execute(NEWEST_TERMINAL_BY_ACTOR_SQL, (actor, at, at)).fetchone()
+        rep = conn.execute(NEWEST_REPORT_SQL, (actor, at, at)).fetchone()
         if rep is None:
             continue
         rts = _epoch(rep[0])
         if rts is None:
             continue
+        ev = conn.execute(REPORT_TASK_EVENT_SQL, (f"report-back:{rep[1]}", actor)).fetchone()
+        status = ev[0] if ev else None
+        if status not in ("completed", "failed", "returned_blocked"):
+            continue                                   # the newest report is not terminal (progress, or a bare note)
         uids = entry["uids"]
         asg = conn.execute(NEWEST_ASSIGNMENT_SQL % ",".join("?" * len(uids)), (*uids, at, at)).fetchone()
         last_d = _epoch(asg[0]) if asg and asg[0] else None
@@ -317,7 +330,7 @@ def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_thre
         idle = now - rts
         if idle < 0 or idle < idle_threshold:
             continue
-        out[bot] = (rts, idle, _task_id(rep[2]) or "-", LEGACY_STATUS.get(rep[1], rep[1]))
+        out[bot] = (rts, idle, _task_id(ev[1]) or "-", LEGACY_STATUS.get(status, status))
     return out
 
 
