@@ -243,7 +243,7 @@ def _violation(events: list[dict], capture: dict) -> Optional[str]:
 
 
 def supersession_events(conn: sqlite3.Connection, fleet: str, rows: list[LegacyRow],
-                        batch: str) -> list[dict]:
+                        batch: str, planned: Optional[dict[str, dict]] = None) -> list[dict]:
     """The terminal ``superseded`` events for every legacy ``supersedes``
     whose retired assignment the plane still holds OPEN for this fleet's
     bot. Every open sibling of a redispatched id is closed (the legacy join
@@ -251,8 +251,13 @@ def supersession_events(conn: sqlite3.Connection, fleet: str, rows: list[LegacyR
     assignment, so a re-run plans nothing once the assignment is terminal.
     A raw-text ``--supersedes`` mints no task id of its own (the dispatch
     door envelopes only typed sends), so the event's source_ref then names
-    the retired id. The shadow (chunk 3) CLASSIFIES the same ``supersedes``
-    field through the legacy matcher's helper; this is where it CLOSES."""
+    the retired id. *planned* maps task ids to the ids THIS run's dispatch
+    imports mint, so a retired dispatch imported in the same run is closed
+    in the same run (the closure follows its assignment in the batch) rather
+    than on the next one. The shadow (chunk 3) CLASSIFIES the same
+    ``supersedes`` field through the legacy matcher's helper; this is where
+    it CLOSES."""
+    planned = planned or {}
     events: list[dict] = []
     for row in rows:
         r = row.row
@@ -262,11 +267,17 @@ def supersession_events(conn: sqlite3.Connection, fleet: str, rows: list[LegacyR
         alias = f"bot:{fleet}/{bot}"
         successor = None
         if r.get("task_id"):
-            hit = conn.execute(LATEST_ASSIGNMENT_BY_REF_SQL,
-                               (f"{DISPATCH}:{r['task_id']}", alias)).fetchone()
-            successor = hit[0] if hit else None
-        for asg, wi in conn.execute(OPEN_ASSIGNMENTS_BY_REF_SQL,
-                                    (f"{DISPATCH}:{retired}", alias)).fetchall():
+            if str(r["task_id"]) in planned:
+                successor = planned[str(r["task_id"])]["asg"]
+            else:
+                hit = conn.execute(LATEST_ASSIGNMENT_BY_REF_SQL,
+                                   (f"{DISPATCH}:{r['task_id']}", alias)).fetchone()
+                successor = hit[0] if hit else None
+        targets = [(asg, wi) for asg, wi in conn.execute(
+            OPEN_ASSIGNMENTS_BY_REF_SQL, (f"{DISPATCH}:{retired}", alias)).fetchall()]
+        if str(retired) in planned:                 # imported by THIS run: the alias is bot:F/<bot> by construction
+            targets.append((planned[str(retired)]["asg"], planned[str(retired)]["wi"]))
+        for asg, wi in targets:
             payload = {"work_item_id": wi, "assignment_id": asg, "event": "superseded"}
             if successor:
                 payload["successor_id"] = successor
@@ -349,7 +360,7 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
             continue
         plan.events.extend(events)
         plan.reports += 1
-    closures = supersession_events(conn, fleet, dispatch_read[2], batch)
+    closures = supersession_events(conn, fleet, dispatch_read[2], batch, planned=ids_by_task)
     for ev in closures:
         err = _violation([ev], capture)
         if err:

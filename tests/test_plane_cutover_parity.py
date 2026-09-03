@@ -524,3 +524,28 @@ def test_a_report_links_only_to_its_own_bots_assignment(tmp_path):
     with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
     assert plan.reports == 0 and len(plan.orphan_reports) == 1
+
+
+def test_a_retired_dispatch_imported_in_the_same_run_is_closed_in_that_run(tmp_path):
+    """Both rows are pre-go-live and missing: the run imports the retired
+    dispatch AND closes it (the closure follows its assignment in the batch),
+    instead of leaving it open until the next run."""
+    root = _root(tmp_path)
+    _live_dispatch(root, "f", "t-9-ffff", ts="2026-08-28T15:53:33Z")          # go-live
+    dlog = tmp_path / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "report-back.jsonl"
+    _write(dlog, [_drow("2026-08-28T00:47:02Z", "t-1-aaaa", task="old"),
+                  {**_drow("2026-08-28T01:00:00Z", "t-2-bbbb", task="new"), "supersedes": "t-1-aaaa"}])
+    _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-1-aaaa", "progress", progress="10"),
+                  _rrow("2026-08-28T03:10:00Z", "t-2-bbbb", "progress", progress="10")])
+    with _ro(root) as conn:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    assert plan.dispatches == 2 and plan.supersessions == 1
+    closure = plan.events[-1]
+    assert closure["payload"]["event"] == "superseded"
+    planned_asg = {e["payload"]["assignment_id"] for e in plan.events if e["event_type"] == "assignment"}
+    assert closure["payload"]["assignment_id"] in planned_asg and closure["payload"]["successor_id"] in planned_asg
+    apply_import(root, plan)
+    assert len(_open_ids(root)) == 2                          # go-live row + the superseding one
+    with _ro(root) as conn:
+        assert plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW).supersessions == 0
