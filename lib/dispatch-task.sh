@@ -572,9 +572,19 @@ _plane_emit_intent() {
     if [ -n "$TASK_ID" ]; then
         dispatch_ref="dispatch-log:$TASK_ID"
     else
-        dispatch_ref="dispatch-log:sha:$(sha256_hex32 "$LEDGER_LINE")"
+        local _key
+        _key=$(sha256_hex32 "$LEDGER_LINE" 2>/dev/null || true)
+        if [ -z "$_key" ]; then
+            # No sha tool on this host: disclose, and emit the communication only
+            # rather than mint a malformed ref (unreachable on Linux/macOS).
+            echo "dispatch-task: no sha256 tool -- id-less dispatch emitted as a communication only" >&2
+            dispatch_ref=""
+        else
+            dispatch_ref="dispatch-log:sha:$_key"
+        fi
     fi
-    src_ref="\"source_ref\":\"$dispatch_ref\","
+    src_ref=""
+    [ -n "$dispatch_ref" ] && src_ref="\"source_ref\":\"$dispatch_ref\","
     if [ -n "$DISPATCH_SUPERSEDES" ] && [ -n "$PLANE_ASG_ID" ]; then
         _sup=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
             --task-id "$DISPATCH_SUPERSEDES" 2>/dev/null || true)
@@ -594,7 +604,7 @@ _plane_emit_intent() {
     fi
     local comm wi_ev asg_ev
     comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
-    if [ -n "$PLANE_WI_ID" ]; then
+    if [ -n "$dispatch_ref" ]; then
         iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
         [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
         [ -n "$DISPATCH_WORKSTREAM" ] && ws_frag=",\"workstream_id\":\"$(json_escape "$DISPATCH_WORKSTREAM")\""
@@ -661,12 +671,11 @@ _append_ledger() {
     printf '%s\n' "$LEDGER_LINE" >> "$LEDGER"
     rotate_jsonl_by_ts "$LEDGER"
 }
-# The row text, composed ONCE here (main shell, so a subshell lock cannot lose
-# it) and keyed for the plane below exactly as the importer keys it.
-LEDGER_LINE=$(
-    printf '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}' \
+# The row text, composed ONCE here into a variable (printf -v: no fork; main
+# shell, so a subshell lock cannot lose it) and keyed for the plane below
+# exactly as the importer keys an unstamped row.
+printf -v LEDGER_LINE '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}' \
         "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID"
-)
 with_lock "$LEDGER.lock" _append_ledger
 
 # Plane intent BEFORE transport (F9): a crash between here and the send leaves

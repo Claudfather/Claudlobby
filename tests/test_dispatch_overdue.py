@@ -1729,6 +1729,22 @@ class TestReportLedgerRefusal:
         out = capsys.readouterr()
         assert out.out.strip() == "" and "#1418" in out.err and "stale head" in out.err
 
+    def test_a_disabled_cap_disables_the_stale_head_rule_too(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """DISPATCH_OVERDUE_MAX_AGE_S <= 0 means NO expiry cap everywhere in
+        this file; the #1418 rule honours it (a fleet that disabled the cap
+        keeps its first-report resolution)."""
+        dlog, _ = self._rows(tmp_path)
+        monkeypatch.setenv("DISPATCH_OVERDUE_MAX_AGE_S", "0")
+        monkeypatch.setattr(
+            "sys.argv",
+            ["dispatch-overdue.py", "--open-task", "w1", dlog,
+             str(tmp_path / "never-reported.jsonl")],
+        )
+        assert dispatch_overdue.main() == 0
+        assert capsys.readouterr().out.strip() == "t-1"
+
     def test_open_task_STILL_refuses_when_the_ledger_is_unopenable(
         self, tmp_path, monkeypatch, capsys
     ):

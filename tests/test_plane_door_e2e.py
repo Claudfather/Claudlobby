@@ -25,7 +25,7 @@ CLI = Path(sys.executable).parent / "claudlobby"
 DOOR_FILES = (
     "dispatch-task.sh", "report-back.sh", "workstream-update.sh",
     "lib-common.sh", "plane-emit.sh", "plane-socket-client.py",
-    "dispatch-overdue.py",
+    "dispatch-overdue.py", "plane-readers.py", "plane-lookup.py",
 )
 
 
@@ -353,3 +353,39 @@ def test_plane_failure_never_blocks_the_door(tmp_path, armed):
     assert "plane record failed" in r.stderr
     row = _ledger_row(tmp_path)
     assert row["task_id"].startswith("t-"), "legacy ledger row still lands"
+
+def test_an_idless_report_answers_open_idless_dispatches_through_the_real_doors(tmp_path, armed):
+    """Cutover chunk 6a, driven through the REAL doors: an id'd task, then an
+    id-less query, then a terminal report with no --task. Before the report
+    both resolvers answer nothing (the id-less dispatch is unanswered); the
+    report closes the query's assignment on the plane (the legacy ledger
+    closes id-less rows by any later terminal report), and afterwards both
+    resolvers hand back the id'd task."""
+    import subprocess as _sp
+    libdir, env = armed
+    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "build the door"', env)
+    assert r.returncode == 0, r.stderr
+    task_id = _ledger_row(tmp_path)["task_id"]
+    r = _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "what is the retry logic"', env)
+    assert r.returncode == 0, r.stderr
+    dlog = tmp_path / "state" / "dispatch-log.jsonl"
+    r = _bash(f'"{libdir}/report-back.sh" w1 progress "looking"', env)     # a non-terminal report first
+    assert r.returncode == 0, r.stderr
+    rlog = next(p for p in tmp_path.rglob("report-back.jsonl"))
+    matcher = [sys.executable, str(libdir / "dispatch-overdue.py"), "--open-task", "w1", str(dlog), str(rlog)]
+    mx = {**env, "PLANE_READ_OPEN_TASK": "0"}
+    before_j = _sp.run(matcher + ["--source", "jsonl"], capture_output=True, text=True, env=mx)
+    before_p = _sp.run(matcher + ["--source", "plane", "--fleet", "e2e-fleet"], capture_output=True, text=True, env=mx)
+    assert before_j.stdout == before_p.stdout == "", (before_j.stderr, before_p.stderr)   # the id-less guard, both sides
+    r = _bash(f'"{libdir}/report-back.sh" w1 completed "done with the query"', env)      # no --task: id-less
+    assert r.returncode == 0, r.stderr
+    conn = connect(db_path(tmp_path))
+    closed = conn.execute(
+        "SELECT t.event, a.source_ref FROM events t JOIN assignments a ON a.assignment_id = t.assignment_id"
+        " WHERE t.kind='task' AND t.event='completed'").fetchall()
+    conn.close()
+    assert [(x["event"], x["source_ref"][:len("dispatch-log:sha:")]) for x in closed] == [("completed", "dispatch-log:sha:")]
+    after_j = _sp.run(matcher + ["--source", "jsonl"], capture_output=True, text=True, env=mx)
+    after_p = _sp.run(matcher + ["--source", "plane", "--fleet", "e2e-fleet"], capture_output=True, text=True, env=mx)
+    assert after_j.stdout.strip() == after_p.stdout.strip() == task_id, (after_j.stderr, after_p.stderr)
+    assert "[source=plane]" in after_p.stderr and after_j.stderr == ""

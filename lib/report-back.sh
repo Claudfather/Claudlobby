@@ -289,6 +289,30 @@ _plane_emit_report_intent() {
             events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_LINK_WI\",\"assignment_id\":\"$PLANE_LINK_ASG\",\"event\":\"supplied_id_not_open\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "--task $TASK_ID was not in the open set at report time")\"$sess_frag}}"
         fi
     fi
+    # Cutover chunk 6a: an id-less report (no --task) with a TERMINAL status
+    # answers every OPEN id-less dispatch of this bot, as the legacy ledger
+    # closes id-less rows by any later terminal report -- each gets the
+    # terminal task event, so the plane resolver guard releases exactly when
+    # the legacy one does and the overdue reader stops paging it.
+    if [ -z "$TASK_ID" ]; then
+        local _idless_ev="" _pairs _wi _asg
+        case "$STATUS" in
+            completed) _idless_ev="completed" ;;
+            failed)    _idless_ev="failed" ;;
+            blocked)   _idless_ev="returned_blocked" ;;
+        esac
+        if [ -n "$_idless_ev" ]; then
+            _pairs=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
+                --root "${CLAUDLOBBY_ROOT:-}" --open-idless --fleet "${FLEET_NAME:-}" --bot "$BOT" \
+                2>/dev/null || true)
+            while read -r _wi _asg; do
+                [ -n "$_asg" ] || continue
+                events="$events,{\"event_type\":\"task\",\"emitter\":\"report-back\",\"source_ref\":\"report-back:$PLANE_MSG_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$_wi\",\"assignment_id\":\"$_asg\",\"event\":\"$_idless_ev\",\"actor\":\"$safe_sender\",\"summary\":\"$(json_escape "$SUMMARY")\"${sess_frag:-}}}"
+            done <<EOF_IDLESS
+$_pairs
+EOF_IDLESS
+        fi
+    fi
     printf '{"events":[%s]}' "$events" | plane_emit_events report-back
 }
 if [ "$PLANE_ARMED" = "1" ]; then

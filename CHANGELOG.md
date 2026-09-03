@@ -6,11 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Added — cutover chunk 6a: the resolver shadowed by its head streak, then flipped; id-less dispatches emitted live (#1444)
+### Added — cutover chunk 6a: the resolver shadowed by its own streak, then flipped; id-less dispatches emitted live and answered (#1444)
 
-- `lib/dispatch-task.sh`: every dispatch lands the construct triple — id-less ones keyed `dispatch-log:sha:<content key of the ledger line>` (the importer's key, `sha256_hex32` in lib-common), the line composed once in the main shell before the locked append.
-- `lib/plane-readers.py`: `answering_idless` (the resolver's #1418 guard from the plane) and `head`; `lib/dispatch-overdue.py`: `--open-task` gains the plane source under `PLANE_READ_OPEN_TASK` (flag AND declaration); the legacy resolver returns nothing on an absent report ledger beside a head older than the expiry cap (#1418), a young head still resolves.
-- `claudlobby/plane/shadow.py`: `head_streak` — `open_task` is a streak mode over the open reader's records (200 agreeing heads + a head change; `Streak.clean_bar`), `GATED` = the three declarable readers; `plane cutover --reader open_task`; `plane shadow --reader open_task` is `--gate`/`--check` only; the doctor's cutover rungs cover the third reader.
+- `lib/dispatch-task.sh`: every dispatch lands the construct triple — id-less ones keyed `dispatch-log:sha:<content key of the ledger line>` (`sha256_hex32` in lib-common; the line composed once with `printf -v` before the locked append; no sha tool → disclose, communication only). `lib/report-back.sh`: an id-less report with a terminal status closes every open id-less dispatch of the bot on the plane (`plane-lookup.py --open-idless`), as the legacy ledger does.
+- `lib/plane-readers.py`: `answering_idless` (the resolver's #1418 guard from the plane), `head`, `open_idless_assignments`; one terminal list feeds every SQL; `connect` (schema probe + transient retry) is now the ONE read-only open every stdlib door imports. `lib/dispatch-overdue.py`: `--open-task` serves the plane under `PLANE_READ_OPEN_TASK` (flag AND declaration), one plane session per call, `[source=plane]` disclosed on the plane path only, an optional `<now_epoch>`; the legacy resolver returns nothing on an absent report ledger beside a head older than the expiry cap (#1418; a disabled cap disables the rule).
+- `claudlobby/plane/shadow.py`: every open record carries the resolver's answers on both sides; `head_streak` grades them (200 agreeing non-empty answers + a change; idle records skipped; `BAR_BY_READER`, shared `_tail`); `GATED` = the three declarable readers; `plane cutover --reader open_task`; `plane shadow --reader open_task` is `--gate`/`--check` only; the doctor's cutover rungs cover the third reader. Migration 0008: `events(actor_uid, occurred_at)`.
 
 ### Added — cutover chunk 5: the list readers flip to the plane behind per-reader flags; the epoch recorded (#1444)
 

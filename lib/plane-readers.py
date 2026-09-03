@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-"""plane-readers.py — the plane answering the two LIST readers, stdlib (cutover chunk 5).
+"""plane-readers.py — the plane answering the LIST readers and the RESOLVER, stdlib
+(cutover chunks 5 + 6a).
 
 The matcher (``dispatch-overdue.py``) is a stdlib script every consumer shells,
 so its plane source cannot import the package (the ``plane-lookup.py`` /
-``plane-shadow-check.py`` precedent). This module is the stdlib twin of the
-package definitions — keep them in step (the SQL is pinned byte-identical):
+``plane-shadow-check.py`` precedent — both now import THIS module's ``connect``
+so the read-only open, its schema probe and its transient retry live once).
+This module is the stdlib twin of the package definitions — keep them in step
+(the open SQL is pinned byte-identical):
 
-- ``open_rows``    ↔ ``claudlobby.plane.queries.OPEN_ASSIGNMENTS_AT_SQL`` +
-                     ``claudlobby.plane.shadow.plane_open``
-- ``overdue_rows`` ↔ ``claudlobby.plane.shadow.plane_overdue`` (deadline
-                     passed, the expiry cap, the bot's own ``progress`` inside
-                     the grace — the watchdog's rules, mirrored; id-less rows
-                     are KEPT, as that reader keeps them)
-- ``declared``     ↔ ``claudlobby.plane.cutover.declared``
-- ``answering_idless`` ↔ ``dispatch-overdue._answering_an_idless_dispatch`` (the
-                     resolver's guard, chunk 6a: a terminal report after an
-                     unanswered id-less dispatch answers THAT — never the
-                     oldest id'd row, the #1418 false-completion class)
+- ``open_rows``     ↔ ``claudlobby.plane.queries.OPEN_ASSIGNMENTS_AT_SQL`` +
+                      ``claudlobby.plane.shadow.plane_open``
+- ``overdue_rows``  ↔ ``claudlobby.plane.shadow.plane_overdue`` (deadline
+                      passed, the expiry cap, the bot's own ``progress`` inside
+                      the grace — the watchdog's rules, mirrored; id-less rows
+                      are KEPT, as that reader keeps them)
+- ``declared``      ↔ ``claudlobby.plane.cutover.declared``
+- ``answering_idless`` / ``head`` ↔ ``dispatch-overdue._answering_an_idless_dispatch``
+                      + ``open_task_id`` (the resolver, chunk 6a: while the bot's
+                      NEWEST assignment is an id-less dispatch nothing has
+                      answered, resolve nothing — the next terminal report
+                      answers THAT, never the oldest id'd row, #1418). The
+                      report door closes id-less assignments on the bot's next
+                      terminal report (``plane-lookup.py --open-idless``), which
+                      is what makes the guard answerable from the plane.
 
 Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
 ``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
@@ -46,10 +53,9 @@ OPEN_RETRY_S = 0.25
 def connect(root: str, *, retries: int = 1) -> sqlite3.Connection:
     """A read-only connection whose FIRST read has succeeded. Retried once
     after a short pause: on the live Mini a `mode=ro` open answered
-    "unable to open database file" for ~20s while the ingest daemon
-    held the WAL, then cleared — a transient the reader must not turn
-    into a page. A persistent failure still raises: refuse, never
-    answer empty."""
+    "unable to open database file" for ~20s while the ingest daemon held
+    the WAL, then cleared — a transient the reader must not turn into a
+    page. A persistent failure still raises: refuse, never answer empty."""
     path = db_file(root)
     if not os.path.isfile(path):
         raise PlaneUnreachable(f"no plane db at {path}")
@@ -67,18 +73,21 @@ def connect(root: str, *, retries: int = 1) -> sqlite3.Connection:
     raise PlaneUnreachable(f"plane db unreadable: {last}") from last
 
 
-# Twin of queries.OPEN_ASSIGNMENTS_AT_SQL — BYTE-IDENTICAL (pinned by test), so
-# the flipped reader and the shadow's plane side can never drift apart.
+# ONE list of the terminal task events, feeding every SQL below — the
+# package's TERMINAL_TASK_EVENTS pattern; OPEN_SQL assembled from it stays
+# BYTE-IDENTICAL to queries.OPEN_ASSIGNMENTS_AT_SQL (pinned by test).
+TERMINAL = ('completed', 'failed', 'cancelled', 'returned_blocked', 'superseded', 'reassigned', 'expired')
+_TERMINAL = "(" + ",".join(f"'{e}'" for e in TERMINAL) + ")"
 OPEN_SQL = (
-    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a WHERE"
-    " a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)  AND NOT EXISTS (SELECT 1 FROM ev"
-    "ents t WHERE t.kind='task'    AND t.event IN ('completed','failed','cancelled','returned_bl"
-    "ocked','superseded','reassigned','expired') AND (? IS NULL OR t.occurred_at <= ?)    AND (t."
-    "assignment_id = a.assignment_id      OR (a.source_ref LIKE 'dispatch-log:%' AND a.source_re"
-    "f NOT LIKE 'dispatch-log:sha:%'          AND t.assignment_id IN (SELECT s.assignment_id FRO"
-    "M assignments s            WHERE s.assignee_uid = a.assignee_uid AND s.source_ref = a.sourc"
-    "e_ref              AND (? IS NULL OR s.occurred_at <= ?))))) ORDER BY a.occurred_at, a.inge"
-    "st_seq"
+    'SELECT a.occurred_at, a.source_ref, a.assignment_id, a.expected_by FROM assignments a WHER'
+    'E a.assignee_uid = ? AND (? IS NULL OR a.occurred_at <= ?)  AND NOT EXISTS (SELECT 1 FROM '
+    "events t WHERE t.kind='task'    AND t.event IN "
+    + _TERMINAL +
+    ' AND (? IS NULL OR t.occurred_at <= ?)    AND (t.assignment_id = a.assignment_id      OR ('
+    "a.source_ref LIKE 'dispatch-log:%' AND a.source_ref NOT LIKE 'dispatch-log:sha:%'         "
+    ' AND t.assignment_id IN (SELECT s.assignment_id FROM assignments s            WHERE s.assi'
+    'gnee_uid = a.assignee_uid AND s.source_ref = a.source_ref              AND (? IS NULL OR s'
+    '.occurred_at <= ?))))) ORDER BY a.occurred_at, a.ingest_seq'
 )
 ROSTER_SQL = "SELECT alias, uid, kind FROM identity_registry WHERE alias LIKE ?"
 LAST_PROGRESS_SQL = (
@@ -94,15 +103,19 @@ DECLARED_SQL = (
     " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
 )
 DISPATCH = "dispatch-log:"
-TERMINAL_TASK_EVENTS = "('completed','failed','cancelled','returned_blocked','superseded','reassigned','expired')"
-NEWEST_ASSIGNMENT_SQL = (
-    "SELECT a.occurred_at, a.source_ref FROM assignments a WHERE a.assignee_uid = ?"
+IDLESS = DISPATCH + "sha:"
+# The bot's newest assignment across its uids, as of an instant (one query, the
+# same tie-break the open list uses: occurred_at, then ingest order).
+_NEWEST_SQL = (
+    "SELECT a.occurred_at, a.source_ref, a.assignment_id, a.work_item_id FROM assignments a"
+    " WHERE a.assignee_uid IN (%s) AND (? IS NULL OR a.occurred_at <= ?)"
     " ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
 )
-LATER_TERMINAL_SQL = (
-    "SELECT 1 FROM events e WHERE e.kind = 'task' AND e.event IN " + TERMINAL_TASK_EVENTS +
-    " AND e.actor_uid = ? AND e.occurred_at >= ? LIMIT 1"
+ASSIGNMENT_TERMINAL_SQL = (
+    "SELECT 1 FROM events e WHERE e.kind = 'task' AND e.event IN " + _TERMINAL +
+    " AND e.assignment_id = ? AND (? IS NULL OR e.occurred_at <= ?) LIMIT 1"
 )
+WORK_ITEM_SQL = "SELECT work_item_id FROM assignments WHERE assignment_id = ?"
 
 
 def _epoch(iso: Optional[str]) -> Optional[int]:
@@ -135,6 +148,24 @@ def bot_entry(conn: sqlite3.Connection, fleet: str, bot: str) -> Optional[dict]:
     return roster(conn, fleet).get(bot.lower())
 
 
+def open_assignments(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+                     *, entry: Optional[dict] = None) -> list[tuple]:
+    """The bot's OPEN assignments as of *at* (None = everything landed), oldest
+    first: (occurred_at, source_ref, assignment_id, expected_by)."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    out: list[tuple] = []
+    for uid in (entry or {}).get("uids", []):
+        out.extend(tuple(r) for r in conn.execute(OPEN_SQL, (uid, at, at, at, at, at, at)))
+    out.sort(key=lambda r: (r[0] or ""))
+    return out
+
+
+def _task_id(source_ref: Optional[str]) -> Optional[str]:
+    if source_ref and source_ref.startswith(DISPATCH) and not source_ref.startswith(IDLESS):
+        return source_ref[len(DISPATCH):]
+    return None
+
+
 def open_rows(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
               *, entry: Optional[dict] = None, idd_only: bool = True
               ) -> list[tuple[int, Optional[int], Optional[str]]]:
@@ -142,22 +173,30 @@ def open_rows(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] 
     task_id), oldest first — from the plane. ``idd_only`` drops rows with no
     legacy task id (``sha:`` refs, or none): the open LIST is id'd rows only;
     the overdue reader keeps them (task_id None → the legacy ``-``)."""
-    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
     out: list[tuple[int, Optional[int], Optional[str]]] = []
-    for uid in (entry or {}).get("uids", []):
-        for occurred_at, source_ref, _asg, expected_by in conn.execute(
-                OPEN_SQL, (uid, at, at, at, at, at, at)):
-            tid = None
-            if source_ref and source_ref.startswith(DISPATCH) \
-                    and not source_ref.startswith(DISPATCH + "sha:"):
-                tid = source_ref[len(DISPATCH):]
-            if idd_only and tid is None:
-                continue
-            da = _epoch(occurred_at)
-            if da is None:
-                continue
-            out.append((da, _epoch(expected_by), tid))
-    out.sort(key=lambda t: t[0])
+    for occurred_at, source_ref, _asg, expected_by in open_assignments(conn, fleet, bot, at, entry=entry):
+        tid = _task_id(source_ref)
+        if idd_only and tid is None:
+            continue
+        da = _epoch(occurred_at)
+        if da is None:
+            continue
+        out.append((da, _epoch(expected_by), tid))
+    return out
+
+
+def open_idless_assignments(conn: sqlite3.Connection, fleet: str, bot: str,
+                            at: Optional[str] = None, *, entry: Optional[dict] = None
+                            ) -> list[tuple[str, str]]:
+    """(work_item_id, assignment_id) for every OPEN id-less dispatch of the bot
+    (a ``sha:``-keyed assignment), oldest first — what the report door closes
+    on the bot's next terminal report, as the legacy ledger closes id-less
+    rows by any later terminal report."""
+    out: list[tuple[str, str]] = []
+    for _at, source_ref, asg, _exp in open_assignments(conn, fleet, bot, at, entry=entry):
+        if source_ref and source_ref.startswith(IDLESS):
+            wi = conn.execute(WORK_ITEM_SQL, (asg,)).fetchone()
+            out.append((wi[0] if wi else "", asg))
     return out
 
 
@@ -188,36 +227,31 @@ def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, ma
     return out
 
 
-def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, *,
-                     entry: Optional[dict] = None) -> bool:
-    """True when the bot's NEWEST assignment is id-less (a ``sha:``-keyed
-    dispatch the live door emitted, chunk 6a) and no terminal task event by
-    this bot lands at or after it — the twin of the legacy guard: the next
-    terminal report answers that dispatch, so the resolver hands back
-    nothing rather than the oldest id'd row. Ties go to the later row, as
-    the legacy ``>=`` does."""
+def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+                     *, entry: Optional[dict] = None) -> bool:
+    """True while the bot's NEWEST assignment (as of *at*) is an id-less
+    dispatch nothing has answered: a ``sha:``-keyed assignment with no
+    terminal task event of its own. The report door lands that event on the
+    bot's next terminal report (any status the legacy ledger calls
+    terminal), so the guard releases exactly when the legacy one does."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    newest: Optional[tuple] = None
-    for uid in (entry or {}).get("uids", []):
-        row = conn.execute(NEWEST_ASSIGNMENT_SQL, (uid,)).fetchone()
-        if row and (newest is None or row[0] >= newest[0]):
-            newest = tuple(row)
-    if newest is None or not (newest[1] or "").startswith(DISPATCH + "sha:"):
+    uids = (entry or {}).get("uids", [])
+    if not uids:
         return False
-    actor = (entry or {}).get("actor")
-    if actor is None:
-        return True                      # no actor identity: no terminal event can be seen
-    return conn.execute(LATER_TERMINAL_SQL, (actor, newest[0])).fetchone() is None
+    row = conn.execute(_NEWEST_SQL % ",".join("?" * len(uids)), (*uids, at, at)).fetchone()
+    if row is None or not (row[1] or "").startswith(IDLESS):
+        return False
+    return conn.execute(ASSIGNMENT_TERMINAL_SQL, (row[2], at, at)).fetchone() is None
 
 
-def head(conn: sqlite3.Connection, fleet: str, bot: str, *,
-         entry: Optional[dict] = None) -> Optional[str]:
+def head(conn: sqlite3.Connection, fleet: str, bot: str, at: Optional[str] = None,
+         *, entry: Optional[dict] = None) -> Optional[str]:
     """The resolver's answer from the plane: the oldest open id'd dispatch,
     or None — including None while an id-less dispatch is unanswered."""
     entry = entry if entry is not None else bot_entry(conn, fleet, bot)
-    if entry is None or answering_idless(conn, fleet, bot, entry=entry):
+    if entry is None or answering_idless(conn, fleet, bot, at, entry=entry):
         return None
-    rows = open_rows(conn, fleet, bot, entry=entry, idd_only=True)
+    rows = open_rows(conn, fleet, bot, at, entry=entry, idd_only=True)
     return rows[0][2] if rows else None
 
 

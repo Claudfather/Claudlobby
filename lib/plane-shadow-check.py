@@ -46,8 +46,12 @@ def main(argv=None) -> int:
         return 3
     prefix = f"bot:{a.fleet}/"
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
-        conn.execute("PRAGMA query_only = 1")
+        import importlib.util
+        _src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "plane-readers.py")
+        _spec = importlib.util.spec_from_file_location("plane_readers", _src)
+        _pr = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_pr)
+        conn = _pr.connect(a.root)                                  # ONE ro open (+retry)
         rows = conn.execute(LATEST_SQL, (*EVENTS, prefix + "%")).fetchall()
     except sqlite3.Error as exc:
         print(f"plane-shadow-check: db unreadable: {exc}", file=sys.stderr)
