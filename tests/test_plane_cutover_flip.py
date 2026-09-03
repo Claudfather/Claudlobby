@@ -79,7 +79,8 @@ def test_the_flag_map_is_one_fact_across_the_boundary(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     doors = load_dispatch_doors(paths)
     assert doors.PLANE_READ_FLAGS == cut.READ_FLAGS == {"open": "PLANE_READ_OPEN",
-                                                        "overdue": "PLANE_READ_OVERDUE"}
+                                                        "overdue": "PLANE_READ_OVERDUE",
+                                                        "open_task": "PLANE_READ_OPEN_TASK"}
     assert SYSTEM_EVENT_SEVERITY["cutover_declared"] == "notice"
 
 
@@ -407,9 +408,10 @@ def test_the_grammar_refuses_a_dropped_value_and_a_plane_source_off_its_modes(tm
                  ("--all", dl, rl, "--root")):
         r = _matcher(root, *args, CLAUDLOBBY_FLEET="other")
         assert r.returncode == 2 and r.stdout == "" and "needs a value" in r.stderr, args
+    accepted = _matcher(root, "--open-task", "w1", dl, rl, "--source", "plane", "--fleet", F)
+    assert accepted.returncode == 0 and "no meaning" not in accepted.stderr   # the resolver flips too (6a)
     for args in (("--orphans", dl, rl, "--bots-dir", str(root)),
                  ("--unassigned", dl, rl),
-                 ("--open-task", "w1", dl, rl),
                  ("w1", dl, rl)):
         r = _matcher(root, *args, "--source", "plane", "--fleet", F)
         assert r.returncode == 2 and r.stdout == "" and "no meaning" in r.stderr, args

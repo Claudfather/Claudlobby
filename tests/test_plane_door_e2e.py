@@ -119,24 +119,32 @@ def test_dispatch_task_armed_lands_the_construct_triple(tmp_path, armed):
     assert statuses[row["plane_assignment_id"]] == "open"
 
 
-def test_dispatch_query_armed_is_communication_only(tmp_path, armed):
+def test_dispatch_query_armed_lands_the_triple_under_the_importers_content_key(tmp_path, armed):
+    """Cutover chunk 6a: an id-less dispatch (query / cancel / compact /
+    restart) lands work_item + assignment + communication like any other,
+    keyed `dispatch-log:sha:<content key of the ledger line>` — the exact key
+    the importer derives, so a later import classifies as a duplicate and
+    the flipped readers can see an overdue id-less dispatch and apply the
+    resolver's id-less guard."""
+    from claudlobby.plane.parity import content_key
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "what is the retry logic"', env)
     assert r.returncode == 0, r.stderr
     conn = connect(db_path(tmp_path))
     comm = conn.execute(
-        "SELECT message_class, command_type, work_item_id FROM communications"
+        "SELECT message_class, command_type, work_item_id, source_ref FROM communications"
     ).fetchone()
+    asg = conn.execute("SELECT source_ref, assignment_id, work_item_id FROM assignments").fetchone()
     n_wi = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
-    n_asg = conn.execute("SELECT COUNT(*) FROM assignments").fetchone()[0]
     conn.close()
-    assert comm["message_class"] == "question"
-    assert comm["command_type"] == "query"
-    assert comm["work_item_id"] is None
-    assert n_wi == 0 and n_asg == 0
-    row = _ledger_row(tmp_path)
-    assert row["plane_msg_id"].startswith("msg_")
-    assert row["plane_work_item_id"] == "" and row["plane_assignment_id"] == ""
+    line = (tmp_path / "state" / "dispatch-log.jsonl").read_text().splitlines()[-1].strip()
+    row = json.loads(line)
+    assert comm["message_class"] == "question" and comm["command_type"] == "query"
+    assert row["task_id"] == "" and row["plane_msg_id"].startswith("msg_")
+    assert n_wi == 1 and asg is not None
+    assert asg["source_ref"] == comm["source_ref"] == f"dispatch-log:sha:{content_key(line)}"
+    assert asg["assignment_id"] == row["plane_assignment_id"] and asg["work_item_id"] == row["plane_work_item_id"]
+    assert comm["work_item_id"] == asg["work_item_id"]
 
 
 def test_unarmed_door_writes_nothing_and_ledger_fields_empty(tmp_path, armed):

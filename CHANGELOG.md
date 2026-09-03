@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — cutover chunk 6a: the resolver shadowed by its head streak, then flipped; id-less dispatches emitted live (#1444)
+
+- `lib/dispatch-task.sh`: every dispatch lands the construct triple — id-less ones keyed `dispatch-log:sha:<content key of the ledger line>` (the importer's key, `sha256_hex32` in lib-common), the line composed once in the main shell before the locked append.
+- `lib/plane-readers.py`: `answering_idless` (the resolver's #1418 guard from the plane) and `head`; `lib/dispatch-overdue.py`: `--open-task` gains the plane source under `PLANE_READ_OPEN_TASK` (flag AND declaration); the legacy resolver returns nothing on an absent report ledger beside a head older than the expiry cap (#1418), a young head still resolves.
+- `claudlobby/plane/shadow.py`: `head_streak` — `open_task` is a streak mode over the open reader's records (200 agreeing heads + a head change; `Streak.clean_bar`), `GATED` = the three declarable readers; `plane cutover --reader open_task`; `plane shadow --reader open_task` is `--gate`/`--check` only; the doctor's cutover rungs cover the third reader.
+
 ### Added — cutover chunk 5: the list readers flip to the plane behind per-reader flags; the epoch recorded (#1444)
 
 - `lib/plane-readers.py` (stdlib): the plane answering `--open` (SQL byte-identical to `queries.OPEN_ASSIGNMENTS_AT_SQL`, pinned) and `--all` (the watchdog's rules mirrored, id-less rows kept, the `.spawn` orphan split applied like legacy). `lib/dispatch-overdue.py`'s providers gain `source=` (`jsonl|plane|auto`, `--fleet`, `--root`); **a flip is flag AND declaration** — `auto` serves the plane only when `PLANE_READ_OPEN` / `PLANE_READ_OVERDUE` is set AND `cutover_declared` is recorded for (fleet, reader), a flag alone is disclosed and the JSONL keeps serving; the JSONL path stays callable by name for the shadow; an unreachable plane, or one that holds no bot of the fleet, refuses (rc 3), never falls back; `--source plane` off its modes and a dropped flag value are usage errors.

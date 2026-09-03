@@ -115,6 +115,7 @@ import datetime
 import json
 import os
 import sqlite3
+import time
 import sys
 
 _TERMINAL = {"completed", "failed", "blocked"}
@@ -167,7 +168,8 @@ def _resolve_progress_grace() -> int:
 # plane under a declared flip REFUSES (rc 3), never falls back — a silent
 # fallback is the one path that would make a flipped fleet read legacy again
 # without anyone knowing. --open-task keeps its own bar (chunk 6).
-PLANE_READ_FLAGS = {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE"}
+PLANE_READ_FLAGS = {"open": "PLANE_READ_OPEN", "overdue": "PLANE_READ_OVERDUE",
+                    "open_task": "PLANE_READ_OPEN_TASK"}
 SOURCES = ("jsonl", "plane", "auto")
 
 
@@ -262,6 +264,24 @@ def _open_dispatches_plane(bot: str, *, fleet: str | None, root: str | None
                   " dispatches never reached the plane)", file=sys.stderr)
             return []
         return [(da, exp, tid) for da, exp, tid in p.pr.open_rows(p.conn, p.fleet, bot, entry=entry)]
+    except sqlite3.Error as exc:
+        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
+    finally:
+        p.close()
+
+
+def _open_task_plane(bot: str, *, fleet: str | None, root: str | None) -> str | None:
+    """The resolver from the plane (chunk 6a): nothing for a bot the plane does
+    not know (disclosed), nothing while an id-less dispatch is unanswered,
+    else the oldest open id'd dispatch."""
+    p = _Plane(fleet, root)
+    try:
+        entry = p.roster.get(bot.lower())
+        if entry is None:
+            print(f"dispatch-overdue: no identity row for bot:{p.fleet}/{bot} in the plane —"
+                  " nothing to resolve by the plane's account", file=sys.stderr)
+            return None
+        return p.pr.head(p.conn, p.fleet, bot, entry=entry)
     except sqlite3.Error as exc:
         raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
     finally:
@@ -810,6 +830,10 @@ def open_task_id(
     bot: str,
     dispatch_log: str,
     report_ledger: str,
+    *,
+    source: str = "jsonl",
+    fleet: str | None = None,
+    root: str | None = None,
 ) -> str | None:
     """The bot's OLDEST still-open id'd dispatch, or None.
 
@@ -869,9 +893,21 @@ def open_task_id(
     echo now leaves its row open until the next report. That is UNTRACKED, the
     degradation direction #1187 chose, and the watchdog still surfaces it.
     """
+    if resolve_source("open_task", source, fleet=fleet, root=root) == "plane":
+        return _open_task_plane(bot, fleet=fleet, root=root)
     if _answering_an_idless_dispatch(bot, dispatch_log, report_ledger):
         return None
     rows = open_dispatches(bot, dispatch_log, report_ledger)
+    if rows and not os.path.exists(report_ledger) \
+            and (int(time.time()) - rows[0][0]) > _resolve_max_age():
+        # #1418: an ABSENT ledger beside an id'd dispatch OLDER than the expiry
+        # cap is a wrong path, not a first report a day late — the head would
+        # be a long-closed id handed back as the one to close. A young head
+        # still resolves, so the first report of a new fleet keeps working.
+        print("dispatch-overdue: --open-task: the report ledger is absent and the oldest"
+              " open id'd dispatch is older than the expiry cap — resolving nothing rather"
+              " than a stale head (#1418)", file=sys.stderr)
+        return None
     return rows[0][2] if rows else None
 
 
@@ -1173,7 +1209,7 @@ def _take_source(argv: list[str]) -> tuple[list[str], str, str | None, str | Non
     return out, source, fleet, root
 
 
-PLANE_SOURCED_MODES = ("--open", "--all")
+PLANE_SOURCED_MODES = ("--open", "--all", "--open-task")
 
 
 def _refuse_plane_source_off_mode(argv: list[str], source: str) -> bool:
@@ -1221,11 +1257,20 @@ def main() -> int:
         if _reject_bot_slot("--open-task", argv[2]):
             return 2
         # ABSENT is legitimate here and must resolve: see the docstring.
-        if _refuse_unreadable_report_ledger(
+        try:
+            src = resolve_source("open_task", source, fleet=fleet_opt, root=root_opt)
+        except PlaneUnreachable as exc:
+            print(f"dispatch-overdue: --open-task plane source: UNREACHABLE — {exc}", file=sys.stderr)
+            return 3
+        if src == "jsonl" and _refuse_unreadable_report_ledger(
             "--open-task", argv[4], refuse_on_absent=False
         ):
             return 3
-        tid = open_task_id(argv[2], argv[3], argv[4])
+        try:
+            tid = open_task_id(argv[2], argv[3], argv[4], source=src, fleet=fleet_opt, root=root_opt)
+        except PlaneUnreachable as exc:
+            print(f"dispatch-overdue: --open-task plane source: UNREACHABLE — {exc}", file=sys.stderr)
+            return 3
         if tid:
             print(tid)
         return 0

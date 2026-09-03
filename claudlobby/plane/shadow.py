@@ -88,6 +88,15 @@ EVENT_DIVERGED = "shadow_parity_diverged"
 READER_OPEN = "open"          # dispatch-overdue.py --open / --open-task: the deadline-blind list
 READER_OVERDUE = "overdue"    # dispatch-overdue.py --all: the watchdog's input (overdue ∪ orphans)
 READERS = (READER_OPEN, READER_OVERDUE)
+# The resolver (dispatch-overdue.py --open-task) is the open list's HEAD, and
+# every open record already carries head_legacy / head_plane / head_agrees —
+# so it is a STREAK MODE over the open reader's records (chunk 6a), never a
+# third comparison. Its bar is its own: a stale head is a false completion
+# (#1418), so 200 agreeing heads with at least one head CHANGE.
+READER_OPEN_TASK = "open_task"
+GATED = READERS + (READER_OPEN_TASK,)
+GATE_HEAD_CLEAN_RUN = 200
+HEAD_TAIL_LIMIT = GATE_HEAD_CLEAN_RUN + 20
 DEFAULT_SKEW_S = 600
 GATE_CLEAN_RUN = 20
 GATE_TRANSITIONS = 1
@@ -432,10 +441,11 @@ class Streak:
     transitions: int = 0          # open→closed transitions seen inside the clean run
     last_diverged_at: Optional[str] = None
     last_at: Optional[str] = None
+    clean_bar: int = GATE_CLEAN_RUN   # the run this streak must reach (the resolver's is longer)
 
     @property
     def gate_ok(self) -> bool:
-        return self.clean_run >= GATE_CLEAN_RUN and self.transitions >= GATE_TRANSITIONS
+        return self.clean_run >= self.clean_bar and self.transitions >= GATE_TRANSITIONS
 
     @property
     def latest_diverged(self) -> bool:
@@ -445,7 +455,7 @@ class Streak:
 
     def line(self) -> str:
         mark = "met" if self.gate_ok else "NOT met"
-        return (f"{self.bot} [{self.reader}]: clean_run={self.clean_run}/{GATE_CLEAN_RUN}"
+        return (f"{self.bot} [{self.reader}]: clean_run={self.clean_run}/{self.clean_bar}"
                 f" transitions={self.transitions}/{GATE_TRANSITIONS}"
                 f" comparisons={self.comparisons}"
                 f" last_diverged={self.last_diverged_at or '-'} -> {mark}")
@@ -510,6 +520,35 @@ def streak(conn: sqlite3.Connection, fleet: str, bot: str,
     return s
 
 
+def head_streak(conn: sqlite3.Connection, fleet: str, bot: str) -> Streak:
+    """The resolver's streak, read off the OPEN reader's records: consecutive
+    clean records whose heads agree, newest first; a diverged record, a head
+    disagreement or a truncated record ends the run; a transition is the
+    head CHANGING between two agreeing records (the resolver exercised, not
+    merely re-read). Bar: GATE_HEAD_CLEAN_RUN."""
+    alias = f"bot:{fleet}/{bot}"
+    s = Streak(bot, READER_OPEN_TASK, clean_bar=GATE_HEAD_CLEAN_RUN)
+    s.comparisons = conn.execute(COUNT_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, READER_OPEN)).fetchone()[0]
+    tail = conn.execute(TAIL_SQL, (EVENT_CLEAN, EVENT_DIVERGED, alias, READER_OPEN, HEAD_TAIL_LIMIT)).fetchall()
+    if tail:
+        s.last_at = tail[0][1]
+    heads: list[Optional[str]] = []
+    for event, at, detail, truncated in tail:
+        data = None
+        if event == EVENT_CLEAN and not truncated and detail:
+            try:
+                data = json.loads(detail)
+            except (json.JSONDecodeError, TypeError):
+                data = None
+        if not isinstance(data, dict) or data.get("head_agrees") is not True:
+            s.last_diverged_at = at
+            break
+        heads.append(data.get("head_legacy"))
+    s.clean_run = len(heads)
+    s.transitions = sum(1 for newer, older in zip(heads, heads[1:]) if newer != older)
+    return s
+
+
 def shadowed_bots(conn: sqlite3.Connection, fleet: str) -> list[str]:
     prefix = f"bot:{fleet}/"
     return sorted(
@@ -554,7 +593,8 @@ def gate_summary(conn: sqlite3.Connection, fleet: str,
     is short, named as such, never absent: an absence read as clean is the
     ``source_state`` class."""
     bots = sorted(set(roster or []) | set(shadowed_bots(conn, fleet)))
-    return [streak(conn, fleet, b, r) for b in bots for r in readers]
+    return [head_streak(conn, fleet, b) if r == READER_OPEN_TASK else streak(conn, fleet, b, r)
+            for b in bots for r in readers]
 
 
 def latest_diverged(conn: sqlite3.Connection, fleet: str, roster: list[str],

@@ -21,10 +21,10 @@ import sqlite3
 from typing import Optional
 
 from .ids import derive_uid
-from .shadow import GATE_CLEAN_RUN, GATE_TRANSITIONS, READERS, Streak
+from .shadow import GATE_CLEAN_RUN, GATE_TRANSITIONS, GATED, Streak
 
 EVENT_DECLARED = "cutover_declared"
-READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in READERS}
+READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
 
 # The fleet is matched on the anchor COLUMN first (survives a truncated
 # detail), the detail's fleet second (a declaration recorded before the fleet

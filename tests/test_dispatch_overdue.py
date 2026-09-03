@@ -3,6 +3,8 @@ including the P4 task-id join matrix (semantics: overdue_all docstring)."""
 
 from __future__ import annotations
 
+import time
+
 import datetime as _dt
 import os
 
@@ -1696,7 +1698,10 @@ class TestReportLedgerRefusal:
 
         Refusing here is what broke three validate-bot-change.sh assertions.
         """
-        dlog, _ = self._rows(tmp_path)
+        now = int(time.time())                       # a YOUNG head: the first report of a new fleet
+        dlog = tmp_path / "young-dispatch.jsonl"
+        _write_jsonl(dlog, [_dispatch("w1", now - 60, now + 1000, task_id="t-1")])
+        dlog = str(dlog)
         monkeypatch.setattr(
             "sys.argv",
             ["dispatch-overdue.py", "--open-task", "w1", dlog,
@@ -1704,6 +1709,25 @@ class TestReportLedgerRefusal:
         )
         assert dispatch_overdue.main() == 0
         assert capsys.readouterr().out.strip() == "t-1"
+
+    def test_open_task_resolves_NOTHING_on_an_absent_ledger_beside_a_stale_head(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """#1418 (cutover chunk 6a): an ABSENT ledger beside an id'd dispatch
+        OLDER than the expiry cap is a wrong path, not a first report a day
+        late — the head would be a long-closed id handed back as the one to
+        close (measured: seven-day-old finished work on three of seven bots).
+        Nothing, disclosed on stderr, rc 0 — the caller degrades to an id-less
+        report exactly as its fail-open contract says."""
+        dlog, _ = self._rows(tmp_path)                 # dispatched_at=100: ancient
+        monkeypatch.setattr(
+            "sys.argv",
+            ["dispatch-overdue.py", "--open-task", "w1", dlog,
+             str(tmp_path / "never-reported.jsonl")],
+        )
+        assert dispatch_overdue.main() == 0
+        out = capsys.readouterr()
+        assert out.out.strip() == "" and "#1418" in out.err and "stale head" in out.err
 
     def test_open_task_STILL_refuses_when_the_ledger_is_unopenable(
         self, tmp_path, monkeypatch, capsys

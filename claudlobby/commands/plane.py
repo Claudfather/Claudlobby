@@ -1025,6 +1025,11 @@ def cmd_plane_shadow(args) -> int:
             return 3
         from ..plane import shadow as sh
         readers = sh.READERS if args.reader == "all" else (args.reader,)
+        if args.reader == sh.READER_OPEN_TASK and not (args.gate or args.check):
+            print("shadow: open_task is a gate mode — the resolver's head is graded inside"
+                  " the open reader's records; use --gate --reader open_task (or --check)",
+                  file=sys.stderr)
+            return 2
         try:
             if args.check:
                 return _shadow_check(conn, fleet, roster, readers)

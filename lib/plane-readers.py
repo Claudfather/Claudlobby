@@ -13,6 +13,10 @@ package definitions — keep them in step (the SQL is pinned byte-identical):
                      the grace — the watchdog's rules, mirrored; id-less rows
                      are KEPT, as that reader keeps them)
 - ``declared``     ↔ ``claudlobby.plane.cutover.declared``
+- ``answering_idless`` ↔ ``dispatch-overdue._answering_an_idless_dispatch`` (the
+                     resolver's guard, chunk 6a: a terminal report after an
+                     unanswered id-less dispatch answers THAT — never the
+                     oldest id'd row, the #1418 false-completion class)
 
 Read-only (``mode=ro`` + ``query_only``). A missing or unopenable db raises
 ``PlaneUnreachable`` — the caller refuses, it never falls back to the JSONL:
@@ -90,6 +94,15 @@ DECLARED_SQL = (
     " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
 )
 DISPATCH = "dispatch-log:"
+TERMINAL_TASK_EVENTS = "('completed','failed','cancelled','returned_blocked','superseded','reassigned','expired')"
+NEWEST_ASSIGNMENT_SQL = (
+    "SELECT a.occurred_at, a.source_ref FROM assignments a WHERE a.assignee_uid = ?"
+    " ORDER BY a.occurred_at DESC, a.ingest_seq DESC LIMIT 1"
+)
+LATER_TERMINAL_SQL = (
+    "SELECT 1 FROM events e WHERE e.kind = 'task' AND e.event IN " + TERMINAL_TASK_EVENTS +
+    " AND e.actor_uid = ? AND e.occurred_at >= ? LIMIT 1"
+)
 
 
 def _epoch(iso: Optional[str]) -> Optional[int]:
@@ -173,6 +186,39 @@ def overdue_rows(conn: sqlite3.Connection, fleet: str, bot: str, *, now: int, ma
             continue
         out.append((da, exp, now - exp, tid))
     return out
+
+
+def answering_idless(conn: sqlite3.Connection, fleet: str, bot: str, *,
+                     entry: Optional[dict] = None) -> bool:
+    """True when the bot's NEWEST assignment is id-less (a ``sha:``-keyed
+    dispatch the live door emitted, chunk 6a) and no terminal task event by
+    this bot lands at or after it — the twin of the legacy guard: the next
+    terminal report answers that dispatch, so the resolver hands back
+    nothing rather than the oldest id'd row. Ties go to the later row, as
+    the legacy ``>=`` does."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    newest: Optional[tuple] = None
+    for uid in (entry or {}).get("uids", []):
+        row = conn.execute(NEWEST_ASSIGNMENT_SQL, (uid,)).fetchone()
+        if row and (newest is None or row[0] >= newest[0]):
+            newest = tuple(row)
+    if newest is None or not (newest[1] or "").startswith(DISPATCH + "sha:"):
+        return False
+    actor = (entry or {}).get("actor")
+    if actor is None:
+        return True                      # no actor identity: no terminal event can be seen
+    return conn.execute(LATER_TERMINAL_SQL, (actor, newest[0])).fetchone() is None
+
+
+def head(conn: sqlite3.Connection, fleet: str, bot: str, *,
+         entry: Optional[dict] = None) -> Optional[str]:
+    """The resolver's answer from the plane: the oldest open id'd dispatch,
+    or None — including None while an id-less dispatch is unanswered."""
+    entry = entry if entry is not None else bot_entry(conn, fleet, bot)
+    if entry is None or answering_idless(conn, fleet, bot, entry=entry):
+        return None
+    rows = open_rows(conn, fleet, bot, entry=entry, idd_only=True)
+    return rows[0][2] if rows else None
 
 
 def declared(conn: sqlite3.Connection, fleet: str, reader: str) -> Optional[str]:
