@@ -234,3 +234,43 @@ def test_who_reviewed_attributes_from_the_plane_like_the_ledger(tmp_path):
                            "--source", "plane", "--root", str(root), "--reviews-json", str(reviews)],
                           capture_output=True, text=True, timeout=60)
     assert gone.returncode == 4 and gone.stdout == "" and "unreachable" in gone.stderr
+
+
+def test_the_plane_orphan_list_is_the_planes_own_not_the_ledgers(tmp_path):
+    """A dispatch the plane holds and the ledger does not (the ledger frozen by
+    a retirement) is orphaned by the plane's own split — the mutant that kept
+    reading the ledger for orphans survived the parity pin, so this one is
+    asymmetric on purpose."""
+    import os
+    from tests.test_plane_cutover_flip import NOW_EPOCH
+    from tests.test_plane_cutover_parity import _live_dispatch
+    root, paths, _, _ = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    _live_dispatch(root, "8", "t-8-only-plane", ts="2026-09-02T09:00:00Z", expected_by="2026-09-02T10:00:00+00:00")
+    bots = root / "bots"
+    (bots / "w1" / "data").mkdir(parents=True)
+    spawn = bots / "w1" / "data" / ".spawn"
+    spawn.write_text("")
+    os.utime(spawn, (NOW_EPOCH - 60, NOW_EPOCH - 60))                  # w1 respawned after both dispatches
+    plane = _matcher(root, "--orphans", dl, rl, str(NOW_EPOCH), "--source", "plane", "--fleet", F, "--bots-dir", str(bots))
+    jsonl = _matcher(root, "--orphans", dl, rl, str(NOW_EPOCH), "--source", "jsonl", "--bots-dir", str(bots))
+    assert plane.returncode == 0 and "t-8-only-plane" in plane.stdout and "t-2-bbbb" in plane.stdout
+    assert "t-8-only-plane" not in jsonl.stdout
+
+
+def test_who_reviewed_counts_a_truncated_task_event_instead_of_dropping_it(tmp_path):
+    wr = load_lib_module("who-reviewed")
+    root, paths, _, _ = _scene(tmp_path)
+    emit_batch(root, [{"event_type": "task", "emitter": "report-back", "fleet": F,
+                       "source_ref": f"report-back:msg_{'6':0>32}", "occurred_at": "2026-09-02T15:00:00Z",
+                       "payload": {"work_item_id": f"wi_{'2':0>32}", "assignment_id": f"asg_{'2':0>32}",
+                                   "event": "completed", "actor": f"bot:{F}/w1",
+                                   "pr_url": "https://github.com/org/repo/pull/7", "summary": "x" * 20000}}])
+    rows, why, truncated = wr.load_plane_rows(str(root))
+    assert why is None and rows == [] and truncated == 1
+    reviews = tmp_path / "reviews.json"
+    reviews.write_text(json.dumps({"reviews": [], "comments": []}))
+    cli = subprocess.run([sys.executable, str(REPO / "lib" / "who-reviewed.py"), "org/repo", "7",
+                          "--source", "plane", "--root", str(root), "--reviews-json", str(reviews), "--json"],
+                         capture_output=True, text=True, timeout=60)
+    assert cli.returncode == 0 and json.loads(cli.stdout)["scope"]["plane_truncated"] == 1
