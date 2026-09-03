@@ -310,30 +310,6 @@ LATEST_HEARTBEAT_SQL = (
     " WHERE l.rn = 1"
 )
 
-# --- fleet events (cutover Phase B): the bot-events ledger's questions ---------
-# A legacy row {ts, bot, type, source, data} is a system event anchored on the
-# bot's actor (or the fleet, for a fleet-level receipt) whose detail carries
-# {source, legacy_ts, data}. These render it back as the legacy row shape so
-# every reader keeps its row contract.
-FLEET_EVENTS_SQL = (
-    "SELECT e.occurred_at, e.event, e.subject_kind, e.subject_alias,"
-    " e.detail, e.detail_truncated FROM events e"
-    " WHERE e.kind = 'system' AND e.fleet_uid = ?"
-    " AND (? IS NULL OR e.occurred_at >= ?)"
-    " AND e.event NOT IN ('shadow_parity_clean','shadow_parity_diverged','cutover_declared',"
-    "                     'legacy_write_retired','daemon_started','daemon_stopping','spool_drain_completed')"
-    " ORDER BY e.occurred_at, e.ingest_seq"
-)
-# fleet-pulse's escalation: which bots carry a CRITICAL event of a type inside
-# the window — one query per type, the readback loop being the same query one
-# pass later (the legacy grep over today's and yesterday's files).
-ESCALATION_SQL = (
-    "SELECT e.subject_alias, MAX(e.occurred_at) FROM events e"
-    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.event = ? AND e.subject_kind = 'actor'"
-    " AND e.occurred_at >= ? GROUP BY e.subject_alias"
-)
-
-
 RECONCILIATION_SQL = (
     "SELECT COUNT(*) FROM events s WHERE s.kind='transmission'"
     " AND s.event='pane_submitted' AND NOT EXISTS"

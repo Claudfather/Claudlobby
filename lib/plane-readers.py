@@ -33,6 +33,7 @@ rollback is the flag, not a silent fallback.
 from __future__ import annotations
 
 import os
+import json
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -349,110 +350,145 @@ def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_thre
     return out
 
 
-# The bot-events ledger from the plane (Phase B): every system event of the
-# fleet that is a fleet event (not the plane's own machinery), rendered back
-# as the legacy row {ts, bot, type, source, data} so every reader keeps its
-# row contract. Twin of queries.FLEET_EVENTS_SQL.
+# The bot-events ledger from the plane (Phase B): every system event the
+# fleet's `emit_fleet_event` door landed — selected by PROVENANCE (the
+# source_ref prefix the door stamps, never an event-name list, so the plane's
+# own machinery and a report door's marker can never leak in) and rendered
+# back as the legacy row {ts, bot, type, source, data} so every reader keeps
+# its row contract. The door stamps occurred_at in UTC (`+00:00` once stored),
+# so `since` — normalised to that form by since_form — compares lexically on
+# the indexed column. The filters ride in the SQL: brief asks for one bot's day.
 FLEET_UID_SQL = "SELECT uid FROM identity_registry WHERE kind = 'fleet' AND alias = ? LIMIT 1"
-MACHINERY_EVENTS = ("shadow_parity_clean", "shadow_parity_diverged", "cutover_declared",
-                    "legacy_write_retired", "daemon_started", "daemon_stopping", "spool_drain_completed")
+FLEET_EVENTS_PREFIX = "fleet-events:"
 FLEET_EVENTS_SQL = (
-    "SELECT e.occurred_at, e.event, e.subject_kind, e.subject_alias,"
+    "SELECT e.occurred_at, e.event, e.severity, e.subject_kind, e.subject_alias,"
     " e.detail, e.detail_truncated FROM events e"
-    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND (? IS NULL OR e.occurred_at >= ?)"
-    " AND e.event NOT IN (" + ",".join(f"'{m}'" for m in MACHINERY_EVENTS) + ")"
+    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.source_ref LIKE ?"
+    " AND (? IS NULL OR e.occurred_at >= ?)"
+    " AND (? IS NULL OR e.event = ?)"
+    " AND (? IS NULL OR lower(e.subject_alias) = lower(?))"
     " ORDER BY e.occurred_at, e.ingest_seq"
 )
+# fleet-pulse's escalation, answered for EVERY critical type in one read (a
+# sweep used to spawn this once per bot per type): which bots carry which
+# critical fleet event strictly after the window start — the legacy grep's
+# own compare — and when the latest landed. Critical = the severity the
+# registry stamped at ingest, one definition.
 ESCALATION_SQL = (
-    "SELECT e.subject_alias, MAX(e.occurred_at) FROM events e"
-    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.event = ? AND e.subject_kind = 'actor'"
-    " AND e.occurred_at >= ? GROUP BY e.subject_alias"
+    "SELECT e.subject_alias, e.event, MAX(e.occurred_at) FROM events e"
+    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.source_ref LIKE ?"
+    " AND e.severity = 'critical' AND e.subject_kind = 'actor' AND e.occurred_at > ?"
+    " AND (? IS NULL OR e.event = ?)"
+    " GROUP BY e.subject_alias, e.event"
 )
 
 
 def since_form(since: Optional[str]) -> Optional[str]:
-    """A window start in the form occurred_at is STORED in (pydantic parses
-    the emitter's instant and it lands as isoformat: `Z` becomes `+00:00`,
-    an offset stays, a naive instant stays naive) — a lexical `>=` between
-    the two forms is otherwise wrong at the boundary ('+' sorts before 'Z')."""
+    """A window start in the form the door STORES occurred_at in — UTC,
+    isoformat (`Z` lands as `+00:00`) — so the lexical compare in the SQL is
+    an instant compare: an aware instant is converted, a NAIVE one is the
+    host's local clock (fleet-pulse's `date +%Y-%m-%dT%H:%M` window) and is
+    converted from it. A string that is not an instant is refused, never
+    compared as text."""
     if not since:
-        return since
+        return None
     try:
-        return datetime.fromisoformat(since.replace("Z", "+00:00")).isoformat()
-    except ValueError:
-        return since
+        dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"since must be an ISO instant, not {since!r}") from exc
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.astimezone(timezone.utc).isoformat()
 
 
-def fleet_uid(conn: sqlite3.Connection, fleet: str) -> Optional[str]:
+def fleet_uid(conn: sqlite3.Connection, fleet: str) -> str:
+    """The fleet's identity uid. Every fleet-scoped row minted it at its first
+    ingest, so a fleet the plane holds no identity for is a plane that never
+    saw the fleet — a wrong root, refused rather than read as 'nothing recorded'."""
     row = conn.execute(FLEET_UID_SQL, (fleet,)).fetchone()
-    return row[0] if row else None
+    if row is None:
+        raise PlaneUnreachable(f"no identity for fleet {fleet!r} in the plane"
+                               " — a wrong root is not 'nothing recorded'")
+    return row[0]
 
 
-def legacy_event_row(occurred_at, event, subject_kind, subject_alias, detail, truncated, fleet) -> dict:
-    """One plane system event as the legacy ledger row it stands for."""
-    import json as _json
+def legacy_event_row(occurred_at, event, severity, subject_kind, subject_alias,
+                     detail, truncated, fleet) -> dict:
+    """One plane system event as the legacy ledger row it stands for. The
+    private keys carry what the row never had: the registry-stamped severity,
+    and whether the detail was truncated (then data is {} and disclosed)."""
     data = {}
     if detail and not truncated:
         try:
-            data = _json.loads(detail)
+            data = json.loads(detail)
         except ValueError:
             data = {}
     prefix = f"bot:{fleet}/"
-    bot = (subject_alias[len(prefix):] if subject_alias and subject_alias.startswith(prefix)
-           else ("fleet" if subject_kind == "fleet" else (subject_alias or "?")))
+    bot = "fleet" if subject_kind == "fleet" else (subject_alias or "?").removeprefix(prefix)
     return {"ts": (data.get("legacy_ts") or (occurred_at or "").replace("+00:00", "Z")),
             "bot": bot, "type": event, "source": data.get("source") or "plane",
             "data": data.get("data") if isinstance(data.get("data"), dict) else {},
-            "_truncated": bool(truncated)}
+            "_severity": severity, "_truncated": bool(truncated)}
+
+
+def public(row: dict) -> dict:
+    """The legacy row shape, private keys stripped — one definition for the
+    CLI, the package and the tests."""
+    return {k: v for k, v in row.items() if not k.startswith("_")}
 
 
 def fleet_events(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = None,
                  bot: Optional[str] = None, event_type: Optional[str] = None) -> list[dict]:
-    """The fleet's events as legacy rows, oldest first (the reader filters
-    critical_only / source itself — those are its own vocabulary)."""
+    """The fleet's events as legacy rows, oldest first (`--critical` and
+    `--source` are the reader's own vocabulary, filtered on the rows)."""
     uid = fleet_uid(conn, fleet)
-    if uid is None:
-        return []
+    alias = f"bot:{fleet}/{bot}" if bot and bot != "fleet" else None
     since = since_form(since)
-    out = []
-    for row in conn.execute(FLEET_EVENTS_SQL, (uid, since, since)):
-        r = legacy_event_row(*row, fleet)
-        if bot and r["bot"].lower() != bot.lower():
-            continue
-        if event_type and r["type"] != event_type:
-            continue
-        out.append(r)
-    return out
+    rows = [legacy_event_row(*row, fleet) for row in conn.execute(
+        FLEET_EVENTS_SQL, (uid, FLEET_EVENTS_PREFIX + "%", since, since,
+                           event_type, event_type, alias, alias))]
+    if bot == "fleet":
+        rows = [r for r in rows if r["bot"] == "fleet"]
+    return rows
 
 
-def escalation(conn: sqlite3.Connection, fleet: str, event_type: str, window_start: str) -> dict[str, str]:
-    """{bot: latest_instant} for every bot carrying *event_type* since
-    *window_start* — fleet-pulse's escalation question."""
+def escalation(conn: sqlite3.Connection, fleet: str, window_start: Optional[str], *,
+               event_type: Optional[str] = None) -> dict[tuple[str, str], str]:
+    """{(bot, type): latest_instant} for every bot carrying a CRITICAL fleet
+    event strictly after *window_start* — fleet-pulse's escalation question,
+    every type at once (or one, with *event_type*)."""
     uid = fleet_uid(conn, fleet)
-    if uid is None:
-        return {}
     prefix = f"bot:{fleet}/"
-    return {alias[len(prefix):]: at for alias, at in conn.execute(ESCALATION_SQL, (uid, event_type, since_form(window_start)))
+    return {(alias.removeprefix(prefix), ev): at
+            for alias, ev, at in conn.execute(
+                ESCALATION_SQL, (uid, FLEET_EVENTS_PREFIX + "%", since_form(window_start) or "",
+                                 event_type, event_type))
             if alias and alias.startswith(prefix)}
 
-
+# Twin of cutover.LATEST_RETIRED_SQL, with the door: a retirement COVERS a
+# door when its recorded flags name it — a record from before a door existed
+# retires nothing it never named. The fleet is matched on the anchor column
+# (the registry mints the fleet identity under its BARE name) first, the
+# detail's fleet second.
 RETIRED_SQL = (
     "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = ?"
     " AND e.detail_truncated = 0 AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"
+    " AND (? IS NULL OR json_extract(e.detail, '$.flags.' || ?) IS NOT NULL)"
     " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
 )
 
 
-def retired(conn: sqlite3.Connection, fleet: str) -> Optional[str]:
-    """The instant the fleet's legacy writes were retired (``legacy_write_retired``),
-    or None — the twin of ``cutover.retired``; the doors skip their ledger
-    append only when this is recorded."""
-    row = conn.execute(RETIRED_SQL, ("legacy_write_retired", f"fleet:{fleet}", fleet)).fetchone()
+def retired(conn: sqlite3.Connection, fleet: str, door: Optional[str] = None) -> Optional[str]:
+    """The instant the fleet's legacy writes were retired (``legacy_write_retired``)
+    — the LATEST record naming *door* (dispatch / report / events) when one is
+    given — or None: the doors skip their ledger append only when this is
+    recorded."""
+    row = conn.execute(RETIRED_SQL, ("legacy_write_retired", fleet, fleet, door, door)).fetchone()
     return row[0] if row else None
 
 
 def declared(conn: sqlite3.Connection, fleet: str, reader: str) -> Optional[str]:
     """The instant of the LATEST ``cutover_declared`` for (fleet, reader), or
     None: a flag nobody declared is not a flip."""
-    row = conn.execute(DECLARED_SQL, ("cutover_declared", reader, f"fleet:{fleet}", fleet)).fetchone()
+    row = conn.execute(DECLARED_SQL, ("cutover_declared", reader, fleet, fleet)).fetchone()
     return row[0] if row else None

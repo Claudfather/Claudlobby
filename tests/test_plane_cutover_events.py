@@ -25,9 +25,10 @@ from claudlobby.brief import _alerts_section
 from claudlobby.commands.events import CRITICAL_TYPES
 from claudlobby.plane import cutover as cut, shadow as sh
 from claudlobby.plane.emit_api import emit_batch
-from claudlobby.plane.registries import CHATTY_SYSTEM_EVENTS, SYSTEM_EVENT_SEVERITY
+from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
 from tests.plane_fixtures import ro as _ro
 from tests.test_plane_cutover_flip import _cli, _declare, _env, _stdlib_readers
+from tests.test_plane_lookup import _run as _lookup
 from tests.test_plane_shadow import F, REPO, _scene
 
 LIB = REPO / "lib"
@@ -36,10 +37,17 @@ TODAY = datetime.now().strftime("%Y-%m-%d")          # the door names its file b
 needs_tmux = pytest.mark.skipif(shutil.which("tmux") is None, reason="fleet-pulse needs tmux")
 
 
-def _land(root, bot, etype, ts, data=None, *, source="pulse"):
-    """One fleet event through `emit_batch`, in the door's exact shape."""
+_N = [0]
+
+
+def _land(root, bot, etype, ts, data=None, *, source="pulse", provenance=True):
+    """One fleet event through `emit_batch`, in the door's exact shape — the
+    provenance the door stamps (`fleet-events:sha:<key>`) unless a test lands
+    a system event that is NOT a fleet event."""
     kind, subj = ("fleet", F) if bot == "fleet" else ("actor", f"bot:{F}/{bot}")
+    _N[0] += 1
     ev = {"event_type": "system", "emitter": source, "fleet": F, "occurred_at": ts,
+          **({"source_ref": f"fleet-events:sha:{_N[0]:0>32x}"} if provenance else {}),
           "payload": {"event": etype, "subject_kind": kind, "subject": subj,
                       "data": {"source": source, "legacy_ts": ts, "data": data or {}}}}
     out = emit_batch(root, [ev])
@@ -48,9 +56,12 @@ def _land(root, bot, etype, ts, data=None, *, source="pulse"):
 
 
 def _door_env(root, **extra):
+    """The e2e battery's no-daemon convention (`_plane_lib`): the shim's socket
+    rung fails, disclosed, and the cold CLI ingests — pointed at this scene.
+    Built here rather than borrowed: `_plane_lib` lays a stub lib down under
+    the scene and the fleet-pulse test lays its own."""
     env = {"CLAUDLOBBY_ROOT": str(root), "HOME": str(root / "home"), "FLEET_NAME": F,
            "PLANE_EMIT_ENABLED": "1", "PLANE_EMIT_CLI": str(CLI),
-           # no daemon: the shim's socket rung fails (disclosed) and the cold CLI ingests
            "PLANE_SOCKET": str(root / "no-daemon.sock"), "PATH": "/usr/bin:/bin"}
     env.update(extra)
     return env
@@ -63,7 +74,7 @@ def _door(root, args, **extra):
 
 
 def _public(row):
-    return {k: v for k, v in row.items() if not k.startswith("_")}
+    return _stdlib_readers().public(row)
 
 
 def _bot_dir(paths, bot):
@@ -74,10 +85,11 @@ def _bot_dir(paths, bot):
 
 # --- the registry ------------------------------------------------------------
 
-def test_every_critical_type_is_registered_critical_and_no_critical_type_is_chatty():
+def test_every_critical_type_is_registered_critical():
+    """`--critical` on the plane path is the registry-stamped severity, so
+    the files' hand list and the registry must agree on every fleet event."""
     for t in CRITICAL_TYPES:
         assert SYSTEM_EVENT_SEVERITY.get(t) == "critical", t
-    assert not (CHATTY_SYSTEM_EVENTS & CRITICAL_TYPES)         # the retention lane never ages a page
     assert SYSTEM_EVENT_SEVERITY["report_status"] == "notice"
 
 
@@ -95,11 +107,14 @@ def test_the_door_lands_the_event_on_the_plane_and_the_reader_renders_the_legacy
     pr = _stdlib_readers()
     with _ro(root) as conn:
         stored = tuple(conn.execute(
-            "SELECT severity, subject_kind, subject_alias, subject_uid IS NOT NULL, kind"
-            " FROM events WHERE event = 'session_missing'").fetchone())
+            "SELECT severity, subject_kind, subject_alias, subject_uid IS NOT NULL, kind,"
+            " source_ref, occurred_at FROM events WHERE event = 'session_missing'").fetchone())
         rows = pr.fleet_events(conn, F)
-    assert stored == ("critical", "actor", f"bot:{F}/w1", 1, "system")
+    assert stored[:5] == ("critical", "actor", f"bot:{F}/w1", 1, "system")
+    assert stored[5].startswith("fleet-events:sha:") and len(stored[5]) == len("fleet-events:sha:") + 32
+    assert stored[6].endswith("+00:00")                            # stamped UTC; the legacy ts keeps its offset
     assert [_public(x) for x in rows] == [legacy]                  # byte for byte the legacy row
+    assert rows[0]["_severity"] == "critical"
 
 
 def test_a_fleet_level_receipt_anchors_on_the_fleet_and_renders_as_bot_fleet(tmp_path):
@@ -129,21 +144,48 @@ def test_the_append_retires_only_on_the_four_facts(tmp_path):
     assert "no legacy_write_retired is recorded" in r.stderr and lines() == 1
     for reader in sh.GATED:
         _declare(root, reader)
-    assert _cli(root, "cutover", "--retire-writes").returncode == 0
-    # all four facts: flag 0, armed, retired, THIS emission recorded -> skipped
+    # a retirement from BEFORE this door existed (chunk 6b's names dispatch and
+    # report) covers nothing it never named: the door keeps writing, and
+    # --retire-writes records the EXTENSION rather than "already retired"
+    old = cut.retirement_event(F, {}, "2026-09-03T00:00:00+00:00")
+    old["payload"]["data"]["flags"].pop("events")
+    assert emit_batch(root, [old])[0].status == "committed"
     r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0")
-    assert "legacy write retired" in r.stderr and lines() == 1
+    assert "that covers 'events'" in r.stderr and lines() == 2
+    ext = _cli(root, "cutover", "--retire-writes")
+    assert ext.returncode == 0 and "recording the extension" in ext.stdout, ext.stdout + ext.stderr
+    assert "['dispatch', 'report']" in ext.stdout and "['events']" in ext.stdout
+    # all four facts: flag 0, armed, retired (covering this door), THIS emission recorded -> skipped
+    r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0")
+    assert "legacy write retired" in r.stderr and lines() == 2
     # the fourth fact fails (the plane did not record this one) -> written
     r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0", PLANE_EMIT_CLI="/usr/bin/false")
-    assert "did not record this one" in r.stderr and lines() == 2
+    assert "did not record this one" in r.stderr and lines() == 3
     # unarmed: the plane is never touched, the ledger is the record
     r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0", PLANE_EMIT_ENABLED="0")
-    assert r.stderr == "" and lines() == 3
+    assert r.stderr == "" and lines() == 4
     # the flag is the operator's: default 1 keeps writing after the retirement too
     r = _door(root, call)
-    assert lines() == 4
+    assert lines() == 5
     with _ro(root) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'session_missing'").fetchone()[0] == 3
+        assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'session_missing'").fetchone()[0] == 4
+
+
+def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tmp_path):
+    """report-back emits its report, then sends through pane_send_verified —
+    whose send_miss is a fleet event through THIS door — then asks
+    plane_write_retired about ITS emission. The door restores the caller's
+    PLANE_EMIT_LAST_RC: a failed report emission must not read as recorded
+    because a nested fleet event succeeded (the structural lens reproduced a
+    report recorded NOWHERE under the first build)."""
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    prog = (f'. "{LIB}/lib-common.sh"; PLANE_EMIT_LAST_RC=4; emit_fleet_event send_miss pane \'{{}}\' "{bot_dir}" w1;'
+            ' echo "outer=$PLANE_EMIT_LAST_RC"')
+    r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=180, env=_door_env(root))
+    assert r.returncode == 0 and "outer=4" in r.stdout, r.stdout + r.stderr
+    with _ro(root) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'send_miss'").fetchone()[0] == 1
 
 
 # --- the readers follow the flip ---------------------------------------------
@@ -170,21 +212,28 @@ def test_claudlobby_events_serves_the_plane_on_flag_and_declaration(tmp_path):
     _land(root, "w1", "session_missing", "2026-09-03T10:00:00Z", {"session": "w1"})
     _land(root, "w2", "keepalive", "2026-09-03T10:01:00Z", {"state": "IDLE"}, source="keepalive")
     _land(root, "fleet", "fleet_rescue", "2026-09-03T10:02:00Z", {"rescued": 1})
+    _land(root, "w1", "report_status", "2026-09-03T10:03:00Z", {"status": "completed"},
+          source="report-back", provenance=False)                  # a report door's marker: NOT a fleet event
     off = _events_cmd(root, "--json")                              # no flag: the files (none readable -> rc 1)
     assert off.returncode == 1 and off.stdout == "" and "no event source was readable" in off.stderr
     flag_only = _events_cmd(root, "--json", PLANE_READ_EVENTS="1")
     assert flag_only.returncode == 1 and flag_only.stdout == ""    # a flag alone changes nothing
     assert "no cutover_declared" in flag_only.stderr
     _declare(root, "events")
+    for off_value in ("0", "true", "yes"):                          # a declaration alone changes nothing either
+        r = _events_cmd(root, "--json", PLANE_READ_EVENTS=off_value)
+        assert r.returncode == 1 and r.stdout == "" and "no cutover_declared" not in r.stderr, off_value
+    assert _events_cmd(root, "--json").returncode == 1
     rows = _rows(_events_cmd(root, "--json", PLANE_READ_EVENTS="1"))
     assert [(r["bot"], r["type"], r["source"]) for r in rows] == [
         ("w1", "session_missing", "pulse"), ("w2", "keepalive", "keepalive"), ("fleet", "fleet_rescue", "pulse")]
     assert rows[0]["ts"] == "2026-09-03T10:00:00Z" and rows[0]["data"] == {"session": "w1"}
-    assert "cutover_declared" not in {r["type"] for r in rows}    # the plane's machinery is not a fleet event
+    assert {"cutover_declared", "report_status"}.isdisjoint({r["type"] for r in rows})   # provenance, not a name list
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--critical", PLANE_READ_EVENTS="1"))] == ["w1"]
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--bot", "W2", PLANE_READ_EVENTS="1"))] == ["w2"]
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--type", "fleet_rescue", PLANE_READ_EVENTS="1"))] == ["fleet"]
     assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--source", "keepalive", PLANE_READ_EVENTS="1"))] == ["w2"]
+    assert [r["bot"] for r in _rows(_events_cmd(root, "--json", "--bot", "fleet", PLANE_READ_EVENTS="1"))] == ["fleet"]
     table = _events_cmd(root, PLANE_READ_EVENTS="1")
     assert table.returncode == 0 and "session_missing" in table.stdout
     _drop_plane(root)
@@ -204,6 +253,11 @@ def test_brief_alerts_follow_the_flip_and_omit_when_the_plane_is_unreachable(tmp
     degraded = []
     assert _alerts_section(paths, "w1", int(now.timestamp()), degraded) == []      # flag alone: the files
     _declare(root, "events")
+    monkeypatch.setenv("PLANE_READ_EVENTS", "0")
+    degraded = []
+    assert _alerts_section(paths, "w1", int(now.timestamp()), degraded) == []      # declaration alone: the files
+    assert not any(d.field == "alerts" and d.mode == "omitted" for d in degraded)
+    monkeypatch.setenv("PLANE_READ_EVENTS", "1")
     degraded = []
     alerts = _alerts_section(paths, "w1", int(now.timestamp()), degraded)
     assert [(a["type"], a["data"]) for a in alerts] == [("session_missing", {"session": "w1"})]
@@ -214,30 +268,42 @@ def test_brief_alerts_follow_the_flip_and_omit_when_the_plane_is_unreachable(tmp
     assert any(d.field == "alerts" and d.mode == "omitted" and "unreachable" in d.reason for d in degraded)
 
 
-def _lookup(root, *args):
-    return subprocess.run([sys.executable, str(LIB / "plane-lookup.py"), "--root", str(root), *args],
-                          capture_output=True, text=True, timeout=120)
-
-
 def test_plane_lookup_answers_the_events_and_escalation_questions(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     _land(root, "w1", "session_missing", "2026-09-03T10:00:00Z", {"session": "w1"})
     _land(root, "w1", "session_missing", "2026-09-03T10:05:00Z", {"session": "w1"})
     _land(root, "w2", "service_down", "2026-09-03T10:06:00Z", {"unit": "x"})
+    _land(root, "w2", "keepalive", "2026-09-03T10:07:00Z", {"state": "IDLE"}, source="keepalive")
     ev = _lookup(root, "--events", "--fleet", F)
     rows = [json.loads(line) for line in ev.stdout.splitlines()]
     assert ev.returncode == 0 and [(r["bot"], r["type"]) for r in rows] == [
-        ("w1", "session_missing"), ("w1", "session_missing"), ("w2", "service_down")]
+        ("w1", "session_missing"), ("w1", "session_missing"), ("w2", "service_down"), ("w2", "keepalive")]
     assert rows[0] == {"ts": "2026-09-03T10:00:00Z", "bot": "w1", "type": "session_missing",
                        "source": "pulse", "data": {"session": "w1"}}
-    assert len(_lookup(root, "--events", "--fleet", F, "--since", "2026-09-03T10:05:00Z").stdout.splitlines()) == 2
+    assert len(_lookup(root, "--events", "--fleet", F, "--since", "2026-09-03T10:05:00Z").stdout.splitlines()) == 3
     assert len(_lookup(root, "--events", "--fleet", F, "--type", "service_down").stdout.splitlines()) == 1
     assert len(_lookup(root, "--events", "--fleet", F, "--bot", "W1").stdout.splitlines()) == 2
-    esc = _lookup(root, "--escalation", "session_missing", "--since", "2026-09-03T10:00", "--fleet", F)
-    assert esc.returncode == 0 and esc.stdout == "w1 2026-09-03T10:05:00+00:00\n"   # the LATEST per bot, stored form
-    quiet = _lookup(root, "--escalation", "service_down", "--since", "2026-09-03T10:07", "--fleet", F)
+    # the escalation: every CRITICAL (bot, type) at once, the latest per pair,
+    # strictly AFTER the window start (the legacy grep's compare), keepalive never
+    esc = _lookup(root, "--escalation", "--since", "2026-09-03T10:00:00Z", "--fleet", F)
+    assert esc.returncode == 0, esc.stderr
+    assert esc.stdout == "w1 session_missing 2026-09-03T10:05:00+00:00\nw2 service_down 2026-09-03T10:06:00+00:00\n"
+    at_start = _lookup(root, "--escalation", "--since", "2026-09-03T10:05:00Z", "--fleet", F)
+    assert at_start.stdout == "w2 service_down 2026-09-03T10:06:00+00:00\n"     # 10:05:00 itself is NOT after
+    one = _lookup(root, "--escalation", "--since", "2026-09-03T10:00:00Z", "--fleet", F, "--type", "service_down")
+    assert one.stdout == "w2 service_down 2026-09-03T10:06:00+00:00\n"
+    # a NAIVE window start is the host's local clock (fleet-pulse's `date +%Y-%m-%dT%H:%M`)
+    local_naive = datetime(2026, 9, 3, 10, 4, 30, tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M")
+    naive = _lookup(root, "--escalation", "--since", local_naive, "--fleet", F)
+    assert naive.stdout.startswith("w1 session_missing 2026-09-03T10:05:00+00:00")
+    quiet = _lookup(root, "--escalation", "--since", "2026-09-03T10:07:00Z", "--fleet", F)
     assert quiet.returncode == 0 and quiet.stdout == ""                            # nothing inside the window
+    garbage = _lookup(root, "--escalation", "--since", "yesterday-ish", "--fleet", F)
+    assert garbage.returncode == 2 and garbage.stdout == "" and "ISO instant" in garbage.stderr
+    assert _lookup(root, "--escalation", "--fleet", F).returncode == 2              # needs --since
     assert _lookup(root, "--events").returncode == 2                                # needs --fleet
+    never = _lookup(root, "--events", "--fleet", "ghost")
+    assert never.returncode == 3 and never.stdout == "" and "no identity for fleet" in never.stderr
     assert _lookup(root, "--declared", "events", "--fleet", F).stdout == ""        # not declared: nothing
     _declare(root, "events")
     at = _lookup(root, "--declared", "events", "--fleet", F)
@@ -250,12 +316,19 @@ def test_plane_lookup_answers_the_events_and_escalation_questions(tmp_path):
 def test_the_row_renderer_discloses_a_truncated_detail_and_never_strips_another_fleets_alias():
     pr = _stdlib_readers()
     detail = '{"source":"pulse","legacy_ts":"2026-09-03T10:00:00-04:00","data":{"a":1}}'
-    whole = pr.legacy_event_row("2026-09-03T14:00:00+00:00", "x", "actor", f"bot:{F}/w1", detail, 0, F)
+    whole = pr.legacy_event_row("2026-09-03T14:00:00+00:00", "x", "notice", "actor", f"bot:{F}/w1", detail, 0, F)
     assert whole == {"ts": "2026-09-03T10:00:00-04:00", "bot": "w1", "type": "x", "source": "pulse",
-                     "data": {"a": 1}, "_truncated": False}
-    cut_off = pr.legacy_event_row("2026-09-03T14:00:00+00:00", "x", "actor", "bot:g/w1", detail, 1, F)
+                     "data": {"a": 1}, "_severity": "notice", "_truncated": False}
+    assert pr.public(whole) == {"ts": "2026-09-03T10:00:00-04:00", "bot": "w1", "type": "x", "source": "pulse",
+                                "data": {"a": 1}}
+    cut_off = pr.legacy_event_row("2026-09-03T14:00:00+00:00", "x", None, "actor", "bot:g/w1", detail, 1, F)
     assert cut_off["_truncated"] and cut_off["data"] == {} and cut_off["source"] == "plane"
     assert cut_off["bot"] == "bot:g/w1" and cut_off["ts"] == "2026-09-03T14:00:00Z"
+    assert pr.since_form("2026-09-03T10:00:00Z") == "2026-09-03T10:00:00+00:00"
+    assert pr.since_form("2026-09-03T06:00:00-04:00") == "2026-09-03T10:00:00+00:00"
+    assert pr.since_form(None) is None and pr.since_form("") is None
+    with pytest.raises(ValueError):
+        pr.since_form("not-an-instant")
 
 
 # --- the declaration: a direct move -------------------------------------------
@@ -273,6 +346,11 @@ def test_the_events_reader_declares_as_a_direct_move_without_a_gate(tmp_path):
     assert "events" in decl and "direct move" in (decl["events"][1] or "")
     assert data["shadowed"] is False and data["gate"] == {"clean_run": None, "transitions": None}
     assert data["gate_met"] is None and data["streaks"] == []
+    with _ro(root) as conn:                                          # anchored on the fleet's identity
+        anchored = conn.execute(
+            "SELECT e.subject_alias, e.subject_uid = i.uid FROM events e JOIN identity_registry i"
+            " ON i.kind = 'fleet' AND i.alias = ? WHERE e.event = 'cutover_declared'", (F,)).fetchone()
+    assert tuple(anchored) == (F, 1)
     assert "events" not in readers and readers == {"open", "overdue", "open_task", "unassigned"}
     _declare(root, "open")                                          # a shadowed reader keeps its real gate block
     with _ro(root) as conn:
@@ -344,3 +422,23 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     with _ro(root) as conn:
         n = conn.execute("SELECT COUNT(*) FROM events WHERE event = 'session_missing'").fetchone()[0]
     assert n >= 4                                                    # two sweeps, two bots each, on the plane
+    summary = (root / "state" / "pulse" / "pulse-summary.txt").read_text()
+    assert "session_missing" in summary and "unknown" not in summary
+
+    # the plane UNREACHABLE under the declared flip: NOT the files (they hold
+    # nothing now), not "none" — unknown, disclosed, and paged like the overdue
+    # reader. Unreachable, not absent: the sweep's own doors emit before its
+    # readers ask, and the cold CLI would re-create an absent db as an EMPTY
+    # plane whose "not declared" answer is the files again — so the db path is
+    # made unopenable (a directory), the shape a wedged disk presents.
+    (root / "state" / "pulse" / "escalation_session_missing").unlink()
+    capture.write_text("")
+    _drop_plane(root)
+    (root / "state" / "plane" / "plane.db").mkdir()
+    dark = _pulse(root, libdir, PLANE_READ_EVENTS="1", PLANE_LEGACY_WRITE_EVENTS="0")
+    assert dark.returncode == 0, dark.stderr[-2000:]
+    assert "UNREACHABLE" in dark.stderr and "cannot be judged this pass" in dark.stderr
+    paged = capture.read_text()
+    assert "events reader for f is UNREACHABLE" in paged and page not in paged, paged
+    summary = (root / "state" / "pulse" / "pulse-summary.txt").read_text()
+    assert "unknown (events reader unreachable)" in summary and " none" not in summary

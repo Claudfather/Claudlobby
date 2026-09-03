@@ -355,12 +355,15 @@ def cmd_plane_doctor(args) -> int:
                     from ..plane import cutover as _cut
                     if paths.fleet_name:
                         ret = _cut.retired(conn, paths.fleet_name)
+                        # a retirement covers a door only when its record NAMES it
+                        covered = _cut.retired_doors(conn, paths.fleet_name) if ret else set()
                         for door, off in _write_flags(paths, _casc).items():
                             if off is None:
                                 rung(False, f"legacy write {door}",
                                      "flag unresolvable (env tiers door unavailable)")
                                 continue
-                            ok, why = _cut.write_flag_vs_retirement(off, ret[0] if ret else None)
+                            ok, why = _cut.write_flag_vs_retirement(
+                                off, ret[0] if (ret and door in covered) else None)
                             rung(ok, f"legacy write {door}", why)
                 except Exception as exc:
                     rung(False, "legacy writes", f"unreadable: {exc}")
@@ -1005,9 +1008,6 @@ def cmd_plane_cutover(args) -> int:
         if roster is None:
             print(f"cutover: UNREACHABLE — fleet manifest: {why}")
             return 3
-        if args.reader in _sh.UNSHADOWED and not args.retire_writes:
-            # a direct move: no streaks exist; declare with the reason recorded
-            args.force = args.force or "direct move (Phase B, no shadow) — operator ruling 2026-09-03"
         if bool(args.reader) == bool(args.retire_writes):
             print("cutover: exactly one of --reader <" + "|".join(_sh.GATED) + "> or --retire-writes",
                   file=sys.stderr)
@@ -1021,6 +1021,7 @@ def cmd_plane_cutover(args) -> int:
             if args.retire_writes:
                 decl = _cut.declared(conn, fleet)
                 missing = _cut.undeclared(decl)
+                covered = _cut.retired_doors(conn, fleet) if already is not None else set()
             else:
                 streaks = _sh.gate_summary(conn, fleet, roster, (args.reader,))
         finally:
@@ -1036,10 +1037,16 @@ def cmd_plane_cutover(args) -> int:
                 print(f"cutover: REFUSED — {len(missing)} reader(s) not declared:"
                       f" {', '.join(missing)}; declare them, or --force <reason>")
                 return 1
-            if already is not None and not args.force:
+            uncovered = sorted(set(_cut.WRITE_FLAGS) - covered) if already is not None else []
+            if already is not None and not args.force and not uncovered:
                 print(f"cutover: the legacy writes are already retired for {fleet} ({already[0]});"
                       " nothing new recorded (--force <reason> records a new retirement)")
                 return 0
+            if uncovered:
+                # A door skips its write only under a record that NAMES it: a
+                # retirement from before a door existed is extended, not repeated.
+                print(f"cutover: the retirement of {already[0]} names {sorted(covered)} but not"
+                      f" {uncovered} — recording the extension")
             now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             ev = _cut.retirement_event(fleet, decl, now, forced=args.force or None,
                                        subject_uid=anchor)
@@ -1073,8 +1080,9 @@ def cmd_plane_cutover(args) -> int:
         if counts.get("duplicate") and not counts.get("committed"):
             print(f"cutover: {args.reader} already declared at this instant ({now}) — one fact,"
                   " nothing new recorded")
+        forced = ev["payload"]["data"]["forced"]
         print(f"cutover: declared {args.reader} → plane at {now}"
-              + (f" (FORCED: {args.force})" if args.force else "")
+              + (f" (FORCED: {forced})" if forced else "")
               + f" [{', '.join(f'{k}={v}' for k, v in counts.items() if v)}]")
         print(f"  add to the fleet .env tier:  {flag}=1")
         print("  then `claudlobby --fleet " + fleet + " generate` (stamps the timers) and"

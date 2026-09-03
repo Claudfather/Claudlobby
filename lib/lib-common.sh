@@ -563,11 +563,28 @@ plane_write_retired() {
         echo "$door: $flag_name=0 but the plane did not record this one (rc=$PLANE_EMIT_LAST_RC) -- writing the ledger" >&2
         return 1
     fi
-    local _retired
-    _retired=$(python3 -S -E "${BASH_SOURCE[0]%/*}/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
-        --retired --fleet "${FLEET_NAME:-}" 2>/dev/null || true)
+    # The retirement must COVER this door: a record from before a door existed
+    # (chunk 6b's named dispatch and report) retires nothing it never named, or
+    # a copy-pasted flag silences a write nobody declared retired. The door key
+    # is the flag's own suffix (no fork for the three known ones).
+    local _door_key _retired
+    case "${flag_name#PLANE_LEGACY_WRITE_}" in
+        DISPATCH) _door_key=dispatch ;;
+        REPORT)   _door_key=report ;;
+        EVENTS)   _door_key=events ;;
+        *) _door_key=$(printf '%s' "${flag_name#PLANE_LEGACY_WRITE_}" | tr '[:upper:]' '[:lower:]') ;;
+    esac
+    # Memoised per process on a POSITIVE answer only: a retirement is monotone
+    # (rollback is the flag, which short-circuits above), so one lookup per
+    # (process, door) is the whole cost — a sweep emits dozens of fleet events.
+    eval "_retired=\${_PLANE_RETIRED_AT_${_door_key}:-}"
     if [ -z "$_retired" ]; then
-        echo "$door: $flag_name=0 but no legacy_write_retired is recorded for ${FLEET_NAME:-?} -- writing the ledger (plane cutover --retire-writes first)" >&2
+        _retired=$(python3 -S -E "${BASH_SOURCE[0]%/*}/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
+            --retired --door "$_door_key" --fleet "${FLEET_NAME:-}" 2>/dev/null || true)
+        [ -n "$_retired" ] && eval "_PLANE_RETIRED_AT_${_door_key}=\$_retired"
+    fi
+    if [ -z "$_retired" ]; then
+        echo "$door: $flag_name=0 but no legacy_write_retired is recorded for ${FLEET_NAME:-?} that covers '$_door_key' -- writing the ledger (plane cutover --retire-writes first)" >&2
         return 1
     fi
     echo "$door: legacy write retired ($_retired) -- the plane recorded it" >&2
@@ -1307,45 +1324,58 @@ emit_fleet_event() {
         events_dir="${CLAUDLOBBY_ROOT:-}/state/events"
         [ -n "$bot_id" ] || bot_id="fleet"
     fi
-    local ts today
+    local ts today _line
     ts=$(ts_iso); today=$(date +%Y-%m-%d)
-    # Cutover Phase B: the event is a SYSTEM event on the plane first —
-    # anchored on the bot's actor (by alias, resolved at ingest) or, for a
-    # fleet-level receipt, on the fleet — and the JSONL append retires behind
+    # The legacy row, composed ONCE (printf -v, no fork): the append below writes
+    # this exact line, and its content key is the plane row's PROVENANCE
+    # (source_ref fleet-events:sha:<key>, the id-less dispatch's derivation) —
+    # the readers select fleet events by that prefix, never by an event-name
+    # list, so the plane's own machinery can never read as a fleet event.
+    printf -v _line '{"ts":"%s","bot":"%s","type":"%s","source":"%s","data":%s}' \
+        "$ts" "$bot_id" "$event_type" "$event_source" "$data_json"
+    # Cutover Phase B: the event is a SYSTEM event on the plane first — anchored
+    # on the bot's actor (by alias, resolved at ingest) or, for a fleet-level
+    # receipt, on the fleet — and the JSONL append retires behind
     # PLANE_LEGACY_WRITE_EVENTS=0 on the same four facts as the other doors
-    # (plane_write_retired: flag, arming, the recorded retirement, THIS
-    # emission recorded). Best-effort like the append: never fails the caller.
+    # (plane_write_retired: flag, arming, the recorded retirement covering
+    # THIS door, THIS emission recorded). Best-effort like the append: never
+    # fails the caller. occurred_at is stamped UTC so every fleet event compares
+    # lexically on the stored column (the legacy ts keeps its local offset
+    # inside the detail, for the byte-identical re-render).
     local _fleet="${FLEET_NAME:-}"
-    if [ -n "$_fleet" ] && plane_armed emit_fleet_event 2>/dev/null; then
+    if [ -n "$_fleet" ] && plane_armed emit_fleet_event; then
         # plane_write_retired reads the script-level PLANE_ARMED the dispatch and
         # report doors set at their top; this door is a library function every
         # script calls, so it carries the verdict itself (dynamic scope: the
-        # check below sees it, the caller never does).
-        local PLANE_ARMED=1
-        local _subj _kind _batch _safe_data
+        # check below sees it, the caller never does) — and it RESTORES the
+        # caller's own emission verdict afterwards: a report door that emits a
+        # send_miss between its emit and its retired check must judge its own
+        # fourth fact, never this door's (measured: a failed report emission
+        # read as recorded after a nested fleet event succeeded).
+        local PLANE_ARMED=1 _outer_rc="${PLANE_EMIT_LAST_RC:-0}"
+        local _subj _kind _batch _detail _src _key _utc _skip=1
         if [ "$bot_id" = "fleet" ]; then
             _kind=fleet; _subj="$_fleet"                # the plane's fleet alias is the bare name
         else
             _kind=actor; _subj="bot:$_fleet/$bot_id"
         fi
-        # data_json is caller-built JSON (validated as such at ingest); the
-        # legacy row's source and the legacy ts ride inside data so the plane
-        # row can be re-rendered as the legacy row byte for byte.
-        _safe_data=$(printf '{"source":"%s","legacy_ts":"%s","data":%s}' \
-            "$(json_escape "$event_source")" "$ts" "$data_json")
-        printf -v _batch '{"events":[{"event_type":"system","emitter":"%s","fleet":"%s","occurred_at":"%s","payload":{"event":"%s","subject_kind":"%s","subject":"%s","data":%s}}]}' \
-            "$(json_escape "$event_source")" "$(json_escape "$_fleet")" "$ts" \
-            "$(json_escape "$event_type")" "$_kind" "$(json_escape "$_subj")" "$_safe_data"
+        # event_source is the one caller-shaped string; type, fleet and bot are
+        # identifiers by construction (a malformed one is refused at ingest,
+        # disclosed, and the legacy line is written regardless).
+        _src=$(json_escape "$event_source")
+        _key=$(sha256_hex32 "$_line" 2>/dev/null || true)
+        _utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        printf -v _detail '{"source":"%s","legacy_ts":"%s","data":%s}' "$_src" "$ts" "$data_json"
+        printf -v _batch '{"events":[{"event_type":"system","emitter":"%s","source_ref":"fleet-events:sha:%s","fleet":"%s","occurred_at":"%s","payload":{"event":"%s","subject_kind":"%s","subject":"%s","data":%s}}]}' \
+            "$_src" "$_key" "$_fleet" "$_utc" "$event_type" "$_kind" "$_subj" "$_detail"
         plane_emit_events emit_fleet_event <<<"$_batch"
         # stderr passes through: the missing fact is DISCLOSED, that is the contract
-        if plane_write_retired emit_fleet_event PLANE_LEGACY_WRITE_EVENTS; then
-            return 0
-        fi
+        plane_write_retired emit_fleet_event PLANE_LEGACY_WRITE_EVENTS && _skip=0
+        PLANE_EMIT_LAST_RC="$_outer_rc"
+        [ "$_skip" -eq 0 ] && return 0
     fi
     mkdir -p "$events_dir" 2>/dev/null || return 0
-    printf '{"ts":"%s","bot":"%s","type":"%s","source":"%s","data":%s}\n' \
-        "$ts" "$bot_id" "$event_type" "$event_source" "$data_json" \
-        >> "$events_dir/fleet-${today}.jsonl" 2>/dev/null || true
+    printf '%s\n' "$_line" >> "$events_dir/fleet-${today}.jsonl" 2>/dev/null || true
 }
 
 # _tmux_send_miss <session> <socket> <reason>

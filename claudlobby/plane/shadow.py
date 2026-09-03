@@ -104,6 +104,9 @@ FLEET_BOT = "_fleet"            # the record's bot slot for a fleet-level reader
 READER_EVENTS = "events"
 GATED = READERS + (READER_OPEN_TASK, READER_UNASSIGNED, READER_EVENTS)
 UNSHADOWED = (READER_EVENTS,)
+# The recorded reason for an unshadowed reader's declaration (no streaks
+# exist to meet): the operator's ruling, applied where the record is built.
+DIRECT_MOVE_REASON = "direct move (Phase B, no shadow) — operator ruling 2026-09-03"
 GATE_HEAD_CLEAN_RUN = 200
 # The bar per reader, ONE registry (a Streak reads its bar from its reader,
 # never from settable state): the list readers' 20, the resolver's 200.

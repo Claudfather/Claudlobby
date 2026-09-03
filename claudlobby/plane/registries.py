@@ -93,15 +93,6 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "fleet_rescue": "notice",
 }
 
-# The chatty types (Phase B, J-B5): high-volume, machinery-only — the retention
-# lane may age these past the incident-join window; a critical type is never
-# aged (the `metric_samples` precedent: never the ledger, only a family's rows).
-CHATTY_SYSTEM_EVENTS: frozenset[str] = frozenset({
-    "send_miss", "send_retry", "send_blind", "send_blind_recovered",
-    "shadow_parity_clean", "pane_stuck",
-})
-
-
 # ---------------------------------------------------------------------------
 # Phase 2b: the metric-name registry (§9b MetricSample — open registry,
 # warn-on-unknown at ingest, additions by PR). Units live HERE, never on

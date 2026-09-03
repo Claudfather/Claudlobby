@@ -269,7 +269,7 @@ def test_cutover_refuses_short_of_the_gate_records_when_met_and_force_records_th
         anchor = cut.fleet_uid(conn, F)
         row = conn.execute("SELECT subject_kind, subject_uid, subject_alias FROM events"
                            " WHERE event = 'cutover_declared'").fetchone()
-        assert tuple(row) == (("fleet", anchor, f"fleet:{F}") if anchor else (None, None, None))
+        assert tuple(row) == (("fleet", anchor, F) if anchor else (None, None, None))   # the bare alias the registry mints
     t0 = NOW - timedelta(hours=40)
     for bot, ids in (("w1", ["t-2-bbbb"]), ("w2", ["t-3-cccc"])):
         for k in range(sh.GATE_CLEAN_RUN):
@@ -297,7 +297,7 @@ def test_the_declaration_id_is_derived_so_a_re_run_at_one_instant_is_one_fact():
     assert a["payload"]["event"] == "cutover_declared" and a["payload"]["data"]["gate_met"] is False
     assert "subject_kind" not in a["payload"]
     anchored = cut.declaration_event(F, "open", [st], "2026-09-03T05:00:00+00:00", subject_uid="flt_x")
-    assert anchored["payload"]["subject_kind"] == "fleet" and anchored["payload"]["subject_alias"] == f"fleet:{F}"
+    assert anchored["payload"]["subject_kind"] == "fleet" and anchored["payload"]["subject_alias"] == F
     try:
         cut.declaration_event(F, "orphans", [], "2026-09-03T05:00:00+00:00")
     except ValueError:

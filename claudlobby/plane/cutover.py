@@ -17,11 +17,12 @@ Twin: ``lib/plane-readers.py::declared`` (stdlib, the matcher's side).
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Optional
 
 from .ids import derive_uid
-from .shadow import BAR_BY_READER, GATE_TRANSITIONS, GATED, UNSHADOWED, Streak
+from .shadow import BAR_BY_READER, DIRECT_MOVE_REASON, GATE_TRANSITIONS, GATED, UNSHADOWED, Streak
 
 EVENT_DECLARED = "cutover_declared"
 READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
@@ -46,7 +47,8 @@ LATEST_DECLARED_SQL = (
 )
 FLEET_UID_SQL = "SELECT uid FROM identity_registry WHERE alias = ? AND kind = 'fleet' LIMIT 1"
 LATEST_RETIRED_SQL = (
-    "SELECT e.occurred_at, json_extract(e.detail, '$.forced') FROM events e"
+    "SELECT e.occurred_at, json_extract(e.detail, '$.forced'), json_extract(e.detail, '$.flags')"
+    " FROM events e"
     " WHERE e.kind = 'system' AND e.event = ? AND e.detail_truncated = 0"
     " AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"
     " ORDER BY e.occurred_at DESC, e.ingest_seq DESC LIMIT 1"
@@ -54,7 +56,11 @@ LATEST_RETIRED_SQL = (
 
 
 def fleet_alias(fleet: str) -> str:
-    return f"fleet:{fleet}"
+    """The registry mints the fleet identity under its BARE name (measured on
+    the estate: `artemis-engineering`, never `fleet:artemis-engineering`) —
+    the prefixed form the first build used resolved nothing, so no
+    declaration was ever anchored on its fleet."""
+    return fleet
 
 
 def fleet_uid(conn: sqlite3.Connection, fleet: str) -> Optional[str]:
@@ -74,6 +80,15 @@ def declaration_event(fleet: str, reader: str, streaks: list[Streak], now: str, 
     duplicate. Anchored on the fleet's identity when it has one."""
     if reader not in READ_FLAGS:
         raise ValueError(f"unknown reader {reader!r}")
+    # An UNSHADOWED reader (Phase B's direct move) has no gate to meet: the
+    # record says so (shadowed=false, no bar, gate_met null, the ruling as its
+    # reason) rather than claiming an empty streak list met a bar.
+    shadowed = reader not in UNSHADOWED
+    if not shadowed:
+        forced = forced or DIRECT_MOVE_REASON
+    gate = ({"clean_run": (streaks[0].clean_bar if streaks else BAR_BY_READER[reader]),
+             "transitions": GATE_TRANSITIONS}
+            if shadowed else {"clean_run": None, "transitions": None})
     return {
         "event_type": "system",
         "emitter": "plane-cutover",
@@ -88,14 +103,9 @@ def declaration_event(fleet: str, reader: str, streaks: list[Streak], now: str, 
                 "fleet": fleet,
                 "reader": reader,
                 "flag": READ_FLAGS[reader],
-                # An UNSHADOWED reader (Phase B's direct move) has no gate to
-                # meet: the record says so (shadowed=false, no bar, gate_met
-                # null) rather than claiming an empty streak list met a bar.
-                "shadowed": reader not in UNSHADOWED,
-                "gate": ({"clean_run": (streaks[0].clean_bar if streaks else BAR_BY_READER[reader]),
-                          "transitions": GATE_TRANSITIONS}
-                         if reader not in UNSHADOWED else {"clean_run": None, "transitions": None}),
-                "gate_met": (not unmet(streaks)) if reader not in UNSHADOWED else None,
+                "shadowed": shadowed,
+                "gate": gate,
+                "gate_met": (not unmet(streaks)) if shadowed else None,
                 "forced": forced,
                 "streaks": [
                     {"bot": s.bot, "clean_run": s.clean_run,
@@ -153,6 +163,21 @@ def retired(conn: sqlite3.Connection, fleet: str) -> Optional[tuple[str, Optiona
     fleet, or None: the legacy writes are still the record."""
     row = conn.execute(LATEST_RETIRED_SQL, (EVENT_RETIRED, fleet_alias(fleet), fleet)).fetchone()
     return (row[0], row[1]) if row else None
+
+
+def retired_doors(conn: sqlite3.Connection, fleet: str) -> set[str]:
+    """The doors the LATEST retirement names (its recorded flags). A record
+    from before a door existed names nothing for it, so the door keeps
+    writing and `--retire-writes` records the extension rather than
+    answering 'already retired'."""
+    row = conn.execute(LATEST_RETIRED_SQL, (EVENT_RETIRED, fleet_alias(fleet), fleet)).fetchone()
+    if not row or not row[2]:
+        return set()
+    try:
+        flags = json.loads(row[2])
+    except ValueError:
+        return set()
+    return set(flags) if isinstance(flags, dict) else set()
 
 
 def _flag_verdict(flag_active: bool, recorded_at: Optional[str], *, flag_only: str,

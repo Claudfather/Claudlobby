@@ -325,13 +325,23 @@ def load_dispatch_doors(paths: Paths):
     section *loudly*. Printing "0 open" because the matcher could not be loaded
     would be the exact failure this door exists to prevent.
     """
+    return load_lib_module(paths, "dispatch-overdue.py")
+
+
+def load_lib_module(paths: Paths, filename: str):
+    """Import one of the INSTALL's stdlib ``lib/*.py`` scripts as a module,
+    or None when unreadable — ``load_dispatch_doors``'s seam, generalised
+    (Phase B: the plane readers ride it too). Always the install's ``lib/``,
+    never the importing checkout's copy: the install's scripts are what the
+    bash doors run, and a checkout fallback changes which install answers."""
     import importlib.util
 
-    src = paths.lib / "dispatch-overdue.py"
+    src = paths.lib / filename
     if not src.is_file():
         return None
     try:
-        spec = importlib.util.spec_from_file_location("dispatch_overdue", src)
+        spec = importlib.util.spec_from_file_location(
+            filename.replace("-", "_").removesuffix(".py"), src)
         if spec is None or spec.loader is None:
             return None
         mod = importlib.util.module_from_spec(spec)
@@ -941,17 +951,25 @@ def _alerts_section(
         .replace("+00:00", "Z")
     )
 
-    from .commands.events import collect_plane_events, plane_events_source
+    from .commands.events import collect_plane_events, plane_events_conn
     try:
-        flipped, note = plane_events_source(paths)
+        conn, note = plane_events_conn(paths)
     except RuntimeError as exc:
         degraded.append(Degradation(field="alerts", mode="omitted",
                                     reason=f"PLANE_READ_EVENTS=1 but the plane is unreachable: {exc}"
                                            " — restore the plane db or flip the flag back to 0",
                                     issue="#1444"))
         return []
-    if flipped:
-        events = collect_plane_events(paths, bot=bot_id, critical_only=True, since=cutoff)
+    if conn is not None:
+        try:
+            events = collect_plane_events(conn, paths, bot=bot_id, critical_only=True, since=cutoff)
+        except RuntimeError as exc:
+            degraded.append(Degradation(field="alerts", mode="omitted",
+                                        reason=f"PLANE_READ_EVENTS=1 but the plane cannot answer: {exc}",
+                                        issue="#1444"))
+            return []
+        finally:
+            conn.close()
     else:
         events = collect_events(
             paths.runtime_bots,

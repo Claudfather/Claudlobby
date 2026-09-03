@@ -203,17 +203,25 @@ recorded state machine:
 `state/events/` for the fleet) moves as a direct move, no shadow.
 `emit_fleet_event` (lib-common, every script's door) lands each fleet event
 on the plane FIRST as a system event anchored on the bot's actor — or the
-fleet, for a fleet-level receipt — by ALIAS (resolved at ingest), with the
-detail `{source, legacy_ts, data}` so the plane re-renders the legacy row
-byte for byte; every `emit_fleet_event` type is registered with the severity
-`CRITICAL_TYPES` implies (critical pages, notice records). The readers —
-`claudlobby events`, brief's alerts, fleet-pulse's escalation loop, summary
-and read-back — serve the plane on `PLANE_READ_EVENTS` AND the `events`
-declaration (the bash readers ask `plane-lookup.py --declared events`; the
-rows come back through `plane-readers.fleet_events` / `escalation`, one row
-rendering for every reader) and REFUSE an unreachable plane under the flag.
-The JSONL append retires behind `PLANE_LEGACY_WRITE_EVENTS=0` on the same
-four facts as the other doors. Still on their own files: `keepalive.sh`'s
+fleet, for a fleet-level receipt — by ALIAS (resolved at ingest), stamped
+UTC, with the PROVENANCE `source_ref fleet-events:sha:<content key of the
+legacy line>` and the detail `{source, legacy_ts, data}` so the plane
+re-renders the legacy row byte for byte; every `emit_fleet_event` type is
+registered with the severity `CRITICAL_TYPES` implies (critical pages,
+notice records). The readers — `claudlobby events`, brief's alerts,
+fleet-pulse's escalation loop, summary and read-back — select fleet events
+by that provenance (never an event-name list) and serve the plane on
+`PLANE_READ_EVENTS` AND the `events` declaration (the bash readers ask
+`plane-lookup.py --declared events` and READ its rc; the rows come back
+through `plane-readers.fleet_events` / `escalation`, one row rendering for
+every reader, fleet-pulse in ONE read per window). An unreachable plane
+under the flag is a third state, never the files: `claudlobby events` rc 3,
+brief's alerts omitted with a `degraded[]` entry, fleet-pulse `not judged
+this pass` + a debounced page + `unknown` in the summary — after the
+retirement the files hold nothing, so a fallback would read an outage as a
+quiet fleet. The JSONL append retires behind `PLANE_LEGACY_WRITE_EVENTS=0`
+on the same four facts as the other doors, the retirement having to NAME
+the door (`--retire-writes` extends a chunk-6b record that predates it). Still on their own files: `keepalive.sh`'s
 `keepalive-*.jsonl` and `bot-vitals.sh`'s rows (they never went through
 `emit_fleet_event`) — Phase B2's readers (`uptime`, `bot-vitals`, `tail-fleet`,
 `data-sweep`) decide those with them.
@@ -238,7 +246,7 @@ is the one definition of "resolves to 1".
 `plane doctor` / `plane registry` / `plane prune` / `plane expire` / `spool retry`. 0001 kernel · 0002 task-status index · 0003/0004
 the fleet room · 0005 FTS · 0006 the registry lane · 0007 `assignments(source_ref)`
 (the legacy join) · 0008 `events(actor_uid, occurred_at)` (progress grace, the
-resolver's guard). A newer db refuses older code (rc 4), never downgrades.
+resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window). A newer db refuses older code (rc 4), never downgrades.
 
 **Retention** — `plane prune` ages `metric_samples` past 30 days by
 `ingested_at` (the incident-join window); nothing else is ever deleted; no

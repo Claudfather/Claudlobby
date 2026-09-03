@@ -596,23 +596,54 @@ _rb_today=$(date +%Y-%m-%d)
 # errtrace (#844) a normal empty span logged a script_error every pulse — on the
 # per-minute path. Suppressing at the statement is what marks a benign non-zero
 # as intended; masking it afterwards only hides it from one of the two readers.
-# Phase B: the events readers follow the flip — flag AND a recorded
-# declaration for the `events` reader (memoised once per sweep); a flag alone
-# is disclosed and the files keep serving.
-_events_from_plane_memo=""
+# Phase B: the events readers follow the flip — flag AND a recorded declaration
+# for the `events` reader, asked ONCE per sweep; a flag alone is disclosed and
+# the files keep serving. An UNREACHABLE plane under the flag is a THIRD state,
+# never the files: after the retirement they hold nothing, so a fallback would
+# read an outage as a quiet fleet (the watchdog gone dark in silence).
+_EVENTS_SOURCE=""          # files | plane | unreachable, decided once per sweep
+_events_why=""
 _events_from_plane() {
-    if [ -z "$_events_from_plane_memo" ]; then
-        _events_from_plane_memo=no
+    if [ -z "$_EVENTS_SOURCE" ]; then
+        _EVENTS_SOURCE=files
         if [ "${PLANE_READ_EVENTS:-0}" = "1" ]; then
-            if python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --declared events --fleet "$fleet" 2>/dev/null | grep -q .; then
-                _events_from_plane_memo=yes
+            local _decl _rc=0
+            _decl=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --declared events \
+                --fleet "$fleet" 2>"$state_dir/.events-err") || _rc=$?
+            if [ "$_rc" -ne 0 ]; then
+                _EVENTS_SOURCE=unreachable
+                _events_why=$(tail -1 "$state_dir/.events-err" 2>/dev/null | cut -c1-200)
+                echo "fleet-pulse: PLANE_READ_EVENTS=1 but the plane is UNREACHABLE (rc=$_rc): ${_events_why} - critical events cannot be judged this pass" >&2
+            elif [ -n "$_decl" ]; then
+                _EVENTS_SOURCE=plane
             else
                 echo "fleet-pulse: PLANE_READ_EVENTS=1 but no cutover_declared for $fleet/events - the events readers keep the files (plane cutover --reader events)" >&2
             fi
+            rm -f "$state_dir/.events-err"
         fi
     fi
-    [ "$_events_from_plane_memo" = yes ]
+    [ "$_EVENTS_SOURCE" = plane ]
 }
+# The plane's CRITICAL set inside a window, read ONCE per window per sweep into
+# a cache file (`<bot> <type> <latest>` per row) — the escalation loop asks
+# inside its own window, the summary inside the read-back span; a sweep used
+# to spawn the lookup once per bot per type. Not a subshell call: a failed read
+# flips the source to unreachable for the rest of the sweep.
+_plane_critical() {   # $1 = window start (a naive local instant, or ISO), $2 = cache path
+    local _rc=0
+    python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalation \
+        --since "$1" --fleet "$fleet" >"$2" 2>"$state_dir/.events-err" || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        _EVENTS_SOURCE=unreachable
+        _events_why=$(tail -1 "$state_dir/.events-err" 2>/dev/null | cut -c1-200)
+        echo "fleet-pulse: critical-events reader UNREACHABLE (rc=$_rc): ${_events_why} - not judged this pass" >&2
+        rm -f "$state_dir/.events-err" "$2"; return 1
+    fi
+    rm -f "$state_dir/.events-err"
+    return 0
+}
+_CRITICAL_ESCALATION_TYPES="service_down session_missing bridge_down rc_timeout"
+_CRITICAL_SUMMARY_TYPES="session_missing service_down bridge_down activity_stuck rc_timeout"
 _rb_yesterday=$(date -u -v-1d +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -d "yesterday" +%Y-%m-%dT00:00:00Z 2>/dev/null || echo "")
 
 _readback_efiles() {
@@ -645,6 +676,33 @@ if [ -z "$_ESCALATION_CHAT_ID" ]; then
     echo "fleet-pulse: WARNING — no escalation Telegram chat ID resolved; critical fleet alerts will NOT be delivered. Set FLEET_PULSE_ESCALATION_CHAT_ID, or ensure at least one bot's bot.conf defines TELEGRAM_GROUP_CHAT_ID." >&2
 fi
 
+# Phase B twin of _overdue_reader_guard: the events reader that could not be
+# reached under a declared flip has left the watchdog dark for critical fleet
+# events — paged (debounced), cleared once it reads again. Runs AFTER the
+# escalation and summary reads, which are what discover the outage.
+_events_page() {
+    local _rc=0
+    TELEGRAM_GROUP_CHAT_ID="$_ESCALATION_CHAT_ID" TELEGRAM_STATE_DIR="${_ESCALATION_STATE_DIR:-}" \
+        "$LIB_DIR/tg-post.sh" "$1" >/dev/null 2>&1 || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        printf '%s ALERT-DELIVERY-FAILED escalation events_reader_unreachable: tg-post exit %s -- will retry next pass\n' "$(ts_iso)" "$_rc" >&2
+        _EVENTS_PAGE_FAILED=1
+    fi
+}
+_events_reader_guard() {
+    if [ "${_EVENTS_SOURCE:-}" != unreachable ]; then
+        debounce_clear "$state_dir" fleet events_reader_unreachable
+        return 0
+    fi
+    [ -n "$_ESCALATION_CHAT_ID" ] || { echo "fleet-pulse: events reader UNREACHABLE and no escalation chat - the watchdog is dark for critical fleet events: ${_events_why}" >&2; return 0; }
+    _EVENTS_PAGE_FAILED=0
+    debounce_notify "$state_dir" fleet events_reader_unreachable _events_page \
+        "FLEET ALERT: the events reader for ${fleet} is UNREACHABLE - critical fleet events cannot be judged until the plane is restored, or PLANE_READ_EVENTS is flipped back to 0. (${_events_why})" \
+        "" 600 || true
+    [ "${_EVENTS_PAGE_FAILED:-0}" = "1" ] && debounce_clear "$state_dir" fleet events_reader_unreachable
+    return 0
+}
+
 _shadow_bridge || true
 _overdue_reader_guard || true
 
@@ -664,47 +722,45 @@ if [ -n "$_ESCALATION_CHAT_ID" ]; then
         # window is NOT caught here, and nothing re-checks a live-but-RC-dark
         # session (keepalive only heals DEAD ones); the durable-marker parity
         # fix (mirror bridge_down's startup+pulse legs) is the deferred follow-up.
-        for _crit_type in service_down session_missing bridge_down rc_timeout; do
+        _esc_cache="$state_dir/.critical-window"
+        _esc_ok=0
+        if _events_from_plane; then
+            _plane_critical "$_window_start" "$_esc_cache" && _esc_ok=1
+        fi
+        for _crit_type in $_CRITICAL_ESCALATION_TYPES; do
             _affected_bots=""
             _affected_count=0
-            if _events_from_plane; then
-                # Phase B: the same question as a Lane-C query — which declared
-                # bots carry this critical type inside the window (the plane
-                # readers' `escalation`); a refusal is disclosed, never empty.
-                _esc_rows=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalation "$_crit_type" \
-                    --since "$_window_start" --fleet "$fleet" 2>"$state_dir/.esc-err") || {
-                    echo "fleet-pulse: escalation reader UNREACHABLE for $_crit_type: $(tail -1 "$state_dir/.esc-err" 2>/dev/null | cut -c1-140) - not judged this pass" >&2
-                    rm -f "$state_dir/.esc-err"; continue; }
-                rm -f "$state_dir/.esc-err"
-                while read -r _bid _latest_ts; do
-                    [ -n "$_bid" ] || continue
+            if [ "$_EVENTS_SOURCE" = files ]; then
+                for bot_dir in "$BOTS_DIR"/*/; do
+                    [ -d "$bot_dir" ] || continue
+                    _bid=$(basename "$bot_dir")
+                    bot_in_fleet "$_bid" "$declared_bots" || continue
+                    _efiles=$(_readback_efiles "$bot_dir")
+                    [ -n "$_efiles" ] || continue
+                    # Check if this bot has this critical event type within the window
+                    # shellcheck disable=SC2086  # _efiles: newline list of ledger paths, intentional split
+                    if grep -q "\"type\":\"$_crit_type\"" $_efiles 2>/dev/null; then
+                        # shellcheck disable=SC2086
+                        _latest_ts=$(grep -h "\"type\":\"$_crit_type\"" $_efiles | tail -1 | \
+                            python3 -c "import sys,json; print(json.loads(sys.stdin.readline())['ts'])" 2>/dev/null || echo "")
+                        if [ -n "$_latest_ts" ] && [[ "$_latest_ts" > "$_window_start" ]]; then
+                            _affected_bots="$_affected_bots $_bid"
+                            _affected_count=$((_affected_count + 1))
+                        fi
+                    fi
+                done
+            elif [ "$_esc_ok" -eq 1 ]; then
+                # Phase B: the same question from the plane's one read — which
+                # declared bots carry this critical type inside the window
+                while read -r _bid _btype _latest_ts; do
+                    [ "$_btype" = "$_crit_type" ] || continue
                     bot_in_fleet "$_bid" "$declared_bots" || continue
                     _affected_bots="$_affected_bots $_bid"
                     _affected_count=$((_affected_count + 1))
-                done <<EOF_ESC
-$_esc_rows
-EOF_ESC
+                done < "$_esc_cache"
             else
-            for bot_dir in "$BOTS_DIR"/*/; do
-                [ -d "$bot_dir" ] || continue
-                _bid=$(basename "$bot_dir")
-                bot_in_fleet "$_bid" "$declared_bots" || continue
-                _efiles=$(_readback_efiles "$bot_dir")
-                [ -n "$_efiles" ] || continue
-                # Check if this bot has this critical event type within the window
-                # shellcheck disable=SC2086  # _efiles: newline list of ledger paths, intentional split
-                if grep -q "\"type\":\"$_crit_type\"" $_efiles 2>/dev/null; then
-                    # shellcheck disable=SC2086
-                    _latest_ts=$(grep -h "\"type\":\"$_crit_type\"" $_efiles | tail -1 | \
-                        python3 -c "import sys,json; print(json.loads(sys.stdin.readline())['ts'])" 2>/dev/null || echo "")
-                    if [ -n "$_latest_ts" ] && [[ "$_latest_ts" > "$_window_start" ]]; then
-                        _affected_bots="$_affected_bots $_bid"
-                        _affected_count=$((_affected_count + 1))
-                    fi
-                fi
-            done
+                continue                  # unreachable under the flag: not judged this pass (disclosed once, paged below)
             fi
-
             if [ "$_affected_count" -ge "$_ESCALATION_THRESHOLD" ]; then
                 _esc_marker="$state_dir/escalation_${_crit_type}"
                 # Debounce: only fire once per 10 minutes
@@ -783,22 +839,33 @@ _summary_tmp=$(safe_mktemp)
 
         _s_alerts=""
         if _events_from_plane; then
-            for _s_ct in session_missing service_down bridge_down activity_stuck rc_timeout; do
-                python3 -S -E "$LIB_DIR/plane-lookup.py" --root "$CLAUDLOBBY_ROOT" --escalation "$_s_ct" \
-                    --since "$_rb_yesterday" --fleet "$fleet" 2>/dev/null | grep -q "^${_s_bid} " && _s_alerts="$_s_alerts $_s_ct"
-            done
+            # ONE read for the whole summary (the read-back span), on the first bot
+            if [ -z "${_rb_read:-}" ]; then
+                _rb_read=1; _rb_ok=0
+                _plane_critical "$_rb_yesterday" "$state_dir/.critical-readback" && _rb_ok=1
+            fi
+            if [ "${_rb_ok:-0}" -eq 1 ]; then
+                for _s_ct in $_CRITICAL_SUMMARY_TYPES; do
+                    grep -q "^${_s_bid} ${_s_ct} " "$state_dir/.critical-readback" 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
+                done
+            fi
         fi
-        _s_efiles=""
-        _events_from_plane || _s_efiles=$(_readback_efiles "$_s_bot_dir")
-        if [ -n "$_s_efiles" ]; then
-            for _s_ct in session_missing service_down bridge_down activity_stuck rc_timeout; do
-                # shellcheck disable=SC2086  # _s_efiles: newline list of ledger paths, intentional split
-                grep -q "\"type\":\"$_s_ct\"" $_s_efiles 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
-            done
+        if [ "$_EVENTS_SOURCE" = files ]; then
+            _s_efiles=$(_readback_efiles "$_s_bot_dir")
+            if [ -n "$_s_efiles" ]; then
+                for _s_ct in $_CRITICAL_SUMMARY_TYPES; do
+                    # shellcheck disable=SC2086  # _s_efiles: newline list of ledger paths, intentional split
+                    grep -q "\"type\":\"$_s_ct\"" $_s_efiles 2>/dev/null && _s_alerts="$_s_alerts $_s_ct"
+                done
+            fi
+        elif [ "$_EVENTS_SOURCE" = unreachable ]; then
+            _s_alerts=" unknown (events reader unreachable)"    # never "none": an outage is not a quiet bot
         fi
         _s_alerts="${_s_alerts:- none}"
         printf "%-12s %-8s %-18s %s\n" "$_s_bid" "$_s_session_status" "$_s_svc_status" "$_s_alerts"
     done
 } > "$_summary_tmp" && mv "$_summary_tmp" "$_summary_file"
+_events_reader_guard || true
+rm -f "$state_dir/.critical-window" "$state_dir/.critical-readback"
 
 cat "$_summary_file"
