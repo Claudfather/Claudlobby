@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — the F18 cutover, chunk 2: the operator's parity door and the parity-gap importer (#1444)
+
+- **`claudlobby plane parity`** — are the legacy ledgers fully in the plane? Bakes in the two ledgers and their join keys, names a cause for every missing row (`pre-go-live` / `unstamped` / `stamped-lost`) and counts multiplicity per (source_ref, kind, event). rc 0 clean, 1 gaps, 3 unreachable — an absent ledger or db never reads as clean; `--json` for machines. First live run on the Mini: reports 253/253, dispatches 139/197 (25 pre-go-live, 33 from the unarmed fleet, 0 lost emits).
+- **`claudlobby --fleet <f> plane import [--apply]`** — lands the rows the plane is missing for THIS fleet through normal ingest with `origin=legacy` + an `import_batch`: four events per dispatch (so status never reads `created_not_sent`), communication + task event per report, attribution by the fleet's own report ledger only (unattributable rows skipped and disclosed), stamped rows keep their ids, unstamped rows get content-hashed ids, and a re-run classifies `duplicate`. Dry-run by default.
+
 ### Added
 
 - **The observable plane, Phase 2b + Phase 4 — the registry lane, the operator plane, and live presence (the estate's first look at itself).** The kernel and dual-write doors (below) fed rows; this stretch makes them legible. Each chunk shipped under a build → multi-round review-and-fold gauntlet (executed adversarial probes, mutation-verified pins, two-leg full-suite gates) → admin-merge → live Mini deploy loop.

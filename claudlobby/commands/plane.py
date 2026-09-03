@@ -629,6 +629,136 @@ def cmd_plane_expire(args) -> int:
     return _guarded("plane expire", run)
 
 
+def _fleet_name(paths) -> "str | None":
+    return paths.fleet_dir.name if paths.fleet_dir else None
+
+
+def cmd_plane_parity(args) -> int:
+    """The operator's parity door (cutover chunk 2): are the two legacy
+    ledgers fully in the plane? Bakes in the ledger paths, the join keys
+    and a cause for every missing row (`plane.parity`). rc 0 clean, 1 gaps,
+    3 unreachable — an absent ledger or db never reads as clean."""
+    paths = _resolve_paths(args)
+    root = paths.root
+
+    def run() -> int:
+        from ..brief import dispatch_ledger_path, report_ledger_path
+        from ..plane.parity import DISPATCH, REPORT, compare, connect_ro
+
+        out = sys.stderr if args.json else sys.stdout
+        path = db_path(root)
+        if not path.is_file():
+            print(f"parity: UNREACHABLE — no plane db at {path}", file=sys.stderr)
+            return 3
+        conn = connect_ro(path)
+        try:
+            reports = [
+                compare(conn, DISPATCH, dispatch_ledger_path(paths), since=args.since),
+                compare(conn, REPORT, report_ledger_path(paths), since=args.since),
+            ]
+        finally:
+            conn.close()
+        rc = 0
+        for p in reports:
+            if not p.reachable:
+                print(f"parity: {p.ledger}: UNREACHABLE — {p.detail}", file=sys.stderr)
+                rc = 3
+                continue
+            causes = ", ".join(f"{c}={n}" for c, n in sorted(p.causes().items())) or "-"
+            print(f"parity: {p.ledger} ({p.path}) rows={p.total} matched={p.matched}"
+                  f" missing={len(p.missing)} [{causes}] duplicates={len(p.duplicates)}"
+                  f" malformed={p.malformed} go_live={p.go_live or '-'}", file=out)
+            if p.state == "empty":
+                print("  the ledger exists and holds no rows — nothing to compare",
+                      file=out)
+            for m in p.missing[:args.show]:
+                print(f"  missing {m.cause} {m.ts} {m.key}", file=out)
+            if len(p.missing) > args.show:
+                print(f"  ... and {len(p.missing) - args.show} more", file=out)
+            for d in p.duplicates[:args.show]:
+                print(f"  duplicate {d}", file=out)
+            if not p.clean and rc == 0:
+                rc = 1
+        if args.json:
+            print(json.dumps({
+                "schema": 1, "rc": rc, "since": args.since,
+                "ledgers": [{
+                    "ledger": p.ledger, "path": str(p.path), "state": p.state,
+                    "detail": p.detail, "rows": p.total, "matched": p.matched,
+                    "malformed": p.malformed, "go_live": p.go_live,
+                    "causes": p.causes(), "duplicates": p.duplicates,
+                    "missing": [{"key": m.key, "ts": m.ts, "cause": m.cause}
+                                for m in p.missing],
+                } for p in reports]}, indent=2))
+        return rc
+
+    return _guarded("plane parity", run)
+
+
+def cmd_plane_import(args) -> int:
+    """The parity-gap importer (cutover chunk 2): land the legacy rows the
+    plane is missing for THIS fleet, through normal ingest, origin=legacy.
+    Attribution is by the fleet's own report ledger — so it needs --fleet.
+    Dry-run is the default; --apply writes."""
+    paths = _resolve_paths(args)
+    root = paths.root
+
+    def run() -> int:
+        from ..brief import dispatch_ledger_path, report_ledger_path
+        from ..plane.legacy_import import apply_import, plan_import
+        from ..plane.parity import connect_ro
+
+        fleet = _fleet_name(paths)
+        if not fleet:
+            print("import: needs --fleet <name> — a dispatch row belongs to a fleet"
+                  " only through that fleet's own report ledger, never a roster"
+                  " guess", file=sys.stderr)
+            return 2
+        path = db_path(root)
+        if not path.is_file():
+            print(f"import: UNREACHABLE — no plane db at {path}", file=sys.stderr)
+            return 3
+        conn = connect_ro(path)
+        try:
+            plan = plan_import(conn, fleet=fleet,
+                               dispatch_path=dispatch_ledger_path(paths),
+                               report_path=report_ledger_path(paths),
+                               now=datetime.now(timezone.utc), since=args.since)
+        finally:
+            conn.close()
+        if not plan.reachable:
+            for p in (plan.dispatch, plan.report):
+                if not p.reachable:
+                    print(f"import: {p.ledger}: UNREACHABLE — {p.detail}",
+                          file=sys.stderr)
+            return 3
+        print(f"import[{fleet}] batch {plan.batch}: {plan.dispatches} dispatch(es)"
+              f" x4 events + {plan.reports} report(s) -> {len(plan.events)} event(s)")
+        for label, keys in (("unattributed (no report in this fleet's ledger)",
+                             plan.unattributed),
+                            ("orphan reports (no dispatch row anywhere)",
+                             plan.orphan_reports),
+                            ("unknown status", plan.unknown_status),
+                            ("malformed", plan.malformed)):
+            if keys:
+                print(f"  skipped {len(keys)} {label}: "
+                      + ", ".join(keys[:5]) + (" ..." if len(keys) > 5 else ""),
+                      file=sys.stderr)
+        if plan.assumed_manager_fleet:
+            print(f"  assumed {plan.assumed_manager_fleet} manager alias(es) in"
+                  f" {fleet} (registry did not name a unique fleet)",
+                  file=sys.stderr)
+        if not args.apply:
+            print("dry-run: nothing written (pass --apply to land the batch)")
+            return 0
+        counts = apply_import(root, plan)
+        print(f"import[{fleet}] committed={counts['committed']}"
+              f" duplicate={counts['duplicate']} spooled={counts['spooled']}")
+        return 0
+
+    return _guarded("plane import", run)
+
+
 def cmd_plane_view(args) -> int:
     """Run the Phase-4 operator-plane view daemon in the foreground (same
     supervision posture as serve: systemd/launchd own backgrounding). Binds
