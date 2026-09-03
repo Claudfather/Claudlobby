@@ -18,9 +18,9 @@ from claudlobby.plane import cutover as cut
 from claudlobby.plane import shadow as sh
 from claudlobby.plane.emit_api import emit_batch
 from tests.plane_fixtures import open_assignment_ids, plane_root, ro as _ro
-from tests.test_plane_cutover_flip import F, _cli, _declare, _ledgers, _matcher, _scene
+from tests.test_plane_cutover_flip import F, NOW_EPOCH, _cli, _declare, _ledgers, _matcher, _scene
 from tests.test_plane_cutover_parity import _drow, _live_dispatch, _rrow, _write
-from tests.test_plane_shadow import NOW, _epoch, _record
+from tests.test_plane_shadow import NOW, REPO, _epoch, _record
 
 
 def test_the_resolver_answers_the_same_from_both_sources(tmp_path):
@@ -238,3 +238,47 @@ def test_a_re_import_of_a_live_idless_row_adds_nothing(tmp_path):
     assert not [e for e in plan.events if e["event_type"] in ("assignment", "work_item")]
     apply_import(root, plan)                                         # (unstamped REPORT rows may import: not this row)
     assert len(open_assignment_ids(root)) == before
+
+
+def test_sha256_hex32_is_the_importers_content_key_and_fails_loudly_without_a_tool(tmp_path):
+    """The bash key must equal `parity.content_key` byte for byte, and with no
+    sha tool on PATH it must FAIL (empty + nonzero) rather than mint junk —
+    the door then discloses and emits the communication only."""
+    import hashlib
+    import subprocess
+    lib = REPO / "lib" / "lib-common.sh"
+    line = '{"ts":"2026-09-02T10:00:00Z","task":"do \\"the\\" thing\\\\n","x":1}'
+    ok = subprocess.run(["bash", "-c", f'source "{lib}"; sha256_hex32 "$1"', "_", line],
+                        capture_output=True, text=True, timeout=30)
+    assert ok.returncode == 0 and ok.stdout.strip() == hashlib.sha256(line.encode()).hexdigest()[:32]
+    bare = tmp_path / "bin"
+    bare.mkdir()
+    for tool in ("bash", "cut", "printf"):
+        src = subprocess.run(["bash", "-c", f"command -v {tool}"], capture_output=True, text=True).stdout.strip()
+        if src and src.startswith("/"):
+            (bare / tool).symlink_to(src)
+    no_tool = subprocess.run(["bash", "-c", f'source "{lib}"; sha256_hex32 "$1"', "_", line],
+                             capture_output=True, text=True, timeout=30, env={"PATH": str(bare)})
+    assert no_tool.returncode != 0 and no_tool.stdout.strip() == ""
+
+
+def test_a_plane_mode_call_opens_the_plane_once(tmp_path, monkeypatch):
+    """The fold's efficiency claim, pinned at the CLI surface: one read-only
+    open per --open / --open-task / --all invocation in plane mode (the
+    declaration check and the read share the session)."""
+    import subprocess
+    root, paths, _, _ = _scene(tmp_path)
+    dl, rl = _ledgers(paths)
+    _declare(root, "open"); _declare(root, "open_task"); _declare(root, "overdue")
+    tracer = tmp_path / "sitecustomize.py"
+    tracer.write_text(
+        "import sqlite3, os\n_real = sqlite3.connect\n"
+        "def _c(*a, **k):\n    open(os.environ['CONNECT_LOG'], 'a').write('open\\n')\n    return _real(*a, **k)\n"
+        "sqlite3.connect = _c\n")
+    for args in (("--open", "w1", dl, rl), ("--open-task", "w1", dl, rl), ("--all", dl, rl, str(NOW_EPOCH))):
+        log = tmp_path / "connects.log"
+        log.write_text("")
+        r = _matcher(root, *args, PLANE_READ_OPEN="1", PLANE_READ_OPEN_TASK="1", PLANE_READ_OVERDUE="1",
+                     CLAUDLOBBY_FLEET=F, PYTHONPATH=str(tmp_path), CONNECT_LOG=str(log))
+        assert r.returncode == 0, (args, r.stderr)
+        assert log.read_text().count("open") == 1, (args, log.read_text())

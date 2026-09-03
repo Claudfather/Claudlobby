@@ -437,6 +437,7 @@ def _classify_all(
     source: str = "jsonl",
     fleet: str | None = None,
     root: str | None = None,
+    plane: "_Plane | None" = None,
 ) -> tuple[
     dict[str, list[tuple[int, int, int, str]]],
     dict[str, list[tuple[int, int, int, str]]],
@@ -447,7 +448,7 @@ def _classify_all(
     orphaned_all each re-parse both ledgers, so calling them in pairs doubles
     the work. Contracts live on those two; this is the implementation.
     """
-    p = _select("overdue", source, fleet=fleet, root=root)
+    p = plane if plane is not None else _select("overdue", source, fleet=fleet, root=root)
     if p is not None:
         # Overdue from the plane; the orphan list stays the legacy hybrid
         # (.spawn against the ledger) — --orphans has no plane counterpart.
@@ -613,6 +614,7 @@ def open_dispatches(
     source: str = "jsonl",
     fleet: str | None = None,
     root: str | None = None,
+    plane: "_Plane | None" = None,
 ) -> list[tuple[int, int | None, str]]:
     """The bot's still-open id'd dispatches, OLDEST FIRST.
 
@@ -655,7 +657,7 @@ def open_dispatches(
     (bot, task_id) closes a row, and only a same-bot ``supersedes`` retires
     one, exactly as in ``_classify_all``.
     """
-    p = _select("open", source, fleet=fleet, root=root)
+    p = plane if plane is not None else _select("open", source, fleet=fleet, root=root)
     if p is not None:
         return _open_dispatches_plane(p, bot)
     bot_key = bot.lower()
@@ -847,6 +849,7 @@ def open_task_id(
     fleet: str | None = None,
     root: str | None = None,
     now: int | None = None,
+    plane: "_Plane | None" = None,
 ) -> str | None:
     """The bot's OLDEST still-open id'd dispatch, or None.
 
@@ -906,7 +909,7 @@ def open_task_id(
     echo now leaves its row open until the next report. That is UNTRACKED, the
     degradation direction #1187 chose, and the watchdog still surfaces it.
     """
-    p = _select("open_task", source, fleet=fleet, root=root)
+    p = plane if plane is not None else _select("open_task", source, fleet=fleet, root=root)
     if p is not None:
         return _open_task_plane(p, bot)
     if _answering_an_idless_dispatch(bot, dispatch_log, report_ledger):
@@ -1274,10 +1277,11 @@ def main() -> int:
             return 2
         # ABSENT is legitimate here and must resolve: see the docstring.
         try:
-            src = resolve_source("open_task", source, fleet=fleet_opt, root=root_opt)
+            plane = _select("open_task", source, fleet=fleet_opt, root=root_opt)
         except PlaneUnreachable as exc:
             print(f"dispatch-overdue: --open-task plane source: UNREACHABLE — {exc}", file=sys.stderr)
             return 3
+        src = "plane" if plane is not None else "jsonl"
         if src == "jsonl" and _refuse_unreadable_report_ledger(
             "--open-task", argv[4], refuse_on_absent=False
         ):
@@ -1294,7 +1298,7 @@ def main() -> int:
                 return 2
         try:
             tid = open_task_id(argv[2], argv[3], argv[4], source=src, fleet=fleet_opt,
-                               root=root_opt, now=now_opt)
+                               root=root_opt, now=now_opt, plane=plane)
         except PlaneUnreachable as exc:
             print(f"dispatch-overdue: --open-task plane source: UNREACHABLE — {exc}", file=sys.stderr)
             return 3
@@ -1317,14 +1321,16 @@ def main() -> int:
         if _reject_bot_slot("--open", argv[2]):
             return 2
         try:
-            src = resolve_source("open", source, fleet=fleet_opt, root=root_opt)
+            plane = _select("open", source, fleet=fleet_opt, root=root_opt)
         except PlaneUnreachable as exc:
             print(f"dispatch-overdue: --open plane source: UNREACHABLE — {exc}", file=sys.stderr)
             return 3
+        src = "plane" if plane is not None else "jsonl"
         if src == "jsonl" and _refuse_unreadable_report_ledger("--open", argv[4]):
             return 3
         try:
-            rows = open_dispatches(argv[2], argv[3], argv[4], source=src, fleet=fleet_opt, root=root_opt)
+            rows = open_dispatches(argv[2], argv[3], argv[4], source=src, fleet=fleet_opt,
+                                   root=root_opt, plane=plane)
         except PlaneUnreachable as exc:
             print(f"dispatch-overdue: --open plane source: UNREACHABLE — {exc}", file=sys.stderr)
             return 3
@@ -1398,7 +1404,7 @@ def main() -> int:
         try:
             over, orph = _classify_all(dlog, rlog, now, max_age, bots_dir,
                                        source=source if argv[1] == "--all" else "jsonl",
-                                       fleet=fleet_opt, root=root_opt)
+                                       fleet=fleet_opt, root=root_opt)   # one open: _select inside
         except PlaneUnreachable as exc:
             print(f"dispatch-overdue: --all plane source: UNREACHABLE — {exc}", file=sys.stderr)
             return 3
