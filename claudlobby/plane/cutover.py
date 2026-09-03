@@ -31,7 +31,8 @@ READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
 # grade) — so the retirement is gated on every reader being declared, and
 # recorded as its own epoch.
 EVENT_RETIRED = "legacy_write_retired"
-WRITE_FLAGS = {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH", "report": "PLANE_LEGACY_WRITE_REPORT"}
+WRITE_FLAGS = {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH", "report": "PLANE_LEGACY_WRITE_REPORT",
+               "events": "PLANE_LEGACY_WRITE_EVENTS"}
 
 # The fleet is matched on the anchor COLUMN first (survives a truncated
 # detail), the detail's fleet second (a declaration recorded before the fleet

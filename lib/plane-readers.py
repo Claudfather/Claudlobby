@@ -349,6 +349,79 @@ def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_thre
     return out
 
 
+# The bot-events ledger from the plane (Phase B): every system event of the
+# fleet that is a fleet event (not the plane's own machinery), rendered back
+# as the legacy row {ts, bot, type, source, data} so every reader keeps its
+# row contract. Twin of queries.FLEET_EVENTS_SQL.
+FLEET_UID_SQL = "SELECT uid FROM identity_registry WHERE kind = 'fleet' AND alias = ? LIMIT 1"
+MACHINERY_EVENTS = ("shadow_parity_clean", "shadow_parity_diverged", "cutover_declared",
+                    "legacy_write_retired", "daemon_started", "daemon_stopping", "spool_drain_completed")
+FLEET_EVENTS_SQL = (
+    "SELECT e.occurred_at, e.event, e.severity, e.subject_kind, e.subject_alias,"
+    " e.detail, e.detail_truncated FROM events e"
+    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND (? IS NULL OR e.occurred_at >= ?)"
+    " AND e.event NOT IN (" + ",".join(f"'{m}'" for m in MACHINERY_EVENTS) + ")"
+    " ORDER BY e.occurred_at, e.ingest_seq"
+)
+ESCALATION_SQL = (
+    "SELECT e.subject_alias, MAX(e.occurred_at) FROM events e"
+    " WHERE e.kind = 'system' AND e.fleet_uid = ? AND e.event = ? AND e.subject_kind = 'actor'"
+    " AND e.occurred_at >= ? GROUP BY e.subject_alias"
+)
+
+
+def fleet_uid(conn: sqlite3.Connection, fleet: str) -> Optional[str]:
+    row = conn.execute(FLEET_UID_SQL, (fleet,)).fetchone()
+    return row[0] if row else None
+
+
+def legacy_event_row(occurred_at, event, subject_kind, subject_alias, detail, truncated, fleet) -> dict:
+    """One plane system event as the legacy ledger row it stands for."""
+    import json as _json
+    data = {}
+    if detail and not truncated:
+        try:
+            data = _json.loads(detail)
+        except ValueError:
+            data = {}
+    prefix = f"bot:{fleet}/"
+    bot = (subject_alias[len(prefix):] if subject_alias and subject_alias.startswith(prefix)
+           else ("fleet" if subject_kind == "fleet" else (subject_alias or "?")))
+    return {"ts": (data.get("legacy_ts") or (occurred_at or "").replace("+00:00", "Z")),
+            "bot": bot, "type": event, "source": data.get("source") or "plane",
+            "data": data.get("data") if isinstance(data.get("data"), dict) else {},
+            "_truncated": bool(truncated)}
+
+
+def fleet_events(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = None,
+                 bot: Optional[str] = None, event_type: Optional[str] = None) -> list[dict]:
+    """The fleet's events as legacy rows, oldest first (the reader filters
+    critical_only / source itself — those are its own vocabulary)."""
+    uid = fleet_uid(conn, fleet)
+    if uid is None:
+        return []
+    out = []
+    for row in conn.execute(FLEET_EVENTS_SQL, (uid, since, since)):
+        r = legacy_event_row(*row, fleet)
+        if bot and r["bot"].lower() != bot.lower():
+            continue
+        if event_type and r["type"] != event_type:
+            continue
+        out.append(r)
+    return out
+
+
+def escalation(conn: sqlite3.Connection, fleet: str, event_type: str, window_start: str) -> dict[str, str]:
+    """{bot: latest_instant} for every bot carrying *event_type* since
+    *window_start* — fleet-pulse's escalation question."""
+    uid = fleet_uid(conn, fleet)
+    if uid is None:
+        return {}
+    prefix = f"bot:{fleet}/"
+    return {alias[len(prefix):]: at for alias, at in conn.execute(ESCALATION_SQL, (uid, event_type, window_start))
+            if alias and alias.startswith(prefix)}
+
+
 RETIRED_SQL = (
     "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = ?"
     " AND e.detail_truncated = 0 AND (e.subject_alias = ? OR json_extract(e.detail, '$.fleet') = ?)"

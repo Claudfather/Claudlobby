@@ -1307,9 +1307,36 @@ emit_fleet_event() {
         events_dir="${CLAUDLOBBY_ROOT:-}/state/events"
         [ -n "$bot_id" ] || bot_id="fleet"
     fi
-    mkdir -p "$events_dir" 2>/dev/null || return 0
     local ts today
     ts=$(ts_iso); today=$(date +%Y-%m-%d)
+    # Cutover Phase B: the event is a SYSTEM event on the plane first —
+    # anchored on the bot's actor (by alias, resolved at ingest) or, for a
+    # fleet-level receipt, on the fleet — and the JSONL append retires behind
+    # PLANE_LEGACY_WRITE_EVENTS=0 on the same four facts as the other doors
+    # (plane_write_retired: flag, arming, the recorded retirement, THIS
+    # emission recorded). Best-effort like the append: never fails the caller.
+    local _fleet="${FLEET_NAME:-}"
+    if [ -n "$_fleet" ] && plane_armed emit_fleet_event 2>/dev/null; then
+        local _subj _kind _batch _safe_data
+        if [ "$bot_id" = "fleet" ]; then
+            _kind=fleet; _subj="$_fleet"                # the plane's fleet alias is the bare name
+        else
+            _kind=actor; _subj="bot:$_fleet/$bot_id"
+        fi
+        # data_json is caller-built JSON (validated as such at ingest); the
+        # legacy row's source and the legacy ts ride inside data so the plane
+        # row can be re-rendered as the legacy row byte for byte.
+        _safe_data=$(printf '{"source":"%s","legacy_ts":"%s","data":%s}' \
+            "$(json_escape "$event_source")" "$ts" "$data_json")
+        printf -v _batch '{"events":[{"event_type":"system","emitter":"%s","fleet":"%s","occurred_at":"%s","payload":{"event":"%s","subject_kind":"%s","subject":"%s","data":%s}}]}' \
+            "$(json_escape "$event_source")" "$(json_escape "$_fleet")" "$ts" \
+            "$(json_escape "$event_type")" "$_kind" "$(json_escape "$_subj")" "$_safe_data"
+        plane_emit_events emit_fleet_event <<<"$_batch"
+        if plane_write_retired emit_fleet_event PLANE_LEGACY_WRITE_EVENTS 2>/dev/null; then
+            return 0
+        fi
+    fi
+    mkdir -p "$events_dir" 2>/dev/null || return 0
     printf '{"ts":"%s","bot":"%s","type":"%s","source":"%s","data":%s}\n' \
         "$ts" "$bot_id" "$event_type" "$event_source" "$data_json" \
         >> "$events_dir/fleet-${today}.jsonl" 2>/dev/null || true
