@@ -469,6 +469,13 @@ if plane_armed dispatch-task --require-fleet; then
     PLANE_ARMED=1
 fi
 PLANE_MSG_ID="" PLANE_WI_ID="" PLANE_ASG_ID=""
+# --supersedes → the plane (cutover chunk 1): look the superseded dispatch up
+# BY ITS LEGACY TASK ID (source_ref), set supersedes_msg_id on this dispatch's
+# communication, and emit a terminal `superseded` task event on the retired
+# assignment (successor_id = this assignment). Until now --supersedes was
+# JSONL-only (14 of 189 closed rows historically), so the plane's "open" set
+# over-reported. Not found in the plane → no wiring, disclosed.
+SUP_WI="" SUP_ASG="" SUP_MSG="" sup_frag="" sup_ev=""
 if [ "$PLANE_ARMED" = "1" ]; then
     PLANE_MSG_ID="$(plane_mint_id msg)"
     if [ -n "$TASK_ID" ]; then
@@ -558,12 +565,23 @@ _plane_emit_intent() {
     # errexit kills the door.
     src_ref=""
     [ -n "$TASK_ID" ] && src_ref="\"source_ref\":\"dispatch-log:$TASK_ID\","
+    if [ -n "$DISPATCH_SUPERSEDES" ] && [ -n "$PLANE_ASG_ID" ]; then
+        _sup=$(python3 -S -E "$LIB_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
+            --task-id "$DISPATCH_SUPERSEDES" 2>/dev/null || true)
+        if [ -n "$_sup" ]; then
+            SUP_WI=${_sup%% *}; _sup=${_sup#* }; SUP_ASG=${_sup%% *}; SUP_MSG=${_sup##* }
+            [ -n "$SUP_MSG" ] && [ "$SUP_MSG" != "$SUP_ASG" ] && sup_frag="\"supersedes_msg_id\":\"$SUP_MSG\","
+            sup_ev="{\"event_type\":\"task\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$SUP_WI\",\"assignment_id\":\"$SUP_ASG\",\"event\":\"superseded\",\"successor_id\":\"$PLANE_ASG_ID\"}}"
+        else
+            echo "dispatch-task: --supersedes $DISPATCH_SUPERSEDES not found in the plane — legacy-only supersession" >&2
+        fi
+    fi
     local link_frag="" ws_frag="" repo_frag="" deadline_frag="" iso_deadline=""
     if [ -n "$PLANE_WI_ID" ]; then
         link_frag="\"work_item_id\":\"$PLANE_WI_ID\",\"assignment_id\":\"$PLANE_ASG_ID\","
     fi
     local comm wi_ev asg_ev
-    comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
+    comm="{\"event_type\":\"communication\",\"emitter\":\"dispatch-task\",$src_ref\"fleet\":\"$safe_fleet\",\"payload\":{\"msg_id\":\"$PLANE_MSG_ID\",${sup_frag}\"sender\":\"$safe_sender\",${recip_field}\"recipient_raw\":\"$safe_worker\",\"message_class\":\"$msg_class\",${cmd_type}${link_frag}\"body\":\"$safe_msg\"}}"
     if [ -n "$TASK_ID" ]; then
         iso_deadline=$(epoch_to_iso_utc "$expected_by" || true)
         [ -n "$iso_deadline" ] && deadline_frag=",\"expected_by\":\"$iso_deadline\""
@@ -573,7 +591,7 @@ _plane_emit_intent() {
         esac
         wi_ev="{\"event_type\":\"work_item\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"work_item_id\":\"$PLANE_WI_ID\",\"title\":\"$safe_task\",\"created_by\":\"$safe_sender\"${ws_frag}${repo_frag}}}"
         asg_ev="{\"event_type\":\"assignment\",\"emitter\":\"dispatch-task\",\"source_ref\":\"dispatch-log:$TASK_ID\",\"fleet\":\"$safe_fleet\",\"payload\":{\"assignment_id\":\"$PLANE_ASG_ID\",\"work_item_id\":\"$PLANE_WI_ID\",\"assignee\":\"$(json_escape "bot:${PLANE_PEER_FLEET:-$FLEET_NAME}/$WORKER_SESSION")\",\"assigned_by\":\"$safe_sender\"${deadline_frag},\"dispatch_msg_id\":\"$PLANE_MSG_ID\"}}"
-        printf '{"events":[%s,%s,%s]}' "$wi_ev" "$asg_ev" "$comm" | plane_emit_events dispatch-task
+        printf '{"events":[%s,%s,%s%s]}' "$wi_ev" "$asg_ev" "$comm" "${sup_ev:+,$sup_ev}" | plane_emit_events dispatch-task
     else
         printf '{"events":[%s]}' "$comm" | plane_emit_events dispatch-task
     fi

@@ -1,0 +1,96 @@
+"""The cutover's first door: the plane answered by legacy task id.
+
+Pins: found (latest by ingest order, assignee filtered case-insensitively);
+not-found is rc 0 + empty stdout + a stderr note (a stamped id is not
+proof the row exists, so callers keep their legacy fallback); unreachable
+is rc 3; and the plane semantics the wiring buys — a `superseded` task
+event makes the retired assignment TERMINAL, so it leaves the open set
+(the 14-of-189 class the JSONL door already dropped). The two doors'
+call sites are pinned by shape; their live behaviour is the Mini canary.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+from claudlobby.plane.db import connect, db_path
+from claudlobby.plane.emit_api import emit_batch
+from claudlobby.plane.queries import NON_TERMINAL_CLAUSE
+
+REPO = Path(__file__).resolve().parent.parent
+LOOKUP = REPO / "lib" / "plane-lookup.py"
+F = "f"
+
+
+def _root(tmp_path):
+    root = tmp_path / "root"
+    (root / "state" / "plane").mkdir(parents=True)
+    (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
+    return root
+
+
+def _dispatch(root, n, task_id, bot="w1"):
+    wi, asg, msg = f"wi_{n:0>32}", f"asg_{n:0>32}", f"msg_{n:0>32}"
+    emit_batch(root, [
+        {"event_type": "work_item", "emitter": "dispatch-task", "fleet": F,
+         "source_ref": f"dispatch-log:{task_id}",
+         "payload": {"work_item_id": wi, "title": "t", "created_by": f"bot:{F}/mgr"}},
+        {"event_type": "assignment", "emitter": "dispatch-task", "fleet": F,
+         "source_ref": f"dispatch-log:{task_id}",
+         "payload": {"assignment_id": asg, "work_item_id": wi,
+                     "assignee": f"bot:{F}/{bot}", "assigned_by": f"bot:{F}/mgr",
+                     "dispatch_msg_id": msg}}])
+    return wi, asg, msg
+
+
+def _run(root, *args):
+    return subprocess.run([sys.executable, str(LOOKUP), "--root", str(root), *args],
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_found_prints_ids_latest_first_and_filters_assignee(tmp_path):
+    root = _root(tmp_path)
+    _dispatch(root, "a", "t-1-aaaa", bot="w1")
+    wi, asg, msg = _dispatch(root, "b", "t-1-aaaa", bot="w1")   # a redispatch: latest wins
+    r = _run(root, "--task-id", "t-1-aaaa", "--assignee", f"bot:{F}/W1")  # case-insensitive
+    assert r.returncode == 0 and r.stdout.split() == [wi, asg, msg]
+    miss = _run(root, "--task-id", "t-1-aaaa", "--assignee", f"bot:{F}/other")
+    assert miss.returncode == 0 and miss.stdout == "" and "not found" in miss.stderr
+
+
+def test_not_found_is_empty_rc0_and_unreachable_is_rc3(tmp_path):
+    root = _root(tmp_path)
+    _dispatch(root, "a", "t-1-aaaa")
+    nf = _run(root, "--task-id", "t-9-zzzz")
+    assert nf.returncode == 0 and nf.stdout == "" and "legacy fallback" in nf.stderr
+    un = _run(tmp_path / "nope", "--task-id", "t-1-aaaa")
+    assert un.returncode == 3 and un.stdout == "" and "unreachable" in un.stderr
+
+
+def test_superseded_event_makes_the_old_assignment_terminal(tmp_path):
+    """What --supersedes now buys: the retired assignment leaves the open set."""
+    root = _root(tmp_path)
+    wi1, asg1, _ = _dispatch(root, "a", "t-1-aaaa")
+    wi2, asg2, _ = _dispatch(root, "b", "t-2-bbbb")
+    emit_batch(root, [{"event_type": "task", "emitter": "dispatch-task", "fleet": F,
+                       "source_ref": "dispatch-log:t-2-bbbb",
+                       "payload": {"work_item_id": wi1, "assignment_id": asg1,
+                                   "event": "superseded", "successor_id": asg2}}])
+    conn = connect(db_path(root))
+    try:
+        open_ids = [r[0] for r in conn.execute(
+            "SELECT a.assignment_id FROM assignments a WHERE" + NON_TERMINAL_CLAUSE)]
+    finally:
+        conn.close()
+    assert open_ids == [asg2]
+
+
+def test_the_two_doors_call_the_lookup_before_the_ledger():
+    rb = (REPO / "lib" / "report-back.sh").read_text()
+    dt = (REPO / "lib" / "dispatch-task.sh").read_text()
+    assert "plane-lookup.py" in rb and rb.index("plane-lookup.py") < rb.index('grep -F "\\"task_id\\"')
+    assert "plane-lookup.py" in dt and '"superseded"' in dt and "supersedes_msg_id" in dt
+    for f in ("report-back.sh", "dispatch-task.sh"):
+        assert subprocess.run(["bash", "-n", str(REPO / "lib" / f)]).returncode == 0

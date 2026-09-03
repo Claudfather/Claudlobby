@@ -206,6 +206,19 @@ _plane_lookup_dispatch_ids() {
     local _task_pat='^t-[0-9]+-[0-9a-f]{4}$' _bot_pat='^[A-Za-z0-9._-]+$'
     [[ "$TASK_ID" =~ $_task_pat ]] || return 0
     [[ "$BOT" =~ $_bot_pat ]] || return 0
+    # PLANE FIRST (cutover chunk 1): the dispatch stamped source_ref
+    # dispatch-log:<task_id> on its plane rows, so ask the plane for the ids
+    # before grepping the legacy ledger. A not-found answer keeps the grep
+    # as the fallback until cutover — a stamped id is not proof the plane
+    # row exists (the ledger is stamped BEFORE the emit).
+    local _ids
+    _ids=$(python3 -S -E "$(dirname "${BASH_SOURCE[0]}")/plane-lookup.py" \
+        --root "${CLAUDLOBBY_ROOT:-}" --task-id "$TASK_ID" \
+        --assignee "bot:${FLEET_NAME:-}/$BOT" 2>/dev/null || true)
+    if [ -n "$_ids" ]; then
+        PLANE_LINK_WI=${_ids%% *}; _ids=${_ids#* }; PLANE_LINK_ASG=${_ids%% *}
+        return 0
+    fi
     row=$(grep -F "\"task_id\":\"$TASK_ID\"" "$dlog" 2>/dev/null \
         | grep -iF "\"bot\":\"$BOT\"" | tail -1 || true)
     [ -n "$row" ] || return 0
