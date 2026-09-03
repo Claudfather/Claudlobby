@@ -12,24 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from claudlobby.plane.db import connect, db_path
+from claudlobby.plane.db import connect, connect_ro, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.legacy_import import apply_import, plan_import
 from claudlobby.plane.parity import (
-    CAUSE_PRE_GO_LIVE, CAUSE_STAMPED_LOST, CAUSE_UNSTAMPED, DISPATCH, REPORT,
-    compare, connect_ro,
+    CAUSE_PRE_GO_LIVE, CAUSE_STAMPED_LOST, CAUSE_UNSTAMPED, DISPATCH, REPORT, compare,
 )
 from claudlobby.plane.queries import TASK_STATUS_SQL
+from tests.plane_fixtures import plane_root as _root, ro as _ro
 
 F = "f"
 NOW = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
-
-
-def _root(tmp_path):
-    root = tmp_path / "root"
-    (root / "state" / "plane").mkdir(parents=True)
-    (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
-    return root
 
 
 def _live_dispatch(root, n, task_id, *, ts, bot="w1"):
@@ -75,10 +68,6 @@ def _write(path: Path, rows, *, extra_lines=()):
     path.write_text("".join(json.dumps(r) + "\n" for r in rows) + "".join(extra_lines))
 
 
-def _ro(root):
-    return connect_ro(db_path(root))
-
-
 # --- parity ------------------------------------------------------------------
 
 def test_parity_joins_both_keys_and_names_a_cause_for_every_missing_row(tmp_path):
@@ -93,11 +82,8 @@ def test_parity_joins_both_keys_and_names_a_cause_for_every_missing_row(tmp_path
         _drow("2026-08-29T12:00:00Z", "t-3-cccc",
               plane=("msg_" + "9" * 32, "wi_" + "9" * 32, "asg_" + "9" * 32)),  # ids minted, no row
     ], extra_lines=["not json\n"])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         p = compare(conn, DISPATCH, dlog)
-    finally:
-        conn.close()
     assert p.state == "ok" and p.total == 5 and p.matched == 2 and p.malformed == 1
     assert p.go_live == "2026-08-28T15:53:33"
     assert {m.key: m.cause for m in p.missing} == {
@@ -127,28 +113,22 @@ def test_parity_duplicates_are_per_source_ref_kind_and_event(tmp_path):
     rlog = tmp_path / "report-back.jsonl"
     _write(rlog, [_rrow("2026-09-01T01:32:01Z", "t-1-aaaa", "completed",
                         plane_msg_id="msg_" + "b" * 32)])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         assert compare(conn, REPORT, rlog).clean
         emit_batch(root, [task])          # the same event again, a fresh event_id
         assert compare(conn, REPORT, rlog).duplicates == [f"{ref} task/completed: 2 rows"]
-    finally:
-        conn.close()
 
 
 def test_parity_unreachable_is_never_empty(tmp_path):
     root = _root(tmp_path)
     _live_dispatch(root, "a", "t-1-aaaa", ts="2026-08-28T15:53:33Z")
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         absent = compare(conn, REPORT, tmp_path / "nope" / "report-back.jsonl")
         assert absent.state == "absent" and not absent.reachable and not absent.clean
         empty_path = tmp_path / "report-back.jsonl"
         empty_path.write_text("")
         empty = compare(conn, REPORT, empty_path)
         assert empty.state == "empty" and empty.reachable and empty.clean and empty.total == 0
-    finally:
-        conn.close()
     with pytest.raises(FileNotFoundError):
         connect_ro(tmp_path / "no" / "plane.db")   # never auto-created
 
@@ -159,14 +139,11 @@ def test_parity_since_window_uses_the_comparable_instant(tmp_path):
     dlog = tmp_path / "dispatch-log.jsonl"
     _write(dlog, [_drow("2026-08-27T00:00:00Z", "t-0-0000"),
                   _drow("2026-08-29T00:00:00Z", "t-2-bbbb")])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         assert [m.key for m in compare(conn, DISPATCH, dlog, since="2026-08-28T00:00:00Z").missing] \
             == ["task:t-2-bbbb"]
         assert [m.key for m in compare(conn, DISPATCH, dlog, since="2026-08-28T00:00:00+00:00").missing] \
             == ["task:t-2-bbbb"]
-    finally:
-        conn.close()
 
 
 # --- import ------------------------------------------------------------------
@@ -187,12 +164,9 @@ def _ledgers(tmp_path, root):
 def test_import_dry_run_plans_four_events_per_dispatch_and_writes_nothing(tmp_path):
     root = _root(tmp_path)
     dlog, rlog = _ledgers(tmp_path, root)
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
         before = conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0]
-    finally:
-        conn.close()
     assert plan.dispatches == 1 and plan.reports == 1
     kinds = [e["event_type"] for e in plan.events]
     assert kinds == ["work_item", "assignment", "communication", "transmission",
@@ -205,21 +179,15 @@ def test_import_dry_run_plans_four_events_per_dispatch_and_writes_nothing(tmp_pa
     assert plan.events[5]["payload"]["pr_url"] == "https://example.invalid/pull/1"
     assert plan.events[5]["payload"]["progress"] == 100
     assert plan.events[1]["payload"]["expected_by"] == "2026-08-29T10:40:00+00:00"  # epoch 1788000000
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         assert conn.execute("SELECT COUNT(*) FROM ingest_ledger").fetchone()[0] == before
-    finally:
-        conn.close()
 
 
 def test_import_apply_lands_a_status_bearing_row_and_reruns_as_duplicates(tmp_path):
     root = _root(tmp_path)
     dlog, rlog = _ledgers(tmp_path, root)
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     assert apply_import(root, plan) == {"committed": 6, "duplicate": 0, "spooled": 0}
     asg = plan.events[1]["payload"]["assignment_id"]
     conn = connect(db_path(root))
@@ -232,12 +200,9 @@ def test_import_apply_lands_a_status_bearing_row_and_reruns_as_duplicates(tmp_pa
         assert origin == "legacy" and batch == plan.batch
     finally:
         conn.close()
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         after = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
         assert compare(conn, DISPATCH, dlog).clean and compare(conn, REPORT, rlog).clean
-    finally:
-        conn.close()
     assert after.events == [] and after.dispatches == 0 and after.reports == 0
     # Replaying the ORIGINAL plan lands nothing new: ids are content-hashed.
     assert apply_import(root, plan) == {"committed": 0, "duplicate": 6, "spooled": 0}
@@ -251,11 +216,8 @@ def test_import_attributes_by_the_report_ledger_only(tmp_path):
         _drow("2026-08-28T00:48:02Z", "t-9-9999", bot="elsewhere"),  # never reported here
         _drow("2026-08-28T00:49:02Z", ""),                            # a query: no task id by design
     ])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     assert plan.dispatches == 1
     assert plan.unattributed == ["task:t-9-9999", "sha:" + plan.unattributed[1][4:]]
     assert plan.unattributed[1].startswith("sha:")
@@ -270,11 +232,8 @@ def test_import_discloses_orphan_reports_and_unknown_status(tmp_path):
         _rrow("2026-08-28T03:02:00Z", "t-0-0000", "sideways"),    # no plane vocabulary
         _rrow("2026-08-28T03:03:00Z", "", "completed"),           # id-less report
     ])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     assert plan.reports == 1
     assert len(plan.orphan_reports) == 2 and len(plan.unknown_status) == 1
 
@@ -287,11 +246,8 @@ def test_import_links_a_report_to_a_dispatch_already_in_the_plane(tmp_path):
     _write(dlog, [_drow("2026-08-28T15:53:32Z", "t-1-aaaa", plane=(msg, wi, asg))])
     _write(rlog, [_rrow("2026-08-28T16:00:00Z", "t-1-aaaa", "blocked",
                         anomaly="supplied-id-not-open")])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     assert plan.dispatches == 0 and plan.reports == 1
     events = [e["payload"]["event"] for e in plan.events if e["event_type"] == "task"]
     assert events == ["returned_blocked", "supplied_id_not_open"]
@@ -307,11 +263,8 @@ def test_import_keeps_a_stamped_rows_own_ids(tmp_path):
     rlog = tmp_path / "runtime" / "report-back.jsonl"
     _write(dlog, [_drow("2026-08-29T12:00:00Z", "t-3-cccc", plane=stamped)])
     _write(rlog, [_rrow("2026-08-29T13:00:00Z", "t-3-cccc", "progress", progress="40")])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     assert plan.dispatch.missing[0].cause == CAUSE_STAMPED_LOST
     assert plan.events[1]["payload"]["assignment_id"] == stamped[2]
     assert plan.events[2]["payload"]["msg_id"] == stamped[0]
@@ -321,12 +274,9 @@ def test_import_keeps_a_stamped_rows_own_ids(tmp_path):
 def test_import_refuses_when_a_ledger_is_unreachable(tmp_path):
     root = _root(tmp_path)
     dlog, rlog = _ledgers(tmp_path, root)
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog,
                            report_path=tmp_path / "gone" / "report-back.jsonl", now=NOW)
-    finally:
-        conn.close()
     assert not plan.reachable and plan.events == []
 
 
@@ -344,14 +294,11 @@ def test_import_ids_survive_ledger_rotation(tmp_path):
     rep_new = _rrow("2026-08-28T03:00:00Z", "t-0-1111", "completed")
     _write(dlog, [older, newer])
     _write(rlog, [rep_old, rep_new])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         first = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
         _write(dlog, [newer])          # the 7-day rotation dropped the older row
         _write(rlog, [rep_new])
         second = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     def by_ref(plan):
         out: dict = {}
         for e in plan.events:
@@ -377,12 +324,9 @@ def test_import_a_unit_the_contracts_refuse_is_skipped_and_the_rest_lands(tmp_pa
     ])
     _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed"),
                   _rrow("2026-08-28T03:01:00Z", "t-5-5555", "completed")])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW,
                            capture={"*": "full"})
-    finally:
-        conn.close()
     assert plan.dispatches == 1 and len(plan.invalid) == 1 and plan.invalid[0].startswith("task:t-5-5555")
     assert plan.orphan_reports == [] or plan.reports == 1   # its report has no assignment to hang on
     assert apply_import(root, plan)["committed"] == len(plan.events) > 0
@@ -398,21 +342,15 @@ def test_import_resolves_the_manager_alias_through_the_registry(tmp_path):
     emit_batch(root, [{"event_type": "work_item", "emitter": "t", "fleet": "g",
                        "payload": {"work_item_id": f"wi_{'e':0>32}", "title": "t",
                                    "created_by": "bot:g/boss"}}])     # boss is known in fleet g only
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     assert plan.events[0]["payload"]["created_by"] == "bot:g/boss"
     assert plan.assumed_manager_fleet == 0
     emit_batch(root, [{"event_type": "work_item", "emitter": "t", "fleet": "h",
                        "payload": {"work_item_id": f"wi_{'d':0>32}", "title": "t",
                                    "created_by": "bot:h/boss"}}])     # now two fleets know it
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     assert plan.events[0]["payload"]["created_by"] == f"bot:{F}/boss"
     assert plan.assumed_manager_fleet == 1
 
@@ -427,12 +365,9 @@ def test_import_an_oversized_field_refuses_only_its_own_unit(tmp_path):
                   _drow("2026-08-28T00:48:02Z", "t-0-1111", task="ok2")])
     _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed"),
                   _rrow("2026-08-28T03:01:00Z", "t-0-1111", "completed", summary="x" * 5000)])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW,
                            capture={"*": "full"})
-    finally:
-        conn.close()
     assert plan.dispatches == 2 and plan.reports == 1 and len(plan.invalid) == 1
     assert "summary" in plan.invalid[0]
     assert apply_import(root, plan)["committed"] == len(plan.events) == 10
@@ -443,18 +378,12 @@ def test_import_a_hand_edited_row_is_a_new_row_by_design(tmp_path):
     earlier self. Pinned so the property is a decision, not a surprise."""
     root = _root(tmp_path)
     dlog, rlog = _ledgers(tmp_path, root)
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     apply_import(root, plan)
     _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed", summary="edited")])
-    conn = _ro(root)
-    try:
+    with _ro(root) as conn:
         again = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
-    finally:
-        conn.close()
     assert again.dispatches == 0 and again.reports == 1
     assert apply_import(root, again)["committed"] == 2
     conn = connect(db_path(root))
@@ -474,3 +403,18 @@ def test_parity_cli_refusal_leaves_no_directory_behind(tmp_path):
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 3 and "UNREACHABLE" in r.stdout
     assert not (root / "state").exists()
+
+
+def test_import_an_oversized_field_refuses_under_the_default_capture_too(tmp_path):
+    """The batch door validates RAW first: metadata capture STRIPS an over-cap
+    summary, so a validator that only looked at the captured form accepted a
+    unit the real door then refused — reopening the whole-batch abort. Pinned
+    under capture={} (the default when no capture.json exists)."""
+    root = _root(tmp_path, capture="{}")
+    dlog, rlog = _ledgers(tmp_path, root)
+    _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed", summary="x" * 5000)])
+    with _ro(root) as conn:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW,
+                           capture={})
+    assert plan.reports == 0 and len(plan.invalid) == 1 and "summary" in plan.invalid[0]
+    assert apply_import(root, plan)["committed"] == len(plan.events) == 4

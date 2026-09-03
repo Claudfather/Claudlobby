@@ -46,7 +46,6 @@ that consumes it. Dry-run is the default; ``apply_import`` writes.
 
 from __future__ import annotations
 
-import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -54,8 +53,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .contracts import ContractViolation, validate_request
-from .emit_api import _apply_capture
+from .contracts import ContractViolation
+from .emit_api import validate_item
+from .ids import derive_hex
 from .parity import (
     DISPATCH, REPORT, LedgerParity, LegacyRow, compare, content_key, read_ledger,
 )
@@ -72,7 +72,7 @@ _UNTITLED = "(untitled legacy dispatch)"
 
 
 def _h(*parts: str) -> str:
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:32]
+    return derive_hex("\n".join(parts))
 
 
 def _iso(epoch) -> Optional[str]:
@@ -225,13 +225,14 @@ def report_events(row: LegacyRow, fleet: str, wi: str, asg: str,
 
 
 def _violation(events: list[dict], capture: dict) -> Optional[str]:
-    """Validate one unit's events the way ``emit_batch`` will (capture mode
-    applied first) — ``emit_batch`` validates the WHOLE batch before its one
-    transaction, so an unvalidated unit would abort every other row with it.
-    A unit the contracts refuse is counted and disclosed, never sent."""
+    """Validate one unit's events with the batch door's OWN validator
+    (``validate_item``: raw first, then the captured form) — ``emit_batch``
+    validates the WHOLE batch before its one transaction, so an unvalidated
+    unit would abort every other row with it. A unit the contracts refuse is
+    counted and disclosed, never sent."""
     try:
         for event in events:
-            validate_request(_apply_capture(event, capture))
+            validate_item(dict(event), capture)
     except ContractViolation as exc:
         return str(exc)[:160]
     return None
@@ -245,17 +246,18 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
     here matches what the door does)."""
     capture = capture or {}
     dp = compare(conn, DISPATCH, dispatch_path, since=since)
-    rp = compare(conn, REPORT, report_path, since=since)
+    report_read = read_ledger(report_path)          # read ONCE: parity + attribution
+    rp = compare(conn, REPORT, report_path, since=since, ledger_read=report_read)
     batch = f"imp_{_h(fleet, now.isoformat())[:16]}"
     plan = ImportPlan(fleet, batch, dp, rp)
     if not plan.reachable:
         return plan
     # The attribution evidence: every task id this fleet's ledger reported,
     # over the WHOLE ledger (a report may sit below --since).
-    _, _, all_reports, _ = read_ledger(report_path)
-    reported = {str(x.row["task_id"]) for x in all_reports if x.row.get("task_id")}
+    reported = {str(x.row["task_id"]) for x in report_read[2] if x.row.get("task_id")}
     ids_by_task: dict[str, dict] = {}
     manager_by_task: dict[str, str] = {}
+    aliases: dict[str, tuple[str, bool]] = {}        # manager name -> resolved once
     for m in dp.missing:
         r = m.row.row
         task_id = r.get("task_id")
@@ -266,7 +268,9 @@ def plan_import(conn: sqlite3.Connection, *, fleet: str, dispatch_path: Path,
         if not (manager and bot and _NAME.match(str(manager)) and _NAME.match(str(bot))):
             plan.malformed.append(m.key)
             continue
-        alias, assumed = manager_alias(conn, fleet, str(manager))
+        if str(manager) not in aliases:
+            aliases[str(manager)] = manager_alias(conn, fleet, str(manager))
+        alias, assumed = aliases[str(manager)]
         ids, events = dispatch_events(m.row, fleet, alias, batch)
         err = _violation(events, capture)
         if err:

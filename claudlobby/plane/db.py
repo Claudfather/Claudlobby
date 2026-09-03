@@ -11,11 +11,31 @@ import sqlite3
 from pathlib import Path
 
 
+def db_file(root: Path) -> Path:
+    """WHERE the db lives — a pure join, no side effect. Readers and every
+    exists-before-connect check use this; ``db_path`` (which creates the
+    0700 directory) is for writers only."""
+    return Path(root) / "state" / "plane" / "plane.db"
+
+
 def db_path(root: Path) -> Path:
-    p = Path(root) / "state" / "plane" / "plane.db"
+    p = db_file(root)
     p.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(p.parent, 0o700)            # round-2 F8: dirs 0700
     return p
+
+
+def connect_ro(path: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
+    """Read-only, and the file must ALREADY exist: ``connect`` auto-creates a
+    db, so a read door on a typo'd root would otherwise open an empty plane
+    and report everything missing (the J1 exists-before-connect finding).
+    Rows are ``sqlite3.Row``; ``query_only`` makes a stray write a SQL error."""
+    if not Path(path).is_file():
+        raise FileNotFoundError(path)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = 1")
+    return conn
 
 
 def connect(path: Path) -> sqlite3.Connection:

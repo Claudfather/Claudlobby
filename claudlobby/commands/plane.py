@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ._helpers import _resolve_paths
 from ..plane.contracts import ContractViolation, export_schemas
-from ..plane.db import connect, db_path
+from ..plane.db import connect, connect_ro, db_file, db_path
 from ..plane.emit_api import emit, emit_batch, _load_capture_config
 from ..plane.identity import provisional_actors
 from ..plane.ids import ensure_host_uid
@@ -250,7 +250,7 @@ def cmd_plane_doctor(args) -> int:
             if not ok:
                 failing += 1
 
-        path = db_path(root)
+        path = db_file(root)
         if not path.exists():
             rung(True, "db", f"absent (not yet used): {path}")
         else:
@@ -409,7 +409,7 @@ def cmd_plane_registry(args) -> int:
     def run() -> int:
         from ..plane import registry_read as rr
 
-        path = db_path(root)
+        path = db_file(root)
         if not path.exists():
             print(f"registry: no plane db at {path} — no scan has run here"
                   " (arm PLANE_EMIT_ENABLED=1 in the fleet-tier .env and"
@@ -555,7 +555,7 @@ def cmd_plane_prune(args) -> int:
         from ..plane.retention import (
             DEFAULT_RETENTION_DAYS, prune_metric_samples)
 
-        path = db_path(root)
+        path = db_file(root)
         if not path.exists():
             print(f"prune: no plane db at {path} — nothing to age out",
                   file=sys.stderr)
@@ -596,7 +596,7 @@ def cmd_plane_expire(args) -> int:
             DEFAULT_AFTER_DAYS, expirable, expired_events)
         from ..plane.emit_api import emit_batch
 
-        path = db_path(root)
+        path = db_file(root)
         if not path.exists():
             print(f"expire: no plane db at {path} — nothing to sweep",
                   file=sys.stderr)
@@ -635,8 +635,16 @@ def _one_line(text: str) -> str:
     return text.replace("\r", "\\r").replace("\n", "\\n")
 
 
-def _fleet_name(paths) -> "str | None":
-    return paths.fleet_dir.name if paths.fleet_dir else None
+def _open_plane_ro(root: Path, door: str, out):
+    """The exists-before-connect probe both cutover doors share: a read-only
+    connection, or None after printing the refusal to *out* (rc 3 is the
+    caller's). ``db_file`` is a pure join — a refusal must not leave a
+    directory behind."""
+    path = db_file(root)
+    if not path.is_file():
+        print(f"{door}: UNREACHABLE — no plane db at {path}", file=out)
+        return None
+    return connect_ro(path)
 
 
 def cmd_plane_parity(args) -> int:
@@ -649,16 +657,12 @@ def cmd_plane_parity(args) -> int:
 
     def run() -> int:
         from ..brief import dispatch_ledger_path, report_ledger_path
-        from ..plane.parity import DISPATCH, REPORT, compare, connect_ro
+        from ..plane.parity import DISPATCH, REPORT, compare
 
         out = sys.stderr if args.json else sys.stdout
-        # A plain join for the pre-check: db_path() mkdirs state/plane as a side
-        # effect, and a read-only door must not leave a directory behind on refusal.
-        path = root / "state" / "plane" / "plane.db"
-        if not path.is_file():
-            print(f"parity: UNREACHABLE — no plane db at {path}", file=out)
+        conn = _open_plane_ro(root, "parity", out)
+        if conn is None:
             return 3
-        conn = connect_ro(path)
         try:
             reports = [
                 compare(conn, DISPATCH, dispatch_ledger_path(paths), since=args.since),
@@ -716,19 +720,16 @@ def cmd_plane_import(args) -> int:
     def run() -> int:
         from ..brief import dispatch_ledger_path, report_ledger_path
         from ..plane.legacy_import import apply_import, plan_import
-        from ..plane.parity import connect_ro
 
-        fleet = _fleet_name(paths)
+        fleet = paths.fleet_name
         if not fleet:
             print("import: needs --fleet <name> — a dispatch row belongs to a fleet"
                   " only through that fleet's own report ledger, never a roster"
                   " guess", file=sys.stderr)
             return 2
-        path = root / "state" / "plane" / "plane.db"     # no mkdir side effect on refusal
-        if not path.is_file():
-            print(f"import: UNREACHABLE — no plane db at {path}")
+        conn = _open_plane_ro(root, "import", sys.stdout)
+        if conn is None:
             return 3
-        conn = connect_ro(path)
         try:
             plan = plan_import(conn, fleet=fleet,
                                dispatch_path=dispatch_ledger_path(paths),

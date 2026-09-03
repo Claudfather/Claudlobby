@@ -21,6 +21,7 @@ from pathlib import Path
 from claudlobby.plane.db import connect, db_path
 from claudlobby.plane.emit_api import emit_batch
 from claudlobby.plane.queries import NON_TERMINAL_CLAUSE
+from tests.plane_fixtures import plane_root
 
 REPO = Path(__file__).resolve().parent.parent
 LOOKUP = REPO / "lib" / "plane-lookup.py"
@@ -28,10 +29,7 @@ F = "f"
 
 
 def _root(tmp_path):
-    root = tmp_path / "root"
-    (root / "state" / "plane").mkdir(parents=True)
-    (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
-    return root
+    return plane_root(tmp_path)
 
 
 def _dispatch(root, n, task_id, bot="w1"):

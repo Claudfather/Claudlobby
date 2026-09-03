@@ -32,7 +32,6 @@ existing ledger holding no rows is a fleet that has not written yet.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass, field
@@ -40,6 +39,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..source_state import SOURCE_OK, probe_source, unreachable_line
+from .db import connect_ro  # noqa: F401 — the read-only open every parity consumer uses
+from .ids import derive_hex
 
 DISPATCH = "dispatch-log"
 REPORT = "report-back"
@@ -56,7 +57,7 @@ PLANE_ID_FIELDS = ("plane_msg_id", "plane_work_item_id", "plane_assignment_id")
 def content_key(raw_line: str) -> str:
     """The content hash an importer stamps as ``<ledger>:sha:<key>`` — over
     the raw line, never its position: rotation rewrites the file."""
-    return hashlib.sha256(raw_line.encode("utf-8")).hexdigest()[:32]
+    return derive_hex(raw_line)
 
 
 def ts19(value) -> str:
@@ -68,7 +69,6 @@ def ts19(value) -> str:
 
 @dataclass
 class LegacyRow:
-    line_no: int
     raw: str
     row: dict
 
@@ -84,9 +84,12 @@ class LegacyRow:
 @dataclass
 class Missing:
     key: str
-    ts: str
     cause: str
     row: LegacyRow
+
+    @property
+    def ts(self) -> str:
+        return self.row.ts
 
 
 @dataclass
@@ -97,7 +100,6 @@ class LedgerParity:
     detail: str = ""
     total: int = 0
     malformed: int = 0
-    matched: int = 0
     missing: list[Missing] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
     go_live: Optional[str] = None    # first occurred_at this ledger's door landed
@@ -105,6 +107,10 @@ class LedgerParity:
     @property
     def reachable(self) -> bool:
         return self.state in ("ok", "empty")
+
+    @property
+    def matched(self) -> int:
+        return self.total - len(self.missing)     # derived: every judged row is one or the other
 
     @property
     def clean(self) -> bool:
@@ -130,7 +136,7 @@ def read_ledger(path: Path) -> tuple[str, str, list[LegacyRow], int]:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return "unreadable", f"{path}: {exc}", [], 0
-    for n, line in enumerate(text.splitlines(), 1):
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:
@@ -140,56 +146,31 @@ def read_ledger(path: Path) -> tuple[str, str, list[LegacyRow], int]:
         except (json.JSONDecodeError, ValueError):
             malformed += 1
             continue
-        rows.append(LegacyRow(n, line, row))
+        rows.append(LegacyRow(line, row))
     return ("ok" if rows else "empty"), "", rows, malformed
-
-
-def connect_ro(path: Path) -> sqlite3.Connection:
-    """Read-only, and the file must ALREADY exist: ``db.connect`` auto-creates
-    a db, so a typo'd root would otherwise compare against an empty plane
-    and report every row missing (the J1 exists-before-connect finding)."""
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
-    conn.execute("PRAGMA query_only = 1")
-    return conn
 
 
 @dataclass
 class PlaneKeys:
-    task_ids: set[str]
-    msg_ids: set[str]
     sha_keys: set[str]
     go_live: Optional[str]
 
 
-TABLES = ("communications", "work_items", "assignments", "events")
-
-
 def plane_keys(conn: sqlite3.Connection, ledger: str) -> PlaneKeys:
-    """Everything the plane holds that a row of *ledger* can join to. The
-    plane keeps one table per family (communications, work_items,
-    assignments, events) — a msg id lives on communications, never events."""
-    task_ids: set[str] = set()
-    if ledger == DISPATCH:
-        task_ids = {
-            r[0][len(DISPATCH) + 1:] for r in conn.execute(
-                "SELECT source_ref FROM assignments WHERE source_ref LIKE ?",
-                (f"{DISPATCH}:%",))
-            if r[0] and not r[0].startswith(f"{DISPATCH}:sha:")}
-    msg_ids = {r[0] for r in conn.execute("SELECT msg_id FROM communications")}
-    sha_keys: set[str] = set()
-    go_live: Optional[str] = None
-    for table in TABLES:
-        sha_keys |= {r[0] for r in conn.execute(
-            f"SELECT DISTINCT source_ref FROM {table} WHERE source_ref LIKE ?",
-            (f"{ledger}:sha:%",))}
-        first = conn.execute(
-            f"SELECT MIN(occurred_at) FROM {table} WHERE emitter = ?",
-            (DOOR_EMITTER[ledger],)).fetchone()[0]
-        if first and (go_live is None or ts19(first) < go_live):
-            go_live = ts19(first)
-    return PlaneKeys(task_ids, msg_ids, sha_keys, go_live)
+    """The two facts about *ledger* the plane holds as a SET. Both live on
+    ``communications``: every batch either door lands carries a communication
+    (a task dispatch's wi+asg+comm, a query's bare comm, a report's comm),
+    so the door's first communication IS its go-live, and an imported row
+    always lands a communication under its ``<ledger>:sha:`` ref. Presence by
+    task id / msg id is a per-row point lookup instead (both indexed), sized
+    to the ledger rather than the plane."""
+    sha_keys = {r[0] for r in conn.execute(
+        "SELECT DISTINCT source_ref FROM communications WHERE source_ref LIKE ?",
+        (f"{ledger}:sha:%",))}
+    first = conn.execute(
+        "SELECT MIN(occurred_at) FROM communications WHERE emitter = ?",
+        (DOOR_EMITTER[ledger],)).fetchone()[0]
+    return PlaneKeys(sha_keys, ts19(first) or None)
 
 
 def duplicates(conn: sqlite3.Connection, ledger: str) -> list[str]:
@@ -211,12 +192,17 @@ def row_key(ledger: str, row: LegacyRow) -> str:
     return f"sha:{content_key(row.raw)}"
 
 
-def present(ledger: str, row: LegacyRow, keys: PlaneKeys) -> bool:
+def present(conn: sqlite3.Connection, ledger: str, row: LegacyRow, keys: PlaneKeys) -> bool:
+    """The same precedence ``row_key`` uses: task id, then msg id, then the
+    content key — each a point lookup on an indexed column."""
     task_id = row.row.get("task_id")
-    if ledger == DISPATCH and task_id and task_id in keys.task_ids:
+    if ledger == DISPATCH and task_id and conn.execute(
+            "SELECT 1 FROM assignments WHERE source_ref = ? LIMIT 1",
+            (f"{DISPATCH}:{task_id}",)).fetchone():
         return True
     msg = row.row.get("plane_msg_id")
-    if msg and msg in keys.msg_ids:
+    if msg and conn.execute(
+            "SELECT 1 FROM communications WHERE msg_id = ? LIMIT 1", (msg,)).fetchone():
         return True
     return f"{ledger}:sha:{content_key(row.raw)}" in keys.sha_keys
 
@@ -230,12 +216,15 @@ def cause_of(row: LegacyRow, go_live: Optional[str]) -> str:
 
 
 def compare(conn: sqlite3.Connection, ledger: str, path: Path, *,
-            since: Optional[str] = None) -> LedgerParity:
+            since: Optional[str] = None,
+            ledger_read: Optional[tuple] = None) -> LedgerParity:
     """One ledger against the plane. *since* is an ISO instant (``Z`` or
-    offset form); rows older than it are outside the window and not judged."""
+    offset form); rows older than it are outside the window and not judged.
+    A caller that already read the ledger passes ``read_ledger``'s tuple as
+    *ledger_read* so the file is parsed once."""
     if ledger not in LEDGERS:
         raise ValueError(f"unknown ledger {ledger!r}")
-    state, detail, rows, malformed = read_ledger(path)
+    state, detail, rows, malformed = ledger_read or read_ledger(path)
     out = LedgerParity(ledger, path, state, detail, malformed=malformed)
     if not out.reachable:
         return out
@@ -246,10 +235,7 @@ def compare(conn: sqlite3.Connection, ledger: str, path: Path, *,
         if floor and ts19(row.ts) < floor:
             continue
         out.total += 1
-        if present(ledger, row, keys):
-            out.matched += 1
-        else:
-            out.missing.append(Missing(row_key(ledger, row), row.ts,
-                                       cause_of(row, keys.go_live), row))
+        if not present(conn, ledger, row, keys):
+            out.missing.append(Missing(row_key(ledger, row), cause_of(row, keys.go_live), row))
     out.duplicates = duplicates(conn, ledger)
     return out
