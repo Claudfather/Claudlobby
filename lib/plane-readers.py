@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -35,17 +36,31 @@ def db_file(root: str) -> str:
     return os.path.join(root, "state", "plane", "plane.db")
 
 
-def connect(root: str) -> sqlite3.Connection:
+OPEN_RETRY_S = 0.25
+
+
+def connect(root: str, *, retries: int = 1) -> sqlite3.Connection:
+    """A read-only connection whose FIRST read has succeeded. Retried once
+    after a short pause: on the live Mini a `mode=ro` open answered
+    "unable to open database file" for ~20s while the ingest daemon
+    held the WAL, then cleared — a transient the reader must not turn
+    into a page. A persistent failure still raises: refuse, never
+    answer empty."""
     path = db_file(root)
     if not os.path.isfile(path):
         raise PlaneUnreachable(f"no plane db at {path}")
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
-        conn.execute("PRAGMA query_only = 1")
-        conn.execute("SELECT 1 FROM identity_registry LIMIT 0")   # the schema is there
-        return conn
-    except sqlite3.Error as exc:
-        raise PlaneUnreachable(f"plane db unreadable: {exc}") from exc
+    last: Optional[Exception] = None
+    for attempt in range(retries + 1):
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+            conn.execute("PRAGMA query_only = 1")
+            conn.execute("SELECT 1 FROM identity_registry LIMIT 0")   # the schema is there
+            return conn
+        except sqlite3.Error as exc:
+            last = exc
+            if attempt < retries:
+                time.sleep(OPEN_RETRY_S)
+    raise PlaneUnreachable(f"plane db unreadable: {last}") from last
 
 
 # Twin of queries.OPEN_ASSIGNMENTS_AT_SQL — BYTE-IDENTICAL (pinned by test), so

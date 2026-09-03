@@ -420,3 +420,33 @@ def test_the_grammar_refuses_a_dropped_value_and_a_plane_source_off_its_modes(tm
     a = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--bots-dir", str(bots), "--source", "jsonl")
     b = _matcher(root, "--all", dl, rl, str(NOW_EPOCH), "--source", "jsonl", "--bots-dir", str(bots))
     assert a.returncode == 0 == b.returncode and a.stdout == b.stdout
+
+
+def test_the_stdlib_open_retries_a_transient_cantopen_once_then_refuses(tmp_path, monkeypatch):
+    """Measured on the Mini: a mode=ro open answered CANTOPEN for ~20s while the
+    daemon held the WAL, then cleared. One retry absorbs the blip; a persistent
+    failure still raises PlaneUnreachable (refuse, never answer empty)."""
+    import sqlite3 as _sq
+    root, _, _, _ = _scene(tmp_path)
+    m = _stdlib_readers()
+    monkeypatch.setattr(m, "OPEN_RETRY_S", 0.0)
+    real = _sq.connect
+    calls = {"n": 0}
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _sq.OperationalError("unable to open database file")
+        return real(*a, **kw)
+    monkeypatch.setattr(m.sqlite3, "connect", flaky)
+    conn = m.connect(str(root))
+    assert calls["n"] == 2 and {"w1", "w2"} <= set(m.roster(conn, F))
+    conn.close()
+    calls["n"] = 0
+    monkeypatch.setattr(m.sqlite3, "connect", lambda *a, **kw: (_ for _ in ()).throw(_sq.OperationalError("unable to open database file")))
+    try:
+        m.connect(str(root))
+    except m.PlaneUnreachable as exc:
+        assert "unable to open" in str(exc)
+    else:
+        raise AssertionError("a persistent CANTOPEN must refuse")
