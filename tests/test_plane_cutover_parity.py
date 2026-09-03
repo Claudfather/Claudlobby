@@ -329,3 +329,34 @@ def test_import_refuses_when_a_ledger_is_unreachable(tmp_path):
     finally:
         conn.close()
     assert not plan.reachable and plan.events == []
+
+
+def test_import_ids_survive_ledger_rotation(tmp_path):
+    """Content, never position: rotation rewrites the file, so a row's line
+    number changes while its ids must not (a position hash would land the
+    same row twice across two runs). Mutation-pinned."""
+    root = _root(tmp_path)
+    _live_dispatch(root, "a", "t-1-aaaa", ts="2026-08-28T15:53:33Z")
+    dlog = tmp_path / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "report-back.jsonl"
+    older = _drow("2026-08-27T00:00:00Z", "t-0-0000", task="older")
+    newer = _drow("2026-08-28T00:47:02Z", "t-0-1111", task="newer")
+    rep_old = _rrow("2026-08-27T01:00:00Z", "t-0-0000", "completed")
+    rep_new = _rrow("2026-08-28T03:00:00Z", "t-0-1111", "completed")
+    _write(dlog, [older, newer])
+    _write(rlog, [rep_old, rep_new])
+    conn = _ro(root)
+    try:
+        first = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+        _write(dlog, [newer])          # the 7-day rotation dropped the older row
+        _write(rlog, [rep_new])
+        second = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    finally:
+        conn.close()
+    ids_first = {e["event_id"] for e in first.events}
+    ids_second = {e["event_id"] for e in second.events}
+    assert ids_second and ids_second <= ids_first        # nothing re-minted by position
+    def asg_of(plan):
+        return next(e["payload"]["assignment_id"] for e in plan.events
+                    if e["event_type"] == "assignment" and e["source_ref"] == "dispatch-log:t-0-1111")
+    assert asg_of(first) == asg_of(second)
