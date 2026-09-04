@@ -158,15 +158,24 @@ def test_uptime_from_the_plane_equals_uptime_from_the_log(tmp_path):
                             "payload": {"subject_kind": "bot_instance", "subject": subj, "metric": "bot.heartbeat",
                                         "value": {"state": state}}})
     (bot / "keepalive.log").write_text("\n".join(log_lines) + "\n")
+    # the dead-session fact the log never writes (its gap IS the fact): counts
+    # as no uptime on the plane side too, so the metrics stay equal
+    samples.append({"event_type": "metric_sample", "emitter": "keepalive", "fleet": FLEET,
+                    "occurred_at": (now - timedelta(minutes=46, seconds=30)).isoformat(),
+                    "payload": {"subject_kind": "bot_instance", "subject": f"bot:{FLEET}/b1",
+                                "metric": "bot.session_up", "value": False}})
     out = emit_batch(root, samples)
     assert all(o.status == "committed" for o in out), out
     from_log = compute_metrics(parse_keepalive_log(bot / "keepalive.log"), timedelta(hours=24), now=now)
     pr = _stdlib_readers()
     with connect(db_path(root)) as conn:
         plane_entries = entries_from_plane(pr, conn, FLEET, "B1", (now - timedelta(days=30)).isoformat())   # case-insensitive alias
-    from_plane = compute_metrics(plane_entries, timedelta(hours=24), now=now)
+    assert [st for _, st in plane_entries].count("DOWN") == 1
+    from_plane = compute_metrics([e for e in plane_entries if e[1] != "DOWN"], timedelta(hours=24), now=now)
     assert from_plane == from_log
     assert from_plane["restart_count"] == 1 and from_plane["entries_in_window"] == 8
+    with_down = compute_metrics(plane_entries, timedelta(hours=24), now=now)
+    assert with_down["uptime_pct"] <= from_log["uptime_pct"] and with_down["restart_count"] == 1   # DOWN adds no uptime
 
 
 def test_cmd_uptime_reads_the_plane_once_the_events_write_is_retired(tmp_path):
