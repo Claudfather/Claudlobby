@@ -88,6 +88,24 @@ def test_the_fleet_pulse_unit_carries_the_unassigned_flag_and_names_its_fleet(tm
     assert "|| _unassigned_rc=$?" in src and "cannot be judged this pass" in src   # a refusal is disclosed, never an empty answer
 
 
+def test_every_fleet_job_unit_carries_the_emission_flag_when_the_tier_arms_it(tmp_path, monkeypatch):
+    """A timer unit sources no .env, and any script that sources lib-common can
+    land a fleet event (the ERR trap alone) — measured on the live estate: the
+    fleet-pulse unit composed with the shadow and read flags but not the
+    emission flag, so a whole sweep's fleet events reached only the JSONL."""
+    from tests.test_plane_cutover_flip import _composed
+    armed, unarmed = tmp_path / "armed", tmp_path / "unarmed"
+    armed.mkdir(); unarmed.mkdir()
+    timers, _ = _composed(armed, monkeypatch, {"PLANE_EMIT_ENABLED": "1"})
+    services = [p for p in timers.iterdir() if p.suffix == ".service"]
+    assert services
+    for svc in services:
+        assert "Environment=PLANE_EMIT_ENABLED=1" in svc.read_text(), svc.name
+    timers, _ = _composed(unarmed, monkeypatch, {"PLANE_EMIT_ENABLED": "0"})
+    for svc in (p for p in timers.iterdir() if p.suffix == ".service"):
+        assert "PLANE_EMIT_ENABLED" not in svc.read_text(), svc.name        # unarmed composes unarmed
+
+
 def test_retire_writes_no_longer_names_a_frozen_reader(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     for reader in sh.GATED:

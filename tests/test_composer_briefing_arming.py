@@ -112,13 +112,16 @@ def _compose_with_defaults(tmp_path: Path, monkeypatch, armed: str):
 def test_keepalive_unit_carries_the_arming_too(tmp_path, monkeypatch):
     """The presence door (keepalive-as-a-door) runs from the keepalive job
     unit — the SAME closed-scheduler-env class briefing hit. The one
-    hoisted derivation stamps exactly the jobs whose scripts read it:
-    keepalive armed, a neighbor job (fleet-pulse) not."""
+    hoisted derivation stamps the emission flag on EVERY fleet job unit
+    (Phase B1 follow-up: any script that sources lib-common can land a
+    fleet event, and fleet-pulse — the fleet's main emitter — composed
+    without it on the live estate, so a whole sweep reached only the JSONL);
+    unarmed composes unarmed."""
     timers = _compose_with_defaults(tmp_path, monkeypatch, armed="1")
     service = (timers / "com.test.keepalive.service").read_text()
     assert "Environment=PLANE_EMIT_ENABLED=1" in service
     pulse = (timers / "com.test.fleet-pulse.service").read_text()
-    assert "PLANE_EMIT_ENABLED" not in pulse
+    assert "Environment=PLANE_EMIT_ENABLED=1" in pulse
     unarmed = _compose_with_defaults(tmp_path, monkeypatch, armed="0")
     assert "PLANE_EMIT_ENABLED" not in (
         unarmed / "com.test.keepalive.service").read_text()
