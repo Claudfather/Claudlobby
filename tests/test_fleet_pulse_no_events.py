@@ -213,8 +213,15 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
     src = (REPO_ROOT / "lib" / "fleet-pulse.sh").read_text()
     assert '_bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace" || true)' in src
     assert 'if _bridge_st=$(bridge_down_state' not in src
+    # The class is bash 3.2's (macOS /bin/bash — the Mini, where it was
+    # measured); bash 4+ (Linux, CI) exempts the substitution as part of the
+    # `if` test, so there the old shape is quiet too. The demonstration asserts
+    # the phantom only where the shell exhibits it; the fixed shape is quiet
+    # everywhere.
+    major = int(subprocess.run(["/bin/bash", "-c", "echo ${BASH_VERSINFO[0]}"],
+                               capture_output=True, text=True).stdout.strip() or "0")
     for shape, body, want in (
-        ("old", 'if x=$(healthy); then :; fi', 1),
+        ("old", 'if x=$(healthy); then :; fi', 1 if major < 4 else 0),
         ("new", 'x=$(healthy || true); if [ -n "$x" ]; then :; fi', 0),
     ):
         root = tmp_path / shape
