@@ -8,7 +8,7 @@
 # -> python -m. NOT the ingest daemon (scope tripwire).
 set -euo pipefail
 if [ "${PLANE_SHADOW_ENABLED:-0}" != "1" ]; then
-    printf 'plane-shadow: dormant (set PLANE_SHADOW_ENABLED=1 to arm the shadow comparison)\n' >&2
+    printf 'plane-shadow: dormant (PLANE_SHADOW_ENABLED is not stamped on this unit: set it in the fleet tier to arm the comparison; a fleet whose legacy writes are retired composes it dormant, the shadow having ended)\n' >&2
     exit 0
 fi
 # The composed fleet timer passes the fleet as the FIRST positional (the

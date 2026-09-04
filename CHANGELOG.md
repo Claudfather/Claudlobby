@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — cutover chunk B3: the shadow ends at rc 0, and a retired fleet's shadow unit composes dormant (#1444)
+
+- `plane shadow` (compare / record / replay) under a retirement returns **0** with its note — the designed end state, not a usage code: the composed timer kept running the record mode after the flip and reported failure every ten minutes (eleven runs at exit 2 on the Mini). The composer no longer arms the `plane-shadow` unit for a fleet whose legacy writes are retired (read on the plane; the tier's answer stands when the plane cannot say), so the unit composes dormant; fleet-pulse keeps the flag for its bridge, which reads what was recorded. No parity door or import for the events family (the pre-B1 history lives in files `OBSERVABILITY_REAP_DAYS` ages out; fix-forward), and no new retention lane (the shadow's 2,857 clean comparisons a day stop with this; fleet events are under 300/day).
+
 ### Added — cutover chunk B2: the per-bot event files that never went through the door (#1444)
 
 - `keepalive.sh`: a TRANSITION (RESTART → `keepalive_restart`, BRIDGE_HEAL → `bridge_heal`, SKIP → `keepalive_skip`, RELOAD → `keepalive_reload`) is a fleet event through `emit_fleet_event` (provenance, alias-anchored, retired with the family) so `claudlobby events` and `uptime` see it; the per-tick verdicts ride the heartbeat sample. The reader-less `keepalive-<day>.jsonl` (867 rows/bot/day, opened by nothing but the validate harness) keeps being written under dual-write and stops when `PLANE_LEGACY_WRITE_EVENTS` says 0 — the flag alone, because the four facts protect a record and a file nothing reads is not one.
