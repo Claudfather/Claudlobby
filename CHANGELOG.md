@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — the legacy importer fits an over-cap summary instead of refusing the report (#1467 chunk D)
+
+- `legacy_import.fit_to_cap`: a legacy report whose summary exceeds the task family's 4096-byte cap is IMPORTED — the summary cut on a UTF-8 boundary with the cut disclosed in its own tail (`… [plane-import: cut at 4096 of N bytes]`), the communication body (cap 16384) carrying the full text — rather than refused as `invalid`. The contracts reject authored content over cap at emit time, where it is a caller bug; a legacy row is history, and a refused unit is a report the plane never holds. Measured on artemis-data's ledger before the fix: 15 of 47 reports refused, every one a long review verdict. Pinned in `tests/test_plane_cutover_parity.py`; the two pins that certified the refusal now certify the fit.
+
 ### Added — cutover chunk A2: the workstream registry, the last file-backed record, moves to the plane (#1444)
 
 - A fourth door, `PLANE_LEGACY_WRITE_WORKSTREAMS` (`WRITE_FLAGS`; `--retire-writes` names it, the doctor's rung and the fleet job units' stamp follow). Under the retirement `workstream-update.sh` works on a registry MATERIALIZED from the plane (`plane-lookup.py --workstreams`, the same jq programs, the locks on the real name), the verb's plane event IS the write, `prune` lands `archived` events and no archive JSONL; an emission the shim could not record lands the materialized registry at the real path, disclosed (`_ws_land_if_unrecorded`), so a verb is never recorded nowhere. `plane_retirement_covers` (lib-common) is the read-side question at startup; `plane_door_key` the one flag→door map. Every plane event the door emits carries `occurred_at` = the VERB's own instant (the same `now` the registry gets), so the plane row and the file agree to the second — the A2 parity pin flaked 1 in 3 when the emit's later stamp crossed a second boundary.

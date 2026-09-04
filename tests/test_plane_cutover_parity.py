@@ -215,6 +215,40 @@ def test_import_apply_lands_a_status_bearing_row_and_reruns_as_duplicates(tmp_pa
     assert apply_import(root, plan) == {"committed": 0, "duplicate": 6, "spooled": 0}
 
 
+def test_import_fits_an_over_cap_summary_instead_of_refusing_the_report(tmp_path):
+    """A legacy report whose summary exceeds the task family's 4096-byte cap
+    is IMPORTED — the summary cut on a UTF-8 boundary with the cut disclosed
+    in its tail, the communication body (cap 16384) carrying the full text —
+    rather than refused as `invalid` (measured: 15 of the data fleet's 47
+    reports were long review verdicts the contracts refused)."""
+    from claudlobby.plane.legacy_import import fit_to_cap
+    from claudlobby.plane.registries import cap_for
+    root = _root(tmp_path)
+    _live_dispatch(root, "a", "t-1-aaaa", ts="2026-08-28T15:53:33Z")   # go-live, as _ledgers
+    dlog = tmp_path / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "report-back.jsonl"
+    long = ("VERDICT: merge — " + "é" * 2600)          # multibyte, well over the cap
+    n_bytes = len(long.encode("utf-8"))
+    assert n_bytes > cap_for("task", "summary")
+    _write(dlog, [_drow("2026-08-28T00:47:02Z", "t-0-0000")])
+    _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed", summary=long)])
+    with _ro(root) as conn:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    assert plan.invalid == [] and plan.reports == 1
+    task = [e for e in plan.events if e["event_type"] == "task"][0]["payload"]
+    comm = [e for e in plan.events if e["event_type"] == "communication"
+            and e["payload"].get("message_class") == "report"][0]["payload"]
+    assert len(task["summary"].encode("utf-8")) <= cap_for("task", "summary")
+    assert task["summary"].endswith("bytes]") and f"plane-import: cut at 4096 of {n_bytes} bytes" in task["summary"]
+    assert task["summary"].startswith("VERDICT: merge — ")
+    assert comm["body"] == long                     # under the body cap: untouched
+    # the helper is boundary-safe and a no-op under cap
+    assert fit_to_cap("short", "task", "summary") == "short"
+    assert "\ufffd" not in fit_to_cap("é" * 5000, "task", "summary")
+    # and the batch lands
+    assert apply_import(root, plan)["committed"] == 6
+
+
 def test_import_attributes_by_the_report_ledger_only(tmp_path):
     root = _root(tmp_path)
     dlog, rlog = _ledgers(tmp_path, root)
@@ -362,10 +396,13 @@ def test_import_resolves_the_manager_alias_through_the_registry(tmp_path):
     assert plan.assumed_manager_fleet == 1
 
 
-def test_import_an_oversized_field_refuses_only_its_own_unit(tmp_path):
-    """task.summary caps at 4096 bytes and the contract REJECTS (never
-    truncates). Measured before the per-unit validation: one such row raised
-    out of emit_batch and zero of the other units landed."""
+def test_import_an_oversized_field_is_fitted_and_its_siblings_land_too(tmp_path):
+    """task.summary caps at 4096 bytes and the contract REJECTS authored
+    content over cap (never truncates) — the importer FITS a legacy row to
+    the cap BEFORE validation, so the unit imports with its cut disclosed.
+    Measured before the per-unit validation existed: one such row raised out
+    of emit_batch and zero of the other units landed; the per-unit validation
+    then refused it alone; now it lands beside its siblings."""
     root = _root(tmp_path)
     dlog, rlog = _ledgers(tmp_path, root)
     _write(dlog, [_drow("2026-08-28T00:47:02Z", "t-0-0000", task="ok"),
@@ -375,9 +412,11 @@ def test_import_an_oversized_field_refuses_only_its_own_unit(tmp_path):
     with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW,
                            capture={"*": "full"})
-    assert plan.dispatches == 2 and plan.reports == 1 and len(plan.invalid) == 1
-    assert "summary" in plan.invalid[0]
-    assert apply_import(root, plan)["committed"] == len(plan.events) == 10
+    assert plan.dispatches == 2 and plan.reports == 2 and plan.invalid == []
+    fitted = [e["payload"]["summary"] for e in plan.events
+              if e["event_type"] == "task" and e["payload"].get("summary", "").endswith("bytes]")]
+    assert len(fitted) == 1 and len(fitted[0].encode("utf-8")) <= 4096
+    assert apply_import(root, plan)["committed"] == len(plan.events) == 12
 
 
 def test_import_a_hand_edited_row_is_a_new_row_by_design(tmp_path):
@@ -412,19 +451,20 @@ def test_parity_cli_refusal_leaves_no_directory_behind(tmp_path):
     assert not (root / "state").exists()
 
 
-def test_import_an_oversized_field_refuses_under_the_default_capture_too(tmp_path):
+def test_import_an_oversized_field_is_fitted_under_the_default_capture_too(tmp_path):
     """The batch door validates RAW first: metadata capture STRIPS an over-cap
     summary, so a validator that only looked at the captured form accepted a
-    unit the real door then refused — reopening the whole-batch abort. Pinned
-    under capture={} (the default when no capture.json exists)."""
+    unit the real door then refused — reopening the whole-batch abort. The fit
+    happens before either pass, so under capture={} (the default when no
+    capture.json exists) the unit imports and the batch lands whole."""
     root = _root(tmp_path, capture="{}")
     dlog, rlog = _ledgers(tmp_path, root)
     _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed", summary="x" * 5000)])
     with _ro(root) as conn:
         plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW,
                            capture={})
-    assert plan.reports == 0 and len(plan.invalid) == 1 and "summary" in plan.invalid[0]
-    assert apply_import(root, plan)["committed"] == len(plan.events) == 4
+    assert plan.reports == 1 and plan.invalid == []
+    assert apply_import(root, plan)["committed"] == len(plan.events) == 6
 
 
 def test_parity_cli_refuses_a_db_that_opens_but_cannot_be_read(tmp_path):
