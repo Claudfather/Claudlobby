@@ -1413,7 +1413,9 @@ emit_fleet_event() {
     # fails the caller. occurred_at is stamped UTC so every fleet event compares
     # lexically on the stored column (the legacy ts keeps its local offset
     # inside the detail, for the byte-identical re-render).
-    local _fleet="${FLEET_NAME:-}"
+    # The fleet: a session's FLEET_NAME, else the timer units' CLAUDLOBBY_FLEET
+    # (the composer stamps that one; resolve_bots_dir reads the same pair).
+    local _fleet="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}"
     if [ -n "$_fleet" ] && plane_armed emit_fleet_event; then
         # plane_write_retired reads the script-level PLANE_ARMED the dispatch and
         # report doors set at their top; this door is a library function every

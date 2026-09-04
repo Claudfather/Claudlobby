@@ -159,6 +159,23 @@ def test_a_fleet_level_receipt_anchors_on_the_fleet_and_renders_as_bot_fleet(tmp
     assert [_public(x) for x in rows] == [legacy]
 
 
+def test_a_timer_run_door_names_its_fleet_from_the_units_carrier(tmp_path):
+    """fleet-pulse runs from a timer unit that carries CLAUDLOBBY_FLEET and no
+    FLEET_NAME; the door reads the same pair resolve_bots_dir does — measured
+    on the live estate: with FLEET_NAME alone the plane branch was skipped
+    and a whole sweep's events reached only the JSONL."""
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    env = _door_env(root, CLAUDLOBBY_FLEET=F)
+    env.pop("FLEET_NAME")
+    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event pane_stuck pulse \'{{"s":1}}\' "{bot_dir}" w1'],
+                       capture_output=True, text=True, timeout=180, env=env)
+    assert r.returncode == 0, r.stderr
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'pane_stuck'", 1) == 1
+    with _ro(root) as conn:
+        assert conn.execute("SELECT subject_alias FROM events WHERE event = 'pane_stuck'").fetchone()[0] == f"bot:{F}/w1"
+
+
 def test_the_append_retires_only_on_the_four_facts(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     bot_dir = _bot_dir(paths, "w1")

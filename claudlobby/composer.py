@@ -3987,6 +3987,7 @@ def compose_fleet_timers(
     # its OWN carrier: a recorded fact must not start being written because
     # emission is on.
     job_extra_env: dict[str, dict[str, str]] = {}
+    job_baseline_env: dict[str, str] = {}
     try:
         _cascade = _env_tiers.cascade(
             _env_tiers.read_tiers(paths, fleet_name=fleet.name)
@@ -3996,6 +3997,14 @@ def compose_fleet_timers(
             if _armed:
                 job_extra_env[_job] = _armed
         plane_extra_env = job_extra_env.get("keepalive")
+        # EVERY fleet job unit carries the emission flag when the tier arms it:
+        # any script that sources lib-common can land a fleet event (the ERR
+        # trap alone), and a timer unit sources no .env — measured on the live
+        # estate: fleet-pulse, the fleet's main emitter, composed with the
+        # shadow and read flags but not this one, so a whole sweep's events
+        # reached only the JSONL (Phase B1's first deploy).
+        if _env_tiers.armed(_cascade, "PLANE_EMIT_ENABLED"):
+            job_baseline_env = {"PLANE_EMIT_ENABLED": "1"}
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(
             "plane arming unresolved (%s) — timer-run plane doors compose"
@@ -4024,7 +4033,7 @@ def compose_fleet_timers(
                 fleet_pulse_env=(
                     fleet.fleet_pulse.env() if fleet.fleet_pulse else None
                 ),
-                extra_env=job_extra_env.get(name),
+                extra_env=({**job_baseline_env, **job_extra_env.get(name, {})} or None),
             )
         dormant = [
             f"{prefix}.{n}" for n, c in timers.items() if not c.get("enroll", True)
