@@ -3893,6 +3893,24 @@ FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = {
     "fleet-pulse": ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS"),
 }
 
+def _shadow_retired_at(paths, fleet_name: str):
+    """The instant the fleet's legacy writes were retired, read from the plane
+    (read-only), or None when not retired or when the plane cannot say."""
+    try:
+        from .plane import cutover as _cut
+        from .plane.db import open_ro
+        conn, _why = open_ro(paths.root)
+        if conn is None:
+            return None
+        try:
+            ret = _cut.retired(conn, fleet_name)
+        finally:
+            conn.close()
+        return ret[0] if ret else None
+    except Exception:            # a schema the composer cannot read: the tier's answer stands
+        return None
+
+
 # The cutover read flags also need a SESSION carrier: start-bot.sh exports
 # bot.conf (`set -a`) but sources the .env tiers WITHOUT export, so a bare
 # `PLANE_READ_OPEN=1` in the fleet tier never reaches report-back.sh or brief
@@ -4015,6 +4033,18 @@ def compose_fleet_timers(
         for _flag in _write_flags.values():
             if _env_tiers.resolves_to(_cascade, _flag, "0"):
                 job_baseline_env[_flag] = "0"
+        # The shadow ENDS with the retirement (B3): a fleet whose legacy writes
+        # are retired on the plane has no legacy side left to grade, so its
+        # plane-shadow unit composes DORMANT even though the tier still arms it
+        # — the timer would only run the record mode to be told so every ten
+        # minutes. The fact is read where it lives; an unreachable plane leaves
+        # the tier's answer standing (the launcher's own refusal covers it).
+        if "plane-shadow" in job_extra_env:
+            _ret = _shadow_retired_at(paths, fleet.name)
+            if _ret:
+                job_extra_env.pop("plane-shadow", None)
+                _log.info("plane-shadow: the legacy writes of %s are retired (%s) — the shadow"
+                          " ended; composing the unit dormant", fleet.name, _ret)
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(
             "plane arming unresolved (%s) — timer-run plane doors compose"

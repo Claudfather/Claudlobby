@@ -1141,10 +1141,14 @@ def cmd_plane_shadow(args) -> int:
             ret = _cut.retired(conn, fleet)
             if ret is not None:
                 conn.close()
+                # rc 0, not a usage code: the end of the shadow is its DESIGNED state,
+                # and the composed timer kept running the record mode after the flip —
+                # eleven runs at exit 2 on the Mini, a unit reporting failure for
+                # having nothing left to do (B3).
                 print(f"shadow: the legacy writes are retired for {fleet} ({ret[0]}) — there is"
                       " no legacy side left to grade; the shadow ended with the retirement"
                       " (--gate / --check still read what was recorded)", file=sys.stderr)
-                return 2
+                return 0
         from ..plane import shadow as sh
         readers = (sh.READERS + (sh.READER_UNASSIGNED,)) if args.reader == "all" else (args.reader,)
         if args.reader == sh.READER_OPEN_TASK and not (args.gate or args.check):

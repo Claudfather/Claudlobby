@@ -140,7 +140,10 @@ def test_the_shadow_ends_with_the_retirement(tmp_path):
     assert forced.returncode == 0 and "FORCED" in forced.stdout
     for args in ((), ("--record",), ("--replay-hours", "3")):
         ended = _cli(root, "shadow", *args)
-        assert ended.returncode == 2 and "no legacy side left" in ended.stderr, args
+        # rc 0: the designed end state, not a usage error (the composed timer ran
+        # the record mode after the flip and reported failure every ten minutes)
+        assert ended.returncode == 0 and "no legacy side left" in ended.stderr, args
+        assert ended.stdout == ""
     assert _cli(root, "shadow", "--gate").returncode == 1                        # what was recorded still reads
     assert _cli(root, "shadow", "--check").returncode == 0
 
@@ -259,3 +262,44 @@ def test_the_plane_orphan_list_is_the_planes_own_not_the_ledgers(tmp_path):
     assert plane.returncode == 0 and "t-8-only-plane" in plane.stdout and "t-2-bbbb" in plane.stdout
     assert "t-8-only-plane" not in jsonl.stdout
 
+
+
+def test_the_shadow_unit_composes_dormant_once_the_writes_are_retired(tmp_path, monkeypatch):
+    """The tier still arms PLANE_SHADOW_ENABLED, but a fleet whose legacy
+    writes are retired has nothing left to grade: its plane-shadow unit
+    composes without the stamp (the launcher's dormant path, exit 0), while a
+    sibling job (fleet-pulse) keeps the same flag for its bridge."""
+    from textwrap import dedent
+    import claudlobby.composer as composer_mod
+    import claudlobby.env_tiers as env_tiers_mod
+    from claudlobby.composer import compose_fleet_timers
+    from claudlobby.config import load_fleet
+    from claudlobby.env_tiers import Resolution
+    from claudlobby.paths import Paths
+    from claudlobby.plane.emit_api import emit_batch
+    from tests.test_composer_briefing_arming import _FLEET
+    fl = dedent(_FLEET).replace("system_defaults: false", "system_defaults: true")
+
+    def compose(root, *, retired):
+        root.mkdir(parents=True)
+        (root / "fleet.yaml").write_text(fl)
+        fleet, md = load_fleet(root / "fleet.yaml")
+        paths = Paths(root=root, fleet_dir=root)
+        if retired:
+            (root / "state" / "plane").mkdir(parents=True)
+            out = emit_batch(root, [cut.retirement_event(fleet.name, {}, "2026-09-04T16:24:49+00:00")])
+            assert out[0].status == "committed"
+        res = {k: Resolution(name=k, value="1", tier="fleet", path=None) for k in ("PLANE_SHADOW_ENABLED", "PLANE_EMIT_ENABLED")}
+        monkeypatch.setattr(env_tiers_mod, "read_tiers", lambda paths, fleet_name=None, bot_name=None: [])
+        monkeypatch.setattr(env_tiers_mod, "cascade", lambda tiers: res)
+        composer_mod._READ_FLAG_MEMO.clear()
+        timers = compose_fleet_timers(fleet, paths, md)
+        shadow = next(p for p in timers.iterdir() if "plane-shadow" in p.name and p.suffix == ".service").read_text()
+        pulse = next(p for p in timers.iterdir() if "fleet-pulse" in p.name and p.suffix == ".service").read_text()
+        return shadow, pulse
+
+    shadow, pulse = compose(tmp_path / "live", retired=False)
+    assert "Environment=PLANE_SHADOW_ENABLED=1" in shadow and "Environment=PLANE_SHADOW_ENABLED=1" in pulse
+    shadow, pulse = compose(tmp_path / "ended", retired=True)
+    assert "PLANE_SHADOW_ENABLED" not in shadow                                   # ended: dormant
+    assert "Environment=PLANE_SHADOW_ENABLED=1" in pulse                          # the bridge still reads what was recorded
