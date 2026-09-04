@@ -176,6 +176,32 @@ def test_a_timer_run_door_names_its_fleet_from_the_units_carrier(tmp_path):
         assert conn.execute("SELECT subject_alias FROM events WHERE event = 'pane_stuck'").fetchone()[0] == f"bot:{F}/w1"
 
 
+def test_a_hand_run_door_reads_the_write_flag_from_the_fleet_tier(tmp_path):
+    """Phase C, found live: rolling-restart's pre-stop-handoff runs from an
+    operator shell with no carrier, and wrote eight legacy lines per bot in
+    the restart window after the retirement. With the env carrying no flag the
+    door reads the fleet tier itself (restricted parser, never sourced)."""
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    ledger = bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl"
+    for reader in sh.GATED:
+        _declare(root, reader)
+    assert _cli(root, "cutover", "--retire-writes").returncode == 0
+    tier = root / "local" / F / ".env"
+    call = f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1'
+    env = _door_env(root); env.pop("PLANE_LEGACY_WRITE_EVENTS", None)
+    tier.write_text("PLANE_LEGACY_WRITE_EVENTS=1\n")
+    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event {call}'], capture_output=True, text=True, timeout=180, env=env)
+    assert r.returncode == 0 and ledger.read_text().count("\n") == 1          # the tier says 1: dual-write
+    tier.write_text("TELEGRAM_BOT_TOKEN=8888888:AAAAAAAAAAAAAAAAAAAA\nPLANE_LEGACY_WRITE_EVENTS=0\n")
+    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event {call}; echo "flag=${{PLANE_LEGACY_WRITE_EVENTS:-unset}} token=${{TELEGRAM_BOT_TOKEN:-none}}"'],
+                       capture_output=True, text=True, timeout=180, env=env)
+    assert r.returncode == 0 and "legacy write retired" in r.stderr, r.stderr
+    assert ledger.read_text().count("\n") == 1                               # the tier says 0: skipped
+    assert "token=none" in r.stdout                                          # nothing else from the tier leaks into the door's shell
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 2) == 2
+
+
 def test_the_append_retires_only_on_the_four_facts(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     bot_dir = _bot_dir(paths, "w1")

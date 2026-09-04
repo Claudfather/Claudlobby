@@ -4005,6 +4005,16 @@ def compose_fleet_timers(
         # reached only the JSONL (Phase B1's first deploy).
         if _env_tiers.armed(_cascade, "PLANE_EMIT_ENABLED"):
             job_baseline_env = {"PLANE_EMIT_ENABLED": "1"}
+        # ... and the RETIREMENT flags when the tier says 0 (Phase C, found
+        # live): a retired write is skipped only where the door can read the
+        # flag, and a timer-run door (fleet-pulse's session_missing and its
+        # kin) read the unit's env — stamped with the read and emit flags,
+        # never the write flags, so the fleet kept dual-writing its events
+        # JSONL from the timer after the sessions had retired theirs.
+        from .plane.cutover import WRITE_FLAGS as _write_flags
+        for _flag in _write_flags.values():
+            if _env_tiers.resolves_to(_cascade, _flag, "0"):
+                job_baseline_env[_flag] = "0"
     except _env_tiers.ResolverUnavailable as exc:
         _log.warning(
             "plane arming unresolved (%s) — timer-run plane doors compose"
@@ -4088,7 +4098,10 @@ def compose_fleet_timers(
     # #1226 defect) and carry it as an Environment= line. Arming lands on
     # briefing timers at the NEXT generate; a resolver failure composes
     # UNARMED (the pre-fix state) and says so.
-    briefing_extra_env = plane_extra_env
+    # The per-(bot, slot) briefing units are composed on their own path: they
+    # carry the same baseline (emission + retirement flags) as every other
+    # fleet job unit — briefing-trigger lands fleet events too.
+    briefing_extra_env = ({**job_baseline_env, **(plane_extra_env or {})} or None)
     composed_briefing: set[str] = set()
     for bot_id, bot in briefing_bots:
         for slot, expr in bot.briefing.slots.items():

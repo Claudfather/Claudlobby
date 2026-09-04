@@ -236,3 +236,14 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
         assert r.returncode == 0 and "done" in r.stdout, (shape, r.stderr)
         rows = "".join(p.read_text() for p in root.rglob("fleet-*.jsonl"))
         assert rows.count('"type":"script_error"') == want, (shape, rows)
+
+
+def test_the_handoff_status_is_captured_without_firing_the_trap():
+    """pre-stop-handoff's `if _x=$(session_command_status …)` was the #1460
+    shape (one phantom script_error per bot per restart, measured on the
+    flip's rolling restart); the status is captured with `|| true` inside the
+    substitution and judged by the predicate's own value table."""
+    src = (REPO_ROOT / "lib" / "pre-stop-handoff.sh").read_text()
+    assert '_handoff_status="$(session_command_status "$_HANDOFF_CMD" "$BOT_DIR" || true)"' in src
+    assert 'if _handoff_status="$(session_command_status' not in src
+    assert "available|unverifiable)" in src
