@@ -194,10 +194,15 @@ recorded state machine:
    emission succeeded (`PLANE_EMIT_LAST_RC`) — every other case writes the
    ledger and says why, because a dispatch or report must land somewhere.
    Rollback: the flags back to 1. Every matcher reader (`--open`, `--all`,
-   `--orphans`, `--open-task`, `--unassigned`) follows its flip; still on a
-   frozen ledger afterwards: the workstreams and briefing writes (their
-   plane adapter is unbuilt). `who-reviewed.py --source plane` keeps
-   attribution alive off the plane's task events.
+   `--orphans`, `--open-task`, `--unassigned`) follows its flip, and the
+   readers of a RETIRED ledger follow the retirement fact itself (chunk C3,
+   `brief.plane_retired_conn`: `legacy_write_retired` naming the door, read
+   on the plane — no flag, because a frozen ledger is wrong on the day it
+   freezes): `claudlobby report-back`, brief's unacked reports + `--ack`,
+   `who-reviewed.py --source auto` (the plane's rows plus the ledgers of
+   fleets whose write is not retired, deduplicated), the supersede hint's
+   task texts. Still on a frozen ledger afterwards: the workstreams and
+   briefing writes (their plane adapter is unbuilt).
 
 **Phase B — the bot-events ledger** (`data/events/fleet-*.jsonl` per bot,
 `state/events/` for the fleet) moves as a direct move, no shadow.

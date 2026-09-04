@@ -328,6 +328,35 @@ def load_dispatch_doors(paths: Paths):
     return load_lib_module(paths, "dispatch-overdue.py")
 
 
+def plane_retired_conn(paths: Paths, door: str):
+    """(conn, note): an OPEN read-only plane connection when the fleet's legacy
+    write for *door* (``dispatch`` / ``report`` / ``events``) is RETIRED on the
+    plane — the ledger is frozen from that instant and a reader that opens it
+    answers from the past — else (None, note or None). The fact is the doors'
+    own second fact (``legacy_write_retired`` naming the door), read where it
+    lives; no reader flag. An unreachable plane returns (None, note): the
+    fact cannot be read, so the ledger serves LABELED, never silently. The
+    caller closes the connection."""
+    fleet = paths.fleet_name
+    if not fleet:
+        return None, None
+    from .plane import cutover as _cut
+    from .plane.db import open_ro
+    conn, why = open_ro(paths.root)
+    if conn is None:
+        return None, (f"the plane is unreachable ({why}), so whether the {door} ledger is frozen"
+                      " cannot be read — serving the ledger, which may be stale")
+    try:
+        covered = _cut.retired_doors(conn, fleet)
+    except Exception as exc:                        # a schema the door cannot read: label, never guess
+        conn.close()
+        return None, f"the plane could not answer whether the {door} ledger is frozen ({exc}) — serving the ledger"
+    if door not in covered:
+        conn.close()
+        return None, None
+    return conn, None
+
+
 def load_lib_module(paths: Paths, filename: str):
     """Import one of the INSTALL's stdlib ``lib/*.py`` scripts as a module,
     or None when unreadable — ``load_dispatch_doors``'s seam, generalised
@@ -779,6 +808,40 @@ def _reports_section(
     does want a narrower view can take it.
     """
     ledger = report_ledger_path(paths)
+    # Cutover C3: with the report write RETIRED the ledger is frozen — the
+    # unacked list comes from the plane (the same row shape, the same cursor
+    # compare: the readers render `ts` in the legacy form). An unreachable
+    # plane under a retirement omits the section like the alerts section does.
+    conn, note = plane_retired_conn(paths, "report")
+    if conn is not None:
+        try:
+            pr = load_lib_module(paths, "plane-readers.py")
+            if pr is None:
+                raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
+            rows = pr.report_rows(conn, paths.fleet_name)
+        except Exception as exc:
+            degraded.append(Degradation(field="reports", mode="omitted",
+                                        reason=f"the report ledger is retired and the plane cannot answer: {exc}",
+                                        issue="#1444"))
+            return {}
+        finally:
+            conn.close()
+        stripped = sum(1 for r in rows if r.get("_body_stripped") and r.get("_source") != "task_event")
+        if stripped:
+            degraded.append(Degradation(field="reports", mode="labeled",
+                                        reason=f"{stripped} report(s) hold no summary on the plane (the capture"
+                                               " policy kept no body and no task event named one)",
+                                        issue="#1444"))
+        unacked = [
+            {"ts": r["ts"], "bot": r["bot"], "status": r["status"], "task_id": r["task_id"],
+             "summary": r["summary"], "pr_url": r["pr_url"]}
+            for r in rows
+            if r.get("status") in terminal and (cursor is None or r["ts"] > cursor)
+        ]
+        unacked.sort(key=lambda r: r["ts"])
+        return {"cursor": cursor, "unacked": unacked, "source": "plane"}
+    if note:
+        degraded.append(Degradation(field="reports", mode="labeled", reason=note, issue="#1444"))
     read = _read_ledger(ledger)
 
     # A ledger that cannot be read would render as "unacked (0)" — an all-clear

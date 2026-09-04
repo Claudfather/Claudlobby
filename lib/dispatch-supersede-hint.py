@@ -137,6 +137,30 @@ def task_texts(dispatch_log: str, bot: str) -> dict[str, str]:
     return out
 
 
+def plane_task_texts(mod, bot: str) -> dict[str, str]:
+    """``{task_id: task text}`` from the PLANE when the open reader resolves to
+    it (cutover C3): after the dispatch write's retirement the log is frozen,
+    so its `task` field would compare a new dispatch against history only.
+    Empty when the reader still serves the JSONL, or on any plane failure —
+    the hint must never be why a dispatch fails (the caller falls back to
+    the log's texts)."""
+    try:
+        p = mod._select("open", "auto", fleet=None, root=None)
+    except Exception:
+        return {}
+    if p is None:
+        return {}
+    try:
+        return p.pr.task_texts(p.conn, p.fleet, bot)
+    except Exception:
+        return {}
+    finally:
+        try:
+            p.close()
+        except Exception:
+            pass
+
+
 def hint(
     bot: str,
     dispatch_log: str,
@@ -163,7 +187,7 @@ def hint(
         return 0, [], ""
 
     mine = refs(new_task) | ref_from_url(new_ref)
-    texts = task_texts(dispatch_log, bot)
+    texts = plane_task_texts(mod, bot) or task_texts(dispatch_log, bot)
     matching = [tid for tid in open_ids if mine and (mine & refs(texts.get(tid, "")))]
     if not matching:
         return len(open_ids), [], ""
