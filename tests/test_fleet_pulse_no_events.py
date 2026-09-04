@@ -200,3 +200,39 @@ def test_pulse_completes_with_no_events_bot(pulse_fleet, extra_env):
     assert "aaa-idle" in proc.stdout
     assert "zzz-logged" in proc.stdout
     assert _script_errors(root) == ""
+
+
+def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
+    """Live-found 2026-09-03/04 (~2,500 rows a day on a 9-bot fleet, one per
+    live bot per sweep, every one `non-zero exit at line 387`): on bash 3.2
+    a function that returns 1 as the LAST command inside a `$( )` fires the
+    inherited ERR trap even when the substitution is an `if` condition —
+    bridge_down_state returns 1 on every HEALTHY bot. The demonstration runs
+    the two shapes under the real trap installer; the shape pin guards the
+    line in fleet-pulse.sh."""
+    src = (REPO_ROOT / "lib" / "fleet-pulse.sh").read_text()
+    assert '_bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace" || true)' in src
+    assert 'if _bridge_st=$(bridge_down_state' not in src
+    # The class is bash 3.2's (macOS /bin/bash — the Mini, where it was
+    # measured); bash 4+ (Linux, CI) exempts the substitution as part of the
+    # `if` test, so there the old shape is quiet too. The demonstration asserts
+    # the phantom only where the shell exhibits it; the fixed shape is quiet
+    # everywhere.
+    major = int(subprocess.run(["/bin/bash", "-c", "echo ${BASH_VERSINFO[0]}"],
+                               capture_output=True, text=True).stdout.strip() or "0")
+    for shape, body, want in (
+        ("old", 'if x=$(healthy); then :; fi', 1 if major < 4 else 0),
+        ("new", 'x=$(healthy || true); if [ -n "$x" ]; then :; fi', 0),
+    ):
+        root = tmp_path / shape
+        (root / "bot" / "data").mkdir(parents=True)
+        (root / "state").mkdir()
+        env = {"PATH": "/usr/bin:/bin", "HOME": str(root), "CLAUDLOBBY_ROOT": str(root),
+               "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "PLANE_EMIT_ENABLED": "0"}
+        r = subprocess.run(["/bin/bash", "-c",
+                            f'. "{REPO_ROOT}/lib/lib-common.sh"; install_error_trap "";'
+                            f' healthy() {{ return 1; }}; {body}; echo done'],
+                           capture_output=True, text=True, env=env, timeout=60)
+        assert r.returncode == 0 and "done" in r.stdout, (shape, r.stderr)
+        rows = "".join(p.read_text() for p in root.rglob("fleet-*.jsonl"))
+        assert rows.count('"type":"script_error"') == want, (shape, rows)

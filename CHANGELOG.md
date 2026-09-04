@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed — a healthy bridge check no longer fires a phantom `script_error` per live bot per sweep
+
+- `fleet-pulse.sh`: `bridge_down_state` returns 1 on every HEALTHY bot, and on bash 3.2 a function returning 1 as the last command inside a `$( )` fires the inherited ERR trap even when the substitution is an `if` condition — ~2,500 `script_error` rows a day on a 9-bot fleet (measured 2026-09-03/04; the keepalive reaper carried the same class), all `non-zero exit at line 387`, registered critical and now landing on the plane. `|| true` inside the substitution, the printed state tested instead of the status; pinned with the two shapes under the real trap installer.
+
 ### Added — cutover Phase B1: the bot-events ledger moves to the plane as a direct move (#1444)
 
 - Follow-up from the first deploy: every fleet job unit carries `PLANE_EMIT_ENABLED` when the tier arms it (a timer unit sources no `.env`, and any script that sources lib-common can land a fleet event — the ERR trap alone; fleet-pulse, the fleet's main emitter, composed with the shadow and read flags but not this one), and `emit_fleet_event` names its fleet from `FLEET_NAME` or the units' `CLAUDLOBBY_FLEET` (the pair `resolve_bots_dir` reads) — measured: a whole sweep's fleet events reached only the JSONL.

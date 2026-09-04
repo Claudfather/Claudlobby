@@ -384,7 +384,14 @@ for bot_dir in "$BOTS_DIR"/*/; do
         # Grace is env-overridable now; fleet.yaml exposure + composer emission
         # are deferred to the observability-config (system-defaults) tier.
         _bridge_grace=$(bot_conf_get "$bot_dir" OBSERVABILITY_BRIDGE_DOWN_GRACE 300)
-        if _bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace"); then
+        # `|| true` INSIDE the substitution: bridge_down_state returns 1 on
+        # every HEALTHY bot (up, in grace, no handle) and prints only when the
+        # bridge is actionably down, and on bash 3.2 a non-zero substitution
+        # inside an `if` still fires the inherited ERR trap — one phantom
+        # `script_error` per live bot per sweep, ~2,500 a day on a 9-bot fleet
+        # (measured 2026-09-03/04; the keepalive reaper carried the same class).
+        _bridge_st=$(bridge_down_state "$bot_dir" "$_bridge_grace" || true)
+        if [ -n "$_bridge_st" ]; then
             emit_fleet_event "bridge_down" "pulse" '{"state":"'"$_bridge_st"'"}' "$bot_dir" "$bot_id"
             debounce_notify "$state_dir" "$bot_id" "bridge_alerted" _notify_current_bot \
                 "$bot_id bridge_down — Telegram bridge '$_bridge_st' (live session, poller not delivering)" "$_mgr_token" "$_RENOTIFY_AFTER_S"
