@@ -215,6 +215,39 @@ def test_import_apply_lands_a_status_bearing_row_and_reruns_as_duplicates(tmp_pa
     assert apply_import(root, plan) == {"committed": 0, "duplicate": 6, "spooled": 0}
 
 
+def test_import_fits_an_over_cap_summary_instead_of_refusing_the_report(tmp_path):
+    """A legacy report whose summary exceeds the task family's 4096-byte cap
+    is IMPORTED — the summary cut on a UTF-8 boundary with the cut disclosed
+    in its tail, the communication body (cap 16384) carrying the full text —
+    rather than refused as `invalid` (measured: 15 of the data fleet's 47
+    reports were long review verdicts the contracts refused)."""
+    from claudlobby.plane.legacy_import import fit_to_cap
+    from claudlobby.plane.registries import cap_for
+    root = _root(tmp_path)
+    _live_dispatch(root, "a", "t-1-aaaa", ts="2026-08-28T15:53:33Z")   # go-live, as _ledgers
+    dlog = tmp_path / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "report-back.jsonl"
+    long = ("VERDICT: merge — " + "é" * 2600)          # 5,217 bytes, multibyte
+    assert len(long.encode("utf-8")) > cap_for("task", "summary")
+    _write(dlog, [_drow("2026-08-28T00:47:02Z", "t-0-0000")])
+    _write(rlog, [_rrow("2026-08-28T03:00:00Z", "t-0-0000", "completed", summary=long)])
+    with _ro(root) as conn:
+        plan = plan_import(conn, fleet=F, dispatch_path=dlog, report_path=rlog, now=NOW)
+    assert plan.invalid == [] and plan.reports == 1
+    task = [e for e in plan.events if e["event_type"] == "task"][0]["payload"]
+    comm = [e for e in plan.events if e["event_type"] == "communication"
+            and e["payload"].get("message_class") == "report"][0]["payload"]
+    assert len(task["summary"].encode("utf-8")) <= cap_for("task", "summary")
+    assert task["summary"].endswith("bytes]") and "plane-import: cut at 4096 of 5217 bytes" in task["summary"]
+    assert task["summary"].startswith("VERDICT: merge — ")
+    assert comm["body"] == long                     # under the body cap: untouched
+    # the helper is boundary-safe and a no-op under cap
+    assert fit_to_cap("short", "task", "summary") == "short"
+    assert "\ufffd" not in fit_to_cap("é" * 5000, "task", "summary")
+    # and the batch lands
+    assert apply_import(root, plan)["committed"] == 6
+
+
 def test_import_attributes_by_the_report_ledger_only(tmp_path):
     root = _root(tmp_path)
     dlog, rlog = _ledgers(tmp_path, root)

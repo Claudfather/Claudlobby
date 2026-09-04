@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Optional
 
 from .contracts import ContractViolation
+from .registries import cap_for
 from .emit_api import validate_item
 from .ids import derive_hex
 from .queries import LATEST_ASSIGNMENT_BY_REF_SQL, OPEN_ASSIGNMENTS_BY_REF_SQL
@@ -183,6 +184,25 @@ def dispatch_events(row: LegacyRow, fleet: str, manager: str,
     return {"wi": wi, "asg": asg, "msg": msg}, events
 
 
+def fit_to_cap(text: str, family: str, field: str) -> str:
+    """A legacy row's text FITTED to the contract's byte cap for the field.
+    The contracts REJECT authored content over cap — right at emit time, where
+    an over-cap field is a caller bug to fix at the caller. A legacy row is
+    history, not a caller: nothing can be fixed upstream of it, and a refused
+    unit is a report the plane never holds (measured on the data fleet's
+    ledger: 15 of 47 reports refused, every one a long review verdict). So
+    the importer cuts on a UTF-8 boundary and says so in the tail — the cut
+    is DISCLOSED in the text itself, since the task family carries no
+    truncation flag — and never lets an over-cap row abort the batch."""
+    cap = cap_for(family, field)
+    raw = text.encode("utf-8")
+    if len(raw) <= cap:
+        return text
+    marker = f"\n… [plane-import: cut at {cap} of {len(raw)} bytes]"
+    keep = raw[:cap - len(marker.encode("utf-8"))].decode("utf-8", errors="ignore")
+    return keep + marker
+
+
 def report_events(row: LegacyRow, fleet: str, wi: str, asg: str,
                   recipient: Optional[str], batch: str) -> Optional[list[dict]]:
     """A report's communication + task event (+ the anomaly it recorded).
@@ -203,11 +223,11 @@ def report_events(row: LegacyRow, fleet: str, wi: str, asg: str,
     if recipient:
         comm_p["recipient"] = recipient
     if r.get("summary"):
-        comm_p["body"] = str(r["summary"])
+        comm_p["body"] = fit_to_cap(str(r["summary"]), "communication", "body")
     task_p: dict = {"work_item_id": wi, "assignment_id": asg, "event": event,
                     "actor": actor}
     if r.get("summary"):
-        task_p["summary"] = str(r["summary"])
+        task_p["summary"] = fit_to_cap(str(r["summary"]), "task", "summary")
     if r.get("pr_url"):
         task_p["pr_url"] = str(r["pr_url"])
     try:
