@@ -138,6 +138,22 @@ _RETRYABLE_MESSAGES = (
 )
 
 
+# The CONTENTION subset of the retryable classes: a lock another writer holds
+# right now, which a short in-process pause resolves. Every other retryable
+# class (readonly, I/O, full, cannot-open) is an infrastructure fault and
+# spools at once — a pause would only delay the record.
+TRANSIENT_LOCK_CODES = frozenset({5, 6})          # SQLITE_BUSY, SQLITE_LOCKED
+_TRANSIENT_LOCK_MESSAGES = ("database is locked", "database table is locked")
+
+
+def is_transient_lock(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code is not None:
+        return (code & 0xFF) in TRANSIENT_LOCK_CODES
+    msg = str(exc).lower()
+    return any(m in msg for m in _TRANSIENT_LOCK_MESSAGES)
+
+
 def is_retryable(exc: sqlite3.OperationalError) -> bool:
     """Whitelist by SQLite primary error code; when no code exists (3.10 or a
     synthetic exception), fall back to message-matching the known infra

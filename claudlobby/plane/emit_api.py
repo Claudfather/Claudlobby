@@ -35,7 +35,7 @@ from .db import connect, db_path
 from .ids import ensure_host_uid, mint_event_id
 from .ingest import ingest_many
 from .migrations import DowngradeError, migrate
-from .spool import SpoolWriteError, is_retryable, spool_write
+from .spool import SpoolWriteError, is_retryable, is_transient_lock, spool_write
 
 
 @dataclass(frozen=True)
@@ -231,16 +231,18 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
             # — OperationalError but equally bugs — propagate loudly too.
             if not is_retryable(exc):
                 raise
-            # A retryable lock is RETRIED in-process before it is spooled: two
+            # A transient LOCK is RETRIED in-process before it is spooled: two
             # first emitters on a brand-new plane race the WAL switch and the
             # first migration, a case SQLite refuses to wait on (a would-be
             # deadlock returns BUSY at once, busy_timeout or not), and the
             # loser's whole batch went to the spool — measured 3 of 10 pairs
             # (Phase B: a door's detached fleet event beside its own emission
             # is exactly that pair). The transaction rolled back, so a retry
-            # re-ingests nothing twice; the spool stays the last resort.
+            # re-ingests nothing twice. Only contention is retried: a readonly
+            # / I/O / full / cannot-open fault spools at once, as before — the
+            # spool is the record for those, and a pause would only delay it.
             attempt += 1
-            if attempt < LOCK_RETRY_ATTEMPTS:
+            if is_transient_lock(exc) and attempt < LOCK_RETRY_ATTEMPTS:
                 time.sleep(LOCK_RETRY_BACKOFF_S * attempt)
                 continue
             # The spool stores the policy-applied envelope, never a fuller body (§11).
