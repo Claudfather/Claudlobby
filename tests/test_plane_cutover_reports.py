@@ -250,12 +250,28 @@ def test_who_reviewed_auto_joins_the_plane_with_the_unretired_ledgers_and_dedupe
     rc = who.main(["o/r", "46", "--reviews-json", str(p46), "--root", str(root), "--json"])
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["events"][0]["verdict"] == "MATCH" and out["events"][0]["bot"] == "w1", out["events"][0]
+    # the same report from the plane AND f's own ledger is ONE candidate: the
+    # ambiguity rule already collapses same-bot duplicates, but a doubled
+    # candidate list still misleads whoever reads the basis (and the row count)
+    assert len(out["events"][0]["candidates"]) == 1 and out["scope"]["rows"] == 2, out["events"][0]["candidates"]   # w1's pr row once + g's; the scene's pr-less completion is not a plane row
     assert out["scope"]["source"] == "auto" and "f" in out["scope"]["fleets"] and "g" in out["scope"]["fleets"]
     assert "plane" not in out["scope"]                                               # reachable: no disclosure
     p47 = _payload(tmp_path / "p47.json", "2026-09-03T09:00:03Z")
     who.main(["o/r", "47", "--reviews-json", str(p47), "--root", str(root), "--json"])
     out = json.loads(capsys.readouterr().out)
     assert out["events"][0]["verdict"] == "MATCH" and out["events"][0]["bot"] == "v1"   # the unretired ledger still joins
+    # the dedupe itself: an explicit --ledger names f's file even though f is
+    # retired, so the same report reaches the join from BOTH sides — one
+    # candidate, never two (the unit, pinned beside the door)
+    who.main(["o/r", "46", "--reviews-json", str(p46), "--root", str(root), "--json",
+              "--ledger", str(report_ledger_path(paths))])
+    out = json.loads(capsys.readouterr().out)
+    assert out["events"][0]["verdict"] == "MATCH" and len(out["events"][0]["candidates"]) == 1
+    both = [{"_fleet": "f", "bot": "w1", "ts": "2026-09-02T12:00:00Z", "_ledger": "/x"},
+            {"_fleet": "f", "bot": "w1", "ts": "2026-09-02T12:00:00.4+00:00", "_ledger": "plane"},
+            {"_fleet": "f", "bot": "w1", "ts": "2026-09-02T12:00:01Z", "_ledger": "/x"}]
+    kept = who.dedupe_rows(both)
+    assert [(k["ts"], k["_ledger"]) for k in kept] == [("2026-09-02T12:00:00.4+00:00", "plane"), ("2026-09-02T12:00:01Z", "/x")]
     _drop_plane(root)
     who.main(["o/r", "46", "--reviews-json", str(p46), "--root", str(root), "--json"])
     out = json.loads(capsys.readouterr().out)
