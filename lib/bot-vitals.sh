@@ -43,15 +43,15 @@ today=$(date +%Y-%m-%d)
 outfile="$events_dir/fleet-${today}.jsonl"
 
 # --- Parse payload and emit event(s) ---
-# Single python3 call: parse payload, classify event type, emit JSONL.
-# Values passed via env to avoid shell injection.
-BOT_ID_VAL="$bot" \
-TS_VAL="$ts" \
+# Single python3 call: parse payload, classify event type, print one
+# `<type>\t<data-json>` line per event; every line then goes through the ONE
+# fleet-event door (cutover B2: emit_fleet_event lands it on the plane with
+# provenance, alias-anchored, and the JSONL append retires with the family —
+# this script printed straight into fleet-<day>.jsonl before, so its rows were
+# invisible to `claudlobby events` from the flip on). Values passed via env to
+# avoid shell injection.
 python3 -c "
-import json, os, sys
-
-ts = os.environ['TS_VAL']
-bot = os.environ['BOT_ID_VAL']
+import json, sys
 
 try:
     p = json.loads(sys.stdin.read())
@@ -65,10 +65,7 @@ session = p.get('session_id', '')
 events = []
 
 def evt(etype, data):
-    events.append(json.dumps(
-        {'ts': ts, 'bot': bot, 'type': etype, 'source': 'vitals', 'data': data},
-        separators=(',', ':'),
-    ))
+    events.append(etype + '\t' + json.dumps(data, separators=(',', ':')))
 
 # Always emit a tool_call event for any hook invocation with a tool name
 if tool:
@@ -92,7 +89,10 @@ if session_event:
 # Print all events, one per line
 for e in events:
     print(e)
-" <<< "$payload" >> "$outfile" 2>/dev/null || true
+" <<< "$payload" 2>/dev/null | while IFS=$'\t' read -r _etype _edata; do
+    [ -n "$_etype" ] || continue
+    emit_fleet_event "$_etype" vitals "$_edata" "${BOT_DIR:-${PWD}}" "$bot" || true
+done
 
 # --- Activity marker ---
 # Touch a marker file on every tool-call hook invocation. fleet-pulse.sh reads

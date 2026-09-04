@@ -452,6 +452,47 @@ def task_texts(conn: sqlite3.Connection, fleet: str, bot: str) -> dict[str, str]
             if _task_id(ref)}
 
 
+# --- keepalive entries (cutover B2): what `claudlobby uptime` reads ---------------
+# The keepalive.log's (instant, state) pairs from the plane: the heartbeat
+# samples the tick emits (BUSY / IDLE / UNKNOWN in the sample's value), the
+# dead-session fact (`bot.session_up` = false → DOWN, which counts as no
+# uptime like the log's gap), and the RESTART transitions the tick lands as
+# `keepalive_restart` fleet events. The alias is matched case-insensitively
+# (the tick's BOT_NAME vs the directory name uptime keys on).
+HEARTBEAT_ENTRIES_SQL = (
+    "SELECT m.occurred_at, m.metric, m.value FROM metric_samples m"
+    " JOIN identity_registry i ON i.uid = m.subject_uid"
+    " WHERE lower(i.alias) = lower(?) AND m.metric IN ('bot.heartbeat', 'bot.session_up')"
+    " AND m.occurred_at >= ? ORDER BY m.occurred_at, m.ingest_seq"
+)
+RESTART_EVENTS_SQL = (
+    "SELECT e.occurred_at FROM events e WHERE e.kind = 'system' AND e.event = 'keepalive_restart'"
+    " AND e.source_ref LIKE 'fleet-events:%' AND lower(e.subject_alias) = lower(?) AND e.occurred_at >= ?"
+)
+
+
+def keepalive_entries(conn: sqlite3.Connection, fleet: str, bot: str,
+                      since: Optional[str]) -> list[tuple[str, str]]:
+    """[(occurred_at, state)] for one bot since *since*, oldest first — the
+    log's line pairs, from the plane."""
+    alias = f"bot:{fleet}/{bot}"
+    since = since_form(since) or ""
+    out: list[tuple[str, str]] = []
+    for at, metric, value in conn.execute(HEARTBEAT_ENTRIES_SQL, (alias, since)):
+        if metric == "bot.session_up":
+            state = "DOWN"
+        else:
+            try:
+                state = (json.loads(value) if value else {}).get("state") or "UNKNOWN"
+            except ValueError:
+                state = "UNKNOWN"
+        out.append((at, state))
+    for (at,) in conn.execute(RESTART_EVENTS_SQL, (alias, since)):
+        out.append((at, "RESTART"))
+    out.sort()
+    return out
+
+
 def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_threshold: int = 0,
                     at: Optional[str] = None) -> dict[str, tuple[int, int, str, str]]:
     """The legacy ``unassigned_all`` shape — {bot: (reported_at, idle_seconds,

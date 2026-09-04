@@ -91,6 +91,14 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     "bot_teardown_started": "notice",
     "handoff_skipped": "notice",
     "fleet_rescue": "notice",
+    # cutover B2 — the keepalive tick's transitions and the vitals hook, through
+    # the fleet-event door (the per-tick verdicts ride the heartbeat sample)
+    "keepalive_restart": "notice",
+    "bridge_heal": "notice",
+    "keepalive_skip": "notice",
+    "keepalive_reload": "notice",
+    "tool_call": "notice",
+    "session_event": "notice",
 }
 
 # ---------------------------------------------------------------------------
