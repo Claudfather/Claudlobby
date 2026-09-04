@@ -78,7 +78,11 @@ def test_the_plane_renders_the_registry_the_door_wrote_under_dual_write(tmp_path
     ws_a = a.stdout.strip()
     b = _ws(root, "open", "A second one"); ws_b = b.stdout.strip()
     assert _ws(root, "progress", ws_a, "--next", "second cut").returncode == 0
-    assert _ws(root, "renew", ws_a, "--note", "still on it").returncode == 0
+    # a DIFFERENT lease on the renew: the renewal's own instant (renewed_until) must
+    # be what the plane renders, not the last progress plus the fleet's lease —
+    # the two coincide to the second when both verbs run in one second (a
+    # mutant dropping the renewal survived the first pin)
+    assert _ws(root, "renew", ws_a, "--note", "still on it", WORKSTREAM_LEASE_DAYS="30").returncode == 0
     assert _ws(root, "block", ws_a, "--note", "waiting on review").returncode == 0
     assert _ws(root, "close", ws_b, "--status", "done").returncode == 0
     assert _ws(root, "prune").returncode == 0                                   # b archived and dropped from the file
@@ -95,6 +99,7 @@ def test_the_plane_renders_the_registry_the_door_wrote_under_dual_write(tmp_path
     assert mine["status"] == "blocked" and mine["next"] == "waiting on review"
     assert [r["note"] for r in theirs["renewals"]] == ["still on it"]
     assert theirs["lease_expires_ts"] == mine["lease_expires_ts"]                # the renewal's own instant
+    assert theirs["lease_expires_ts"] > pr._plus_days(mine["last_progress_ts"], 14)   # and not progress + the default lease
     assert plane_reg["updated"] >= mine["last_progress_ts"]
 
 

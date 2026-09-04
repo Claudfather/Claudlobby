@@ -396,7 +396,9 @@ prune)
             *) _die "prune: unknown arg: $1" ;;
         esac
     done
-    [ -n "$ARCHIVE" ] || ARCHIVE="$(dirname "$REGISTRY")/workstreams-archive.jsonl"
+    # beside the REAL registry, never the materialized temp (the R3 mutant hid
+    # there: an archive appended into the temp dir under the retirement)
+    [ -n "$ARCHIVE" ] || ARCHIVE="$(dirname "$WS_REAL_REGISTRY")/workstreams-archive.jsonl"
     _prune_ws() {
         _init_registry
         local terminal tmp
