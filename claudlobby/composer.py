@@ -3890,7 +3890,7 @@ FLEET_JOB_ARMING: dict[str, tuple[str, ...]] = {
     # stamp the bridge could never arm from a timer) and the chunk-5 flip of
     # its overdue reader (PLANE_READ_OVERDUE — per reader, never one
     # fleet-wide flag). The one genuinely multi-flag job.
-    "fleet-pulse": ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED"),
+    "fleet-pulse": ("PLANE_SHADOW_ENABLED", "PLANE_READ_OVERDUE", "PLANE_READ_UNASSIGNED", "PLANE_READ_EVENTS"),
 }
 
 # The cutover read flags also need a SESSION carrier: start-bot.sh exports

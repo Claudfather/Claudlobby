@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -20,6 +22,51 @@ CRITICAL_TYPES = {
     "restart_failed",
     "rc_timeout",
 }
+
+
+def plane_events_conn(paths):
+    """(conn, note): an OPEN read-only plane connection when the events reader
+    is flipped — PLANE_READ_EVENTS=1 AND a recorded `cutover_declared` for
+    `events`, the two facts every flipped reader needs — else (None, a note
+    or None). ONE open: the declaration check and the read share it (the
+    dispatch matcher's measured fold). Raises RuntimeError when the flag is
+    set and the plane cannot be reached: refused, never read as quiet (Phase
+    B — after the retirement the files hold nothing). The caller closes."""
+    if os.environ.get("PLANE_READ_EVENTS", "0") != "1":
+        return None, None
+    from ..plane import cutover as _cut
+    from ..plane.db import open_ro
+    fleet = paths.fleet_name
+    if not fleet:
+        return None, "PLANE_READ_EVENTS=1 but no fleet is named — serving the ledgers"
+    conn, why = open_ro(paths.root)
+    if conn is None:
+        raise RuntimeError(f"PLANE_READ_EVENTS=1 but the plane is unreachable: {why}")
+    if "events" not in _cut.declared(conn, fleet):
+        conn.close()
+        return None, (f"PLANE_READ_EVENTS=1 but no cutover_declared for {fleet}/events — the flip is"
+                      f" not declared; serving the ledgers (`claudlobby --fleet {fleet} plane cutover --reader events`)")
+    return conn, None
+
+
+def collect_plane_events(conn, paths, *, bot=None, event_type=None, source=None,
+                         critical_only=False, since=None) -> list[dict]:
+    """The fleet's events from the plane as legacy rows — the same filters and
+    row shape as `collect_events`, through the stdlib readers the bash doors
+    ship (one row rendering; critical = the severity the registry stamped at
+    ingest, one definition). A plane that cannot answer (no identity for the
+    fleet, a db error) raises RuntimeError — the caller's refusal."""
+    from ..brief import load_lib_module
+    pr = load_lib_module(paths, "plane-readers.py")
+    if pr is None:
+        raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
+    try:
+        rows = pr.fleet_events(conn, paths.fleet_name, since=since, bot=bot, event_type=event_type)
+    except (pr.PlaneUnreachable, sqlite3.Error) as exc:
+        raise RuntimeError(str(exc)) from exc
+    return [pr.public(r) for r in rows
+            if (not source or r.get("source") == source)
+            and (not critical_only or r.get("_severity") == "critical")]
 
 
 def collect_events(
@@ -227,15 +274,32 @@ def cmd_events(args) -> int:
         return 1
 
     coverage: dict = {}
-    events = collect_events(
-        bots_dir,
-        bot=args.bot,
-        event_type=args.type,
-        source=args.source,
-        critical_only=args.critical,
-        fleet_events_dir=paths.root / "state" / "events",
-        coverage=coverage,
-    )
+    try:
+        conn, note = plane_events_conn(paths)
+    except RuntimeError as exc:
+        print(f"claudlobby events: UNREACHABLE — {exc}", file=sys.stderr)
+        return 3
+    if note:
+        print(f"claudlobby events: {note}", file=sys.stderr)
+    if conn is not None:
+        try:
+            events = collect_plane_events(conn, paths, bot=args.bot, event_type=args.type,
+                                          source=args.source, critical_only=args.critical)
+        except RuntimeError as exc:
+            print(f"claudlobby events: UNREACHABLE — {exc}", file=sys.stderr)
+            return 3
+        finally:
+            conn.close()
+    else:
+        events = collect_events(
+            bots_dir,
+            bot=args.bot,
+            event_type=args.type,
+            source=args.source,
+            critical_only=args.critical,
+            fleet_events_dir=paths.root / "state" / "events",
+            coverage=coverage,
+        )
 
     if args.json:
         for ev in events:

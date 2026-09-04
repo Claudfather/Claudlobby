@@ -55,8 +55,43 @@ SYSTEM_EVENT_SEVERITY: dict[str, str] = {
     # cutover chunk 7a — a report whose status reached no task event (a terminal
     # note that resolved nothing): the status the idle-worker check reads.
     "report_status": "notice",
+    # cutover Phase B — the bot-events ledger (data/events/fleet-*.jsonl) on the
+    # plane: every `emit_fleet_event` type the estate emits, registered with the
+    # severity `claudlobby events`' CRITICAL_TYPES implies (critical pages the
+    # operator through fleet-pulse's escalation; notice is the record). An
+    # unregistered type still ingests with NULL severity (F19).
+    "session_missing": "critical",
+    "service_down": "critical",
+    "activity_stuck": "critical",
+    "script_error": "critical",
+    "overdue_dispatch": "critical",
+    "bridge_down": "critical",
+    "reload_failed": "critical",
+    "restart_failed": "critical",
+    "rc_timeout": "critical",
+    "alert_delivery_failed": "notice",
+    "dispatch_orphaned": "notice",
+    "worker_unassigned": "notice",
+    "pane_stuck": "notice",
+    "wip_uncommitted": "notice",
+    "send_miss": "notice",
+    "send_retry": "notice",
+    "send_blind": "notice",
+    "send_blind_recovered": "notice",
+    "resume_skipped": "notice",
+    "plugin_marketplace_failed": "notice",
+    "briefing_deferred": "notice",
+    "briefing_dispatched": "notice",
+    "briefing_failed": "notice",
+    "audit_selected": "notice",
+    "audit_dispatched": "notice",
+    "audit_deferred": "notice",
+    "audit_failed": "notice",
+    "sweep_repo_unreachable": "notice",
+    "bot_teardown_started": "notice",
+    "handoff_skipped": "notice",
+    "fleet_rescue": "notice",
 }
-
 
 # ---------------------------------------------------------------------------
 # Phase 2b: the metric-name registry (§9b MetricSample — open registry,

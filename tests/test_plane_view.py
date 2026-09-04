@@ -373,7 +373,8 @@ def test_healthz_ok_is_one_envelope_with_summary(tmp_path):
     r = TestClient(create_app(tmp_path)).get("/healthz")
     assert r.status_code == 200
     data = r.json()["data"]
-    assert data["schema_user_version"] == 8
+    from claudlobby.plane.migrations import SCHEMA_USER_VERSION
+    assert data["schema_user_version"] == SCHEMA_USER_VERSION
     assert "counts" in data and "spool_files" in data
     assert "corrective" in data
 

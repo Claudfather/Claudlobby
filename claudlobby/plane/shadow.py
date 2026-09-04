@@ -99,7 +99,14 @@ READER_OPEN_TASK = "open_task"
 # The idle-worker check (chunk 7a): a set of bots, compared like the lists.
 READER_UNASSIGNED = "unassigned"
 FLEET_BOT = "_fleet"            # the record's bot slot for a fleet-level reader
-GATED = READERS + (READER_OPEN_TASK, READER_UNASSIGNED)
+# The bot-events ledger's readers (Phase B) move DIRECTLY under the hard-flip
+# ruling: declarable, flag-gated, never shadowed (no per-reader comparison).
+READER_EVENTS = "events"
+GATED = READERS + (READER_OPEN_TASK, READER_UNASSIGNED, READER_EVENTS)
+UNSHADOWED = (READER_EVENTS,)
+# The recorded reason for an unshadowed reader's declaration (no streaks
+# exist to meet): the operator's ruling, applied where the record is built.
+DIRECT_MOVE_REASON = "direct move (Phase B, no shadow) — operator ruling 2026-09-03"
 GATE_HEAD_CLEAN_RUN = 200
 # The bar per reader, ONE registry (a Streak reads its bar from its reader,
 # never from settable state): the list readers' 20, the resolver's 200.
@@ -724,7 +731,7 @@ def gate_summary(conn: sqlite3.Connection, fleet: str,
     ``source_state`` class."""
     bots = sorted((set(roster or []) | set(shadowed_bots(conn, fleet))) - {FLEET_BOT})
     out = [head_streak(conn, fleet, b) if r == READER_OPEN_TASK else streak(conn, fleet, b, r)
-           for b in bots for r in readers if r != READER_UNASSIGNED]
+           for b in bots for r in readers if r not in (READER_UNASSIGNED,) + UNSHADOWED]
     if READER_UNASSIGNED in readers:
         out.append(streak(conn, fleet, FLEET_BOT, READER_UNASSIGNED))   # one streak per fleet
     return out

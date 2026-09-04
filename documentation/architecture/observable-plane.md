@@ -166,12 +166,17 @@ recorded state machine:
    nothing. `plane doctor` carries the rung; `lib/plane-shadow-check.py` is
    the watchdog's question (the fleet-pulse bridge pages a diverged latest
    comparison).
-3. **Declare.** `plane cutover --reader open|overdue|open_task` refuses unless
-   the gate is met on every declared bot (`--force <reason>` records the
-   reason instead) and lands `cutover_declared`, anchored on the fleet's
-   identity. A flip is TWO facts: this declaration AND the flag.
+3. **Declare.** `plane cutover --reader open|overdue|open_task|unassigned`
+   refuses unless the gate is met on every declared bot (`--force <reason>`
+   records the reason instead) and lands `cutover_declared`, anchored on the
+   fleet's identity. A flip is TWO facts: this declaration AND the flag.
+   `--reader events` is a DIRECT MOVE (Phase B, operator ruling 2026-09-03:
+   no backward compat, fix forward): no shadow exists for it, so it declares
+   without a gate and records the ruling as its reason (`shadowed: false`,
+   `gate_met: null`) rather than an empty streak list read as a met bar.
 4. **Flip.** `PLANE_READ_OPEN=1` / `PLANE_READ_OVERDUE=1` /
-   `PLANE_READ_OPEN_TASK=1` in the fleet `.env` tier; `generate` composes the
+   `PLANE_READ_OPEN_TASK=1` / `PLANE_READ_UNASSIGNED=1` / `PLANE_READ_EVENTS=1`
+   in the fleet `.env` tier; `generate` composes the
    armed flags into `bot.conf` (the session carrier — `start-bot.sh` exports
    `bot.conf` and sources the tiers WITHOUT export) and stamps them on the
    timer units that read the matcher (`FLEET_JOB_ARMING`). The matcher serves
@@ -179,8 +184,8 @@ recorded state machine:
    the JSONL keeps serving. An unreachable plane under a declared flip
    REFUSES (rc 3, empty stdout) — never a silent fallback — and the watchdog
    pages a refused reader. Rollback at this stage: the flag back to 0.
-5. **Retire the writes.** `PLANE_LEGACY_WRITE_DISPATCH` / `_REPORT` default
-   `1`; `plane cutover --retire-writes` refuses unless every reader is
+5. **Retire the writes.** `PLANE_LEGACY_WRITE_DISPATCH` / `_REPORT` /
+   `_EVENTS` default `1`; `plane cutover --retire-writes` refuses unless every reader is
    declared and records `legacy_write_retired` — retiring a write ENDS the
    shadow for the readers that read that ledger (`plane shadow` compare and
    record modes refuse afterwards; `--gate`/`--check` still read the
@@ -188,11 +193,42 @@ recorded state machine:
    says 0, the plane is armed, the retirement is recorded, and THAT
    emission succeeded (`PLANE_EMIT_LAST_RC`) — every other case writes the
    ledger and says why, because a dispatch or report must land somewhere.
-   Rollback: the flags back to 1. Still on the frozen ledger afterwards:
-   `dispatch-overdue.py --unassigned` (no plane path yet — named by the
-   door), the workstreams and briefing writes (their plane adapter is
-   unbuilt). `who-reviewed.py --source plane` keeps attribution alive off
-   the plane's task events.
+   Rollback: the flags back to 1. Every matcher reader (`--open`, `--all`,
+   `--orphans`, `--open-task`, `--unassigned`) follows its flip; still on a
+   frozen ledger afterwards: the workstreams and briefing writes (their
+   plane adapter is unbuilt). `who-reviewed.py --source plane` keeps
+   attribution alive off the plane's task events.
+
+**Phase B — the bot-events ledger** (`data/events/fleet-*.jsonl` per bot,
+`state/events/` for the fleet) moves as a direct move, no shadow.
+`emit_fleet_event` (lib-common, every script's door) lands each fleet event
+on the plane FIRST as a system event anchored on the bot's actor — or the
+fleet, for a fleet-level receipt — by ALIAS (resolved at ingest), stamped
+UTC, with the PROVENANCE `source_ref fleet-events:sha:<content key of the
+legacy line>` and the detail `{source, legacy_ts, data}` so the plane
+re-renders the legacy row byte for byte; every `emit_fleet_event` type is
+registered with the severity `CRITICAL_TYPES` implies (critical pages,
+notice records). The readers — `claudlobby events`, brief's alerts,
+fleet-pulse's escalation loop, summary and read-back — select fleet events
+by that provenance (never an event-name list) and serve the plane on
+`PLANE_READ_EVENTS` AND the `events` declaration (the bash readers ask
+`plane-lookup.py --declared events` and READ its rc; the rows come back
+through `plane-readers.fleet_events` / `escalation`, one row rendering for
+every reader, fleet-pulse in ONE read per window). An unreachable plane
+under the flag is a third state, never the files: `claudlobby events` rc 3,
+brief's alerts omitted with a `degraded[]` entry, fleet-pulse `not judged
+this pass` + a debounced page + `unknown` in the summary — after the
+retirement the files hold nothing, so a fallback would read an outage as a
+quiet fleet. The JSONL append retires behind `PLANE_LEGACY_WRITE_EVENTS=0`
+on the same four facts as the other doors, the retirement having to NAME
+the door (`--retire-writes` extends a chunk-6b record that predates it).
+The door never holds a hot path: under dual-write its plane emission is
+detached (reaped at the keepalive tick's bound, the presence emit's shape),
+under the retirement it is waited on only to `FLEET_EVENT_EMIT_TIMEOUT_S`
+(a reaped emission is "not recorded" and the ledger is written). Still on their own files: `keepalive.sh`'s
+`keepalive-*.jsonl` and `bot-vitals.sh`'s rows (they never went through
+`emit_fleet_event`) — Phase B2's readers (`uptime`, `bot-vitals`, `tail-fleet`,
+`data-sweep`) decide those with them.
 
 `plane parity` is the reconciliation door (matched / pre-go-live / unstamped /
 stamped-lost per row, with the multiplicity a report legitimately has) and
@@ -214,7 +250,7 @@ is the one definition of "resolves to 1".
 `plane doctor` / `plane registry` / `plane prune` / `plane expire` / `spool retry`. 0001 kernel · 0002 task-status index · 0003/0004
 the fleet room · 0005 FTS · 0006 the registry lane · 0007 `assignments(source_ref)`
 (the legacy join) · 0008 `events(actor_uid, occurred_at)` (progress grace, the
-resolver's guard). A newer db refuses older code (rc 4), never downgrades.
+resolver's guard) · 0009 `events(fleet_uid, occurred_at) WHERE kind='system'` (Phase B: the fleet-events readers and the escalation window). A newer db refuses older code (rc 4), never downgrades.
 
 **Retention** — `plane prune` ages `metric_samples` past 30 days by
 `ingested_at` (the incident-join window); nothing else is ever deleted; no

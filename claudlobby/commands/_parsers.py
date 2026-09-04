@@ -523,8 +523,8 @@ def register_subparsers(sub) -> None:
                       help="Chunk 6b: declare the legacy JSONL writes retired (dispatch-log +"
                       " report-back) — refuses unless every reader is declared; records"
                       " legacy_write_retired; prints the PLANE_LEGACY_WRITE_*=0 lines")
-    pcut.add_argument("--reader", choices=("open", "overdue", "open_task", "unassigned"), default=None,
-                      help="Which reader flips: the open list, the watchdog's overdue set, or the"
+    pcut.add_argument("--reader", choices=("open", "overdue", "open_task", "unassigned", "events"), default=None,
+                      help="Which reader flips (events = a direct move, no gate): the open list, the watchdog's overdue set, or the"
                       " resolver (--open-task; its bar is 200 agreeing heads + a head change)")
     pcut.add_argument("--force", default="",
                       help="Declare despite a short gate; the reason is recorded in the event")
