@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed — Phase C follow-ups from the live flip: the events write retires for timer-run and hand-run doors too; the handoff's phantom (#1444)
 
 - The composer stamps every `PLANE_LEGACY_WRITE_*` flag that resolves to `0` on EVERY fleet job unit (beside the emission flag): a timer-run door reads the unit's env, and fleet-pulse kept dual-writing its events JSONL from the timer after the sessions had retired theirs (measured after the flip). `emit_fleet_event` reads the write flag from the FLEET TIER when the env carries none (`plane_fleet_tier_value`, through the restricted parser — never sourced): a hand-run script (rolling-restart's `pre-stop-handoff.sh`) carried no flags and wrote eight lines per bot in the restart window.
+- `plane_write_retired` names the fleet from `FLEET_NAME` or the units' `CLAUDLOBBY_FLEET` (the pair every fleet-scoped door reads): with the stamp in place the fleet-pulse timer STILL wrote six legacy lines per sweep, because the retirement lookup ran with an empty `--fleet` from a timer and the door wrote 'just in case' — measured after the flip, pinned.
 - `pre-stop-handoff.sh`: `session_command_status` returns 1 for an absent provider, and the `if _x=$( )` shape fired the bash-3.2 ERR trap — one phantom `script_error` per bot per restart (the #1460 class); the status is captured with `|| true` and tested by value.
 
 ### Fixed — a healthy bridge check no longer fires a phantom `script_error` per live bot per sweep

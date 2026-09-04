@@ -176,6 +176,29 @@ def test_a_timer_run_door_names_its_fleet_from_the_units_carrier(tmp_path):
         assert conn.execute("SELECT subject_alias FROM events WHERE event = 'pane_stuck'").fetchone()[0] == f"bot:{F}/w1"
 
 
+def test_a_timer_run_door_honours_the_retirement_through_the_units_carrier(tmp_path):
+    """Phase C, found live AFTER the stamps landed: the fleet-pulse unit carried
+    PLANE_LEGACY_WRITE_EVENTS=0 and CLAUDLOBBY_FLEET, yet every sweep still
+    wrote six legacy lines — the retirement predicate looked the record up
+    under FLEET_NAME alone, so from a timer the lookup was refused (an empty
+    --fleet) and the door wrote 'just in case'. The predicate reads the same
+    pair the door does."""
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    ledger = bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl"
+    for reader in sh.GATED:
+        _declare(root, reader)
+    assert _cli(root, "cutover", "--retire-writes").returncode == 0
+    env = _door_env(root, CLAUDLOBBY_FLEET=F, PLANE_LEGACY_WRITE_EVENTS="0")
+    env.pop("FLEET_NAME")
+    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event pane_stuck pulse \'{{"s":1}}\' "{bot_dir}" w1'],
+                       capture_output=True, text=True, timeout=180, env=env)
+    assert r.returncode == 0 and "legacy write retired" in r.stderr, r.stderr
+    assert "for ? that covers" not in r.stderr                                # the fleet is named, never '?'
+    assert not ledger.exists()                                                # retired: nothing written
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'pane_stuck'", 1) == 1
+
+
 def test_a_hand_run_door_reads_the_write_flag_from_the_fleet_tier(tmp_path):
     """Phase C, found live: rolling-restart's pre-stop-handoff runs from an
     operator shell with no carrier, and wrote eight legacy lines per bot in
