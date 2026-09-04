@@ -114,8 +114,12 @@ def main(argv=None) -> int:
     ap.add_argument("--since", default=None,
                     help="an ISO instant; a naive one is the host's local clock (fleet-pulse's window)")
     ap.add_argument("--type", default=None)
-    ap.add_argument("--door", default=None, choices=("dispatch", "report", "events"),
+    ap.add_argument("--door", default=None, choices=("dispatch", "report", "events", "workstreams"),
                     help="with --retired: the retirement must name this door's flag")
+    ap.add_argument("--workstreams", action="store_true",
+                    help="print the fleet's workstream registry JSON from the plane (needs --fleet;"
+                    " --lease-days for a never-renewed lease) — cutover A2, the door's read side")
+    ap.add_argument("--lease-days", type=int, default=14)
     ap.add_argument("--fleet", default=None)
     ap.add_argument("--bot", default=None)
     a = ap.parse_args(argv)
@@ -128,6 +132,15 @@ def main(argv=None) -> int:
         if not (a.fleet and a.bot):
             ap.error("--open-idless needs --fleet and --bot")
         return _open_idless(a)
+    if a.workstreams:
+        if not a.fleet:
+            ap.error("--workstreams needs --fleet")
+
+        def fn(pr, conn):
+            print(json.dumps(pr.workstream_registry(conn, a.fleet, lease_days=a.lease_days),
+                             separators=(",", ":"), sort_keys=True))
+            return 0
+        return _with_plane(a.root, fn)
     if a.events or a.escalation:
         if not a.fleet:
             ap.error("--events / --escalation need --fleet")

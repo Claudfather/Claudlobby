@@ -744,7 +744,14 @@ def _workstream_section(
     (``lib/workstream-update.sh:249`` is explicit that renew does not advance
     progress), which is exactly the state worth surfacing.
     """
-    workstreams = load_workstreams(paths)
+    from .workstreams import plane_workstreams
+    served, note = plane_workstreams(paths)          # cutover A2: the plane once the write is retired
+    if note:
+        if "cannot answer" in note:
+            degraded.append(Degradation(field="workstreams", mode="omitted", reason=note, issue="#1444"))
+            return {}
+        degraded.append(Degradation(field="workstreams", mode="labeled", reason=note, issue="#1444"))
+    workstreams = served if served is not None else load_workstreams(paths)
 
     # An empty result has two very different causes and load_workstreams cannot
     # distinguish them: a genuinely empty registry, or one whose JSON failed to
@@ -752,7 +759,7 @@ def _workstream_section(
     # file is the silent-drop failure this epic exists to close, so the corrupt
     # case is separated out here — checked only on the empty path, so the normal
     # path pays nothing.
-    if not workstreams:
+    if not workstreams and served is None:
         reg = registry_path(paths)
         if reg.is_file():
             try:

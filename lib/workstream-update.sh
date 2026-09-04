@@ -55,16 +55,24 @@ _plane_actor() { printf 'bot:%s/%s' "$FLEET_NAME" "${BOT_NAME:-operator}"; }
 # One workstream event OBJECT on stdout — prune batches N of these into one
 # atomic emission (gauntlet round: the per-id loop paid a shim spawn per
 # pruned id, serialized inside the registry lock).
+# _plane_ws_event_obj <id> <event> [extra-json-fragment] [occurred-at]: the
+# fourth argument is the VERB's instant — the same `now` the registry gets —
+# so the plane row and the file agree to the second (the emit's own stamp can
+# fall a second later; the A2 parity pin flaked 1 in 3 on exactly that).
 _plane_ws_event_obj() {
-    printf '{"event_type":"workstream_event","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","payload":{"workstream_id":"%s","event":"%s","actor":"%s"%s}}' \
-        "$(json_escape "$1")" "$(json_escape "$FLEET_NAME")" \
+    local _at_frag=""
+    [ -n "${4:-}" ] && _at_frag=",\"occurred_at\":\"$(json_escape "$4")\""
+    printf '{"event_type":"workstream_event","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s"%s,"payload":{"workstream_id":"%s","event":"%s","actor":"%s"%s}}' \
+        "$(json_escape "$1")" "$(json_escape "$FLEET_NAME")" "$_at_frag" \
         "$(json_escape "$1")" "$2" "$(json_escape "$(_plane_actor)")" "${3:-}"
 }
 # _plane_ws_event <id> <event> [extra-json-fragment-with-leading-comma]
 _plane_ws_event() {
     [ "$PLANE_ARMED" = "1" ] || return 0
-    printf '{"events":[%s]}' "$(_plane_ws_event_obj "$1" "$2" "${3:-}")" \
-        | plane_emit_events workstream-update || true
+    # a here-string, never a pipeline: the wrapper must run in THIS shell so its
+    # result (PLANE_EMIT_LAST_RC, the fourth fact) is visible to the fallback
+    plane_emit_events workstream-update <<<"{\"events\":[$(_plane_ws_event_obj "$1" "$2" "${3:-}" "${4:-}")]}" || true
+    _ws_land_if_unrecorded
 }
 install_error_trap ""
 
@@ -81,6 +89,37 @@ _resolve_registry() {
 
 REGISTRY="$(_resolve_registry)"
 mkdir -p "$(dirname "$REGISTRY")"
+
+# --- cutover A2: the plane is the registry once this door's write is retired --
+# Read-side question at startup (plane_retirement_covers: the flag says 0, the
+# plane is armed, a recorded retirement NAMES the workstreams door): the verbs
+# then work on a registry MATERIALIZED from the plane (plane-lookup.py
+# --workstreams) into a temp file — the same jq programs, the same locks — and
+# the verb's plane event IS the write: _apply keeps the temp current for the
+# rest of this run and writes NO file. The one fallback: an emission the shim
+# could not record lands the materialized registry at the real path, disclosed,
+# so a verb can never be recorded nowhere. Not retired = the file, as before.
+WS_RETIRED=0
+WS_REAL_REGISTRY="$REGISTRY"
+if plane_retirement_covers workstream-update PLANE_LEGACY_WRITE_WORKSTREAMS 2>/dev/null; then
+    _ws_tmp="$(safe_mktemp)"
+    if python3 -S -E "$LIB_DIR/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" --workstreams \
+            --fleet "${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}" --lease-days "${WORKSTREAM_LEASE_DAYS:-14}" > "$_ws_tmp" 2>/dev/null \
+            && [ -s "$_ws_tmp" ]; then
+        WS_RETIRED=1
+        REGISTRY="$_ws_tmp"
+    else
+        rm -f "$_ws_tmp"
+        echo "workstream-update: the workstreams write is retired but the plane could not serve the registry -- working on the file (may be stale)" >&2
+    fi
+fi
+_ws_land_if_unrecorded() {
+    # after a verb's emit under the retirement: the shim's rc is the fourth fact
+    if [ "$WS_RETIRED" = "1" ] && [ "${PLANE_EMIT_LAST_RC:-1}" -ne 0 ]; then
+        cp "$REGISTRY" "$WS_REAL_REGISTRY" 2>/dev/null \
+            && echo "workstream-update: the plane did not record this verb (rc=$PLANE_EMIT_LAST_RC) -- the registry was landed at $WS_REAL_REGISTRY" >&2
+    fi
+}
 
 LEASE_DAYS="${WORKSTREAM_LEASE_DAYS:-14}"
 MAX_ACTIVE="${WORKSTREAM_MAX_ACTIVE:-12}"
@@ -123,6 +162,9 @@ _slugify() {
 _init_registry() {
     [ -f "$REGISTRY" ] || printf '%s\n' '{"updated":"1970-01-01T00:00:00Z","workstreams":{}}' > "$REGISTRY"
 }
+# The lock is taken on the REAL registry path even when the plane is the
+# registry: local writers serialize on one name regardless of the source.
+_ws_lock() { printf '%s' "$WS_REAL_REGISTRY.lock"; }
 
 _registry_has() {
     # _registry_has <id> -> 0 if the id exists
@@ -233,18 +275,23 @@ open)
         if [ "$PLANE_ARMED" = "1" ]; then
             local owner_frag="" proj_frag=""
             [ -n "$OWNER" ] && owner_frag=",\"owner\":\"$(json_escape "bot:$FLEET_NAME/$OWNER")\""
+            # the opening --next is the construct's goal: the stated next step at
+            # opening, which the plane renders as `next` until a progress replaces it
+            [ -n "$NEXT" ] && owner_frag="$owner_frag,\"goal\":\"$(json_escape "$NEXT")\""
             case "$PROJECT" in
                 [a-z]*) proj_frag=",\"project_key\":\"$(json_escape "$PROJECT")\"" ;;
             esac
-            printf '{"events":[{"event_type":"workstream","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","payload":{"workstream_id":"%s","title":"%s","opened_by":"%s"%s%s}}]}' \
-                "$(json_escape "$id")" "$(json_escape "$FLEET_NAME")" \
+            local _open_batch
+            printf -v _open_batch '{"events":[{"event_type":"workstream","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","occurred_at":"%s","payload":{"workstream_id":"%s","title":"%s","opened_by":"%s"%s%s}}]}' \
+                "$(json_escape "$id")" "$(json_escape "$FLEET_NAME")" "$now" \
                 "$(json_escape "$id")" "$(json_escape "$TITLE")" \
-                "$(json_escape "$(_plane_actor)")" "$owner_frag" "$proj_frag" \
-                | plane_emit_events workstream-update || true
+                "$(json_escape "$(_plane_actor)")" "$owner_frag" "$proj_frag"
+            plane_emit_events workstream-update <<<"$_open_batch" || true
+            _ws_land_if_unrecorded
         fi
         printf '%s\n' "$id"
     }
-    with_lock "$REGISTRY.lock" _open_ws || exit $?
+    with_lock "$(_ws_lock)" _open_ws || exit $?
     ;;
 
 progress)
@@ -271,9 +318,9 @@ progress)
             || return 1
         local frag=""
         [ -n "$NEXT" ] && frag=",\"next_step\":\"$(json_escape "$NEXT")\""
-        _plane_ws_event "$ID" "progressed" "$frag"
+        _plane_ws_event "$ID" "progressed" "$frag" "$now"
     }
-    with_lock "$REGISTRY.lock" _progress_ws || exit $?
+    with_lock "$(_ws_lock)" _progress_ws || exit $?
     ;;
 
 renew)
@@ -298,9 +345,9 @@ renew)
             --arg id "$ID" --arg now "$now" --arg expiry "$expiry" --arg note "$NOTE" \
             || return 1
         _plane_ws_event "$ID" "renewed" \
-            ",\"renewed_until\":\"$(json_escape "$expiry")\",\"note\":\"$(json_escape "$NOTE")\""
+            ",\"renewed_until\":\"$(json_escape "$expiry")\",\"note\":\"$(json_escape "$NOTE")\"" "$now"
     }
-    with_lock "$REGISTRY.lock" _renew_ws || exit $?
+    with_lock "$(_ws_lock)" _renew_ws || exit $?
     ;;
 
 block)
@@ -315,14 +362,15 @@ block)
     # Existence checked inside the lock (see progress) to avoid the auto-vivify race.
     _block_ws() {
         _require_exists block || return 1
-        _apply "$(_now_iso)" '.workstreams[$id].status = "blocked"
+        local now; now="$(_now_iso)"
+        _apply "$now" '.workstreams[$id].status = "blocked"
                 | (if $note != "" then .workstreams[$id].next = $note else . end)' \
             --arg id "$ID" --arg note "$NOTE" || return 1
         local frag=""
         [ -n "$NOTE" ] && frag=",\"note\":\"$(json_escape "$NOTE")\""
-        _plane_ws_event "$ID" "blocked" "$frag"
+        _plane_ws_event "$ID" "blocked" "$frag" "$now"
     }
-    with_lock "$REGISTRY.lock" _block_ws || exit $?
+    with_lock "$(_ws_lock)" _block_ws || exit $?
     ;;
 
 close)
@@ -342,9 +390,9 @@ close)
         _apply "$now" '.workstreams[$id].status = $status
                 | .workstreams[$id].closed_ts = $now' \
             --arg id "$ID" --arg status "$STATUS" --arg now "$now" || return 1
-        _plane_ws_event "$ID" "closed" ",\"disposition\":\"$STATUS\""
+        _plane_ws_event "$ID" "closed" ",\"disposition\":\"$STATUS\"" "$now"
     }
-    with_lock "$REGISTRY.lock" _close_ws || exit $?
+    with_lock "$(_ws_lock)" _close_ws || exit $?
     ;;
 
 prune)
@@ -355,7 +403,9 @@ prune)
             *) _die "prune: unknown arg: $1" ;;
         esac
     done
-    [ -n "$ARCHIVE" ] || ARCHIVE="$(dirname "$REGISTRY")/workstreams-archive.jsonl"
+    # beside the REAL registry, never the materialized temp (the R3 mutant hid
+    # there: an archive appended into the temp dir under the retirement)
+    [ -n "$ARCHIVE" ] || ARCHIVE="$(dirname "$WS_REAL_REGISTRY")/workstreams-archive.jsonl"
     _prune_ws() {
         _init_registry
         local terminal tmp
@@ -371,8 +421,11 @@ prune)
         tmp=$(safe_mktemp)
         jq -c '.workstreams[] | select(.status=="done" or .status=="abandoned")' "$REGISTRY" > "$tmp" \
             || { rm -f "$tmp"; echo "workstream-update: prune: failed to collect terminal entries" >&2; return 1; }
-        cat "$tmp" >> "$ARCHIVE" \
-            || { rm -f "$tmp"; echo "workstream-update: prune: failed to append $ARCHIVE" >&2; return 1; }
+        # under the retirement the `archived` events are the archive: no JSONL append
+        if [ "$WS_RETIRED" != "1" ]; then
+            cat "$tmp" >> "$ARCHIVE" \
+                || { rm -f "$tmp"; echo "workstream-update: prune: failed to append $ARCHIVE" >&2; return 1; }
+        fi
         # Retain the pruned ids; emit archived only AFTER the registry drop
         # succeeds (#1372 review F13): emitting first recorded `archived` for
         # a prune that then failed, and the retry double-emitted.
@@ -385,7 +438,8 @@ prune)
             echo "workstream-update: prune: could not extract pruned ids — archived events not emitted (registry drop stands)" >&2
         fi
         rm -f "$tmp"
-        _apply "$(_now_iso)" \
+        local _prune_now; _prune_now="$(_now_iso)"
+        _apply "$_prune_now" \
             '.workstreams |= with_entries(select(.value.status != "done" and .value.status != "abandoned"))' \
             || return 1
         # ONE atomic batch, emitted AFTER the lock releases (gauntlet round):
@@ -402,7 +456,7 @@ prune)
             local _pid _ev _batch=""
             while IFS= read -r _pid; do
                 [ -n "$_pid" ] || continue
-                _ev="$(_plane_ws_event_obj "$_pid" "archived")"
+                _ev="$(_plane_ws_event_obj "$_pid" "archived" "" "$_prune_now")"
                 _batch="${_batch:+$_batch,}$_ev"
             done <<< "$_pruned_ids"
             printf '%s' "$_batch" > "$PLANE_PRUNE_BATCH_FILE"
@@ -411,10 +465,10 @@ prune)
     }
     PLANE_PRUNE_BATCH_FILE=""
     [ "$PLANE_ARMED" = "1" ] && PLANE_PRUNE_BATCH_FILE="$(safe_mktemp)"
-    with_lock "$REGISTRY.lock" _prune_ws || { _prc=$?; rm -f "$PLANE_PRUNE_BATCH_FILE"; exit "$_prc"; }
+    with_lock "$(_ws_lock)" _prune_ws || { _prc=$?; rm -f "$PLANE_PRUNE_BATCH_FILE"; exit "$_prc"; }
     if [ -n "$PLANE_PRUNE_BATCH_FILE" ] && [ -s "$PLANE_PRUNE_BATCH_FILE" ]; then
-        printf '{"events":[%s]}' "$(cat "$PLANE_PRUNE_BATCH_FILE")" \
-            | plane_emit_events workstream-update || true
+        plane_emit_events workstream-update <<<"{\"events\":[$(cat "$PLANE_PRUNE_BATCH_FILE")]}" || true
+        _ws_land_if_unrecorded
     fi
     rm -f "$PLANE_PRUNE_BATCH_FILE"
     ;;

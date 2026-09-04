@@ -638,6 +638,38 @@ plane_emit_bounded() {
     return 0
 }
 
+# plane_door_key <FLAG_NAME> -- the door the flag names (dispatch / report /
+# events / workstreams): the flag's own suffix, no fork for the known ones.
+plane_door_key() {
+    case "${1#PLANE_LEGACY_WRITE_}" in
+        DISPATCH)    printf dispatch ;;
+        REPORT)      printf report ;;
+        EVENTS)      printf events ;;
+        WORKSTREAMS) printf workstreams ;;
+        *) printf '%s' "${1#PLANE_LEGACY_WRITE_}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+
+# plane_retirement_covers <door> <FLAG_NAME> -- returns 0 when the flag says 0
+# (the env, else the fleet tier) AND the plane is armed AND a recorded
+# retirement NAMES this door: the READ-side question a door asks at startup
+# (cutover A2: is the file still the record?) -- the emission fact is
+# plane_write_retired's, asked per write.
+plane_retirement_covers() {
+    local door="$1" flag_name="$2" flag_val _fleet_name="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}" _door_key _retired
+    if [ -n "$(eval "printf '%s' \"\${$flag_name+x}\"")" ]; then
+        eval "flag_val=\${$flag_name:-1}"
+    else
+        flag_val=$(plane_fleet_tier_value "$_fleet_name" "$flag_name" 1)
+    fi
+    [ "$flag_val" = "0" ] || return 1
+    [ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || return 1
+    _door_key=$(plane_door_key "$flag_name")
+    _retired=$(python3 -S -E "${BASH_SOURCE[0]%/*}/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
+        --retired --door "$_door_key" --fleet "$_fleet_name" 2>/dev/null || true)
+    [ -n "$_retired" ]
+}
+
 # plane_write_retired <door> <FLAG_NAME> -- returns 0 when the legacy JSONL append
 # may be SKIPPED, 1 when the door must write it. Skipping needs FOUR facts, and
 # the missing one is disclosed: the flag says 0; the plane is armed; the
@@ -666,12 +698,7 @@ plane_write_retired() {
     # --fleet) and the door wrote its ledger "just in case" on every sweep:
     # measured after the flip — the stamp in place, six legacy lines per sweep.
     local _door_key _retired _fleet_name="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}"
-    case "${flag_name#PLANE_LEGACY_WRITE_}" in
-        DISPATCH) _door_key=dispatch ;;
-        REPORT)   _door_key=report ;;
-        EVENTS)   _door_key=events ;;
-        *) _door_key=$(printf '%s' "${flag_name#PLANE_LEGACY_WRITE_}" | tr '[:upper:]' '[:lower:]') ;;
-    esac
+    _door_key=$(plane_door_key "$flag_name")
     # Memoised per process on a POSITIVE answer only: a retirement is monotone
     # (rollback is the flag, which short-circuits above), so one lookup per
     # (process, door) is the whole cost — a sweep emits dozens of fleet events.

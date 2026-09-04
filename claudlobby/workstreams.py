@@ -8,6 +8,7 @@ Path resolution mirrors the report-back ledger (overlay vs. root mode).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from .paths import Paths
@@ -18,8 +19,40 @@ def registry_path(paths: Paths) -> Path:
     return paths.fleet_state / "workstreams.json"
 
 
+def plane_workstreams(paths: Paths):
+    """(entries, note) from the PLANE when the fleet's workstreams write is
+    retired (cutover A2 — the registry file is then no record at all), else
+    (None, note or None). The retirement fact is read where it lives
+    (``brief.plane_retired_conn``); an unreachable plane serves the file
+    LABELED."""
+    from .brief import load_lib_module, plane_retired_conn
+    conn, note = plane_retired_conn(paths, "workstreams")
+    if conn is None:
+        return None, note
+    try:
+        pr = load_lib_module(paths, "plane-readers.py")
+        if pr is None:
+            return None, f"lib/plane-readers.py is not readable under {paths.lib} — serving the file"
+        try:
+            lease = int(os.environ.get("WORKSTREAM_LEASE_DAYS") or 14)
+        except ValueError:
+            lease = 14
+        reg = pr.workstream_registry(conn, paths.fleet_name, lease_days=lease)
+    except Exception as exc:
+        return None, f"the workstreams write is retired and the plane cannot answer: {exc}"
+    finally:
+        conn.close()
+    return reg.get("workstreams", {}), None
+
+
 def load_workstreams(paths: Paths) -> dict:
-    """Return the ``{id: entry}`` map, or empty on missing/corrupt registry."""
+    """Return the ``{id: entry}`` map, or empty on missing/corrupt registry.
+    Cutover A2: the plane's registry once the workstreams write is retired
+    (the file is no record then); the note, if any, is the caller's to
+    disclose through ``plane_workstreams``."""
+    entries, _note = plane_workstreams(paths)
+    if entries is not None:
+        return entries
     p = registry_path(paths)
     if not p.is_file():
         return {}

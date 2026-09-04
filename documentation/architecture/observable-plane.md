@@ -201,8 +201,12 @@ recorded state machine:
    freezes): `claudlobby report-back`, brief's unacked reports + `--ack`,
    `who-reviewed.py --source auto` (the plane's rows plus the ledgers of
    fleets whose write is not retired, deduplicated), the supersede hint's
-   task texts. Still on a frozen ledger afterwards: the workstreams and
-   briefing writes (their plane adapter is unbuilt).
+   task texts. Chunk A2 closes the last file-backed record: the workstream
+   registry's write retires behind `PLANE_LEGACY_WRITE_WORKSTREAMS` (the
+   door then works on a registry materialized from the plane and its verb
+   events are the writes; `claudlobby workstreams` and brief's section render
+   the registry from the plane). The briefing trigger already rode
+   `emit_fleet_event`, so it retired with the events family.
 
 **Phase B — the bot-events ledger** (`data/events/fleet-*.jsonl` per bot,
 `state/events/` for the fleet) moves as a direct move, no shadow.

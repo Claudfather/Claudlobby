@@ -1059,7 +1059,7 @@ def cmd_plane_cutover(args) -> int:
                   " the shadow ends here — there is no legacy side left to grade;"
                   " rollback = the flags back to 1")
             print("  every matcher reader (--open, --all, --orphans, --open-task, --unassigned) follows"
-                  " its flip; the workstreams and briefing writes are the remaining residual")
+                  " its flip; the report, events and workstream readers follow this retirement")
             return 0
         if already is not None:
             print(f"cutover: note — the legacy writes are retired ({already[0]}); the shadow cannot"

@@ -493,6 +493,90 @@ def keepalive_entries(conn: sqlite3.Connection, fleet: str, bot: str,
     return out
 
 
+# --- the workstream registry from the plane (cutover A2) --------------------------
+# workstreams.json is the last file-backed record: {updated, workstreams: {id:
+# {id, fleet, title, project, status, owner_bot, next, task_ids, refs,
+# opened_ts, last_progress_ts, lease_expires_ts, renewals[, closed_ts]}}}. The
+# plane holds the construct (title, owner, project, opened instant) and the
+# verb events the same door lands (progressed.next_step, renewed.renewed_until
+# + note, blocked.note, closed.disposition, archived); an archived (pruned)
+# workstream is absent from the registry, as the prune verb drops it. The lease
+# of a never-renewed workstream is the opening instant plus the fleet's lease
+# days — the door computed it from the same knob when it opened the row.
+WS_CONSTRUCTS_SQL = (
+    "SELECT w.workstream_id, w.title, w.project_key, w.occurred_at, i.alias, w.goal FROM workstreams w"
+    " LEFT JOIN identity_registry i ON i.uid = w.owner_uid"
+    " WHERE w.fleet_uid = ? ORDER BY w.occurred_at, w.ingest_seq"
+)
+WS_EVENTS_SQL = (
+    "SELECT e.workstream_id, e.event, e.occurred_at, e.renewed_until, e.detail FROM events e"
+    " WHERE e.kind = 'workstream' AND e.fleet_uid = ? ORDER BY e.ingest_seq"
+)
+
+
+def _plus_days(iso: str, days: int) -> str:
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    from datetime import timedelta
+    return (dt + timedelta(days=days)).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def workstream_registry(conn: sqlite3.Connection, fleet: str, *, lease_days: int = 14) -> dict:
+    """The registry the door would have written, from the plane."""
+    uid = fleet_uid(conn, fleet)
+    prefix = f"bot:{fleet}/"
+    entries: dict = {}
+    for wid, title, project, opened, owner_alias, goal in conn.execute(WS_CONSTRUCTS_SQL, (uid,)):
+        entries[wid] = {
+            "id": wid, "fleet": fleet, "title": title or "",
+            "project": project or None, "status": "active",
+            "owner_bot": (owner_alias.removeprefix(prefix) if owner_alias and owner_alias.startswith(prefix)
+                          else (owner_alias or None)),
+            "next": goal or None, "task_ids": [], "refs": {"issues": [], "prs": []},
+            "opened_ts": legacy_ts(opened), "last_progress_ts": legacy_ts(opened),
+            "lease_expires_ts": _plus_days(opened or "", lease_days), "renewals": [],
+        }
+    newest = max((e["opened_ts"] for e in entries.values()), default="")
+    archived: set = set()
+    for wid, event, at, renewed_until, detail in conn.execute(WS_EVENTS_SQL, (uid,)):
+        e = entries.get(wid)
+        if e is None:
+            continue
+        try:
+            data = json.loads(detail) if detail else {}
+        except ValueError:
+            data = {}
+        ts = legacy_ts(at)
+        newest = max(newest, ts)
+        if event == "progressed":
+            e["last_progress_ts"] = ts
+            e["lease_expires_ts"] = _plus_days(at or "", lease_days)
+            if data.get("next_step"):
+                e["next"] = data["next_step"]
+        elif event == "renewed":
+            if renewed_until:
+                e["lease_expires_ts"] = legacy_ts(renewed_until)
+            e["renewals"].append({"ts": ts, "note": data.get("note") or ""})
+        elif event == "blocked":
+            e["status"] = "blocked"
+            if data.get("note"):
+                e["next"] = data["note"]
+        elif event == "unblocked":
+            e["status"] = "active"
+        elif event == "closed":
+            e["status"] = data.get("disposition") or "done"
+            e["closed_ts"] = ts
+        elif event == "archived":
+            archived.add(wid)
+    for wid in archived:
+        entries.pop(wid, None)
+    return {"updated": newest, "workstreams": entries}
+
+
 def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_threshold: int = 0,
                     at: Optional[str] = None) -> dict[str, tuple[int, int, str, str]]:
     """The legacy ``unassigned_all`` shape — {bot: (reported_at, idle_seconds,

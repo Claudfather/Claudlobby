@@ -241,13 +241,13 @@ def test_the_append_retires_only_on_the_four_facts(tmp_path):
     # report) covers nothing it never named: the door keeps writing, and
     # --retire-writes records the EXTENSION rather than "already retired"
     old = cut.retirement_event(F, {}, "2026-09-03T00:00:00+00:00")
-    old["payload"]["data"]["flags"].pop("events")
+    old["payload"]["data"]["flags"].pop("events"); old["payload"]["data"]["flags"].pop("workstreams", None)   # a chunk-6b record
     assert emit_batch(root, [old])[0].status == "committed"
     r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0")
     assert "that covers 'events'" in r.stderr and lines() == 2
     ext = _cli(root, "cutover", "--retire-writes")
     assert ext.returncode == 0 and "recording the extension" in ext.stdout, ext.stdout + ext.stderr
-    assert "['dispatch', 'report']" in ext.stdout and "['events']" in ext.stdout
+    assert "['dispatch', 'report']" in ext.stdout and "['events', 'workstreams']" in ext.stdout
     # all four facts: flag 0, armed, retired (covering this door), THIS emission recorded -> skipped
     r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0")
     assert "legacy write retired" in r.stderr and lines() == 2

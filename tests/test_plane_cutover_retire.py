@@ -124,7 +124,8 @@ def test_retire_writes_refuses_until_every_reader_is_declared_then_records(tmp_p
         data = json.loads(conn.execute("SELECT detail FROM events WHERE event = 'legacy_write_retired'").fetchone()[0])
     assert data["undeclared"] == [] and set(data["declared"]) == {"open", "overdue", "open_task", "unassigned", "events"}
     assert data["flags"] == {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH=0", "report": "PLANE_LEGACY_WRITE_REPORT=0",
-                             "events": "PLANE_LEGACY_WRITE_EVENTS=0"}
+                             "events": "PLANE_LEGACY_WRITE_EVENTS=0", "workstreams": "PLANE_LEGACY_WRITE_WORKSTREAMS=0"}
+    assert "PLANE_LEGACY_WRITE_WORKSTREAMS=0" in done.stdout                       # the fourth door (cutover A2)
     again = _cli(root, "cutover", "--retire-writes")
     assert again.returncode == 0 and "already retired" in again.stdout             # nothing new recorded
     with _ro(root) as conn:
@@ -184,7 +185,7 @@ def test_the_doctor_reads_the_write_flags_against_the_retirement(tmp_path):
 def test_the_retirement_token_is_registered():
     from claudlobby.plane.registries import SYSTEM_EVENT_SEVERITY
     assert SYSTEM_EVENT_SEVERITY["legacy_write_retired"] == "notice"
-    assert cut.EVENT_RETIRED == "legacy_write_retired" and set(cut.WRITE_FLAGS) == {"dispatch", "report", "events"}
+    assert cut.EVENT_RETIRED == "legacy_write_retired" and set(cut.WRITE_FLAGS) == {'dispatch', 'report', 'events', 'workstreams'}
 
 
 def test_write_flag_vs_retirement_names_the_missing_half():
