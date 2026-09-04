@@ -314,6 +314,144 @@ NEWEST_ASSIGNMENT_SQL = (
 LEGACY_STATUS = {"completed": "completed", "failed": "failed", "returned_blocked": "blocked"}
 
 
+# --- the report ledger from the plane (cutover chunk C3) -------------------------
+# A legacy report row {ts, bot, task_id, status, summary, pr_url, issues, skill,
+# progress, artifact, task_anomaly, plane_msg_id} is a `report` communication
+# (source_ref report-back:<msg>) plus the task event the door landed under the
+# same ref — status, summary, pr_url, progress; the task id off the linked
+# assignment's dispatch-log ref — else the report_status marker an id-less
+# terminal note carries, else the body's own `[BOTREPORT] bot | status |
+# summary | progress:N | pr:URL` under full capture. `ts` renders in the legacy
+# form (UTC, seconds, `Z`) so every brief cursor keeps comparing correctly.
+REPORT_COMMS_SQL = (
+    "SELECT c.occurred_at, c.msg_id, c.sender_uid, c.sender_alias, c.body, c.source_ref"
+    " FROM communications c"
+    " WHERE c.message_class = 'report' AND c.fleet_uid = ? AND c.source_ref LIKE 'report-back:%'"
+    " AND (? IS NULL OR c.occurred_at >= ?)"
+    " ORDER BY c.occurred_at, c.ingest_seq"
+)
+_REPORT_STATUS_EVENT_SQL = (
+    "SELECT e.event, e.detail, a.source_ref FROM events e"
+    " LEFT JOIN assignments a ON a.assignment_id = e.assignment_id"
+    " WHERE e.kind = 'task' AND e.source_ref = ? AND e.actor_uid = ?"
+    " AND e.event IN ('completed', 'failed', 'returned_blocked', 'progress')"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+_REPORT_MARKER_SQL = (
+    "SELECT json_extract(e.detail, '$.status') FROM events e"
+    " WHERE e.kind = 'system' AND e.event = 'report_status' AND e.source_ref = ? AND e.subject_uid = ?"
+    " ORDER BY e.ingest_seq DESC LIMIT 1"
+)
+REPORT_FIELDS = ("ts", "bot", "task_id", "status", "summary", "pr_url", "issues", "skill",
+                 "progress", "artifact", "task_anomaly", "plane_msg_id")
+
+
+def legacy_ts(occurred_at: Optional[str]) -> str:
+    """The legacy ledger's instant form: UTC, whole seconds, `Z`."""
+    try:
+        dt = datetime.fromisoformat((occurred_at or "").replace("Z", "+00:00"))
+    except ValueError:
+        return occurred_at or ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_report_body(body: Optional[str]) -> dict:
+    """The fields the wire line carries: `[BOTREPORT] <bot> | <status> |
+    <summary> [| progress:N] [| pr:URL] [| artifact:URL] …` — the door's own
+    format (report-back.sh header). Empty when the capture policy stripped
+    the body."""
+    out: dict = {}
+    if not body or "|" not in body:
+        return out
+    text = body.strip()
+    if text.startswith("[BOTREPORT]"):
+        text = text[len("[BOTREPORT]"):].strip()
+    parts = [x.strip() for x in text.split(" | ")]
+    if len(parts) >= 2:
+        out["status"] = parts[1]
+    if len(parts) >= 3:
+        out["summary"] = parts[2]
+    for extra in parts[3:]:
+        key, _, val = extra.partition(":")
+        if key in ("progress", "pr", "artifact", "issues", "skill") and val:
+            out["pr_url" if key == "pr" else key] = val
+    return out
+
+
+def report_rows(conn: sqlite3.Connection, fleet: str, *, since: Optional[str] = None,
+                bot: Optional[str] = None, status: Optional[str] = None) -> list[dict]:
+    """The fleet's reports as legacy rows, oldest first. Private keys: `_source`
+    (`task_event` / `marker` / `body` — which leg named the status) and
+    `_body_stripped` (the capture policy kept no body, so a report the plane
+    holds only as a communication renders an empty summary — disclosed, never
+    invented)."""
+    uid = fleet_uid(conn, fleet)
+    since = since_form(since)
+    prefix = f"bot:{fleet}/"
+    out: list[dict] = []
+    for occurred_at, msg_id, sender_uid, sender_alias, body, ref in conn.execute(
+            REPORT_COMMS_SQL, (uid, since, since)):
+        name = (sender_alias or "").removeprefix(prefix)
+        if bot and name.lower() != bot.lower():
+            continue
+        parsed = parse_report_body(body)
+        row = {k: "" for k in REPORT_FIELDS}
+        row.update({"ts": legacy_ts(occurred_at), "bot": name, "plane_msg_id": msg_id or "",
+                    "summary": parsed.get("summary", ""), "pr_url": parsed.get("pr_url", ""),
+                    "progress": parsed.get("progress", ""), "artifact": parsed.get("artifact", ""),
+                    "issues": parsed.get("issues", ""), "skill": parsed.get("skill", ""),
+                    "status": parsed.get("status", ""), "_source": "body" if parsed else "none",
+                    "_body_stripped": not body})
+        ev = conn.execute(_REPORT_STATUS_EVENT_SQL, (ref, sender_uid)).fetchone()
+        if ev is not None:
+            event, detail, dispatch_ref = ev
+            row["status"] = LEGACY_STATUS.get(event, event)
+            try:
+                data = json.loads(detail) if detail else {}
+            except ValueError:
+                data = {}
+            if data.get("summary"):
+                row["summary"] = data["summary"]
+            if data.get("pr_url"):
+                row["pr_url"] = data["pr_url"]
+            if data.get("progress") is not None and data.get("progress") != "":
+                row["progress"] = str(data["progress"])
+            row["task_id"] = _task_id(dispatch_ref) or ""
+            row["_source"] = "task_event"
+        else:
+            marker = conn.execute(_REPORT_MARKER_SQL, (ref, sender_uid)).fetchone()
+            if marker and marker[0]:
+                row["status"] = marker[0]
+                row["_source"] = "marker" if not parsed else "body"
+        if status and row["status"] != status:
+            continue
+        out.append(row)
+    return out
+
+
+TASK_TEXTS_SQL = (
+    "SELECT a.source_ref, w.title FROM assignments a"
+    " JOIN work_items w ON w.work_item_id = a.work_item_id"
+    " WHERE a.assignee_uid IN (%s) AND a.source_ref LIKE 'dispatch-log:%%'"
+    " AND a.source_ref NOT LIKE 'dispatch-log:sha:%%'"
+)
+
+
+def task_texts(conn: sqlite3.Connection, fleet: str, bot: str) -> dict[str, str]:
+    """{task_id: the dispatch text} for one bot from the plane — the work item's
+    title IS the dispatch text (the door stores it whole). The supersede
+    hint's reference comparison once read the dispatch log's `task` field;
+    after the retirement that file is frozen."""
+    entry = roster(conn, fleet).get(bot.lower())
+    if not entry or not entry["uids"]:
+        return {}
+    marks = ",".join("?" * len(entry["uids"]))
+    return {_task_id(ref): title for ref, title in conn.execute(TASK_TEXTS_SQL % marks, tuple(entry["uids"]))
+            if _task_id(ref)}
+
+
 def unassigned_rows(conn: sqlite3.Connection, fleet: str, *, now: int, idle_threshold: int = 0,
                     at: Optional[str] = None) -> dict[str, tuple[int, int, str, str]]:
     """The legacy ``unassigned_all`` shape — {bot: (reported_at, idle_seconds,

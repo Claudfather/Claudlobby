@@ -509,30 +509,55 @@ def cmd_report_back(args) -> int:
                 )
                 return 1
 
-    # Read and filter entries
+    # Cutover C3: with the report write RETIRED the ledger is frozen and the
+    # rows come from the plane — the same row shape, the same filters. The fact
+    # is read where it lives; an unreachable plane serves the ledger LABELED.
+    from ..brief import load_lib_module, plane_retired_conn
+    source = str(ledger)
+    conn, note = plane_retired_conn(paths, "report")
+    if note:
+        print(f"claudlobby report-back: {note}", file=sys.stderr)
     entries = []
     total_rows = 0
-    for line in ledger.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    if conn is not None:
         try:
-            entry = _json.loads(line)
-        except _json.JSONDecodeError:
-            continue
-        total_rows += 1
-        if args.bot and entry.get("bot") != args.bot:
-            continue
-        if args.status and entry.get("status") != args.status:
-            continue
-        if cutoff:
-            try:
-                ts = datetime.fromisoformat(entry["ts"].replace("Z", "+00:00"))
-                if ts < cutoff:
-                    continue
-            except (KeyError, ValueError):
+            pr = load_lib_module(paths, "plane-readers.py")
+            if pr is None:
+                raise RuntimeError(f"lib/plane-readers.py is not readable under {paths.lib}")
+            rows = pr.report_rows(conn, paths.fleet_name, since=cutoff.isoformat() if cutoff else None)
+        except Exception as exc:
+            print(f"claudlobby report-back: UNREACHABLE — the report ledger is retired and the plane"
+                  f" cannot answer: {exc}", file=sys.stderr)
+            return 3
+        finally:
+            conn.close()
+        source = "the plane (the report ledger is retired)"
+        total_rows = len(rows)
+        entries = [pr.public(r) for r in rows
+                   if (not args.bot or r.get("bot") == args.bot)
+                   and (not args.status or r.get("status") == args.status)]
+    else:
+        for line in ledger.read_text().splitlines():
+            line = line.strip()
+            if not line:
                 continue
-        entries.append(entry)
+            try:
+                entry = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            total_rows += 1
+            if args.bot and entry.get("bot") != args.bot:
+                continue
+            if args.status and entry.get("status") != args.status:
+                continue
+            if cutoff:
+                try:
+                    ts = datetime.fromisoformat(entry["ts"].replace("Z", "+00:00"))
+                    if ts < cutoff:
+                        continue
+                except (KeyError, ValueError):
+                    continue
+            entries.append(entry)
 
     if not entries:
         # Emptiness is stated POSITIVELY, naming the ledger that was read and how
@@ -541,7 +566,7 @@ def cmd_report_back(args) -> int:
         # the instrument worked and the filter is what excluded everything. Left
         # on stderr under --json so an empty JSONL stream stays empty.
         print(
-            f"0 event(s) matched — read {total_rows} row(s) from {ledger}",
+            f"0 event(s) matched — read {total_rows} row(s) from {source}",
             file=sys.stderr if args.json else sys.stdout,
         )
         return 0

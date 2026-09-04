@@ -329,6 +329,39 @@ def load_plane_rows(root: str) -> tuple[list[dict], str | None]:
     return rows, None
 
 
+def report_write_retired(root: str, fleet: str) -> bool:
+    """Is the fleet's report write retired on the plane (the ledger frozen)?
+    False when the plane cannot say — then the ledger is read and the scope
+    discloses the plane's state."""
+    pr = _readers()
+    try:
+        conn = pr.connect(root)
+    except pr.PlaneUnreachable:
+        return False
+    try:
+        return pr.retired(conn, fleet, "report") is not None
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def dedupe_rows(rows: list[dict]) -> list[dict]:
+    """One row per (fleet, bot, second): a report the plane and a ledger both
+    hold is one candidate, never two — two identical candidates would read as
+    AMBIGUOUS under the join's own rule. The plane's row wins the tie."""
+    seen: set = set()
+    out: list[dict] = []
+    ordered = sorted(rows, key=lambda r: 0 if r.get("_ledger") == "plane" else 1)
+    for r in ordered:
+        key = (r.get("_fleet"), r.get("bot"), (r.get("ts") or "")[:19])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
 def attribute_event(
     event: dict,
     rows: list[dict],
@@ -550,9 +583,10 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("CLAUDLOBBY_ROOT", ""),
         help="claudlobby root for ledger discovery",
     )
-    parser.add_argument("--source", choices=("ledger", "plane"), default="ledger",
-                        help="join against the report ledgers (default) or the plane's"
-                        " task events (cutover chunk 6b — survives the ledger's retirement)")
+    parser.add_argument("--source", choices=("auto", "ledger", "plane"), default="auto",
+                        help="auto (default, cutover C3): the plane's rows plus the ledgers of fleets"
+                        " whose report write is NOT retired, deduplicated; ledger: the report"
+                        " ledgers only; plane: the plane's task events only (chunk 6b)")
     parser.add_argument("--tolerance", type=int, default=DEFAULT_TOLERANCE_S)
     parser.add_argument("--backward", type=int, default=DEFAULT_BACKWARD_S)
     args = parser.parse_args(argv)
@@ -578,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
     bad_lines = 0
     fleets: list = []
     ledgers: list = []
+    plane_note = None
     if args.source == "plane":
         if not args.root:
             print("--source plane needs --root (or CLAUDLOBBY_ROOT); refusing rather than"
@@ -588,6 +623,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"the plane is unreachable ({why}) — not an empty answer; refusing", file=sys.stderr)
             return 4
         fleets = sorted({r["_fleet"] for r in rows})
+    elif args.source == "auto":
+        # Cutover C3: the plane holds every report an ARMED fleet made and is the
+        # only record once a fleet's report write is retired; an unarmed fleet's
+        # reports live in its ledger alone. So: the plane's rows, plus the ledgers
+        # of fleets whose write is NOT retired, deduplicated by (fleet, bot,
+        # second) before the AMBIGUOUS rule — the same report seen twice must not
+        # read as two candidates. An unreachable plane is DISCLOSED in the scope
+        # and the ledgers still serve (right for an unflipped fleet, stale for a
+        # flipped one — said so, never silent).
+        if args.root:
+            rows, plane_note = load_plane_rows(args.root)
+            ledgers = [(fleet, path) for fleet, path in
+                       ([(os.path.basename(os.path.dirname(os.path.dirname(p))) or "(explicit)", p) for p in args.ledger]
+                        if args.ledger else discover_ledgers(args.root))
+                       if plane_note is not None or not report_write_retired(args.root, fleet)]
+        elif args.ledger:
+            ledgers = [(os.path.basename(os.path.dirname(os.path.dirname(p))) or "(explicit)", p) for p in args.ledger]
+        else:
+            print("no --ledger given and CLAUDLOBBY_ROOT is unset, so neither the plane nor a"
+                  " ledger could be located; refusing rather than reporting every review as UNKNOWN",
+                  file=sys.stderr)
+            return 4
     elif args.ledger:
         ledgers = [
             (os.path.basename(os.path.dirname(os.path.dirname(p))) or "(explicit)", p)
@@ -611,9 +668,13 @@ def main(argv: list[str] | None = None) -> int:
         bad_lines += bad
         rows.extend(loaded)
         fleets.append(fleet)
+    if args.source == "auto":
+        fleets = sorted(set(fleets) | {r["_fleet"] for r in rows if r.get("_ledger") == "plane"})
+        rows = dedupe_rows(rows)
 
     result = {
         "scope": {
+            **({"plane": f"unreachable: {plane_note}"} if plane_note else {}),
             "repo": args.repo,
             "number": args.number,
             "tolerance": args.tolerance,
