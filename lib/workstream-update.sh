@@ -55,9 +55,15 @@ _plane_actor() { printf 'bot:%s/%s' "$FLEET_NAME" "${BOT_NAME:-operator}"; }
 # One workstream event OBJECT on stdout — prune batches N of these into one
 # atomic emission (gauntlet round: the per-id loop paid a shim spawn per
 # pruned id, serialized inside the registry lock).
+# _plane_ws_event_obj <id> <event> [extra-json-fragment] [occurred-at]: the
+# fourth argument is the VERB's instant — the same `now` the registry gets —
+# so the plane row and the file agree to the second (the emit's own stamp can
+# fall a second later; the A2 parity pin flaked 1 in 3 on exactly that).
 _plane_ws_event_obj() {
-    printf '{"event_type":"workstream_event","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","payload":{"workstream_id":"%s","event":"%s","actor":"%s"%s}}' \
-        "$(json_escape "$1")" "$(json_escape "$FLEET_NAME")" \
+    local _at_frag=""
+    [ -n "${4:-}" ] && _at_frag=",\"occurred_at\":\"$(json_escape "$4")\""
+    printf '{"event_type":"workstream_event","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s"%s,"payload":{"workstream_id":"%s","event":"%s","actor":"%s"%s}}' \
+        "$(json_escape "$1")" "$(json_escape "$FLEET_NAME")" "$_at_frag" \
         "$(json_escape "$1")" "$2" "$(json_escape "$(_plane_actor)")" "${3:-}"
 }
 # _plane_ws_event <id> <event> [extra-json-fragment-with-leading-comma]
@@ -65,7 +71,7 @@ _plane_ws_event() {
     [ "$PLANE_ARMED" = "1" ] || return 0
     # a here-string, never a pipeline: the wrapper must run in THIS shell so its
     # result (PLANE_EMIT_LAST_RC, the fourth fact) is visible to the fallback
-    plane_emit_events workstream-update <<<"{\"events\":[$(_plane_ws_event_obj "$1" "$2" "${3:-}")]}" || true
+    plane_emit_events workstream-update <<<"{\"events\":[$(_plane_ws_event_obj "$1" "$2" "${3:-}" "${4:-}")]}" || true
     _ws_land_if_unrecorded
 }
 install_error_trap ""
@@ -276,8 +282,8 @@ open)
                 [a-z]*) proj_frag=",\"project_key\":\"$(json_escape "$PROJECT")\"" ;;
             esac
             local _open_batch
-            printf -v _open_batch '{"events":[{"event_type":"workstream","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","payload":{"workstream_id":"%s","title":"%s","opened_by":"%s"%s%s}}]}' \
-                "$(json_escape "$id")" "$(json_escape "$FLEET_NAME")" \
+            printf -v _open_batch '{"events":[{"event_type":"workstream","emitter":"workstream-update","source_ref":"workstreams:%s","fleet":"%s","occurred_at":"%s","payload":{"workstream_id":"%s","title":"%s","opened_by":"%s"%s%s}}]}' \
+                "$(json_escape "$id")" "$(json_escape "$FLEET_NAME")" "$now" \
                 "$(json_escape "$id")" "$(json_escape "$TITLE")" \
                 "$(json_escape "$(_plane_actor)")" "$owner_frag" "$proj_frag"
             plane_emit_events workstream-update <<<"$_open_batch" || true
@@ -312,7 +318,7 @@ progress)
             || return 1
         local frag=""
         [ -n "$NEXT" ] && frag=",\"next_step\":\"$(json_escape "$NEXT")\""
-        _plane_ws_event "$ID" "progressed" "$frag"
+        _plane_ws_event "$ID" "progressed" "$frag" "$now"
     }
     with_lock "$(_ws_lock)" _progress_ws || exit $?
     ;;
@@ -339,7 +345,7 @@ renew)
             --arg id "$ID" --arg now "$now" --arg expiry "$expiry" --arg note "$NOTE" \
             || return 1
         _plane_ws_event "$ID" "renewed" \
-            ",\"renewed_until\":\"$(json_escape "$expiry")\",\"note\":\"$(json_escape "$NOTE")\""
+            ",\"renewed_until\":\"$(json_escape "$expiry")\",\"note\":\"$(json_escape "$NOTE")\"" "$now"
     }
     with_lock "$(_ws_lock)" _renew_ws || exit $?
     ;;
@@ -356,12 +362,13 @@ block)
     # Existence checked inside the lock (see progress) to avoid the auto-vivify race.
     _block_ws() {
         _require_exists block || return 1
-        _apply "$(_now_iso)" '.workstreams[$id].status = "blocked"
+        local now; now="$(_now_iso)"
+        _apply "$now" '.workstreams[$id].status = "blocked"
                 | (if $note != "" then .workstreams[$id].next = $note else . end)' \
             --arg id "$ID" --arg note "$NOTE" || return 1
         local frag=""
         [ -n "$NOTE" ] && frag=",\"note\":\"$(json_escape "$NOTE")\""
-        _plane_ws_event "$ID" "blocked" "$frag"
+        _plane_ws_event "$ID" "blocked" "$frag" "$now"
     }
     with_lock "$(_ws_lock)" _block_ws || exit $?
     ;;
@@ -383,7 +390,7 @@ close)
         _apply "$now" '.workstreams[$id].status = $status
                 | .workstreams[$id].closed_ts = $now' \
             --arg id "$ID" --arg status "$STATUS" --arg now "$now" || return 1
-        _plane_ws_event "$ID" "closed" ",\"disposition\":\"$STATUS\""
+        _plane_ws_event "$ID" "closed" ",\"disposition\":\"$STATUS\"" "$now"
     }
     with_lock "$(_ws_lock)" _close_ws || exit $?
     ;;
@@ -431,7 +438,8 @@ prune)
             echo "workstream-update: prune: could not extract pruned ids — archived events not emitted (registry drop stands)" >&2
         fi
         rm -f "$tmp"
-        _apply "$(_now_iso)" \
+        local _prune_now; _prune_now="$(_now_iso)"
+        _apply "$_prune_now" \
             '.workstreams |= with_entries(select(.value.status != "done" and .value.status != "abandoned"))' \
             || return 1
         # ONE atomic batch, emitted AFTER the lock releases (gauntlet round):
@@ -448,7 +456,7 @@ prune)
             local _pid _ev _batch=""
             while IFS= read -r _pid; do
                 [ -n "$_pid" ] || continue
-                _ev="$(_plane_ws_event_obj "$_pid" "archived")"
+                _ev="$(_plane_ws_event_obj "$_pid" "archived" "" "$_prune_now")"
                 _batch="${_batch:+$_batch,}$_ev"
             done <<< "$_pruned_ids"
             printf '%s' "$_batch" > "$PLANE_PRUNE_BATCH_FILE"
