@@ -255,6 +255,7 @@ def test_who_reviewed_auto_joins_the_plane_with_the_unretired_ledgers_and_dedupe
     # candidate list still misleads whoever reads the basis (and the row count)
     assert len(out["events"][0]["candidates"]) == 1 and out["scope"]["rows"] == 2, out["events"][0]["candidates"]   # w1's pr row once + g's; the scene's pr-less completion is not a plane row
     assert out["scope"]["source"] == "auto" and "f" in out["scope"]["fleets"] and "g" in out["scope"]["fleets"]
+    assert out["scope"]["ledgers_read"] == 1 and out["scope"]["ledgers_found"] == 1    # g's file; the plane is not a ledger (live: read 2 of found 1)
     assert "plane" not in out["scope"]                                               # reachable: no disclosure
     p47 = _payload(tmp_path / "p47.json", "2026-09-03T09:00:03Z")
     who.main(["o/r", "47", "--reviews-json", str(p47), "--root", str(root), "--json"])

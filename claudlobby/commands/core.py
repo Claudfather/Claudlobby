@@ -749,7 +749,8 @@ def cmd_uptime(args) -> int:
             return entries_from_plane(pr, conn, fleet_name, bot_dir.name, since)
     try:
         results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
-                                  bot_dirs=bot_dirs, entries_for=entries_for)
+                                  bot_dirs=bot_dirs,
+                                  **({"entries_for": entries_for} if entries_for is not None else {}))
     finally:
         if conn is not None:
             conn.close()

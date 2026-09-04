@@ -142,7 +142,12 @@ plane_presence_samples() {
         # huge negative age readers would mis-sort — age has floor
         # semantics, not signed-delta semantics.
         local agefrag="" m_epoch age
-        if m_epoch=$(stat_mtime "$BOT_DIR/data/.last-tool-call" 2>/dev/null); then
+        # `|| true` INSIDE the substitution (the #1460 rule): stat_mtime returns
+        # 1 for a bot that has made no tool call yet, and on bash 3.2 that fires
+        # the inherited ERR trap even under an `if` — a phantom script_error per
+        # tick, now a fleet event on the plane (B2 made it visible).
+        m_epoch=$(stat_mtime "$BOT_DIR/data/.last-tool-call" 2>/dev/null || true)
+        if [ -n "$m_epoch" ]; then
             age=$(( $(date +%s) - m_epoch ))
             if [ "$age" -lt 0 ]; then age=0; fi
             agefrag=',"marker_age_s":'"$age"

@@ -89,6 +89,7 @@ def test_a_dead_session_restart_lands_as_a_fleet_event_and_the_reader_less_file_
             "SELECT source_ref, subject_alias, severity FROM events WHERE event = 'keepalive_restart'").fetchone()
     assert ref.startswith("fleet-events:sha:") and alias == f"bot:{FLEET}/b1" and sev == "notice"
     # the flag at 0: the keepalive file is NOT written; nothing retired the fleet line, so it still is
+    (tmp_path / "second").mkdir()
     libdir2, bot2, env2 = _rig(tmp_path / "second", has_session=False)
     env2["PLANE_LEGACY_WRITE_EVENTS"] = "0"
     r = _tick(libdir2, bot2, env2)

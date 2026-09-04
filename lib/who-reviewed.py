@@ -668,6 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         bad_lines += bad
         rows.extend(loaded)
         fleets.append(fleet)
+    ledgers_read = len(fleets)                      # the FILES read; the plane is not one of them
     if args.source == "auto":
         fleets = sorted(set(fleets) | {r["_fleet"] for r in rows if r.get("_ledger") == "plane"})
         rows = dedupe_rows(rows)
@@ -679,7 +680,7 @@ def main(argv: list[str] | None = None) -> int:
             "number": args.number,
             "tolerance": args.tolerance,
             "backward": args.backward,
-            "ledgers_read": len(fleets),
+            "ledgers_read": ledgers_read,
             "ledgers_found": len(ledgers),
             "unreadable": unreadable,
             "bad_lines": bad_lines,
