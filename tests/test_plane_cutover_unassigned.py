@@ -106,6 +106,27 @@ def test_every_fleet_job_unit_carries_the_emission_flag_when_the_tier_arms_it(tm
         assert "PLANE_EMIT_ENABLED" not in svc.read_text(), svc.name        # unarmed composes unarmed
 
 
+def test_every_fleet_job_unit_carries_the_retirement_flags_when_the_tier_says_0(tmp_path, monkeypatch):
+    """Phase C, found live: the sessions retired their events write but the
+    fleet-pulse TIMER kept dual-writing — its unit was stamped with the read
+    and emit flags, never the write flags. Every fleet job unit now carries
+    each PLANE_LEGACY_WRITE_* that resolves to 0; at 1 nothing is stamped."""
+    from tests.test_plane_cutover_flip import _composed
+    on, off = tmp_path / "on", tmp_path / "off"
+    on.mkdir(); off.mkdir()
+    timers, _ = _composed(on, monkeypatch, {"PLANE_EMIT_ENABLED": "1", "PLANE_LEGACY_WRITE_EVENTS": "0",
+                                            "PLANE_LEGACY_WRITE_DISPATCH": "0"})
+    services = [p for p in timers.iterdir() if p.suffix == ".service"]
+    assert services
+    for svc in services:
+        text = svc.read_text()
+        assert "Environment=PLANE_LEGACY_WRITE_EVENTS=0" in text and "Environment=PLANE_LEGACY_WRITE_DISPATCH=0" in text, svc.name
+        assert "PLANE_LEGACY_WRITE_REPORT" not in text                       # unset in the tier: nothing stamped
+    timers, _ = _composed(off, monkeypatch, {"PLANE_EMIT_ENABLED": "1", "PLANE_LEGACY_WRITE_EVENTS": "1"})
+    for svc in (p for p in timers.iterdir() if p.suffix == ".service"):
+        assert "PLANE_LEGACY_WRITE" not in svc.read_text(), svc.name
+
+
 def test_retire_writes_no_longer_names_a_frozen_reader(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
     for reader in sh.GATED:

@@ -545,6 +545,22 @@ plane_emit_events() {
     return 0
 }
 
+# plane_fleet_tier_value <fleet> <KEY> <default> -- one key from the fleet .env
+# tier (the file the composer resolves at generate time), for a door running
+# with NO carrier: the restricted parser (parse_env_file) reads it, nothing is
+# sourced, and the last assignment wins as the cascade would have it.
+plane_fleet_tier_value() {
+    local _fleet="$1" _key="$2" _default="${3:-}" _dir _val=""
+    _dir=$(resolve_fleet_dir "$_fleet" 2>/dev/null) || _dir="${CLAUDLOBBY_ROOT:-}/local/$_fleet"
+    if [ -f "$_dir/.env" ]; then
+        # parse_env_file EXPORTS into the calling shell; inside this
+        # substitution the exports die with the subshell and only the one
+        # value comes back (the fleet tier alone: the flip writes it there).
+        _val=$( unset "$_key"; parse_env_file "$_dir/.env" >/dev/null 2>&1 || true; eval "printf '%s' \"\${$_key-}\"" )
+    fi
+    printf '%s' "${_val:-$_default}"
+}
+
 # plane_kill_tree <pid> -- kill a process and everything under it (recursive
 # pgrep -P: portable where macOS bash 3.2 has no pkill -g / setsid). The
 # keepalive tick carries the same form inside its reaper subshell; a bare kill
@@ -1451,8 +1467,19 @@ emit_fleet_event() {
         # bounded (FLEET_EVENT_EMIT_TIMEOUT_S, default 10), a reaped one being
         # "not recorded" and the ledger written. Measured: with the emission
         # synchronous, a wedged rung held the keepalive tick 60s per fleet event.
+        # The write flag: the env (a session's bot.conf, a job unit's stamp),
+        # else the FLEET TIER itself — a hand-run script (rolling-restart's
+        # pre-stop-handoff, an operator's spin-down) carries no flags and
+        # kept dual-writing after the flip (measured: eight lines per bot in
+        # the restart window). Read only when unset, through the restricted
+        # parser, never sourced.
         local _flag
-        eval "_flag=\${PLANE_LEGACY_WRITE_EVENTS:-1}"
+        if [ -n "${PLANE_LEGACY_WRITE_EVENTS+x}" ]; then
+            _flag="${PLANE_LEGACY_WRITE_EVENTS:-1}"
+        else
+            _flag=$(plane_fleet_tier_value "$_fleet" PLANE_LEGACY_WRITE_EVENTS 1)
+            [ "$_flag" = "0" ] && PLANE_LEGACY_WRITE_EVENTS=0   # plane_write_retired reads the env
+        fi
         if [ "$_flag" = "0" ]; then
             plane_emit_bounded emit_fleet_event "${FLEET_EVENT_EMIT_TIMEOUT_S:-10}" "$_batch"
             # stderr passes through: the missing fact is DISCLOSED, that is the contract
