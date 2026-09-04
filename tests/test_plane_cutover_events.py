@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -77,6 +78,30 @@ def _public(row):
     return _stdlib_readers().public(row)
 
 
+def _await(root, sql, want, *, timeout=30):
+    """Under dual-write the door's plane emission is DETACHED (the ledger line
+    is the record; the row lands when the cold CLI lands it), so a test reads
+    the plane after the row is there, never at the instant the door returned."""
+    deadline = time.monotonic() + timeout
+    while True:
+        with _ro(root) as conn:
+            got = conn.execute(sql).fetchone()[0]
+        if got == want or time.monotonic() > deadline:
+            return got
+        time.sleep(0.25)
+
+
+def _wedge(tmp_path, seconds):
+    w = tmp_path / "wedge-cli"
+    w.write_text(f"#!/bin/bash\nsleep {seconds}\n")
+    w.chmod(0o755)
+    return w
+
+
+def _wedge_alive(w):
+    return bool(subprocess.run(["pgrep", "-f", str(w)], capture_output=True, text=True).stdout.strip())
+
+
 def _bot_dir(paths, bot):
     d = paths.runtime_bots / bot
     (d / "data").mkdir(parents=True, exist_ok=True)
@@ -104,6 +129,7 @@ def test_the_door_lands_the_event_on_the_plane_and_the_reader_renders_the_legacy
     legacy = json.loads(ledger.read_text().strip())                # still appended: nothing retired
     assert (legacy["bot"], legacy["type"], legacy["source"], legacy["data"]) == \
         ("w1", "session_missing", "pulse", {"session": "w1"})
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 1) == 1
     pr = _stdlib_readers()
     with _ro(root) as conn:
         stored = tuple(conn.execute(
@@ -123,6 +149,7 @@ def test_a_fleet_level_receipt_anchors_on_the_fleet_and_renders_as_bot_fleet(tmp
     assert r.returncode == 0, r.stderr
     legacy = json.loads((root / "state" / "events" / f"fleet-{TODAY}.jsonl").read_text().strip())
     assert legacy["bot"] == "fleet" and legacy["data"] == {"rescued": 2}
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'fleet_rescue'", 1) == 1
     pr = _stdlib_readers()
     with _ro(root) as conn:
         kind, alias = tuple(conn.execute(
@@ -167,8 +194,7 @@ def test_the_append_retires_only_on_the_four_facts(tmp_path):
     # the flag is the operator's: default 1 keeps writing after the retirement too
     r = _door(root, call)
     assert lines() == 5
-    with _ro(root) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'session_missing'").fetchone()[0] == 4
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 4) == 4
 
 
 def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tmp_path):
@@ -184,8 +210,51 @@ def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tm
             ' echo "outer=$PLANE_EMIT_LAST_RC"')
     r = subprocess.run(["bash", "-c", prog], capture_output=True, text=True, timeout=180, env=_door_env(root))
     assert r.returncode == 0 and "outer=4" in r.stdout, r.stdout + r.stderr
-    with _ro(root) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM events WHERE event = 'send_miss'").fetchone()[0] == 1
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'send_miss'", 1) == 1
+
+
+def test_under_dual_write_a_wedged_rung_never_holds_the_door(tmp_path):
+    """The door runs inside every lib/ hot path (the keepalive tick's ERR trap,
+    its send verifier); under dual-write the ledger line IS the record, so the
+    plane emission is detached and reaped at the tick's bound — measured: a
+    synchronous emission held the keepalive tick 60s per fleet event behind a
+    wedged rung, failing the tick's own 15s pin."""
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    w = _wedge(tmp_path, 60)
+    t0 = time.monotonic()
+    r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
+              PLANE_EMIT_CLI=str(w), KEEPALIVE_EMIT_TIMEOUT_S="3")
+    elapsed = time.monotonic() - t0
+    assert r.returncode == 0 and elapsed < 5, (elapsed, r.stderr)
+    assert "session_missing" in (bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl").read_text()
+    deadline = time.monotonic() + 15                                  # the wedge appears, then is reaped
+    while not _wedge_alive(w) and time.monotonic() < deadline:
+        time.sleep(0.25)
+    assert _wedge_alive(w), "the detached emission never spawned the rung"
+    deadline = time.monotonic() + 15
+    while _wedge_alive(w) and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert not _wedge_alive(w), "the wedged rung outlived the reaper"
+
+
+def test_under_the_retirement_a_wedged_rung_is_waited_on_only_to_the_bound(tmp_path):
+    """With the write retired the door needs its fourth fact, so it waits —
+    bounded: a reaped emission is 'not recorded' and the ledger is written."""
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    for reader in sh.GATED:
+        _declare(root, reader)
+    assert _cli(root, "cutover", "--retire-writes").returncode == 0
+    w = _wedge(tmp_path, 60)
+    t0 = time.monotonic()
+    r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
+              PLANE_EMIT_CLI=str(w), PLANE_LEGACY_WRITE_EVENTS="0", FLEET_EVENT_EMIT_TIMEOUT_S="2")
+    elapsed = time.monotonic() - t0
+    assert r.returncode == 0 and 2 <= elapsed < 8, (elapsed, r.stderr)
+    assert "reaped at 2s" in r.stderr and "did not record this one" in r.stderr, r.stderr
+    assert "session_missing" in (bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl").read_text()
+    assert not _wedge_alive(w)
 
 
 # --- the readers follow the flip ---------------------------------------------
@@ -422,9 +491,8 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     assert page in capture.read_text(), capture.read_text() + after.stderr[-2000:]
     assert not list(paths.runtime_bots.glob("*/data/events/fleet-*.jsonl"))       # retired: no file came back
     assert "UNREACHABLE" not in after.stderr and "no cutover_declared" not in after.stderr
-    with _ro(root) as conn:
-        n = conn.execute("SELECT COUNT(*) FROM events WHERE event = 'session_missing'").fetchone()[0]
-    assert n >= 4                                                    # two sweeps, two bots each, on the plane
+    n = _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 4)
+    assert n >= 4, n                                                 # two sweeps, two bots each, on the plane
     summary = (root / "state" / "pulse" / "pulse-summary.txt").read_text()
     assert "session_missing" in summary and "unknown" not in summary
 

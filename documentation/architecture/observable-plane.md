@@ -221,7 +221,11 @@ this pass` + a debounced page + `unknown` in the summary — after the
 retirement the files hold nothing, so a fallback would read an outage as a
 quiet fleet. The JSONL append retires behind `PLANE_LEGACY_WRITE_EVENTS=0`
 on the same four facts as the other doors, the retirement having to NAME
-the door (`--retire-writes` extends a chunk-6b record that predates it). Still on their own files: `keepalive.sh`'s
+the door (`--retire-writes` extends a chunk-6b record that predates it).
+The door never holds a hot path: under dual-write its plane emission is
+detached (reaped at the keepalive tick's bound, the presence emit's shape),
+under the retirement it is waited on only to `FLEET_EVENT_EMIT_TIMEOUT_S`
+(a reaped emission is "not recorded" and the ledger is written). Still on their own files: `keepalive.sh`'s
 `keepalive-*.jsonl` and `bot-vitals.sh`'s rows (they never went through
 `emit_fleet_event`) — Phase B2's readers (`uptime`, `bot-vitals`, `tail-fleet`,
 `data-sweep`) decide those with them.
