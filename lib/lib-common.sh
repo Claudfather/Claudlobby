@@ -654,7 +654,12 @@ plane_write_retired() {
     # (chunk 6b's named dispatch and report) retires nothing it never named, or
     # a copy-pasted flag silences a write nobody declared retired. The door key
     # is the flag's own suffix (no fork for the three known ones).
-    local _door_key _retired
+    # The fleet: a session's FLEET_NAME, else the timer units' CLAUDLOBBY_FLEET
+    # — the pair every fleet-scoped door reads. The first build asked for
+    # FLEET_NAME alone, so from a timer unit the lookup was refused (an empty
+    # --fleet) and the door wrote its ledger "just in case" on every sweep:
+    # measured after the flip — the stamp in place, six legacy lines per sweep.
+    local _door_key _retired _fleet_name="${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}"
     case "${flag_name#PLANE_LEGACY_WRITE_}" in
         DISPATCH) _door_key=dispatch ;;
         REPORT)   _door_key=report ;;
@@ -667,11 +672,11 @@ plane_write_retired() {
     eval "_retired=\${_PLANE_RETIRED_AT_${_door_key}:-}"
     if [ -z "$_retired" ]; then
         _retired=$(python3 -S -E "${BASH_SOURCE[0]%/*}/plane-lookup.py" --root "${CLAUDLOBBY_ROOT:-}" \
-            --retired --door "$_door_key" --fleet "${FLEET_NAME:-}" 2>/dev/null || true)
+            --retired --door "$_door_key" --fleet "$_fleet_name" 2>/dev/null || true)
         [ -n "$_retired" ] && eval "_PLANE_RETIRED_AT_${_door_key}=\$_retired"
     fi
     if [ -z "$_retired" ]; then
-        echo "$door: $flag_name=0 but no legacy_write_retired is recorded for ${FLEET_NAME:-?} that covers '$_door_key' -- writing the ledger (plane cutover --retire-writes first)" >&2
+        echo "$door: $flag_name=0 but no legacy_write_retired is recorded for ${_fleet_name:-?} that covers '$_door_key' -- writing the ledger (plane cutover --retire-writes first)" >&2
         return 1
     fi
     echo "$door: legacy write retired ($_retired) -- the plane recorded it" >&2
