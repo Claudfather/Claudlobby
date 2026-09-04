@@ -42,7 +42,7 @@ Once you have decided to canary:
 1. **Pick a low-risk canary bot.** A worker, never the manager running the rollout — if the canary wedges, you still want a live hand on the controls. Prefer an idle bot with no WIP (see `safe-worker-restart` — clean pane, clean `git status`, no pending report). A bad canary should cost nothing.
 2. **Deploy to the canary only.** Apply the change and restart/reload that one bot. The rest of the fleet stays on the old path — it is your control group and your fallback.
 3. **Observe / drill it in production.** Watch it do the *real* thing, not a stub: does it boot clean, does the path the change touches actually fire against real config? Don't just confirm the process is up.
-4. **Evidence gate.** Green-light only on **observed behavior + audit evidence** — cite the pane output, the `data/events/*.jsonl` line, the `keepalive.log` entry. No evidence, no rollout. If the canary surfaces a bug, **halt**: fix it, re-canary from step 2.
+4. **Evidence gate.** Green-light only on **observed behavior + audit evidence** — cite the pane output, the `claudlobby events` row, the `keepalive.log` entry. No evidence, no rollout. If the canary surfaces a bug, **halt**: fix it, re-canary from step 2.
 5. **Flag the human before the fleet-wide switch.** The fleet-wide roll is the committal, hard-to-walk-back step. Surface it — "canary clean on `<bot>`, rolling to the remaining N?" — and get a go before flipping the fleet.
 6. **Roll the rest, then burn in.** Ship to the remaining bots. "Rolled" is not "done" — a slow failure (a leak, a wedged restart on the fourth bot) only shows on the fleet under load. Declare done after the burn-in is quiet.
 

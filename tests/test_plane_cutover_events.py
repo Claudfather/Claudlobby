@@ -1,13 +1,15 @@
-"""Cutover Phase B1 — the bot-events ledger (`data/events/fleet-*.jsonl` per
-bot, `state/events/` for the fleet) moves to the plane as a DIRECT MOVE: no
-shadow (operator ruling 2026-09-03 — no backward compat, hard flip, fix
-forward). `emit_fleet_event` lands every fleet event as a system event anchored
-on the bot's actor (or the fleet) whose detail carries {source, legacy_ts,
-data}, so the plane re-renders the legacy row byte for byte; the JSONL append
-retires on the same four facts as the other doors. The readers — `claudlobby
-events`, brief's alerts, fleet-pulse's escalation + summary — follow the flip:
-PLANE_READ_EVENTS=1 AND a recorded `cutover_declared` for `events`; a flag
-alone is disclosed; an unreachable plane refuses, never reads as quiet.
+"""Cutover Phase B1 → F18 closure R1 — the bot-events ledger
+(`data/events/fleet-*.jsonl` per bot, `state/events/` for the fleet) moved to
+the plane as a DIRECT MOVE (operator ruling 2026-09-03 — no backward compat,
+hard flip, fix forward), and with R1 the file is GONE: `emit_fleet_event`
+lands every fleet event as a system event anchored on the bot's actor (or the
+fleet) whose detail carries {source, legacy_ts, data}, so the plane re-renders
+the legacy row byte for byte, and writes nothing else — waited on, bounded,
+a failed or reaped emission disclosed as not recorded. The readers —
+`claudlobby events`, brief's alerts, fleet-pulse's escalation + summary —
+follow the flip until R2: PLANE_READ_EVENTS=1 AND a recorded
+`cutover_declared` for `events`; a flag alone is disclosed; an unreachable
+plane refuses, never reads as quiet.
 """
 from __future__ import annotations
 
@@ -79,9 +81,9 @@ def _public(row):
 
 
 def _await(root, sql, want, *, timeout=30):
-    """Under dual-write the door's plane emission is DETACHED (the ledger line
-    is the record; the row lands when the cold CLI lands it), so a test reads
-    the plane after the row is there, never at the instant the door returned."""
+    """The door's emission is waited on (bounded), so the row is normally there
+    when the door returns; the poll keeps the fleet-pulse tests honest, whose
+    sweep runs several doors."""
     deadline = time.monotonic() + timeout
     while True:
         with _ro(root) as conn:
@@ -125,10 +127,7 @@ def test_the_door_lands_the_event_on_the_plane_and_the_reader_renders_the_legacy
     bot_dir = _bot_dir(paths, "w1")
     r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1')
     assert r.returncode == 0, r.stderr
-    ledger = bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl"
-    legacy = json.loads(ledger.read_text().strip())                # still appended: nothing retired
-    assert (legacy["bot"], legacy["type"], legacy["source"], legacy["data"]) == \
-        ("w1", "session_missing", "pulse", {"session": "w1"})
+    assert not (bot_dir / "data" / "events").exists()               # no file, ever (R1)
     assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 1) == 1
     pr = _stdlib_readers()
     with _ro(root) as conn:
@@ -139,16 +138,18 @@ def test_the_door_lands_the_event_on_the_plane_and_the_reader_renders_the_legacy
     assert stored[:5] == ("critical", "actor", f"bot:{F}/w1", 1, "system")
     assert stored[5].startswith("fleet-events:sha:") and len(stored[5]) == len("fleet-events:sha:") + 32
     assert stored[6].endswith("+00:00")                            # stamped UTC; the legacy ts keeps its offset
-    assert [_public(x) for x in rows] == [legacy]                  # byte for byte the legacy row
+    legacy = _public(rows[0])                                      # the row as the retired ledger wrote it
+    assert (legacy["bot"], legacy["type"], legacy["source"], legacy["data"]) == \
+        ("w1", "session_missing", "pulse", {"session": "w1"})
+    assert legacy["ts"] and set(legacy) == {"ts", "bot", "type", "source", "data"}
     assert rows[0]["_severity"] == "critical"
 
 
 def test_a_fleet_level_receipt_anchors_on_the_fleet_and_renders_as_bot_fleet(tmp_path):
     root, paths, _, _ = _scene(tmp_path)
-    r = _door(root, 'fleet_rescue pulse \'{"rescued":2}\' ""')     # an EMPTY bot_dir: the fleet ledger
+    r = _door(root, 'fleet_rescue pulse \'{"rescued":2}\' ""')     # an EMPTY bot_dir: the fleet anchor
     assert r.returncode == 0, r.stderr
-    legacy = json.loads((root / "state" / "events" / f"fleet-{TODAY}.jsonl").read_text().strip())
-    assert legacy["bot"] == "fleet" and legacy["data"] == {"rescued": 2}
+    assert not (root / "state" / "events").exists()                # no fleet-level file, ever (R1)
     assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'fleet_rescue'", 1) == 1
     pr = _stdlib_readers()
     with _ro(root) as conn:
@@ -156,7 +157,8 @@ def test_a_fleet_level_receipt_anchors_on_the_fleet_and_renders_as_bot_fleet(tmp
             "SELECT subject_kind, subject_alias FROM events WHERE event = 'fleet_rescue'").fetchone())
         rows = pr.fleet_events(conn, F)
     assert (kind, alias) == ("fleet", F)
-    assert [_public(x) for x in rows] == [legacy]
+    legacy = _public(rows[0])
+    assert legacy["bot"] == "fleet" and legacy["data"] == {"rescued": 2}
 
 
 def test_a_timer_run_door_names_its_fleet_from_the_units_carrier(tmp_path):
@@ -176,93 +178,6 @@ def test_a_timer_run_door_names_its_fleet_from_the_units_carrier(tmp_path):
         assert conn.execute("SELECT subject_alias FROM events WHERE event = 'pane_stuck'").fetchone()[0] == f"bot:{F}/w1"
 
 
-def test_a_timer_run_door_honours_the_retirement_through_the_units_carrier(tmp_path):
-    """Phase C, found live AFTER the stamps landed: the fleet-pulse unit carried
-    PLANE_LEGACY_WRITE_EVENTS=0 and CLAUDLOBBY_FLEET, yet every sweep still
-    wrote six legacy lines — the retirement predicate looked the record up
-    under FLEET_NAME alone, so from a timer the lookup was refused (an empty
-    --fleet) and the door wrote 'just in case'. The predicate reads the same
-    pair the door does."""
-    root, paths, _, _ = _scene(tmp_path)
-    bot_dir = _bot_dir(paths, "w1")
-    ledger = bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl"
-    for reader in sh.GATED:
-        _declare(root, reader)
-    assert _cli(root, "cutover", "--retire-writes").returncode == 0
-    env = _door_env(root, CLAUDLOBBY_FLEET=F, PLANE_LEGACY_WRITE_EVENTS="0")
-    env.pop("FLEET_NAME")
-    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event pane_stuck pulse \'{{"s":1}}\' "{bot_dir}" w1'],
-                       capture_output=True, text=True, timeout=180, env=env)
-    assert r.returncode == 0 and "legacy write retired" in r.stderr, r.stderr
-    assert "for ? that covers" not in r.stderr                                # the fleet is named, never '?'
-    assert not ledger.exists()                                                # retired: nothing written
-    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'pane_stuck'", 1) == 1
-
-
-def test_a_hand_run_door_reads_the_write_flag_from_the_fleet_tier(tmp_path):
-    """Phase C, found live: rolling-restart's pre-stop-handoff runs from an
-    operator shell with no carrier, and wrote eight legacy lines per bot in
-    the restart window after the retirement. With the env carrying no flag the
-    door reads the fleet tier itself (restricted parser, never sourced)."""
-    root, paths, _, _ = _scene(tmp_path)
-    bot_dir = _bot_dir(paths, "w1")
-    ledger = bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl"
-    for reader in sh.GATED:
-        _declare(root, reader)
-    assert _cli(root, "cutover", "--retire-writes").returncode == 0
-    tier = root / "local" / F / ".env"
-    call = f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1'
-    env = _door_env(root); env.pop("PLANE_LEGACY_WRITE_EVENTS", None)
-    tier.write_text("PLANE_LEGACY_WRITE_EVENTS=1\n")
-    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event {call}'], capture_output=True, text=True, timeout=180, env=env)
-    assert r.returncode == 0 and ledger.read_text().count("\n") == 1          # the tier says 1: dual-write
-    tier.write_text("TELEGRAM_BOT_TOKEN=8888888:AAAAAAAAAAAAAAAAAAAA\nPLANE_LEGACY_WRITE_EVENTS=0\n")
-    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event {call}; echo "flag=${{PLANE_LEGACY_WRITE_EVENTS:-unset}} token=${{TELEGRAM_BOT_TOKEN:-none}}"'],
-                       capture_output=True, text=True, timeout=180, env=env)
-    assert r.returncode == 0 and "legacy write retired" in r.stderr, r.stderr
-    assert ledger.read_text().count("\n") == 1                               # the tier says 0: skipped
-    assert "token=none" in r.stdout                                          # nothing else from the tier leaks into the door's shell
-    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 2) == 2
-
-
-def test_the_append_retires_only_on_the_four_facts(tmp_path):
-    root, paths, _, _ = _scene(tmp_path)
-    bot_dir = _bot_dir(paths, "w1")
-    ledger = bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl"
-    call = f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1'
-    lines = lambda: ledger.read_text().count("\n") if ledger.exists() else 0
-
-    # flag 0 with NO recorded retirement: the ledger is written and the gap named
-    r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0")
-    assert "no legacy_write_retired is recorded" in r.stderr and lines() == 1
-    for reader in sh.GATED:
-        _declare(root, reader)
-    # a retirement from BEFORE this door existed (chunk 6b's names dispatch and
-    # report) covers nothing it never named: the door keeps writing, and
-    # --retire-writes records the EXTENSION rather than "already retired"
-    old = cut.retirement_event(F, {}, "2026-09-03T00:00:00+00:00")
-    old["payload"]["data"]["flags"].pop("events"); old["payload"]["data"]["flags"].pop("workstreams", None)   # a chunk-6b record
-    assert emit_batch(root, [old])[0].status == "committed"
-    r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0")
-    assert "that covers 'events'" in r.stderr and lines() == 2
-    ext = _cli(root, "cutover", "--retire-writes")
-    assert ext.returncode == 0 and "recording the extension" in ext.stdout, ext.stdout + ext.stderr
-    assert "['dispatch', 'report']" in ext.stdout and "['events', 'workstreams']" in ext.stdout
-    # all four facts: flag 0, armed, retired (covering this door), THIS emission recorded -> skipped
-    r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0")
-    assert "legacy write retired" in r.stderr and lines() == 2
-    # the fourth fact fails (the plane did not record this one) -> written
-    r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0", PLANE_EMIT_CLI="/usr/bin/false")
-    assert "did not record this one" in r.stderr and lines() == 3
-    # unarmed: the plane is never touched, the ledger is the record
-    r = _door(root, call, PLANE_LEGACY_WRITE_EVENTS="0", PLANE_EMIT_ENABLED="0")
-    assert r.stderr == "" and lines() == 4
-    # the flag is the operator's: default 1 keeps writing after the retirement too
-    r = _door(root, call)
-    assert lines() == 5
-    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 4) == 4
-
-
 def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tmp_path):
     """report-back emits its report, then sends through pane_send_verified —
     whose send_miss is a fleet event through THIS door — then asks
@@ -279,48 +194,61 @@ def test_a_nested_fleet_event_never_clobbers_the_callers_own_emission_verdict(tm
     assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'send_miss'", 1) == 1
 
 
-def test_under_dual_write_a_wedged_rung_never_holds_the_door(tmp_path):
+def test_a_wedged_rung_is_waited_on_only_to_the_bound_and_disclosed(tmp_path):
     """The door runs inside every lib/ hot path (the keepalive tick's ERR trap,
-    its send verifier); under dual-write the ledger line IS the record, so the
-    plane emission is detached and reaped at the tick's bound — measured: a
-    synchronous emission held the keepalive tick 60s per fleet event behind a
-    wedged rung, failing the tick's own 15s pin."""
+    its send verifier), so a wedged rung must never hold it for a minute —
+    measured: a synchronous emission held the keepalive tick 60s per fleet
+    event. It waits, bounded, and a reaped emission is DISCLOSED as not
+    recorded: there is no file to write instead (R1)."""
     root, paths, _, _ = _scene(tmp_path)
     bot_dir = _bot_dir(paths, "w1")
     w = _wedge(tmp_path, 60)
     t0 = time.monotonic()
     r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
-              PLANE_EMIT_CLI=str(w), KEEPALIVE_EMIT_TIMEOUT_S="3")
-    elapsed = time.monotonic() - t0
-    assert r.returncode == 0 and elapsed < 5, (elapsed, r.stderr)
-    assert "session_missing" in (bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl").read_text()
-    deadline = time.monotonic() + 15                                  # the wedge appears, then is reaped
-    while not _wedge_alive(w) and time.monotonic() < deadline:
-        time.sleep(0.25)
-    assert _wedge_alive(w), "the detached emission never spawned the rung"
-    deadline = time.monotonic() + 15
-    while _wedge_alive(w) and time.monotonic() < deadline:
-        time.sleep(0.5)
-    assert not _wedge_alive(w), "the wedged rung outlived the reaper"
-
-
-def test_under_the_retirement_a_wedged_rung_is_waited_on_only_to_the_bound(tmp_path):
-    """With the write retired the door needs its fourth fact, so it waits —
-    bounded: a reaped emission is 'not recorded' and the ledger is written."""
-    root, paths, _, _ = _scene(tmp_path)
-    bot_dir = _bot_dir(paths, "w1")
-    for reader in sh.GATED:
-        _declare(root, reader)
-    assert _cli(root, "cutover", "--retire-writes").returncode == 0
-    w = _wedge(tmp_path, 60)
-    t0 = time.monotonic()
-    r = _door(root, f'session_missing pulse \'{{"session":"w1"}}\' "{bot_dir}" w1',
-              PLANE_EMIT_CLI=str(w), PLANE_LEGACY_WRITE_EVENTS="0", FLEET_EVENT_EMIT_TIMEOUT_S="2")
+              PLANE_EMIT_CLI=str(w), FLEET_EVENT_EMIT_TIMEOUT_S="2")
     elapsed = time.monotonic() - t0
     assert r.returncode == 0 and 2 <= elapsed < 8, (elapsed, r.stderr)
-    assert "reaped at 2s" in r.stderr and "did not record this one" in r.stderr, r.stderr
-    assert "session_missing" in (bot_dir / "data" / "events" / f"fleet-{TODAY}.jsonl").read_text()
+    assert "reaped at 2s" in r.stderr and "not recorded" in r.stderr, r.stderr
+    assert not (bot_dir / "data" / "events").exists()
     assert not _wedge_alive(w)
+
+
+def test_a_bot_anchored_door_with_no_fleet_in_its_environment_reads_the_bots_own_conf(tmp_path):
+    """A hand-run pre-stop hook carries the bot dir and nothing else: the fleet
+    comes from the bot's own bot.conf (plane_peer_fleet's rule), so the row is
+    anchored on the bot — measured on the data flip, where nine such hooks
+    wrote into a frozen file instead."""
+    root, paths, _, _ = _scene(tmp_path)
+    bot_dir = _bot_dir(paths, "w1")
+    (bot_dir / "bot.conf").write_text(f"export FLEET_NAME={F}\nexport BOT_NAME=w1\n")
+    env = _door_env(root); env.pop("FLEET_NAME")
+    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event pane_stuck pulse \'{{"s":1}}\' "{bot_dir}" w1; echo rc=$?'],
+                       capture_output=True, text=True, timeout=180, env=env)
+    assert r.returncode == 0 and "rc=0" in r.stdout, r.stderr
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'pane_stuck'", 1) == 1
+    with _ro(root) as conn:
+        assert tuple(conn.execute("SELECT subject_kind, subject_alias FROM events WHERE event = 'pane_stuck'").fetchone()) == ("actor", f"bot:{F}/w1")
+
+
+def test_a_host_job_with_no_fleet_anywhere_anchors_on_the_host(tmp_path):
+    """disk-monitor, host-health-check, a sibling pull: no fleet, no bot. The
+    state/events/ file used to take their receipts; the plane takes them now,
+    anchored on the HOST (the probe's convention) — never silence."""
+    import socket
+    root, paths, _, _ = _scene(tmp_path)
+    env = _door_env(root); env.pop("FLEET_NAME")
+    r = subprocess.run(["bash", "-c", f'. "{LIB}/lib-common.sh"; emit_fleet_event disk_high disk-monitor \'{{"pct":93}}\' ""; echo rc=$?'],
+                       capture_output=True, text=True, timeout=180, env=env)
+    assert r.returncode == 0 and "rc=0" in r.stdout, r.stderr
+    assert _await(root, "SELECT COUNT(*) FROM events WHERE event = 'disk_high'", 1) == 1
+    pr = _stdlib_readers()
+    with _ro(root) as conn:
+        kind, alias = conn.execute("SELECT subject_kind, subject_alias FROM events WHERE event = 'disk_high'").fetchone()
+        rows = pr.fleet_events(conn, "_host")
+    assert kind == "host" and alias == socket.gethostname()
+    legacy = _public(rows[0])
+    assert (legacy["bot"], legacy["type"], legacy["source"], legacy["data"]) == ("host", "disk_high", "disk-monitor", {"pct": 93})
+    assert not (root / "state" / "events").exists()
 
 
 # --- the readers follow the flip ---------------------------------------------
@@ -527,9 +455,8 @@ def _pulse(root, libdir, **extra):
 def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_path):
     """Two declared bots with no tmux session: the sweep emits session_missing
     for both (through the real door, onto the plane) and its escalation must
-    find them — from the files before the flip, from the plane after it, the
-    same page either way. After the write is retired the files hold nothing,
-    so a page can only have come from the plane."""
+    find them from the plane under the flip — no file holds anything now, so
+    a page can only have come from the plane."""
     root, paths, _, _ = _scene(tmp_path)
     for b in ("w1", "w2"):
         (_bot_dir(paths, b) / "bot.conf").write_text(f"TMUX_SOCKET=b1-none-{b}\n")   # no server anywhere
@@ -538,27 +465,17 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     libdir = _pulse_lib(tmp_path, capture)
     page = "FLEET ALERT: session_missing on 2 bots (w1 w2)."
 
-    before = _pulse(root, libdir)                                    # the files answer the escalation
-    assert before.returncode == 0, before.stderr[-2000:]
-    assert page in capture.read_text(), capture.read_text() + before.stderr[-2000:]
-    ledgers = list(paths.runtime_bots.glob("*/data/events/fleet-*.jsonl"))
-    assert len(ledgers) == 2 and all("session_missing" in p.read_text() for p in ledgers)
-
     for reader in sh.GATED:                                          # the hard flip: declare + retire
         _declare(root, reader, "operator ruling 2026-09-03: hard flip, fix forward")
     assert _cli(root, "cutover", "--retire-writes").returncode == 0
-    for p in ledgers:
-        p.unlink()
-    (root / "state" / "pulse" / "escalation_session_missing").unlink()   # the debounce marker: re-arm
-    capture.write_text("")
 
-    after = _pulse(root, libdir, PLANE_READ_EVENTS="1", PLANE_LEGACY_WRITE_EVENTS="0")
+    after = _pulse(root, libdir, PLANE_READ_EVENTS="1")
     assert after.returncode == 0, after.stderr[-2000:]
     assert page in capture.read_text(), capture.read_text() + after.stderr[-2000:]
-    assert not list(paths.runtime_bots.glob("*/data/events/fleet-*.jsonl"))       # retired: no file came back
+    assert not list(paths.runtime_bots.glob("*/data/events/fleet-*.jsonl"))       # no file, ever (R1)
     assert "UNREACHABLE" not in after.stderr and "no cutover_declared" not in after.stderr
-    n = _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 4)
-    assert n >= 4, n                                                 # two sweeps, two bots each, on the plane
+    n = _await(root, "SELECT COUNT(*) FROM events WHERE event = 'session_missing'", 2)
+    assert n >= 2, n                                                 # one sweep, two bots, on the plane
     summary = (root / "state" / "pulse" / "pulse-summary.txt").read_text()
     assert "session_missing" in summary and "unknown" not in summary
 
@@ -572,7 +489,7 @@ def test_fleet_pulse_escalates_from_the_plane_once_the_files_are_retired(tmp_pat
     capture.write_text("")
     _drop_plane(root)
     (root / "state" / "plane" / "plane.db").mkdir()
-    dark = _pulse(root, libdir, PLANE_READ_EVENTS="1", PLANE_LEGACY_WRITE_EVENTS="0")
+    dark = _pulse(root, libdir, PLANE_READ_EVENTS="1")
     assert dark.returncode == 0, dark.stderr[-2000:]
     assert "UNREACHABLE" in dark.stderr and "cannot be judged this pass" in dark.stderr
     # the escalation loop never reaches for a cache no read produced (a read

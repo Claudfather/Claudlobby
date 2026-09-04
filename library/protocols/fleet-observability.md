@@ -19,22 +19,13 @@ Both write the same JSONL schema to the same bot-local directory. Managers read 
 
 ## Where to Read
 
-Each bot writes its own events to:
-
-```
-<bot-dir>/data/events/fleet-YYYY-MM-DD.jsonl
-```
-
-All paths are derivable from fleet.yaml. For a fleet named `<fleet>`:
-
-```
-$CLAUDLOBBY_ROOT/local/<fleet>/runtime/bots/<bot>/data/events/fleet-$(date +%Y-%m-%d).jsonl
-```
-
-**That is where the data lives, not how a manager should read it.** Do not use `resolve_bots_dir`
-to iterate bot directories and read this path directly — see "Reading Events" below for why, and
-use `claudlobby events` instead. `resolve_bots_dir` stays the right tool for cases that only need
-bot *names* (e.g. enumerating who exists), not for reaching into `data/events/` across bots.
+Every bot's events are recorded on the plane — the host's flight recorder,
+`$CLAUDLOBBY_ROOT/state/plane/plane.db` — and nowhere else (F18 closure: the
+per-bot `data/events/*.jsonl` files are gone). Read them through
+`claudlobby events` (`--fleet <fleet> events --since 24h [--bot <bot>] [--json]`),
+which renders the same `{ts, bot, type, source, data}` rows the ledgers had.
+Never open the database by hand from a session; `resolve_bots_dir` stays the
+right tool for cases that only need bot *names* (e.g. enumerating who exists).
 
 ## Event Schema
 

@@ -6,7 +6,8 @@ stubbed) — the door-test pattern from test_plane_gauntlet_doors. The
 load-bearing laws: the tick's ALREADY-COMPUTED verdict is what gets
 recorded (the sampler classifies nothing); the dead-session path records
 session_up=false and NO heartbeat (no pane was classified — a fabricated
-verdict is the lie this lane kills); dormancy holds; and the sample's
+verdict is the lie this lane kills); the emit is always on (only
+PLANE_EMIT_DISABLED=1 silences it — F18 closure R1); and the sample's
 subject resolves to the SAME uid the registry keyframes use, so presence
 joins equipment with no glue.
 """
@@ -34,7 +35,7 @@ DOOR_FILES = ("keepalive.sh", "lib-common.sh", "plane-emit.sh",
 
 
 def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
-         fresh_marker: bool = False, armed: bool = True):
+         fresh_marker: bool = False, armed: bool = True, disabled: bool = False):
     # pane default is the ASCII form of the idle glyph class — the ❯ glyph
     # byte-matches unreliably under the rig's minimal (C-locale) env
     libdir = tmp_path / "lib"
@@ -70,7 +71,9 @@ def _rig(tmp_path: Path, *, pane: str = "> ", has_session: bool = True,
         "PATH": "/usr/bin:/bin",
     }
     if armed:
-        env["PLANE_EMIT_ENABLED"] = "1"
+        env["PLANE_EMIT_ENABLED"] = "1"     # ignored since R1; kept for the shape
+    if disabled:
+        env["PLANE_EMIT_DISABLED"] = "1"
     return libdir, bot, env
 
 
@@ -156,11 +159,22 @@ def test_dead_session_records_session_down_and_no_heartbeat(tmp_path):
     assert (bot / "start-stub.log").exists()   # the restart ladder ran
 
 
-def test_dormant_without_arming_emits_nothing(tmp_path):
+def test_records_without_any_flag_and_disabled_emits_nothing(tmp_path):
+    """The always-on contract (F18 closure R1): a tick with NO plane flag in
+    its environment records its heartbeat; PLANE_EMIT_DISABLED=1 records
+    nothing (the tick itself still runs, rc 0)."""
     libdir, bot, env = _rig(tmp_path, armed=False)
     r = _tick(libdir, bot, env)
     assert r.returncode == 0, r.stderr
-    assert not db_path(tmp_path).is_file()
+    rows = _wait_samples(tmp_path)
+    assert "bot.heartbeat" in [s["metric"] for s in rows]
+    d = tmp_path / "disabled"
+    d.mkdir()
+    libdir2, bot2, env2 = _rig(d, disabled=True)
+    r = _tick(libdir2, bot2, env2)
+    assert r.returncode == 0, r.stderr
+    time.sleep(2)                       # the emit is backgrounded; give a silenced one nothing to do
+    assert not db_path(d).is_file()
 
 
 def test_heartbeat_subject_joins_the_registry_keyframe(tmp_path):

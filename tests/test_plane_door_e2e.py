@@ -1,5 +1,6 @@
 """PR-B armed-path e2e: the REAL doors, the REAL shim (cold-CLI rung), a REAL
-plane db — the dual-write contract end to end, with parity as the verdict.
+plane db — the plane-only contract end to end (F18 closure R1: the doors write
+no ledger; the plane is the only record, and a disabled door records nothing).
 
 Harness = test_task_id_dispatch's _fake_lib pattern extended: doors +
 lib-common + the plane shim are symlinked so LIB_DIR resolves inside the fake
@@ -10,6 +11,7 @@ real ingest into <tmp>/state/plane/plane.db."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -72,9 +74,36 @@ def _rows(tmp_path: Path, sql: str, params: tuple = ()):
     return out
 
 
-def _ledger_row(tmp_path: Path) -> dict:
-    lines = (tmp_path / "state" / "dispatch-log.jsonl").read_text().splitlines()
-    return json.loads(lines[-1])
+def _plane_row(tmp_path: Path) -> dict:
+    """The newest dispatch as the retired ledger row once carried it — from
+    the plane, the only record."""
+    rows = _rows(tmp_path, "SELECT assignment_id, work_item_id, dispatch_msg_id, expected_by, source_ref"
+                           " FROM assignments ORDER BY ingest_seq DESC LIMIT 1")
+    assert rows, "no dispatch on the plane"
+    a = rows[0]
+    ref = a["source_ref"] or ""
+    task_id = ref[len("dispatch-log:"):] if ref.startswith("dispatch-log:t-") else ""
+    return {"task_id": task_id, "plane_msg_id": a["dispatch_msg_id"],
+            "plane_work_item_id": a["work_item_id"], "plane_assignment_id": a["assignment_id"],
+            "expected_by": a["expected_by"]}
+
+
+def _seed_assignment(root: Path, *, task_id: str, bot: str, tag: str):
+    """A work item + assignment for <bot> keyed dispatch-log:<task_id>, landed
+    through the batch door — the plane-side twin of the forged ledger rows the
+    #1372 review used to build its collision shapes."""
+    from claudlobby.plane.emit_api import emit_batch
+    ids = ("msg_" + tag * 32, "wi_" + tag * 32, "asg_" + tag * 32)
+    base = {"emitter": "dispatch-task", "fleet": "e2e-fleet", "source_ref": f"dispatch-log:{task_id}"}
+    out = emit_batch(root, [
+        {**base, "event_type": "work_item",
+         "payload": {"work_item_id": ids[1], "title": f"forged for {bot}", "created_by": "bot:e2e-fleet/lead"}},
+        {**base, "event_type": "assignment",
+         "payload": {"assignment_id": ids[2], "work_item_id": ids[1], "assignee": f"bot:e2e-fleet/{bot}",
+                     "assigned_by": "bot:e2e-fleet/lead", "dispatch_msg_id": ids[0]}},
+    ])
+    assert all(o.status == "committed" for o in out), out
+    return ids
 
 
 @pytest.fixture()
@@ -86,7 +115,9 @@ def test_dispatch_task_armed_lands_the_construct_triple(tmp_path, armed):
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "fix the widget"', env)
     assert r.returncode == 0, r.stderr
-    row = _ledger_row(tmp_path)
+    assert not (tmp_path / "state" / "dispatch-log.jsonl").exists()        # no ledger, ever
+    row = _plane_row(tmp_path)
+    assert row["task_id"].startswith("t-")
     assert row["plane_msg_id"].startswith("msg_")
     assert row["plane_work_item_id"].startswith("wi_")
     assert row["plane_assignment_id"].startswith("asg_")
@@ -126,7 +157,6 @@ def test_dispatch_query_armed_lands_the_triple_under_the_importers_content_key(t
     the importer derives, so a later import classifies as a duplicate and
     the flipped readers can see an overdue id-less dispatch and apply the
     resolver's id-less guard."""
-    from claudlobby.plane.parity import content_key
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "what is the retry logic"', env)
     assert r.returncode == 0, r.stderr
@@ -137,27 +167,29 @@ def test_dispatch_query_armed_lands_the_triple_under_the_importers_content_key(t
     asg = conn.execute("SELECT source_ref, assignment_id, work_item_id, expected_by FROM assignments").fetchone()
     n_wi = conn.execute("SELECT COUNT(*) FROM work_items").fetchone()[0]
     conn.close()
-    line = (tmp_path / "state" / "dispatch-log.jsonl").read_text().splitlines()[-1].strip()
-    row = json.loads(line)
+    row = _plane_row(tmp_path)
     assert comm["message_class"] == "question" and comm["command_type"] == "query"
     assert row["task_id"] == "" and row["plane_msg_id"].startswith("msg_")
-    # the deadline is withheld on BOTH sides: the ledger's null and no plane
-    # expected_by — a query that could go "overdue" on the plane alone paged
-    # the shadow on every unanswered one (measured live 2026-09-03)
+    # the deadline is withheld: no plane expected_by — a query that could go
+    # "overdue" paged the shadow on every unanswered one (measured live 2026-09-03)
     assert row["expected_by"] is None and asg["expected_by"] is None
     assert n_wi == 1 and asg is not None
-    assert asg["source_ref"] == comm["source_ref"] == f"dispatch-log:sha:{content_key(line)}"
+    # keyed by the content key of the row as the retired ledger wrote it —
+    # deterministic from the dispatch itself, 32 hex, the importer's derivation
+    assert asg["source_ref"] == comm["source_ref"]
+    assert re.fullmatch(r"dispatch-log:sha:[0-9a-f]{32}", asg["source_ref"]), asg["source_ref"]
     assert asg["assignment_id"] == row["plane_assignment_id"] and asg["work_item_id"] == row["plane_work_item_id"]
     assert comm["work_item_id"] == asg["work_item_id"]
 
 
-def test_unarmed_door_writes_nothing_and_ledger_fields_empty(tmp_path, armed):
+def test_a_disabled_door_records_nothing_and_still_sends(tmp_path, armed):
+    """PLANE_EMIT_DISABLED=1 (the harness exemption) is the one thing that
+    silences a door; PLANE_EMIT_ENABLED=0 means nothing any more."""
     libdir, env = armed
-    env = {**env, "PLANE_EMIT_ENABLED": "0"}
+    env = {**env, "PLANE_EMIT_DISABLED": "1", "PLANE_EMIT_ENABLED": "0"}
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "quiet fleet"', env)
     assert r.returncode == 0, r.stderr
-    row = _ledger_row(tmp_path)
-    assert row["plane_msg_id"] == ""
+    assert not (tmp_path / "state" / "dispatch-log.jsonl").exists()
     assert not db_path(tmp_path).exists() or _rows(
         tmp_path, "SELECT COUNT(*) FROM communications")[0][0] == 0
 
@@ -166,7 +198,7 @@ def test_report_back_links_task_facts_and_closes_the_status(tmp_path, armed):
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "build the door"', env)
     assert r.returncode == 0, r.stderr
-    row = _ledger_row(tmp_path)
+    row = _plane_row(tmp_path)
     task_id = row["task_id"]
     r2 = _bash(
         f'"{libdir}/report-back.sh" w1 completed "door built"'
@@ -196,12 +228,7 @@ def test_report_back_links_task_facts_and_closes_the_status(tmp_path, armed):
     assert txs == ["pane_submitted", "failed"]
     statuses = dict(_rows(tmp_path, TASK_STATUS_SQL))
     assert statuses[row["plane_assignment_id"]] == "completed"
-    # report ledger carries the parity join (path via discovery, not a
-    # hardcoded tier — fleet_runtime_dir owns the overlay-vs-root rule)
-    ledgers = list(tmp_path.rglob("report-back.jsonl"))
-    assert ledgers, "report ledger never written"
-    rb = json.loads(ledgers[0].read_text().splitlines()[-1])
-    assert rb["plane_msg_id"].startswith("msg_")
+    assert not list(tmp_path.rglob("report-back.jsonl")), "no report ledger, ever"
 
 
 def test_workstream_lifecycle_emits_construct_and_verb_events(tmp_path, armed):
@@ -235,21 +262,6 @@ def test_workstream_lifecycle_emits_construct_and_verb_events(tmp_path, armed):
     assert statuses[ws_id] == "closed"
 
 
-def test_parity_is_the_verdict_dispatch_lane_clean(tmp_path, armed):
-    libdir, env = armed
-    for i in range(3):
-        r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "task {i}"', env)
-        assert r.returncode == 0, r.stderr
-    r = subprocess.run(
-        [sys.executable, str(LIB_DIR / "plane-parity.py"),
-         "--legacy", str(tmp_path / "state" / "dispatch-log.jsonl"),
-         "--ledger-name", "dispatch-log", "--id-field", "task_id",
-         "--db", str(db_path(tmp_path))],
-        capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "matched: 3" in r.stdout
-
-
 def test_f2_progress_injection_refused(tmp_path, armed):
     """#1372 review F2: --progress was raw-interpolated into two JSONs — a
     crafted value forged duplicate keys redirecting the report's task facts."""
@@ -270,15 +282,10 @@ def test_f3_report_joins_by_task_id_AND_bot(tmp_path, armed):
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "for w one"', env)
     assert r.returncode == 0, r.stderr
-    row_w1 = _ledger_row(tmp_path)
-    # forge a SECOND ledger row for w2 carrying the SAME task id but different
-    # plane ids (the reviewer's collision shape)
-    forged = dict(row_w1)
-    forged["bot"] = "w2"
-    forged["plane_work_item_id"] = "wi_" + "f" * 32
-    forged["plane_assignment_id"] = "asg_" + "f" * 32
-    ledger = tmp_path / "state" / "dispatch-log.jsonl"
-    ledger.write_text(ledger.read_text() + json.dumps(forged) + "\n")
+    row_w1 = _plane_row(tmp_path)
+    # a SECOND assignment for w2 carrying the SAME task id but different plane
+    # ids (the reviewer's collision shape), landed on the plane
+    _seed_assignment(tmp_path, task_id=row_w1["task_id"], bot="w2", tag="f")
     r2 = _bash(
         f'"{libdir}/report-back.sh" w1 completed "done"'
         f' --task {row_w1["task_id"]}', env)
@@ -300,12 +307,8 @@ def test_f3_residual_casefold_and_newline_id(tmp_path, armed):
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand W1 "case probe"', env)
     assert r.returncode == 0, r.stderr
-    row = _ledger_row(tmp_path)
-    forged = dict(row)
-    forged["bot"] = "w1"
-    forged["plane_assignment_id"] = "asg_" + "e" * 32
-    ledger = tmp_path / "state" / "dispatch-log.jsonl"
-    ledger.write_text(ledger.read_text() + json.dumps(forged) + "\n")
+    row = _plane_row(tmp_path)
+    _seed_assignment(tmp_path, task_id=row["task_id"], bot="w1", tag="e")     # the lowercase twin
     r2 = _bash(f'"{libdir}/report-back.sh" W1 completed "done"'
                f' --task {row["task_id"]}', env)
     assert r2.returncode == 0, r2.stderr
@@ -314,10 +317,10 @@ def test_f3_residual_casefold_and_newline_id(tmp_path, armed):
         "SELECT assignment_id FROM events WHERE kind='task'"
         " AND event='completed'")]
     conn.close()
-    # Case-insensitive join means BOTH rows match; tail -1 takes the newest —
-    # which here is the forged one. The property under test is narrower and
-    # is the one the reviewer's probe asserted: the LEGITIMATE W1 row is not
-    # excluded by case. So assert the link happened at all AND that a
+    # Case-insensitive join means BOTH assignments match and the lookup takes
+    # the newest — here the seeded twin. The property under test is narrower
+    # and is the one the reviewer's probe asserted: the LEGITIMATE W1 row is
+    # not excluded by case. So assert the link happened at all AND that a
     # newline-bearing id never links:
     assert evs, "case-mismatched legitimate row must still be joinable"
     r3 = _bash(f'"{libdir}/report-back.sh" W1 completed "n" '
@@ -336,7 +339,7 @@ def test_f2_residual_leading_zero_progress_lands(tmp_path, armed):
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "lz probe"', env)
     assert r.returncode == 0, r.stderr
-    row = _ledger_row(tmp_path)
+    row = _plane_row(tmp_path)
     r2 = _bash(f'"{libdir}/report-back.sh" w1 progress "going"'
                f' --progress 01 --task {row["task_id"]}', env)
     assert r2.returncode == 0, r2.stderr
@@ -355,32 +358,34 @@ def test_plane_failure_never_blocks_the_door(tmp_path, armed):
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "still dispatches"', env)
     assert r.returncode == 0, "a dead plane must never block a dispatch"
     assert "plane record failed" in r.stderr
-    row = _ledger_row(tmp_path)
-    assert row["task_id"].startswith("t-"), "legacy ledger row still lands"
+    # ...and the loss is said LOUDLY: there is no other record
+    assert "did NOT record this dispatch" in r.stderr and "sending anyway" in r.stderr
+    assert not (tmp_path / "state" / "dispatch-log.jsonl").exists()
 
 def test_an_idless_report_answers_open_idless_dispatches_through_the_real_doors(tmp_path, armed):
     """Cutover chunk 6a, driven through the REAL doors: an id'd task, then an
     id-less query, then a terminal report with no --task. Before the report
-    both resolvers answer nothing (the id-less dispatch is unanswered); the
-    report closes the query's assignment on the plane (the legacy ledger
-    closes id-less rows by any later terminal report), and afterwards both
-    resolvers hand back the id'd task."""
+    the resolver answers nothing (the id-less dispatch is unanswered); the
+    report closes the query's assignment on the plane, and afterwards the
+    resolver hands back the id'd task."""
     import subprocess as _sp
     libdir, env = armed
     r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "build the door"', env)
     assert r.returncode == 0, r.stderr
-    task_id = _ledger_row(tmp_path)["task_id"]
+    task_id = _plane_row(tmp_path)["task_id"]
     r = _bash(f'"{libdir}/dispatch-task.sh" --type query w1 "what is the retry logic"', env)
     assert r.returncode == 0, r.stderr
+    # the matcher's two positional ledger slots: the retired ledgers' paths,
+    # absent (R2 of the closure removes the slots)
     dlog = tmp_path / "state" / "dispatch-log.jsonl"
+    rlog = tmp_path / "runtime" / "fleet" / "report-back.jsonl"
     r = _bash(f'"{libdir}/report-back.sh" w1 progress "looking"', env)     # a non-terminal report first
     assert r.returncode == 0, r.stderr
-    rlog = next(p for p in tmp_path.rglob("report-back.jsonl"))
+    assert not dlog.exists() and not rlog.exists()
     matcher = [sys.executable, str(libdir / "dispatch-overdue.py"), "--open-task", "w1", str(dlog), str(rlog)]
     mx = {**env, "PLANE_READ_OPEN_TASK": "0"}
-    before_j = _sp.run(matcher + ["--source", "jsonl"], capture_output=True, text=True, env=mx)
     before_p = _sp.run(matcher + ["--source", "plane", "--fleet", "e2e-fleet"], capture_output=True, text=True, env=mx)
-    assert before_j.stdout == before_p.stdout == "", (before_j.stderr, before_p.stderr)   # the id-less guard, both sides
+    assert before_p.stdout == "", before_p.stderr                       # the id-less guard
     r = _bash(f'"{libdir}/report-back.sh" w1 completed "done with the query"', env)      # no --task: id-less
     assert r.returncode == 0, r.stderr
     conn = connect(db_path(tmp_path))
@@ -389,10 +394,9 @@ def test_an_idless_report_answers_open_idless_dispatches_through_the_real_doors(
         " WHERE t.kind='task' AND t.event='completed'").fetchall()
     conn.close()
     assert [(x["event"], x["source_ref"][:len("dispatch-log:sha:")]) for x in closed] == [("completed", "dispatch-log:sha:")]
-    after_j = _sp.run(matcher + ["--source", "jsonl"], capture_output=True, text=True, env=mx)
     after_p = _sp.run(matcher + ["--source", "plane", "--fleet", "e2e-fleet"], capture_output=True, text=True, env=mx)
-    assert after_j.stdout.strip() == after_p.stdout.strip() == task_id, (after_j.stderr, after_p.stderr)
-    assert "[source=plane]" in after_p.stderr and after_j.stderr == ""
+    assert after_p.stdout.strip() == task_id, after_p.stderr
+    assert "[source=plane]" in after_p.stderr
 
 
 def test_a_terminal_bare_note_lands_its_status_marker_through_the_real_door(tmp_path, armed):

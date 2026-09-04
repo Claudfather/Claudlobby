@@ -10,7 +10,7 @@ import os
 import subprocess
 import time
 
-from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, read_fleet_events
+from tests.conftest import TG_STUB, _scrubbed_env, _write_exec, plane_emit_env, read_fleet_events
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIB = os.path.join(REPO_ROOT, "lib")
@@ -30,7 +30,8 @@ def _signal_root(tmp_path, bots_at="runtime/bots"):
 
 def _run(script, args, root, tmp_path, extra_env=None):
     env = _scrubbed_env(
-        CLAUDLOBBY_ROOT=str(root), TG_CAPTURE=str(tmp_path / "tg-capture")
+        CLAUDLOBBY_ROOT=str(root), TG_CAPTURE=str(tmp_path / "tg-capture"),
+        **plane_emit_env(),          # the host job's receipt lands on the plane under _host
     )
     env.update(extra_env or {})
     return subprocess.run(

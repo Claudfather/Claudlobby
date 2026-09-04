@@ -4,8 +4,9 @@ Drives the REAL lib/plane-host-probe.sh (real lib-common, real shim, real
 cold-CLI ingest into a scratch db; the facet tools stubbed on PATH so the
 values are deterministic). Load-bearing laws: subject_kind=host keyed by
 hostname (joins the Host card); Pi-only facets are ABSENT on a non-Pi host,
-never a fabricated 0; the job_ran proof-of-run always lands; dormant
-without arming; every path exits 0.
+never a fabricated 0; the job_ran proof-of-run always lands; always on
+(no flag needed — only PLANE_EMIT_DISABLED=1 silences it, F18 closure R1);
+every path exits 0.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ REPO = Path(__file__).resolve().parent.parent
 CLI = Path(sys.executable).parent / "claudlobby"
 
 
-def _rig(tmp_path, *, pi=False, armed=True):
+def _rig(tmp_path, *, pi=False, armed=True, disabled=False):
     root = tmp_path / "root"
     (root / "state" / "plane").mkdir(parents=True)
     (root / "state" / "plane" / "capture.json").write_text('{"*": "full"}')
@@ -60,7 +61,9 @@ def _rig(tmp_path, *, pi=False, armed=True):
         "PATH": f"{stub}:/usr/bin:/bin",
     }
     if armed:
-        env["PLANE_EMIT_ENABLED"] = "1"
+        env["PLANE_EMIT_ENABLED"] = "1"     # ignored since R1; kept for the shape
+    if disabled:
+        env["PLANE_EMIT_DISABLED"] = "1"
     return root, env
 
 
@@ -114,11 +117,17 @@ def test_no_pi_facets_are_fabricated_off_a_pi(tmp_path):
     assert "host.undervoltage" not in s
 
 
-def test_dormant_without_arming(tmp_path):
+def test_records_without_any_flag_and_disabled_silences_it(tmp_path):
+    """The always-on contract (F18 closure R1): no plane flag → the probe
+    records (the job_ran proof-of-run lands); PLANE_EMIT_DISABLED=1 → nothing."""
     root, env = _rig(tmp_path, armed=False)
     r = _run(root, env)
+    assert r.returncode == 0, r.stderr
+    assert _samples(root)["host.job_ran"]["value"] in ("1", 1)
+    root2, env2 = _rig(tmp_path / "d", disabled=True)
+    r = _run(root2, env2)
     assert r.returncode == 0
-    assert not db_path(root).is_file()
+    assert not db_path(root2).is_file()
 
 
 def test_probe_job_composes_dormant_and_arms_on_the_emit_flag(tmp_path,

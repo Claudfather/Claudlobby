@@ -6,7 +6,8 @@ heartbeat, registry keyframe and operator message — as typed facts with minted
 identities, and derives everything else (open work, attention, presence,
 utilization) from those facts at read time. The operator plane (`claudlobby
 plane view`) renders it; `brief` answers from it; the legacy JSONL ledgers are
-being retired behind it (the F18 cutover, below).
+gone — retired reader by reader (the F18 cutover, below) and then removed
+outright with the F18 closure (R1: no door writes a file any more).
 
 Design of record: `documentation/plans/2026-08-18-observable-plane-design-v2.md`
 (the forks F1–F18 are LOCKED there; this page describes what shipped). Phase
@@ -84,17 +85,17 @@ and never blocks its real action on it.
 
 ## The doors — who writes what
 
-| Door | Records | Dormant until |
+| Door | Records | Silenced by |
 |---|---|---|
-| `lib/dispatch-task.sh` | work_item + assignment + communication (+ the `pane_submitted` / `carrier_queued` / `failed` transmission after the send); `--supersedes` sets `supersedes_msg_id` and a terminal `superseded` on the retired assignment; an id-less dispatch is keyed by the content hash of its ledger line | `PLANE_EMIT_ENABLED` |
-| `lib/report-back.sh` | the report as a communication; task events on the assignment the legacy task id resolves to (`lib/plane-lookup.py`); an id-less terminal report closes the bot's open id-less dispatches | `PLANE_EMIT_ENABLED` |
-| `lib/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_ENABLED` |
-| `lib/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_ENABLED` |
-| `lib/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_ENABLED` |
-| `lib/plane-session-start.sh` (hook) | the session uid + a per-process uid to `$BOT_DIR/data/.plane-session` | `PLANE_EMIT_ENABLED` |
-| `lib/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_ENABLED` |
-| `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; declaration events | `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) |
-| `lib/workstream-update.sh`, `lib/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_ENABLED` |
+| `lib/dispatch-task.sh` | work_item + assignment + communication (+ the `pane_submitted` / `carrier_queued` / `failed` transmission after the send); `--supersedes` sets `supersedes_msg_id` and a terminal `superseded` on the retired assignment; an id-less dispatch is keyed by the content hash of its ledger line | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `lib/report-back.sh` | the report as a communication; task events on the assignment the legacy task id resolves to (`lib/plane-lookup.py`); an id-less terminal report closes the bot's open id-less dispatches | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `lib/keepalive.sh` | `bot.heartbeat` + `bot.session_up` metric samples per tick (presence's recorded half) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `lib/plane-telegram-in.sh` / `-out.sh` / `plane-rc-relay-out.sh` (hooks) | the operator's inbound messages, the bot's replies, RC-relayed final answers, with honest transmission states (carrier `telegram-bridge`) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `lib/tg-post.sh` | a `notice` communication + its transmission for every fleet post to Telegram (carrier `telegram-tgpost`, intent before the send, the outcome after) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `lib/plane-session-start.sh` (hook) | the session uid + a per-process uid to `$BOT_DIR/data/.plane-session` | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `lib/plane-host-probe.sh` (host timer) | `host.*` metric samples (load, RAM, disk, Pi thermals) | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
+| `claudlobby generate` (`registry_emit.py`) | registry keyframes for every composed entity; declaration events | dormant until `PLANE_EMIT_ENABLED` in the fleet `.env` tier (the tier cascade, not `fleet.yaml env:`) — the one place the flag still means something (R3 decides its fate) |
+| `lib/workstream-update.sh`, `lib/briefing-trigger.sh` | workstream construct + verb events; briefing communications | `PLANE_EMIT_DISABLED=1` only — always on since F18 R1 |
 | `claudlobby plane expire` (host timer) | a terminal `expired` on assignments overdue past the horizon — a Lane-B fact through normal ingest | `PLANE_EXPIRE_ENABLED` |
 | `claudlobby plane shadow --record` (fleet timer) | `shadow_parity_clean` / `_diverged` system events per (bot, reader, instant) | `PLANE_SHADOW_ENABLED` |
 | `claudlobby plane cutover --reader` | `cutover_declared` (the epoch) | the operator's hand |
@@ -140,9 +141,10 @@ their own flag). The read side (`brief`, `plane view`) needs no flag.
 ## The cutover (F18) — from the JSONL ledgers to the plane
 
 The legacy ledgers (`state/dispatch-log.jsonl`, per-fleet
-`runtime/report-back.jsonl`) are still written by every door; the plane is
-read instead of them one READER at a time, and each reader's flip is a
-recorded state machine:
+`runtime/report-back.jsonl`) were written by every door while the plane was
+read instead of them one READER at a time, each reader's flip a recorded state
+machine (steps 1–5; history now — the closure that follows removed the
+writers):
 
 1. **Shadow.** `plane shadow --record` compares, per bot and per reader, the
    legacy answer (the install's own `lib/dispatch-overdue.py`, through
@@ -207,6 +209,25 @@ recorded state machine:
    events are the writes; `claudlobby workstreams` and brief's section render
    the registry from the plane). The briefing trigger already rode
    `emit_fleet_event`, so it retired with the events family.
+6. **The closure (F18 R1, 2026-09-04 — operator ruling: no JSONL, no shims,
+   no backwards compat).** With both fleets retired on every door, the legacy
+   WRITERS were removed outright: no door writes a ledger, a per-bot event
+   file, a keepalive file or a registry file; the four-fact machinery
+   (`plane_write_retired`, `plane_retirement_covers`, the tier read, the
+   detached emission) went with them, and `PLANE_LEGACY_WRITE_*` means
+   nothing to a door (the composer still stamps it until R3). The plane is
+   the ONLY record and it is ALWAYS ON: `plane_armed` arms unless
+   `PLANE_EMIT_DISABLED=1` (the harness exemption), because an env-gated
+   arming loses records the day the file is gone — measured on the data
+   flip, where every restarted bot's pre-stop hook ran with no flag in its
+   environment and wrote its `handoff_skipped` into a file the retirement
+   had frozen. An unrecorded dispatch or report is said LOUDLY on stderr and
+   the send proceeds (the send is the mission); an unrecorded workstream
+   verb REFUSES (there is no file to fall back to). The workstream door
+   materializes its registry from the plane inside its lock, starts a fresh
+   fleet from the empty registry (`--or-empty`) and dedups against archived
+   ids. The readers that still know how to read a file (R2) and the cutover
+   machinery itself (R3) follow.
 
 **Phase B — the bot-events ledger** (`data/events/fleet-*.jsonl` per bot,
 `state/events/` for the fleet) moves as a direct move, no shadow.
@@ -228,18 +249,18 @@ under the flag is a third state, never the files: `claudlobby events` rc 3,
 brief's alerts omitted with a `degraded[]` entry, fleet-pulse `not judged
 this pass` + a debounced page + `unknown` in the summary — after the
 retirement the files hold nothing, so a fallback would read an outage as a
-quiet fleet. The JSONL append retires behind `PLANE_LEGACY_WRITE_EVENTS=0`
-on the same four facts as the other doors, the retirement having to NAME
-the door (`--retire-writes` extends a chunk-6b record that predates it).
-The door never holds a hot path: under dual-write its plane emission is
-detached (reaped at the keepalive tick's bound, the presence emit's shape),
-under the retirement it is waited on only to `FLEET_EVENT_EMIT_TIMEOUT_S`
-(a reaped emission is "not recorded" and the ledger is written). Chunk B2 closes the two writers that never went through the door: the
+quiet fleet. The JSONL append retired behind `PLANE_LEGACY_WRITE_EVENTS=0`
+on the same four facts as the other doors until R1 removed it: the door now
+writes the plane and nothing else, waited on only to
+`FLEET_EVENT_EMIT_TIMEOUT_S` (a failed or reaped emission is disclosed as
+"not recorded"; the shim's spool is the durability below that), because the
+door runs inside every hot path and a wedged rung must never hold a tick.
+Chunk B2 closes the two writers that never went through the door: the
 keepalive tick's TRANSITIONS are fleet events (`keepalive_restart`,
 `bridge_heal`, `keepalive_skip`, `keepalive_reload`; the per-tick verdicts ride
 the heartbeat sample), the vitals hook lands `tool_call` / `session_event`
-through `emit_fleet_event`, the reader-less `keepalive-<day>.jsonl` stops when
-the events flag says 0, and `claudlobby uptime` reads the plane's heartbeat
+through `emit_fleet_event`, the reader-less `keepalive-<day>.jsonl` is gone
+(R1), and `claudlobby uptime` reads the plane's heartbeat
 samples + restart events once the events write is retired. `data-sweep.sh` and
 `tail-fleet.sh --events` keep aging/tailing whatever files remain (hygiene over
 files, not readers of record).
@@ -251,8 +272,9 @@ own report ledger only, never guessed).
 
 ## Operations
 
-**Arming carriers** — `PLANE_EMIT_ENABLED` (every runtime door and the
-generate-time registry scan), `PLANE_SHADOW_ENABLED` (the shadow timer and the
+**Arming carriers** — `PLANE_EMIT_ENABLED` (the generate-time registry scan
+only: every runtime door is always on since F18 R1, and `PLANE_EMIT_DISABLED=1`
+is the harness exemption that silences one), `PLANE_SHADOW_ENABLED` (the shadow timer and the
 fleet-pulse bridge), `PLANE_EXPIRE_ENABLED`, `PLANE_PRUNE_ENABLED` (the two
 host sweeps self-gate), `PLANE_READ_*` (the flips). Put them in the fleet
 `.env` tier: sessions get them through `bot.conf`, timers through the composed

@@ -54,7 +54,7 @@ Read `$FLEET_STATE_PATH` (defaults to `$CLAUDLOBBY_ROOT/state/fleet-state.json`)
 Round-robin across the idle workers (no worker gets a second lens until every idle worker has one). For each lens:
 
 1. Write `lenses/<lens>/dispatch.md` instructing the worker to: read `skills/<lens>/SKILL.md` and apply it with `--dispatch` to the run's `source.md`; write findings **only** to `lenses/<lens>/result.md` (no PR posts, no issues); and `report-back` on completion with `skill:ironclad-lens`. Embed the lens result format the skill defines.
-2. Dispatch via tracked dispatch — `$CLAUDLOBBY_ROOT/lib/dispatch-task.sh <worker> <task…>` — so the run is recorded to `state/dispatch-log.jsonl` and the overdue watchdog applies (see `dispatch`). The `[BOTCOMMAND]` envelope and the `set +H;` / settle / `Enter` / verify-retry send pattern are defined in the `dispatch` protocol; do not restate them.
+2. Dispatch via tracked dispatch — `$CLAUDLOBBY_ROOT/lib/dispatch-task.sh <worker> <task…>` — so the run is recorded on the plane (a work item + assignment) and the overdue watchdog applies (see `dispatch`). The `[BOTCOMMAND]` envelope and the `set +H;` / settle / `Enter` / verify-retry send pattern are defined in the `dispatch` protocol; do not restate them.
 3. Update `fleet-state.json`: set the worker's `status` to `working` and `current_task` to `ironclad:<lens>`.
 
 ### 3. Collect results

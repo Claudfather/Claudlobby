@@ -22,7 +22,7 @@ from tests.conftest import load_lib_module
 from tests.plane_fixtures import ro as _ro
 from tests.test_plane_cutover_flip import F, _cli, _composed, _declare, _ledgers, _matcher, _scene
 from tests.test_plane_cutover_parity import _rrow
-from tests.test_plane_door_e2e import _bash, _ledger_row, _plane_lib
+from tests.test_plane_door_e2e import _bash, _plane_row, _plane_lib
 from tests.test_plane_shadow import REPO
 
 E2E_FLEET = "e2e-fleet"
@@ -37,68 +37,6 @@ def _record_retirement(root, fleet=E2E_FLEET):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     decl = {r: (now, None) for r in cut.GATED}
     emit_batch(root, [cut.retirement_event(fleet, decl, now)])
-
-
-def test_the_legacy_writes_default_on(tmp_path):
-    libdir, env = _plane_lib(tmp_path)
-    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "one"', env)
-    assert r.returncode == 0 and _lines(tmp_path / "state" / "dispatch-log.jsonl") == 1
-    task_id = _ledger_row(tmp_path)["task_id"]
-    r = _bash(f'"{libdir}/report-back.sh" w1 completed "done" --task {task_id}', env)
-    assert r.returncode == 0 and len(list(tmp_path.rglob("report-back.jsonl"))) == 1
-
-
-def test_a_retired_write_is_skipped_only_on_all_four_facts(tmp_path):
-    libdir, env = _plane_lib(tmp_path)
-    dlog = tmp_path / "state" / "dispatch-log.jsonl"
-    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "seed"', env)     # a real db + one row
-    assert r.returncode == 0 and _lines(dlog) == 1
-    retired = {**env, **RETIRED}
-    # flag 0, armed, emit ok — but NO retirement recorded: writes, says so
-    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "undeclared"', retired)
-    assert r.returncode == 0 and _lines(dlog) == 2 and "no legacy_write_retired is recorded" in r.stderr
-    _record_retirement(tmp_path)
-    # all four facts: skipped, the plane has the row
-    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "retired"', retired)
-    assert r.returncode == 0 and _lines(dlog) == 2 and "the plane recorded it" in r.stderr
-    conn = connect(db_path(tmp_path))
-    assert conn.execute("SELECT COUNT(*) FROM assignments").fetchone()[0] == 3
-    conn.close()
-    task_id = _ledger_row(tmp_path)["task_id"]
-    r = _bash(f'"{libdir}/report-back.sh" w1 completed "done" --task {task_id}', retired)
-    assert r.returncode == 0 and "the plane recorded it" in r.stderr
-    assert not list(tmp_path.rglob("report-back.jsonl"))                          # never written
-    # unarmed: writes anyway
-    unarmed = {**retired, "PLANE_EMIT_ENABLED": "0"}
-    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "unarmed"', unarmed)
-    assert r.returncode == 0 and _lines(dlog) == 3 and "plane is unarmed" in r.stderr
-    r = _bash(f'"{libdir}/report-back.sh" w1 completed "done" --task {task_id}', unarmed)
-    assert r.returncode == 0 and "plane is unarmed" in r.stderr
-    assert len(list(tmp_path.rglob("report-back.jsonl"))) == 1
-
-
-def test_a_failed_emission_writes_the_ledger_even_when_retired(tmp_path):
-    """The structural lens's blocker, driven: every emit rung dead (no daemon,
-    a failing cold CLI) and the write retired — the dispatch and the report
-    must still land in the ledger, disclosed."""
-    libdir, env = _plane_lib(tmp_path)
-    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "seed"', env)
-    assert r.returncode == 0
-    _record_retirement(tmp_path)
-    dead = tmp_path / "dead-cli"
-    dead.write_text("#!/bin/bash\nexit 1\n")
-    dead.chmod(0o755)
-    broken = {**env, **RETIRED, "PLANE_EMIT_CLI": str(dead), "PLANE_SOCKET": str(tmp_path / "no.sock")}
-    dlog = tmp_path / "state" / "dispatch-log.jsonl"
-    before = _lines(dlog)
-    r = _bash(f'"{libdir}/dispatch-task.sh" --botcommand w1 "must land"', broken)
-    assert r.returncode == 0 and _lines(dlog) == before + 1, r.stderr
-    assert "did not record this one" in r.stderr and "writing the ledger" in r.stderr
-    assert "legacy record stands" not in r.stderr                                  # the old lie is gone
-    task_id = _ledger_row(tmp_path)["task_id"]
-    r = _bash(f'"{libdir}/report-back.sh" w1 completed "done" --task {task_id}', broken)
-    assert r.returncode == 0 and "did not record this one" in r.stderr
-    assert len(list(tmp_path.rglob("report-back.jsonl"))) == 1
 
 
 def test_retire_writes_refuses_until_every_reader_is_declared_then_records(tmp_path):

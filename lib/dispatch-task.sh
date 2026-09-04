@@ -1,5 +1,5 @@
 #!/bin/bash
-# Manager dispatch wrapper — record the task to the dispatch ledger, then send.
+# Manager dispatch wrapper — record the dispatch on the plane, then send.
 # Usage: dispatch-task.sh [flags] <worker-session> <task...>
 #
 # Flags:
@@ -7,7 +7,7 @@
 #   --repo NAME        Target repo (adds repo:<NAME> to envelope)
 #   --priority LEVEL   Priority level (adds priority:<LEVEL> to envelope)
 #   --ref URL          Reference URL (adds ref:<URL> to envelope)
-#   --workstream ID    Workstream this task advances (envelope + ledger)
+#   --workstream ID    Workstream this task advances (envelope + plane work item)
 #   --supersedes ID    This dispatch REPLACES an earlier one; the named task id is
 #                      retired rather than left to age out and page. Opt-in, and
 #                      inert when omitted — see the ledger-write comment below.
@@ -45,12 +45,12 @@
 # format and the tracking used to be the same decision — `--botcommand` alone
 # minted — which meant a manager who wanted the fleet message format for a peer
 # note got a permanently open row as a side effect. They are separate now.
-# Every send still writes a ledger row; only `task` writes one with an id.
+# Every send still records a communication on the plane; only `task` records a
+# work item + assignment with an id.
 #
-# Appends {ts,manager,bot,task_id,workstream,task,dispatched_at,expected_by,
-# claudron_hits,supersedes,open_at_dispatch} to state/dispatch-log.jsonl (self-rotated via
-# rotate_jsonl_by_ts) so the fleet-pulse watchdog can flag `overdue_dispatch`
-# if no terminal [BOTREPORT] (completed|failed|blocked) arrives by expected_by.
+# The plane's assignment (its expected_by) is what the fleet-pulse watchdog
+# reads to flag `overdue_dispatch` if no terminal [BOTREPORT]
+# (completed|failed|blocked) arrives by expected_by.
 # Manager identity is this bot's $BOT_ID; the deadline defaults to
 # $OBSERVABILITY_DISPATCH_DEADLINE (composed into bot.conf) and can be
 # overridden with --deadline-min. Sending itself reuses lib/dispatch.sh.
@@ -412,8 +412,6 @@ fi
 
 MANAGER="${BOT_ID:-${BOT_NAME:-unknown}}"
 CLAUDLOBBY_ROOT="${CLAUDLOBBY_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
-LEDGER="$(dispatch_ledger_path)"
-mkdir -p "$(dirname "$LEDGER")"
 
 now_epoch=$(date +%s)
 expected_by=$(( now_epoch + DEADLINE_S ))
@@ -442,10 +440,10 @@ OPEN_AT_DISPATCH=0
 if [ -n "$TASK_ID" ] && command -v python3 >/dev/null 2>&1; then
     _dt_reports="$(fleet_runtime_dir)/report-back.jsonl"
     _dt_hint=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" \
-        --bot "$WORKER_SESSION" --dispatch-log "$LEDGER" \
+        --bot "$WORKER_SESSION" --dispatch-log "$(dispatch_ledger_path)" \
         --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || true)
     OPEN_AT_DISPATCH=$(python3 "$LIB_DIR/dispatch-supersede-hint.py" --count-only \
-        --bot "$WORKER_SESSION" --dispatch-log "$LEDGER" \
+        --bot "$WORKER_SESSION" --dispatch-log "$(dispatch_ledger_path)" \
         --report-ledger "$_dt_reports" --task "$TASK" --ref "$DISPATCH_REF" 2>/dev/null || echo 0)
     case "$OPEN_AT_DISPATCH" in ''|*[!0-9]*) OPEN_AT_DISPATCH=0 ;; esac
     # Only the loud tier is printed, and only when the caller has NOT declared.
@@ -457,13 +455,13 @@ fi
 # Escape backslash + double-quote for valid JSON (no jq dependency).
 safe_task=$(json_escape "$TASK")
 
-# --- observable-plane dual-write (PR-B T4; phase-2 plan §3/§6b) ----------------
-# DORMANT unless the fleet arms PLANE_EMIT_ENABLED=1 (SESSION_DIGEST_ENABLED
-# precedent — a root pull must never activate door behavior, and an unarmed
-# fleet pays zero latency). PLANE_EMIT_DISABLED=1 (harness override) wins.
-# The legacy ledger stays load-bearing; every plane failure is disclosed on
-# stderr and NEVER blocks the dispatch. Construct ids are minted HERE and
-# recorded in the ledger row so report-back can join without a db read.
+# --- the plane record (PR-B T4; phase-2 plan §3/§6b; F18 closure R1) ----------
+# The plane is the ONLY record of a dispatch: PLANE_EMIT_DISABLED=1 (the harness
+# exemption) is the one thing that silences it. Every plane failure is disclosed
+# on stderr and NEVER blocks the dispatch — the send is the mission — but an
+# unrecorded dispatch is said LOUDLY, because there is no other record.
+# Construct ids are minted HERE; report-back joins through the plane's own
+# source_ref (dispatch-log:<task_id>).
 PLANE_ARMED=0
 if plane_armed dispatch-task --require-fleet; then
     PLANE_ARMED=1
@@ -573,7 +571,7 @@ _plane_emit_intent() {
         dispatch_ref="dispatch-log:$TASK_ID"
     else
         local _key
-        _key=$(sha256_hex32 "$LEDGER_LINE" 2>/dev/null || true)
+        _key=$(sha256_hex32 "$DISPATCH_RECORD" 2>/dev/null || true)
         if [ -z "$_key" ]; then
             # No sha tool on this host: disclose, and emit the communication only
             # rather than mint a malformed ref (unreachable on Linux/macOS).
@@ -641,68 +639,22 @@ _plane_emit_transmission() {
         | plane_emit_events dispatch-task
 }
 
-_append_ledger() {
-    # `supersedes` is the one field that records INTENT rather than what happened.
-    # A re-dispatch replaces an earlier task; the older row will never be separately
-    # answered, so it ages out and pages the manager about work that shipped. Nothing
-    # downstream can infer that from the ledger, because the ledger records what was
-    # SENT, never what was MEANT — two dispatches to one bot look identical whether
-    # the second replaces the first or queues behind it. Only the caller knows, and
-    # only at this moment.
-    #
-    # OPT-IN, AND THAT IS THE SAFETY PROPERTY. Omitting the flag reproduces today's
-    # behaviour exactly: the row retires on nothing and the watchdog eventually pages.
-    # So a forgotten flag costs a false page — the status quo — and can never retire a
-    # dispatch someone still owes. The failure mode of forgetting is inert, which is
-    # what makes this safe to default off. Inferring supersession from timing instead
-    # was measured and rejected: over 189 closed rows, 14 were "superseded" by a later
-    # closure and still answered afterwards, 3 of them unambiguously genuine work
-    # answered 6-7h late. Retiring those would have turned a false-page bug into a
-    # silently-dropped-task bug.
-    #
-    # `open_at_dispatch` is the QUIET tier of the #1032 visibility pair: how many
-    # rows this bot already had open when this one was minted. It is recorded
-    # rather than spoken because it is true of 51% of dispatches — see the
-    # two-tier note above. Recording it is what makes the usage gap MEASURABLE:
-    # `open_at_dispatch > 0 AND supersedes == ""` is the population that should
-    # shrink as the declaration habit lands, and without the field there is no
-    # before to compare an after against. Digits by construction (validated to 0
-    # on any non-numeric), so no escaping.
-    #
-    # Schema-uniform rows: task_id/workstream/claudron_hits/supersedes/
-    # open_at_dispatch always emitted (empty = absent, matching the report
-    # ledger's always-emit convention; every consumer treats "" as falsy).
-    # claudron_hits is digits-or-empty by construction (the preflight parser
-    # prints a count), so no escaping.
-    # plane_* fields (PR-B T4): the plane construct ids this dispatch minted,
-    # recorded so report-back can join legacy task id -> plane rows without a
-    # db read. Always emitted, empty when the plane is unarmed — the same
-    # schema-uniform convention as task_id/workstream above; every existing
-    # consumer reads fields by name and treats "" as falsy. Ids are hex
-    # constants by construction, so no escaping.
-    printf '%s\n' "$LEDGER_LINE" >> "$LEDGER"
-    rotate_jsonl_by_ts "$LEDGER"
-}
-# The row text, composed ONCE here into a variable (printf -v: no fork; main
-# shell, so a subshell lock cannot lose it) and keyed for the plane below
-# exactly as the importer keys an unstamped row.
-printf -v LEDGER_LINE '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}' \
+# The dispatch row exactly as the retired ledger wrote it, composed ONCE
+# (printf -v: no fork) and kept for its CONTENT KEY alone: an id-less
+# dispatch's plane ref is dispatch-log:sha:<key> of this text (the importer's
+# derivation for an unstamped row), so the ref stayed stable across the F18
+# closure. Nothing writes it anywhere.
+printf -v DISPATCH_RECORD '{"ts":"%s","manager":"%s","bot":"%s","task_id":"%s","workstream":"%s","task":"%s","dispatched_at":%s,"expected_by":%s,"claudron_hits":"%s","supersedes":"%s","open_at_dispatch":%s,"plane_msg_id":"%s","plane_work_item_id":"%s","plane_assignment_id":"%s"}' \
         "$ts" "$MANAGER" "$WORKER_SESSION" "$TASK_ID" "$(json_escape "$DISPATCH_WORKSTREAM")" "$safe_task" "$now_epoch" "$EXPECTED_BY_JSON" "$CLAUDRON_HITS" "$(json_escape "$DISPATCH_SUPERSEDES")" "$OPEN_AT_DISPATCH" "$PLANE_MSG_ID" "$PLANE_WI_ID" "$PLANE_ASG_ID"
-# Plane intent BEFORE transport (F9) — and BEFORE the legacy append (chunk 6b):
-# a crash between here and the send leaves an intent with no transmission,
-# visible, and exactly what reconciliation exists to surface; and the ledger
-# decision below needs to know whether THIS emission was recorded.
+# Plane intent BEFORE transport (F9): a crash between here and the send leaves
+# an intent with no transmission, visible, and exactly what reconciliation
+# exists to surface. An emission the shim could not record is DISCLOSED loudly
+# and the send proceeds: the send is the mission, and there is no other record.
 if [ "$PLANE_ARMED" = "1" ]; then
     _plane_emit_intent || true
-fi
-
-# Cutover chunk 6b: the legacy append retires behind PLANE_LEGACY_WRITE_DISPATCH=0
-# (composed into bot.conf from the fleet .env tier). plane_write_retired skips
-# it only when the flag says 0 AND the plane is armed AND the retirement is
-# RECORDED AND this emission succeeded -- every other case writes the ledger
-# and says why. Retiring the write ends the shadow for every reader of it.
-if ! plane_write_retired dispatch-task PLANE_LEGACY_WRITE_DISPATCH; then
-    with_lock "$LEDGER.lock" _append_ledger
+    if [ "${PLANE_EMIT_LAST_RC:-0}" -ne 0 ]; then
+        echo "dispatch-task: the plane did NOT record this dispatch (rc=$PLANE_EMIT_LAST_RC) -- sending anyway; there is no other record" >&2
+    fi
 fi
 
 # Send via the low-level race-safe primitive (re-validates the session).

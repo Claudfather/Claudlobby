@@ -41,7 +41,7 @@
 # per-message 4096 cap, so the loss was silent exactly when the batch was
 # biggest (r3, probed at 1.5MB/2.5MB: rc 0, nothing recorded, no stderr).
 #
-# DORMANT (PLANE_EMIT_ENABLED=1) and NON-BLOCKING, the estate pattern.
+# SILENT only under PLANE_EMIT_DISABLED=1 and NON-BLOCKING, the estate pattern.
 # Deliberately does NOT source lib-common.sh: nothing here needs it, and
 # the 3,865-line source costs ~50ms per channel message on a Pi (r3; the
 # gh-mention-guard precedent) — plane-emit.sh is called direct, with the
@@ -49,7 +49,7 @@
 
 set -u
 
-[ "${PLANE_EMIT_ENABLED:-0}" = "1" ] || exit 0
+[ "${PLANE_EMIT_DISABLED:-0}" != "1" ] || exit 0
 [ "${PLANE_EMIT_DISABLED:-0}" = "1" ] && exit 0
 if [ -z "${FLEET_NAME:-}" ] || [ -z "${BOT_ID:-}" ]; then
   echo "plane-telegram-in: armed but FLEET_NAME/BOT_ID unset — not recording" >&2

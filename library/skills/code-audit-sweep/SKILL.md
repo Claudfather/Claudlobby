@@ -87,10 +87,9 @@ If `gh` errors (auth/rate-limit/network), report it verbatim and emit
 observability loop the selector opened with `audit_selected`):
 
 ```bash
-EVENTS="{{CLAUDLOBBY_ROOT}}/local/{{FLEET_NAME}}/runtime/bots/{{BOT_NAME}}/data/events/fleet-$(date +%Y-%m-%d).jsonl"
-mkdir -p "$(dirname "$EVENTS")"
-printf '{"ts":"%s","bot":"{{BOT_NAME}}","type":"audit_completed","source":"audit","data":{"repo":"<org/repo>","audit_type":"<audit-type>","issues":<count>}}\n' \
-  "$(date -Iseconds)" >> "$EVENTS"
+# the ONE fleet-event door: the event lands on the plane (nothing lives in a file any more)
+. "{{CLAUDLOBBY_ROOT}}/lib/lib-common.sh"
+emit_fleet_event audit_completed audit '{"repo":"<org/repo>","audit_type":"<audit-type>","issues":<count>}'
 ```
 
 On any unrecoverable failure, emit `audit_failed` with the same shape plus a

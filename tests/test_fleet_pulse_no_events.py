@@ -227,15 +227,22 @@ def test_a_healthy_bridge_check_fires_no_phantom_script_error(tmp_path):
         root = tmp_path / shape
         (root / "bot" / "data").mkdir(parents=True)
         (root / "state").mkdir()
+        # the fleet event the trap emits goes through the shim; a counting CLI
+        # stub records each batch's event name (no plane needed — R1 writes no file)
+        seen = root / "emitted"
+        stub = root / "cli"
+        stub.write_text("#!/bin/bash\nf=\"${@: -1}\"; cat \"$f\" >> \"" + str(seen) + "\"; echo >> \"" + str(seen) + "\"\n")
+        stub.chmod(0o755)
         env = {"PATH": "/usr/bin:/bin", "HOME": str(root), "CLAUDLOBBY_ROOT": str(root),
-               "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "PLANE_EMIT_ENABLED": "0"}
+               "BOT_DIR": str(root / "bot"), "BOT_ID": "b", "FLEET_NAME": "f",
+               "PLANE_EMIT_CLI": str(stub), "PLANE_SOCKET": str(root / "no.sock")}
         r = subprocess.run(["/bin/bash", "-c",
                             f'. "{REPO_ROOT}/lib/lib-common.sh"; install_error_trap "";'
                             f' healthy() {{ return 1; }}; {body}; echo done'],
                            capture_output=True, text=True, env=env, timeout=60)
         assert r.returncode == 0 and "done" in r.stdout, (shape, r.stderr)
-        rows = "".join(p.read_text() for p in root.rglob("fleet-*.jsonl"))
-        assert rows.count('"type":"script_error"') == want, (shape, rows)
+        rows = seen.read_text() if seen.exists() else ""
+        assert rows.count('"event": "script_error"') + rows.count('"event":"script_error"') == want, (shape, rows)
 
 
 def test_the_handoff_status_is_captured_without_firing_the_trap():

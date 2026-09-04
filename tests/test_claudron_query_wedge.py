@@ -1,9 +1,17 @@
 """Claudron query-before preflight in dispatch-task.sh (plan P1e, fork F7).
 
 Drives the real dispatch-task.sh with the #518 stub harness (_fake_lib:
-symlinked script + stubbed transport/tmux) plus a stubbed `claudron` binary
-on PATH. The wedge is off by default, injects single-line pointers when on,
-and must never block a dispatch on any failure.
+symlinked script + stubbed transport/tmux + a REAL plane through the shim's
+cold rung) plus a stubbed `claudron` binary on PATH. The wedge is off by
+default, injects single-line pointers when on, and must never block a dispatch
+on any failure.
+
+F18 closure (R1): the dispatch ledger is gone, so the record a test reads back
+is the PLANE row (`plane_dispatch_row`: its `task` is the message AS SENT, the
+enriched envelope the worker received). The ledger's hit COUNT has no home on
+the plane and is asserted nowhere any more — the pointers themselves are
+asserted in the sent envelope, which is the evidence that mattered (G1: what
+the worker was handed).
 """
 
 from __future__ import annotations
@@ -15,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import call_lib_fn
-from tests.test_task_id_dispatch import _bash, _fake_lib
+from tests.test_task_id_dispatch import _bash, _fake_lib, plane_dispatch_row
 
 CAPTURE_STUB = """#!/bin/bash
 printf '%s' "$2" > "$(dirname "$0")/../sent.txt"
@@ -80,14 +88,15 @@ def _wedge_env(tmp_path: Path, claudron_stdout: str) -> dict:
 
 
 def _run_dispatch(tmp_path: Path, env: dict, task: str = "fix the spotify job"):
+    """Returns (result, the message the transport stub received, the plane's
+    row for that dispatch — {} when nothing was recorded)."""
     libdir, base_env = _fake_lib(tmp_path, CAPTURE_STUB)
     r = _bash(
         f'"{libdir}/dispatch-task.sh" --repo kev worker-1 "{task}"',
         env={**base_env, **env},
     )
     sent = (tmp_path / "sent.txt").read_text() if (tmp_path / "sent.txt").exists() else ""
-    ledger_path = tmp_path / "state" / "dispatch-log.jsonl"
-    row = json.loads(ledger_path.read_text().splitlines()[-1]) if ledger_path.exists() else {}
+    row = plane_dispatch_row(tmp_path) or {}
     return r, sent, row
 
 
@@ -97,19 +106,19 @@ def test_off_by_default(tmp_path):
     r, sent, row = _run_dispatch(tmp_path, env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
-    assert row["claudron_hits"] == ""
+    assert "[fleet memory:" not in row["task"]          # the plane records what was sent: no pointers
 
 
 def test_injects_from_0_2_0_envelope(tmp_path):
     # Regression: claudron 0.2.0's {ok, data:{results}} envelope. Before the
-    # parser read data.results, this silently produced claudron_hits="0" —
-    # zero G1 evidence against every 0.2.0 vault.
+    # parser read data.results, this silently injected NOTHING (a zero-hit
+    # lookup) — zero G1 evidence against every 0.2.0 vault.
     env = _wedge_env(tmp_path, json.dumps(TWO_HITS_ENVELOPED))
     r, sent, row = _run_dispatch(tmp_path, env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory: Spotify API Rate Limits" in sent
     assert "Telegram Formatting Pitfalls" in sent
-    assert row["claudron_hits"] == "2"
+    assert "Spotify API Rate Limits" in row["task"] and "Telegram Formatting Pitfalls" in row["task"]
 
 
 def test_injects_pointers_and_counts(tmp_path):
@@ -123,8 +132,10 @@ def test_injects_pointers_and_counts(tmp_path):
     # --repo forces the envelope, whose tail is deterministically task:<id>.
     assert sent.rstrip().endswith("| task:" + row["task_id"]), sent
     assert "fix the spotify job" in sent
-    assert row["claudron_hits"] == "2"
-    # Enriched task is what the ledger records (G1 evidence).
+    # Both pointers were injected (the count the ledger once carried is asserted
+    # here by presence, which is the stronger claim).
+    assert sent.count("(" + vault + "/pi-fleet/shared/knowledge/") == 2, sent
+    # Enriched task is what the plane records (G1 evidence): the worker got it.
     assert "[fleet memory:" in row["task"]
     # Single line — the envelope must survive.
     assert "\n" not in sent.strip()
@@ -135,7 +146,7 @@ def test_zero_hits_runs_but_does_not_inject(tmp_path):
     r, sent, row = _run_dispatch(tmp_path, env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
-    assert row["claudron_hits"] == "0"
+    assert "fix the spotify job" in row["task"]          # the dispatch still landed, unenriched
 
 
 def test_non_json_output_degrades_to_plain_send(tmp_path):
@@ -146,7 +157,7 @@ def test_non_json_output_degrades_to_plain_send(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
     assert "fix the spotify job" in sent
-    assert row["claudron_hits"] == ""
+    assert "fix the spotify job" in row["task"]
 
 
 def test_missing_vault_dir_skips(tmp_path):
@@ -155,7 +166,7 @@ def test_missing_vault_dir_skips(tmp_path):
     r, sent, row = _run_dispatch(tmp_path, env)
     assert r.returncode == 0, r.stderr
     assert "[fleet memory:" not in sent
-    assert row["claudron_hits"] == ""
+    assert "[fleet memory:" not in row["task"]
 
 
 def test_pipes_in_titles_cannot_break_the_envelope(tmp_path):
@@ -171,20 +182,24 @@ def test_pipes_in_titles_cannot_break_the_envelope(tmp_path):
     env = _wedge_env(tmp_path, json.dumps(evil))
     r, sent, row = _run_dispatch(tmp_path, env)
     assert r.returncode == 0, r.stderr
-    assert row["claudron_hits"] == "1"
+    assert "[fleet memory: Rate" in sent                 # the pointer was injected
     # All pipes from claudron-supplied strings are replaced before the
     # envelope is assembled, so the only pipes in the message are the
     # envelope's own field separators: [BOTCOMMAND] <caller> | task |
     # <task> | repo:<r> | task:<id> — exactly four.
     assert sent.count("|") == 4, sent
     assert "priority:evil |" not in sent
+    assert row["task"].count("|") == 4, row["task"]      # and the plane holds exactly what was sent
 
 
-def test_newlines_in_titles_cannot_corrupt_the_ledger(tmp_path):
+def test_newlines_in_titles_cannot_corrupt_the_record(tmp_path):
     # Review #528 Major: an embedded newline in a claudron-returned title
     # survived into $TASK; the line-oriented ledger rotation then truncated
-    # the row into permanently invalid JSON. All whitespace runs in
-    # claudron-supplied strings must collapse to single spaces.
+    # the row into permanently invalid JSON. The ledger is gone, but the
+    # property outlives it — a newline in the sent line breaks the tmux
+    # envelope, and the plane body must hold exactly what was sent. All
+    # whitespace runs in claudron-supplied strings must collapse to single
+    # spaces.
     evil = {
         "query": "q",
         "results": [
@@ -197,12 +212,10 @@ def test_newlines_in_titles_cannot_corrupt_the_ledger(tmp_path):
     env = _wedge_env(tmp_path, json.dumps(evil))
     r, sent, row = _run_dispatch(tmp_path, env)
     assert r.returncode == 0, r.stderr
-    # _run_dispatch already json.loads the last ledger line — reaching here
-    # means the row round-tripped. Belt-and-braces on the payloads:
-    assert row["claudron_hits"] == "1"
+    assert "[fleet memory: Rate" in sent                 # the pointer was injected
     assert "\n" not in sent and "\r" not in sent and "\t" not in sent
     assert "Rate limits with tabs" in sent
-    assert "\n" not in row["task"]
+    assert "\n" not in row["task"] and "Rate limits with tabs" in row["task"]
 
 
 def test_non_dict_json_shapes_degrade_cleanly(tmp_path):
@@ -215,7 +228,7 @@ def test_non_dict_json_shapes_degrade_cleanly(tmp_path):
         r, sent, row = _run_dispatch(case_dir, env)
         assert r.returncode == 0, (payload, r.stderr)
         assert "[fleet memory:" not in sent
-        assert row["claudron_hits"] in ("", "0"), (payload, row)
+        assert "fix the spotify job" in row["task"], (payload, row)   # the dispatch still landed
 
 
 def test_query_limit_env_overrides_default(tmp_path):
@@ -256,7 +269,7 @@ def test_control_chars_in_titles_sanitize_clean(tmp_path):
     env = _wedge_env(tmp_path, json.dumps(evil))
     r, sent, row = _run_dispatch(tmp_path, env)
     assert r.returncode == 0, r.stderr
-    assert row["claudron_hits"] == "1"
+    assert "[fleet memory: quagga" in sent               # the pointer was injected
     for payload in (sent, row["task"]):
         assert "\x1b" not in payload and "\x01" not in payload
         assert "[31m" not in payload and "[0m" not in payload
@@ -264,7 +277,7 @@ def test_control_chars_in_titles_sanitize_clean(tmp_path):
 
 
 def test_clean_output_is_fixed_point_of_tmux_sanitizer(tmp_path):
-    # The ledger must record what the worker receives: clean() output must
+    # The plane must record what the worker receives: clean() output must
     # pass the send-side sanitizer unchanged. Widening one sanitizer without
     # the other (e.g. OSC handling) fails here before it desyncs a fleet.
     evil = {
@@ -279,7 +292,7 @@ def test_clean_output_is_fixed_point_of_tmux_sanitizer(tmp_path):
     env = _wedge_env(tmp_path, json.dumps(evil))
     r, sent, row = _run_dispatch(tmp_path, env)
     assert r.returncode == 0, r.stderr
-    assert row["claudron_hits"] == "1"
+    assert "[fleet memory: Rate" in sent                 # the pointer was injected
     assert call_lib_fn("sanitize_tmux_input", row["task"]) == row["task"]
 
 

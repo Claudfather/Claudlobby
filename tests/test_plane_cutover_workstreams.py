@@ -1,12 +1,11 @@
-"""Cutover chunk A2 — the workstream registry, the last file-backed record.
-`workstream-update.sh` dual-wrote its verbs to the plane since PR-B; now a
-fourth door (`PLANE_LEGACY_WRITE_WORKSTREAMS`) retires the file: under the
-retirement the door works on a registry MATERIALIZED from the plane (the same
-jq programs, the same locks), the verb's plane event IS the write, and every
-reader (`claudlobby workstreams`, brief's section) renders the registry from
-the plane — `plane-readers.workstream_registry`, pinned equal to the file the
-door writes under dual-write. An emission the shim could not record lands the
-registry at the real path, disclosed, so a verb is never recorded nowhere.
+"""The workstream registry lives on the plane (cutover chunk A2 moved it
+there behind a fourth door; the F18 closure's R1 made it the ONLY home).
+`workstream-update.sh` works on a registry MATERIALIZED from the plane (the
+same jq programs, one lock), the verb's plane event IS the write, no file is
+ever written, and every reader (`claudlobby workstreams`, brief's section)
+renders the registry from the plane — `plane-readers.workstream_registry`. No
+flag gates this door any more: a plane that cannot serve the registry, or an
+emission the shim could not record, is a REFUSAL (rc 3 / rc 4), never a file.
 """
 from __future__ import annotations
 
@@ -70,7 +69,9 @@ SHARED = ("id", "fleet", "title", "project", "status", "owner_bot", "next", "tas
           "opened_ts", "last_progress_ts", "lease_expires_ts")
 
 
-def test_the_plane_renders_the_registry_the_door_wrote_under_dual_write(tmp_path):
+def test_the_plane_renders_every_verb_the_door_wrote(tmp_path):
+    """The whole verb table through the real door, read back through the
+    renderer the door itself materializes from — and no file anywhere."""
     root, paths, _, _ = _scene(tmp_path)
     reg = registry_path(paths)
     a = _ws(root, "open", "Ship the widget", "--owner", "w1", "--project", "alpha", "--next", "first cut")
@@ -85,22 +86,24 @@ def test_the_plane_renders_the_registry_the_door_wrote_under_dual_write(tmp_path
     assert _ws(root, "renew", ws_a, "--note", "still on it", WORKSTREAM_LEASE_DAYS="30").returncode == 0
     assert _ws(root, "block", ws_a, "--note", "waiting on review").returncode == 0
     assert _ws(root, "close", ws_b, "--status", "done").returncode == 0
-    assert _ws(root, "prune").returncode == 0                                   # b archived and dropped from the file
-    file_reg = json.loads(reg.read_text())
-    assert set(file_reg["workstreams"]) == {ws_a}
-    assert (root / "local" / F / "runtime" / "workstreams-archive.jsonl").exists()   # dual-write: the archive
+    pruned = _ws(root, "prune")
+    assert pruned.returncode == 0 and "archived on the plane" in pruned.stdout
+    assert not reg.exists()                                                     # the plane event IS the write
+    assert not (root / "local" / F / "runtime" / "workstreams-archive.jsonl").exists()   # the archived event is the archive
     assert _await(root, "SELECT COUNT(*) FROM events WHERE kind = 'workstream' AND event = 'archived'", 1) == 1
     pr = _stdlib_readers()
     with _ro(root) as conn:
         plane_reg = pr.workstream_registry(conn, F, lease_days=14)
-    assert set(plane_reg["workstreams"]) == {ws_a}                              # the pruned one is gone on both sides
-    mine, theirs = file_reg["workstreams"][ws_a], plane_reg["workstreams"][ws_a]
-    assert {k: mine[k] for k in SHARED} == {k: theirs[k] for k in SHARED}, (mine, theirs)
-    assert mine["status"] == "blocked" and mine["next"] == "waiting on review"
-    assert [r["note"] for r in theirs["renewals"]] == ["still on it"]
-    assert theirs["lease_expires_ts"] == mine["lease_expires_ts"]                # the renewal's own instant
-    assert theirs["lease_expires_ts"] > pr._plus_days(mine["last_progress_ts"], 14)   # and not progress + the default lease
-    assert plane_reg["updated"] >= mine["last_progress_ts"]
+    assert set(plane_reg["workstreams"]) == {ws_a}                              # the pruned one is gone
+    e = plane_reg["workstreams"][ws_a]
+    assert set(SHARED) <= set(e) and set(e) >= {"renewals"}
+    assert (e["id"], e["fleet"], e["title"], e["project"], e["owner_bot"]) == (ws_a, F, "Ship the widget", "alpha", "w1")
+    assert e["status"] == "blocked" and e["next"] == "waiting on review"        # the block's note replaced the progress's next
+    assert e["task_ids"] == [] and e["refs"] == {"issues": [], "prs": []}
+    assert e["opened_ts"] <= e["last_progress_ts"]                              # the progress advanced (or held) the instant
+    assert [r["note"] for r in e["renewals"]] == ["still on it"]
+    assert e["lease_expires_ts"] > pr._plus_days(e["last_progress_ts"], 14)     # the renewal's own instant, not progress + the default lease
+    assert plane_reg["updated"] >= e["last_progress_ts"]
 
 
 def test_under_the_retirement_the_door_works_with_no_file_and_the_readers_serve_the_plane(tmp_path):
@@ -139,14 +142,18 @@ def test_under_the_retirement_the_door_works_with_no_file_and_the_readers_serve_
     assert unknown.returncode == 1 and "may be stale" in unknown.stderr
 
 
-def test_an_unrecorded_verb_lands_the_registry_at_the_real_path(tmp_path):
+def test_an_unrecorded_verb_refuses_and_changes_nothing(tmp_path):
+    """An emission the shim could not record is a REFUSAL (rc 4): the verb did
+    not happen, the plane is unchanged, and no file appears — there is
+    nothing to land it in any more."""
     root, paths, _, _ = _scene(tmp_path)
     reg = registry_path(paths)
-    _retire(root)
-    a = _ws(root, "open", "Lost in the post", PLANE_LEGACY_WRITE_WORKSTREAMS="0", PLANE_EMIT_CLI="/usr/bin/false")
-    assert a.returncode == 0, a.stderr
-    assert "did not record this verb" in a.stderr and "landed at" in a.stderr
-    assert reg.exists() and a.stdout.strip() in json.loads(reg.read_text())["workstreams"]
+    a = _ws(root, "open", "Lost in the post", PLANE_EMIT_CLI="/usr/bin/false")
+    assert a.returncode == 4, a.stdout + a.stderr
+    assert "did not record this verb" in a.stderr and "nothing changed" in a.stderr
+    assert "landed at" not in a.stderr
+    assert not reg.exists()
+    assert _await(root, "SELECT COUNT(*) FROM workstreams", 0, timeout=2) == 0
 
 
 def test_the_lookup_and_the_reader_refuse_an_unknown_fleet(tmp_path):
@@ -157,3 +164,8 @@ def test_the_lookup_and_the_reader_refuse_an_unknown_fleet(tmp_path):
     ok = subprocess.run([sys.executable, str(LIB / "plane-lookup.py"), "--root", str(root), "--workstreams", "--fleet", F],
                         capture_output=True, text=True, timeout=120)
     assert ok.returncode == 0 and json.loads(ok.stdout) == {"updated": "", "workstreams": {}}
+    # the WRITER's question (--or-empty): an unknown fleet is the empty registry,
+    # because its first open is exactly the call that must work
+    first = subprocess.run([sys.executable, str(LIB / "plane-lookup.py"), "--root", str(root), "--workstreams",
+                            "--or-empty", "--fleet", "ghost"], capture_output=True, text=True, timeout=120)
+    assert first.returncode == 0 and json.loads(first.stdout) == {"updated": "1970-01-01T00:00:00Z", "workstreams": {}, "archived": []}   # the writer's render carries the archived ids
