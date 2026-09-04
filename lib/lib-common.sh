@@ -551,7 +551,13 @@ plane_emit_events() {
 # sourced, and the last assignment wins as the cascade would have it.
 plane_fleet_tier_value() {
     local _fleet="$1" _key="$2" _default="${3:-}" _dir _val=""
-    _dir=$(resolve_fleet_dir "$_fleet" 2>/dev/null) || _dir="${CLAUDLOBBY_ROOT:-}/local/$_fleet"
+    # `|| true` INSIDE the substitution (the #1460 rule): resolve_fleet_dir ends
+    # in `return 1` for a fleet with no directory, and on bash 3.2 that fires
+    # the inherited ERR trap inside the subshell even though the outer `||`
+    # guards the assignment — measured as three phantom script_errors per
+    # keepalive tick in the door harness.
+    _dir=$(resolve_fleet_dir "$_fleet" 2>/dev/null || true)
+    [ -n "$_dir" ] || _dir="${CLAUDLOBBY_ROOT:-}/local/$_fleet"
     if [ -f "$_dir/.env" ]; then
         # parse_env_file EXPORTS into the calling shell; inside this
         # substitution the exports die with the subshell and only the one

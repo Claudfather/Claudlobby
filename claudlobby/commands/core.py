@@ -725,8 +725,35 @@ def cmd_uptime(args) -> int:
         return 1
 
     windows = [args.window] if args.window else list(WINDOWS.keys())
-    results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
-                              bot_dirs=bot_dirs)
+    # Cutover B2: with the events write RETIRED the keepalive log is frozen
+    # and the entries come from the plane (the heartbeat samples and the
+    # restart transitions); the fact is read where it lives, an unreachable
+    # plane with the fact unknown serves the log LABELED.
+    from ..brief import load_lib_module, plane_retired_conn
+    from ..uptime import entries_from_plane
+    conn, note = plane_retired_conn(paths, "events")
+    if note:
+        print(f"claudlobby uptime: {note}", file=sys.stderr)
+    entries_for = None
+    if conn is not None:
+        pr = load_lib_module(paths, "plane-readers.py")
+        if pr is None:
+            conn.close()
+            print("claudlobby uptime: UNREACHABLE — the events write is retired and"
+                  f" lib/plane-readers.py is not readable under {paths.lib}", file=sys.stderr)
+            return 3
+        since = (datetime.now(timezone.utc) - max(WINDOWS.values())).isoformat()
+        fleet_name = paths.fleet_name
+
+        def entries_for(bot_dir):
+            return entries_from_plane(pr, conn, fleet_name, bot_dir.name, since)
+    try:
+        results = aggregate_fleet(bots_dir, windows=windows, bot_filter=args.bot,
+                                  bot_dirs=bot_dirs,
+                                  **({"entries_for": entries_for} if entries_for is not None else {}))
+    finally:
+        if conn is not None:
+            conn.close()
 
     if not results:
         log.info("No bots found in %s", bots_dir)

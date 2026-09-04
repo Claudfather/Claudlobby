@@ -40,10 +40,32 @@ LOG="$BOT_DIR/keepalive.log"
 # KEEPALIVE_REAP_DAYS still overrides; both fall back to 7.
 KEEPALIVE_REAP_DAYS="${KEEPALIVE_REAP_DAYS:-${OBSERVABILITY_REAP_DAYS:-7}}"
 
-# Emit structured JSONL event for fleet-pulse / claudlobby uptime consumption.
+# Emit a keepalive event. Cutover B2: a TRANSITION (RESTART, BRIDGE_HEAL, SKIP,
+# RELOAD) is a FLEET EVENT on the plane through the one door (emit_fleet_event:
+# provenance, alias-anchored, retired with the family), so `claudlobby events`
+# and `uptime` see it; the per-tick verdicts BUSY / IDLE / UNKNOWN ride the
+# heartbeat sample the same tick emits (plane_presence_samples) and are not
+# fleet events. The keepalive-<day>.jsonl file has NO reader in the estate
+# (measured: 867 rows/bot/day, only the validate harness ever opened it): it
+# keeps being written under dual-write and stops the day the events write is
+# retired — the flag alone gates it, because the four facts protect a RECORD
+# and a file nothing reads is not one.
 emit_keepalive_event() {
     local ev_state="$1"
     local ev_detail="${2:-}"
+    case "$ev_state" in
+        RESTART)     emit_fleet_event keepalive_restart keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        BRIDGE_HEAL) emit_fleet_event bridge_heal keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        SKIP)        emit_fleet_event keepalive_skip keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+        RELOAD)      emit_fleet_event keepalive_reload keepalive "{\"detail\":\"$(json_escape "$ev_detail")\"}" "$BOT_DIR" "$BOT_NAME" || true ;;
+    esac
+    local _wflag
+    if [ -n "${PLANE_LEGACY_WRITE_EVENTS+x}" ]; then
+        _wflag="${PLANE_LEGACY_WRITE_EVENTS:-1}"
+    else
+        _wflag=$(plane_fleet_tier_value "${FLEET_NAME:-${CLAUDLOBBY_FLEET:-}}" PLANE_LEGACY_WRITE_EVENTS 1)
+    fi
+    [ "$_wflag" = "0" ] && return 0
     local events_dir="$BOT_DIR/data/events"
     mkdir -p "$events_dir"
     local events_file="$events_dir/keepalive-$(date +%Y-%m-%d).jsonl"
@@ -120,7 +142,12 @@ plane_presence_samples() {
         # huge negative age readers would mis-sort — age has floor
         # semantics, not signed-delta semantics.
         local agefrag="" m_epoch age
-        if m_epoch=$(stat_mtime "$BOT_DIR/data/.last-tool-call" 2>/dev/null); then
+        # `|| true` INSIDE the substitution (the #1460 rule): stat_mtime returns
+        # 1 for a bot that has made no tool call yet, and on bash 3.2 that fires
+        # the inherited ERR trap even under an `if` — a phantom script_error per
+        # tick, now a fleet event on the plane (B2 made it visible).
+        m_epoch=$(stat_mtime "$BOT_DIR/data/.last-tool-call" 2>/dev/null || true)
+        if [ -n "$m_epoch" ]; then
             age=$(( $(date +%s) - m_epoch ))
             if [ "$age" -lt 0 ]; then age=0; fi
             agefrag=',"marker_age_s":'"$age"

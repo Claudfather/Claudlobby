@@ -230,10 +230,15 @@ the door (`--retire-writes` extends a chunk-6b record that predates it).
 The door never holds a hot path: under dual-write its plane emission is
 detached (reaped at the keepalive tick's bound, the presence emit's shape),
 under the retirement it is waited on only to `FLEET_EVENT_EMIT_TIMEOUT_S`
-(a reaped emission is "not recorded" and the ledger is written). Still on their own files: `keepalive.sh`'s
-`keepalive-*.jsonl` and `bot-vitals.sh`'s rows (they never went through
-`emit_fleet_event`) — Phase B2's readers (`uptime`, `bot-vitals`, `tail-fleet`,
-`data-sweep`) decide those with them.
+(a reaped emission is "not recorded" and the ledger is written). Chunk B2 closes the two writers that never went through the door: the
+keepalive tick's TRANSITIONS are fleet events (`keepalive_restart`,
+`bridge_heal`, `keepalive_skip`, `keepalive_reload`; the per-tick verdicts ride
+the heartbeat sample), the vitals hook lands `tool_call` / `session_event`
+through `emit_fleet_event`, the reader-less `keepalive-<day>.jsonl` stops when
+the events flag says 0, and `claudlobby uptime` reads the plane's heartbeat
+samples + restart events once the events write is retired. `data-sweep.sh` and
+`tail-fleet.sh --events` keep aging/tailing whatever files remain (hygiene over
+files, not readers of record).
 
 `plane parity` is the reconciliation door (matched / pre-go-live / unstamped /
 stamped-lost per row, with the multiplicity a report legitimately has) and

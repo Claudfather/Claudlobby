@@ -152,11 +152,28 @@ def compute_metrics(
     }
 
 
+def entries_from_plane(pr, conn, fleet: str, bot: str, since_iso: str) -> list[tuple[datetime, str]]:
+    """The (timestamp, state) entries `compute_metrics` consumes, from the
+    plane's keepalive entries (cutover B2 — the heartbeat samples, the
+    dead-session fact, the restart transitions) instead of keepalive.log."""
+    out: list[tuple[datetime, str]] = []
+    for at, state in pr.keepalive_entries(conn, fleet, bot, since_iso):
+        try:
+            ts = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        out.append((ts, state))
+    return out
+
+
 def aggregate_fleet(
     bots_dir: Path,
     windows: list[str] | None = None,
     bot_filter: str | None = None,
     bot_dirs: list[Path] | None = None,
+    entries_for=None,
 ) -> dict:
     """Aggregate metrics for all bots (or one) in a fleet's runtime dir.
 
@@ -190,7 +207,9 @@ def aggregate_fleet(
         if bot_filter and bot_name != bot_filter:
             continue
 
-        entries = collect_bot_logs(bot_dir)
+        # ``entries_for`` (cutover B2): the plane's entries once the events write
+        # is retired; the log otherwise — the same arithmetic over the same pairs.
+        entries = entries_for(bot_dir) if entries_for is not None else collect_bot_logs(bot_dir)
         results[bot_name] = {}
         for w in windows:
             results[bot_name][w] = compute_metrics(entries, WINDOWS[w], now=now)
