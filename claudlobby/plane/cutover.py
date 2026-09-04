@@ -33,6 +33,7 @@ READ_FLAGS = {r: f"PLANE_READ_{r.upper()}" for r in GATED}
 # recorded as its own epoch.
 EVENT_RETIRED = "legacy_write_retired"
 WRITE_FLAGS = {"dispatch": "PLANE_LEGACY_WRITE_DISPATCH", "report": "PLANE_LEGACY_WRITE_REPORT",
+               "workstreams": "PLANE_LEGACY_WRITE_WORKSTREAMS",
                "events": "PLANE_LEGACY_WRITE_EVENTS"}
 
 # The fleet is matched on the anchor COLUMN first (survives a truncated

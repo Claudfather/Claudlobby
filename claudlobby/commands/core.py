@@ -682,16 +682,27 @@ def cmd_workstreams(args) -> int:
     # the wrong tier". Probed here rather than inside load_workstreams because
     # that function is also imported by brief.py, which has its own remedy
     # (label the section) and must keep its current contract.
-    registry = registry_path(paths)
-    probe = probe_source(registry)
-    if probe.unreachable:
-        remedy = (
-            "" if getattr(args, "fleet", None) else UNREACHABLE_REMEDIES["fleet_tier"]
-        )
-        print(unreachable_line("the workstream registry", probe, remedy=remedy))
-        return 1
+    # Cutover A2: with the workstreams write RETIRED the registry file is no
+    # record — the plane serves (an absent file is then expected, not a refusal);
+    # the plane unable to answer under a retirement is rc 3; the fact unknown
+    # serves the file LABELED.
+    from ..workstreams import plane_workstreams
+    entries, note = plane_workstreams(paths)
+    if note:
+        print(f"claudlobby workstreams: {note}", file=sys.stderr)
+        if "cannot answer" in note:
+            return 3
+    if entries is None:
+        registry = registry_path(paths)
+        probe = probe_source(registry)
+        if probe.unreachable:
+            remedy = (
+                "" if getattr(args, "fleet", None) else UNREACHABLE_REMEDIES["fleet_tier"]
+            )
+            print(unreachable_line("the workstream registry", probe, remedy=remedy))
+            return 1
 
-    workstreams = load_workstreams(paths)
+    workstreams = entries if entries is not None else load_workstreams(paths)
     if getattr(args, "ws_command", "list") == "show":
         entry = workstreams.get(args.id)
         if not entry:
