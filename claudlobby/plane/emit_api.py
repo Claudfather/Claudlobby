@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -167,6 +168,12 @@ def validate_item(finalized: dict, modes: dict):
     return (first if c is finalized else validate_request(c)), c
 
 
+# A retryable lock is retried this many times, with a growing pause, before a
+# batch is spooled (fresh-plane first-writer races; see emit_batch).
+LOCK_RETRY_ATTEMPTS = 6
+LOCK_RETRY_BACKOFF_S = 0.15
+
+
 def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
     """One atomic unit of work: validate ALL, then ONE transaction (F4).
     The dispatch door commits work_item + assignment + communication here.
@@ -197,36 +204,51 @@ def emit_batch(root: Path, raw_requests: list[dict]) -> list[EmitOutcome]:
         item, c = validate_item(r, modes or {})        # ContractViolation propagates
         captured.append(c)
         items.append(item)
-    try:
-        conn = connect(db_path(root))
+    attempt = 0
+    while True:
         try:
-            migrate(conn)                               # DowngradeError propagates
-            host = ensure_host_uid(Path(root) / "state")
-            results = ingest_many(conn, items, host_uid=host)
-        finally:
+            conn = connect(db_path(root))
             try:
-                conn.close()
-            except sqlite3.Error:
-                # Post-review fix: a WAL-flush failure on close, AFTER a
-                # successful commit, must not fall into the spool path —
-                # that reported committed events as "spooled" and queued a
-                # redundant replay. A close failure after a FAILED ingest
-                # changes nothing (that exception already routed).
-                pass
-    except (DowngradeError, ContractViolation):
-        raise
-    except sqlite3.OperationalError as exc:
-        # Spool ONLY whitelisted-retryable codes (round-4 F6): IntegrityError
-        # never lands here (a bug, propagates), and a missing table / SQL typo
-        # — OperationalError but equally bugs — propagate loudly too.
-        if not is_retryable(exc):
+                migrate(conn)                               # DowngradeError propagates
+                host = ensure_host_uid(Path(root) / "state")
+                results = ingest_many(conn, items, host_uid=host)
+            finally:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    # Post-review fix: a WAL-flush failure on close, AFTER a
+                    # successful commit, must not fall into the spool path —
+                    # that reported committed events as "spooled" and queued a
+                    # redundant replay. A close failure after a FAILED ingest
+                    # changes nothing (that exception already routed).
+                    pass
+            break
+        except (DowngradeError, ContractViolation):
             raise
-        # The spool stores the policy-applied envelope, never a fuller body (§11).
-        path = spool_write(root, captured, str(exc))    # raises SpoolWriteError
-        return [
-            EmitOutcome(r["event_id"], "spooled", detail=str(path))
-            for r in captured
-        ]
+        except sqlite3.OperationalError as exc:
+            # Spool ONLY whitelisted-retryable codes (round-4 F6): IntegrityError
+            # never lands here (a bug, propagates), and a missing table / SQL typo
+            # — OperationalError but equally bugs — propagate loudly too.
+            if not is_retryable(exc):
+                raise
+            # A retryable lock is RETRIED in-process before it is spooled: two
+            # first emitters on a brand-new plane race the WAL switch and the
+            # first migration, a case SQLite refuses to wait on (a would-be
+            # deadlock returns BUSY at once, busy_timeout or not), and the
+            # loser's whole batch went to the spool — measured 3 of 10 pairs
+            # (Phase B: a door's detached fleet event beside its own emission
+            # is exactly that pair). The transaction rolled back, so a retry
+            # re-ingests nothing twice; the spool stays the last resort.
+            attempt += 1
+            if attempt < LOCK_RETRY_ATTEMPTS:
+                time.sleep(LOCK_RETRY_BACKOFF_S * attempt)
+                continue
+            # The spool stores the policy-applied envelope, never a fuller body (§11).
+            path = spool_write(root, captured, str(exc))    # raises SpoolWriteError
+            return [
+                EmitOutcome(r["event_id"], "spooled", detail=str(path))
+                for r in captured
+            ]
     return [
         EmitOutcome(res.event_id, "duplicate" if res.duplicate else "committed")
         for res in results

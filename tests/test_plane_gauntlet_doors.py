@@ -423,9 +423,15 @@ def test_prune_emits_one_batch_for_all_archived(tmp_path, armed):
     libdir, env = armed
     counter = tmp_path / "emit-count"
     wrapper = tmp_path / "counting-cli"
+    # Count the DOOR's batches only (emitter workstream-update): a fleet event
+    # the door's ERR trap lands (Phase B, emitter lib) is emitted DETACHED and
+    # may reach the cold CLI after the counter reset below — a different
+    # family's batch, never the prune's, and counting it made this pin flake
+    # (measured 1 in 3).
     wrapper.write_text(
         "#!/bin/bash\n"
-        f"echo x >> {counter}\n"
+        'f="${@: -1}"\n'
+        "grep -q '\"emitter\": *\"workstream-update\"' \"$f\" 2>/dev/null && echo x >> " + str(counter) + "\n"
         f'exec "{CLI}" "$@"\n'
     )
     wrapper.chmod(0o755)

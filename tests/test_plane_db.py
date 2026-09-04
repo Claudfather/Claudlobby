@@ -250,3 +250,38 @@ def test_duplicate_event_id_rejected_by_ledger(conn):
             "INSERT INTO ingest_ledger (event_id, family, ingested_at)"
             " VALUES ('ev_' || printf('%032x', 7), 'task_event', 't')"
         )
+
+
+def test_concurrent_first_emitters_on_a_fresh_plane_all_land_none_spooled(tmp_path):
+    """Two or three cold CLIs racing the very first write of a plane used to
+    lose one batch to the spool ("database is locked" — the fresh-file case
+    SQLite refuses to wait on, busy_timeout or not; measured 3 of 10 pairs).
+    Phase B makes the pair routine: a door's detached fleet event lands
+    beside the door's own emission. A retryable lock is retried in-process;
+    the spool stays the last resort."""
+    import json
+    import subprocess
+    import sys
+    cli = Path(sys.executable).parent / "claudlobby"
+    losses = 0
+    for trial in range(4):
+        root = tmp_path / f"t{trial}" / "root"
+        (root / "state" / "plane").mkdir(parents=True)
+        (root / "local" / "f").mkdir(parents=True)
+        (root / "local" / "f" / "fleet.yaml").write_text("fleet:\n  name: f\n  bots:\n    w1:\n")
+        files = []
+        for i in range(3):
+            batch = {"events": [{"event_type": "system", "emitter": "t", "fleet": "f",
+                                 "payload": {"event": "daemon_started", "data": {"i": i}}}]}
+            f = root / f"batch{i}.json"
+            f.write_text(json.dumps(batch))
+            files.append(f)
+        procs = [subprocess.Popen([str(cli), "--root", str(root), "emit-batch", "--json", str(f)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for f in files]
+        errs = [p.communicate()[1] for p in procs]
+        assert all(p.returncode == 0 for p in procs), errs
+        n = connect(root / "state" / "plane" / "plane.db").execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        spooled = list((root / "state" / "plane" / "spool").glob("*")) if (root / "state" / "plane" / "spool").exists() else []
+        if n != 3 or spooled:
+            losses += 1
+    assert losses == 0

@@ -60,10 +60,14 @@ def connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=5.0)
     conn.isolation_level = None           # autocommit — ingest/migrate own txns
     conn.row_factory = sqlite3.Row
+    # busy_timeout FIRST, so the WAL switch below waits for a concurrent
+    # creator where it can; the fresh-file case SQLite will NOT wait on (a
+    # would-be deadlock between two first writers returns BUSY at once) is
+    # retried by emit_batch before anything is spooled.
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
     if str(path) != ":memory:":
         for suffix in ("", "-wal", "-shm"):
             f = str(path) + suffix
